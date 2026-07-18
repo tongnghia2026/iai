@@ -45,9 +45,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux system deps
         if: matrix.os == 'ubuntu-latest'
+        # Matches the README's Debian/Ubuntu list (minus the removed webview
+        # deps): a C toolchain + pkg-config for lcms2-sys, and the X11/Wayland
+        # dev libs winit/rfd/arboard link against once this flips to a full build.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev pkg-config
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgtk-3-dev liblcms2-dev
       - name: Check
         run: cargo check --locked --all-targets
 
