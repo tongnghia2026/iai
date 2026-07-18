@@ -483,6 +483,13 @@ impl Canvas {
             let dest_y = (tile_y0 as i32 - local_y) as u32;
             new_tiles.blit_region_from(src_tiles, tile_x0, tile_y0, dest_x, dest_y, copy_w, copy_h);
         }
+        // A crop of a 16-bit layer stays 16-bit: the blit copied the overlapping
+        // region's masters; up-convert any fill / transparent border (exact
+        // `v*257`) so has_hdr() holds for the whole cropped result instead of a
+        // single master-less border tile flipping it to false.
+        if src_tiles.has_hdr() {
+            new_tiles.promote_to_hdr();
+        }
         new_tiles.bump_all_revisions();
         (new_tiles, out_w, out_h)
     }

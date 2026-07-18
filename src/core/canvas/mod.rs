@@ -1641,6 +1641,33 @@ mod hdr_adjust_tests {
     }
 
     #[test]
+    fn crop_preserves_16bit_master() {
+        // Cropping a 16-bit layer (a very common RAW operation) must keep the
+        // masters, not rebuild the tiles at 8 bits.
+        let (w, h) = (32u32, 32u32);
+        let mut px16 = vec![0u16; (w * h * 4) as usize];
+        for p in 0..(w * h) as usize {
+            px16[p * 4] = 300;
+            px16[p * 4 + 1] = 40000;
+            px16[p * 4 + 2] = 12345;
+            px16[p * 4 + 3] = 65535;
+        }
+        let mut canvas = Canvas::from_rgba16(px16, w, h);
+        assert!(canvas.layer_stack.layers[0].tiles.has_hdr());
+
+        assert!(canvas.crop(8, 8, 16, 16, false));
+        assert_eq!((canvas.width, canvas.height), (16, 16));
+
+        let tiles = &canvas.layer_stack.layers[0].tiles;
+        assert!(tiles.has_hdr(), "crop dropped the 16-bit master");
+        assert_eq!(
+            tiles.get_pixel16(4, 4),
+            (300, 40000, 12345, 65535),
+            "crop quantized the 16-bit values"
+        );
+    }
+
+    #[test]
     fn flatten_16bit_on_large_canvas() {
         // The RAW case: Flatten Image on a >25M px 16-bit doc must chunk (no
         // canvas-sized f32 buffer) and stay 16-bit.

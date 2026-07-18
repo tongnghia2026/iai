@@ -1266,6 +1266,61 @@ impl TileMap {
         }
     }
 
+    /// 16-bit-master version of [`flatten_tiles_region_into`]: reads each tile's
+    /// 16-bit master into `out` (RGBA16), falling back to the 8-bit mirror
+    /// up-converted as `v*257` for any tile without a master. Lets crop and other
+    /// blit-based rebuilds copy a region at full precision.
+    pub fn flatten16_region_into(&self, x0: u32, y0: u32, w: u32, h: u32, out: &mut [u16]) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        out.fill(0);
+
+        for row in 0..h {
+            let py = y0 + row;
+            if py >= self.height {
+                break;
+            }
+            let ty = py / TILE_SIZE;
+            let ty_rem = py % TILE_SIZE;
+
+            let mut px = x0;
+            while px < x0 + w {
+                if px >= self.width {
+                    break;
+                }
+                let tx = px / TILE_SIZE;
+                let tx_rem = px % TILE_SIZE;
+
+                let tile_w = TILE_SIZE - tx_rem;
+                let copy_w = tile_w.min(x0 + w - px).min(self.width - px);
+
+                let pos = TilePos {
+                    x: tx as i32,
+                    y: ty as i32,
+                };
+                if let Some(tile) = self.tiles.get(&pos) {
+                    let src_i = ((ty_rem * TILE_SIZE + tx_rem) * 4) as usize;
+                    let dst_i = ((row * w + (px - x0)) * 4) as usize;
+                    let len = (copy_w * 4) as usize;
+
+                    if dst_i + len <= out.len() {
+                        if let Some(p16) = &tile.pixels16 {
+                            if src_i + len <= p16.len() {
+                                out[dst_i..dst_i + len].copy_from_slice(&p16[src_i..src_i + len]);
+                            }
+                        } else if src_i + len <= tile.pixels.len() {
+                            for k in 0..len {
+                                out[dst_i + k] = tile.pixels[src_i + k] as u16 * 257;
+                            }
+                        }
+                    }
+                }
+                px += copy_w;
+            }
+        }
+    }
+
     /// Copy a `w×h` rectangle from `src` (at `src_x,src_y`) into `self` (at
     /// `dst_x,dst_y`) in 256-px chunks, never allocating a canvas-sized buffer.
     /// This is the tile-native replacement for the `extract_region → flat →
@@ -1289,22 +1344,50 @@ impl TileMap {
             return;
         }
         let chunk = TILE_SIZE;
-        let mut buf = vec![0u8; (chunk * chunk * 4) as usize];
-        let mut cy = 0;
-        while cy < h {
-            let ch = chunk.min(h - cy);
-            let mut cx = 0;
-            while cx < w {
-                let cw = chunk.min(w - cx);
-                let needed = (cw * ch * 4) as usize;
-                src.flatten_tiles_region_into(src_x + cx, src_y + cy, cw, ch, &mut buf[..needed]);
-                self.write_region(dst_x + cx, dst_y + cy, cw, ch, &buf[..needed]);
-                cx += cw;
+        // When the source carries a full 16-bit master, copy at 16 bits so the
+        // rebuild (crop, flip, resize-to-same-size) keeps precision;
+        // write_region16 refreshes each destination tile's 8-bit mirror too.
+        // Otherwise copy the 8-bit mirror as before.
+        if src.has_hdr() {
+            let mut buf16 = vec![0u16; (chunk * chunk * 4) as usize];
+            let mut cy = 0;
+            while cy < h {
+                let ch = chunk.min(h - cy);
+                let mut cx = 0;
+                while cx < w {
+                    let cw = chunk.min(w - cx);
+                    let needed = (cw * ch * 4) as usize;
+                    src.flatten16_region_into(src_x + cx, src_y + cy, cw, ch, &mut buf16[..needed]);
+                    self.write_region16(dst_x + cx, dst_y + cy, cw, ch, &buf16[..needed]);
+                    cx += cw;
+                }
+                cy += ch;
             }
-            cy += ch;
+        } else {
+            let mut buf = vec![0u8; (chunk * chunk * 4) as usize];
+            let mut cy = 0;
+            while cy < h {
+                let ch = chunk.min(h - cy);
+                let mut cx = 0;
+                while cx < w {
+                    let cw = chunk.min(w - cx);
+                    let needed = (cw * ch * 4) as usize;
+                    src.flatten_tiles_region_into(
+                        src_x + cx,
+                        src_y + cy,
+                        cw,
+                        ch,
+                        &mut buf[..needed],
+                    );
+                    self.write_region(dst_x + cx, dst_y + cy, cw, ch, &buf[..needed]);
+                    cx += cw;
+                }
+                cy += ch;
+            }
         }
 
         if src.has_any_ink() {
+            let mut buf = vec![0u8; (chunk * chunk * 4) as usize];
             let mut cy = 0;
             while cy < h {
                 let ch = chunk.min(h - cy);
