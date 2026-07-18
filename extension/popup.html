@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font: 13px system-ui, sans-serif; width: 280px; padding: 12px; }
+      h3 { margin: 0 0 6px; }
+      p { margin: 6px 0; color: #444; }
+      input { width: 100%; box-sizing: border-box; padding: 5px; }
+      button { margin-top: 8px; padding: 5px 10px; }
+      #conn { margin: 6px 0; font-weight: 600; }
+      #status { margin-top: 8px; color: #0a6; min-height: 1em; }
+      .row { display: flex; gap: 6px; }
+      .row button { flex: 1; }
+    </style>
+  </head>
+  <body>
+    <h3>iAi Bridge</h3>
+    <div id="conn">…</div>
+    <p>Dán token hiển thị trong iAi (panel AI → nguồn Web):</p>
+    <input id="token" type="text" placeholder="token..." />
+    <div class="row">
+      <button id="save">Lưu token</button>
+      <button id="reconnect">Kết nối lại</button>
+    </div>
+    <div id="status"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

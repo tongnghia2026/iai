@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "iAi Bridge",
+  "version": "0.4.0",
+  "description": "Cầu nối iAi ↔ Gemini/ChatGPT: chỉnh ảnh AI miễn phí bằng phiên web của bạn (chạy được cả trên Linux).",
+  "permissions": ["storage", "alarms", "scripting", "clipboardWrite", "offscreen", "debugger"],
+  "host_permissions": [
+    "https://gemini.google.com/*",
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://*.googleusercontent.com/*",
+    "https://*.gstatic.com/*",
+    "https://*.oaiusercontent.com/*",
+    "https://*.oaistatic.com/*",
+    "https://*.openai.com/*",
+    "https://*.chatgpt.com/*",
+    "https://*.blob.core.windows.net/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "iAi Bridge" },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gemini.google.com/*",
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["content-web.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

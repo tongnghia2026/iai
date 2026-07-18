@@ -1,0 +1,60 @@
+[package]
+name = "iai"
+version = "0.1.0"
+edition = "2021"
+description = "A high-performance, GPU-accelerated image editor written in Rust."
+license = "MIT"
+repository = "https://github.com/tongnghia2026/iai"
+readme = "README.md"
+
+# The library holds the whole application; the binary is a thin entry point.
+# Tests compile against the library, not the binary's module tree.
+[lib]
+name = "iai"
+path = "src/lib.rs"
+
+[[bin]]
+name = "iai"
+path = "src/main.rs"
+
+[dependencies]
+winit = { version = "0.30", features = ["rwh_06"] }
+wgpu = "29"
+pollster = "0.3"
+bytemuck = { version = "1.0", features = ["derive"] }
+rayon = "1"
+image = "0.25"
+rfd = "0.15"
+egui = "0.34"
+egui-wgpu = "0.34"
+egui-winit = "0.34"
+arboard = "3.6.1"
+png = "0.17"
+tiff = "0.11"
+lcms2 = "6"
+zip = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+rawloader = "0.37"
+ort = "2.0.0-rc.12"
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json", "multipart"], default-features = false }
+ab_glyph = "0.2"
+egui-phosphor = "0.12.0"
+base64 = "0.22"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+hayro = "0.7.1"
+lopdf = { version = "0.43", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi"] }
+
+[dev-dependencies]
+naga = { version = "29", features = ["wgsl-in"] }
+
+# Optimized release builds — an image editor is CPU/GPU bound, so the extra
+# build time is worth it for noticeably faster compositing, filters and I/O.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
