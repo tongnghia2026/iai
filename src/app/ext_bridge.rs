@@ -2,8 +2,8 @@
 // connects to. iai sends `edit` requests (image + prompt); the extension drives
 // the user's real Gemini/ChatGPT tab in their own browser and sends the result
 // image back. This replaces the embedded-webview "fake web" (which only worked on
-// Windows/macOS) — the extension runs in the user's real Chromium/Firefox so it
-// behaves the same on Linux too.
+// Windows/macOS) — the extension runs in the user's real Chromium browser
+// (Chrome/Edge/Brave) so it behaves the same on Linux too.
 //
 // Sync `tungstenite` on a worker thread (matches the app's thread+mpsc pattern,
 // e.g. `core/ai/edit.rs`); inbound events are drained once per frame by the app.
