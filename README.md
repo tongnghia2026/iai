@@ -28,7 +28,7 @@ iAi is a desktop raster image editor built from the ground up in Rust.
 - **Develop** — a raw/raster develop panel: exposure, contrast, highlights/shadows/whites/blacks, tone curve, HSL colour mixer, detail & effects
 - **Colour management** — ICC profiles, soft-proofing, display CMS, CMYK separations, print
 - **Formats** — PNG, JPEG, TIFF, WebP, PSD, RAW and multi-page PDF import, PDF export, plus the native `.iai` project format
-- **16-bit** pipeline end to end
+- **16-bit** import & Develop — RAW and 16-bit PNG/TIFF decode to a 16-bit master that survives Develop and the global adjustments (see the [bit-depth capability matrix](docs/bit-depth-and-color-capability.md))
 - **GPU-accelerated** compositing (wgpu / WGSL)
 - **AI** — subject/background masking, inpainting fill, face restoration, and a Gemini-powered retouch panel
 
@@ -37,6 +37,8 @@ iAi is a desktop raster image editor built from the ground up in Rust.
 iAi is built from source with Cargo. The steps below take you from a clean machine to a running build on **Windows**, **macOS** and **Linux**, including installing Git and the Rust toolchain.
 
 > **Requirements at a glance:** Git · Rust (stable, edition 2021) · a C/C++ toolchain · a GPU with Vulkan, Metal, DX12 or OpenGL support. The first use of an AI feature downloads its model (internet required).
+
+> **Platform support.** Windows is the primary, CI-tested target and the only one with a release build today. macOS and Linux compile from the same source — CI keeps an informational compile check for each — but they are **not yet CI-verified; treat them as experimental**.
 
 ### Windows
 
@@ -89,8 +91,7 @@ sudo apt install -y git curl build-essential pkg-config \
     libxkbcommon-dev libwayland-dev \
     libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
     libvulkan1 mesa-vulkan-drivers \
-    xdg-desktop-portal xdg-desktop-portal-gtk \
-    libwebkit2gtk-4.1-dev libsoup-3.0-dev libxdo-dev
+    xdg-desktop-portal xdg-desktop-portal-gtk
 ```
 
 **Fedora**
@@ -99,8 +100,7 @@ sudo dnf install -y git curl gcc gcc-c++ make pkgconf-pkg-config \
     libxkbcommon-devel wayland-devel \
     libX11-devel libXcursor-devel libXrandr-devel libXi-devel \
     vulkan-loader mesa-vulkan-drivers \
-    xdg-desktop-portal xdg-desktop-portal-gtk \
-    webkit2gtk4.1-devel libsoup3-devel libxdo-devel
+    xdg-desktop-portal xdg-desktop-portal-gtk
 ```
 
 **Arch Linux**
@@ -109,8 +109,7 @@ sudo pacman -S --needed git curl base-devel \
     libxkbcommon wayland \
     libx11 libxcursor libxrandr libxi \
     vulkan-icd-loader mesa \
-    xdg-desktop-portal xdg-desktop-portal-gtk \
-    webkit2gtk-4.1 libsoup3 xdotool
+    xdg-desktop-portal xdg-desktop-portal-gtk
 ```
 
 Then **install Rust** via rustup (all distros):
@@ -165,13 +164,13 @@ Use `cargo check` for a quick compile test, or `cargo test` before making a rele
 > its ONNX model (tens of MB) to your local application-data directory. An internet
 > connection is required for that first download only.
 
-> **AI Gemini panel — Linux notes.** The free *Bridge* mode opens Gemini in an
-> embedded web view (WebKitGTK on Linux — install `libwebkit2gtk-4.1-dev` above).
-> It copies the canvas to the clipboard and tries a real paste into the composer;
-> on **X11** this auto-paste works, but on **Wayland** synthetic input is blocked,
-> so the image is left on the clipboard — just click the Gemini chat box and press
-> **Ctrl+V** yourself. Driving the Gemini web UI is unofficial; for a fully
-> supported path use the paid API mode instead.
+> **AI Gemini / ChatGPT panel.** The free *Web* mode drives your **own** logged-in
+> Gemini or ChatGPT tab through the **IAI Bridge browser extension** (in
+> [`extension/`](extension/README.md)) — no embedded web view, so it behaves the
+> same on Windows, macOS and Linux. It attaches the canvas, fills the prompt,
+> submits, and pulls the generated image back into a layer; see
+> [`extension/README.md`](extension/README.md) to load it. Driving the chat web UI
+> is unofficial; for a fully supported path use the paid **API** mode instead.
 
 ---
 
@@ -201,7 +200,7 @@ src/
 ├── tools/     Brush, eraser, selection, crop, clone, warp, text, …
 ├── formats/   PNG/JPEG/TIFF/WebP/PSD/RAW/PDF/iAi importers & exporters
 ├── ui/        Menubar, panels, toolbar, dialogs, overlays
-└── plugin/    Tool & filter trait interfaces
+└── extension/ Internal tool/filter trait seams (compile-time, not a plugin SDK)
 ```
 
 ## Contributing

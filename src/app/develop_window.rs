@@ -549,7 +549,7 @@ impl App {
                     .win
                     .develop_egui_ctx
                     .as_ref()
-                    .is_some_and(|ctx| ctx.wants_keyboard_input());
+                    .is_some_and(|ctx| ctx.egui_wants_keyboard_input());
                 if !typing {
                     self.close_develop_window();
                 }

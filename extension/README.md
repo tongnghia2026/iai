@@ -2,7 +2,8 @@
 
 Drives your **own** logged-in Gemini / ChatGPT tab to edit images for IAI — for
 free, using your normal browser session. Unlike IAI's old embedded webview, this
-runs in your real Chromium/Firefox, so it works the same on **Linux** too.
+runs in your real **Chromium** browser (Chrome / Edge / Brave), so it works the
+same on **Linux** too. (Firefox is experimental — see below.)
 
 ## Status
 
@@ -59,7 +60,10 @@ Ctrl+V (no DOM backup) so it never lands **twice**.
   `{ "type": "status", "id?", "message" }`,
   `{ "type": "result", "id", "image": "<base64 png>" }`
 
-## Firefox
+## Firefox (experimental)
 
-Load via `about:debugging` → This Firefox → Load Temporary Add-on → pick
-`manifest.json`. (MV3 background differs slightly; may need minor tweaks.)
+**Untested and unsupported.** Firefox's MV3 background model differs and the DOM
+heuristics have not been verified there, so expect breakage — Chrome / Edge /
+Brave are the supported browsers. To try it anyway: `about:debugging` → This
+Firefox → Load Temporary Add-on → pick `manifest.json`; you will likely need to
+adjust the background / service-worker wiring first.

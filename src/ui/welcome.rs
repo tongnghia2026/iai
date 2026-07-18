@@ -71,9 +71,13 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 ui.add_space(14.0);
 
                 ui.label(
-                    egui::RichText::new("v0.1.0  ·  Open Source Image Editor")
-                        .size(12.0)
-                        .color(egui::Color32::from_gray(90)),
+                    egui::RichText::new(concat!(
+                        "v",
+                        env!("CARGO_PKG_VERSION"),
+                        "  ·  Open Source Image Editor"
+                    ))
+                    .size(12.0)
+                    .color(egui::Color32::from_gray(90)),
                 );
 
                 ui.add_space(36.0);
@@ -163,7 +167,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         ui,
                         card_w,
                         "Cross Platform",
-                        "Windows · Linux · macOS\nRust + wgpu",
+                        "Windows today\nLinux/macOS from source",
                     );
                     ui.add_space(card_gap);
                     feature_card(
