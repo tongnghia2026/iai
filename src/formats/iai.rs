@@ -10,6 +10,12 @@ use std::path::{Path, PathBuf};
 /// RGB documents keep writing v2 so older builds still open them; v3 is only
 /// stamped when ink is present, which older builds MUST reject (their loader
 /// errors on version > 2) rather than silently strip the ink.
+///
+/// 16-bit precision does NOT bump the version: a layer that still holds a 16-bit
+/// master is written as a 16-bit RGBA PNG at `layer_{i}.png`. Older builds decode
+/// it as 8-bit (graceful precision loss they couldn't use anyway); this build
+/// detects the 16-bit payload on load and rebuilds the master. See
+/// `docs/bit-depth-and-color-capability.md`.
 const IAI_FORMAT_VERSION: u64 = 3;
 
 pub struct IaiImporter;
@@ -146,16 +152,23 @@ fn build_canvas_from_meta<R: Read + Seek>(
         let offset_x = layer_info["offset_x"].as_i64().unwrap_or(0) as i32;
         let offset_y = layer_info["offset_y"].as_i64().unwrap_or(0) as i32;
 
-        let (pixels, layer_w, layer_h) = {
+        let (pixels, layer_w, layer_h, hdr16) = {
             let entry_name = format!("{prefix}layer_{}.png", i);
             match archive.by_name(&entry_name) {
                 Ok(mut f) => {
                     let mut buf = Vec::new();
                     f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
                     let img = image::load_from_memory(&buf).map_err(|e| e.to_string())?;
-                    let rgba = img.to_rgba8();
-                    let (lw, lh) = rgba.dimensions();
-                    (rgba.into_raw(), lw.max(1), lh.max(1))
+                    let (lw, lh) = (img.width().max(1), img.height().max(1));
+                    // A 16-bit PNG payload carries a preserved master; keep it so
+                    // the layer reopens at full precision instead of being
+                    // rebuilt at 8 bits from the mirror.
+                    let hdr16 = matches!(
+                        img,
+                        image::DynamicImage::ImageRgba16(_) | image::DynamicImage::ImageRgb16(_)
+                    )
+                    .then(|| img.to_rgba16().into_raw());
+                    (img.to_rgba8().into_raw(), lw, lh, hdr16)
                 }
                 Err(_) => {
                     let lw = layer_info["width"].as_u64().unwrap_or(w as u64) as u32;
@@ -165,12 +178,18 @@ fn build_canvas_from_meta<R: Read + Seek>(
                     let Some(len) = Canvas::guarded_flat_rgba_len(lw, lh) else {
                         return Err("iAi layer qua lon de tao buffer phang".to_string());
                     };
-                    (vec![0u8; len], lw, lh)
+                    (vec![0u8; len], lw, lh, None)
                 }
             }
         };
 
         let mut layer = Layer::from_rgba(i as u32, &name, pixels, layer_w, layer_h);
+        // Restore the 16-bit master when the payload was 16-bit. `from_rgba`
+        // built an 8-bit-only tilemap; swap in one that carries both the master
+        // and its 8-bit mirror.
+        if let Some(px16) = hdr16 {
+            layer.tiles = crate::core::tile::TileMap::from_rgba16(&px16, layer_w, layer_h);
+        }
         layer.opacity = opacity;
         layer.visible = visible;
         layer.locked = locked;
@@ -566,8 +585,16 @@ fn write_canvas_layers(
 ) -> Result<(), String> {
     let stored = stored_options();
     for (i, layer) in canvas.layer_stack.layers.iter().enumerate() {
-        let flat_pixels = layer.flatten_tiles();
-        let png_data = encode_png(&flat_pixels, layer.width, layer.height)?;
+        // A layer still carrying a full 16-bit master (RAW / 16-bit import,
+        // untouched by 8-bit edits) is written as a 16-bit RGBA PNG so precision
+        // round-trips. No format-version bump is needed: a 16-bit PNG decodes
+        // fine as 8-bit, so older builds still open the file (they just can't
+        // use the extra precision). Layers without a master stay 8-bit.
+        let png_data = if layer.tiles.has_hdr() {
+            encode_png16(&layer.tiles.flatten16(), layer.width, layer.height)?
+        } else {
+            encode_png(&layer.flatten_tiles(), layer.width, layer.height)?
+        };
         zip.start_file(format!("{prefix}layer_{}.png", i), stored)
             .map_err(|e| e.to_string())?;
         zip.write_all(&png_data).map_err(|e| e.to_string())?;
@@ -718,6 +745,24 @@ fn encode_png(pixels: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
         writer.write_image_data(pixels).map_err(|e| e.to_string())?;
+    }
+    Ok(buf)
+}
+
+/// Encode 16-bit RGBA as a PNG, preserving a layer's 16-bit master so `.iai`
+/// round-trips precision. PNG stores 16-bit samples big-endian.
+fn encode_png16(px16: &[u16], w: u32, h: u32) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut buf, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Sixteen);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        let mut be = Vec::with_capacity(px16.len() * 2);
+        for &s in px16 {
+            be.extend_from_slice(&s.to_be_bytes());
+        }
+        writer.write_image_data(&be).map_err(|e| e.to_string())?;
     }
     Ok(buf)
 }
@@ -1351,6 +1396,70 @@ mod tests {
                 loaded.channels.alpha[0].height
             ),
             (8, 8)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hdr_layer_round_trips_16bit_master() {
+        use crate::core::tile::TileMap;
+        let dir = tmp_dir("hdr-16bit");
+        let path = dir.join("doc.iai");
+
+        // Values chosen so an 8-bit round-trip cannot reproduce them: 300 is not
+        // any `v*257`, and 40000 / 12345 are mid-codes the 8-bit mirror loses.
+        let (w, h) = (8u32, 8u32);
+        let mut px16 = vec![0u16; (w * h * 4) as usize];
+        for p in 0..(w * h) as usize {
+            px16[p * 4] = 300;
+            px16[p * 4 + 1] = 40000;
+            px16[p * 4 + 2] = 12345;
+            px16[p * 4 + 3] = 65535;
+        }
+        let mut canvas = solid([1, 1, 1, 255], w, h);
+        canvas.layer_stack.layers[0].tiles = TileMap::from_rgba16(&px16, w, h);
+        assert!(
+            canvas.layer_stack.layers[0].tiles.has_hdr(),
+            "test setup: layer should carry a 16-bit master"
+        );
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+
+        assert!(
+            loaded.layer_stack.layers[0].tiles.has_hdr(),
+            "16-bit master lost on .iai round-trip"
+        );
+        assert_eq!(
+            loaded.layer_stack.layers[0].tiles.get_pixel16(3, 3),
+            (300, 40000, 12345, 65535),
+            "16-bit values not preserved bit-exact"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn eight_bit_layer_stays_eight_bit() {
+        // A layer without a master must NOT be promoted on save; the payload
+        // stays an 8-bit PNG and reopens master-less.
+        let dir = tmp_dir("ldr-8bit");
+        let path = dir.join("doc.iai");
+        let canvas = solid([10, 20, 30, 255], 8, 8);
+        assert!(!canvas.layer_stack.layers[0].tiles.has_hdr());
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(
+            !loaded.layer_stack.layers[0].tiles.has_hdr(),
+            "8-bit layer gained a master it never had"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
