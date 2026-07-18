@@ -563,7 +563,15 @@ impl Canvas {
                 // filter/adjustment/export to 8-bit. Rebuild the masters from the
                 // pre-stroke snapshot so only the actually-painted pixels drop to
                 // 8-bit precision and the rest of each touched tile stays 16-bit.
-                if is_16bit && target == crate::core::layer::PaintTarget::Pixels {
+                // Preserve masters when the document is in 16-bit mode OR the
+                // layer actually carried masters before this edit — e.g. a 16-bit
+                // `.iai` reopened before its mode flag was restored. has_hdr() is
+                // the honest per-layer check; the mode flag can lag behind it.
+                // (For 8-bit documents the first master-less tile short-circuits
+                // has_hdr() to false, so this stays cheap.)
+                if target == crate::core::layer::PaintTarget::Pixels
+                    && (is_16bit || snap.before_tiles.has_hdr())
+                {
                     layer.tiles.repromote_after_paint(&snap.before_tiles);
                 }
                 let has_mask = layer.mask.is_some();
@@ -1590,6 +1598,46 @@ mod hdr_adjust_tests {
         assert!((b as i32 - 10321).abs() <= 2, "b={b}");
         assert_eq!(a, 65535);
         assert!(r % 257 != 0, "sub-8-bit precision preserved");
+    }
+
+    #[test]
+    fn edit_preserves_masters_on_hdr_layer_even_in_8bit_mode() {
+        // A 16-bit .iai reopened before its mode flag is restored: the layer has
+        // masters but bit_depth is Eight. An 8-bit edit under a stroke must still
+        // keep the untouched pixels at 16-bit — repromote is gated on has_hdr(),
+        // not only on the document mode flag.
+        use crate::core::tile::TileMap;
+        let (w, h) = (16u32, 16u32);
+        let mut px16 = vec![0u16; (w * h * 4) as usize];
+        for p in 0..(w * h) as usize {
+            px16[p * 4] = 300;
+            px16[p * 4 + 1] = 40000;
+            px16[p * 4 + 2] = 12345;
+            px16[p * 4 + 3] = 65535;
+        }
+        let mut canvas = Canvas::new(w, h);
+        canvas.bit_depth = BitDepth::Eight; // deliberately NOT 16-bit mode
+        canvas.layer_stack.layers[0].tiles = TileMap::from_rgba16(&px16, w, h);
+        assert!(canvas.layer_stack.layers[0].tiles.has_hdr());
+
+        // 8-bit edit of a 2x2 corner under a stroke; write_region drops the
+        // touched tile's master.
+        canvas.begin_stroke("Edit");
+        canvas.layer_stack.layers[0]
+            .tiles
+            .write_region(0, 0, 2, 2, &[0u8, 0, 0, 255].repeat(4));
+        canvas.end_stroke();
+
+        let tiles = &canvas.layer_stack.layers[0].tiles;
+        assert!(
+            tiles.has_hdr(),
+            "masters lost after an 8-bit edit on an hdr layer in 8-bit mode"
+        );
+        assert_eq!(
+            tiles.get_pixel16(5, 5),
+            (300, 40000, 12345, 65535),
+            "untouched 16-bit pixel not preserved through the edit"
+        );
     }
 
     #[test]

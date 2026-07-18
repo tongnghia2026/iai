@@ -127,6 +127,12 @@ fn build_canvas_from_meta<R: Read + Seek>(
     canvas.color_space = color_space;
     canvas.metadata.author = meta["author"].as_str().unwrap_or("").to_string();
     canvas.metadata.description = meta["description"].as_str().unwrap_or("").to_string();
+    // 16-bit mode (post-B2 key; absent on older files = 8-bit). Keeps a reopened
+    // 16-bit document in 16-bit mode so its first edit preserves precision
+    // instead of quantizing the masters the 16-bit layer PNGs just restored.
+    if meta["bit_depth"].as_u64() == Some(16) {
+        canvas.bit_depth = crate::core::canvas::BitDepth::Sixteen;
+    }
 
     canvas.layer_stack.layers.clear();
 
@@ -541,11 +547,20 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
         })
         .collect();
 
+    // Document bit-depth mode. Persisted so a reopened 16-bit document stays in
+    // 16-bit mode and edits keep preserving the masters that the 16-bit layer
+    // PNGs restore. Older builds ignore this key (they default to 8-bit).
+    let bit_depth = if canvas.bit_depth == crate::core::canvas::BitDepth::Sixteen {
+        16
+    } else {
+        8
+    };
     let mut meta = serde_json::json!({
         "width": canvas.width,
         "height": canvas.height,
         "dpi": canvas.metadata.resolution_ppi,
         "color_space": color_space_to_str(canvas.color_space),
+        "bit_depth": bit_depth,
         "author": canvas.metadata.author,
         "description": canvas.metadata.description,
         "layer_count": canvas.layer_stack.layers.len(),
@@ -1417,6 +1432,7 @@ mod tests {
             px16[p * 4 + 3] = 65535;
         }
         let mut canvas = solid([1, 1, 1, 255], w, h);
+        canvas.bit_depth = crate::core::canvas::BitDepth::Sixteen;
         canvas.layer_stack.layers[0].tiles = TileMap::from_rgba16(&px16, w, h);
         assert!(
             canvas.layer_stack.layers[0].tiles.has_hdr(),
@@ -1438,6 +1454,13 @@ mod tests {
             loaded.layer_stack.layers[0].tiles.get_pixel16(3, 3),
             (300, 40000, 12345, 65535),
             "16-bit values not preserved bit-exact"
+        );
+        // The 16-bit mode flag must round-trip too, so the first edit after
+        // reopening keeps preserving the masters instead of quantizing them.
+        assert_eq!(
+            loaded.bit_depth,
+            crate::core::canvas::BitDepth::Sixteen,
+            "bit_depth mode not restored on reopen"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
