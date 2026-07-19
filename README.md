@@ -28,7 +28,7 @@ iAi is a desktop raster image editor built from the ground up in Rust.
 - **Develop** — a raw/raster develop panel: exposure, contrast, highlights/shadows/whites/blacks, tone curve, HSL colour mixer, detail & effects
 - **Colour management** — ICC profiles, soft-proofing, display CMS, CMYK separations, print
 - **Formats** — PNG, JPEG, TIFF, WebP, PSD, RAW and multi-page PDF import, PDF export, plus the native `.iai` project format
-- **16-bit** import & Develop — RAW and 16-bit PNG/TIFF decode to a 16-bit master that survives Develop and the global adjustments (see the [bit-depth capability matrix](docs/bit-depth-and-color-capability.md))
+- **16-bit** editing — RAW / 16-bit PNG / TIFF decode to a 16-bit master that survives Develop, global adjustments, the common raster edits (paint, fill, crop, flip, rotate, resize, merge) and a `.iai` save/reopen round-trip; display is 8-bit-dithered (see the [bit-depth capability matrix](docs/bit-depth-and-color-capability.md))
 - **GPU-accelerated** compositing (wgpu / WGSL)
 - **AI** — subject/background masking, inpainting fill, face restoration, and a Gemini-powered retouch panel
 
