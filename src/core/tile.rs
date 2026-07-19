@@ -1411,6 +1411,9 @@ impl TileMap {
         let cols = (new_w + TILE_SIZE - 1) / TILE_SIZE;
         let rows = (new_h + TILE_SIZE - 1) / TILE_SIZE;
         let rev = NEXT_TILE_REV.fetch_add(1, Ordering::Relaxed);
+        // Permute the 16-bit master too when the source has one, so a lossless
+        // rotate/flip of a 16-bit layer stays 16-bit instead of quantizing.
+        let src_hdr = self.has_hdr();
 
         let tiles: Vec<(TilePos, Arc<Tile>)> = (0..rows)
             .into_par_iter()
@@ -1418,6 +1421,7 @@ impl TileMap {
                 let mut local = Vec::new();
                 for cx in 0..cols {
                     let mut tile_pixels = vec![0u8; TILE_BYTES];
+                    let mut tile_pixels16 = src_hdr.then(|| vec![0u16; TILE_BYTES]);
                     let mut has_data = false;
                     for ty in 0..TILE_SIZE {
                         let ny = cy * TILE_SIZE + ty;
@@ -1439,6 +1443,13 @@ impl TileMap {
                                 tile_pixels[i + 1] = g;
                                 tile_pixels[i + 2] = b;
                                 tile_pixels[i + 3] = a;
+                                if let Some(p16) = tile_pixels16.as_mut() {
+                                    let (r16, g16, b16, a16) = self.get_pixel16(ox, oy);
+                                    p16[i] = r16;
+                                    p16[i + 1] = g16;
+                                    p16[i + 2] = b16;
+                                    p16[i + 3] = a16;
+                                }
                             }
                         }
                     }
@@ -1450,7 +1461,7 @@ impl TileMap {
                             },
                             Arc::new(Tile {
                                 pixels: tile_pixels,
-                                pixels16: None,
+                                pixels16: tile_pixels16,
                                 // Rotate/flip do not carry ink; CMYK docs gate
                                 // these ops at the UI (v1).
                                 ink: None,
@@ -1475,6 +1486,9 @@ impl TileMap {
         let cols = (new_w + TILE_SIZE - 1) / TILE_SIZE;
         let rows = (new_h + TILE_SIZE - 1) / TILE_SIZE;
         let rev = NEXT_TILE_REV.fetch_add(1, Ordering::Relaxed);
+        // Permute the 16-bit master too when the source has one, so a lossless
+        // rotate/flip of a 16-bit layer stays 16-bit instead of quantizing.
+        let src_hdr = self.has_hdr();
 
         let tiles: Vec<(TilePos, Arc<Tile>)> = (0..rows)
             .into_par_iter()
@@ -1482,6 +1496,7 @@ impl TileMap {
                 let mut local = Vec::new();
                 for cx in 0..cols {
                     let mut tile_pixels = vec![0u8; TILE_BYTES];
+                    let mut tile_pixels16 = src_hdr.then(|| vec![0u16; TILE_BYTES]);
                     let mut has_data = false;
                     for ty in 0..TILE_SIZE {
                         let ny = cy * TILE_SIZE + ty;
@@ -1503,6 +1518,13 @@ impl TileMap {
                                 tile_pixels[i + 1] = g;
                                 tile_pixels[i + 2] = b;
                                 tile_pixels[i + 3] = a;
+                                if let Some(p16) = tile_pixels16.as_mut() {
+                                    let (r16, g16, b16, a16) = self.get_pixel16(ox, oy);
+                                    p16[i] = r16;
+                                    p16[i + 1] = g16;
+                                    p16[i + 2] = b16;
+                                    p16[i + 3] = a16;
+                                }
                             }
                         }
                     }
@@ -1514,7 +1536,7 @@ impl TileMap {
                             },
                             Arc::new(Tile {
                                 pixels: tile_pixels,
-                                pixels16: None,
+                                pixels16: tile_pixels16,
                                 // Rotate/flip do not carry ink; CMYK docs gate
                                 // these ops at the UI (v1).
                                 ink: None,
@@ -1537,6 +1559,9 @@ impl TileMap {
         let cols = (self.width + TILE_SIZE - 1) / TILE_SIZE;
         let rows = (self.height + TILE_SIZE - 1) / TILE_SIZE;
         let rev = NEXT_TILE_REV.fetch_add(1, Ordering::Relaxed);
+        // Permute the 16-bit master too when the source has one, so a lossless
+        // rotate/flip of a 16-bit layer stays 16-bit instead of quantizing.
+        let src_hdr = self.has_hdr();
 
         let tiles: Vec<(TilePos, Arc<Tile>)> = (0..rows)
             .into_par_iter()
@@ -1544,6 +1569,7 @@ impl TileMap {
                 let mut local = Vec::new();
                 for cx in 0..cols {
                     let mut tile_pixels = vec![0u8; TILE_BYTES];
+                    let mut tile_pixels16 = src_hdr.then(|| vec![0u16; TILE_BYTES]);
                     let mut has_data = false;
                     for ty in 0..TILE_SIZE {
                         let ny = cy * TILE_SIZE + ty;
@@ -1565,6 +1591,13 @@ impl TileMap {
                                 tile_pixels[i + 1] = g;
                                 tile_pixels[i + 2] = b;
                                 tile_pixels[i + 3] = a;
+                                if let Some(p16) = tile_pixels16.as_mut() {
+                                    let (r16, g16, b16, a16) = self.get_pixel16(ox, oy);
+                                    p16[i] = r16;
+                                    p16[i + 1] = g16;
+                                    p16[i + 2] = b16;
+                                    p16[i + 3] = a16;
+                                }
                             }
                         }
                     }
@@ -1576,7 +1609,7 @@ impl TileMap {
                             },
                             Arc::new(Tile {
                                 pixels: tile_pixels,
-                                pixels16: None,
+                                pixels16: tile_pixels16,
                                 // Rotate/flip do not carry ink; CMYK docs gate
                                 // these ops at the UI (v1).
                                 ink: None,
@@ -1756,6 +1789,9 @@ impl TileMap {
         let cols = (self.width + TILE_SIZE - 1) / TILE_SIZE;
         let rows = (self.height + TILE_SIZE - 1) / TILE_SIZE;
         let rev = NEXT_TILE_REV.fetch_add(1, Ordering::Relaxed);
+        // Permute the 16-bit master too when the source has one, so a lossless
+        // rotate/flip of a 16-bit layer stays 16-bit instead of quantizing.
+        let src_hdr = self.has_hdr();
 
         let tiles: Vec<(TilePos, Arc<Tile>)> = (0..rows)
             .into_par_iter()
@@ -1763,6 +1799,7 @@ impl TileMap {
                 let mut local = Vec::new();
                 for cx in 0..cols {
                     let mut tile_pixels = vec![0u8; TILE_BYTES];
+                    let mut tile_pixels16 = src_hdr.then(|| vec![0u16; TILE_BYTES]);
                     let mut has_data = false;
                     for ty in 0..TILE_SIZE {
                         let ny = cy * TILE_SIZE + ty;
@@ -1784,6 +1821,13 @@ impl TileMap {
                                 tile_pixels[i + 1] = g;
                                 tile_pixels[i + 2] = b;
                                 tile_pixels[i + 3] = a;
+                                if let Some(p16) = tile_pixels16.as_mut() {
+                                    let (r16, g16, b16, a16) = self.get_pixel16(ox, oy);
+                                    p16[i] = r16;
+                                    p16[i + 1] = g16;
+                                    p16[i + 2] = b16;
+                                    p16[i + 3] = a16;
+                                }
                             }
                         }
                     }
@@ -1795,7 +1839,7 @@ impl TileMap {
                             },
                             Arc::new(Tile {
                                 pixels: tile_pixels,
-                                pixels16: None,
+                                pixels16: tile_pixels16,
                                 // Rotate/flip do not carry ink; CMYK docs gate
                                 // these ops at the UI (v1).
                                 ink: None,
@@ -1859,6 +1903,42 @@ pub fn apply_write_mask(before: [u8; 4], px: &mut [u8; 4], wm: [bool; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotate_and_flip_preserve_16bit_master() {
+        // Lossless permutations of a 16-bit layer must keep the master; before
+        // this each rebuilt tiles at 8 bits and dropped it. Uniform sub-8-bit
+        // values (300 is not a `v*257`) prove precision survived; the geometry
+        // itself is covered by the existing 8-bit rotate/flip tests.
+        let (w, h) = (20u32, 12u32);
+        let mut px16 = vec![0u16; (w * h * 4) as usize];
+        for p in 0..(w * h) as usize {
+            px16[p * 4] = 300;
+            px16[p * 4 + 1] = 40000;
+            px16[p * 4 + 2] = 12345;
+            px16[p * 4 + 3] = 65535;
+        }
+        let src = TileMap::from_rgba16(&px16, w, h);
+        assert!(src.has_hdr());
+        let want = (300u16, 40000u16, 12345u16, 65535u16);
+
+        let cw = src.rotate_90_cw();
+        assert_eq!((cw.width, cw.height), (h, w));
+        assert!(cw.has_hdr(), "rotate_90_cw dropped the master");
+        assert_eq!(cw.get_pixel16(3, 3), want);
+
+        let ccw = src.rotate_90_ccw();
+        assert!(ccw.has_hdr(), "rotate_90_ccw dropped the master");
+        assert_eq!(ccw.get_pixel16(3, 3), want);
+
+        let fh = src.flip_h();
+        assert!(fh.has_hdr(), "flip_h dropped the master");
+        assert_eq!(fh.get_pixel16(3, 3), want);
+
+        let fv = src.flip_v();
+        assert!(fv.has_hdr(), "flip_v dropped the master");
+        assert_eq!(fv.get_pixel16(3, 3), want);
+    }
 
     #[test]
     fn blend_masked_touches_only_enabled_channels() {
