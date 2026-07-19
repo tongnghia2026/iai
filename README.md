@@ -38,7 +38,7 @@ iAi is built from source with Cargo. The steps below take you from a clean machi
 
 > **Requirements at a glance:** Git · Rust (stable, edition 2021) · a C/C++ toolchain · a GPU with Vulkan, Metal, DX12 or OpenGL support. The first use of an AI feature downloads its model (internet required).
 
-> **Platform support.** Windows is the primary, CI-tested target and the only one with a release build today. macOS and Linux compile from the same source — CI keeps an informational compile check for each — but they are **not yet CI-verified; treat them as experimental**.
+> **Platform support.** Windows is the primary target — full CI (build + test) and the only one with a release build. macOS and Linux are **compile-checked in CI on every push** and build from the same source; they are not yet runtime-verified, so there are no prebuilt binaries for them yet.
 
 ### Windows
 

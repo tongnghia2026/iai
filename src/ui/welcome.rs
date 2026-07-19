@@ -167,7 +167,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         ui,
                         card_w,
                         "Cross Platform",
-                        "Windows today\nLinux/macOS from source",
+                        "Windows, Linux, macOS\nBuilds from source",
                     );
                     ui.add_space(card_gap);
                     feature_card(

@@ -27,14 +27,14 @@ jobs:
       - name: Test (includes WGSL validation)
         run: cargo test --locked
 
-  # Portability watch. IAI has no non-Windows release target today and these
-  # have never been green, so they are informational: they exist to show how far
-  # the library is from building elsewhere, not to block a Windows fix.
-  # Flip a platform to blocking once it actually passes.
+  # Portability gate (blocking). Linux and macOS must keep compiling. Now that
+  # `cargo check` passes on both, this enforces the source stays cross-platform
+  # instead of only reporting how far off it is. Still a compile check, not a
+  # full build+test or a release target — upgrading to those is a later step,
+  # each flipped on once it is verified green on the platform.
   portability:
-    name: Compile check (${{ matrix.os }}) — informational
+    name: Compile check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
