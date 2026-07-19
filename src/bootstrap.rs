@@ -44,9 +44,20 @@ fn init_thread_pool() {
 pub fn run() -> Result<(), BootstrapError> {
     init_thread_pool();
 
+    #[cfg(windows)]
+    crate::windows_integration::register_iai_file_type();
+
     let event_loop = EventLoop::new().map_err(BootstrapError::EventLoop)?;
     let mut app = App::new();
     app.start_background_init();
+    let startup_files: Vec<_> = std::env::args_os()
+        .skip(1)
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect();
+    if !startup_files.is_empty() {
+        app.start_load_paths(startup_files);
+    }
     event_loop
         .run_app(&mut app)
         .map_err(BootstrapError::EventLoop)

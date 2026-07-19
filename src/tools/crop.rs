@@ -268,6 +268,16 @@ impl CropTool {
         self.mode = CropMode::FixedSize;
     }
 
+    /// Refresh resolution from the active image only when Crop has no fixed
+    /// output preset. A fixed-size preset owns its DPI (for example an ID-photo
+    /// preset at 600 ppi), so leaving and returning to Crop must not replace it
+    /// with the document's commonly-defaulted 72 ppi metadata.
+    pub fn sync_dpi_on_activate(&mut self, canvas_dpi: f32) {
+        if self.mode != CropMode::FixedSize {
+            self.dpi = canvas_dpi.max(1.0);
+        }
+    }
+
     pub fn commit(&mut self, canvas: &mut Canvas, background: [u8; 4]) {
         let x0 = self.crop_x0.min(self.crop_x1);
         let y0 = self.crop_y0.min(self.crop_y1);
@@ -970,6 +980,34 @@ mod tests {
         assert!((at_300.0 - 1181.1024).abs() < 0.001);
         assert!((at_300.1 - 1771.6536).abs() < 0.001);
         assert_eq!((crop.fixed_w, crop.fixed_h), (10.0, 15.0));
+    }
+
+    #[test]
+    fn fixed_size_preset_keeps_dpi_when_crop_tool_is_reselected() {
+        let mut crop = CropTool::new();
+        let preset = CropPreset {
+            name: "3x4 600dpi".to_string(),
+            width: 2.8,
+            height: 3.8,
+            unit: Unit::Centimeters,
+            dpi: 600.0,
+        };
+        crop.apply_preset(&preset);
+
+        crop.sync_dpi_on_activate(72.0);
+
+        assert_eq!(crop.dpi, 600.0);
+        assert_eq!(crop.mode, CropMode::FixedSize);
+    }
+
+    #[test]
+    fn free_crop_adopts_active_document_dpi() {
+        let mut crop = CropTool::new();
+        crop.dpi = 600.0;
+
+        crop.sync_dpi_on_activate(300.0);
+
+        assert_eq!(crop.dpi, 300.0);
     }
 
     #[test]

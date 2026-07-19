@@ -18,7 +18,7 @@ pub struct BackgroundJobs {
     pub(in crate::app) pending_file_dialog:
         Option<std::sync::mpsc::Receiver<crate::file_io::FileDialogResult>>,
     /// Background image-import jobs. A worker thread decodes each path off the UI
-    /// thread and streams `(path, Vec<Canvas>|Err)` back; multi-page formats such
+    /// thread and streams `(path, Vec<Canvas>|Err, is_last)` back; multi-page formats such
     /// as PDF produce one canvas per page. `poll_loads()` attaches each finished
     /// document so opening large / many files never blocks the window.
     #[allow(clippy::type_complexity)]
@@ -26,6 +26,7 @@ pub struct BackgroundJobs {
         std::sync::mpsc::Receiver<(
             std::path::PathBuf,
             Result<Vec<crate::core::canvas::Canvas>, String>,
+            bool,
         )>,
     >,
     /// Fast embedded-JPEG previews for RAW opens: attached as a placeholder tab
@@ -47,8 +48,9 @@ pub struct BackgroundJobs {
     /// transient Develop session. Their eventual worker result is discarded
     /// instead of reopening the window the user just closed.
     pub(in crate::app) cancelled_raw_loads: std::collections::HashSet<String>,
-    /// The next finished load becomes the active tab (gives immediate feedback for
-    /// a single open); the rest of a multi-file batch attach as background tabs.
+    /// The next finished load becomes active immediately for early feedback; once
+    /// a multi-file batch finishes, its final successfully loaded document becomes
+    /// active (see the `is_last` marker carried by `pending_loads`).
     pub(in crate::app) load_activate_pending: bool,
     /// PDFs opened this batch, waiting for their page-selection dialog. Handled one
     /// at a time: probe -> dialog -> render. See `maybe_start_next_pdf_probe`.

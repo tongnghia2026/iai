@@ -57,11 +57,24 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         build_document_list(ctx, ui, data, actions);
 
-                        // Overflowing tabs are clipped before the fixed menu.
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
-                            build_tabs(ui, data, actions)
-                        });
+                        // Keep the document list fixed while the tabs themselves
+                        // slide underneath the available strip.  A newly appended
+                        // document is revealed at the right edge automatically;
+                        // selecting an older document reveals that tab again.
+                        let tabs_size = egui::vec2(ui.available_width(), TAB_H);
+                        ui.allocate_ui_with_layout(
+                            tabs_size,
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                egui::ScrollArea::horizontal()
+                                    .id_salt("document_tab_scroll")
+                                    .scroll_bar_visibility(
+                                        egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                                    )
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| build_tabs(ui, data, actions));
+                            },
+                        );
                     });
                 });
             });
@@ -78,6 +91,18 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
 fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
+    let count_key = egui::Id::new("document_tab_previous_count");
+    let active_key = egui::Id::new("document_tab_previous_active");
+    let previous_count = ui
+        .ctx()
+        .data(|d| d.get_temp::<usize>(count_key))
+        .unwrap_or(0);
+    let previous_active = ui
+        .ctx()
+        .data(|d| d.get_temp::<usize>(active_key))
+        .unwrap_or(data.doc.active_doc_idx);
+    let documents_appended = data.doc.doc_count > previous_count;
+    let active_changed = data.doc.active_doc_idx != previous_active;
 
     for i in 0..data.doc.doc_count {
         let title = data
@@ -105,6 +130,14 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
         let (tab_rect, tab_response) =
             ui.allocate_exact_size(egui::vec2(tab_w, TAB_H), egui::Sense::click());
+
+        // Appends take precedence so the newest filename is always visible on
+        // the right.  Otherwise follow explicit tab/keyboard navigation.
+        if documents_appended && i + 1 == data.doc.doc_count {
+            tab_response.scroll_to_me(Some(egui::Align::Max));
+        } else if !documents_appended && active_changed && is_active {
+            tab_response.scroll_to_me(Some(egui::Align::Center));
+        }
         let painter = ui.painter();
         painter.rect_filled(tab_rect, 0.0, tab_fill);
 
@@ -220,6 +253,11 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if new_resp.clicked() {
         actions.doc.new_doc_tab = true;
     }
+
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(count_key, data.doc.doc_count);
+        d.insert_temp(active_key, data.doc.active_doc_idx);
+    });
 }
 
 fn build_document_list(

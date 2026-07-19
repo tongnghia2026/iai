@@ -282,8 +282,7 @@ impl App {
                 if id == crate::tools::ToolId::Crop {
                     let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
                     let dpi = canvas.metadata.resolution_ppi;
-                    let c = self.edit.tools.crop_mut();
-                    c.dpi = dpi;
+                    self.edit.tools.crop_mut().sync_dpi_on_activate(dpi);
                 }
                 if id == crate::tools::ToolId::PerspectiveCrop {
                     // No auto frame — wait for the user to pick the four corners.

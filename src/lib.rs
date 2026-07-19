@@ -28,6 +28,8 @@ pub mod formats;
 pub mod gpu;
 pub mod tools;
 pub mod ui;
+#[cfg(windows)]
+pub mod windows_integration;
 
 // `crate::log_crash` is called from deep subsystems (GPU device-lost recovery);
 // keep the short root path working now that the implementation lives in `crash`.

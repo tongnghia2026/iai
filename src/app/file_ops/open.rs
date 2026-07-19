@@ -189,9 +189,10 @@ impl App {
                 // The registry holds only built-in importers (no runtime plugins), so a
                 // fresh one matches `self.jobs.format_registry` and needs no sharing.
                 let registry = crate::formats::FormatRegistry::new();
-                for path in paths_to_load {
+                let path_count = paths_to_load.len();
+                for (index, path) in paths_to_load.into_iter().enumerate() {
                     let result = import_many_guarded(&registry, &path);
-                    if tx.send((path, result)).is_err() {
+                    if tx.send((path, result, index + 1 == path_count)).is_err() {
                         break; // UI dropped the receiver (app closing) — stop decoding.
                     }
                 }
@@ -239,14 +240,25 @@ impl App {
             let mut alive = true;
             loop {
                 match rx.try_recv() {
-                    Ok((path, Ok(canvases))) => {
+                    Ok((path, Ok(canvases), is_last)) => {
                         let page_count = canvases.len();
+                        let mut last_attached = None;
                         for (page_index, canvas) in canvases.into_iter().enumerate() {
                             let page = (page_count > 1).then_some((page_index, page_count));
-                            self.attach_loaded_doc(path.clone(), canvas, page, None);
+                            last_attached =
+                                self.attach_loaded_doc(path.clone(), canvas, page, None);
+                        }
+                        if is_last {
+                            if let Some(id) = last_attached {
+                                if let Some(idx) =
+                                    self.docs.documents.iter().position(|doc| doc.id == id)
+                                {
+                                    self.switch_to_doc(idx);
+                                }
+                            }
                         }
                     }
-                    Ok((path, Err(e))) => {
+                    Ok((path, Err(e), _is_last)) => {
                         // A failed decode never reached the point that consumes
                         // the preview-luma cache entry — drop it here.
                         crate::formats::raw_preview::forget_cached_mean_luma(&path);
@@ -337,9 +349,10 @@ impl App {
         }
     }
 
-    /// Attach a decoded document. The first of a batch becomes the active tab and
-    /// gets its GPU state uploaded; the rest attach as background tabs and upload
-    /// lazily when selected (so opening many files doesn't upload them all at once).
+    /// Attach a decoded document. The first of a batch becomes active immediately;
+    /// intermediate documents attach as background tabs, and `poll_loads` activates
+    /// the final document when the batch completes. This limits GPU uploads to the
+    /// first and final images instead of flashing through every opened file.
     /// Install `doc` as the active tab — replacing the welcome placeholder or
     /// pushed as a new tab — saving the outgoing view and syncing all GPU state.
     /// Returns the new active index. Caller has already cleared
@@ -535,10 +548,10 @@ impl App {
         canvas: Canvas,
         page: Option<(usize, usize)>,
         pdf_page: Option<crate::core::document::PdfPageRef>,
-    ) {
+    ) -> Option<crate::core::document::DocumentId> {
         let path_key = normalized_path_key(&path);
         if self.jobs.cancelled_raw_loads.remove(&path_key) {
-            return;
+            return None;
         }
         let is_raw = crate::formats::raw::is_raw_path(&path);
         // A RAW whose fast preview is already showing: swap the full decode into
@@ -547,7 +560,7 @@ impl App {
             if let Some(existing_id) = self.jobs.raw_preview_docs.remove(&path_key) {
                 if let Some(idx) = self.docs.documents.iter().position(|d| d.id == existing_id) {
                     self.replace_preview_with_full(idx, canvas);
-                    return;
+                    return Some(existing_id);
                 }
                 // Placeholder was closed before the decode finished — fall through
                 // and attach as a fresh document.
@@ -556,7 +569,7 @@ impl App {
             // flight; the first to land filled the placeholder above, so a
             // second result for an already-open path is a duplicate — drop it.
             if is_raw && self.find_open_document_by_path(&path).is_some() {
-                return;
+                return None;
             }
         }
         let (w, h) = (canvas.width, canvas.height);
@@ -620,6 +633,7 @@ impl App {
                 self.dev.pending_develop.push(id);
             }
         }
+        Some(id)
     }
 
     /// Take the file-dialog result (if the worker thread is done) and run the
