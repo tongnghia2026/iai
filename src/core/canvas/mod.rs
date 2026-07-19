@@ -1700,6 +1700,46 @@ mod hdr_adjust_tests {
     }
 
     #[test]
+    fn filter_style_commit_preserves_16bit_outside_the_change() {
+        // A filter / Smart Fill commit: 16-bit before, 8-bit after. Pixels the op
+        // left unchanged must keep their 16-bit master (only the changed region
+        // becomes 8-bit-sourced), so a selection-limited op does not collapse the
+        // whole layer to 8-bit.
+        use crate::core::tile::TileMap;
+        let (w, h) = (16u32, 16u32);
+        let mut px16 = vec![0u16; (w * h * 4) as usize];
+        for p in 0..(w * h) as usize {
+            px16[p * 4] = 300;
+            px16[p * 4 + 1] = 40000;
+            px16[p * 4 + 2] = 12345;
+            px16[p * 4 + 3] = 65535;
+        }
+        let mut canvas = Canvas::from_rgba16(px16, w, h);
+        let lid = canvas.layer_stack.layers[0].id;
+        let before = canvas.layer_stack.layers[0].tiles.clone();
+        assert!(before.has_hdr());
+
+        // "after" = an 8-bit copy of the layer with one corner pixel changed.
+        let mut after8 = before.flatten();
+        after8[0] = 0;
+        after8[1] = 0;
+        after8[2] = 0;
+        after8[3] = 255;
+        let after = TileMap::from_rgba(&after8, w, h);
+        assert!(!after.has_hdr());
+
+        assert!(canvas.commit_layer_tiles_change(lid, before, after, "Filter"));
+
+        let tiles = &canvas.layer_stack.layers[0].tiles;
+        assert!(tiles.has_hdr(), "commit dropped the 16-bit master");
+        assert_eq!(
+            tiles.get_pixel16(5, 5),
+            (300, 40000, 12345, 65535),
+            "unchanged pixel lost its 16-bit precision"
+        );
+    }
+
+    #[test]
     fn flatten_16bit_on_large_canvas() {
         // The RAW case: Flatten Image on a >25M px 16-bit doc must chunk (no
         // canvas-sized f32 buffer) and stay 16-bit.

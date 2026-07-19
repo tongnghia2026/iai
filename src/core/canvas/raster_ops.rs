@@ -388,6 +388,12 @@ impl Canvas {
             return false;
         };
 
+        // Keep the document 16-bit across an 8-bit tiles replacement (filters,
+        // Smart Fill): pixels the op left unchanged should keep their 16-bit
+        // master instead of the whole layer dropping to 8-bit — which matters
+        // most for a selection-limited op that only touches part of the layer.
+        // Rebuild the masters from the before-state (mirror is untouched).
+        let before_hdr = before_tiles.has_hdr();
         self.layer_stack.layers[idx].tiles = before_tiles;
         let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
             label,
@@ -395,6 +401,10 @@ impl Canvas {
             self.width,
             self.height,
         );
+        let mut after_tiles = after_tiles;
+        if before_hdr {
+            after_tiles.repromote_after_paint(&self.layer_stack.layers[idx].tiles);
+        }
         self.layer_stack.layers[idx].tiles = after_tiles;
         cmd.capture_after(&self.layer_stack, self.width, self.height);
         self.record_as(Box::new(cmd), ChangeKind::LayerPixels);

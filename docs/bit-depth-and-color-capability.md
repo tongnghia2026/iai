@@ -12,8 +12,8 @@ First written during the architecture-hardening milestone (2026-07-17), when
 16-bit was an import-and-Develop capability only. Updated 2026-07-19 after the
 B1/B2 work: `.iai` now round-trips 16 bits, the mode flag persists, and the
 common raster edits (paint, fill, gradient, crop, flip, 90° rotate, resize /
-rotate-by-angle, merge, flatten) preserve the master instead of dropping it. The
-remaining 8-bit paths are filters, the colour-mode conversions, and the entire
+rotate-by-angle, merge, flatten, filters, Smart Fill) preserve the master instead
+of dropping it. The remaining 8-bit paths are the colour-mode conversions and the
 render/display path (see below for why the last is intentional).
 
 ## The model
@@ -30,9 +30,9 @@ Historically this meant **16-bit was a property a document could lose, silently,
 by being edited**. B2 closed most of that: an 8-bit edit snapshots the tiles
 first, and `repromote_after_paint` then rebuilds each touched tile's master —
 restoring the untouched pixels to their exact 16-bit values and up-converting the
-changed ones (`v*257`). So `has_hdr()` now survives the common edits. The paths
-that still drop it are the ones that have not been taught to repromote (filters)
-or that deliberately leave the RGB domain (colour-mode conversion).
+changed ones (`v*257`). So `has_hdr()` now survives the common edits. The only
+path that still drops it does so deliberately: colour-mode conversion leaves the
+RGB domain.
 
 ## Legend
 
@@ -69,7 +69,7 @@ or that deliberately leave the RGB domain (colour-mode conversion).
 | Global adjustments (Levels/Curves) | Native | 16-bit paths present. |
 | Paint / brush / eraser | Preserved (B2.1) | 8-bit `write_region`, then `end_stroke` repromotes; untouched pixels keep 16-bit. Gated on `has_hdr()` (not just the mode flag), so it holds even for a reopened 16-bit `.iai`. |
 | Fill / gradient | Preserved (B2.1) | Same stroke path as paint. |
-| Filters | Quantized | 8-bit; the filter commit has no repromote yet. The main remaining editing gap. |
+| Filters / Smart Fill | Preserved | The shared commit (`commit_layer_tiles_change`) repromotes from the before-state, so a selection-limited op keeps the rest of the layer at 16-bit. The pixels it actually changes are 8-bit-computed. |
 | Crop | Native (B2.2) | `blit_region_from` copies the 16-bit master region (`flatten16_region_into` → `write_region16`); the fill/border is promoted so `has_hdr()` holds. |
 | Flip / 90° rotate | Native (B2.3) | `flip_h/flip_v/rotate_90_*` permute `pixels16` alongside the mirror. |
 | Resize / rotate-by-angle / perspective | Native (B2.4) | `resample_into_tiles` samples with `sample_bilinear16` and writes `write_region16`. |
@@ -103,8 +103,8 @@ change that — see "Why the display stays 8-bit" below.
 2. It survives Develop, the global adjustments, and now the common raster edits
    (paint, fill, gradient, crop, flip, 90° rotate, resize / rotate-by-angle,
    merge, flatten) and a `.iai` save/reopen/edit round-trip.
-3. It is still dropped by **filters**, and deliberately by **colour-mode
-   conversion** (CMYK leaves the RGB domain).
+3. It is dropped only where that is deliberate: **colour-mode conversion** (CMYK
+   leaves the RGB domain).
 4. It is **not seen at full precision on screen** — but that is by design, not a
    gap (next section).
 
@@ -135,7 +135,8 @@ not done.
   `write_region` anywhere in an operation quietly ends 16-bit for that tile —
   unless the op snapshots first and repromotes (the B2 pattern) or writes 16-bit
   directly (`write_region16` / `sample_bilinear16` / `flatten16_region_into`).
-- The remaining editing gap is **filters**: teach the filter commit to repromote
-  (snapshot → 8-bit apply → `repromote_after_paint`) or to run 16-bit natively.
+- The RGB-domain editing paths all preserve 16-bit now. If you add a new one that
+  replaces a layer's tiles from an 8-bit computation, route it through
+  `commit_layer_tiles_change` (which repromotes) or repromote yourself.
 - Any `.iai` change must stay backward compatible with existing files (the 16-bit
   payload rides in a normal PNG and the `bit_depth` key is optional).
