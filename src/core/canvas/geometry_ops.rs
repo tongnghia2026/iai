@@ -508,52 +508,113 @@ impl Canvas {
         use rayon::prelude::*;
         let mut new_tiles = crate::core::tile::TileMap::new(out_w, out_h);
         let chunk = 256u32;
+        // Resample at 16 bits when the source carries a full master, so resize /
+        // rotate-by-angle / perspective keep precision instead of quantizing.
+        // write_region16 also refreshes each tile's 8-bit mirror.
+        let src_hdr = src.has_hdr();
         let mut by = 0;
         while by < out_h {
             let ch = chunk.min(out_h - by);
             let mut bx = 0;
             while bx < out_w {
                 let cw = chunk.min(out_w - bx);
-                let mut buf = vec![0u8; (cw * ch * 4) as usize];
-                buf.par_chunks_mut((cw * 4) as usize)
-                    .enumerate()
-                    .for_each(|(r, row)| {
-                        let v = (by + r as u32) as f32 + 0.5;
-                        for c in 0..cw as usize {
-                            let u = (bx + c as u32) as f32 + 0.5;
-                            let (sx, sy) = map(u, v);
-                            let (mut rr, mut gg, mut bb, mut aa) = src.sample_bilinear(sx, sy);
-                            if let Some([br, bg, bb_bg, ba]) = background {
-                                let src_a = aa as f32 / 255.0;
-                                let bg_a = ba as f32 / 255.0;
-                                let out_a = src_a + bg_a * (1.0 - src_a);
-                                if out_a > 0.0 {
-                                    rr = ((rr as f32 * src_a + br as f32 * bg_a * (1.0 - src_a))
-                                        / out_a)
-                                        .round()
-                                        .clamp(0.0, 255.0)
-                                        as u8;
-                                    gg = ((gg as f32 * src_a + bg as f32 * bg_a * (1.0 - src_a))
-                                        / out_a)
-                                        .round()
-                                        .clamp(0.0, 255.0)
-                                        as u8;
-                                    bb = ((bb as f32 * src_a + bb_bg as f32 * bg_a * (1.0 - src_a))
-                                        / out_a)
-                                        .round()
-                                        .clamp(0.0, 255.0)
-                                        as u8;
+                if src_hdr {
+                    let mut buf = vec![0u16; (cw * ch * 4) as usize];
+                    buf.par_chunks_mut((cw * 4) as usize)
+                        .enumerate()
+                        .for_each(|(r, row)| {
+                            let v = (by + r as u32) as f32 + 0.5;
+                            for c in 0..cw as usize {
+                                let u = (bx + c as u32) as f32 + 0.5;
+                                let (sx, sy) = map(u, v);
+                                let (mut rr, mut gg, mut bb, mut aa) =
+                                    src.sample_bilinear16(sx, sy);
+                                if let Some([br, bg, bb_bg, ba]) = background {
+                                    // Background is an 8-bit fill colour; lift to 16 bits.
+                                    let (br, bg, bb_bg, ba) = (
+                                        br as u16 * 257,
+                                        bg as u16 * 257,
+                                        bb_bg as u16 * 257,
+                                        ba as u16 * 257,
+                                    );
+                                    let src_a = aa as f32 / 65535.0;
+                                    let bg_a = ba as f32 / 65535.0;
+                                    let out_a = src_a + bg_a * (1.0 - src_a);
+                                    if out_a > 0.0 {
+                                        rr = ((rr as f32 * src_a
+                                            + br as f32 * bg_a * (1.0 - src_a))
+                                            / out_a)
+                                            .round()
+                                            .clamp(0.0, 65535.0)
+                                            as u16;
+                                        gg = ((gg as f32 * src_a
+                                            + bg as f32 * bg_a * (1.0 - src_a))
+                                            / out_a)
+                                            .round()
+                                            .clamp(0.0, 65535.0)
+                                            as u16;
+                                        bb = ((bb as f32 * src_a
+                                            + bb_bg as f32 * bg_a * (1.0 - src_a))
+                                            / out_a)
+                                            .round()
+                                            .clamp(0.0, 65535.0)
+                                            as u16;
+                                    }
+                                    aa = (out_a * 65535.0).round().clamp(0.0, 65535.0) as u16;
                                 }
-                                aa = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+                                let idx = c * 4;
+                                row[idx] = rr;
+                                row[idx + 1] = gg;
+                                row[idx + 2] = bb;
+                                row[idx + 3] = aa;
                             }
-                            let idx = c * 4;
-                            row[idx] = rr;
-                            row[idx + 1] = gg;
-                            row[idx + 2] = bb;
-                            row[idx + 3] = aa;
-                        }
-                    });
-                new_tiles.write_region(bx, by, cw, ch, &buf);
+                        });
+                    new_tiles.write_region16(bx, by, cw, ch, &buf);
+                } else {
+                    let mut buf = vec![0u8; (cw * ch * 4) as usize];
+                    buf.par_chunks_mut((cw * 4) as usize)
+                        .enumerate()
+                        .for_each(|(r, row)| {
+                            let v = (by + r as u32) as f32 + 0.5;
+                            for c in 0..cw as usize {
+                                let u = (bx + c as u32) as f32 + 0.5;
+                                let (sx, sy) = map(u, v);
+                                let (mut rr, mut gg, mut bb, mut aa) = src.sample_bilinear(sx, sy);
+                                if let Some([br, bg, bb_bg, ba]) = background {
+                                    let src_a = aa as f32 / 255.0;
+                                    let bg_a = ba as f32 / 255.0;
+                                    let out_a = src_a + bg_a * (1.0 - src_a);
+                                    if out_a > 0.0 {
+                                        rr = ((rr as f32 * src_a
+                                            + br as f32 * bg_a * (1.0 - src_a))
+                                            / out_a)
+                                            .round()
+                                            .clamp(0.0, 255.0)
+                                            as u8;
+                                        gg = ((gg as f32 * src_a
+                                            + bg as f32 * bg_a * (1.0 - src_a))
+                                            / out_a)
+                                            .round()
+                                            .clamp(0.0, 255.0)
+                                            as u8;
+                                        bb = ((bb as f32 * src_a
+                                            + bb_bg as f32 * bg_a * (1.0 - src_a))
+                                            / out_a)
+                                            .round()
+                                            .clamp(0.0, 255.0)
+                                            as u8;
+                                    }
+                                    aa = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+                                }
+                                let idx = c * 4;
+                                row[idx] = rr;
+                                row[idx + 1] = gg;
+                                row[idx + 2] = bb;
+                                row[idx + 3] = aa;
+                            }
+                        });
+                    new_tiles.write_region(bx, by, cw, ch, &buf);
+                }
                 bx += cw;
             }
             by += ch;

@@ -1668,6 +1668,38 @@ mod hdr_adjust_tests {
     }
 
     #[test]
+    fn resize_preserves_16bit_master() {
+        // Resampling (resize / rotate-by-angle / perspective) a 16-bit layer must
+        // keep the master. A uniform sub-8-bit field (300 is not a v*257) resamples
+        // to the same value, so the result proves precision survived the bilinear.
+        let (w, h) = (40u32, 40u32);
+        let mut px16 = vec![0u16; (w * h * 4) as usize];
+        for p in 0..(w * h) as usize {
+            px16[p * 4] = 300;
+            px16[p * 4 + 1] = 40000;
+            px16[p * 4 + 2] = 12345;
+            px16[p * 4 + 3] = 65535;
+        }
+        let mut canvas = Canvas::from_rgba16(px16, w, h);
+        assert!(canvas.layer_stack.layers[0].tiles.has_hdr());
+
+        assert!(canvas.resize_image(20, 20, 300.0));
+        assert_eq!((canvas.width, canvas.height), (20, 20));
+
+        let tiles = &canvas.layer_stack.layers[0].tiles;
+        assert!(tiles.has_hdr(), "resize dropped the 16-bit master");
+        let (r, g, b, a) = tiles.get_pixel16(10, 10);
+        assert!((r as i32 - 300).abs() <= 1, "r={r}");
+        assert!((g as i32 - 40000).abs() <= 1, "g={g}");
+        assert!((b as i32 - 12345).abs() <= 1, "b={b}");
+        assert_eq!(a, 65535);
+        assert!(
+            r % 257 != 0 || g % 257 != 0,
+            "sub-8-bit precision preserved (not an 8-bit up-convert)"
+        );
+    }
+
+    #[test]
     fn flatten_16bit_on_large_canvas() {
         // The RAW case: Flatten Image on a >25M px 16-bit doc must chunk (no
         // canvas-sized f32 buffer) and stay 16-bit.

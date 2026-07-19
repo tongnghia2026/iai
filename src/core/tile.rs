@@ -1725,6 +1725,50 @@ impl TileMap {
         (to_u8(r), to_u8(g), to_u8(b), to_u8(a))
     }
 
+    /// 16-bit counterpart of [`sample_bilinear`]: same premultiplied-alpha bilinear
+    /// math, reading the 16-bit master (`get_pixel16` falls back to the up-converted
+    /// mirror) so resampling a 16-bit layer keeps precision. Out-of-bounds →
+    /// `(0,0,0,0)`.
+    pub fn sample_bilinear16(&self, x: f32, y: f32) -> (u16, u16, u16, u16) {
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let fx = x - x0 as f32;
+        let fy = y - y0 as f32;
+
+        let samp = |px: i32, py: i32| -> [f32; 4] {
+            if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
+                return [0.0; 4];
+            }
+            let (r, g, b, a) = self.get_pixel16(px as u32, py as u32);
+            let af = a as f32 / 65535.0;
+            [
+                r as f32 * af / 65535.0,
+                g as f32 * af / 65535.0,
+                b as f32 * af / 65535.0,
+                af,
+            ]
+        };
+
+        let c00 = samp(x0, y0);
+        let c10 = samp(x0 + 1, y0);
+        let c01 = samp(x0, y0 + 1);
+        let c11 = samp(x0 + 1, y0 + 1);
+
+        let lerp = |a: f32, b: f32, t: f32| -> f32 { a * (1.0 - t) + b * t };
+        let a = lerp(lerp(c00[3], c10[3], fx), lerp(c01[3], c11[3], fx), fy);
+        if a < f32::EPSILON {
+            return (0, 0, 0, 0);
+        }
+        let r = lerp(lerp(c00[0], c10[0], fx), lerp(c01[0], c11[0], fx), fy) / a;
+        let g = lerp(lerp(c00[1], c10[1], fx), lerp(c01[1], c11[1], fx), fy) / a;
+        let b = lerp(lerp(c00[2], c10[2], fx), lerp(c01[2], c11[2], fx), fy) / a;
+
+        fn to_u16(v: f32) -> u16 {
+            (v * 65535.0).round().clamp(0.0, 65535.0) as u16
+        }
+        (to_u16(r), to_u16(g), to_u16(b), to_u16(a))
+    }
+
     /// Returns the tight bounding box of all non-transparent pixels in layer-local coords.
     /// Result is (min_x, min_y, max_x_exclusive, max_y_exclusive), all in layer pixels.
     /// Returns `None` if the TileMap is entirely transparent / empty.
