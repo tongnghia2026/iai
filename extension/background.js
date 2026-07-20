@@ -273,6 +273,28 @@ async function realClick(tabId, x, y) {
   });
 }
 
+async function realScroll(tabId, x, y) {
+  // Wheel input is only reliably delivered to the page when its tab is active.
+  // The edit workflow already owns this tab, so re-assert focus before each
+  // scrolling burst in case the browser moved focus while generation ran.
+  await focusTab(tabId);
+  await withDebugger(tabId, async (target) => {
+    // A trusted wheel event is routed by Chromium to the actual scroll container
+    // under this point. This keeps working when Gemini replaces/virtualizes its
+    // conversation DOM and ignores content-script scrollTop changes.
+    for (let i = 0; i < 3; i++) {
+      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x,
+        y,
+        deltaX: 0,
+        deltaY: 4096,
+      });
+      await sleep(40);
+    }
+  });
+}
+
 async function realType(tabId, text) {
   await focusTab(tabId);
   await withDebugger(tabId, async (target) => {
@@ -428,6 +450,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
     }
     realClick(tabId, msg.x, msg.y)
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (msg.type === "realScroll") {
+    const tabId = jobTabId(msg.id, sender);
+    if (!tabId) {
+      sendResponse({ ok: false, error: "missing tab id" });
+      return true;
+    }
+    realScroll(tabId, msg.x, msg.y)
       .then(() => sendResponse({ ok: true }))
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;

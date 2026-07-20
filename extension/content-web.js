@@ -510,8 +510,86 @@
   }
 
   function scrollChatToBottom() {
+    // Gemini has changed its nesting a few times. The largest scrollable node is
+    // not always the conversation (the sidebar can win), so scroll every large
+    // pane in the main/right part of the window as well as the document itself.
     try {
-      var sc = chatScroller();
+      var scrollers = [chatScroller(), document.scrollingElement, document.documentElement];
+      var all = document.querySelectorAll("div,main,section");
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.scrollHeight <= el.clientHeight + 40) continue;
+        var r = el.getBoundingClientRect();
+        if (r.width < window.innerWidth * 0.4 || r.right < window.innerWidth * 0.55) continue;
+        var style = getComputedStyle(el);
+        if (style.overflowY === "auto" || style.overflowY === "scroll") scrollers.push(el);
+      }
+      uniqueElements(scrollers).forEach(function (sc) {
+        if (sc) sc.scrollTop = sc.scrollHeight;
+      });
+      window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
+    } catch (e) {}
+  }
+
+  function looksLikeLargeImage(img) {
+    try {
+      var r = img.getBoundingClientRect();
+      return (
+        img.naturalWidth >= 256 ||
+        img.naturalHeight >= 256 ||
+        Number(img.getAttribute("width")) >= 256 ||
+        Number(img.getAttribute("height")) >= 256 ||
+        r.width >= 220 ||
+        r.height >= 220
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Gemini's composer is fixed over the conversation. At scrollTop=max the
+  // bottom of a result can therefore still sit behind it. Put a real spacer
+  // after the result's conversation item so the pane has enough extra scroll
+  // range to lift the whole image above the composer.
+  function reserveGeminiResultSpace(img) {
+    if (!IS_GEMINI || !img) return;
+    try {
+      var sc = img.parentElement;
+      while (sc && sc !== document.body && sc !== document.documentElement) {
+        var style = getComputedStyle(sc);
+        if (
+          sc.scrollHeight > sc.clientHeight + 20 &&
+          (style.overflowY === "auto" || style.overflowY === "scroll")
+        ) {
+          break;
+        }
+        sc = sc.parentElement;
+      }
+      if (!sc || sc === document.body || sc === document.documentElement) sc = chatScroller();
+      if (!sc || !sc.appendChild) return;
+
+      var item = img;
+      while (item.parentElement && item.parentElement !== sc) item = item.parentElement;
+
+      var spacer = document.getElementById("iai-gemini-bottom-spacer");
+      if (!spacer) {
+        spacer = document.createElement("div");
+        spacer.id = "iai-gemini-bottom-spacer";
+        spacer.setAttribute("aria-hidden", "true");
+      }
+      var ce = composer();
+      var composerTop = ce ? ce.getBoundingClientRect().top : window.innerHeight - 140;
+      var reserve = Math.max(160, Math.ceil(window.innerHeight - composerTop + 48));
+      spacer.style.cssText =
+        "display:block!important;width:1px!important;min-height:" +
+        reserve +
+        "px!important;height:" +
+        reserve +
+        "px!important;flex:0 0 " +
+        reserve +
+        "px!important;pointer-events:none!important;";
+      if (item.parentElement === sc) item.insertAdjacentElement("afterend", spacer);
+      else sc.appendChild(spacer);
       sc.scrollTop = sc.scrollHeight;
     } catch (e) {}
   }
@@ -677,8 +755,16 @@
   // often doesn't stick on Gemini's custom composer, so insertText lands nowhere).
   async function focusComposerReal(id) {
     focusComposer();
-    var p = composerCenter();
-    if (p) await sendMessage({ type: "realClick", id: id, x: p.x, y: p.y });
+    // ChatGPT's composer can move while the tab is being focused (attachment
+    // chips and the previous generated image both affect the layout). A trusted
+    // coordinate click calculated before that move can consequently land on the
+    // previous result and open its lightbox. DOM focus is sufficient for
+    // debugger paste/insertText on ChatGPT; retain the trusted click only for
+    // Gemini's custom editor, where focus() alone is not reliable.
+    if (!IS_CHATGPT) {
+      var p = composerCenter();
+      if (p) await sendMessage({ type: "realClick", id: id, x: p.x, y: p.y });
+    }
     focusComposer();
     await sleep(150);
   }
@@ -739,7 +825,7 @@
       });
   }
 
-  function armGrab(id, timeoutMs) {
+  function armGrab(id, timeoutMs, submittedPrompt) {
     var started = Date.now();
     var beforeElements = Array.prototype.slice.call(document.querySelectorAll("img"));
     var before = new Set(
@@ -748,11 +834,27 @@
       })
     );
     var done = false;
+    var submitted = false;
     var obs;
     var timer;
     var poll;
     var scanTimer;
     var nudged = [];
+    var trustedScrollPending = false;
+
+    function trustedGeminiScroll() {
+      if (!IS_GEMINI || trustedScrollPending || done) return;
+      trustedScrollPending = true;
+      // Aim above the fixed composer, inside Gemini's conversation pane.
+      sendMessage({
+        type: "realScroll",
+        id: id,
+        x: Math.round(window.innerWidth * 0.68),
+        y: Math.round(window.innerHeight * 0.42),
+      }).then(function () {
+        trustedScrollPending = false;
+      });
+    }
     function cleanup() {
       try {
         obs && obs.disconnect();
@@ -774,9 +876,22 @@
         done = true;
         cleanup();
       },
+      markSubmitted: function () {
+        if (done || submitted) return;
+        submitted = true;
+        started = Date.now();
+        scheduleScan();
+      },
     };
     function finish(img) {
       if (done) return;
+      if (IS_GEMINI) {
+        reserveGeminiResultSpace(img);
+        try {
+          img.scrollIntoView({ block: "end", inline: "nearest" });
+        } catch (e) {}
+        scrollChatToBottom();
+      }
       done = true;
       cleanup();
       status(id, "Da thay anh ket qua, dang tai ve IAI...");
@@ -802,20 +917,38 @@
         img.setAttribute("loading", "eager");
       } catch (e) {}
       try {
-        img.scrollIntoView({ block: "center" });
+        img.scrollIntoView({ block: IS_GEMINI ? "end" : "center", inline: "nearest" });
       } catch (e) {}
+      if (IS_GEMINI) scrollChatToBottom();
       img.addEventListener("load", scheduleScan, { once: true });
     }
     function scan() {
-      if (done) return;
-      var candidates = Array.prototype.filter.call(document.querySelectorAll("img"), function (i) {
-        return (beforeElements.indexOf(i) < 0 || !before.has(i.currentSrc || i.src)) && isResultCandidate(i);
-      });
-      if (!candidates.length && IS_CHATGPT && Date.now() - started > 6000 && !chatGptPageStillGenerating()) {
-        candidates = Array.prototype.filter.call(document.querySelectorAll("img"), function (i) {
-          return isResultCandidate(i);
+      if (done || !submitted) return;
+      // A Gemini result can remain lazy/unloaded until visible. Nudge every new
+      // non-composer image first; waiting for result controls before scrolling
+      // creates a deadlock on builds that add those controls only after loading.
+      if (IS_GEMINI) {
+        var cb = composerBox();
+        Array.prototype.forEach.call(document.querySelectorAll("img"), function (img) {
+          // Do not treat a src/srcset swap on an existing lazy image as a new
+          // result. Scrolling can load an older Gemini result and change its src.
+          var isNew = beforeElements.indexOf(img) < 0;
+          if (isNew && !(cb && cb.contains(img)) && looksLikeLargeImage(img)) {
+            reserveGeminiResultSpace(img);
+            nudgeLoad(img);
+          }
         });
       }
+      var candidates = Array.prototype.filter.call(document.querySelectorAll("img"), function (i) {
+        var src = i.currentSrc || i.src || "";
+        // A chat UI can virtualize an older turn while we scroll: the same old
+        // result then comes back as a brand-new <img> node. Requiring both a
+        // new node and a source that was not present at arm time keeps that
+        // re-created historical image outside this job's result set. A genuine
+        // result may replace its preview src, but its node is still new.
+        var isNew = beforeElements.indexOf(i) < 0 && !!src && !before.has(src);
+        return isNew && isResultCandidate(i);
+      });
       candidates.sort(function (a, b) {
         return imagePageBottom(a) - imagePageBottom(b);
       });
@@ -830,7 +963,7 @@
     // Generation causes mutation storms and scan walks ancestors per image —
     // coalesce bursts into one scan per 250ms.
     function scheduleScan() {
-      if (done || scanTimer) return;
+      if (done || !submitted || scanTimer) return;
       scanTimer = setTimeout(function () {
         scanTimer = null;
         scan();
@@ -849,7 +982,20 @@
     // new result image looks stable before nudging any lazy image.
     poll = setInterval(function () {
       if (done) return;
-      if (IS_GEMINI) scrollChatToBottom();
+      // Never scan or scroll while the command is still sitting in the composer.
+      // This is the hard job boundary that prevents an older image being returned.
+      if (!submitted) {
+        if (!promptLooksFilled(submittedPrompt)) {
+          submitted = true;
+          started = Date.now();
+        } else {
+          return;
+        }
+      }
+      if (IS_GEMINI) {
+        scrollChatToBottom();
+        trustedGeminiScroll();
+      }
       scan();
     }, 1200);
     timer = setTimeout(function () {
@@ -910,7 +1056,7 @@
     if (stopIfCancelled()) return;
 
     var attached = hasNewAttachment(beforeAttach);
-    if (!attached && (!pastedImage || IS_CHATGPT)) {
+    if (!attached && !pastedImage) {
       // Only fall back to the DOM attach when the native Ctrl+V paste did NOT
       // happen (older IAI, or the paste dispatch failed). The attachment detector
       // is unreliable — Gemini often renders the chip without a matching <img> in
@@ -969,7 +1115,7 @@
     // stops as soon as the job finishes
     // (result grabbed or cancelled), since armGrab owns activeJobs[msg.id] now.
     status(msg.id, "Buoc 3/3: da co anh + prompt, dang gui...");
-    armGrab(msg.id, 180000);
+    armGrab(msg.id, 180000, msg.prompt);
     await sleep(300);
     var sendDeadline = Date.now() + (IS_CHATGPT ? 120000 : 45000);
     var sent = false;
@@ -1020,6 +1166,9 @@
     }
     if (stopIfCancelled()) return;
     if (sent) {
+      if (activeJobs[msg.id] && activeJobs[msg.id].markSubmitted) {
+        activeJobs[msg.id].markSubmitted();
+      }
       status(
         msg.id,
         IS_CHATGPT
