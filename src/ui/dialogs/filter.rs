@@ -688,7 +688,9 @@ pub(crate) fn filter_line_slider(
 
 pub(crate) fn smart_fill_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let mut open = true;
-    let mut do_apply = false;
+    // Shift+F5 opens this modal; Enter confirms it just like clicking Apply.
+    // Consume the key here so it cannot leak through to the canvas/tool session.
+    let mut do_apply = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
 
     let id = egui::Id::new("smart_fill_use_ai");
     // Default to Classic (PatchMatch) — instant, no model download.
