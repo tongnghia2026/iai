@@ -12,7 +12,9 @@
 //! canvas-sized texture, Mode B (large canvases — every RAW in practice) has
 //! the compositor bake this window's view while it is open (D2.4).
 
+use crate::app::develop_shell::DevelopTool;
 use crate::app::state::App;
+use egui_phosphor::regular as ph;
 use std::sync::Arc;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -98,8 +100,12 @@ fn centre_window_in_work_area(window: &Window, area: DevelopWorkArea) {
 }
 
 /// Width (logical points) of the Develop window's right-hand controls panel.
-/// The canvas viewport is everything to its left.
+/// The canvas viewport is everything between it and the left tool rail.
 const DEVELOP_PANEL_W: f32 = 360.0;
+
+/// Width (logical points) of the Develop window's left tool rail (Hand / Zoom /
+/// White-balance eyedropper — D5). The canvas viewport starts to its right.
+const DEVELOP_RAIL_W: f32 = 46.0;
 
 /// Height (logical points) of the bottom filmstrip panel, shown for a
 /// multi-image session. The canvas viewport sits above it.
@@ -492,25 +498,54 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => match state {
-                // An armed local mask captures the left drag over the viewport
-                // (over the panel the click belongs to egui).
-                ElementState::Pressed
+                ElementState::Pressed => {
                     if self.shell.ui.develop_local_arm.is_some()
-                        && self.develop_cursor_in_viewport() =>
-                {
-                    let (cx, cy) = self.develop_canvas_coords();
-                    self.develop_local_pointer_down_at(cx, cy);
+                        && self.develop_cursor_in_viewport()
+                    {
+                        // An armed local mask captures the left drag over the
+                        // viewport (over the panel the click belongs to egui);
+                        // it takes precedence over the tool rail.
+                        let (cx, cy) = self.develop_canvas_coords();
+                        self.develop_local_pointer_down_at(cx, cy);
+                        if let Some(w) = &self.win.develop_window {
+                            w.request_redraw();
+                        }
+                    } else if self.develop_cursor_in_viewport() {
+                        // Otherwise the active rail tool handles the click.
+                        match self.dev.develop_tool {
+                            DevelopTool::Hand => {
+                                // Left-drag pans, like the middle button; the
+                                // CursorMoved handler follows `develop_pan_drag`.
+                                self.dev.develop_pan_drag = Some(self.dev.develop_cursor);
+                            }
+                            DevelopTool::Zoom => {
+                                let alt = self
+                                    .win
+                                    .develop_egui_ctx
+                                    .as_ref()
+                                    .is_some_and(|c| c.input(|i| i.modifiers.alt));
+                                let factor = if alt { 1.0 / 1.5 } else { 1.5 };
+                                self.develop_zoom_at_cursor(factor);
+                            }
+                            DevelopTool::WhiteBalance => {
+                                self.develop_wb_sample_at_cursor();
+                            }
+                        }
+                        if let Some(w) = &self.win.develop_window {
+                            w.request_redraw();
+                        }
+                    }
+                }
+                ElementState::Released => {
+                    if self.dev.develop_local_drag.is_some() {
+                        self.develop_local_pointer_up();
+                    }
+                    // End a Hand-tool left-drag pan (a no-op if none is active).
+                    self.dev.develop_pan_drag = None;
                     if let Some(w) = &self.win.develop_window {
                         w.request_redraw();
                     }
                 }
-                ElementState::Released if self.dev.develop_local_drag.is_some() => {
-                    self.develop_local_pointer_up();
-                    if let Some(w) = &self.win.develop_window {
-                        w.request_redraw();
-                    }
-                }
-                _ => {}
             },
             WindowEvent::MouseWheel { delta, .. } => {
                 // Scroll zooms about the cursor, but only over the canvas
@@ -531,6 +566,36 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 self.redraw_develop_window(event_loop);
+            }
+            // Tool-rail shortcuts (ACR-style): H Hand, Z Zoom, I white-balance
+            // eyedropper. Ignored while a text field (preset name, numeric slider
+            // entry) holds keyboard focus.
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key:
+                            PhysicalKey::Code(code @ (KeyCode::KeyH | KeyCode::KeyZ | KeyCode::KeyI)),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                let typing = self
+                    .win
+                    .develop_egui_ctx
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.egui_wants_keyboard_input());
+                if !typing {
+                    self.dev.develop_tool = match code {
+                        KeyCode::KeyH => DevelopTool::Hand,
+                        KeyCode::KeyZ => DevelopTool::Zoom,
+                        _ => DevelopTool::WhiteBalance,
+                    };
+                    self.shell.ui.develop_local_arm = None;
+                    if let Some(w) = &self.win.develop_window {
+                        w.request_redraw();
+                    }
+                }
             }
             // Escape from the Develop window is the Cancel path (like the X
             // button) — so it can be closed while it holds keyboard focus, where
@@ -691,7 +756,49 @@ impl App {
         let mut reset_100 = false;
         let mut apply_dev = false;
         let mut cancel_dev = false;
+        let active_tool = self.dev.develop_tool;
+        let panning = self.dev.develop_pan_drag.is_some();
+        let mut tool_clicked: Option<DevelopTool> = None;
         let full_output = ctx.run_ui(raw_input, |ctx| {
+            // Left tool rail (D5): Hand / Zoom / White-balance eyedropper. Hidden
+            // while the "Open Image" bake owns the window (modal progress).
+            if bake_progress.is_none() {
+                egui::SidePanel::left("develop_tool_rail")
+                    .exact_width(DEVELOP_RAIL_W)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.add_space(8.0);
+                        ui.vertical_centered(|ui| {
+                            for (tool, icon, tip) in [
+                                (DevelopTool::Hand, ph::HAND, "Hand — drag to pan (H)"),
+                                (
+                                    DevelopTool::Zoom,
+                                    ph::MAGNIFYING_GLASS,
+                                    "Zoom — click to zoom in, Alt-click to zoom out (Z)",
+                                ),
+                                (
+                                    DevelopTool::WhiteBalance,
+                                    ph::EYEDROPPER,
+                                    "White Balance — click a neutral grey to set Temp/Tint (I)",
+                                ),
+                            ] {
+                                let resp = ui
+                                    .add_sized(
+                                        [34.0, 30.0],
+                                        egui::SelectableLabel::new(
+                                            active_tool == tool,
+                                            egui::RichText::new(icon).size(18.0),
+                                        ),
+                                    )
+                                    .on_hover_text(tip);
+                                if resp.clicked() {
+                                    tool_clicked = Some(tool);
+                                }
+                                ui.add_space(2.0);
+                            }
+                        });
+                    });
+            }
             egui::SidePanel::right("develop_panel")
                 .exact_width(DEVELOP_PANEL_W)
                 .resizable(false)
@@ -734,6 +841,14 @@ impl App {
                         });
                         return;
                     }
+                    ui.add_space(6.0);
+                    // Profile picker (stub): one built-in look for now — the
+                    // disabled dropdown marks where camera/creative profiles land.
+                    ui.add_enabled_ui(false, |ui| {
+                        egui::ComboBox::from_label("Profile")
+                            .selected_text("iAi Standard")
+                            .show_ui(ui, |_ui| {});
+                    });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         fit_clicked = ui.button("Fit").clicked();
@@ -793,9 +908,9 @@ impl App {
                     FILMSTRIP_H
                 };
                 let vp = egui::Rect::from_min_max(
-                    egui::pos2(0.0, 0.0),
+                    egui::pos2(DEVELOP_RAIL_W, 0.0),
                     egui::pos2(
-                        (ctx.screen_rect().width() - DEVELOP_PANEL_W).max(0.0),
+                        (ctx.screen_rect().width() - DEVELOP_PANEL_W).max(DEVELOP_RAIL_W),
                         (ctx.screen_rect().height() - strip_h).max(0.0),
                     ),
                 );
@@ -807,10 +922,45 @@ impl App {
                     .with_clip_rect(vp);
                 crate::ui::draw_develop_local_overlay(&painter, ov);
             }
+            // Reflect the active tool in the cursor while the pointer is over the
+            // canvas viewport (between the rail and panel, above the filmstrip).
+            // Setting it through egui — not winit directly — keeps egui's own
+            // cursor tracking correct as the pointer crosses back onto the chrome.
+            if bake_progress.is_none() {
+                let strip_h = if filmstrip.is_empty() {
+                    0.0
+                } else {
+                    FILMSTRIP_H
+                };
+                let vp = egui::Rect::from_min_max(
+                    egui::pos2(DEVELOP_RAIL_W, 0.0),
+                    egui::pos2(
+                        (ctx.screen_rect().width() - DEVELOP_PANEL_W).max(DEVELOP_RAIL_W),
+                        (ctx.screen_rect().height() - strip_h).max(0.0),
+                    ),
+                );
+                if ctx.pointer_latest_pos().is_some_and(|p| vp.contains(p)) {
+                    let icon = match tool_clicked.unwrap_or(active_tool) {
+                        DevelopTool::Hand if panning => egui::CursorIcon::Grabbing,
+                        DevelopTool::Hand => egui::CursorIcon::Grab,
+                        DevelopTool::Zoom => egui::CursorIcon::ZoomIn,
+                        DevelopTool::WhiteBalance => egui::CursorIcon::Crosshair,
+                    };
+                    ctx.set_cursor_icon(icon);
+                }
+            }
         });
 
         if let Some(state) = &mut self.win.develop_egui_state {
             state.handle_platform_output(&window, full_output.platform_output);
+        }
+
+        // Apply a tool-rail selection (the cursor for it was already emitted
+        // through egui inside the frame above).
+        if let Some(tool) = tool_clicked {
+            self.dev.develop_tool = tool;
+            // Choosing a rail tool cancels a pending local-mask placement.
+            self.shell.ui.develop_local_arm = None;
         }
 
         let pixels_per_point = window.scale_factor() as f32;
@@ -939,7 +1089,8 @@ impl App {
         let pixels_per_point = window.scale_factor() as f32;
         let sz = window.inner_size();
         let panel_px = DEVELOP_PANEL_W * pixels_per_point;
-        let vw = (sz.width as f32 - panel_px).max(1.0);
+        let rail_px = DEVELOP_RAIL_W * pixels_per_point;
+        let vw = (sz.width as f32 - panel_px - rail_px).max(1.0);
         let vh = (sz.height as f32 - self.develop_filmstrip_px(pixels_per_point)).max(1.0);
         let cw = self.docs.documents[self.docs.active_doc_idx].canvas.width as f32;
         let ch = self.docs.documents[self.docs.active_doc_idx].canvas.height as f32;
@@ -950,9 +1101,11 @@ impl App {
         let zoom = ((vw - pad * 2.0) / cw)
             .min((vh - pad * 2.0) / ch)
             .clamp(0.01, 64.0);
-        // Centre within the viewport area (left of the panel), in physical px.
+        // Centre within the viewport area (between the rail and the panel), in
+        // physical px — the offset is measured from the window origin, so the
+        // rail's width shifts the canvas right.
         self.dev.develop_view_zoom = zoom;
-        self.dev.develop_view_off = ((vw - cw * zoom) / 2.0, (vh - ch * zoom) / 2.0);
+        self.dev.develop_view_off = (rail_px + (vw - cw * zoom) / 2.0, (vh - ch * zoom) / 2.0);
     }
 
     /// The current Develop view as a compare-key against
@@ -1151,6 +1304,86 @@ impl App {
         ])
     }
 
+    /// White-balance eyedropper (D5): average a small patch of the scene master
+    /// around the cursor, solve the Temperature/Tint pair that neutralises it
+    /// (inverse CAT16), and apply it to the live Develop settings. The sample is
+    /// the pre-white-balance scene value, so the solved sliders are absolute.
+    /// Needs a scene session (RAW, or a linearised JPEG/PNG Develop).
+    fn develop_wb_sample_at_cursor(&mut self) {
+        if !self.develop_cursor_in_viewport() {
+            return;
+        }
+        let (cx, cy) = self.develop_canvas_coords();
+        let active_id = self.docs.documents[self.docs.active_doc_idx].id;
+        // Average a small box of scene pixels to beat sensor noise; the borrow of
+        // the preview/scene ends with this block so the settings can be applied.
+        let avg = {
+            let Some(preview) = self.dev.develop_preview.as_ref() else {
+                return;
+            };
+            if preview.doc_id != active_id {
+                return;
+            }
+            let Some(scene) = preview.scene.as_ref() else {
+                self.shell.status_msg =
+                    "White balance needs a RAW or Develop scene image".to_string();
+                return;
+            };
+            let doc = &self.docs.documents[self.docs.active_doc_idx];
+            let Some(layer) = doc
+                .canvas
+                .layer_stack
+                .layers
+                .iter()
+                .find(|l| l.id == preview.layer_id)
+            else {
+                return;
+            };
+            let lx = (cx - layer.offset.0 as f32).round() as i32;
+            let ly = (cy - layer.offset.1 as f32).round() as i32;
+            const R: i32 = 2; // 5×5 patch
+            let mut sum = [0.0f64; 3];
+            let mut n = 0u32;
+            for oy in -R..=R {
+                for ox in -R..=R {
+                    let x = lx + ox;
+                    let y = ly + oy;
+                    if x < 0 || y < 0 || x >= scene.width as i32 || y >= scene.height as i32 {
+                        continue;
+                    }
+                    let rgb = scene.get_rgb(x as u32, y as u32);
+                    sum[0] += rgb[0] as f64;
+                    sum[1] += rgb[1] as f64;
+                    sum[2] += rgb[2] as f64;
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                return; // Clicked outside the image.
+            }
+            [
+                (sum[0] / n as f64) as f32,
+                (sum[1] / n as f64) as f32,
+                (sum[2] / n as f64) as f32,
+            ]
+        };
+
+        let (temp, tint) = crate::core::cat16::neutralize(avg);
+        let mut settings = self.shell.ui.develop_settings.clone();
+        settings.temperature = temp;
+        settings.tint = tint;
+        self.shell.ui.develop_settings = settings.clone();
+        self.update_develop_preview(settings);
+        self.develop_session_save_active_settings();
+        self.shell.status_msg = format!("White balance set (Temp {temp:.0}, Tint {tint:.0})");
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        if let Some(w) = &self.win.develop_window {
+            w.request_redraw();
+        }
+    }
+
     /// True when the last cursor position sits over the canvas viewport (left
     /// of the controls panel, above the filmstrip) rather than the chrome.
     fn develop_cursor_in_viewport(&self) -> bool {
@@ -1159,7 +1392,9 @@ impl App {
         };
         let ppp = w.scale_factor() as f32;
         let panel_px = DEVELOP_PANEL_W * ppp;
-        self.dev.develop_cursor.0 < (w.inner_size().width as f32 - panel_px)
+        let rail_px = DEVELOP_RAIL_W * ppp;
+        self.dev.develop_cursor.0 > rail_px
+            && self.dev.develop_cursor.0 < (w.inner_size().width as f32 - panel_px)
             && self.dev.develop_cursor.1
                 < (w.inner_size().height as f32 - self.develop_filmstrip_px(ppp))
     }
@@ -1184,12 +1419,13 @@ impl App {
     /// in the viewport area left of the panel.
     fn develop_set_zoom_100(&mut self, window: &Window, pixels_per_point: f32) {
         let sz = window.inner_size();
-        let vw = (sz.width as f32 - DEVELOP_PANEL_W * pixels_per_point).max(1.0);
+        let rail_px = DEVELOP_RAIL_W * pixels_per_point;
+        let vw = (sz.width as f32 - DEVELOP_PANEL_W * pixels_per_point - rail_px).max(1.0);
         let vh = sz.height as f32 - self.develop_filmstrip_px(pixels_per_point);
         let cw = self.docs.documents[self.docs.active_doc_idx].canvas.width as f32;
         let ch = self.docs.documents[self.docs.active_doc_idx].canvas.height as f32;
         self.dev.develop_view_zoom = 1.0;
-        self.dev.develop_view_off = ((vw - cw) / 2.0, (vh - ch) / 2.0);
+        self.dev.develop_view_off = (rail_px + (vw - cw) / 2.0, (vh - ch) / 2.0);
         self.dev.develop_view_fit = false;
     }
 }

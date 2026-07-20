@@ -16,7 +16,7 @@
 //! through the same locus code as the D65 reference, so the gains cancel and a
 //! neutral setting is a true no-op (`is_neutral` semantics).
 
-use crate::core::develop::control_to_unit;
+use crate::core::develop::{control_to_unit, CONTROL_LIMIT};
 
 /// D65 correlated colour temperature (K). The locus is evaluated here for the
 /// reference white so temp = 0 cancels exactly.
@@ -175,12 +175,126 @@ pub fn wb_matrix(temperature: f32, tint: f32) -> [[f32; 3]; 3] {
     m
 }
 
+/// Solve the Temperature/Tint slider pair (each ±`CONTROL_LIMIT`) whose
+/// [`wb_matrix`] maps a linear-sRGB sample closest to neutral grey — the
+/// white-balance eyedropper (D5). The sample is the scene value the user
+/// clicked, taken BEFORE white balance, so the result is an absolute setting
+/// rather than a delta on the current one.
+///
+/// The balanced pixel `wb·p` is neutral exactly when its two chroma residuals
+/// `(r−g, g−b)` vanish — a smooth two-in / two-out system in (temp, tint), so a
+/// handful of Gauss-Newton steps from the neutral start converge. The result is
+/// clamped to the slider range: a sample too saturated to neutralise within
+/// range yields the best in-range correction instead of running away.
+pub fn neutralize(pixel: [f32; 3]) -> (f32, f32) {
+    let sum = pixel[0] + pixel[1] + pixel[2];
+    if !sum.is_finite() || sum <= 1e-6 {
+        return (0.0, 0.0);
+    }
+    // Chromaticity only: the overall scale never moves the root, and unit-sum
+    // keeps the residual magnitudes well-conditioned across bright/dark samples.
+    let p = [pixel[0] / sum, pixel[1] / sum, pixel[2] / sum];
+    let residual = |temp: f32, tint: f32| {
+        let w = mat_apply(&wb_matrix(temp, tint), p);
+        [w[0] - w[1], w[1] - w[2]]
+    };
+    let (mut temp, mut tint) = (0.0f32, 0.0f32);
+    for _ in 0..30 {
+        let r = residual(temp, tint);
+        if r[0].abs() + r[1].abs() < 1e-6 {
+            break;
+        }
+        // One-sided finite-difference Jacobian — the slider→matrix map is smooth
+        // enough over this range that a forward difference tracks it well.
+        let h = 2.0;
+        let rt = residual(temp + h, tint);
+        let rn = residual(temp, tint + h);
+        let a = (rt[0] - r[0]) / h; // ∂(r−g)/∂temp
+        let b = (rn[0] - r[0]) / h; // ∂(r−g)/∂tint
+        let c = (rt[1] - r[1]) / h; // ∂(g−b)/∂temp
+        let d = (rn[1] - r[1]) / h; // ∂(g−b)/∂tint
+        let det = a * d - b * c;
+        if det.abs() < 1e-9 {
+            break; // At a slider clamp the matrix stops moving — take the best so far.
+        }
+        // Δ = −J⁻¹·r.
+        let mut d_temp = (b * r[1] - d * r[0]) / det;
+        let mut d_tint = (c * r[0] - a * r[1]) / det;
+        // Damp a runaway step so a far-off sample cannot overshoot the smooth
+        // region before the range clamp catches it.
+        let step = (d_temp * d_temp + d_tint * d_tint).sqrt();
+        let cap = 2.0 * CONTROL_LIMIT;
+        if step > cap {
+            let s = cap / step;
+            d_temp *= s;
+            d_tint *= s;
+        }
+        temp = (temp + d_temp).clamp(-CONTROL_LIMIT, CONTROL_LIMIT);
+        tint = (tint + d_tint).clamp(-CONTROL_LIMIT, CONTROL_LIMIT);
+        if d_temp.abs() + d_tint.abs() < 1e-3 {
+            break;
+        }
+    }
+    (temp, tint)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn approx(a: f32, b: f32, eps: f32) -> bool {
         (a - b).abs() <= eps
+    }
+
+    /// Chroma spread of a linear-sRGB pixel, normalised by its brightness.
+    fn chroma_spread(w: [f32; 3]) -> f32 {
+        let max = w[0].max(w[1]).max(w[2]);
+        let min = w[0].min(w[1]).min(w[2]);
+        (max - min) / max.max(1e-4)
+    }
+
+    #[test]
+    fn eyedropper_neutralises_a_colour_cast() {
+        // Mild warm / cool / green / magenta casts on a mid-grey card — all
+        // comfortably inside the slider range.
+        for p in [
+            [0.55f32, 0.50, 0.42], // warm
+            [0.42, 0.50, 0.55],    // cool
+            [0.48, 0.56, 0.48],    // green
+            [0.55, 0.47, 0.55],    // magenta
+        ] {
+            let (t, g) = neutralize(p);
+            assert!(t.abs() <= CONTROL_LIMIT && g.abs() <= CONTROL_LIMIT);
+            let balanced = mat_apply(&wb_matrix(t, g), p);
+            assert!(
+                chroma_spread(balanced) < 0.01,
+                "cast not removed for {p:?}: balanced {balanced:?} (t={t}, g={g})"
+            );
+        }
+    }
+
+    #[test]
+    fn eyedropper_on_neutral_is_a_no_op() {
+        let (t, g) = neutralize([0.5, 0.5, 0.5]);
+        assert!(approx(t, 0.0, 1e-3) && approx(g, 0.0, 1e-3), "t={t}, g={g}");
+    }
+
+    #[test]
+    fn eyedropper_reduces_even_a_strong_cast() {
+        // A saturated sample may not neutralise fully in range, but the result
+        // must still cut the cast, never worsen it.
+        let p = [0.7f32, 0.45, 0.25];
+        let (t, g) = neutralize(p);
+        let balanced = mat_apply(&wb_matrix(t, g), p);
+        assert!(
+            chroma_spread(balanced) < chroma_spread(p),
+            "did not reduce cast: {p:?} -> {balanced:?} (t={t}, g={g})"
+        );
+    }
+
+    #[test]
+    fn eyedropper_ignores_black() {
+        assert_eq!(neutralize([0.0, 0.0, 0.0]), (0.0, 0.0));
     }
 
     #[test]

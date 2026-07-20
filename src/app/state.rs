@@ -1066,6 +1066,7 @@ impl App {
                 develop_view_fit: true,
                 develop_cursor: (0.0, 0.0),
                 develop_pan_drag: None,
+                develop_tool: crate::app::develop_shell::DevelopTool::default(),
                 develop_composited_view: None,
                 develop_preview: None,
                 develop_histogram: None,

@@ -2,6 +2,20 @@
 
 use super::state::*;
 
+/// The active pointer tool in the Develop window's canvas viewport (D5 tool
+/// rail). View state, not serialized. Middle-drag always pans regardless of the
+/// tool, and an armed local mask always takes the left drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DevelopTool {
+    /// Left-drag pans the viewport (the default, matching the middle-drag pan).
+    #[default]
+    Hand,
+    /// Left-click zooms in about the cursor; Alt+click zooms out.
+    Zoom,
+    /// Left-click samples the pixel and solves Temperature/Tint to neutralise it.
+    WhiteBalance,
+}
+
 /// The Develop window's session state.
 ///
 /// Owns the second OS window's view (zoom/pan/fit), preview and histogram
@@ -19,6 +33,8 @@ pub struct DevelopShell {
     /// of an in-progress middle-button pan.
     pub(in crate::app) develop_cursor: (f32, f32),
     pub(in crate::app) develop_pan_drag: Option<(f32, f32)>,
+    /// The active canvas tool in the viewport (D5 left tool rail).
+    pub(in crate::app) develop_tool: DevelopTool,
     /// Mode B only: the Develop-window view the compositor last baked, as
     /// `[off_x, off_y, zoom]` bit patterns + window `[w, h]`. Mode B composites
     /// carry the view transform, so the Develop window must recomposite when its
