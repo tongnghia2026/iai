@@ -149,26 +149,61 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     // stashed in temp memory and restored if the popup closes without
     // a click, so browsing can't silently change the font.
     let font_combo_open_id = egui::Id::new("text_panel_font_family_preview_open");
+    let font_search_id = egui::Id::new("text_panel_font_family_search");
     let font_combo = egui::ComboBox::from_id_salt("text_panel_font_family")
         .selected_text(data.tool.text_font_family.name())
         .width(ui.available_width().min(220.0))
+        .height(420.0)
         .show_ui(ui, |ui| {
-            let mut committed = false;
-            for family in TextFontFamily::all() {
-                let row = ui.selectable_label(&data.tool.text_font_family == family, family.name());
-                if row.clicked() {
-                    committed = true;
-                    actions.tool.set_text_font_family = Some(family.clone());
-                } else if row.hovered() && &data.tool.text_font_family != family {
-                    actions.tool.preview_text_font_family = Some(family.clone());
-                }
+            ui.set_min_width(260.0);
+
+            let had_search_state = ui.data(|d| d.get_temp::<String>(font_search_id).is_some());
+            let mut search = ui
+                .data(|d| d.get_temp::<String>(font_search_id))
+                .unwrap_or_default();
+            let search_response = ui.add(
+                egui::TextEdit::singleline(&mut search)
+                    .hint_text("Search fonts…")
+                    .desired_width(f32::INFINITY),
+            );
+            if !had_search_state {
+                search_response.request_focus();
             }
+            ui.data_mut(|d| d.insert_temp(font_search_id, search.clone()));
+            ui.separator();
+
+            let search = search.trim().to_lowercase();
+            let mut committed = false;
+            let mut match_count = 0;
+            egui::ScrollArea::vertical()
+                .id_salt("text_panel_font_family_list")
+                .max_height(370.0)
+                .show(ui, |ui| {
+                    for family in TextFontFamily::all() {
+                        if !search.is_empty() && !family.name().to_lowercase().contains(&search) {
+                            continue;
+                        }
+                        match_count += 1;
+                        let row = ui
+                            .selectable_label(&data.tool.text_font_family == family, family.name());
+                        if row.clicked() {
+                            committed = true;
+                            actions.tool.set_text_font_family = Some(family.clone());
+                        } else if row.hovered() && &data.tool.text_font_family != family {
+                            actions.tool.preview_text_font_family = Some(family.clone());
+                        }
+                    }
+                    if match_count == 0 {
+                        ui.weak("No matching fonts");
+                    }
+                });
             committed
         });
     match font_combo.inner {
         Some(committed) => {
             if committed {
                 ui.data_mut(|d| d.remove::<bool>(font_combo_open_id));
+                ui.data_mut(|d| d.remove::<String>(font_search_id));
             } else {
                 ui.data_mut(|d| d.insert_temp(font_combo_open_id, true));
             }
@@ -179,6 +214,7 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 .unwrap_or(false)
             {
                 ui.data_mut(|d| d.remove::<bool>(font_combo_open_id));
+                ui.data_mut(|d| d.remove::<String>(font_search_id));
                 actions.tool.cancel_text_font_family_preview = true;
             }
         }

@@ -207,6 +207,9 @@ impl App {
         if actions.doc.save_as {
             self.do_save_as();
         }
+        if actions.doc.save_project {
+            self.do_save_project();
+        }
 
         if self.shell.exit_requested && self.jobs.pending_file_dialog.is_none() {
             self.shell.exit_requested = false;

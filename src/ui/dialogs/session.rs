@@ -138,7 +138,7 @@ pub(crate) fn exit_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut UiA
         });
 
     if do_save_exit {
-        actions.doc.save = true;
+        actions.doc.save_project = true;
         actions.doc.exit = true;
         actions.dialogs.show_exit_dialog = Some(false);
     }
@@ -182,7 +182,7 @@ pub(crate) fn close_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut Ui
         });
 
     if do_save_close {
-        actions.doc.save = true;
+        actions.doc.save_project = true;
         actions.doc.close_file_without_saving = Some(true);
         actions.dialogs.show_close_dialog = Some(false);
     }

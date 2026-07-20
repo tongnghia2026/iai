@@ -125,6 +125,33 @@ fn clamp_live_scale(value: f32, drag_start: f32) -> f32 {
     (value * sign).max(MIN_LIVE_SCALE) * sign
 }
 
+/// Uniform scale ratio whose transformed corner is closest to the pointer.
+/// `along_*` is the pointer in the transform's unrotated coordinate system.
+/// When scaling around the opposite corner, measure from that fixed corner;
+/// measuring from the pivot and translating afterwards applies the pointer
+/// movement twice and makes the handle outrun the cursor.
+fn corner_drag_ratio(
+    along_x: f32,
+    along_y: f32,
+    lx: f32,
+    ly: f32,
+    start_sx: f32,
+    start_sy: f32,
+    from_center: bool,
+) -> f32 {
+    let (anchor_lx, anchor_ly) = if from_center { (0.0, 0.0) } else { (-lx, -ly) };
+    let base_x = start_sx * (lx - anchor_lx);
+    let base_y = start_sy * (ly - anchor_ly);
+    let target_x = along_x - start_sx * anchor_lx;
+    let target_y = along_y - start_sy * anchor_ly;
+    let denom = base_x * base_x + base_y * base_y;
+    if denom <= f32::EPSILON {
+        1.0
+    } else {
+        (target_x * base_x + target_y * base_y) / denom
+    }
+}
+
 fn transformed_content_bounds(
     ts: &TransformState,
     ls: &LayerOrigState,
@@ -1214,26 +1241,37 @@ impl App {
                     let upd_x = lx.abs() > 1.0;
                     let upd_y = ly.abs() > 1.0;
 
+                    // Non-Alt drags keep the opposite handle fixed. Compute each
+                    // axis from that anchor, not from the center pivot; translation
+                    // below then preserves the anchor without doubling the drag.
+                    let anchor_lx = if alt { 0.0 } else { -lx };
+                    let anchor_ly = if alt { 0.0 } else { -ly };
+
                     let raw_sx = if upd_x {
-                        along_x / lx
+                        (along_x - ts.drag_start_sx * anchor_lx) / (lx - anchor_lx)
                     } else {
                         ts.drag_start_sx
                     };
                     let raw_sy = if upd_y {
-                        along_y / ly
+                        (along_y - ts.drag_start_sy * anchor_ly) / (ly - anchor_ly)
                     } else {
                         ts.drag_start_sy
                     };
 
                     match (upd_x, upd_y) {
                         (true, true) => {
-                            let ratio_x = raw_sx / ts.drag_start_sx;
-                            let ratio_y = raw_sy / ts.drag_start_sy;
-                            let ratio = if (ratio_x - 1.0).abs() >= (ratio_y - 1.0).abs() {
-                                ratio_x
-                            } else {
-                                ratio_y
-                            };
+                            // Project onto the original corner diagonal. Besides
+                            // keeping the handle with the cursor, this avoids the
+                            // x/y dominance switch that caused visible jitter.
+                            let ratio = corner_drag_ratio(
+                                along_x,
+                                along_y,
+                                lx,
+                                ly,
+                                ts.drag_start_sx,
+                                ts.drag_start_sy,
+                                alt,
+                            );
                             ts.scale_x = ts.drag_start_sx * ratio;
                             ts.scale_y = ts.drag_start_sy * ratio;
                         }
@@ -1680,6 +1718,52 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_transform_corner_tracks_pointer_without_doubling_drag() {
+        let mut app = crate::app::state::App::new();
+        app.shell.ui.snap_enabled = false;
+        app.edit.transform_state = Some(TransformState {
+            layer_states: Vec::new(),
+            preview_layer_states: Vec::new(),
+            layer_idx: 0,
+            layer_id: 1,
+            orig_offset: (0, 0),
+            orig_w: 100,
+            orig_h: 100,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            angle_deg: 0.0,
+            translate_x: 0.0,
+            translate_y: 0.0,
+            pivot_cx: 50.0,
+            pivot_cy: 50.0,
+            drag_handle: Some(Some(TransformHandle::TopLeft)),
+            drag_start_cx: 0.0,
+            drag_start_cy: 0.0,
+            drag_start_sx: 1.0,
+            drag_start_sy: 1.0,
+            drag_start_angle: 0.0,
+            drag_start_tx: 0.0,
+            drag_start_ty: 0.0,
+            quad: None,
+            drag_start_quad: [(0.0, 0.0); 4],
+            mode: crate::app::state::TransformMode::Free,
+        });
+
+        app.transform_on_drag(-10.0, -10.0, false, false);
+
+        let handles = app
+            .edit
+            .transform_state
+            .as_ref()
+            .expect("transform remains active")
+            .handle_positions();
+        assert!((handles[0].0 + 10.0).abs() < 0.001);
+        assert!((handles[0].1 + 10.0).abs() < 0.001);
+        assert!((handles[7].0 - 100.0).abs() < 0.001);
+        assert!((handles[7].1 - 100.0).abs() < 0.001);
+    }
 
     #[test]
     fn undo_during_free_transform_reverts_pending_only() {

@@ -8,7 +8,43 @@ use crate::file_io;
 use crate::formats::ExportOptions;
 use std::path::Path;
 
+fn requires_project_save_on_close(layer_count: usize, is_pdf_document: bool) -> bool {
+    is_pdf_document || layer_count > 1
+}
+
 impl App {
+    /// Save requested by an exit/close confirmation. A document with multiple
+    /// layers defaults to an editable `.iai` project. A flat, single-layer
+    /// document keeps the regular Save behavior and may overwrite its source
+    /// PNG/JPEG/etc. An existing `.iai` project is always updated in place.
+    pub fn do_save_project(&mut self) {
+        let requires_project = self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .is_some_and(|doc| {
+                requires_project_save_on_close(
+                    doc.canvas.layer_stack.layers.len(),
+                    doc.pdf_document.is_some(),
+                )
+            });
+        if !requires_project {
+            self.do_save();
+            return;
+        }
+
+        let existing_project = self.docs.current_file.clone().filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("iai"))
+        });
+        if let Some(path) = existing_project {
+            self.save_to(&path);
+        } else {
+            self.do_save_project_as();
+        }
+    }
+
     pub fn do_save(&mut self) {
         // Multi-page PDF sessions save as a full `.iai` project (all edited pages),
         // never as a flat single canvas — otherwise the other pages would be lost.
@@ -37,6 +73,25 @@ impl App {
     }
 
     pub fn do_save_as(&mut self) {
+        self.do_save_as_with_suggestion(self.docs.current_file.clone());
+    }
+
+    fn do_save_project_as(&mut self) {
+        let suggestion = self.docs.current_file.clone().or_else(|| {
+            self.docs
+                .documents
+                .get(self.docs.active_doc_idx)
+                .and_then(|doc| doc.path.clone())
+        });
+        let suggestion = Some(
+            suggestion
+                .unwrap_or_else(|| std::path::PathBuf::from("untitled"))
+                .with_extension("iai"),
+        );
+        self.do_save_as_with_suggestion(suggestion);
+    }
+
+    fn do_save_as_with_suggestion(&mut self, suggested_path: Option<std::path::PathBuf>) {
         if self.jobs.pending_file_dialog.is_some() {
             return;
         }
@@ -46,7 +101,7 @@ impl App {
         let parent = file_io::dialog_parent(window);
         // For a PDF project with no `.iai` yet, default the name to the source PDF's
         // stem so "Save" lands next to a sensible <document>.iai.
-        let current = self.docs.current_file.clone().or_else(|| {
+        let current = suggested_path.or_else(|| {
             self.docs
                 .documents
                 .get(self.docs.active_doc_idx)
@@ -825,5 +880,21 @@ impl App {
             Err(error) => self.shell.status_msg = format!("Error building hybrid PDF: {error}"),
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_project_save_on_close;
+
+    #[test]
+    fn close_save_keeps_source_format_for_single_layer_image() {
+        assert!(!requires_project_save_on_close(1, false));
+    }
+
+    #[test]
+    fn close_save_defaults_to_project_for_multiple_layers_or_pdf() {
+        assert!(requires_project_save_on_close(2, false));
+        assert!(requires_project_save_on_close(1, true));
     }
 }

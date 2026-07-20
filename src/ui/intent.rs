@@ -28,6 +28,9 @@ pub struct DocumentIntent {
     pub open_file: bool,
     pub save: bool,
     pub save_as: bool,
+    /// Save from an exit/close confirmation. Multi-layer documents default to
+    /// an `.iai` project; a single-layer image keeps its original format.
+    pub save_project: bool,
     pub export: Option<ExportFormat>,
     pub exit: bool,
     pub undo: bool,
