@@ -645,6 +645,7 @@ pub struct TextEditState {
     pub origin: (i32, i32),
     /// Rotation copied from `TextData` while editing.
     pub rotation_deg: f32,
+    pub stretch_x: f32,
     pub flip_x: bool,
     pub flip_y: bool,
     /// True for a freshly created layer (discarded on cancel / empty commit).
@@ -1012,6 +1013,7 @@ impl App {
                 brush_popup_pos: None,
                 selection_ctx_menu_pos: None,
                 text_drag_hovered: false,
+                text_panel_hovered: false,
                 show_refine_panel: false,
                 refine_feather: 0.0,
                 refine_smooth: 0,
@@ -2279,9 +2281,16 @@ impl App {
 
             // I-beam over the canvas/overlay while editing text, but not over
             // the window chrome — panels keep the normal arrow.
-            if self.edit.text_edit.is_some() && self.edit.tools.active_id() == ToolId::Text {
+            if self.edit.text_edit.is_some()
+                && self.edit.tools.active_id() == ToolId::Text
+                // The colour dialog owns cursor semantics while open: normal
+                // Windows/UI cursors over the dialog, eyedropper over canvas.
+                && !self.shell.ui.show_paint_color_dialog
+            {
                 w.set_cursor_visible(true);
-                if self.edit.text_drag_hovered {
+                if self.edit.text_panel_hovered {
+                    w.set_cursor(CursorIcon::Default);
+                } else if self.edit.text_drag_hovered {
                     w.set_cursor(CursorIcon::Move);
                 } else {
                     w.set_cursor(CursorIcon::Text);

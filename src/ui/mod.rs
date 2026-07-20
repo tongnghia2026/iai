@@ -295,6 +295,7 @@ fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
     td.underline.hash(&mut h);
     td.tracking_px.to_bits().hash(&mut h);
     td.opacity.to_bits().hash(&mut h);
+    td.stretch_x.to_bits().hash(&mut h);
     td.rotation_deg.to_bits().hash(&mut h);
     td.flip_x.hash(&mut h);
     td.flip_y.hash(&mut h);
@@ -324,7 +325,7 @@ fn text_preview_texture(
             return Some((texture, w, h));
         }
     }
-    let raster = crate::core::text::rasterize(td)?;
+    let raster = crate::core::text::rasterize_stretched(td)?;
 
     let image = egui::ColorImage::from_rgba_unmultiplied(
         [raster.width as usize, raster.height as usize],
@@ -474,8 +475,10 @@ fn paint_text_selection_overlay(
     rotation_deg: f32,
     flip_x: bool,
     flip_y: bool,
+    stretch_x: f32,
     fill: egui::Color32,
 ) {
+    let stretch_x = stretch_x.max(0.001);
     for rect in rects {
         if rect.w <= 0.0 || rect.h <= 0.0 {
             continue;
@@ -483,9 +486,9 @@ fn paint_text_selection_overlay(
 
         let grow_x = 1.0 / scale;
         let grow_y = 0.5 / scale;
-        let x0 = rect.x - grow_x;
+        let x0 = rect.x * stretch_x - grow_x;
         let y0 = rect.y - grow_y;
-        let x1 = rect.x + rect.w + grow_x;
+        let x1 = (rect.x + rect.w) * stretch_x + grow_x;
         let y1 = rect.y + rect.h + grow_y;
         painter.add(egui::Shape::convex_polygon(
             vec![
@@ -527,6 +530,7 @@ fn paint_text_caret_overlay(
     rotation_deg: f32,
     flip_x: bool,
     flip_y: bool,
+    stretch_x: f32,
     screen_font: f32,
     time: f64,
 ) {
@@ -543,7 +547,7 @@ fn paint_text_caret_overlay(
     let caret_h_local = caret_h / scale;
     let top = text_local_to_screen(
         origin,
-        rect.x,
+        rect.x * stretch_x.max(0.001),
         center_y - caret_h_local * 0.5,
         scale,
         rotation_deg,
@@ -552,7 +556,7 @@ fn paint_text_caret_overlay(
     );
     let bottom = text_local_to_screen(
         origin,
-        rect.x,
+        rect.x * stretch_x.max(0.001),
         center_y + caret_h_local * 0.5,
         scale,
         rotation_deg,
@@ -2219,6 +2223,7 @@ pub fn build(
                 underline: data.tool.text_underline,
                 tracking_px: data.tool.text_tracking_px,
                 opacity: data.tool.text_opacity,
+                stretch_x: data.tool.text_stretch_x,
                 rotation_deg: data.tool.text_rotation_deg,
                 flip_x: data.tool.text_flip_x,
                 flip_y: data.tool.text_flip_y,
@@ -2237,6 +2242,28 @@ pub fn build(
                 .as_ref()
                 .is_some_and(|range| !range.is_empty())
                 || data.tool.text_selection.is_some();
+            // Photoshop-style spacing shortcuts while a text range is selected.
+            // Consume them before TextEdit sees the event; otherwise Alt+Arrow
+            // may move/collapse its cursor instead of preserving the selection.
+            if has_text_selection {
+                let alt = egui::Modifiers::ALT;
+                if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowLeft)) {
+                    actions.tool.set_text_tracking_px =
+                        Some((data.tool.text_tracking_px - 1.0).clamp(-200.0, 500.0));
+                }
+                if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowRight)) {
+                    actions.tool.set_text_tracking_px =
+                        Some((data.tool.text_tracking_px + 1.0).clamp(-200.0, 500.0));
+                }
+                if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowUp)) {
+                    actions.tool.set_text_line_height =
+                        Some((data.tool.text_line_height - 0.05).clamp(0.5, 4.0));
+                }
+                if ctx.input_mut(|i| i.consume_key(alt, egui::Key::ArrowDown)) {
+                    actions.tool.set_text_line_height =
+                        Some((data.tool.text_line_height + 0.05).clamp(0.5, 4.0));
+                }
+            }
             let text_scale = (zoom / ctx.pixels_per_point()).max(0.001);
             let text_origin = egui::pos2(mx, my);
             let preview_image =
@@ -2496,7 +2523,12 @@ pub fn build(
                     });
                     let primary_pressed = ctx.input(|i| i.pointer.primary_pressed());
                     let continuing_drag = ctx.data(|d| d.get_temp::<usize>(anchor_id)).is_some();
-                    if let Some(idx) = crate::core::text::char_index_at_pos(&caret_td, tx, ty) {
+                    // The preview texture is already horizontally stretched,
+                    // while layout/caret geometry stays in upright text space.
+                    // Undo that stretch before resolving the character index.
+                    let layout_x = tx / data.tool.text_stretch_x.max(0.001);
+                    if let Some(idx) = crate::core::text::char_index_at_pos(&caret_td, layout_x, ty)
+                    {
                         use egui::text::{CCursor, CCursorRange};
                         if pointer_in_text
                             && ctx.input(|i| {
@@ -2562,7 +2594,7 @@ pub fn build(
             if let Some(range) = active_text_range {
                 let overlay_painter = ctx
                     .layer_painter(egui::LayerId::new(
-                        egui::Order::Foreground,
+                        egui::Order::Middle,
                         egui::Id::new("text_overlay_selection_preview"),
                     ))
                     .with_clip_rect(canvas_viewport);
@@ -2581,6 +2613,7 @@ pub fn build(
                                 data.tool.text_rotation_deg,
                                 data.tool.text_flip_x,
                                 data.tool.text_flip_y,
+                                data.tool.text_stretch_x,
                                 screen_font,
                                 ctx.input(|i| i.time),
                             );
@@ -2606,6 +2639,7 @@ pub fn build(
                             data.tool.text_rotation_deg,
                             data.tool.text_flip_x,
                             data.tool.text_flip_y,
+                            data.tool.text_stretch_x,
                             fill,
                         );
                     }

@@ -900,6 +900,7 @@ fn text_to_json(td: &crate::core::text::TextData) -> serde_json::Value {
         "underline": td.underline,
         "tracking_px": td.tracking_px,
         "opacity": td.opacity,
+        "stretch_x": td.stretch_x,
         "rotation_deg": td.rotation_deg,
         "flip_x": td.flip_x,
         "flip_y": td.flip_y,
@@ -997,6 +998,7 @@ fn json_to_text_data(v: &serde_json::Value) -> Option<crate::core::text::TextDat
     let underline = v["underline"].as_bool().unwrap_or(false);
     let tracking_px = v["tracking_px"].as_f64().unwrap_or(0.0) as f32;
     let opacity = v["opacity"].as_f64().unwrap_or(1.0) as f32;
+    let stretch_x = v["stretch_x"].as_f64().unwrap_or(1.0) as f32;
     let rotation_deg = v["rotation_deg"].as_f64().unwrap_or(0.0) as f32;
     let flip_x = v["flip_x"].as_bool().unwrap_or(false);
     let flip_y = v["flip_y"].as_bool().unwrap_or(false);
@@ -1041,6 +1043,7 @@ fn json_to_text_data(v: &serde_json::Value) -> Option<crate::core::text::TextDat
         underline,
         tracking_px,
         opacity,
+        stretch_x,
         rotation_deg,
         flip_x,
         flip_y,
@@ -1548,7 +1551,12 @@ mod tests {
         let mut td = crate::core::text::TextData {
             content: "Turn".to_string(),
             font_px: 32.0,
+            font_family: crate::core::text::TextFontFamily::SystemFace {
+                family: "Example Sans".to_string(),
+                style: "SemiBold Italic".to_string(),
+            },
             rotation_deg: 37.5,
+            stretch_x: 1.75,
             flip_x: true,
             flip_y: true,
             ..crate::core::text::TextData::default()
@@ -1569,6 +1577,8 @@ mod tests {
         let restored = json_to_text_data(&json).expect("text json restores");
 
         assert!((restored.rotation_deg - 37.5).abs() < 0.001);
+        assert_eq!(restored.font_family, td.font_family);
+        assert!((restored.stretch_x - 1.75).abs() < 0.001);
         assert!(restored.flip_x);
         assert!(restored.flip_y);
         assert_eq!(restored.glyph_styles, td.glyph_styles);

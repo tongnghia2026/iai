@@ -174,6 +174,7 @@ pub struct ToolIntent {
     /// UI acknowledged the focus request → app clears its one-shot flag.
     pub consume_text_focus: bool,
     pub text_drag_handle_hovered: bool,
+    pub text_panel_hovered: bool,
     pub brush_size: Option<f32>,
     pub brush_hardness: Option<f32>,
     pub brush_opacity: Option<f32>,

@@ -59,7 +59,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
     if data.chrome.show_text_panel {
         let mut open = true;
-        floating_panel(
+        let response = floating_panel(
             ctx,
             "Text",
             egui::pos2(default_x(360.0), 128.0),
@@ -67,6 +67,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
             &mut open,
             |ui| text_panel(ui, data, actions),
         );
+        actions.tool.text_panel_hovered = response.is_some_and(|r| r.contains_pointer());
         if !open {
             actions.chrome.show_text_panel = Some(false);
         }
@@ -110,19 +111,21 @@ fn floating_panel(
     default_width: f32,
     open: &mut bool,
     add_contents: impl FnOnce(&mut egui::Ui),
-) {
+) -> Option<egui::Response> {
     egui::Window::new(title)
         .open(open)
         .collapsible(false)
         .movable(true)
         .resizable(true)
+        .order(egui::Order::Foreground)
         .default_pos(default_pos)
         .default_width(default_width)
         .min_width(220.0)
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 5.0);
             add_contents(ui);
-        });
+        })
+        .map(|inner| inner.response)
 }
 
 fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
@@ -152,7 +155,7 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let font_search_id = egui::Id::new("text_panel_font_family_search");
     let font_combo = egui::ComboBox::from_id_salt("text_panel_font_family")
         .selected_text(data.tool.text_font_family.name())
-        .width(ui.available_width().min(220.0))
+        .width(ui.available_width().min(190.0))
         .height(420.0)
         .show_ui(ui, |ui| {
             ui.set_min_width(260.0);
@@ -199,6 +202,31 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 });
             committed
         });
+    let family_rect = font_combo.response.rect;
+    let style_left = family_rect.right() + 6.0;
+    let style_width = (ui.max_rect().right() - style_left).max(90.0);
+    let style_rect = egui::Rect::from_min_size(
+        egui::pos2(style_left, family_rect.top()),
+        egui::vec2(style_width, family_rect.height()),
+    );
+    #[allow(deprecated)]
+    ui.allocate_ui_at_rect(style_rect, |ui| {
+        egui::ComboBox::from_id_salt("text_panel_font_face")
+            .selected_text(data.tool.text_font_family.style_name())
+            .width(style_width)
+            .show_ui(ui, |ui| {
+                for face in data.tool.text_font_family.faces() {
+                    let selected = face.style_name() == data.tool.text_font_family.style_name();
+                    if ui.selectable_label(selected, face.style_name()).clicked() {
+                        actions.tool.set_text_font_family = Some(face);
+                        // The chosen face already carries its real weight/slant;
+                        // avoid stacking the legacy faux Bold/Italic on top.
+                        actions.tool.set_text_bold = Some(false);
+                        actions.tool.set_text_italic = Some(false);
+                    }
+                }
+            });
+    });
     match font_combo.inner {
         Some(committed) => {
             if committed {

@@ -743,6 +743,12 @@ impl App {
                     .as_ref()
                     .map(|s| s.rotation_deg)
                     .unwrap_or(0.0),
+                text_stretch_x: self
+                    .edit
+                    .text_edit
+                    .as_ref()
+                    .map(|s| s.stretch_x)
+                    .unwrap_or(1.0),
                 text_flip_x: self
                     .edit
                     .text_edit

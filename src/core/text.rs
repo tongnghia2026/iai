@@ -28,6 +28,7 @@ pub enum TextFontFamily {
     DejaVuSans,
     LiberationSans,
     System(String),
+    SystemFace { family: String, style: String },
 }
 
 impl TextFontFamily {
@@ -44,6 +45,7 @@ impl TextFontFamily {
             TextFontFamily::DejaVuSans => "DejaVu Sans",
             TextFontFamily::LiberationSans => "Liberation Sans",
             TextFontFamily::System(name) => name.as_str(),
+            TextFontFamily::SystemFace { family, .. } => family.as_str(),
         }
     }
 
@@ -56,6 +58,9 @@ impl TextFontFamily {
             TextFontFamily::DejaVuSans => "DejaVuSans".to_string(),
             TextFontFamily::LiberationSans => "LiberationSans".to_string(),
             TextFontFamily::System(name) => format!("System:{name}"),
+            TextFontFamily::SystemFace { family, style } => {
+                format!("SystemFace:{family}\u{1f}{style}")
+            }
         }
     }
 
@@ -81,7 +86,7 @@ impl TextFontFamily {
             TextFontFamily::LiberationSans => {
                 &["/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"]
             }
-            TextFontFamily::System(_) => &[],
+            TextFontFamily::System(_) | TextFontFamily::SystemFace { .. } => &[],
         }
     }
 
@@ -89,6 +94,14 @@ impl TextFontFamily {
         if let Some(name) = s.strip_prefix("System:") {
             return known_family_from_name(name)
                 .unwrap_or_else(|| TextFontFamily::System(name.to_string()));
+        }
+        if let Some(face) = s.strip_prefix("SystemFace:") {
+            if let Some((family, style)) = face.split_once('\u{1f}') {
+                return TextFontFamily::SystemFace {
+                    family: family.to_string(),
+                    style: style.to_string(),
+                };
+            }
         }
         match s {
             "Arial" => TextFontFamily::Arial,
@@ -101,9 +114,37 @@ impl TextFontFamily {
     }
 }
 
+impl TextFontFamily {
+    pub fn style_name(&self) -> &str {
+        match self {
+            Self::SystemFace { style, .. } => style,
+            _ => "Regular",
+        }
+    }
+
+    pub fn faces(&self) -> Vec<TextFontFamily> {
+        let key = normalized_family_key(self.name());
+        let mut faces: Vec<_> = system_font_entries()
+            .iter()
+            .filter(|entry| normalized_family_key(&entry.family) == key)
+            .map(|entry| TextFontFamily::SystemFace {
+                family: entry.family.clone(),
+                style: entry.style.clone(),
+            })
+            .collect();
+        faces.sort_by_key(|face| face.style_name().to_ascii_lowercase());
+        faces.dedup_by(|a, b| a.style_name().eq_ignore_ascii_case(b.style_name()));
+        if faces.is_empty() {
+            faces.push(self.clone());
+        }
+        faces
+    }
+}
+
 #[derive(Clone)]
 struct SystemFontEntry {
     family: String,
+    style: String,
     path: PathBuf,
     score: i32,
 }
@@ -167,19 +208,22 @@ fn build_system_font_entries() -> Vec<SystemFontEntry> {
         let Some(family) = font_family_name_from_bytes(&bytes) else {
             continue;
         };
+        let style = font_style_name_from_bytes(&bytes).unwrap_or_else(|| "Regular".to_string());
         let key = normalized_family_key(&family);
         if key.is_empty() {
             continue;
         }
         let entry = SystemFontEntry {
             family,
+            style: style.clone(),
             score: regular_font_score(&path),
             path,
         };
-        match by_family.get(&key) {
+        let face_key = format!("{key}\u{1f}{}", style.to_ascii_lowercase());
+        match by_family.get(&face_key) {
             Some(existing) if existing.score >= entry.score => {}
             _ => {
-                by_family.insert(key, entry);
+                by_family.insert(face_key, entry);
             }
         }
     }
@@ -246,7 +290,13 @@ fn font_path_for_family(family: &TextFontFamily) -> Option<PathBuf> {
             let key = normalized_family_key(family.name());
             system_font_entries()
                 .iter()
-                .find(|entry| normalized_family_key(&entry.family) == key)
+                .filter(|entry| normalized_family_key(&entry.family) == key)
+                .find(|entry| match family {
+                    TextFontFamily::SystemFace { style, .. } => {
+                        entry.style.eq_ignore_ascii_case(style)
+                    }
+                    _ => true,
+                })
                 .map(|entry| entry.path.clone())
         })
 }
@@ -411,6 +461,64 @@ fn font_family_name_from_bytes(data: &[u8]) -> Option<String> {
     best.map(|(_, value)| value)
 }
 
+fn font_style_name_from_bytes(data: &[u8]) -> Option<String> {
+    if data.get(0..4) == Some(b"ttcf") {
+        return None;
+    }
+    let table_count = read_u16(data, 4)? as usize;
+    let mut name_table = None;
+    for i in 0..table_count {
+        let rec = 12 + i * 16;
+        if data.get(rec..rec + 4) == Some(b"name") {
+            let offset = read_u32(data, rec + 8)? as usize;
+            let length = read_u32(data, rec + 12)? as usize;
+            if offset.checked_add(length)? <= data.len() {
+                name_table = Some((offset, length));
+            }
+            break;
+        }
+    }
+    let (table_offset, table_len) = name_table?;
+    let count = read_u16(data, table_offset + 2)? as usize;
+    let string_base = table_offset + read_u16(data, table_offset + 4)? as usize;
+    let table_end = table_offset + table_len;
+    let mut best: Option<(i32, String)> = None;
+    for i in 0..count {
+        let rec = table_offset + 6 + i * 12;
+        if rec + 12 > table_end || rec + 12 > data.len() {
+            continue;
+        }
+        let platform = read_u16(data, rec)?;
+        let encoding = read_u16(data, rec + 2)?;
+        let language = read_u16(data, rec + 4)?;
+        let name_id = read_u16(data, rec + 6)?;
+        if name_id != 2 && name_id != 17 {
+            continue;
+        }
+        let length = read_u16(data, rec + 8)? as usize;
+        let offset = read_u16(data, rec + 10)? as usize;
+        let start = string_base.checked_add(offset)?;
+        let end = start.checked_add(length)?;
+        if end > data.len() || end > table_end {
+            continue;
+        }
+        let value = decode_name_string(platform, encoding, &data[start..end])?
+            .trim_matches(char::from(0))
+            .trim()
+            .to_string();
+        if value.is_empty() {
+            continue;
+        }
+        let score = (if name_id == 17 { 100 } else { 60 })
+            + (if platform == 3 { 20 } else { 0 })
+            + (if language == 0x0409 { 12 } else { 0 });
+        if best.as_ref().is_none_or(|(old, _)| score > *old) {
+            best = Some((score, value));
+        }
+    }
+    best.map(|(_, value)| value)
+}
+
 fn decode_name_string(platform: u16, encoding: u16, bytes: &[u8]) -> Option<String> {
     if platform == 0 || platform == 3 || encoding == 1 || encoding == 10 {
         if !bytes.len().is_multiple_of(2) {
@@ -461,6 +569,9 @@ pub struct TextData {
     pub tracking_px: f32,
     /// Layer-local text opacity, multiplied with `color[3]`.
     pub opacity: f32,
+    /// Persistent horizontal glyph stretch. Free Transform uses this to keep
+    /// non-uniformly scaled text editable without losing its visual shape.
+    pub stretch_x: f32,
     /// Clockwise rotation around the upright raster origin, in degrees.
     pub rotation_deg: f32,
     /// Mirror the upright raster before rotation.
@@ -535,6 +646,7 @@ impl Default for TextData {
             underline: false,
             tracking_px: 0.0,
             opacity: 1.0,
+            stretch_x: 1.0,
             rotation_deg: 0.0,
             flip_x: false,
             flip_y: false,
@@ -1075,6 +1187,7 @@ pub fn rasterize(td: &TextData) -> Option<Rasterized> {
 fn placed_raster_bounds(
     width: u32,
     height: u32,
+    stretch_x: f32,
     angle_deg: f32,
     flip_x: bool,
     flip_y: bool,
@@ -1095,7 +1208,7 @@ fn placed_raster_bounds(
     let mut max_x = f32::NEG_INFINITY;
     let mut max_y = f32::NEG_INFINITY;
     for (x, y) in corners {
-        let tx = fx * x;
+        let tx = fx * x * stretch_x;
         let ty = fy * y;
         let rx = c * tx - s * ty;
         let ry = s * tx + c * ty;
@@ -1163,8 +1276,45 @@ fn sample_rgba_bilinear(src: &[u8], width: u32, height: u32, x: f32, y: f32) -> 
 
 /// Rasterize text and apply its placement rotation. The returned delta is the
 /// rotated bounding-box top-left relative to the upright raster origin.
-pub fn rasterize_placed(td: &TextData) -> Option<(Rasterized, (i32, i32))> {
+pub fn rasterize_stretched(td: &TextData) -> Option<Rasterized> {
     let upright = rasterize(td)?;
+    let stretch_x = if td.stretch_x.is_finite() && td.stretch_x > 0.001 {
+        td.stretch_x
+    } else {
+        1.0
+    };
+    if (stretch_x - 1.0).abs() <= 0.001 {
+        return Some(upright);
+    }
+    let width = ((upright.width as f32 * stretch_x).round() as u32).max(1);
+    let len = (width as u64)
+        .checked_mul(upright.height as u64)
+        .and_then(|n| n.checked_mul(4))
+        .and_then(|n| usize::try_from(n).ok())?;
+    let mut rgba = vec![0; len];
+    for y in 0..upright.height {
+        for x in 0..width {
+            let sample_x = (x as f32 + 0.5) / stretch_x - 0.5;
+            let px = sample_rgba_bilinear(
+                &upright.rgba,
+                upright.width,
+                upright.height,
+                sample_x,
+                y as f32,
+            );
+            let i = ((y * width + x) * 4) as usize;
+            rgba[i..i + 4].copy_from_slice(&px);
+        }
+    }
+    Some(Rasterized {
+        rgba,
+        width,
+        height: upright.height,
+    })
+}
+
+pub fn rasterize_placed(td: &TextData) -> Option<(Rasterized, (i32, i32))> {
+    let upright = rasterize_stretched(td)?;
     let angle = td.rotation_deg.rem_euclid(360.0);
     if (!angle.is_finite() || angle <= 0.001 || (360.0 - angle) <= 0.001)
         && !td.flip_x
@@ -1173,8 +1323,14 @@ pub fn rasterize_placed(td: &TextData) -> Option<(Rasterized, (i32, i32))> {
         return Some((upright, (0, 0)));
     }
 
-    let (dx, dy, out_w, out_h) =
-        placed_raster_bounds(upright.width, upright.height, angle, td.flip_x, td.flip_y)?;
+    let (dx, dy, out_w, out_h) = placed_raster_bounds(
+        upright.width,
+        upright.height,
+        1.0,
+        angle,
+        td.flip_x,
+        td.flip_y,
+    )?;
     let len = (out_w as u64)
         .checked_mul(out_h as u64)
         .and_then(|n| n.checked_mul(4))

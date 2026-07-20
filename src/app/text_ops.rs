@@ -185,6 +185,7 @@ impl App {
             underline: self.edit.text_underline,
             tracking_px: self.edit.text_tracking_px,
             opacity: self.edit.text_opacity,
+            stretch_x: 1.0,
             rotation_deg: 0.0,
             flip_x: false,
             flip_y: false,
@@ -269,6 +270,7 @@ impl App {
             buffer: String::new(),
             origin,
             rotation_deg: 0.0,
+            stretch_x: 1.0,
             flip_x: false,
             flip_y: false,
             is_new: true,
@@ -347,6 +349,7 @@ impl App {
             buffer: td.content.clone(),
             origin,
             rotation_deg: td.rotation_deg,
+            stretch_x: td.stretch_x,
             flip_x: td.flip_x,
             flip_y: td.flip_y,
             is_new: false,
@@ -597,6 +600,7 @@ impl App {
         let mut td =
             self.text_data_from_state(session.buffer.clone(), session.glyph_styles.clone());
         td.rotation_deg = session.rotation_deg;
+        td.stretch_x = session.stretch_x;
         td.flip_x = session.flip_x;
         td.flip_y = session.flip_y;
 

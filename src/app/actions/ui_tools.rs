@@ -132,6 +132,7 @@ impl App {
             self.edit.text_focus_pending = false;
         }
         self.edit.text_drag_hovered = actions.tool.text_drag_handle_hovered;
+        self.edit.text_panel_hovered = actions.tool.text_panel_hovered;
     }
 
     pub(super) fn handle_transform_crop_actions(

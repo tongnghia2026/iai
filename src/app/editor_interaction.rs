@@ -99,6 +99,7 @@ pub struct EditorInteraction {
     /// UI. None when closed.
     pub(in crate::app) selection_ctx_menu_pos: Option<(f32, f32)>,
     pub(in crate::app) text_drag_hovered: bool,
+    pub(in crate::app) text_panel_hovered: bool,
     pub(in crate::app) show_refine_panel: bool,
     pub(in crate::app) refine_feather: f32,
     pub(in crate::app) refine_smooth: u32,

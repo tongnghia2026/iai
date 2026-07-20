@@ -94,6 +94,7 @@ pub struct ToolViewModel {
     pub text_tracking_px: f32,
     pub text_opacity: f32,
     pub text_rotation_deg: f32,
+    pub text_stretch_x: f32,
     pub text_flip_x: bool,
     pub text_flip_y: bool,
     /// Per-character colour/size of the active editing session (empty when
@@ -550,6 +551,7 @@ impl Default for UiData {
                 text_tracking_px: 0.0,
                 text_opacity: 1.0,
                 text_rotation_deg: 0.0,
+                text_stretch_x: 1.0,
                 text_flip_x: false,
                 text_flip_y: false,
                 text_glyph_styles: std::sync::Arc::new(Vec::new()),

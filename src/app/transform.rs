@@ -261,7 +261,10 @@ fn scaled_text_data(td: &TextData, sx: f32, sy: f32) -> TextData {
         sy
     };
     out.font_px = (out.font_px * font_scale).clamp(4.0, 1600.0);
-    out.tracking_px = (out.tracking_px * sx).clamp(-200.0, 500.0);
+    // Font size carries the vertical scale; retain the independent horizontal
+    // component so reopening the Type tool reproduces the transformed glyphs.
+    out.stretch_x = (out.stretch_x * sx / font_scale.max(TRANSFORM_EPS)).clamp(0.01, 100.0);
+    out.tracking_px = (out.tracking_px * font_scale).clamp(-200.0, 500.0);
     for gs in &mut out.glyph_styles {
         gs.font_px = (gs.font_px * font_scale).clamp(4.0, 1600.0);
     }
@@ -1947,7 +1950,7 @@ mod tests {
             orig_w: content_w,
             orig_h: content_h,
             scale_x: 2.0,
-            scale_y: 2.0,
+            scale_y: 1.0,
             angle_deg: 0.0,
             translate_x: 0.0,
             translate_y: 0.0,
@@ -1976,7 +1979,8 @@ mod tests {
         let LayerType::Text(after_td) = &result.layers[0].layer_type else {
             panic!("scaled text stays editable");
         };
-        assert!((after_td.font_px - 48.0).abs() < 0.01);
+        assert!((after_td.font_px - 24.0).abs() < 0.01);
+        assert!((after_td.stretch_x - 2.0).abs() < 0.01);
         assert!(result.layers[0].width > raster.width);
 
         let mut stack = LayerStack::new(160, 120);
@@ -1996,13 +2000,15 @@ mod tests {
         let LayerType::Text(redo_td) = &ctx.layers.layers[idx].layer_type else {
             panic!("redo keeps text layer");
         };
-        assert!((redo_td.font_px - 48.0).abs() < 0.01);
+        assert!((redo_td.font_px - 24.0).abs() < 0.01);
+        assert!((redo_td.stretch_x - 2.0).abs() < 0.01);
 
         command.undo(&mut ctx).expect("undo applies");
         let LayerType::Text(undo_td) = &ctx.layers.layers[idx].layer_type else {
             panic!("undo keeps text layer");
         };
         assert!((undo_td.font_px - 24.0).abs() < 0.01);
+        assert!((undo_td.stretch_x - 1.0).abs() < 0.01);
     }
 
     #[test]
