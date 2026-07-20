@@ -444,6 +444,11 @@ mod tests {
         assert!(session.edited_pages[&0].canvas.is_dirty());
         assert!(app.docs.documents[0].is_modified());
 
+        // Closing the application from a clean page must still ask to save the
+        // edited page cached elsewhere in this PDF session.
+        assert!(!app.request_app_exit());
+        assert!(app.shell.ui.show_exit_dialog);
+
         app.pdf_nav_goto(0);
         let session = app.docs.documents[0].pdf_document.as_ref().unwrap();
         assert_eq!(session.active_page, 0);

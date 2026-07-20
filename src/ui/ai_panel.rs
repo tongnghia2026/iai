@@ -35,6 +35,13 @@ const AODAI_COLORS: [(&str, &str); 6] = [
     ("Tím", "violet"),
 ];
 const VEST_COLORS: [(&str, &str); 3] = [("Đen", "black"), ("Navy", "navy"), ("Xám", "light gray")];
+const TIE_COLORS: [(&str, &str); 5] = [
+    ("Đỏ đô", "burgundy"),
+    ("Navy", "navy"),
+    ("Đen", "black"),
+    ("Xám", "charcoal gray"),
+    ("Xanh dương", "medium blue"),
+];
 
 const RETOUCH_CHOICES: [(&str, &str); 4] = [
     (
@@ -889,17 +896,19 @@ fn compose_id_photo_prompt(st: &AiPanelState) -> String {
     p.push_str(bg);
     p.push_str(
         ". Create a clean, polished ID-photo look: bright but not overexposed, soft frontal studio \
-         light, smooth highlight transitions, neutral white balance with a gentle white-pink \
-         complexion, and natural contrast. Retouch skin beautifully but realistically: smoother, \
-         clearer, brighter and even-toned across the face and neck; reduce shine, redness, acne, \
-         dark patches and blotchy/yellow areas without plastic skin. Keep pores and natural texture \
+         light, smooth highlight transitions, neutral-to-subtly-warm white balance and natural \
+         contrast. Keep the person's real skin tone with only a very slight warm golden undertone; \
+         avoid an overly pale, white or pink complexion. Retouch skin beautifully but realistically: \
+         smoother, clearer and even-toned across the face and neck; reduce shine, excess redness, \
+         acne and dark patches without removing the skin's natural warm/yellow undertone or creating \
+         plastic skin. Keep pores and natural texture \
          subtle. Add gentle clarity to the eyes, hair and clothing, with no halos or harsh \
          sharpening. ",
     );
     match st.id_gender {
         1 => p.push_str("The subject is male: no makeup. "),
         2 => p.push_str(
-            "The subject is female: at most very light, natural makeup (clean, subtle). ",
+            "The subject is female: at most very light, natural makeup (clean, subtle), with the natural lip color made only slightly redder and healthier-looking, never vivid or heavily made up. ",
         ),
         _ => {}
     }
@@ -919,8 +928,32 @@ fn compose_id_photo_prompt(st: &AiPanelState) -> String {
                     .get(st.id_vest_color as usize)
                     .map(|c| c.1)
                     .unwrap_or("black");
+                let buttons = match st.id_vest_buttons {
+                    0 => "one-button",
+                    2 => "three-button",
+                    _ => "two-button",
+                };
+                let front = if st.id_vest_front == 1 {
+                    "double-breasted"
+                } else {
+                    "single-breasted"
+                };
+                let tie = if st.id_vest_tie {
+                    let tie_color = TIE_COLORS
+                        .get(st.id_tie_color as usize)
+                        .map(|c| c.1)
+                        .unwrap_or("burgundy");
+                    let pattern = match st.id_tie_pattern {
+                        1 => "with a subtle diagonal stripe pattern",
+                        2 => "with a subtle small-dot pattern",
+                        _ => "plain with no pattern",
+                    };
+                    format!(", plus a neat {tie_color} tie {pattern}")
+                } else {
+                    ", with no tie".to_string()
+                };
                 format!(
-                    "a formal {color} suit jacket worn over a plain white collared dress shirt, neat and well-fitted"
+                    "a formal {color}, {front}, {buttons} suit jacket worn over a plain white collared dress shirt{tie}, neat and well-fitted"
                 )
             }
             _ => {
@@ -937,13 +970,18 @@ fn compose_id_photo_prompt(st: &AiPanelState) -> String {
         p.push_str(&outfit);
         p.push_str("; keep the same body pose and shoulders, change nothing else. ");
     }
+    if st.id_tidy_hair {
+        p.push_str(
+            "Tidy the hair naturally: smooth only stray or flyaway hairs and make the outline neat, while preserving the original hairstyle, hairline, length, volume, color and identity. ",
+        );
+    }
     p.push_str(
         "Preserve the person's identity and natural likeness: keep the same face structure, facial \
          features, jawline, nose, eyes, eyebrows, mouth, expression, gaze, age, hairstyle, head pose, \
          head size and identifying marks. Flattering retouch is allowed, but do not change bone \
          structure, facial proportions, expression, or make the person look like someone else. Do not \
          zoom, rotate, re-crop, re-frame, or change canvas/aspect ratio. Only edit background, \
-         lighting, color, skin and requested clothing. Photorealistic, soft, polished and natural ID \
+         lighting, color, skin, requested clothing and requested stray-hair cleanup. Photorealistic, soft, polished and natural ID \
          photo.",
     );
     p
@@ -1028,6 +1066,65 @@ fn id_photo_section(
                 }
             }
         });
+        if st.id_outfit == 2 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Số cúc").small().weak());
+                for (val, label) in [(0u8, "1 cúc"), (1, "2 cúc"), (2, "3 cúc")] {
+                    if ui
+                        .selectable_label(st.id_vest_buttons == val, label)
+                        .clicked()
+                    {
+                        st.id_vest_buttons = val;
+                        *changed = true;
+                    }
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Kiểu vạt").small().weak());
+                for (val, label) in [(0u8, "Vạt đơn"), (1, "Vạt đôi")] {
+                    if ui
+                        .selectable_label(st.id_vest_front == val, label)
+                        .clicked()
+                    {
+                        st.id_vest_front = val;
+                        *changed = true;
+                    }
+                }
+            });
+            if ui.checkbox(&mut st.id_vest_tie, "Thêm cà vạt").changed() {
+                *changed = true;
+            }
+            if st.id_vest_tie {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Màu cà vạt").small().weak());
+                    for (i, (label, _)) in TIE_COLORS.iter().enumerate() {
+                        if ui
+                            .selectable_label(st.id_tie_color as usize == i, *label)
+                            .clicked()
+                        {
+                            st.id_tie_color = i as u8;
+                            *changed = true;
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Hoa văn").small().weak());
+                    for (val, label) in [(0u8, "Trơn"), (1, "Sọc chéo"), (2, "Chấm nhỏ")] {
+                        if ui
+                            .selectable_label(st.id_tie_pattern == val, label)
+                            .clicked()
+                        {
+                            st.id_tie_pattern = val;
+                            *changed = true;
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    if ui.checkbox(&mut st.id_tidy_hair, "Tóc gọn gàng").changed() {
+        *changed = true;
     }
 
     ui.add_space(6.0);

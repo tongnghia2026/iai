@@ -2059,7 +2059,16 @@ impl App {
         if self.block_exit_if_active_operation() {
             return false;
         }
-        if self.is_modified() {
+        // App exit must consider the whole active document, not only the page
+        // currently visible. A PDF can have dirty pages cached in its session
+        // while the page on screen is clean; exiting in that state would
+        // otherwise silently discard those edits.
+        let document_is_modified = self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .is_some_and(|document| document.is_modified());
+        if document_is_modified {
             self.shell.ui.show_exit_dialog = true;
             if let Some(w) = &self.win.window {
                 w.request_redraw();

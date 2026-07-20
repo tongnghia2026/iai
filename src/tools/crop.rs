@@ -278,7 +278,7 @@ impl CropTool {
         }
     }
 
-    pub fn commit(&mut self, canvas: &mut Canvas, background: [u8; 4]) {
+    pub fn commit(&mut self, canvas: &mut Canvas, background: Option<[u8; 4]>) {
         let x0 = self.crop_x0.min(self.crop_x1);
         let y0 = self.crop_y0.min(self.crop_y1);
         let x1 = self.crop_x0.max(self.crop_x1);
@@ -318,23 +318,42 @@ impl CropTool {
             let iy1 = y1.round() as i32;
             let cw = (ix1 - ix0).max(1) as u32;
             let ch = (iy1 - iy0).max(1) as u32;
-            canvas.crop_with_background(ix0, iy0, cw, ch, self.delete_cropped, background)
+            match background {
+                Some(color) => {
+                    canvas.crop_with_background(ix0, iy0, cw, ch, self.delete_cropped, color)
+                }
+                None => canvas.crop(ix0, iy0, cw, ch, self.delete_cropped),
+            }
         } else {
             let cx = (x0 + x1) * 0.5;
             let cy = (y0 + y1) * 0.5;
-            canvas.crop_transformed_with_background(
-                cx,
-                cy,
-                box_w,
-                box_h,
-                out_w,
-                out_h,
-                self.image_tx,
-                self.image_ty,
-                self.rotation,
-                self.delete_cropped,
-                background,
-            )
+            match background {
+                Some(color) => canvas.crop_transformed_with_background(
+                    cx,
+                    cy,
+                    box_w,
+                    box_h,
+                    out_w,
+                    out_h,
+                    self.image_tx,
+                    self.image_ty,
+                    self.rotation,
+                    self.delete_cropped,
+                    color,
+                ),
+                None => canvas.crop_transformed(
+                    cx,
+                    cy,
+                    box_w,
+                    box_h,
+                    out_w,
+                    out_h,
+                    self.image_tx,
+                    self.image_ty,
+                    self.rotation,
+                    self.delete_cropped,
+                ),
+            }
         };
         if !committed {
             return;
@@ -615,7 +634,16 @@ impl Tool for CropTool {
         self.cancel();
     }
     fn on_confirm(&mut self, ctx: &mut ToolCtx) {
-        let background = ctx.bg_color;
+        // A PNG with alpha intentionally has no Background layer. Extending or
+        // rotating its crop must therefore sample outside the source as
+        // transparent instead of silently filling it with the toolbar BG color.
+        let background = ctx
+            .canvas()
+            .layer_stack
+            .layers
+            .iter()
+            .any(|layer| layer.is_background)
+            .then_some(ctx.bg_color);
         self.commit(ctx.canvas_mut(), background);
     }
 
@@ -946,6 +974,40 @@ mod tests {
         assert!(w <= 400.0);
         assert!(h <= 300.0);
         assert!((w / h - 2480.0 / 3508.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn expanding_crop_keeps_transparent_png_area_transparent() {
+        let mut canvas = Canvas::from_rgba(
+            vec![
+                255, 0, 0, 255, 0, 0, 0, 0, // row 0
+                0, 0, 0, 0, 0, 0, 0, 0, // row 1
+            ],
+            2,
+            2,
+        );
+        assert!(!canvas.layer_stack.layers[0].is_background);
+
+        let mut crop = CropTool::new();
+        crop.crop_x0 = -1.0;
+        crop.crop_y0 = -1.0;
+        crop.crop_x1 = 3.0;
+        crop.crop_y1 = 3.0;
+        crop.commit(&mut canvas, None);
+
+        assert_eq!((canvas.width, canvas.height), (4, 4));
+        assert_eq!(canvas.layer_stack.layers.len(), 1);
+        assert!(!canvas.layer_stack.layers[0].is_background);
+        assert_eq!(
+            canvas.layer_stack.layers[0].tiles.get_pixel(0, 0).3,
+            0,
+            "new crop border must remain transparent"
+        );
+        assert_eq!(
+            canvas.layer_stack.layers[0].tiles.get_pixel(1, 1),
+            (255, 0, 0, 255),
+            "original PNG content must remain aligned"
+        );
     }
 
     #[test]

@@ -710,10 +710,16 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let mut apply_preset: Option<PresetAction> = None;
     let mut open_new_preset = false;
     let mut open_delete_dialog = false;
+    let preset_popup_height = crop_preset_popup_height(data.dialogs.user_presets.len());
 
     egui::ComboBox::from_id_salt("crop_preset_combined")
         .selected_text(preset_label)
-        .width(160.0)
+        // Long physical-size and user preset names should remain readable.
+        .width(270.0)
+        // Egui's default combo height is intentionally short and adds a scroll
+        // bar. Size this menu from its actual row count so the full preset list
+        // opens at once (the popup system still constrains it to the monitor).
+        .height(preset_popup_height)
         .show_ui(ui, |ui| {
             ui.label(
                 egui::RichText::new("Ratio")
@@ -858,38 +864,35 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.label("W:");
     let mut w_disp = data.tool.crop_w_display;
     let typed_unit = std::cell::Cell::new(None);
-    let response = ui
+    let w_response = ui
         .add(dimension_drag(&mut w_disp, &typed_unit, speed, decimals))
         .on_hover_text("Type a unit such as 10 cm, 15mm, or 8 in");
     if let Some(parsed) = typed_unit.get() {
         unit = parsed;
         actions.tool.set_crop_unit = Some(parsed as u8);
     }
-    if response.changed() || typed_unit.get().is_some() {
+    if w_response.changed() || typed_unit.get().is_some() {
         actions.tool.set_crop_w_value = Some(w_disp);
     }
 
     let swap_btn = egui::Button::new(egui::RichText::new(ph::SWAP).size(12.0).color(pal.icon))
         .min_size(egui::vec2(22.0, 22.0));
-    if ui
-        .add(swap_btn)
-        .on_hover_text("Swap Width and Height")
-        .clicked()
-    {
+    let swap_response = ui.add(swap_btn).on_hover_text("Swap Width and Height");
+    if swap_response.clicked() {
         actions.tool.swap_crop_wh = true;
     }
 
     ui.label("H:");
     let mut h_disp = data.tool.crop_h_display;
     let typed_unit = std::cell::Cell::new(None);
-    let response = ui
+    let h_response = ui
         .add(dimension_drag(&mut h_disp, &typed_unit, speed, decimals))
         .on_hover_text("Type a unit such as 10 cm, 15mm, or 8 in");
     if let Some(parsed) = typed_unit.get() {
         unit = parsed;
         actions.tool.set_crop_unit = Some(parsed as u8);
     }
-    if response.changed() || typed_unit.get().is_some() {
+    if h_response.changed() || typed_unit.get().is_some() {
         actions.tool.set_crop_h_value = Some(h_disp);
     }
 
@@ -897,7 +900,7 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
     let unit_names = ["px", "cm", "mm", "in", "pt", "pc", "%"];
     let mut unit_idx = unit as usize;
-    egui::ComboBox::from_id_salt("crop_unit")
+    let unit_response = egui::ComboBox::from_id_salt("crop_unit")
         .selected_text(unit_names.get(unit_idx).copied().unwrap_or("px"))
         .width(44.0)
         .show_ui(ui, |ui| {
@@ -907,19 +910,42 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                     unit = Unit::all()[unit_idx];
                 }
             }
-        });
+        })
+        .response;
 
     let mut dpi_val = data.tool.crop_dpi;
-    if ui
-        .add(
-            egui::DragValue::new(&mut dpi_val)
-                .range(1.0..=2400.0)
-                .speed(1.0)
-                .suffix(" ppi"),
-        )
-        .changed()
-    {
+    let dpi_response = ui.add(
+        egui::DragValue::new(&mut dpi_val)
+            .range(1.0..=2400.0)
+            .speed(1.0)
+            .suffix(" ppi"),
+    );
+    if dpi_response.changed() {
         actions.tool.set_crop_dpi = Some(dpi_val);
+    }
+
+    // Crop's keyboard workflow is data-entry oriented. Keep Tab moving through
+    // W → H → DPI (and Shift+Tab in reverse), skipping the mouse-oriented swap
+    // button and unit picker. Clicking the unit picker still works normally.
+    let (tab, shift) = ui
+        .ctx()
+        .input(|input| (input.key_pressed(egui::Key::Tab), input.modifiers.shift));
+    if tab {
+        if !shift && (w_response.has_focus() || swap_response.has_focus()) {
+            h_response.request_focus();
+        } else if !shift && h_response.has_focus() {
+            dpi_response.request_focus();
+        } else if !shift && unit_response.has_focus() {
+            dpi_response.request_focus();
+        } else if shift && dpi_response.has_focus() {
+            h_response.request_focus();
+        } else if shift && h_response.has_focus() {
+            w_response.request_focus();
+        } else if shift && swap_response.has_focus() {
+            w_response.request_focus();
+        } else if shift && unit_response.has_focus() {
+            h_response.request_focus();
+        }
     }
 
     if ui
@@ -994,6 +1020,21 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             actions.tool.crop_confirm = true;
         }
     }
+}
+
+/// Enough vertical room for every fixed Crop row plus all saved presets.
+/// Separators/headings are included in the base; each saved preset contributes
+/// one normal menu row, and a non-empty saved section also shows Delete Preset.
+fn crop_preset_popup_height(saved_preset_count: usize) -> f32 {
+    const FIXED_CONTENT_HEIGHT: f32 = 560.0;
+    const MENU_ROW_HEIGHT: f32 = 26.0;
+    FIXED_CONTENT_HEIGHT
+        + saved_preset_count as f32 * MENU_ROW_HEIGHT
+        + if saved_preset_count > 0 {
+            MENU_ROW_HEIGHT
+        } else {
+            0.0
+        }
 }
 
 #[derive(Clone)]

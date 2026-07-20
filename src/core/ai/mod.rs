@@ -91,6 +91,18 @@ pub struct AiPanelState {
     pub id_aodai_color: u8,
     /// Index into the vest-color list (see VEST_COLORS in ai_panel.rs).
     pub id_vest_color: u8,
+    /// Vest button count: 0 = one, 1 = two, 2 = three.
+    pub id_vest_buttons: u8,
+    /// Vest front style: 0 = single-breasted, 1 = double-breasted.
+    pub id_vest_front: u8,
+    /// Add a tie to the selected vest outfit.
+    pub id_vest_tie: bool,
+    /// Index into the tie-color list (see TIE_COLORS in ai_panel.rs).
+    pub id_tie_color: u8,
+    /// Tie pattern: 0 = plain, 1 = striped, 2 = subtle dotted.
+    pub id_tie_pattern: u8,
+    /// Tidy flyaway hair while preserving the original hairstyle.
+    pub id_tidy_hair: bool,
 
     // ---- "Xếp ảnh in" sheet composer ----
     /// Cutting gap between placed photos, in pixels at sheet DPI.
@@ -123,6 +135,12 @@ impl Default for AiPanelState {
             id_shirt_color: 0,
             id_aodai_color: 0,
             id_vest_color: 0,
+            id_vest_buttons: 1,
+            id_vest_front: 0,
+            id_vest_tie: false,
+            id_tie_color: 0,
+            id_tie_pattern: 0,
+            id_tidy_hair: false,
             impose_gap_px: 10,
         }
     }

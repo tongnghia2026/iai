@@ -1526,9 +1526,25 @@ impl GpuState {
             });
 
             if canvas_bg.is_none() {
-                rpass.set_pipeline(&self.checker_pipeline);
-                rpass.set_bind_group(0, &self.checker_bind_group, &[]);
-                rpass.draw(0..4, 0..1);
+                // The checker shader is fullscreen and this scissor is the
+                // authoritative visible canvas rectangle. Do not make the
+                // shader infer canvas dimensions from unrelated uniform slots.
+                if let Some((cx, cy, cw, ch)) = canvas_clip {
+                    let cw = cw.min(self.main.config.width.saturating_sub(cx));
+                    let ch = ch.min(self.main.config.height.saturating_sub(cy));
+                    if cw > 0 && ch > 0 {
+                        rpass.set_scissor_rect(cx, cy, cw, ch);
+                        rpass.set_pipeline(&self.checker_pipeline);
+                        rpass.set_bind_group(0, &self.checker_bind_group, &[]);
+                        rpass.draw(0..4, 0..1);
+                        rpass.set_scissor_rect(
+                            0,
+                            0,
+                            self.main.config.width,
+                            self.main.config.height,
+                        );
+                    }
+                }
             }
 
             if draw_canvas {
@@ -1735,7 +1751,8 @@ struct CanvasUniforms {
     zoom:        f32,
     vp_mode:     f32,
     screen_size: vec2<f32>,
-    _pad2:       vec2<f32>,
+    proof_enabled: f32,
+    channel_view:  f32,
 };
 
 @group(0) @binding(0) var<uniform> u: CanvasUniforms;
@@ -1769,24 +1786,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Screen pixel position
     let sp = in.pos.xy;
 
-    // Canvas bounds on screen (canvas_size unknown → not encoded in offset.zw)
-    // Trick: we use canvas_size = texture dimension, but the checker shader has no texture.
-    // Solution: pass canvas_size via the _pad/_pad2 slots.
-    // In practice: _pad2 = canvas_size (see the extended CanvasUniforms on the Rust side)
-    let canvas_screen_w = u._pad2.x;   // canvas_w * zoom
-    let canvas_screen_h = u._pad2.y;   // canvas_h * zoom
-
-    let cx0 = u.offset.x;
-    let cy0 = u.offset.y;
-    let cx1 = cx0 + canvas_screen_w;
-    let cy1 = cy0 + canvas_screen_h;
-
-    // Outside the canvas → transparent (screen background shows through)
-    if sp.x < cx0 || sp.x > cx1 || sp.y < cy0 || sp.y > cy1 {
-        discard;
-    }
-
-    // Canvas-space pixel coords
+    // The render pass scissors this fullscreen shader to the visible canvas.
+    // Derive only the pattern coordinates here; canvas bounds do not belong in
+    // the uniform and must never alias proof/channel display controls again.
     let canvas_px = (sp - u.offset) / u.zoom;
 
     // Checkerboard 8px
@@ -1795,8 +1797,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let cy = floor(canvas_px.y / CELL);
     let checker = (i32(cx) + i32(cy)) % 2;
 
-    let light = vec4<f32>(0.030, 0.030, 0.030, 1.0);
-    let dark  = vec4<f32>(0.020, 0.020, 0.020, 1.0);
+    // Keep transparency clearly visible in both application themes.  The old
+    // 0.03/0.02 values were almost black and made the checkerboard look like a
+    // missing/solid canvas background, especially for transparent PNG files.
+    let light = vec4<f32>(0.34, 0.34, 0.34, 1.0);
+    let dark  = vec4<f32>(0.24, 0.24, 0.24, 1.0);
 
     if checker == 0 {
         return light;
@@ -2077,5 +2082,14 @@ mod shader_validation {
         validate("canvas", super::CANVAS_SHADER);
         validate("cursor", super::CURSOR_SHADER);
         validate("selection", super::SELECTION_SHADER);
+    }
+
+    #[test]
+    fn checker_shader_does_not_alias_display_controls_as_canvas_size() {
+        let shader = super::CHECKER_SHADER;
+        assert!(!shader.contains("_pad2"));
+        assert!(!shader.contains("discard"));
+        assert!(shader.contains("proof_enabled"));
+        assert!(shader.contains("channel_view"));
     }
 }
