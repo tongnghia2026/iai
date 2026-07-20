@@ -28,6 +28,8 @@ pub struct EditorInteraction {
     pub(in crate::app) transform_snap_guides: Vec<crate::core::snapping::SnapLine>,
     pub(in crate::app) pending_transform_commit:
         Option<std::sync::mpsc::Receiver<Result<TransformCommitResult, String>>>,
+    /// Continue into mesh Warp after an asynchronous transform bake.
+    pub(in crate::app) warp_after_transform_commit: bool,
     /// Internal layer clipboard: whole cloned `Layer`s (preserving offset, opacity,
     /// blend, mask, visibility, and group structure via `parent_id`). Copying a group
     /// header stores its whole subtree; paste remaps ids so the folder + children

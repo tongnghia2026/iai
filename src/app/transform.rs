@@ -26,6 +26,100 @@ const ROTATE_ZONE: f32 = 24.0;
 const MIN_LIVE_SCALE: f32 = 0.02;
 const TRANSFORM_EPS: f32 = 0.001;
 
+fn projective_handle_indices(h: TransformHandle) -> &'static [usize] {
+    match h {
+        TransformHandle::TopLeft => &[0],
+        TransformHandle::TopCenter => &[0, 1],
+        TransformHandle::TopRight => &[1],
+        TransformHandle::MiddleLeft => &[0, 3],
+        TransformHandle::MiddleRight => &[1, 2],
+        TransformHandle::BottomLeft => &[3],
+        TransformHandle::BottomCenter => &[3, 2],
+        TransformHandle::BottomRight => &[2],
+        TransformHandle::Center => &[0, 1, 2, 3],
+    }
+}
+
+fn dragged_projective_quad(
+    start: [(f32, f32); 4],
+    h: TransformHandle,
+    mode: crate::app::state::TransformMode,
+    dx: f32,
+    dy: f32,
+) -> [(f32, f32); 4] {
+    use crate::app::state::TransformMode;
+    let mut q = start;
+    if h == TransformHandle::Center {
+        for p in &mut q {
+            p.0 += dx;
+            p.1 += dy;
+        }
+        return q;
+    }
+    match mode {
+        TransformMode::Skew => {
+            let horizontal = matches!(
+                h,
+                TransformHandle::TopLeft
+                    | TransformHandle::TopCenter
+                    | TransformHandle::TopRight
+                    | TransformHandle::BottomLeft
+                    | TransformHandle::BottomCenter
+                    | TransformHandle::BottomRight
+            );
+            for &i in projective_handle_indices(h) {
+                if horizontal {
+                    q[i].0 += dx;
+                } else {
+                    q[i].1 += dy;
+                }
+            }
+        }
+        TransformMode::Distort => {
+            for &i in projective_handle_indices(h) {
+                q[i].0 += dx;
+                q[i].1 += dy;
+            }
+        }
+        TransformMode::Perspective => {
+            for &i in projective_handle_indices(h) {
+                q[i].0 += dx;
+                q[i].1 += dy;
+            }
+            // Moving a corner also moves its two adjacent corners in the
+            // opposite direction on the corresponding axis, producing the
+            // symmetric trapezoid expected from Perspective mode.
+            let corner = match h {
+                TransformHandle::TopLeft => Some((0, 3, 1)),
+                TransformHandle::TopRight => Some((1, 2, 0)),
+                TransformHandle::BottomRight => Some((2, 1, 3)),
+                TransformHandle::BottomLeft => Some((3, 0, 2)),
+                _ => None,
+            };
+            if let Some((_i, vertical_neighbor, horizontal_neighbor)) = corner {
+                q[vertical_neighbor].0 -= dx;
+                q[horizontal_neighbor].1 -= dy;
+            }
+        }
+        TransformMode::Free => {}
+    }
+    q
+}
+
+fn transform_quad_about_center(quad: &mut [(f32, f32); 4], sx: f32, sy: f32, angle_deg: f32) {
+    let center = (
+        quad.iter().map(|p| p.0).sum::<f32>() * 0.25,
+        quad.iter().map(|p| p.1).sum::<f32>() * 0.25,
+    );
+    let (s, c) = angle_deg.to_radians().sin_cos();
+    for p in quad {
+        let x = (p.0 - center.0) * sx;
+        let y = (p.1 - center.1) * sy;
+        p.0 = center.0 + c * x - s * y;
+        p.1 = center.1 + s * x + c * y;
+    }
+}
+
 fn clamp_live_scale(value: f32, drag_start: f32) -> f32 {
     let sign = if drag_start < 0.0 { -1.0 } else { 1.0 };
     (value * sign).max(MIN_LIVE_SCALE) * sign
@@ -86,6 +180,9 @@ fn transformed_content_bounds(
 }
 
 fn translate_only(ts: &TransformState) -> Option<(i32, i32)> {
+    if ts.quad.is_some() {
+        return None;
+    }
     let angle = ts.angle_deg.rem_euclid(360.0);
     let angle_is_zero = angle <= TRANSFORM_EPS || (360.0 - angle) <= TRANSFORM_EPS;
     if !angle_is_zero
@@ -107,6 +204,9 @@ fn translate_only(ts: &TransformState) -> Option<(i32, i32)> {
 }
 
 fn axis_aligned_positive_text_scale(ts: &TransformState) -> Option<(f32, f32)> {
+    if ts.quad.is_some() {
+        return None;
+    }
     let angle = ts.angle_deg.rem_euclid(360.0);
     let angle_is_zero = angle <= TRANSFORM_EPS || (360.0 - angle) <= TRANSFORM_EPS;
     if !angle_is_zero
@@ -142,6 +242,9 @@ fn scaled_text_data(td: &TextData, sx: f32, sy: f32) -> TextData {
 }
 
 fn transformed_text_data(td: &TextData, ts: &TransformState) -> Option<TextData> {
+    if ts.quad.is_some() {
+        return None;
+    }
     if !ts.scale_x.is_finite()
         || !ts.scale_y.is_finite()
         || !ts.angle_deg.is_finite()
@@ -208,6 +311,9 @@ fn transformed_shape_span(
     ls: &LayerOrigState,
     ts: &TransformState,
 ) -> Option<(f32, f32, f32, f32, f32, f32)> {
+    if ts.quad.is_some() {
+        return None;
+    }
     if !ts.scale_x.is_finite()
         || !ts.scale_y.is_finite()
         || !ts.angle_deg.is_finite()
@@ -313,10 +419,6 @@ fn bake_transform_commit(
         }
     }
 
-    let (inv_a, inv_b, inv_c, inv_d) = ts.inv_matrix();
-    let pivot_tx = ts.pivot_cx + ts.translate_x;
-    let pivot_ty = ts.pivot_cy + ts.translate_y;
-
     let mut cmd = crate::core::command::FreeTransformCommand::new("Free Transform");
     let mut updates = Vec::with_capacity(ts.layer_states.len());
 
@@ -389,14 +491,13 @@ fn bake_transform_commit(
             .enumerate()
             .for_each(|(py, row)| {
                 let canvas_y = py as f32 + new_oy as f32;
-                let dy = canvas_y - pivot_ty;
                 for px in 0..new_w as usize {
                     let canvas_x = px as f32 + new_ox as f32;
-                    let dx = canvas_x - pivot_tx;
-                    let ex = inv_a * dx + inv_b * dy;
-                    let ey = inv_c * dx + inv_d * dy;
-                    let lx = ex + ts.pivot_cx - orig_ox;
-                    let ly = ey + ts.pivot_cy - orig_oy;
+                    let Some((src_x, src_y)) = ts.inverse_canvas_point(canvas_x, canvas_y) else {
+                        continue;
+                    };
+                    let lx = src_x - orig_ox;
+                    let ly = src_y - orig_oy;
                     if lx < 0.0 || ly < 0.0 || lx >= orig_w || ly >= orig_h {
                         continue;
                     }
@@ -431,16 +532,16 @@ fn bake_transform_commit(
                 .enumerate()
                 .for_each(|(py, row)| {
                     let canvas_y = py as f32 + new_oy as f32;
-                    let dy = canvas_y - pivot_ty;
                     for px in 0..new_w as usize {
                         let canvas_x = px as f32 + new_ox as f32;
-                        let dx = canvas_x - pivot_tx;
-                        let ex = inv_a * dx + inv_b * dy;
-                        let ey = inv_c * dx + inv_d * dy;
+                        let Some((src_x, src_y)) = ts.inverse_canvas_point(canvas_x, canvas_y)
+                        else {
+                            continue;
+                        };
                         // Clamp-to-edge: pixels mapping outside the source mask
                         // take the nearest edge value instead of a hard reveal.
-                        let lx = (ex + ts.pivot_cx - orig_ox).clamp(0.0, mw - 1.0);
-                        let ly = (ey + ts.pivot_cy - orig_oy).clamp(0.0, mh - 1.0);
+                        let lx = (src_x - orig_ox).clamp(0.0, mw - 1.0);
+                        let ly = (src_y - orig_oy).clamp(0.0, mh - 1.0);
                         let g = match interpolation {
                             crate::core::geometry::InterpolationMode::Bilinear => {
                                 mask_tiles.sample_bilinear(lx, ly).0
@@ -618,6 +719,9 @@ impl App {
             drag_start_angle: 0.0,
             drag_start_tx: 0.0,
             drag_start_ty: 0.0,
+            quad: None,
+            drag_start_quad: [(0.0, 0.0); 4],
+            mode: crate::app::state::TransformMode::Free,
         });
 
         self.update_transform_preview();
@@ -661,7 +765,8 @@ impl App {
             && ts.scale_y == 1.0
             && ts.angle_deg == 0.0
             && ts.translate_x == 0.0
-            && ts.translate_y == 0.0;
+            && ts.translate_y == 0.0
+            && ts.quad.is_none();
         if !identity {
             ts.scale_x = 1.0;
             ts.scale_y = 1.0;
@@ -669,6 +774,8 @@ impl App {
             ts.translate_x = 0.0;
             ts.translate_y = 0.0;
             ts.drag_handle = None;
+            ts.quad = None;
+            ts.mode = crate::app::state::TransformMode::Free;
             self.update_transform_preview();
             self.recomposite_visible();
             self.shell.status_msg = "Transform reset".to_string();
@@ -778,11 +885,17 @@ impl App {
                         .record(Box::new(result.command));
                     self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
                     self.shell.status_msg = "Transform applied".to_string();
+                    if self.edit.warp_after_transform_commit {
+                        self.edit.warp_after_transform_commit = false;
+                        self.begin_warp();
+                    }
                 } else {
+                    self.edit.warp_after_transform_commit = false;
                     self.shell.status_msg = "Transform finished for another document".to_string();
                 }
             }
             Ok(Err(err)) => {
+                self.edit.warp_after_transform_commit = false;
                 self.clear_transform_preview();
                 self.recomposite();
                 self.shell.status_msg = err;
@@ -794,6 +907,7 @@ impl App {
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.edit.warp_after_transform_commit = false;
                 self.clear_transform_preview();
                 self.recomposite();
                 self.shell.status_msg = "Transform worker stopped".to_string();
@@ -803,24 +917,17 @@ impl App {
 
     pub fn update_transform_preview(&mut self) {
         let previews: Vec<TransformPreviewUniform> = if let Some(ts) = &self.edit.transform_state {
-            let (inv_a, inv_b, inv_c, inv_d) = ts.inv_matrix();
+            let Some(inv_m) = ts.inverse_homography() else {
+                return;
+            };
             ts.layer_states
                 .iter()
                 .chain(ts.preview_layer_states.iter())
                 .map(|ls| TransformPreviewUniform {
                     layer_id: ls.layer_id,
-                    inv_a,
-                    inv_b,
-                    inv_c,
-                    inv_d,
-                    pivot_x: ts.pivot_cx,
-                    pivot_y: ts.pivot_cy,
-                    tx: ts.translate_x,
-                    ty: ts.translate_y,
+                    inv_m,
                     orig_ox: ls.offset.0 as f32,
                     orig_oy: ls.offset.1 as f32,
-                    orig_w: ls.width as f32,
-                    orig_h: ls.height as f32,
                 })
                 .collect()
         } else {
@@ -876,17 +983,16 @@ impl App {
                 ts.drag_start_angle = ts.angle_deg;
                 ts.drag_start_tx = ts.translate_x;
                 ts.drag_start_ty = ts.translate_y;
+                if let Some(q) = ts.quad {
+                    ts.drag_start_quad = q;
+                }
                 return;
             }
         }
 
-        let pivot_tx = ts.pivot_cx + ts.translate_x;
-        let pivot_ty = ts.pivot_cy + ts.translate_y;
-        let (inv_a, inv_b, inv_c, inv_d) = ts.inv_matrix();
-        let dx = canvas_x - pivot_tx;
-        let dy = canvas_y - pivot_ty;
-        let orig_cx = ts.pivot_cx + inv_a * dx + inv_b * dy;
-        let orig_cy = ts.pivot_cy + inv_c * dx + inv_d * dy;
+        let Some((orig_cx, orig_cy)) = ts.inverse_canvas_point(canvas_x, canvas_y) else {
+            return;
+        };
         let ox0 = ts.orig_offset.0 as f32;
         let oy0 = ts.orig_offset.1 as f32;
         let ox1 = ox0 + ts.orig_w as f32;
@@ -899,6 +1005,13 @@ impl App {
             ts.drag_start_cy = canvas_y;
             ts.drag_start_tx = ts.translate_x;
             ts.drag_start_ty = ts.translate_y;
+            if let Some(q) = ts.quad {
+                ts.drag_start_quad = q;
+            }
+            return;
+        }
+
+        if ts.mode != crate::app::state::TransformMode::Free {
             return;
         }
 
@@ -995,6 +1108,39 @@ impl App {
         let threshold = SNAP_THRESHOLD_PX / zoom.max(1e-4);
         self.edit.transform_snap_guides.clear();
         let mut guides: Vec<SnapLine> = Vec::new();
+
+        let projective_dragged = {
+            let Some(ts) = self.edit.transform_state.as_mut() else {
+                return;
+            };
+            if ts.mode == crate::app::state::TransformMode::Free || ts.quad.is_none() {
+                false
+            } else if let Some(Some(h)) = ts.drag_handle {
+                let candidate = dragged_projective_quad(
+                    ts.drag_start_quad,
+                    h,
+                    ts.mode,
+                    canvas_x - ts.drag_start_cx,
+                    canvas_y - ts.drag_start_cy,
+                );
+                let valid = crate::core::geometry::Homography::square_to_quad(
+                    candidate.map(|(x, y)| crate::core::geometry::Point::new(x, y)),
+                )
+                .and_then(|m| m.inverse())
+                .is_some();
+                if valid {
+                    ts.quad = Some(candidate);
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if projective_dragged {
+            self.update_transform_preview();
+            self.request_interactive_recompose();
+            return;
+        }
 
         {
             let Some(ts) = self.edit.transform_state.as_mut() else {
@@ -1271,28 +1417,39 @@ impl App {
 
     pub fn transform_set_scale_x(&mut self, v: f32) {
         if let Some(ts) = self.edit.transform_state.as_mut() {
-            ts.scale_x = if v < 0.0 {
+            let next = if v < 0.0 {
                 v.min(-MIN_LIVE_SCALE)
             } else {
                 v.max(MIN_LIVE_SCALE)
             };
+            if let Some(q) = ts.quad.as_mut() {
+                transform_quad_about_center(q, next / ts.scale_x, 1.0, 0.0);
+            }
+            ts.scale_x = next;
         }
         self.update_transform_preview();
         self.recomposite_visible();
     }
     pub fn transform_set_scale_y(&mut self, v: f32) {
         if let Some(ts) = self.edit.transform_state.as_mut() {
-            ts.scale_y = if v < 0.0 {
+            let next = if v < 0.0 {
                 v.min(-MIN_LIVE_SCALE)
             } else {
                 v.max(MIN_LIVE_SCALE)
             };
+            if let Some(q) = ts.quad.as_mut() {
+                transform_quad_about_center(q, 1.0, next / ts.scale_y, 0.0);
+            }
+            ts.scale_y = next;
         }
         self.update_transform_preview();
         self.recomposite_visible();
     }
     pub fn transform_set_angle(&mut self, deg: f32) {
         if let Some(ts) = self.edit.transform_state.as_mut() {
+            if let Some(q) = ts.quad.as_mut() {
+                transform_quad_about_center(q, 1.0, 1.0, deg - ts.angle_deg);
+            }
             ts.angle_deg = deg;
         }
         self.update_transform_preview();
@@ -1300,6 +1457,12 @@ impl App {
     }
     pub fn transform_set_translate_x(&mut self, v: f32) {
         if let Some(ts) = self.edit.transform_state.as_mut() {
+            if let Some(q) = ts.quad.as_mut() {
+                let dx = v - ts.translate_x;
+                for p in q {
+                    p.0 += dx;
+                }
+            }
             ts.translate_x = v;
         }
         self.update_transform_preview();
@@ -1307,10 +1470,75 @@ impl App {
     }
     pub fn transform_set_translate_y(&mut self, v: f32) {
         if let Some(ts) = self.edit.transform_state.as_mut() {
+            if let Some(q) = ts.quad.as_mut() {
+                let dy = v - ts.translate_y;
+                for p in q {
+                    p.1 += dy;
+                }
+            }
             ts.translate_y = v;
         }
         self.update_transform_preview();
         self.recomposite_visible();
+    }
+
+    /// Restore the live transform to the state in which this session began.
+    pub fn transform_reset(&mut self) {
+        let Some(ts) = self.edit.transform_state.as_mut() else {
+            return;
+        };
+        ts.scale_x = 1.0;
+        ts.scale_y = 1.0;
+        ts.angle_deg = 0.0;
+        ts.translate_x = 0.0;
+        ts.translate_y = 0.0;
+        ts.drag_handle = None;
+        ts.quad = None;
+        ts.mode = crate::app::state::TransformMode::Free;
+        self.edit.transform_snap_guides.clear();
+        self.update_transform_preview();
+        self.recomposite_visible();
+        self.shell.status_msg = "Free Transform reset".to_string();
+    }
+
+    pub fn transform_set_mode(&mut self, mode: crate::app::state::TransformMode) {
+        let Some(ts) = self.edit.transform_state.as_mut() else {
+            return;
+        };
+        if mode != crate::app::state::TransformMode::Free && ts.quad.is_none() {
+            let c = ts.corners();
+            ts.quad = Some([c[0], c[1], c[3], c[2]]);
+        }
+        ts.mode = mode;
+        ts.drag_handle = None;
+        self.edit.transform_snap_guides.clear();
+        self.update_transform_preview();
+        self.recomposite_visible();
+        self.shell.status_msg = format!("Free Transform — {mode:?}");
+    }
+
+    /// Warp uses the existing mesh editor. The pending transform is committed
+    /// first when necessary; an unchanged transform can switch immediately.
+    pub fn transform_start_warp(&mut self) {
+        let unchanged = self.edit.transform_state.as_ref().is_some_and(|ts| {
+            ts.quad.is_none()
+                && ts.scale_x == 1.0
+                && ts.scale_y == 1.0
+                && ts.angle_deg == 0.0
+                && ts.translate_x == 0.0
+                && ts.translate_y == 0.0
+        });
+        if unchanged {
+            self.cancel_transform();
+            self.begin_warp();
+        } else {
+            self.edit.warp_after_transform_commit = true;
+            self.commit_transform();
+            if self.edit.pending_transform_commit.is_none() {
+                self.edit.warp_after_transform_commit = false;
+                self.begin_warp();
+            }
+        }
     }
 
     pub fn transform_cursor_hint(&self) -> u8 {
@@ -1360,15 +1588,11 @@ impl App {
             }
         }
 
-        let pivot_tx = ts.pivot_cx + ts.translate_x;
-        let pivot_ty = ts.pivot_cy + ts.translate_y;
-        let (inv_a, inv_b, inv_c, inv_d) = ts.inv_matrix();
         let cx = (mx - vox) / zoom;
         let cy = (my - voy) / zoom;
-        let dx = cx - pivot_tx;
-        let dy = cy - pivot_ty;
-        let orig_cx = ts.pivot_cx + inv_a * dx + inv_b * dy;
-        let orig_cy = ts.pivot_cy + inv_c * dx + inv_d * dy;
+        let Some((orig_cx, orig_cy)) = ts.inverse_canvas_point(cx, cy) else {
+            return 0;
+        };
         let ox0 = ts.orig_offset.0 as f32;
         let oy0 = ts.orig_offset.1 as f32;
         let ox1 = ox0 + ts.orig_w as f32;
@@ -1388,6 +1612,9 @@ impl App {
 
     pub fn transform_flip_horizontal(&mut self) {
         if let Some(ts) = self.edit.transform_state.as_mut() {
+            if let Some(q) = ts.quad.as_mut() {
+                transform_quad_about_center(q, -1.0, 1.0, 0.0);
+            }
             ts.scale_x *= -1.0;
         }
         self.update_transform_preview();
@@ -1398,6 +1625,9 @@ impl App {
     }
     pub fn transform_flip_vertical(&mut self) {
         if let Some(ts) = self.edit.transform_state.as_mut() {
+            if let Some(q) = ts.quad.as_mut() {
+                transform_quad_about_center(q, 1.0, -1.0, 0.0);
+            }
             ts.scale_y *= -1.0;
         }
         self.update_transform_preview();
@@ -1408,6 +1638,9 @@ impl App {
     }
     pub fn transform_rotate_90cw(&mut self) {
         if let Some(ts) = self.edit.transform_state.as_mut() {
+            if let Some(q) = ts.quad.as_mut() {
+                transform_quad_about_center(q, 1.0, 1.0, 90.0);
+            }
             ts.angle_deg += 90.0;
         }
         self.update_transform_preview();
@@ -1418,6 +1651,9 @@ impl App {
     }
     pub fn transform_rotate_90ccw(&mut self) {
         if let Some(ts) = self.edit.transform_state.as_mut() {
+            if let Some(q) = ts.quad.as_mut() {
+                transform_quad_about_center(q, 1.0, 1.0, -90.0);
+            }
             ts.angle_deg -= 90.0;
         }
         self.update_transform_preview();
@@ -1428,6 +1664,9 @@ impl App {
     }
     pub fn transform_rotate_180(&mut self) {
         if let Some(ts) = self.edit.transform_state.as_mut() {
+            if let Some(q) = ts.quad.as_mut() {
+                transform_quad_about_center(q, 1.0, 1.0, 180.0);
+            }
             ts.angle_deg += 180.0;
         }
         self.update_transform_preview();
@@ -1469,6 +1708,9 @@ mod tests {
             drag_start_angle: 0.0,
             drag_start_tx: 0.0,
             drag_start_ty: 0.0,
+            quad: None,
+            drag_start_quad: [(0.0, 0.0); 4],
+            mode: crate::app::state::TransformMode::Free,
         });
 
         assert!(app.transform_undo_pending(), "session consumes the undo");
@@ -1557,6 +1799,9 @@ mod tests {
             drag_start_angle: 0.0,
             drag_start_tx: 0.0,
             drag_start_ty: 0.0,
+            quad: None,
+            drag_start_quad: [(0.0, 0.0); 4],
+            mode: crate::app::state::TransformMode::Free,
         };
 
         let result = bake_transform_commit(
@@ -1632,6 +1877,9 @@ mod tests {
             drag_start_angle: 0.0,
             drag_start_tx: 0.0,
             drag_start_ty: 0.0,
+            quad: None,
+            drag_start_quad: [(0.0, 0.0); 4],
+            mode: crate::app::state::TransformMode::Free,
         };
 
         let result = bake_transform_commit(
@@ -1728,6 +1976,9 @@ mod tests {
             drag_start_angle: 0.0,
             drag_start_tx: 0.0,
             drag_start_ty: 0.0,
+            quad: None,
+            drag_start_quad: [(0.0, 0.0); 4],
+            mode: crate::app::state::TransformMode::Free,
         };
 
         let result = bake_transform_commit(
@@ -1810,6 +2061,9 @@ mod tests {
             drag_start_angle: 0.0,
             drag_start_tx: 0.0,
             drag_start_ty: 0.0,
+            quad: None,
+            drag_start_quad: [(0.0, 0.0); 4],
+            mode: crate::app::state::TransformMode::Free,
         };
 
         let result = bake_transform_commit(
@@ -1891,6 +2145,9 @@ mod tests {
             drag_start_angle: 0.0,
             drag_start_tx: 0.0,
             drag_start_ty: 0.0,
+            quad: None,
+            drag_start_quad: [(0.0, 0.0); 4],
+            mode: crate::app::state::TransformMode::Free,
         }
     }
 
@@ -1992,5 +2249,52 @@ mod tests {
         assert!(((y1 - y0).abs() - 60.0).abs() <= 1.0);
         assert!((after.corner_radius - 2.0 * sd.corner_radius).abs() <= 0.5);
         assert!(layer.mask.is_some(), "mask survives");
+    }
+
+    #[test]
+    fn skew_moves_a_whole_edge_and_keeps_a_parallelogram() {
+        let q = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)];
+        let out = dragged_projective_quad(
+            q,
+            TransformHandle::TopCenter,
+            crate::app::state::TransformMode::Skew,
+            15.0,
+            9.0,
+        );
+        assert_eq!(out[0], (15.0, 0.0));
+        assert_eq!(out[1], (115.0, 0.0));
+        assert_eq!(out[2], q[2]);
+        assert_eq!(out[3], q[3]);
+    }
+
+    #[test]
+    fn distort_moves_only_the_selected_corner() {
+        let q = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)];
+        let out = dragged_projective_quad(
+            q,
+            TransformHandle::TopRight,
+            crate::app::state::TransformMode::Distort,
+            -12.0,
+            7.0,
+        );
+        assert_eq!(out[1], (88.0, 7.0));
+        assert_eq!(out[0], q[0]);
+        assert_eq!(out[2], q[2]);
+        assert_eq!(out[3], q[3]);
+    }
+
+    #[test]
+    fn perspective_corner_drag_moves_adjacent_edges_symmetrically() {
+        let q = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)];
+        let out = dragged_projective_quad(
+            q,
+            TransformHandle::TopLeft,
+            crate::app::state::TransformMode::Perspective,
+            10.0,
+            5.0,
+        );
+        assert_eq!(out[0], (10.0, 5.0));
+        assert_eq!(out[3], (-10.0, 80.0));
+        assert_eq!(out[1], (100.0, -5.0));
     }
 }

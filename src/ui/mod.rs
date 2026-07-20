@@ -1724,38 +1724,84 @@ pub fn build(
         }
 
         if let Some((mx, my)) = data.tool.transform_ctx_menu_pos {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                actions.tool.transform_ctx_menu_close = true;
+            }
             let popup_id = egui::Id::new("transform_ctx_menu");
-            let menu_pos = egui::pos2(mx, my);
+            let screen = ctx.content_rect();
+            let menu_w = 210.0;
+            let menu_h = 380.0;
+            let menu_pos = egui::pos2(
+                mx.min(screen.max.x - menu_w).max(screen.min.x),
+                my.min(screen.max.y - menu_h).max(screen.min.y + 28.0),
+            );
+            let pal = data.chrome.theme_mode.palette();
             let resp = egui::Area::new(popup_id)
                 .fixed_pos(menu_pos)
                 .order(egui::Order::Tooltip)
                 .show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_min_width(160.0);
-                        if ui.button("Flip Horizontal").clicked() {
-                            actions.tool.transform_flip_h = true;
-                        }
-                        if ui.button("Flip Vertical").clicked() {
-                            actions.tool.transform_flip_v = true;
-                        }
-                        ui.separator();
-                        if ui.button("Rotate 90° CW").clicked() {
-                            actions.tool.transform_rot_90cw = true;
-                        }
-                        if ui.button("Rotate 90° CCW").clicked() {
-                            actions.tool.transform_rot_90ccw = true;
-                        }
-                        if ui.button("Rotate 180°").clicked() {
-                            actions.tool.transform_rot_180 = true;
-                        }
-                        ui.separator();
-                        if ui.button("Cancel Transform").clicked() {
-                            actions.tool.transform_cancel = true;
-                        }
-                        if ui.button("Apply Transform").clicked() {
-                            actions.tool.transform_commit = true;
-                        }
-                    });
+                    egui::Frame::new()
+                        .fill(pal.panel_bg)
+                        .stroke(egui::Stroke::new(1.0_f32, pal.border_subtle))
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::same(4))
+                        .show(ui, |ui| {
+                            ui.set_min_width(menu_w - 8.0);
+                            ui.label(egui::RichText::new("Free Transform").strong());
+                            ui.separator();
+                            if ui.selectable_label(false, "Reset Transform").clicked() {
+                                actions.tool.transform_reset = true;
+                            }
+                            ui.separator();
+                            if ui.selectable_label(false, "Skew").clicked() {
+                                actions.tool.set_transform_mode =
+                                    Some(crate::app::state::TransformMode::Skew);
+                            }
+                            if ui.selectable_label(false, "Distort").clicked() {
+                                actions.tool.set_transform_mode =
+                                    Some(crate::app::state::TransformMode::Distort);
+                            }
+                            if ui.selectable_label(false, "Perspective").clicked() {
+                                actions.tool.set_transform_mode =
+                                    Some(crate::app::state::TransformMode::Perspective);
+                            }
+                            if ui.selectable_label(false, "Warp…").clicked() {
+                                actions.tool.transform_warp = true;
+                            }
+                            ui.separator();
+                            if ui.selectable_label(false, "Flip Horizontal").clicked() {
+                                actions.tool.transform_flip_h = true;
+                            }
+                            if ui.selectable_label(false, "Flip Vertical").clicked() {
+                                actions.tool.transform_flip_v = true;
+                            }
+                            ui.separator();
+                            if ui.selectable_label(false, "Rotate 90° Clockwise").clicked() {
+                                actions.tool.transform_rot_90cw = true;
+                            }
+                            if ui
+                                .selectable_label(false, "Rotate 90° Counter Clockwise")
+                                .clicked()
+                            {
+                                actions.tool.transform_rot_90ccw = true;
+                            }
+                            if ui.selectable_label(false, "Rotate 180°").clicked() {
+                                actions.tool.transform_rot_180 = true;
+                            }
+                            ui.separator();
+                            if ui
+                                .selectable_label(false, "Cancel Transform    Esc")
+                                .clicked()
+                            {
+                                actions.tool.transform_cancel = true;
+                            }
+                            if ui
+                                .selectable_label(false, "Apply Transform     Enter")
+                                .clicked()
+                            {
+                                actions.tool.transform_commit = true;
+                            }
+                        });
                 });
             let clicked_outside = ctx.input(|i| i.pointer.any_click()) && !resp.response.hovered();
             if clicked_outside {

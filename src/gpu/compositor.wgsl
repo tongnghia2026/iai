@@ -1510,7 +1510,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var filter_lx: f32 = 0.0;
     var filter_ly: f32 = 0.0;
 
-    if (u.xform_active == 1u) {
+    if (u.xform_active == 2u) {
+        // Free Transform uses a full inverse homography. The existing twelve
+        // transform slots are packed as m00..m22, layer origin x/y, spare.
+        let w = u.xform_tx * canvas_x + u.xform_ty * canvas_y + u.xform_orig_ox;
+        if (abs(w) < 0.000001) {
+            return dst;
+        }
+        let src_canvas_x = (u.xform_inv_a * canvas_x + u.xform_inv_b * canvas_y + u.xform_inv_c) / w;
+        let src_canvas_y = (u.xform_inv_d * canvas_x + u.xform_pivot_x * canvas_y + u.xform_pivot_y) / w;
+        let slx = src_canvas_x - u.xform_orig_oy;
+        let sly = src_canvas_y - u.xform_orig_w;
+        if (slx < 0.0 || sly < 0.0 || slx >= u.layer_w || sly >= u.layer_h) {
+            return dst;
+        }
+        src = sample_tile_bilinear(slx, sly);
+        mask_a = sample_mask_bilinear(slx, sly);
+        dev_local = vec2<f32>(slx / max(u.layer_w, 1.0), sly / max(u.layer_h, 1.0));
+        filter_lx = slx;
+        filter_ly = sly;
+    } else if (u.xform_active == 1u) {
         // ── Free-transform preview path ────────────────────────────────────
         // Inverse affine transform: output canvas pos to original layer-local pos.
         //   Forward: new_pos = pivot + translate + M * (orig_canvas - pivot)

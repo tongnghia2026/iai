@@ -58,6 +58,15 @@ pub enum TransformHandle {
     Center,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TransformMode {
+    #[default]
+    Free,
+    Skew,
+    Distort,
+    Perspective,
+}
+
 /// Snapshot of one layer's state before a free transform.
 #[derive(Clone)]
 pub struct LayerOrigState {
@@ -102,6 +111,10 @@ pub struct TransformState {
     pub drag_start_angle: f32,
     pub drag_start_tx: f32,
     pub drag_start_ty: f32,
+    /// Destination corners in TL, TR, BR, BL order for non-affine modes.
+    pub quad: Option<[(f32, f32); 4]>,
+    pub drag_start_quad: [(f32, f32); 4],
+    pub mode: TransformMode,
 }
 
 pub struct TransformCommitLayer {
@@ -123,6 +136,18 @@ pub struct TransformCommitResult {
 impl TransformState {
     /// Forward-transform a canvas point through the current transform.
     pub fn transform_point(&self, cx: f32, cy: f32) -> (f32, f32) {
+        if let Some(quad) = self.quad {
+            let w = self.orig_w.max(1) as f32;
+            let h = self.orig_h.max(1) as f32;
+            let u = (cx - self.orig_offset.0 as f32) / w;
+            let v = (cy - self.orig_offset.1 as f32) / h;
+            if let Some(map) = crate::core::geometry::Homography::square_to_quad(
+                quad.map(|(x, y)| crate::core::geometry::Point::new(x, y)),
+            ) {
+                let p = map.apply(u, v);
+                return (p.x, p.y);
+            }
+        }
         let rad = self.angle_deg.to_radians();
         let c = rad.cos();
         let s = rad.sin();
@@ -131,6 +156,65 @@ impl TransformState {
         let nx = self.pivot_cx + self.translate_x + c * self.scale_x * dx - s * self.scale_y * dy;
         let ny = self.pivot_cy + self.translate_y + s * self.scale_x * dx + c * self.scale_y * dy;
         (nx, ny)
+    }
+
+    /// Inverse map from destination canvas coordinates back to original canvas.
+    pub fn inverse_canvas_point(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        if let Some(quad) = self.quad {
+            let map = crate::core::geometry::Homography::square_to_quad(
+                quad.map(|(x, y)| crate::core::geometry::Point::new(x, y)),
+            )?;
+            let uv = map.inverse()?.apply(x, y);
+            return Some((
+                self.orig_offset.0 as f32 + uv.x * self.orig_w as f32,
+                self.orig_offset.1 as f32 + uv.y * self.orig_h as f32,
+            ));
+        }
+        let (a, b, c, d) = self.inv_matrix();
+        let dx = x - (self.pivot_cx + self.translate_x);
+        let dy = y - (self.pivot_cy + self.translate_y);
+        Some((
+            self.pivot_cx + a * dx + b * dy,
+            self.pivot_cy + c * dx + d * dy,
+        ))
+    }
+
+    /// Inverse canvas-to-canvas homography used by GPU preview and CPU commit.
+    pub fn inverse_homography(&self) -> Option<[f32; 9]> {
+        let src = [
+            crate::core::geometry::Point::new(self.orig_offset.0 as f32, self.orig_offset.1 as f32),
+            crate::core::geometry::Point::new(
+                self.orig_offset.0 as f32 + self.orig_w as f32,
+                self.orig_offset.1 as f32,
+            ),
+            crate::core::geometry::Point::new(
+                self.orig_offset.0 as f32 + self.orig_w as f32,
+                self.orig_offset.1 as f32 + self.orig_h as f32,
+            ),
+            crate::core::geometry::Point::new(
+                self.orig_offset.0 as f32,
+                self.orig_offset.1 as f32 + self.orig_h as f32,
+            ),
+        ];
+        let dst = if let Some(q) = self.quad {
+            q.map(|(x, y)| crate::core::geometry::Point::new(x, y))
+        } else {
+            src.map(|p| {
+                let (x, y) = self.transform_point(p.x, p.y);
+                crate::core::geometry::Point::new(x, y)
+            })
+        };
+        let unit_to_src = crate::core::geometry::Homography::square_to_quad(src)?;
+        let dst_to_unit = crate::core::geometry::Homography::square_to_quad(dst)?.inverse()?;
+        let a = dst_to_unit.m;
+        let b = unit_to_src.m;
+        let mut out = [0.0; 9];
+        for r in 0..3 {
+            for c in 0..3 {
+                out[r * 3 + c] = (0..3).map(|k| b[r * 3 + k] * a[k * 3 + c]).sum();
+            }
+        }
+        Some(out)
     }
 
     /// Inverse matrix coefficients used by the GPU shader.
@@ -155,6 +239,19 @@ impl TransformState {
     /// Positions of the 8 handles in canvas space.
     /// Order: TL, TC, TR, ML, MR, BL, BC, BR.
     pub fn handle_positions(&self) -> [(f32, f32); 8] {
+        if let Some([tl, tr, br, bl]) = self.quad {
+            let mid = |a: (f32, f32), b: (f32, f32)| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+            return [
+                tl,
+                mid(tl, tr),
+                tr,
+                mid(tl, bl),
+                mid(tr, br),
+                bl,
+                mid(bl, br),
+                br,
+            ];
+        }
         let ox = self.orig_offset.0 as f32;
         let oy = self.orig_offset.1 as f32;
         let w = self.orig_w as f32;
@@ -885,6 +982,7 @@ impl App {
                 guide_op: None,
                 transform_snap_guides: Vec::new(),
                 pending_transform_commit: None,
+                warp_after_transform_commit: false,
                 clipboard: None,
                 clipboard_image_new_doc_hint: None,
                 os_clipboard_written: None,

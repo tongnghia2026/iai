@@ -699,18 +699,10 @@ fn develop_scene_to_gpu(
 #[derive(Clone)]
 pub struct TransformPreviewUniform {
     pub layer_id: u32,
-    pub inv_a: f32,
-    pub inv_b: f32,
-    pub inv_c: f32,
-    pub inv_d: f32,
-    pub pivot_x: f32,
-    pub pivot_y: f32,
-    pub tx: f32,
-    pub ty: f32,
+    /// Destination-canvas to original-canvas projective transform.
+    pub inv_m: [f32; 9],
     pub orig_ox: f32,
     pub orig_oy: f32,
-    pub orig_w: f32,
-    pub orig_h: f32,
 }
 
 /// Global image transform used by the modern Crop preview. Unlike Free Transform,
@@ -3084,8 +3076,8 @@ struct VsOut {
                 orig_h,
             ) = if let Some(t) = tp {
                 (
-                    1u32, t.inv_a, t.inv_b, t.inv_c, t.inv_d, t.pivot_x, t.pivot_y, t.tx, t.ty,
-                    t.orig_ox, t.orig_oy, t.orig_w, t.orig_h,
+                    2u32, t.inv_m[0], t.inv_m[1], t.inv_m[2], t.inv_m[3], t.inv_m[4], t.inv_m[5],
+                    t.inv_m[6], t.inv_m[7], t.inv_m[8], t.orig_ox, t.orig_oy, 0.0,
                 )
             } else if let Some(crop) = cp {
                 (

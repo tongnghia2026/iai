@@ -178,6 +178,9 @@ impl App {
             || actions.tool.transform_rot_90cw
             || actions.tool.transform_rot_90ccw
             || actions.tool.transform_rot_180
+            || actions.tool.transform_reset
+            || actions.tool.set_transform_mode.is_some()
+            || actions.tool.transform_warp
             || actions.tool.transform_ctx_menu_close
             || actions.tool.transform_commit
             || actions.tool.transform_cancel;
@@ -195,6 +198,15 @@ impl App {
         }
         if actions.tool.transform_rot_180 {
             self.transform_rotate_180();
+        }
+        if actions.tool.transform_reset {
+            self.transform_reset();
+        }
+        if let Some(mode) = actions.tool.set_transform_mode.take() {
+            self.transform_set_mode(mode);
+        }
+        if actions.tool.transform_warp {
+            self.transform_start_warp();
         }
         if ctx_menu_consumed {
             self.edit.transform_ctx_menu_pos = None;

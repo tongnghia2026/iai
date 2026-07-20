@@ -271,6 +271,10 @@ pub struct ToolIntent {
     pub transform_rot_90cw: bool,
     pub transform_rot_90ccw: bool,
     pub transform_rot_180: bool,
+    /// Restore the pending Free Transform without leaving the session.
+    pub transform_reset: bool,
+    pub set_transform_mode: Option<crate::app::state::TransformMode>,
+    pub transform_warp: bool,
     pub transform_ctx_menu_close: bool,
     /// Begin Free Transform (Ctrl+T) — fired from the selection context menu.
     pub start_transform: bool,

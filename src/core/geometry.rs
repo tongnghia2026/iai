@@ -244,6 +244,38 @@ impl Homography {
             (m[3] * u + m[4] * v + m[5]) * inv,
         )
     }
+
+    /// Return the inverse projective mapping, or `None` for a singular matrix.
+    pub fn inverse(&self) -> Option<Homography> {
+        let m = self.m;
+        let c00 = m[4] * m[8] - m[5] * m[7];
+        let c01 = m[2] * m[7] - m[1] * m[8];
+        let c02 = m[1] * m[5] - m[2] * m[4];
+        let c10 = m[5] * m[6] - m[3] * m[8];
+        let c11 = m[0] * m[8] - m[2] * m[6];
+        let c12 = m[2] * m[3] - m[0] * m[5];
+        let c20 = m[3] * m[7] - m[4] * m[6];
+        let c21 = m[1] * m[6] - m[0] * m[7];
+        let c22 = m[0] * m[4] - m[1] * m[3];
+        let det = m[0] * c00 + m[1] * c10 + m[2] * c20;
+        if !det.is_finite() || det.abs() < 1e-9 {
+            return None;
+        }
+        let inv_det = 1.0 / det;
+        Some(Homography {
+            m: [
+                c00 * inv_det,
+                c01 * inv_det,
+                c02 * inv_det,
+                c10 * inv_det,
+                c11 * inv_det,
+                c12 * inv_det,
+                c20 * inv_det,
+                c21 * inv_det,
+                c22 * inv_det,
+            ],
+        })
+    }
 }
 
 /// Evaluate a cubic Bézier at parameter `t ∈ [0,1]` given the four control
@@ -306,6 +338,20 @@ mod geometry_tests {
             Point::new(30.0, 0.0),
         ];
         assert!(Homography::square_to_quad(collinear).is_none());
+    }
+
+    #[test]
+    fn homography_inverse_round_trips_points() {
+        let h = Homography::square_to_quad([
+            Point::new(10.0, 20.0),
+            Point::new(120.0, 5.0),
+            Point::new(90.0, 130.0),
+            Point::new(-15.0, 80.0),
+        ])
+        .unwrap();
+        let inv = h.inverse().unwrap();
+        let p = h.apply(0.27, 0.63);
+        assert!(close(inv.apply(p.x, p.y), Point::new(0.27, 0.63)));
     }
 
     #[test]

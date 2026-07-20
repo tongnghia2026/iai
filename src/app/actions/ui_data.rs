@@ -996,7 +996,7 @@ impl App {
                 transform_overlay: self.edit.transform_state.as_ref().map(|ts| {
                     let corners = ts.corners();
                     let handles = ts.handle_positions();
-                    let center = (ts.pivot_cx + ts.translate_x, ts.pivot_cy + ts.translate_y);
+                    let center = ts.transform_point(ts.pivot_cx, ts.pivot_cy);
                     TransformOverlayData {
                         corners,
                         handles,
