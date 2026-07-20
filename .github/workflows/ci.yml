@@ -58,6 +58,44 @@ jobs:
       - name: Check
         run: cargo check --locked --all-targets
 
+  # Staging job for the next portability step: a full build + test on Linux and
+  # macOS (not just `cargo check`). Informational for now so a link error or a
+  # display-dependent test can't red the gate. Once this is confirmed green on a
+  # real run for both OSes, retire the `portability` compile-check above and make
+  # this the blocking portability gate.
+  portability-full:
+    name: Build & test (${{ matrix.os }}, informational)
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgtk-3-dev liblcms2-dev
+      - name: Build
+        run: cargo build --locked
+      # Linux CI is headless; wrap tests in a virtual X server so anything that
+      # touches a display (clipboard, window creation) can still run. Harmless on
+      # macOS, which has a display server available to the runner.
+      - name: Test (Linux, headless)
+        if: matrix.os == 'ubuntu-latest'
+        run: xvfb-run -a cargo test --locked
+      - name: Test (macOS)
+        if: matrix.os == 'macos-latest'
+        run: cargo test --locked
+
   clippy:
     name: Clippy (informational)
     runs-on: windows-latest
