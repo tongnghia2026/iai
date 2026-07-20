@@ -26,6 +26,8 @@ pub struct DocumentIntent {
     pub fill_background: bool,
     pub new_canvas: bool,
     pub open_file: bool,
+    /// Welcome screen: open this recent file (Track B library).
+    pub open_recent: Option<std::path::PathBuf>,
     pub save: bool,
     pub save_as: bool,
     /// Save from an exit/close confirmation. Multi-layer documents default to

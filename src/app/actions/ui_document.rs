@@ -201,6 +201,9 @@ impl App {
         if actions.doc.open_file {
             self.do_open();
         }
+        if let Some(path) = actions.doc.open_recent.take() {
+            self.start_load_paths(vec![path]);
+        }
         if actions.doc.save {
             self.do_save();
         }

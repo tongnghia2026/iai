@@ -458,6 +458,21 @@ pub struct AiViewModel {
     pub ext_token: String,
 }
 
+/// One recent-files entry for the welcome screen (Track B): its path, display
+/// name, pixel size, and thumbnail texture once the cache has produced it.
+pub struct RecentThumb {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub dims: (u32, u32),
+    pub thumb: Option<(egui::TextureId, egui::Vec2)>,
+}
+
+/// The welcome screen's view model: the recent-files list.
+#[derive(Default)]
+pub struct WelcomeViewModel {
+    pub recent: Vec<RecentThumb>,
+}
+
 pub struct UiData {
     /// The active document as the UI sees it: geometry, colour mode, view,
     pub doc: DocumentViewModel,
@@ -479,6 +494,8 @@ pub struct UiData {
     pub channels: ChannelsViewModel,
     /// The AI panel and extension-bridge status.
     pub ai: AiViewModel,
+    /// The welcome screen: recent files and their thumbnails.
+    pub welcome: WelcomeViewModel,
 }
 
 impl Default for UiData {
@@ -828,6 +845,7 @@ impl Default for UiData {
                 ext_log: Vec::new(),
                 ext_token: String::new(),
             },
+            welcome: WelcomeViewModel::default(),
         }
     }
 }

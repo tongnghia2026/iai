@@ -9,6 +9,7 @@ pub mod editor_interaction;
 pub mod ext_bridge;
 pub mod file_ops;
 pub mod input;
+pub mod library;
 pub mod os_clipboard;
 pub mod render;
 pub mod shape_ops;

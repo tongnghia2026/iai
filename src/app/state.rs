@@ -861,6 +861,8 @@ pub struct App {
     pub(in crate::app) dev: DevelopShell,
     /// Dialogs, panels, preferences, presets, print/proof settings.
     pub(in crate::app) shell: UiShell,
+    /// The lightweight library: recent-files catalog + thumbnail cache.
+    pub(in crate::app) lib: crate::app::library::LibraryShell,
 }
 
 impl App {
@@ -1201,6 +1203,7 @@ impl App {
                     crate::core::presets::AdjustmentPresets::load(),
                 ),
             },
+            lib: crate::app::library::LibraryShell::new(),
         }
     }
 

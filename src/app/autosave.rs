@@ -13,14 +13,14 @@ use std::time::{Duration, Instant, SystemTime};
 /// How often the active dirty project is mirrored to disk.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(90);
 
-fn iai_data_dir() -> Option<PathBuf> {
+pub(in crate::app) fn iai_data_dir() -> Option<PathBuf> {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).or_else(|| {
         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
     })?;
     Some(base.join("IAI"))
 }
 
-fn ensure_data_child_dir(name: &str) -> Option<PathBuf> {
+pub(in crate::app) fn ensure_data_child_dir(name: &str) -> Option<PathBuf> {
     let dir = iai_data_dir()?.join(name);
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)

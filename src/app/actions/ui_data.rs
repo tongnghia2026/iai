@@ -292,6 +292,15 @@ impl App {
     pub fn collect_ui_data(&mut self) -> UiData {
         self.poll_printer_refresh();
 
+        // Welcome screen: recent files + their thumbnails (uploads ready
+        // thumbnails and requests missing ones on the main egui context). Only
+        // while the welcome screen shows, so the editor path pays nothing.
+        let welcome_recent = if self.shell.ui.show_welcome {
+            self.welcome_recent_view()
+        } else {
+            Vec::new()
+        };
+
         // Reveal the active layer in the Layers panel when the selection changes:
         // expand its collapsed ancestor folders and flag a scroll-to-active for
         // this frame. Detected centrally so every selection path (panel click,
@@ -1356,6 +1365,9 @@ impl App {
                 ext_status: self.jobs.ext.status.clone(),
                 ext_log: self.jobs.ext.log.iter().cloned().collect(),
                 ext_token: self.jobs.ext.token.clone(),
+            },
+            welcome: crate::ui::WelcomeViewModel {
+                recent: welcome_recent,
             },
         }
     }

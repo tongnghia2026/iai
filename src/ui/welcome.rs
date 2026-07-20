@@ -137,17 +137,19 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     );
                 });
 
-                ui.add_space(8.0);
+                ui.add_space(10.0);
 
-                if data.doc.current_file.is_none() {
+                if data.welcome.recent.is_empty() {
                     ui.label(
                         egui::RichText::new("No recent files")
                             .color(egui::Color32::from_gray(55))
                             .size(12.0),
                     );
+                } else {
+                    recent_grid(ui, &data.welcome.recent, actions);
                 }
 
-                ui.add_space(32.0);
+                ui.add_space(28.0);
 
                 ui.horizontal(|ui| {
                     let card_w = 130.0_f32;
@@ -195,6 +197,116 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 }
             });
         });
+}
+
+/// Recent-files grid on the welcome screen (Track B): up to two centred rows of
+/// clickable thumbnail cards. Clicking one opens that file.
+fn recent_grid(ui: &mut egui::Ui, recent: &[crate::ui::RecentThumb], actions: &mut UiActions) {
+    const PER_ROW: usize = 4;
+    const CARD_W: f32 = 116.0;
+    const GAP: f32 = 10.0;
+    let shown = recent.len().min(PER_ROW * 2);
+    for row in recent[..shown].chunks(PER_ROW) {
+        let row_w = CARD_W * row.len() as f32 + GAP * row.len().saturating_sub(1) as f32;
+        ui.horizontal(|ui| {
+            let avail = ui.available_width();
+            ui.add_space(((avail - row_w) / 2.0).max(0.0));
+            for (i, item) in row.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(GAP);
+                }
+                recent_card(ui, item, actions);
+            }
+        });
+        ui.add_space(GAP);
+    }
+}
+
+fn recent_card(ui: &mut egui::Ui, item: &crate::ui::RecentThumb, actions: &mut UiActions) {
+    let card_w = 116.0_f32;
+    let thumb_h = 78.0_f32;
+    let card_h = thumb_h + 30.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(card_w, card_h), egui::Sense::click());
+    let hovered = resp.hovered();
+    let painter = ui.painter().clone();
+    painter.rect_filled(
+        rect,
+        6.0,
+        if hovered {
+            egui::Color32::from_rgb(40, 44, 56)
+        } else {
+            egui::Color32::from_rgb(26, 28, 36)
+        },
+    );
+    painter.rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_gray(if hovered { 72 } else { 38 }),
+        ),
+        egui::StrokeKind::Inside,
+    );
+
+    let thumb_rect = egui::Rect::from_min_size(rect.min, egui::vec2(card_w, thumb_h));
+    match item.thumb {
+        Some((id, size)) => {
+            let pad = 6.0;
+            let avail = egui::vec2(card_w - pad * 2.0, thumb_h - pad * 2.0);
+            let scale = (avail.x / size.x.max(1.0)).min(avail.y / size.y.max(1.0));
+            let img_rect = egui::Rect::from_center_size(thumb_rect.center(), size * scale);
+            painter.image(
+                id,
+                img_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        None => {
+            painter.rect_filled(
+                thumb_rect.shrink(6.0),
+                4.0,
+                egui::Color32::from_rgb(20, 22, 28),
+            );
+            painter.text(
+                thumb_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "…",
+                egui::FontId::proportional(18.0),
+                egui::Color32::from_gray(90),
+            );
+        }
+    }
+
+    painter.text(
+        egui::pos2(rect.center().x, thumb_rect.max.y + 9.0),
+        egui::Align2::CENTER_CENTER,
+        short_name(&item.name, 16),
+        egui::FontId::proportional(10.5),
+        egui::Color32::from_gray(if hovered { 225 } else { 200 }),
+    );
+    painter.text(
+        egui::pos2(rect.center().x, thumb_rect.max.y + 21.0),
+        egui::Align2::CENTER_CENTER,
+        format!("{}×{}", item.dims.0, item.dims.1),
+        egui::FontId::proportional(9.0),
+        egui::Color32::from_gray(110),
+    );
+
+    if resp.clicked() {
+        actions.doc.open_recent = Some(item.path.clone());
+    }
+    resp.on_hover_text(item.path.to_string_lossy().to_string());
+}
+
+/// Truncate a file name to `max` characters, appending an ellipsis when cut.
+fn short_name(name: &str, max: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= max {
+        return name.to_string();
+    }
+    let head: String = chars[..max.saturating_sub(1)].iter().collect();
+    format!("{head}…")
 }
 
 fn feature_card(ui: &mut egui::Ui, width: f32, title: &str, desc: &str) {

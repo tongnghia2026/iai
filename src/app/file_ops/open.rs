@@ -241,12 +241,18 @@ impl App {
             loop {
                 match rx.try_recv() {
                     Ok((path, Ok(canvases), is_last)) => {
+                        // Record the successful open in the recent-files catalog
+                        // (Track B) and prime its thumbnail.
+                        let dims = canvases.first().map(|c| (c.width, c.height));
                         let page_count = canvases.len();
                         let mut last_attached = None;
                         for (page_index, canvas) in canvases.into_iter().enumerate() {
                             let page = (page_count > 1).then_some((page_index, page_count));
                             last_attached =
                                 self.attach_loaded_doc(path.clone(), canvas, page, None);
+                        }
+                        if let Some((w, h)) = dims {
+                            self.record_recent(&path, w, h);
                         }
                         if is_last {
                             if let Some(id) = last_attached {
