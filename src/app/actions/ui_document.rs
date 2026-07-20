@@ -202,7 +202,15 @@ impl App {
             self.do_open();
         }
         if let Some(path) = actions.doc.open_recent.take() {
-            self.start_load_paths(vec![path]);
+            if path.exists() {
+                self.start_load_paths(vec![path]);
+            } else {
+                self.shell.status_msg =
+                    format!("Recent file not found: {}", path.to_string_lossy());
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
         }
         if actions.doc.save {
             self.do_save();

@@ -48,6 +48,11 @@ pub struct BackgroundJobs {
     /// transient Develop session. Their eventual worker result is discarded
     /// instead of reopening the window the user just closed.
     pub(in crate::app) cancelled_raw_loads: std::collections::HashSet<String>,
+    /// Path keys whose generic decode is in flight on `pending_loads`. Guards
+    /// against a duplicate load of the same file before its first decode lands
+    /// and gets a tab (e.g. a fast double-click on a recent-files card). Cleared
+    /// as each result is drained in `poll_loads`.
+    pub(in crate::app) loading_keys: std::collections::HashSet<String>,
     /// The next finished load becomes active immediately for early feedback; once
     /// a multi-file batch finishes, its final successfully loaded document becomes
     /// active (see the `is_last` marker carried by `pending_loads`).

@@ -1042,6 +1042,7 @@ impl App {
                 raw_preview_docs: std::collections::HashMap::new(),
                 raw_preview_failures: std::collections::HashMap::new(),
                 cancelled_raw_loads: std::collections::HashSet::new(),
+                loading_keys: std::collections::HashSet::new(),
                 load_activate_pending: false,
                 pending_pdf_probe_queue: std::collections::VecDeque::new(),
                 pending_pdf_probe: None,

@@ -105,6 +105,12 @@ impl App {
         if idx != self.docs.active_doc_idx {
             self.switch_to_doc(idx);
         }
+        // Focusing a document that is already open always leaves the welcome
+        // screen — e.g. clicking a recent-files card (or re-opening via the
+        // dialog) for a file that still has a tab. Without this the welcome
+        // stayed up because only the fresh-load path (activate_new_document)
+        // cleared it.
+        self.shell.ui.show_welcome = false;
 
         let name = file_name(&path);
         if self.disk_is_newer_than_document(idx, &path) {
@@ -164,13 +170,19 @@ impl App {
                 self.focus_existing_open_path(idx, path);
                 continue;
             }
-            if queued_keys.insert(normalized_path_key(&path)) {
+            let key = normalized_path_key(&path);
+            // A decode of this file is already running but has not attached its
+            // tab yet (e.g. a fast double-click on a recent card): skip the
+            // duplicate instead of opening the same image in two tabs.
+            if self.jobs.loading_keys.contains(&key) {
+                continue;
+            }
+            if queued_keys.insert(key.clone()) {
                 // A fresh open of this path overrides a stale cancel from an
                 // earlier Develop session whose decode may still be in flight
                 // (otherwise the leftover key would swallow the new preview).
-                self.jobs
-                    .cancelled_raw_loads
-                    .remove(&normalized_path_key(&path));
+                self.jobs.cancelled_raw_loads.remove(&key);
+                self.jobs.loading_keys.insert(key);
                 paths_to_load.push(path);
             }
         }
@@ -241,6 +253,7 @@ impl App {
             loop {
                 match rx.try_recv() {
                     Ok((path, Ok(canvases), is_last)) => {
+                        self.jobs.loading_keys.remove(&normalized_path_key(&path));
                         // Record the successful open in the recent-files catalog
                         // (Track B) and prime its thumbnail.
                         let dims = canvases.first().map(|c| (c.width, c.height));
@@ -265,6 +278,7 @@ impl App {
                         }
                     }
                     Ok((path, Err(e), _is_last)) => {
+                        self.jobs.loading_keys.remove(&normalized_path_key(&path));
                         // A failed decode never reached the point that consumes
                         // the preview-luma cache entry — drop it here.
                         crate::formats::raw_preview::forget_cached_mean_luma(&path);

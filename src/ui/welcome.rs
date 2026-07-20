@@ -32,18 +32,42 @@ fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 #[allow(deprecated)]
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let logo_tex = load_logo(ctx);
+    let bg = egui::Color32::from_rgb(18, 20, 26);
 
     egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(egui::Color32::from_rgb(18, 20, 26)))
+        .frame(egui::Frame::new().fill(bg))
         .show(ctx, |ui| {
-            let total_h = ui.available_height();
-            let top_pad = ((total_h - 500.0) / 2.0).max(20.0);
-            ui.add_space(top_pad);
+            // "Back to Canvas" pinned as a thin footer so the recent grid gets
+            // the whole middle of the screen.
+            egui::TopBottomPanel::bottom("welcome_footer")
+                .frame(egui::Frame::new().fill(bg))
+                .show_separator_line(false)
+                .show_inside(ui, |ui| {
+                    ui.add_space(5.0);
+                    ui.vertical_centered(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Back to Canvas")
+                                        .size(11.0)
+                                        .color(egui::Color32::from_gray(70)),
+                                )
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
+                            actions.chrome.show_welcome = Some(false);
+                        }
+                    });
+                    ui.add_space(5.0);
+                });
 
+            // Compact header sitting near the top.
+            ui.add_space(16.0);
             ui.vertical_centered(|ui| {
                 if let Some(ref tex) = logo_tex {
                     let tex_size = tex.size_vec2();
-                    let logo_h = 175.0_f32;
+                    let logo_h = 88.0_f32;
                     let logo_w = logo_h * tex_size.x / tex_size.y;
                     let (strip_rect, _) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), logo_h),
@@ -62,38 +86,37 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 } else {
                     ui.label(
                         egui::RichText::new("iAi")
-                            .size(64.0)
+                            .size(44.0)
                             .strong()
                             .color(egui::Color32::from_rgb(0, 140, 255)),
                     );
                 }
 
-                ui.add_space(14.0);
-
+                ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(concat!(
                         "v",
                         env!("CARGO_PKG_VERSION"),
                         "  ·  Open Source Image Editor"
                     ))
-                    .size(12.0)
+                    .size(11.0)
                     .color(egui::Color32::from_gray(90)),
                 );
 
-                ui.add_space(36.0);
+                ui.add_space(16.0);
 
                 ui.horizontal(|ui| {
-                    let btn_w = 160.0_f32;
-                    let gap = 14.0_f32;
+                    let btn_w = 150.0_f32;
+                    let gap = 12.0_f32;
                     let total_btn = btn_w * 2.0 + gap;
                     let avail = ui.available_width();
                     ui.add_space(((avail - total_btn) / 2.0).max(0.0));
 
                     if ui
                         .add(
-                            egui::Button::new(egui::RichText::new("  New Canvas  ").size(14.0))
+                            egui::Button::new(egui::RichText::new("  New Canvas  ").size(13.0))
                                 .fill(egui::Color32::from_rgb(30, 100, 215))
-                                .min_size(egui::vec2(btn_w, 46.0)),
+                                .min_size(egui::vec2(btn_w, 40.0)),
                         )
                         .clicked()
                     {
@@ -106,11 +129,11 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         .add(
                             egui::Button::new(
                                 egui::RichText::new("  Open File  ")
-                                    .size(14.0)
+                                    .size(13.0)
                                     .color(egui::Color32::from_gray(210)),
                             )
                             .fill(egui::Color32::from_rgb(42, 44, 54))
-                            .min_size(egui::vec2(btn_w, 46.0)),
+                            .min_size(egui::vec2(btn_w, 40.0)),
                         )
                         .clicked()
                     {
@@ -118,98 +141,49 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     }
                 });
 
-                ui.add_space(32.0);
-
+                ui.add_space(18.0);
                 ui.label(
                     egui::RichText::new("Recent Files")
                         .size(11.0)
                         .color(egui::Color32::from_gray(75)),
                 );
-                ui.add_space(6.0);
+                ui.add_space(8.0);
+            });
 
-                let sep_w = 340.0_f32;
-                let sep_avail = ui.available_width();
-                ui.horizontal(|ui| {
-                    ui.add_space(((sep_avail - sep_w) / 2.0).max(0.0));
-                    ui.add_sized(
-                        egui::vec2(sep_w, 1.0),
-                        egui::Separator::default().horizontal(),
-                    );
-                });
-
-                ui.add_space(10.0);
-
-                if data.welcome.recent.is_empty() {
+            // Recent grid fills the remaining height: a responsive, scrollable
+            // wall of thumbnails (as many columns as the width allows).
+            if data.welcome.recent.is_empty() {
+                ui.add_space(18.0);
+                ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("No recent files")
                             .color(egui::Color32::from_gray(55))
                             .size(12.0),
                     );
-                } else {
-                    recent_grid(ui, &data.welcome.recent, actions);
-                }
-
-                ui.add_space(28.0);
-
-                ui.horizontal(|ui| {
-                    let card_w = 130.0_f32;
-                    let card_gap = 12.0_f32;
-                    let total_cards = (card_w + 24.0) * 3.0 + card_gap * 2.0;
-                    let avail = ui.available_width();
-                    ui.add_space(((avail - total_cards) / 2.0).max(0.0));
-
-                    feature_card(
-                        ui,
-                        card_w,
-                        "Open Source",
-                        "Free forever\nContribute on GitHub",
-                    );
-                    ui.add_space(card_gap);
-                    feature_card(
-                        ui,
-                        card_w,
-                        "Cross Platform",
-                        "Windows, Linux, macOS\nBuilds from source",
-                    );
-                    ui.add_space(card_gap);
-                    feature_card(
-                        ui,
-                        card_w,
-                        "Extensible",
-                        "Plugin API coming\nMicrokernel design",
-                    );
                 });
-
-                ui.add_space(28.0);
-
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("Back to Canvas")
-                                .size(11.0)
-                                .color(egui::Color32::from_gray(65)),
-                        )
-                        .frame(false),
-                    )
-                    .clicked()
-                {
-                    actions.chrome.show_welcome = Some(false);
-                }
-            });
+            } else {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(2.0);
+                        recent_grid(ui, &data.welcome.recent, actions);
+                    });
+            }
         });
 }
 
-/// Recent-files grid on the welcome screen (Track B): up to two centred rows of
-/// clickable thumbnail cards. Clicking one opens that file.
+/// Recent-files grid on the welcome screen (Track B): centred rows of clickable
+/// thumbnail cards, as many columns as the width allows. Shows every recent
+/// entry; the caller wraps it in a scroll area.
 fn recent_grid(ui: &mut egui::Ui, recent: &[crate::ui::RecentThumb], actions: &mut UiActions) {
-    const PER_ROW: usize = 4;
     const CARD_W: f32 = 116.0;
-    const GAP: f32 = 10.0;
-    let shown = recent.len().min(PER_ROW * 2);
-    for row in recent[..shown].chunks(PER_ROW) {
+    const GAP: f32 = 12.0;
+    // Fit as many columns as the available width allows (min 2).
+    let avail = ui.available_width();
+    let cols = (((avail + GAP) / (CARD_W + GAP)).floor() as usize).clamp(2, 10);
+    for row in recent.chunks(cols) {
         let row_w = CARD_W * row.len() as f32 + GAP * row.len().saturating_sub(1) as f32;
         ui.horizontal(|ui| {
-            let avail = ui.available_width();
             ui.add_space(((avail - row_w) / 2.0).max(0.0));
             for (i, item) in row.iter().enumerate() {
                 if i > 0 {
@@ -226,7 +200,14 @@ fn recent_card(ui: &mut egui::Ui, item: &crate::ui::RecentThumb, actions: &mut U
     let card_w = 116.0_f32;
     let thumb_h = 78.0_f32;
     let card_h = thumb_h + 30.0;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(card_w, card_h), egui::Sense::click());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(card_w, card_h), egui::Sense::hover());
+    // Interact with a stable, path-derived id (not the positional auto-id) so a
+    // press and release land on the same widget even as thumbnails stream in.
+    let resp = ui.interact(
+        rect,
+        egui::Id::new(("welcome_recent_card", item.path.as_path())),
+        egui::Sense::click(),
+    );
     let hovered = resp.hovered();
     let painter = ui.painter().clone();
     painter.rect_filled(
@@ -307,30 +288,4 @@ fn short_name(name: &str, max: usize) -> String {
     }
     let head: String = chars[..max.saturating_sub(1)].iter().collect();
     format!("{head}…")
-}
-
-fn feature_card(ui: &mut egui::Ui, width: f32, title: &str, desc: &str) {
-    egui::Frame::new()
-        .fill(egui::Color32::from_rgb(26, 28, 36))
-        .inner_margin(egui::Margin::symmetric(12, 10))
-        .corner_radius(8.0)
-        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_gray(38)))
-        .show(ui, |ui| {
-            ui.set_min_width(width);
-            ui.set_max_width(width);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new(title)
-                        .size(12.0)
-                        .strong()
-                        .color(egui::Color32::from_gray(210)),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(desc)
-                        .size(10.0)
-                        .color(egui::Color32::from_gray(95)),
-                );
-            });
-        });
 }
