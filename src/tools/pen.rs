@@ -18,13 +18,21 @@
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::geometry::{cubic_bezier, Point};
 use crate::core::selection::SelectionMode;
+use crate::core::vector::flatten;
+use crate::core::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
 
 /// Grab radius (screen px) for hitting an anchor or handle dot — clicking within
 /// this of the first anchor closes the path, of any other moves it; Alt-click
 /// resets it to a corner; Ctrl-drag a handle reshapes the curve.
 const ANCHOR_HIT_PX: f32 = 10.0;
-/// Subdivisions per curved segment when flattening to a polyline.
+/// Fixed subdivisions used only by the interactive "insert node on path" hit-test
+/// (`insert_anchor_on_path`) to find which segment was clicked. The rendered
+/// polyline no longer uses a fixed step count — see [`PenTool::flatten`].
 const FLATTEN_STEPS: usize = 24;
+/// Flatness (canvas px) for the shared adaptive flattening of the rendered path.
+/// Sub-pixel, so the polyline/selection is at least as accurate as the old fixed
+/// 24-step subdivision on every curve size (finer on large curves).
+const FLATTEN_TOLERANCE_PX: f32 = 0.2;
 
 /// What committing the path does (Pen tool option bar).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +98,64 @@ impl PenAnchor {
             out_handle: None,
         }
     }
+
+    /// Convert to a vector-core [`Node`] (adapter task T3.1). Handles map 1:1 —
+    /// both models store *absolute* control points — so the drawn curve is
+    /// identical. The [`NodeKind`] is inferred from the handles (Pen doesn't track
+    /// it) purely as an editing hint for the future Node tool; it does not affect
+    /// rendering.
+    fn to_node(self) -> Node {
+        Node {
+            anchor: self.pt.into(),
+            in_handle: self.in_handle.map(Into::into),
+            out_handle: self.out_handle.map(Into::into),
+            kind: infer_node_kind(self.pt, self.in_handle, self.out_handle),
+        }
+    }
+}
+
+/// Classify a node from its handles: no handles → corner (Cusp); two handles
+/// collinear through the anchor → Symmetric if equal length else Smooth;
+/// anything else → Cusp. Rendering-neutral (used only as an editing hint).
+fn infer_node_kind(
+    pt: (f32, f32),
+    in_h: Option<(f32, f32)>,
+    out_h: Option<(f32, f32)>,
+) -> NodeKind {
+    let (i, o) = match (in_h, out_h) {
+        (Some(i), Some(o)) => (i, o),
+        _ => return NodeKind::Cusp,
+    };
+    // Vectors pointing away from the anchor along each handle.
+    let vi = (i.0 - pt.0, i.1 - pt.1);
+    let vo = (o.0 - pt.0, o.1 - pt.1);
+    let li = (vi.0 * vi.0 + vi.1 * vi.1).sqrt();
+    let lo = (vo.0 * vo.0 + vo.1 * vo.1).sqrt();
+    if li < 1e-6 || lo < 1e-6 {
+        return NodeKind::Cusp;
+    }
+    // Smooth requires the handles to be opposite (collinear, pointing apart).
+    let cross = vi.0 * vo.1 - vi.1 * vo.0;
+    let dot = vi.0 * vo.0 + vi.1 * vo.1;
+    let opposite = cross.abs() <= 1e-3 * li * lo && dot < 0.0;
+    if !opposite {
+        NodeKind::Cusp
+    } else if (li - lo).abs() <= 1e-3 * li.max(lo) {
+        NodeKind::Symmetric
+    } else {
+        NodeKind::Smooth
+    }
+}
+
+/// Adapt a list of Pen anchors into the shared vector-core [`PathData`] — one
+/// contour (task T3.1). Empty input yields an empty path. Free function so it can
+/// be unit-tested without a live `PenTool`.
+pub fn pen_anchors_to_path(anchors: &[PenAnchor], closed: bool) -> PathData {
+    if anchors.is_empty() {
+        return PathData::default();
+    }
+    let nodes = anchors.iter().map(|a| a.to_node()).collect();
+    PathData::new(vec![Contour::new(nodes, closed)], FillRule::NonZero)
 }
 
 pub struct PenTool {
@@ -308,8 +374,19 @@ impl PenTool {
         self.anchors.is_empty()
     }
 
+    /// Adapt the current anchors into the shared vector-core [`PathData`] — one
+    /// contour (task T3.1). The bridge that lets Pen reuse the vector-core
+    /// flatten/hit-test instead of a second geometry model; also the basis for a
+    /// future "commit as Path layer" (task T4.4).
+    pub fn to_path_data(&self) -> PathData {
+        pen_anchors_to_path(&self.anchors, self.closed)
+    }
+
     /// Flatten the path to a polyline in canvas space. Straight where both
-    /// adjacent handles are absent, cubic Bézier otherwise.
+    /// adjacent handles are absent, cubic Bézier otherwise. Routed through the
+    /// shared adaptive flattener (task T3.2) — no fixed step count — so the
+    /// polyline (and the selection/fill built from it) is sub-pixel accurate at
+    /// any curve size.
     pub fn flatten(&self) -> Vec<(f32, f32)> {
         let n = self.anchors.len();
         if n == 0 {
@@ -318,28 +395,13 @@ impl PenTool {
         if n == 1 {
             return vec![self.anchors[0].pt];
         }
-        let mut out = Vec::with_capacity(n * FLATTEN_STEPS);
-        out.push(self.anchors[0].pt);
-        let seg_count = if self.closed { n } else { n - 1 };
-        for s in 0..seg_count {
-            let a = self.anchors[s];
-            let b = self.anchors[(s + 1) % n];
-            let straight = a.out_handle.is_none() && b.in_handle.is_none();
-            if straight {
-                out.push(b.pt);
-            } else {
-                let p0: Point = a.pt.into();
-                let c1: Point = a.out_handle.unwrap_or(a.pt).into();
-                let c2: Point = b.in_handle.unwrap_or(b.pt).into();
-                let p3: Point = b.pt.into();
-                for k in 1..=FLATTEN_STEPS {
-                    let t = k as f32 / FLATTEN_STEPS as f32;
-                    let p = cubic_bezier(p0, c1, c2, p3, t);
-                    out.push((p.x, p.y));
-                }
-            }
+        match self.to_path_data().contours.first() {
+            Some(c) => flatten::flatten_contour(c, FLATTEN_TOLERANCE_PX)
+                .into_iter()
+                .map(|p| (p.x, p.y))
+                .collect(),
+            None => Vec::new(),
         }
-        out
     }
 
     /// Flattened points the app draws as the live path overlay — only the anchors
@@ -613,10 +675,109 @@ mod tests {
             },
         ];
         let pts = t.flatten();
-        assert_eq!(pts.len(), 1 + FLATTEN_STEPS);
+        // Adaptive flatten (no fixed step count): a curved segment yields several
+        // on-curve points — more than the 2 a straight segment produces.
+        assert!(
+            pts.len() > 4,
+            "curve should subdivide adaptively: {}",
+            pts.len()
+        );
         // The curve bulges downward (positive y) between the endpoints.
         let mid = pts[pts.len() / 2];
         assert!(mid.1 > 10.0, "curve should bow out: {mid:?}");
+        // Every vertex lies on the true cubic (shape unchanged by the new flatten).
+        let (p0, c1, c2, p3): (Point, Point, Point, Point) = (
+            (0.0, 0.0).into(),
+            (0.0, 50.0).into(),
+            (100.0, 50.0).into(),
+            (100.0, 0.0).into(),
+        );
+        for &(vx, vy) in &pts {
+            let d = (0..=400)
+                .map(|k| {
+                    let p = cubic_bezier(p0, c1, c2, p3, k as f32 / 400.0);
+                    (p.x - vx).hypot(p.y - vy)
+                })
+                .fold(f32::MAX, f32::min);
+            assert!(d < 0.5, "vertex ({vx},{vy}) drifted off curve by {d}");
+        }
+    }
+
+    #[test]
+    fn adapter_preserves_anchor_structure() {
+        // T3.1: PenAnchor → PathData maps handles and closed 1:1.
+        let anchors = vec![
+            PenAnchor {
+                pt: (0.0, 0.0),
+                in_handle: None,
+                out_handle: Some((10.0, 10.0)),
+            },
+            PenAnchor {
+                pt: (50.0, 0.0),
+                in_handle: Some((40.0, 10.0)),
+                out_handle: None,
+            },
+        ];
+        let path = pen_anchors_to_path(&anchors, true);
+        assert_eq!(path.contours.len(), 1);
+        let c = &path.contours[0];
+        assert!(c.closed);
+        assert_eq!(c.nodes.len(), 2);
+        assert_eq!(c.nodes[0].anchor, Point::new(0.0, 0.0));
+        assert_eq!(c.nodes[0].out_handle, Some(Point::new(10.0, 10.0)));
+        assert_eq!(c.nodes[1].in_handle, Some(Point::new(40.0, 10.0)));
+        // Empty input → empty path.
+        assert!(pen_anchors_to_path(&[], false).contours.is_empty());
+    }
+
+    #[test]
+    fn adapter_segment_matches_pen_bezier() {
+        // The adapted segment's control points equal the Pen's own p0/c1/c2/p3
+        // (out_handle→c1, in_handle→c2), so the drawn curve is identical.
+        let anchors = vec![
+            PenAnchor {
+                pt: (0.0, 0.0),
+                in_handle: None,
+                out_handle: Some((0.0, 80.0)),
+            },
+            PenAnchor {
+                pt: (100.0, 0.0),
+                in_handle: Some((100.0, 80.0)),
+                out_handle: None,
+            },
+        ];
+        let path = pen_anchors_to_path(&anchors, false);
+        let seg = path.contours[0].segment(0).unwrap();
+        assert_eq!(
+            seg,
+            (
+                Point::new(0.0, 0.0),
+                Point::new(0.0, 80.0),
+                Point::new(100.0, 80.0),
+                Point::new(100.0, 0.0),
+            )
+        );
+    }
+
+    #[test]
+    fn adapter_infers_smooth_kinds() {
+        // Mirror handles → Symmetric; unequal collinear → Smooth; none → Cusp.
+        let sym = PenAnchor {
+            pt: (50.0, 50.0),
+            in_handle: Some((30.0, 50.0)),
+            out_handle: Some((70.0, 50.0)),
+        }
+        .to_node();
+        assert_eq!(sym.kind, NodeKind::Symmetric);
+        let smooth = PenAnchor {
+            pt: (50.0, 50.0),
+            in_handle: Some((40.0, 50.0)),
+            out_handle: Some((70.0, 50.0)),
+        }
+        .to_node();
+        assert_eq!(smooth.kind, NodeKind::Smooth);
+        let cusp = PenAnchor::corner((10.0, 10.0)).to_node();
+        assert_eq!(cusp.kind, NodeKind::Cusp);
     }
 
     #[test]
