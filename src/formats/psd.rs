@@ -20,10 +20,11 @@
 // file, or a section-less file falls back to the flat composite, so nothing
 // regresses to an error. PSD stores layers bottom→top, matching our stack order.
 
+use super::psd_adjust;
 use super::{ExportOptions, Exporter, Importer};
 use crate::core::blend::BlendMode;
 use crate::core::canvas::{BitDepth, Canvas};
-use crate::core::layer::{Layer, LayerMask};
+use crate::core::layer::{AdjustmentType, Layer, LayerMask};
 use crate::core::tile::TileMap;
 use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
@@ -478,6 +479,11 @@ struct RawLayer {
     /// lsct section-divider type: 0 = normal layer, 1 = open folder, 2 = closed
     /// folder, 3 = bounding divider ("</Layer group>").
     section: u8,
+    /// Some when the layer is an adjustment layer whose parameters we decoded
+    /// (`levl`/`hue2`/… → an editable iAi adjustment). `is_adjustment` stays true
+    /// even for recognised-but-unmapped types so they are not read as raster.
+    adjustment: Option<AdjustmentType>,
+    is_adjustment: bool,
     /// channel id → decoded plane (raw bytes, big-endian samples for 16-bit).
     planes: HashMap<i16, Vec<u8>>,
 }
@@ -644,8 +650,12 @@ fn parse_layer_record(r: &mut Reader, header: &Header) -> Result<RawLayer, Strin
     let mut name = latin1(name_bytes);
 
     // Additional layer info: Unicode name ('luni') overrides the Pascal name;
-    // section divider ('lsct'/'lsdk') marks group folders.
+    // section divider ('lsct'/'lsdk') marks group folders; adjustment blocks
+    // ('levl'/'hue2'/…) mark — and, when we can map them, define — an adjustment
+    // layer.
     let mut section = 0u8;
+    let mut adjustment: Option<AdjustmentType> = None;
+    let mut is_adjustment = false;
     while es.remaining() >= 12 {
         let sig = es.take(4)?;
         if sig != b"8BIM" && sig != b"8B64" {
@@ -670,6 +680,12 @@ fn parse_layer_record(r: &mut Reader, header: &Header) -> Result<RawLayer, Strin
                     section = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u8;
                 }
             }
+            _ if psd_adjust::is_adjustment_key(&key) => {
+                is_adjustment = true;
+                if adjustment.is_none() {
+                    adjustment = psd_adjust::parse_adjustment(&key, data);
+                }
+            }
             _ => {}
         }
         // Additional-info blocks are padded to an even length.
@@ -690,6 +706,8 @@ fn parse_layer_record(r: &mut Reader, header: &Header) -> Result<RawLayer, Strin
         channels,
         mask,
         section,
+        adjustment,
+        is_adjustment,
         planes: HashMap::new(),
     })
 }
@@ -853,8 +871,34 @@ fn build_app_layers(raw: &[RawLayer], header: &Header, icc: Option<&[u8]>) -> Ve
                 out.push(g);
             }
             _ => {
+                // Adjustment layer we decoded → an editable iAi adjustment,
+                // canvas-sized, carrying its own mask/opacity/blend/visibility.
+                if let Some(adj) = rl.adjustment.clone() {
+                    let id = next_id;
+                    next_id += 1;
+                    let mut l = Layer::new_adjustment(id, adj, cw, ch);
+                    if !rl.name.is_empty() {
+                        l.name = rl.name.clone();
+                    }
+                    l.opacity = (rl.opacity as f32) / 255.0;
+                    l.blend_mode = map_blend(&rl.blend);
+                    l.visible = rl.visible;
+                    l.parent_id = stack.last().copied();
+                    if let Some(m) = build_canvas_mask(rl, header, cw, ch) {
+                        l.mask = Some(m);
+                        l.mask_active = true;
+                    }
+                    out.push(l);
+                    continue;
+                }
+                // A recognised adjustment layer we can't map yet (e.g. Curves in
+                // Phase 1): skip it rather than import an empty raster that would
+                // punch a transparent hole in the composite.
+                if rl.is_adjustment {
+                    continue;
+                }
                 if rl.width() == 0 || rl.height() == 0 {
-                    continue; // adjustment/empty layer — no pixels to import
+                    continue; // empty layer — no pixels to import
                 }
                 let id = next_id;
                 next_id += 1;
@@ -1012,6 +1056,49 @@ fn build_layer_mask(rl: &RawLayer, header: &Header) -> Option<LayerMask> {
             }
             let v = sample((my * mw + mx) as usize);
             mask.tiles.set_pixel(lx as u32, ly as u32, v, v, v, 255);
+        }
+    }
+    mask.enabled = !m.disabled;
+    Some(mask)
+}
+
+/// Canvas-sized mask for a bounds-less layer (an adjustment layer). The PSD mask
+/// rect is in absolute image coordinates, so its pixels blit straight onto a
+/// canvas-sized mask — unlike [`build_layer_mask`], which works relative to a
+/// raster layer's own origin.
+fn build_canvas_mask(rl: &RawLayer, header: &Header, cw: u32, ch: u32) -> Option<LayerMask> {
+    let m = rl.mask.as_ref()?;
+    let mw = (m.right - m.left).max(0) as u32;
+    let mh = (m.bottom - m.top).max(0) as u32;
+    if mw == 0 || mh == 0 {
+        return None;
+    }
+    let plane = rl.planes.get(&-2).or_else(|| rl.planes.get(&-3))?;
+    let mut mask = if m.default_color >= 128 {
+        LayerMask::new_white(cw, ch)
+    } else {
+        LayerMask::new_black(cw, ch)
+    };
+    let bps = (header.depth / 8) as usize;
+    let sample = |i: usize| -> u8 {
+        if bps == 2 {
+            plane.get(i * 2).copied().unwrap_or(0) // high byte of the BE u16
+        } else {
+            plane.get(i).copied().unwrap_or(0)
+        }
+    };
+    for my in 0..mh {
+        let cy = m.top + my as i32;
+        if cy < 0 || cy >= ch as i32 {
+            continue;
+        }
+        for mx in 0..mw {
+            let cx = m.left + mx as i32;
+            if cx < 0 || cx >= cw as i32 {
+                continue;
+            }
+            let v = sample((my * mw + mx) as usize);
+            mask.tiles.set_pixel(cx as u32, cy as u32, v, v, v, 255);
         }
     }
     mask.enabled = !m.disabled;
@@ -1477,5 +1564,123 @@ mod tests {
         let mask = layer.mask.as_ref().expect("mask imported");
         assert_eq!(mask.tiles.get_pixel(0, 0).0, 0, "left pixel masked");
         assert_eq!(mask.tiles.get_pixel(1, 0).0, 255, "right pixel revealed");
+    }
+
+    /// A zero-bounds adjustment layer: no channels, a single additional-info
+    /// block carrying the adjustment parameters.
+    fn adjustment_layer_record(name: &str, key: &[u8; 4], block: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let mut rec = Vec::new();
+        for v in [0i32, 0, 0, 0] {
+            rec.extend_from_slice(&v.to_be_bytes());
+        }
+        rec.extend_from_slice(&0u16.to_be_bytes()); // 0 channels
+        rec.extend_from_slice(b"8BIM");
+        rec.extend_from_slice(b"norm");
+        rec.push(255); // opacity
+        rec.push(0); // clipping
+        rec.push(0); // flags: visible
+        rec.push(0); // filler
+
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0u32.to_be_bytes()); // mask len
+        extra.extend_from_slice(&0u32.to_be_bytes()); // blending ranges len
+        let nb = name.as_bytes();
+        extra.push(nb.len() as u8);
+        extra.extend_from_slice(nb);
+        let pad = (4 - ((1 + nb.len()) % 4)) % 4;
+        extra.extend(std::iter::repeat(0u8).take(pad));
+        extra.extend_from_slice(b"8BIM");
+        extra.extend_from_slice(key);
+        extra.extend_from_slice(&(block.len() as u32).to_be_bytes());
+        extra.extend_from_slice(block);
+        if block.len() % 2 == 1 {
+            extra.push(0); // even-padding
+        }
+        rec.extend_from_slice(&(extra.len() as u32).to_be_bytes());
+        rec.extend_from_slice(&extra);
+        (rec, Vec::new())
+    }
+
+    fn levl_block() -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(&2u16.to_be_bytes());
+        for i in 0..29 {
+            let rec = if i == 0 {
+                [10i16, 245, 0, 255, 130]
+            } else {
+                [0i16, 255, 0, 255, 100]
+            };
+            for v in rec {
+                d.extend_from_slice(&v.to_be_bytes());
+            }
+        }
+        d
+    }
+
+    #[test]
+    fn imports_levels_adjustment_layer() {
+        let base = layer_record(
+            (0, 0, 1, 2),
+            "Base",
+            255,
+            b"norm",
+            0,
+            None,
+            &[
+                (0, vec![100, 100]),
+                (1, vec![100, 100]),
+                (2, vec![100, 100]),
+            ],
+        );
+        let adj = adjustment_layer_record("My Levels", b"levl", &levl_block());
+        let psd = build_layered_psd(2, 1, &[base, adj]);
+        let canvas = import_bytes(&psd).unwrap();
+
+        let layers = &canvas.layer_stack.layers;
+        assert_eq!(
+            layers.len(),
+            2,
+            "base raster + adjustment layer, not dropped"
+        );
+        assert_eq!(layers[1].name, "My Levels");
+        match &layers[1].layer_type {
+            crate::core::layer::LayerType::Adjustment(AdjustmentType::Levels { channels }) => {
+                assert_eq!(channels[0].in_black, 10);
+                assert_eq!(channels[0].in_white, 245);
+                assert!((channels[0].gamma - 1.30).abs() < 1e-4);
+            }
+            _ => panic!("expected a Levels adjustment layer"),
+        }
+        // Adjustment layers are canvas-sized so they cover the whole document.
+        assert_eq!((layers[1].width, layers[1].height), (2, 1));
+    }
+
+    #[test]
+    fn unmapped_adjustment_layer_is_skipped_not_a_hole() {
+        // 'curv' is recognised as an adjustment but not decoded in Phase 1 — the
+        // layer must be dropped, never imported as an empty (transparent) raster.
+        let base = layer_record(
+            (0, 0, 1, 2),
+            "Base",
+            255,
+            b"norm",
+            0,
+            None,
+            &[
+                (0, vec![100, 100]),
+                (1, vec![100, 100]),
+                (2, vec![100, 100]),
+            ],
+        );
+        let adj = adjustment_layer_record("Curves 1", b"curv", &[0u8; 8]);
+        let psd = build_layered_psd(2, 1, &[base, adj]);
+        let canvas = import_bytes(&psd).unwrap();
+        let layers = &canvas.layer_stack.layers;
+        assert_eq!(
+            layers.len(),
+            1,
+            "only the base raster; curves skipped for now"
+        );
+        assert_eq!(layers[0].name, "Base");
     }
 }

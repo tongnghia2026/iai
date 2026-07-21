@@ -5,6 +5,7 @@ pub mod jpeg;
 pub mod pdf;
 pub mod png;
 pub mod psd;
+pub mod psd_adjust;
 pub mod raw;
 pub mod raw_exif;
 pub mod raw_preview;
