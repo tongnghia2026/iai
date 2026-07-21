@@ -10,9 +10,10 @@
 //   • RGB and Grayscale colour modes, optional alpha channel
 //   • embedded ICC profiles (resource 1039) through the shared
 //     colour-managed import path, same rules as PNG/TIFF
-// Unsupported colour modes (CMYK, Lab, Indexed, Bitmap, Duotone,
-// Multichannel) and 32-bit depth return a specific message instead of a
-// panic or wrong pixels.
+// CMYK files import as an editable ink document (flat composite; the ink
+// separation is preserved). Still-unsupported colour modes (Lab, Indexed,
+// Bitmap, Duotone, Multichannel) and 32-bit depth return a specific message
+// instead of a panic or wrong pixels.
 //
 // When the Layer & Mask section carries an editable layer stack it is rebuilt in
 // full: layers (name/opacity/blend/visibility/offset), per-layer masks, and
@@ -89,6 +90,10 @@ fn import_bytes(data: &[u8]) -> Result<Canvas, String> {
     // when there is no usable Layer & Mask section).
     let compression = r.u16()?;
     let channels = decode_channels(&mut r, &header, compression)?;
+
+    if header.color_mode == 4 {
+        return import_cmyk_composite(&channels, &header, icc.as_deref());
+    }
 
     match header.depth {
         8 => {
@@ -245,10 +250,9 @@ fn parse_header(r: &mut Reader) -> Result<Header, String> {
 
 fn check_supported(h: &Header) -> Result<(), String> {
     let mode_name = match h.color_mode {
-        1 | 3 => None,
+        1 | 3 | 4 => None, // Grayscale, RGB, CMYK
         0 => Some("Bitmap (1-bit)"),
         2 => Some("Indexed color"),
-        4 => Some("CMYK"),
         7 => Some("Multichannel"),
         8 => Some("Duotone"),
         9 => Some("Lab"),
@@ -259,7 +263,11 @@ fn check_supported(h: &Header) -> Result<(), String> {
             "PSD {name} chưa được hỗ trợ — hãy chuyển sang RGB (Image ▸ Mode) rồi lưu lại"
         ));
     }
-    let required = if h.color_mode == 3 { 3 } else { 1 };
+    let required = match h.color_mode {
+        3 => 3, // RGB
+        4 => 4, // CMYK
+        _ => 1, // Grayscale
+    };
     if h.channels < required {
         return Err("PSD: thiếu kênh màu".to_string());
     }
@@ -460,6 +468,91 @@ fn assemble_rgba16(channels: &[Vec<u8>], h: &Header) -> Result<Vec<u16>, String>
     Ok(out)
 }
 
+/// Import a flat CMYK composite as an editable ink document. PSD stores CMYK
+/// channels **inverted** (255 = no ink); we un-invert to iAi's convention
+/// (255 = full ink), keep the file's exact ink separation, and project an sRGB
+/// mirror through the document's CMYK space — the embedded profile when it is
+/// CMYK, otherwise the built-in naive space. 16-bit ink is reduced to iAi's
+/// 8-bit ink planes. The 5th channel, when present, is a normal (non-inverted)
+/// alpha plane.
+fn import_cmyk_composite(
+    channels: &[Vec<u8>],
+    h: &Header,
+    icc: Option<&[u8]>,
+) -> Result<Canvas, String> {
+    use crate::core::canvas::{CmykProfile, ColorMode};
+    use crate::core::cms;
+
+    if channels.len() < 4 {
+        return Err("PSD CMYK: thiếu kênh mực".to_string());
+    }
+    let n = (h.width as usize) * (h.height as usize);
+    let bps = (h.depth / 8) as usize;
+    // 8-bit ink sample of channel `c` at pixel `i`, un-inverted from PSD storage.
+    let ink_at = |c: usize, i: usize| -> u8 {
+        let plane = &channels[c];
+        let v = if bps == 2 {
+            (u16::from_be_bytes([plane[i * 2], plane[i * 2 + 1]]) >> 8) as u8
+        } else {
+            plane[i]
+        };
+        255 - v
+    };
+    // Packed ink planes: C, M, Y, K per pixel.
+    let mut ink = vec![0u8; n * 4];
+    for i in 0..n {
+        ink[i * 4] = ink_at(0, i);
+        ink[i * 4 + 1] = ink_at(1, i);
+        ink[i * 4 + 2] = ink_at(2, i);
+        ink[i * 4 + 3] = ink_at(3, i);
+    }
+    let alpha_plane = channels.get(4);
+    let alpha_at = |i: usize| -> u8 {
+        match alpha_plane {
+            Some(a) if bps == 2 => (u16::from_be_bytes([a[i * 2], a[i * 2 + 1]]) >> 8) as u8,
+            Some(a) => a[i],
+            None => 255,
+        }
+    };
+
+    // Choose the CMYK space: an embedded CMYK ICC, else the naive built-in.
+    let profile = match icc {
+        Some(bytes) if cms::profile_is_cmyk(bytes) => {
+            let name = cms::profile_from_bytes(bytes)
+                .map(|p| cms::profile_name(&p))
+                .unwrap_or_else(|| "CMYK profile".to_string());
+            CmykProfile::Icc {
+                name,
+                data: bytes.to_vec(),
+            }
+        }
+        _ => CmykProfile::Naive,
+    };
+    let profile_name = profile.display_name().to_string();
+    let conv = profile.converter().unwrap_or(cms::CmykConverter::Naive);
+
+    // Project ink → sRGB for the display mirror, carrying the alpha plane.
+    let cmyk_px: &[[u8; 4]] = bytemuck::cast_slice(&ink);
+    let mut rgb = vec![[0u8; 3]; n];
+    conv.cmyk_to_rgb_slice(cmyk_px, &mut rgb);
+    let mut mirror = vec![0u8; n * 4];
+    for i in 0..n {
+        mirror[i * 4] = rgb[i][0];
+        mirror[i * 4 + 1] = rgb[i][1];
+        mirror[i * 4 + 2] = rgb[i][2];
+        mirror[i * 4 + 3] = alpha_at(i);
+    }
+
+    let mut canvas = Canvas::from_rgba(mirror, h.width, h.height);
+    if let Some(layer) = canvas.layer_stack.layers.first_mut() {
+        layer.tiles.write_ink_region(0, 0, h.width, h.height, &ink);
+    }
+    canvas.color_mode = ColorMode::Cmyk(profile);
+    canvas.channels.select_composite();
+    canvas.metadata.source_profile = profile_name;
+    Ok(canvas)
+}
+
 // ---------------------------------------------------------------------------
 // Layer & Mask section — editable layer stack (layers, masks, nested groups).
 // ---------------------------------------------------------------------------
@@ -521,6 +614,12 @@ fn import_layer_stack(
     icc_is_srgb: bool,
 ) -> Result<Option<Canvas>, String> {
     if lm.is_empty() {
+        return Ok(None);
+    }
+    // CMYK layers carry C/M/Y/K planes, not RGB; the per-layer raster path would
+    // misread them as RGB. Route CMYK files to the flat-composite path, which
+    // imports them as an editable ink document.
+    if header.color_mode == 4 {
         return Ok(None);
     }
     // 16-bit + a non-sRGB profile needs the colour-managed 8-bit composite path;
@@ -1402,11 +1501,28 @@ mod tests {
     }
 
     #[test]
-    fn cmyk_rejected_with_clear_message() {
-        let img = vec![0u8, 0];
-        let psd = build_psd(1, 4, 1, 1, 8, 4, &[], &img);
-        let err = expect_err(&psd);
-        assert!(err.contains("CMYK"), "{err}");
+    fn cmyk_imports_as_editable_ink_document() {
+        // 2×1, RAW, 4 channels. PSD stores CMYK inverted (255 = no ink).
+        // px0 = pure cyan ink (iAi C=255); px1 = 50% black (iAi K=128).
+        // Planar: C=[0,255] M=[255,255] Y=[255,255] K=[255,127].
+        let mut img = vec![0u8, 0]; // compression RAW
+        img.extend_from_slice(&[0, 255]); // C
+        img.extend_from_slice(&[255, 255]); // M
+        img.extend_from_slice(&[255, 255]); // Y
+        img.extend_from_slice(&[255, 127]); // K
+        let psd = build_psd(1, 4, 2, 1, 8, 4, &[], &img);
+        let canvas = import_bytes(&psd).unwrap();
+
+        assert!(canvas.is_cmyk(), "CMYK file must open as an ink document");
+        // Ink planes hold the un-inverted separation (255 = full ink).
+        let mut ink = vec![0u8; 2 * 4];
+        canvas.layer_stack.layers[0]
+            .tiles
+            .extract_ink_region_into(0, 0, 2, 1, &mut ink);
+        assert_eq!(&ink[0..4], &[255, 0, 0, 0], "px0 = pure cyan ink");
+        assert_eq!(&ink[4..8], &[0, 0, 0, 128], "px1 = 50% black ink");
+        // The naive-space mirror of pure cyan is (0,255,255).
+        assert_eq!(pixel(&canvas, 0, 0), (0, 255, 255, 255));
     }
 
     #[test]
