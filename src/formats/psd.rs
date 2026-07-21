@@ -942,8 +942,8 @@ fn build_app_layers(raw: &[RawLayer], header: &Header, icc: Option<&[u8]>) -> Ve
                     out.push(l);
                     continue;
                 }
-                // A recognised adjustment layer we can't map yet (e.g. Curves in
-                // Phase 1): skip it rather than import an empty raster that would
+                // A recognised adjustment layer we can't map yet (e.g. Selective
+                // Colour): skip it rather than import an empty raster that would
                 // punch a transparent hole in the composite.
                 if rl.is_adjustment {
                     continue;
@@ -1706,6 +1706,53 @@ mod tests {
         assert_eq!((layers[1].width, layers[1].height), (2, 1));
     }
 
+    /// Version-1 Curves, master channel only (bitmask bit 0), lifting the midtone.
+    fn curv_block() -> Vec<u8> {
+        let mut d = Vec::new();
+        d.push(0); // is_map = points
+        d.extend_from_slice(&1u16.to_be_bytes()); // version
+        d.extend_from_slice(&0b0001u32.to_be_bytes()); // master only
+        d.extend_from_slice(&3u16.to_be_bytes()); // point count
+        for (out, inp) in [(0u16, 0u16), (160, 128), (255, 255)] {
+            d.extend_from_slice(&out.to_be_bytes());
+            d.extend_from_slice(&inp.to_be_bytes());
+        }
+        d
+    }
+
+    #[test]
+    fn imports_curves_adjustment_layer() {
+        let base = layer_record(
+            (0, 0, 1, 2),
+            "Base",
+            255,
+            b"norm",
+            0,
+            None,
+            &[
+                (0, vec![100, 100]),
+                (1, vec![100, 100]),
+                (2, vec![100, 100]),
+            ],
+        );
+        let adj = adjustment_layer_record("My Curves", b"curv", &curv_block());
+        let psd = build_layered_psd(2, 1, &[base, adj]);
+        let canvas = import_bytes(&psd).unwrap();
+
+        let layers = &canvas.layer_stack.layers;
+        assert_eq!(layers.len(), 2, "base raster + curves layer, not dropped");
+        assert_eq!(layers[1].name, "My Curves");
+        match &layers[1].layer_type {
+            crate::core::layer::LayerType::Adjustment(AdjustmentType::Curves { channels }) => {
+                assert_eq!(channels[0].len(), 3);
+                assert!((channels[0][1].0 - 128.0 / 255.0).abs() < 1e-4);
+                assert!((channels[0][1].1 - 160.0 / 255.0).abs() < 1e-4);
+            }
+            _ => panic!("expected a Curves adjustment layer"),
+        }
+        assert_eq!((layers[1].width, layers[1].height), (2, 1));
+    }
+
     /// Build a bare layer-info blob (count + one record + its channel data), the
     /// payload a TIFF `Layr` block carries.
     fn one_layer_info_blob() -> Vec<u8> {
@@ -1762,8 +1809,9 @@ mod tests {
 
     #[test]
     fn unmapped_adjustment_layer_is_skipped_not_a_hole() {
-        // 'curv' is recognised as an adjustment but not decoded in Phase 1 — the
-        // layer must be dropped, never imported as an empty (transparent) raster.
+        // 'selc' (Selective Colour) is recognised as an adjustment but not decoded
+        // yet — the layer must be dropped, never imported as an empty (transparent)
+        // raster that would punch a hole in the composite.
         let base = layer_record(
             (0, 0, 1, 2),
             "Base",
@@ -1777,14 +1825,14 @@ mod tests {
                 (2, vec![100, 100]),
             ],
         );
-        let adj = adjustment_layer_record("Curves 1", b"curv", &[0u8; 8]);
+        let adj = adjustment_layer_record("Selective Colour 1", b"selc", &[0u8; 8]);
         let psd = build_layered_psd(2, 1, &[base, adj]);
         let canvas = import_bytes(&psd).unwrap();
         let layers = &canvas.layer_stack.layers;
         assert_eq!(
             layers.len(),
             1,
-            "only the base raster; curves skipped for now"
+            "only the base raster; unmapped adjustment skipped"
         );
         assert_eq!(layers[0].name, "Base");
     }
