@@ -342,6 +342,8 @@ pub struct InputState {
 
 pub struct UiState {
     pub show_welcome: bool,
+    /// The Library grid browser (Track B) is showing instead of the editor.
+    pub show_library: bool,
     pub show_new_dialog: bool,
     pub show_resize_dialog: bool,
     pub show_image_size_dialog: bool,
@@ -1094,6 +1096,7 @@ impl App {
                 ui_data_cache: UiDataCache::default(),
                 ui: UiState {
                     show_welcome: true,
+                    show_library: false,
                     show_new_dialog: false,
                     show_resize_dialog: false,
                     show_image_size_dialog: false,

@@ -399,6 +399,8 @@ pub struct DialogViewModel {
 pub struct ChromeViewModel {
     pub status_msg: String,
     pub show_welcome: bool,
+    /// The Library grid browser is showing instead of the editor (Track B).
+    pub show_library: bool,
     pub theme_mode: theme::ThemeMode,
     pub show_color_panel: bool,
     pub show_text_panel: bool,
@@ -473,6 +475,25 @@ pub struct WelcomeViewModel {
     pub recent: Vec<RecentThumb>,
 }
 
+/// One scanned file in the Library grid (Track B): path, display name, whether
+/// it is selected, and its thumbnail texture once the cache has produced it.
+pub struct LibraryEntry {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub selected: bool,
+    pub thumb: Option<(egui::TextureId, egui::Vec2)>,
+}
+
+/// The Library grid browser's view model (Track B): the chosen folder, the
+/// images found in it, and how many are selected.
+#[derive(Default)]
+pub struct LibraryViewModel {
+    /// Display path of the chosen folder (None until one is picked).
+    pub folder: Option<String>,
+    pub entries: Vec<LibraryEntry>,
+    pub selected_count: usize,
+}
+
 pub struct UiData {
     /// The active document as the UI sees it: geometry, colour mode, view,
     pub doc: DocumentViewModel,
@@ -496,6 +517,8 @@ pub struct UiData {
     pub ai: AiViewModel,
     /// The welcome screen: recent files and their thumbnails.
     pub welcome: WelcomeViewModel,
+    /// The Library grid browser: the chosen folder and its images.
+    pub library: LibraryViewModel,
 }
 
 impl Default for UiData {
@@ -803,6 +826,7 @@ impl Default for UiData {
             chrome: ChromeViewModel {
                 status_msg: String::new(),
                 show_welcome: true,
+                show_library: false,
                 theme_mode: theme::ThemeMode::Dark,
                 show_color_panel: true,
                 show_text_panel: false,
@@ -846,6 +870,7 @@ impl Default for UiData {
                 ext_token: String::new(),
             },
             welcome: WelcomeViewModel::default(),
+            library: LibraryViewModel::default(),
         }
     }
 }

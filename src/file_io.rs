@@ -76,6 +76,8 @@ pub enum FileDialogResult {
     OpenedMany(Vec<PathBuf>),
     SaveAs(PathBuf),
     Export(crate::formats::ExportFormat, PathBuf),
+    /// A folder chosen in the Library grid browser (Track B) → scan for images.
+    PickedFolder(PathBuf),
 }
 
 /// Send-safe parent window handle (just the HWND/HINSTANCE integers on Windows)
@@ -158,6 +160,15 @@ pub fn dialog_open_many(parent: Option<DialogParent>) -> Option<Vec<PathBuf>> {
         dialog = dialog.set_parent(&p);
     }
     dialog.pick_files()
+}
+
+/// Pick a folder for the Library grid browser. CALL ON A WORKER THREAD.
+pub fn dialog_pick_folder(parent: Option<DialogParent>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title("Choose Folder");
+    if let Some(p) = parent {
+        dialog = dialog.set_parent(&p);
+    }
+    dialog.pick_folder()
 }
 
 /// Open the Save As dialog. CALL ON A WORKER THREAD.

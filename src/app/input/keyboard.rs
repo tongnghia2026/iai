@@ -52,6 +52,22 @@ impl App {
             }
             return;
         }
+        // Ctrl+A in the Library grid selects every thumbnail (not the hidden
+        // document's pixels). Intercept before the editor's Select All below.
+        if self.shell.ui.show_library
+            && pressed
+            && self.edit.input.ctrl_held
+            && !self.edit.input.shift_held
+            && matches!(physical_key, PhysicalKey::Code(KeyCode::KeyA))
+        {
+            self.lib.grid.select_all();
+            let n = self.lib.grid.selected.len();
+            self.shell.status_msg = format!("Selected all ({n})");
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
         if self.is_blocking_modal() {
             return;
         }

@@ -106,9 +106,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 ui.add_space(16.0);
 
                 ui.horizontal(|ui| {
-                    let btn_w = 150.0_f32;
+                    let btn_w = 140.0_f32;
                     let gap = 12.0_f32;
-                    let total_btn = btn_w * 2.0 + gap;
+                    let total_btn = btn_w * 3.0 + gap * 2.0;
                     let avail = ui.available_width();
                     ui.add_space(((avail - total_btn) / 2.0).max(0.0));
 
@@ -138,6 +138,26 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         .clicked()
                     {
                         actions.doc.open_file = true;
+                    }
+
+                    ui.add_space(gap);
+
+                    // Browse Folder → open the folder picker; a chosen folder
+                    // switches to the Library grid (Track B).
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("  Browse Folder  ")
+                                    .size(13.0)
+                                    .color(egui::Color32::from_gray(210)),
+                            )
+                            .fill(egui::Color32::from_rgb(42, 44, 54))
+                            .min_size(egui::vec2(btn_w, 40.0)),
+                        )
+                        .on_hover_text("Open a folder of photos in the Library")
+                        .clicked()
+                    {
+                        actions.library.open_folder = true;
                     }
                 });
 

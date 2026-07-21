@@ -128,12 +128,17 @@ impl App {
                 actions.chrome.show_welcome = None;
                 denied = true;
             }
+            if actions.chrome.show_library == Some(true) {
+                actions.chrome.show_library = None;
+                denied = true;
+            }
             if denied {
                 self.deny_modal_action();
             }
         }
 
         self.handle_chrome_actions(&mut actions);
+        self.handle_library_actions(&mut actions);
         self.handle_text_actions(&mut actions);
         self.handle_transform_crop_actions(&mut actions, event_loop);
         self.handle_tool_color_actions(&mut actions, event_loop);

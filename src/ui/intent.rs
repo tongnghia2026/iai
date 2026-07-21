@@ -478,6 +478,9 @@ pub struct ChromeIntent {
     pub set_toolbox_single_column: Option<bool>,
     pub set_theme_mode: Option<theme::ThemeMode>,
     pub show_welcome: Option<bool>,
+    /// Toggle the Library grid browser (Track B). `true` also leaves the welcome
+    /// screen; `false` returns to the editor.
+    pub show_library: Option<bool>,
     pub toggle_color_panel: bool,
     pub toggle_text_panel: bool,
     pub toggle_layer_panel: bool,
@@ -502,6 +505,35 @@ pub struct ChromeIntent {
     pub window_minimize: bool,
     pub window_maximize_toggle: bool,
     pub window_drag: bool,
+}
+/// How a Library grid click changes the selection.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LibrarySelect {
+    /// Plain click — select only this entry (and set it as the range anchor).
+    Replace,
+    /// Ctrl/Cmd click — toggle this entry in the selection (and re-anchor here).
+    Toggle,
+    /// Shift click — select the contiguous range from the anchor to this entry.
+    Range,
+}
+
+/// Library grid commands (Track B): folder browse, selection, open.
+#[derive(Default)]
+pub struct LibraryIntent {
+    /// Header "Choose Folder" — open the deferred folder picker.
+    pub open_folder: bool,
+    /// Click a grid card: (path, how the click changes the selection).
+    pub select_entry: Option<(std::path::PathBuf, LibrarySelect)>,
+    /// Double-click a card — open that single file into the editor.
+    pub open_entry: Option<std::path::PathBuf>,
+    /// "Open Selected" — open every selected file into the editor.
+    pub open_selected: bool,
+    /// Clear the current selection.
+    pub clear_selection: bool,
+    /// Paths whose cards are visible in the scroll viewport this frame — the app
+    /// requests thumbnails only for these, so a large folder never floods the
+    /// generator or thrashes the resident-texture cache.
+    pub visible_thumbs: Vec<std::path::PathBuf>,
 }
 /// Channels panel commands.
 #[derive(Default)]
@@ -553,6 +585,8 @@ pub struct UiActions {
     pub dialogs: DialogIntent,
     /// Chrome: panel toggles, toolbox, theme, guides, window buttons.
     pub chrome: ChromeIntent,
+    /// Library grid commands: folder browse, selection, open.
+    pub library: LibraryIntent,
     /// Channels panel commands.
     pub channels: ChannelsIntent,
     /// AI panel commands and extension-bridge runs.

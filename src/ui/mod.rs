@@ -8,6 +8,7 @@ pub mod color_picker;
 pub mod develop;
 pub mod dialogs;
 pub mod intent;
+pub mod library;
 pub mod menubar;
 pub mod nav;
 pub mod panels;
@@ -645,6 +646,12 @@ pub fn build(
 
         if data.chrome.show_welcome {
             welcome::build(ctx, data, &mut actions);
+            dialogs::build(ctx, data, &mut actions);
+            return;
+        }
+
+        if data.chrome.show_library {
+            library::build(ctx, data, &mut actions);
             dialogs::build(ctx, data, &mut actions);
             return;
         }

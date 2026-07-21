@@ -301,6 +301,14 @@ impl App {
             Vec::new()
         };
 
+        // Library grid: the chosen folder's images + their thumbnails. Built only
+        // while the Library browser shows, so the editor path pays nothing.
+        let library = if self.shell.ui.show_library {
+            self.library_grid_view()
+        } else {
+            crate::ui::LibraryViewModel::default()
+        };
+
         // Reveal the active layer in the Layers panel when the selection changes:
         // expand its collapsed ancestor folders and flag a scroll-to-active for
         // this frame. Detected centrally so every selection path (panel click,
@@ -1300,6 +1308,7 @@ impl App {
             chrome: ChromeViewModel {
                 status_msg: self.shell.status_msg.clone(),
                 show_welcome: self.shell.ui.show_welcome,
+                show_library: self.shell.ui.show_library,
                 theme_mode: self.shell.ui.theme_mode,
                 show_color_panel: self.shell.ui.show_color_panel,
                 show_text_panel: self.shell.ui.show_text_panel,
@@ -1369,6 +1378,7 @@ impl App {
             welcome: crate::ui::WelcomeViewModel {
                 recent: welcome_recent,
             },
+            library,
         }
     }
 

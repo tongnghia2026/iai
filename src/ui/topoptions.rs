@@ -53,6 +53,21 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 {
                     actions.chrome.show_welcome = Some(true);
                 }
+
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(ph::GRID_NINE)
+                                .size(15.0)
+                                .color(pal.icon),
+                        )
+                        .min_size(egui::vec2(26.0, 24.0)),
+                    )
+                    .on_hover_text("Library — browse a folder of photos")
+                    .clicked()
+                {
+                    actions.chrome.show_library = Some(true);
+                }
                 ui.separator();
 
                 match data.tool.active_tool {

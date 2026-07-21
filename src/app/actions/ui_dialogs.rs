@@ -467,6 +467,10 @@ impl App {
         }
         if let Some(v) = actions.chrome.show_welcome.take() {
             self.shell.ui.show_welcome = v;
+            // The welcome screen and the Library grid are mutually exclusive.
+            if v {
+                self.shell.ui.show_library = false;
+            }
         }
         if let Some((v, idx)) = actions.dialogs.show_rename_dialog.take() {
             self.shell.ui.show_rename_dialog = v;

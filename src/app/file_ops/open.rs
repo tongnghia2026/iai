@@ -679,6 +679,20 @@ impl App {
                     file_io::FileDialogResult::Export(fmt, path) => {
                         self.do_export(fmt, &path.to_string_lossy());
                     }
+                    file_io::FileDialogResult::PickedFolder(dir) => {
+                        // Library grid (Track B): scan the folder for images and
+                        // show its grid (a picker can only be opened from Library).
+                        let count = {
+                            self.lib.grid.scan(dir);
+                            self.lib.grid.entries.len()
+                        };
+                        self.shell.ui.show_library = true;
+                        self.shell.ui.show_welcome = false;
+                        self.shell.status_msg = format!("Library: {count} images");
+                        if let Some(w) = &self.win.window {
+                            w.request_redraw();
+                        }
+                    }
                 }
                 if self.shell.close_requested {
                     self.shell.close_requested = false;
