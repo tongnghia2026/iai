@@ -24,6 +24,7 @@ pub mod shape;
 pub mod smart_fill;
 pub mod ucs;
 pub mod units;
+pub mod vector;
 pub mod warp;
 
 pub mod document;
