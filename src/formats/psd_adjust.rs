@@ -11,14 +11,15 @@
 //! Phase 1: Levels, Hue/Saturation, Brightness/Contrast, Invert, Posterize,
 //! Threshold. Phase 2 adds Curves (`curv`), Channel Mixer (`mixr`), Color Balance
 //! (`blnc`) and Photo Filter (`phfl`). Phase 2b adds Exposure (`expA`), Vibrance
-//! (`vibA`) and Black & White (`blwh`) — the last two via the shared
-//! [`super::psd_descriptor`] parser, since Photoshop stores them as descriptors.
+//! (`vibA`), Black & White (`blwh`) — the last two via the shared
+//! [`super::psd_descriptor`] parser, since Photoshop stores them as descriptors —
+//! and Gradient Map (`grdm`).
 //!
 //! Blocks whose layout we don't map yet return `None`; the caller then keeps the
 //! prior behaviour (skip) rather than guessing. Every parser is bounds-checked
 //! and never panics on a short/truncated block.
 
-use super::psd_descriptor::parse_versioned_descriptor;
+use super::psd_descriptor::{parse_versioned_descriptor, Cur};
 use crate::core::layer::{identity_curve, AdjustmentType, LevelsParams};
 
 fn be_i16(d: &[u8], off: usize) -> Option<i16> {
@@ -56,6 +57,7 @@ pub fn parse_adjustment(key: &[u8; 4], data: &[u8]) -> Option<AdjustmentType> {
         b"expA" => parse_exposure(data),
         b"vibA" => parse_vibrance(data),
         b"blwh" => parse_black_and_white(data),
+        b"grdm" => parse_gradient_map(data),
         b"nvrt" => Some(AdjustmentType::Invert),
         b"post" => parse_posterize(data),
         b"thrs" => parse_threshold(data),
@@ -357,6 +359,57 @@ fn parse_black_and_white(d: &[u8]) -> Option<AdjustmentType> {
         c: slider("Cyn ", 60.0),
         b: slider("Bl  ", 20.0),
         m: slider("Mgnt", 80.0),
+    })
+}
+
+/// `grdm` — Gradient Map (legacy binary). Header: `u16` version, `u8` reversed,
+/// `u8` dithered, a 4-byte gradient method (version 3 only), the gradient name
+/// (Unicode string), then a `u16` colour-stop count and that many 20-byte
+/// records: `u32` location (0..4096), `u32` midpoint, `u16` colour model, four
+/// `u16` colour components (16-bit, 65535 = 255) and 2 pad bytes.
+///
+/// The stop colours are read as RGB (the first three components) — the common
+/// case for an RGB document; other colour models aren't distinguished. A noise
+/// gradient (zero colour stops) or a short/implausible block returns `None`
+/// (skip), and iAi's Gradient Map maps the tonal range across the stops.
+fn parse_gradient_map(d: &[u8]) -> Option<AdjustmentType> {
+    let mut c = Cur::new(d);
+    let version = c.u16()?;
+    let reverse = c.u8()? != 0;
+    let dither = c.u8()? != 0;
+    if version == 3 {
+        c.take(4)?; // gradient method ('Gcls' classic / 'Gnse' noise)
+    }
+    // Gradient name: Unicode string (u32 count of UTF-16 units) — skip it.
+    let name_len = c.u32()? as usize;
+    c.take(name_len.checked_mul(2)?)?;
+
+    let count = c.u16()? as usize;
+    if count == 0 || count > 256 {
+        return None; // noise gradient (no stops) or an implausible count
+    }
+    let to8 = |v: u16| ((v as u32 * 255 + 32767) / 65535) as u8;
+    let mut stops = Vec::with_capacity(count);
+    for _ in 0..count {
+        let location = c.u32()?;
+        let _midpoint = c.u32()?;
+        let _mode = c.u16()?;
+        let r = c.u16()?;
+        let g = c.u16()?;
+        let b = c.u16()?;
+        let _a = c.u16()?;
+        c.take(2)?; // 2-byte pad
+        let pos = (location as f32 / 4096.0).clamp(0.0, 1.0);
+        stops.push((pos, [to8(r), to8(g), to8(b)]));
+    }
+    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if stops.len() < 2 {
+        stops.push(stops[0]); // iAi needs ≥ 2 stops; a flat map is still valid
+    }
+    Some(AdjustmentType::GradientMap {
+        stops,
+        reverse,
+        dither,
     })
 }
 
@@ -792,5 +845,53 @@ mod tests {
             panic!("expected BlackAndWhite");
         };
         assert_eq!([r, y, g, c, b, m], [40.0, 60.0, 40.0, 60.0, 20.0, 80.0]);
+    }
+
+    #[test]
+    fn gradient_map_reads_black_to_red_stops() {
+        let mut d = Vec::new();
+        push_u16(&mut d, 1); // version
+        d.push(0); // reversed = false
+        d.push(1); // dithered = true
+        push_u32(&mut d, 0); // gradient name: zero-length unicode string
+        push_u16(&mut d, 2); // colour-stop count
+        let mut stop = |loc: u32, r: u16, g: u16, b: u16| {
+            push_u32(&mut d, loc);
+            push_u32(&mut d, 2048); // midpoint
+            push_u16(&mut d, 0); // colour model
+            push_u16(&mut d, r);
+            push_u16(&mut d, g);
+            push_u16(&mut d, b);
+            push_u16(&mut d, 0); // 4th component
+            push_u16(&mut d, 0); // 2-byte pad
+        };
+        stop(0, 0, 0, 0); // black at 0
+        stop(4096, 65535, 0, 0); // red at 1
+        let Some(AdjustmentType::GradientMap {
+            stops,
+            reverse,
+            dither,
+        }) = parse_adjustment(b"grdm", &d)
+        else {
+            panic!("expected GradientMap");
+        };
+        assert!(!reverse && dither);
+        assert_eq!(stops.len(), 2);
+        assert_eq!(stops[0], (0.0, [0, 0, 0]));
+        assert_eq!(stops[1], (1.0, [255, 0, 0]));
+    }
+
+    #[test]
+    fn gradient_map_noise_or_short_is_skipped() {
+        // Zero colour stops (noise gradient) → skip.
+        let mut noise = Vec::new();
+        push_u16(&mut noise, 1);
+        noise.push(0);
+        noise.push(0);
+        push_u32(&mut noise, 0); // empty name
+        push_u16(&mut noise, 0); // zero stops
+        assert!(parse_adjustment(b"grdm", &noise).is_none());
+        // Truncated mid-stop → skip, no panic.
+        assert!(parse_adjustment(b"grdm", &[0, 1, 0, 0, 0, 0, 0, 0, 0, 1]).is_none());
     }
 }
