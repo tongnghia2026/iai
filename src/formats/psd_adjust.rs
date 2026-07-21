@@ -10,17 +10,25 @@
 //!
 //! Phase 1: Levels, Hue/Saturation, Brightness/Contrast, Invert, Posterize,
 //! Threshold. Phase 2 adds Curves (`curv`), Channel Mixer (`mixr`), Color Balance
-//! (`blnc`) and Photo Filter (`phfl`).
+//! (`blnc`) and Photo Filter (`phfl`). Phase 2b adds Exposure (`expA`), Vibrance
+//! (`vibA`) and Black & White (`blwh`) — the last two via the shared
+//! [`super::psd_descriptor`] parser, since Photoshop stores them as descriptors.
 //!
 //! Blocks whose layout we don't map yet return `None`; the caller then keeps the
 //! prior behaviour (skip) rather than guessing. Every parser is bounds-checked
 //! and never panics on a short/truncated block.
 
+use super::psd_descriptor::parse_versioned_descriptor;
 use crate::core::layer::{identity_curve, AdjustmentType, LevelsParams};
 
 fn be_i16(d: &[u8], off: usize) -> Option<i16> {
     d.get(off..off + 2)
         .map(|b| i16::from_be_bytes([b[0], b[1]]))
+}
+
+fn be_f32(d: &[u8], off: usize) -> Option<f32> {
+    d.get(off..off + 4)
+        .map(|b| f32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 fn be_u16(d: &[u8], off: usize) -> Option<u16> {
@@ -45,6 +53,9 @@ pub fn parse_adjustment(key: &[u8; 4], data: &[u8]) -> Option<AdjustmentType> {
         b"mixr" => parse_channel_mixer(data),
         b"blnc" => parse_color_balance(data),
         b"phfl" => parse_photo_filter(data),
+        b"expA" => parse_exposure(data),
+        b"vibA" => parse_vibrance(data),
+        b"blwh" => parse_black_and_white(data),
         b"nvrt" => Some(AdjustmentType::Invert),
         b"post" => parse_posterize(data),
         b"thrs" => parse_threshold(data),
@@ -302,6 +313,50 @@ fn parse_photo_filter(d: &[u8]) -> Option<AdjustmentType> {
         color,
         density,
         luminosity,
+    })
+}
+
+/// `expA` — Exposure. `u16` version, then three big-endian `f32`: exposure
+/// (stops), offset, and gamma-correction — matching iAi's Exposure fields.
+fn parse_exposure(d: &[u8]) -> Option<AdjustmentType> {
+    let _version = be_u16(d, 0)?;
+    let exposure = be_f32(d, 2)?.clamp(-20.0, 20.0);
+    let offset = be_f32(d, 6)?.clamp(-0.5, 0.5);
+    let gamma = be_f32(d, 10)?.clamp(0.01, 10.0);
+    Some(AdjustmentType::Exposure {
+        exposure,
+        offset,
+        gamma,
+    })
+}
+
+/// `vibA` — Vibrance. A version-prefixed descriptor with `long` keys `vibrance`
+/// and `Strt` (saturation), both −100..100 — iAi's Vibrance fields.
+fn parse_vibrance(d: &[u8]) -> Option<AdjustmentType> {
+    let desc = parse_versioned_descriptor(d)?;
+    let vibrance = desc.num("vibrance").unwrap_or(0.0) as f32;
+    let saturation = desc.num("Strt").unwrap_or(0.0) as f32;
+    Some(AdjustmentType::Vibrance {
+        vibrance: vibrance.clamp(-100.0, 100.0),
+        saturation: saturation.clamp(-100.0, 100.0),
+    })
+}
+
+/// `blwh` — Black & White. A version-prefixed descriptor with a `long` per
+/// colour channel (`Rd  `/`Yllw`/`Grn `/`Cyn `/`Bl  `/`Mgnt`, Photoshop range
+/// −200..300; defaults 40/60/40/60/20/80) — iAi's BlackAndWhite sliders.
+fn parse_black_and_white(d: &[u8]) -> Option<AdjustmentType> {
+    let desc = parse_versioned_descriptor(d)?;
+    let slider = |key: &str, default: f32| -> f32 {
+        (desc.num(key).map(|v| v as f32).unwrap_or(default)).clamp(-200.0, 300.0)
+    };
+    Some(AdjustmentType::BlackAndWhite {
+        r: slider("Rd  ", 40.0),
+        y: slider("Yllw", 60.0),
+        g: slider("Grn ", 40.0),
+        c: slider("Cyn ", 60.0),
+        b: slider("Bl  ", 20.0),
+        m: slider("Mgnt", 80.0),
     })
 }
 
@@ -636,5 +691,106 @@ mod tests {
         assert!(parse_adjustment(b"mixr", &[0, 1, 0, 0, 0]).is_none()); // no records
         assert!(parse_adjustment(b"blnc", &[0, 0, 0, 0]).is_none()); // partial triple
         assert!(parse_adjustment(b"phfl", &[0, 2, 0, 0]).is_none()); // no components
+        assert!(parse_adjustment(b"expA", &[0, 1, 0, 0]).is_none()); // truncated float
+        assert!(parse_adjustment(b"vibA", &[0, 0, 0]).is_none()); // no descriptor
+    }
+
+    // --- descriptor builders for the Phase 2b tests ---
+
+    fn push_f32(v: &mut Vec<u8>, x: f32) {
+        v.extend_from_slice(&x.to_be_bytes());
+    }
+    fn push_desc_key(v: &mut Vec<u8>, key: &str) {
+        push_u32(v, key.len() as u32);
+        v.extend_from_slice(key.as_bytes());
+    }
+    fn push_desc_unicode(v: &mut Vec<u8>, s: &str) {
+        let units: Vec<u16> = s.encode_utf16().collect();
+        push_u32(v, units.len() as u32 + 1);
+        for u in units {
+            push_u16(v, u);
+        }
+        push_u16(v, 0);
+    }
+    /// A version-prefixed descriptor whose items are all `long`.
+    fn versioned_longs(class: &str, items: &[(&str, i32)]) -> Vec<u8> {
+        let mut d = Vec::new();
+        push_u32(&mut d, 16); // descriptor version
+        push_desc_unicode(&mut d, "");
+        push_desc_key(&mut d, class);
+        push_u32(&mut d, items.len() as u32);
+        for (k, val) in items {
+            push_desc_key(&mut d, k);
+            d.extend_from_slice(b"long");
+            push_u32(&mut d, *val as u32);
+        }
+        d
+    }
+
+    #[test]
+    fn exposure_reads_three_floats() {
+        let mut d = Vec::new();
+        push_u16(&mut d, 1); // version
+        push_f32(&mut d, 1.5); // exposure
+        push_f32(&mut d, -0.05); // offset
+        push_f32(&mut d, 1.2); // gamma
+        let Some(AdjustmentType::Exposure {
+            exposure,
+            offset,
+            gamma,
+        }) = parse_adjustment(b"expA", &d)
+        else {
+            panic!("expected Exposure");
+        };
+        assert!((exposure - 1.5).abs() < 1e-4);
+        assert!((offset - (-0.05)).abs() < 1e-4);
+        assert!((gamma - 1.2).abs() < 1e-4);
+    }
+
+    #[test]
+    fn vibrance_reads_descriptor() {
+        let block = versioned_longs("vibrance", &[("vibrance", 40), ("Strt", -20)]);
+        let Some(AdjustmentType::Vibrance {
+            vibrance,
+            saturation,
+        }) = parse_adjustment(b"vibA", &block)
+        else {
+            panic!("expected Vibrance");
+        };
+        assert_eq!(vibrance, 40.0);
+        assert_eq!(saturation, -20.0);
+    }
+
+    #[test]
+    fn black_and_white_reads_six_sliders() {
+        let block = versioned_longs(
+            "blackAndWhite",
+            &[
+                ("Rd  ", 25),
+                ("Yllw", 70),
+                ("Grn ", 45),
+                ("Cyn ", 55),
+                ("Bl  ", 15),
+                ("Mgnt", 90),
+            ],
+        );
+        let Some(AdjustmentType::BlackAndWhite { r, y, g, c, b, m }) =
+            parse_adjustment(b"blwh", &block)
+        else {
+            panic!("expected BlackAndWhite");
+        };
+        assert_eq!([r, y, g, c, b, m], [25.0, 70.0, 45.0, 55.0, 15.0, 90.0]);
+    }
+
+    #[test]
+    fn black_and_white_missing_keys_fall_back_to_defaults() {
+        // An empty descriptor → Photoshop's default mix, not a panic.
+        let block = versioned_longs("blackAndWhite", &[]);
+        let Some(AdjustmentType::BlackAndWhite { r, y, g, c, b, m }) =
+            parse_adjustment(b"blwh", &block)
+        else {
+            panic!("expected BlackAndWhite");
+        };
+        assert_eq!([r, y, g, c, b, m], [40.0, 60.0, 40.0, 60.0, 20.0, 80.0]);
     }
 }
