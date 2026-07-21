@@ -8,13 +8,15 @@
 //!   ops      - node/segment editing operations              [T1.3] DONE
 //!   flatten  - adaptive Bézier flattening                   [T1.4] DONE
 //!   hittest  - fill/stroke hit-testing                      [T1.5] DONE
-//!   style    - VectorStyle / StrokeStyle                    [T2.2] pending
-//!   color    - ColorValue (RGB/CMYK/opacity)                [T2.1] pending
+//!   color    - ColorValue (RGB/CMYK/opacity)                [T2.1] DONE
+//!   style    - VectorStyle / StrokeStyle                    [T2.2] DONE
 //!   raster   - PathData -> TileMap cache                    [T5.x] pending
 //! These stay declared here as they land; nothing above depends on UI or GPU.
 
 pub mod affine;
+pub mod color;
 pub mod flatten;
 pub mod hittest;
 pub mod ops;
 pub mod path;
+pub mod style;
