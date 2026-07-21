@@ -21,6 +21,7 @@
 // regresses to an error. PSD stores layers bottom→top, matching our stack order.
 
 use super::psd_adjust;
+use super::psd_text;
 use super::{ExportOptions, Exporter, Importer};
 use crate::core::blend::BlendMode;
 use crate::core::canvas::{BitDepth, Canvas};
@@ -484,6 +485,10 @@ struct RawLayer {
     /// even for recognised-but-unmapped types so they are not read as raster.
     adjustment: Option<AdjustmentType>,
     is_adjustment: bool,
+    /// Some when the layer carries a `TySh` type-tool block we decoded into
+    /// editable text; the layer's rasterized pixels are still imported for the
+    /// initial appearance (see the consumption loop).
+    text: Option<crate::core::text::TextData>,
     /// channel id → decoded plane (raw bytes, big-endian samples for 16-bit).
     planes: HashMap<i16, Vec<u8>>,
 }
@@ -703,10 +708,11 @@ fn parse_layer_record(r: &mut Reader, header: &Header) -> Result<RawLayer, Strin
     // Additional layer info: Unicode name ('luni') overrides the Pascal name;
     // section divider ('lsct'/'lsdk') marks group folders; adjustment blocks
     // ('levl'/'hue2'/…) mark — and, when we can map them, define — an adjustment
-    // layer.
+    // layer; the type-tool block ('TySh') carries editable text.
     let mut section = 0u8;
     let mut adjustment: Option<AdjustmentType> = None;
     let mut is_adjustment = false;
+    let mut text = None;
     while es.remaining() >= 12 {
         let sig = es.take(4)?;
         if sig != b"8BIM" && sig != b"8B64" {
@@ -729,6 +735,11 @@ fn parse_layer_record(r: &mut Reader, header: &Header) -> Result<RawLayer, Strin
             b"lsct" | b"lsdk" => {
                 if data.len() >= 4 {
                     section = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u8;
+                }
+            }
+            b"TySh" => {
+                if text.is_none() {
+                    text = psd_text::parse_type_tool(data).map(|t| t.td);
                 }
             }
             _ if psd_adjust::is_adjustment_key(&key) => {
@@ -759,6 +770,7 @@ fn parse_layer_record(r: &mut Reader, header: &Header) -> Result<RawLayer, Strin
         section,
         adjustment,
         is_adjustment,
+        text,
         planes: HashMap::new(),
     })
 }
@@ -955,6 +967,12 @@ fn build_app_layers(raw: &[RawLayer], header: &Header, icc: Option<&[u8]>) -> Ve
                 next_id += 1;
                 if let Some(mut l) = build_raster_layer(id, rl, header, icc) {
                     l.parent_id = stack.last().copied();
+                    // A type-tool ('TySh') layer keeps Photoshop's rasterized
+                    // pixels for a pixel-perfect look, but becomes an editable iAi
+                    // text layer (re-rasterized from `TextData` only on edit).
+                    if let Some(td) = rl.text.clone() {
+                        l.layer_type = crate::core::layer::LayerType::Text(td);
+                    }
                     out.push(l);
                 }
             }
@@ -1750,6 +1768,95 @@ mod tests {
             }
             _ => panic!("expected a Curves adjustment layer"),
         }
+        assert_eq!((layers[1].width, layers[1].height), (2, 1));
+    }
+
+    /// A minimal `TySh` block: identity transform + a text descriptor whose only
+    /// item is the `Txt ` string. Enough to exercise the import wiring.
+    fn tysh_block(text: &str) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(&1u16.to_be_bytes()); // version
+                                                  // identity transform (xx, xy, yx, yy, tx, ty)
+        for x in [1.0f64, 0.0, 0.0, 1.0, 0.0, 0.0] {
+            d.extend_from_slice(&x.to_be_bytes());
+        }
+        d.extend_from_slice(&50u16.to_be_bytes()); // text version
+        d.extend_from_slice(&16u32.to_be_bytes()); // descriptor version
+        d.extend_from_slice(&1u32.to_be_bytes()); // unicode name len (1 = NUL only)
+        d.extend_from_slice(&0u16.to_be_bytes()); // NUL
+        d.extend_from_slice(&4u32.to_be_bytes()); // classID "TxLr"
+        d.extend_from_slice(b"TxLr");
+        d.extend_from_slice(&1u32.to_be_bytes()); // item count
+        d.extend_from_slice(&4u32.to_be_bytes()); // key "Txt "
+        d.extend_from_slice(b"Txt ");
+        d.extend_from_slice(b"TEXT");
+        let units: Vec<u16> = text.encode_utf16().collect();
+        d.extend_from_slice(&(units.len() as u32 + 1).to_be_bytes());
+        for u in units {
+            d.extend_from_slice(&u.to_be_bytes());
+        }
+        d.extend_from_slice(&0u16.to_be_bytes()); // NUL
+        d
+    }
+
+    /// A raster layer that also carries a `TySh` type-tool block, appended to the
+    /// record's extra-data section (with the extra-length field patched to match).
+    fn text_layer_record(name: &str, text: &str) -> (Vec<u8>, Vec<u8>) {
+        let channels: &[(i16, Vec<u8>)] =
+            &[(0, vec![200, 200]), (1, vec![40, 40]), (2, vec![40, 40])];
+        let (mut rec, cdata) = layer_record((0, 0, 1, 2), name, 255, b"norm", 0, None, channels);
+
+        // Build the 8BIM/TySh additional-info block (even-padded).
+        let block = tysh_block(text);
+        let mut tysh = Vec::new();
+        tysh.extend_from_slice(b"8BIM");
+        tysh.extend_from_slice(b"TySh");
+        tysh.extend_from_slice(&(block.len() as u32).to_be_bytes());
+        tysh.extend_from_slice(&block);
+        if block.len() % 2 == 1 {
+            tysh.push(0);
+        }
+
+        // The extra-length u32 sits right after the 4-byte-aligned per-layer header:
+        // 16 (bounds) + 2 (channel count) + 6*n (channel infos) + 4 (8BIM) + 4
+        // (blend) + 4 (opacity/clip/flags/filler). Patch it to include the block.
+        let extra_len_pos = 16 + 2 + 6 * channels.len() + 4 + 4 + 4;
+        let old = u32::from_be_bytes([
+            rec[extra_len_pos],
+            rec[extra_len_pos + 1],
+            rec[extra_len_pos + 2],
+            rec[extra_len_pos + 3],
+        ]);
+        let new = old + tysh.len() as u32;
+        rec[extra_len_pos..extra_len_pos + 4].copy_from_slice(&new.to_be_bytes());
+        rec.extend_from_slice(&tysh);
+        (rec, cdata)
+    }
+
+    #[test]
+    fn imports_text_layer_as_editable() {
+        let base = layer_record(
+            (0, 0, 1, 2),
+            "BG",
+            255,
+            b"norm",
+            0,
+            None,
+            &[(0, vec![1, 1]), (1, vec![1, 1]), (2, vec![1, 1])],
+        );
+        let text = text_layer_record("ignored-pascal", "Hello world");
+        let psd = build_layered_psd(2, 1, &[base, text]);
+        let canvas = import_bytes(&psd).unwrap();
+
+        let layers = &canvas.layer_stack.layers;
+        assert_eq!(layers.len(), 2, "base + text layer");
+        match &layers[1].layer_type {
+            crate::core::layer::LayerType::Text(td) => {
+                assert_eq!(td.content, "Hello world");
+            }
+            other => panic!("expected an editable Text layer, got {other:?}"),
+        }
+        // The rasterized pixels are still imported for the initial appearance.
         assert_eq!((layers[1].width, layers[1].height), (2, 1));
     }
 
