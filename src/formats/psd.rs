@@ -530,6 +530,19 @@ fn import_layer_stack(
         return Ok(None); // mask-only / adjustment-only section: no pixel layers
     }
     let li = s.take(layer_info_len.min(s.remaining()))?;
+    parse_layer_info(li, header, icc)
+}
+
+/// Parse a layer-info blob — 2-byte layer count, then the layer records, then
+/// the channel image data — into a layered canvas. Shared by the PSD Layer &
+/// Mask section and by TIFF's embedded ImageSourceData (`Layr`/`Lr16`). `li`
+/// must begin at the layer count. `Ok(None)` = nothing usable (fall back to the
+/// flat composite).
+fn parse_layer_info(
+    li: &[u8],
+    header: &Header,
+    icc: Option<&[u8]>,
+) -> Result<Option<Canvas>, String> {
     let mut r = Reader::new(li);
 
     let count = r.i16()?.unsigned_abs() as usize;
@@ -568,6 +581,44 @@ fn import_layer_stack(
         return Ok(None);
     }
     Ok(Some(assemble_canvas(app_layers, header, icc)))
+}
+
+/// Parse a Photoshop layer block lifted from a TIFF's ImageSourceData tag (37724)
+/// into a layered canvas — the same editable stack a PSD would yield. `block` is
+/// the `Layr`/`Lr16` block payload; `depth` is 8 or 16 (32-bit is rejected by the
+/// caller). The payload may or may not carry a leading 4-byte layer-info length
+/// (writers differ), so both framings are tried; a wrong guess fails the per-record
+/// `8BIM` signature check and is discarded. `None` → caller uses the flat image.
+pub(crate) fn import_tiff_photoshop_layers(
+    block: &[u8],
+    depth: u16,
+    width: u32,
+    height: u32,
+    icc: Option<&[u8]>,
+    icc_is_srgb: bool,
+) -> Option<Canvas> {
+    if !matches!(depth, 8 | 16) || (depth == 16 && !icc_is_srgb) {
+        return None;
+    }
+    let header = Header {
+        is_psb: false,
+        channels: 3,
+        width,
+        height,
+        depth,
+        color_mode: 3, // RGB — the near-universal case for layered TIFFs
+    };
+    // Framing A: payload begins at the 2-byte layer count.
+    if let Ok(Some(canvas)) = parse_layer_info(block, &header, icc) {
+        return Some(canvas);
+    }
+    // Framing B: payload begins with a 4-byte layer-info length.
+    if block.len() >= 4 {
+        if let Ok(Some(canvas)) = parse_layer_info(&block[4..], &header, icc) {
+            return Some(canvas);
+        }
+    }
+    None
 }
 
 /// Channel dimensions: colour/alpha channels use the layer rect; the user (-2)
@@ -1653,6 +1704,60 @@ mod tests {
         }
         // Adjustment layers are canvas-sized so they cover the whole document.
         assert_eq!((layers[1].width, layers[1].height), (2, 1));
+    }
+
+    /// Build a bare layer-info blob (count + one record + its channel data), the
+    /// payload a TIFF `Layr` block carries.
+    fn one_layer_info_blob() -> Vec<u8> {
+        let l = layer_record(
+            (0, 0, 1, 2),
+            "TiffLayer",
+            255,
+            b"norm",
+            0,
+            None,
+            &[(0, vec![11, 22]), (1, vec![33, 44]), (2, vec![55, 66])],
+        );
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&1i16.to_be_bytes()); // layer count
+        blob.extend_from_slice(&l.0); // record
+        blob.extend_from_slice(&l.1); // channel image data
+        blob
+    }
+
+    #[test]
+    fn tiff_layer_block_count_first_framing() {
+        let block = one_layer_info_blob();
+        let canvas =
+            import_tiff_photoshop_layers(&block, 8, 2, 1, None, true).expect("layered canvas");
+        assert_eq!(canvas.layer_stack.layers.len(), 1);
+        assert_eq!(canvas.layer_stack.layers[0].name, "TiffLayer");
+        assert_eq!(
+            canvas.layer_stack.layers[0].tiles.get_pixel(0, 0),
+            (11, 33, 55, 255)
+        );
+    }
+
+    #[test]
+    fn tiff_layer_block_length_prefixed_framing() {
+        // Some writers prefix the layer info with its 4-byte length; the parser
+        // must fall through framing A (count-first) to framing B.
+        let inner = one_layer_info_blob();
+        let mut block = Vec::new();
+        block.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        block.extend_from_slice(&inner);
+        let canvas =
+            import_tiff_photoshop_layers(&block, 8, 2, 1, None, true).expect("layered canvas");
+        assert_eq!(canvas.layer_stack.layers.len(), 1);
+        assert_eq!(canvas.layer_stack.layers[0].name, "TiffLayer");
+    }
+
+    #[test]
+    fn tiff_layer_block_rejects_garbage_and_32bit() {
+        assert!(import_tiff_photoshop_layers(&[0xAB; 40], 8, 2, 1, None, true).is_none());
+        assert!(
+            import_tiff_photoshop_layers(&one_layer_info_blob(), 32, 2, 1, None, true).is_none()
+        );
     }
 
     #[test]
