@@ -167,7 +167,13 @@ impl App {
         if self.edit.input.painting && self.edit.path_transform.is_none() {
             return None;
         }
-        let (_, t, b) = self.active_path_object()?;
+        let (id, model_t, b) = self.active_path_object()?;
+        // During a handle drag the box tracks `pending` (updated every frame),
+        // not the throttled re-rastered model, so it stays glued to the cursor.
+        let t = match &self.edit.path_transform {
+            Some(d) if d.layer_id == id => d.pending,
+            _ => model_t,
+        };
         let map = |p: Point| {
             let q = t.apply_point(p);
             (q.x, q.y)
@@ -333,11 +339,14 @@ impl App {
             layer_id,
             handle,
             orig_transform: orig,
+            pending: orig,
             local_bounds: lb,
             pivot,
             start_cx: cx,
             start_cy: cy,
             changed: false,
+            last_bake: None,
+            bake_cost_secs: 0.0,
         });
     }
 
@@ -429,19 +438,38 @@ impl App {
         }
     }
 
-    /// Apply the in-progress gesture to `(cx, cy)`, re-rasterising the Path's
-    /// cache live (dirty-rect + partial recomposite, like a Shape handle drag) so
-    /// the object tracks the cursor. The model is mutated directly here; the undo
-    /// entry is recorded once on release.
+    /// Apply the in-progress gesture to `(cx, cy)`. The target transform is stored
+    /// as `pending` every frame (the overlay box follows it smoothly); the fill
+    /// re-raster into the layer is THROTTLED by its own measured cost so a big
+    /// filled path can't stall the drag (which is what made rotation look
+    /// stepped). The undo entry is recorded once on release.
     pub fn path_transform_update(&mut self, cx: f32, cy: f32, shift: bool, alt: bool) {
-        let (new_t, layer_id) = match &self.edit.path_transform {
+        let (new_t, layer_id, bake_due) = match self.edit.path_transform.as_mut() {
             Some(d) => match Self::path_transform_target(d, cx, cy, shift, alt) {
-                Some(t) => (t, d.layer_id),
+                Some(t) => {
+                    d.pending = t;
+                    d.changed = true;
+                    // Keep the raster live when cheap; back off to ~a third duty
+                    // cycle when a bake costs real time (like a Shape handle drag).
+                    let wait = (d.bake_cost_secs * 2.0).clamp(0.0, 0.5);
+                    let due = d
+                        .last_bake
+                        .map_or(true, |t| t.elapsed().as_secs_f32() >= wait);
+                    (t, d.layer_id, due)
+                }
                 None => return,
             },
             None => return,
         };
+        if !bake_due {
+            // The overlay still tracks `pending`; just repaint the frame.
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
 
+        let bake_start = std::time::Instant::now();
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let Some(idx) = canvas
             .layer_stack
@@ -457,7 +485,7 @@ impl App {
                 return;
             };
             if o.transform == new_t {
-                return; // no change this frame
+                return; // already baked at this transform
             }
             (layer.offset, layer.width, layer.height, o.clone())
         };
@@ -476,12 +504,14 @@ impl App {
         };
         canvas.mark_dirty_layer_bounds(old_off.0, old_off.1, old_w, old_h);
         canvas.mark_dirty_layer_bounds(new_off.0, new_off.1, new_w, new_h);
-        if let Some(d) = self.edit.path_transform.as_mut() {
-            d.changed = true;
-        }
         // Pixel-only change: dirty-rect flatten + recomposite, not the full
         // flatten/upload of a structure change.
         self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+        // Measure the full per-frame cost (raster + recomposite) for the throttle.
+        if let Some(d) = self.edit.path_transform.as_mut() {
+            d.bake_cost_secs = bake_start.elapsed().as_secs_f32();
+            d.last_bake = Some(std::time::Instant::now());
+        }
     }
 
     /// Finish the gesture: restore the pre-gesture transform so the gateway
@@ -501,13 +531,22 @@ impl App {
         else {
             return;
         };
-        let final_t = match &canvas.layer_stack.layers[idx].layer_type {
-            LayerType::Path(o) => o.transform,
-            _ => return,
-        };
+        if !matches!(
+            canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Path(_)
+        ) {
+            return;
+        }
+        // Commit `pending` — the true target at release, which the throttled live
+        // re-raster may not have caught up to in the model yet.
+        let final_t = drag.pending;
         if !drag.changed || final_t == drag.orig_transform {
             // Nothing moved — make sure the model is exactly the baseline.
-            if final_t != drag.orig_transform {
+            let model_t = match &canvas.layer_stack.layers[idx].layer_type {
+                LayerType::Path(o) => o.transform,
+                _ => return,
+            };
+            if model_t != drag.orig_transform {
                 let layer = &mut canvas.layer_stack.layers[idx];
                 if let LayerType::Path(o) = &layer.layer_type {
                     let mut o = o.clone();
@@ -551,11 +590,14 @@ mod tests {
             layer_id: 1,
             handle,
             orig_transform: AffineTransform::IDENTITY,
+            pending: AffineTransform::IDENTITY,
             local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             pivot: Point::new(50.0, 50.0),
             start_cx: 100.0,
             start_cy: 50.0,
             changed: false,
+            last_bake: None,
+            bake_cost_secs: 0.0,
         }
     }
 

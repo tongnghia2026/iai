@@ -693,9 +693,13 @@ pub struct ShapeDragState {
 /// An in-progress on-canvas transform of a Path layer under the Move tool:
 /// dragging a corner/edge handle scales, dragging the rotate ring outside a
 /// corner rotates. The gesture edits the vector object's affine `transform`
-/// (never bakes node coordinates), re-rasterising the cache live; on release it
-/// records ONE [`crate::core::command_vector::ChangeVectorTransform`] so the
-/// object stays editable and the edit is a single undo step.
+/// (never bakes node coordinates); on release it records ONE
+/// [`crate::core::command_vector::ChangeVectorTransform`] so the object stays
+/// editable and the edit is a single undo step.
+///
+/// The overlay box follows `pending` every frame (smooth at 60 fps) while the
+/// fill re-raster is throttled by its own measured cost — rasterising a big
+/// filled path each frame stalls the drag and makes a rotation look stepped.
 pub struct PathTransformDrag {
     pub layer_id: u32,
     /// The grabbed handle. `Some(h)` = scale via that handle; `None` = rotate.
@@ -703,8 +707,11 @@ pub struct PathTransformDrag {
     /// Object `transform` captured at press (after folding any pending Move
     /// drag). The undo baseline AND the frame every drag frame recomputes from.
     pub orig_transform: crate::core::vector::affine::AffineTransform,
+    /// Latest target transform for this cursor position. Drives the overlay box
+    /// every frame and is committed on release, independent of the throttled bake.
+    pub pending: crate::core::vector::affine::AffineTransform,
     /// Fill geometry bounds in OBJECT-LOCAL space at press: its four corners map
-    /// through `orig_transform` to the displayed box.
+    /// through the transform to the displayed box.
     pub local_bounds: crate::core::geometry::Rect,
     /// Canvas-space pivot (box centre) at press — the rotation centre.
     pub pivot: crate::core::geometry::Point,
@@ -714,6 +721,10 @@ pub struct PathTransformDrag {
     /// True once the gesture actually changed the transform (so a no-op click on
     /// a handle pushes no undo entry).
     pub changed: bool,
+    /// When the last live re-raster finished + how long it took, setting the
+    /// throttle so a heavy fill can't stall the drag.
+    pub last_bake: Option<Instant>,
+    pub bake_cost_secs: f32,
 }
 
 /// A deferred options-bar style edit (Radius/Stroke/colour scrub) for a Shape
