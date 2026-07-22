@@ -160,6 +160,7 @@ impl MoveTool {
                 LayerType::Raster
                     | LayerType::Text(_)
                     | LayerType::Shape(_)
+                    | LayerType::Path(_)
                     | LayerType::SmartObject
             )
     }

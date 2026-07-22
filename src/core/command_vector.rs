@@ -47,6 +47,37 @@ pub(crate) fn apply_object_to_layer(layer: &mut Layer, object: VectorObjectData)
     layer.layer_type = LayerType::Path(object);
 }
 
+/// Reconcile a Path layer's `Layer::offset` INTO its model, then re-derive the
+/// raster. A Move-tool drag shifts `offset` (the general layer-move path) without
+/// touching the model, but the model is the source of truth for position and the
+/// offset is otherwise DERIVED from it (`apply_object_to_layer` sets it to the
+/// model's raster origin). This bakes any such drag into the model transform so
+/// the two agree again — at the SAME on-canvas position — which is what lets a
+/// dragged Path survive a reload and lets a later rotate pivot about the displayed
+/// centre. A no-op offset (already in sync) still re-derives the raster from the
+/// model, so this doubles as the cache-rebuild step. Called on load and before a
+/// model edit that must respect a pending drag.
+pub(crate) fn fold_offset_into_model(layer: &mut Layer) {
+    let LayerType::Path(obj) = &layer.layer_type else {
+        return;
+    };
+    let obj = obj.clone();
+    let Some(r) = raster::rasterize(&obj) else {
+        return;
+    };
+    let dx = (layer.offset.0 - r.offset.0) as f32;
+    let dy = (layer.offset.1 - r.offset.1) as f32;
+    let obj = if dx != 0.0 || dy != 0.0 {
+        VectorObjectData {
+            transform: AffineTransform::translate(dx, dy).then(&obj.transform),
+            ..obj
+        }
+    } else {
+        obj
+    };
+    apply_object_to_layer(layer, obj);
+}
+
 /// The current Path model on layer `id`, or an error if it is missing / not a
 /// Path layer. Shared by the model-edit commands.
 fn path_object(ctx: &EditContext, id: u32) -> Result<VectorObjectData, String> {
@@ -628,6 +659,39 @@ mod tests {
         assert!(
             corner[0] > 240 && corner[1] > 240 && corner[2] > 240,
             "background visible, got {corner:?}"
+        );
+    }
+
+    #[test]
+    fn drag_then_rebuild_preserves_position() {
+        let mut c = canvas();
+        let mut cmd = CreatePathLayer::new(obj(40.0), "Path 1");
+        cmd.execute(&mut edit_ctx(&mut c)).unwrap();
+        let id = cmd.created_id().unwrap();
+        c.record(Box::new(cmd));
+        let off0 = current_offset(&c, id);
+
+        // Simulate a Move-tool drag: shift the layer offset (model untouched).
+        c.layer_stack
+            .layers
+            .iter_mut()
+            .find(|l| l.id == id)
+            .unwrap()
+            .offset = (off0.0 + 25, off0.1 - 10);
+
+        // Reload path: rebuild folds the drag into the model, keeping the position.
+        c.rebuild_path_caches();
+        assert_eq!(
+            current_offset(&c, id),
+            (off0.0 + 25, off0.1 - 10),
+            "dragged position survives rebuild"
+        );
+        // Now offset matches the model, so a further rebuild does not drift it.
+        c.rebuild_path_caches();
+        assert_eq!(
+            current_offset(&c, id),
+            (off0.0 + 25, off0.1 - 10),
+            "fold is idempotent"
         );
     }
 

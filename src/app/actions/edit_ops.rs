@@ -7,6 +7,29 @@ use crate::core::document::GuideOrientation;
 use crate::core::snapping::{snap_1d, SnapKind, SNAP_THRESHOLD_PX};
 use crate::ui::{LayerAlign, MoveTransformAction};
 
+/// The affine that rotates/flips a vector object about the layer-space pivot
+/// `(cx,cy)` — `T(c) ∘ M ∘ T(-c)`. Composed onto the object's transform so a
+/// Path's model (not its baked tiles) carries the rotation and stays editable.
+/// Screen space has y down, so a positive rotation reads clockwise.
+fn vector_action_pivot(
+    action: MoveTransformAction,
+    cx: f32,
+    cy: f32,
+) -> crate::core::vector::affine::AffineTransform {
+    use crate::core::vector::affine::AffineTransform;
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let m = match action {
+        MoveTransformAction::Rotate90Cw => AffineTransform::rotate(FRAC_PI_2),
+        MoveTransformAction::Rotate90Ccw => AffineTransform::rotate(-FRAC_PI_2),
+        MoveTransformAction::Rotate180 => AffineTransform::rotate(PI),
+        MoveTransformAction::FlipHorizontal => AffineTransform::scale(-1.0, 1.0),
+        MoveTransformAction::FlipVertical => AffineTransform::scale(1.0, -1.0),
+    };
+    AffineTransform::translate(cx, cy)
+        .then(&m)
+        .then(&AffineTransform::translate(-cx, -cy))
+}
+
 /// New `(offset_x, offset_y, width, height)` for a layer flipped/rotated within the
 /// group union box `[ux0,uy0]` sized `union_w × union_h`, keeping the union's
 /// CENTRE fixed. Rotating a non-square box only swaps its dimensions, so anchoring
@@ -199,6 +222,7 @@ impl App {
                         LayerType::Raster
                             | LayerType::Text(_)
                             | LayerType::Shape(_)
+                            | LayerType::Path(_)
                             | LayerType::SmartObject
                     )
             };
@@ -324,6 +348,7 @@ impl App {
                     LayerType::Raster
                         | LayerType::Text(_)
                         | LayerType::Shape(_)
+                        | LayerType::Path(_)
                         | LayerType::SmartObject
                 )
         }
@@ -451,6 +476,29 @@ impl App {
 
                         for idx in targets {
                             let layer = &mut canvas.layer_stack.layers[idx];
+                            // Vector Path: rotate/flip the MODEL (about the object's
+                            // displayed centre) and re-derive the raster, so the
+                            // object stays editable and survives rebuild_path_caches
+                            // on reload. Never bake the tiles (Mục 3.2).
+                            if matches!(layer.layer_type, LayerType::Path(_)) {
+                                // Reconcile any pending Move-tool drag first so the
+                                // pivot is the displayed centre, not the stale model.
+                                crate::core::command_vector::fold_offset_into_model(layer);
+                                if let LayerType::Path(obj) = &layer.layer_type {
+                                    let mut obj = obj.clone();
+                                    let (cx, cy) = obj
+                                        .layer_bounds(0.25)
+                                        .map(|b| (b.x + b.w * 0.5, b.y + b.h * 0.5))
+                                        .unwrap_or((0.0, 0.0));
+                                    obj.transform =
+                                        vector_action_pivot(action, cx, cy).then(&obj.transform);
+                                    crate::core::command_vector::apply_object_to_layer(layer, obj);
+                                }
+                                if let Some(mask) = &mut layer.mask {
+                                    transform_mask(mask, action);
+                                }
+                                continue;
+                            }
                             let (nox, noy, nw, nh) = transformed_layer_placement(
                                 action,
                                 ux0,
@@ -873,5 +921,124 @@ mod tests {
         assert_eq!((canvas.width, canvas.height), (400, 600));
         assert_eq!(bg.offset, (0, 0));
         assert_eq!((bg.width, bg.height), (400, 600));
+    }
+
+    fn rect_path_object(
+        w: f32,
+        h: f32,
+        tx: f32,
+        ty: f32,
+    ) -> crate::core::vector::object::VectorObjectData {
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(w, 0.0)),
+                    Node::sharp(Point::new(w, h)),
+                    Node::sharp(Point::new(0.0, h)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        VectorObjectData::new(
+            path,
+            VectorStyle::default(),
+            AffineTransform::translate(tx, ty),
+        )
+    }
+
+    #[test]
+    fn vector_rotate_swaps_dims_keeps_centre_and_round_trips() {
+        use super::vector_action_pivot;
+        let obj = rect_path_object(40.0, 20.0, 100.0, 50.0);
+        let b0 = obj.layer_bounds(0.1).unwrap();
+        let (cx, cy) = (b0.x + b0.w * 0.5, b0.y + b0.h * 0.5);
+
+        let mut rot = obj.clone();
+        rot.transform =
+            vector_action_pivot(MoveTransformAction::Rotate90Cw, cx, cy).then(&rot.transform);
+        let b1 = rot.layer_bounds(0.1).unwrap();
+        assert!(
+            (b1.w - b0.h).abs() < 0.5 && (b1.h - b0.w).abs() < 0.5,
+            "90° swaps width/height: {b1:?}"
+        );
+        assert!(
+            ((b1.x + b1.w * 0.5) - cx).abs() < 0.5 && ((b1.y + b1.h * 0.5) - cy).abs() < 0.5,
+            "centre kept fixed"
+        );
+
+        // Rotating back restores the original placement.
+        rot.transform =
+            vector_action_pivot(MoveTransformAction::Rotate90Ccw, cx, cy).then(&rot.transform);
+        let b2 = rot.layer_bounds(0.1).unwrap();
+        assert!(
+            (b2.x - b0.x).abs() < 0.5 && (b2.y - b0.y).abs() < 0.5 && (b2.w - b0.w).abs() < 0.5,
+            "CW then CCW round-trips: {b2:?} vs {b0:?}"
+        );
+    }
+
+    #[test]
+    fn move_transform_keeps_path_editable_not_baked() {
+        use crate::core::command_vector::CreatePathLayer;
+        use crate::core::gateway::ChangeKind;
+        use crate::core::layer::LayerType;
+
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let id = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            canvas
+                .execute(
+                    Box::new(CreatePathLayer::new(
+                        rect_path_object(40.0, 20.0, 50.0, 60.0),
+                        "Path 1",
+                    )),
+                    ChangeKind::LayerStructure,
+                )
+                .unwrap();
+            let idx = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .position(|l| matches!(l.layer_type, LayerType::Path(_)))
+                .unwrap();
+            canvas.layer_stack.layers[idx].selected = true;
+            canvas.layer_stack.active_idx = idx;
+            canvas.layer_stack.layers[idx].id
+        };
+        let (w0, h0) = {
+            let l = find_layer(&app, id);
+            (l.width as i32, l.height as i32)
+        };
+
+        app.apply_move_transform_action(MoveTransformAction::Rotate90Cw);
+
+        let l = find_layer(&app, id);
+        assert!(
+            matches!(l.layer_type, LayerType::Path(_)),
+            "Path stays an editable vector after rotate (tiles not baked to Raster)"
+        );
+        assert!(
+            (l.width as i32 - h0).abs() <= 2 && (l.height as i32 - w0).abs() <= 2,
+            "90° swapped the raster dims: {}x{} was {w0}x{h0}",
+            l.width,
+            l.height
+        );
+    }
+
+    fn find_layer(app: &App, id: u32) -> &crate::core::layer::Layer {
+        app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == id)
+            .unwrap()
     }
 }

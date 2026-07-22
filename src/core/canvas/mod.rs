@@ -802,9 +802,10 @@ impl Canvas {
         use crate::core::layer::LayerType;
         let mut any = false;
         for layer in &mut self.layer_stack.layers {
-            if let LayerType::Path(obj) = &layer.layer_type {
-                let obj = obj.clone();
-                crate::core::command_vector::apply_object_to_layer(layer, obj);
+            if matches!(layer.layer_type, LayerType::Path(_)) {
+                // Folds a saved Move-tool drag (offset ≠ model) back into the
+                // model AND re-derives the raster from the model.
+                crate::core::command_vector::fold_offset_into_model(layer);
                 any = true;
             }
         }
