@@ -1000,34 +1000,47 @@ impl App {
                     self.edit.tools.active_id(),
                     ToolId::PolygonLasso | ToolId::Pen
                 ) {
+                    // Pen in Path mode commits an editable vector layer, which
+                    // needs app-level (layer-structure) invalidation — handle it
+                    // before building the raster ToolCtx. Ctrl+Enter still forces
+                    // a selection regardless of mode.
+                    if self.edit.tools.active_id() == ToolId::Pen
+                        && !self.edit.input.ctrl_held
+                        && self.edit.tools.pen().mode == crate::tools::pen::PenMode::Path
                     {
-                        let mut ctx = ToolCtx::new(
-                            &mut self.docs.documents[self.docs.active_doc_idx],
-                            self.edit.fg_color,
-                            self.edit.bg_color,
-                            self.edit.view.zoom,
-                            self.edit.view.offset_x,
-                            self.edit.view.offset_y,
-                        );
-                        // Ctrl+Enter forces a Pen path to a selection,
-                        // regardless of its Selection/Fill/Stroke mode.
-                        if self.edit.input.ctrl_held && self.edit.tools.active_id() == ToolId::Pen {
-                            self.edit
-                                .tools
-                                .pen_mut()
-                                .commit_as_selection(ctx.canvas_mut());
-                        } else {
-                            self.edit.tools.active_on_confirm(&mut ctx);
+                        self.commit_pen_as_path();
+                    } else {
+                        {
+                            let mut ctx = ToolCtx::new(
+                                &mut self.docs.documents[self.docs.active_doc_idx],
+                                self.edit.fg_color,
+                                self.edit.bg_color,
+                                self.edit.view.zoom,
+                                self.edit.view.offset_x,
+                                self.edit.view.offset_y,
+                            );
+                            // Ctrl+Enter forces a Pen path to a selection,
+                            // regardless of its Selection/Fill/Stroke mode.
+                            if self.edit.input.ctrl_held
+                                && self.edit.tools.active_id() == ToolId::Pen
+                            {
+                                self.edit
+                                    .tools
+                                    .pen_mut()
+                                    .commit_as_selection(ctx.canvas_mut());
+                            } else {
+                                self.edit.tools.active_on_confirm(&mut ctx);
+                            }
                         }
-                    }
-                    self.docs.documents[self.docs.active_doc_idx]
-                        .canvas
-                        .selection
-                        .refresh_bbox();
-                    self.upload_selection_mask();
-                    self.push_selection_uniforms();
-                    if let Some(w) = &self.win.window {
-                        w.request_redraw();
+                        self.docs.documents[self.docs.active_doc_idx]
+                            .canvas
+                            .selection
+                            .refresh_bbox();
+                        self.upload_selection_mask();
+                        self.push_selection_uniforms();
+                        if let Some(w) = &self.win.window {
+                            w.request_redraw();
+                        }
                     }
                 }
             }

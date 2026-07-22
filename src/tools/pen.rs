@@ -18,8 +18,11 @@
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::geometry::{cubic_bezier, Point};
 use crate::core::selection::SelectionMode;
+use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::flatten;
+use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
+use crate::core::vector::style::VectorStyle;
 
 /// Grab radius (screen px) for hitting an anchor or handle dot — clicking within
 /// this of the first anchor closes the path, of any other moves it; Alt-click
@@ -43,6 +46,8 @@ pub enum PenMode {
     Fill,
     /// Stroke the path outline with the foreground colour.
     Stroke,
+    /// Commit as an editable vector Path layer (Bước 4 / T4.4).
+    Path,
 }
 
 impl PenMode {
@@ -51,12 +56,14 @@ impl PenMode {
             PenMode::Selection => 0,
             PenMode::Fill => 1,
             PenMode::Stroke => 2,
+            PenMode::Path => 3,
         }
     }
     pub fn from_u8(v: u8) -> PenMode {
         match v {
             1 => PenMode::Fill,
             2 => PenMode::Stroke,
+            3 => PenMode::Path,
             _ => PenMode::Selection,
         }
     }
@@ -445,8 +452,35 @@ impl PenTool {
                     }
                 }
             }
+            // Committing a Path layer needs app-level invalidation (a new layer),
+            // so the app calls `take_path_object` directly. Reaching here without
+            // that routing leaves the path intact instead of dropping it.
+            PenMode::Path => return,
         }
         self.clear();
+    }
+
+    /// Take the drawn path as an editable vector object for a Path-layer commit
+    /// (Bước 4 / T4.4), clearing the in-progress path. `None` when there are fewer
+    /// than two anchors (no segment). A ≥3-anchor path is closed like
+    /// Selection/Fill so a drawn shape fills as expected. The object starts at the
+    /// default style (solid black fill) and identity transform; geometry is in
+    /// canvas space, which for the single implicit page equals layer space
+    /// (Mục 3.4 / 3.13).
+    pub fn take_path_object(&mut self) -> Option<VectorObjectData> {
+        if self.anchors.len() >= 3 {
+            self.closed = true;
+        }
+        if self.anchors.len() < 2 {
+            return None;
+        }
+        let path = self.to_path_data();
+        self.clear();
+        Some(VectorObjectData::new(
+            path,
+            VectorStyle::default(),
+            AffineTransform::IDENTITY,
+        ))
     }
 
     pub fn clear(&mut self) {
@@ -812,6 +846,31 @@ mod tests {
         }
         assert!(doc.canvas.selection.active);
         assert!(t.is_empty()); // cleared after commit
+    }
+
+    #[test]
+    fn take_path_object_builds_closed_shape_and_clears() {
+        let mut t = PenTool::new();
+        t.anchors = vec![
+            PenAnchor::corner((20.0, 20.0)),
+            PenAnchor::corner((160.0, 30.0)),
+            PenAnchor::corner((140.0, 150.0)),
+        ];
+        let obj = t.take_path_object().expect("object");
+        assert!(t.is_empty(), "pen cleared after commit");
+        let c = &obj.path.contours[0];
+        assert!(c.closed, "≥3-anchor path closes like Selection/Fill");
+        assert_eq!(c.nodes.len(), 3);
+        // Default style is the visible solid-black fill.
+        assert!(obj.style.fill.is_visible());
+        assert_eq!(obj.transform, AffineTransform::IDENTITY);
+    }
+
+    #[test]
+    fn take_path_object_needs_two_anchors() {
+        let mut t = PenTool::new();
+        t.anchors = vec![PenAnchor::corner((20.0, 20.0))];
+        assert!(t.take_path_object().is_none());
     }
 
     #[test]

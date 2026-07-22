@@ -236,7 +236,12 @@ fn pen_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
     ui.label("On Enter:");
     let mut mode = data.tool.pen_mode;
-    for (v, name) in [(0u8, "Selection"), (1, "Fill"), (2, "Stroke")] {
+    for (v, name) in [
+        (0u8, "Selection"),
+        (1, "Fill"),
+        (2, "Stroke"),
+        (3, "Path (Vector)"),
+    ] {
         if ui.selectable_value(&mut mode, v, name).changed() {
             actions.tool.set_pen_mode = Some(mode);
         }
