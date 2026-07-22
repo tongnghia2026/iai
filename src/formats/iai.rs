@@ -336,6 +336,11 @@ fn build_canvas_from_meta<R: Read + Seek>(
         }
     }
 
+    // Path layers: re-derive the raster cache from the restored model so the
+    // model — not the baked PNG fallback — is authoritative on reopen (Muc 3.8,
+    // Buoc 5). No-op when there are no Path layers.
+    canvas.rebuild_path_caches();
+
     canvas.flatten_full();
     Ok(canvas)
 }

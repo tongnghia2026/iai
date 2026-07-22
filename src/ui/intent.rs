@@ -107,6 +107,8 @@ pub struct LayerIntent {
     pub duplicate_layer: Option<usize>,
     pub layer_via_copy: bool,
     pub remove_layer: Option<usize>,
+    /// Bake a vector Path layer (this index) down to a plain raster layer.
+    pub rasterize_layer: Option<usize>,
     pub select_layer: Option<(usize, bool, bool)>,
     /// Ctrl+click a layer's thumbnail → load that layer's alpha as a selection.
     pub load_layer_selection: Option<usize>,

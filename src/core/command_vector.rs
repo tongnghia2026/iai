@@ -26,7 +26,10 @@ use crate::core::vector::style::VectorStyle;
 /// raster (tiles/width/height/offset) is derived state, so this fully replaces it
 /// — no cache is stored in history. On a CMYK document the RGB mirror written here
 /// is turned into ink planes afterwards by [`Canvas::reconcile_path_ink`].
-fn apply_object_to_layer(layer: &mut Layer, object: VectorObjectData) {
+///
+/// Shared with [`crate::core::canvas::Canvas::rebuild_path_caches`] (rebuild the
+/// cache from the model on load) so both paths derive tiles identically.
+pub(crate) fn apply_object_to_layer(layer: &mut Layer, object: VectorObjectData) {
     match raster::rasterize(&object) {
         Some(r) => {
             layer.tiles = TileMap::from_rgba(&r.rgba, r.width, r.height);
@@ -322,6 +325,70 @@ impl Command for ChangeVectorTransform {
     }
 }
 
+// ── RasterizeVectorLayer ─────────────────────────────────────────────────────
+
+/// Bake a Path layer down to a plain Raster layer (Mục 3.7 / T5.3): the rendered
+/// tiles are kept as-is (the raster is already the cache), only the vector model
+/// is dropped so raster tools may paint directly. This is the explicit, opt-in
+/// Rasterize policy — raster tools never silently rasterize a vector layer
+/// (Mục 3.2). Undo restores the model; the tiles never change, so it is visually
+/// a no-op in both directions.
+pub struct RasterizeVectorLayer {
+    layer_id: u32,
+    model: Option<VectorObjectData>,
+}
+
+impl RasterizeVectorLayer {
+    pub fn new(layer_id: u32) -> Self {
+        Self {
+            layer_id,
+            model: None,
+        }
+    }
+}
+
+impl Command for RasterizeVectorLayer {
+    fn execute(&mut self, ctx: &mut EditContext) -> Result<(), String> {
+        let layer = ctx
+            .layers
+            .layers
+            .iter_mut()
+            .find(|l| l.id == self.layer_id)
+            .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
+        match std::mem::replace(&mut layer.layer_type, LayerType::Raster) {
+            LayerType::Path(obj) => {
+                self.model = Some(obj);
+                Ok(())
+            }
+            other => {
+                // Not a Path layer: put the type back and refuse.
+                layer.layer_type = other;
+                Err(format!("Layer {} is not a Path layer", self.layer_id))
+            }
+        }
+    }
+
+    fn undo(&mut self, ctx: &mut EditContext) -> Result<(), String> {
+        let obj = self.model.clone().ok_or("nothing to undo")?;
+        let layer = ctx
+            .layers
+            .layers
+            .iter_mut()
+            .find(|l| l.id == self.layer_id)
+            .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
+        layer.layer_type = LayerType::Path(obj);
+        Ok(())
+    }
+
+    fn label(&self) -> &str {
+        "Rasterize Path"
+    }
+
+    fn memory_bytes(&self) -> usize {
+        self.model.as_ref().map_or(0, |o| o.path.total_nodes() * 40)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,6 +557,99 @@ mod tests {
             .unwrap_err();
         assert!(err.message.contains("not found"));
         assert!(!c.is_dirty(), "failed command must not dirty the document");
+    }
+
+    #[test]
+    fn rasterize_converts_to_raster_and_undo_restores_model() {
+        let mut c = canvas();
+        let mut cmd = CreatePathLayer::new(obj(40.0), "Path 1");
+        cmd.execute(&mut edit_ctx(&mut c)).unwrap();
+        let id = cmd.created_id().unwrap();
+        c.record(Box::new(cmd));
+        let tiles_before = c
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == id)
+            .unwrap()
+            .tiles
+            .tiles
+            .len();
+
+        c.execute(
+            Box::new(RasterizeVectorLayer::new(id)),
+            ChangeKind::LayerStructure,
+        )
+        .expect("rasterize");
+        let l = c.layer_stack.layers.iter().find(|l| l.id == id).unwrap();
+        assert!(
+            matches!(l.layer_type, LayerType::Raster),
+            "now a raster layer"
+        );
+        // The rendered tiles are kept verbatim (visually a no-op).
+        assert_eq!(l.tiles.tiles.len(), tiles_before);
+
+        c.undo().expect("undo");
+        assert!(matches!(
+            c.layer_stack
+                .layers
+                .iter()
+                .find(|l| l.id == id)
+                .unwrap()
+                .layer_type,
+            LayerType::Path(_)
+        ));
+    }
+
+    #[test]
+    fn path_layer_composites_into_flattened_canvas() {
+        // A red path over the white background must show through the compositor:
+        // this is the Bước 5 "raster cache feeds the existing compositor" check,
+        // exercised on the CPU flatten path (the GPU atlas reads the same tiles).
+        let mut c = canvas(); // white 100×100
+        c.execute(
+            Box::new(CreatePathLayer::new(obj(40.0), "Path 1")),
+            ChangeKind::LayerStructure,
+        )
+        .expect("create");
+        let flat = c.export_flat();
+        let px = |x: usize, y: usize| {
+            let i = (y * 100 + x) * 4;
+            [flat[i], flat[i + 1], flat[i + 2]]
+        };
+        // Centre of the red square (object at translate(30,30), side 40 → ~50,50).
+        let cen = px(50, 50);
+        assert!(
+            cen[0] > 200 && cen[1] < 60 && cen[2] < 60,
+            "path fill composited, got {cen:?}"
+        );
+        // A corner still shows the white background.
+        let corner = px(2, 2);
+        assert!(
+            corner[0] > 240 && corner[1] > 240 && corner[2] > 240,
+            "background visible, got {corner:?}"
+        );
+    }
+
+    #[test]
+    fn rebuild_path_caches_re_derives_tiles_from_model() {
+        let mut c = canvas();
+        let mut cmd = CreatePathLayer::new(obj(40.0), "Path 1");
+        cmd.execute(&mut edit_ctx(&mut c)).unwrap();
+        let id = cmd.created_id().unwrap();
+        c.record(Box::new(cmd));
+
+        // Simulate a missing/corrupt cache (e.g. a file with no baked PNG).
+        c.layer_stack
+            .layers
+            .iter_mut()
+            .find(|l| l.id == id)
+            .unwrap()
+            .tiles = TileMap::new(1, 1);
+
+        c.rebuild_path_caches();
+        let l = c.layer_stack.layers.iter().find(|l| l.id == id).unwrap();
+        assert!(!l.tiles.tiles.is_empty(), "cache re-derived from the model");
     }
 
     // ── helpers ──

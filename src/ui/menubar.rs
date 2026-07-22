@@ -590,6 +590,20 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.layers.remove_layer = Some(data.layers.active_layer_idx);
                             ui.close();
                         }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Rasterize Layer",
+                                "",
+                                data.layers
+                                    .layer_types
+                                    .get(data.layers.active_layer_idx)
+                                    .is_some_and(|t| t == "Path"),
+                            ))
+                            .clicked()
+                        {
+                            actions.layers.rasterize_layer = Some(data.layers.active_layer_idx);
+                            ui.close();
+                        }
                         ui.separator();
                         ui.menu_button("New Adjustment Layer", |ui| {
                             use crate::core::layer::AdjustmentType;

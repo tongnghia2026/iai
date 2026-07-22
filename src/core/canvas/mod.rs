@@ -792,6 +792,28 @@ impl Canvas {
         }
     }
 
+    /// Re-derive every Path layer's raster cache from its model (Bước 5 / T5.2).
+    /// The model is the source of truth; the cache must be rebuildable from it
+    /// (Mục 3.8). Called after loading an `.iai` so a reopened document renders
+    /// from the model rather than trusting the baked PNG fallback, and as a
+    /// recovery path when a cache is missing/corrupt. No-op when there are no
+    /// Path layers.
+    pub fn rebuild_path_caches(&mut self) {
+        use crate::core::layer::LayerType;
+        let mut any = false;
+        for layer in &mut self.layer_stack.layers {
+            if let LayerType::Path(obj) = &layer.layer_type {
+                let obj = obj.clone();
+                crate::core::command_vector::apply_object_to_layer(layer, obj);
+                any = true;
+            }
+        }
+        if any {
+            self.reconcile_path_ink();
+            self.layer_revision += 1;
+        }
+    }
+
     /// Monotonic stamp of the history stacks. The History panel keys its cache
     /// off this, so it cannot go stale.
     pub fn history_revision(&self) -> u64 {
