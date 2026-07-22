@@ -1,6 +1,6 @@
 mod open;
 mod pdf_session;
-mod save_export;
+pub(crate) mod save_export;
 
 use super::state::App;
 use crate::core::canvas::{Canvas, CanvasMetadata};

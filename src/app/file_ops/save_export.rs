@@ -899,7 +899,7 @@ impl App {
 /// they are fully opaque, unmasked and Normal-blend — anything else stays in the
 /// raster so the output is always visually correct. Geometry comes out in canvas
 /// pixel space (transform applied); the PDF writer maps it to points.
-fn collect_pdf_vectors(
+pub(crate) fn collect_pdf_vectors(
     canvas: &crate::core::canvas::Canvas,
 ) -> Vec<crate::core::print::PdfVectorObject> {
     use crate::core::layer::{BlendMode, LayerType};

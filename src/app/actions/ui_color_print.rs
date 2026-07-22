@@ -309,6 +309,18 @@ impl App {
                     None
                 };
                 let ink_native = ink_page.is_some();
+                // Crisp vector overlay for RGB pages: the same qualifying Path
+                // layers the File ▸ Export path draws as true PDF vectors, so a
+                // Ctrl+P Save-as-PDF / send-to-printer is resolution-independent
+                // too (it used to be pure raster → "PDF răng cưa"). CMYK ink
+                // pages stay pure raster (empty overlay).
+                let page_vectors = if ink_native {
+                    Vec::new()
+                } else {
+                    crate::app::file_ops::save_export::collect_pdf_vectors(
+                        &self.docs.documents[self.docs.active_doc_idx].canvas,
+                    )
+                };
                 // Small canvases keep the exact flat path; past the flat-buffer
                 // cap the page is composited and zlib-encoded in row bands
                 // (Viewport Streaming) - same bytes, no canvas-sized buffer.
@@ -327,7 +339,15 @@ impl App {
                             layout.intent.to_lcms(),
                         );
                     }
-                    crate::core::print::build_pdf(&rgba, cw, ch, dpi, &layout, pdf_icc)
+                    crate::core::print::build_pdf_with_vectors(
+                        &rgba,
+                        cw,
+                        ch,
+                        dpi,
+                        &page_vectors,
+                        &layout,
+                        pdf_icc,
+                    )
                 } else {
                     let mut stack = self.docs.documents[self.docs.active_doc_idx]
                         .canvas
@@ -344,7 +364,14 @@ impl App {
                         }
                         Ok(band)
                     })
-                    .and_then(|page| crate::core::print::build_pdf_encoded(&page, &layout, pdf_icc))
+                    .and_then(|page| {
+                        crate::core::print::build_pdf_encoded_with_vectors(
+                            &page,
+                            &page_vectors,
+                            &layout,
+                            pdf_icc,
+                        )
+                    })
                 };
                 match pdf_result {
                     Ok(pdf) => {

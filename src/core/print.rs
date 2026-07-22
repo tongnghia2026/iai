@@ -225,6 +225,21 @@ pub fn build_pdf(
     layout: &PrintLayout,
     icc: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
+    build_pdf_with_vectors(rgba, w, h, dpi, &[], layout, icc)
+}
+
+/// Like [`build_pdf`], but overlays crisp vector paths (see [`PdfVectorObject`])
+/// over the flattened RGB image, so a Path layer prints resolution-independent
+/// through the print/Save-as-PDF path just like the File ▸ Export path.
+pub fn build_pdf_with_vectors(
+    rgba: &[u8],
+    w: u32,
+    h: u32,
+    dpi: f32,
+    vectors: &[PdfVectorObject],
+    layout: &PrintLayout,
+    icc: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
     if w == 0 || h == 0 {
         return Err("Empty image, cannot print".into());
     }
@@ -239,7 +254,7 @@ pub fn build_pdf(
         dpi,
         components: 3,
     };
-    build_pdf_encoded(&page, layout, icc)
+    build_pdf_encoded_with_vectors(&page, vectors, layout, icc)
 }
 
 /// Row-band height pulled per callback by [`encode_pdf_page_streamed`].
@@ -292,6 +307,18 @@ pub fn build_pdf_encoded(
     layout: &PrintLayout,
     icc: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
+    build_pdf_encoded_with_vectors(page, &[], layout, icc)
+}
+
+/// Like [`build_pdf_encoded`], but overlays crisp vector paths (see
+/// [`PdfVectorObject`]) on an RGB page. CMYK ink pages ignore `vectors` so their
+/// DeviceCMYK colour space is never mixed with sRGB, matching the multipage path.
+pub fn build_pdf_encoded_with_vectors(
+    page: &EncodedPdfPage,
+    vectors: &[PdfVectorObject],
+    layout: &PrintLayout,
+    icc: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
     let (w, h, dpi) = (page.w, page.h, page.dpi);
     let compressed = &page.compressed_rgb;
 
@@ -318,9 +345,13 @@ pub fn build_pdf_encoded(
         .as_bytes(),
     );
 
-    let content = format!(
+    let mut content = format!(
         "q\n{clip_x:.2} {clip_y:.2} {clip_w:.2} {clip_h:.2} re W n\n{dw:.2} 0 0 {dh:.2} {tx:.2} {ty:.2} cm\n/Im0 Do\nQ\n"
     );
+    // Overlay crisp vector paths on RGB pages (CMYK ink pages stay pure raster).
+    if page.components == 3 {
+        append_vector_content(&mut content, vectors, w, h, dw, dh, tx, ty);
+    }
     offsets.push(pdf.len());
     pdf.extend_from_slice(format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes());
     pdf.extend_from_slice(content.as_bytes());
@@ -1238,6 +1269,58 @@ mod tests {
     #[test]
     fn build_pdf_multipage_rejects_empty() {
         assert!(build_pdf_multipage(&[], None).is_err());
+    }
+
+    #[test]
+    fn single_page_print_pdf_embeds_vector_path_operators() {
+        use crate::core::geometry::Point;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+
+        // The Ctrl+P / print Save-as-PDF path (build_pdf_with_vectors) must draw
+        // qualifying Path layers as crisp vectors, just like File ▸ Export does.
+        let rgba = vec![255u8; 4 * 4 * 4];
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(4.0, 0.0)),
+                    Node::sharp(Point::new(2.0, 4.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        let obj = PdfVectorObject {
+            path,
+            fill: Some([0.0, 0.0, 1.0]),
+            stroke: None,
+            stroke_width_px: 0.0,
+            even_odd: false,
+        };
+        let pdf = build_pdf_with_vectors(
+            &rgba,
+            4,
+            4,
+            72.0,
+            std::slice::from_ref(&obj),
+            &PrintLayout::default(),
+            None,
+        )
+        .expect("pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains(" m\n"), "vector moveto present");
+        assert!(text.contains(" l\n"), "vector lineto present");
+        assert!(
+            text.contains("0.0000 0.0000 1.0000 rg"),
+            "blue fill colour set"
+        );
+        assert!(text.contains("f\nQ"), "nonzero fill operator present");
+        // Plain build_pdf (no vectors) stays pure raster — no fill operator.
+        let plain = build_pdf(&rgba, 4, 4, 72.0, &PrintLayout::default(), None).expect("pdf");
+        assert!(
+            !String::from_utf8_lossy(&plain).contains(" rg\n"),
+            "raster-only PDF has no vector overlay"
+        );
     }
 
     #[test]
