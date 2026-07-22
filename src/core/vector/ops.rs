@@ -123,6 +123,184 @@ pub fn set_segment_curved(contour: &mut Contour, seg: usize) -> OpResult {
 }
 
 // ---------------------------------------------------------------------------
+// Control handles / node kind
+// ---------------------------------------------------------------------------
+
+/// Which of a node's two control handles an edit refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleSide {
+    /// The handle for the segment arriving at the node ([`Node::in_handle`]).
+    In,
+    /// The handle for the segment leaving the node ([`Node::out_handle`]).
+    Out,
+}
+
+/// Move one control handle of `node` to `new_pos`, keeping the node's kind
+/// contract (Mục 2.2 / Giai đoạn 3):
+///
+/// * [`NodeKind::Cusp`] — the handle moves alone.
+/// * [`NodeKind::Smooth`] — the opposite handle stays collinear through the
+///   anchor, its own length preserved.
+/// * [`NodeKind::Symmetric`] — the opposite handle mirrors to the same length.
+///
+/// The opposite handle is only touched when it already exists (an open endpoint
+/// with a single handle just moves that one). A zero-length drag onto the anchor
+/// leaves the opposite handle alone (no meaningful direction to mirror).
+pub fn apply_handle_move(node: &mut Node, side: HandleSide, new_pos: Point) {
+    match side {
+        HandleSide::In => node.in_handle = Some(new_pos),
+        HandleSide::Out => node.out_handle = Some(new_pos),
+    }
+    if node.kind == NodeKind::Cusp {
+        return;
+    }
+    let a = node.anchor;
+    let (dx, dy) = (new_pos.x - a.x, new_pos.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len <= f32::EPSILON {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let kind = node.kind;
+    let opp = match side {
+        HandleSide::In => &mut node.out_handle,
+        HandleSide::Out => &mut node.in_handle,
+    };
+    if let Some(op) = opp {
+        let opp_len = if kind == NodeKind::Symmetric {
+            len
+        } else {
+            ((op.x - a.x).powi(2) + (op.y - a.y).powi(2)).sqrt()
+        };
+        // Opposite handle points the other way along the shared tangent.
+        *op = Point::new(a.x - ux * opp_len, a.y - uy * opp_len);
+    }
+}
+
+/// Anchors of the nodes adjacent to `ni`, honoring open vs closed contours.
+fn neighbor_anchors(c: &Contour, ni: usize) -> (Option<Point>, Option<Point>) {
+    let n = c.nodes.len();
+    if ni >= n {
+        return (None, None);
+    }
+    let prev = if ni > 0 {
+        Some(c.nodes[ni - 1].anchor)
+    } else if c.closed && n >= 2 {
+        Some(c.nodes[n - 1].anchor)
+    } else {
+        None
+    };
+    let next = if ni + 1 < n {
+        Some(c.nodes[ni + 1].anchor)
+    } else if c.closed && n >= 2 {
+        Some(c.nodes[0].anchor)
+    } else {
+        None
+    };
+    (prev, next)
+}
+
+/// Unit tangent for a smooth node: along the chord `prev → next` when both
+/// neighbours exist, else along whichever neighbour is present.
+fn smooth_tangent(anchor: Point, prev: Option<Point>, next: Option<Point>) -> (f32, f32) {
+    let (dx, dy) = match (prev, next) {
+        (Some(p), Some(q)) => (q.x - p.x, q.y - p.y),
+        (Some(p), None) => (anchor.x - p.x, anchor.y - p.y),
+        (None, Some(q)) => (q.x - anchor.x, q.y - anchor.y),
+        (None, None) => (1.0, 0.0),
+    };
+    let len = (dx * dx + dy * dy).sqrt();
+    if len <= f32::EPSILON {
+        (1.0, 0.0)
+    } else {
+        (dx / len, dy / len)
+    }
+}
+
+/// Give node `ni` collinear handles through a smooth tangent, synthesizing a
+/// handle where one is missing and otherwise preserving each existing handle's
+/// length; sets [`NodeKind::Smooth`]. A handle is only placed on a side that has
+/// an adjacent segment, so open endpoints stay clean. Converting a Cusp corner
+/// this way is how a straight primitive becomes a curve the user can bend.
+pub fn set_node_smooth(contour: &mut Contour, ni: usize) -> OpResult {
+    make_node_collinear(contour, ni, false)
+}
+
+/// Like [`set_node_smooth`] but forces both handles to equal length
+/// ([`NodeKind::Symmetric`] — a true mirror).
+pub fn set_node_symmetric(contour: &mut Contour, ni: usize) -> OpResult {
+    make_node_collinear(contour, ni, true)
+}
+
+/// Make node `ni` a corner ([`NodeKind::Cusp`]): its handles keep their current
+/// positions but become independent. Handles are left as-is.
+pub fn set_node_cusp(contour: &mut Contour, ni: usize) -> OpResult {
+    let n = contour.nodes.len();
+    let node = contour
+        .nodes
+        .get_mut(ni)
+        .ok_or_else(|| format!("node {ni} out of range (have {n})"))?;
+    node.kind = NodeKind::Cusp;
+    Ok(())
+}
+
+fn make_node_collinear(contour: &mut Contour, ni: usize, symmetric: bool) -> OpResult {
+    let n = contour.nodes.len();
+    if ni >= n {
+        return Err(format!("node {ni} out of range (have {n})"));
+    }
+    let (prev, next) = neighbor_anchors(contour, ni);
+    let has_in = ni > 0 || contour.closed; // a segment arrives here
+    let has_out = ni + 1 < n || contour.closed; // a segment leaves here
+    let node = &mut contour.nodes[ni];
+    let a = node.anchor;
+    let (ux, uy) = smooth_tangent(a, prev, next);
+    // Default handle length: a third of the chord to each neighbour — a gentle curve.
+    let def_in = prev.map_or(0.0, |p| a.distance_to(p) / 3.0);
+    let def_out = next.map_or(0.0, |q| a.distance_to(q) / 3.0);
+    let cur_in = node.in_handle.map(|h| a.distance_to(h));
+    let cur_out = node.out_handle.map(|h| a.distance_to(h));
+    let (len_in, len_out) = if symmetric {
+        let l = match (cur_in, cur_out) {
+            (Some(i), Some(o)) => (i + o) / 2.0,
+            (Some(i), None) => i,
+            (None, Some(o)) => o,
+            (None, None) => (def_in + def_out) / 2.0,
+        };
+        let l = if l <= f32::EPSILON {
+            def_in.max(def_out).max(1.0)
+        } else {
+            l
+        };
+        (l, l)
+    } else {
+        (cur_in.unwrap_or(def_in), cur_out.unwrap_or(def_out))
+    };
+    node.in_handle = has_in.then(|| {
+        let l = if len_in <= f32::EPSILON {
+            def_in.max(1.0)
+        } else {
+            len_in
+        };
+        Point::new(a.x - ux * l, a.y - uy * l)
+    });
+    node.out_handle = has_out.then(|| {
+        let l = if len_out <= f32::EPSILON {
+            def_out.max(1.0)
+        } else {
+            len_out
+        };
+        Point::new(a.x + ux * l, a.y + uy * l)
+    });
+    node.kind = if symmetric {
+        NodeKind::Symmetric
+    } else {
+        NodeKind::Smooth
+    };
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Break / join
 // ---------------------------------------------------------------------------
 
@@ -482,6 +660,87 @@ mod tests {
         assert_eq!(path.contours[0].nodes.len(), 3);
         assert_eq!(path.contours[0].nodes[2].anchor, Point::new(20.0, 0.0));
         assert!(join_contours(&mut path, 0, 0, 1e-3).is_err());
+    }
+
+    #[test]
+    fn cusp_handle_moves_alone() {
+        let mut node = Node::with_handles(
+            Point::new(0.0, 0.0),
+            Point::new(-2.0, 0.0),
+            Point::new(2.0, 0.0),
+            NodeKind::Cusp,
+        );
+        apply_handle_move(&mut node, HandleSide::Out, Point::new(3.0, 4.0));
+        assert_eq!(node.out_handle, Some(Point::new(3.0, 4.0)));
+        // The in handle is untouched for a cusp.
+        assert_eq!(node.in_handle, Some(Point::new(-2.0, 0.0)));
+    }
+
+    #[test]
+    fn smooth_handle_keeps_opposite_collinear_preserving_its_length() {
+        // In handle length 5 (pointing left); dragging the out handle to (0,3)
+        // must swing the in handle to (0,-5): collinear, opposite direction,
+        // length preserved.
+        let mut node = Node::with_handles(
+            Point::new(0.0, 0.0),
+            Point::new(-5.0, 0.0),
+            Point::new(4.0, 0.0),
+            NodeKind::Smooth,
+        );
+        apply_handle_move(&mut node, HandleSide::Out, Point::new(0.0, 3.0));
+        let ih = node.in_handle.unwrap();
+        assert!(close(ih, Point::new(0.0, -5.0)), "got {ih:?}");
+        // The dragged handle is exactly where asked.
+        assert_eq!(node.out_handle, Some(Point::new(0.0, 3.0)));
+    }
+
+    #[test]
+    fn symmetric_handle_mirrors_to_equal_length() {
+        let mut node = Node::with_handles(
+            Point::new(1.0, 1.0),
+            Point::new(-3.0, 1.0),
+            Point::new(5.0, 1.0),
+            NodeKind::Symmetric,
+        );
+        apply_handle_move(&mut node, HandleSide::Out, Point::new(4.0, 1.0));
+        // Out at (4,1) => length 3 from anchor along +x, in mirrors to (-2,1).
+        assert!(close(node.in_handle.unwrap(), Point::new(-2.0, 1.0)));
+    }
+
+    #[test]
+    fn set_node_smooth_adds_collinear_handles_to_a_corner() {
+        // A cusp corner of a closed triangle gets collinear handles.
+        let mut path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(10.0, 0.0)),
+                    Node::sharp(Point::new(5.0, 10.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        set_node_smooth(&mut path.contours[0], 1).unwrap();
+        let n = path.contours[0].nodes[1];
+        assert_eq!(n.kind, NodeKind::Smooth);
+        let (ih, oh) = (n.in_handle.unwrap(), n.out_handle.unwrap());
+        let a = n.anchor;
+        // Collinear through the anchor: (ih-a) and (oh-a) are antiparallel.
+        let v1 = (ih.x - a.x, ih.y - a.y);
+        let v2 = (oh.x - a.x, oh.y - a.y);
+        let cross = v1.0 * v2.1 - v1.1 * v2.0;
+        let dot = v1.0 * v2.0 + v1.1 * v2.1;
+        assert!(cross.abs() < 1e-3, "handles not collinear: {v1:?} {v2:?}");
+        assert!(dot < 0.0, "handles must point opposite ways");
+    }
+
+    #[test]
+    fn node_kind_setters_reject_out_of_range() {
+        let mut c = open_line();
+        assert!(set_node_smooth(&mut c, 9).is_err());
+        assert!(set_node_symmetric(&mut c, 9).is_err());
+        assert!(set_node_cusp(&mut c, 9).is_err());
     }
 
     #[test]

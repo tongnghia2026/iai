@@ -13,11 +13,12 @@
 //! (delta-0 invariant) the object transform maps local ⇄ canvas directly.
 
 use crate::app::render::CanvasEvent;
-use crate::app::state::{App, NodeDrag};
+use crate::app::state::{App, NodeDrag, NodeDragTarget};
 use crate::core::geometry::{cubic_bezier, Point};
 use crate::core::layer::LayerType;
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::object::VectorObjectData;
+use crate::core::vector::ops::HandleSide;
 use crate::core::vector::path::PathData;
 
 /// Screen-space grab radius for an anchor.
@@ -32,6 +33,10 @@ const OUTLINE_TOL: f32 = 0.4;
 /// What the Node tool pointer is over on the active Path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NodeHit {
+    /// A Bézier control handle `(contour, node, side)` of the SELECTED node —
+    /// these sit on top of the anchor and are only reachable when their node is
+    /// selected (that is when the overlay draws them).
+    Handle(usize, usize, HandleSide),
     /// An existing anchor `(contour, node)`.
     Node(usize, usize),
     /// A point on segment `seg` of `contour` at parameter `t` — insert here.
@@ -158,11 +163,12 @@ impl App {
     }
 
     /// Cursor hint for the Node tool at the current mouse position:
-    /// `2` over an anchor (drag to move), `3` over a segment (click to insert),
-    /// `0` otherwise (plain arrow). Keeps the cursor logic in `state.rs` tiny and
-    /// mirrors `move_hover_hint`.
+    /// `4` over a control handle (drag to reshape), `2` over an anchor (drag to
+    /// move), `3` over a segment (click to insert), `0` otherwise (plain arrow).
+    /// Keeps the cursor logic in `state.rs` tiny and mirrors `move_hover_hint`.
     pub fn node_cursor_hint(&self) -> u8 {
         match self.node_hit_at_screen(self.edit.input.mouse_x, self.edit.input.mouse_y) {
+            Some(NodeHit::Handle(..)) => 4,
             Some(NodeHit::Node(..)) => 2,
             Some(NodeHit::Segment(..)) => 3,
             None => 0,
@@ -172,7 +178,7 @@ impl App {
     /// Which anchor / segment of the active Path is under the screen point.
     /// Anchors win over segments.
     pub fn node_hit_at_screen(&self, sx: f32, sy: f32) -> Option<NodeHit> {
-        let (_, t, path) = self.node_edit_geometry()?;
+        let (id, t, path) = self.node_edit_geometry()?;
         let zoom = self.edit.view.zoom;
         let vox = self.edit.view.offset_x;
         let voy = self.edit.view.offset_y;
@@ -182,7 +188,26 @@ impl App {
         };
         let dist2 = |(ax, ay): (f32, f32)| (ax - sx).powi(2) + (ay - sy).powi(2);
 
-        // Anchors first.
+        // Handles of the SELECTED node win first — they sit on top of the path
+        // and are only drawn (hence grabbable) while their node is selected.
+        if let Some((lid, sc, sn)) = self.edit.node_selected {
+            if lid == id {
+                if let Some(node) = path.contours.get(sc).and_then(|c| c.nodes.get(sn)) {
+                    for (side, h) in [
+                        (HandleSide::In, node.in_handle),
+                        (HandleSide::Out, node.out_handle),
+                    ] {
+                        if let Some(hp) = h {
+                            if dist2(to_screen(hp)) <= NODE_HIT_PX * NODE_HIT_PX {
+                                return Some(NodeHit::Handle(sc, sn, side));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Anchors next.
         let mut best: Option<(f32, usize, usize)> = None;
         for (ci, c) in path.contours.iter().enumerate() {
             for (ni, node) in c.nodes.iter().enumerate() {
@@ -234,8 +259,12 @@ impl App {
         let grab_local = inv.apply_point(Point::new(cx, cy));
 
         let orig_path = model_path.clone();
-        let (pending, contour, node) = match hit {
-            NodeHit::Node(ci, ni) => (model_path, ci, ni),
+        // (pending geometry, contour, node, drag target, geometry-already-changed?)
+        let (pending, contour, node, target, changed) = match hit {
+            NodeHit::Node(ci, ni) => (model_path, ci, ni, NodeDragTarget::Anchor, false),
+            NodeHit::Handle(ci, ni, side) => {
+                (model_path, ci, ni, NodeDragTarget::Handle(side), false)
+            }
             NodeHit::Segment(ci, seg, tparam) => {
                 let mut p = model_path;
                 let Some(c) = p.contours.get_mut(ci) else {
@@ -245,7 +274,8 @@ impl App {
                     Ok(i) => i,
                     Err(_) => return false,
                 };
-                (p, ci, ni)
+                // An insert already changed geometry; drag the fresh anchor.
+                (p, ci, ni, NodeDragTarget::Anchor, true)
             }
         };
         let Some(base_node) = pending
@@ -256,13 +286,13 @@ impl App {
             return false;
         };
         let base_node = *base_node;
-        let changed = !matches!(hit, NodeHit::Node(..)); // an insert already changed geometry
 
         self.edit.node_selected = Some((id, contour, node));
         self.edit.node_drag = Some(NodeDrag {
             layer_id: id,
             contour,
             node,
+            target,
             orig_path,
             pending: pending.clone(),
             grab_local,
@@ -305,7 +335,24 @@ impl App {
                 let Some(slot) = c.nodes.get_mut(d.node) else {
                     return;
                 };
-                *slot = shifted_node(&d.base_node, dx, dy);
+                match d.target {
+                    NodeDragTarget::Anchor => {
+                        *slot = shifted_node(&d.base_node, dx, dy);
+                    }
+                    NodeDragTarget::Handle(side) => {
+                        // Reset to the node as it was at press, then move the
+                        // grabbed handle rigidly with the cursor; the opposite
+                        // handle is coupled per the node kind in core.
+                        *slot = d.base_node;
+                        let base_h = match side {
+                            HandleSide::In => d.base_node.in_handle,
+                            HandleSide::Out => d.base_node.out_handle,
+                        }
+                        .unwrap_or(d.base_node.anchor);
+                        let new_pos = Point::new(base_h.x + dx, base_h.y + dy);
+                        crate::core::vector::ops::apply_handle_move(slot, side, new_pos);
+                    }
+                }
                 d.changed = true;
                 (d.layer_id, d.pending.clone())
             }
@@ -431,6 +478,47 @@ impl App {
         );
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.shell.status_msg = "Đã xoá điểm".to_string();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
+    /// Cycle node `(ci, ni)`'s kind Cusp → Smooth → Symmetric → Cusp (Node tool
+    /// double-click on an anchor). Converting a Cusp corner to Smooth synthesizes
+    /// collinear handles, so a straight primitive (rectangle/polygon) becomes a
+    /// curve the user can then bend by dragging those handles. One
+    /// [`crate::core::command_vector::ReplacePathGeometry`] = one undo.
+    pub fn node_toggle_kind(&mut self, ci: usize, ni: usize) -> bool {
+        use crate::core::vector::ops;
+        use crate::core::vector::path::NodeKind;
+        let Some((layer_id, _t, mut path)) = self.active_node_object() else {
+            return false;
+        };
+        let Some(c) = path.contours.get_mut(ci) else {
+            return false;
+        };
+        let Some(kind) = c.nodes.get(ni).map(|n| n.kind) else {
+            return false;
+        };
+        let (res, label) = match kind {
+            NodeKind::Cusp => (ops::set_node_smooth(c, ni), "Điểm trơn (Smooth)"),
+            NodeKind::Smooth => (ops::set_node_symmetric(c, ni), "Điểm đối xứng (Symmetric)"),
+            NodeKind::Symmetric => (ops::set_node_cusp(c, ni), "Điểm góc (Cusp)"),
+        };
+        if res.is_err() {
+            return false;
+        }
+        self.edit.node_selected = Some((layer_id, ci, ni));
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let _ = canvas.execute(
+            Box::new(crate::core::command_vector::ReplacePathGeometry::new(
+                layer_id, path,
+            )),
+            crate::core::gateway::ChangeKind::LayerStructure,
+        );
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = label.to_string();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -563,6 +651,81 @@ mod tests {
         );
         app.docs.documents[0].canvas.undo().expect("undo");
         assert_eq!(model_path(&app, id).contours[0].nodes.len(), 4);
+    }
+
+    fn node_at(app: &App, id: u32, ci: usize, ni: usize) -> crate::core::vector::path::Node {
+        model_path(app, id).contours[ci].nodes[ni]
+    }
+
+    #[test]
+    fn double_click_converts_cusp_corner_to_smooth_with_handles() {
+        use crate::core::vector::path::NodeKind;
+        let (mut app, id) = app_with_path();
+        // A fresh rect corner is a cusp with no handles.
+        let n0 = node_at(&app, id, 0, 0);
+        assert_eq!(n0.kind, NodeKind::Cusp);
+        assert!(n0.in_handle.is_none() && n0.out_handle.is_none());
+
+        assert!(app.node_toggle_kind(0, 0));
+        let n0 = node_at(&app, id, 0, 0);
+        assert_eq!(n0.kind, NodeKind::Smooth);
+        assert!(
+            n0.in_handle.is_some() && n0.out_handle.is_some(),
+            "handles synthesized so the corner can now be bent"
+        );
+
+        app.docs.documents[0].canvas.undo().expect("undo");
+        let n0 = node_at(&app, id, 0, 0);
+        assert_eq!(n0.kind, NodeKind::Cusp);
+        assert!(n0.in_handle.is_none() && n0.out_handle.is_none());
+    }
+
+    #[test]
+    fn drag_out_handle_reshapes_curve_couples_in_handle_and_undoes() {
+        let (mut app, id) = app_with_path();
+        // Give the top-left node collinear handles, then drag its OUT handle.
+        assert!(app.node_toggle_kind(0, 0)); // Cusp -> Smooth, selects node (0,0)
+        let before = node_at(&app, id, 0, 0);
+        let oh = before.out_handle.unwrap();
+        // Transform is translate(100,120) at 1:1 zoom, 0 offset => canvas = local + (100,120).
+        let (cx, cy) = (oh.x + 100.0, oh.y + 120.0);
+        let hit = app.node_hit_at_screen(cx, cy).expect("handle hit");
+        assert!(matches!(hit, NodeHit::Handle(0, 0, HandleSide::Out)));
+        assert!(app.node_press(hit, cx, cy));
+        app.node_drag_update(cx + 5.0, cy - 8.0); // move the handle by (+5,-8)
+        app.node_drag_finish();
+
+        let after = node_at(&app, id, 0, 0);
+        let oh2 = after.out_handle.unwrap();
+        assert!(
+            (oh2.x - (oh.x + 5.0)).abs() < 0.5 && (oh2.y - (oh.y - 8.0)).abs() < 0.5,
+            "out handle followed the cursor, got {oh2:?}"
+        );
+        // Smooth coupling: the in handle stays collinear and points the other way.
+        let a = after.anchor;
+        let ih = after.in_handle.unwrap();
+        let (vo, vi) = ((oh2.x - a.x, oh2.y - a.y), (ih.x - a.x, ih.y - a.y));
+        let (no, ni) = (
+            (vo.0 * vo.0 + vo.1 * vo.1).sqrt(),
+            (vi.0 * vi.0 + vi.1 * vi.1).sqrt(),
+        );
+        let cross = (vo.0 / no) * (vi.1 / ni) - (vo.1 / no) * (vi.0 / ni);
+        assert!(
+            cross.abs() < 1e-2,
+            "in/out handles not collinear after drag"
+        );
+        assert!(
+            vo.0 * vi.0 + vo.1 * vi.1 < 0.0,
+            "handles point opposite ways"
+        );
+
+        // One undo returns to the smoothed-but-undragged handle (single step).
+        app.docs.documents[0].canvas.undo().expect("undo");
+        let back = node_at(&app, id, 0, 0);
+        assert!(
+            back.out_handle.unwrap().distance_to(oh) < 0.5,
+            "the handle drag undid in one step"
+        );
     }
 
     #[test]

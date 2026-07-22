@@ -724,10 +724,22 @@ pub struct PathTransformDrag {
     pub changed: bool,
 }
 
+/// What a [`NodeDrag`] is moving.
+#[derive(Clone, Copy, PartialEq)]
+pub enum NodeDragTarget {
+    /// The node's anchor — the whole node (anchor + both handles) shifts rigidly.
+    Anchor,
+    /// One Bézier control handle; the opposite handle is coupled per the node's
+    /// [`crate::core::vector::path::NodeKind`] (see
+    /// [`crate::core::vector::ops::apply_handle_move`]).
+    Handle(crate::core::vector::ops::HandleSide),
+}
+
 /// An in-progress node edit of a Path layer under the Node tool: dragging an
-/// anchor moves it (handles follow), and a press on a segment first INSERTS an
-/// anchor then drags it. The gesture edits only `PathData` geometry (object
-/// transform kept) and, on release, records ONE
+/// anchor moves it (handles follow), dragging a control handle reshapes the
+/// curve, and a press on a segment first INSERTS an anchor then drags it. The
+/// gesture edits only `PathData` geometry (object transform kept) and, on
+/// release, records ONE
 /// [`crate::core::command_vector::ReplacePathGeometry`] so an insert+move is a
 /// single undo step. Like [`PathTransformDrag`], the overlay follows `pending`
 /// every frame while the fill re-raster runs off-thread.
@@ -736,6 +748,9 @@ pub struct NodeDrag {
     /// Which contour + node index is being dragged (in `pending`).
     pub contour: usize,
     pub node: usize,
+    /// Whether the gesture moves the anchor (handles follow rigidly) or one of
+    /// the node's Bézier control handles (kind-coupled — see [`NodeDragTarget`]).
+    pub target: NodeDragTarget,
     /// Path geometry BEFORE the whole gesture (incl. before any insert). The undo
     /// baseline and the state the model is rewound to before the commit.
     pub orig_path: crate::core::vector::path::PathData,
@@ -2616,6 +2631,7 @@ impl App {
                         // and HID the cursor over the canvas (nothing to test with).
                         w.set_cursor_visible(true);
                         match self.node_cursor_hint() {
+                            4 => w.set_cursor(CursorIcon::Crosshair),
                             2 => w.set_cursor(CursorIcon::Move),
                             3 => w.set_cursor(CursorIcon::Crosshair),
                             _ => w.set_cursor(CursorIcon::Default),

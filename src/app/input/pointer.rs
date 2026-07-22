@@ -375,13 +375,32 @@ impl App {
                                 }
                             }
 
-                            // Node tool: press on an anchor drags it; press on a
-                            // segment inserts an anchor there and drags it; press
-                            // on empty space deselects. All routed to node_ops.
+                            // Node tool: double-click an anchor cycles its kind
+                            // (Cusp→Smooth→Symmetric); a single press on a handle
+                            // reshapes the curve, on an anchor drags it, on a
+                            // segment inserts an anchor there and drags it, and on
+                            // empty space deselects. All routed to node_ops.
                             if self.edit.tools.active_id() == ToolId::Node
                                 && self.edit.transform_state.is_none()
                             {
                                 let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
+                                let is_double_click = self
+                                    .edit
+                                    .input
+                                    .last_left_release_time
+                                    .map(|t| t.elapsed().as_millis() < 400)
+                                    .unwrap_or(false);
+                                if is_double_click {
+                                    if let Some(crate::app::node_ops::NodeHit::Node(ci, ni)) =
+                                        self.node_hit_at_screen(msx, msy)
+                                    {
+                                        if self.node_toggle_kind(ci, ni) {
+                                            self.edit.input.last_left_release_time = None;
+                                            self.edit.input.painting = true;
+                                            return;
+                                        }
+                                    }
+                                }
                                 let ev = self.tool_event();
                                 if let Some(hit) = self.node_hit_at_screen(msx, msy) {
                                     if self.node_press(hit, ev.canvas_x, ev.canvas_y) {
