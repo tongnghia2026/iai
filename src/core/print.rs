@@ -494,6 +494,7 @@ pub fn encode_pdf_page_cmyk(
 /// sRGB in `0..1`. Only opaque, unmasked, Normal-blend Path layers that sit above
 /// all raster content become vectors; everything else stays in the image, so the
 /// output is always visually correct.
+#[derive(Clone)]
 pub struct PdfVectorObject {
     pub path: crate::core::vector::path::PathData,
     pub fill: Option<[f32; 3]>,
@@ -502,11 +503,137 @@ pub struct PdfVectorObject {
     pub even_odd: bool,
 }
 
+/// A PDF-ready split of a canvas: opaque Path layers that PDF can represent
+/// natively, plus the layer ids that must be omitted from the raster base. The
+/// eligibility rule is deliberately conservative because the current writer
+/// overlays native paths after one raster image; only the top uninterrupted Path
+/// run can be promoted without changing z-order.
+pub struct PdfVectorSelection {
+    pub objects: Vec<PdfVectorObject>,
+    pub promoted_layer_ids: Vec<u32>,
+}
+
+pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSelection {
+    use crate::core::layer::{BlendMode, LayerType};
+    use crate::core::vector::path::FillRule;
+    use crate::core::vector::style::Paint;
+
+    if canvas.is_cmyk() {
+        return PdfVectorSelection {
+            objects: Vec::new(),
+            promoted_layer_ids: Vec::new(),
+        };
+    }
+    let layers = &canvas.layer_stack.layers;
+    let top_raster = layers
+        .iter()
+        .enumerate()
+        .filter(|(i, l)| {
+            canvas.layer_stack.is_effectively_visible(*i)
+                && !l.is_group()
+                && !matches!(l.layer_type, LayerType::Path(_))
+        })
+        .map(|(i, _)| i as isize)
+        .max()
+        .unwrap_or(-1);
+    let rgb = |p: Paint| -> Option<[f32; 3]> {
+        match p {
+            Paint::Solid(c) => {
+                let [r, g, b, _] = c.to_rgba8();
+                Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+            }
+            Paint::None => None,
+        }
+    };
+    let ancestors_are_plain = |index: usize| {
+        let mut parent_id = layers[index].parent_id;
+        while let Some(id) = parent_id {
+            let Some(parent) = layers.iter().find(|layer| layer.id == id) else {
+                return false;
+            };
+            if !parent.visible
+                || parent.mask.is_some()
+                || (parent.opacity - 1.0).abs() > 1e-3
+                || parent.blend_mode != BlendMode::Normal
+            {
+                return false;
+            }
+            parent_id = parent.parent_id;
+        }
+        true
+    };
+
+    let mut objects = Vec::new();
+    let mut promoted_layer_ids = Vec::new();
+    for (i, layer) in layers.iter().enumerate() {
+        if (i as isize) <= top_raster
+            || !canvas.layer_stack.is_effectively_visible(i)
+            || layer.mask.is_some()
+            || (layer.opacity - 1.0).abs() > 1e-3
+            || layer.blend_mode != BlendMode::Normal
+            || !ancestors_are_plain(i)
+        {
+            continue;
+        }
+        let LayerType::Path(obj) = &layer.layer_type else {
+            continue;
+        };
+        if (obj.style.opacity - 1.0).abs() > 1e-3 {
+            continue;
+        }
+        let fill = obj
+            .style
+            .fill
+            .is_visible()
+            .then(|| rgb(obj.style.fill))
+            .flatten();
+        let half = obj.style.effective_stroke_width() * 0.5;
+        let stroke = (obj.style.stroke.is_visible() && half > 0.0)
+            .then(|| rgb(obj.style.stroke))
+            .flatten();
+        if fill.is_none() && stroke.is_none() {
+            continue;
+        }
+        objects.push(PdfVectorObject {
+            path: obj.path_in_layer_space(),
+            fill,
+            stroke,
+            stroke_width_px: obj.style.effective_stroke_width(),
+            even_odd: obj.path.fill_rule == FillRule::EvenOdd,
+        });
+        promoted_layer_ids.push(layer.id);
+    }
+    PdfVectorSelection {
+        objects,
+        promoted_layer_ids,
+    }
+}
+
+/// Flatten the PDF raster base without native vector paths. Operates on a clone
+/// so export cannot perturb visibility, selection, undo, or document dirtiness.
+pub fn pdf_raster_base(
+    canvas: &crate::core::canvas::Canvas,
+    selection: &PdfVectorSelection,
+) -> Vec<u8> {
+    if selection.promoted_layer_ids.is_empty() {
+        return canvas.export_flat();
+    }
+    let promoted: std::collections::HashSet<u32> =
+        selection.promoted_layer_ids.iter().copied().collect();
+    let mut stack = canvas.layer_stack.clone();
+    for layer in &mut stack.layers {
+        if promoted.contains(&layer.id) {
+            layer.visible = false;
+        }
+    }
+    stack.flatten(canvas.width, canvas.height)
+}
+
 /// Append the PDF content-stream operators that draw `objects` (in canvas pixel
 /// space) over a page whose image occupies `dw×dh` points at `(tx,ty)` for a
 /// `w×h` pixel source. All inline (colours as `rg`/`RG`), so no extra PDF
 /// resources or object-number changes are needed.
-fn append_vector_content(
+pub(crate) fn append_vector_content(
     out: &mut String,
     objects: &[PdfVectorObject],
     w: u32,
@@ -1321,6 +1448,67 @@ mod tests {
             !String::from_utf8_lossy(&plain).contains(" rg\n"),
             "raster-only PDF has no vector overlay"
         );
+    }
+
+    #[test]
+    fn promoted_path_is_removed_from_pdf_raster_base() {
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255; 16 * 16 * 4], 16, 16);
+        let index = canvas.add_layer();
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(2.0, 2.0)),
+                    Node::sharp(Point::new(14.0, 2.0)),
+                    Node::sharp(Point::new(14.0, 14.0)),
+                    Node::sharp(Point::new(2.0, 14.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                path,
+                VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+
+        let full = canvas.export_flat();
+        let selection = collect_pdf_vectors(&canvas);
+        assert_eq!(selection.objects.len(), 1);
+        let base = pdf_raster_base(&canvas, &selection);
+        let center = ((8 * 16 + 8) * 4) as usize;
+        assert!(
+            full[center] > 200 && full[center + 1] < 30,
+            "full canvas contains red Path"
+        );
+        assert_eq!(&base[center..center + 4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn nonopaque_path_stays_in_pdf_raster_base() {
+        use crate::core::layer::LayerType;
+        let mut canvas = crate::core::canvas::Canvas::new(4, 4);
+        let index = canvas.add_layer();
+        canvas.layer_stack.layers[index].opacity = 0.5;
+        // A non-Path layer is enough to pin the conservative eligibility rule;
+        // importantly, no layer id may be hidden from the raster base.
+        assert!(matches!(
+            canvas.layer_stack.layers[index].layer_type,
+            LayerType::Raster
+        ));
+        let selection = collect_pdf_vectors(&canvas);
+        assert!(selection.promoted_layer_ids.is_empty());
     }
 
     #[test]

@@ -1704,10 +1704,20 @@ pub fn build(
         }
 
         if let Some(ref ov) = data.tool.transform_overlay {
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::new("transform_overlay"),
-            ));
+            // Canvas tool chrome must stay above the image but below floating
+            // windows/dialogs. It also must not escape the canvas when a rotated
+            // box extends into panels or modal UI.
+            let canvas_screen_rect = egui::Rect::from_min_max(
+                to_screen_pos(0.0, 0.0),
+                to_screen_pos(data.doc.canvas_w as f32, data.doc.canvas_h as f32),
+            );
+            let clip_rect = canvas_screen_rect.intersect(canvas_viewport);
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    CANVAS_TOOL_OVERLAY_ORDER,
+                    egui::Id::new("transform_overlay"),
+                ))
+                .with_clip_rect(clip_rect);
 
             let bbox_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220);
             let handle_fill = egui::Color32::from_rgba_unmultiplied(240, 240, 255, 240);

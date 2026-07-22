@@ -314,10 +314,13 @@ impl App {
                 // Ctrl+P Save-as-PDF / send-to-printer is resolution-independent
                 // too (it used to be pure raster → "PDF răng cưa"). CMYK ink
                 // pages stay pure raster (empty overlay).
-                let page_vectors = if ink_native {
-                    Vec::new()
+                let vector_selection = if ink_native {
+                    crate::core::print::PdfVectorSelection {
+                        objects: Vec::new(),
+                        promoted_layer_ids: Vec::new(),
+                    }
                 } else {
-                    crate::app::file_ops::save_export::collect_pdf_vectors(
+                    crate::core::print::collect_pdf_vectors(
                         &self.docs.documents[self.docs.active_doc_idx].canvas,
                     )
                 };
@@ -329,9 +332,10 @@ impl App {
                         crate::core::print::build_pdf_encoded(&page, &layout, None)
                     })
                 } else if crate::core::canvas::Canvas::fits_flat_buffer(cw, ch) {
-                    let mut rgba = self.docs.documents[self.docs.active_doc_idx]
-                        .canvas
-                        .export_flat();
+                    let mut rgba = crate::core::print::pdf_raster_base(
+                        &self.docs.documents[self.docs.active_doc_idx].canvas,
+                        &vector_selection,
+                    );
                     if let Some(pp) = &printer_profile {
                         crate::core::cms::convert_srgb_to_rgb_profile(
                             &mut rgba,
@@ -344,7 +348,7 @@ impl App {
                         cw,
                         ch,
                         dpi,
-                        &page_vectors,
+                        &vector_selection.objects,
                         &layout,
                         pdf_icc,
                     )
@@ -353,6 +357,16 @@ impl App {
                         .canvas
                         .layer_stack
                         .clone();
+                    let promoted: std::collections::HashSet<u32> = vector_selection
+                        .promoted_layer_ids
+                        .iter()
+                        .copied()
+                        .collect();
+                    for layer in &mut stack.layers {
+                        if promoted.contains(&layer.id) {
+                            layer.visible = false;
+                        }
+                    }
                     crate::core::print::encode_pdf_page_streamed(cw, ch, dpi, |y, rows| {
                         let mut band = stack.flatten_band(cw, ch, y, rows);
                         if let Some(pp) = &printer_profile {
@@ -367,7 +381,7 @@ impl App {
                     .and_then(|page| {
                         crate::core::print::build_pdf_encoded_with_vectors(
                             &page,
-                            &page_vectors,
+                            &vector_selection.objects,
                             &layout,
                             pdf_icc,
                         )

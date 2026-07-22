@@ -17,7 +17,7 @@ use crate::app::state::{App, PathTransformDrag, TransformHandle};
 use crate::core::geometry::{Point, Rect};
 use crate::core::layer::LayerType;
 use crate::core::vector::affine::AffineTransform;
-use crate::core::vector::object::VectorObjectData;
+use crate::gpu::compositor::TransformPreviewUniform;
 
 /// Screen-space grab radius for a box handle.
 const HANDLE_HIT_PX: f32 = 9.0;
@@ -27,6 +27,13 @@ const ROTATE_RING_PX: f32 = 26.0;
 const BOX_TOL: f32 = 0.25;
 /// Smallest |scale factor| a drag may collapse to (keeps the affine invertible).
 const MIN_SCALE: f32 = 0.01;
+
+fn path_preview_inverse(original: AffineTransform, pending: AffineTransform) -> Option<[f32; 9]> {
+    let inverse = original.then(&pending.inverse()?);
+    Some([
+        inverse.a, inverse.c, inverse.e, inverse.b, inverse.d, inverse.f, 0.0, 0.0, 1.0,
+    ])
+}
 
 /// What the pointer is over on the active Path's transform box.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -438,38 +445,49 @@ impl App {
         }
     }
 
-    /// Apply the in-progress gesture to `(cx, cy)`. The target transform is stored
-    /// as `pending` every frame (the overlay box follows it smoothly at 60 fps);
-    /// the fill re-raster is handed to the OFF-THREAD Path bake so a big filled
-    /// path never stalls the drag. The undo entry is recorded once on release.
+    /// Apply the in-progress gesture to `(cx, cy)`. Both the overlay and the GPU
+    /// preview use `pending` in the same frame. The cached Path raster remains
+    /// untouched until release, avoiding an O(area) CPU raster on every pointer
+    /// event; release commits and rasterizes the final editable vector once.
     pub fn path_transform_update(&mut self, cx: f32, cy: f32, shift: bool, alt: bool) {
-        let (new_t, layer_id) = match self.edit.path_transform.as_mut() {
+        let (new_t, orig_t, layer_id) = match self.edit.path_transform.as_mut() {
             Some(d) => match Self::path_transform_target(d, cx, cy, shift, alt) {
                 Some(t) => {
                     d.pending = t;
                     d.changed = true;
-                    (t, d.layer_id)
+                    (t, d.orig_transform, d.layer_id)
                 }
                 None => return,
             },
             None => return,
         };
-        // Build the target object (path + style kept, new transform) and request
-        // an off-thread bake; the overlay already tracks `pending` this frame.
-        let object = {
+        let (orig_ox, orig_oy) = {
             let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
             match canvas.layer_stack.layers.iter().find(|l| l.id == layer_id) {
-                Some(l) => match &l.layer_type {
-                    LayerType::Path(o) if o.transform != new_t => VectorObjectData {
-                        transform: new_t,
-                        ..o.clone()
-                    },
-                    _ => return,
-                },
+                Some(l) if matches!(l.layer_type, LayerType::Path(_)) => {
+                    (l.offset.0 as f32, l.offset.1 as f32)
+                }
                 None => return,
+                _ => return,
             }
         };
-        self.request_path_bake(layer_id, object);
+        // Destination canvas -> source canvas. A source point displayed under
+        // `orig_t` moves to `new_t`; sampling therefore applies
+        // `orig_t * inverse(new_t)` to the destination coordinate.
+        let Some(inv_m) = path_preview_inverse(orig_t, new_t) else {
+            return;
+        };
+        let preview = TransformPreviewUniform {
+            layer_id,
+            inv_m,
+            orig_ox,
+            orig_oy,
+        };
+        if let Some(gpu) = &mut self.win.gpu {
+            gpu.compositor.transform_previews.clear();
+            gpu.compositor.transform_previews.push(preview);
+        }
+        self.request_interactive_recompose();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -483,6 +501,12 @@ impl App {
         let Some(drag) = self.edit.path_transform.take() else {
             return;
         };
+        if let Some(gpu) = &mut self.win.gpu {
+            gpu.compositor.transform_previews.clear();
+        }
+        // The last composed frame still contains the GPU-transformed cache.
+        // Rebuild once from the model even for a no-op release or early exit.
+        self.recomposite_visible();
         // Abandon any in-flight worker bake — the final geometry is committed
         // synchronously below, so a late result would be stale.
         self.cancel_path_bake();
@@ -548,6 +572,24 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_path_preview_maps_pending_destination_back_to_original_canvas() {
+        let original = AffineTransform::translate(30.0, 20.0).then(&AffineTransform::rotate(0.2));
+        let pending = AffineTransform::translate(80.0, 45.0)
+            .then(&AffineTransform::rotate(0.8))
+            .then(&AffineTransform::scale(1.7, 0.6));
+        let m = path_preview_inverse(original, pending).expect("invertible preview");
+        let local = Point::new(12.0, 9.0);
+        let destination = pending.apply_point(local);
+        let source = Point::new(
+            m[0] * destination.x + m[1] * destination.y + m[2],
+            m[3] * destination.x + m[4] * destination.y + m[5],
+        );
+        let expected = original.apply_point(local);
+        assert!((source.x - expected.x).abs() < 1e-3);
+        assert!((source.y - expected.y).abs() < 1e-3);
+    }
 
     fn drag(handle: Option<TransformHandle>) -> PathTransformDrag {
         PathTransformDrag {
@@ -761,6 +803,10 @@ mod tests {
         app.path_transform_begin(PathBoxHit::Handle(TransformHandle::BottomRight), hx, hy);
         // Drag it out well past the object to enlarge.
         app.path_transform_update(220.0, 200.0, false, false);
+        assert!(
+            app.jobs.path_bake.is_none() && app.jobs.path_bake_next.is_none(),
+            "live Path transform must queue no CPU raster bake"
+        );
         app.path_transform_finish();
 
         let l = find_layer(&app, id);

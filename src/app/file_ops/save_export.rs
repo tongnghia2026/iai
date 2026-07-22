@@ -599,13 +599,18 @@ impl App {
                         let overlay = (doc.is_modified()
                             && allow_overlay
                             && compatibility.get(source_index).copied().unwrap_or(false))
-                        .then(|| doc.pdf_safe_overlay_rgba())
+                        .then(|| {
+                            doc.pdf_page
+                                .as_ref()
+                                .and_then(|page| page.safe_overlay_pdf_parts(&doc.canvas))
+                        })
                         .flatten();
                         let content = if !doc.is_modified() {
                             crate::formats::pdf::HybridPageContent::Original
-                        } else if let Some(rgba) = overlay {
+                        } else if let Some((rgba, vectors)) = overlay {
                             crate::formats::pdf::HybridPageContent::Overlay {
                                 rgba,
+                                vectors,
                                 width: doc.canvas.width,
                                 height: doc.canvas.height,
                                 dpi: doc.canvas.metadata.resolution_ppi,
@@ -718,13 +723,18 @@ impl App {
                     ink_pages += 1;
                     crate::core::print::encode_pdf_page_cmyk(&ink, w, h, dpi)
                 } else {
-                    let Some(rgba) = doc.canvas.export_flat_up_to(PDF_EXPORT_MAX_PIXELS) else {
+                    if crate::core::canvas::Canvas::pixel_count(w, h)
+                        .is_none_or(|p| p > PDF_EXPORT_MAX_PIXELS)
+                    {
                         self.shell.status_msg =
                             format!("Document {} is too large to export safely", idx + 1);
                         return;
-                    };
-                    // RGB page: collect its crisp vector paths.
-                    page_vectors = collect_pdf_vectors(&doc.canvas);
+                    }
+                    // RGB page: split native PDF paths out of the raster base so
+                    // their anti-aliased cache cannot leave a jagged halo.
+                    let selection = crate::core::print::collect_pdf_vectors(&doc.canvas);
+                    let rgba = crate::core::print::pdf_raster_base(&doc.canvas, &selection);
+                    page_vectors = selection.objects;
                     crate::core::print::encode_pdf_page(&rgba, w, h, dpi)
                 }
             };
@@ -836,11 +846,12 @@ impl App {
                     let content = if let Some((canvas, reference)) = edited {
                         let overlay = (allow_overlay
                             && compatibility.get(page_index).copied().unwrap_or(false))
-                        .then(|| reference.safe_overlay_rgba(canvas))
+                        .then(|| reference.safe_overlay_pdf_parts(canvas))
                         .flatten();
-                        if let Some(rgba) = overlay {
+                        if let Some((rgba, vectors)) = overlay {
                             crate::formats::pdf::HybridPageContent::Overlay {
                                 rgba,
+                                vectors,
                                 width: canvas.width,
                                 height: canvas.height,
                                 dpi: canvas.metadata.resolution_ppi,
@@ -891,78 +902,6 @@ impl App {
         }
         true
     }
-}
-
-/// Collect the Path layers that can be drawn as crisp PDF vectors over the
-/// flattened image. Only paths that sit ABOVE all raster/non-path content
-/// qualify (so overlaying them can't occlude a higher layer), and only when
-/// they are fully opaque, unmasked and Normal-blend — anything else stays in the
-/// raster so the output is always visually correct. Geometry comes out in canvas
-/// pixel space (transform applied); the PDF writer maps it to points.
-pub(crate) fn collect_pdf_vectors(
-    canvas: &crate::core::canvas::Canvas,
-) -> Vec<crate::core::print::PdfVectorObject> {
-    use crate::core::layer::{BlendMode, LayerType};
-    use crate::core::vector::path::FillRule;
-    use crate::core::vector::style::Paint;
-
-    let layers = &canvas.layer_stack.layers;
-    // Highest visible non-Path layer: paths must be above it to overlay safely.
-    let top_raster = layers
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.visible && !l.is_group() && !matches!(l.layer_type, LayerType::Path(_)))
-        .map(|(i, _)| i as isize)
-        .max()
-        .unwrap_or(-1);
-
-    let rgb = |p: Paint| -> Option<[f32; 3]> {
-        match p {
-            Paint::Solid(c) => {
-                let [r, g, b, _] = c.to_rgba8();
-                Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
-            }
-            Paint::None => None,
-        }
-    };
-
-    let mut out = Vec::new();
-    for (i, layer) in layers.iter().enumerate() {
-        if (i as isize) <= top_raster || !layer.visible || layer.mask.is_some() {
-            continue;
-        }
-        if (layer.opacity - 1.0).abs() > 1e-3 || layer.blend_mode != BlendMode::Normal {
-            continue;
-        }
-        let LayerType::Path(obj) = &layer.layer_type else {
-            continue;
-        };
-        if (obj.style.opacity - 1.0).abs() > 1e-3 {
-            continue;
-        }
-        let fill = if obj.style.fill.is_visible() {
-            rgb(obj.style.fill)
-        } else {
-            None
-        };
-        let half = obj.style.effective_stroke_width() * 0.5;
-        let stroke = if obj.style.stroke.is_visible() && half > 0.0 {
-            rgb(obj.style.stroke)
-        } else {
-            None
-        };
-        if fill.is_none() && stroke.is_none() {
-            continue;
-        }
-        out.push(crate::core::print::PdfVectorObject {
-            path: obj.path_in_layer_space(),
-            fill,
-            stroke,
-            stroke_width_px: obj.style.effective_stroke_width(),
-            even_odd: obj.path.fill_rule == FillRule::EvenOdd,
-        });
-    }
-    out
 }
 
 #[cfg(test)]

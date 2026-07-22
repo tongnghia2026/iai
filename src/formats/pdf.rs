@@ -1,6 +1,6 @@
 use super::{ExportOptions, Exporter, Importer};
 use crate::core::canvas::Canvas;
-use crate::core::print::{build_pdf, PrintLayout};
+use crate::core::print::PrintLayout;
 use lopdf::dictionary;
 use std::io::Write;
 use std::path::Path;
@@ -347,6 +347,7 @@ pub enum HybridPageContent {
     Original,
     Overlay {
         rgba: Vec<u8>,
+        vectors: Vec<crate::core::print::PdfVectorObject>,
         width: u32,
         height: u32,
         dpi: f32,
@@ -644,6 +645,42 @@ fn add_overlay(
     Ok(true)
 }
 
+fn add_vector_overlay(
+    document: &mut lopdf::Document,
+    page_id: lopdf::ObjectId,
+    objects: &[crate::core::print::PdfVectorObject],
+    width: u32,
+    height: u32,
+    dpi: f32,
+) -> Result<bool, String> {
+    if objects.is_empty() {
+        return Ok(false);
+    }
+    if !page_accepts_overlay(document, page_id, width, height, dpi) {
+        return Err("PDF page geometry is not safe for a vector overlay".to_string());
+    }
+    let rect =
+        page_rect(document, page_id).ok_or_else(|| "PDF page has no page box".to_string())?;
+    let mut content = String::new();
+    crate::core::print::append_vector_content(
+        &mut content,
+        objects,
+        width,
+        height,
+        rect.width,
+        rect.height,
+        rect.x,
+        rect.y,
+    );
+    if content.is_empty() {
+        return Ok(false);
+    }
+    document
+        .add_page_contents(page_id, content.into_bytes())
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn replace_page_with_raster(
     document: &mut lopdf::Document,
     page_id: lopdf::ObjectId,
@@ -743,11 +780,16 @@ pub fn build_hybrid_pdf(path: &Path, pages: &[HybridPage]) -> Result<HybridPdf, 
             HybridPageContent::Original => vector_pages += 1,
             HybridPageContent::Overlay {
                 rgba,
+                vectors,
                 width,
                 height,
                 dpi,
             } => {
-                if add_overlay(&mut document, page_id, &name, rgba, *width, *height, *dpi)? {
+                let raster_added =
+                    add_overlay(&mut document, page_id, &name, rgba, *width, *height, *dpi)?;
+                let vector_added =
+                    add_vector_overlay(&mut document, page_id, vectors, *width, *height, *dpi)?;
+                if raster_added || vector_added {
                     overlay_pages += 1;
                 } else {
                     vector_pages += 1;
@@ -811,15 +853,32 @@ impl Exporter for PdfExporter {
     }
 
     fn export(&self, canvas: &Canvas, path: &Path, _opts: &ExportOptions) -> Result<(), String> {
-        let rgba = canvas
-            .export_flat_up_to(MAX_PDF_PAGE_PIXELS)
-            .ok_or_else(|| "PDF canvas is too large to export safely".to_string())?;
+        if Canvas::pixel_count(canvas.width, canvas.height).is_none_or(|p| p > MAX_PDF_PAGE_PIXELS)
+        {
+            return Err("PDF canvas is too large to export safely".to_string());
+        }
+        if canvas.is_cmyk() {
+            if let Some(ink) = canvas.flatten_ink() {
+                let page = crate::core::print::encode_pdf_page_cmyk(
+                    &ink,
+                    canvas.width,
+                    canvas.height,
+                    canvas.metadata.resolution_ppi,
+                )?;
+                let pdf =
+                    crate::core::print::build_pdf_encoded(&page, &PrintLayout::default(), None)?;
+                return std::fs::write(path, &pdf).map_err(|e| e.to_string());
+            }
+        }
+        let selection = crate::core::print::collect_pdf_vectors(canvas);
+        let rgba = crate::core::print::pdf_raster_base(canvas, &selection);
         let icc = super::export_icc_bytes(canvas);
-        let pdf = build_pdf(
+        let pdf = crate::core::print::build_pdf_with_vectors(
             &rgba,
             canvas.width,
             canvas.height,
             canvas.metadata.resolution_ppi,
+            &selection.objects,
             &PrintLayout::default(),
             Some(&icc),
         )?;
@@ -840,6 +899,94 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn generic_pdf_exporter_writes_native_path_content() {
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        let mut canvas = Canvas::from_rgba(vec![255; 8 * 8 * 4], 8, 8);
+        let index = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(1.0, 1.0)),
+                            Node::sharp(Point::new(7.0, 1.0)),
+                            Node::sharp(Point::new(4.0, 7.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                VectorStyle::filled(ColorValue::rgb(0.0, 0.0, 1.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+        let output = temp_pdf_path("generic-native-vector");
+        PdfExporter
+            .export(&canvas, &output, &ExportOptions::default())
+            .expect("export");
+        let bytes = std::fs::read(&output).expect("read pdf");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains(" m\n") && text.contains("f\nQ"));
+        let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    fn hybrid_pdf_keeps_new_path_edit_as_native_vector() {
+        use crate::core::geometry::Point;
+        use crate::core::print::PdfVectorObject;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+
+        let source = temp_pdf_path("hybrid-vector-source");
+        std::fs::write(&source, minimal_pdf(&[(40, 40)])).expect("write source");
+        let vector = PdfVectorObject {
+            path: PathData::new(
+                vec![Contour::new(
+                    vec![
+                        Node::sharp(Point::new(4.0, 4.0)),
+                        Node::sharp(Point::new(36.0, 4.0)),
+                        Node::sharp(Point::new(20.0, 36.0)),
+                    ],
+                    true,
+                )],
+                FillRule::NonZero,
+            ),
+            fill: Some([1.0, 0.0, 0.0]),
+            stroke: None,
+            stroke_width_px: 0.0,
+            even_odd: false,
+        };
+        let hybrid = build_hybrid_pdf(
+            &source,
+            &[HybridPage {
+                source_index: 0,
+                content: HybridPageContent::Overlay {
+                    rgba: vec![0; 40 * 40 * 4],
+                    vectors: vec![vector],
+                    width: 40,
+                    height: 40,
+                    dpi: 72.0,
+                },
+            }],
+        )
+        .expect("hybrid export");
+        let document = lopdf::Document::load_mem(&hybrid.bytes).expect("parse hybrid");
+        let page_id = *document.get_pages().values().next().expect("page");
+        let content = document.get_page_content(page_id).expect("page content");
+        let text = String::from_utf8_lossy(&content);
+        assert!(text.contains("1.0000 0.0000 0.0000 rg"));
+        assert!(text.contains(" m\n") && text.contains("f\nQ"));
+        let _ = std::fs::remove_file(source);
     }
 
     fn minimal_pdf(page_sizes: &[(u32, u32)]) -> Vec<u8> {
@@ -890,7 +1037,8 @@ mod tests {
     fn imports_a_generated_pdf_page_at_auto_dpi() {
         let path = temp_pdf_path("pdf-import");
         let rgba = vec![255u8; 8 * 6 * 4];
-        let pdf = build_pdf(&rgba, 8, 6, 72.0, &PrintLayout::default(), None).unwrap();
+        let pdf = crate::core::print::build_pdf(&rgba, 8, 6, 72.0, &PrintLayout::default(), None)
+            .unwrap();
         std::fs::write(&path, pdf).unwrap();
 
         let imported = PdfImporter.import_many(&path).unwrap();
@@ -1107,6 +1255,7 @@ mod tests {
                     source_index: 1,
                     content: HybridPageContent::Overlay {
                         rgba: overlay,
+                        vectors: Vec::new(),
                         width: 40,
                         height: 10,
                         dpi: 72.0,
