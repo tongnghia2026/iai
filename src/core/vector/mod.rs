@@ -10,13 +10,16 @@
 //!   hittest  - fill/stroke hit-testing                      [T1.5] DONE
 //!   color    - ColorValue (RGB/CMYK/opacity)                [T2.1] DONE
 //!   style    - VectorStyle / StrokeStyle                    [T2.2] DONE
-//!   raster   - PathData -> TileMap cache                    [T5.x] pending
+//!   object   - VectorObjectData (what a Path layer holds)   [T4.1] DONE
+//!   raster   - VectorObjectData -> RGBA cache (CPU)         [T4.1 min / T5.x full]
 //! These stay declared here as they land; nothing above depends on UI or GPU.
 
 pub mod affine;
 pub mod color;
 pub mod flatten;
 pub mod hittest;
+pub mod object;
 pub mod ops;
 pub mod path;
+pub mod raster;
 pub mod style;

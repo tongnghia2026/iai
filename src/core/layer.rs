@@ -674,6 +674,11 @@ pub enum LayerType {
     Group,
     Text(crate::core::text::TextData),
     Shape(crate::core::shape::ShapeData),
+    /// An editable vector Path object (Bước 4). Holds the source-of-truth model
+    /// (geometry + fill/outline + object transform, Mục 3.2); `Layer::tiles` is
+    /// a raster cache derived from it, and `Layer::offset` places that raster on
+    /// the canvas/page. One object per layer at MVP (Mục 3.3).
+    Path(crate::core::vector::object::VectorObjectData),
     SmartObject,
 }
 

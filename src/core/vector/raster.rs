@@ -1,0 +1,425 @@
+#![allow(dead_code)]
+//! PathData → RGBA raster cache (foundation-adjacent, Bước 4 minimal / T5.1 full).
+//!
+//! The vector model ([`VectorObjectData`]) is the source of truth; this produces
+//! the derived `Layer::tiles` raster the existing compositor, thumbnail and
+//! raster export consume (Mục 3.2 / 3.8). It is a straight-alpha CPU rasteriser
+//! with no UI/GPU dependency, mirroring the synchronous `ShapeData::render`
+//! precedent (Mục 3.5 allows a synchronous fallback in the first slice).
+//!
+//! This is deliberately the *minimal* correct rasteriser for Bước 4: an analytic
+//! scanline fill (vertical supersampling + horizontal analytic coverage, honouring
+//! the path's fill rule) plus a per-segment capsule stroke. The generation /
+//! stale-worker / dirty-rect / GPU-atlas machinery is Bước 5 (T5.2) and is layered
+//! ON TOP without changing this function's output.
+
+use crate::core::geometry::Point;
+use crate::core::vector::flatten::flatten_path;
+use crate::core::vector::object::VectorObjectData;
+use crate::core::vector::style::Paint;
+
+/// Flatten tolerance in layer pixels. Small enough to be invisible at 100%, large
+/// enough that a page-sized curve does not explode the polyline.
+const FLATTEN_TOL: f32 = 0.25;
+/// Vertical fill subsamples per output row (horizontal is analytic).
+const FILL_SUBSAMPLES: u32 = 4;
+/// Refuse rasters larger than this many pixels in the first slice; the model
+/// still round-trips and B5's tiled rasteriser will remove the ceiling.
+const MAX_RASTER_PIXELS: u64 = 64_000_000;
+
+/// A rendered vector object: a tight RGBA buffer plus the integer offset that
+/// places its top-left in the object's coordinate (layer) space.
+pub struct PathRaster {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub offset: (i32, i32),
+}
+
+/// Rasterise a vector object into a tight straight-alpha RGBA buffer. Returns
+/// `None` when there is nothing visible to draw (empty path, no fill and no
+/// outline) or the raster would exceed [`MAX_RASTER_PIXELS`].
+pub fn rasterize(object: &VectorObjectData) -> Option<PathRaster> {
+    let fill_visible = object.style.fill.is_visible();
+    let half = object.style.effective_stroke_width() * 0.5;
+    let stroke_visible = object.style.stroke.is_visible() && half > 0.0;
+    if !fill_visible && !stroke_visible {
+        return None;
+    }
+
+    let lpath = object.path_in_layer_space();
+    // Per-contour polylines in LAYER space, with the source `closed` flag so the
+    // stroke does not draw a phantom closing edge on an open contour.
+    let polylines = flatten_path(&lpath, FLATTEN_TOL);
+    let closed: Vec<bool> = lpath.contours.iter().map(|c| c.closed).collect();
+
+    // Bounds over every on-curve point.
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    );
+    for pl in &polylines {
+        for p in pl {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+    }
+    if !min_x.is_finite() || max_x < min_x {
+        return None;
+    }
+
+    // AA margin: half the stroke plus a pixel for the coverage ramp.
+    let pad = half.max(0.0) + 1.0;
+    let off_x = (min_x - pad).floor();
+    let off_y = (min_y - pad).floor();
+    let w = ((max_x + pad).ceil() - off_x).max(1.0);
+    let h = ((max_y + pad).ceil() - off_y).max(1.0);
+    if (w as u64) * (h as u64) > MAX_RASTER_PIXELS {
+        return None;
+    }
+    let w = w as u32;
+    let h = h as u32;
+    let offset = (off_x as i32, off_y as i32);
+
+    // Shift every polyline into raster-local space once.
+    let local: Vec<Vec<Point>> = polylines
+        .iter()
+        .map(|pl| {
+            pl.iter()
+                .map(|p| Point::new(p.x - off_x, p.y - off_y))
+                .collect()
+        })
+        .collect();
+
+    let opacity = object.style.opacity.clamp(0.0, 1.0);
+    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+
+    // ── Fill ─────────────────────────────────────────────────────────────────
+    if fill_visible {
+        if let Some(color) = object.style.fill.color() {
+            let [fr, fg, fb, fa] = color.to_rgba8();
+            let rgb = [fr as f32 / 255.0, fg as f32 / 255.0, fb as f32 / 255.0];
+            let base_a = (fa as f32 / 255.0) * opacity;
+            let even_odd = object.path.fill_rule == crate::core::vector::path::FillRule::EvenOdd;
+            let cov = fill_coverage(&local, w, h, even_odd);
+            for i in 0..(w as usize * h as usize) {
+                let c = cov[i];
+                if c > 0.0015 {
+                    let px = &mut rgba[i * 4..i * 4 + 4];
+                    let mut p = [px[0], px[1], px[2], px[3]];
+                    blend_straight(&mut p, rgb, base_a * c);
+                    px.copy_from_slice(&p);
+                }
+            }
+        }
+    }
+
+    // ── Stroke (over the fill) ───────────────────────────────────────────────
+    if stroke_visible {
+        if let Paint::Solid(color) = object.style.stroke {
+            let [sr, sg, sb, sa] = color.to_rgba8();
+            let rgb = [sr as f32 / 255.0, sg as f32 / 255.0, sb as f32 / 255.0];
+            let base_a = (sa as f32 / 255.0) * opacity;
+            let cov = stroke_coverage(&local, &closed, w, h, half);
+            for i in 0..(w as usize * h as usize) {
+                let c = cov[i];
+                if c > 0.0015 {
+                    let px = &mut rgba[i * 4..i * 4 + 4];
+                    let mut p = [px[0], px[1], px[2], px[3]];
+                    blend_straight(&mut p, rgb, base_a * c);
+                    px.copy_from_slice(&p);
+                }
+            }
+        }
+    }
+
+    Some(PathRaster {
+        rgba,
+        width: w,
+        height: h,
+        offset,
+    })
+}
+
+/// Analytic scanline fill coverage in `[0,1]` per pixel. Each contour is treated
+/// as closed (an open contour is implicitly closed for filling, matching every
+/// 2D vector renderer). Vertical antialiasing comes from [`FILL_SUBSAMPLES`]
+/// sub-scanlines; horizontal antialiasing is analytic at the span endpoints.
+fn fill_coverage(local: &[Vec<Point>], w: u32, h: u32, even_odd: bool) -> Vec<f32> {
+    let mut cov = vec![0f32; (w as usize) * (h as usize)];
+    // Edge list: (x0,y0,x1,y1) with y0 < y1 tracked via winding sign.
+    struct Edge {
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        dir: i32,
+    }
+    let mut edges: Vec<Edge> = Vec::new();
+    for pl in local {
+        if pl.len() < 2 {
+            continue;
+        }
+        let n = pl.len();
+        for i in 0..n {
+            let a = pl[i];
+            // Close the ring: the last→first edge fills an open contour too.
+            let b = pl[(i + 1) % n];
+            if (a.y - b.y).abs() < f32::EPSILON {
+                continue; // horizontal edges contribute no crossings
+            }
+            let (x0, y0, x1, y1, dir) = if a.y < b.y {
+                (a.x, a.y, b.x, b.y, 1)
+            } else {
+                (b.x, b.y, a.x, a.y, -1)
+            };
+            edges.push(Edge {
+                x0,
+                y0,
+                x1,
+                y1,
+                dir,
+            });
+        }
+    }
+    if edges.is_empty() {
+        return cov;
+    }
+
+    let ss = FILL_SUBSAMPLES;
+    let sub_w = 1.0 / ss as f32;
+    let mut xs: Vec<(f32, i32)> = Vec::new();
+    for py in 0..h {
+        for s in 0..ss {
+            let yc = py as f32 + (s as f32 + 0.5) * sub_w;
+            xs.clear();
+            for e in &edges {
+                if yc >= e.y0 && yc < e.y1 {
+                    let t = (yc - e.y0) / (e.y1 - e.y0);
+                    xs.push((e.x0 + t * (e.x1 - e.x0), e.dir));
+                }
+            }
+            if xs.len() < 2 {
+                continue;
+            }
+            xs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let row = (py as usize) * (w as usize);
+            let mut wind = 0i32;
+            for pair in 0..xs.len() - 1 {
+                let before = wind;
+                wind += xs[pair].1;
+                let inside = if even_odd {
+                    // Parity of the number of crossings seen so far.
+                    (pair as i32 + 1) & 1 == 1
+                } else {
+                    wind != 0
+                };
+                let _ = before;
+                if inside {
+                    add_span(
+                        &mut cov[row..row + w as usize],
+                        xs[pair].0,
+                        xs[pair + 1].0,
+                        sub_w,
+                    );
+                }
+            }
+        }
+    }
+    cov
+}
+
+/// Add `weight * horizontal_overlap` to each pixel the interval `[xa, xb)` covers,
+/// with analytic partial coverage at the two endpoints.
+fn add_span(row: &mut [f32], xa: f32, xb: f32, weight: f32) {
+    let w = row.len();
+    let xa = xa.max(0.0);
+    let xb = xb.min(w as f32);
+    if xb <= xa {
+        return;
+    }
+    let start = xa.floor() as usize;
+    let end = (xb.ceil() as usize).min(w);
+    for x in start..end {
+        let l = (x as f32).max(xa);
+        let r = ((x + 1) as f32).min(xb);
+        let o = (r - l).clamp(0.0, 1.0);
+        if o > 0.0 {
+            row[x] = (row[x] + weight * o).min(1.0);
+        }
+    }
+}
+
+/// Per-segment capsule stroke coverage in `[0,1]` per pixel, unioned via max so
+/// overlapping segments/joins stay opaque without double-counting. Only pixels
+/// inside each segment's expanded bbox are touched, so a page-sized thin outline
+/// costs O(perimeter·width), not O(area).
+fn stroke_coverage(local: &[Vec<Point>], closed: &[bool], w: u32, h: u32, half: f32) -> Vec<f32> {
+    let mut cov = vec![0f32; (w as usize) * (h as usize)];
+    let reach = half + 0.5; // coverage ramp reaches half a pixel past the edge
+    for (ci, pl) in local.iter().enumerate() {
+        if pl.len() < 2 {
+            continue;
+        }
+        let n = pl.len();
+        // A closed flattened contour already ends at its start point, so edges
+        // 0..n-1 cover the ring; an open one stops before wrapping.
+        let seg_count = if closed.get(ci).copied().unwrap_or(false) {
+            n // includes the wrap edge (pl[n-1] == pl[0] for a closed ring)
+        } else {
+            n - 1
+        };
+        for i in 0..seg_count {
+            let a = pl[i];
+            let b = pl[(i + 1) % n];
+            let min_x = (a.x.min(b.x) - reach).floor().max(0.0) as u32;
+            let max_x = ((a.x.max(b.x) + reach).ceil() as i64).clamp(0, w as i64) as u32;
+            let min_y = (a.y.min(b.y) - reach).floor().max(0.0) as u32;
+            let max_y = ((a.y.max(b.y) + reach).ceil() as i64).clamp(0, h as i64) as u32;
+            for py in min_y..max_y {
+                let row = (py as usize) * (w as usize);
+                for px in min_x..max_x {
+                    let d = dist_to_segment(px as f32 + 0.5, py as f32 + 0.5, a, b);
+                    let c = (0.5 - (d - half)).clamp(0.0, 1.0);
+                    if c > 0.0 {
+                        let idx = row + px as usize;
+                        if c > cov[idx] {
+                            cov[idx] = c;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    cov
+}
+
+/// Distance from `(px,py)` to segment `a→b`.
+fn dist_to_segment(px: f32, py: f32, a: Point, b: Point) -> f32 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-6 {
+        let ex = px - a.x;
+        let ey = py - a.y;
+        return (ex * ex + ey * ey).sqrt();
+    }
+    let t = (((px - a.x) * dx + (py - a.y) * dy) / len2).clamp(0.0, 1.0);
+    let cx = a.x + t * dx;
+    let cy = a.y + t * dy;
+    let ex = px - cx;
+    let ey = py - cy;
+    (ex * ex + ey * ey).sqrt()
+}
+
+/// Source-over blend of a straight-alpha colour into an `[r,g,b,a]` pixel (u8),
+/// matching `shape.rs`'s blend so vector and shape rasters composite identically.
+fn blend_straight(px: &mut [u8; 4], src: [f32; 3], src_a: f32) {
+    if src_a <= 0.0015 {
+        return;
+    }
+    let dr = px[0] as f32 / 255.0;
+    let dg = px[1] as f32 / 255.0;
+    let db = px[2] as f32 / 255.0;
+    let da = px[3] as f32 / 255.0;
+    let a = src_a.min(1.0);
+    let out_a = a + da * (1.0 - a);
+    if out_a <= 0.0015 {
+        return;
+    }
+    let inv = da * (1.0 - a);
+    px[0] = (((src[0] * a + dr * inv) / out_a) * 255.0).round() as u8;
+    px[1] = (((src[1] * a + dg * inv) / out_a) * 255.0).round() as u8;
+    px[2] = (((src[2] * a + db * inv) / out_a) * 255.0).round() as u8;
+    px[3] = (out_a * 255.0).round() as u8;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::vector::affine::AffineTransform;
+    use crate::core::vector::color::ColorValue;
+    use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+    use crate::core::vector::style::VectorStyle;
+
+    fn square_obj(side: f32, style: VectorStyle) -> VectorObjectData {
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(side, 0.0)),
+                    Node::sharp(Point::new(side, side)),
+                    Node::sharp(Point::new(0.0, side)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        VectorObjectData::new(path, style, AffineTransform::translate(20.0, 20.0))
+    }
+
+    fn alpha_at(r: &PathRaster, x: u32, y: u32) -> u8 {
+        r.rgba[((y * r.width + x) * 4 + 3) as usize]
+    }
+
+    #[test]
+    fn empty_style_renders_nothing() {
+        let mut style = VectorStyle::default();
+        style.fill = Paint::None;
+        style.stroke = Paint::None;
+        assert!(rasterize(&square_obj(40.0, style)).is_none());
+    }
+
+    #[test]
+    fn filled_square_is_opaque_inside_offset_placed() {
+        let r = rasterize(&square_obj(
+            40.0,
+            VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0)),
+        ))
+        .expect("raster");
+        // Offset places the raster near (20,20) minus the AA pad.
+        assert!(r.offset.0 <= 20 && r.offset.1 <= 20);
+        // Centre of the square (~ layer (40,40)) is opaque red.
+        let cx = (40 - r.offset.0) as u32;
+        let cy = (40 - r.offset.1) as u32;
+        let i = ((cy * r.width + cx) * 4) as usize;
+        assert!(r.rgba[i + 3] > 250, "interior opaque");
+        assert_eq!(&r.rgba[i..i + 3], &[255, 0, 0], "fill colour");
+        // A corner of the raster is transparent (outside the square).
+        assert_eq!(alpha_at(&r, 0, 0), 0, "outside transparent");
+    }
+
+    #[test]
+    fn stroke_only_leaves_interior_hollow() {
+        let r = rasterize(&square_obj(
+            40.0,
+            VectorStyle::stroked(ColorValue::BLACK, 4.0),
+        ))
+        .expect("raster");
+        // The centre is well inside; a stroke-only object leaves it transparent.
+        let cx = (40 - r.offset.0) as u32;
+        let cy = (40 - r.offset.1) as u32;
+        assert_eq!(alpha_at(&r, cx, cy), 0, "interior hollow for stroke-only");
+        // A point on the left edge (layer x≈20) is painted.
+        let ex = (20 - r.offset.0) as u32;
+        assert!(alpha_at(&r, ex, cy) > 200, "edge painted");
+    }
+
+    #[test]
+    fn opacity_scales_alpha() {
+        let mut style = VectorStyle::filled(ColorValue::rgb(0.0, 0.0, 0.0));
+        style.opacity = 0.5;
+        let r = rasterize(&square_obj(40.0, style)).expect("raster");
+        let cx = (40 - r.offset.0) as u32;
+        let cy = (40 - r.offset.1) as u32;
+        let a = alpha_at(&r, cx, cy);
+        assert!(
+            (a as i32 - 128).abs() <= 3,
+            "opacity 0.5 → alpha ~128, got {a}"
+        );
+    }
+}

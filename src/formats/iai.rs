@@ -874,6 +874,7 @@ fn layer_type_to_str(lt: &LayerType) -> &'static str {
         LayerType::Group => "Group",
         LayerType::Text(_) => "Text",
         LayerType::Shape(_) => "Shape",
+        LayerType::Path(_) => "Path",
         LayerType::SmartObject => "SmartObject",
     }
 }
