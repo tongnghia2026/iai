@@ -83,6 +83,34 @@ impl App {
         self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
     }
 
+    /// Live-preview `style` on the active Path WITHOUT recording history, the way
+    /// a colour-dialog drag or width scrub should: the model style is updated
+    /// immediately (cheap — so a following read/commit sees the latest), but the
+    /// expensive fill re-raster is handed to the OFF-THREAD Path bake. The old
+    /// path re-rastered synchronously on the UI thread on every colour tick, which
+    /// stalled the picker on a big filled path ("fill màu lag"). Mirrors the
+    /// live scale/rotate drag, which bakes off-thread for the same reason.
+    fn preview_path_style_live(&mut self, layer_id: u32, style: VectorStyle) {
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let Some(idx) = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == layer_id)
+        else {
+            return;
+        };
+        let obj = {
+            let layer = &mut canvas.layer_stack.layers[idx];
+            let LayerType::Path(o) = &mut layer.layer_type else {
+                return;
+            };
+            o.style = style;
+            o.clone()
+        };
+        self.request_path_bake(layer_id, obj);
+    }
+
     /// Capture the pre-edit style baseline for the active Path (once per
     /// interaction), so the scrub/dialog commits as one undo step.
     fn path_style_begin(&mut self) {
@@ -101,6 +129,10 @@ impl App {
         let Some((id, baseline)) = self.edit.pending_path_style.take() else {
             return;
         };
+        // Drop any in-flight / queued live-preview bake: the final style is
+        // rasterised synchronously below, so a late worker result would be stale
+        // (same guard the transform commit uses).
+        self.cancel_path_bake();
         let Some((cur_id, final_style)) = self.active_path_style() else {
             return;
         };
@@ -187,7 +219,7 @@ impl App {
         self.path_style_begin();
         if let Some((id, mut style)) = self.active_path_style() {
             style.fill = Paint::Solid(ColorValue::from_rgba8(rgba));
-            self.preview_path_style(id, style);
+            self.preview_path_style_live(id, style);
         }
     }
 
@@ -199,7 +231,7 @@ impl App {
             if style.stroke_style.width <= 0.0 {
                 style.stroke_style.width = 1.0;
             }
-            self.preview_path_style(id, style);
+            self.preview_path_style_live(id, style);
         }
     }
 
@@ -213,7 +245,7 @@ impl App {
             if w > 0.0 && matches!(style.stroke, Paint::None) {
                 style.stroke = Paint::Solid(ColorValue::BLACK);
             }
-            self.preview_path_style(id, style);
+            self.preview_path_style_live(id, style);
         }
     }
 }
