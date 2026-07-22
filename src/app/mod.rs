@@ -18,6 +18,7 @@ pub mod state;
 pub mod text_ops;
 pub mod transform;
 pub mod ui_shell;
+pub mod vector_transform;
 pub mod warp;
 pub mod window_runtime;
 

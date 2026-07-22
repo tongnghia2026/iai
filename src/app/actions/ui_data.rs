@@ -1016,16 +1016,30 @@ impl App {
                 pen_closed: self.edit.tools.active_id() == crate::tools::ToolId::Pen
                     && self.edit.tools.pen().is_closed(),
                 crop_cursor_hint: self.crop_cursor_hint(),
-                transform_overlay: self.edit.transform_state.as_ref().map(|ts| {
-                    let corners = ts.corners();
-                    let handles = ts.handle_positions();
-                    let center = ts.transform_point(ts.pivot_cx, ts.pivot_cy);
-                    TransformOverlayData {
-                        corners,
-                        handles,
-                        center,
-                    }
-                }),
+                transform_overlay: self
+                    .edit
+                    .transform_state
+                    .as_ref()
+                    .map(|ts| {
+                        let corners = ts.corners();
+                        let handles = ts.handle_positions();
+                        let center = ts.transform_point(ts.pivot_cx, ts.pivot_cy);
+                        TransformOverlayData {
+                            corners,
+                            handles,
+                            center,
+                        }
+                    })
+                    // No modal Free Transform: the Move tool's active Path shows
+                    // the same oriented box for on-canvas scale/rotate.
+                    .or_else(|| {
+                        self.active_path_transform_box()
+                            .map(|b| TransformOverlayData {
+                                corners: b.corners,
+                                handles: b.handles,
+                                center: b.center,
+                            })
+                    }),
                 transform_scale_x: self
                     .edit
                     .transform_state

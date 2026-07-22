@@ -90,6 +90,17 @@ impl VectorObjectData {
             Some(core)
         }
     }
+
+    /// Tight bounds of the fill geometry in OBJECT-LOCAL space (transform NOT
+    /// applied), or `None` for an empty path. Mapping the four corners of this
+    /// rect through `transform` gives the on-canvas oriented bounding box the
+    /// Move-tool transform handles draw and scale about — doing the scale in this
+    /// local frame keeps it aligned with a rotated object's own axes. Stroke pad
+    /// is intentionally omitted: it lives in layer units and would distort the box
+    /// under a non-uniform transform.
+    pub fn local_bounds(&self, tol: f32) -> Option<Rect> {
+        crate::core::vector::flatten::tight_bounds(&self.path, tol)
+    }
 }
 
 #[cfg(test)]

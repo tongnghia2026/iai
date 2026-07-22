@@ -562,14 +562,54 @@ impl Tool for MoveTool {
                         }
                     }
                 }
-                if !layer_ids.is_empty() {
+                // A Path layer carries its position in the vector MODEL (the raster
+                // is a cache), so fold the drag into the model transform via
+                // ChangeVectorTransform — the object stays editable, the offset
+                // and model never drift apart (so the on-canvas transform box is
+                // always exact), and the position survives a reload. Everything
+                // else keeps the relative TranslateLayerCommand.
+                let (path_ids, other_ids): (Vec<u32>, Vec<u32>) =
+                    layer_ids.into_iter().partition(|id| {
+                        canvas
+                            .layer_stack
+                            .layers
+                            .iter()
+                            .find(|l| l.id == *id)
+                            .is_some_and(|l| {
+                                matches!(l.layer_type, crate::core::layer::LayerType::Path(_))
+                            })
+                    });
+                if !other_ids.is_empty() {
                     let cmd = crate::core::command::TranslateLayerCommand::from_applied_move(
-                        layer_ids,
+                        other_ids,
                         self.total_dx,
                         self.total_dy,
                         &canvas.layer_stack,
                     );
                     canvas.record(Box::new(cmd));
+                }
+                let (tdx, tdy) = (self.total_dx as f32, self.total_dy as f32);
+                for id in path_ids {
+                    let m0 = canvas
+                        .layer_stack
+                        .layers
+                        .iter()
+                        .find(|l| l.id == id)
+                        .and_then(|l| match &l.layer_type {
+                            crate::core::layer::LayerType::Path(o) => Some(o.transform),
+                            _ => None,
+                        });
+                    if let Some(m0) = m0 {
+                        let new_t =
+                            crate::core::vector::affine::AffineTransform::translate(tdx, tdy)
+                                .then(&m0);
+                        let _ = canvas.execute(
+                            Box::new(crate::core::command_vector::ChangeVectorTransform::new(
+                                id, new_t,
+                            )),
+                            crate::core::gateway::ChangeKind::LayerStructure,
+                        );
+                    }
                 }
             }
             canvas.end_undo_group();

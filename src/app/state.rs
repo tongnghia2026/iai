@@ -690,6 +690,32 @@ pub struct ShapeDragState {
     pub bake_cost_secs: f32,
 }
 
+/// An in-progress on-canvas transform of a Path layer under the Move tool:
+/// dragging a corner/edge handle scales, dragging the rotate ring outside a
+/// corner rotates. The gesture edits the vector object's affine `transform`
+/// (never bakes node coordinates), re-rasterising the cache live; on release it
+/// records ONE [`crate::core::command_vector::ChangeVectorTransform`] so the
+/// object stays editable and the edit is a single undo step.
+pub struct PathTransformDrag {
+    pub layer_id: u32,
+    /// The grabbed handle. `Some(h)` = scale via that handle; `None` = rotate.
+    pub handle: Option<TransformHandle>,
+    /// Object `transform` captured at press (after folding any pending Move
+    /// drag). The undo baseline AND the frame every drag frame recomputes from.
+    pub orig_transform: crate::core::vector::affine::AffineTransform,
+    /// Fill geometry bounds in OBJECT-LOCAL space at press: its four corners map
+    /// through `orig_transform` to the displayed box.
+    pub local_bounds: crate::core::geometry::Rect,
+    /// Canvas-space pivot (box centre) at press — the rotation centre.
+    pub pivot: crate::core::geometry::Point,
+    /// Cursor canvas position at press (rotation reference angle).
+    pub start_cx: f32,
+    pub start_cy: f32,
+    /// True once the gesture actually changed the transform (so a no-op click on
+    /// a handle pushes no undo entry).
+    pub changed: bool,
+}
+
 /// A deferred options-bar style edit (Radius/Stroke/colour scrub) for a Shape
 /// layer. Scrubbing emits a tick per frame and each tick used to re-rasterize
 /// the whole shape; bakes are now throttled by measured cost (like
@@ -997,6 +1023,7 @@ impl App {
                 adjustment_layer_edit: None,
                 text_edit: None,
                 shape_drag: None,
+                path_transform: None,
                 shape_style_pending: None,
                 text_font_px: 48.0,
                 text_font_px_auto: true,
@@ -2351,10 +2378,20 @@ impl App {
                                     GuideOrientation::Vertical => CursorIcon::EwResize,
                                 })
                         });
-                        // The native four-way Move cursor is visually heavy on
-                        // Windows. Use the compact OS pointer for layer movement;
-                        // guide edges still advertise their resize direction.
-                        w.set_cursor(guide_cursor.unwrap_or(CursorIcon::Default));
+                        // A vector Path shows its transform box: resize/rotate over
+                        // a handle, move over its fill. The native four-way Move
+                        // cursor is visually heavy, so a plain layer body still uses
+                        // the compact OS pointer; guide edges take priority.
+                        let path_cursor = match self.move_hover_hint() {
+                            2 => Some(CursorIcon::NwseResize),
+                            3 => Some(CursorIcon::NeswResize),
+                            4 => Some(CursorIcon::NsResize),
+                            5 => Some(CursorIcon::EwResize),
+                            6 => Some(CursorIcon::Grab),
+                            1 => Some(CursorIcon::Move),
+                            _ => None,
+                        };
+                        w.set_cursor(guide_cursor.or(path_cursor).unwrap_or(CursorIcon::Default));
                     }
                     ToolId::Hand => {
                         w.set_cursor_visible(true);

@@ -58,6 +58,9 @@ pub struct EditorInteraction {
     pub(in crate::app) text_edit: Option<TextEditState>,
     /// Active Shape-handle drag (Shape tool). See [`ShapeDragState`].
     pub(in crate::app) shape_drag: Option<ShapeDragState>,
+    /// Active on-canvas Path transform (scale/rotate) under the Move tool. See
+    /// [`PathTransformDrag`]. None unless a handle is being dragged.
+    pub(in crate::app) path_transform: Option<PathTransformDrag>,
     /// Deferred options-bar style edit (Radius/Stroke/colour scrub) for a
     /// Shape layer. See [`ShapeStylePending`].
     pub(in crate::app) shape_style_pending: Option<ShapeStylePending>,

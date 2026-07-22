@@ -355,6 +355,26 @@ impl App {
                                 }
                             }
 
+                            // Move tool: grabbing a transform handle (or the
+                            // rotate ring) of the active Path layer starts an
+                            // on-canvas scale/rotate that keeps the object
+                            // editable; otherwise the press falls through to the
+                            // normal Move (select / drag / marquee).
+                            if self.edit.tools.active_id() == ToolId::Move
+                                && self.edit.transform_state.is_none()
+                            {
+                                let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
+                                if let Some(hit) = self.path_box_hit_at_screen(msx, msy) {
+                                    let ev = self.tool_event();
+                                    self.path_transform_begin(hit, ev.canvas_x, ev.canvas_y);
+                                    self.edit.input.painting = true;
+                                    if let Some(w) = &self.win.window {
+                                        w.request_redraw();
+                                    }
+                                    return;
+                                }
+                            }
+
                             if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair)
                                 && self.edit.input.alt_held
                                 && self.edit.transform_state.is_none()
@@ -520,7 +540,21 @@ impl App {
                         }
                         let releasing_move = self.edit.input.painting
                             && self.edit.transform_state.is_none()
+                            && self.edit.path_transform.is_none()
                             && self.edit.tools.active_id() == ToolId::Move;
+                        if self.edit.path_transform.is_some() {
+                            // Finish an on-canvas Path scale/rotate (records one
+                            // ChangeVectorTransform). Bypasses the Move tool's
+                            // own release path — the gesture never touched it.
+                            self.path_transform_finish();
+                            self.edit.input.last_left_release_time =
+                                Some(std::time::Instant::now());
+                            self.edit.input.painting = false;
+                            if let Some(w) = &self.win.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         if self.edit.input.painting {
                             if self.edit.transform_state.is_some() {
                                 self.transform_on_release();
@@ -882,6 +916,21 @@ impl App {
             self.constrain_pan();
             self.push_canvas_uniforms();
             self.win.pending_view_change = true;
+        } else if self.edit.input.painting
+            && !self.edit.input.was_over_ui
+            && self.edit.path_transform.is_some()
+        {
+            // Live on-canvas Path scale/rotate.
+            let ev = self.tool_event();
+            self.path_transform_update(
+                ev.canvas_x,
+                ev.canvas_y,
+                self.edit.input.shift_held,
+                self.edit.input.alt_held,
+            );
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
         } else if self.edit.input.painting && !self.edit.input.was_over_ui {
             if self.edit.transform_state.is_some() {
                 let ev = self.tool_event();
