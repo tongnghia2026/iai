@@ -150,6 +150,8 @@ pub fn rasterize(object: &VectorObjectData) -> Option<PathRaster> {
 /// 2D vector renderer). Vertical antialiasing comes from [`FILL_SUBSAMPLES`]
 /// sub-scanlines; horizontal antialiasing is analytic at the span endpoints.
 fn fill_coverage(local: &[Vec<Point>], w: u32, h: u32, even_odd: bool) -> Vec<f32> {
+    use rayon::prelude::*;
+
     let mut cov = vec![0f32; (w as usize) * (h as usize)];
     // Edge list: (x0,y0,x1,y1) with y0 < y1 tracked via winding sign.
     struct Edge {
@@ -192,8 +194,13 @@ fn fill_coverage(local: &[Vec<Point>], w: u32, h: u32, even_odd: bool) -> Vec<f3
 
     let ss = FILL_SUBSAMPLES;
     let sub_w = 1.0 / ss as f32;
-    let mut xs: Vec<(f32, i32)> = Vec::new();
-    for py in 0..h {
+    let wu = w as usize;
+    // Each output row is independent (it reads the shared edge list and writes
+    // only its own `w` pixels), so scanlines run in parallel — filling a
+    // page-sized path is O(area) and was the drag/colour-picker bottleneck. The
+    // per-row result is byte-identical to the serial scan.
+    cov.par_chunks_mut(wu).enumerate().for_each(|(py, row)| {
+        let mut xs: Vec<(f32, i32)> = Vec::new();
         for s in 0..ss {
             let yc = py as f32 + (s as f32 + 0.5) * sub_w;
             xs.clear();
@@ -207,10 +214,8 @@ fn fill_coverage(local: &[Vec<Point>], w: u32, h: u32, even_odd: bool) -> Vec<f3
                 continue;
             }
             xs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let row = (py as usize) * (w as usize);
             let mut wind = 0i32;
             for pair in 0..xs.len() - 1 {
-                let before = wind;
                 wind += xs[pair].1;
                 let inside = if even_odd {
                     // Parity of the number of crossings seen so far.
@@ -218,18 +223,12 @@ fn fill_coverage(local: &[Vec<Point>], w: u32, h: u32, even_odd: bool) -> Vec<f3
                 } else {
                     wind != 0
                 };
-                let _ = before;
                 if inside {
-                    add_span(
-                        &mut cov[row..row + w as usize],
-                        xs[pair].0,
-                        xs[pair + 1].0,
-                        sub_w,
-                    );
+                    add_span(row, xs[pair].0, xs[pair + 1].0, sub_w);
                 }
             }
         }
-    }
+    });
     cov
 }
 
