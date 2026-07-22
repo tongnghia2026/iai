@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod iai;
+pub mod iai_vector;
 pub mod jpeg;
 pub mod pdf;
 pub mod png;

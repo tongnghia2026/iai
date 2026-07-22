@@ -11,12 +11,18 @@ use std::path::{Path, PathBuf};
 /// stamped when ink is present, which older builds MUST reject (their loader
 /// errors on version > 2) rather than silently strip the ink.
 ///
+/// v4 adds editable vector Path layers (per-layer `"path"` model payload, Bước 4).
+/// Only stamped when a Path layer is present, so RGB/CMYK files without vector
+/// content keep writing v2/v3 and older builds still open them; a v4 file makes
+/// older builds reject (version > their max) rather than silently dropping the
+/// vector model on resave.
+///
 /// 16-bit precision does NOT bump the version: a layer that still holds a 16-bit
 /// master is written as a 16-bit RGBA PNG at `layer_{i}.png`. Older builds decode
 /// it as 8-bit (graceful precision loss they couldn't use anyway); this build
 /// detects the 16-bit payload on load and rebuilds the master. See
 /// `docs/bit-depth-and-color-capability.md`.
-const IAI_FORMAT_VERSION: u64 = 3;
+const IAI_FORMAT_VERSION: u64 = 4;
 
 pub struct IaiImporter;
 pub struct IaiExporter;
@@ -212,6 +218,13 @@ fn build_canvas_from_meta<R: Read + Seek>(
         } else if layer_info["layer_type"].as_str() == Some("Shape") {
             if let Some(shape) = json_to_shape_data(&layer_info["shape"]) {
                 layer.layer_type = crate::core::layer::LayerType::Shape(shape);
+            }
+        } else if layer_info["layer_type"].as_str() == Some("Path") {
+            // Model is the source of truth; the baked PNG already loaded above is
+            // the display fallback. A malformed/oversized payload decodes to None,
+            // leaving the layer as the raster it loaded (Mục 5.3).
+            if let Some(obj) = super::iai_vector::json_to_layer_path(&layer_info["path"]) {
+                layer.layer_type = crate::core::layer::LayerType::Path(obj);
             }
         } else if layer_info["layer_type"].as_str() == Some("Group") {
             layer.layer_type = crate::core::layer::LayerType::Group;
@@ -431,10 +444,21 @@ impl Exporter for IaiExporter {
         write_iai_archive(path, |zip| {
             let options = deflated_options();
             let mut manifest = canvas_meta_json(canvas);
-            // RGB single-canvas files stay v2 (readable by older builds — the
-            // historical hard-coded `1` was needlessly conservative); CMYK
-            // documents stamp v3 so older builds reject instead of losing ink.
-            manifest["version"] = serde_json::json!(if canvas.is_cmyk() { 3u64 } else { 2u64 });
+            // Graduated version so files stay openable by older builds when they
+            // can be: a Path layer forces v4 (vector model would be lost on an
+            // older resave), else CMYK stamps v3 (ink), else RGB stays v2.
+            let has_path = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .any(|l| matches!(l.layer_type, crate::core::layer::LayerType::Path(_)));
+            manifest["version"] = serde_json::json!(if has_path {
+                4u64
+            } else if canvas.is_cmyk() {
+                3u64
+            } else {
+                2u64
+            });
 
             zip.start_file("manifest.json", options)
                 .map_err(|e| e.to_string())?;
@@ -510,6 +534,11 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
         } else {
             serde_json::Value::Null
         };
+        let path_json = if let crate::core::layer::LayerType::Path(ref obj) = layer.layer_type {
+            super::iai_vector::layer_path_to_json(obj)
+        } else {
+            serde_json::Value::Null
+        };
         layers_json.push(serde_json::json!({
             "name": layer.name,
             "opacity": layer.opacity,
@@ -528,6 +557,7 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             "adjustment": adj_json,
             "text": text_json,
             "shape": shape_json,
+            "path": path_json,
         }));
     }
 
@@ -701,10 +731,20 @@ pub fn save_pdf_project(
             })
             .collect();
 
-        // Projects only need v3 when a page actually carries CMYK ink;
-        // otherwise stay at v2 so older builds keep opening them.
-        let version = if pages.iter().any(|p| p.canvas.is_cmyk()) {
-            IAI_FORMAT_VERSION
+        // Graduated version (mirrors the single-canvas path): a Path layer on any
+        // page forces v4, else CMYK ink needs v3, else stay v2 so older builds
+        // keep opening the project.
+        let has_path = pages.iter().any(|p| {
+            p.canvas
+                .layer_stack
+                .layers
+                .iter()
+                .any(|l| matches!(l.layer_type, crate::core::layer::LayerType::Path(_)))
+        });
+        let version = if has_path {
+            4u64
+        } else if pages.iter().any(|p| p.canvas.is_cmyk()) {
+            3u64
         } else {
             2u64
         };
@@ -1544,6 +1584,143 @@ mod tests {
         let manifest = read_manifest(&mut zip).unwrap();
         assert_eq!(manifest["version"].as_u64(), Some(2));
         assert!(manifest.get("color_mode").is_none_or(|v| v.is_null()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Path layer persistence (Bước 4 / T4.3) ──
+    use crate::core::vector::affine::AffineTransform;
+    use crate::core::vector::color::ColorValue;
+    use crate::core::vector::object::VectorObjectData;
+    use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+    use crate::core::vector::style::{Paint, StrokeStyle, VectorStyle};
+
+    fn sample_path_object() -> VectorObjectData {
+        use crate::core::geometry::Point;
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::with_handles(
+                        Point::new(40.0, 0.0),
+                        Point::new(30.0, -6.0),
+                        Point::new(50.0, 6.0),
+                        crate::core::vector::path::NodeKind::Smooth,
+                    ),
+                    Node::sharp(Point::new(40.0, 40.0)),
+                    Node::sharp(Point::new(0.0, 40.0)),
+                ],
+                true,
+            )],
+            FillRule::EvenOdd,
+        );
+        let mut style = VectorStyle::filled(ColorValue::cmyk(0.0, 0.0, 0.0, 1.0));
+        style.stroke = Paint::Solid(ColorValue::rgb(0.0, 0.4, 1.0));
+        style.stroke_style = StrokeStyle {
+            width: 2.5,
+            ..StrokeStyle::default()
+        };
+        style.opacity = 0.9;
+        VectorObjectData::new(path, style, AffineTransform::translate(20.0, 15.0))
+    }
+
+    fn loaded_path_model(canvas: &Canvas) -> VectorObjectData {
+        canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find_map(|l| match &l.layer_type {
+                LayerType::Path(o) => Some(o.clone()),
+                _ => None,
+            })
+            .expect("a Path layer survived the round-trip")
+    }
+
+    #[test]
+    fn path_layer_round_trips_and_stamps_v4() {
+        let dir = tmp_dir("path-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        let obj = sample_path_object();
+        canvas
+            .execute(
+                Box::new(crate::core::command_vector::CreatePathLayer::new(
+                    obj.clone(),
+                    "Path 1",
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        // Manifest is stamped v4 because a Path layer is present.
+        let f = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(4)
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(
+            loaded_path_model(&loaded),
+            obj,
+            "geometry/style/transform must round-trip"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn path_layer_round_trips_on_cmyk() {
+        let dir = tmp_dir("path-cmyk");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        canvas
+            .convert_to_cmyk(crate::core::canvas::CmykProfile::Naive)
+            .expect("to CMYK");
+        let obj = sample_path_object();
+        canvas
+            .execute(
+                Box::new(crate::core::command_vector::CreatePathLayer::new(
+                    obj.clone(),
+                    "Path 1",
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.is_cmyk(), "CMYK mode lost");
+        // The model (incl. the CMYK fill colour) is the source of truth and must
+        // survive verbatim even though the baked fallback is a mirror.
+        assert_eq!(loaded_path_model(&loaded), obj);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn newer_version_is_rejected() {
+        let dir = tmp_dir("newer-ver");
+        let path = dir.join("doc.iai");
+        // Hand-write a minimal archive claiming a version beyond this build.
+        write_iai_archive(&path, |zip| {
+            zip.start_file("manifest.json", stored_options())
+                .map_err(|e| e.to_string())?;
+            let m =
+                serde_json::json!({ "version": IAI_FORMAT_VERSION + 1, "width": 4, "height": 4 });
+            zip.write_all(m.to_string().as_bytes())
+                .map_err(|e| e.to_string())
+        })
+        .expect("write");
+        assert!(load(&path).is_err(), "a newer-version file must be refused");
         std::fs::remove_dir_all(&dir).ok();
     }
 
