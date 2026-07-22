@@ -455,6 +455,119 @@ pub fn encode_pdf_page_cmyk(
     })
 }
 
+/// One vector object drawn crisply on a PDF page, ON TOP of the raster image.
+/// Geometry is in CANVAS PIXEL coordinates (the object transform already
+/// applied); the page builder maps it to points with the SAME placement as the
+/// image, so each vector lands exactly over its rasterised twin and sharpens the
+/// edges at any zoom / print size (true resolution independence). Colours are
+/// sRGB in `0..1`. Only opaque, unmasked, Normal-blend Path layers that sit above
+/// all raster content become vectors; everything else stays in the image, so the
+/// output is always visually correct.
+pub struct PdfVectorObject {
+    pub path: crate::core::vector::path::PathData,
+    pub fill: Option<[f32; 3]>,
+    pub stroke: Option<[f32; 3]>,
+    pub stroke_width_px: f32,
+    pub even_odd: bool,
+}
+
+/// Append the PDF content-stream operators that draw `objects` (in canvas pixel
+/// space) over a page whose image occupies `dw×dh` points at `(tx,ty)` for a
+/// `w×h` pixel source. All inline (colours as `rg`/`RG`), so no extra PDF
+/// resources or object-number changes are needed.
+fn append_vector_content(
+    out: &mut String,
+    objects: &[PdfVectorObject],
+    w: u32,
+    h: u32,
+    dw: f32,
+    dh: f32,
+    tx: f32,
+    ty: f32,
+) {
+    if objects.is_empty() || w == 0 || h == 0 {
+        return;
+    }
+    let sx = dw / w as f32;
+    let sy = dh / h as f32;
+    // Canvas pixel (top-left origin, y-down) → PDF point (bottom-left, y-up).
+    let mx = |x: f32| tx + x * sx;
+    let my = |y: f32| ty + dh - y * sy;
+
+    out.push_str("q\n");
+    for o in objects {
+        let has_fill = o.fill.is_some();
+        let has_stroke = o.stroke.is_some() && o.stroke_width_px > 0.0;
+        if !has_fill && !has_stroke {
+            continue;
+        }
+        out.push_str("q\n");
+        if let Some([r, g, b]) = o.fill {
+            out.push_str(&format!("{r:.4} {g:.4} {b:.4} rg\n"));
+        }
+        if has_stroke {
+            if let Some([r, g, b]) = o.stroke {
+                out.push_str(&format!(
+                    "{r:.4} {g:.4} {b:.4} RG\n{:.3} w\n",
+                    o.stroke_width_px * sx
+                ));
+            }
+        }
+        for c in &o.path.contours {
+            if c.nodes.is_empty() {
+                continue;
+            }
+            let n = c.nodes.len();
+            let p0 = c.nodes[0].anchor;
+            out.push_str(&format!("{:.3} {:.3} m\n", mx(p0.x), my(p0.y)));
+            for seg in 0..c.segment_count() {
+                let Some((_p0, p1, p2, p3)) = c.segment(seg) else {
+                    continue;
+                };
+                let straight =
+                    c.nodes[seg].out_handle.is_none() && c.nodes[(seg + 1) % n].in_handle.is_none();
+                if straight {
+                    out.push_str(&format!("{:.3} {:.3} l\n", mx(p3.x), my(p3.y)));
+                } else {
+                    out.push_str(&format!(
+                        "{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} c\n",
+                        mx(p1.x),
+                        my(p1.y),
+                        mx(p2.x),
+                        my(p2.y),
+                        mx(p3.x),
+                        my(p3.y)
+                    ));
+                }
+            }
+            if c.closed {
+                out.push_str("h\n");
+            }
+        }
+        let op = match (has_fill, has_stroke) {
+            (true, true) => {
+                if o.even_odd {
+                    "B*"
+                } else {
+                    "B"
+                }
+            }
+            (true, false) => {
+                if o.even_odd {
+                    "f*"
+                } else {
+                    "f"
+                }
+            }
+            (false, true) => "S",
+            (false, false) => "n",
+        };
+        out.push_str(op);
+        out.push_str("\nQ\n");
+    }
+    out.push_str("Q\n");
+}
+
 /// Build a multi-page print-ready PDF — one image page per input, each sized to
 /// its document's physical dimensions (page = document, image fills the page).
 /// Every page is losslessly embedded (`FlateDecode`); a single ICC object is shared
@@ -472,11 +585,14 @@ pub fn build_pdf_multipage(
         .iter()
         .map(|page| encode_pdf_page(page.rgba, page.w, page.h, page.dpi))
         .collect::<Result<Vec<_>, _>>()?;
-    build_pdf_multipage_encoded(&encoded, icc)
+    build_pdf_multipage_encoded(&encoded, &[], icc)
 }
 
+/// `vectors[i]` (when present) are drawn as crisp vector paths over page `i`'s
+/// image — see [`PdfVectorObject`]. Pass `&[]` for an all-raster PDF.
 pub fn build_pdf_multipage_encoded(
     pages: &[EncodedPdfPage],
+    vectors: &[Vec<PdfVectorObject>],
     icc: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
     if pages.is_empty() {
@@ -560,10 +676,17 @@ pub fn build_pdf_multipage_encoded(
             .as_bytes(),
         );
 
-        let content = format!(
+        let mut content = format!(
             "q\n0 0 {:.2} {:.2} re W n\n{:.2} 0 0 {:.2} {:.2} {:.2} cm\n/Im0 Do\nQ\n",
             e.pw, e.ph, e.dw, e.dh, e.tx, e.ty
         );
+        // Overlay crisp vector paths on RGB pages (CMYK ink pages stay pure
+        // raster so their DeviceCMYK colour space isn't mixed with sRGB).
+        if e.components == 3 {
+            if let Some(objs) = vectors.get(i) {
+                append_vector_content(&mut content, objs, e.w, e.h, e.dw, e.dh, e.tx, e.ty);
+            }
+        }
         offsets.push(pdf.len());
         pdf.extend_from_slice(
             format!(
@@ -1118,6 +1241,82 @@ mod tests {
     }
 
     #[test]
+    fn multipage_pdf_embeds_vector_path_operators() {
+        use crate::core::geometry::Point;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+
+        // A 4×4 white RGB page with a filled red triangle drawn on top as vector.
+        let rgba = vec![255u8; 4 * 4 * 4];
+        let page = encode_pdf_page(&rgba, 4, 4, 72.0).expect("encode");
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(4.0, 0.0)),
+                    Node::sharp(Point::new(2.0, 4.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        let obj = PdfVectorObject {
+            path,
+            fill: Some([1.0, 0.0, 0.0]),
+            stroke: None,
+            stroke_width_px: 0.0,
+            even_odd: false,
+        };
+        let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], None).expect("pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        // The content stream is uncompressed, so the path operators are visible.
+        assert!(text.contains(" m\n"), "vector moveto present");
+        assert!(text.contains(" l\n"), "vector lineto present");
+        assert!(
+            text.contains("1.0000 0.0000 0.0000 rg"),
+            "red fill colour set"
+        );
+        assert!(text.contains("f\nQ"), "nonzero fill operator present");
+        // Still exactly one embedded image (the raster page) — no extra XObjects.
+        let images = pdf.windows(11).filter(|w| *w == b"FlateDecode").count();
+        assert_eq!(images, 1, "vector overlay adds no image XObject");
+    }
+
+    #[test]
+    fn vector_overlay_skipped_on_cmyk_pages() {
+        use crate::core::geometry::Point;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+
+        // A DeviceCMYK ink page must NOT get an sRGB vector overlay.
+        let ink = vec![0u8; 4 * 4 * 4];
+        let page = encode_pdf_page_cmyk(&ink, 4, 4, 72.0).expect("encode cmyk");
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(4.0, 0.0)),
+                    Node::sharp(Point::new(2.0, 4.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        let obj = PdfVectorObject {
+            path,
+            fill: Some([1.0, 0.0, 0.0]),
+            stroke: None,
+            stroke_width_px: 0.0,
+            even_odd: false,
+        };
+        let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], None).expect("pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/DeviceCMYK"), "ink page is DeviceCMYK");
+        assert!(
+            !text.contains(" rg\n"),
+            "no sRGB fill overlay on a CMYK page"
+        );
+    }
+
+    #[test]
     fn build_pdf_multipage_can_embed_icc() {
         let a = vec![10u8; 8 * 8 * 4];
         let icc = crate::core::cms::srgb_icc_bytes();
@@ -1184,7 +1383,7 @@ mod tests {
         let rgb_page = encode_pdf_page(&[10u8; 8 * 8 * 4], 8, 8, 72.0).expect("rgb");
         let ink_page = encode_pdf_page_cmyk(&[20u8; 8 * 8 * 4], 8, 8, 72.0).expect("ink");
         let icc = crate::core::cms::srgb_icc_bytes();
-        let pdf = build_pdf_multipage_encoded(&[rgb_page, ink_page], Some(&icc)).expect("pdf");
+        let pdf = build_pdf_multipage_encoded(&[rgb_page, ink_page], &[], Some(&icc)).expect("pdf");
         let text = String::from_utf8_lossy(&pdf);
         assert!(
             text.contains("/ColorSpace [/ICCBased"),
@@ -1201,7 +1400,7 @@ mod tests {
     fn multipage_all_ink_pages_skip_unused_icc_object() {
         let ink_page = encode_pdf_page_cmyk(&[20u8; 8 * 8 * 4], 8, 8, 72.0).expect("ink");
         let icc = crate::core::cms::srgb_icc_bytes();
-        let pdf = build_pdf_multipage_encoded(&[ink_page], Some(&icc)).expect("pdf");
+        let pdf = build_pdf_multipage_encoded(&[ink_page], &[], Some(&icc)).expect("pdf");
         assert!(
             !pdf.windows(8).any(|w| w == b"ICCBased"),
             "no RGB page references the ICC object, so it must not be embedded"

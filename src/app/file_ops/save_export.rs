@@ -661,11 +661,16 @@ impl App {
         }
 
         let mut encoded = Vec::with_capacity(doc_indices.len());
+        // Crisp vector overlay per page (empty for CMYK ink / re-rendered PDF
+        // pages, which stay pure raster).
+        let mut vectors: Vec<Vec<crate::core::print::PdfVectorObject>> =
+            Vec::with_capacity(doc_indices.len());
         let mut ink_pages = 0usize;
         for &idx in &doc_indices {
             let Some(doc) = self.docs.documents.get(idx) else {
                 continue;
             };
+            let mut page_vectors: Vec<crate::core::print::PdfVectorObject> = Vec::new();
             let lazy_page = doc.pdf_page.as_ref().filter(|page| !page.loaded).cloned();
             let encoded_page = if let Some(page) = lazy_page {
                 let canvas = match crate::formats::pdf::PdfImporter::render_selected(
@@ -718,11 +723,16 @@ impl App {
                             format!("Document {} is too large to export safely", idx + 1);
                         return;
                     };
+                    // RGB page: collect its crisp vector paths.
+                    page_vectors = collect_pdf_vectors(&doc.canvas);
                     crate::core::print::encode_pdf_page(&rgba, w, h, dpi)
                 }
             };
             match encoded_page {
-                Ok(page) => encoded.push(page),
+                Ok(page) => {
+                    encoded.push(page);
+                    vectors.push(page_vectors);
+                }
                 Err(error) => {
                     self.shell.status_msg = format!("Error encoding PDF page: {error}");
                     return;
@@ -740,7 +750,7 @@ impl App {
             .export_embed_icc
             .then(crate::core::cms::srgb_icc_bytes);
         let n = encoded.len();
-        match crate::core::print::build_pdf_multipage_encoded(&encoded, icc.as_deref()) {
+        match crate::core::print::build_pdf_multipage_encoded(&encoded, &vectors, icc.as_deref()) {
             Ok(bytes) => match std::fs::write(&path, &bytes) {
                 Ok(_) => {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -881,6 +891,78 @@ impl App {
         }
         true
     }
+}
+
+/// Collect the Path layers that can be drawn as crisp PDF vectors over the
+/// flattened image. Only paths that sit ABOVE all raster/non-path content
+/// qualify (so overlaying them can't occlude a higher layer), and only when
+/// they are fully opaque, unmasked and Normal-blend — anything else stays in the
+/// raster so the output is always visually correct. Geometry comes out in canvas
+/// pixel space (transform applied); the PDF writer maps it to points.
+fn collect_pdf_vectors(
+    canvas: &crate::core::canvas::Canvas,
+) -> Vec<crate::core::print::PdfVectorObject> {
+    use crate::core::layer::{BlendMode, LayerType};
+    use crate::core::vector::path::FillRule;
+    use crate::core::vector::style::Paint;
+
+    let layers = &canvas.layer_stack.layers;
+    // Highest visible non-Path layer: paths must be above it to overlay safely.
+    let top_raster = layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.visible && !l.is_group() && !matches!(l.layer_type, LayerType::Path(_)))
+        .map(|(i, _)| i as isize)
+        .max()
+        .unwrap_or(-1);
+
+    let rgb = |p: Paint| -> Option<[f32; 3]> {
+        match p {
+            Paint::Solid(c) => {
+                let [r, g, b, _] = c.to_rgba8();
+                Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+            }
+            Paint::None => None,
+        }
+    };
+
+    let mut out = Vec::new();
+    for (i, layer) in layers.iter().enumerate() {
+        if (i as isize) <= top_raster || !layer.visible || layer.mask.is_some() {
+            continue;
+        }
+        if (layer.opacity - 1.0).abs() > 1e-3 || layer.blend_mode != BlendMode::Normal {
+            continue;
+        }
+        let LayerType::Path(obj) = &layer.layer_type else {
+            continue;
+        };
+        if (obj.style.opacity - 1.0).abs() > 1e-3 {
+            continue;
+        }
+        let fill = if obj.style.fill.is_visible() {
+            rgb(obj.style.fill)
+        } else {
+            None
+        };
+        let half = obj.style.effective_stroke_width() * 0.5;
+        let stroke = if obj.style.stroke.is_visible() && half > 0.0 {
+            rgb(obj.style.stroke)
+        } else {
+            None
+        };
+        if fill.is_none() && stroke.is_none() {
+            continue;
+        }
+        out.push(crate::core::print::PdfVectorObject {
+            path: obj.path_in_layer_space(),
+            fill,
+            stroke,
+            stroke_width_px: obj.style.effective_stroke_width(),
+            even_odd: obj.path.fill_rule == FillRule::EvenOdd,
+        });
+    }
+    out
 }
 
 #[cfg(test)]
