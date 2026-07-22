@@ -650,6 +650,7 @@ impl Canvas {
         }
         self.layer_revision += 1;
         self.reconcile_selection_dims();
+        self.reconcile_path_ink();
         self.flatten_full();
         Some(self.history_nav_outcome())
     }
@@ -671,6 +672,7 @@ impl Canvas {
         }
         self.layer_revision += 1;
         self.reconcile_selection_dims();
+        self.reconcile_path_ink();
         self.flatten_full();
         Some(self.history_nav_outcome())
     }
@@ -754,8 +756,39 @@ impl Canvas {
             cmd.execute(&mut ctx)
         };
         match result {
-            Ok(()) => Ok(self.record_as(cmd, kind)),
+            Ok(()) => {
+                self.reconcile_path_ink();
+                Ok(self.record_as(cmd, kind))
+            }
             Err(message) => Err(ChangeError { message }),
+        }
+    }
+
+    /// Re-derive CMYK ink planes for Path layers from their (freshly rasterised)
+    /// RGB mirror. A vector command rebuilds the mirror deterministically from
+    /// its model (`command_vector`); on a CMYK document the ink planes must
+    /// follow so separations/export and the baked `.iai` fallback stay correct.
+    /// The ICC converter lives here on the canvas, not in an `EditContext`, so
+    /// this runs after the gateway rather than inside the command. No-op on RGB
+    /// documents (one bool check) and on CMYK documents with no Path layers.
+    fn reconcile_path_ink(&mut self) {
+        use crate::core::layer::LayerType;
+        if !self.is_cmyk()
+            || !self
+                .layer_stack
+                .layers
+                .iter()
+                .any(|l| matches!(l.layer_type, LayerType::Path(_)))
+        {
+            return;
+        }
+        let Some(conv) = self.cmyk_converter() else {
+            return;
+        };
+        for layer in &mut self.layer_stack.layers {
+            if matches!(layer.layer_type, LayerType::Path(_)) {
+                layer.tiles.encode_ink_from_mirror(&conv);
+            }
         }
     }
 
