@@ -698,8 +698,9 @@ pub struct ShapeDragState {
 /// editable and the edit is a single undo step.
 ///
 /// The overlay box follows `pending` every frame (smooth at 60 fps) while the
-/// fill re-raster is throttled by its own measured cost — rasterising a big
-/// filled path each frame stalls the drag and makes a rotation look stepped.
+/// fill re-raster runs OFF-THREAD (see [`PathBakeInFlight`]) — rasterising a big
+/// filled path on the UI thread each frame stalled the drag and made a rotation
+/// look very laggy.
 pub struct PathTransformDrag {
     pub layer_id: u32,
     /// The grabbed handle. `Some(h)` = scale via that handle; `None` = rotate.
@@ -721,10 +722,6 @@ pub struct PathTransformDrag {
     /// True once the gesture actually changed the transform (so a no-op click on
     /// a handle pushes no undo entry).
     pub changed: bool,
-    /// When the last live re-raster finished + how long it took, setting the
-    /// throttle so a heavy fill can't stall the drag.
-    pub last_bake: Option<Instant>,
-    pub bake_cost_secs: f32,
 }
 
 /// An in-progress node edit of a Path layer under the Node tool: dragging an
@@ -733,7 +730,7 @@ pub struct PathTransformDrag {
 /// transform kept) and, on release, records ONE
 /// [`crate::core::command_vector::ReplacePathGeometry`] so an insert+move is a
 /// single undo step. Like [`PathTransformDrag`], the overlay follows `pending`
-/// every frame while the fill re-raster is throttled.
+/// every frame while the fill re-raster runs off-thread.
 pub struct NodeDrag {
     pub layer_id: u32,
     /// Which contour + node index is being dragged (in `pending`).
@@ -750,8 +747,6 @@ pub struct NodeDrag {
     pub grab_local: crate::core::geometry::Point,
     pub base_node: crate::core::vector::path::Node,
     pub changed: bool,
-    pub last_bake: Option<Instant>,
-    pub bake_cost_secs: f32,
 }
 
 /// A deferred options-bar style edit (Radius/Stroke/colour scrub) for a Shape
@@ -785,6 +780,23 @@ pub struct ShapeBakeInFlight {
     pub started: std::time::Instant,
     #[allow(clippy::type_complexity)]
     pub rx: std::sync::mpsc::Receiver<Option<(crate::core::tile::TileMap, u32, u32)>>,
+}
+
+/// An off-thread Path rasterization (a live scale/rotate or node drag on an RGB
+/// document): the worker renders the whole [`VectorObjectData`] and its tight
+/// `TileMap` + placement offset; the UI thread polls per frame
+/// (`poll_path_bake`) and swaps the result in, so a page-sized filled path never
+/// stalls the drag. One job at a time — its completion starts whatever
+/// `path_bake_next` holds by then (latest wins). `doc_id`/`layer_id` pin the
+/// destination; a result for anything no longer active is dropped.
+pub struct PathBakeInFlight {
+    pub doc_id: crate::core::document::DocumentId,
+    pub layer_id: u32,
+    /// The object being rendered (its model becomes the layer's on completion).
+    pub object: crate::core::vector::object::VectorObjectData,
+    pub started: std::time::Instant,
+    #[allow(clippy::type_complexity)]
+    pub rx: std::sync::mpsc::Receiver<Option<(crate::core::tile::TileMap, u32, u32, (i32, i32))>>,
 }
 
 pub struct TextFontPreviewSession {
@@ -1129,6 +1141,8 @@ impl App {
                 pending_iai_projects: Vec::new(),
                 pending_printer_refresh: None,
                 shape_bake: None,
+                path_bake: None,
+                path_bake_next: None,
                 select_subject: crate::core::select_subject::SelectSubjectEngine::new(),
                 ai_engine: crate::core::ai::edit::AiEditEngine::new(),
                 ext: crate::app::ext_bridge::ExtBridge::new(),

@@ -107,6 +107,14 @@ pub struct BackgroundJobs {
         Option<std::sync::mpsc::Receiver<Result<Vec<crate::core::print::PrinterInfo>, String>>>,
     /// Off-thread Shape rasterization in flight. See [`ShapeBakeInFlight`].
     pub(in crate::app) shape_bake: Option<ShapeBakeInFlight>,
+    /// Off-thread Path (vector) rasterization in flight — used by the live
+    /// scale/rotate and node drags so re-rastering a filled path never stalls
+    /// the UI thread. See [`PathBakeInFlight`].
+    pub(in crate::app) path_bake: Option<PathBakeInFlight>,
+    /// The newest Path bake requested while one was already running (latest
+    /// wins): `(layer_id, object)`. `poll_path_bake` starts it once the running
+    /// job lands.
+    pub(in crate::app) path_bake_next: Option<(u32, crate::core::vector::object::VectorObjectData)>,
     pub(in crate::app) select_subject: crate::core::select_subject::SelectSubjectEngine,
     /// Gemini AI image-edit engine (see core/ai/edit.rs).
     pub(in crate::app) ai_engine: crate::core::ai::edit::AiEditEngine,

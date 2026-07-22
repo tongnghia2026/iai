@@ -106,6 +106,8 @@ impl App {
         // even after the pointer goes idle.
         self.poll_shape_bake();
         self.flush_pending_shape_style();
+        // Off-thread Path bakes (live scale/rotate & node drags).
+        self.poll_path_bake();
 
         // Strict modal lock (standard design-app behavior): while a modal
         // operation or dialog is open, features outside its scope are refused

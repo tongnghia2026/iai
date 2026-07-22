@@ -256,8 +256,6 @@ impl App {
             grab_local,
             base_node,
             changed,
-            last_bake: None,
-            bake_cost_secs: 0.0,
         });
         // Show the inserted node (and the fresh selection) immediately.
         self.apply_pending_node_geometry(id, &pending);
@@ -273,7 +271,8 @@ impl App {
     }
 
     /// Apply the in-progress node drag to `(cx, cy)`. Updates `pending` every
-    /// frame (the overlay tracks it); the fill re-raster is throttled.
+    /// frame (the overlay tracks it at 60 fps); the fill re-raster runs
+    /// OFF-THREAD so a big filled path never stalls the drag.
     pub fn node_drag_update(&mut self, cx: f32, cy: f32) {
         // Map the cursor to object-local space via the object transform inverse.
         let Some((_, t, _)) = self.active_node_object() else {
@@ -284,7 +283,7 @@ impl App {
         };
         let local = inv.apply_point(Point::new(cx, cy));
 
-        let (layer_id, pending, bake_due) = match self.edit.node_drag.as_mut() {
+        let (layer_id, pending) = match self.edit.node_drag.as_mut() {
             Some(d) => {
                 let dx = local.x - d.grab_local.x;
                 let dy = local.y - d.grab_local.y;
@@ -296,25 +295,28 @@ impl App {
                 };
                 *slot = shifted_node(&d.base_node, dx, dy);
                 d.changed = true;
-                let wait = (d.bake_cost_secs * 2.0).clamp(0.0, 0.5);
-                let due = d
-                    .last_bake
-                    .map_or(true, |b| b.elapsed().as_secs_f32() >= wait);
-                (d.layer_id, d.pending.clone(), due)
+                (d.layer_id, d.pending.clone())
             }
             None => return,
         };
-        if !bake_due {
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
+        // Build the target object (style + transform kept, new geometry) and hand
+        // it to the off-thread bake.
+        let object = {
+            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+            match canvas.layer_stack.layers.iter().find(|l| l.id == layer_id) {
+                Some(l) => match &l.layer_type {
+                    LayerType::Path(o) => VectorObjectData {
+                        path: pending,
+                        ..o.clone()
+                    },
+                    _ => return,
+                },
+                None => return,
             }
-            return;
-        }
-        let bake_start = std::time::Instant::now();
-        self.apply_pending_node_geometry(layer_id, &pending);
-        if let Some(d) = self.edit.node_drag.as_mut() {
-            d.bake_cost_secs = bake_start.elapsed().as_secs_f32();
-            d.last_bake = Some(std::time::Instant::now());
+        };
+        self.request_path_bake(layer_id, object);
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
         }
     }
 
@@ -362,6 +364,8 @@ impl App {
         let Some(drag) = self.edit.node_drag.take() else {
             return;
         };
+        // Abandon any in-flight worker bake — committed synchronously below.
+        self.cancel_path_bake();
         if !drag.changed || drag.pending == drag.orig_path {
             // A no-op click: restore the exact baseline, record nothing.
             self.apply_pending_node_geometry(drag.layer_id, &drag.orig_path);

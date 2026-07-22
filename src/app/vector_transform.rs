@@ -17,6 +17,7 @@ use crate::app::state::{App, PathTransformDrag, TransformHandle};
 use crate::core::geometry::{Point, Rect};
 use crate::core::layer::LayerType;
 use crate::core::vector::affine::AffineTransform;
+use crate::core::vector::object::VectorObjectData;
 
 /// Screen-space grab radius for a box handle.
 const HANDLE_HIT_PX: f32 = 9.0;
@@ -346,8 +347,6 @@ impl App {
             start_cx: cx,
             start_cy: cy,
             changed: false,
-            last_bake: None,
-            bake_cost_secs: 0.0,
         });
     }
 
@@ -440,78 +439,39 @@ impl App {
     }
 
     /// Apply the in-progress gesture to `(cx, cy)`. The target transform is stored
-    /// as `pending` every frame (the overlay box follows it smoothly); the fill
-    /// re-raster into the layer is THROTTLED by its own measured cost so a big
-    /// filled path can't stall the drag (which is what made rotation look
-    /// stepped). The undo entry is recorded once on release.
+    /// as `pending` every frame (the overlay box follows it smoothly at 60 fps);
+    /// the fill re-raster is handed to the OFF-THREAD Path bake so a big filled
+    /// path never stalls the drag. The undo entry is recorded once on release.
     pub fn path_transform_update(&mut self, cx: f32, cy: f32, shift: bool, alt: bool) {
-        let (new_t, layer_id, bake_due) = match self.edit.path_transform.as_mut() {
+        let (new_t, layer_id) = match self.edit.path_transform.as_mut() {
             Some(d) => match Self::path_transform_target(d, cx, cy, shift, alt) {
                 Some(t) => {
                     d.pending = t;
                     d.changed = true;
-                    // Keep the raster live when cheap; back off to ~a third duty
-                    // cycle when a bake costs real time (like a Shape handle drag).
-                    let wait = (d.bake_cost_secs * 2.0).clamp(0.0, 0.5);
-                    let due = d
-                        .last_bake
-                        .map_or(true, |t| t.elapsed().as_secs_f32() >= wait);
-                    (t, d.layer_id, due)
+                    (t, d.layer_id)
                 }
                 None => return,
             },
             None => return,
         };
-        if !bake_due {
-            // The overlay still tracks `pending`; just repaint the frame.
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
+        // Build the target object (path + style kept, new transform) and request
+        // an off-thread bake; the overlay already tracks `pending` this frame.
+        let object = {
+            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+            match canvas.layer_stack.layers.iter().find(|l| l.id == layer_id) {
+                Some(l) => match &l.layer_type {
+                    LayerType::Path(o) if o.transform != new_t => VectorObjectData {
+                        transform: new_t,
+                        ..o.clone()
+                    },
+                    _ => return,
+                },
+                None => return,
             }
-            return;
-        }
-
-        let bake_start = std::time::Instant::now();
-        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
-        let Some(idx) = canvas
-            .layer_stack
-            .layers
-            .iter()
-            .position(|l| l.id == layer_id)
-        else {
-            return;
         };
-        let (old_off, old_w, old_h, obj) = {
-            let layer = &canvas.layer_stack.layers[idx];
-            let LayerType::Path(o) = &layer.layer_type else {
-                return;
-            };
-            if o.transform == new_t {
-                return; // already baked at this transform
-            }
-            (layer.offset, layer.width, layer.height, o.clone())
-        };
-        let mut obj = obj;
-        obj.transform = new_t;
-        {
-            let layer = &mut canvas.layer_stack.layers[idx];
-            crate::core::command_vector::apply_object_to_layer(layer, obj);
-        }
-        // CMYK ink planes are re-derived by the gateway when the gesture commits
-        // on release; a live preview keeps the RGB mirror only.
-        canvas.layer_revision += 1;
-        let (new_off, new_w, new_h) = {
-            let l = &canvas.layer_stack.layers[idx];
-            (l.offset, l.width, l.height)
-        };
-        canvas.mark_dirty_layer_bounds(old_off.0, old_off.1, old_w, old_h);
-        canvas.mark_dirty_layer_bounds(new_off.0, new_off.1, new_w, new_h);
-        // Pixel-only change: dirty-rect flatten + recomposite, not the full
-        // flatten/upload of a structure change.
-        self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
-        // Measure the full per-frame cost (raster + recomposite) for the throttle.
-        if let Some(d) = self.edit.path_transform.as_mut() {
-            d.bake_cost_secs = bake_start.elapsed().as_secs_f32();
-            d.last_bake = Some(std::time::Instant::now());
+        self.request_path_bake(layer_id, object);
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
         }
     }
 
@@ -523,6 +483,9 @@ impl App {
         let Some(drag) = self.edit.path_transform.take() else {
             return;
         };
+        // Abandon any in-flight worker bake — the final geometry is committed
+        // synchronously below, so a late result would be stale.
+        self.cancel_path_bake();
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let Some(idx) = canvas
             .layer_stack
@@ -597,8 +560,6 @@ mod tests {
             start_cx: 100.0,
             start_cy: 50.0,
             changed: false,
-            last_bake: None,
-            bake_cost_secs: 0.0,
         }
     }
 
