@@ -92,6 +92,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     ToolId::Transform => transform_options(ui, data, actions),
                     ToolId::Text => text_options(ui, data, actions),
                     ToolId::Shape => shape_options(ui, data, actions),
+                    ToolId::Node => node_options(ui, data, actions),
                     ToolId::PerspectiveCrop => perspective_crop_options(ui, data, actions),
                     ToolId::Pen => pen_options(ui, data, actions),
                     _ => default_options(ui, data),
@@ -1422,6 +1423,67 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ph::FLIP_VERTICAL,
         "Flip selected layers vertically",
     );
+
+    // When a vector Path is active, its Fill/Outline are editable right here.
+    if data.tool.path_style.is_some() {
+        ui.separator();
+        path_style_options(ui, data, actions);
+    }
+}
+
+fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    ui.label(egui::RichText::new("Node").strong());
+    ui.separator();
+    if data.tool.path_style.is_some() {
+        path_style_options(ui, data, actions);
+        ui.separator();
+    }
+    ui.label(
+        egui::RichText::new("Kéo điểm · bấm cạnh = chèn · Delete = xoá")
+            .size(11.0)
+            .color(egui::Color32::from_gray(150)),
+    );
+}
+
+/// Fill/Outline colour + outline width for the active Path layer. Shared by the
+/// Move and Node options bars. Colours open the paint dialog (targets 5/6);
+/// the width scrub previews live and commits one undo on release.
+fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    let Some(style) = data.tool.path_style else {
+        return;
+    };
+    // Fill.
+    let mut fill = style.fill_enabled;
+    if ui.checkbox(&mut fill, "Fill").changed() {
+        actions.tool.set_path_fill_enabled = Some(fill);
+    }
+    if shape_color_chip(ui, style.fill_color, "Fill colour") {
+        actions.dialogs.open_paint_color_dialog = Some(5);
+    }
+    ui.separator();
+    // Outline.
+    let mut stroke = style.stroke_enabled;
+    if ui.checkbox(&mut stroke, "Outline").changed() {
+        actions.tool.set_path_stroke_enabled = Some(stroke);
+    }
+    if shape_color_chip(ui, style.stroke_color, "Outline colour") {
+        actions.dialogs.open_paint_color_dialog = Some(6);
+    }
+    ui.label("Width:");
+    let mut w = style.stroke_width;
+    let resp = ui.add(
+        egui::DragValue::new(&mut w)
+            .range(0.0..=500.0)
+            .suffix(" px")
+            .speed(0.2),
+    );
+    if resp.changed() {
+        actions.tool.set_path_stroke_width = Some(w);
+    }
+    // One undo step per scrub: commit when the drag stops or the field loses focus.
+    if resp.drag_stopped() || resp.lost_focus() {
+        actions.tool.commit_path_style = true;
+    }
 }
 
 fn align_button(ui: &mut egui::Ui, actions: &mut UiActions, align: LayerAlign, tooltip: &str) {

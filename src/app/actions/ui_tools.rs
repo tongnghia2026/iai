@@ -394,13 +394,18 @@ impl App {
                 2 => 2,
                 3 => 3,
                 4 => 4,
+                5 => 5,
+                6 => 6,
                 _ => 0,
             };
+            let path_style = self.active_path_style_vm();
             let color = match target {
                 1 => self.edit.bg_color,
                 2 => self.edit.text_color,
                 3 => self.edit.tools.shape().fill_color,
                 4 => self.edit.tools.shape().stroke_color,
+                5 => path_style.map_or([0, 0, 0, 255], |s| s.fill_color),
+                6 => path_style.map_or([0, 0, 0, 255], |s| s.stroke_color),
                 _ => self.edit.tools.brush().settings.color,
             };
             self.shell.ui.show_paint_color_dialog = true;
@@ -444,6 +449,10 @@ impl App {
             self.shell.ui.show_paint_color_dialog = false;
             self.shell.ui.paint_color_dialog_center_next = false;
             self.set_paint_color(target, color);
+            // A Path colour was previewed live; commit the single undo step.
+            if target == 5 || target == 6 {
+                self.path_style_commit();
+            }
         }
         if actions.dialogs.paint_color_dialog_cancel {
             let target = self.shell.ui.paint_color_dialog_target;
@@ -452,6 +461,10 @@ impl App {
             self.shell.ui.paint_color_dialog_color = color;
             self.shell.ui.paint_color_dialog_center_next = false;
             self.set_paint_color(target, color);
+            // Restore the baseline and record nothing (final == baseline).
+            if target == 5 || target == 6 {
+                self.path_style_commit();
+            }
         }
     }
 
@@ -480,6 +493,19 @@ impl App {
         if let Some(r) = actions.tool.set_shape_corner_radius.take() {
             self.edit.tools.shape_mut().corner_radius = r.clamp(0.0, 5000.0);
             self.update_selected_shape_style();
+        }
+        // Path layer Fill/Outline (Move / Node options bar).
+        if let Some(on) = actions.tool.set_path_fill_enabled.take() {
+            self.path_set_fill_enabled(on);
+        }
+        if let Some(on) = actions.tool.set_path_stroke_enabled.take() {
+            self.path_set_stroke_enabled(on);
+        }
+        if let Some(w) = actions.tool.set_path_stroke_width.take() {
+            self.path_set_stroke_width(w);
+        }
+        if actions.tool.commit_path_style {
+            self.path_style_commit();
         }
         if actions.tool.swap_colors {
             std::mem::swap(

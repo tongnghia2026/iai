@@ -56,6 +56,8 @@ impl App {
                 self.edit.tools.shape_mut().stroke_color = color;
                 self.update_selected_shape_style();
             }
+            5 => self.path_set_fill_color(color),
+            6 => self.path_set_stroke_color(color),
             _ => {
                 self.edit.tools.brush_mut().settings.color = color;
                 self.edit.tools.fill_mut().color = color;

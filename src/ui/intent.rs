@@ -267,6 +267,14 @@ pub struct ToolIntent {
     pub set_shape_fill: Option<bool>,
     pub set_shape_stroke_width: Option<f32>,
     pub set_shape_corner_radius: Option<f32>,
+    /// Path layer Fill/Outline (options bar under Move / Node).
+    pub set_path_fill_enabled: Option<bool>,
+    pub set_path_stroke_enabled: Option<bool>,
+    /// Live preview of the outline width; `commit_path_style` finalises the scrub.
+    pub set_path_stroke_width: Option<f32>,
+    /// End of an interactive Path style edit (width scrub / colour dialog) — record
+    /// the single undo step.
+    pub commit_path_style: bool,
     pub transform_commit: bool,
     pub transform_cancel: bool,
     pub set_transform_scale_x: Option<f32>,

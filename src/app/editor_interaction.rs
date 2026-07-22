@@ -67,6 +67,10 @@ pub struct EditorInteraction {
     /// The currently-selected Path node `(layer_id, contour, node)` for the Node
     /// tool — highlighted in the overlay and the target of the Delete key.
     pub(in crate::app) node_selected: Option<(u32, usize, usize)>,
+    /// Baseline `(layer_id, style)` captured when an interactive Path style edit
+    /// (colour dialog / outline-width scrub) begins, so the whole interaction
+    /// commits as ONE `ChangeVectorStyle` on release. None when idle.
+    pub(in crate::app) pending_path_style: Option<(u32, crate::core::vector::style::VectorStyle)>,
     /// Deferred options-bar style edit (Radius/Stroke/colour scrub) for a
     /// Shape layer. See [`ShapeStylePending`].
     pub(in crate::app) shape_style_pending: Option<ShapeStylePending>,

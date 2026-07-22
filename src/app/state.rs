@@ -1064,6 +1064,7 @@ impl App {
                 path_transform: None,
                 node_drag: None,
                 node_selected: None,
+                pending_path_style: None,
                 shape_style_pending: None,
                 text_font_px: 48.0,
                 text_font_px_auto: true,

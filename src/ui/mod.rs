@@ -138,6 +138,19 @@ pub struct ShapeOverlay {
     pub dragging: bool,
 }
 
+/// Current fill/outline style of the active Path layer, for the options-bar
+/// Fill/Outline controls (Move / Node tools). `*_enabled` mirrors whether the
+/// paint is present (`Paint::Solid`); the colour is the last solid colour (or
+/// black) so a chip always shows something.
+#[derive(Clone, Copy)]
+pub struct PathStyleData {
+    pub fill_enabled: bool,
+    pub fill_color: [u8; 4],
+    pub stroke_enabled: bool,
+    pub stroke_color: [u8; 4],
+    pub stroke_width: f32,
+}
+
 /// On-canvas editing overlay for the Node tool: the active Path's outline,
 /// its anchor points, and the handle arms of the selected node. All positions
 /// are in canvas space; the UI maps them to screen.

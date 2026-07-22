@@ -188,6 +188,9 @@ pub struct ToolViewModel {
     /// On-canvas editing overlay for the active Path layer (Node tool): outline
     /// + anchor points + selected-node handle arms.
     pub node_overlay: Option<super::NodeOverlay>,
+    /// Fill/Outline of the active Path layer for the options-bar controls
+    /// (Move / Node). `None` when the active layer isn't an editable Path.
+    pub path_style: Option<super::PathStyleData>,
     /// Pen tool: commit mode (0=Selection, 1=Fill, 2=Stroke) + stroke width.
     pub pen_mode: u8,
     pub pen_stroke_width: f32,
@@ -664,6 +667,7 @@ impl Default for UiData {
                 shape_preview: None,
                 shape_overlay: None,
                 node_overlay: None,
+                path_style: None,
                 pen_mode: 0,
                 pen_stroke_width: 3.0,
                 gradient_preview: None,

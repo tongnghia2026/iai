@@ -933,6 +933,15 @@ impl App {
                 },
                 // On-canvas node editing overlay for the active Path (Node tool).
                 node_overlay: self.active_node_overlay(),
+                // Fill/Outline of the active Path (options bar under Move / Node).
+                path_style: if matches!(
+                    self.edit.tools.active_id(),
+                    crate::tools::ToolId::Move | crate::tools::ToolId::Node
+                ) {
+                    self.active_path_style_vm()
+                } else {
+                    None
+                },
                 gradient_preview: if self.edit.tools.active_id() == crate::tools::ToolId::Gradient {
                     self.edit.tools.gradient().preview_line()
                 } else {
