@@ -33,6 +33,9 @@ pub enum ToolId {
     Dodge,
     Burn,
     Patch,
+    /// Direct-selection of a Path layer's nodes (edit anchor points). Companion
+    /// to Pen (create) and Move (whole-object transform).
+    Node,
 }
 
 #[derive(Debug, Clone, Copy)]

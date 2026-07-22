@@ -10,6 +10,7 @@ pub mod ext_bridge;
 pub mod file_ops;
 pub mod input;
 pub mod library;
+pub mod node_ops;
 pub mod os_clipboard;
 pub mod pen_ops;
 pub mod render;

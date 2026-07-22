@@ -37,6 +37,9 @@ const SHAPE_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Shape, ph::SHAPES, "Shap
 
 const PEN_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Pen, ph::PEN_NIB, "Pen (P)")];
 
+const NODE_GROUP: &[(ToolId, &str, &str)] =
+    &[(ToolId::Node, ph::BEZIER_CURVE, "Node — edit points (A)")];
+
 const BRUSH_GROUP: &[(ToolId, &str, &str)] = &[
     (ToolId::Brush, ph::PAINT_BRUSH, "Brush (B)"),
     (ToolId::Pencil, ph::PENCIL, "Pencil (B)"),
@@ -85,6 +88,7 @@ const TOOL_GROUPS: &[&[(ToolId, &str, &str)]] = &[
     SMUDGE_GROUP,
     DODGE_GROUP,
     PEN_GROUP,
+    NODE_GROUP,
     TEXT_GROUP,
     SHAPE_GROUP,
     HAND_GROUP,

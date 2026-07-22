@@ -185,6 +185,9 @@ pub struct ToolViewModel {
     /// On-canvas editing overlay for the active Shape layer (Shape tool):
     /// bounding-box span + handle positions in canvas space.
     pub shape_overlay: Option<ShapeOverlay>,
+    /// On-canvas editing overlay for the active Path layer (Node tool): outline
+    /// + anchor points + selected-node handle arms.
+    pub node_overlay: Option<super::NodeOverlay>,
     /// Pen tool: commit mode (0=Selection, 1=Fill, 2=Stroke) + stroke width.
     pub pen_mode: u8,
     pub pen_stroke_width: f32,
@@ -660,6 +663,7 @@ impl Default for UiData {
                 shape_corner_radius: 0.0,
                 shape_preview: None,
                 shape_overlay: None,
+                node_overlay: None,
                 pen_mode: 0,
                 pen_stroke_width: 3.0,
                 gradient_preview: None,

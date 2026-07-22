@@ -727,6 +727,33 @@ pub struct PathTransformDrag {
     pub bake_cost_secs: f32,
 }
 
+/// An in-progress node edit of a Path layer under the Node tool: dragging an
+/// anchor moves it (handles follow), and a press on a segment first INSERTS an
+/// anchor then drags it. The gesture edits only `PathData` geometry (object
+/// transform kept) and, on release, records ONE
+/// [`crate::core::command_vector::ReplacePathGeometry`] so an insert+move is a
+/// single undo step. Like [`PathTransformDrag`], the overlay follows `pending`
+/// every frame while the fill re-raster is throttled.
+pub struct NodeDrag {
+    pub layer_id: u32,
+    /// Which contour + node index is being dragged (in `pending`).
+    pub contour: usize,
+    pub node: usize,
+    /// Path geometry BEFORE the whole gesture (incl. before any insert). The undo
+    /// baseline and the state the model is rewound to before the commit.
+    pub orig_path: crate::core::vector::path::PathData,
+    /// Latest geometry for this cursor position (drives the overlay + commit).
+    pub pending: crate::core::vector::path::PathData,
+    /// Grab point in OBJECT-LOCAL space, and the dragged node (anchor + handles)
+    /// at press, so the node — and its handles — track the cursor rigidly without
+    /// jumping to it.
+    pub grab_local: crate::core::geometry::Point,
+    pub base_node: crate::core::vector::path::Node,
+    pub changed: bool,
+    pub last_bake: Option<Instant>,
+    pub bake_cost_secs: f32,
+}
+
 /// A deferred options-bar style edit (Radius/Stroke/colour scrub) for a Shape
 /// layer. Scrubbing emits a tick per frame and each tick used to re-rasterize
 /// the whole shape; bakes are now throttled by measured cost (like
@@ -1035,6 +1062,8 @@ impl App {
                 text_edit: None,
                 shape_drag: None,
                 path_transform: None,
+                node_drag: None,
+                node_selected: None,
                 shape_style_pending: None,
                 text_font_px: 48.0,
                 text_font_px_auto: true,

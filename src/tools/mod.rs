@@ -11,6 +11,7 @@ pub mod gradient;
 pub mod hand_tool;
 pub mod lasso;
 pub mod move_tool;
+pub mod node_tool;
 pub mod patch;
 pub mod pen;
 pub mod pencil;
@@ -92,6 +93,7 @@ impl ToolId {
             ToolId::Dodge => "Dodge",
             ToolId::Burn => "Burn",
             ToolId::Patch => "Patch",
+            ToolId::Node => "Node",
         }
     }
 
@@ -122,6 +124,9 @@ impl ToolId {
                 | ToolId::PolygonLasso
                 | ToolId::SmartSelect
                 | ToolId::RefineBrush
+                // Node editing routes through the vector gateway, which
+                // re-derives ink from the mirror — no direct ink write.
+                | ToolId::Node
         )
     }
 }
@@ -181,6 +186,7 @@ pub struct ToolManager {
     brush: brush::BrushTool,
     eraser: eraser::EraserTool,
     move_tool: move_tool::MoveTool,
+    node_tool: node_tool::NodeTool,
     eyedropper: eyedropper::EyedropperTool,
     fill: fill::FillTool,
     crop: crop::CropTool,
@@ -221,6 +227,7 @@ impl ToolManager {
             brush: brush::BrushTool::new(),
             eraser: eraser::EraserTool::new(),
             move_tool: move_tool::MoveTool::new(),
+            node_tool: node_tool::NodeTool::new(),
             eyedropper: eyedropper::EyedropperTool::new(),
             fill: fill::FillTool::new(),
             crop: crop::CropTool::new(),
@@ -279,6 +286,7 @@ impl ToolManager {
             ToolId::Dodge => &self.dodge,
             ToolId::Burn => &self.burn,
             ToolId::Patch => &self.patch,
+            ToolId::Node => &self.node_tool,
         }
     }
 
@@ -311,6 +319,7 @@ impl ToolManager {
             ToolId::Dodge => &mut self.dodge,
             ToolId::Burn => &mut self.burn,
             ToolId::Patch => &mut self.patch,
+            ToolId::Node => &mut self.node_tool,
         }
     }
 

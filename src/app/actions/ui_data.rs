@@ -931,6 +931,8 @@ impl App {
                 } else {
                     None
                 },
+                // On-canvas node editing overlay for the active Path (Node tool).
+                node_overlay: self.active_node_overlay(),
                 gradient_preview: if self.edit.tools.active_id() == crate::tools::ToolId::Gradient {
                     self.edit.tools.gradient().preview_line()
                 } else {

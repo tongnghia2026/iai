@@ -138,6 +138,19 @@ pub struct ShapeOverlay {
     pub dragging: bool,
 }
 
+/// On-canvas editing overlay for the Node tool: the active Path's outline,
+/// its anchor points, and the handle arms of the selected node. All positions
+/// are in canvas space; the UI maps them to screen.
+#[derive(Clone)]
+pub struct NodeOverlay {
+    /// Flattened contours (each a polyline) to draw as the path outline.
+    pub outlines: Vec<Vec<(f32, f32)>>,
+    /// Anchor points: `(canvas_x, canvas_y, selected)`.
+    pub nodes: Vec<(f32, f32, bool)>,
+    /// Bézier handle arms of the selected node: `[anchor_x, anchor_y, ctrl_x, ctrl_y]`.
+    pub handles: Vec<[f32; 4]>,
+}
+
 /// Warp freeze-mask snapshot for the red canvas overlay. `alpha` is the mesh
 /// node grid (`gw × gh`, 0..255); the panel scales it over the layer's canvas rect.
 pub struct WarpFreezeView {
@@ -1230,6 +1243,63 @@ pub fn build(
                     ));
                 } else {
                     let rect = egui::Rect::from_center_size(c, egui::vec2(8.0, 8.0));
+                    painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
+                    painter.rect_stroke(
+                        rect,
+                        0.0,
+                        egui::Stroke::new(1.0_f32, accent),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+        }
+
+        // Node tool overlay: the active Path's outline, its anchor points, and
+        // the selected node's Bézier handle arms.
+        if let Some(overlay) = &data.tool.node_overlay {
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("node_overlay"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            let accent = egui::Color32::from_rgb(64, 140, 240);
+            // Path outline (steady blue line, like the Pen preview).
+            for line in &overlay.outlines {
+                if line.len() >= 2 {
+                    let pts: Vec<egui::Pos2> =
+                        line.iter().map(|&(x, y)| to_screen_pos(x, y)).collect();
+                    painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0_f32, accent)));
+                }
+            }
+            // Handle arms of the selected node (thin line + round control point).
+            for &[ax, ay, hx, hy] in &overlay.handles {
+                let a = to_screen_pos(ax, ay);
+                let h = to_screen_pos(hx, hy);
+                painter.add(egui::Shape::line_segment(
+                    [a, h],
+                    egui::Stroke::new(1.0_f32, accent),
+                ));
+                painter.circle(
+                    h,
+                    3.0,
+                    egui::Color32::WHITE,
+                    egui::Stroke::new(1.0_f32, accent),
+                );
+            }
+            // Anchor squares: hollow for normal, filled for the selected node.
+            for &(x, y, selected) in &overlay.nodes {
+                let c = to_screen_pos(x, y);
+                let rect = egui::Rect::from_center_size(c, egui::vec2(7.0, 7.0));
+                if selected {
+                    painter.rect_filled(rect, 0.0, accent);
+                    painter.rect_stroke(
+                        rect,
+                        0.0,
+                        egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
+                        egui::StrokeKind::Outside,
+                    );
+                } else {
                     painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
                     painter.rect_stroke(
                         rect,

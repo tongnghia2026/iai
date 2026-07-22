@@ -122,8 +122,9 @@ fn clamp_scale(s: f32) -> f32 {
 
 impl App {
     /// Active layer index if it is an on-canvas-transformable Path (visible,
-    /// unlocked, not the background). The box shows for this layer under Move.
-    fn active_path_layer(&self) -> Option<usize> {
+    /// unlocked, not the background). The box shows for this layer under Move;
+    /// the Node tool reuses it for the layer it edits.
+    pub(crate) fn active_path_layer(&self) -> Option<usize> {
         let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
         let idx = canvas.layer_stack.active_idx;
         let layer = canvas.layer_stack.layers.get(idx)?;

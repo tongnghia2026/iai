@@ -61,6 +61,12 @@ pub struct EditorInteraction {
     /// Active on-canvas Path transform (scale/rotate) under the Move tool. See
     /// [`PathTransformDrag`]. None unless a handle is being dragged.
     pub(in crate::app) path_transform: Option<PathTransformDrag>,
+    /// Active node-edit drag under the Node tool. See [`NodeDrag`]. None unless a
+    /// node is being dragged.
+    pub(in crate::app) node_drag: Option<NodeDrag>,
+    /// The currently-selected Path node `(layer_id, contour, node)` for the Node
+    /// tool — highlighted in the overlay and the target of the Delete key.
+    pub(in crate::app) node_selected: Option<(u32, usize, usize)>,
     /// Deferred options-bar style edit (Radius/Stroke/colour scrub) for a
     /// Shape layer. See [`ShapeStylePending`].
     pub(in crate::app) shape_style_pending: Option<ShapeStylePending>,

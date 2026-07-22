@@ -218,6 +218,20 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
+                if pressed
+                    && !repeat
+                    && self.edit.tools.active_id() == ToolId::Node
+                    && self.edit.node_selected.is_some()
+                    && !self.edit.input.alt_held
+                    && !self.edit.input.ctrl_held =>
+            {
+                // Node tool: Delete removes the selected anchor (not the layer).
+                self.node_delete_selected();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
                 if pressed && !repeat =>
             {
                 if self.edit.input.alt_held {
@@ -426,6 +440,14 @@ impl App {
             }
             PhysicalKey::Code(KeyCode::KeyP) if pressed && !self.edit.input.ctrl_held => {
                 self.edit.tools.select(ToolId::Pen);
+                self.sync_cursor(event_loop);
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            PhysicalKey::Code(KeyCode::KeyA) if pressed && !self.edit.input.ctrl_held => {
+                // Direct-selection: edit a Path layer's anchor points.
+                self.edit.tools.select(ToolId::Node);
                 self.sync_cursor(event_loop);
                 if let Some(w) = &self.win.window {
                     w.request_redraw();

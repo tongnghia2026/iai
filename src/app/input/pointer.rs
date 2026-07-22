@@ -375,6 +375,32 @@ impl App {
                                 }
                             }
 
+                            // Node tool: press on an anchor drags it; press on a
+                            // segment inserts an anchor there and drags it; press
+                            // on empty space deselects. All routed to node_ops.
+                            if self.edit.tools.active_id() == ToolId::Node
+                                && self.edit.transform_state.is_none()
+                            {
+                                let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
+                                let ev = self.tool_event();
+                                if let Some(hit) = self.node_hit_at_screen(msx, msy) {
+                                    if self.node_press(hit, ev.canvas_x, ev.canvas_y) {
+                                        self.edit.input.painting = true;
+                                        return;
+                                    }
+                                } else if self.edit.node_selected.is_some() {
+                                    // Click on empty canvas clears the selection.
+                                    self.edit.node_selected = None;
+                                    if let Some(w) = &self.win.window {
+                                        w.request_redraw();
+                                    }
+                                }
+                                // Swallow the press so it never falls through to a
+                                // pixel tool on the (vector) Path layer.
+                                self.edit.input.painting = true;
+                                return;
+                            }
+
                             if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair)
                                 && self.edit.input.alt_held
                                 && self.edit.transform_state.is_none()
@@ -547,6 +573,22 @@ impl App {
                             // ChangeVectorTransform). Bypasses the Move tool's
                             // own release path — the gesture never touched it.
                             self.path_transform_finish();
+                            self.edit.input.last_left_release_time =
+                                Some(std::time::Instant::now());
+                            self.edit.input.painting = false;
+                            if let Some(w) = &self.win.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        if self.edit.tools.active_id() == ToolId::Node
+                            && self.edit.transform_state.is_none()
+                        {
+                            // Finish a Node tool drag (records one
+                            // ReplacePathGeometry), or just release a no-hit press.
+                            if self.edit.node_drag.is_some() {
+                                self.node_drag_finish();
+                            }
                             self.edit.input.last_left_release_time =
                                 Some(std::time::Instant::now());
                             self.edit.input.painting = false;
@@ -931,6 +973,16 @@ impl App {
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
+        } else if self.edit.input.painting
+            && !self.edit.input.was_over_ui
+            && self.edit.node_drag.is_some()
+        {
+            // Live Node tool drag (move / place an anchor).
+            let ev = self.tool_event();
+            self.node_drag_update(ev.canvas_x, ev.canvas_y);
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
         } else if self.edit.input.painting && !self.edit.input.was_over_ui {
             if self.edit.transform_state.is_some() {
                 let ev = self.tool_event();
@@ -1030,6 +1082,11 @@ impl App {
                         if let Some(w) = &self.win.window {
                             w.request_redraw();
                         }
+                    }
+                    ToolId::Node => {
+                        // A live node drag is handled above (node_drag branch); a
+                        // press that hit nothing must NOT queue a pixel-tool stroke
+                        // on the vector Path.
                     }
                     _ => {
                         let event = self.tool_event();
