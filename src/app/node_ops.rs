@@ -157,6 +157,18 @@ impl App {
         })
     }
 
+    /// Cursor hint for the Node tool at the current mouse position:
+    /// `2` over an anchor (drag to move), `3` over a segment (click to insert),
+    /// `0` otherwise (plain arrow). Keeps the cursor logic in `state.rs` tiny and
+    /// mirrors `move_hover_hint`.
+    pub fn node_cursor_hint(&self) -> u8 {
+        match self.node_hit_at_screen(self.edit.input.mouse_x, self.edit.input.mouse_y) {
+            Some(NodeHit::Node(..)) => 2,
+            Some(NodeHit::Segment(..)) => 3,
+            None => 0,
+        }
+    }
+
     /// Which anchor / segment of the active Path is under the screen point.
     /// Anchors win over segments.
     pub fn node_hit_at_screen(&self, sx: f32, sy: f32) -> Option<NodeHit> {

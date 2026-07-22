@@ -2609,6 +2609,18 @@ impl App {
                             w.set_cursor_visible(false);
                         }
                     }
+                    ToolId::Node => {
+                        // Direct-selection: a plain arrow, a Move cursor over an
+                        // anchor, a crosshair over a segment (insert). Without this
+                        // arm the Node tool fell through to the brush-ring default
+                        // and HID the cursor over the canvas (nothing to test with).
+                        w.set_cursor_visible(true);
+                        match self.node_cursor_hint() {
+                            2 => w.set_cursor(CursorIcon::Move),
+                            3 => w.set_cursor(CursorIcon::Crosshair),
+                            _ => w.set_cursor(CursorIcon::Default),
+                        }
+                    }
                     _ => {
                         if let Some(ring) = &self.win.cursor_ring {
                             w.set_cursor_visible(true);
