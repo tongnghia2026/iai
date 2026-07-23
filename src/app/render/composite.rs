@@ -365,6 +365,25 @@ impl App {
                 &canvas.layer_stack
             };
 
+            // The active editable vector is drawn separately from a
+            // zoom-bucketed supersampled raster. Remove its document-resolution
+            // cache from this composite so coarse edge pixels cannot show through
+            // underneath the smoother overlay.
+            let display_stack_owned = self
+                .shell
+                .ui_data_cache
+                .path_display_suppressed_layer
+                .filter(|(doc_id, _)| *doc_id == self.docs.documents[self.docs.active_doc_idx].id.0)
+                .map(|(_, layer_id)| {
+                    let mut stack = render_stack_ref.clone();
+                    if let Some(layer) = stack.layers.iter_mut().find(|layer| layer.id == layer_id)
+                    {
+                        layer.visible = false;
+                    }
+                    stack
+                });
+            let render_stack_ref = display_stack_owned.as_ref().unwrap_or(render_stack_ref);
+
             gpu.composite_layers(
                 render_stack_ref,
                 comp_off_x,

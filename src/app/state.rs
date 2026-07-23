@@ -920,6 +920,9 @@ pub struct UiDataCache {
     pub channel_thumbs_built_at: Option<Instant>,
     pub path_display: Option<PathDisplayCacheEntry>,
     pub path_display_serial: u64,
+    /// Active vector layer omitted from the coarse document composite while
+    /// its supersampled display raster is drawn above it.
+    pub path_display_suppressed_layer: Option<(u32, u32)>,
 }
 
 /// In-progress guide gesture (preview is rendered until committed).

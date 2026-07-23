@@ -13,6 +13,26 @@ use super::App;
 
 impl App {
     pub(in crate::app) fn active_path_display(&mut self) -> Option<crate::ui::PathDisplayRaster> {
+        let display = self.active_vector_display_inner();
+        let suppressed = display.as_ref().map(|_| {
+            let doc = &self.docs.documents[self.docs.active_doc_idx];
+            (
+                doc.id.0,
+                doc.canvas.layer_stack.layers[doc.canvas.layer_stack.active_idx].id,
+            )
+        });
+        if self.shell.ui_data_cache.path_display_suppressed_layer != suppressed {
+            self.shell.ui_data_cache.path_display_suppressed_layer = suppressed;
+            // The coarse atlas copy must enter/leave the composite in lock-step
+            // with the supersampled overlay. Otherwise its larger pixels protrude
+            // around the smooth edge (or the object stays missing after switching
+            // tools/layers).
+            self.recomposite();
+        }
+        display
+    }
+
+    fn active_vector_display_inner(&mut self) -> Option<crate::ui::PathDisplayRaster> {
         let tool = self.edit.tools.active_id();
         if !matches!(
             tool,
