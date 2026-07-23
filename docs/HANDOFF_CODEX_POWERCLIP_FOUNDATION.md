@@ -2,7 +2,8 @@
 
 Ngày cập nhật: 2026-07-23  
 Nhánh: `feat/vector-core-foundation`  
-HEAD: `005a01b`
+Commit code sau cùng: `005a01b` (PowerClip foundation).  
+Các commit kế tiếp chỉ là tài liệu bàn giao (`e4df28f` và commit transfer 2026-07-23).
 
 ## 1. Trạng thái workspace
 
@@ -179,3 +180,33 @@ Không được báo PowerClip “dùng được” trước khi compositor clip
   hỏi user trước.
 - Giữ kỷ luật thêm module/file mới cho logic nặng; không nhồi thêm vào
   `layer.rs`, `ui/mod.rs` hoặc `iai.rs` nếu có thể tách.
+
+## 7. Chuyển sang máy khác (transfer 2026-07-23)
+
+Gói code được nén để tiếp tục làm trên máy khác.
+
+Trạng thái tại thời điểm đóng gói:
+
+- Working tree sạch với file tracked; chỉ còn hai mục untracked của user là
+  `KE_HOACH_PHAT_TRIEN_VECTOR_IAI.txt` (đã đưa vào gói) và `dist/` (đã loại).
+- Mốc test xanh gần nhất: `005a01b` — 840 test, 836 pass, 0 fail, 4 ignore.
+  Từ đó chỉ có commit tài liệu, không đụng code nên mốc này vẫn còn giá trị.
+
+Gói zip **có**: toàn bộ `src/`, `tests/`, `assets/`, `extension/`, `docs/`,
+`Cargo.toml`, `Cargo.lock`, `build.rs`, plan `KE_HOACH_PHAT_TRIEN_VECTOR_IAI.txt`,
+và nguyên thư mục `.git` (đủ lịch sử + nhánh `feat/vector-core-foundation`).
+
+Gói zip **không có** (tự sinh lại được, để giảm dung lượng):
+
+- `target/` — build cache của Cargo (~17,5 GB).
+- `dist/` — bản portable đã export (~105 MB).
+
+Các bước trên máy mới:
+
+1. Giải nén, mở thư mục `IAI`.
+2. Cài Rust toolchain (`rustup`, kênh stable) nếu chưa có.
+3. `cargo build` để dựng lại `target/` (lần đầu sẽ lâu).
+4. Kiểm tra lịch sử: `git status`, `git log --oneline` — vẫn đang ở nhánh
+   `feat/vector-core-foundation`, không có commit nào bị mất.
+5. Tiếp tục theo mục 5 ở trên (audit cổng Foundation Freeze) và giữ nguyên
+   quy ước mục 6 — **chỉ commit local, không push khi chưa được yêu cầu**.
