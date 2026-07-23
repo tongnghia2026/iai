@@ -1112,6 +1112,7 @@ impl App {
                 node_drag: None,
                 node_selected: None,
                 node_multi: Vec::new(),
+                node_marquee: None,
                 pending_path_style: None,
                 shape_style_pending: None,
                 text_font_px: 48.0,

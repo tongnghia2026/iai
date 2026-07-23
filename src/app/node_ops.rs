@@ -149,6 +149,70 @@ impl App {
         }
     }
 
+    /// True while a rubber-band selection is being dragged.
+    pub fn node_marquee_active(&self) -> bool {
+        self.edit.node_marquee.is_some()
+    }
+
+    /// Begin a rubber-band selection at a screen point (press on empty canvas).
+    pub fn node_marquee_start(&mut self, sx: f32, sy: f32) {
+        self.edit.node_marquee = Some((sx, sy, sx, sy));
+    }
+
+    /// Extend the rubber-band to the current screen point.
+    pub fn node_marquee_update(&mut self, sx: f32, sy: f32) {
+        if let Some(m) = &mut self.edit.node_marquee {
+            m.2 = sx;
+            m.3 = sy;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Finish the rubber-band: select every anchor of the active Path whose screen
+    /// position falls inside the rect. A click-sized rect just clears the selection.
+    pub fn node_marquee_finish(&mut self) {
+        let Some((x0, y0, x1, y1)) = self.edit.node_marquee.take() else {
+            return;
+        };
+        let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
+        let (lo_y, hi_y) = (y0.min(y1), y0.max(y1));
+        if (hi_x - lo_x) < 3.0 && (hi_y - lo_y) < 3.0 {
+            self.clear_node_selection();
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        let Some((id, t, path)) = self.node_edit_geometry() else {
+            self.clear_node_selection();
+            return;
+        };
+        let zoom = self.edit.view.zoom;
+        let vox = self.edit.view.offset_x;
+        let voy = self.edit.view.offset_y;
+        let mut inside: Vec<(usize, usize)> = Vec::new();
+        for (ci, c) in path.contours.iter().enumerate() {
+            for (ni, node) in c.nodes.iter().enumerate() {
+                let q = t.apply_point(node.anchor);
+                let (sx, sy) = (q.x * zoom + vox, q.y * zoom + voy);
+                if sx >= lo_x && sx <= hi_x && sy >= lo_y && sy <= hi_y {
+                    inside.push((ci, ni));
+                }
+            }
+        }
+        if let Some((&first, rest)) = inside.split_first() {
+            self.edit.node_selected = Some((id, first.0, first.1));
+            self.edit.node_multi = rest.to_vec();
+        } else {
+            self.clear_node_selection();
+        }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
     /// Align the multi-selected nodes onto a shared coordinate (Node options bar).
     /// Needs ≥2 selected nodes. The target is computed GLOBALLY across the whole
     /// selection (consistent even across contours); each node's handles move with
@@ -208,6 +272,96 @@ impl App {
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
+        true
+    }
+
+    /// Commit a whole-geometry edit as ONE `ReplacePathGeometry` (structural), set a
+    /// status line, and request a redraw. Shared by break/join.
+    fn commit_node_geometry(&mut self, layer_id: u32, path: PathData, msg: &str) {
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let _ = canvas.execute(
+            Box::new(crate::core::command_vector::ReplacePathGeometry::new(
+                layer_id, path,
+            )),
+            crate::core::gateway::ChangeKind::LayerStructure,
+        );
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = msg.to_string();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Break the active Path at the primary selected node — reopen a closed contour
+    /// there, or split an open contour into two. Rejected at an open endpoint.
+    pub fn node_break_at_selected(&mut self) -> bool {
+        let Some((id, ci, ni)) = self.edit.node_selected else {
+            self.shell.status_msg = "Chọn một điểm để tách".to_string();
+            return false;
+        };
+        let Some((layer_id, _t, mut path)) = self.active_node_object() else {
+            return false;
+        };
+        if layer_id != id {
+            return false;
+        }
+        if crate::core::vector::ops::break_at_node(&mut path, ci, ni).is_err() {
+            self.shell.status_msg = "Không tách được tại điểm đầu/cuối".to_string();
+            return true;
+        }
+        self.clear_node_selection();
+        self.commit_node_geometry(layer_id, path, "Đã tách đường");
+        true
+    }
+
+    /// Join the two selected endpoints — close the active contour if they are its
+    /// two ends, else weld two open contours into one. Needs exactly two selected
+    /// nodes, both endpoints of open contours.
+    pub fn node_join_selected(&mut self) -> bool {
+        let Some((id, sel)) = self.node_effective_selection() else {
+            return false;
+        };
+        let Some((layer_id, _t, mut path)) = self.active_node_object() else {
+            return false;
+        };
+        if layer_id != id {
+            return false;
+        }
+        if sel.len() != 2 {
+            self.shell.status_msg = "Chọn đúng 2 điểm đầu/cuối để nối".to_string();
+            return true;
+        }
+        let (a, b) = (sel[0], sel[1]);
+        let endpoint_ok = |ci: usize, ni: usize| {
+            path.contours.get(ci).is_some_and(|c| {
+                !c.closed && c.nodes.len() >= 2 && (ni == 0 || ni + 1 == c.nodes.len())
+            })
+        };
+        let (a_ok, b_ok) = (endpoint_ok(a.0, a.1), endpoint_ok(b.0, b.1));
+        if !a_ok || !b_ok {
+            self.shell.status_msg = "Nối cần 2 điểm đầu/cuối của đường mở".to_string();
+            return true;
+        }
+        const WELD: f32 = 6.0;
+        let res = if a.0 == b.0 {
+            // Two ends of the same contour → close it.
+            crate::core::vector::ops::close_contour(&mut path, a.0, WELD)
+        } else {
+            // Two open contours → orient so a's selected end is LAST and b's is
+            // FIRST, then concatenate (welding coincident endpoints).
+            if a.1 == 0 {
+                path.contours[a.0].reverse();
+            }
+            if b.1 != 0 {
+                path.contours[b.0].reverse();
+            }
+            crate::core::vector::ops::join_contours(&mut path, a.0, b.0, WELD)
+        };
+        if res.is_err() {
+            return false;
+        }
+        self.clear_node_selection();
+        self.commit_node_geometry(layer_id, path, "Đã nối đường");
         true
     }
 
@@ -284,6 +438,10 @@ impl App {
             outlines,
             nodes,
             handles,
+            marquee: self
+                .edit
+                .node_marquee
+                .map(|(x0, y0, x1, y1)| [x0, y0, x1, y1]),
         })
     }
 
@@ -1224,5 +1382,79 @@ mod tests {
         // Returns true (handled) but changes nothing with a single node selected.
         assert!(app.node_align(Axis::Horizontal, AlignRef::Average));
         assert_eq!(model_path(&app, id), before);
+    }
+
+    #[test]
+    fn marquee_selects_the_enclosed_anchors() {
+        let (mut app, id) = app_with_path();
+        // At 1:1 / no view offset, canvas == screen. The rect's top edge nodes are
+        // at (100,120) and (140,120); the bottom edge at y=140.
+        app.node_marquee_start(90.0, 110.0);
+        app.node_marquee_update(150.0, 130.0);
+        app.node_marquee_finish();
+        assert_eq!(app.edit.node_selected, Some((id, 0, 0)));
+        assert_eq!(app.edit.node_multi, vec![(0, 1)], "only the two top nodes");
+    }
+
+    #[test]
+    fn marquee_click_sized_clears_the_selection() {
+        let (mut app, id) = app_with_path();
+        app.edit.node_selected = Some((id, 0, 0));
+        app.node_marquee_start(200.0, 200.0);
+        app.node_marquee_update(201.0, 201.0); // < 3px → treated as a click
+        app.node_marquee_finish();
+        assert_eq!(app.edit.node_selected, None);
+        assert!(app.edit.node_multi.is_empty());
+    }
+
+    #[test]
+    fn break_reopens_a_closed_contour_and_undoes() {
+        let (mut app, id) = app_with_path();
+        app.edit.node_selected = Some((id, 0, 1));
+        assert!(app.node_break_at_selected());
+        let p = model_path(&app, id);
+        assert!(
+            !p.contours[0].closed,
+            "closed rect reopened at the break node"
+        );
+        assert_eq!(
+            p.contours[0].nodes.len(),
+            5,
+            "break node duplicated at both ends"
+        );
+        app.docs.documents[0].canvas.undo().expect("undo");
+        assert!(
+            model_path(&app, id).contours[0].closed,
+            "undo restores the ring"
+        );
+    }
+
+    #[test]
+    fn join_closes_an_opened_contour() {
+        let (mut app, id) = app_with_path();
+        // Open the rect at an interior node, then join its two ends → closed again.
+        app.edit.node_selected = Some((id, 0, 1));
+        assert!(app.node_break_at_selected());
+        let last = model_path(&app, id).contours[0].nodes.len() - 1;
+        app.edit.node_selected = Some((id, 0, 0));
+        app.node_shift_toggle(0, last);
+        assert!(app.node_join_selected());
+        assert!(
+            model_path(&app, id).contours[0].closed,
+            "the two ends welded the contour closed"
+        );
+    }
+
+    #[test]
+    fn join_needs_two_open_endpoints() {
+        let (mut app, id) = app_with_path();
+        // Two adjacent nodes of a CLOSED contour are not open endpoints.
+        app.edit.node_selected = Some((id, 0, 0));
+        app.node_shift_toggle(0, 1);
+        assert!(app.node_join_selected(), "handled");
+        assert!(
+            model_path(&app, id).contours[0].closed,
+            "nothing joined on a closed contour"
+        );
     }
 }

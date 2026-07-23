@@ -162,6 +162,9 @@ pub struct NodeOverlay {
     pub nodes: Vec<(f32, f32, bool)>,
     /// Bézier handle arms of the selected node: `[anchor_x, anchor_y, ctrl_x, ctrl_y]`.
     pub handles: Vec<[f32; 4]>,
+    /// Active rubber-band selection rect in SCREEN space `[x0, y0, x1, y1]`, or
+    /// `None` when not marquee-dragging.
+    pub marquee: Option<[f32; 4]>,
 }
 
 #[derive(Clone)]
@@ -1403,6 +1406,21 @@ pub fn build(
                         egui::StrokeKind::Inside,
                     );
                 }
+            }
+            // Rubber-band selection rect (screen space — drawn directly).
+            if let Some([x0, y0, x1, y1]) = overlay.marquee {
+                let rect = egui::Rect::from_two_pos(egui::pos2(x0, y0), egui::pos2(x1, y1));
+                painter.rect_filled(
+                    rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(64, 140, 240, 40),
+                );
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(1.0_f32, accent),
+                    egui::StrokeKind::Middle,
+                );
             }
         }
 

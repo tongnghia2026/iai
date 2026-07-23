@@ -476,6 +476,12 @@ impl App {
         if let Some((axis, reference)) = actions.tool.node_align.take() {
             self.node_align(axis, reference);
         }
+        if std::mem::take(&mut actions.tool.node_break) {
+            self.node_break_at_selected();
+        }
+        if std::mem::take(&mut actions.tool.node_join) {
+            self.node_join_selected();
+        }
         if let Some(m) = actions.tool.set_pen_mode.take() {
             self.edit.tools.pen_mut().mode = crate::tools::pen::PenMode::from_u8(m);
         }

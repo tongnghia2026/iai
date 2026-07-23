@@ -425,12 +425,11 @@ impl App {
                                     }
                                     self.edit.input.painting = true;
                                     return;
-                                } else if self.edit.node_selected.is_some() {
-                                    // Click on empty canvas clears the selection.
-                                    self.clear_node_selection();
-                                    if let Some(w) = &self.win.window {
-                                        w.request_redraw();
-                                    }
+                                } else {
+                                    // Empty canvas: begin a rubber-band selection.
+                                    // Release decides — select the enclosed anchors,
+                                    // or clear if it was really just a click.
+                                    self.node_marquee_start(msx, msy);
                                 }
                                 // Swallow the press so it never falls through to a
                                 // pixel tool on the (vector) Path layer.
@@ -622,9 +621,12 @@ impl App {
                             && self.edit.transform_state.is_none()
                         {
                             // Finish a Node tool drag (records one
-                            // ReplacePathGeometry), or just release a no-hit press.
+                            // ReplacePathGeometry), a rubber-band selection, or just
+                            // release a no-hit press.
                             if self.edit.node_drag.is_some() {
                                 self.node_drag_finish();
+                            } else if self.node_marquee_active() {
+                                self.node_marquee_finish();
                             }
                             self.edit.input.last_left_release_time =
                                 Some(std::time::Instant::now());
@@ -1020,6 +1022,12 @@ impl App {
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
+        } else if self.edit.input.painting
+            && !self.edit.input.was_over_ui
+            && self.node_marquee_active()
+        {
+            // Extend the Node-tool rubber-band (screen space).
+            self.node_marquee_update(self.edit.input.mouse_x, self.edit.input.mouse_y);
         } else if self.edit.input.painting && !self.edit.input.was_over_ui {
             if self.edit.transform_state.is_some() {
                 let ev = self.tool_event();

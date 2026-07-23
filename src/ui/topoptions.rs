@@ -1476,10 +1476,28 @@ fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
     ui.separator();
 
+    // Break the path at the selected node / join two selected endpoints.
+    if ui
+        .button("Tách")
+        .on_hover_text("Tách đường tại điểm đang chọn")
+        .clicked()
+    {
+        actions.tool.node_break = true;
+    }
+    if ui
+        .button("Nối")
+        .on_hover_text("Nối 2 điểm đầu/cuối đã chọn (đóng hoặc hàn đường)")
+        .clicked()
+    {
+        actions.tool.node_join = true;
+    }
+    ui.separator();
+
     ui.label(
         egui::RichText::new(
             "Kéo điểm/tay nắm · bấm cạnh = chèn · Alt+cạnh = thẳng/cong · \
-             double-click điểm = góc/trơn · Shift+click = chọn nhiều · bấm path khác = chọn · Delete = xoá",
+             double-click điểm = góc/trơn · Shift+click hoặc kéo khung = chọn nhiều · \
+             bấm path khác = chọn · Delete = xoá",
         )
         .size(11.0)
         .color(egui::Color32::from_gray(150)),

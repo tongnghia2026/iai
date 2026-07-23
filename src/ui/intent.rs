@@ -159,6 +159,10 @@ pub struct ToolIntent {
         crate::core::vector::ops::Axis,
         crate::core::vector::ops::AlignRef,
     )>,
+    /// Break the active Path at the primary selected node (Node options bar).
+    pub node_break: bool,
+    /// Join the two selected endpoints — close or weld (Node options bar).
+    pub node_join: bool,
     /// New buffer contents from the editing overlay.
     pub text_buffer: Option<String>,
     pub text_cursor: Option<(Option<std::ops::Range<usize>>, Option<usize>)>,

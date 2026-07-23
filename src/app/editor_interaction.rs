@@ -71,6 +71,9 @@ pub struct EditorInteraction {
     /// `node_selected`, for multi-node move / delete / align. Excludes the primary
     /// (which lives in `node_selected`). Empty for a single-node selection.
     pub(in crate::app) node_multi: Vec<(usize, usize)>,
+    /// Active Node-tool rubber-band selection rect in SCREEN space
+    /// `(start_x, start_y, cur_x, cur_y)`. `None` unless dragging on empty canvas.
+    pub(in crate::app) node_marquee: Option<(f32, f32, f32, f32)>,
     /// Baseline `(layer_id, style)` captured when an interactive Path style edit
     /// (colour dialog / outline-width scrub) begins, so the whole interaction
     /// commits as ONE `ChangeVectorStyle` on release. None when idle.
