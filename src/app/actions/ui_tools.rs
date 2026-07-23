@@ -503,6 +503,14 @@ impl App {
             self.edit.tools.shape_mut().corner_radius = r.clamp(0.0, 5000.0);
             self.update_selected_shape_style();
         }
+        if let Some(n) = actions.tool.set_shape_sides.take() {
+            self.edit.tools.shape_mut().sides = n.clamp(3, 100);
+            self.update_selected_shape_style();
+        }
+        if let Some(f) = actions.tool.set_shape_star_inner.take() {
+            self.edit.tools.shape_mut().star_inner = f.clamp(0.05, 0.95);
+            self.update_selected_shape_style();
+        }
         // Path layer Fill/Outline (Move / Node options bar).
         if let Some(on) = actions.tool.set_path_fill_enabled.take() {
             self.path_set_fill_enabled(on);

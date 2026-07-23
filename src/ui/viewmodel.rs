@@ -181,6 +181,10 @@ pub struct ToolViewModel {
     pub shape_stroke_width: f32,
     pub shape_stroke_color: [u8; 4],
     pub shape_corner_radius: f32,
+    /// Polygon edge count / Star point count.
+    pub shape_sides: u32,
+    /// Star inner-radius fraction.
+    pub shape_star_inner: f32,
     pub shape_preview: Option<[f32; 4]>,
     /// On-canvas editing overlay for the active Shape layer (Shape tool):
     /// bounding-box span + handle positions in canvas space.
@@ -667,6 +671,8 @@ impl Default for UiData {
                 shape_stroke_width: 2.0,
                 shape_stroke_color: [0, 0, 0, 255],
                 shape_corner_radius: 0.0,
+                shape_sides: 5,
+                shape_star_inner: 0.5,
                 shape_preview: None,
                 shape_overlay: None,
                 node_overlay: None,

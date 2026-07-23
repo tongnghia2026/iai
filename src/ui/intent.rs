@@ -279,6 +279,10 @@ pub struct ToolIntent {
     pub set_shape_fill: Option<bool>,
     pub set_shape_stroke_width: Option<f32>,
     pub set_shape_corner_radius: Option<f32>,
+    /// Polygon edge count / Star point count.
+    pub set_shape_sides: Option<u32>,
+    /// Star inner-radius fraction.
+    pub set_shape_star_inner: Option<f32>,
     /// Path layer Fill/Outline (options bar under Move / Node).
     pub set_path_fill_enabled: Option<bool>,
     pub set_path_stroke_enabled: Option<bool>,

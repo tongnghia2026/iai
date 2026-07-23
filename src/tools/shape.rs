@@ -25,6 +25,10 @@ pub struct ShapeTool {
     pub stroke_color: [u8; 4],
     /// Rounded-rectangle corner radius in canvas pixels. 0 = sharp corners.
     pub corner_radius: f32,
+    /// Polygon edge count / Star point count (3–100).
+    pub sides: u32,
+    /// Star inner-radius fraction of the outer radius (0–1).
+    pub star_inner: f32,
     start_x: f32,
     start_y: f32,
     cur_x: f32,
@@ -43,6 +47,8 @@ impl Default for ShapeTool {
             stroke_width: 2.0,
             stroke_color: [0, 0, 0, 255],
             corner_radius: 0.0,
+            sides: 5,
+            star_inner: 0.5,
             start_x: 0.0,
             start_y: 0.0,
             cur_x: 0.0,
@@ -68,13 +74,6 @@ impl ShapeTool {
         let dx = self.cur_x - self.start_x;
         let dy = self.cur_y - self.start_y;
         match self.kind {
-            ShapeKind::Rectangle | ShapeKind::Ellipse => {
-                let m = dx.abs().max(dy.abs());
-                (
-                    self.start_x + m * dx.signum(),
-                    self.start_y + m * dy.signum(),
-                )
-            }
             ShapeKind::Line => {
                 let len = (dx * dx + dy * dy).sqrt();
                 if len < 0.001 {
@@ -86,6 +85,14 @@ impl ShapeTool {
                 (
                     self.start_x + len * snapped.cos(),
                     self.start_y + len * snapped.sin(),
+                )
+            }
+            // Rectangle / Ellipse / Polygon / Star: Shift → square bounds.
+            _ => {
+                let m = dx.abs().max(dy.abs());
+                (
+                    self.start_x + m * dx.signum(),
+                    self.start_y + m * dy.signum(),
                 )
             }
         }

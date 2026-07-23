@@ -159,6 +159,44 @@ pub fn line_path(x0: f32, y0: f32, x1: f32, y1: f32) -> PathData {
     )
 }
 
+/// A regular polygon with `sides` edges inscribed in the box `(x0,y0)`–`(x1,y1)`,
+/// as one closed contour of sharp nodes (first vertex points up). `sides` clamped
+/// to `[3, 100]`. Matches [`crate::core::shape::ShapeData::polygon_vertices`].
+pub fn polygon_path(x0: f32, y0: f32, x1: f32, y1: f32, sides: u32) -> PathData {
+    let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+    let rx = (x1 - x0).abs() * 0.5;
+    let ry = (y1 - y0).abs() * 0.5;
+    let n = sides.clamp(3, 100);
+    let start = -std::f32::consts::FRAC_PI_2;
+    let nodes = (0..n)
+        .map(|i| {
+            let a = start + std::f32::consts::TAU * i as f32 / n as f32;
+            Node::sharp(Point::new(cx + rx * a.cos(), cy + ry * a.sin()))
+        })
+        .collect();
+    PathData::new(vec![Contour::new(nodes, true)], FillRule::NonZero)
+}
+
+/// An N-pointed star inscribed in the box, as one closed contour of `2·points`
+/// sharp nodes alternating the outer radius and `inner`×outer (first point up).
+/// `points` clamped to `[3, 100]`, `inner` to `[0.05, 0.95]`.
+pub fn star_path(x0: f32, y0: f32, x1: f32, y1: f32, points: u32, inner: f32) -> PathData {
+    let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+    let rx = (x1 - x0).abs() * 0.5;
+    let ry = (y1 - y0).abs() * 0.5;
+    let n = points.clamp(3, 100);
+    let f_inner = inner.clamp(0.05, 0.95);
+    let start = -std::f32::consts::FRAC_PI_2;
+    let nodes = (0..2 * n)
+        .map(|i| {
+            let a = start + std::f32::consts::PI * i as f32 / n as f32;
+            let f = if i % 2 == 0 { 1.0 } else { f_inner };
+            Node::sharp(Point::new(cx + rx * f * a.cos(), cy + ry * f * a.sin()))
+        })
+        .collect();
+    PathData::new(vec![Contour::new(nodes, true)], FillRule::NonZero)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +284,31 @@ mod tests {
         assert_eq!(c.nodes.len(), 2);
         assert_eq!(c.nodes[0].anchor, Point::new(5.0, 6.0));
         assert_eq!(c.nodes[1].anchor, Point::new(70.0, 80.0));
+    }
+
+    #[test]
+    fn polygon_has_n_sharp_nodes_first_up() {
+        let p = polygon_path(0.0, 0.0, 100.0, 100.0, 6);
+        let c = &p.contours[0];
+        assert!(c.closed);
+        assert_eq!(c.nodes.len(), 6);
+        assert!(c
+            .nodes
+            .iter()
+            .all(|n| n.in_handle.is_none() && n.out_handle.is_none()));
+        assert!((c.nodes[0].anchor.x - 50.0).abs() < 0.01 && c.nodes[0].anchor.y.abs() < 0.01);
+    }
+
+    #[test]
+    fn star_alternates_outer_and_inner_radii() {
+        let p = star_path(0.0, 0.0, 100.0, 100.0, 5, 0.5);
+        let c = &p.contours[0];
+        assert!(c.closed);
+        assert_eq!(c.nodes.len(), 10);
+        let d = |i: usize| {
+            ((c.nodes[i].anchor.x - 50.0).powi(2) + (c.nodes[i].anchor.y - 50.0).powi(2)).sqrt()
+        };
+        assert!((d(0) - 50.0).abs() < 0.5, "outer ~50, got {}", d(0));
+        assert!((d(1) - 25.0).abs() < 0.5, "inner ~25, got {}", d(1));
     }
 }

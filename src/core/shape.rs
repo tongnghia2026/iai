@@ -12,6 +12,11 @@ pub enum ShapeKind {
     Rectangle,
     Ellipse,
     Line,
+    /// Regular N-gon inscribed in the bounding box (`sides` = number of edges).
+    Polygon,
+    /// N-pointed star inscribed in the box (`sides` = points, `star_inner` = inner
+    /// radius as a fraction of the outer).
+    Star,
 }
 
 impl ShapeKind {
@@ -19,6 +24,8 @@ impl ShapeKind {
         match v {
             1 => ShapeKind::Ellipse,
             2 => ShapeKind::Line,
+            3 => ShapeKind::Polygon,
+            4 => ShapeKind::Star,
             _ => ShapeKind::Rectangle,
         }
     }
@@ -27,6 +34,8 @@ impl ShapeKind {
             ShapeKind::Rectangle => 0,
             ShapeKind::Ellipse => 1,
             ShapeKind::Line => 2,
+            ShapeKind::Polygon => 3,
+            ShapeKind::Star => 4,
         }
     }
     pub fn label(self) -> &'static str {
@@ -34,7 +43,14 @@ impl ShapeKind {
             ShapeKind::Rectangle => "Rectangle",
             ShapeKind::Ellipse => "Ellipse",
             ShapeKind::Line => "Line",
+            ShapeKind::Polygon => "Polygon",
+            ShapeKind::Star => "Star",
         }
+    }
+    /// A box-bounded, fillable shape (Rectangle / Ellipse / Polygon / Star) — as
+    /// opposed to the open Line. Used to share box handling across kinds.
+    pub fn is_box_shape(self) -> bool {
+        !matches!(self, ShapeKind::Line)
     }
 }
 
@@ -100,6 +116,10 @@ pub struct ShapeData {
     pub y1: f32,
     /// Rounded-rectangle corner radius (canvas px). 0 = sharp.
     pub corner_radius: f32,
+    /// Polygon edge count / Star point count (ignored for other kinds).
+    pub sides: u32,
+    /// Star inner-radius fraction of the outer radius, in `(0,1)` (Star only).
+    pub star_inner: f32,
     pub fill: bool,
     pub fill_color: [u8; 4],
     /// Outline / line thickness (canvas px). 0 = no outline.
@@ -151,6 +171,11 @@ impl ShapeData {
             x1: cx1 - off_x,
             y1: cy1 - off_y,
             corner_radius: corner_radius.max(0.0),
+            // Defaults; Polygon/Star callers overwrite these (kept out of the
+            // signature so existing call sites are unchanged). `rebuilt` copies
+            // them from `self`, so a resize never resets them.
+            sides: 5,
+            star_inner: 0.5,
             fill,
             fill_color,
             stroke_width: stroke_width.max(0.0),
@@ -205,6 +230,38 @@ impl ShapeData {
         self.corner_radius.min(w * 0.5).min(h * 0.5).max(0.0)
     }
 
+    /// Local-space vertices of a Polygon (N sharp corners) or Star (2N alternating
+    /// corners) inscribed in the bounding box — first vertex points up. Empty for
+    /// non-polygonal kinds. The box's half-extents are the radii, so the shape
+    /// stretches with a non-square box.
+    pub fn polygon_vertices(&self) -> Vec<(f32, f32)> {
+        let cx = (self.x0 + self.x1) * 0.5;
+        let cy = (self.y0 + self.y1) * 0.5;
+        let rx = (self.x1 - self.x0).abs() * 0.5;
+        let ry = (self.y1 - self.y0).abs() * 0.5;
+        let n = self.sides.clamp(3, 200) as usize;
+        let start = -std::f32::consts::FRAC_PI_2;
+        match self.kind {
+            ShapeKind::Polygon => (0..n)
+                .map(|i| {
+                    let a = start + std::f32::consts::TAU * i as f32 / n as f32;
+                    (cx + rx * a.cos(), cy + ry * a.sin())
+                })
+                .collect(),
+            ShapeKind::Star => {
+                let inner = self.star_inner.clamp(0.05, 0.95);
+                (0..2 * n)
+                    .map(|i| {
+                        let a = start + std::f32::consts::PI * i as f32 / n as f32;
+                        let f = if i % 2 == 0 { 1.0 } else { inner };
+                        (cx + rx * f * a.cos(), cy + ry * f * a.sin())
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Size of the tight raster that holds this shape.
     pub fn raster_size(&self) -> (u32, u32) {
         let pad = Self::pad(self.stroke_width);
@@ -233,6 +290,9 @@ impl ShapeData {
         let w = (cx1 - cx0).abs();
         let h = (cy1 - cy0).abs();
         data.corner_radius = data.corner_radius.min(w * 0.5).min(h * 0.5).max(0.0);
+        // Polygon/Star parameters are not derived from the span — carry them over.
+        data.sides = self.sides;
+        data.star_inner = self.star_inner;
         (data, off)
     }
 
@@ -326,6 +386,9 @@ impl ShapeData {
         ];
         let stroke_a = self.stroke_color[3] as f32 / 255.0;
         let half = self.stroke_width.max(0.0) * 0.5;
+        // This geometry is constant for the whole raster; do not allocate it
+        // again for every Polygon/Star pixel sample.
+        let polygon_vertices = self.polygon_vertices();
 
         // Boundary-referenced signed distance per kind. A line is treated as a
         // "filled" band of half-width `half.max(0.5)` (matching coverage_parts,
@@ -358,6 +421,7 @@ impl ShapeData {
                     let b = (self.y1 - self.y0).abs() * 0.5;
                     sdf_ellipse(px, py, cx, cy, a, b)
                 }
+                ShapeKind::Polygon | ShapeKind::Star => sdf_polygon(px, py, &polygon_vertices),
             }
         };
         // |sd| beyond this is provably coverage 0 (outside) or exactly the
@@ -401,7 +465,13 @@ impl ShapeData {
                     x += run;
                 } else {
                     // AA ramp / stroke ring: exact coverage.
-                    let (fill_cov, stroke_cov) = self.coverage_parts(px, py);
+                    // Reuse the signed distance already computed above. This
+                    // avoids walking every polygon edge twice at boundary
+                    // pixels (and keeps the Line band semantics unchanged).
+                    let (fill_cov, stroke_cov) = match self.kind {
+                        ShapeKind::Line => (0.0, (0.5 - sd).clamp(0.0, 1.0)),
+                        _ => self.fill_stroke_parts(sd, half),
+                    };
                     if fill_cov >= 0.0015 || stroke_cov >= 0.0015 {
                         let i = ((y * w + x) * 4) as usize;
                         let mut p = [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]];
@@ -454,6 +524,10 @@ impl ShapeData {
                 let sd = sdf_ellipse(px, py, cx, cy, a, b);
                 self.fill_stroke_parts(sd, half)
             }
+            ShapeKind::Polygon | ShapeKind::Star => {
+                let sd = sdf_polygon(px, py, &self.polygon_vertices());
+                self.fill_stroke_parts(sd, half)
+            }
         }
     }
 
@@ -489,7 +563,7 @@ fn pixel_snapped_span(
     let visible_stroke = stroke_color[3] > 0
         && match kind {
             ShapeKind::Line => true,
-            ShapeKind::Rectangle | ShapeKind::Ellipse => stroke_width > 0.05,
+            _ => stroke_width > 0.05,
         };
     let phase = if visible_stroke {
         stroke_pixel_phase(stroke_width)
@@ -500,11 +574,6 @@ fn pixel_snapped_span(
     };
 
     match kind {
-        ShapeKind::Rectangle | ShapeKind::Ellipse => {
-            let (x0, x1) = snap_pair_to_phase(cx0, cx1, phase);
-            let (y0, y1) = snap_pair_to_phase(cy0, cy1, phase);
-            (x0, y0, x1, y1)
-        }
         ShapeKind::Line => {
             let dx = (cx1 - cx0).abs();
             let dy = (cy1 - cy0).abs();
@@ -521,7 +590,48 @@ fn pixel_snapped_span(
                 (cx0, cy0, cx1, cy1)
             }
         }
+        // Rectangle / Ellipse / Polygon / Star: pixel-snap the bounding box.
+        _ => {
+            let (x0, x1) = snap_pair_to_phase(cx0, cx1, phase);
+            let (y0, y1) = snap_pair_to_phase(cy0, cy1, phase);
+            (x0, y0, x1, y1)
+        }
     }
+}
+
+/// Signed distance to a closed polygon (negative inside), after Inigo Quilez's
+/// `sdPoly`. `v` are the polygon vertices in order; fewer than 3 → +∞.
+fn sdf_polygon(px: f32, py: f32, v: &[(f32, f32)]) -> f32 {
+    let n = v.len();
+    if n < 3 {
+        return f32::INFINITY;
+    }
+    let mut d = {
+        let dx = px - v[0].0;
+        let dy = py - v[0].1;
+        dx * dx + dy * dy
+    };
+    let mut s = 1.0f32;
+    let mut j = n - 1;
+    for i in 0..n {
+        let e = (v[j].0 - v[i].0, v[j].1 - v[i].1);
+        let w = (px - v[i].0, py - v[i].1);
+        let denom = e.0 * e.0 + e.1 * e.1;
+        let t = if denom > 0.0 {
+            ((w.0 * e.0 + w.1 * e.1) / denom).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let bx = w.0 - e.0 * t;
+        let by = w.1 - e.1 * t;
+        d = d.min(bx * bx + by * by);
+        let c = [py >= v[i].1, py < v[j].1, e.0 * w.1 > e.1 * w.0];
+        if c[0] == c[1] && c[1] == c[2] {
+            s = -s;
+        }
+        j = i;
+    }
+    s * d.sqrt()
 }
 
 fn stroke_pixel_phase(stroke_width: f32) -> f32 {
@@ -738,6 +848,22 @@ mod tests {
                 [1, 2, 3, 255],
                 0.0,
                 [0, 0, 0, 0],
+            ),
+            (
+                ShapeKind::Polygon,
+                0.0,
+                true,
+                [40, 180, 90, 220],
+                3.0,
+                [20, 30, 40, 255],
+            ),
+            (
+                ShapeKind::Star,
+                0.0,
+                true,
+                [220, 160, 20, 180],
+                4.0,
+                [60, 20, 100, 255],
             ),
             (
                 ShapeKind::Line,

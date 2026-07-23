@@ -20,7 +20,7 @@ impl App {
     /// Create a new Shape layer from a canvas-space drag span, using the Shape
     /// tool's current style (kind, fill/stroke colours, width, corner radius).
     pub fn begin_new_shape(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
-        let (kind, fill, fill_color, stroke_width, stroke_color, corner_radius) = {
+        let (kind, fill, fill_color, stroke_width, stroke_color, corner_radius, sides, star_inner) = {
             let s = self.edit.tools.shape();
             (
                 s.kind,
@@ -29,9 +29,11 @@ impl App {
                 s.stroke_width,
                 s.stroke_color,
                 s.corner_radius,
+                s.sides,
+                s.star_inner,
             )
         };
-        let (data, offset) = ShapeData::from_canvas_span(
+        let (mut data, offset) = ShapeData::from_canvas_span(
             kind,
             x0,
             y0,
@@ -43,6 +45,9 @@ impl App {
             stroke_width,
             stroke_color,
         );
+        // Polygon/Star parameters live on the tool, not the span.
+        data.sides = sides.clamp(3, 100);
+        data.star_inner = star_inner.clamp(0.05, 0.95);
         let Some(raster) = data.render() else {
             return;
         };
@@ -129,6 +134,8 @@ impl App {
             ShapeKind::Rectangle => from_shape::rect_path(x0, y0, x1, y1, data.effective_radius()),
             ShapeKind::Ellipse => from_shape::ellipse_path(x0, y0, x1, y1),
             ShapeKind::Line => from_shape::line_path(x0, y0, x1, y1),
+            ShapeKind::Polygon => from_shape::polygon_path(x0, y0, x1, y1, data.sides),
+            ShapeKind::Star => from_shape::star_path(x0, y0, x1, y1, data.sides, data.star_inner),
         };
         let style = VectorStyle::from_shape_fields(
             data.fill,
@@ -659,7 +666,7 @@ impl App {
         let s = self.edit.tools.shape();
         let (x0, y0, x1, y1) = data.canvas_span(offset);
         // Keep the shape's own kind — the options combo only affects new shapes.
-        let (new_data, new_offset) = ShapeData::from_canvas_span(
+        let (mut new_data, new_offset) = ShapeData::from_canvas_span(
             data.kind,
             x0,
             y0,
@@ -671,6 +678,9 @@ impl App {
             s.stroke_width,
             s.stroke_color,
         );
+        // Sides / inner-radius are live-editable like the corner radius.
+        new_data.sides = s.sides.clamp(3, 100);
+        new_data.star_inner = s.star_inner.clamp(0.05, 0.95);
         Some((idx, new_data, new_offset))
     }
 
@@ -820,6 +830,8 @@ mod tests {
             x1: 80.0,
             y1: 70.0,
             corner_radius: radius,
+            sides: 5,
+            star_inner: 0.5,
             fill: true,
             fill_color: [200, 40, 40, 255],
             stroke_width: 3.0,

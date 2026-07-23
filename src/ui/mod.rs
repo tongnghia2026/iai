@@ -1153,6 +1153,35 @@ pub fn build(
                     }
                     format!("{:.0} × {:.0}", (x1 - x0).abs(), (y1 - y0).abs())
                 }
+                3 | 4 => {
+                    let cx = (x0 + x1) * 0.5;
+                    let cy = (y0 + y1) * 0.5;
+                    let rx = (x1 - x0).abs() * 0.5;
+                    let ry = (y1 - y0).abs() * 0.5;
+                    let n = data.tool.shape_sides.clamp(3, 100) as usize;
+                    if rx > 0.5 && ry > 0.5 {
+                        let start = -std::f32::consts::FRAC_PI_2;
+                        let star = data.tool.shape_kind == 4;
+                        let inner = data.tool.shape_star_inner.clamp(0.05, 0.95);
+                        let count = if star { 2 * n } else { n };
+                        let mut pts: Vec<egui::Pos2> = (0..count)
+                            .map(|i| {
+                                let (a, f) = if star {
+                                    let a = start + std::f32::consts::PI * i as f32 / n as f32;
+                                    (a, if i % 2 == 0 { 1.0 } else { inner })
+                                } else {
+                                    (start + std::f32::consts::TAU * i as f32 / n as f32, 1.0)
+                                };
+                                to_screen_pos(cx + rx * f * a.cos(), cy + ry * f * a.sin())
+                            })
+                            .collect();
+                        if let Some(&first) = pts.first() {
+                            pts.push(first);
+                        }
+                        painter.add(egui::Shape::line(pts, stroke));
+                    }
+                    format!("{:.0} × {:.0}", (x1 - x0).abs(), (y1 - y0).abs())
+                }
                 _ => {
                     let w = (x1 - x0).abs();
                     let h = (y1 - y0).abs();

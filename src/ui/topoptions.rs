@@ -1226,11 +1226,19 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         .selected_text(match kind {
             1 => "Ellipse",
             2 => "Line",
+            3 => "Polygon",
+            4 => "Star",
             _ => "Rectangle",
         })
         .width(100.0)
         .show_ui(ui, |ui| {
-            for (v, name) in [(0u8, "Rectangle"), (1, "Ellipse"), (2, "Line")] {
+            for (v, name) in [
+                (0u8, "Rectangle"),
+                (1, "Ellipse"),
+                (2, "Line"),
+                (3, "Polygon"),
+                (4, "Star"),
+            ] {
                 if ui.selectable_value(&mut kind, v, name).changed() {
                     actions.tool.set_shape_kind = Some(kind);
                 }
@@ -1284,6 +1292,29 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             .changed()
         {
             actions.tool.set_shape_corner_radius = Some(r);
+        }
+    }
+
+    // Polygon edge count / Star point count, and the star's inner radius.
+    if kind == 3 || kind == 4 {
+        ui.separator();
+        ui.label(if kind == 4 { "Points:" } else { "Sides:" });
+        let mut n = data.tool.shape_sides as i32;
+        if ui
+            .add(egui::DragValue::new(&mut n).range(3..=100).speed(0.15))
+            .changed()
+        {
+            actions.tool.set_shape_sides = Some(n.clamp(3, 100) as u32);
+        }
+    }
+    if kind == 4 {
+        ui.label("Inner:");
+        let mut f = data.tool.shape_star_inner;
+        if ui
+            .add(egui::DragValue::new(&mut f).range(0.05..=0.95).speed(0.005))
+            .changed()
+        {
+            actions.tool.set_shape_star_inner = Some(f);
         }
     }
 
