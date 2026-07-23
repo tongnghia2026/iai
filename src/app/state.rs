@@ -762,6 +762,10 @@ pub struct NodeDrag {
     pub grab_local: crate::core::geometry::Point,
     pub base_node: crate::core::vector::path::Node,
     pub changed: bool,
+    /// For a multi-node move: the OTHER selected nodes `(contour, node, base)`
+    /// dragged rigidly alongside the primary. Empty for a single-node drag or a
+    /// handle drag.
+    pub group: Vec<(usize, usize, crate::core::vector::path::Node)>,
 }
 
 /// A deferred options-bar style edit (Radius/Stroke/colour scrub) for a Shape
@@ -1107,6 +1111,7 @@ impl App {
                 path_transform: None,
                 node_drag: None,
                 node_selected: None,
+                node_multi: Vec::new(),
                 pending_path_style: None,
                 shape_style_pending: None,
                 text_font_px: 48.0,

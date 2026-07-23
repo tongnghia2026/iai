@@ -473,6 +473,9 @@ impl App {
         actions: &mut UiActions,
         event_loop: &ActiveEventLoop,
     ) {
+        if let Some((axis, reference)) = actions.tool.node_align.take() {
+            self.node_align(axis, reference);
+        }
         if let Some(m) = actions.tool.set_pen_mode.take() {
             self.edit.tools.pen_mut().mode = crate::tools::pen::PenMode::from_u8(m);
         }

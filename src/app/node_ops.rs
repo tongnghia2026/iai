@@ -18,7 +18,7 @@ use crate::core::geometry::{cubic_bezier, Point};
 use crate::core::layer::LayerType;
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::object::VectorObjectData;
-use crate::core::vector::ops::HandleSide;
+use crate::core::vector::ops::{AlignRef, Axis, HandleSide};
 use crate::core::vector::path::PathData;
 
 /// Screen-space grab radius for an anchor.
@@ -94,6 +94,123 @@ impl App {
         Some((layer.id, obj.transform, obj.path.clone()))
     }
 
+    /// Every selected node `(contour, node)` on the active Path — the primary in
+    /// `node_selected` plus the `node_multi` extras — with the layer id. `None`
+    /// when nothing is selected. The primary is always first.
+    fn node_effective_selection(&self) -> Option<(u32, Vec<(usize, usize)>)> {
+        let (lid, pc, pn) = self.edit.node_selected?;
+        let mut v = vec![(pc, pn)];
+        for &(c, n) in &self.edit.node_multi {
+            if (c, n) != (pc, pn) {
+                v.push((c, n));
+            }
+        }
+        Some((lid, v))
+    }
+
+    /// Clear both the primary node and the multi-selection.
+    pub fn clear_node_selection(&mut self) {
+        self.edit.node_selected = None;
+        self.edit.node_multi.clear();
+    }
+
+    /// Shift-click a node `(ci, ni)`: toggle it in the multi-selection. Adding a
+    /// node makes it the new primary (the old primary joins the extras); removing
+    /// the primary promotes an extra (or clears). Node coords are on the active
+    /// Path layer.
+    pub fn node_shift_toggle(&mut self, ci: usize, ni: usize) {
+        let Some((id, _, _)) = self.active_node_object() else {
+            return;
+        };
+        match self.edit.node_selected {
+            None => self.edit.node_selected = Some((id, ci, ni)),
+            Some((lid, ..)) if lid != id => {
+                // Selection was on another layer — start fresh on this one.
+                self.edit.node_multi.clear();
+                self.edit.node_selected = Some((id, ci, ni));
+            }
+            Some((lid, pc, pn)) => {
+                if (ci, ni) == (pc, pn) {
+                    // Deselect the primary: promote an extra, else clear.
+                    match self.edit.node_multi.pop() {
+                        Some((mc, mn)) => self.edit.node_selected = Some((lid, mc, mn)),
+                        None => self.edit.node_selected = None,
+                    }
+                } else if let Some(pos) = self.edit.node_multi.iter().position(|&x| x == (ci, ni)) {
+                    self.edit.node_multi.remove(pos);
+                } else {
+                    self.edit.node_multi.push((pc, pn));
+                    self.edit.node_selected = Some((lid, ci, ni));
+                }
+            }
+        }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Align the multi-selected nodes onto a shared coordinate (Node options bar).
+    /// Needs ≥2 selected nodes. The target is computed GLOBALLY across the whole
+    /// selection (consistent even across contours); each node's handles move with
+    /// its anchor so curvature is kept. One `ReplacePathGeometry` = one undo.
+    pub fn node_align(&mut self, axis: Axis, reference: AlignRef) -> bool {
+        let Some((layer_id, sel)) = self.node_effective_selection() else {
+            return false;
+        };
+        if sel.len() < 2 {
+            self.shell.status_msg = "Cần chọn ít nhất 2 điểm để căn".to_string();
+            return true;
+        }
+        let Some((_, _t, mut path)) = self.active_node_object() else {
+            return false;
+        };
+        let coord = |p: Point| match axis {
+            Axis::Horizontal => p.y,
+            Axis::Vertical => p.x,
+        };
+        let mut vals = Vec::with_capacity(sel.len());
+        for &(c, n) in &sel {
+            if let Some(node) = path.contours.get(c).and_then(|c| c.nodes.get(n)) {
+                vals.push(coord(node.anchor));
+            }
+        }
+        if vals.len() < 2 {
+            return false;
+        }
+        let target = match reference {
+            AlignRef::First => vals[0],
+            AlignRef::Last => *vals.last().unwrap(),
+            AlignRef::Min => vals.iter().copied().fold(f32::INFINITY, f32::min),
+            AlignRef::Max => vals.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+            AlignRef::Average => vals.iter().sum::<f32>() / vals.len() as f32,
+        };
+        for &(c, n) in &sel {
+            if let Some(node) = path.contours.get_mut(c).and_then(|c| c.nodes.get_mut(n)) {
+                let (dx, dy) = match axis {
+                    Axis::Horizontal => (0.0, target - node.anchor.y),
+                    Axis::Vertical => (target - node.anchor.x, 0.0),
+                };
+                let shift = |p: Point| Point::new(p.x + dx, p.y + dy);
+                node.anchor = shift(node.anchor);
+                node.in_handle = node.in_handle.map(shift);
+                node.out_handle = node.out_handle.map(shift);
+            }
+        }
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let _ = canvas.execute(
+            Box::new(crate::core::command_vector::ReplacePathGeometry::new(
+                layer_id, path,
+            )),
+            crate::core::gateway::ChangeKind::LayerStructure,
+        );
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = "Đã căn các điểm".to_string();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     /// The geometry the overlay/hit-test should use: the live `pending` path
     /// during a drag, else the committed model path. Plus the object transform.
     fn node_edit_geometry(&self) -> Option<(u32, AffineTransform, PathData)> {
@@ -119,10 +236,17 @@ impl App {
             let q = t.apply_point(p);
             (q.x, q.y)
         };
-        let sel = self
+        // The focused (primary) node — its Bézier arms are drawn/grabbable. The
+        // extra multi-selection is only highlighted, not armed.
+        let primary = self
             .edit
             .node_selected
             .and_then(|(lid, c, n)| (lid == id).then_some((c, n)));
+        let multi: &[(usize, usize)] = if self.edit.node_selected.map(|(lid, ..)| lid) == Some(id) {
+            &self.edit.node_multi
+        } else {
+            &[]
+        };
 
         let mut outlines: Vec<Vec<(f32, f32)>> = Vec::new();
         for c in &path.contours {
@@ -141,9 +265,10 @@ impl App {
         for (ci, c) in path.contours.iter().enumerate() {
             for (ni, node) in c.nodes.iter().enumerate() {
                 let (ax, ay) = map(node.anchor);
-                let selected = sel == Some((ci, ni));
+                let is_primary = primary == Some((ci, ni));
+                let selected = is_primary || multi.contains(&(ci, ni));
                 nodes.push((ax, ay, selected));
-                if selected {
+                if is_primary {
                     if let Some(h) = node.in_handle {
                         let (hx, hy) = map(h);
                         handles.push([ax, ay, hx, hy]);
@@ -295,7 +420,38 @@ impl App {
         };
         let base_node = *base_node;
 
-        self.edit.node_selected = Some((id, contour, node));
+        // If this anchor belongs to a multi-selection, the whole selection moves
+        // rigidly (group drag). Otherwise the press starts a fresh single
+        // selection (and drops any previous multi-selection).
+        let group: Vec<(usize, usize, crate::core::vector::path::Node)> =
+            if matches!(target, NodeDragTarget::Anchor) {
+                match self.node_effective_selection() {
+                    Some((lid, sel))
+                        if lid == id && sel.len() > 1 && sel.contains(&(contour, node)) =>
+                    {
+                        sel.iter()
+                            .filter(|&&(c, n)| (c, n) != (contour, node))
+                            .filter_map(|&(c, n)| {
+                                pending
+                                    .contours
+                                    .get(c)
+                                    .and_then(|cc| cc.nodes.get(n))
+                                    .map(|nd| (c, n, *nd))
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+
+        if group.is_empty() {
+            // Fresh single-node selection (or a handle/insert gesture).
+            self.edit.node_selected = Some((id, contour, node));
+            self.edit.node_multi.clear();
+        }
+        // else: keep the existing multi-selection for the rigid group move.
         self.edit.node_drag = Some(NodeDrag {
             layer_id: id,
             contour,
@@ -306,6 +462,7 @@ impl App {
             grab_local,
             base_node,
             changed,
+            group,
         });
         // Show the inserted node (and the fresh selection) immediately.
         self.apply_pending_node_geometry(id, &pending);
@@ -337,20 +494,44 @@ impl App {
             Some(d) => {
                 let dx = local.x - d.grab_local.x;
                 let dy = local.y - d.grab_local.y;
-                let Some(c) = d.pending.contours.get_mut(d.contour) else {
-                    return;
-                };
-                let Some(slot) = c.nodes.get_mut(d.node) else {
-                    return;
-                };
                 match d.target {
                     NodeDragTarget::Anchor => {
+                        // Primary node follows the cursor rigidly.
+                        let Some(slot) = d
+                            .pending
+                            .contours
+                            .get_mut(d.contour)
+                            .and_then(|c| c.nodes.get_mut(d.node))
+                        else {
+                            return;
+                        };
                         *slot = shifted_node(&d.base_node, dx, dy);
+                        // Any other selected nodes (a multi-selection) move by the
+                        // same delta — possibly in other contours.
+                        let grp = d.group.clone();
+                        for (gc, gn, gbase) in grp {
+                            if let Some(slot) = d
+                                .pending
+                                .contours
+                                .get_mut(gc)
+                                .and_then(|c| c.nodes.get_mut(gn))
+                            {
+                                *slot = shifted_node(&gbase, dx, dy);
+                            }
+                        }
                     }
                     NodeDragTarget::Handle(side) => {
                         // Reset to the node as it was at press, then move the
                         // grabbed handle rigidly with the cursor; the opposite
                         // handle is coupled per the node kind in core.
+                        let Some(slot) = d
+                            .pending
+                            .contours
+                            .get_mut(d.contour)
+                            .and_then(|c| c.nodes.get_mut(d.node))
+                        else {
+                            return;
+                        };
                         *slot = d.base_node;
                         let base_h = match side {
                             HandleSide::In => d.base_node.in_handle,
@@ -454,10 +635,12 @@ impl App {
         }
     }
 
-    /// Delete the selected node (Delete key under the Node tool). Refuses to drop
-    /// a contour below 2 nodes (nothing left to draw). Returns true when handled.
+    /// Delete every selected node (Delete key under the Node tool) — the primary
+    /// plus any multi-selection. Deletes high→low within each contour so indices
+    /// stay valid, and never drops a contour below 2 nodes. Returns true when
+    /// handled.
     pub fn node_delete_selected(&mut self) -> bool {
-        let Some((id, ci, ni)) = self.edit.node_selected else {
+        let Some((id, sel)) = self.node_effective_selection() else {
             return false;
         };
         let Some((layer_id, _t, mut path)) = self.active_node_object() else {
@@ -466,17 +649,34 @@ impl App {
         if layer_id != id {
             return false;
         }
-        let Some(c) = path.contours.get_mut(ci) else {
-            return false;
-        };
-        if c.nodes.len() <= 2 {
+        // Group selected indices by contour; delete descending so earlier indices
+        // remain valid, keeping every contour at ≥2 nodes.
+        use std::collections::BTreeMap;
+        let mut by_contour: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (c, n) in sel {
+            by_contour.entry(c).or_default().push(n);
+        }
+        let mut deleted = 0usize;
+        for (c, mut idxs) in by_contour {
+            let Some(contour) = path.contours.get_mut(c) else {
+                continue;
+            };
+            idxs.sort_unstable_by(|a, b| b.cmp(a));
+            idxs.dedup();
+            for idx in idxs {
+                if contour.nodes.len() <= 2 {
+                    break;
+                }
+                if crate::core::vector::ops::delete_node(contour, idx).is_ok() {
+                    deleted += 1;
+                }
+            }
+        }
+        if deleted == 0 {
             self.shell.status_msg = "Không thể xoá: đường cần ít nhất 2 điểm".to_string();
             return true;
         }
-        if crate::core::vector::ops::delete_node(c, ni).is_err() {
-            return false;
-        }
-        self.edit.node_selected = None;
+        self.clear_node_selection();
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let _ = canvas.execute(
             Box::new(crate::core::command_vector::ReplacePathGeometry::new(
@@ -485,7 +685,11 @@ impl App {
             crate::core::gateway::ChangeKind::LayerStructure,
         );
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Đã xoá điểm".to_string();
+        self.shell.status_msg = if deleted == 1 {
+            "Đã xoá điểm".to_string()
+        } else {
+            format!("Đã xoá {deleted} điểm")
+        };
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -546,7 +750,7 @@ impl App {
             return false;
         }
         canvas.layer_stack.active_idx = idx;
-        self.edit.node_selected = None;
+        self.clear_node_selection();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -908,5 +1112,117 @@ mod tests {
             2,
             "not deleted"
         );
+    }
+
+    #[test]
+    fn shift_toggle_builds_then_shrinks_the_multiselection() {
+        let (mut app, id) = app_with_path();
+        app.edit.node_selected = Some((id, 0, 0));
+        // Shift-add node 2: it becomes primary, the old primary joins the extras.
+        app.node_shift_toggle(0, 2);
+        assert_eq!(app.edit.node_selected, Some((id, 0, 2)));
+        assert_eq!(app.edit.node_multi, vec![(0, 0)]);
+        // Shift-add node 1 too.
+        app.node_shift_toggle(0, 1);
+        assert_eq!(app.edit.node_selected, Some((id, 0, 1)));
+        assert_eq!(app.edit.node_multi, vec![(0, 0), (0, 2)]);
+        // Shift-click the primary again removes it; an extra is promoted.
+        app.node_shift_toggle(0, 1);
+        assert_eq!(app.edit.node_selected, Some((id, 0, 2)));
+        assert_eq!(app.edit.node_multi, vec![(0, 0)]);
+    }
+
+    #[test]
+    fn dragging_a_multiselected_node_moves_the_whole_group() {
+        let (mut app, id) = app_with_path();
+        app.edit.node_selected = Some((id, 0, 0)); // local (0,0)
+        app.node_shift_toggle(0, 1); // add local (40,0); primary = node 1
+                                     // Drag node 1 (canvas 140,120) by (+10,+5). Both selected nodes shift.
+        let hit = app.node_hit_at_screen(140.0, 120.0).expect("node 1");
+        assert!(matches!(hit, NodeHit::Node(0, 1)));
+        app.node_press(hit, 140.0, 120.0);
+        app.node_drag_update(150.0, 125.0);
+        app.node_drag_finish();
+
+        let p = model_path(&app, id);
+        let n0 = p.contours[0].nodes[0].anchor;
+        let n1 = p.contours[0].nodes[1].anchor;
+        let n2 = p.contours[0].nodes[2].anchor;
+        assert!(
+            (n0.x - 10.0).abs() < 0.5 && (n0.y - 5.0).abs() < 0.5,
+            "n0 {n0:?}"
+        );
+        assert!(
+            (n1.x - 50.0).abs() < 0.5 && (n1.y - 5.0).abs() < 0.5,
+            "n1 {n1:?}"
+        );
+        assert!(
+            (n2.x - 40.0).abs() < 0.5 && (n2.y - 20.0).abs() < 0.5,
+            "n2 unmoved"
+        );
+        // One undo returns the whole group.
+        app.docs.documents[0].canvas.undo().expect("undo");
+        let p = model_path(&app, id);
+        assert!(
+            p.contours[0].nodes[0]
+                .anchor
+                .distance_to(Point::new(0.0, 0.0))
+                < 0.5
+        );
+        assert!(
+            p.contours[0].nodes[1]
+                .anchor
+                .distance_to(Point::new(40.0, 0.0))
+                < 0.5
+        );
+    }
+
+    #[test]
+    fn delete_removes_every_selected_node() {
+        let (mut app, id) = app_with_path();
+        app.edit.node_selected = Some((id, 0, 0));
+        app.node_shift_toggle(0, 2); // selection = {0, 2}
+        assert!(app.node_delete_selected());
+        assert_eq!(
+            model_path(&app, id).contours[0].nodes.len(),
+            2,
+            "two removed"
+        );
+        assert_eq!(app.edit.node_selected, None);
+        assert!(app.edit.node_multi.is_empty());
+        app.docs.documents[0].canvas.undo().expect("undo");
+        assert_eq!(
+            model_path(&app, id).contours[0].nodes.len(),
+            4,
+            "both restored"
+        );
+    }
+
+    #[test]
+    fn align_left_snaps_selected_nodes_to_min_x_and_undoes() {
+        let (mut app, id) = app_with_path();
+        app.edit.node_selected = Some((id, 0, 0)); // x = 0
+        app.node_shift_toggle(0, 1); // add x = 40
+        assert!(app.node_align(Axis::Vertical, AlignRef::Min));
+        let p = model_path(&app, id);
+        assert!((p.contours[0].nodes[0].anchor.x - 0.0).abs() < 0.5);
+        assert!(
+            (p.contours[0].nodes[1].anchor.x - 0.0).abs() < 0.5,
+            "node 1 snapped to the min x"
+        );
+        // The aligned axis only; y is untouched.
+        assert!((p.contours[0].nodes[1].anchor.y - 0.0).abs() < 0.5);
+        app.docs.documents[0].canvas.undo().expect("undo");
+        assert!((model_path(&app, id).contours[0].nodes[1].anchor.x - 40.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn align_below_two_nodes_is_a_handled_noop() {
+        let (mut app, id) = app_with_path();
+        app.edit.node_selected = Some((id, 0, 1));
+        let before = model_path(&app, id);
+        // Returns true (handled) but changes nothing with a single node selected.
+        assert!(app.node_align(Axis::Horizontal, AlignRef::Average));
+        assert_eq!(model_path(&app, id), before);
     }
 }

@@ -67,6 +67,10 @@ pub struct EditorInteraction {
     /// The currently-selected Path node `(layer_id, contour, node)` for the Node
     /// tool — highlighted in the overlay and the target of the Delete key.
     pub(in crate::app) node_selected: Option<(u32, usize, usize)>,
+    /// Additional selected Path nodes `(contour, node)` on the SAME layer as
+    /// `node_selected`, for multi-node move / delete / align. Excludes the primary
+    /// (which lives in `node_selected`). Empty for a single-node selection.
+    pub(in crate::app) node_multi: Vec<(usize, usize)>,
     /// Baseline `(layer_id, style)` captured when an interactive Path style edit
     /// (colour dialog / outline-width scrub) begins, so the whole interaction
     /// commits as ONE `ChangeVectorStyle` on release. None when idle.

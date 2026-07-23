@@ -1432,16 +1432,54 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 }
 
 fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    use crate::core::vector::ops::{AlignRef, Axis};
     ui.label(egui::RichText::new("Node").strong());
     ui.separator();
     if data.tool.path_style.is_some() {
         path_style_options(ui, data, actions);
         ui.separator();
     }
+
+    // Align the multi-selected nodes (Shift+click to pick several). Snaps X for
+    // left/centre/right, Y for top/middle/bottom; a no-op below 2 selected nodes.
+    ui.label("Căn:");
+    if ui
+        .button("⯇")
+        .on_hover_text("Căn trái (các điểm đã chọn, ≥2)")
+        .clicked()
+    {
+        actions.tool.node_align = Some((Axis::Vertical, AlignRef::Min));
+    }
+    if ui
+        .button("‖")
+        .on_hover_text("Căn giữa theo chiều ngang")
+        .clicked()
+    {
+        actions.tool.node_align = Some((Axis::Vertical, AlignRef::Average));
+    }
+    if ui.button("⯈").on_hover_text("Căn phải").clicked() {
+        actions.tool.node_align = Some((Axis::Vertical, AlignRef::Max));
+    }
+    ui.separator();
+    if ui.button("⯅").on_hover_text("Căn trên").clicked() {
+        actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Min));
+    }
+    if ui
+        .button("═")
+        .on_hover_text("Căn giữa theo chiều dọc")
+        .clicked()
+    {
+        actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Average));
+    }
+    if ui.button("⯆").on_hover_text("Căn dưới").clicked() {
+        actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Max));
+    }
+    ui.separator();
+
     ui.label(
         egui::RichText::new(
             "Kéo điểm/tay nắm · bấm cạnh = chèn · Alt+cạnh = thẳng/cong · \
-             double-click điểm = góc/trơn · bấm path khác = chọn · Delete = xoá",
+             double-click điểm = góc/trơn · Shift+click = chọn nhiều · bấm path khác = chọn · Delete = xoá",
         )
         .size(11.0)
         .color(egui::Color32::from_gray(150)),

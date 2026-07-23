@@ -403,6 +403,15 @@ impl App {
                                 }
                                 let ev = self.tool_event();
                                 if let Some(hit) = self.node_hit_at_screen(msx, msy) {
+                                    // Shift+click an anchor toggles it in the
+                                    // multi-selection instead of starting a drag.
+                                    if self.edit.input.shift_held {
+                                        if let crate::app::node_ops::NodeHit::Node(ci, ni) = hit {
+                                            self.node_shift_toggle(ci, ni);
+                                            self.edit.input.painting = true;
+                                            return;
+                                        }
+                                    }
                                     if self.node_press(hit, ev.canvas_x, ev.canvas_y) {
                                         self.edit.input.painting = true;
                                         return;
@@ -418,7 +427,7 @@ impl App {
                                     return;
                                 } else if self.edit.node_selected.is_some() {
                                     // Click on empty canvas clears the selection.
-                                    self.edit.node_selected = None;
+                                    self.clear_node_selection();
                                     if let Some(w) = &self.win.window {
                                         w.request_redraw();
                                     }
