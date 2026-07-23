@@ -384,4 +384,94 @@ mod tests {
         });
         assert!(json_to_layer_path(&bad).is_none());
     }
+
+    /// Contract #8 property test: sweep a matrix of objects (fill kinds, colour
+    /// spaces, caps/joins, fill rules, open/closed + multi-contour, skew
+    /// transforms) and assert the schema round-trips each one EXACTLY. f32→f64→f32
+    /// is lossless, so equality is bit-for-bit. No external proptest dependency.
+    #[test]
+    fn property_schema_round_trip_over_many_objects() {
+        use crate::core::geometry::Point;
+
+        let fills = [
+            Paint::None,
+            Paint::Solid(ColorValue::rgb(0.2, 0.4, 0.6)),
+            Paint::Solid(ColorValue::cmyk(0.1, 0.0, 0.9, 0.05)),
+            Paint::Solid(ColorValue::rgba(1.0, 1.0, 1.0, 0.5)),
+        ];
+        let caps = [LineCap::Butt, LineCap::Round, LineCap::Square];
+        let joins = [LineJoin::Miter, LineJoin::Round, LineJoin::Bevel];
+        let rules = [FillRule::NonZero, FillRule::EvenOdd];
+
+        let mut count = 0;
+        for (fi, fill) in fills.iter().enumerate() {
+            for (ci, cap) in caps.iter().enumerate() {
+                for (ji, join) in joins.iter().enumerate() {
+                    for (ri, rule) in rules.iter().enumerate() {
+                        let k = (fi + ci + ji + ri) as f32;
+                        let mut nodes = vec![
+                            Node::sharp(Point::new(k, -k)),
+                            Node::with_handles(
+                                Point::new(10.0 + k, 0.0),
+                                Point::new(8.0 + k, -2.0),
+                                Point::new(12.0 + k, 2.0),
+                                NodeKind::Smooth,
+                            ),
+                            Node::sharp(Point::new(20.0, 20.0 + k)),
+                        ];
+                        if ci % 2 == 0 {
+                            nodes.push(Node::with_handles(
+                                Point::new(-5.0, 15.0),
+                                Point::new(-6.0, 14.0),
+                                Point::new(-4.0, 16.0),
+                                NodeKind::Symmetric,
+                            ));
+                        }
+                        let mut contours = vec![Contour::new(nodes, ri == 0)];
+                        if ji == 2 {
+                            // Second (hole) contour — compound path.
+                            contours.push(Contour::new(
+                                vec![
+                                    Node::sharp(Point::new(2.0, 2.0)),
+                                    Node::sharp(Point::new(4.0, 2.0)),
+                                    Node::sharp(Point::new(3.0, 4.0)),
+                                ],
+                                true,
+                            ));
+                        }
+                        let style = VectorStyle {
+                            fill: *fill,
+                            fill_overprint: fi % 2 == 0,
+                            stroke: Paint::Solid(ColorValue::rgb(0.0, k / 10.0, 1.0)),
+                            stroke_style: StrokeStyle {
+                                width: 0.5 + k,
+                                cap: *cap,
+                                join: *join,
+                                miter_limit: 1.0 + k,
+                            },
+                            stroke_overprint: ji % 2 == 1,
+                            opacity: (0.3 + 0.1 * k).min(1.0),
+                        };
+                        let obj = VectorObjectData::new(
+                            PathData::new(contours, *rule),
+                            style,
+                            AffineTransform {
+                                a: 1.0,
+                                b: 0.1 * k,
+                                c: -0.05 * k,
+                                d: 1.0,
+                                e: k,
+                                f: -k,
+                            },
+                        );
+                        assert!(obj.validate().is_ok(), "test matrix stays in-contract");
+                        let back = json_to_layer_path(&layer_path_to_json(&obj)).expect("decode");
+                        assert_eq!(back, obj, "schema round-trip must be exact");
+                        count += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(count, fills.len() * caps.len() * joins.len() * rules.len());
+    }
 }

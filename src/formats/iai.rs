@@ -1717,6 +1717,213 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ── M1 end-to-end (Mục 14 / cổng Foundation Freeze) ──
+    // Drive the whole thin slice through the gateway — Pen→Path commit, Node
+    // edit, Fill/Outline, then Transform — and prove the FINAL model survives a
+    // .iai round-trip AND that PDF export represents it correctly (native vector
+    // on RGB; raster fallback on CMYK, which M1 explicitly allows).
+
+    fn path_layer_id(canvas: &Canvas) -> u32 {
+        canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| matches!(l.layer_type, LayerType::Path(_)))
+            .map(|l| l.id)
+            .expect("a Path layer exists")
+    }
+
+    #[test]
+    fn m1_end_to_end_rgb_edit_chain_roundtrips_and_emits_pdf_vector() {
+        use crate::core::command_vector::{
+            ChangeVectorStyle, ChangeVectorTransform, CreatePathLayer, ReplacePathGeometry,
+        };
+        use crate::core::gateway::ChangeKind;
+        use crate::core::geometry::Point;
+
+        let dir = tmp_dir("m1-rgb");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+
+        // 1) Pen → Path commit.
+        canvas
+            .execute(
+                Box::new(CreatePathLayer::new(sample_path_object(), "Path 1")),
+                ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+        let id = path_layer_id(&canvas);
+
+        // 2) Node edit: replace geometry (equivalent to move + insert a node).
+        let edited_geom = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(60.0, 0.0)),
+                    Node::sharp(Point::new(60.0, 60.0)),
+                    Node::sharp(Point::new(30.0, 45.0)), // inserted node
+                    Node::sharp(Point::new(0.0, 60.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        canvas
+            .execute(
+                Box::new(ReplacePathGeometry::new(id, edited_geom.clone())),
+                ChangeKind::LayerPixels,
+            )
+            .expect("edit geometry");
+
+        // 3) Fill/Outline: opaque red fill, thin blue outline.
+        let mut final_style = VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0));
+        final_style.stroke = Paint::Solid(ColorValue::rgb(0.0, 0.0, 1.0));
+        final_style.stroke_style = StrokeStyle {
+            width: 1.5,
+            ..StrokeStyle::default()
+        };
+        canvas
+            .execute(
+                Box::new(ChangeVectorStyle::new(id, final_style)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("style");
+
+        // 4) Transform: move (no node baking).
+        let final_xf = AffineTransform::translate(8.0, 4.0);
+        canvas
+            .execute(
+                Box::new(ChangeVectorTransform::new(id, final_xf)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("transform");
+
+        let expected = VectorObjectData::new(edited_geom.clone(), final_style, final_xf);
+        assert_eq!(
+            loaded_path_model(&canvas),
+            expected,
+            "live model after the M1 edit chain"
+        );
+
+        // Undo/redo integrity through the gateway: last step is the transform.
+        assert!(canvas.can_undo());
+        canvas.undo().expect("undo transform");
+        assert_eq!(
+            loaded_path_model(&canvas).transform,
+            AffineTransform::translate(20.0, 15.0),
+            "undo reverts only the transform to the pre-step value"
+        );
+        canvas.redo().expect("redo transform");
+        assert_eq!(loaded_path_model(&canvas).transform, final_xf);
+
+        // Round-trip the FINAL model through .iai.
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(
+            loaded_path_model(&loaded),
+            expected,
+            "final geometry/style/transform round-trips"
+        );
+
+        // PDF: an eligible top RGB Path becomes a native vector over the raster.
+        let sel = crate::core::print::collect_pdf_vectors(&loaded);
+        assert_eq!(sel.objects.len(), 1, "RGB Path promoted to a PDF vector");
+        let fill = sel.objects[0].fill.expect("red fill present");
+        assert!(
+            (fill[0] - 1.0).abs() < 1e-3 && fill[1].abs() < 1e-3 && fill[2].abs() < 1e-3,
+            "promoted fill colour is red"
+        );
+        assert!(!sel.promoted_layer_ids.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn m1_end_to_end_cmyk_roundtrips_and_pdf_uses_raster_fallback() {
+        use crate::core::command_vector::{
+            ChangeVectorStyle, ChangeVectorTransform, CreatePathLayer, ReplacePathGeometry,
+        };
+        use crate::core::gateway::ChangeKind;
+        use crate::core::geometry::Point;
+
+        let dir = tmp_dir("m1-cmyk");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        canvas
+            .convert_to_cmyk(crate::core::canvas::CmykProfile::Naive)
+            .expect("to CMYK");
+
+        canvas
+            .execute(
+                Box::new(CreatePathLayer::new(sample_path_object(), "Path 1")),
+                ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+        let id = path_layer_id(&canvas);
+
+        let edited_geom = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(50.0, 0.0)),
+                    Node::sharp(Point::new(50.0, 50.0)),
+                    Node::sharp(Point::new(0.0, 50.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        canvas
+            .execute(
+                Box::new(ReplacePathGeometry::new(id, edited_geom.clone())),
+                ChangeKind::LayerPixels,
+            )
+            .expect("edit geometry");
+
+        // Pure-K fill: proves CMYK ink survives verbatim (no RGB round-trip).
+        let final_style = VectorStyle::filled(ColorValue::cmyk(0.0, 0.0, 0.0, 1.0));
+        canvas
+            .execute(
+                Box::new(ChangeVectorStyle::new(id, final_style)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("style");
+        let final_xf = AffineTransform::translate(6.0, 3.0);
+        canvas
+            .execute(
+                Box::new(ChangeVectorTransform::new(id, final_xf)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("transform");
+
+        let expected = VectorObjectData::new(edited_geom, final_style, final_xf);
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.is_cmyk(), "CMYK mode lost on round-trip");
+        assert_eq!(
+            loaded_path_model(&loaded),
+            expected,
+            "CMYK model (incl. pure-K fill) round-trips verbatim"
+        );
+
+        // M1 allows a raster PDF fallback on CMYK: nothing is promoted to native
+        // vector (ink-native separations stay in the image).
+        let sel = crate::core::print::collect_pdf_vectors(&loaded);
+        assert!(
+            sel.objects.is_empty() && sel.promoted_layer_ids.is_empty(),
+            "CMYK PDF uses the raster fallback (M1 allowance)"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn powerclip_relation_round_trips_separately_from_group_parent() {
         let dir = tmp_dir("powerclip-v4");
