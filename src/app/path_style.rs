@@ -14,9 +14,10 @@
 use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 use crate::core::layer::LayerType;
+use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorObjectData;
-use crate::core::vector::style::{Paint, VectorStyle};
+use crate::core::vector::style::{DashPattern, Gradient, GradientKind, Paint, VectorStyle};
 
 impl App {
     /// `(layer_id, current style)` of the active editable Path layer, or `None`.
@@ -38,14 +39,40 @@ impl App {
         let (_, style) = self.active_path_style()?;
         let color_of = |p: Paint, fallback: [u8; 4]| match p {
             Paint::Solid(c) => c.to_rgba8(),
+            Paint::Gradient(g) => g
+                .active_stops()
+                .first()
+                .map_or(fallback, |s| s.color.to_rgba8()),
             Paint::None => fallback,
         };
         Some(crate::ui::PathStyleData {
-            fill_enabled: matches!(style.fill, Paint::Solid(_)),
+            fill_enabled: style.fill.is_visible(),
             fill_color: color_of(style.fill, [0, 0, 0, 255]),
-            stroke_enabled: matches!(style.stroke, Paint::Solid(_)),
+            fill_end_color: match style.fill {
+                Paint::Gradient(g) => g
+                    .active_stops()
+                    .last()
+                    .map_or([255, 255, 255, 255], |s| s.color.to_rgba8()),
+                _ => [255, 255, 255, 255],
+            },
+            stroke_enabled: style.stroke.is_visible(),
             stroke_color: color_of(style.stroke, [0, 0, 0, 255]),
             stroke_width: style.stroke_style.width,
+            fill_kind: match style.fill {
+                Paint::Gradient(g) if g.kind == GradientKind::Linear => 1,
+                Paint::Gradient(_) => 2,
+                _ => 0,
+            },
+            dash_kind: {
+                let d = style.stroke_style.dash.as_slice();
+                if d.is_empty() {
+                    0
+                } else if d.len() == 2 && d[0] <= d[1] * 0.35 {
+                    2
+                } else {
+                    1
+                }
+            },
         })
     }
 
@@ -185,6 +212,7 @@ impl App {
             if on {
                 let c = match s.fill {
                     Paint::Solid(c) => c,
+                    Paint::Gradient(g) => g.active_stops()[0].color,
                     Paint::None => ColorValue::BLACK,
                 };
                 s.fill = Paint::Solid(c);
@@ -201,6 +229,7 @@ impl App {
             if on {
                 let c = match s.stroke {
                     Paint::Solid(c) => c,
+                    Paint::Gradient(g) => g.active_stops()[0].color,
                     Paint::None => ColorValue::BLACK,
                 };
                 s.stroke = Paint::Solid(c);
@@ -218,8 +247,22 @@ impl App {
     pub fn path_set_fill_color(&mut self, rgba: [u8; 4]) {
         self.path_style_begin();
         if let Some((id, mut style)) = self.active_path_style() {
-            style.fill = Paint::Solid(ColorValue::from_rgba8(rgba));
+            match &mut style.fill {
+                Paint::Gradient(g) => g.stops[0].color = ColorValue::from_rgba8(rgba),
+                _ => style.fill = Paint::Solid(ColorValue::from_rgba8(rgba)),
+            }
             self.preview_path_style_live(id, style);
+        }
+    }
+
+    pub fn path_set_fill_end_color(&mut self, rgba: [u8; 4]) {
+        self.path_style_begin();
+        if let Some((id, mut style)) = self.active_path_style() {
+            if let Paint::Gradient(g) = &mut style.fill {
+                let last = g.stop_count.saturating_sub(1) as usize;
+                g.stops[last].color = ColorValue::from_rgba8(rgba);
+                self.preview_path_style_live(id, style);
+            }
         }
     }
 
@@ -247,6 +290,78 @@ impl App {
             }
             self.preview_path_style_live(id, style);
         }
+    }
+
+    pub fn path_set_dash_kind(&mut self, kind: u8) {
+        self.commit_path_style_change(|s| {
+            let w = s.stroke_style.width.max(1.0);
+            s.stroke_style.dash = match kind {
+                1 => DashPattern::from_slice(&[4.0 * w, 2.0 * w], 0.0),
+                2 => DashPattern::from_slice(&[0.25 * w, 1.75 * w], 0.0),
+                _ => DashPattern::default(),
+            };
+            if kind != 0 && matches!(s.stroke, Paint::None) {
+                s.stroke = Paint::Solid(ColorValue::BLACK);
+            }
+        });
+    }
+
+    pub fn path_set_fill_kind(&mut self, kind: u8) {
+        let Some(idx) = self.active_path_layer() else {
+            return;
+        };
+        let object = match &self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack
+            .layers[idx]
+            .layer_type
+        {
+            LayerType::Path(o) => o,
+            _ => return,
+        };
+        let Some(bounds) = object.local_bounds(0.25) else {
+            return;
+        };
+        let current = match object.style.fill {
+            Paint::Solid(c) => c,
+            Paint::Gradient(g) => g
+                .active_stops()
+                .first()
+                .map_or(ColorValue::BLACK, |s| s.color),
+            Paint::None => ColorValue::BLACK,
+        };
+        let end = ColorValue::WHITE;
+        let paint = match kind {
+            1 => Paint::Gradient(Gradient::two_color(
+                GradientKind::Linear,
+                current,
+                end,
+                AffineTransform {
+                    a: bounds.w.max(1.0),
+                    d: bounds.h.max(1.0),
+                    e: bounds.x,
+                    f: bounds.y,
+                    ..AffineTransform::IDENTITY
+                },
+            )),
+            2 => {
+                let radius = (bounds.w.max(bounds.h) * 0.5).max(1.0);
+                Paint::Gradient(Gradient::two_color(
+                    GradientKind::Radial,
+                    current,
+                    end,
+                    AffineTransform {
+                        a: radius,
+                        d: radius,
+                        e: bounds.x + bounds.w * 0.5,
+                        f: bounds.y + bounds.h * 0.5,
+                        ..AffineTransform::IDENTITY
+                    },
+                ))
+            }
+            _ => Paint::Solid(current),
+        };
+        self.commit_path_style_change(|s| s.fill = paint);
     }
 }
 

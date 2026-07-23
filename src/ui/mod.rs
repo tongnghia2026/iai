@@ -146,9 +146,14 @@ pub struct ShapeOverlay {
 pub struct PathStyleData {
     pub fill_enabled: bool,
     pub fill_color: [u8; 4],
+    pub fill_end_color: [u8; 4],
     pub stroke_enabled: bool,
     pub stroke_color: [u8; 4],
     pub stroke_width: f32,
+    /// 0 solid, 1 linear gradient, 2 radial gradient.
+    pub fill_kind: u8,
+    /// 0 solid, 1 dashed, 2 dotted.
+    pub dash_kind: u8,
 }
 
 /// On-canvas editing overlay for the Node tool: the active Path's outline,

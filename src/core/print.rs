@@ -542,6 +542,7 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
                 let [r, g, b, _] = c.to_rgba8();
                 Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
             }
+            Paint::Gradient(_) => None,
             Paint::None => None,
         }
     };
@@ -579,6 +580,16 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
             continue;
         };
         if (obj.style.opacity - 1.0).abs() > 1e-3 {
+            continue;
+        }
+        // The current native PDF path writer supports solid paints and solid
+        // outlines only. Keep advanced styles in the raster base until PDF
+        // shading patterns / dash operators are emitted natively; never promote
+        // only the supported half of an object because that would drop artwork.
+        if matches!(obj.style.fill, Paint::Gradient(_))
+            || matches!(obj.style.stroke, Paint::Gradient(_))
+            || !obj.style.stroke_style.dash.is_solid()
+        {
             continue;
         }
         let fill = obj

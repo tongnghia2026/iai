@@ -396,6 +396,7 @@ impl App {
                 4 => 4,
                 5 => 5,
                 6 => 6,
+                7 => 7,
                 _ => 0,
             };
             let path_style = self.active_path_style_vm();
@@ -406,6 +407,7 @@ impl App {
                 4 => self.edit.tools.shape().stroke_color,
                 5 => path_style.map_or([0, 0, 0, 255], |s| s.fill_color),
                 6 => path_style.map_or([0, 0, 0, 255], |s| s.stroke_color),
+                7 => path_style.map_or([255, 255, 255, 255], |s| s.fill_end_color),
                 _ => self.edit.tools.brush().settings.color,
             };
             self.shell.ui.show_paint_color_dialog = true;
@@ -450,7 +452,7 @@ impl App {
             self.shell.ui.paint_color_dialog_center_next = false;
             self.set_paint_color(target, color);
             // A Path colour was previewed live; commit the single undo step.
-            if target == 5 || target == 6 {
+            if target == 5 || target == 6 || target == 7 {
                 self.path_style_commit();
             }
         }
@@ -462,7 +464,7 @@ impl App {
             self.shell.ui.paint_color_dialog_center_next = false;
             self.set_paint_color(target, color);
             // Restore the baseline and record nothing (final == baseline).
-            if target == 5 || target == 6 {
+            if target == 5 || target == 6 || target == 7 {
                 self.path_style_commit();
             }
         }
@@ -520,6 +522,12 @@ impl App {
         }
         if let Some(w) = actions.tool.set_path_stroke_width.take() {
             self.path_set_stroke_width(w);
+        }
+        if let Some(kind) = actions.tool.set_path_fill_kind.take() {
+            self.path_set_fill_kind(kind);
+        }
+        if let Some(kind) = actions.tool.set_path_dash_kind.take() {
+            self.path_set_dash_kind(kind);
         }
         if actions.tool.commit_path_style {
             self.path_style_commit();

@@ -23,7 +23,10 @@ use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
-use crate::core::vector::style::{LineCap, LineJoin, Paint, StrokeStyle, VectorStyle};
+use crate::core::vector::style::{
+    DashPattern, Gradient, GradientKind, GradientStop, LineCap, LineJoin, Paint, StrokeStyle,
+    VectorStyle, MAX_GRADIENT_STOPS,
+};
 use serde_json::{json, Value};
 
 /// Payload schema version (independent of the `.iai` container version). Bumped
@@ -85,6 +88,8 @@ fn stroke_style_to_json(s: &StrokeStyle) -> Value {
         "cap": cap_u8(s.cap),
         "join": join_u8(s.join),
         "miter_limit": s.miter_limit,
+        "dash": s.dash.as_slice(),
+        "dash_offset": s.dash.offset,
     })
 }
 
@@ -92,6 +97,14 @@ fn paint_to_json(p: Paint) -> Value {
     match p {
         Paint::None => json!({ "kind": "none" }),
         Paint::Solid(c) => json!({ "kind": "solid", "color": color_to_json(c) }),
+        Paint::Gradient(g) => json!({
+            "kind": "gradient",
+            "gradient_kind": match g.kind { GradientKind::Linear => "linear", GradientKind::Radial => "radial" },
+            "transform": affine_to_json(&g.transform),
+            "stops": g.active_stops().iter().map(|s| json!({
+                "offset": s.offset, "color": color_to_json(s.color)
+            })).collect::<Vec<_>>(),
+        }),
     }
 }
 
@@ -240,12 +253,47 @@ fn json_to_stroke_style(v: &Value) -> Option<StrokeStyle> {
             _ => LineJoin::Miter,
         },
         miter_limit: v.get("miter_limit").and_then(Value::as_f64).unwrap_or(4.0) as f32,
+        dash: DashPattern::from_slice(
+            &v.get("dash")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_f64)
+                        .map(|n| n as f32)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            v.get("dash_offset").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+        ),
     })
 }
 
 fn json_to_paint(v: &Value) -> Option<Paint> {
     match v.get("kind").and_then(Value::as_str) {
         Some("solid") => Some(Paint::Solid(json_to_color(v.get("color")?)?)),
+        Some("gradient") => {
+            let arr = v.get("stops")?.as_array()?;
+            if !(2..=MAX_GRADIENT_STOPS).contains(&arr.len()) {
+                return None;
+            }
+            let mut stops = [GradientStop::default(); MAX_GRADIENT_STOPS];
+            for (i, item) in arr.iter().enumerate() {
+                stops[i] = GradientStop {
+                    offset: item.get("offset")?.as_f64()? as f32,
+                    color: json_to_color(item.get("color")?)?,
+                };
+            }
+            Some(Paint::Gradient(Gradient {
+                kind: if v.get("gradient_kind").and_then(Value::as_str) == Some("radial") {
+                    GradientKind::Radial
+                } else {
+                    GradientKind::Linear
+                },
+                stops,
+                stop_count: arr.len() as u8,
+                transform: json_to_affine(v.get("transform")?)?,
+            }))
+        }
         _ => Some(Paint::None),
     }
 }
@@ -331,6 +379,7 @@ mod tests {
             cap: LineCap::Round,
             join: LineJoin::Bevel,
             miter_limit: 2.0,
+            dash: DashPattern::default(),
         };
         style.stroke_overprint = true;
         style.opacity = 0.75;
@@ -358,6 +407,20 @@ mod tests {
             back.style.fill,
             Paint::Solid(ColorValue::cmyk(0.0, 0.0, 0.0, 1.0))
         );
+    }
+
+    #[test]
+    fn gradient_and_dash_round_trip() {
+        let mut obj = sample();
+        obj.style.fill = Paint::Gradient(Gradient::two_color(
+            GradientKind::Radial,
+            ColorValue::cmyk(0.1, 0.2, 0.3, 0.4),
+            ColorValue::WHITE,
+            AffineTransform::scale(40.0, 30.0),
+        ));
+        obj.style.stroke_style.dash = DashPattern::from_slice(&[6.0, 2.0, 1.0, 2.0], 1.5);
+        let back = json_to_layer_path(&layer_path_to_json(&obj)).expect("decode");
+        assert_eq!(back, obj);
     }
 
     #[test]
@@ -448,6 +511,7 @@ mod tests {
                                 cap: *cap,
                                 join: *join,
                                 miter_limit: 1.0 + k,
+                                dash: DashPattern::default(),
                             },
                             stroke_overprint: ji % 2 == 1,
                             opacity: (0.3 + 0.1 * k).min(1.0),

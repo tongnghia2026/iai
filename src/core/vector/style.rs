@@ -11,7 +11,138 @@
 //! Fill *rule* (NonZero/EvenOdd) is geometry, so it stays on `PathData`
 //! (path.rs), not here.
 
+use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::color::ColorValue;
+
+pub const MAX_DASHES: usize = 8;
+pub const MAX_GRADIENT_STOPS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DashPattern {
+    pub values: [f32; MAX_DASHES],
+    pub len: u8,
+    pub offset: f32,
+}
+
+impl Default for DashPattern {
+    fn default() -> Self {
+        Self {
+            values: [0.0; MAX_DASHES],
+            len: 0,
+            offset: 0.0,
+        }
+    }
+}
+
+impl DashPattern {
+    pub fn from_slice(values: &[f32], offset: f32) -> Self {
+        let mut out = Self::default();
+        let len = values.len().min(MAX_DASHES);
+        out.values[..len].copy_from_slice(&values[..len]);
+        out.len = len as u8;
+        out.offset = offset;
+        out
+    }
+
+    pub fn as_slice(&self) -> &[f32] {
+        &self.values[..self.len.min(MAX_DASHES as u8) as usize]
+    }
+
+    pub fn is_solid(self) -> bool {
+        self.len == 0
+    }
+
+    fn validate(self) -> Result<(), String> {
+        if !self.offset.is_finite() {
+            return Err("dash offset must be finite".into());
+        }
+        if self.as_slice().iter().any(|v| !v.is_finite() || *v <= 0.0) {
+            return Err("dash values must be finite and > 0".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GradientKind {
+    Linear,
+    Radial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStop {
+    pub offset: f32,
+    pub color: ColorValue,
+}
+
+impl Default for GradientStop {
+    fn default() -> Self {
+        Self {
+            offset: 0.0,
+            color: ColorValue::BLACK,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Gradient {
+    pub kind: GradientKind,
+    pub stops: [GradientStop; MAX_GRADIENT_STOPS],
+    pub stop_count: u8,
+    /// Maps unit gradient space into object-local coordinates.
+    pub transform: AffineTransform,
+}
+
+impl Gradient {
+    pub fn two_color(
+        kind: GradientKind,
+        start: ColorValue,
+        end: ColorValue,
+        transform: AffineTransform,
+    ) -> Self {
+        let mut stops = [GradientStop::default(); MAX_GRADIENT_STOPS];
+        stops[0] = GradientStop {
+            offset: 0.0,
+            color: start,
+        };
+        stops[1] = GradientStop {
+            offset: 1.0,
+            color: end,
+        };
+        Self {
+            kind,
+            stops,
+            stop_count: 2,
+            transform,
+        }
+    }
+
+    pub fn active_stops(&self) -> &[GradientStop] {
+        &self.stops[..self.stop_count.min(MAX_GRADIENT_STOPS as u8) as usize]
+    }
+
+    fn validate(self) -> Result<(), String> {
+        if !(2..=MAX_GRADIENT_STOPS as u8).contains(&self.stop_count) {
+            return Err("gradient must have 2..=8 stops".into());
+        }
+        let t = self.transform;
+        if ![t.a, t.b, t.c, t.d, t.e, t.f].iter().all(|v| v.is_finite()) || t.inverse().is_none() {
+            return Err("gradient transform must be finite and invertible".into());
+        }
+        let mut previous = -1.0_f32;
+        for stop in self.active_stops() {
+            if !stop.offset.is_finite() || !(0.0..=1.0).contains(&stop.offset) {
+                return Err("gradient stop offset must be in [0,1]".into());
+            }
+            if stop.offset < previous {
+                return Err("gradient stops must be sorted".into());
+            }
+            stop.color.validate()?;
+            previous = stop.offset;
+        }
+        Ok(())
+    }
+}
 
 /// How a stroke's ends are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,6 +169,7 @@ pub enum Paint {
     #[default]
     None,
     Solid(ColorValue),
+    Gradient(Gradient),
     // Gradient(..) / Pattern(..): Phase 6 — additive variants, no migration.
 }
 
@@ -46,6 +178,7 @@ impl Paint {
         match self {
             Paint::None => false,
             Paint::Solid(c) => c.alpha() > 0.0,
+            Paint::Gradient(g) => g.active_stops().iter().any(|s| s.color.alpha() > 0.0),
         }
     }
 
@@ -53,6 +186,7 @@ impl Paint {
         match self {
             Paint::None => None,
             Paint::Solid(c) => Some(c),
+            Paint::Gradient(_) => None,
         }
     }
 }
@@ -67,6 +201,7 @@ pub struct StrokeStyle {
     pub cap: LineCap,
     pub join: LineJoin,
     pub miter_limit: f32,
+    pub dash: DashPattern,
 }
 
 impl Default for StrokeStyle {
@@ -76,6 +211,7 @@ impl Default for StrokeStyle {
             cap: LineCap::default(),
             join: LineJoin::default(),
             miter_limit: 4.0,
+            dash: DashPattern::default(),
         }
     }
 }
@@ -152,9 +288,12 @@ impl VectorStyle {
         if !self.stroke_style.miter_limit.is_finite() || self.stroke_style.miter_limit < 1.0 {
             return Err("miter limit must be finite and >= 1".into());
         }
+        self.stroke_style.dash.validate()?;
         for p in [self.fill, self.stroke] {
-            if let Paint::Solid(c) = p {
-                c.validate()?;
+            match p {
+                Paint::Solid(c) => c.validate()?,
+                Paint::Gradient(g) => g.validate()?,
+                Paint::None => {}
             }
         }
         Ok(())
@@ -254,5 +393,34 @@ mod tests {
         let mut s = VectorStyle::default();
         s.stroke_style.miter_limit = 0.5;
         assert!(s.validate().is_err());
+
+        let mut s = VectorStyle::stroked(ColorValue::BLACK, 2.0);
+        s.stroke_style.dash = DashPattern::from_slice(&[4.0, -1.0], 0.0);
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn gradient_validates_sorted_stops_and_invertible_transform() {
+        let gradient = Gradient::two_color(
+            GradientKind::Linear,
+            ColorValue::BLACK,
+            ColorValue::WHITE,
+            AffineTransform::scale(100.0, 50.0),
+        );
+        let style = VectorStyle::filled(ColorValue::BLACK);
+        let style = VectorStyle {
+            fill: Paint::Gradient(gradient),
+            ..style
+        };
+        assert!(style.validate().is_ok());
+
+        let mut bad = gradient;
+        bad.stops[1].offset = -0.1;
+        assert!(VectorStyle {
+            fill: Paint::Gradient(bad),
+            ..style
+        }
+        .validate()
+        .is_err());
     }
 }

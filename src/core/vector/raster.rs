@@ -16,7 +16,7 @@
 use crate::core::geometry::Point;
 use crate::core::vector::flatten::flatten_path;
 use crate::core::vector::object::VectorObjectData;
-use crate::core::vector::style::Paint;
+use crate::core::vector::style::{GradientKind, Paint};
 
 /// Flatten tolerance in layer pixels. Small enough to be invisible at 100%, large
 /// enough that a page-sized curve does not explode the polyline.
@@ -100,39 +100,49 @@ pub fn rasterize(object: &VectorObjectData) -> Option<PathRaster> {
 
     // ── Fill ─────────────────────────────────────────────────────────────────
     if fill_visible {
-        if let Some(color) = object.style.fill.color() {
-            let [fr, fg, fb, fa] = color.to_rgba8();
-            let rgb = [fr as f32 / 255.0, fg as f32 / 255.0, fb as f32 / 255.0];
-            let base_a = (fa as f32 / 255.0) * opacity;
-            let even_odd = object.path.fill_rule == crate::core::vector::path::FillRule::EvenOdd;
-            let cov = fill_coverage(&local, w, h, even_odd);
-            for i in 0..(w as usize * h as usize) {
-                let c = cov[i];
-                if c > 0.0015 {
-                    let px = &mut rgba[i * 4..i * 4 + 4];
-                    let mut p = [px[0], px[1], px[2], px[3]];
-                    blend_straight(&mut p, rgb, base_a * c);
-                    px.copy_from_slice(&p);
-                }
+        let even_odd = object.path.fill_rule == crate::core::vector::path::FillRule::EvenOdd;
+        let cov = fill_coverage(&local, w, h, even_odd);
+        for i in 0..(w as usize * h as usize) {
+            let c = cov[i];
+            if c > 0.0015 {
+                let x = (i % w as usize) as f32 + off_x + 0.5;
+                let y = (i / w as usize) as f32 + off_y + 0.5;
+                let [r, g, b, a] = sample_paint(object.style.fill, object, Point::new(x, y));
+                let px = &mut rgba[i * 4..i * 4 + 4];
+                let mut p = [px[0], px[1], px[2], px[3]];
+                blend_straight(
+                    &mut p,
+                    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
+                    (a as f32 / 255.0) * opacity * c,
+                );
+                px.copy_from_slice(&p);
             }
         }
     }
 
     // ── Stroke (over the fill) ───────────────────────────────────────────────
     if stroke_visible {
-        if let Paint::Solid(color) = object.style.stroke {
-            let [sr, sg, sb, sa] = color.to_rgba8();
-            let rgb = [sr as f32 / 255.0, sg as f32 / 255.0, sb as f32 / 255.0];
-            let base_a = (sa as f32 / 255.0) * opacity;
-            let cov = stroke_coverage(&local, &closed, w, h, half);
-            for i in 0..(w as usize * h as usize) {
-                let c = cov[i];
-                if c > 0.0015 {
-                    let px = &mut rgba[i * 4..i * 4 + 4];
-                    let mut p = [px[0], px[1], px[2], px[3]];
-                    blend_straight(&mut p, rgb, base_a * c);
-                    px.copy_from_slice(&p);
-                }
+        let (stroke_lines, stroke_closed) = dashed_polylines(
+            &local,
+            &closed,
+            object.style.stroke_style.dash.as_slice(),
+            object.style.stroke_style.dash.offset,
+        );
+        let cov = stroke_coverage(&stroke_lines, &stroke_closed, w, h, half);
+        for i in 0..(w as usize * h as usize) {
+            let c = cov[i];
+            if c > 0.0015 {
+                let x = (i % w as usize) as f32 + off_x + 0.5;
+                let y = (i / w as usize) as f32 + off_y + 0.5;
+                let [r, g, b, a] = sample_paint(object.style.stroke, object, Point::new(x, y));
+                let px = &mut rgba[i * 4..i * 4 + 4];
+                let mut p = [px[0], px[1], px[2], px[3]];
+                blend_straight(
+                    &mut p,
+                    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
+                    (a as f32 / 255.0) * opacity * c,
+                );
+                px.copy_from_slice(&p);
             }
         }
     }
@@ -143,6 +153,113 @@ pub fn rasterize(object: &VectorObjectData) -> Option<PathRaster> {
         height: h,
         offset,
     })
+}
+
+fn sample_paint(paint: Paint, object: &VectorObjectData, layer_point: Point) -> [u8; 4] {
+    match paint {
+        Paint::None => [0, 0, 0, 0],
+        Paint::Solid(color) => color.to_rgba8(),
+        Paint::Gradient(gradient) => {
+            let Some(object_inv) = object.transform.inverse() else {
+                return [0, 0, 0, 0];
+            };
+            let Some(gradient_inv) = gradient.transform.inverse() else {
+                return [0, 0, 0, 0];
+            };
+            let gp = gradient_inv.apply_point(object_inv.apply_point(layer_point));
+            let t = match gradient.kind {
+                GradientKind::Linear => gp.x,
+                GradientKind::Radial => (gp.x * gp.x + gp.y * gp.y).sqrt(),
+            }
+            .clamp(0.0, 1.0);
+            let stops = gradient.active_stops();
+            let right = stops
+                .iter()
+                .position(|s| s.offset >= t)
+                .unwrap_or(stops.len() - 1);
+            if right == 0 {
+                return stops[0].color.to_rgba8();
+            }
+            let a = stops[right - 1];
+            let b = stops[right];
+            let mix = ((t - a.offset) / (b.offset - a.offset).max(1e-6)).clamp(0.0, 1.0);
+            let ca = a.color.to_rgba8();
+            let cb = b.color.to_rgba8();
+            let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * mix).round() as u8;
+            [
+                lerp(ca[0], cb[0]),
+                lerp(ca[1], cb[1]),
+                lerp(ca[2], cb[2]),
+                lerp(ca[3], cb[3]),
+            ]
+        }
+    }
+}
+
+fn dashed_polylines(
+    input: &[Vec<Point>],
+    closed: &[bool],
+    pattern: &[f32],
+    offset: f32,
+) -> (Vec<Vec<Point>>, Vec<bool>) {
+    if pattern.is_empty() {
+        return (input.to_vec(), closed.to_vec());
+    }
+    let mut pat = pattern.to_vec();
+    if pat.len() % 2 == 1 {
+        pat.extend_from_within(..);
+    }
+    let period: f32 = pat.iter().sum();
+    if period <= f32::EPSILON {
+        return (input.to_vec(), closed.to_vec());
+    }
+    let mut out = Vec::new();
+    for (ci, line) in input.iter().enumerate() {
+        if line.len() < 2 {
+            continue;
+        }
+        let mut phase = offset.rem_euclid(period);
+        let mut pi = 0usize;
+        while phase >= pat[pi] {
+            phase -= pat[pi];
+            pi = (pi + 1) % pat.len();
+        }
+        let count = if closed.get(ci).copied().unwrap_or(false) {
+            line.len()
+        } else {
+            line.len() - 1
+        };
+        for si in 0..count {
+            let a = line[si];
+            let b = line[(si + 1) % line.len()];
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let length = (dx * dx + dy * dy).sqrt();
+            if length <= 1e-6 {
+                continue;
+            }
+            let mut at = 0.0;
+            while at < length {
+                let take = (pat[pi] - phase).min(length - at);
+                if pi % 2 == 0 && take > 1e-6 {
+                    let p0 = Point::new(a.x + dx * (at / length), a.y + dy * (at / length));
+                    let p1 = Point::new(
+                        a.x + dx * ((at + take) / length),
+                        a.y + dy * ((at + take) / length),
+                    );
+                    out.push(vec![p0, p1]);
+                }
+                at += take;
+                phase += take;
+                if phase + 1e-6 >= pat[pi] {
+                    phase = 0.0;
+                    pi = (pi + 1) % pat.len();
+                }
+            }
+        }
+    }
+    let flags = vec![false; out.len()];
+    (out, flags)
 }
 
 /// Analytic scanline fill coverage in `[0,1]` per pixel. Each contour is treated
@@ -344,6 +461,7 @@ mod tests {
     use crate::core::vector::color::ColorValue;
     use crate::core::vector::path::{Contour, FillRule, Node, PathData};
     use crate::core::vector::style::VectorStyle;
+    use crate::core::vector::style::{DashPattern, Gradient, GradientKind, Paint};
 
     fn square_obj(side: f32, style: VectorStyle) -> VectorObjectData {
         let path = PathData::new(
@@ -359,6 +477,43 @@ mod tests {
             FillRule::NonZero,
         );
         VectorObjectData::new(path, style, AffineTransform::translate(20.0, 20.0))
+    }
+
+    #[test]
+    fn dashed_stroke_has_visible_gaps() {
+        let mut style = VectorStyle::stroked(ColorValue::BLACK, 4.0);
+        style.stroke_style.dash = DashPattern::from_slice(&[8.0, 8.0], 0.0);
+        let raster = rasterize(&square_obj(80.0, style)).unwrap();
+        let opaque = raster.rgba.chunks_exact(4).filter(|p| p[3] > 200).count();
+        let solid = rasterize(&square_obj(
+            80.0,
+            VectorStyle::stroked(ColorValue::BLACK, 4.0),
+        ))
+        .unwrap();
+        let solid_opaque = solid.rgba.chunks_exact(4).filter(|p| p[3] > 200).count();
+        assert!(opaque < solid_opaque);
+    }
+
+    #[test]
+    fn linear_gradient_changes_colour_across_fill() {
+        let gradient = Gradient::two_color(
+            GradientKind::Linear,
+            ColorValue::BLACK,
+            ColorValue::WHITE,
+            AffineTransform::scale(40.0, 40.0),
+        );
+        let obj = square_obj(
+            40.0,
+            VectorStyle {
+                fill: Paint::Gradient(gradient),
+                ..VectorStyle::default()
+            },
+        );
+        let raster = rasterize(&obj).unwrap();
+        let y = raster.height as usize / 2;
+        let left = (y * raster.width as usize + 5) * 4;
+        let right = (y * raster.width as usize + raster.width as usize - 6) * 4;
+        assert!(raster.rgba[left] + 80 < raster.rgba[right]);
     }
 
     fn alpha_at(r: &PathRaster, x: u32, y: u32) -> u8 {

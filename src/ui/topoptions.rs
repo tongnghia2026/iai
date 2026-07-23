@@ -1580,6 +1580,24 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     if shape_color_chip(ui, style.fill_color, "Fill colour") {
         actions.dialogs.open_paint_color_dialog = Some(5);
     }
+    let mut fill_kind = style.fill_kind;
+    egui::ComboBox::from_id_salt("path_fill_kind")
+        .selected_text(match fill_kind {
+            1 => "Linear",
+            2 => "Radial",
+            _ => "Solid",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut fill_kind, 0, "Solid");
+            ui.selectable_value(&mut fill_kind, 1, "Linear");
+            ui.selectable_value(&mut fill_kind, 2, "Radial");
+        });
+    if fill_kind != style.fill_kind {
+        actions.tool.set_path_fill_kind = Some(fill_kind);
+    }
+    if style.fill_kind != 0 && shape_color_chip(ui, style.fill_end_color, "Gradient end colour") {
+        actions.dialogs.open_paint_color_dialog = Some(7);
+    }
     ui.separator();
     // Outline.
     let mut stroke = style.stroke_enabled;
@@ -1603,6 +1621,21 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     // One undo step per scrub: commit when the drag stops or the field loses focus.
     if resp.drag_stopped() || resp.lost_focus() {
         actions.tool.commit_path_style = true;
+    }
+    let mut dash_kind = style.dash_kind;
+    egui::ComboBox::from_id_salt("path_dash_kind")
+        .selected_text(match dash_kind {
+            1 => "Dashed",
+            2 => "Dotted",
+            _ => "Solid",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut dash_kind, 0, "Solid");
+            ui.selectable_value(&mut dash_kind, 1, "Dashed");
+            ui.selectable_value(&mut dash_kind, 2, "Dotted");
+        });
+    if dash_kind != style.dash_kind {
+        actions.tool.set_path_dash_kind = Some(dash_kind);
     }
 }
 
