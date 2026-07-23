@@ -894,6 +894,10 @@ pub struct Layer {
     /// Membership is stored here (not in `LayerType::Group`) so reorders never
     /// invalidate stale child indices.
     pub parent_id: Option<u32>,
+    /// Independent PowerClip relation: this layer's pixels are content clipped
+    /// by the referenced frame layer. Deliberately separate from `parent_id`,
+    /// which means group membership only.
+    pub clip_parent_id: Option<u32>,
     /// Group-only: whether the folder is expanded in the panel. Ignored for
     /// non-group layers. Defaults to `true`.
     pub expanded: bool,
@@ -922,6 +926,7 @@ impl Layer {
             offset: (0, 0),
             selected: false,
             parent_id: None,
+            clip_parent_id: None,
             expanded: true,
         }
     }
@@ -954,6 +959,7 @@ impl Layer {
             offset: (0, 0),
             selected: false,
             parent_id: None,
+            clip_parent_id: None,
             expanded: true,
         }
     }
@@ -980,6 +986,7 @@ impl Layer {
             offset: (0, 0),
             selected: false,
             parent_id: None,
+            clip_parent_id: None,
             expanded: true,
         }
     }
@@ -1034,6 +1041,7 @@ impl Layer {
             offset: self.offset,
             selected: self.selected,
             parent_id: self.parent_id,
+            clip_parent_id: self.clip_parent_id,
             expanded: self.expanded,
         }
     }
@@ -1853,7 +1861,14 @@ impl LayerStack {
         if idx >= self.layers.len() {
             return false;
         }
+        let removed_id = self.layers[idx].id;
         self.layers.remove(idx);
+        for layer in &mut self.layers {
+            if layer.clip_parent_id == Some(removed_id) {
+                layer.clip_parent_id = None;
+            }
+        }
+        self.repair_clip_relations();
         if idx < self.active_idx {
             self.active_idx -= 1;
         } else if self.active_idx >= self.layers.len() {
@@ -1942,21 +1957,25 @@ impl LayerStack {
         let start = self.group_member_range(header_idx).start;
         let old_gid = self.layers[header_idx].id;
         let new_gid = self.reserve_id();
+        let mut id_map = std::collections::HashMap::new();
+        id_map.insert(old_gid, new_gid);
+        for i in start..header_idx {
+            id_map.insert(self.layers[i].id, self.reserve_id());
+        }
 
         let mut block: Vec<Layer> = Vec::with_capacity(header_idx - start + 1);
         let mut generated_names = Vec::with_capacity(header_idx - start + 1);
         for i in start..=header_idx {
-            let nid = if self.layers[i].id == old_gid {
-                new_gid
-            } else {
-                self.reserve_id()
-            };
+            let nid = id_map[&self.layers[i].id];
             let source_name = self.layers[i].name.clone();
             let mut d = self.layers[i].duplicate(nid);
             d.name = self.copy_name_with_reserved(&source_name, &mut generated_names);
-            if self.layers[i].parent_id == Some(old_gid) {
-                d.parent_id = Some(new_gid);
-            }
+            d.parent_id = self.layers[i]
+                .parent_id
+                .map(|parent| id_map.get(&parent).copied().unwrap_or(parent));
+            d.clip_parent_id = self.layers[i]
+                .clip_parent_id
+                .map(|parent| id_map.get(&parent).copied().unwrap_or(parent));
             d.selected = false;
             block.push(d);
         }
@@ -1993,6 +2012,10 @@ impl LayerStack {
             // Keep membership only for a parent that was copied too; an outer folder
             // left behind becomes a top-level paste.
             l.parent_id = src.parent_id.and_then(|p| id_map.get(&p).copied());
+            // A copied clip relation survives only when its frame was copied in
+            // the same block. Never leave a pasted child pointing into the
+            // source document/block.
+            l.clip_parent_id = src.clip_parent_id.and_then(|p| id_map.get(&p).copied());
             l.is_background = false;
             l.locked = false;
             l.selected = true;

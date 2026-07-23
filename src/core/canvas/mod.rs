@@ -1,6 +1,7 @@
 // Main document model — Canvas, History, metadata.
 //
 
+mod clip_ops;
 mod color_mode;
 mod geometry_ops;
 mod history_gate;

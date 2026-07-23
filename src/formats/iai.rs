@@ -208,6 +208,7 @@ fn build_canvas_from_meta<R: Read + Seek>(
         layer.blend_mode = blend_mode;
         layer.offset = (offset_x, offset_y);
         layer.parent_id = layer_info["parent"].as_u64().map(|p| p as u32);
+        layer.clip_parent_id = layer_info["clip_parent"].as_u64().map(|p| p as u32);
         layer.expanded = layer_info["expanded"].as_bool().unwrap_or(true);
         if let Some(adj) = json_to_adjustment(&layer_info["adjustment"]) {
             layer.layer_type = crate::core::layer::LayerType::Adjustment(adj);
@@ -263,6 +264,7 @@ fn build_canvas_from_meta<R: Read + Seek>(
             .push(Layer::new(0, "Layer 1", w, h));
     }
     canvas.layer_stack.repair_next_id();
+    canvas.layer_stack.repair_clip_relations();
 
     let active_idx = meta["active_layer"].as_u64().unwrap_or(0) as usize;
     canvas.layer_stack.active_idx =
@@ -450,14 +452,14 @@ impl Exporter for IaiExporter {
             let options = deflated_options();
             let mut manifest = canvas_meta_json(canvas);
             // Graduated version so files stay openable by older builds when they
-            // can be: a Path layer forces v4 (vector model would be lost on an
-            // older resave), else CMYK stamps v3 (ink), else RGB stays v2.
-            let has_path = canvas
-                .layer_stack
-                .layers
-                .iter()
-                .any(|l| matches!(l.layer_type, crate::core::layer::LayerType::Path(_)));
-            manifest["version"] = serde_json::json!(if has_path {
+            // can be: a Path or clipping relation forces v4 (editable model
+            // would be lost on an older resave), else CMYK stamps v3 (ink),
+            // else RGB stays v2.
+            let has_v4_model = canvas.layer_stack.layers.iter().any(|l| {
+                matches!(l.layer_type, crate::core::layer::LayerType::Path(_))
+                    || l.clip_parent_id.is_some()
+            });
+            manifest["version"] = serde_json::json!(if has_v4_model {
                 4u64
             } else if canvas.is_cmyk() {
                 3u64
@@ -523,6 +525,11 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             .and_then(|pid| canvas.layer_stack.layers.iter().position(|l| l.id == pid))
             .map(|p| serde_json::json!(p as u64))
             .unwrap_or(serde_json::Value::Null);
+        let clip_parent_index: serde_json::Value = layer
+            .clip_parent_id
+            .and_then(|pid| canvas.layer_stack.layers.iter().position(|l| l.id == pid))
+            .map(|p| serde_json::json!(p as u64))
+            .unwrap_or(serde_json::Value::Null);
         let adj_json = if let crate::core::layer::LayerType::Adjustment(ref adj) = layer.layer_type
         {
             adjustment_to_json(adj)
@@ -558,6 +565,7 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             "offset_x": layer.offset.0,
             "offset_y": layer.offset.1,
             "parent": parent_index,
+            "clip_parent": clip_parent_index,
             "expanded": layer.expanded,
             "adjustment": adj_json,
             "text": text_json,
@@ -736,17 +744,15 @@ pub fn save_pdf_project(
             })
             .collect();
 
-        // Graduated version (mirrors the single-canvas path): a Path layer on any
-        // page forces v4, else CMYK ink needs v3, else stay v2 so older builds
-        // keep opening the project.
-        let has_path = pages.iter().any(|p| {
-            p.canvas
-                .layer_stack
-                .layers
-                .iter()
-                .any(|l| matches!(l.layer_type, crate::core::layer::LayerType::Path(_)))
+        // Graduated version (mirrors the single-canvas path): a Path or clipping
+        // relation on any page forces v4, else CMYK ink needs v3, else stay v2.
+        let has_v4_model = pages.iter().any(|p| {
+            p.canvas.layer_stack.layers.iter().any(|l| {
+                matches!(l.layer_type, crate::core::layer::LayerType::Path(_))
+                    || l.clip_parent_id.is_some()
+            })
         });
-        let version = if has_path {
+        let version = if has_v4_model {
             4u64
         } else if pages.iter().any(|p| p.canvas.is_cmyk()) {
             3u64
@@ -1708,6 +1714,58 @@ mod tests {
         // The model (incl. the CMYK fill colour) is the source of truth and must
         // survive verbatim even though the baked fallback is a mirror.
         assert_eq!(loaded_path_model(&loaded), obj);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn powerclip_relation_round_trips_separately_from_group_parent() {
+        let dir = tmp_dir("powerclip-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 48, 48);
+        let frame_idx = canvas.layer_stack.add_layer(48, 48);
+        let frame_id = canvas.layer_stack.layers[frame_idx].id;
+        let child_id = canvas
+            .layer_stack
+            .create_clipped_pixel_child(frame_id, 48, 48)
+            .expect("create clipped child");
+        assert_eq!(
+            canvas
+                .layer_stack
+                .layers
+                .iter()
+                .find(|layer| layer.id == child_id)
+                .unwrap()
+                .parent_id,
+            None
+        );
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let f = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(4)
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        let child = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .find(|layer| layer.name == "Pixel Paint inside")
+            .expect("clipped child");
+        let loaded_frame = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .find(|layer| Some(layer.id) == child.clip_parent_id)
+            .expect("clip frame");
+        assert_ne!(child.id, loaded_frame.id);
+        assert_eq!(child.parent_id, None, "clip is not group membership");
         std::fs::remove_dir_all(&dir).ok();
     }
 

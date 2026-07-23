@@ -13,6 +13,7 @@ pub mod channels;
 pub mod cms;
 pub mod color;
 pub mod command;
+pub mod command_clip;
 pub mod command_vector;
 pub mod develop;
 pub mod develop_scene;
