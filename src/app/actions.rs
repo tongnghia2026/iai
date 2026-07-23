@@ -108,6 +108,8 @@ impl App {
         self.flush_pending_shape_style();
         // Off-thread Path bakes (live scale/rotate & node drags).
         self.poll_path_bake();
+        // Off-thread crisp-Path display overlay bakes (zoom-bucket changes).
+        self.poll_display_bake();
 
         // Strict modal lock (standard design-app behavior): while a modal
         // operation or dialog is open, features outside its scope are refused

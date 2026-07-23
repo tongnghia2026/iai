@@ -844,6 +844,26 @@ pub struct PathDisplayCacheEntry {
     pub display: crate::ui::PathDisplayRaster,
 }
 
+/// Finished off-thread bake of the crisp active-Path display overlay. Built on a
+/// worker so zooming across scale buckets never rasterizes on the UI thread.
+pub struct DisplayBakeOutput {
+    pub tiles: Vec<crate::ui::PathDisplayTile>,
+    pub canvas_x: f32,
+    pub canvas_y: f32,
+    pub canvas_w: f32,
+    pub canvas_h: f32,
+    pub raster_w: u32,
+    pub raster_h: u32,
+}
+
+/// In-flight off-thread bake of the crisp display overlay (mirrors
+/// [`PathBakeInFlight`]). `key` pins exactly what was requested so a result for a
+/// stale zoom/geometry is matched (or ignored) correctly.
+pub struct DisplayBakeInFlight {
+    pub key: PathDisplayCacheKey,
+    pub rx: std::sync::mpsc::Receiver<Option<DisplayBakeOutput>>,
+}
+
 #[derive(Default)]
 pub struct UiDataCache {
     pub history_entries: std::sync::Arc<Vec<crate::core::command::HistoryEntry>>,
@@ -1180,6 +1200,8 @@ impl App {
                 shape_bake: None,
                 path_bake: None,
                 path_bake_next: None,
+                display_bake: None,
+                display_bake_next: None,
                 select_subject: crate::core::select_subject::SelectSubjectEngine::new(),
                 ai_engine: crate::core::ai::edit::AiEditEngine::new(),
                 ext: crate::app::ext_bridge::ExtBridge::new(),
