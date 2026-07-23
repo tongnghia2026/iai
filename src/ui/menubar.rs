@@ -604,6 +604,20 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.layers.rasterize_layer = Some(data.layers.active_layer_idx);
                             ui.close();
                         }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Convert to Curves",
+                                "",
+                                data.layers
+                                    .layer_types
+                                    .get(data.layers.active_layer_idx)
+                                    .is_some_and(|t| t == "Shape"),
+                            ))
+                            .clicked()
+                        {
+                            actions.layers.convert_to_curves = Some(data.layers.active_layer_idx);
+                            ui.close();
+                        }
                         ui.separator();
                         ui.menu_button("New Adjustment Layer", |ui| {
                             use crate::core::layer::AdjustmentType;

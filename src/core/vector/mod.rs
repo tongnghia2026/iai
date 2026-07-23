@@ -12,11 +12,13 @@
 //!   style    - VectorStyle / StrokeStyle                    [T2.2] DONE
 //!   object   - VectorObjectData (what a Path layer holds)   [T4.1] DONE
 //!   raster   - VectorObjectData -> RGBA cache (CPU)         [T4.1 min / T5.x full]
+//!   from_shape - primitive geometry -> PathData (curves)    [Giai đoạn 4]
 //! These stay declared here as they land; nothing above depends on UI or GPU.
 
 pub mod affine;
 pub mod color;
 pub mod flatten;
+pub mod from_shape;
 pub mod hittest;
 pub mod object;
 pub mod ops;

@@ -771,7 +771,7 @@ impl Canvas {
     /// The ICC converter lives here on the canvas, not in an `EditContext`, so
     /// this runs after the gateway rather than inside the command. No-op on RGB
     /// documents (one bool check) and on CMYK documents with no Path layers.
-    fn reconcile_path_ink(&mut self) {
+    pub(crate) fn reconcile_path_ink(&mut self) {
         use crate::core::layer::LayerType;
         if !self.is_cmyk()
             || !self

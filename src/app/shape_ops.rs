@@ -105,6 +105,68 @@ impl App {
         }
     }
 
+    /// Convert the Shape layer at `idx` into an editable vector Path layer
+    /// ("Convert to Curves", Giai đoạn 4). The primitive geometry becomes a
+    /// `PathData` (rectangle/rounded-rect/ellipse → closed curves, line → open),
+    /// the fill/stroke carry over through the existing style adapter, and the
+    /// layer is swapped IN PLACE so its id / stacking order / opacity / blend /
+    /// mask are kept. One structural undo restores the Shape. Returns true when it
+    /// converted.
+    pub fn convert_shape_to_path(&mut self, idx: usize) -> bool {
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::from_shape;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::style::VectorStyle;
+
+        let (data, offset) = match self.shape_at(idx) {
+            Some(v) => v,
+            None => return false,
+        };
+        // Shape geometry is layer-local; convert to canvas space so the Path lands
+        // in the same place (its transform is then identity — delta-0 invariant).
+        let (x0, y0, x1, y1) = data.canvas_span(offset);
+        let path = match data.kind {
+            ShapeKind::Rectangle => from_shape::rect_path(x0, y0, x1, y1, data.effective_radius()),
+            ShapeKind::Ellipse => from_shape::ellipse_path(x0, y0, x1, y1),
+            ShapeKind::Line => from_shape::line_path(x0, y0, x1, y1),
+        };
+        let style = VectorStyle::from_shape_fields(
+            data.fill,
+            data.fill_color,
+            data.stroke_width,
+            data.stroke_color,
+        );
+        let object = VectorObjectData::new(path, style, AffineTransform::IDENTITY);
+
+        let (cw, ch) = {
+            let d = &self.docs.documents[self.docs.active_doc_idx];
+            (d.canvas.width, d.canvas.height)
+        };
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let before =
+            LayerStructureCommand::capture_before("Convert to Curves", &canvas.layer_stack, cw, ch);
+        {
+            let Some(layer) = canvas.layer_stack.layers.get_mut(idx) else {
+                return false;
+            };
+            crate::core::command_vector::apply_object_to_layer(layer, object);
+        }
+        // CMYK: re-derive ink planes for the new Path raster from its RGB mirror.
+        canvas.reconcile_path_ink();
+        canvas.layer_revision += 1;
+
+        let mut cmd = before;
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
+
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = "Đã chuyển Shape thành đường cong (Path)".to_string();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     /// On-canvas editing overlay for the active Shape layer: the bounding-box
     /// span, the kind, the effective corner radius, and every handle position
     /// (incl. the zoom-dependent corner-radius node). Consumed by hit-testing
@@ -737,5 +799,97 @@ impl App {
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::canvas::Canvas;
+
+    /// App with one Shape layer (a 60×40 primitive at (20,30)) active.
+    fn app_with_shape(kind: ShapeKind, radius: f32) -> (App, usize) {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let canvas = &mut app.docs.documents[0].canvas;
+        let idx = canvas.layer_stack.add_layer(200, 200);
+        let data = ShapeData {
+            kind,
+            x0: 20.0,
+            y0: 30.0,
+            x1: 80.0,
+            y1: 70.0,
+            corner_radius: radius,
+            fill: true,
+            fill_color: [200, 40, 40, 255],
+            stroke_width: 3.0,
+            stroke_color: [0, 0, 0, 255],
+        };
+        let layer = &mut canvas.layer_stack.layers[idx];
+        layer.offset = (0, 0);
+        layer.layer_type = LayerType::Shape(data);
+        canvas.layer_stack.active_idx = idx;
+        (app, idx)
+    }
+
+    #[test]
+    fn convert_rectangle_shape_to_editable_path_and_undo() {
+        let (mut app, idx) = app_with_shape(ShapeKind::Rectangle, 0.0);
+        assert!(app.convert_shape_to_path(idx));
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Path(o) => {
+                assert_eq!(o.path.contours[0].nodes.len(), 4);
+                assert!(o.path.contours[0].closed);
+                assert!(o.style.fill.is_visible(), "fill carried over");
+            }
+            _ => panic!("expected a Path layer after Convert to Curves"),
+        }
+        // The structural undo restores the Shape layer exactly.
+        app.docs.documents[0].canvas.undo().expect("undo");
+        assert!(matches!(
+            app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Shape(_)
+        ));
+    }
+
+    #[test]
+    fn convert_rounded_rectangle_yields_eight_nodes() {
+        let (mut app, idx) = app_with_shape(ShapeKind::Rectangle, 10.0);
+        assert!(app.convert_shape_to_path(idx));
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Path(o) => assert_eq!(o.path.contours[0].nodes.len(), 8),
+            _ => panic!("expected Path"),
+        }
+    }
+
+    #[test]
+    fn convert_ellipse_and_line_shapes() {
+        let (mut app, idx) = app_with_shape(ShapeKind::Ellipse, 0.0);
+        assert!(app.convert_shape_to_path(idx));
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Path(o) => {
+                assert_eq!(o.path.contours[0].nodes.len(), 4);
+                assert!(o.path.contours[0].closed);
+            }
+            _ => panic!("ellipse → closed 4-node path"),
+        }
+
+        let (mut app2, idx2) = app_with_shape(ShapeKind::Line, 0.0);
+        assert!(app2.convert_shape_to_path(idx2));
+        match &app2.docs.documents[0].canvas.layer_stack.layers[idx2].layer_type {
+            LayerType::Path(o) => {
+                assert_eq!(o.path.contours[0].nodes.len(), 2);
+                assert!(!o.path.contours[0].closed, "line → open path");
+            }
+            _ => panic!("line → 2-node open path"),
+        }
+    }
+
+    #[test]
+    fn convert_refuses_a_non_shape_layer() {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(100, 100);
+        // Layer 0 is the plain raster background — nothing to convert.
+        assert!(!app.convert_shape_to_path(0));
     }
 }

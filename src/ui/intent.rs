@@ -109,6 +109,8 @@ pub struct LayerIntent {
     pub remove_layer: Option<usize>,
     /// Bake a vector Path layer (this index) down to a plain raster layer.
     pub rasterize_layer: Option<usize>,
+    /// Convert the Shape layer (this index) into an editable vector Path layer.
+    pub convert_to_curves: Option<usize>,
     pub select_layer: Option<(usize, bool, bool)>,
     /// Ctrl+click a layer's thumbnail → load that layer's alpha as a selection.
     pub load_layer_selection: Option<usize>,
