@@ -1345,7 +1345,13 @@ pub fn build(
                             ctx.load_texture(
                                 format!("active_path_display_{index}"),
                                 image,
-                                egui::TextureOptions::NEAREST,
+                                // Display rasters are baked at the next zoom
+                                // bucket (2x/4x/8x/16x). Most actual zooms sit
+                                // between buckets, so the texture is reduced
+                                // slightly on screen. Linear filtering preserves
+                                // the supersampled edge coverage; nearest sampling
+                                // reintroduced visible stair-steps at e.g. 257%.
+                                egui::TextureOptions::LINEAR,
                             )
                         })
                         .collect();
