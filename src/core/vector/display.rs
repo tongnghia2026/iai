@@ -6,6 +6,19 @@
 
 use super::{affine::AffineTransform, object::VectorObjectData, raster::PathRaster};
 
+/// Conservative texture edge accepted by older/low-limit adapters. The path
+/// display is tiled before egui uploads it, so no individual texture can trip
+/// wgpu's `max_texture_dimension_2d` validation.
+pub const DISPLAY_TILE_EDGE: u32 = 1024;
+
+pub struct DisplayRasterTile {
+    pub rgba: Vec<u8>,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Pick the smallest power-of-two display scale that is not below `zoom`.
 /// The 16x ceiling covers the editor's 1600% inspection range while the
 /// rasterizer's own pixel ceiling remains the final memory guard.
@@ -33,6 +46,36 @@ pub fn rasterize_for_display(object: &VectorObjectData, scale: u8) -> Option<Pat
     // scale just like the transformed geometry.
     scaled.style.stroke_style.width *= scale as f32;
     super::raster::rasterize(&scaled)
+}
+
+/// Split a tight RGBA raster into upload-safe texture tiles. Tiles contain no
+/// document state; they are only the screen-resolution display derivative.
+pub fn split_display_tiles(rgba: &[u8], width: u32, height: u32) -> Vec<DisplayRasterTile> {
+    if width == 0 || height == 0 || rgba.len() < width as usize * height as usize * 4 {
+        return Vec::new();
+    }
+    let mut tiles = Vec::new();
+    for y in (0..height).step_by(DISPLAY_TILE_EDGE as usize) {
+        for x in (0..width).step_by(DISPLAY_TILE_EDGE as usize) {
+            let tile_w = DISPLAY_TILE_EDGE.min(width - x);
+            let tile_h = DISPLAY_TILE_EDGE.min(height - y);
+            let mut pixels = vec![0; tile_w as usize * tile_h as usize * 4];
+            for row in 0..tile_h {
+                let src = ((y + row) as usize * width as usize + x as usize) * 4;
+                let dst = row as usize * tile_w as usize * 4;
+                let len = tile_w as usize * 4;
+                pixels[dst..dst + len].copy_from_slice(&rgba[src..src + len]);
+            }
+            tiles.push(DisplayRasterTile {
+                rgba: pixels,
+                x,
+                y,
+                width: tile_w,
+                height: tile_h,
+            });
+        }
+    }
+    tiles
 }
 
 #[cfg(test)]
@@ -74,5 +117,25 @@ mod tests {
         assert!(hi.height >= base.height * 3);
         assert!(hi.width <= base.width * 5);
         assert!(hi.height <= base.height * 5);
+    }
+
+    #[test]
+    fn oversized_display_raster_is_split_below_gpu_limit() {
+        // Exact dimensions from the reported crash: one 2247x2256 upload used
+        // to exceed a 2048px adapter limit.
+        let (w, h) = (2247, 2256);
+        let rgba = vec![17; w * h * 4];
+        let tiles = split_display_tiles(&rgba, w as u32, h as u32);
+        assert_eq!(tiles.len(), 9);
+        assert!(tiles
+            .iter()
+            .all(|t| t.width <= DISPLAY_TILE_EDGE && t.height <= DISPLAY_TILE_EDGE));
+        let covered: u64 = tiles.iter().map(|t| t.width as u64 * t.height as u64).sum();
+        assert_eq!(covered, w as u64 * h as u64);
+        let bottom_right = tiles.last().unwrap();
+        assert_eq!(
+            (bottom_right.x, bottom_right.y),
+            (2 * DISPLAY_TILE_EDGE, 2 * DISPLAY_TILE_EDGE)
+        );
     }
 }

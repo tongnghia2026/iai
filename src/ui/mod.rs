@@ -167,13 +167,22 @@ pub struct NodeOverlay {
 #[derive(Clone)]
 pub struct PathDisplayRaster {
     pub cache_key: u64,
-    pub rgba: std::sync::Arc<Vec<u8>>,
-    pub width: u32,
-    pub height: u32,
+    pub tiles: std::sync::Arc<Vec<PathDisplayTile>>,
     pub canvas_x: f32,
     pub canvas_y: f32,
     pub canvas_w: f32,
     pub canvas_h: f32,
+    pub raster_w: u32,
+    pub raster_h: u32,
+}
+
+#[derive(Clone)]
+pub struct PathDisplayTile {
+    pub rgba: std::sync::Arc<Vec<u8>>,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Warp freeze-mask snapshot for the red canvas overlay. `alpha` is the mesh
@@ -1285,42 +1294,59 @@ pub fn build(
         // dialogs and panels always remain above it.
         if let Some(display) = &data.tool.path_display {
             let texture_cache_id = egui::Id::new("active_path_display_texture");
-            let texture = ctx
+            let textures = ctx
                 .data(|d| {
-                    d.get_temp::<(u64, egui::TextureHandle)>(texture_cache_id)
+                    d.get_temp::<(u64, Vec<egui::TextureHandle>)>(texture_cache_id)
                         .filter(|(key, _)| *key == display.cache_key)
-                        .map(|(_, texture)| texture)
+                        .map(|(_, textures)| textures)
                 })
                 .unwrap_or_else(|| {
-                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                        [display.width as usize, display.height as usize],
-                        display.rgba.as_slice(),
-                    );
-                    let texture = ctx.load_texture(
-                        "active_path_display",
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
+                    let textures: Vec<_> = display
+                        .tiles
+                        .iter()
+                        .enumerate()
+                        .map(|(index, tile)| {
+                            let image = egui::ColorImage::from_rgba_unmultiplied(
+                                [tile.width as usize, tile.height as usize],
+                                tile.rgba.as_slice(),
+                            );
+                            ctx.load_texture(
+                                format!("active_path_display_{index}"),
+                                image,
+                                egui::TextureOptions::NEAREST,
+                            )
+                        })
+                        .collect();
                     ctx.data_mut(|d| {
-                        d.insert_temp(texture_cache_id, (display.cache_key, texture.clone()));
+                        d.insert_temp(texture_cache_id, (display.cache_key, textures.clone()));
                     });
-                    texture
+                    textures
                 });
-            let rect = egui::Rect::from_min_size(
-                to_screen_pos(display.canvas_x, display.canvas_y),
-                egui::vec2(display.canvas_w * zoom, display.canvas_h * zoom),
-            );
-            ctx.layer_painter(egui::LayerId::new(
-                CANVAS_TOOL_OVERLAY_ORDER,
-                egui::Id::new("active_path_display"),
-            ))
-            .with_clip_rect(canvas_viewport)
-            .image(
-                texture.id(),
-                rect,
-                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    CANVAS_TOOL_OVERLAY_ORDER,
+                    egui::Id::new("active_path_display"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            let px_canvas_x = display.canvas_w / display.raster_w as f32;
+            let px_canvas_y = display.canvas_h / display.raster_h as f32;
+            for (tile, texture) in display.tiles.iter().zip(&textures) {
+                let tile_x = display.canvas_x + tile.x as f32 * px_canvas_x;
+                let tile_y = display.canvas_y + tile.y as f32 * px_canvas_y;
+                let rect = egui::Rect::from_min_size(
+                    to_screen_pos(tile_x, tile_y),
+                    egui::vec2(
+                        tile.width as f32 * px_canvas_x * zoom,
+                        tile.height as f32 * px_canvas_y * zoom,
+                    ),
+                );
+                painter.image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
         }
 
         // Node tool overlay: the active Path's outline, its anchor points, and

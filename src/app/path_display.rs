@@ -8,7 +8,9 @@ use super::App;
 
 impl App {
     pub(in crate::app) fn active_path_display(&mut self) -> Option<crate::ui::PathDisplayRaster> {
-        if !matches!(self.edit.tools.active_id(), ToolId::Move | ToolId::Node)
+        let tool = self.edit.tools.active_id();
+        if !matches!(tool, ToolId::Move | ToolId::Node | ToolId::Pen)
+            || (tool == ToolId::Pen && !self.edit.tools.pen().is_empty())
             || self.edit.transform_state.is_some()
             || self.edit.path_transform.is_some()
         {
@@ -76,15 +78,29 @@ impl App {
             self.shell.ui_data_cache.path_display_serial =
                 self.shell.ui_data_cache.path_display_serial.wrapping_add(1);
             let inv = 1.0 / scale as f32;
+            let tiles = crate::core::vector::display::split_display_tiles(
+                &raster.rgba,
+                raster.width,
+                raster.height,
+            )
+            .into_iter()
+            .map(|tile| crate::ui::PathDisplayTile {
+                rgba: std::sync::Arc::new(tile.rgba),
+                x: tile.x,
+                y: tile.y,
+                width: tile.width,
+                height: tile.height,
+            })
+            .collect();
             let display = crate::ui::PathDisplayRaster {
                 cache_key: self.shell.ui_data_cache.path_display_serial,
-                rgba: std::sync::Arc::new(raster.rgba),
-                width: raster.width,
-                height: raster.height,
+                tiles: std::sync::Arc::new(tiles),
                 canvas_x: layer.offset.0 as f32 + raster.offset.0 as f32 * inv,
                 canvas_y: layer.offset.1 as f32 + raster.offset.1 as f32 * inv,
                 canvas_w: raster.width as f32 * inv,
                 canvas_h: raster.height as f32 * inv,
+                raster_w: raster.width,
+                raster_h: raster.height,
             };
             self.shell.ui_data_cache.path_display = Some(PathDisplayCacheEntry {
                 key: key.clone(),
