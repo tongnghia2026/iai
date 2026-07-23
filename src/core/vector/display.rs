@@ -110,6 +110,43 @@ mod tests {
     }
 
     #[test]
+    fn display_offset_over_scale_is_the_layer_offset_not_double() {
+        use crate::core::vector::style::VectorStyle;
+        // A path far from the origin. `rasterize_for_display` already bakes the
+        // object transform, so its offset ÷ scale IS the canvas top-left — the same
+        // place the document-resolution tiles sit (`layer.offset`). The overlay must
+        // therefore be placed at `rd.offset / scale` ALONE; adding `layer.offset`
+        // double-counts and ghosts a second copy (bug fixed in path_display.rs).
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(40.0, 0.0)),
+                    Node::sharp(Point::new(40.0, 40.0)),
+                    Node::sharp(Point::new(0.0, 40.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        let obj = VectorObjectData::new(
+            path,
+            VectorStyle::default(),
+            AffineTransform::translate(100.0, 80.0),
+        );
+        let r = super::super::raster::rasterize(&obj).unwrap();
+        let rd = rasterize_for_display(&obj, 4).unwrap();
+        let inv = 1.0 / 4.0;
+        assert!(
+            (rd.offset.0 as f32 * inv - r.offset.0 as f32).abs() <= 1.0
+                && (rd.offset.1 as f32 * inv - r.offset.1 as f32).abs() <= 1.0,
+            "display offset/scale {:?} must map back onto the layer offset {:?}",
+            (rd.offset.0 as f32 * inv, rd.offset.1 as f32 * inv),
+            r.offset,
+        );
+    }
+
+    #[test]
     fn display_raster_scales_geometry() {
         let base = super::super::raster::rasterize(&square(20.0)).unwrap();
         let hi = rasterize_for_display(&square(20.0), 4).unwrap();

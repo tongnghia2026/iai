@@ -95,8 +95,13 @@ impl App {
             let display = crate::ui::PathDisplayRaster {
                 cache_key: self.shell.ui_data_cache.path_display_serial,
                 tiles: std::sync::Arc::new(tiles),
-                canvas_x: layer.offset.0 as f32 + raster.offset.0 as f32 * inv,
-                canvas_y: layer.offset.1 as f32 + raster.offset.1 as f32 * inv,
+                // `rasterize_for_display` bakes the object transform, so its offset
+                // (÷ scale) already IS the canvas top-left — the same place the
+                // document-res tiles sit. Do NOT add `layer.offset` too: that
+                // double-counts and ghosts a second copy for a path far from the
+                // origin (visible once zoomed past 100%).
+                canvas_x: raster.offset.0 as f32 * inv,
+                canvas_y: raster.offset.1 as f32 * inv,
                 canvas_w: raster.width as f32 * inv,
                 canvas_h: raster.height as f32 * inv,
                 raster_w: raster.width,
