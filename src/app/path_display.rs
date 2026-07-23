@@ -1,6 +1,11 @@
-//! Cached screen-resolution display raster for the active editable Path.
+//! Cached screen-resolution display raster for the active editable vector object.
 
 use crate::core::layer::{BlendMode, LayerType};
+use crate::core::shape::{ShapeData, ShapeKind};
+use crate::core::vector::affine::AffineTransform;
+use crate::core::vector::from_shape;
+use crate::core::vector::object::VectorObjectData;
+use crate::core::vector::style::VectorStyle;
 use crate::tools::ToolId;
 
 use super::state::{PathDisplayCacheEntry, PathDisplayCacheKey};
@@ -9,8 +14,10 @@ use super::App;
 impl App {
     pub(in crate::app) fn active_path_display(&mut self) -> Option<crate::ui::PathDisplayRaster> {
         let tool = self.edit.tools.active_id();
-        if !matches!(tool, ToolId::Move | ToolId::Node | ToolId::Pen)
-            || (tool == ToolId::Pen && !self.edit.tools.pen().is_empty())
+        if !matches!(
+            tool,
+            ToolId::Move | ToolId::Node | ToolId::Pen | ToolId::Shape
+        ) || (tool == ToolId::Pen && !self.edit.tools.pen().is_empty())
             || self.edit.transform_state.is_some()
             || self.edit.path_transform.is_some()
         {
@@ -21,8 +28,12 @@ impl App {
         let stack = &doc.canvas.layer_stack;
         let active_idx = stack.active_idx;
         let layer = stack.layers.get(active_idx)?;
-        let LayerType::Path(object) = &layer.layer_type else {
-            return None;
+        let object = match &layer.layer_type {
+            LayerType::Path(object) => object.clone(),
+            LayerType::Shape(shape) if matches!(tool, ToolId::Move | ToolId::Shape) => {
+                shape_display_object(shape, layer.offset)
+            }
+            _ => return None,
         };
         let ancestors_are_plain = {
             let mut parent_id = layer.parent_id;
@@ -65,7 +76,7 @@ impl App {
             layer_id: layer.id,
             scale,
             layer_offset: layer.offset,
-            object: object.clone(),
+            object,
         };
         // Cache hit: the crisp raster for this exact (object, scale, offset) is
         // ready.
@@ -86,7 +97,10 @@ impl App {
         // Cache miss. NEVER rasterize on the UI thread here — a big path at a high
         // zoom bucket is what made zooming lag. Skip entirely during a node drag
         // (the tile preview covers the edit); otherwise kick an OFF-THREAD bake.
-        if self.edit.node_drag.is_some() {
+        if self.edit.node_drag.is_some()
+            || (tool == ToolId::Shape
+                && (self.shape_drag_active() || self.shape_style_scrub_active()))
+        {
             return None;
         }
         self.request_display_bake(key.clone());
@@ -212,5 +226,60 @@ impl App {
         if let Some(next) = self.jobs.display_bake_next.take() {
             self.spawn_display_bake(next);
         }
+    }
+}
+
+/// Adapt an editable Shape to the same transient vector object used by the
+/// high-zoom Path overlay. The Shape model remains untouched; this is display
+/// geometry only.
+fn shape_display_object(shape: &ShapeData, layer_offset: (i32, i32)) -> VectorObjectData {
+    let (x0, y0, x1, y1) = shape.canvas_span(layer_offset);
+    let path = match shape.kind {
+        ShapeKind::Rectangle => from_shape::rect_path(x0, y0, x1, y1, shape.effective_radius()),
+        ShapeKind::Ellipse => from_shape::ellipse_path(x0, y0, x1, y1),
+        ShapeKind::Line => from_shape::line_path(x0, y0, x1, y1),
+        ShapeKind::Polygon => from_shape::polygon_path(x0, y0, x1, y1, shape.sides),
+        ShapeKind::Star => from_shape::star_path(x0, y0, x1, y1, shape.sides, shape.star_inner),
+    };
+    let style = VectorStyle::from_shape_fields(
+        shape.fill,
+        shape.fill_color,
+        shape.stroke_width,
+        shape.stroke_color,
+    );
+    VectorObjectData::new(path, style, AffineTransform::IDENTITY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn star_display_adapter_keeps_canvas_position_and_points() {
+        let (mut shape, offset) = ShapeData::from_canvas_span(
+            ShapeKind::Star,
+            100.0,
+            80.0,
+            180.0,
+            160.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            2.0,
+            [0, 0, 0, 255],
+        );
+        shape.sides = 7;
+        shape.star_inner = 0.4;
+        let object = shape_display_object(&shape, offset);
+        assert_eq!(object.path.contours.len(), 1);
+        assert_eq!(object.path.contours[0].nodes.len(), 14);
+        let anchors = object.path.contours[0]
+            .nodes
+            .iter()
+            .map(|node| node.anchor)
+            .collect::<Vec<_>>();
+        assert!(anchors
+            .iter()
+            .all(|p| { p.x >= 99.0 && p.y >= 79.0 && p.x <= 181.0 && p.y <= 161.0 }));
     }
 }
