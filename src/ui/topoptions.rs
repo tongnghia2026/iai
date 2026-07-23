@@ -1439,9 +1439,12 @@ fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ui.separator();
     }
     ui.label(
-        egui::RichText::new("Kéo điểm · bấm cạnh = chèn · Delete = xoá")
-            .size(11.0)
-            .color(egui::Color32::from_gray(150)),
+        egui::RichText::new(
+            "Kéo điểm/tay nắm · bấm cạnh = chèn · Alt+cạnh = thẳng/cong · \
+             double-click điểm = góc/trơn · bấm path khác = chọn · Delete = xoá",
+        )
+        .size(11.0)
+        .color(egui::Color32::from_gray(150)),
     );
 }
 

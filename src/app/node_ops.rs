@@ -247,9 +247,17 @@ impl App {
     }
 
     /// Begin a Node tool gesture at press point `(cx, cy)` (canvas space). A
-    /// `Node` hit drags that anchor; a `Segment` hit inserts an anchor there and
-    /// drags the new one. Returns true when a gesture started.
+    /// `Handle` hit reshapes the curve; a `Node` hit drags that anchor; a
+    /// `Segment` hit inserts an anchor there and drags the new one (or, with Alt
+    /// held, converts the segment line↔curve without inserting). Returns true
+    /// when the press was consumed.
     pub fn node_press(&mut self, hit: NodeHit, cx: f32, cy: f32) -> bool {
+        // Alt + click a segment converts it line↔curve instead of inserting.
+        if let NodeHit::Segment(ci, seg, _) = hit {
+            if self.edit.input.alt_held {
+                return self.node_convert_segment(ci, seg);
+            }
+        }
         let Some((id, t, model_path)) = self.active_node_object() else {
             return false;
         };
@@ -524,6 +532,67 @@ impl App {
         }
         true
     }
+
+    /// If the canvas point `(cx, cy)` is over the fill/outline of a Path layer
+    /// that is not the current edit target, make that layer active and clear the
+    /// node selection — Node/Shape-tool "click any object to edit it". Returns
+    /// true when it switched the active layer.
+    pub fn node_click_select_path(&mut self, cx: f32, cy: f32) -> bool {
+        let Some(idx) = self.path_layer_hit_at(cx, cy) else {
+            return false;
+        };
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        if idx == canvas.layer_stack.active_idx {
+            return false;
+        }
+        canvas.layer_stack.active_idx = idx;
+        self.edit.node_selected = None;
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
+    /// Toggle segment `seg` of contour `ci` between straight and curved (Alt+click
+    /// a segment under the Node tool). Straight → default 1/3–2/3 handles the user
+    /// can then bend; curved → drops the two facing handles. One
+    /// [`crate::core::command_vector::ReplacePathGeometry`] = one undo.
+    fn node_convert_segment(&mut self, ci: usize, seg: usize) -> bool {
+        use crate::core::vector::ops;
+        let Some((layer_id, _t, mut path)) = self.active_node_object() else {
+            return false;
+        };
+        let Some(c) = path.contours.get_mut(ci) else {
+            return false;
+        };
+        if seg >= c.segment_count() {
+            return false;
+        }
+        let n = c.nodes.len();
+        let straight =
+            c.nodes[seg].out_handle.is_none() && c.nodes[(seg + 1) % n].in_handle.is_none();
+        let (res, label) = if straight {
+            (ops::set_segment_curved(c, seg), "Đoạn cong (Curve)")
+        } else {
+            (ops::set_segment_straight(c, seg), "Đoạn thẳng (Line)")
+        };
+        if res.is_err() {
+            return false;
+        }
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let _ = canvas.execute(
+            Box::new(crate::core::command_vector::ReplacePathGeometry::new(
+                layer_id, path,
+            )),
+            crate::core::gateway::ChangeKind::LayerStructure,
+        );
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = label.to_string();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -726,6 +795,85 @@ mod tests {
             back.out_handle.unwrap().distance_to(oh) < 0.5,
             "the handle drag undid in one step"
         );
+    }
+
+    #[test]
+    fn alt_click_segment_toggles_line_curve_without_inserting_and_undoes() {
+        let (mut app, id) = app_with_path();
+        app.edit.input.alt_held = true;
+        // Midpoint of the top edge (canvas 120,120) hits segment 0, which is straight.
+        let hit = app.node_hit_at_screen(120.0, 120.0).expect("segment hit");
+        assert!(matches!(hit, NodeHit::Segment(0, 0, _)));
+        assert!(app.node_press(hit, 120.0, 120.0));
+        let p = model_path(&app, id);
+        assert_eq!(p.contours[0].nodes.len(), 4, "no node inserted");
+        assert!(
+            p.contours[0].nodes[0].out_handle.is_some()
+                && p.contours[0].nodes[1].in_handle.is_some(),
+            "segment 0 is now a curve"
+        );
+        // Alt+click again straightens it back.
+        let hit = app.node_hit_at_screen(120.0, 120.0).expect("segment hit");
+        assert!(app.node_press(hit, 120.0, 120.0));
+        let p = model_path(&app, id);
+        assert!(
+            p.contours[0].nodes[0].out_handle.is_none()
+                && p.contours[0].nodes[1].in_handle.is_none(),
+            "segment 0 is straight again"
+        );
+        // Each toggle is its own undo step.
+        app.docs.documents[0].canvas.undo().expect("undo");
+        let p = model_path(&app, id);
+        assert!(p.contours[0].nodes[0].out_handle.is_some(), "back to curve");
+    }
+
+    #[test]
+    fn click_selects_another_path_as_edit_target() {
+        use crate::core::command_vector::CreatePathLayer;
+        use crate::core::gateway::ChangeKind;
+        let (mut app, first_id) = app_with_path();
+        // Add a second Path far from the first (a 40×20 rect at (10,10)).
+        let second_id = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            canvas
+                .execute(
+                    Box::new(CreatePathLayer::new(
+                        rect_obj(40.0, 20.0, 10.0, 10.0),
+                        "Path 2",
+                    )),
+                    ChangeKind::LayerStructure,
+                )
+                .unwrap();
+            let idx = canvas.layer_stack.layers.len() - 1;
+            canvas.layer_stack.layers[idx].id
+        };
+        // Make the FIRST path the edit target again.
+        let first_idx = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let idx = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .position(|l| l.id == first_id)
+                .unwrap();
+            canvas.layer_stack.active_idx = idx;
+            idx
+        };
+        assert_eq!(
+            app.active_path_layer(),
+            Some(first_idx),
+            "first path is active"
+        );
+
+        // Clicking inside the SECOND path's fill (canvas ~30,20) switches to it.
+        assert!(app.node_click_select_path(30.0, 20.0));
+        let active = app.docs.documents[0].canvas.layer_stack.active_idx;
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers[active].id, second_id,
+            "second path is now the edit target"
+        );
+        // Clicking empty space (no path) does not switch.
+        assert!(!app.node_click_select_path(280.0, 280.0));
     }
 
     #[test]

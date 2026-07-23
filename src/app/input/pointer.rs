@@ -407,6 +407,15 @@ impl App {
                                         self.edit.input.painting = true;
                                         return;
                                     }
+                                } else if self.node_click_select_path(ev.canvas_x, ev.canvas_y) {
+                                    // Clicked another Path's body — make it the edit
+                                    // target (Shape-tool object switching), then grab
+                                    // a node of it if the click also landed on one.
+                                    if let Some(hit) = self.node_hit_at_screen(msx, msy) {
+                                        self.node_press(hit, ev.canvas_x, ev.canvas_y);
+                                    }
+                                    self.edit.input.painting = true;
+                                    return;
                                 } else if self.edit.node_selected.is_some() {
                                     // Click on empty canvas clears the selection.
                                     self.edit.node_selected = None;
