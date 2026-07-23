@@ -127,17 +127,15 @@ tài liệu, không ép đổi struct nền lúc này.
 
 | Điều kiện (Mục 3.11) | Trạng thái |
 |----------------------|-----------|
-| (1) 10 contract có test round-trip + property | ✅ Gần đủ — round-trip schema (`iai_vector.rs`), round-trip Canvas RGB+CMYK (`iai.rs`), property-style path (mới), undo/redo command (`command_vector.rs`). |
-| (2) M1 chạy end-to-end RGB **và** CMYK | 🟡 Test tự động mức model/command đã thêm (phiên này). Phần **GUI thủ công** (vẽ Pen thật, kéo Node, nhìn PDF mắt thường) vẫn chờ user xác nhận. |
-| (3) Giả lập 4 tính năng tương lai | ✅ Tài liệu này — cả 4 additive; chỉ 1 ADR "page ownership" cần ghi. |
+| (1) 10 contract có test round-trip + property | ✅ round-trip schema + property sweep (`iai_vector.rs`), round-trip Canvas RGB+CMYK + page_id (`iai.rs`), undo/redo command (`command_vector.rs`), validate core. |
+| (2) M1 chạy end-to-end RGB **và** CMYK | ✅ Test tự động (`m1_end_to_end_*`) + **user GUI-test xác nhận OK 2026-07-23**. |
+| (3) Giả lập 4 tính năng tương lai | ✅ Tài liệu này — cả 4 additive; contract #10 đã vật chất hóa (xem ADR). |
 
-**CHƯA tuyên bố Foundation Freeze.** Còn 2 việc chốt cổng:
+**✅ ĐÃ TUYÊN BỐ FOUNDATION FREEZE (2026-07-23).** Cả hai việc chốt cổng đã xong:
+user GUI-test M1 OK, và ADR "page ownership" đã chốt **+ vật chất hóa** (`PageId`/
+`Page`/`Layer::page_id` + persistence) — xem
+[ADR_PAGE_OWNERSHIP.md](ADR_PAGE_OWNERSHIP.md). Tuyên bố chính thức + danh sách 10
+contract đóng băng: [FOUNDATION_FREEZE.md](FOUNDATION_FREEZE.md).
 
-1. User GUI-test luồng M1 end-to-end (Pen→Path→Node→Fill/Outline→màu RGB &
-   CMYK→save/mở→PDF) và xác nhận không mất thiết kế.
-2. Ghi ADR "page ownership" cho tính năng D (nơi đặt `page_id` + struct `Page`),
-   để lần thêm Artboard là additive có kỷ luật.
-
-Đạt cả hai → tuyên bố ĐÓNG BĂNG 10 contract; từ đó lớp tính năng (Giai đoạn 3 trở
-đi: Pick/Node nâng cao, Polygon/Star, PowerClip UX, Boolean, Text→Curves,
-gradient/dash, Artboard) CHỈ THÊM, không sửa nền.
+Từ đây lớp tính năng (Pick/Node nâng cao, Polygon/Star, PowerClip UX, Boolean,
+Text→Curves, gradient/dash, Artboard) CHỈ THÊM, không sửa nền.

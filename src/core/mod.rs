@@ -21,6 +21,7 @@ pub mod gateway;
 pub mod geometry;
 pub mod hw;
 pub mod layer;
+pub mod page;
 pub mod selection;
 pub mod shape;
 pub mod smart_fill;

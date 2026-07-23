@@ -209,6 +209,8 @@ fn build_canvas_from_meta<R: Read + Seek>(
         layer.offset = (offset_x, offset_y);
         layer.parent_id = layer_info["parent"].as_u64().map(|p| p as u32);
         layer.clip_parent_id = layer_info["clip_parent"].as_u64().map(|p| p as u32);
+        layer.page_id =
+            crate::core::page::PageId(layer_info["page"].as_u64().map(|p| p as u32).unwrap_or(0));
         layer.expanded = layer_info["expanded"].as_bool().unwrap_or(true);
         if let Some(adj) = json_to_adjustment(&layer_info["adjustment"]) {
             layer.layer_type = crate::core::layer::LayerType::Adjustment(adj);
@@ -530,6 +532,14 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             .and_then(|pid| canvas.layer_stack.layers.iter().position(|l| l.id == pid))
             .map(|p| serde_json::json!(p as u64))
             .unwrap_or(serde_json::Value::Null);
+        // Page ownership (contract #10). A page id, not a layer index. Written only
+        // when off the implicit page, so default single-page docs are unchanged.
+        let page_value: serde_json::Value = if layer.page_id != crate::core::page::PageId::IMPLICIT
+        {
+            serde_json::json!(layer.page_id.0)
+        } else {
+            serde_json::Value::Null
+        };
         let adj_json = if let crate::core::layer::LayerType::Adjustment(ref adj) = layer.layer_type
         {
             adjustment_to_json(adj)
@@ -566,6 +576,7 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             "offset_y": layer.offset.1,
             "parent": parent_index,
             "clip_parent": clip_parent_index,
+            "page": page_value,
             "expanded": layer.expanded,
             "adjustment": adj_json,
             "text": text_json,
@@ -1920,6 +1931,41 @@ mod tests {
         assert!(
             sel.objects.is_empty() && sel.promoted_layer_ids.is_empty(),
             "CMYK PDF uses the raster fallback (M1 allowance)"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn layer_page_id_round_trips_through_iai() {
+        // Contract #10: a layer's page ownership persists. MVP keeps everything on
+        // the implicit page; this drives a non-implicit id to prove the schema slot
+        // carries it, so multi-page later is additive.
+        let dir = tmp_dir("page-id");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([10, 20, 30, 255], 8, 8);
+        let idx = canvas.layer_stack.add_layer(8, 8);
+        canvas.layer_stack.layers[idx].page_id = crate::core::page::PageId(2);
+        assert_eq!(
+            canvas.layer_stack.layers[0].page_id,
+            crate::core::page::PageId::IMPLICIT
+        );
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(loaded.layer_stack.layers.len(), 2);
+        assert_eq!(
+            loaded.layer_stack.layers[0].page_id,
+            crate::core::page::PageId::IMPLICIT,
+            "implicit-page layer stays implicit"
+        );
+        assert_eq!(
+            loaded.layer_stack.layers[idx].page_id,
+            crate::core::page::PageId(2),
+            "non-implicit page id must round-trip"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

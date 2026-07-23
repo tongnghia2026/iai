@@ -898,6 +898,10 @@ pub struct Layer {
     /// by the referenced frame layer. Deliberately separate from `parent_id`,
     /// which means group membership only.
     pub clip_parent_id: Option<u32>,
+    /// Which page / artboard this layer belongs to (foundation contract #10). At
+    /// MVP every layer is on [`crate::core::page::PageId::IMPLICIT`], so behaviour
+    /// is unchanged; the field is here so multi-page support is purely additive.
+    pub page_id: crate::core::page::PageId,
     /// Group-only: whether the folder is expanded in the panel. Ignored for
     /// non-group layers. Defaults to `true`.
     pub expanded: bool,
@@ -927,6 +931,7 @@ impl Layer {
             selected: false,
             parent_id: None,
             clip_parent_id: None,
+            page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
         }
     }
@@ -960,6 +965,7 @@ impl Layer {
             selected: false,
             parent_id: None,
             clip_parent_id: None,
+            page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
         }
     }
@@ -987,6 +993,7 @@ impl Layer {
             selected: false,
             parent_id: None,
             clip_parent_id: None,
+            page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
         }
     }
@@ -1042,6 +1049,9 @@ impl Layer {
             selected: self.selected,
             parent_id: self.parent_id,
             clip_parent_id: self.clip_parent_id,
+            // A duplicate stays on the same page as its source (page membership is
+            // copied verbatim, unlike the clip relation which is remapped).
+            page_id: self.page_id,
             expanded: self.expanded,
         }
     }
