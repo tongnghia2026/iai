@@ -164,6 +164,18 @@ pub struct NodeOverlay {
     pub handles: Vec<[f32; 4]>,
 }
 
+#[derive(Clone)]
+pub struct PathDisplayRaster {
+    pub cache_key: u64,
+    pub rgba: std::sync::Arc<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
+    pub canvas_x: f32,
+    pub canvas_y: f32,
+    pub canvas_w: f32,
+    pub canvas_h: f32,
+}
+
 /// Warp freeze-mask snapshot for the red canvas overlay. `alpha` is the mesh
 /// node grid (`gw × gh`, 0..255); the panel scales it over the layer's canvas rect.
 pub struct WarpFreezeView {
@@ -1265,6 +1277,50 @@ pub fn build(
                     );
                 }
             }
+        }
+
+        // A zoom-bucketed display raster keeps the active Path crisp without
+        // changing the document-resolution atlas (and therefore without
+        // softening raster/photo layers). It sits in the canvas-tool layer so
+        // dialogs and panels always remain above it.
+        if let Some(display) = &data.tool.path_display {
+            let texture_cache_id = egui::Id::new("active_path_display_texture");
+            let texture = ctx
+                .data(|d| {
+                    d.get_temp::<(u64, egui::TextureHandle)>(texture_cache_id)
+                        .filter(|(key, _)| *key == display.cache_key)
+                        .map(|(_, texture)| texture)
+                })
+                .unwrap_or_else(|| {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [display.width as usize, display.height as usize],
+                        display.rgba.as_slice(),
+                    );
+                    let texture = ctx.load_texture(
+                        "active_path_display",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    ctx.data_mut(|d| {
+                        d.insert_temp(texture_cache_id, (display.cache_key, texture.clone()));
+                    });
+                    texture
+                });
+            let rect = egui::Rect::from_min_size(
+                to_screen_pos(display.canvas_x, display.canvas_y),
+                egui::vec2(display.canvas_w * zoom, display.canvas_h * zoom),
+            );
+            ctx.layer_painter(egui::LayerId::new(
+                CANVAS_TOOL_OVERLAY_ORDER,
+                egui::Id::new("active_path_display"),
+            ))
+            .with_clip_rect(canvas_viewport)
+            .image(
+                texture.id(),
+                rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
         }
 
         // Node tool overlay: the active Path's outline, its anchor points, and

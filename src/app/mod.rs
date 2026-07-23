@@ -13,6 +13,7 @@ pub mod library;
 pub mod node_ops;
 pub mod os_clipboard;
 pub mod path_bake;
+pub mod path_display;
 pub mod path_style;
 pub mod pen_ops;
 pub mod render;

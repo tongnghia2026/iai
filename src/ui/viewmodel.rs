@@ -188,6 +188,9 @@ pub struct ToolViewModel {
     /// On-canvas editing overlay for the active Path layer (Node tool): outline
     /// + anchor points + selected-node handle arms.
     pub node_overlay: Option<super::NodeOverlay>,
+    /// Zoom-bucketed raster for the active Path. Display-only; document tiles
+    /// and export continue to use the normal document-resolution cache.
+    pub path_display: Option<super::PathDisplayRaster>,
     /// Fill/Outline of the active Path layer for the options-bar controls
     /// (Move / Node). `None` when the active layer isn't an editable Path.
     pub path_style: Option<super::PathStyleData>,
@@ -667,6 +670,7 @@ impl Default for UiData {
                 shape_preview: None,
                 shape_overlay: None,
                 node_overlay: None,
+                path_display: None,
                 path_style: None,
                 pen_mode: 0,
                 pen_stroke_width: 3.0,

@@ -17,6 +17,7 @@
 
 pub mod affine;
 pub mod color;
+pub mod display;
 pub mod flatten;
 pub mod from_shape;
 pub mod hittest;

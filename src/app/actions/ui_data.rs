@@ -931,6 +931,7 @@ impl App {
                 } else {
                     None
                 },
+                path_display: self.active_path_display(),
                 // On-canvas node editing overlay for the active Path (Node tool).
                 node_overlay: self.active_node_overlay(),
                 // Fill/Outline of the active Path (options bar under Move / Node).

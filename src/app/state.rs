@@ -826,6 +826,20 @@ pub struct TextFontPreviewState {
     pub session: Option<TextFontPreviewSession>,
 }
 
+#[derive(Clone, PartialEq)]
+pub struct PathDisplayCacheKey {
+    pub doc_id: u32,
+    pub layer_id: u32,
+    pub scale: u8,
+    pub layer_offset: (i32, i32),
+    pub object: crate::core::vector::object::VectorObjectData,
+}
+
+pub struct PathDisplayCacheEntry {
+    pub key: PathDisplayCacheKey,
+    pub display: crate::ui::PathDisplayRaster,
+}
+
 #[derive(Default)]
 pub struct UiDataCache {
     pub history_entries: std::sync::Arc<Vec<crate::core::command::HistoryEntry>>,
@@ -880,6 +894,8 @@ pub struct UiDataCache {
     /// Rebuild throttle: the colour plates force a full CPU flatten, so they
     /// refresh at most every few hundred ms while the panel is open.
     pub channel_thumbs_built_at: Option<Instant>,
+    pub path_display: Option<PathDisplayCacheEntry>,
+    pub path_display_serial: u64,
 }
 
 /// In-progress guide gesture (preview is rendered until committed).
