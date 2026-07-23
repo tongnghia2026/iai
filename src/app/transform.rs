@@ -669,6 +669,36 @@ impl App {
             }
         };
 
+        // Path geometry owns an affine model and must never enter the raster
+        // Free Transform worker. Scale/rotate it with the Move-tool handles;
+        // skew/projective requires an explicit Rasterize decision. A mixed
+        // selection is blocked as a whole instead of silently transforming only
+        // the raster members and tearing the selection apart.
+        let selection_contains_path =
+            candidates.iter().any(|&idx| {
+                canvas.layer_stack.layers.get(idx).is_some_and(|layer| {
+                    matches!(layer.layer_type, LayerType::Path(_))
+                        || (layer.is_group()
+                            && canvas
+                                .layer_stack
+                                .group_member_range(idx)
+                                .any(|member_idx| {
+                                    canvas.layer_stack.layers.get(member_idx).is_some_and(
+                                        |member| matches!(member.layer_type, LayerType::Path(_)),
+                                    )
+                                }))
+                })
+            });
+        if selection_contains_path {
+            self.shell.status_msg =
+                "Path uses affine Move handles; rasterize explicitly for skew/projective"
+                    .to_string();
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
         let mut target_indices = Vec::new();
         let mut seen_targets = std::collections::HashSet::new();
         let mut preview_layer_states = Vec::new();

@@ -924,6 +924,20 @@ impl App {
         if let Some(align) = actions.layers.align_layers.take() {
             self.align_selected_layers_to_canvas(align);
         }
+        if let Some(distribute) = actions.layers.distribute_layers.take() {
+            self.distribute_selected_layers(distribute);
+        }
+        if actions.layers.duplicate_selected_step {
+            self.duplicate_selected_with_step((10, 10));
+        }
+        if actions.layers.repeat_duplicate_step {
+            let delta = self.edit.tools.move_tool().last_duplicate_delta;
+            if let Some(delta) = delta {
+                self.duplicate_selected_with_step(delta);
+            } else {
+                self.shell.status_msg = "No duplicate step to repeat".to_string();
+            }
+        }
         if let Some(action) = actions.tool.move_transform.take() {
             self.apply_move_transform_action(action);
             self.sync_cursor(event_loop);

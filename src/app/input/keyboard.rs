@@ -272,11 +272,19 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::KeyD) if pressed && self.edit.input.ctrl_held => {
-                self.docs.documents[self.docs.active_doc_idx]
-                    .canvas
-                    .deselect();
-                self.upload_selection_mask();
-                self.push_selection_uniforms();
+                if self.edit.input.shift_held {
+                    if let Some(delta) = self.edit.tools.move_tool().last_duplicate_delta {
+                        self.duplicate_selected_with_step(delta);
+                    } else {
+                        self.shell.status_msg = "No duplicate step to repeat".to_string();
+                    }
+                } else {
+                    self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .deselect();
+                    self.upload_selection_mask();
+                    self.push_selection_uniforms();
+                }
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }

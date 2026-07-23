@@ -23,6 +23,9 @@ pub struct MoveTool {
     /// Structure command captured on Alt+drag duplicate, pushed in the same group
     /// as the TranslateLayerCommand on release so undo also removes the copy.
     pub pending_dup_cmd: Option<crate::core::command::LayerStructureCommand>,
+    /// Last committed duplicate translation. Repeating it duplicates the current
+    /// selection by the same vector (Corel-style step-and-repeat).
+    pub last_duplicate_delta: Option<(i32, i32)>,
 
     // --- Snapping (③) ---
     /// Master snap toggle (mirrors UiState.snap_enabled; set by the app each frame).
@@ -62,6 +65,7 @@ impl MoveTool {
             marquee_end_x: 0.0,
             marquee_end_y: 0.0,
             pending_dup_cmd: None,
+            last_duplicate_delta: None,
             snap_enabled: true,
             press_cx: 0.0,
             press_cy: 0.0,
@@ -538,6 +542,7 @@ impl Tool for MoveTool {
         let _res = ToolResponse::none();
 
         let dup_cmd = self.pending_dup_cmd.take();
+        let duplicated = dup_cmd.is_some();
         let moved = self.total_dx != 0 || self.total_dy != 0;
         if dup_cmd.is_some() || moved {
             let canvas = ctx.canvas_mut();
@@ -613,6 +618,9 @@ impl Tool for MoveTool {
                 }
             }
             canvas.end_undo_group();
+            if duplicated && moved {
+                self.last_duplicate_delta = Some((self.total_dx, self.total_dy));
+            }
         }
 
         let _ = event;

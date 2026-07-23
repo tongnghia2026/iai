@@ -102,6 +102,9 @@ pub struct DocumentIntent {
 #[derive(Default)]
 pub struct LayerIntent {
     pub align_layers: Option<LayerAlign>,
+    pub distribute_layers: Option<LayerDistribute>,
+    pub duplicate_selected_step: bool,
+    pub repeat_duplicate_step: bool,
     pub add_layer: bool,
     pub add_adjustment_layer: Option<AdjustmentType>,
     pub duplicate_layer: Option<usize>,

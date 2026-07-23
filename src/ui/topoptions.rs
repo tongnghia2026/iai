@@ -1,4 +1,4 @@
-use super::{modal_flash_btn, LayerAlign, MoveTransformAction, UiActions, UiData};
+use super::{modal_flash_btn, LayerAlign, LayerDistribute, MoveTransformAction, UiActions, UiData};
 use crate::core::text::TextAlign;
 use crate::tools::ToolId;
 use egui;
@@ -1417,6 +1417,36 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         LayerAlign::Bottom,
         "Align bottom edges to selection bounds; single layer uses canvas",
     );
+    ui.separator();
+    if ui
+        .button("⇔")
+        .on_hover_text("Distribute horizontal centres of 3 or more selected objects")
+        .clicked()
+    {
+        actions.layers.distribute_layers = Some(LayerDistribute::HorizontalCenters);
+    }
+    if ui
+        .button("⇕")
+        .on_hover_text("Distribute vertical centres of 3 or more selected objects")
+        .clicked()
+    {
+        actions.layers.distribute_layers = Some(LayerDistribute::VerticalCenters);
+    }
+    ui.separator();
+    if ui
+        .button("Dup")
+        .on_hover_text("Duplicate selected objects with a 10 × 10 px step")
+        .clicked()
+    {
+        actions.layers.duplicate_selected_step = true;
+    }
+    if ui
+        .button("Repeat")
+        .on_hover_text("Repeat the last duplicate translation (Ctrl+Shift+D)")
+        .clicked()
+    {
+        actions.layers.repeat_duplicate_step = true;
+    }
     ui.separator();
     move_transform_button(
         ui,

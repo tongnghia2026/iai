@@ -5,7 +5,7 @@ use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 use crate::core::document::GuideOrientation;
 use crate::core::snapping::{snap_1d, SnapKind, SNAP_THRESHOLD_PX};
-use crate::ui::{LayerAlign, MoveTransformAction};
+use crate::ui::{LayerAlign, LayerDistribute, MoveTransformAction};
 
 /// The affine that rotates/flips a vector object about the layer-space pivot
 /// `(cx,cy)` — `T(c) ∘ M ∘ T(-c)`. Composed onto the object's transform so a
@@ -316,6 +316,20 @@ impl App {
                     }
 
                     if moved > 0 {
+                        // Path position belongs to its affine model; Layer::offset
+                        // is only the derived raster origin. Fold alignment deltas
+                        // back into the model before the history snapshot so save/
+                        // reload and later transforms keep the same placement.
+                        for &idx in &indices {
+                            if matches!(
+                                canvas.layer_stack.layers[idx].layer_type,
+                                LayerType::Path(_)
+                            ) {
+                                crate::core::command_vector::fold_offset_into_model(
+                                    &mut canvas.layer_stack.layers[idx],
+                                );
+                            }
+                        }
                         cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
                         canvas.record(Box::new(cmd));
                     }
@@ -335,6 +349,182 @@ impl App {
         } else {
             format!("Aligned {moved_count} layers")
         };
+        true
+    }
+
+    /// Evenly distribute the centres of three or more selected movable objects.
+    /// The outermost two objects stay fixed; interior objects are translated to
+    /// equal centre-to-centre intervals. One structural command makes the whole
+    /// operation a single undo step.
+    pub(super) fn distribute_selected_layers(&mut self, mode: LayerDistribute) -> bool {
+        use crate::core::layer::LayerType;
+
+        let moved_count = {
+            let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+            let can_move = |layer: &crate::core::layer::Layer| {
+                layer.selected
+                    && !layer.locked
+                    && !layer.is_background
+                    && matches!(
+                        layer.layer_type,
+                        LayerType::Raster
+                            | LayerType::Text(_)
+                            | LayerType::Shape(_)
+                            | LayerType::Path(_)
+                            | LayerType::SmartObject
+                    )
+            };
+            let mut objects: Vec<(usize, f32)> = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .enumerate()
+                .filter(|(_, layer)| can_move(layer))
+                .filter_map(|(idx, layer)| {
+                    layer.tiles.content_bounds().map(|(x0, y0, x1, y1)| {
+                        let center = match mode {
+                            LayerDistribute::HorizontalCenters => {
+                                layer.offset.0 as f32 + (x0 + x1) as f32 * 0.5
+                            }
+                            LayerDistribute::VerticalCenters => {
+                                layer.offset.1 as f32 + (y0 + y1) as f32 * 0.5
+                            }
+                        };
+                        (idx, center)
+                    })
+                })
+                .collect();
+            objects.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+            if objects.len() < 3 {
+                0
+            } else {
+                let first = objects.first().unwrap().1;
+                let last = objects.last().unwrap().1;
+                let step = (last - first) / (objects.len() - 1) as f32;
+                let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
+                    "Distribute Layers",
+                    &canvas.layer_stack,
+                    canvas.width,
+                    canvas.height,
+                );
+                let mut moved = 0usize;
+                for (order, &(idx, current)) in
+                    objects.iter().enumerate().skip(1).take(objects.len() - 2)
+                {
+                    let delta = (first + step * order as f32 - current).round() as i32;
+                    if delta == 0 {
+                        continue;
+                    }
+                    let layer = &mut canvas.layer_stack.layers[idx];
+                    match mode {
+                        LayerDistribute::HorizontalCenters => layer.offset.0 += delta,
+                        LayerDistribute::VerticalCenters => layer.offset.1 += delta,
+                    }
+                    if matches!(layer.layer_type, LayerType::Path(_)) {
+                        crate::core::command_vector::fold_offset_into_model(layer);
+                    }
+                    moved += 1;
+                }
+                if moved > 0 {
+                    cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
+                    canvas.record(Box::new(cmd));
+                }
+                moved
+            }
+        };
+
+        if moved_count == 0 {
+            self.shell.status_msg = "Select at least 3 movable objects to distribute".to_string();
+            return false;
+        }
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = format!("Distributed {moved_count} objects");
+        true
+    }
+
+    /// Duplicate the selected movable objects and translate the copies by
+    /// `delta`. The copies become the new selection, making repeated calls a
+    /// deterministic step-and-repeat chain. Geometry remains editable: Path
+    /// offsets are folded into their affine model before the single history
+    /// snapshot is recorded.
+    pub(in crate::app) fn duplicate_selected_with_step(&mut self, delta: (i32, i32)) -> bool {
+        use crate::core::layer::LayerType;
+
+        let duplicated = {
+            let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+            let indices: Vec<usize> = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .enumerate()
+                .filter(|(_, layer)| {
+                    layer.selected
+                        && !layer.locked
+                        && !layer.is_background
+                        && !layer.is_group()
+                        && matches!(
+                            layer.layer_type,
+                            LayerType::Raster
+                                | LayerType::Text(_)
+                                | LayerType::Shape(_)
+                                | LayerType::Path(_)
+                                | LayerType::SmartObject
+                        )
+                })
+                .map(|(idx, _)| idx)
+                .collect();
+            if indices.is_empty() {
+                0
+            } else {
+                let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
+                    "Duplicate Step",
+                    &canvas.layer_stack,
+                    canvas.width,
+                    canvas.height,
+                );
+                for layer in &mut canvas.layer_stack.layers {
+                    layer.selected = false;
+                }
+                let mut new_ids = Vec::with_capacity(indices.len());
+                for &idx in indices.iter().rev() {
+                    let new_idx = canvas.layer_stack.duplicate_layer(idx);
+                    let layer = &mut canvas.layer_stack.layers[new_idx];
+                    layer.offset.0 += delta.0;
+                    layer.offset.1 += delta.1;
+                    if matches!(layer.layer_type, LayerType::Path(_)) {
+                        crate::core::command_vector::fold_offset_into_model(layer);
+                    }
+                    layer.selected = true;
+                    new_ids.push(layer.id);
+                }
+                if let Some(active) = new_ids.first().and_then(|id| {
+                    canvas
+                        .layer_stack
+                        .layers
+                        .iter()
+                        .position(|layer| layer.id == *id)
+                }) {
+                    canvas.layer_stack.active_idx = active;
+                }
+                cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
+                canvas.record(Box::new(cmd));
+                indices.len()
+            }
+        };
+
+        if duplicated == 0 {
+            self.shell.status_msg = "No movable objects selected".to_string();
+            return false;
+        }
+        self.edit.tools.move_tool_mut().last_duplicate_delta = Some(delta);
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = format!(
+            "Duplicated {duplicated} object{} by {}, {}",
+            if duplicated == 1 { "" } else { "s" },
+            delta.0,
+            delta.1
+        );
         true
     }
 
@@ -799,7 +989,7 @@ mod tests {
     use crate::app::state::App;
     use crate::core::canvas::Canvas;
     use crate::core::tile::TileMap;
-    use crate::ui::MoveTransformAction;
+    use crate::ui::{LayerAlign, LayerDistribute, MoveTransformAction};
 
     /// Apply the placement to every layer and return the transformed union box.
     fn transformed_union(
@@ -1040,5 +1230,165 @@ mod tests {
             .iter()
             .find(|l| l.id == id)
             .unwrap()
+    }
+
+    fn add_selected_box(app: &mut App, x: i32, y: i32) -> u32 {
+        let canvas = &mut app.docs.documents[0].canvas;
+        let idx = canvas.layer_stack.add_layer(10, 10);
+        let layer = &mut canvas.layer_stack.layers[idx];
+        layer.tiles = TileMap::from_rgba(&vec![255; 10 * 10 * 4], 10, 10);
+        layer.offset = (x, y);
+        layer.selected = true;
+        layer.id
+    }
+
+    #[test]
+    fn distribute_horizontal_centres_keeps_outer_objects_and_undoes_once() {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(240, 160);
+        app.docs.documents[0].canvas.layer_stack.layers[0].selected = false;
+        let left = add_selected_box(&mut app, 10, 20);
+        let middle = add_selected_box(&mut app, 50, 20);
+        let right = add_selected_box(&mut app, 170, 20);
+
+        assert!(app.distribute_selected_layers(LayerDistribute::HorizontalCenters));
+        assert_eq!(find_layer(&app, left).offset.0, 10);
+        assert_eq!(find_layer(&app, middle).offset.0, 90);
+        assert_eq!(find_layer(&app, right).offset.0, 170);
+        assert_eq!(app.docs.documents[0].canvas.undo_count(), 1);
+
+        app.docs.documents[0]
+            .canvas
+            .undo()
+            .expect("undo distribute");
+        assert_eq!(find_layer(&app, middle).offset.0, 50);
+    }
+
+    #[test]
+    fn align_path_folds_raster_offset_into_affine_model() {
+        use crate::core::command_vector::CreatePathLayer;
+        use crate::core::gateway::ChangeKind;
+        use crate::core::layer::LayerType;
+
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 160);
+        let (id, original) = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            canvas.layer_stack.layers[0].selected = false;
+            let object = rect_path_object(30.0, 20.0, 80.0, 50.0);
+            let original = object.transform;
+            canvas
+                .execute(
+                    Box::new(CreatePathLayer::new(object, "Aligned Path")),
+                    ChangeKind::LayerStructure,
+                )
+                .unwrap();
+            let idx = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .position(|l| matches!(l.layer_type, LayerType::Path(_)))
+                .unwrap();
+            canvas.layer_stack.layers[idx].selected = true;
+            canvas.layer_stack.active_idx = idx;
+            (canvas.layer_stack.layers[idx].id, original)
+        };
+        // Ignore creation history: the assertion below concerns alignment only.
+        app.docs.documents[0].canvas.mark_saved();
+        let before_undo = app.docs.documents[0].canvas.undo_count();
+
+        assert!(app.align_selected_layers_to_canvas(LayerAlign::Left));
+        let layer = find_layer(&app, id);
+        let aligned = match &layer.layer_type {
+            LayerType::Path(object) => object.transform,
+            _ => panic!("Path must stay editable"),
+        };
+        assert_ne!(aligned, original, "alignment must update the model");
+        assert_eq!(
+            layer.offset.0 + layer.tiles.content_bounds().unwrap().0,
+            0,
+            "visible content aligned to canvas left"
+        );
+        assert_eq!(
+            app.docs.documents[0].canvas.undo_count(),
+            before_undo + 1,
+            "one alignment = one undo step"
+        );
+        app.docs.documents[0].canvas.undo().expect("undo align");
+        let restored = match &find_layer(&app, id).layer_type {
+            LayerType::Path(object) => object.transform,
+            _ => panic!("Path must stay editable"),
+        };
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn duplicate_step_repeats_delta_and_keeps_path_editable() {
+        use crate::core::command_vector::CreatePathLayer;
+        use crate::core::gateway::ChangeKind;
+        use crate::core::layer::LayerType;
+
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(300, 200);
+        {
+            let canvas = &mut app.docs.documents[0].canvas;
+            canvas.layer_stack.layers[0].selected = false;
+            canvas
+                .execute(
+                    Box::new(CreatePathLayer::new(
+                        rect_path_object(20.0, 20.0, 40.0, 50.0),
+                        "Step Path",
+                    )),
+                    ChangeKind::LayerStructure,
+                )
+                .unwrap();
+            let idx = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .position(|layer| matches!(layer.layer_type, LayerType::Path(_)))
+                .unwrap();
+            canvas.layer_stack.layers[idx].selected = true;
+            canvas.layer_stack.active_idx = idx;
+        }
+
+        assert!(app.duplicate_selected_with_step((25, 10)));
+        assert!(app.duplicate_selected_with_step((25, 10)));
+        let mut origins: Vec<(i32, i32)> = app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .filter(|layer| matches!(layer.layer_type, LayerType::Path(_)))
+            .map(|layer| layer.offset)
+            .collect();
+        origins.sort_unstable();
+        assert_eq!(origins.len(), 3);
+        assert_eq!(origins[1].0 - origins[0].0, 25);
+        assert_eq!(origins[2].0 - origins[1].0, 25);
+        assert_eq!(origins[1].1 - origins[0].1, 10);
+        assert_eq!(origins[2].1 - origins[1].1, 10);
+        assert!(app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .filter(|layer| matches!(layer.layer_type, LayerType::Path(_)))
+            .all(|layer| matches!(layer.layer_type, LayerType::Path(_))));
+
+        app.docs.documents[0]
+            .canvas
+            .undo()
+            .expect("undo second step");
+        assert_eq!(
+            app.docs.documents[0]
+                .canvas
+                .layer_stack
+                .layers
+                .iter()
+                .filter(|layer| matches!(layer.layer_type, LayerType::Path(_)))
+                .count(),
+            2
+        );
     }
 }

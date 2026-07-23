@@ -639,6 +639,12 @@ pub enum LayerAlign {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerDistribute {
+    HorizontalCenters,
+    VerticalCenters,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveTransformAction {
     Rotate90Ccw,
     Rotate90Cw,
