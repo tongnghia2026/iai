@@ -58,15 +58,38 @@ pub(crate) fn apply_object_to_layer(layer: &mut Layer, object: VectorObjectData)
 /// model, so this doubles as the cache-rebuild step. Called on load and before a
 /// model edit that must respect a pending drag.
 pub(crate) fn fold_offset_into_model(layer: &mut Layer) {
+    fold_offset_impl(layer, false);
+}
+
+/// [`fold_offset_into_model`] that ALWAYS re-derives the raster from the model,
+/// even when the offset is already in sync. Load-time cache rebuild uses this so
+/// a reopened document renders from the model rather than trusting the baked
+/// raster fallback; interactive gesture-begin call sites use the plain variant,
+/// whose in-sync fast path skips the O(area) re-raster entirely.
+pub(crate) fn rebuild_path_cache_from_model(layer: &mut Layer) {
+    fold_offset_impl(layer, true);
+}
+
+fn fold_offset_impl(layer: &mut Layer, force_rebuild: bool) {
     let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type else {
         return;
     };
-    let obj = obj.clone();
-    let Some(r) = raster::rasterize(&obj) else {
+    // The raster ORIGIN is a function of the flattened bounds alone —
+    // `raster_geometry` computes it in O(nodes). The old code called
+    // `rasterize` (O(area)) just to learn it, then `apply_object_to_layer`
+    // rasterized AGAIN: two full CPU renders of e.g. a page-sized gradient on
+    // every transform/gradient gesture press, the reported first-click lag.
+    let Some((origin, rw, rh)) = raster::raster_geometry(obj) else {
         return;
     };
-    let dx = (layer.offset.0 - r.offset.0) as f32;
-    let dy = (layer.offset.1 - r.offset.1) as f32;
+    let dx = (layer.offset.0 - origin.0) as f32;
+    let dy = (layer.offset.1 - origin.1) as f32;
+    if dx == 0.0 && dy == 0.0 && layer.width == rw && layer.height == rh && !force_rebuild {
+        // Offset and cache dimensions already agree with the model — the cache
+        // IS the derived raster; nothing to fold and nothing to rebuild.
+        return;
+    }
+    let obj = obj.clone();
     let obj = if dx != 0.0 || dy != 0.0 {
         VectorObjectData {
             transform: AffineTransform::translate(dx, dy).then(&obj.transform),
@@ -763,6 +786,39 @@ mod tests {
             (off0.0 + 25, off0.1 - 10),
             "fold is idempotent"
         );
+    }
+
+    /// A gesture press calls `fold_offset_into_model` on a layer whose offset
+    /// already matches its model. That must NOT re-rasterize the cache — the
+    /// old double O(area) render here was the first-click lag when rotating or
+    /// scaling a page-sized gradient Path.
+    #[test]
+    fn in_sync_fold_skips_the_area_raster() {
+        let mut c = canvas();
+        let mut cmd = CreatePathLayer::new(obj(40.0), "Path 1");
+        cmd.execute(&mut edit_ctx(&mut c)).unwrap();
+        let id = cmd.created_id().unwrap();
+        c.record(Box::new(cmd));
+        let layer = c.layer_stack.layers.iter_mut().find(|l| l.id == id).unwrap();
+        let before = layer.tiles.revision_fingerprint();
+
+        fold_offset_into_model(layer);
+        assert_eq!(
+            layer.tiles.revision_fingerprint(),
+            before,
+            "in-sync fold must leave the raster cache untouched"
+        );
+
+        // With real drift the fold still runs: position is preserved and the
+        // model transform absorbs the delta.
+        layer.offset = (layer.offset.0 + 25, layer.offset.1 - 10);
+        let dragged = layer.offset;
+        fold_offset_into_model(layer);
+        assert_eq!(layer.offset, dragged, "dragged position survives the fold");
+        let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type else {
+            panic!("still a path");
+        };
+        assert_eq!((o.transform.e, o.transform.f), (30.0 + 25.0, 30.0 - 10.0));
     }
 
     #[test]

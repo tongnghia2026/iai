@@ -816,7 +816,7 @@ impl Canvas {
             ) {
                 // Folds a saved Move-tool drag (offset ≠ model) back into the
                 // model AND re-derives the raster from the model.
-                crate::core::command_vector::fold_offset_into_model(layer);
+                crate::core::command_vector::rebuild_path_cache_from_model(layer);
                 any = true;
             } else if let LayerType::Vector(
                 crate::core::vector::object::VectorGeometry::Primitive(shape),

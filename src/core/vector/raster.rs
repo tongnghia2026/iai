@@ -14,6 +14,7 @@
 //! ON TOP without changing this function's output.
 
 use crate::core::geometry::Point;
+use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::flatten::flatten_path;
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::style::{GradientKind, Paint};
@@ -53,10 +54,21 @@ pub fn rasterize_clipped(
     rasterize_impl(object, Some(clip))
 }
 
-fn rasterize_impl(
+/// Flattened contours plus the derived raster frame, shared by [`rasterize`]
+/// and [`raster_geometry`] so both compute the identical placement.
+struct RasterLayout {
+    polylines: Vec<Vec<Point>>,
+    closed: Vec<bool>,
+    off_x: f32,
+    off_y: f32,
+    w: u32,
+    h: u32,
+}
+
+fn raster_layout(
     object: &VectorObjectData,
     clip: Option<crate::core::geometry::Rect>,
-) -> Option<PathRaster> {
+) -> Option<RasterLayout> {
     let fill_visible = object.style.fill.is_visible();
     let half = object.style.effective_stroke_width() * 0.5;
     let stroke_visible = object.style.stroke.is_visible() && half > 0.0;
@@ -109,8 +121,41 @@ fn rasterize_impl(
     if (w as u64) * (h as u64) > MAX_RASTER_PIXELS {
         return None;
     }
-    let w = w as u32;
-    let h = h as u32;
+    Some(RasterLayout {
+        polylines,
+        closed,
+        off_x,
+        off_y,
+        w: w as u32,
+        h: h as u32,
+    })
+}
+
+/// The exact placement [`rasterize`] would produce for `object` —
+/// `(offset, width, height)` — from the flattened bounds alone, WITHOUT filling
+/// any pixels: O(nodes), not O(area). `None` exactly when [`rasterize`] returns
+/// `None`. Lets a caller detect an already-in-sync raster cache cheaply instead
+/// of re-rendering the whole object just to learn its origin.
+pub fn raster_geometry(object: &VectorObjectData) -> Option<((i32, i32), u32, u32)> {
+    let l = raster_layout(object, None)?;
+    Some(((l.off_x as i32, l.off_y as i32), l.w, l.h))
+}
+
+fn rasterize_impl(
+    object: &VectorObjectData,
+    clip: Option<crate::core::geometry::Rect>,
+) -> Option<PathRaster> {
+    let RasterLayout {
+        polylines,
+        closed,
+        off_x,
+        off_y,
+        w,
+        h,
+    } = raster_layout(object, clip)?;
+    let fill_visible = object.style.fill.is_visible();
+    let half = object.style.effective_stroke_width() * 0.5;
+    let stroke_visible = object.style.stroke.is_visible() && half > 0.0;
     let offset = (off_x as i32, off_y as i32);
 
     // Shift every polyline into raster-local space once.
@@ -126,26 +171,37 @@ fn rasterize_impl(
     let opacity = object.style.opacity.clamp(0.0, 1.0);
     let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
 
+    // Painting a coverage mask is embarrassingly parallel by row, and every
+    // per-raster constant (affine inverses, stop table) is hoisted into
+    // `PreparedPaint` — the naive loop recomputed two matrix inverses per pixel,
+    // which made a page-sized gradient fill the dominant cost of a raster.
+    let paint_rows = |rgba: &mut [u8], cov: &[f32], paint: &PreparedPaint| {
+        use rayon::prelude::*;
+        let wu = w as usize;
+        rgba.par_chunks_mut(wu * 4).enumerate().for_each(|(py, row)| {
+            let y = py as f32 + off_y + 0.5;
+            let cov_row = &cov[py * wu..(py + 1) * wu];
+            for (px_i, px) in row.chunks_exact_mut(4).enumerate() {
+                let c = cov_row[px_i];
+                if c > 0.0015 {
+                    let [r, g, b, a] = paint.sample(Point::new(px_i as f32 + off_x + 0.5, y));
+                    let mut p = [px[0], px[1], px[2], px[3]];
+                    blend_straight(
+                        &mut p,
+                        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
+                        (a as f32 / 255.0) * opacity * c,
+                    );
+                    px.copy_from_slice(&p);
+                }
+            }
+        });
+    };
+
     // ── Fill ─────────────────────────────────────────────────────────────────
     if fill_visible {
         let even_odd = object.path.fill_rule == crate::core::vector::path::FillRule::EvenOdd;
         let cov = fill_coverage(&local, w, h, even_odd);
-        for i in 0..(w as usize * h as usize) {
-            let c = cov[i];
-            if c > 0.0015 {
-                let x = (i % w as usize) as f32 + off_x + 0.5;
-                let y = (i / w as usize) as f32 + off_y + 0.5;
-                let [r, g, b, a] = sample_paint(object.style.fill, object, Point::new(x, y));
-                let px = &mut rgba[i * 4..i * 4 + 4];
-                let mut p = [px[0], px[1], px[2], px[3]];
-                blend_straight(
-                    &mut p,
-                    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
-                    (a as f32 / 255.0) * opacity * c,
-                );
-                px.copy_from_slice(&p);
-            }
-        }
+        paint_rows(&mut rgba, &cov, &PreparedPaint::new(object.style.fill, object));
     }
 
     // ── Stroke (over the fill) ───────────────────────────────────────────────
@@ -157,22 +213,11 @@ fn rasterize_impl(
             object.style.stroke_style.dash.offset,
         );
         let cov = stroke_coverage(&stroke_lines, &stroke_closed, w, h, half);
-        for i in 0..(w as usize * h as usize) {
-            let c = cov[i];
-            if c > 0.0015 {
-                let x = (i % w as usize) as f32 + off_x + 0.5;
-                let y = (i / w as usize) as f32 + off_y + 0.5;
-                let [r, g, b, a] = sample_paint(object.style.stroke, object, Point::new(x, y));
-                let px = &mut rgba[i * 4..i * 4 + 4];
-                let mut p = [px[0], px[1], px[2], px[3]];
-                blend_straight(
-                    &mut p,
-                    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
-                    (a as f32 / 255.0) * opacity * c,
-                );
-                px.copy_from_slice(&p);
-            }
-        }
+        paint_rows(
+            &mut rgba,
+            &cov,
+            &PreparedPaint::new(object.style.stroke, object),
+        );
     }
 
     Some(PathRaster {
@@ -183,11 +228,83 @@ fn rasterize_impl(
     })
 }
 
-fn sample_paint(paint: Paint, object: &VectorObjectData, layer_point: Point) -> [u8; 4] {
-    let Some(object_inv) = object.transform.inverse() else {
-        return [0, 0, 0, 0];
-    };
-    sample_paint_in_object_space(paint, object_inv.apply_point(layer_point))
+/// A paint with its per-raster constants resolved once: the object/gradient
+/// inverses collapsed into a single LAYER→gradient transform and the stops
+/// pre-converted to RGBA8. `sample` is then pure per-pixel arithmetic.
+enum PreparedPaint {
+    None,
+    Solid([u8; 4]),
+    Gradient {
+        /// LAYER space → gradient space (`gradient⁻¹ ∘ object⁻¹`).
+        to_gradient: AffineTransform,
+        radial: bool,
+        stops: Vec<(f32, [u8; 4])>,
+    },
+}
+
+impl PreparedPaint {
+    fn new(paint: Paint, object: &VectorObjectData) -> Self {
+        // A singular object transform blanks every paint, matching the
+        // per-pixel `sample_paint` this replaces.
+        let Some(object_inv) = object.transform.inverse() else {
+            return Self::None;
+        };
+        match paint {
+            Paint::None => Self::None,
+            Paint::Solid(color) => Self::Solid(color.to_rgba8()),
+            Paint::Gradient(gradient) => {
+                let Some(gradient_inv) = gradient.transform.inverse() else {
+                    return Self::None;
+                };
+                Self::Gradient {
+                    to_gradient: gradient_inv.then(&object_inv),
+                    radial: gradient.kind == GradientKind::Radial,
+                    stops: gradient
+                        .active_stops()
+                        .iter()
+                        .map(|s| (s.offset, s.color.to_rgba8()))
+                        .collect(),
+                }
+            }
+        }
+    }
+
+    fn sample(&self, layer_point: Point) -> [u8; 4] {
+        match self {
+            Self::None => [0, 0, 0, 0],
+            Self::Solid(color) => *color,
+            Self::Gradient {
+                to_gradient,
+                radial,
+                stops,
+            } => {
+                let gp = to_gradient.apply_point(layer_point);
+                let t = if *radial {
+                    (gp.x * gp.x + gp.y * gp.y).sqrt()
+                } else {
+                    gp.x
+                }
+                .clamp(0.0, 1.0);
+                let right = stops
+                    .iter()
+                    .position(|s| s.0 >= t)
+                    .unwrap_or(stops.len() - 1);
+                if right == 0 {
+                    return stops[0].1;
+                }
+                let (a_off, ca) = stops[right - 1];
+                let (b_off, cb) = stops[right];
+                let mix = ((t - a_off) / (b_off - a_off).max(1e-6)).clamp(0.0, 1.0);
+                let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * mix).round() as u8;
+                [
+                    lerp(ca[0], cb[0]),
+                    lerp(ca[1], cb[1]),
+                    lerp(ca[2], cb[2]),
+                    lerp(ca[3], cb[3]),
+                ]
+            }
+        }
+    }
 }
 
 /// Sample a vector paint at an object-local point. Parametric primitives use
@@ -561,6 +678,40 @@ mod tests {
         style.fill = Paint::None;
         style.stroke = Paint::None;
         assert!(rasterize(&square_obj(40.0, style)).is_none());
+    }
+
+    /// `raster_geometry` must report exactly the frame `rasterize` produces —
+    /// it is the cheap in-sync check that lets a gesture press skip the O(area)
+    /// re-raster.
+    #[test]
+    fn raster_geometry_matches_rasterize_frame() {
+        let gradient = Gradient::two_color(
+            GradientKind::Linear,
+            ColorValue::BLACK,
+            ColorValue::WHITE,
+            AffineTransform::scale(40.0, 40.0),
+        );
+        let cases = [
+            square_obj(40.0, VectorStyle::filled(ColorValue::rgb(0.0, 1.0, 0.0))),
+            square_obj(40.0, VectorStyle::stroked(ColorValue::BLACK, 6.0)),
+            square_obj(
+                40.0,
+                VectorStyle {
+                    fill: Paint::Gradient(gradient),
+                    ..VectorStyle::default()
+                },
+            ),
+        ];
+        for obj in cases {
+            let r = rasterize(&obj).expect("raster");
+            let (offset, w, h) = raster_geometry(&obj).expect("geometry");
+            assert_eq!(offset, r.offset);
+            assert_eq!((w, h), (r.width, r.height));
+        }
+        let mut invisible = VectorStyle::default();
+        invisible.fill = Paint::None;
+        invisible.stroke = Paint::None;
+        assert!(raster_geometry(&square_obj(40.0, invisible)).is_none());
     }
 
     #[test]
