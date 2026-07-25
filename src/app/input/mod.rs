@@ -619,6 +619,9 @@ impl ApplicationHandler for App {
         // Tools/states that legitimately act on the gray pasteboard outside the
         // page. Brush-like tools need their center to cross the page edge so they
         // can paint cleanly up to it; the actual pixel writes remain canvas-clipped.
+        // The vector tools (Pen/Shape/Node/Gradient/Text) work in canvas space —
+        // their anchors, geometry, handles and layers may legitimately sit off the
+        // page — so they must keep receiving pointer events there too.
         // For these tools, only the surrounding chrome counts as UI.
         let pasteboard_ok = self.edit.transform_state.is_some()
             || matches!(
@@ -635,6 +638,11 @@ impl ApplicationHandler for App {
                     | ToolId::Crop
                     | ToolId::PerspectiveCrop
                     | ToolId::Move
+                    | ToolId::Pen
+                    | ToolId::Shape
+                    | ToolId::Node
+                    | ToolId::Gradient
+                    | ToolId::Text
                     | ToolId::SelectionRect
                     | ToolId::SelectionEllipse
                     | ToolId::Lasso

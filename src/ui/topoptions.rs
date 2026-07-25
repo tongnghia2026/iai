@@ -38,66 +38,74 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.spacing_mut().button_padding = egui::vec2(7.0, 3.0);
-            ui.horizontal_centered(|ui| {
-                ui.add_space(4.0);
+            // Keep every tool's options reachable: when the row is wider than the
+            // window (e.g. Move with a vector object selected) it scrolls instead
+            // of pushing controls off the right edge.
+            egui::ScrollArea::horizontal()
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.add_space(4.0);
 
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(ph::HOUSE).size(15.0).color(pal.icon),
-                        )
-                        .min_size(egui::vec2(26.0, 24.0)),
-                    )
-                    .on_hover_text("Home — Welcome Screen")
-                    .clicked()
-                {
-                    actions.chrome.show_welcome = Some(true);
-                }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(ph::HOUSE).size(15.0).color(pal.icon),
+                                )
+                                .min_size(egui::vec2(26.0, 24.0)),
+                            )
+                            .on_hover_text("Home — Welcome Screen")
+                            .clicked()
+                        {
+                            actions.chrome.show_welcome = Some(true);
+                        }
 
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(ph::GRID_NINE)
-                                .size(15.0)
-                                .color(pal.icon),
-                        )
-                        .min_size(egui::vec2(26.0, 24.0)),
-                    )
-                    .on_hover_text("Library — browse a folder of photos")
-                    .clicked()
-                {
-                    actions.chrome.show_library = Some(true);
-                }
-                ui.separator();
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(ph::GRID_NINE)
+                                        .size(15.0)
+                                        .color(pal.icon),
+                                )
+                                .min_size(egui::vec2(26.0, 24.0)),
+                            )
+                            .on_hover_text("Library — browse a folder of photos")
+                            .clicked()
+                        {
+                            actions.chrome.show_library = Some(true);
+                        }
+                        ui.separator();
 
-                match data.tool.active_tool {
-                    ToolId::Brush | ToolId::Pencil => brush_options(ui, data, actions),
-                    ToolId::Eraser => eraser_options(ui, data, actions),
-                    ToolId::Crop => crop_options(ui, data, actions),
-                    ToolId::Fill => fill_options(ui, data, actions),
-                    ToolId::Gradient => gradient_options(ui, data, actions),
-                    ToolId::Eyedropper => eyedropper_options(ui, data, actions),
-                    ToolId::Clone => clone_tool_options(ui, data, actions, false),
-                    ToolId::Repair => clone_tool_options(ui, data, actions, true),
-                    ToolId::Smudge => smudge_options(ui, data, actions),
-                    ToolId::Dodge | ToolId::Burn => dodge_burn_options(ui, data, actions),
-                    ToolId::Patch => patch_options(ui, data, actions),
-                    ToolId::Move => move_options(ui, data, actions),
-                    ToolId::Zoom => zoom_options(ui, data, actions),
-                    ToolId::SmartSelect => smart_select_options(ui, data, actions),
-                    ToolId::SelectionRect
-                    | ToolId::SelectionEllipse
-                    | ToolId::Lasso
-                    | ToolId::PolygonLasso => selection_options(ui, data, actions),
-                    ToolId::Transform => transform_options(ui, data, actions),
-                    ToolId::Text => text_options(ui, data, actions),
-                    ToolId::Shape => shape_options(ui, data, actions),
-                    ToolId::Node => node_options(ui, data, actions),
-                    ToolId::PerspectiveCrop => perspective_crop_options(ui, data, actions),
-                    ToolId::Pen => pen_options(ui, data, actions),
-                    _ => default_options(ui, data),
-                }
-            });
+                        match data.tool.active_tool {
+                            ToolId::Brush | ToolId::Pencil => brush_options(ui, data, actions),
+                            ToolId::Eraser => eraser_options(ui, data, actions),
+                            ToolId::Crop => crop_options(ui, data, actions),
+                            ToolId::Fill => fill_options(ui, data, actions),
+                            ToolId::Gradient => gradient_options(ui, data, actions),
+                            ToolId::Eyedropper => eyedropper_options(ui, data, actions),
+                            ToolId::Clone => clone_tool_options(ui, data, actions, false),
+                            ToolId::Repair => clone_tool_options(ui, data, actions, true),
+                            ToolId::Smudge => smudge_options(ui, data, actions),
+                            ToolId::Dodge | ToolId::Burn => dodge_burn_options(ui, data, actions),
+                            ToolId::Patch => patch_options(ui, data, actions),
+                            ToolId::Move => move_options(ui, data, actions),
+                            ToolId::Zoom => zoom_options(ui, data, actions),
+                            ToolId::SmartSelect => smart_select_options(ui, data, actions),
+                            ToolId::SelectionRect
+                            | ToolId::SelectionEllipse
+                            | ToolId::Lasso
+                            | ToolId::PolygonLasso => selection_options(ui, data, actions),
+                            ToolId::Transform => transform_options(ui, data, actions),
+                            ToolId::Text => text_options(ui, data, actions),
+                            ToolId::Shape => shape_options(ui, data, actions),
+                            ToolId::Node => node_options(ui, data, actions),
+                            ToolId::PerspectiveCrop => perspective_crop_options(ui, data, actions),
+                            ToolId::Pen => pen_options(ui, data, actions),
+                            _ => default_options(ui, data),
+                        }
+                    });
+                });
         });
 }
 
@@ -264,11 +272,6 @@ fn pen_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             actions.tool.set_pen_stroke_width = Some(sw);
         }
     }
-
-    ui.separator();
-    ui.label(
-        "Click = corner · drag = curve · click 1st point = close · Alt-click = corner · Ctrl-drag = move/reshape · Ctrl-click path = add node · Ctrl+Alt = break joint · Ctrl+Z = undo point · Enter = apply · Ctrl+Enter = selection · Esc = cancel",
-    );
 }
 
 fn brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
@@ -1448,14 +1451,14 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     );
     ui.separator();
     if ui
-        .button("⇔")
+        .button(ph::ARROWS_LEFT_RIGHT)
         .on_hover_text("Distribute horizontal centres of 3 or more selected objects")
         .clicked()
     {
         actions.layers.distribute_layers = Some(LayerDistribute::HorizontalCenters);
     }
     if ui
-        .button("⇕")
+        .button(ph::ARROWS_DOWN_UP)
         .on_hover_text("Distribute vertical centres of 3 or more selected objects")
         .clicked()
     {
@@ -1514,11 +1517,57 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         "Flip selected layers vertically",
     );
 
-    // When a vector Path is active, its Fill/Outline are editable right here.
+    // When a vector object is active, expose a compact Fill/Outline/Width here;
+    // the full editor (gradient stops, dash, overprint) lives in the Color panel
+    // so this already-crowded bar stays reachable.
     if data.tool.path_style.is_some() {
         ui.separator();
-        path_style_options(ui, data, actions);
+        path_style_quick(ui, data, actions);
     }
+}
+
+/// Compact Fill/Outline/Width quick-access for the crowded Move options bar.
+/// Full styling (gradient ramp, dash, overprint, fill/dash kinds) lives in the
+/// Color panel's Object section, so this row stays short. Same `path_*` actions
+/// as the panel, so the two surfaces stay in sync.
+fn path_style_quick(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    let Some(style) = data.tool.path_style else {
+        return;
+    };
+    let mut fill = style.fill_enabled;
+    if ui.checkbox(&mut fill, "Fill").changed() {
+        actions.tool.set_path_fill_enabled = Some(fill);
+    }
+    if shape_color_chip(ui, style.fill_color, "Fill colour") {
+        actions.dialogs.open_paint_color_dialog = Some(5);
+    }
+    ui.separator();
+    let mut stroke = style.stroke_enabled;
+    if ui.checkbox(&mut stroke, "Outline").changed() {
+        actions.tool.set_path_stroke_enabled = Some(stroke);
+    }
+    if shape_color_chip(ui, style.stroke_color, "Outline colour") {
+        actions.dialogs.open_paint_color_dialog = Some(6);
+    }
+    ui.label("Width:");
+    let mut w = style.stroke_width;
+    let resp = ui.add(
+        egui::DragValue::new(&mut w)
+            .range(0.0..=500.0)
+            .suffix(" px")
+            .speed(0.2),
+    );
+    if resp.changed() {
+        actions.tool.set_path_stroke_width = Some(w);
+    }
+    if resp.drag_stopped() || resp.lost_focus() {
+        actions.tool.commit_path_style = true;
+    }
+    ui.label(
+        egui::RichText::new("More in Color panel")
+            .size(10.0)
+            .color(egui::Color32::from_gray(140)),
+    );
 }
 
 fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
@@ -1532,51 +1581,63 @@ fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
     // Align the multi-selected nodes (Shift+click to pick several). Snaps X for
     // left/centre/right, Y for top/middle/bottom; a no-op below 2 selected nodes.
-    ui.label("Căn:");
+    ui.label("Align:");
     if ui
-        .button("⯇")
-        .on_hover_text("Căn trái (các điểm đã chọn, ≥2)")
+        .button(ph::ALIGN_LEFT)
+        .on_hover_text("Align left (selected points, ≥2)")
         .clicked()
     {
         actions.tool.node_align = Some((Axis::Vertical, AlignRef::Min));
     }
     if ui
-        .button("‖")
-        .on_hover_text("Căn giữa theo chiều ngang")
+        .button(ph::ALIGN_CENTER_VERTICAL)
+        .on_hover_text("Align horizontal centres")
         .clicked()
     {
         actions.tool.node_align = Some((Axis::Vertical, AlignRef::Average));
     }
-    if ui.button("⯈").on_hover_text("Căn phải").clicked() {
+    if ui
+        .button(ph::ALIGN_RIGHT)
+        .on_hover_text("Align right")
+        .clicked()
+    {
         actions.tool.node_align = Some((Axis::Vertical, AlignRef::Max));
     }
     ui.separator();
-    if ui.button("⯅").on_hover_text("Căn trên").clicked() {
+    if ui
+        .button(ph::ALIGN_TOP)
+        .on_hover_text("Align top")
+        .clicked()
+    {
         actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Min));
     }
     if ui
-        .button("═")
-        .on_hover_text("Căn giữa theo chiều dọc")
+        .button(ph::ALIGN_CENTER_HORIZONTAL)
+        .on_hover_text("Align vertical centres")
         .clicked()
     {
         actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Average));
     }
-    if ui.button("⯆").on_hover_text("Căn dưới").clicked() {
+    if ui
+        .button(ph::ALIGN_BOTTOM)
+        .on_hover_text("Align bottom")
+        .clicked()
+    {
         actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Max));
     }
     ui.separator();
 
     // Break the path at the selected node / join two selected endpoints.
     if ui
-        .button("Tách")
-        .on_hover_text("Tách đường tại điểm đang chọn")
+        .button("Break")
+        .on_hover_text("Break the path at the selected point")
         .clicked()
     {
         actions.tool.node_break = true;
     }
     if ui
-        .button("Nối")
-        .on_hover_text("Nối 2 điểm đầu/cuối đã chọn (đóng hoặc hàn đường)")
+        .button("Join")
+        .on_hover_text("Join the two selected endpoints (close or weld the path)")
         .clicked()
     {
         actions.tool.node_join = true;
@@ -1585,9 +1646,9 @@ fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
     ui.label(
         egui::RichText::new(
-            "Kéo điểm/tay nắm · bấm cạnh = chèn · Alt+cạnh = thẳng/cong · \
-             double-click điểm = góc/trơn · Shift+click hoặc kéo khung = chọn nhiều · \
-             bấm path khác = chọn · Delete = xoá",
+            "Drag point/handle · click edge = insert · Alt+edge = line/curve · \
+             double-click point = corner/smooth · Shift+click or box = multi-select · \
+             click another path = select · Delete = remove",
         )
         .size(11.0)
         .color(egui::Color32::from_gray(150)),
