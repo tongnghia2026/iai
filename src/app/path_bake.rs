@@ -11,7 +11,7 @@ use crate::app::render::CanvasEvent;
 use crate::app::state::{App, PathBakeInFlight};
 use crate::core::layer::LayerType;
 use crate::core::tile::TileMap;
-use crate::core::vector::object::VectorObjectData;
+use crate::core::vector::object::{VectorGeometry, VectorObjectData};
 use crate::core::vector::raster;
 
 impl App {
@@ -170,7 +170,7 @@ impl App {
         };
         let (old_off, old_w, old_h) = {
             let l = &canvas.layer_stack.layers[idx];
-            if !matches!(l.layer_type, LayerType::Path(_)) {
+            if !matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))) {
                 return;
             }
             (l.offset, l.width, l.height)
@@ -180,7 +180,7 @@ impl App {
         layer.width = w;
         layer.height = h;
         layer.offset = offset;
-        layer.layer_type = LayerType::Path(object);
+        layer.layer_type = LayerType::Vector(VectorGeometry::Path(object));
         canvas.layer_revision += 1;
         canvas.mark_dirty_layer_bounds(old_off.0, old_off.1, old_w, old_h);
         canvas.mark_dirty_layer_bounds(offset.0, offset.1, w, h);

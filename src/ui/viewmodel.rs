@@ -23,6 +23,8 @@ pub struct DocumentViewModel {
     pub cmyk_profile_name: String,
     /// Whether "Embed Color Profile (ICC)" is enabled for export.
     pub export_embed_icc: bool,
+    /// Named RGB/CMYK process colours stored in this document.
+    pub swatches: std::sync::Arc<Vec<crate::core::palette::DocumentSwatch>>,
     pub zoom: f32,
     pub offset_x: f32,
     pub offset_y: f32,
@@ -139,6 +141,8 @@ pub struct ToolViewModel {
     pub fill_contiguous: bool,
     pub fill_anti_alias: bool,
     pub fill_all_layers: bool,
+    /// Context-sensitive Gradient target: 0 disabled, 1 pixel, 2 vector, 3 mask.
+    pub gradient_mode: u8,
     pub gradient_type: u8,
     pub gradient_opacity: f32,
     pub gradient_reverse: bool,
@@ -192,6 +196,8 @@ pub struct ToolViewModel {
     /// On-canvas editing overlay for the active Path layer (Node tool): outline
     /// + anchor points + selected-node handle arms.
     pub node_overlay: Option<super::NodeOverlay>,
+    /// Transform handles for the active Path's vector gradient fill.
+    pub path_gradient_overlay: Option<super::PathGradientOverlay>,
     /// Zoom-bucketed raster for the active Path. Display-only; document tiles
     /// and export continue to use the normal document-resolution cache.
     pub path_display: Option<super::PathDisplayRaster>,
@@ -547,6 +553,7 @@ impl Default for UiData {
                 is_cmyk: false,
                 cmyk_profile_name: String::new(),
                 export_embed_icc: true,
+                swatches: std::sync::Arc::new(Vec::new()),
                 zoom: 1.0,
                 offset_x: 0.0,
                 offset_y: 0.0,
@@ -636,6 +643,7 @@ impl Default for UiData {
                 fill_contiguous: true,
                 fill_anti_alias: true,
                 fill_all_layers: false,
+                gradient_mode: 1,
                 gradient_type: 0,
                 gradient_opacity: 1.0,
                 gradient_reverse: false,
@@ -676,6 +684,7 @@ impl Default for UiData {
                 shape_preview: None,
                 shape_overlay: None,
                 node_overlay: None,
+                path_gradient_overlay: None,
                 path_display: None,
                 path_style: None,
                 pen_mode: 0,

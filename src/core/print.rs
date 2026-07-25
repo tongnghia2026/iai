@@ -337,10 +337,15 @@ pub fn build_pdf_encoded_with_vectors(
     pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
 
     offsets.push(pdf.len());
+    let shading_resources = if page.components == 3 {
+        pdf_shading_resources(vectors)
+    } else {
+        String::new()
+    };
     pdf.extend_from_slice(
         format!(
             "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}] \
-             /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n"
+             /Resources << /XObject << /Im0 5 0 R >> {shading_resources} >> /Contents 4 0 R >>\nendobj\n"
         )
         .as_bytes(),
     );
@@ -498,8 +503,17 @@ pub fn encode_pdf_page_cmyk(
 pub struct PdfVectorObject {
     pub path: crate::core::vector::path::PathData,
     pub fill: Option<[f32; 3]>,
+    /// Gradient transform maps unit gradient space directly into canvas pixels.
+    /// Keeping it here lets the PDF writer paint axial/radial shadings through
+    /// the same affine transform as the editable object, including ellipses.
+    pub fill_gradient: Option<crate::core::vector::style::Gradient>,
     pub stroke: Option<[f32; 3]>,
     pub stroke_width_px: f32,
+    pub stroke_cap: crate::core::vector::style::LineCap,
+    pub stroke_join: crate::core::vector::style::LineJoin,
+    pub stroke_miter_limit: f32,
+    pub stroke_dash: Vec<f32>,
+    pub stroke_dash_offset: f32,
     pub even_odd: bool,
 }
 
@@ -511,6 +525,13 @@ pub struct PdfVectorObject {
 pub struct PdfVectorSelection {
     pub objects: Vec<PdfVectorObject>,
     pub promoted_layer_ids: Vec<u32>,
+}
+
+fn shape_as_vector(
+    shape: &crate::core::shape::ShapeData,
+    layer_offset: (i32, i32),
+) -> crate::core::vector::object::VectorObjectData {
+    shape.to_vector_object(layer_offset)
 }
 
 pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSelection {
@@ -525,17 +546,6 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
         };
     }
     let layers = &canvas.layer_stack.layers;
-    let top_raster = layers
-        .iter()
-        .enumerate()
-        .filter(|(i, l)| {
-            canvas.layer_stack.is_effectively_visible(*i)
-                && !l.is_group()
-                && !matches!(l.layer_type, LayerType::Path(_))
-        })
-        .map(|(i, _)| i as isize)
-        .max()
-        .unwrap_or(-1);
     let rgb = |p: Paint| -> Option<[f32; 3]> {
         match p {
             Paint::Solid(c) => {
@@ -566,54 +576,98 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
 
     let mut objects = Vec::new();
     let mut promoted_layer_ids = Vec::new();
-    for (i, layer) in layers.iter().enumerate() {
-        if (i as isize) <= top_raster
-            || !canvas.layer_stack.is_effectively_visible(i)
-            || layer.mask.is_some()
+    // Walk from the top down and stop at the first painted layer that cannot be
+    // represented natively. This guarantees the later vector overlay never
+    // jumps above unsupported content that originally covered it.
+    for (i, layer) in layers.iter().enumerate().rev() {
+        if !canvas.layer_stack.is_effectively_visible(i) || layer.is_group() {
+            continue;
+        }
+        if layer.mask.is_some()
             || (layer.opacity - 1.0).abs() > 1e-3
             || layer.blend_mode != BlendMode::Normal
             || !ancestors_are_plain(i)
         {
-            continue;
+            break;
         }
-        let LayerType::Path(obj) = &layer.layer_type else {
-            continue;
+        let shape_object;
+        let obj = match &layer.layer_type {
+            LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(object)) => object,
+            LayerType::Vector(crate::core::vector::object::VectorGeometry::Primitive(shape)) => {
+                shape_object = shape_as_vector(shape, layer.offset);
+                &shape_object
+            }
+            _ => break,
         };
         if (obj.style.opacity - 1.0).abs() > 1e-3 {
-            continue;
+            break;
         }
-        // The current native PDF path writer supports solid paints and solid
-        // outlines only. Keep advanced styles in the raster base until PDF
-        // shading patterns / dash operators are emitted natively; never promote
-        // only the supported half of an object because that would drop artwork.
-        if matches!(obj.style.fill, Paint::Gradient(_))
-            || matches!(obj.style.stroke, Paint::Gradient(_))
-            || !obj.style.stroke_style.dash.is_solid()
-        {
-            continue;
+        // The current native writer has no ExtGState overprint operators. Keep
+        // these objects in the raster fallback rather than silently emitting a
+        // visually similar path that has different press/separation semantics.
+        if obj.style.fill_overprint || obj.style.stroke_overprint {
+            break;
         }
-        let fill = obj
-            .style
-            .fill
-            .is_visible()
-            .then(|| rgb(obj.style.fill))
-            .flatten();
+        // Gradient outlines still need a PDF pattern-stroke implementation.
+        // Never promote only the supported half of an object because that would
+        // drop artwork. Fill gradients and dash arrays are emitted natively.
+        if matches!(obj.style.stroke, Paint::Gradient(_)) {
+            break;
+        }
+        // The native writer does not yet emit transparency graphics states.
+        // Keep any translucent paint in the raster base rather than changing
+        // its appearance.
+        let fill_is_opaque = match obj.style.fill {
+            Paint::None => true,
+            Paint::Solid(c) => c.alpha() >= 1.0 - 1e-3,
+            Paint::Gradient(g) => g
+                .active_stops()
+                .iter()
+                .all(|stop| stop.color.alpha() >= 1.0 - 1e-3),
+        };
+        let stroke_is_opaque = match obj.style.stroke {
+            Paint::None => true,
+            Paint::Solid(c) => c.alpha() >= 1.0 - 1e-3,
+            Paint::Gradient(_) => false,
+        };
+        if !fill_is_opaque || !stroke_is_opaque {
+            break;
+        }
+        let fill = match obj.style.fill {
+            Paint::Solid(_) => rgb(obj.style.fill),
+            Paint::None | Paint::Gradient(_) => None,
+        };
+        let fill_gradient = match obj.style.fill {
+            Paint::Gradient(mut gradient) => {
+                gradient.transform = obj.transform.then(&gradient.transform);
+                Some(gradient)
+            }
+            Paint::None | Paint::Solid(_) => None,
+        };
         let half = obj.style.effective_stroke_width() * 0.5;
         let stroke = (obj.style.stroke.is_visible() && half > 0.0)
             .then(|| rgb(obj.style.stroke))
             .flatten();
-        if fill.is_none() && stroke.is_none() {
+        if fill.is_none() && fill_gradient.is_none() && stroke.is_none() {
             continue;
         }
         objects.push(PdfVectorObject {
             path: obj.path_in_layer_space(),
             fill,
+            fill_gradient,
             stroke,
             stroke_width_px: obj.style.effective_stroke_width(),
+            stroke_cap: obj.style.stroke_style.cap,
+            stroke_join: obj.style.stroke_style.join,
+            stroke_miter_limit: obj.style.stroke_style.miter_limit,
+            stroke_dash: obj.style.stroke_style.dash.as_slice().to_vec(),
+            stroke_dash_offset: obj.style.stroke_style.dash.offset,
             even_odd: obj.path.fill_rule == FillRule::EvenOdd,
         });
         promoted_layer_ids.push(layer.id);
     }
+    objects.reverse();
+    promoted_layer_ids.reverse();
     PdfVectorSelection {
         objects,
         promoted_layer_ids,
@@ -644,6 +698,130 @@ pub fn pdf_raster_base(
 /// space) over a page whose image occupies `dw×dh` points at `(tx,ty)` for a
 /// `w×h` pixel source. All inline (colours as `rg`/`RG`), so no extra PDF
 /// resources or object-number changes are needed.
+fn append_pdf_path(
+    out: &mut String,
+    path: &crate::core::vector::path::PathData,
+    mx: impl Fn(f32) -> f32,
+    my: impl Fn(f32) -> f32,
+) {
+    for contour in &path.contours {
+        if contour.nodes.is_empty() {
+            continue;
+        }
+        let node_count = contour.nodes.len();
+        let first = contour.nodes[0].anchor;
+        out.push_str(&format!("{:.3} {:.3} m\n", mx(first.x), my(first.y)));
+        for segment in 0..contour.segment_count() {
+            let Some((_p0, p1, p2, p3)) = contour.segment(segment) else {
+                continue;
+            };
+            let straight = contour.nodes[segment].out_handle.is_none()
+                && contour.nodes[(segment + 1) % node_count]
+                    .in_handle
+                    .is_none();
+            if straight {
+                out.push_str(&format!("{:.3} {:.3} l\n", mx(p3.x), my(p3.y)));
+            } else {
+                out.push_str(&format!(
+                    "{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} c\n",
+                    mx(p1.x),
+                    my(p1.y),
+                    mx(p2.x),
+                    my(p2.y),
+                    mx(p3.x),
+                    my(p3.y)
+                ));
+            }
+        }
+        if contour.closed {
+            out.push_str("h\n");
+        }
+    }
+}
+
+fn gradient_function_pdf(gradient: &crate::core::vector::style::Gradient) -> String {
+    let color = |value: crate::core::vector::color::ColorValue| {
+        let [r, g, b, _] = value.to_rgba8();
+        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+    };
+    let mut stops: Vec<(f32, [f32; 3])> = Vec::new();
+    for stop in gradient.active_stops() {
+        let offset = stop.offset.clamp(0.0, 1.0);
+        if stops
+            .last()
+            .is_some_and(|(previous, _)| (offset - *previous).abs() < 1e-6)
+        {
+            if let Some(last) = stops.last_mut() {
+                last.1 = color(stop.color);
+            }
+        } else {
+            stops.push((offset, color(stop.color)));
+        }
+    }
+    if stops.is_empty() {
+        stops.push((0.0, [0.0; 3]));
+    }
+    if stops[0].0 > 0.0 {
+        stops.insert(0, (0.0, stops[0].1));
+    }
+    if stops.last().is_some_and(|(offset, _)| *offset < 1.0) {
+        let last = stops.last().expect("checked").1;
+        stops.push((1.0, last));
+    }
+    if stops.len() == 1 {
+        stops.push((1.0, stops[0].1));
+    }
+    let type2 = |a: [f32; 3], b: [f32; 3]| {
+        format!(
+            "<< /FunctionType 2 /Domain [0 1] /C0 [{:.5} {:.5} {:.5}] /C1 [{:.5} {:.5} {:.5}] /N 1 >>",
+            a[0], a[1], a[2], b[0], b[1], b[2]
+        )
+    };
+    if stops.len() == 2 {
+        return type2(stops[0].1, stops[1].1);
+    }
+    let functions = stops
+        .windows(2)
+        .map(|pair| type2(pair[0].1, pair[1].1))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let bounds = stops[1..stops.len() - 1]
+        .iter()
+        .map(|(offset, _)| format!("{offset:.6}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let encode = (0..stops.len() - 1)
+        .map(|_| "0 1")
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "<< /FunctionType 3 /Domain [0 1] /Functions [{functions}] /Bounds [{bounds}] /Encode [{encode}] >>"
+    )
+}
+
+pub(crate) fn pdf_shading_resources(objects: &[PdfVectorObject]) -> String {
+    use crate::core::vector::style::GradientKind;
+    let mut entries = String::new();
+    for (index, object) in objects.iter().enumerate() {
+        let Some(gradient) = object.fill_gradient else {
+            continue;
+        };
+        let (kind, coords) = match gradient.kind {
+            GradientKind::Linear => (2, "0 0 1 0"),
+            GradientKind::Radial => (3, "0 0 0 0 0 1"),
+        };
+        entries.push_str(&format!(
+            "/IaiSh{index} << /ShadingType {kind} /ColorSpace /DeviceRGB /Coords [{coords}] /Function {} /Extend [true true] >> ",
+            gradient_function_pdf(&gradient)
+        ));
+    }
+    if entries.is_empty() {
+        String::new()
+    } else {
+        format!("/Shading << {entries}>>")
+    }
+}
+
 pub(crate) fn append_vector_content(
     out: &mut String,
     objects: &[PdfVectorObject],
@@ -664,75 +842,87 @@ pub(crate) fn append_vector_content(
     let my = |y: f32| ty + dh - y * sy;
 
     out.push_str("q\n");
-    for o in objects {
-        let has_fill = o.fill.is_some();
+    for (index, o) in objects.iter().enumerate() {
+        let has_solid_fill = o.fill.is_some();
+        let has_gradient_fill = o.fill_gradient.is_some();
+        let has_fill = has_solid_fill || has_gradient_fill;
         let has_stroke = o.stroke.is_some() && o.stroke_width_px > 0.0;
         if !has_fill && !has_stroke {
             continue;
         }
-        out.push_str("q\n");
-        if let Some([r, g, b]) = o.fill {
-            out.push_str(&format!("{r:.4} {g:.4} {b:.4} rg\n"));
+        if let Some(gradient) = o.fill_gradient {
+            out.push_str("q\n");
+            append_pdf_path(out, &o.path, mx, my);
+            out.push_str(if o.even_odd { "W* n\n" } else { "W n\n" });
+            let page = crate::core::vector::affine::AffineTransform {
+                a: sx,
+                b: 0.0,
+                c: 0.0,
+                d: -sy,
+                e: tx,
+                f: ty + dh,
+            };
+            let matrix = page.then(&gradient.transform);
+            out.push_str(&format!(
+                "{:.6} {:.6} {:.6} {:.6} {:.6} {:.6} cm\n/IaiSh{index} sh\nQ\n",
+                matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f
+            ));
         }
-        if has_stroke {
-            if let Some([r, g, b]) = o.stroke {
-                out.push_str(&format!(
-                    "{r:.4} {g:.4} {b:.4} RG\n{:.3} w\n",
-                    o.stroke_width_px * sx
-                ));
+
+        if has_solid_fill || has_stroke {
+            out.push_str("q\n");
+            if let Some([r, g, b]) = o.fill {
+                out.push_str(&format!("{r:.4} {g:.4} {b:.4} rg\n"));
             }
-        }
-        for c in &o.path.contours {
-            if c.nodes.is_empty() {
-                continue;
-            }
-            let n = c.nodes.len();
-            let p0 = c.nodes[0].anchor;
-            out.push_str(&format!("{:.3} {:.3} m\n", mx(p0.x), my(p0.y)));
-            for seg in 0..c.segment_count() {
-                let Some((_p0, p1, p2, p3)) = c.segment(seg) else {
-                    continue;
-                };
-                let straight =
-                    c.nodes[seg].out_handle.is_none() && c.nodes[(seg + 1) % n].in_handle.is_none();
-                if straight {
-                    out.push_str(&format!("{:.3} {:.3} l\n", mx(p3.x), my(p3.y)));
-                } else {
+            if has_stroke {
+                if let Some([r, g, b]) = o.stroke {
+                    use crate::core::vector::style::{LineCap, LineJoin};
+                    let cap = match o.stroke_cap {
+                        LineCap::Butt => 0,
+                        LineCap::Round => 1,
+                        LineCap::Square => 2,
+                    };
+                    let join = match o.stroke_join {
+                        LineJoin::Miter => 0,
+                        LineJoin::Round => 1,
+                        LineJoin::Bevel => 2,
+                    };
+                    let dash = o
+                        .stroke_dash
+                        .iter()
+                        .map(|value| format!("{:.3}", value * sx))
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     out.push_str(&format!(
-                        "{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} c\n",
-                        mx(p1.x),
-                        my(p1.y),
-                        mx(p2.x),
-                        my(p2.y),
-                        mx(p3.x),
-                        my(p3.y)
+                        "{r:.4} {g:.4} {b:.4} RG\n{:.3} w\n{cap} J\n{join} j\n{:.3} M\n[{dash}] {:.3} d\n",
+                        o.stroke_width_px * sx,
+                        o.stroke_miter_limit.max(1.0),
+                        o.stroke_dash_offset * sx,
                     ));
                 }
             }
-            if c.closed {
-                out.push_str("h\n");
-            }
+            append_pdf_path(out, &o.path, mx, my);
+            let op = match (has_solid_fill, has_stroke) {
+                (true, true) => {
+                    if o.even_odd {
+                        "B*"
+                    } else {
+                        "B"
+                    }
+                }
+                (true, false) => {
+                    if o.even_odd {
+                        "f*"
+                    } else {
+                        "f"
+                    }
+                }
+                (false, true) => "S",
+                (false, false) => "n",
+            };
+            out.push_str(op);
+            out.push_str("\nQ\n");
         }
-        let op = match (has_fill, has_stroke) {
-            (true, true) => {
-                if o.even_odd {
-                    "B*"
-                } else {
-                    "B"
-                }
-            }
-            (true, false) => {
-                if o.even_odd {
-                    "f*"
-                } else {
-                    "f"
-                }
-            }
-            (false, true) => "S",
-            (false, false) => "n",
-        };
-        out.push_str(op);
-        out.push_str("\nQ\n");
     }
     out.push_str("Q\n");
 }
@@ -834,12 +1024,20 @@ pub fn build_pdf_multipage_encoded(
         let page_obj = base + i * 3;
         let content_obj = page_obj + 1;
         let image_obj = page_obj + 2;
+        let shading_resources = if e.components == 3 {
+            vectors
+                .get(i)
+                .map(|objects| pdf_shading_resources(objects))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
 
         offsets.push(pdf.len());
         pdf.extend_from_slice(
             format!(
                 "{page_obj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] \
-                 /Resources << /XObject << /Im0 {image_obj} 0 R >> >> /Contents {content_obj} 0 R >>\nendobj\n",
+                 /Resources << /XObject << /Im0 {image_obj} 0 R >> {shading_resources} >> /Contents {content_obj} 0 R >>\nendobj\n",
                 e.pw, e.ph
             )
             .as_bytes(),
@@ -1431,8 +1629,14 @@ mod tests {
         let obj = PdfVectorObject {
             path,
             fill: Some([0.0, 0.0, 1.0]),
+            fill_gradient: None,
             stroke: None,
             stroke_width_px: 0.0,
+            stroke_cap: crate::core::vector::style::LineCap::Butt,
+            stroke_join: crate::core::vector::style::LineJoin::Miter,
+            stroke_miter_limit: 4.0,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
             even_odd: false,
         };
         let pdf = build_pdf_with_vectors(
@@ -1507,6 +1711,168 @@ mod tests {
     }
 
     #[test]
+    fn gradient_fill_and_dashed_outline_are_native_pdf_vectors() {
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::{
+            DashPattern, Gradient, GradientKind, GradientStop, Paint, StrokeStyle, VectorStyle,
+        };
+
+        let mut gradient = Gradient::two_color(
+            GradientKind::Radial,
+            ColorValue::rgb(1.0, 0.0, 0.0),
+            ColorValue::rgb(0.0, 0.0, 1.0),
+            AffineTransform::translate(8.0, 8.0).then(&AffineTransform::scale(6.0, 3.0)),
+        );
+        gradient.stop_count = 3;
+        gradient.stops[1] = GradientStop {
+            offset: 0.4,
+            color: ColorValue::rgb(0.0, 1.0, 0.0),
+        };
+        gradient.stops[2] = GradientStop {
+            offset: 1.0,
+            color: ColorValue::rgb(0.0, 0.0, 1.0),
+        };
+        let style = VectorStyle {
+            fill: Paint::Gradient(gradient),
+            stroke: Paint::Solid(ColorValue::BLACK),
+            stroke_style: StrokeStyle {
+                width: 2.0,
+                dash: DashPattern::from_slice(&[3.0, 2.0], 1.0),
+                ..StrokeStyle::default()
+            },
+            ..VectorStyle::default()
+        };
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(2.0, 2.0)),
+                    Node::sharp(Point::new(14.0, 2.0)),
+                    Node::sharp(Point::new(14.0, 14.0)),
+                    Node::sharp(Point::new(2.0, 14.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255; 16 * 16 * 4], 16, 16);
+        let index = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(path, style, AffineTransform::IDENTITY),
+        );
+
+        let selection = collect_pdf_vectors(&canvas);
+        assert_eq!(selection.objects.len(), 1);
+        assert!(selection.objects[0].fill_gradient.is_some());
+        assert_eq!(selection.objects[0].stroke_dash, vec![3.0, 2.0]);
+        let base = pdf_raster_base(&canvas, &selection);
+        let pdf = build_pdf_with_vectors(
+            &base,
+            16,
+            16,
+            72.0,
+            &selection.objects,
+            &PrintLayout::default(),
+            None,
+        )
+        .expect("gradient pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/ShadingType 3"));
+        assert!(text.contains("/FunctionType 3"));
+        assert!(text.contains("/IaiSh0 sh"));
+        assert!(text.contains("[3.000 2.000] 1.000 d"));
+        lopdf::Document::load_mem(&pdf).expect("valid PDF structure");
+    }
+
+    #[test]
+    fn top_shape_does_not_force_path_below_it_into_pdf_raster() {
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::layer::LayerType;
+        use crate::core::shape::{ShapeData, ShapeKind};
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::{Gradient, GradientKind, Paint, VectorStyle};
+
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255; 100 * 100 * 4], 100, 100);
+        let path_index = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[path_index],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(10.0, 10.0)),
+                            Node::sharp(Point::new(90.0, 10.0)),
+                            Node::sharp(Point::new(50.0, 90.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+        let shape_index = canvas.add_layer();
+        let (mut shape, offset) = ShapeData::from_canvas_span(
+            ShapeKind::Rectangle,
+            15.0,
+            15.0,
+            70.0,
+            70.0,
+            12.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 0],
+        );
+        shape.style.fill = Paint::Gradient(Gradient::two_color(
+            GradientKind::Linear,
+            ColorValue::rgb(0.0, 0.0, 0.0),
+            ColorValue::rgb(0.0, 0.0, 1.0),
+            AffineTransform::translate(shape.x0, shape.y0)
+                .then(&AffineTransform::scale((shape.x1 - shape.x0).abs(), 1.0)),
+        ));
+        canvas.layer_stack.layers[shape_index].layer_type = LayerType::Vector(
+            crate::core::vector::object::VectorGeometry::Primitive(shape),
+        );
+        canvas.layer_stack.layers[shape_index].offset = offset;
+
+        let selection = collect_pdf_vectors(&canvas);
+        assert_eq!(selection.objects.len(), 2);
+        assert_eq!(selection.promoted_layer_ids.len(), 2);
+        assert!(
+            selection.objects[1].fill_gradient.is_some(),
+            "primitive Shape gradient must stay native"
+        );
+        let base = pdf_raster_base(&canvas, &selection);
+        let pdf = build_pdf_with_vectors(
+            &base,
+            100,
+            100,
+            72.0,
+            &selection.objects,
+            &PrintLayout::default(),
+            None,
+        )
+        .expect("shape and path PDF");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains(" rg\n"), "solid Path must stay native");
+        assert!(
+            text.contains("/ShadingType 2") && text.contains("/IaiSh1 sh"),
+            "primitive Shape gradient must be emitted as native PDF shading"
+        );
+    }
+
+    #[test]
     fn nonopaque_path_stays_in_pdf_raster_base() {
         use crate::core::layer::LayerType;
         let mut canvas = crate::core::canvas::Canvas::new(4, 4);
@@ -1519,6 +1885,40 @@ mod tests {
             LayerType::Raster
         ));
         let selection = collect_pdf_vectors(&canvas);
+        assert!(selection.promoted_layer_ids.is_empty());
+    }
+
+    #[test]
+    fn overprint_path_is_not_promoted_without_pdf_overprint_support() {
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        let mut style = VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0));
+        style.fill_overprint = true;
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(1.0, 1.0)),
+                    Node::sharp(Point::new(7.0, 1.0)),
+                    Node::sharp(Point::new(4.0, 7.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        let mut canvas = crate::core::canvas::Canvas::new(8, 8);
+        let index = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(path, style, AffineTransform::IDENTITY),
+        );
+        let selection = collect_pdf_vectors(&canvas);
+        assert!(selection.objects.is_empty());
         assert!(selection.promoted_layer_ids.is_empty());
     }
 
@@ -1544,8 +1944,14 @@ mod tests {
         let obj = PdfVectorObject {
             path,
             fill: Some([1.0, 0.0, 0.0]),
+            fill_gradient: None,
             stroke: None,
             stroke_width_px: 0.0,
+            stroke_cap: crate::core::vector::style::LineCap::Butt,
+            stroke_join: crate::core::vector::style::LineJoin::Miter,
+            stroke_miter_limit: 4.0,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
             even_odd: false,
         };
         let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], None).expect("pdf");
@@ -1585,8 +1991,14 @@ mod tests {
         let obj = PdfVectorObject {
             path,
             fill: Some([1.0, 0.0, 0.0]),
+            fill_gradient: None,
             stroke: None,
             stroke_width_px: 0.0,
+            stroke_cap: crate::core::vector::style::LineCap::Butt,
+            stroke_join: crate::core::vector::style::LineJoin::Miter,
+            stroke_miter_limit: 4.0,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
             even_odd: false,
         };
         let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], None).expect("pdf");

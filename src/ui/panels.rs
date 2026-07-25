@@ -568,7 +568,232 @@ fn color_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                     actions.tool.brush_color = Some([c.r(), c.g(), c.b(), 255]);
                 }
             });
+
+            ui.add_space(8.0);
+            ui.separator();
+            vector_palette(ui, data, actions);
         });
+}
+
+fn vector_palette(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    use crate::core::vector::color::ColorValue;
+
+    let has_path = data.tool.path_style.is_some();
+    let gesture = if has_path {
+        "Left click: Fill · Right click: Outline"
+    } else {
+        "No editable Path selected · Left: Foreground · Right: Background"
+    };
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Quick Palette").strong().size(11.0));
+        ui.label(egui::RichText::new(gesture).small().weak());
+    });
+
+    let quick = [
+        ("Black", [0, 0, 0, 255]),
+        ("White", [255, 255, 255, 255]),
+        ("Gray", [128, 128, 128, 255]),
+        ("Red", [237, 28, 36, 255]),
+        ("Orange", [247, 148, 30, 255]),
+        ("Yellow", [255, 242, 0, 255]),
+        ("Green", [0, 166, 81, 255]),
+        ("Cyan", [0, 174, 239, 255]),
+        ("Blue", [0, 84, 166, 255]),
+        ("Violet", [102, 45, 145, 255]),
+        ("Magenta", [236, 0, 140, 255]),
+        ("Brown", [117, 76, 36, 255]),
+    ];
+    ui.horizontal_wrapped(|ui| {
+        let none = palette_none_button(ui).on_hover_text(if has_path {
+            "No color — left: remove Fill · right: remove Outline"
+        } else {
+            "Select an editable Path to remove Fill/Outline"
+        });
+        if none.clicked_by(egui::PointerButton::Primary) {
+            actions.tool.clear_palette_fill = true;
+        }
+        if none.clicked_by(egui::PointerButton::Secondary) {
+            actions.tool.clear_palette_outline = true;
+        }
+        for (name, rgba) in quick {
+            let color = ColorValue::from_rgba8(rgba);
+            let response = palette_color_button(ui, color).on_hover_text(name);
+            palette_gesture(response, color, actions);
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("Document Swatches ({})", data.doc.swatches.len()))
+                .strong()
+                .size(11.0),
+        );
+        let add_color = data
+            .tool
+            .path_style
+            .and_then(|style| style.fill_value.or(style.stroke_value))
+            .unwrap_or_else(|| ColorValue::from_rgba8(data.tool.brush_color));
+        if ui
+            .small_button(format!("{} Add current", ph::PLUS))
+            .on_hover_text("Add the selected Path colour (or Foreground) to this document")
+            .clicked()
+        {
+            actions.tool.add_document_swatch = Some(add_color);
+        }
+        ui.menu_button("Manage\u{2026}", |ui| {
+            ui.set_min_width(300.0);
+            if data.doc.swatches.is_empty() {
+                ui.weak("No document swatches yet");
+            }
+            for (index, swatch) in data.doc.swatches.iter().enumerate() {
+                ui.push_id(("manage_document_swatch", index), |ui| {
+                    ui.horizontal(|ui| {
+                        let _ = palette_color_button(ui, swatch.color);
+                        let edit_id = ui.id().with("name");
+                        let mut name = ui
+                            .data(|memory| memory.get_temp::<String>(edit_id))
+                            .unwrap_or_else(|| swatch.name.clone());
+                        let changed = ui
+                            .add(
+                                egui::TextEdit::singleline(&mut name)
+                                    .desired_width(170.0)
+                                    .char_limit(crate::core::palette::MAX_SWATCH_NAME_BYTES),
+                            )
+                            .changed();
+                        if changed {
+                            ui.data_mut(|memory| memory.insert_temp(edit_id, name.clone()));
+                        }
+                        if ui
+                            .small_button(ph::CHECK)
+                            .on_hover_text("Rename swatch")
+                            .clicked()
+                        {
+                            actions.tool.rename_document_swatch = Some((index, name));
+                        }
+                        if ui
+                            .small_button(ph::TRASH)
+                            .on_hover_text("Remove swatch")
+                            .clicked()
+                        {
+                            actions.tool.remove_document_swatch = Some(index);
+                        }
+                    });
+                });
+            }
+        });
+    });
+
+    if data.doc.swatches.is_empty() {
+        ui.label(
+            egui::RichText::new("Add named RGB/CMYK colours used by this project.")
+                .small()
+                .weak(),
+        );
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            for swatch in data.doc.swatches.iter() {
+                let response =
+                    palette_color_button(ui, swatch.color).on_hover_text(swatch_tooltip(swatch));
+                palette_gesture(response, swatch.color, actions);
+            }
+        });
+    }
+
+    if let Some(style) = data.tool.path_style {
+        ui.add_space(5.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Print").strong().size(11.0));
+            let mut fill = style.fill_overprint;
+            if ui
+                .add_enabled(
+                    style.fill_enabled,
+                    egui::Checkbox::new(&mut fill, "Overprint Fill"),
+                )
+                .changed()
+            {
+                actions.tool.set_path_fill_overprint = Some(fill);
+            }
+            let mut outline = style.stroke_overprint;
+            if ui
+                .add_enabled(
+                    style.stroke_enabled,
+                    egui::Checkbox::new(&mut outline, "Overprint Outline"),
+                )
+                .changed()
+            {
+                actions.tool.set_path_stroke_overprint = Some(outline);
+            }
+        });
+    }
+}
+
+fn palette_gesture(
+    response: egui::Response,
+    color: crate::core::vector::color::ColorValue,
+    actions: &mut UiActions,
+) {
+    if response.clicked_by(egui::PointerButton::Primary) {
+        actions.tool.apply_palette_fill = Some(color);
+    }
+    if response.clicked_by(egui::PointerButton::Secondary) {
+        actions.tool.apply_palette_outline = Some(color);
+    }
+}
+
+fn palette_color_button(
+    ui: &mut egui::Ui,
+    color: crate::core::vector::color::ColorValue,
+) -> egui::Response {
+    let [r, g, b, _] = color.to_rgba8();
+    ui.add(
+        egui::Button::new("")
+            .fill(egui::Color32::from_rgb(r, g, b))
+            .stroke(egui::Stroke::new(
+                1.0_f32,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ))
+            .min_size(egui::vec2(22.0, 22.0))
+            .sense(egui::Sense::click()),
+    )
+}
+
+fn palette_none_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 1.0, egui::Color32::WHITE);
+    painter.rect_stroke(
+        rect,
+        1.0,
+        egui::Stroke::new(1.0_f32, egui::Color32::GRAY),
+        egui::StrokeKind::Inside,
+    );
+    painter.line_segment(
+        [rect.left_bottom(), rect.right_top()],
+        egui::Stroke::new(2.0_f32, egui::Color32::RED),
+    );
+    response
+}
+
+fn swatch_tooltip(swatch: &crate::core::palette::DocumentSwatch) -> String {
+    use crate::core::vector::color::ColorValue;
+    match swatch.color {
+        ColorValue::Rgb { .. } => {
+            let [r, g, b, _] = swatch.color.to_rgba8();
+            format!("{}\nRGB #{r:02X}{g:02X}{b:02X}", swatch.name)
+        }
+        ColorValue::Cmyk { c, m, y, k, .. } => {
+            let p = |v: f32| (v.clamp(0.0, 1.0) * 100.0).round() as u8;
+            format!(
+                "{}\nCMYK C{} M{} Y{} K{}",
+                swatch.name,
+                p(c),
+                p(m),
+                p(y),
+                p(k)
+            )
+        }
+    }
 }
 
 fn ps_layer_thumbnail(

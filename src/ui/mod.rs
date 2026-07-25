@@ -146,14 +146,27 @@ pub struct ShapeOverlay {
 pub struct PathStyleData {
     pub fill_enabled: bool,
     pub fill_color: [u8; 4],
+    /// Exact process colour behind the preview chip (preserves CMYK identity).
+    pub fill_value: Option<crate::core::vector::color::ColorValue>,
+    pub fill_overprint: bool,
     pub fill_end_color: [u8; 4],
+    pub gradient_stop_colors: [[u8; 4]; crate::core::vector::style::MAX_GRADIENT_STOPS],
+    pub gradient_stop_offsets: [f32; crate::core::vector::style::MAX_GRADIENT_STOPS],
+    pub gradient_stop_count: u8,
     pub stroke_enabled: bool,
     pub stroke_color: [u8; 4],
+    pub stroke_value: Option<crate::core::vector::color::ColorValue>,
+    pub stroke_overprint: bool,
     pub stroke_width: f32,
     /// 0 solid, 1 linear gradient, 2 radial gradient.
     pub fill_kind: u8,
     /// 0 solid, 1 dashed, 2 dotted.
     pub dash_kind: u8,
+    /// Editable dash/gap lengths in canvas units. Only the first `dash_len`
+    /// entries are active.
+    pub dash_values: [f32; crate::core::vector::style::MAX_DASHES],
+    pub dash_len: u8,
+    pub dash_offset: f32,
 }
 
 /// On-canvas editing overlay for the Node tool: the active Path's outline,
@@ -170,6 +183,16 @@ pub struct NodeOverlay {
     /// Active rubber-band selection rect in SCREEN space `[x0, y0, x1, y1]`, or
     /// `None` when not marquee-dragging.
     pub marquee: Option<[f32; 4]>,
+}
+
+#[derive(Clone)]
+pub struct PathGradientOverlay {
+    /// 0 linear, 1 radial.
+    pub kind: u8,
+    pub center: (f32, f32),
+    pub axis_x: (f32, f32),
+    pub axis_y: (f32, f32),
+    pub stops: Vec<(f32, f32)>,
 }
 
 #[derive(Clone)]
@@ -1467,6 +1490,56 @@ pub fn build(
                     egui::Stroke::new(1.0_f32, accent),
                     egui::StrokeKind::Middle,
                 );
+            }
+        }
+
+        // Editable Path gradient transform: origin and basis handles. Linear
+        // gradients expose direction; radial gradients also expose the second
+        // radius and an ellipse preview.
+        if let Some(overlay) = &data.tool.path_gradient_overlay {
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("path_gradient_overlay"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            let center = to_screen_pos(overlay.center.0, overlay.center.1);
+            let axis_x = to_screen_pos(overlay.axis_x.0, overlay.axis_x.1);
+            let axis_y = to_screen_pos(overlay.axis_y.0, overlay.axis_y.1);
+            let shadow = egui::Stroke::new(3.0_f32, egui::Color32::from_black_alpha(150));
+            let accent = egui::Stroke::new(1.25_f32, egui::Color32::from_rgb(255, 210, 70));
+            for stroke in [shadow, accent] {
+                painter.line_segment([center, axis_x], stroke);
+                if overlay.kind == 1 {
+                    painter.line_segment([center, axis_y], stroke);
+                }
+            }
+            if overlay.kind == 1 {
+                let vx = axis_x - center;
+                let vy = axis_y - center;
+                let ellipse: Vec<egui::Pos2> = (0..=64)
+                    .map(|index| {
+                        let angle = std::f32::consts::TAU * index as f32 / 64.0;
+                        center + vx * angle.cos() + vy * angle.sin()
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(ellipse, accent));
+            }
+            for &(x, y) in &overlay.stops {
+                let point = to_screen_pos(x, y);
+                painter.circle(
+                    point,
+                    3.0,
+                    egui::Color32::WHITE,
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40)),
+                );
+            }
+            let center_rect = egui::Rect::from_center_size(center, egui::vec2(8.0, 8.0));
+            painter.rect_filled(center_rect, 1.0, egui::Color32::WHITE);
+            painter.rect_stroke(center_rect, 1.0, accent, egui::StrokeKind::Outside);
+            painter.circle(axis_x, 5.0, egui::Color32::WHITE, accent);
+            if overlay.kind == 1 {
+                painter.circle(axis_y, 5.0, egui::Color32::WHITE, accent);
             }
         }
 
@@ -3371,6 +3444,10 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
         2 => "Text Color",
         3 => "Shape Fill Color",
         4 => "Shape Stroke Color",
+        5 => "Path Fill Color",
+        6 => "Path Outline Color",
+        7 => "Gradient End Color",
+        8..=15 => "Gradient Stop Color",
         _ => "Foreground Color",
     };
 

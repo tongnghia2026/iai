@@ -365,20 +365,22 @@ impl App {
                 &canvas.layer_stack
             };
 
-            // The active editable vector is drawn separately from a
-            // zoom-bucketed supersampled raster. Remove its document-resolution
-            // cache from this composite so coarse edge pixels cannot show through
-            // underneath the smoother overlay.
+            // The top visible vector run is drawn separately from one
+            // zoom-bucketed supersampled raster. Remove every corresponding
+            // document-resolution cache so coarse edge pixels cannot show
+            // through underneath the smoother overlay.
             let display_stack_owned = self
                 .shell
                 .ui_data_cache
-                .path_display_suppressed_layer
+                .path_display_suppressed_layers
+                .as_ref()
                 .filter(|(doc_id, _)| *doc_id == self.docs.documents[self.docs.active_doc_idx].id.0)
-                .map(|(_, layer_id)| {
+                .map(|(_, layer_ids)| {
                     let mut stack = render_stack_ref.clone();
-                    if let Some(layer) = stack.layers.iter_mut().find(|layer| layer.id == layer_id)
-                    {
-                        layer.visible = false;
+                    for layer in &mut stack.layers {
+                        if layer_ids.contains(&layer.id) {
+                            layer.visible = false;
+                        }
                     }
                     stack
                 });

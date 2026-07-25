@@ -2287,11 +2287,15 @@ struct VsOut {
             crate::core::layer::LayerType::Raster => 1u8.hash(&mut h),
             crate::core::layer::LayerType::Group => 2u8.hash(&mut h),
             crate::core::layer::LayerType::Text(_) => 3u8.hash(&mut h),
-            crate::core::layer::LayerType::Shape(_) => 4u8.hash(&mut h),
+            crate::core::layer::LayerType::Vector(
+                crate::core::vector::object::VectorGeometry::Primitive(_),
+            ) => 4u8.hash(&mut h),
             crate::core::layer::LayerType::SmartObject => 5u8.hash(&mut h),
             // Path renders through its tiles cache (hashed above via the tile
             // revision fingerprint), like Shape/Text — the discriminant is enough.
-            crate::core::layer::LayerType::Path(_) => 6u8.hash(&mut h),
+            crate::core::layer::LayerType::Vector(
+                crate::core::vector::object::VectorGeometry::Path(_),
+            ) => 6u8.hash(&mut h),
         }
         h.finish()
     }

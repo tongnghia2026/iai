@@ -17,6 +17,7 @@ use crate::app::state::{App, PathTransformDrag, TransformHandle};
 use crate::core::geometry::{Point, Rect};
 use crate::core::layer::LayerType;
 use crate::core::vector::affine::AffineTransform;
+use crate::core::vector::object::VectorGeometry;
 use crate::gpu::compositor::TransformPreviewUniform;
 
 /// Screen-space grab radius for a box handle.
@@ -136,7 +137,7 @@ impl App {
         let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
         let idx = canvas.layer_stack.active_idx;
         let layer = canvas.layer_stack.layers.get(idx)?;
-        if matches!(layer.layer_type, LayerType::Path(_))
+        if matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
             && layer.visible
             && !layer.locked
             && !layer.is_background
@@ -154,7 +155,7 @@ impl App {
             .canvas
             .layer_stack
             .layers[idx];
-        let LayerType::Path(obj) = &layer.layer_type else {
+        let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type else {
             return None;
         };
         let lb = obj.local_bounds(BOX_TOL)?;
@@ -257,7 +258,7 @@ impl App {
             if !layer.visible {
                 continue;
             }
-            let LayerType::Path(obj) = &layer.layer_type else {
+            let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type else {
                 continue;
             };
             let Some(inv) = obj.transform.inverse() else {
@@ -332,7 +333,7 @@ impl App {
         // Normalise any residual offset↔model drift (no-op in the common case).
         crate::core::command_vector::fold_offset_into_model(layer);
         let layer_id = layer.id;
-        let LayerType::Path(obj) = &layer.layer_type else {
+        let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type else {
             return;
         };
         let orig = obj.transform;
@@ -464,7 +465,7 @@ impl App {
         let (orig_ox, orig_oy) = {
             let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
             match canvas.layer_stack.layers.iter().find(|l| l.id == layer_id) {
-                Some(l) if matches!(l.layer_type, LayerType::Path(_)) => {
+                Some(l) if matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))) => {
                     (l.offset.0 as f32, l.offset.1 as f32)
                 }
                 None => return,
@@ -521,7 +522,7 @@ impl App {
         };
         if !matches!(
             canvas.layer_stack.layers[idx].layer_type,
-            LayerType::Path(_)
+            LayerType::Vector(VectorGeometry::Path(_))
         ) {
             return;
         }
@@ -531,12 +532,12 @@ impl App {
         if !drag.changed || final_t == drag.orig_transform {
             // Nothing moved — make sure the model is exactly the baseline.
             let model_t = match &canvas.layer_stack.layers[idx].layer_type {
-                LayerType::Path(o) => o.transform,
+                LayerType::Vector(VectorGeometry::Path(o)) => o.transform,
                 _ => return,
             };
             if model_t != drag.orig_transform {
                 let layer = &mut canvas.layer_stack.layers[idx];
-                if let LayerType::Path(o) = &layer.layer_type {
+                if let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type {
                     let mut o = o.clone();
                     o.transform = drag.orig_transform;
                     crate::core::command_vector::apply_object_to_layer(layer, o);
@@ -549,7 +550,7 @@ impl App {
         // Rewind the live preview to the baseline so `execute` records old→new.
         {
             let layer = &mut canvas.layer_stack.layers[idx];
-            if let LayerType::Path(o) = &layer.layer_type {
+            if let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type {
                 let mut o = o.clone();
                 o.transform = drag.orig_transform;
                 crate::core::command_vector::apply_object_to_layer(layer, o);
@@ -753,7 +754,7 @@ mod tests {
                 .layer_stack
                 .layers
                 .iter()
-                .position(|l| matches!(l.layer_type, LayerType::Path(_)))
+                .position(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
                 .unwrap();
             canvas.layer_stack.layers[idx].selected = true;
             canvas.layer_stack.active_idx = idx;
@@ -811,7 +812,7 @@ mod tests {
 
         let l = find_layer(&app, id);
         assert!(
-            matches!(l.layer_type, LayerType::Path(_)),
+            matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))),
             "scaled Path stays an editable vector (not baked to Raster)"
         );
         assert!(
@@ -824,7 +825,10 @@ mod tests {
         // One undo step restores the original size and keeps it a Path.
         app.docs.documents[0].canvas.undo().expect("undo");
         let l = find_layer(&app, id);
-        assert!(matches!(l.layer_type, LayerType::Path(_)));
+        assert!(matches!(
+            l.layer_type,
+            LayerType::Vector(VectorGeometry::Path(_))
+        ));
         assert_eq!((l.width, l.height), (w0, h0), "undo restored the size");
     }
 }

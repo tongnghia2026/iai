@@ -40,6 +40,23 @@ pub struct PathRaster {
 /// `None` when there is nothing visible to draw (empty path, no fill and no
 /// outline) or the raster would exceed [`MAX_RASTER_PIXELS`].
 pub fn rasterize(object: &VectorObjectData) -> Option<PathRaster> {
+    rasterize_impl(object, None)
+}
+
+/// Rasterize only the intersection with `clip` in layer coordinates. This is
+/// used by the high-zoom editor overlay so a 6400% view allocates roughly the
+/// visible screen, not a 64x copy of the entire object.
+pub fn rasterize_clipped(
+    object: &VectorObjectData,
+    clip: crate::core::geometry::Rect,
+) -> Option<PathRaster> {
+    rasterize_impl(object, Some(clip))
+}
+
+fn rasterize_impl(
+    object: &VectorObjectData,
+    clip: Option<crate::core::geometry::Rect>,
+) -> Option<PathRaster> {
     let fill_visible = object.style.fill.is_visible();
     let half = object.style.effective_stroke_width() * 0.5;
     let stroke_visible = object.style.stroke.is_visible() && half > 0.0;
@@ -74,10 +91,21 @@ pub fn rasterize(object: &VectorObjectData) -> Option<PathRaster> {
 
     // AA margin: half the stroke plus a pixel for the coverage ramp.
     let pad = half.max(0.0) + 1.0;
-    let off_x = (min_x - pad).floor();
-    let off_y = (min_y - pad).floor();
-    let w = ((max_x + pad).ceil() - off_x).max(1.0);
-    let h = ((max_y + pad).ceil() - off_y).max(1.0);
+    let mut off_x = (min_x - pad).floor();
+    let mut off_y = (min_y - pad).floor();
+    let mut end_x = (max_x + pad).ceil();
+    let mut end_y = (max_y + pad).ceil();
+    if let Some(clip) = clip {
+        off_x = off_x.max(clip.x.floor());
+        off_y = off_y.max(clip.y.floor());
+        end_x = end_x.min(clip.right().ceil());
+        end_y = end_y.min(clip.bottom().ceil());
+        if end_x <= off_x || end_y <= off_y {
+            return None;
+        }
+    }
+    let w = (end_x - off_x).max(1.0);
+    let h = (end_y - off_y).max(1.0);
     if (w as u64) * (h as u64) > MAX_RASTER_PIXELS {
         return None;
     }
@@ -156,17 +184,24 @@ pub fn rasterize(object: &VectorObjectData) -> Option<PathRaster> {
 }
 
 fn sample_paint(paint: Paint, object: &VectorObjectData, layer_point: Point) -> [u8; 4] {
+    let Some(object_inv) = object.transform.inverse() else {
+        return [0, 0, 0, 0];
+    };
+    sample_paint_in_object_space(paint, object_inv.apply_point(layer_point))
+}
+
+/// Sample a vector paint at an object-local point. Parametric primitives use
+/// this same function, so Path and Shape gradients have identical stop,
+/// transform and alpha semantics.
+pub(crate) fn sample_paint_in_object_space(paint: Paint, object_point: Point) -> [u8; 4] {
     match paint {
         Paint::None => [0, 0, 0, 0],
         Paint::Solid(color) => color.to_rgba8(),
         Paint::Gradient(gradient) => {
-            let Some(object_inv) = object.transform.inverse() else {
-                return [0, 0, 0, 0];
-            };
             let Some(gradient_inv) = gradient.transform.inverse() else {
                 return [0, 0, 0, 0];
             };
-            let gp = gradient_inv.apply_point(object_inv.apply_point(layer_point));
+            let gp = gradient_inv.apply_point(object_point);
             let t = match gradient.kind {
                 GradientKind::Linear => gp.x,
                 GradientKind::Radial => (gp.x * gp.x + gp.y * gp.y).sqrt(),

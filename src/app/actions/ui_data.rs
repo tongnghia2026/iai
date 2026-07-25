@@ -402,13 +402,7 @@ impl App {
             self.shell.ui_data_cache.layer_types = std::sync::Arc::new(
                 layers
                     .iter()
-                    .map(|l| {
-                        format!("{:?}", l.layer_type)
-                            .split('(')
-                            .next()
-                            .unwrap_or("Raster")
-                            .to_string()
-                    })
+                    .map(|layer| layer_ui_type(&layer.layer_type).to_string())
                     .collect(),
             );
             self.shell.ui_data_cache.layer_is_background =
@@ -626,6 +620,13 @@ impl App {
                     crate::core::canvas::ColorMode::Rgb => String::new(),
                 },
                 export_embed_icc: self.shell.ui.export_embed_icc,
+                swatches: std::sync::Arc::new(
+                    self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .metadata
+                        .swatches
+                        .clone(),
+                ),
                 zoom: self.edit.view.zoom,
                 offset_x: self.edit.view.offset_x,
                 offset_y: self.edit.view.offset_y,
@@ -859,19 +860,12 @@ impl App {
                 fill_contiguous: self.edit.tools.fill().contiguous,
                 fill_anti_alias: self.edit.tools.fill().anti_alias,
                 fill_all_layers: self.edit.tools.fill().sample_merged,
-                gradient_type: self.edit.tools.gradient().gradient_type as u8,
+                gradient_mode: self.active_gradient_mode(),
+                gradient_type: self.active_gradient_ui_type(),
                 gradient_opacity: self.edit.tools.gradient().opacity,
                 gradient_reverse: self.edit.tools.gradient().reverse,
                 gradient_dither: self.edit.tools.gradient().dither,
-                gradient_stops: self
-                    .edit
-                    .tools
-                    .gradient()
-                    .gradient
-                    .stops
-                    .iter()
-                    .map(|s| (s.position, s.color))
-                    .collect(),
+                gradient_stops: self.active_gradient_ui_stops(),
                 show_gradient_editor: self.shell.ui.show_gradient_editor,
                 eyedropper_sample: self.edit.tools.eyedropper().sample_size as u8,
                 eyedropper_sample_merged: self.edit.tools.eyedropper().sample_merged,
@@ -936,15 +930,11 @@ impl App {
                 path_display: self.active_path_display(),
                 // On-canvas node editing overlay for the active Path (Node tool).
                 node_overlay: self.active_node_overlay(),
+                path_gradient_overlay: self.active_path_gradient_overlay(),
                 // Fill/Outline of the active Path (options bar under Move / Node).
-                path_style: if matches!(
-                    self.edit.tools.active_id(),
-                    crate::tools::ToolId::Move | crate::tools::ToolId::Node
-                ) {
-                    self.active_path_style_vm()
-                } else {
-                    None
-                },
+                // Kept available outside Move/Node as well: the document Palette
+                // applies Fill/Outline to the selected editable Path.
+                path_style: self.active_path_style_vm(),
                 gradient_preview: if self.edit.tools.active_id() == crate::tools::ToolId::Gradient {
                     self.edit.tools.gradient().preview_line()
                 } else {
@@ -1423,6 +1413,24 @@ impl App {
     }
 }
 
+/// Stable UI-facing layer kind. Do not derive this from `Debug`: unified
+/// `LayerType::Vector` deliberately contains both parametric Shape and curve
+/// Path geometry, but the Layer menu needs to distinguish them for
+/// Convert-to-Curves and Rasterize.
+fn layer_ui_type(layer_type: &crate::core::layer::LayerType) -> &'static str {
+    use crate::core::layer::LayerType;
+    use crate::core::vector::object::VectorGeometry;
+    match layer_type {
+        LayerType::Raster => "Raster",
+        LayerType::Adjustment(_) => "Adjustment",
+        LayerType::Text(_) => "Text",
+        LayerType::Group => "Group",
+        LayerType::SmartObject => "SmartObject",
+        LayerType::Vector(VectorGeometry::Primitive(_)) => "Shape",
+        LayerType::Vector(VectorGeometry::Path(_)) => "Path",
+    }
+}
+
 fn build_layer_thumbnail_rgba(layer: &crate::core::layer::Layer) -> Vec<u8> {
     let mut out = vec![0_u8; PANEL_THUMB * PANEL_THUMB * 4];
     if layer.width == 0 || layer.height == 0 {
@@ -1589,6 +1597,8 @@ fn thumbnail_fit(src_w: usize, src_h: usize, thumb: usize) -> (usize, usize, usi
 mod tests {
     use super::*;
     use crate::core::layer::{Layer, LayerMask};
+    use crate::core::shape::{ShapeData, ShapeKind};
+    use crate::core::vector::object::{VectorGeometry, VectorObjectData};
 
     #[test]
     fn layer_thumbnail_preserves_wide_aspect_ratio() {
@@ -1622,5 +1632,33 @@ mod tests {
         assert_eq!(alpha_at(16, 32), 255);
         assert_eq!(alpha_at(47, 32), 255);
         assert_eq!(alpha_at(48, 32), 0);
+    }
+
+    #[test]
+    fn unified_vector_geometry_keeps_shape_and_path_ui_kinds() {
+        let (shape, _) = ShapeData::from_canvas_span(
+            ShapeKind::Star,
+            10.0,
+            10.0,
+            90.0,
+            90.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 255],
+        );
+        assert_eq!(
+            layer_ui_type(&crate::core::layer::LayerType::Vector(
+                VectorGeometry::Primitive(shape)
+            )),
+            "Shape"
+        );
+        assert_eq!(
+            layer_ui_type(&crate::core::layer::LayerType::Vector(
+                VectorGeometry::Path(VectorObjectData::default())
+            )),
+            "Path"
+        );
     }
 }

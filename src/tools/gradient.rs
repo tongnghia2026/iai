@@ -1,7 +1,16 @@
 #![allow(dead_code)]
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::canvas::Canvas;
+use crate::core::geometry::Point;
+use crate::core::layer::{LayerType, PaintTarget};
 use crate::core::tile::{Tile, TilePos, TILE_SIZE};
+use crate::core::vector::affine::AffineTransform;
+use crate::core::vector::color::ColorValue;
+use crate::core::vector::object::VectorGeometry;
+use crate::core::vector::style::{
+    Gradient as VectorGradient, GradientKind, GradientStop as VectorGradientStop, Paint,
+    MAX_GRADIENT_STOPS,
+};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -521,6 +530,158 @@ impl GradientTool {
         canvas.end_stroke();
     }
 
+    fn active_target_is_vector(canvas: &Canvas) -> bool {
+        let Some(layer) = canvas.layer_stack.layers.get(canvas.layer_stack.active_idx) else {
+            return false;
+        };
+        layer.paint_target == PaintTarget::Pixels
+            && matches!(layer.layer_type, LayerType::Vector(_))
+            && layer.visible
+            && !layer.locked
+            && !layer.is_background
+    }
+
+    /// Apply the current gesture as an editable vector gradient. Returns true
+    /// when the active target was a Vector layer (including a refused tiny
+    /// gesture), so the caller never falls through and paints its raster cache.
+    fn apply_vector_gradient(&self, canvas: &mut Canvas, ex: f32, ey: f32) -> bool {
+        if !Self::active_target_is_vector(canvas) {
+            return false;
+        }
+        canvas.layer_stack.normalize_active_idx();
+        let idx = canvas.layer_stack.active_idx;
+
+        // A Path may still carry a temporary Move-tool offset. Reconcile it
+        // before mapping the canvas gesture into object-local coordinates.
+        if matches!(
+            canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Vector(VectorGeometry::Path(_))
+        ) {
+            crate::core::command_vector::fold_offset_into_model(
+                &mut canvas.layer_stack.layers[idx],
+            );
+        }
+
+        let layer = &canvas.layer_stack.layers[idx];
+        let layer_id = layer.id;
+        let old_bounds = (layer.offset, layer.width, layer.height);
+        let (mut style, to_local) = match &layer.layer_type {
+            LayerType::Vector(VectorGeometry::Path(object)) => {
+                let Some(inverse) = object.transform.inverse() else {
+                    return true;
+                };
+                (object.style, inverse)
+            }
+            LayerType::Vector(VectorGeometry::Primitive(shape)) => (
+                shape.style,
+                AffineTransform::translate(-(layer.offset.0 as f32), -(layer.offset.1 as f32)),
+            ),
+            _ => return false,
+        };
+        let start = to_local.apply_point(Point::new(self.start_x, self.start_y));
+        let end = to_local.apply_point(Point::new(ex, ey));
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        if dx * dx + dy * dy < 0.001 {
+            return true;
+        }
+
+        let kind = if self.gradient_type == GradientType::Radial {
+            GradientKind::Radial
+        } else {
+            // Angle/Reflected/Diamond remain pixel-only. The context-sensitive
+            // UI exposes only Linear/Radial for a Vector target.
+            GradientKind::Linear
+        };
+        let transform = AffineTransform {
+            a: dx,
+            b: dy,
+            c: -dy,
+            d: dx,
+            e: start.x,
+            f: start.y,
+        };
+        let gradient = match style.fill {
+            Paint::Gradient(mut gradient) => {
+                gradient.kind = kind;
+                gradient.transform = transform;
+                gradient
+            }
+            _ => {
+                let mut stops = self.gradient.stops.clone();
+                stops.sort_by(|a, b| {
+                    a.position
+                        .partial_cmp(&b.position)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                if stops.len() < 2 {
+                    stops = vec![
+                        GradientStop {
+                            position: 0.0,
+                            color: [0, 0, 0, 255],
+                        },
+                        GradientStop {
+                            position: 1.0,
+                            color: [255, 255, 255, 255],
+                        },
+                    ];
+                }
+                stops.truncate(MAX_GRADIENT_STOPS);
+                if self.reverse {
+                    for stop in &mut stops {
+                        stop.position = 1.0 - stop.position;
+                    }
+                    stops.reverse();
+                }
+                let mut gradient = VectorGradient::two_color(
+                    kind,
+                    ColorValue::from_rgba8(stops[0].color),
+                    ColorValue::from_rgba8(stops[stops.len() - 1].color),
+                    transform,
+                );
+                gradient.stop_count = stops.len() as u8;
+                for (index, stop) in stops.into_iter().enumerate() {
+                    gradient.stops[index] = VectorGradientStop {
+                        offset: stop.position.clamp(0.0, 1.0),
+                        color: ColorValue::from_rgba8(stop.color),
+                    };
+                }
+                gradient
+            }
+        };
+        style.fill = Paint::Gradient(gradient);
+        if canvas
+            .execute(
+                Box::new(crate::core::command_vector::ChangeVectorStyle::new(
+                    layer_id, style,
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .is_ok()
+        {
+            let new_bounds = {
+                let layer = &canvas.layer_stack.layers[idx];
+                (layer.offset, layer.width, layer.height)
+            };
+            canvas.mark_dirty_layer_bounds(
+                old_bounds.0 .0,
+                old_bounds.0 .1,
+                old_bounds.1,
+                old_bounds.2,
+            );
+            canvas.mark_dirty_layer_bounds(
+                new_bounds.0 .0,
+                new_bounds.0 .1,
+                new_bounds.1,
+                new_bounds.2,
+            );
+            // This command runs inside the Tool abstraction, so no App-level
+            // CanvasEvent is available to bump the UI cache revision for us.
+            canvas.layer_revision += 1;
+        }
+        true
+    }
+
     fn build_lut(&self) -> Vec<[u8; 4]> {
         let mut stops = self.gradient.stops.clone();
         stops.sort_by(|a, b| {
@@ -631,6 +792,9 @@ impl Tool for GradientTool {
             }
         }
         self.is_dragging = false;
+        if self.apply_vector_gradient(ctx.canvas_mut(), ex, ey) {
+            return ToolResponse::repaint();
+        }
         if !Canvas::fits_flat_buffer(ctx.canvas().width, ctx.canvas().height) {
             return ToolResponse::blocked(
                 "Gradient không hỗ trợ canvas > 25M pixels (Viewport Streaming mode)",
@@ -644,6 +808,7 @@ impl Tool for GradientTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::shape::{ShapeData, ShapeKind};
 
     #[test]
     fn gradient_samples_hold_edge_stop_colors() {
@@ -663,6 +828,88 @@ mod tests {
 
         assert_eq!(gradient.sample(0.0), [255, 0, 0, 255]);
         assert_eq!(gradient.sample(1.0), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn vector_gradient_keeps_shape_primitive_and_undoes_style_only() {
+        let mut canvas = Canvas::new(160, 120);
+        let index = canvas.layer_stack.add_layer(160, 120);
+        let (mut shape, offset) = ShapeData::from_canvas_span(
+            ShapeKind::Star,
+            20.0,
+            20.0,
+            120.0,
+            100.0,
+            0.0,
+            true,
+            [220, 30, 20, 255],
+            2.0,
+            [0, 0, 0, 255],
+        );
+        shape.sides = 7;
+        let raster = shape.render().unwrap();
+        let layer = &mut canvas.layer_stack.layers[index];
+        layer.offset = offset;
+        layer.width = raster.width;
+        layer.height = raster.height;
+        layer.tiles =
+            crate::core::tile::TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+        layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(shape));
+        canvas.layer_stack.active_idx = index;
+
+        let mut tool = GradientTool::new();
+        tool.start_x = 25.0;
+        tool.start_y = 30.0;
+        let revision_before = canvas.layer_revision;
+        assert!(tool.apply_vector_gradient(&mut canvas, 115.0, 90.0));
+        assert!(
+            canvas.dirty.active,
+            "vector Gradient release must schedule an immediate composite"
+        );
+        assert!(canvas.layer_revision > revision_before);
+
+        let LayerType::Vector(VectorGeometry::Primitive(after)) =
+            &canvas.layer_stack.layers[index].layer_type
+        else {
+            panic!("gradient must not convert the primitive to curves or pixels");
+        };
+        assert_eq!(after.kind, ShapeKind::Star);
+        assert_eq!(after.sides, 7);
+        assert!(matches!(after.style.fill, Paint::Gradient(_)));
+
+        canvas.undo().expect("undo gradient");
+        let LayerType::Vector(VectorGeometry::Primitive(restored)) =
+            &canvas.layer_stack.layers[index].layer_type
+        else {
+            panic!("undo must retain the primitive");
+        };
+        assert!(matches!(restored.style.fill, Paint::Solid(_)));
+        assert_eq!(restored.sides, 7);
+    }
+
+    #[test]
+    fn active_mask_never_routes_through_vector_backend() {
+        let mut canvas = Canvas::new(32, 32);
+        let index = canvas.layer_stack.add_layer(32, 32);
+        let (shape, offset) = ShapeData::from_canvas_span(
+            ShapeKind::Rectangle,
+            4.0,
+            4.0,
+            28.0,
+            28.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 0],
+        );
+        let layer = &mut canvas.layer_stack.layers[index];
+        layer.offset = offset;
+        layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(shape));
+        layer.mask = Some(crate::core::layer::LayerMask::new_white(32, 32));
+        layer.paint_target = PaintTarget::Mask;
+        canvas.layer_stack.active_idx = index;
+        assert!(!GradientTool::active_target_is_vector(&canvas));
     }
 
     #[test]

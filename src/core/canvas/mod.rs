@@ -73,6 +73,9 @@ pub struct CanvasMetadata {
     /// sRGB working space (empty when the source was untagged or already sRGB).
     /// Display-only — shown in the Info panel.
     pub source_profile: String,
+    /// Named process colours owned by this document. Kept out of global UI
+    /// preferences so each `.iai` project carries its production palette.
+    pub swatches: Vec<crate::core::palette::DocumentSwatch>,
 }
 
 impl Default for CanvasMetadata {
@@ -84,6 +87,7 @@ impl Default for CanvasMetadata {
             tags: Vec::new(),
             resolution_ppi: 72.0,
             source_profile: String::new(),
+            swatches: Vec::new(),
         }
     }
 }
@@ -643,7 +647,8 @@ impl Canvas {
                 &mut self.height,
                 Some(&mut self.selection),
             )
-            .with_channels(&mut self.channels);
+            .with_channels(&mut self.channels)
+            .with_metadata(&mut self.metadata);
             self.cmd_history.undo(&mut ctx)
         };
         if !undone {
@@ -665,7 +670,8 @@ impl Canvas {
                 &mut self.height,
                 Some(&mut self.selection),
             )
-            .with_channels(&mut self.channels);
+            .with_channels(&mut self.channels)
+            .with_metadata(&mut self.metadata);
             self.cmd_history.redo(&mut ctx)
         };
         if !redone {
@@ -753,7 +759,8 @@ impl Canvas {
                 &mut self.height,
                 Some(&mut self.selection),
             )
-            .with_channels(&mut self.channels);
+            .with_channels(&mut self.channels)
+            .with_metadata(&mut self.metadata);
             cmd.execute(&mut ctx)
         };
         match result {
@@ -779,7 +786,7 @@ impl Canvas {
                 .layer_stack
                 .layers
                 .iter()
-                .any(|l| matches!(l.layer_type, LayerType::Path(_)))
+                .any(|l| matches!(l.layer_type, LayerType::Vector(_)))
         {
             return;
         }
@@ -787,7 +794,7 @@ impl Canvas {
             return;
         };
         for layer in &mut self.layer_stack.layers {
-            if matches!(layer.layer_type, LayerType::Path(_)) {
+            if matches!(layer.layer_type, LayerType::Vector(_)) {
                 layer.tiles.encode_ink_from_mirror(&conv);
             }
         }
@@ -803,11 +810,29 @@ impl Canvas {
         use crate::core::layer::LayerType;
         let mut any = false;
         for layer in &mut self.layer_stack.layers {
-            if matches!(layer.layer_type, LayerType::Path(_)) {
+            if matches!(
+                layer.layer_type,
+                LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(_))
+            ) {
                 // Folds a saved Move-tool drag (offset ≠ model) back into the
                 // model AND re-derives the raster from the model.
                 crate::core::command_vector::fold_offset_into_model(layer);
                 any = true;
+            } else if let LayerType::Vector(
+                crate::core::vector::object::VectorGeometry::Primitive(shape),
+            ) = &layer.layer_type
+            {
+                let shape = shape.clone();
+                if let Some(raster) = shape.render() {
+                    layer.tiles = crate::core::tile::TileMap::from_rgba(
+                        &raster.rgba,
+                        raster.width,
+                        raster.height,
+                    );
+                    layer.width = raster.width;
+                    layer.height = raster.height;
+                    any = true;
+                }
             }
         }
         if any {

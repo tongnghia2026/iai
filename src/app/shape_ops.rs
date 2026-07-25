@@ -9,6 +9,7 @@ use crate::core::command::LayerStructureCommand;
 use crate::core::layer::LayerType;
 use crate::core::shape::{ShapeData, ShapeHandle, ShapeKind};
 use crate::core::tile::TileMap;
+use crate::core::vector::object::VectorGeometry;
 
 /// Screen-space grab radius for a handle.
 const HANDLE_HIT_PX: f32 = 8.0;
@@ -72,7 +73,7 @@ impl App {
         layer.height = raster.height;
         layer.offset = offset;
         layer.name = kind.label().to_string();
-        layer.layer_type = LayerType::Shape(data);
+        layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(data));
 
         let mut cmd = before;
         cmd.capture_after(&canvas.layer_stack, cw, ch);
@@ -90,7 +91,12 @@ impl App {
         let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
         let idx = canvas.layer_stack.active_idx;
         let layer = canvas.layer_stack.layers.get(idx)?;
-        if matches!(layer.layer_type, LayerType::Shape(_)) && layer.visible && !layer.locked {
+        if matches!(
+            layer.layer_type,
+            LayerType::Vector(VectorGeometry::Primitive(_))
+        ) && layer.visible
+            && !layer.locked
+        {
             Some(idx)
         } else {
             None
@@ -103,7 +109,7 @@ impl App {
             .layer_stack
             .layers
             .get(idx)?;
-        if let LayerType::Shape(d) = &layer.layer_type {
+        if let LayerType::Vector(VectorGeometry::Primitive(d)) = &layer.layer_type {
             Some((d.clone(), layer.offset))
         } else {
             None
@@ -121,15 +127,14 @@ impl App {
         use crate::core::vector::affine::AffineTransform;
         use crate::core::vector::from_shape;
         use crate::core::vector::object::VectorObjectData;
-        use crate::core::vector::style::VectorStyle;
 
         let (data, offset) = match self.shape_at(idx) {
             Some(v) => v,
             None => return false,
         };
+        let (x0, y0, x1, y1) = data.canvas_span(offset);
         // Shape geometry is layer-local; convert to canvas space so the Path lands
         // in the same place (its transform is then identity — delta-0 invariant).
-        let (x0, y0, x1, y1) = data.canvas_span(offset);
         let path = match data.kind {
             ShapeKind::Rectangle => from_shape::rect_path(x0, y0, x1, y1, data.effective_radius()),
             ShapeKind::Ellipse => from_shape::ellipse_path(x0, y0, x1, y1),
@@ -137,13 +142,7 @@ impl App {
             ShapeKind::Polygon => from_shape::polygon_path(x0, y0, x1, y1, data.sides),
             ShapeKind::Star => from_shape::star_path(x0, y0, x1, y1, data.sides, data.star_inner),
         };
-        let style = VectorStyle::from_shape_fields(
-            data.fill,
-            data.fill_color,
-            data.stroke_width,
-            data.stroke_color,
-        );
-        let object = VectorObjectData::new(path, style, AffineTransform::IDENTITY);
+        let object = VectorObjectData::new(path, data.style, AffineTransform::IDENTITY);
 
         let (cw, ch) = {
             let d = &self.docs.documents[self.docs.active_doc_idx];
@@ -298,7 +297,7 @@ impl App {
                 else {
                     return;
                 };
-                let LayerType::Shape(d) = &layer.layer_type else {
+                let LayerType::Vector(VectorGeometry::Primitive(d)) = &layer.layer_type else {
                     return;
                 };
                 (d.clone(), layer.offset)
@@ -453,7 +452,10 @@ impl App {
         };
         let (old_off, old_w, old_h) = {
             let l = &canvas.layer_stack.layers[idx];
-            if !matches!(l.layer_type, LayerType::Shape(_)) {
+            if !matches!(
+                l.layer_type,
+                LayerType::Vector(VectorGeometry::Primitive(_))
+            ) {
                 return false;
             }
             (l.offset, l.width, l.height)
@@ -463,7 +465,7 @@ impl App {
         layer.width = w;
         layer.height = h;
         layer.offset = offset;
-        layer.layer_type = LayerType::Shape(data);
+        layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(data));
         canvas.layer_revision += 1;
         canvas.mark_dirty_layer_bounds(old_off.0, old_off.1, old_w, old_h);
         canvas.mark_dirty_layer_bounds(offset.0, offset.1, w, h);
@@ -489,7 +491,10 @@ impl App {
                     .find(|l| l.id == layer_id)
                     .is_some_and(|l| {
                         l.offset == off
-                            && matches!(&l.layer_type, LayerType::Shape(cur) if *cur == data)
+                            && matches!(
+                                &l.layer_type,
+                                LayerType::Vector(VectorGeometry::Primitive(cur)) if *cur == data
+                            )
                     });
                 if !already {
                     let doc_id = doc.id;
@@ -525,7 +530,7 @@ impl App {
         };
         let (offset, old_w, old_h) = {
             let layer = &canvas.layer_stack.layers[idx];
-            let LayerType::Shape(d) = &layer.layer_type else {
+            let LayerType::Vector(VectorGeometry::Primitive(d)) = &layer.layer_type else {
                 return;
             };
             if *d == new_data && layer.offset == new_offset {
@@ -545,7 +550,7 @@ impl App {
         layer.width = raster.width;
         layer.height = raster.height;
         layer.offset = new_offset;
-        layer.layer_type = LayerType::Shape(new_data);
+        layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(new_data));
         canvas.layer_revision += 1;
         canvas.mark_dirty_layer_bounds(offset.0, offset.1, old_w, old_h);
         canvas.mark_dirty_layer_bounds(new_offset.0, new_offset.1, raster.width, raster.height);
@@ -563,7 +568,7 @@ impl App {
     /// DragValue emits a tick per frame, so like handle drags the CPU
     /// rasterization is throttled by its own measured cost — this just pins
     /// the target layer and lets `flush_pending_shape_style` decide.
-    pub fn update_selected_shape_style(&mut self) {
+    pub fn update_selected_shape_style(&mut self, apply_fill: bool, apply_stroke: bool) {
         let Some(idx) = self.active_shape_index() else {
             return;
         };
@@ -574,12 +579,18 @@ impl App {
             .layers[idx]
             .id;
         match self.edit.shape_style_pending.as_mut() {
-            Some(p) if p.doc_id == doc_id && p.layer_id == layer_id => p.dirty = true,
+            Some(p) if p.doc_id == doc_id && p.layer_id == layer_id => {
+                p.dirty = true;
+                p.apply_fill |= apply_fill;
+                p.apply_stroke |= apply_stroke;
+            }
             _ => {
                 self.edit.shape_style_pending = Some(crate::app::state::ShapeStylePending {
                     doc_id,
                     layer_id,
                     dirty: true,
+                    apply_fill,
+                    apply_stroke,
                     last_bake: None,
                     bake_cost_secs: 0.0,
                 });
@@ -619,10 +630,15 @@ impl App {
                     .layer_stack
                     .layers[idx];
                 l.offset == new_offset
-                    && matches!(&l.layer_type, LayerType::Shape(cur) if *cur == new_data)
+                    && matches!(
+                        &l.layer_type,
+                        LayerType::Vector(VectorGeometry::Primitive(cur)) if *cur == new_data
+                    )
             };
             if let Some(p) = self.edit.shape_style_pending.as_mut() {
                 p.dirty = false; // consumed by the job (re-set by newer ticks)
+                p.apply_fill = false;
+                p.apply_stroke = false;
             }
             if !same {
                 self.spawn_shape_bake(doc_id, layer_id, new_data, new_offset);
@@ -664,19 +680,37 @@ impl App {
         }
         let (data, offset) = self.shape_at(idx)?;
         let s = self.edit.tools.shape();
+        let pending = self.edit.shape_style_pending.as_ref()?;
         let (x0, y0, x1, y1) = data.canvas_span(offset);
+        let mut style = data.style;
+        if pending.apply_fill {
+            style.fill = if s.fill {
+                crate::core::vector::style::Paint::Solid(
+                    crate::core::vector::color::ColorValue::from_rgba8(s.fill_color),
+                )
+            } else {
+                crate::core::vector::style::Paint::None
+            };
+        }
+        if pending.apply_stroke {
+            style.stroke_style.width = s.stroke_width.max(0.0);
+            style.stroke = if s.stroke_width > 0.0 {
+                crate::core::vector::style::Paint::Solid(
+                    crate::core::vector::color::ColorValue::from_rgba8(s.stroke_color),
+                )
+            } else {
+                crate::core::vector::style::Paint::None
+            };
+        }
         // Keep the shape's own kind — the options combo only affects new shapes.
-        let (mut new_data, new_offset) = ShapeData::from_canvas_span(
+        let (mut new_data, new_offset) = ShapeData::from_canvas_span_with_style(
             data.kind,
             x0,
             y0,
             x1,
             y1,
             s.corner_radius,
-            s.fill,
-            s.fill_color,
-            s.stroke_width,
-            s.stroke_color,
+            style,
         );
         // Sides / inner-radius are live-editable like the corner radius.
         new_data.sides = s.sides.clamp(3, 100);
@@ -708,42 +742,25 @@ impl App {
             self.edit.shape_style_pending = None;
             return;
         }
-        let bake_start = std::time::Instant::now();
-        let (fill, fill_color, stroke_width, stroke_color, corner_radius) = {
-            let s = self.edit.tools.shape();
-            (
-                s.fill,
-                s.fill_color,
-                s.stroke_width,
-                s.stroke_color,
-                s.corner_radius,
-            )
+        let Some((idx, new_data, new_offset)) = self.styled_shape_target(doc_id, layer_id) else {
+            self.edit.shape_style_pending = None;
+            return;
         };
+        let bake_start = std::time::Instant::now();
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let (data, offset, old_w, old_h) = {
             let l = &canvas.layer_stack.layers[idx];
-            let LayerType::Shape(d) = &l.layer_type else {
+            let LayerType::Vector(VectorGeometry::Primitive(d)) = &l.layer_type else {
                 return;
             };
             (d.clone(), l.offset, l.width, l.height)
         };
-        let (x0, y0, x1, y1) = data.canvas_span(offset);
         // Keep the shape's own kind — the options combo only affects new shapes.
-        let (new_data, new_offset) = ShapeData::from_canvas_span(
-            data.kind,
-            x0,
-            y0,
-            x1,
-            y1,
-            corner_radius,
-            fill,
-            fill_color,
-            stroke_width,
-            stroke_color,
-        );
         if new_data == data && new_offset == offset {
             if let Some(p) = self.edit.shape_style_pending.as_mut() {
                 p.dirty = false;
+                p.apply_fill = false;
+                p.apply_stroke = false;
             }
             return;
         }
@@ -751,6 +768,8 @@ impl App {
             // Degenerate size — nothing can apply; stop the retry loop.
             if let Some(p) = self.edit.shape_style_pending.as_mut() {
                 p.dirty = false;
+                p.apply_fill = false;
+                p.apply_stroke = false;
             }
             return;
         };
@@ -763,7 +782,7 @@ impl App {
         layer.width = raster.width;
         layer.height = raster.height;
         layer.offset = new_offset;
-        layer.layer_type = LayerType::Shape(new_data);
+        layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(new_data));
         canvas.layer_revision += 1;
         // Pixel-only change — dirty-rect flatten + recomposite, not the
         // full-canvas flatten/upload of LayerStructureChanged.
@@ -772,6 +791,8 @@ impl App {
         self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
         if let Some(p) = self.edit.shape_style_pending.as_mut() {
             p.dirty = false;
+            p.apply_fill = false;
+            p.apply_stroke = false;
             p.bake_cost_secs = bake_start.elapsed().as_secs_f32();
             p.last_bake = Some(std::time::Instant::now());
         }
@@ -832,14 +853,16 @@ mod tests {
             corner_radius: radius,
             sides: 5,
             star_inner: 0.5,
-            fill: true,
-            fill_color: [200, 40, 40, 255],
-            stroke_width: 3.0,
-            stroke_color: [0, 0, 0, 255],
+            style: crate::core::vector::style::VectorStyle::from_shape_fields(
+                true,
+                [200, 40, 40, 255],
+                3.0,
+                [0, 0, 0, 255],
+            ),
         };
         let layer = &mut canvas.layer_stack.layers[idx];
         layer.offset = (0, 0);
-        layer.layer_type = LayerType::Shape(data);
+        layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(data));
         canvas.layer_stack.active_idx = idx;
         (app, idx)
     }
@@ -849,7 +872,7 @@ mod tests {
         let (mut app, idx) = app_with_shape(ShapeKind::Rectangle, 0.0);
         assert!(app.convert_shape_to_path(idx));
         match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
-            LayerType::Path(o) => {
+            LayerType::Vector(VectorGeometry::Path(o)) => {
                 assert_eq!(o.path.contours[0].nodes.len(), 4);
                 assert!(o.path.contours[0].closed);
                 assert!(o.style.fill.is_visible(), "fill carried over");
@@ -860,7 +883,7 @@ mod tests {
         app.docs.documents[0].canvas.undo().expect("undo");
         assert!(matches!(
             app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type,
-            LayerType::Shape(_)
+            LayerType::Vector(VectorGeometry::Primitive(_))
         ));
     }
 
@@ -869,7 +892,9 @@ mod tests {
         let (mut app, idx) = app_with_shape(ShapeKind::Rectangle, 10.0);
         assert!(app.convert_shape_to_path(idx));
         match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
-            LayerType::Path(o) => assert_eq!(o.path.contours[0].nodes.len(), 8),
+            LayerType::Vector(VectorGeometry::Path(o)) => {
+                assert_eq!(o.path.contours[0].nodes.len(), 8)
+            }
             _ => panic!("expected Path"),
         }
     }
@@ -879,7 +904,7 @@ mod tests {
         let (mut app, idx) = app_with_shape(ShapeKind::Ellipse, 0.0);
         assert!(app.convert_shape_to_path(idx));
         match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
-            LayerType::Path(o) => {
+            LayerType::Vector(VectorGeometry::Path(o)) => {
                 assert_eq!(o.path.contours[0].nodes.len(), 4);
                 assert!(o.path.contours[0].closed);
             }
@@ -889,7 +914,7 @@ mod tests {
         let (mut app2, idx2) = app_with_shape(ShapeKind::Line, 0.0);
         assert!(app2.convert_shape_to_path(idx2));
         match &app2.docs.documents[0].canvas.layer_stack.layers[idx2].layer_type {
-            LayerType::Path(o) => {
+            LayerType::Vector(VectorGeometry::Path(o)) => {
                 assert_eq!(o.path.contours[0].nodes.len(), 2);
                 assert!(!o.path.contours[0].closed, "line → open path");
             }
@@ -903,5 +928,72 @@ mod tests {
         app.docs.documents[0].canvas = Canvas::new(100, 100);
         // Layer 0 is the plain raster background — nothing to convert.
         assert!(!app.convert_shape_to_path(0));
+    }
+
+    #[test]
+    fn geometry_only_shape_edit_preserves_vector_gradient() {
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::style::{Gradient, GradientKind, Paint};
+
+        let (mut app, idx) = app_with_shape(ShapeKind::Rectangle, 0.0);
+        let gradient = Gradient::two_color(
+            GradientKind::Linear,
+            ColorValue::cmyk(0.1, 0.2, 0.3, 0.4),
+            ColorValue::rgb(0.9, 0.2, 0.1),
+            AffineTransform::translate(20.0, 30.0).then(&AffineTransform::scale(60.0, 1.0)),
+        );
+        let layer = &mut app.docs.documents[0].canvas.layer_stack.layers[idx];
+        let LayerType::Vector(VectorGeometry::Primitive(data)) = &mut layer.layer_type else {
+            panic!("expected primitive");
+        };
+        data.style.fill = Paint::Gradient(gradient);
+
+        app.edit.tools.shape_mut().corner_radius = 12.0;
+        let doc_id = app.docs.documents[0].id;
+        let layer_id = app.docs.documents[0].canvas.layer_stack.layers[idx].id;
+        app.edit.shape_style_pending = Some(crate::app::state::ShapeStylePending {
+            doc_id,
+            layer_id,
+            dirty: true,
+            apply_fill: false,
+            apply_stroke: false,
+            last_bake: None,
+            bake_cost_secs: 0.0,
+        });
+        let (_, target, _) = app
+            .styled_shape_target(doc_id, layer_id)
+            .expect("geometry target");
+        assert_eq!(target.corner_radius, 12.0);
+        assert_eq!(target.style.fill, Paint::Gradient(gradient));
+    }
+
+    #[test]
+    fn convert_gradient_shape_to_curves_preserves_gradient_style() {
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::style::{Gradient, GradientKind, Paint};
+
+        let (mut app, idx) = app_with_shape(ShapeKind::Star, 0.0);
+        let gradient = Gradient::two_color(
+            GradientKind::Radial,
+            ColorValue::rgb(0.1, 0.4, 0.9),
+            ColorValue::cmyk(0.0, 0.8, 0.2, 0.1),
+            AffineTransform::translate(50.0, 50.0).then(&AffineTransform::scale(30.0, 30.0)),
+        );
+        let layer = &mut app.docs.documents[0].canvas.layer_stack.layers[idx];
+        let LayerType::Vector(VectorGeometry::Primitive(shape)) = &mut layer.layer_type else {
+            panic!("expected primitive");
+        };
+        shape.style.fill = Paint::Gradient(gradient);
+
+        assert!(app.convert_shape_to_path(idx));
+        let LayerType::Vector(VectorGeometry::Path(object)) =
+            &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type
+        else {
+            panic!("expected Path after Convert to Curves");
+        };
+        assert_eq!(object.style.fill, Paint::Gradient(gradient));
+        assert_eq!(object.path.contours[0].nodes.len(), 10);
     }
 }

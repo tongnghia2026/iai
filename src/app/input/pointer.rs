@@ -10,6 +10,17 @@ use winit::{
 };
 
 impl App {
+    /// Present a vector gradient created by GradientTool::on_release.
+    ///
+    /// The Tool owns the command and marks the old/new layer bounds dirty; the
+    /// App owns the separate crisp-vector overlay and GPU compositor. Both must
+    /// be invalidated together in the same release event, otherwise the model is
+    /// committed but the old overlay remains visible until another input.
+    fn finish_vector_gradient_release(&mut self) {
+        self.invalidate_vector_display();
+        self.apply_canvas_event(crate::app::render::CanvasEvent::LayerPixelsChanged);
+    }
+
     /// The main window's MouseInput arm, verbatim: press/release routing to
     /// tools, guides, transform/text/shape sessions and window chrome.
     pub(in crate::app) fn on_main_mouse_input(
@@ -355,6 +366,24 @@ impl App {
                                 }
                             }
 
+                            // Gradient transform handles are interactive only
+                            // while the Gradient Tool is active.
+                            if self.edit.tools.active_id() == ToolId::Gradient
+                                && self.edit.transform_state.is_none()
+                            {
+                                let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
+                                if let Some(handle) = self.path_gradient_handle_at_screen(msx, msy)
+                                {
+                                    let ev = self.tool_event();
+                                    self.path_gradient_begin(handle, ev.canvas_x, ev.canvas_y);
+                                    self.edit.input.painting = true;
+                                    if let Some(w) = &self.win.window {
+                                        w.request_redraw();
+                                    }
+                                    return;
+                                }
+                            }
+
                             // Move tool: grabbing a transform handle (or the
                             // rotate ring) of the active Path layer starts an
                             // on-canvas scale/rotate that keeps the object
@@ -603,7 +632,22 @@ impl App {
                         let releasing_move = self.edit.input.painting
                             && self.edit.transform_state.is_none()
                             && self.edit.path_transform.is_none()
+                            && self.edit.path_gradient_drag.is_none()
                             && self.edit.tools.active_id() == ToolId::Move;
+                        if self.edit.path_gradient_drag.is_some() {
+                            // Commit from a settled input state. This makes the
+                            // final full composite take the normal (non-drag)
+                            // path and prevents any interactive cache policy
+                            // from surviving the release frame.
+                            self.edit.input.painting = false;
+                            self.path_gradient_finish();
+                            self.edit.input.last_left_release_time =
+                                Some(std::time::Instant::now());
+                            if let Some(w) = &self.win.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         if self.edit.path_transform.is_some() {
                             // Finish an on-canvas Path scale/rotate (records one
                             // ChangeVectorTransform). Bypasses the Move tool's
@@ -685,6 +729,8 @@ impl App {
 
                                 let event = self.tool_event();
                                 let active_tool = self.edit.tools.active_id();
+                                let releasing_vector_gradient = active_tool == ToolId::Gradient
+                                    && self.active_gradient_mode() == 2;
                                 let tool_resp = {
                                     let mut ctx = ToolCtx::new(
                                         &mut self.docs.documents[self.docs.active_doc_idx],
@@ -703,7 +749,9 @@ impl App {
                                     active_tool,
                                     ToolId::Move | ToolId::Crop | ToolId::PerspectiveCrop
                                 ) && !tool_resp.needs_composite;
-                                if !move_layer_release {
+                                if releasing_vector_gradient {
+                                    self.finish_vector_gradient_release();
+                                } else if !move_layer_release {
                                     self.flush_canvas();
                                 }
                                 if active_tool == ToolId::Crop {
@@ -999,6 +1047,15 @@ impl App {
             self.win.pending_view_change = true;
         } else if self.edit.input.painting
             && !self.edit.input.was_over_ui
+            && self.edit.path_gradient_drag.is_some()
+        {
+            let ev = self.tool_event();
+            self.path_gradient_update(ev.canvas_x, ev.canvas_y);
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        } else if self.edit.input.painting
+            && !self.edit.input.was_over_ui
             && self.edit.path_transform.is_some()
         {
             // Live on-canvas Path scale/rotate.
@@ -1161,5 +1218,96 @@ impl App {
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::canvas::Canvas;
+    use crate::core::layer::LayerType;
+    use crate::core::shape::{ShapeData, ShapeKind};
+    use crate::core::tile::TileMap;
+    use crate::core::vector::object::VectorGeometry;
+    use crate::extension::tool::PointerEvent;
+
+    #[test]
+    fn vector_gradient_release_updates_flat_canvas_without_followup_input() {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(160, 120);
+        let index = app.docs.documents[0].canvas.layer_stack.add_layer(160, 120);
+        let (shape, offset) = ShapeData::from_canvas_span(
+            ShapeKind::Star,
+            20.0,
+            20.0,
+            120.0,
+            100.0,
+            0.0,
+            true,
+            [220, 30, 20, 255],
+            2.0,
+            [0, 0, 0, 255],
+        );
+        let raster = shape.render().expect("render star");
+        {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let layer = &mut canvas.layer_stack.layers[index];
+            layer.offset = offset;
+            layer.width = raster.width;
+            layer.height = raster.height;
+            layer.tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+            layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(shape));
+            canvas.layer_stack.active_idx = index;
+            canvas.flatten_full();
+            canvas.ensure_pixels();
+            canvas.dirty.clear();
+        }
+        let before = app.docs.documents[0].canvas.pixels.clone();
+        app.edit.tools.select(ToolId::Gradient);
+
+        let fg = app.edit.fg_color;
+        let bg = app.edit.bg_color;
+        let zoom = app.edit.view.zoom;
+        let pan_x = app.edit.view.offset_x;
+        let pan_y = app.edit.view.offset_y;
+        {
+            let mut ctx = ToolCtx::new(&mut app.docs.documents[0], fg, bg, zoom, pan_x, pan_y);
+            let _ = app
+                .edit
+                .tools
+                .on_press(PointerEvent::new(25.0, 30.0), &mut ctx);
+            let _ = app
+                .edit
+                .tools
+                .on_drag(PointerEvent::new(115.0, 90.0), &mut ctx);
+            let _ = app
+                .edit
+                .tools
+                .on_release(PointerEvent::new(115.0, 90.0), &mut ctx);
+        }
+        assert!(
+            app.docs.documents[0].canvas.dirty.active,
+            "tool release must mark the vector bounds dirty"
+        );
+
+        // This is the exact App-side release hook. No zoom, Move, layer click,
+        // or other synthetic follow-up event is allowed before the assertion.
+        app.finish_vector_gradient_release();
+
+        let canvas = &app.docs.documents[0].canvas;
+        assert!(!canvas.dirty.active);
+        assert!(
+            canvas.pixels != before,
+            "release hook must flatten the changed vector bounds immediately"
+        );
+        let LayerType::Vector(VectorGeometry::Primitive(shape)) =
+            &canvas.layer_stack.layers[index].layer_type
+        else {
+            panic!("gradient must keep the Star primitive");
+        };
+        assert!(matches!(
+            shape.style.fill,
+            crate::core::vector::style::Paint::Gradient(_)
+        ));
     }
 }

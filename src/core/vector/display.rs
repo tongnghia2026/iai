@@ -20,14 +20,14 @@ pub struct DisplayRasterTile {
 }
 
 /// Pick the smallest power-of-two display scale that is not below `zoom`.
-/// The 16x ceiling covers the editor's 1600% inspection range while the
-/// rasterizer's own pixel ceiling remains the final memory guard.
+/// The editor permits 6400%, so the display derivative must cover 64x too.
+/// High buckets are viewport-clipped by [`rasterize_for_display_clipped`].
 pub fn zoom_bucket(zoom: f32) -> Option<u8> {
     if !zoom.is_finite() || zoom <= 1.0 {
         return None;
     }
     let mut bucket = 2u8;
-    while (bucket as f32) < zoom && bucket < 16 {
+    while (bucket as f32) < zoom && bucket < 64 {
         bucket *= 2;
     }
     Some(bucket)
@@ -37,15 +37,116 @@ pub fn zoom_bucket(zoom: f32) -> Option<u8> {
 /// dimensions are also scaled; callers divide them by `scale` to place the
 /// image back in canvas space.
 pub fn rasterize_for_display(object: &VectorObjectData, scale: u8) -> Option<PathRaster> {
+    rasterize_for_display_inner(object, scale, None)
+}
+
+pub fn rasterize_for_display_clipped(
+    object: &VectorObjectData,
+    scale: u8,
+    clip: crate::core::geometry::Rect,
+) -> Option<PathRaster> {
+    rasterize_for_display_inner(object, scale, Some(clip))
+}
+
+/// Rasterize and composite a bottom-to-top run of vector objects into one
+/// screen-resolution overlay. A single combined image preserves their z-order
+/// while allowing the compositor to hide every coarse document-resolution twin.
+pub fn rasterize_stack_for_display_clipped(
+    objects: &[VectorObjectData],
+    scale: u8,
+    clip: crate::core::geometry::Rect,
+) -> Option<PathRaster> {
+    let rasters = objects
+        .iter()
+        .filter_map(|object| rasterize_for_display_clipped(object, scale, clip))
+        .collect::<Vec<_>>();
+    let first = rasters.first()?;
+    let mut x0 = first.offset.0;
+    let mut y0 = first.offset.1;
+    let mut x1 = x0.saturating_add(first.width as i32);
+    let mut y1 = y0.saturating_add(first.height as i32);
+    for raster in &rasters[1..] {
+        x0 = x0.min(raster.offset.0);
+        y0 = y0.min(raster.offset.1);
+        x1 = x1.max(raster.offset.0.saturating_add(raster.width as i32));
+        y1 = y1.max(raster.offset.1.saturating_add(raster.height as i32));
+    }
+    let width = x1.saturating_sub(x0) as u32;
+    let height = y1.saturating_sub(y0) as u32;
+    let pixels = (width as usize).checked_mul(height as usize)?;
+    if pixels > 64_000_000 {
+        return None;
+    }
+    let mut rgba = vec![0u8; pixels.checked_mul(4)?];
+    for raster in rasters {
+        let dx = raster.offset.0.saturating_sub(x0) as usize;
+        let dy = raster.offset.1.saturating_sub(y0) as usize;
+        for row in 0..raster.height as usize {
+            for col in 0..raster.width as usize {
+                let src_index = (row * raster.width as usize + col) * 4;
+                let dst_index = ((dy + row) * width as usize + dx + col) * 4;
+                let src = &raster.rgba[src_index..src_index + 4];
+                let sa = src[3] as f32 / 255.0;
+                if sa <= 0.0 {
+                    continue;
+                }
+                let dst = &mut rgba[dst_index..dst_index + 4];
+                let da = dst[3] as f32 / 255.0;
+                let out_a = sa + da * (1.0 - sa);
+                for channel in 0..3 {
+                    let premultiplied =
+                        src[channel] as f32 * sa + dst[channel] as f32 * da * (1.0 - sa);
+                    dst[channel] =
+                        (premultiplied / out_a.max(1e-6)).round().clamp(0.0, 255.0) as u8;
+                }
+                dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    Some(PathRaster {
+        rgba,
+        width,
+        height,
+        offset: (x0, y0),
+    })
+}
+
+fn rasterize_for_display_inner(
+    object: &VectorObjectData,
+    scale: u8,
+    clip: Option<crate::core::geometry::Rect>,
+) -> Option<PathRaster> {
     if scale <= 1 {
         return None;
     }
     let mut scaled = object.clone();
-    scaled.transform = AffineTransform::scale(scale as f32, scale as f32).then(&object.transform);
+    let factor = scale as f32;
+    scaled.transform = AffineTransform::scale(factor, factor).then(&object.transform);
     // Stroke width is expressed in layer units, so it must follow the display
     // scale just like the transformed geometry.
-    scaled.style.stroke_style.width *= scale as f32;
-    super::raster::rasterize(&scaled)
+    scaled.style.stroke_style.width *= factor;
+    let dash_len = scaled
+        .style
+        .stroke_style
+        .dash
+        .len
+        .min(crate::core::vector::style::MAX_DASHES as u8) as usize;
+    for value in &mut scaled.style.stroke_style.dash.values[..dash_len] {
+        *value *= factor;
+    }
+    scaled.style.stroke_style.dash.offset *= factor;
+    match clip {
+        Some(clip) => {
+            let scaled_clip = crate::core::geometry::Rect::new(
+                clip.x * factor,
+                clip.y * factor,
+                clip.w * factor,
+                clip.h * factor,
+            );
+            super::raster::rasterize_clipped(&scaled, scaled_clip)
+        }
+        None => super::raster::rasterize(&scaled),
+    }
 }
 
 /// Split a tight RGBA raster into upload-safe texture tiles. Tiles contain no
@@ -107,6 +208,8 @@ mod tests {
         assert_eq!(zoom_bucket(4.0), Some(4));
         assert_eq!(zoom_bucket(4.1), Some(8));
         assert_eq!(zoom_bucket(16.0), Some(16));
+        assert_eq!(zoom_bucket(16.1), Some(32));
+        assert_eq!(zoom_bucket(64.0), Some(64));
     }
 
     #[test]
@@ -154,6 +257,50 @@ mod tests {
         assert!(hi.height >= base.height * 3);
         assert!(hi.width <= base.width * 5);
         assert!(hi.height <= base.height * 5);
+    }
+
+    #[test]
+    fn maximum_zoom_rasterizes_only_the_visible_clip() {
+        let hi = rasterize_for_display_clipped(
+            &square(2_000.0),
+            64,
+            crate::core::geometry::Rect::new(900.0, 700.0, 40.0, 30.0),
+        )
+        .expect("visible portion");
+        assert!(hi.width <= 40 * 64 + 2);
+        assert!(hi.height <= 30 * 64 + 2);
+        assert!(hi.width > 2_000 && hi.height > 1_500);
+    }
+
+    #[test]
+    fn visible_vector_run_composites_bottom_to_top() {
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::style::VectorStyle;
+        let mut bottom = square(20.0);
+        bottom.style = VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0));
+        bottom.transform = AffineTransform::translate(5.0, 5.0);
+        let mut top = square(20.0);
+        top.style = VectorStyle::filled(ColorValue::rgb(0.0, 0.0, 1.0));
+        top.transform = AffineTransform::translate(15.0, 5.0);
+        let raster = rasterize_stack_for_display_clipped(
+            &[bottom, top],
+            4,
+            crate::core::geometry::Rect::new(0.0, 0.0, 40.0, 40.0),
+        )
+        .expect("combined display");
+        let sample = |canvas_x: i32, canvas_y: i32| {
+            let x = canvas_x * 4 - raster.offset.0;
+            let y = canvas_y * 4 - raster.offset.1;
+            let index = (y as usize * raster.width as usize + x as usize) * 4;
+            [
+                raster.rgba[index],
+                raster.rgba[index + 1],
+                raster.rgba[index + 2],
+                raster.rgba[index + 3],
+            ]
+        };
+        assert_eq!(sample(10, 10), [255, 0, 0, 255]);
+        assert_eq!(sample(20, 10), [0, 0, 255, 255]);
     }
 
     #[test]

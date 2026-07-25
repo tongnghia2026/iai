@@ -5,6 +5,7 @@ use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 use crate::core::document::GuideOrientation;
 use crate::core::snapping::{snap_1d, SnapKind, SNAP_THRESHOLD_PX};
+use crate::core::vector::object::VectorGeometry;
 use crate::ui::{LayerAlign, LayerDistribute, MoveTransformAction};
 
 /// The affine that rotates/flips a vector object about the layer-space pivot
@@ -221,8 +222,7 @@ impl App {
                         layer.layer_type,
                         LayerType::Raster
                             | LayerType::Text(_)
-                            | LayerType::Shape(_)
-                            | LayerType::Path(_)
+                            | LayerType::Vector(_)
                             | LayerType::SmartObject
                     )
             };
@@ -323,7 +323,7 @@ impl App {
                         for &idx in &indices {
                             if matches!(
                                 canvas.layer_stack.layers[idx].layer_type,
-                                LayerType::Path(_)
+                                LayerType::Vector(VectorGeometry::Path(_))
                             ) {
                                 crate::core::command_vector::fold_offset_into_model(
                                     &mut canvas.layer_stack.layers[idx],
@@ -369,8 +369,7 @@ impl App {
                         layer.layer_type,
                         LayerType::Raster
                             | LayerType::Text(_)
-                            | LayerType::Shape(_)
-                            | LayerType::Path(_)
+                            | LayerType::Vector(_)
                             | LayerType::SmartObject
                     )
             };
@@ -421,7 +420,7 @@ impl App {
                         LayerDistribute::HorizontalCenters => layer.offset.0 += delta,
                         LayerDistribute::VerticalCenters => layer.offset.1 += delta,
                     }
-                    if matches!(layer.layer_type, LayerType::Path(_)) {
+                    if matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_))) {
                         crate::core::command_vector::fold_offset_into_model(layer);
                     }
                     moved += 1;
@@ -467,8 +466,7 @@ impl App {
                             layer.layer_type,
                             LayerType::Raster
                                 | LayerType::Text(_)
-                                | LayerType::Shape(_)
-                                | LayerType::Path(_)
+                                | LayerType::Vector(_)
                                 | LayerType::SmartObject
                         )
                 })
@@ -492,7 +490,7 @@ impl App {
                     let layer = &mut canvas.layer_stack.layers[new_idx];
                     layer.offset.0 += delta.0;
                     layer.offset.1 += delta.1;
-                    if matches!(layer.layer_type, LayerType::Path(_)) {
+                    if matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_))) {
                         crate::core::command_vector::fold_offset_into_model(layer);
                     }
                     layer.selected = true;
@@ -537,8 +535,7 @@ impl App {
                     layer.layer_type,
                     LayerType::Raster
                         | LayerType::Text(_)
-                        | LayerType::Shape(_)
-                        | LayerType::Path(_)
+                        | LayerType::Vector(_)
                         | LayerType::SmartObject
                 )
         }
@@ -670,11 +667,16 @@ impl App {
                             // displayed centre) and re-derive the raster, so the
                             // object stays editable and survives rebuild_path_caches
                             // on reload. Never bake the tiles (Mục 3.2).
-                            if matches!(layer.layer_type, LayerType::Path(_)) {
+                            if matches!(
+                                layer.layer_type,
+                                LayerType::Vector(VectorGeometry::Path(_))
+                            ) {
                                 // Reconcile any pending Move-tool drag first so the
                                 // pivot is the displayed centre, not the stale model.
                                 crate::core::command_vector::fold_offset_into_model(layer);
-                                if let LayerType::Path(obj) = &layer.layer_type {
+                                if let LayerType::Vector(VectorGeometry::Path(obj)) =
+                                    &layer.layer_type
+                                {
                                     let mut obj = obj.clone();
                                     let (cx, cy) = obj
                                         .layer_bounds(0.25)
@@ -989,6 +991,7 @@ mod tests {
     use crate::app::state::App;
     use crate::core::canvas::Canvas;
     use crate::core::tile::TileMap;
+    use crate::core::vector::object::VectorGeometry;
     use crate::ui::{LayerAlign, LayerDistribute, MoveTransformAction};
 
     /// Apply the placement to every layer and return the transformed union box.
@@ -1196,7 +1199,7 @@ mod tests {
                 .layer_stack
                 .layers
                 .iter()
-                .position(|l| matches!(l.layer_type, LayerType::Path(_)))
+                .position(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
                 .unwrap();
             canvas.layer_stack.layers[idx].selected = true;
             canvas.layer_stack.active_idx = idx;
@@ -1211,7 +1214,7 @@ mod tests {
 
         let l = find_layer(&app, id);
         assert!(
-            matches!(l.layer_type, LayerType::Path(_)),
+            matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))),
             "Path stays an editable vector after rotate (tiles not baked to Raster)"
         );
         assert!(
@@ -1287,7 +1290,7 @@ mod tests {
                 .layer_stack
                 .layers
                 .iter()
-                .position(|l| matches!(l.layer_type, LayerType::Path(_)))
+                .position(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
                 .unwrap();
             canvas.layer_stack.layers[idx].selected = true;
             canvas.layer_stack.active_idx = idx;
@@ -1300,7 +1303,7 @@ mod tests {
         assert!(app.align_selected_layers_to_canvas(LayerAlign::Left));
         let layer = find_layer(&app, id);
         let aligned = match &layer.layer_type {
-            LayerType::Path(object) => object.transform,
+            LayerType::Vector(VectorGeometry::Path(object)) => object.transform,
             _ => panic!("Path must stay editable"),
         };
         assert_ne!(aligned, original, "alignment must update the model");
@@ -1316,7 +1319,7 @@ mod tests {
         );
         app.docs.documents[0].canvas.undo().expect("undo align");
         let restored = match &find_layer(&app, id).layer_type {
-            LayerType::Path(object) => object.transform,
+            LayerType::Vector(VectorGeometry::Path(object)) => object.transform,
             _ => panic!("Path must stay editable"),
         };
         assert_eq!(restored, original);
@@ -1346,7 +1349,9 @@ mod tests {
                 .layer_stack
                 .layers
                 .iter()
-                .position(|layer| matches!(layer.layer_type, LayerType::Path(_)))
+                .position(|layer| {
+                    matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
+                })
                 .unwrap();
             canvas.layer_stack.layers[idx].selected = true;
             canvas.layer_stack.active_idx = idx;
@@ -1359,7 +1364,7 @@ mod tests {
             .layer_stack
             .layers
             .iter()
-            .filter(|layer| matches!(layer.layer_type, LayerType::Path(_)))
+            .filter(|layer| matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
             .map(|layer| layer.offset)
             .collect();
         origins.sort_unstable();
@@ -1373,8 +1378,12 @@ mod tests {
             .layer_stack
             .layers
             .iter()
-            .filter(|layer| matches!(layer.layer_type, LayerType::Path(_)))
-            .all(|layer| matches!(layer.layer_type, LayerType::Path(_))));
+            .filter(|layer| {
+                matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
+            })
+            .all(|layer| {
+                matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
+            }));
 
         app.docs.documents[0]
             .canvas
@@ -1386,7 +1395,9 @@ mod tests {
                 .layer_stack
                 .layers
                 .iter()
-                .filter(|layer| matches!(layer.layer_type, LayerType::Path(_)))
+                .filter(|layer| {
+                    matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
+                })
                 .count(),
             2
         );

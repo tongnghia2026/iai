@@ -16,19 +16,186 @@ use crate::app::state::App;
 use crate::core::layer::LayerType;
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::color::ColorValue;
-use crate::core::vector::object::VectorObjectData;
-use crate::core::vector::style::{DashPattern, Gradient, GradientKind, Paint, VectorStyle};
+use crate::core::vector::object::VectorGeometry;
+use crate::core::vector::style::{
+    DashPattern, Gradient, GradientKind, GradientStop, Paint, VectorStyle, MAX_DASHES,
+    MAX_GRADIENT_STOPS,
+};
 
 impl App {
-    /// `(layer_id, current style)` of the active editable Path layer, or `None`.
-    fn active_path_style(&self) -> Option<(u32, VectorStyle)> {
-        let idx = self.active_path_layer()?;
-        let layer = &self.docs.documents[self.docs.active_doc_idx]
-            .canvas
+    /// Context-sensitive Gradient Tool target:
+    /// 0 disabled, 1 raster pixels, 2 vector object, 3 layer mask.
+    pub fn active_gradient_mode(&self) -> u8 {
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let Some(layer) = canvas.layer_stack.layers.get(canvas.layer_stack.active_idx) else {
+            return 0;
+        };
+        if !layer.visible || (layer.locked && !layer.is_background) {
+            return 0;
+        }
+        if layer.paint_target == crate::core::layer::PaintTarget::Mask {
+            return u8::from(layer.mask.is_some()) * 3;
+        }
+        match layer.layer_type {
+            LayerType::Raster => 1,
+            LayerType::Vector(_) if !layer.is_background => 2,
+            _ => 0,
+        }
+    }
+
+    pub fn active_gradient_ui_type(&self) -> u8 {
+        if self.active_gradient_mode() == 2 {
+            if let Some((_, style)) = self.active_path_style() {
+                if let Paint::Gradient(gradient) = style.fill {
+                    return u8::from(gradient.kind == GradientKind::Radial);
+                }
+            }
+            return u8::from(
+                self.edit.tools.gradient().gradient_type
+                    == crate::tools::gradient::GradientType::Radial,
+            );
+        }
+        self.edit.tools.gradient().gradient_type as u8
+    }
+
+    pub fn active_gradient_ui_stops(&self) -> Vec<(f32, [u8; 4])> {
+        if self.active_gradient_mode() == 2 {
+            if let Some((_, style)) = self.active_path_style() {
+                if let Paint::Gradient(gradient) = style.fill {
+                    return gradient
+                        .active_stops()
+                        .iter()
+                        .map(|stop| (stop.offset, stop.color.to_rgba8()))
+                        .collect();
+                }
+            }
+        }
+        self.edit
+            .tools
+            .gradient()
+            .gradient
+            .stops
+            .iter()
+            .map(|stop| (stop.position, stop.color))
+            .collect()
+    }
+
+    /// Change the Vector target's gradient kind. A solid target only updates
+    /// the tool preset; it is not modified until the first canvas drag.
+    pub fn vector_gradient_set_kind(&mut self, kind: u8) -> bool {
+        let Some((_, style)) = self.active_path_style() else {
+            return false;
+        };
+        if !matches!(style.fill, Paint::Gradient(_)) {
+            return false;
+        }
+        self.commit_path_style_change(|style| {
+            if let Paint::Gradient(gradient) = &mut style.fill {
+                gradient.kind = if kind == 1 {
+                    GradientKind::Radial
+                } else {
+                    GradientKind::Linear
+                };
+            }
+        });
+        true
+    }
+
+    /// Live-preview all stops from the shared Gradient Editor. Returns false
+    /// for a solid Vector target so the same editor can continue editing the
+    /// working preset without changing the document before a drag.
+    pub fn vector_gradient_set_stops(&mut self, stops: Vec<(f32, [u8; 4])>) -> bool {
+        let Some((id, mut style)) = self.active_path_style() else {
+            return false;
+        };
+        let Paint::Gradient(gradient) = &mut style.fill else {
+            return false;
+        };
+        let old_stops = gradient.active_stops().to_vec();
+        let mut stops = stops;
+        stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        stops.truncate(MAX_GRADIENT_STOPS);
+        if stops.len() < 2 {
+            return true;
+        }
+        self.path_style_begin();
+        gradient.stop_count = stops.len() as u8;
+        let mut reused = [false; MAX_GRADIENT_STOPS];
+        for (index, (offset, color)) in stops.into_iter().enumerate() {
+            // The shared editor transports an RGBA preview. Reuse the exact
+            // model colour when its preview is unchanged, so moving a CMYK
+            // stop does not silently convert it to RGB.
+            let same_index = old_stops
+                .get(index)
+                .filter(|stop| !reused[index] && stop.color.to_rgba8() == color)
+                .map(|stop| (index, stop.color));
+            let preserved = same_index.or_else(|| {
+                old_stops.iter().enumerate().find_map(|(old_index, stop)| {
+                    (!reused[old_index] && stop.color.to_rgba8() == color)
+                        .then_some((old_index, stop.color))
+                })
+            });
+            let model_color = if let Some((old_index, model_color)) = preserved {
+                reused[old_index] = true;
+                model_color
+            } else {
+                ColorValue::from_rgba8(color)
+            };
+            gradient.stops[index] = GradientStop {
+                offset: offset.clamp(0.0, 1.0),
+                color: model_color,
+            };
+        }
+        self.preview_path_style_live(id, style);
+        true
+    }
+
+    pub fn vector_gradient_reverse(&mut self) -> bool {
+        let Some((_, style)) = self.active_path_style() else {
+            return false;
+        };
+        if !matches!(style.fill, Paint::Gradient(_)) {
+            return false;
+        }
+        self.commit_path_style_change(|style| {
+            if let Paint::Gradient(gradient) = &mut style.fill {
+                let count = gradient.stop_count as usize;
+                for stop in &mut gradient.stops[..count] {
+                    stop.offset = 1.0 - stop.offset;
+                }
+                gradient.stops[..count].reverse();
+            }
+        });
+        true
+    }
+
+    /// `(layer_id, current style)` of the active editable Vector layer.
+    pub(in crate::app) fn active_path_style(&self) -> Option<(u32, VectorStyle)> {
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let layer = canvas
             .layer_stack
-            .layers[idx];
+            .layers
+            .get(canvas.layer_stack.active_idx)?;
+        if !layer.visible || layer.locked || layer.is_background {
+            return None;
+        }
         match &layer.layer_type {
-            LayerType::Path(o) => Some((layer.id, o.style)),
+            LayerType::Vector(VectorGeometry::Path(o)) => Some((layer.id, o.style)),
+            LayerType::Vector(VectorGeometry::Primitive(shape)) => Some((layer.id, shape.style)),
+            _ => None,
+        }
+    }
+
+    fn vector_style_by_id(&self, layer_id: u32) -> Option<VectorStyle> {
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let layer = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|layer| layer.id == layer_id)?;
+        match &layer.layer_type {
+            LayerType::Vector(VectorGeometry::Path(object)) => Some(object.style),
+            LayerType::Vector(VectorGeometry::Primitive(shape)) => Some(shape.style),
             _ => None,
         }
     }
@@ -37,6 +204,17 @@ impl App {
     /// active layer isn't an editable Path.
     pub fn active_path_style_vm(&self) -> Option<crate::ui::PathStyleData> {
         let (_, style) = self.active_path_style()?;
+        let mut gradient_stop_colors = [[0, 0, 0, 255]; MAX_GRADIENT_STOPS];
+        let mut gradient_stop_offsets = [0.0; MAX_GRADIENT_STOPS];
+        let gradient_stop_count = if let Paint::Gradient(g) = style.fill {
+            for (index, stop) in g.active_stops().iter().enumerate() {
+                gradient_stop_colors[index] = stop.color.to_rgba8();
+                gradient_stop_offsets[index] = stop.offset;
+            }
+            g.stop_count
+        } else {
+            0
+        };
         let color_of = |p: Paint, fallback: [u8; 4]| match p {
             Paint::Solid(c) => c.to_rgba8(),
             Paint::Gradient(g) => g
@@ -48,6 +226,12 @@ impl App {
         Some(crate::ui::PathStyleData {
             fill_enabled: style.fill.is_visible(),
             fill_color: color_of(style.fill, [0, 0, 0, 255]),
+            fill_value: match style.fill {
+                Paint::Solid(color) => Some(color),
+                Paint::Gradient(gradient) => gradient.active_stops().first().map(|stop| stop.color),
+                Paint::None => None,
+            },
+            fill_overprint: style.fill_overprint,
             fill_end_color: match style.fill {
                 Paint::Gradient(g) => g
                     .active_stops()
@@ -55,8 +239,17 @@ impl App {
                     .map_or([255, 255, 255, 255], |s| s.color.to_rgba8()),
                 _ => [255, 255, 255, 255],
             },
+            gradient_stop_colors,
+            gradient_stop_offsets,
+            gradient_stop_count,
             stroke_enabled: style.stroke.is_visible(),
             stroke_color: color_of(style.stroke, [0, 0, 0, 255]),
+            stroke_value: match style.stroke {
+                Paint::Solid(color) => Some(color),
+                Paint::Gradient(gradient) => gradient.active_stops().first().map(|stop| stop.color),
+                Paint::None => None,
+            },
+            stroke_overprint: style.stroke_overprint,
             stroke_width: style.stroke_style.width,
             fill_kind: match style.fill {
                 Paint::Gradient(g) if g.kind == GradientKind::Linear => 1,
@@ -73,12 +266,15 @@ impl App {
                     1
                 }
             },
+            dash_values: style.stroke_style.dash.values,
+            dash_len: style.stroke_style.dash.len,
+            dash_offset: style.stroke_style.dash.offset,
         })
     }
 
     /// Re-raster the active Path with `style`, WITHOUT recording history (a live
     /// preview). Dirty-rect invalidation only.
-    fn preview_path_style(&mut self, layer_id: u32, style: VectorStyle) {
+    fn preview_path_style(&mut self, layer_id: u32, style: VectorStyle) -> bool {
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let Some(idx) = canvas
             .layer_stack
@@ -86,19 +282,20 @@ impl App {
             .iter()
             .position(|l| l.id == layer_id)
         else {
-            return;
+            return false;
         };
-        let (old_off, old_w, old_h, obj) = {
+        let (old_off, old_w, old_h) = {
             let layer = &canvas.layer_stack.layers[idx];
-            let LayerType::Path(o) = &layer.layer_type else {
-                return;
-            };
-            (layer.offset, layer.width, layer.height, o.clone())
+            if !matches!(layer.layer_type, LayerType::Vector(_)) {
+                return false;
+            }
+            (layer.offset, layer.width, layer.height)
         };
-        let new_obj = VectorObjectData { style, ..obj };
         {
             let layer = &mut canvas.layer_stack.layers[idx];
-            crate::core::command_vector::apply_object_to_layer(layer, new_obj);
+            if crate::core::command_vector::apply_style_to_layer(layer, style).is_err() {
+                return false;
+            }
         }
         canvas.layer_revision += 1;
         let (new_off, new_w, new_h) = {
@@ -108,6 +305,7 @@ impl App {
         canvas.mark_dirty_layer_bounds(old_off.0, old_off.1, old_w, old_h);
         canvas.mark_dirty_layer_bounds(new_off.0, new_off.1, new_w, new_h);
         self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+        true
     }
 
     /// Live-preview `style` on the active Path WITHOUT recording history, the way
@@ -127,15 +325,45 @@ impl App {
         else {
             return;
         };
-        let obj = {
+        let path_object = {
             let layer = &mut canvas.layer_stack.layers[idx];
-            let LayerType::Path(o) = &mut layer.layer_type else {
-                return;
-            };
-            o.style = style;
-            o.clone()
+            match &mut layer.layer_type {
+                LayerType::Vector(VectorGeometry::Path(object)) => {
+                    object.style = style;
+                    Some(object.clone())
+                }
+                LayerType::Vector(VectorGeometry::Primitive(_)) => None,
+                _ => return,
+            }
         };
-        self.request_path_bake(layer_id, obj);
+        if let Some(object) = path_object {
+            self.request_path_bake(layer_id, object);
+        } else {
+            let _ = self.preview_path_style(layer_id, style);
+        }
+    }
+
+    /// Update only the vector appearance model during an on-canvas gradient
+    /// handle drag. The control overlay follows this immediately, while the
+    /// potentially page-sized raster cache is rebuilt once on release.
+    fn preview_path_style_model_only(&mut self, layer_id: u32, style: VectorStyle) {
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let Some(layer) = canvas
+            .layer_stack
+            .layers
+            .iter_mut()
+            .find(|layer| layer.id == layer_id)
+        else {
+            return;
+        };
+        match &mut layer.layer_type {
+            LayerType::Vector(VectorGeometry::Path(object)) => object.style = style,
+            LayerType::Vector(VectorGeometry::Primitive(shape)) => shape.style = style,
+            _ => return,
+        }
+        if let Some(window) = &self.win.window {
+            window.request_redraw();
+        }
     }
 
     /// Capture the pre-edit style baseline for the active Path (once per
@@ -144,9 +372,18 @@ impl App {
         let Some((id, style)) = self.active_path_style() else {
             return;
         };
-        match self.edit.pending_path_style {
-            Some((pid, _)) if pid == id => {}
-            _ => self.edit.pending_path_style = Some((id, style)),
+        if self
+            .edit
+            .pending_path_style
+            .is_some_and(|(pending_id, _)| pending_id != id)
+        {
+            // Finish the pinned old target before starting a session on the
+            // newly selected vector layer. Commands use layer ids, so a panel
+            // selection change can never redirect the edit.
+            self.path_style_commit();
+        }
+        if self.edit.pending_path_style.is_none() {
+            self.edit.pending_path_style = Some((id, style));
         }
     }
 
@@ -160,24 +397,37 @@ impl App {
         // rasterised synchronously below, so a late worker result would be stale
         // (same guard the transform commit uses).
         self.cancel_path_bake();
-        let Some((cur_id, final_style)) = self.active_path_style() else {
+        let Some(final_style) = self.vector_style_by_id(id) else {
             return;
         };
-        if cur_id != id || final_style == baseline {
-            // Nothing to record; make sure the model matches the baseline again.
-            if cur_id == id && final_style != baseline {
-                self.preview_path_style(id, baseline);
-            }
+        if final_style == baseline {
             return;
         }
-        // Rewind to baseline so the gateway captures the correct "before".
-        self.preview_path_style(id, baseline);
+        if final_style.validate().is_err() {
+            let _ = self.preview_path_style(id, baseline);
+            return;
+        }
+        // A crisp-display job may still carry the pre-drag vector style, and
+        // its suppression state may be hiding the document-resolution layer.
+        // Remove both before rebuilding the committed raster so the very next
+        // composite is sourced only from the final model.
+        self.invalidate_vector_display();
+        // The preview already owns the final model. Rebuild its cache once,
+        // then record a command carrying the captured baseline directly.
+        if !self.preview_path_style(id, final_style) {
+            let _ = self.preview_path_style(id, baseline);
+            return;
+        }
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
-        let _ = canvas.execute(
-            Box::new(crate::core::command_vector::ChangeVectorStyle::new(
-                id,
-                final_style,
-            )),
+        canvas.reconcile_path_ink();
+        let _ = canvas.record_as(
+            Box::new(
+                crate::core::command_vector::ChangeVectorStyle::already_applied(
+                    id,
+                    baseline,
+                    final_style,
+                ),
+            ),
             crate::core::gateway::ChangeKind::LayerStructure,
         );
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
@@ -191,7 +441,11 @@ impl App {
         let Some((id, mut style)) = self.active_path_style() else {
             return;
         };
+        let before = style;
         apply(&mut style);
+        if style == before {
+            return;
+        }
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let _ = canvas.execute(
             Box::new(crate::core::command_vector::ChangeVectorStyle::new(
@@ -218,6 +472,7 @@ impl App {
                 s.fill = Paint::Solid(c);
             } else {
                 s.fill = Paint::None;
+                s.fill_overprint = false;
             }
         });
     }
@@ -238,7 +493,72 @@ impl App {
                 }
             } else {
                 s.stroke = Paint::None;
+                s.stroke_overprint = false;
             }
+        });
+    }
+
+    /// Apply an exact process colour from the document/quick palette. Palette
+    /// clicks deliberately choose a solid paint (matching Corel's palette
+    /// gesture); gradient-stop editing remains in the gradient UI.
+    pub fn path_apply_palette_fill(&mut self, color: ColorValue) -> bool {
+        if self.active_path_style().is_none() {
+            return false;
+        }
+        self.path_style_commit();
+        self.commit_path_style_change(|style| style.fill = Paint::Solid(color));
+        true
+    }
+
+    pub fn path_apply_palette_outline(&mut self, color: ColorValue) -> bool {
+        if self.active_path_style().is_none() {
+            return false;
+        }
+        self.path_style_commit();
+        self.commit_path_style_change(|style| {
+            style.stroke = Paint::Solid(color);
+            if style.stroke_style.width <= 0.0 {
+                style.stroke_style.width = 1.0;
+            }
+        });
+        true
+    }
+
+    pub fn path_clear_palette_fill(&mut self) -> bool {
+        if self.active_path_style().is_none() {
+            return false;
+        }
+        self.path_style_commit();
+        self.commit_path_style_change(|style| {
+            style.fill = Paint::None;
+            style.fill_overprint = false;
+        });
+        true
+    }
+
+    pub fn path_clear_palette_outline(&mut self) -> bool {
+        if self.active_path_style().is_none() {
+            return false;
+        }
+        self.path_style_commit();
+        self.commit_path_style_change(|style| {
+            style.stroke = Paint::None;
+            style.stroke_overprint = false;
+        });
+        true
+    }
+
+    pub fn path_set_fill_overprint(&mut self, enabled: bool) {
+        self.path_style_commit();
+        self.commit_path_style_change(|style| {
+            style.fill_overprint = enabled && style.fill.is_visible();
+        });
+    }
+
+    pub fn path_set_stroke_overprint(&mut self, enabled: bool) {
+        self.path_style_commit();
+        self.commit_path_style_change(|style| {
+            style.stroke_overprint = enabled && style.stroke.is_visible();
         });
     }
 
@@ -264,6 +584,123 @@ impl App {
                 self.preview_path_style_live(id, style);
             }
         }
+    }
+
+    /// Live-preview one vector-gradient stop colour. The colour dialog calls
+    /// `path_style_commit` on OK/Cancel so the whole interaction is one undo.
+    pub fn path_set_gradient_stop_color(&mut self, index: u8, rgba: [u8; 4]) {
+        self.path_style_begin();
+        if let Some((id, mut style)) = self.active_path_style() {
+            if let Paint::Gradient(g) = &mut style.fill {
+                let index = index as usize;
+                if index < g.stop_count as usize {
+                    g.stops[index].color = ColorValue::from_rgba8(rgba);
+                    self.preview_path_style_live(id, style);
+                }
+            }
+        }
+    }
+
+    /// Live-preview a stop location while preserving sorted gradient order.
+    pub fn path_set_gradient_stop_offset(&mut self, index: u8, offset: f32) {
+        self.path_style_begin();
+        if let Some((id, mut style)) = self.active_path_style() {
+            if let Paint::Gradient(g) = &mut style.fill {
+                let index = index as usize;
+                let count = g.stop_count.min(MAX_GRADIENT_STOPS as u8) as usize;
+                if index < count {
+                    let lo = if index == 0 {
+                        0.0
+                    } else {
+                        g.stops[index - 1].offset
+                    };
+                    let hi = if index + 1 == count {
+                        1.0
+                    } else {
+                        g.stops[index + 1].offset
+                    };
+                    g.stops[index].offset = if offset.is_finite() {
+                        offset.clamp(lo, hi)
+                    } else {
+                        lo
+                    };
+                    self.preview_path_style_live(id, style);
+                }
+            }
+        }
+    }
+
+    /// Live-preview an on-canvas edit of the gradient's local transform.
+    pub(in crate::app) fn path_set_gradient_transform(&mut self, transform: AffineTransform) {
+        if !transform.is_finite() || transform.inverse().is_none() {
+            return;
+        }
+        self.path_style_begin();
+        if let Some((id, mut style)) = self.active_path_style() {
+            if let Paint::Gradient(g) = &mut style.fill {
+                g.transform = transform;
+                self.preview_path_style_model_only(id, style);
+            }
+        }
+    }
+
+    /// Insert a colour stop at the midpoint of the widest interval.
+    pub fn path_add_gradient_stop(&mut self) {
+        self.path_style_commit();
+        self.commit_path_style_change(|style| {
+            let Paint::Gradient(g) = &mut style.fill else {
+                return;
+            };
+            let count = g.stop_count.min(MAX_GRADIENT_STOPS as u8) as usize;
+            if !(2..MAX_GRADIENT_STOPS).contains(&count) {
+                return;
+            }
+            let (left, _) = g.active_stops().windows(2).enumerate().fold(
+                (0usize, -1.0_f32),
+                |best, (index, pair)| {
+                    let gap = pair[1].offset - pair[0].offset;
+                    if gap > best.1 {
+                        (index, gap)
+                    } else {
+                        best
+                    }
+                },
+            );
+            let right = left + 1;
+            let offset = (g.stops[left].offset + g.stops[right].offset) * 0.5;
+            let a = g.stops[left].color.to_rgba8();
+            let b = g.stops[right].color.to_rgba8();
+            let midpoint =
+                std::array::from_fn(|channel| ((a[channel] as u16 + b[channel] as u16) / 2) as u8);
+            for index in (right..count).rev() {
+                g.stops[index + 1] = g.stops[index];
+            }
+            g.stops[right] = GradientStop {
+                offset,
+                color: ColorValue::from_rgba8(midpoint),
+            };
+            g.stop_count = (count + 1) as u8;
+        });
+    }
+
+    /// Remove one gradient stop while retaining the model minimum of two.
+    pub fn path_remove_gradient_stop(&mut self, index: u8) {
+        self.path_style_commit();
+        self.commit_path_style_change(|style| {
+            let Paint::Gradient(g) = &mut style.fill else {
+                return;
+            };
+            let count = g.stop_count.min(MAX_GRADIENT_STOPS as u8) as usize;
+            let index = index as usize;
+            if count <= 2 || index >= count {
+                return;
+            }
+            for current in index..count - 1 {
+                g.stops[current] = g.stops[current + 1];
+            }
+            g.stops[count - 1] = GradientStop::default();
+            g.stop_count = (count - 1) as u8;
+        });
     }
 
     /// Live-preview the Path's outline colour during a colour-dialog drag.
@@ -306,6 +743,41 @@ impl App {
         });
     }
 
+    /// Live-preview a custom dash/gap array. Invalid UI values are normalised
+    /// here as a final guard so the model never receives an invalid length.
+    pub fn path_set_dash_values(&mut self, mut values: [f32; MAX_DASHES], len: u8) {
+        self.path_style_begin();
+        let len = len.clamp(1, MAX_DASHES as u8);
+        for value in &mut values[..len as usize] {
+            *value = if value.is_finite() {
+                value.clamp(0.01, 10_000.0)
+            } else {
+                1.0
+            };
+        }
+        if let Some((id, mut style)) = self.active_path_style() {
+            style.stroke_style.dash =
+                DashPattern::from_slice(&values[..len as usize], style.stroke_style.dash.offset);
+            if matches!(style.stroke, Paint::None) {
+                style.stroke = Paint::Solid(ColorValue::BLACK);
+            }
+            self.preview_path_style_live(id, style);
+        }
+    }
+
+    /// Live-preview the phase of the current dash array.
+    pub fn path_set_dash_offset(&mut self, offset: f32) {
+        self.path_style_begin();
+        if let Some((id, mut style)) = self.active_path_style() {
+            style.stroke_style.dash.offset = if offset.is_finite() {
+                offset.clamp(-10_000.0, 10_000.0)
+            } else {
+                0.0
+            };
+            self.preview_path_style_live(id, style);
+        }
+    }
+
     pub fn path_set_fill_kind(&mut self, kind: u8) {
         let Some(idx) = self.active_path_layer() else {
             return;
@@ -316,7 +788,7 @@ impl App {
             .layers[idx]
             .layer_type
         {
-            LayerType::Path(o) => o,
+            LayerType::Vector(VectorGeometry::Path(o)) => o,
             _ => return,
         };
         let Some(bounds) = object.local_bounds(0.25) else {
@@ -373,6 +845,7 @@ mod tests {
     use crate::core::gateway::ChangeKind;
     use crate::core::geometry::Point;
     use crate::core::vector::affine::AffineTransform;
+    use crate::core::vector::object::VectorObjectData;
     use crate::core::vector::path::{Contour, FillRule, Node, PathData};
 
     fn app_with_path() -> (App, u32) {
@@ -407,7 +880,7 @@ mod tests {
                 .layer_stack
                 .layers
                 .iter()
-                .position(|l| matches!(l.layer_type, LayerType::Path(_)))
+                .position(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
                 .unwrap();
             canvas.layer_stack.active_idx = idx;
             canvas.layer_stack.layers[idx].id
@@ -425,7 +898,7 @@ mod tests {
             .unwrap()
             .layer_type
         {
-            LayerType::Path(o) => o.style,
+            LayerType::Vector(VectorGeometry::Path(o)) => o.style,
             _ => panic!("not a path"),
         }
     }
@@ -437,6 +910,112 @@ mod tests {
         assert!(vm.fill_enabled);
         assert_eq!(vm.fill_color, [255, 0, 0, 255]);
         assert!(!vm.stroke_enabled, "default path has no outline");
+    }
+
+    #[test]
+    fn gradient_mode_tracks_vector_raster_and_active_mask() {
+        let (mut app, id) = app_with_path();
+        assert_eq!(app.active_gradient_mode(), 2);
+
+        let canvas = &mut app.docs.documents[0].canvas;
+        let raster = canvas.layer_stack.add_layer(200, 200);
+        canvas.layer_stack.active_idx = raster;
+        assert_eq!(app.active_gradient_mode(), 1);
+
+        let path = app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|layer| layer.id == id)
+            .unwrap();
+        let canvas = &mut app.docs.documents[0].canvas;
+        canvas.layer_stack.active_idx = path;
+        canvas.layer_stack.layers[path].mask =
+            Some(crate::core::layer::LayerMask::new_white(200, 200));
+        canvas.layer_stack.layers[path].paint_target = crate::core::layer::PaintTarget::Mask;
+        assert_eq!(app.active_gradient_mode(), 3);
+    }
+
+    #[test]
+    fn shared_gradient_editor_stops_commit_as_one_vector_undo() {
+        let (mut app, id) = app_with_path();
+        app.path_set_fill_kind(1);
+        let baseline = style(&app, id);
+
+        assert!(app.vector_gradient_set_stops(vec![
+            (0.0, [10, 20, 30, 255]),
+            (0.4, [40, 50, 60, 200]),
+            (1.0, [70, 80, 90, 255]),
+        ]));
+        assert!(app.vector_gradient_set_stops(vec![
+            (0.0, [1, 2, 3, 255]),
+            (0.75, [4, 5, 6, 128]),
+            (1.0, [7, 8, 9, 255]),
+        ]));
+        app.path_style_commit();
+
+        let Paint::Gradient(gradient) = style(&app, id).fill else {
+            panic!("expected vector gradient");
+        };
+        assert_eq!(gradient.stop_count, 3);
+        assert!((gradient.stops[1].offset - 0.75).abs() < 1e-3);
+        app.docs.documents[0].canvas.undo().expect("one undo");
+        assert_eq!(style(&app, id), baseline);
+    }
+
+    #[test]
+    fn shared_gradient_editor_preserves_exact_cmyk_when_moving_stop() {
+        let (mut app, id) = app_with_path();
+        let pure_k = ColorValue::cmyk(0.0, 0.0, 0.0, 1.0);
+        let rich_cmyk = ColorValue::cmyka(0.7, 0.2, 0.1, 0.05, 0.8);
+        {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let layer = canvas
+                .layer_stack
+                .layers
+                .iter_mut()
+                .find(|layer| layer.id == id)
+                .unwrap();
+            let LayerType::Vector(VectorGeometry::Path(object)) = &mut layer.layer_type else {
+                panic!("expected path");
+            };
+            object.style.fill = Paint::Gradient(Gradient::two_color(
+                GradientKind::Linear,
+                pure_k,
+                rich_cmyk,
+                AffineTransform::IDENTITY,
+            ));
+        }
+
+        let mut preview = app.active_gradient_ui_stops();
+        preview[1].0 = 0.65;
+        assert!(app.vector_gradient_set_stops(preview));
+        app.path_style_commit();
+
+        let Paint::Gradient(gradient) = style(&app, id).fill else {
+            panic!("expected gradient");
+        };
+        assert_eq!(gradient.stops[0].color, pure_k);
+        assert_eq!(gradient.stops[1].color, rich_cmyk);
+        assert!((gradient.stops[1].offset - 0.65).abs() < 1e-6);
+    }
+
+    #[test]
+    fn switching_document_commits_gradient_editor_to_original_canvas() {
+        let (mut app, id) = app_with_path();
+        app.path_set_fill_kind(1);
+        let baseline = style(&app, id);
+        assert!(app.vector_gradient_set_stops(vec![
+            (0.0, [20, 40, 60, 255]),
+            (1.0, [220, 180, 100, 255]),
+        ]));
+
+        app.open_new_doc_tab();
+        assert_eq!(app.docs.active_doc_idx, 1);
+        assert!(matches!(style(&app, id).fill, Paint::Gradient(_)));
+        app.docs.documents[0].canvas.undo().expect("one undo");
+        assert_eq!(style(&app, id), baseline);
     }
 
     #[test]
@@ -486,6 +1065,80 @@ mod tests {
     }
 
     #[test]
+    fn custom_dash_and_offset_commit_as_one_undo_step() {
+        let (mut app, id) = app_with_path();
+        let mut values = [0.0; MAX_DASHES];
+        values[..4].copy_from_slice(&[6.0, 2.0, 1.0, 2.0]);
+
+        app.path_set_dash_values(values, 4);
+        app.path_set_dash_offset(1.5);
+        app.path_style_commit();
+
+        let dash = style(&app, id).stroke_style.dash;
+        assert_eq!(dash.as_slice(), &[6.0, 2.0, 1.0, 2.0]);
+        assert!((dash.offset - 1.5).abs() < 1e-3);
+        assert!(matches!(style(&app, id).stroke, Paint::Solid(_)));
+
+        app.docs.documents[0].canvas.undo().expect("undo");
+        assert!(style(&app, id).stroke_style.dash.is_solid());
+        assert!(matches!(style(&app, id).stroke, Paint::None));
+    }
+
+    #[test]
+    fn gradient_stop_add_remove_and_undo() {
+        let (mut app, id) = app_with_path();
+        app.path_set_fill_kind(1);
+
+        app.path_add_gradient_stop();
+        let Paint::Gradient(gradient) = style(&app, id).fill else {
+            panic!("expected gradient");
+        };
+        assert_eq!(gradient.stop_count, 3);
+        assert!((gradient.stops[1].offset - 0.5).abs() < 1e-3);
+
+        app.docs.documents[0].canvas.undo().expect("undo add");
+        let Paint::Gradient(gradient) = style(&app, id).fill else {
+            panic!("expected gradient");
+        };
+        assert_eq!(gradient.stop_count, 2);
+
+        app.path_add_gradient_stop();
+        app.path_remove_gradient_stop(1);
+        let Paint::Gradient(gradient) = style(&app, id).fill else {
+            panic!("expected gradient");
+        };
+        assert_eq!(gradient.stop_count, 2);
+        app.docs.documents[0].canvas.undo().expect("undo remove");
+        let Paint::Gradient(gradient) = style(&app, id).fill else {
+            panic!("expected gradient");
+        };
+        assert_eq!(gradient.stop_count, 3);
+    }
+
+    #[test]
+    fn gradient_stop_color_and_location_are_one_undo_step() {
+        let (mut app, id) = app_with_path();
+        app.path_set_fill_kind(1);
+
+        app.path_set_gradient_stop_offset(1, 0.75);
+        app.path_set_gradient_stop_color(1, [10, 20, 30, 255]);
+        app.path_style_commit();
+
+        let Paint::Gradient(gradient) = style(&app, id).fill else {
+            panic!("expected gradient");
+        };
+        assert!((gradient.stops[1].offset - 0.75).abs() < 1e-3);
+        assert_eq!(gradient.stops[1].color.to_rgba8(), [10, 20, 30, 255]);
+
+        app.docs.documents[0].canvas.undo().expect("undo stop edit");
+        let Paint::Gradient(gradient) = style(&app, id).fill else {
+            panic!("expected gradient");
+        };
+        assert!((gradient.stops[1].offset - 1.0).abs() < 1e-3);
+        assert_eq!(gradient.stops[1].color.to_rgba8(), [255, 255, 255, 255]);
+    }
+
+    #[test]
     fn cancelled_edit_records_nothing() {
         let (mut app, id) = app_with_path();
         let dirty_before = app.docs.documents[0].canvas.is_dirty();
@@ -502,5 +1155,49 @@ mod tests {
             dirty_before,
             "a no-net-change edit adds no history"
         );
+    }
+
+    #[test]
+    fn palette_gesture_preserves_exact_cmyk_and_is_undoable() {
+        let (mut app, id) = app_with_path();
+        let pure_k = ColorValue::cmyk(0.0, 0.0, 0.0, 1.0);
+        assert!(app.path_apply_palette_fill(pure_k));
+        assert_eq!(style(&app, id).fill, Paint::Solid(pure_k));
+        app.docs.documents[0].canvas.undo().expect("undo palette");
+        assert_eq!(
+            style(&app, id).fill,
+            Paint::Solid(ColorValue::rgb(1.0, 0.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn overprint_fill_and_outline_are_independent_undo_steps() {
+        let (mut app, id) = app_with_path();
+        app.path_apply_palette_outline(ColorValue::BLACK);
+        app.path_set_fill_overprint(true);
+        app.path_set_stroke_overprint(true);
+        let current = style(&app, id);
+        assert!(current.fill_overprint);
+        assert!(current.stroke_overprint);
+
+        app.docs.documents[0]
+            .canvas
+            .undo()
+            .expect("undo outline OP");
+        let current = style(&app, id);
+        assert!(current.fill_overprint);
+        assert!(!current.stroke_overprint);
+        app.docs.documents[0].canvas.undo().expect("undo fill OP");
+        assert!(!style(&app, id).fill_overprint);
+    }
+
+    #[test]
+    fn removing_a_paint_also_clears_its_overprint_flag() {
+        let (mut app, id) = app_with_path();
+        app.path_set_fill_overprint(true);
+        app.path_clear_palette_fill();
+        let current = style(&app, id);
+        assert_eq!(current.fill, Paint::None);
+        assert!(!current.fill_overprint);
     }
 }

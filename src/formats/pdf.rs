@@ -551,13 +551,15 @@ fn inherit_resources_onto_page(
                 .cloned()
         })
         .unwrap_or_default();
-    let detached_xobjects = resources.get(b"XObject").ok().and_then(|xobjects| {
-        dereferenced_object(document, xobjects)
-            .and_then(|object| object.as_dict().ok())
-            .cloned()
-    });
-    if let Some(xobjects) = detached_xobjects {
-        resources.set("XObject", xobjects);
+    for key in [b"XObject".as_slice(), b"Shading".as_slice()] {
+        let detached = resources.get(key).ok().and_then(|value| {
+            dereferenced_object(document, value)
+                .and_then(|object| object.as_dict().ok())
+                .cloned()
+        });
+        if let Some(dictionary) = detached {
+            resources.set(key, dictionary);
+        }
     }
     document
         .get_dictionary_mut(page_id)
@@ -645,6 +647,128 @@ fn add_overlay(
     Ok(true)
 }
 
+fn pdf_real(value: f32) -> lopdf::Object {
+    lopdf::Object::Real(value)
+}
+
+fn pdf_real_array(values: impl IntoIterator<Item = f32>) -> lopdf::Object {
+    lopdf::Object::Array(values.into_iter().map(pdf_real).collect())
+}
+
+fn gradient_function_object(gradient: &crate::core::vector::style::Gradient) -> lopdf::Object {
+    let color = |value: crate::core::vector::color::ColorValue| {
+        let [r, g, b, _] = value.to_rgba8();
+        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+    };
+    let mut stops: Vec<(f32, [f32; 3])> = Vec::new();
+    for stop in gradient.active_stops() {
+        let offset = stop.offset.clamp(0.0, 1.0);
+        if stops
+            .last()
+            .is_some_and(|(previous, _)| (offset - *previous).abs() < 1e-6)
+        {
+            if let Some(last) = stops.last_mut() {
+                last.1 = color(stop.color);
+            }
+        } else {
+            stops.push((offset, color(stop.color)));
+        }
+    }
+    if stops.is_empty() {
+        stops.push((0.0, [0.0; 3]));
+    }
+    if stops[0].0 > 0.0 {
+        stops.insert(0, (0.0, stops[0].1));
+    }
+    if stops.last().is_some_and(|(offset, _)| *offset < 1.0) {
+        let last = stops.last().expect("checked").1;
+        stops.push((1.0, last));
+    }
+    if stops.len() == 1 {
+        stops.push((1.0, stops[0].1));
+    }
+    let type2 = |a: [f32; 3], b: [f32; 3]| {
+        lopdf::Object::Dictionary(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => pdf_real_array([0.0, 1.0]),
+            "C0" => pdf_real_array(a),
+            "C1" => pdf_real_array(b),
+            "N" => pdf_real(1.0),
+        })
+    };
+    if stops.len() == 2 {
+        return type2(stops[0].1, stops[1].1);
+    }
+    let functions = lopdf::Object::Array(
+        stops
+            .windows(2)
+            .map(|pair| type2(pair[0].1, pair[1].1))
+            .collect(),
+    );
+    let bounds = pdf_real_array(stops[1..stops.len() - 1].iter().map(|(offset, _)| *offset));
+    let encode = pdf_real_array((0..stops.len() - 1).flat_map(|_| [0.0, 1.0]));
+    lopdf::Object::Dictionary(dictionary! {
+        "FunctionType" => 3,
+        "Domain" => pdf_real_array([0.0, 1.0]),
+        "Functions" => functions,
+        "Bounds" => bounds,
+        "Encode" => encode,
+    })
+}
+
+fn add_vector_shading_resources(
+    document: &mut lopdf::Document,
+    page_id: lopdf::ObjectId,
+    objects: &[crate::core::print::PdfVectorObject],
+) -> Result<(), String> {
+    use crate::core::vector::style::GradientKind;
+    let mut additions = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        let Some(gradient) = object.fill_gradient else {
+            continue;
+        };
+        let (kind, coords) = match gradient.kind {
+            GradientKind::Linear => (2, pdf_real_array([0.0, 0.0, 1.0, 0.0])),
+            GradientKind::Radial => (3, pdf_real_array([0.0, 0.0, 0.0, 0.0, 0.0, 1.0])),
+        };
+        additions.push((
+            format!("IaiSh{index}"),
+            lopdf::Object::Dictionary(dictionary! {
+                "ShadingType" => kind,
+                "ColorSpace" => "DeviceRGB",
+                "Coords" => coords,
+                "Function" => gradient_function_object(&gradient),
+                "Extend" => lopdf::Object::Array(vec![
+                    lopdf::Object::Boolean(true),
+                    lopdf::Object::Boolean(true),
+                ]),
+            }),
+        ));
+    }
+    if additions.is_empty() {
+        return Ok(());
+    }
+    let page = document
+        .get_dictionary_mut(page_id)
+        .map_err(|error| error.to_string())?;
+    let resources = page
+        .get_mut(b"Resources")
+        .map_err(|error| error.to_string())?
+        .as_dict_mut()
+        .map_err(|error| error.to_string())?;
+    let mut shadings = resources
+        .get(b"Shading")
+        .ok()
+        .and_then(|object| object.as_dict().ok())
+        .cloned()
+        .unwrap_or_default();
+    for (name, shading) in additions {
+        shadings.set(name, shading);
+    }
+    resources.set("Shading", shadings);
+    Ok(())
+}
+
 fn add_vector_overlay(
     document: &mut lopdf::Document,
     page_id: lopdf::ObjectId,
@@ -661,6 +785,8 @@ fn add_vector_overlay(
     }
     let rect =
         page_rect(document, page_id).ok_or_else(|| "PDF page has no page box".to_string())?;
+    inherit_resources_onto_page(document, page_id)?;
+    add_vector_shading_resources(document, page_id, objects)?;
     let mut content = String::new();
     crate::core::print::append_vector_content(
         &mut content,
@@ -945,7 +1071,10 @@ mod tests {
     fn hybrid_pdf_keeps_new_path_edit_as_native_vector() {
         use crate::core::geometry::Point;
         use crate::core::print::PdfVectorObject;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
         use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::{Gradient, GradientKind};
 
         let source = temp_pdf_path("hybrid-vector-source");
         std::fs::write(&source, minimal_pdf(&[(40, 40)])).expect("write source");
@@ -962,17 +1091,31 @@ mod tests {
                 FillRule::NonZero,
             ),
             fill: Some([1.0, 0.0, 0.0]),
+            fill_gradient: None,
             stroke: None,
             stroke_width_px: 0.0,
+            stroke_cap: crate::core::vector::style::LineCap::Butt,
+            stroke_join: crate::core::vector::style::LineJoin::Miter,
+            stroke_miter_limit: 4.0,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
             even_odd: false,
         };
+        let mut gradient_vector = vector.clone();
+        gradient_vector.fill = None;
+        gradient_vector.fill_gradient = Some(Gradient::two_color(
+            GradientKind::Linear,
+            ColorValue::BLACK,
+            ColorValue::WHITE,
+            AffineTransform::translate(4.0, 4.0).then(&AffineTransform::scale(32.0, 32.0)),
+        ));
         let hybrid = build_hybrid_pdf(
             &source,
             &[HybridPage {
                 source_index: 0,
                 content: HybridPageContent::Overlay {
                     rgba: vec![0; 40 * 40 * 4],
-                    vectors: vec![vector],
+                    vectors: vec![vector, gradient_vector],
                     width: 40,
                     height: 40,
                     dpi: 72.0,
@@ -986,6 +1129,19 @@ mod tests {
         let text = String::from_utf8_lossy(&content);
         assert!(text.contains("1.0000 0.0000 0.0000 rg"));
         assert!(text.contains(" m\n") && text.contains("f\nQ"));
+        assert!(text.contains("/IaiSh1 sh"));
+        let page = document.get_dictionary(page_id).expect("page dictionary");
+        let resources = page
+            .get(b"Resources")
+            .expect("resources")
+            .as_dict()
+            .expect("resource dictionary");
+        let shadings = resources
+            .get(b"Shading")
+            .expect("shading resources")
+            .as_dict()
+            .expect("shading dictionary");
+        assert!(shadings.has(b"IaiSh1"));
         let _ = std::fs::remove_file(source);
     }
 

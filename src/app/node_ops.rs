@@ -17,6 +17,7 @@ use crate::app::state::{App, NodeDrag, NodeDragTarget};
 use crate::core::geometry::{cubic_bezier, Point};
 use crate::core::layer::LayerType;
 use crate::core::vector::affine::AffineTransform;
+use crate::core::vector::object::VectorGeometry;
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::ops::{AlignRef, Axis, HandleSide};
 use crate::core::vector::path::PathData;
@@ -88,7 +89,7 @@ impl App {
             .canvas
             .layer_stack
             .layers[idx];
-        let LayerType::Path(obj) = &layer.layer_type else {
+        let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type else {
             return None;
         };
         Some((layer.id, obj.transform, obj.path.clone()))
@@ -711,7 +712,7 @@ impl App {
             let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
             match canvas.layer_stack.layers.iter().find(|l| l.id == layer_id) {
                 Some(l) => match &l.layer_type {
-                    LayerType::Path(o) => VectorObjectData {
+                    LayerType::Vector(VectorGeometry::Path(o)) => VectorObjectData {
                         path: pending,
                         ..o.clone()
                     },
@@ -740,7 +741,7 @@ impl App {
         };
         let (old_off, old_w, old_h, obj) = {
             let layer = &canvas.layer_stack.layers[idx];
-            let LayerType::Path(o) = &layer.layer_type else {
+            let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type else {
                 return;
             };
             (layer.offset, layer.width, layer.height, o.clone())
@@ -1006,7 +1007,7 @@ mod tests {
                 .layer_stack
                 .layers
                 .iter()
-                .position(|l| matches!(l.layer_type, LayerType::Path(_)))
+                .position(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
                 .unwrap();
             canvas.layer_stack.active_idx = idx;
             canvas.layer_stack.layers[idx].id
@@ -1028,7 +1029,7 @@ mod tests {
             .unwrap()
             .layer_type
         {
-            LayerType::Path(o) => o.path.clone(),
+            LayerType::Vector(VectorGeometry::Path(o)) => o.path.clone(),
             _ => panic!("not a path"),
         }
     }
@@ -1053,7 +1054,7 @@ mod tests {
             app.docs.documents[0].canvas.layer_stack.layers
                 [app.docs.documents[0].canvas.layer_stack.active_idx]
                 .layer_type,
-            LayerType::Path(_)
+            LayerType::Vector(VectorGeometry::Path(_))
         ));
 
         app.docs.documents[0].canvas.undo().expect("undo");
@@ -1255,7 +1256,9 @@ mod tests {
         {
             let canvas = &mut app.docs.documents[0].canvas;
             let idx = canvas.layer_stack.active_idx;
-            if let LayerType::Path(o) = &mut canvas.layer_stack.layers[idx].layer_type {
+            if let LayerType::Vector(VectorGeometry::Path(o)) =
+                &mut canvas.layer_stack.layers[idx].layer_type
+            {
                 o.path.contours[0].nodes.truncate(2);
                 o.path.contours[0].closed = false;
             }

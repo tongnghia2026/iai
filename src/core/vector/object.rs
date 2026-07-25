@@ -19,9 +19,30 @@
 //! source of truth (Mục 3.2). See [`crate::core::vector::raster`].
 
 use crate::core::geometry::Rect;
+use crate::core::shape::ShapeData;
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::path::PathData;
 use crate::core::vector::style::VectorStyle;
+
+/// Source geometry owned by one unified vector layer.
+///
+/// Primitive objects retain their parametric controls until the user explicitly
+/// converts them to curves. Shape and Pen are creation tools, not layer kinds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VectorGeometry {
+    Primitive(ShapeData),
+    Path(VectorObjectData),
+}
+
+impl VectorGeometry {
+    pub fn is_primitive(&self) -> bool {
+        matches!(self, Self::Primitive(_))
+    }
+
+    pub fn is_path(&self) -> bool {
+        matches!(self, Self::Path(_))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct VectorObjectData {

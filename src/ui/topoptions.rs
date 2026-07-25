@@ -1142,6 +1142,27 @@ fn fill_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 }
 
 fn gradient_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    let vector_mode = data.tool.gradient_mode == 2;
+    let mode_label = match data.tool.gradient_mode {
+        1 => "Pixel",
+        2 => "Vector",
+        3 => "Mask",
+        _ => "Unavailable",
+    };
+    ui.label(
+        egui::RichText::new(mode_label)
+            .strong()
+            .color(if vector_mode {
+                egui::Color32::from_rgb(90, 190, 255)
+            } else {
+                egui::Color32::from_gray(190)
+            }),
+    );
+    ui.separator();
+    if data.tool.gradient_mode == 0 {
+        ui.label("Select an editable Raster, Vector, or Mask target");
+        return;
+    }
     // Clickable gradient swatch → opens the Gradient Editor (pick the ramp colors).
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(88.0, 20.0), egui::Sense::click());
     crate::ui::dialogs::paint_gradient_bar(
@@ -1174,40 +1195,48 @@ fn gradient_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             if ui.selectable_value(&mut g_type, 1, "Radial").changed() {
                 actions.tool.set_gradient_type = Some(g_type);
             }
-            if ui.selectable_value(&mut g_type, 2, "Angle").changed() {
-                actions.tool.set_gradient_type = Some(g_type);
-            }
-            if ui.selectable_value(&mut g_type, 3, "Reflected").changed() {
-                actions.tool.set_gradient_type = Some(g_type);
-            }
-            if ui.selectable_value(&mut g_type, 4, "Diamond").changed() {
-                actions.tool.set_gradient_type = Some(g_type);
+            if !vector_mode {
+                if ui.selectable_value(&mut g_type, 2, "Angle").changed() {
+                    actions.tool.set_gradient_type = Some(g_type);
+                }
+                if ui.selectable_value(&mut g_type, 3, "Reflected").changed() {
+                    actions.tool.set_gradient_type = Some(g_type);
+                }
+                if ui.selectable_value(&mut g_type, 4, "Diamond").changed() {
+                    actions.tool.set_gradient_type = Some(g_type);
+                }
             }
         });
 
     ui.separator();
-    ui.label("Opacity:");
-    let mut op = data.tool.gradient_opacity * 100.0;
-    if ui
-        .add(
-            egui::DragValue::new(&mut op)
-                .range(0.0..=100.0)
-                .suffix("%")
-                .speed(0.5),
-        )
-        .changed()
-    {
-        actions.tool.set_gradient_opacity = Some(op / 100.0);
-    }
+    if vector_mode {
+        if ui.button("Reverse").clicked() {
+            actions.tool.set_gradient_reverse = Some(true);
+        }
+    } else {
+        ui.label("Opacity:");
+        let mut op = data.tool.gradient_opacity * 100.0;
+        if ui
+            .add(
+                egui::DragValue::new(&mut op)
+                    .range(0.0..=100.0)
+                    .suffix("%")
+                    .speed(0.5),
+            )
+            .changed()
+        {
+            actions.tool.set_gradient_opacity = Some(op / 100.0);
+        }
 
-    ui.separator();
-    let mut reverse = data.tool.gradient_reverse;
-    if ui.checkbox(&mut reverse, "Reverse").changed() {
-        actions.tool.set_gradient_reverse = Some(reverse);
-    }
-    let mut dither = data.tool.gradient_dither;
-    if ui.checkbox(&mut dither, "Dither").changed() {
-        actions.tool.set_gradient_dither = Some(dither);
+        ui.separator();
+        let mut reverse = data.tool.gradient_reverse;
+        if ui.checkbox(&mut reverse, "Reverse").changed() {
+            actions.tool.set_gradient_reverse = Some(reverse);
+        }
+        let mut dither = data.tool.gradient_dither;
+        if ui.checkbox(&mut dither, "Dither").changed() {
+            actions.tool.set_gradient_dither = Some(dither);
+        }
     }
 }
 
@@ -1580,6 +1609,17 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     if shape_color_chip(ui, style.fill_color, "Fill colour") {
         actions.dialogs.open_paint_color_dialog = Some(5);
     }
+    let mut fill_overprint = style.fill_overprint;
+    if ui
+        .add_enabled(
+            style.fill_enabled,
+            egui::Checkbox::new(&mut fill_overprint, "OP Fill"),
+        )
+        .on_hover_text("Overprint Fill — preserve underlying inks on output")
+        .changed()
+    {
+        actions.tool.set_path_fill_overprint = Some(fill_overprint);
+    }
     let mut fill_kind = style.fill_kind;
     egui::ComboBox::from_id_salt("path_fill_kind")
         .selected_text(match fill_kind {
@@ -1598,6 +1638,68 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     if style.fill_kind != 0 && shape_color_chip(ui, style.fill_end_color, "Gradient end colour") {
         actions.dialogs.open_paint_color_dialog = Some(7);
     }
+    if style.fill_kind != 0 {
+        ui.menu_button(format!("Stops: {}", style.gradient_stop_count), |ui| {
+            ui.set_min_width(285.0);
+            ui.label("Gradient stops");
+            ui.separator();
+            let count = style.gradient_stop_count as usize;
+            for index in 0..count {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}.", index + 1));
+                    if shape_color_chip(ui, style.gradient_stop_colors[index], "Edit stop colour") {
+                        actions.dialogs.open_paint_color_dialog = Some(8 + index as u8);
+                    }
+                    let lo = if index == 0 {
+                        0.0
+                    } else {
+                        style.gradient_stop_offsets[index - 1]
+                    };
+                    let hi = if index + 1 == count {
+                        1.0
+                    } else {
+                        style.gradient_stop_offsets[index + 1]
+                    };
+                    let mut percent = style.gradient_stop_offsets[index] * 100.0;
+                    let response = ui.add(
+                        egui::DragValue::new(&mut percent)
+                            .range((lo * 100.0)..=(hi * 100.0))
+                            .suffix("%")
+                            .speed(0.25)
+                            .max_decimals(1),
+                    );
+                    if response.changed() {
+                        actions.tool.set_path_gradient_stop_offset =
+                            Some((index as u8, percent / 100.0));
+                    }
+                    if response.drag_stopped() || response.lost_focus() {
+                        actions.tool.commit_path_style = true;
+                    }
+                    if ui
+                        .add_enabled(count > 2, egui::Button::new("Delete"))
+                        .clicked()
+                    {
+                        actions.tool.remove_path_gradient_stop = Some(index as u8);
+                    }
+                });
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    count < crate::core::vector::style::MAX_GRADIENT_STOPS,
+                    egui::Button::new("Add stop"),
+                )
+                .clicked()
+            {
+                actions.tool.add_path_gradient_stop = true;
+            }
+            ui.label(
+                egui::RichText::new("Stops stay sorted; minimum 2, maximum 8")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(140)),
+            );
+        });
+    }
     ui.separator();
     // Outline.
     let mut stroke = style.stroke_enabled;
@@ -1606,6 +1708,17 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     }
     if shape_color_chip(ui, style.stroke_color, "Outline colour") {
         actions.dialogs.open_paint_color_dialog = Some(6);
+    }
+    let mut stroke_overprint = style.stroke_overprint;
+    if ui
+        .add_enabled(
+            style.stroke_enabled,
+            egui::Checkbox::new(&mut stroke_overprint, "OP Line"),
+        )
+        .on_hover_text("Overprint Outline — preserve underlying inks on output")
+        .changed()
+    {
+        actions.tool.set_path_stroke_overprint = Some(stroke_overprint);
     }
     ui.label("Width:");
     let mut w = style.stroke_width;
@@ -1637,6 +1750,68 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     if dash_kind != style.dash_kind {
         actions.tool.set_path_dash_kind = Some(dash_kind);
     }
+    ui.add_enabled_ui(style.dash_len > 0, |ui| {
+        ui.menu_button("Dash\u{2026}", |ui| {
+            ui.set_min_width(330.0);
+
+            let mut values = style.dash_values;
+            let mut len = style.dash_len.clamp(1, 8);
+            ui.horizontal(|ui| {
+                ui.label("Segments:");
+                let response = ui.add(egui::DragValue::new(&mut len).range(1..=8));
+                if response.changed() {
+                    let old_len = style.dash_len.max(1) as usize;
+                    for index in old_len..len as usize {
+                        values[index] = values[index % old_len].max(0.01);
+                    }
+                    actions.tool.set_path_dash_values = Some((values, len));
+                }
+                if response.drag_stopped() || response.lost_focus() {
+                    actions.tool.commit_path_style = true;
+                }
+            });
+
+            ui.label("Dash / gap lengths:");
+            let mut values_changed = false;
+            let mut values_finished = false;
+            ui.horizontal_wrapped(|ui| {
+                for (index, value) in values[..len as usize].iter_mut().enumerate() {
+                    ui.label(format!("{}:", index + 1));
+                    let response = ui.add(
+                        egui::DragValue::new(value)
+                            .range(0.01..=10_000.0)
+                            .speed(0.1)
+                            .max_decimals(2),
+                    );
+                    values_changed |= response.changed();
+                    values_finished |= response.drag_stopped() || response.lost_focus();
+                }
+            });
+            if values_changed {
+                actions.tool.set_path_dash_values = Some((values, len));
+            }
+            if values_finished {
+                actions.tool.commit_path_style = true;
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Offset:");
+                let mut offset = style.dash_offset;
+                let response = ui.add(
+                    egui::DragValue::new(&mut offset)
+                        .range(-10_000.0..=10_000.0)
+                        .speed(0.1)
+                        .max_decimals(2),
+                );
+                if response.changed() {
+                    actions.tool.set_path_dash_offset = Some(offset);
+                }
+                if response.drag_stopped() || response.lost_focus() {
+                    actions.tool.commit_path_style = true;
+                }
+            });
+        });
+    });
 }
 
 fn align_button(ui: &mut egui::Ui, actions: &mut UiActions, align: LayerAlign, tooltip: &str) {

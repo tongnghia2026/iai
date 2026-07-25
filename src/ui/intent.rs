@@ -289,10 +289,27 @@ pub struct ToolIntent {
     /// Path layer Fill/Outline (options bar under Move / Node).
     pub set_path_fill_enabled: Option<bool>,
     pub set_path_stroke_enabled: Option<bool>,
+    pub set_path_fill_overprint: Option<bool>,
+    pub set_path_stroke_overprint: Option<bool>,
+    /// Corel-like palette gesture: primary click applies Fill, secondary click
+    /// applies Outline while preserving an exact RGB/CMYK process value.
+    pub apply_palette_fill: Option<crate::core::vector::color::ColorValue>,
+    pub apply_palette_outline: Option<crate::core::vector::color::ColorValue>,
+    pub clear_palette_fill: bool,
+    pub clear_palette_outline: bool,
+    pub add_document_swatch: Option<crate::core::vector::color::ColorValue>,
+    pub rename_document_swatch: Option<(usize, String)>,
+    pub remove_document_swatch: Option<usize>,
     /// Live preview of the outline width; `commit_path_style` finalises the scrub.
     pub set_path_stroke_width: Option<f32>,
     pub set_path_fill_kind: Option<u8>,
+    pub set_path_gradient_stop_offset: Option<(u8, f32)>,
+    pub add_path_gradient_stop: bool,
+    pub remove_path_gradient_stop: Option<u8>,
     pub set_path_dash_kind: Option<u8>,
+    /// Live preview of the custom dash array and phase.
+    pub set_path_dash_values: Option<([f32; crate::core::vector::style::MAX_DASHES], u8)>,
+    pub set_path_dash_offset: Option<f32>,
     /// End of an interactive Path style edit (width scrub / colour dialog) — record
     /// the single undo step.
     pub commit_path_style: bool,

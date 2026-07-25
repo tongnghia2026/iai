@@ -133,6 +133,7 @@ fn build_canvas_from_meta<R: Read + Seek>(
     canvas.color_space = color_space;
     canvas.metadata.author = meta["author"].as_str().unwrap_or("").to_string();
     canvas.metadata.description = meta["description"].as_str().unwrap_or("").to_string();
+    canvas.metadata.swatches = super::iai_palette::json_to_palette(meta.get("document_swatches"));
     // 16-bit mode (post-B2 key; absent on older files = 8-bit). Keeps a reopened
     // 16-bit document in 16-bit mode so its first edit preserves precision
     // instead of quantizing the masters the 16-bit layer PNGs just restored.
@@ -220,14 +221,18 @@ fn build_canvas_from_meta<R: Read + Seek>(
             }
         } else if layer_info["layer_type"].as_str() == Some("Shape") {
             if let Some(shape) = json_to_shape_data(&layer_info["shape"]) {
-                layer.layer_type = crate::core::layer::LayerType::Shape(shape);
+                layer.layer_type = crate::core::layer::LayerType::Vector(
+                    crate::core::vector::object::VectorGeometry::Primitive(shape),
+                );
             }
         } else if layer_info["layer_type"].as_str() == Some("Path") {
             // Model is the source of truth; the baked PNG already loaded above is
             // the display fallback. A malformed/oversized payload decodes to None,
             // leaving the layer as the raster it loaded (Mục 5.3).
             if let Some(obj) = super::iai_vector::json_to_layer_path(&layer_info["path"]) {
-                layer.layer_type = crate::core::layer::LayerType::Path(obj);
+                layer.layer_type = crate::core::layer::LayerType::Vector(
+                    crate::core::vector::object::VectorGeometry::Path(obj),
+                );
             }
         } else if layer_info["layer_type"].as_str() == Some("Group") {
             layer.layer_type = crate::core::layer::LayerType::Group;
@@ -458,9 +463,9 @@ impl Exporter for IaiExporter {
             // would be lost on an older resave), else CMYK stamps v3 (ink),
             // else RGB stays v2.
             let has_v4_model = canvas.layer_stack.layers.iter().any(|l| {
-                matches!(l.layer_type, crate::core::layer::LayerType::Path(_))
+                matches!(l.layer_type, crate::core::layer::LayerType::Vector(_))
                     || l.clip_parent_id.is_some()
-            });
+            }) || !canvas.metadata.swatches.is_empty();
             manifest["version"] = serde_json::json!(if has_v4_model {
                 4u64
             } else if canvas.is_cmyk() {
@@ -551,12 +556,18 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
         } else {
             serde_json::Value::Null
         };
-        let shape_json = if let crate::core::layer::LayerType::Shape(ref shape) = layer.layer_type {
+        let shape_json = if let crate::core::layer::LayerType::Vector(
+            crate::core::vector::object::VectorGeometry::Primitive(ref shape),
+        ) = layer.layer_type
+        {
             shape_to_json(shape)
         } else {
             serde_json::Value::Null
         };
-        let path_json = if let crate::core::layer::LayerType::Path(ref obj) = layer.layer_type {
+        let path_json = if let crate::core::layer::LayerType::Vector(
+            crate::core::vector::object::VectorGeometry::Path(ref obj),
+        ) = layer.layer_type
+        {
             super::iai_vector::layer_path_to_json(obj)
         } else {
             serde_json::Value::Null
@@ -617,6 +628,7 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
         "bit_depth": bit_depth,
         "author": canvas.metadata.author,
         "description": canvas.metadata.description,
+        "document_swatches": super::iai_palette::palette_to_json(&canvas.metadata.swatches),
         "layer_count": canvas.layer_stack.layers.len(),
         "active_layer": canvas.layer_stack.active_idx,
         "layers": layers_json,
@@ -758,10 +770,11 @@ pub fn save_pdf_project(
         // Graduated version (mirrors the single-canvas path): a Path or clipping
         // relation on any page forces v4, else CMYK ink needs v3, else stay v2.
         let has_v4_model = pages.iter().any(|p| {
-            p.canvas.layer_stack.layers.iter().any(|l| {
-                matches!(l.layer_type, crate::core::layer::LayerType::Path(_))
-                    || l.clip_parent_id.is_some()
-            })
+            !p.canvas.metadata.swatches.is_empty()
+                || p.canvas.layer_stack.layers.iter().any(|l| {
+                    matches!(l.layer_type, crate::core::layer::LayerType::Vector(_))
+                        || l.clip_parent_id.is_some()
+                })
         });
         let version = if has_v4_model {
             4u64
@@ -935,8 +948,8 @@ fn layer_type_to_str(lt: &LayerType) -> &'static str {
         LayerType::Adjustment(_) => "Adjustment",
         LayerType::Group => "Group",
         LayerType::Text(_) => "Text",
-        LayerType::Shape(_) => "Shape",
-        LayerType::Path(_) => "Path",
+        LayerType::Vector(crate::core::vector::object::VectorGeometry::Primitive(_)) => "Shape",
+        LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(_)) => "Path",
         LayerType::SmartObject => "SmartObject",
     }
 }
@@ -1007,10 +1020,13 @@ fn shape_to_json(sd: &crate::core::shape::ShapeData) -> serde_json::Value {
         "corner_radius": sd.corner_radius,
         "sides": sd.sides,
         "star_inner": sd.star_inner,
-        "fill": sd.fill,
-        "fill_color": sd.fill_color,
-        "stroke_width": sd.stroke_width,
-        "stroke_color": sd.stroke_color,
+        "style": super::iai_vector::style_to_json(&sd.style),
+        // Legacy mirrors keep old readers useful for solid shapes. New readers
+        // use `style`, which preserves gradient/dash/CMYK/overprint exactly.
+        "fill": sd.fill_enabled(),
+        "fill_color": sd.fill_color(),
+        "stroke_width": sd.stroke_width(),
+        "stroke_color": sd.stroke_color(),
     })
 }
 
@@ -1032,6 +1048,21 @@ fn json_to_shape_data(v: &serde_json::Value) -> Option<crate::core::shape::Shape
             a[3].as_u64()? as u8,
         ])
     };
+    let legacy_fill = v["fill"].as_bool().unwrap_or(true);
+    let legacy_fill_color = color("fill_color").unwrap_or([0, 0, 0, 255]);
+    let legacy_stroke_width = f("stroke_width").unwrap_or(0.0);
+    let legacy_stroke_color = color("stroke_color").unwrap_or([0, 0, 0, 255]);
+    let style = v
+        .get("style")
+        .and_then(super::iai_vector::json_to_style)
+        .unwrap_or_else(|| {
+            crate::core::vector::style::VectorStyle::from_shape_fields(
+                legacy_fill,
+                legacy_fill_color,
+                legacy_stroke_width,
+                legacy_stroke_color,
+            )
+        });
     Some(ShapeData {
         kind: ShapeKind::from_u8(v["kind"].as_u64().unwrap_or(0) as u8),
         x0: f("x0")?,
@@ -1041,10 +1072,7 @@ fn json_to_shape_data(v: &serde_json::Value) -> Option<crate::core::shape::Shape
         corner_radius: f("corner_radius").unwrap_or(0.0),
         sides: v["sides"].as_u64().unwrap_or(5) as u32,
         star_inner: f("star_inner").unwrap_or(0.5),
-        fill: v["fill"].as_bool().unwrap_or(true),
-        fill_color: color("fill_color").unwrap_or([0, 0, 0, 255]),
-        stroke_width: f("stroke_width").unwrap_or(0.0),
-        stroke_color: color("stroke_color").unwrap_or([0, 0, 0, 255]),
+        style,
     })
 }
 
@@ -1613,6 +1641,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn document_palette_round_trips_rgb_and_cmyk_and_stamps_v4() {
+        use crate::core::palette::DocumentSwatch;
+        use crate::core::vector::color::ColorValue;
+
+        let dir = tmp_dir("palette-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 8, 8);
+        canvas.metadata.swatches = vec![
+            DocumentSwatch::new("Brand Red", ColorValue::rgb(1.0, 0.1, 0.2)),
+            DocumentSwatch::new("Pure K", ColorValue::cmyk(0.0, 0.0, 0.0, 1.0)),
+        ];
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(4),
+            "palette is persistent production data and must not be silently stripped by old builds"
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(loaded.metadata.swatches, canvas.metadata.swatches);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // ── Path layer persistence (Bước 4 / T4.3) ──
     use crate::core::vector::affine::AffineTransform;
     use crate::core::vector::color::ColorValue;
@@ -1655,7 +1714,9 @@ mod tests {
             .layers
             .iter()
             .find_map(|l| match &l.layer_type {
-                LayerType::Path(o) => Some(o.clone()),
+                LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(o)) => {
+                    Some(o.clone())
+                }
                 _ => None,
             })
             .expect("a Path layer survived the round-trip")
@@ -1743,7 +1804,12 @@ mod tests {
             .layer_stack
             .layers
             .iter()
-            .find(|l| matches!(l.layer_type, LayerType::Path(_)))
+            .find(|l| {
+                matches!(
+                    l.layer_type,
+                    LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(_))
+                )
+            })
             .map(|l| l.id)
             .expect("a Path layer exists")
     }
@@ -2084,7 +2150,7 @@ mod tests {
 
     #[test]
     fn shape_data_round_trips_json() {
-        let (sd, _) = crate::core::shape::ShapeData::from_canvas_span(
+        let (mut sd, _) = crate::core::shape::ShapeData::from_canvas_span(
             crate::core::shape::ShapeKind::Rectangle,
             10.0,
             20.0,
@@ -2095,6 +2161,20 @@ mod tests {
             [200, 30, 40, 255],
             4.0,
             [0, 0, 0, 255],
+        );
+        sd.style.fill = crate::core::vector::style::Paint::Gradient(
+            crate::core::vector::style::Gradient::two_color(
+                crate::core::vector::style::GradientKind::Radial,
+                crate::core::vector::color::ColorValue::cmyk(0.1, 0.2, 0.3, 0.4),
+                crate::core::vector::color::ColorValue::rgba(0.8, 0.2, 0.1, 0.6),
+                crate::core::vector::affine::AffineTransform {
+                    a: 80.0,
+                    d: 60.0,
+                    e: 10.0,
+                    f: 5.0,
+                    ..crate::core::vector::affine::AffineTransform::IDENTITY
+                },
+            ),
         );
         let json = shape_to_json(&sd);
         let restored = json_to_shape_data(&json).expect("shape json restores");

@@ -724,6 +724,21 @@ pub struct PathTransformDrag {
     pub changed: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathGradientHandle {
+    Center,
+    AxisX,
+    AxisY,
+}
+
+/// An in-progress drag of a vector fill gradient's on-canvas transform handles.
+pub struct PathGradientDrag {
+    pub layer_id: u32,
+    pub handle: PathGradientHandle,
+    pub original: crate::core::vector::affine::AffineTransform,
+    pub start_local: crate::core::geometry::Point,
+}
+
 /// What a [`NodeDrag`] is moving.
 #[derive(Clone, Copy, PartialEq)]
 pub enum NodeDragTarget {
@@ -779,6 +794,11 @@ pub struct ShapeStylePending {
     pub layer_id: u32,
     /// A style tick arrived since the last bake.
     pub dirty: bool,
+    /// The fill controls were explicitly changed. Geometry-only edits must
+    /// preserve an existing vector gradient.
+    pub apply_fill: bool,
+    /// The outline controls were explicitly changed.
+    pub apply_stroke: bool,
     pub last_bake: Option<std::time::Instant>,
     pub bake_cost_secs: f32,
 }
@@ -831,12 +851,18 @@ pub struct TextFontPreviewState {
 }
 
 #[derive(Clone, PartialEq)]
-pub struct PathDisplayCacheKey {
-    pub doc_id: u32,
+pub struct PathDisplayObjectKey {
     pub layer_id: u32,
-    pub scale: u8,
     pub layer_offset: (i32, i32),
     pub object: crate::core::vector::object::VectorObjectData,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct PathDisplayCacheKey {
+    pub doc_id: u32,
+    pub scale: u8,
+    pub clip: (u32, u32, u32, u32),
+    pub objects: Vec<PathDisplayObjectKey>,
 }
 
 pub struct PathDisplayCacheEntry {
@@ -920,9 +946,9 @@ pub struct UiDataCache {
     pub channel_thumbs_built_at: Option<Instant>,
     pub path_display: Option<PathDisplayCacheEntry>,
     pub path_display_serial: u64,
-    /// Active vector layer omitted from the coarse document composite while
+    /// Top visible vector run omitted from the coarse document composite while
     /// its supersampled display raster is drawn above it.
-    pub path_display_suppressed_layer: Option<(u32, u32)>,
+    pub path_display_suppressed_layers: Option<(u32, Vec<u32>)>,
 }
 
 /// In-progress guide gesture (preview is rendered until committed).
@@ -1132,6 +1158,7 @@ impl App {
                 text_edit: None,
                 shape_drag: None,
                 path_transform: None,
+                path_gradient_drag: None,
                 node_drag: None,
                 node_selected: None,
                 node_multi: Vec::new(),

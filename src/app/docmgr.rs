@@ -21,6 +21,10 @@ impl App {
         if self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
+        // Interactive vector-style previews are pinned to the current canvas.
+        // Commit while that document is still active so layer-id reuse in the
+        // destination document can never redirect or discard the edit.
+        self.path_style_commit();
         self.docs.documents[self.docs.active_doc_idx].saved_zoom = self.edit.view.zoom;
         self.docs.documents[self.docs.active_doc_idx].saved_offset_x = self.edit.view.offset_x;
         self.docs.documents[self.docs.active_doc_idx].saved_offset_y = self.edit.view.offset_y;
@@ -125,6 +129,9 @@ impl App {
         {
             self.commit_text_edit();
         }
+        if idx == self.docs.active_doc_idx {
+            self.path_style_commit();
+        }
 
         if self.docs.documents[idx].is_modified() {
             self.docs.pending_close_doc_idx = Some(idx);
@@ -190,6 +197,7 @@ impl App {
         if self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
+        self.path_style_commit();
         let doc_idx = self.docs.active_doc_idx;
         let Some(pdf) = self.docs.documents[doc_idx].pdf_document.as_ref() else {
             return;

@@ -1,6 +1,7 @@
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::document::GuideOrientation;
 use crate::core::snapping::{best_snap, SnapKind, SnapLine, SNAP_THRESHOLD_PX};
+use crate::core::vector::object::VectorGeometry;
 
 pub struct MoveTool {
     pub drag_start_x: f32,
@@ -163,8 +164,7 @@ impl MoveTool {
                 layer.layer_type,
                 LayerType::Raster
                     | LayerType::Text(_)
-                    | LayerType::Shape(_)
-                    | LayerType::Path(_)
+                    | LayerType::Vector(_)
                     | LayerType::SmartObject
             )
     }
@@ -581,7 +581,10 @@ impl Tool for MoveTool {
                             .iter()
                             .find(|l| l.id == *id)
                             .is_some_and(|l| {
-                                matches!(l.layer_type, crate::core::layer::LayerType::Path(_))
+                                matches!(
+                                    l.layer_type,
+                                    crate::core::layer::LayerType::Vector(VectorGeometry::Path(_))
+                                )
                             })
                     });
                 if !other_ids.is_empty() {
@@ -601,7 +604,9 @@ impl Tool for MoveTool {
                         .iter()
                         .find(|l| l.id == id)
                         .and_then(|l| match &l.layer_type {
-                            crate::core::layer::LayerType::Path(o) => Some(o.transform),
+                            crate::core::layer::LayerType::Vector(VectorGeometry::Path(o)) => {
+                                Some(o.transform)
+                            }
                             _ => None,
                         });
                     if let Some(m0) = m0 {

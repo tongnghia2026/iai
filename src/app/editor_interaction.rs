@@ -61,6 +61,8 @@ pub struct EditorInteraction {
     /// Active on-canvas Path transform (scale/rotate) under the Move tool. See
     /// [`PathTransformDrag`]. None unless a handle is being dragged.
     pub(in crate::app) path_transform: Option<PathTransformDrag>,
+    /// Active on-canvas vector-gradient transform handle drag.
+    pub(in crate::app) path_gradient_drag: Option<PathGradientDrag>,
     /// Active node-edit drag under the Node tool. See [`NodeDrag`]. None unless a
     /// node is being dragged.
     pub(in crate::app) node_drag: Option<NodeDrag>,

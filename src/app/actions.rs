@@ -50,15 +50,16 @@ impl App {
             }
             3 => {
                 self.edit.tools.shape_mut().fill_color = color;
-                self.update_selected_shape_style();
+                self.update_selected_shape_style(true, false);
             }
             4 => {
                 self.edit.tools.shape_mut().stroke_color = color;
-                self.update_selected_shape_style();
+                self.update_selected_shape_style(false, true);
             }
             5 => self.path_set_fill_color(color),
             6 => self.path_set_stroke_color(color),
             7 => self.path_set_fill_end_color(color),
+            8..=15 => self.path_set_gradient_stop_color(target - 8, color),
             _ => {
                 self.edit.tools.brush_mut().settings.color = color;
                 self.edit.tools.fill_mut().color = color;

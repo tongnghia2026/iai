@@ -71,7 +71,7 @@ fn node_to_json(n: &Node) -> Value {
     })
 }
 
-fn style_to_json(s: &VectorStyle) -> Value {
+pub(super) fn style_to_json(s: &VectorStyle) -> Value {
     json!({
         "fill": paint_to_json(s.fill),
         "fill_overprint": s.fill_overprint,
@@ -215,7 +215,7 @@ fn json_to_node(v: &Value) -> Option<Node> {
     })
 }
 
-fn json_to_style(v: &Value) -> Option<VectorStyle> {
+pub(super) fn json_to_style(v: &Value) -> Option<VectorStyle> {
     let d = VectorStyle::default();
     let fill = v.get("fill").and_then(json_to_paint).unwrap_or(d.fill);
     let stroke = v.get("stroke").and_then(json_to_paint).unwrap_or(d.stroke);

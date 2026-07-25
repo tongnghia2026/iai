@@ -18,6 +18,7 @@ use crate::core::shape::{ShapeData, ShapeKind};
 use crate::core::snapping::{best_snap, SnapKind, SnapLine, SNAP_THRESHOLD_PX};
 use crate::core::text::{rasterize_placed, TextData};
 use crate::core::tile::TileMap;
+use crate::core::vector::object::VectorGeometry;
 use crate::gpu::compositor::TransformPreviewUniform;
 use rayon::prelude::*;
 
@@ -364,7 +365,7 @@ fn transformed_shape_span(
     let sx = ts.scale_x.abs();
     let sy = ts.scale_y.abs();
     let radius = (sd.corner_radius * sx.min(sy)).max(0.0);
-    let stroke = (sd.stroke_width * (sx * sy).sqrt()).max(0.0);
+    let stroke = (sd.stroke_width() * (sx * sy).sqrt()).max(0.0);
     Some((nx0, ny0, nx1, ny1, radius, stroke))
 }
 
@@ -376,17 +377,10 @@ fn rasterized_shape_layer_at(
     radius: f32,
     stroke: f32,
 ) -> Option<(ShapeData, TileMap, u32, u32, (i32, i32))> {
-    let (mut next, off) = ShapeData::from_canvas_span(
-        sd.kind,
-        span.0,
-        span.1,
-        span.2,
-        span.3,
-        radius,
-        sd.fill,
-        sd.fill_color,
-        stroke,
-        sd.stroke_color,
+    let mut style = sd.style;
+    style.stroke_style.width = stroke;
+    let (mut next, off) = ShapeData::from_canvas_span_with_style(
+        sd.kind, span.0, span.1, span.2, span.3, radius, style,
     );
     let w = (span.2 - span.0).abs();
     let h = (span.3 - span.1).abs();
@@ -401,7 +395,10 @@ fn transformable_layer(layer: &Layer) -> bool {
         && !layer.is_background
         && matches!(
             layer.layer_type,
-            LayerType::Raster | LayerType::Text(_) | LayerType::Shape(_) | LayerType::SmartObject
+            LayerType::Raster
+                | LayerType::Text(_)
+                | LayerType::Vector(VectorGeometry::Primitive(_))
+                | LayerType::SmartObject
         )
 }
 
@@ -474,7 +471,7 @@ fn bake_transform_commit(
                 after_layer_type = LayerType::Raster;
             }
         }
-        if let LayerType::Shape(sd) = &ls.layer_type {
+        if let LayerType::Vector(VectorGeometry::Primitive(sd)) = &ls.layer_type {
             match transformed_shape_span(sd, ls, &ts) {
                 Some((nx0, ny0, nx1, ny1, radius, stroke)) => {
                     let crisp = if ls.mask.is_none() {
@@ -483,7 +480,7 @@ fn bake_transform_commit(
                         None
                     };
                     if let Some((next_sd, tiles, w, h, off)) = crisp {
-                        after_layer_type = LayerType::Shape(next_sd);
+                        after_layer_type = LayerType::Vector(VectorGeometry::Primitive(next_sd));
                         crisp_vector_layer = Some((tiles, w, h, off));
                     } else if ls.mask.is_some() {
                         // The mask was resampled to the transformed content
@@ -496,8 +493,8 @@ fn bake_transform_commit(
                         next.x1 = nx1 - new_ox as f32;
                         next.y1 = ny1 - new_oy as f32;
                         next.corner_radius = radius;
-                        next.stroke_width = stroke;
-                        after_layer_type = LayerType::Shape(next);
+                        next.style.stroke_style.width = stroke;
+                        after_layer_type = LayerType::Vector(VectorGeometry::Primitive(next));
                     } else {
                         after_layer_type = LayerType::Raster;
                     }
@@ -677,14 +674,19 @@ impl App {
         let selection_contains_path =
             candidates.iter().any(|&idx| {
                 canvas.layer_stack.layers.get(idx).is_some_and(|layer| {
-                    matches!(layer.layer_type, LayerType::Path(_))
+                    matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
                         || (layer.is_group()
                             && canvas
                                 .layer_stack
                                 .group_member_range(idx)
                                 .any(|member_idx| {
                                     canvas.layer_stack.layers.get(member_idx).is_some_and(
-                                        |member| matches!(member.layer_type, LayerType::Path(_)),
+                                        |member| {
+                                            matches!(
+                                                member.layer_type,
+                                                LayerType::Vector(VectorGeometry::Path(_))
+                                            )
+                                        },
                                     )
                                 }))
                 })
@@ -2225,7 +2227,7 @@ mod tests {
         let ls = LayerOrigState {
             layer_id,
             layer_idx: 0,
-            layer_type: LayerType::Shape(sd.clone()),
+            layer_type: LayerType::Vector(VectorGeometry::Primitive(sd.clone())),
             tiles,
             mask: None,
             offset: off,
@@ -2283,7 +2285,7 @@ mod tests {
         .expect("bake succeeds");
 
         let layer = &result.layers[0];
-        let LayerType::Shape(after) = &layer.layer_type else {
+        let LayerType::Vector(VectorGeometry::Primitive(after)) = &layer.layer_type else {
             panic!("scaled shape stays editable");
         };
         // The 40×30 span doubles; geometry must follow the raster instead of
@@ -2292,7 +2294,7 @@ mod tests {
         assert!(((x1 - x0).abs() - 80.0).abs() <= 1.0, "span w {}", x1 - x0);
         assert!(((y1 - y0).abs() - 60.0).abs() <= 1.0, "span h {}", y1 - y0);
         assert!((after.corner_radius - 2.0 * sd.corner_radius).abs() <= 0.5);
-        assert!((after.stroke_width - 2.0 * sd.stroke_width).abs() <= 0.1);
+        assert!((after.stroke_width() - 2.0 * sd.stroke_width()).abs() <= 0.1);
         // Crisp vector re-render, not a blurry resample: raster covers the span.
         assert!(layer.width as f32 >= 80.0 && layer.height as f32 >= 60.0);
     }
@@ -2326,7 +2328,7 @@ mod tests {
         )
         .expect("bake succeeds");
         let layer = &result.layers[0];
-        let LayerType::Shape(after) = &layer.layer_type else {
+        let LayerType::Vector(VectorGeometry::Primitive(after)) = &layer.layer_type else {
             panic!("a rotated line stays a live shape");
         };
         assert_eq!(after.kind, ShapeKind::Line);
@@ -2350,7 +2352,7 @@ mod tests {
             inverted: false,
         });
         let sd = match &ls.layer_type {
-            LayerType::Shape(sd) => sd.clone(),
+            LayerType::Vector(VectorGeometry::Primitive(sd)) => sd.clone(),
             _ => unreachable!(),
         };
         let ts = shape_transform_state(ls, 2.0, 2.0, 0.0);
@@ -2361,7 +2363,7 @@ mod tests {
         )
         .expect("bake succeeds");
         let layer = &result.layers[0];
-        let LayerType::Shape(after) = &layer.layer_type else {
+        let LayerType::Vector(VectorGeometry::Primitive(after)) = &layer.layer_type else {
             panic!("masked shape keeps editable geometry");
         };
         let (x0, y0, x1, y1) = after.canvas_span(layer.offset);

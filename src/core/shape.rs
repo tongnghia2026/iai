@@ -7,6 +7,9 @@
 // raster on the canvas, so the Move tool can shift the layer without touching the
 // geometry, and editing handles work in canvas space via `canvas_span`.
 
+use crate::core::geometry::Point;
+use crate::core::vector::style::{Paint, VectorStyle};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ShapeKind {
     Rectangle,
@@ -120,11 +123,9 @@ pub struct ShapeData {
     pub sides: u32,
     /// Star inner-radius fraction of the outer radius, in `(0,1)` (Star only).
     pub star_inner: f32,
-    pub fill: bool,
-    pub fill_color: [u8; 4],
-    /// Outline / line thickness (canvas px). 0 = no outline.
-    pub stroke_width: f32,
-    pub stroke_color: [u8; 4],
+    /// Shared vector appearance. Primitive and Bézier geometry now use exactly
+    /// the same fill, gradient, outline, dash, overprint and opacity model.
+    pub style: VectorStyle,
 }
 
 /// A rendered shape: tight RGBA buffer sized to the shape's own extent.
@@ -147,18 +148,35 @@ impl ShapeData {
     #[allow(clippy::too_many_arguments)]
     pub fn from_canvas_span(
         kind: ShapeKind,
-        mut cx0: f32,
-        mut cy0: f32,
-        mut cx1: f32,
-        mut cy1: f32,
+        cx0: f32,
+        cy0: f32,
+        cx1: f32,
+        cy1: f32,
         corner_radius: f32,
         fill: bool,
         fill_color: [u8; 4],
         stroke_width: f32,
         stroke_color: [u8; 4],
     ) -> (ShapeData, (i32, i32)) {
+        let style = VectorStyle::from_shape_fields(fill, fill_color, stroke_width, stroke_color);
+        Self::from_canvas_span_with_style(kind, cx0, cy0, cx1, cy1, corner_radius, style)
+    }
+
+    /// Build a parametric primitive with a shared vector style.
+    pub fn from_canvas_span_with_style(
+        kind: ShapeKind,
+        mut cx0: f32,
+        mut cy0: f32,
+        mut cx1: f32,
+        mut cy1: f32,
+        corner_radius: f32,
+        style: VectorStyle,
+    ) -> (ShapeData, (i32, i32)) {
+        let fill = style.fill.is_visible();
+        let stroke_width = style.effective_stroke_width();
+        let stroke_visible = style.stroke.is_visible();
         (cx0, cy0, cx1, cy1) =
-            pixel_snapped_span(kind, cx0, cy0, cx1, cy1, fill, stroke_width, stroke_color);
+            pixel_snapped_span(kind, cx0, cy0, cx1, cy1, fill, stroke_width, stroke_visible);
         let pad = Self::pad(stroke_width);
         let minx = cx0.min(cx1);
         let miny = cy0.min(cy1);
@@ -176,12 +194,83 @@ impl ShapeData {
             // them from `self`, so a resize never resets them.
             sides: 5,
             star_inner: 0.5,
-            fill,
-            fill_color,
-            stroke_width: stroke_width.max(0.0),
-            stroke_color,
+            style,
         };
         (data, (off_x as i32, off_y as i32))
+    }
+
+    pub fn fill_enabled(&self) -> bool {
+        self.style.fill.is_visible()
+    }
+
+    pub fn fill_color(&self) -> [u8; 4] {
+        match self.style.fill {
+            Paint::Solid(color) => color.to_rgba8(),
+            Paint::Gradient(gradient) => gradient
+                .active_stops()
+                .first()
+                .map_or([0, 0, 0, 0], |stop| stop.color.to_rgba8()),
+            Paint::None => [0, 0, 0, 0],
+        }
+    }
+
+    pub fn stroke_width(&self) -> f32 {
+        self.style.stroke_style.width.max(0.0)
+    }
+
+    pub fn stroke_color(&self) -> [u8; 4] {
+        match self.style.stroke {
+            Paint::Solid(color) => color.to_rgba8(),
+            Paint::Gradient(gradient) => gradient
+                .active_stops()
+                .first()
+                .map_or([0, 0, 0, 0], |stop| stop.color.to_rgba8()),
+            Paint::None => [0, 0, 0, 0],
+        }
+    }
+
+    pub fn set_solid_style(
+        &mut self,
+        fill: bool,
+        fill_color: [u8; 4],
+        stroke_width: f32,
+        stroke_color: [u8; 4],
+    ) {
+        self.style = VectorStyle::from_shape_fields(fill, fill_color, stroke_width, stroke_color);
+    }
+
+    /// Canonical adapter for display and PDF backends. Geometry remains local
+    /// and layer placement becomes the object transform, preserving the local
+    /// coordinate system of gradients and other vector paints.
+    pub fn to_vector_object(
+        &self,
+        layer_offset: (i32, i32),
+    ) -> crate::core::vector::object::VectorObjectData {
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::from_shape;
+        let path = match self.kind {
+            ShapeKind::Rectangle => {
+                from_shape::rect_path(self.x0, self.y0, self.x1, self.y1, self.effective_radius())
+            }
+            ShapeKind::Ellipse => from_shape::ellipse_path(self.x0, self.y0, self.x1, self.y1),
+            ShapeKind::Line => from_shape::line_path(self.x0, self.y0, self.x1, self.y1),
+            ShapeKind::Polygon => {
+                from_shape::polygon_path(self.x0, self.y0, self.x1, self.y1, self.sides)
+            }
+            ShapeKind::Star => from_shape::star_path(
+                self.x0,
+                self.y0,
+                self.x1,
+                self.y1,
+                self.sides,
+                self.star_inner,
+            ),
+        };
+        crate::core::vector::object::VectorObjectData::new(
+            path,
+            self.style,
+            AffineTransform::translate(layer_offset.0 as f32, layer_offset.1 as f32),
+        )
     }
 
     /// The shape's geometry in canvas space, given its layer offset.
@@ -264,7 +353,7 @@ impl ShapeData {
 
     /// Size of the tight raster that holds this shape.
     pub fn raster_size(&self) -> (u32, u32) {
-        let pad = Self::pad(self.stroke_width);
+        let pad = Self::pad(self.style.effective_stroke_width());
         let maxx = self.x0.max(self.x1);
         let maxy = self.y0.max(self.y1);
         let w = (maxx + pad).ceil().max(1.0);
@@ -274,17 +363,14 @@ impl ShapeData {
 
     /// Re-derive the shape from an edited canvas-space span, keeping style.
     fn rebuilt(&self, cx0: f32, cy0: f32, cx1: f32, cy1: f32) -> (ShapeData, (i32, i32)) {
-        let (mut data, off) = Self::from_canvas_span(
+        let (mut data, off) = Self::from_canvas_span_with_style(
             self.kind,
             cx0,
             cy0,
             cx1,
             cy1,
             self.corner_radius,
-            self.fill,
-            self.fill_color,
-            self.stroke_width,
-            self.stroke_color,
+            self.style,
         );
         // Corner radius can't exceed half the shorter side.
         let w = (cx1 - cx0).abs();
@@ -373,19 +459,24 @@ impl ShapeData {
             return None;
         }
         let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
-        let fill_rgb = [
-            self.fill_color[0] as f32 / 255.0,
-            self.fill_color[1] as f32 / 255.0,
-            self.fill_color[2] as f32 / 255.0,
-        ];
-        let fill_a = self.fill_color[3] as f32 / 255.0;
-        let stroke_rgb = [
-            self.stroke_color[0] as f32 / 255.0,
-            self.stroke_color[1] as f32 / 255.0,
-            self.stroke_color[2] as f32 / 255.0,
-        ];
-        let stroke_a = self.stroke_color[3] as f32 / 255.0;
-        let half = self.stroke_width.max(0.0) * 0.5;
+        let fill_paint = self.style.fill;
+        let stroke_paint = self.style.stroke;
+        let opacity = self.style.opacity.clamp(0.0, 1.0);
+        let sample = |paint: Paint, px: f32, py: f32| {
+            let color = crate::core::vector::raster::sample_paint_in_object_space(
+                paint,
+                Point::new(px, py),
+            );
+            (
+                [
+                    color[0] as f32 / 255.0,
+                    color[1] as f32 / 255.0,
+                    color[2] as f32 / 255.0,
+                ],
+                color[3] as f32 / 255.0 * opacity,
+            )
+        };
+        let half = self.style.effective_stroke_width() * 0.5;
         // This geometry is constant for the whole raster; do not allocate it
         // again for every Polygon/Star pixel sample.
         let polygon_vertices = self.polygon_vertices();
@@ -434,14 +525,16 @@ impl ShapeData {
         // Exact interior pixel, computed through the same blend as the
         // per-pixel path (fill_cov = 1, stroke_cov = 0; a line's interior is
         // its stroke at full coverage) so runs are byte-identical to it.
+        let interior_paint = if self.kind == ShapeKind::Line {
+            stroke_paint
+        } else {
+            fill_paint
+        };
+        let interior_is_gradient = matches!(interior_paint, Paint::Gradient(_));
         let mut interior_px = [0u8; 4];
-        match self.kind {
-            ShapeKind::Line => blend_straight(&mut interior_px, stroke_rgb, stroke_a),
-            _ => {
-                if self.fill {
-                    blend_straight(&mut interior_px, fill_rgb, fill_a);
-                }
-            }
+        if !interior_is_gradient {
+            let (rgb, alpha) = sample(interior_paint, self.x0, self.y0);
+            blend_straight(&mut interior_px, rgb, alpha);
         }
 
         for y in 0..h {
@@ -456,8 +549,19 @@ impl ShapeData {
                 } else if sd <= -(band + 1.0) {
                     // Pure interior: slice-fill the guaranteed run.
                     let run = (((-sd) - band) as u32).max(1).min(w - x);
-                    if interior_px[3] > 0 {
-                        let start = ((y * w + x) * 4) as usize;
+                    let start = ((y * w + x) * 4) as usize;
+                    if interior_is_gradient {
+                        for (index, p) in rgba[start..start + run as usize * 4]
+                            .chunks_exact_mut(4)
+                            .enumerate()
+                        {
+                            let (rgb, alpha) =
+                                sample(interior_paint, (x as usize + index) as f32 + 0.5, py);
+                            let mut out = [p[0], p[1], p[2], p[3]];
+                            blend_straight(&mut out, rgb, alpha);
+                            p.copy_from_slice(&out);
+                        }
+                    } else if interior_px[3] > 0 {
                         for p in rgba[start..start + run as usize * 4].chunks_exact_mut(4) {
                             p.copy_from_slice(&interior_px);
                         }
@@ -475,6 +579,8 @@ impl ShapeData {
                     if fill_cov >= 0.0015 || stroke_cov >= 0.0015 {
                         let i = ((y * w + x) * 4) as usize;
                         let mut p = [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]];
+                        let (fill_rgb, fill_a) = sample(fill_paint, px, py);
+                        let (stroke_rgb, stroke_a) = sample(stroke_paint, px, py);
                         blend_straight(&mut p, fill_rgb, fill_cov * fill_a);
                         blend_straight(&mut p, stroke_rgb, stroke_cov * stroke_a);
                         rgba[i..i + 4].copy_from_slice(&p);
@@ -491,8 +597,9 @@ impl ShapeData {
     }
 
     /// Anti-aliased `(fill, stroke)` coverage of local pixel centre `(px,py)`.
+    #[cfg(test)]
     fn coverage_parts(&self, px: f32, py: f32) -> (f32, f32) {
-        let half = self.stroke_width.max(0.0) * 0.5;
+        let half = self.style.effective_stroke_width() * 0.5;
         match self.kind {
             ShapeKind::Line => {
                 let d = dist_to_segment(px, py, self.x0, self.y0, self.x1, self.y1);
@@ -532,7 +639,7 @@ impl ShapeData {
     }
 
     fn fill_stroke_parts(&self, sd: f32, half: f32) -> (f32, f32) {
-        let fill_cov = if self.fill {
+        let fill_cov = if self.style.fill.is_visible() {
             (0.5 - sd).clamp(0.0, 1.0)
         } else {
             0.0
@@ -558,9 +665,9 @@ fn pixel_snapped_span(
     cy1: f32,
     fill: bool,
     stroke_width: f32,
-    stroke_color: [u8; 4],
+    stroke_visible: bool,
 ) -> (f32, f32, f32, f32) {
-    let visible_stroke = stroke_color[3] > 0
+    let visible_stroke = stroke_visible
         && match kind {
             ShapeKind::Line => true,
             _ => stroke_width > 0.05,
@@ -777,18 +884,20 @@ mod tests {
     fn render_reference(d: &ShapeData) -> Vec<u8> {
         let (w, h) = d.raster_size();
         let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+        let fill_color = d.fill_color();
+        let stroke_color = d.stroke_color();
         let fill_rgb = [
-            d.fill_color[0] as f32 / 255.0,
-            d.fill_color[1] as f32 / 255.0,
-            d.fill_color[2] as f32 / 255.0,
+            fill_color[0] as f32 / 255.0,
+            fill_color[1] as f32 / 255.0,
+            fill_color[2] as f32 / 255.0,
         ];
-        let fill_a = d.fill_color[3] as f32 / 255.0;
+        let fill_a = fill_color[3] as f32 / 255.0;
         let stroke_rgb = [
-            d.stroke_color[0] as f32 / 255.0,
-            d.stroke_color[1] as f32 / 255.0,
-            d.stroke_color[2] as f32 / 255.0,
+            stroke_color[0] as f32 / 255.0,
+            stroke_color[1] as f32 / 255.0,
+            stroke_color[2] as f32 / 255.0,
         ];
-        let stroke_a = d.stroke_color[3] as f32 / 255.0;
+        let stroke_a = stroke_color[3] as f32 / 255.0;
         for y in 0..h {
             for x in 0..w {
                 let (fill_cov, stroke_cov) = d.coverage_parts(x as f32 + 0.5, y as f32 + 0.5);

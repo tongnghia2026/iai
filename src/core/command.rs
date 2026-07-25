@@ -28,6 +28,9 @@ pub struct EditContext<'a> {
     /// Channels-panel state (alpha channels). Only alpha-channel commands
     /// need it; other construction sites leave it `None`.
     pub channels: Option<&'a mut crate::core::channels::ChannelsState>,
+    /// Document metadata is optional for low-level command tests that operate
+    /// on a bare LayerStack. Canvas gateway contexts always provide it.
+    pub metadata: Option<&'a mut crate::core::canvas::CanvasMetadata>,
 }
 
 impl<'a> EditContext<'a> {
@@ -43,11 +46,17 @@ impl<'a> EditContext<'a> {
             canvas_height: h,
             selection: sel,
             channels: None,
+            metadata: None,
         }
     }
 
     pub fn with_channels(mut self, channels: &'a mut crate::core::channels::ChannelsState) -> Self {
         self.channels = Some(channels);
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: &'a mut crate::core::canvas::CanvasMetadata) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 }

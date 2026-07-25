@@ -17,7 +17,7 @@ use crate::core::command::{Command, EditContext};
 use crate::core::layer::{Layer, LayerType};
 use crate::core::tile::TileMap;
 use crate::core::vector::affine::AffineTransform;
-use crate::core::vector::object::VectorObjectData;
+use crate::core::vector::object::{VectorGeometry, VectorObjectData};
 use crate::core::vector::path::PathData;
 use crate::core::vector::raster;
 use crate::core::vector::style::VectorStyle;
@@ -44,7 +44,7 @@ pub(crate) fn apply_object_to_layer(layer: &mut Layer, object: VectorObjectData)
             layer.height = 1;
         }
     }
-    layer.layer_type = LayerType::Path(object);
+    layer.layer_type = LayerType::Vector(VectorGeometry::Path(object));
 }
 
 /// Reconcile a Path layer's `Layer::offset` INTO its model, then re-derive the
@@ -58,7 +58,7 @@ pub(crate) fn apply_object_to_layer(layer: &mut Layer, object: VectorObjectData)
 /// model, so this doubles as the cache-rebuild step. Called on load and before a
 /// model edit that must respect a pending drag.
 pub(crate) fn fold_offset_into_model(layer: &mut Layer) {
-    let LayerType::Path(obj) = &layer.layer_type else {
+    let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type else {
         return;
     };
     let obj = obj.clone();
@@ -88,7 +88,7 @@ fn path_object(ctx: &EditContext, id: u32) -> Result<VectorObjectData, String> {
         .find(|l| l.id == id)
         .ok_or_else(|| format!("Layer {id} not found"))?;
     match &layer.layer_type {
-        LayerType::Path(obj) => Ok(obj.clone()),
+        LayerType::Vector(VectorGeometry::Path(obj)) => Ok(obj.clone()),
         _ => Err(format!("Layer {id} is not a Path layer")),
     }
 }
@@ -102,6 +102,65 @@ fn set_path_object(ctx: &mut EditContext, id: u32, object: VectorObjectData) -> 
         .ok_or_else(|| format!("Layer {id} not found"))?;
     apply_object_to_layer(layer, object);
     Ok(())
+}
+
+fn vector_style(ctx: &EditContext, id: u32) -> Result<VectorStyle, String> {
+    let layer = ctx
+        .layers
+        .layers
+        .iter()
+        .find(|layer| layer.id == id)
+        .ok_or_else(|| format!("Layer {id} not found"))?;
+    match &layer.layer_type {
+        LayerType::Vector(VectorGeometry::Path(object)) => Ok(object.style),
+        LayerType::Vector(VectorGeometry::Primitive(shape)) => Ok(shape.style),
+        _ => Err(format!("Layer {id} is not a Vector layer")),
+    }
+}
+
+pub(crate) fn apply_style_to_layer(layer: &mut Layer, style: VectorStyle) -> Result<(), String> {
+    match &layer.layer_type {
+        LayerType::Vector(VectorGeometry::Path(object)) => {
+            let mut object = object.clone();
+            object.style = style;
+            apply_object_to_layer(layer, object);
+            Ok(())
+        }
+        LayerType::Vector(VectorGeometry::Primitive(shape)) => {
+            let (x0, y0, x1, y1) = shape.canvas_span(layer.offset);
+            let (mut next, offset) = crate::core::shape::ShapeData::from_canvas_span_with_style(
+                shape.kind,
+                x0,
+                y0,
+                x1,
+                y1,
+                shape.corner_radius,
+                style,
+            );
+            next.sides = shape.sides;
+            next.star_inner = shape.star_inner;
+            let raster = next
+                .render()
+                .ok_or_else(|| "primitive vector rasterization failed".to_string())?;
+            layer.tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+            layer.width = raster.width;
+            layer.height = raster.height;
+            layer.offset = offset;
+            layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(next));
+            Ok(())
+        }
+        _ => Err(format!("Layer {} is not a Vector layer", layer.id)),
+    }
+}
+
+fn set_vector_style(ctx: &mut EditContext, id: u32, style: VectorStyle) -> Result<(), String> {
+    let layer = ctx
+        .layers
+        .layers
+        .iter_mut()
+        .find(|layer| layer.id == id)
+        .ok_or_else(|| format!("Layer {id} not found"))?;
+    apply_style_to_layer(layer, style)
 }
 
 // ── CreatePathLayer ──────────────────────────────────────────────────────────
@@ -195,7 +254,10 @@ impl Command for DeletePathLayer {
             .iter()
             .position(|l| l.id == self.layer_id)
             .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
-        if !matches!(ctx.layers.layers[pos].layer_type, LayerType::Path(_)) {
+        if !matches!(
+            ctx.layers.layers[pos].layer_type,
+            LayerType::Vector(VectorGeometry::Path(_))
+        ) {
             return Err(format!("Layer {} is not a Path layer", self.layer_id));
         }
         self.prev_active = ctx.layers.active_idx;
@@ -275,7 +337,8 @@ impl Command for ReplacePathGeometry {
 
 // ── ChangeVectorStyle ────────────────────────────────────────────────────────
 
-/// Change a Path layer's fill/outline/opacity, keeping geometry and transform.
+/// Change a unified Vector layer's fill/outline/opacity, keeping either its
+/// parametric primitive or Bézier geometry editable.
 pub struct ChangeVectorStyle {
     layer_id: u32,
     new_style: VectorStyle,
@@ -290,22 +353,29 @@ impl ChangeVectorStyle {
             old_style: None,
         }
     }
+
+    /// History record for a style mutation whose final model/cache has already
+    /// been applied by an interactive preview. This avoids rewinding and
+    /// rasterizing the baseline just to let `execute` capture it.
+    pub fn already_applied(layer_id: u32, old_style: VectorStyle, new_style: VectorStyle) -> Self {
+        Self {
+            layer_id,
+            new_style,
+            old_style: Some(old_style),
+        }
+    }
 }
 
 impl Command for ChangeVectorStyle {
     fn execute(&mut self, ctx: &mut EditContext) -> Result<(), String> {
         self.new_style.validate()?;
-        let mut obj = path_object(ctx, self.layer_id)?;
-        self.old_style = Some(obj.style);
-        obj.style = self.new_style;
-        set_path_object(ctx, self.layer_id, obj)
+        self.old_style = Some(vector_style(ctx, self.layer_id)?);
+        set_vector_style(ctx, self.layer_id, self.new_style)
     }
 
     fn undo(&mut self, ctx: &mut EditContext) -> Result<(), String> {
         let old = self.old_style.ok_or("nothing to undo")?;
-        let mut obj = path_object(ctx, self.layer_id)?;
-        obj.style = old;
-        set_path_object(ctx, self.layer_id, obj)
+        set_vector_style(ctx, self.layer_id, old)
     }
 
     fn label(&self) -> &str {
@@ -387,7 +457,7 @@ impl Command for RasterizeVectorLayer {
             .find(|l| l.id == self.layer_id)
             .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
         match std::mem::replace(&mut layer.layer_type, LayerType::Raster) {
-            LayerType::Path(obj) => {
+            LayerType::Vector(VectorGeometry::Path(obj)) => {
                 self.model = Some(obj);
                 Ok(())
             }
@@ -407,7 +477,7 @@ impl Command for RasterizeVectorLayer {
             .iter_mut()
             .find(|l| l.id == self.layer_id)
             .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
-        layer.layer_type = LayerType::Path(obj);
+        layer.layer_type = LayerType::Vector(VectorGeometry::Path(obj));
         Ok(())
     }
 
@@ -460,7 +530,7 @@ mod tests {
         c.layer_stack
             .layers
             .iter()
-            .filter(|l| matches!(l.layer_type, LayerType::Path(_)))
+            .filter(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
             .count()
     }
 
@@ -496,7 +566,7 @@ mod tests {
             .layer_stack
             .layers
             .iter()
-            .find(|l| matches!(l.layer_type, LayerType::Path(_)))
+            .find(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
             .unwrap();
         assert!(!layer.tiles.tiles.is_empty(), "path has a raster cache");
         // Placed near the object's translated origin (30,30) minus the AA pad.
@@ -628,7 +698,7 @@ mod tests {
                 .find(|l| l.id == id)
                 .unwrap()
                 .layer_type,
-            LayerType::Path(_)
+            LayerType::Vector(VectorGeometry::Path(_))
         ));
     }
 
@@ -734,7 +804,7 @@ mod tests {
             .unwrap()
             .layer_type
         {
-            LayerType::Path(o) => o.style,
+            LayerType::Vector(VectorGeometry::Path(o)) => o.style,
             _ => panic!("not a path"),
         }
     }
