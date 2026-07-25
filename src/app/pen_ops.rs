@@ -29,6 +29,19 @@ impl App {
             )
             .is_ok();
         if created {
+            // Make the freshly created Path the sole selection so the Move tool's
+            // on-canvas transform box (which only shows for a SELECTED active Path,
+            // see `active_path_transform_box`) appears immediately without an extra
+            // click. `add_layer` already pointed `active_idx` at it.
+            let canvas = &mut self.docs.documents[doc_idx].canvas;
+            let new_idx = canvas.layer_stack.active_idx;
+            for l in &mut canvas.layer_stack.layers {
+                l.selected = false;
+            }
+            if let Some(l) = canvas.layer_stack.layers.get_mut(new_idx) {
+                l.selected = true;
+            }
+            canvas.layer_revision += 1;
             // Rebuilds the GPU atlas / flattens for the added layer and schedules
             // a redraw (LayerStructureChanged owns that bookkeeping).
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);

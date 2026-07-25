@@ -129,6 +129,34 @@ fn clamp_scale(s: f32) -> f32 {
     }
 }
 
+/// Build the oriented transform box for the local-bounds rectangle `b` mapped
+/// through `t`. Used both for a single Path (t = the object transform, b =
+/// object-local bounds — a box that stays glued to a rotated object) and for a
+/// multi-Path union drag (t = the canvas-space delta `M`, b = the union AABB in
+/// canvas space — the whole selection scales/rotates as one rigid box).
+fn box_from(t: AffineTransform, b: Rect) -> PathBox {
+    let map = |p: Point| {
+        let q = t.apply_point(p);
+        (q.x, q.y)
+    };
+    let corners = [
+        map(local_handle_point(b, TransformHandle::TopLeft)),
+        map(local_handle_point(b, TransformHandle::TopRight)),
+        map(local_handle_point(b, TransformHandle::BottomLeft)),
+        map(local_handle_point(b, TransformHandle::BottomRight)),
+    ];
+    let mut handles = [(0.0f32, 0.0f32); 8];
+    for (i, h) in HANDLE_ORDER.iter().enumerate() {
+        handles[i] = map(local_handle_point(b, *h));
+    }
+    let center = map(local_handle_point(b, TransformHandle::Center));
+    PathBox {
+        corners,
+        handles,
+        center,
+    }
+}
+
 impl App {
     /// Active layer index if it is an on-canvas-transformable Path (visible,
     /// unlocked, not the background). The box shows for this layer under Move;
@@ -162,10 +190,102 @@ impl App {
         Some((layer.id, obj.transform, lb))
     }
 
-    /// The active Path's oriented transform box, or `None` when the Move tool is
-    /// not showing one (wrong tool, no editable Path active, a modal transform,
-    /// or a plain layer-move drag in progress). Consumed by the overlay VM and by
-    /// handle hit-testing, so both agree on where the handles are.
+    /// Selected, visible, unlocked, non-background Path layer indices — the set an
+    /// on-canvas transform gesture would move together.
+    fn selected_path_layers(&self) -> Vec<usize> {
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        canvas
+            .layer_stack
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                l.selected
+                    && l.visible
+                    && !l.locked
+                    && !l.is_background
+                    && matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The clean multi-Path selection to transform together as a single union
+    /// box, or `None`. Requires at least two eligible Paths and NO other selected
+    /// non-background layer — a mixed selection (a Path plus a raster, say) can't
+    /// be faithfully scaled/rotated by the affine-only on-canvas box, so it falls
+    /// back to the single active-Path box instead of silently moving only some.
+    fn multi_path_targets(&self) -> Option<Vec<usize>> {
+        let paths = self.selected_path_layers();
+        if paths.len() < 2 {
+            return None;
+        }
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let clean = !canvas
+            .layer_stack
+            .layers
+            .iter()
+            .enumerate()
+            .any(|(i, l)| l.selected && !l.is_background && !paths.contains(&i));
+        clean.then_some(paths)
+    }
+
+    /// Canvas-space AABB of one Path layer's fill geometry (object-local bounds
+    /// mapped through the object transform), or `None` for a degenerate path.
+    fn path_canvas_bounds(&self, idx: usize) -> Option<Rect> {
+        let layer = self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack
+            .layers
+            .get(idx)?;
+        let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type else {
+            return None;
+        };
+        let b = obj.local_bounds(BOX_TOL)?;
+        let pts = [
+            obj.transform.apply_point(Point::new(b.x, b.y)),
+            obj.transform.apply_point(Point::new(b.x + b.w, b.y)),
+            obj.transform.apply_point(Point::new(b.x, b.y + b.h)),
+            obj.transform.apply_point(Point::new(b.x + b.w, b.y + b.h)),
+        ];
+        let mut x0 = f32::INFINITY;
+        let mut y0 = f32::INFINITY;
+        let mut x1 = f32::NEG_INFINITY;
+        let mut y1 = f32::NEG_INFINITY;
+        for p in pts {
+            x0 = x0.min(p.x);
+            y0 = y0.min(p.y);
+            x1 = x1.max(p.x);
+            y1 = y1.max(p.y);
+        }
+        (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
+    }
+
+    /// Union of every target Path's canvas-space AABB — the multi-select box.
+    fn union_canvas_bounds(&self, paths: &[usize]) -> Option<Rect> {
+        let mut x0 = f32::INFINITY;
+        let mut y0 = f32::INFINITY;
+        let mut x1 = f32::NEG_INFINITY;
+        let mut y1 = f32::NEG_INFINITY;
+        let mut any = false;
+        for &idx in paths {
+            if let Some(b) = self.path_canvas_bounds(idx) {
+                x0 = x0.min(b.x);
+                y0 = y0.min(b.y);
+                x1 = x1.max(b.x + b.w);
+                y1 = y1.max(b.y + b.h);
+                any = true;
+            }
+        }
+        (any && x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
+    }
+
+    /// The on-canvas transform box, or `None` when the Move tool is not showing
+    /// one (wrong tool, nothing suitable selected, a modal transform, or a plain
+    /// layer-move drag in progress). Shows a single oriented box for one selected
+    /// Path or a union box around a clean multi-Path selection. Consumed by the
+    /// overlay VM and by handle hit-testing, so both agree on where the handles
+    /// are.
     pub fn active_path_transform_box(&self) -> Option<PathBox> {
         if self.edit.tools.active_id() != crate::tools::ToolId::Move
             || self.edit.transform_state.is_some()
@@ -177,33 +297,33 @@ impl App {
         if self.edit.input.painting && self.edit.path_transform.is_none() {
             return None;
         }
-        let (id, model_t, b) = self.active_path_object()?;
-        // During a handle drag the box tracks `pending` (updated every frame),
-        // not the throttled re-rastered model, so it stays glued to the cursor.
-        let t = match &self.edit.path_transform {
-            Some(d) if d.layer_id == id => d.pending,
-            _ => model_t,
-        };
-        let map = |p: Point| {
-            let q = t.apply_point(p);
-            (q.x, q.y)
-        };
-        let corners = [
-            map(local_handle_point(b, TransformHandle::TopLeft)),
-            map(local_handle_point(b, TransformHandle::TopRight)),
-            map(local_handle_point(b, TransformHandle::BottomLeft)),
-            map(local_handle_point(b, TransformHandle::BottomRight)),
-        ];
-        let mut handles = [(0.0f32, 0.0f32); 8];
-        for (i, h) in HANDLE_ORDER.iter().enumerate() {
-            handles[i] = map(local_handle_point(b, *h));
+        // Live gesture: the box tracks `pending` every frame (the single object
+        // target, or the multi-Path canvas-space delta) so it stays glued to the
+        // cursor rather than the throttled, re-rastered model.
+        if let Some(d) = &self.edit.path_transform {
+            return Some(box_from(d.pending, d.local_bounds));
         }
-        let center = map(local_handle_point(b, TransformHandle::Center));
-        Some(PathBox {
-            corners,
-            handles,
-            center,
-        })
+        // Idle: a clean multi-Path selection shows one union box around them all
+        // (the reported "frame only wraps one layer" bug).
+        if let Some(paths) = self.multi_path_targets() {
+            let b = self.union_canvas_bounds(&paths)?;
+            return Some(box_from(AffineTransform::IDENTITY, b));
+        }
+        // Idle single: show the active Path's oriented box, but ONLY while it is
+        // SELECTED. Clicking empty canvas deselects every layer (Move tool) yet
+        // leaves `active_idx` pointing here; without this gate the box would
+        // linger and read as "still selected" (the reported empty-click bug).
+        let idx = self.active_path_layer()?;
+        if !self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack
+            .layers[idx]
+            .selected
+        {
+            return None;
+        }
+        let (_, model_t, b) = self.active_path_object()?;
+        Some(box_from(model_t, b))
     }
 
     /// Which part of the active Path's box is under the screen point, if any.
@@ -325,6 +445,11 @@ impl App {
     /// model first so the box pivot is the displayed centre and `orig_transform`
     /// is the true undo baseline.
     pub fn path_transform_begin(&mut self, hit: PathBoxHit, cx: f32, cy: f32) {
+        // A clean multi-Path selection scales/rotates as one union box.
+        if let Some(paths) = self.multi_path_targets() {
+            self.begin_union_path_transform(hit, cx, cy, &paths);
+            return;
+        }
         let Some(idx) = self.active_path_layer() else {
             return;
         };
@@ -355,6 +480,55 @@ impl App {
             start_cx: cx,
             start_cy: cy,
             changed: false,
+            canvas_frame: false,
+            targets: vec![(layer_id, orig)],
+        });
+    }
+
+    /// Begin a union scale/rotate over several selected Paths. The gesture builds
+    /// a CANVAS-space delta `M` about the union box (identity `orig_transform`,
+    /// union AABB as `local_bounds`); every target's new transform is `M ∘ orig_i`
+    /// so they move together and each stays an editable vector.
+    fn begin_union_path_transform(&mut self, hit: PathBoxHit, cx: f32, cy: f32, paths: &[usize]) {
+        let mut targets: Vec<(u32, AffineTransform)> = Vec::with_capacity(paths.len());
+        {
+            let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+            for &idx in paths {
+                let Some(layer) = canvas.layer_stack.layers.get_mut(idx) else {
+                    continue;
+                };
+                // Normalise any residual offset↔model drift so the union box and
+                // the committed transforms agree.
+                crate::core::command_vector::fold_offset_into_model(layer);
+                if let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type {
+                    targets.push((layer.id, obj.transform));
+                }
+            }
+        }
+        if targets.len() < 2 {
+            return;
+        }
+        let Some(b) = self.union_canvas_bounds(paths) else {
+            return;
+        };
+        let pivot = Point::new(b.x + b.w * 0.5, b.y + b.h * 0.5);
+        let handle = match hit {
+            PathBoxHit::Handle(h) => Some(h),
+            PathBoxHit::Rotate => None,
+        };
+        let layer_id = targets[0].0;
+        self.edit.path_transform = Some(PathTransformDrag {
+            layer_id,
+            handle,
+            orig_transform: AffineTransform::IDENTITY,
+            pending: AffineTransform::IDENTITY,
+            local_bounds: b,
+            pivot,
+            start_cx: cx,
+            start_cy: cy,
+            changed: false,
+            canvas_frame: true,
+            targets,
         });
     }
 
@@ -451,42 +625,55 @@ impl App {
     /// untouched until release, avoiding an O(area) CPU raster on every pointer
     /// event; release commits and rasterizes the final editable vector once.
     pub fn path_transform_update(&mut self, cx: f32, cy: f32, shift: bool, alt: bool) {
-        let (new_t, orig_t, layer_id) = match self.edit.path_transform.as_mut() {
-            Some(d) => match Self::path_transform_target(d, cx, cy, shift, alt) {
-                Some(t) => {
-                    d.pending = t;
-                    d.changed = true;
-                    (t, d.orig_transform, d.layer_id)
-                }
+        // Recompute the gesture target and derive each moved Path's (id, orig,
+        // new) transform pair. A single drag has one entry; a union drag maps its
+        // canvas-space delta `M` onto every target as `M ∘ orig_i`.
+        let moves: Vec<(u32, AffineTransform, AffineTransform)> =
+            match self.edit.path_transform.as_mut() {
+                Some(d) => match Self::path_transform_target(d, cx, cy, shift, alt) {
+                    Some(t) => {
+                        d.pending = t;
+                        d.changed = true;
+                        if d.canvas_frame {
+                            d.targets
+                                .iter()
+                                .map(|(id, orig)| (*id, *orig, t.then(orig)))
+                                .collect()
+                        } else {
+                            // Single: `pending` already IS the object's new transform.
+                            vec![(d.layer_id, d.orig_transform, t)]
+                        }
+                    }
+                    None => return,
+                },
                 None => return,
-            },
-            None => return,
-        };
-        let (orig_ox, orig_oy) = {
+            };
+        // Build one GPU transform preview per moved Path. Destination canvas ->
+        // source canvas: a source point displayed under `orig` moves to `new`, so
+        // sampling applies `orig * inverse(new)` to the destination coordinate.
+        let mut previews: Vec<TransformPreviewUniform> = Vec::with_capacity(moves.len());
+        {
             let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
-            match canvas.layer_stack.layers.iter().find(|l| l.id == layer_id) {
-                Some(l) if matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))) => {
-                    (l.offset.0 as f32, l.offset.1 as f32)
+            for (id, orig_t, new_t) in &moves {
+                let Some(l) = canvas.layer_stack.layers.iter().find(|l| l.id == *id) else {
+                    continue;
+                };
+                if !matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))) {
+                    continue;
                 }
-                None => return,
-                _ => return,
+                let Some(inv_m) = path_preview_inverse(*orig_t, *new_t) else {
+                    continue;
+                };
+                previews.push(TransformPreviewUniform {
+                    layer_id: *id,
+                    inv_m,
+                    orig_ox: l.offset.0 as f32,
+                    orig_oy: l.offset.1 as f32,
+                });
             }
-        };
-        // Destination canvas -> source canvas. A source point displayed under
-        // `orig_t` moves to `new_t`; sampling therefore applies
-        // `orig_t * inverse(new_t)` to the destination coordinate.
-        let Some(inv_m) = path_preview_inverse(orig_t, new_t) else {
-            return;
-        };
-        let preview = TransformPreviewUniform {
-            layer_id,
-            inv_m,
-            orig_ox,
-            orig_oy,
-        };
+        }
         if let Some(gpu) = &mut self.win.gpu {
-            gpu.compositor.transform_previews.clear();
-            gpu.compositor.transform_previews.push(preview);
+            gpu.compositor.transform_previews = previews;
         }
         self.request_interactive_recompose();
         if let Some(w) = &self.win.window {
@@ -494,10 +681,11 @@ impl App {
         }
     }
 
-    /// Finish the gesture: restore the pre-gesture transform so the gateway
+    /// Finish the gesture: restore the pre-gesture transform(s) so the gateway
     /// captures the correct "before", then commit the final transform as ONE
-    /// [`crate::core::command_vector::ChangeVectorTransform`] (a single undo
-    /// step). A no-op drag (a click on a handle) records nothing.
+    /// [`crate::core::command_vector::ChangeVectorTransform`] (a single undo step)
+    /// for a single Path, or every target's transform in ONE undo group for a
+    /// union drag. A no-op drag (a click on a handle) records nothing.
     pub fn path_transform_finish(&mut self) {
         let Some(drag) = self.edit.path_transform.take() else {
             return;
@@ -511,6 +699,72 @@ impl App {
         // Abandon any in-flight worker bake — the final geometry is committed
         // synchronously below, so a late result would be stale.
         self.cancel_path_bake();
+
+        // Multi-Path union: commit every target's `M ∘ orig_i` in one undo group.
+        if drag.canvas_frame {
+            let finals: Vec<(u32, AffineTransform, AffineTransform)> = drag
+                .targets
+                .iter()
+                .map(|(id, orig)| (*id, *orig, drag.pending.then(orig)))
+                .collect();
+            let no_op = !drag.changed || finals.iter().all(|(_, orig, fin)| fin == orig);
+            let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+            if no_op {
+                // Nothing moved — make sure every target's model is its baseline.
+                let mut touched = false;
+                for (id, orig, _) in &finals {
+                    let Some(idx) = canvas.layer_stack.layers.iter().position(|l| l.id == *id)
+                    else {
+                        continue;
+                    };
+                    let layer = &mut canvas.layer_stack.layers[idx];
+                    if let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type {
+                        if o.transform != *orig {
+                            let mut o = o.clone();
+                            o.transform = *orig;
+                            crate::core::command_vector::apply_object_to_layer(layer, o);
+                            touched = true;
+                        }
+                    }
+                }
+                if touched {
+                    self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+                }
+                return;
+            }
+            canvas.begin_undo_group("Transform Paths");
+            for (id, orig, fin) in &finals {
+                let Some(idx) = canvas.layer_stack.layers.iter().position(|l| l.id == *id) else {
+                    continue;
+                };
+                if !matches!(
+                    canvas.layer_stack.layers[idx].layer_type,
+                    LayerType::Vector(VectorGeometry::Path(_))
+                ) {
+                    continue;
+                }
+                // Rewind this target to its baseline so `execute` records old→new.
+                {
+                    let layer = &mut canvas.layer_stack.layers[idx];
+                    if let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type {
+                        let mut o = o.clone();
+                        o.transform = *orig;
+                        crate::core::command_vector::apply_object_to_layer(layer, o);
+                    }
+                }
+                let _ = canvas.execute(
+                    Box::new(crate::core::command_vector::ChangeVectorTransform::new(*id, *fin)),
+                    crate::core::gateway::ChangeKind::LayerStructure,
+                );
+            }
+            canvas.end_undo_group();
+            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let Some(idx) = canvas
             .layer_stack
@@ -603,6 +857,8 @@ mod tests {
             start_cx: 100.0,
             start_cy: 50.0,
             changed: false,
+            canvas_frame: false,
+            targets: vec![(1, AffineTransform::IDENTITY)],
         }
     }
 
@@ -830,5 +1086,153 @@ mod tests {
             LayerType::Vector(VectorGeometry::Path(_))
         ));
         assert_eq!((l.width, l.height), (w0, h0), "undo restored the size");
+    }
+
+    /// Deselecting the active Path (e.g. clicking empty canvas) must hide the box
+    /// even though `active_idx` still points at it.
+    #[test]
+    fn deselecting_active_path_hides_box() {
+        let (mut app, id) = app_with_active_path();
+        assert!(
+            app.active_path_transform_box().is_some(),
+            "box shows for the selected active path"
+        );
+        for l in &mut app.docs.documents[0].canvas.layer_stack.layers {
+            if l.id == id {
+                l.selected = false;
+            }
+        }
+        assert!(
+            app.active_path_transform_box().is_none(),
+            "clearing the selection hides the on-canvas box"
+        );
+    }
+
+    /// Build an App with two selected Path layers under the Move tool.
+    fn app_with_two_paths() -> (App, u32, u32) {
+        use crate::core::canvas::Canvas;
+        use crate::core::command_vector::CreatePathLayer;
+        use crate::core::gateway::ChangeKind;
+
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(400, 400);
+        let (id_a, id_b) = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            canvas
+                .execute(
+                    Box::new(CreatePathLayer::new(
+                        rect_path_object(40.0, 20.0, 100.0, 120.0),
+                        "Path A",
+                    )),
+                    ChangeKind::LayerStructure,
+                )
+                .unwrap();
+            canvas
+                .execute(
+                    Box::new(CreatePathLayer::new(
+                        rect_path_object(40.0, 20.0, 200.0, 200.0),
+                        "Path B",
+                    )),
+                    ChangeKind::LayerStructure,
+                )
+                .unwrap();
+            let paths: Vec<usize> = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(paths.len(), 2);
+            for l in &mut canvas.layer_stack.layers {
+                l.selected = false;
+            }
+            for &idx in &paths {
+                canvas.layer_stack.layers[idx].selected = true;
+            }
+            canvas.layer_stack.active_idx = paths[0];
+            (
+                canvas.layer_stack.layers[paths[0]].id,
+                canvas.layer_stack.layers[paths[1]].id,
+            )
+        };
+        app.edit.tools.select(crate::tools::ToolId::Move);
+        app.edit.view.zoom = 1.0;
+        app.edit.view.offset_x = 0.0;
+        app.edit.view.offset_y = 0.0;
+        (app, id_a, id_b)
+    }
+
+    #[test]
+    fn union_box_wraps_all_selected_paths() {
+        let (app, _a, _b) = app_with_two_paths();
+        let bx = app
+            .active_path_transform_box()
+            .expect("union box shown for a clean multi-Path selection");
+        // Paths span (100,120)-(140,140) and (200,200)-(240,220) ⇒ union
+        // (100,120)-(240,220).
+        assert!((bx.corners[0].0 - 100.0).abs() < 1.0 && (bx.corners[0].1 - 120.0).abs() < 1.0);
+        assert!((bx.corners[3].0 - 240.0).abs() < 1.0 && (bx.corners[3].1 - 220.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn union_drag_scales_every_path_in_one_undo() {
+        let (mut app, id_a, id_b) = app_with_two_paths();
+        let (wa0, wb0) = (find_layer(&app, id_a).width, find_layer(&app, id_b).width);
+        // Grab the union bottom-right handle and drag it out to double the box
+        // about the fixed top-left corner (100,120).
+        let (hx, hy) = {
+            let bx = app.active_path_transform_box().unwrap();
+            bx.handles[7]
+        };
+        app.path_transform_begin(PathBoxHit::Handle(TransformHandle::BottomRight), hx, hy);
+        app.path_transform_update(380.0, 320.0, false, false);
+        app.path_transform_finish();
+
+        let la = find_layer(&app, id_a);
+        let lb = find_layer(&app, id_b);
+        assert!(
+            matches!(la.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
+                && matches!(lb.layer_type, LayerType::Vector(VectorGeometry::Path(_))),
+            "both stay editable vectors"
+        );
+        assert!(
+            la.width > wa0 && lb.width > wb0,
+            "both paths scaled up: A {}→{}, B {}→{}",
+            wa0,
+            la.width,
+            wb0,
+            lb.width
+        );
+
+        // A SINGLE undo reverts the whole union transform (one undo group).
+        app.docs.documents[0].canvas.undo().expect("undo");
+        assert_eq!(find_layer(&app, id_a).width, wa0, "undo restored path A");
+        assert_eq!(find_layer(&app, id_b).width, wb0, "undo restored path B");
+    }
+
+    #[test]
+    fn mixed_selection_falls_back_to_single_box() {
+        let (mut app, _a, id_b) = app_with_two_paths();
+        // Add a plain raster layer and select it alongside the paths → no longer a
+        // clean Path-only selection, so the union box must not engage.
+        {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let idx = canvas.layer_stack.add_layer(400, 400);
+            canvas.layer_stack.layers[idx].selected = true;
+            // Keep an active Path so the single-box path still has a candidate.
+            let b_idx = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .position(|l| l.id == id_b)
+                .unwrap();
+            canvas.layer_stack.active_idx = b_idx;
+        }
+        assert!(
+            app.multi_path_targets().is_none(),
+            "a mixed selection is not a clean multi-Path target set"
+        );
     }
 }

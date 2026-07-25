@@ -451,7 +451,20 @@ impl App {
         // each per-frame recomposite only fills the VIEWPORT (~1-2M px), not the
         // full canvas resolution (e.g. 17.5M px) Mode A would composite. Zoom/pan
         // (non-interactive) keeps Mode A's cached, recomposite-free re-blit.
-        let interactive = self.is_interactive_edit();
+        //
+        // Exception: an on-canvas Path scale/rotate previews entirely through the
+        // GPU transform slots, whose math is canvas-space (mode-agnostic — see the
+        // `xform_active` branch in compositor.wgsl) and which Mode A composites
+        // fine through its scissored partial path. Forcing Mode B for it would flip
+        // the ping/pong textures (canvas-size ↔ window-size) on gesture start,
+        // reallocating them and clearing `ping_initialized` — so the FIRST frame of
+        // the first such gesture pays a full-viewport recomposite plus a cold
+        // texture allocation, the visible one-beat hitch users hit when they first
+        // grab a rotate/scale handle. Staying in Mode A keeps `ping_initialized`
+        // and the textures, so the first frame is a cheap partial composite. A
+        // genuinely large / streaming canvas still switches to Mode B below via
+        // `is_large_canvas` / `viewport_streaming`.
+        let interactive = self.is_interactive_edit() && self.edit.path_transform.is_none();
         let mut mode_changed = false;
         if let Some(gpu) = &mut self.win.gpu {
             let canvas_pixels = (cw as u64).saturating_mul(ch as u64);

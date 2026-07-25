@@ -722,6 +722,17 @@ pub struct PathTransformDrag {
     /// True once the gesture actually changed the transform (so a no-op click on
     /// a handle pushes no undo entry).
     pub changed: bool,
+    /// `false` (single Path): `orig_transform`/`pending` are the object's own
+    /// transform and `local_bounds` is in OBJECT-LOCAL space — scaling runs in the
+    /// object's local frame so it stays square to a rotated object.
+    /// `true` (multi-Path union): `orig_transform` is the identity, `pending` is a
+    /// CANVAS-space delta `M`, and `local_bounds` is the union AABB in CANVAS
+    /// space. Each target's new transform is `M ∘ orig_i`.
+    pub canvas_frame: bool,
+    /// Every Path moved by this gesture: `(layer_id, transform captured at press)`.
+    /// One entry for a single-Path drag; the whole selection for a union drag.
+    /// Drives the per-layer GPU preview and the one-undo-group commit.
+    pub targets: Vec<(u32, crate::core::vector::affine::AffineTransform)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

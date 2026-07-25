@@ -78,6 +78,14 @@ impl App {
         let mut cmd = before;
         cmd.capture_after(&canvas.layer_stack, cw, ch);
         canvas.record(Box::new(cmd));
+        // Make the new shape the sole selection so it (and a later Convert to
+        // Curves) shows the Move tool's on-canvas transform box without an extra
+        // click — the box only shows for a SELECTED layer (see
+        // `active_path_transform_box`). `add_layer` already set `active_idx`.
+        for l in &mut canvas.layer_stack.layers {
+            l.selected = false;
+        }
+        canvas.layer_stack.layers[idx].selected = true;
         canvas.layer_revision += 1;
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
