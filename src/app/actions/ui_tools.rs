@@ -793,7 +793,7 @@ impl App {
                 } else {
                     None
                 };
-            c.dpi = d.max(1.0);
+            c.set_user_dpi(d);
             if had_selection && c.mode == crate::tools::crop::CropMode::FixedSize {
                 c.init_bounds(cw as u32, ch as u32);
             } else if let Some((w, h)) = displayed {

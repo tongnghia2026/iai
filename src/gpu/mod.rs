@@ -1441,25 +1441,42 @@ impl GpuState {
         canvas_clip: Option<(u32, u32, u32, u32)>,
         draw_canvas: bool,
     ) -> bool {
-        let surface_texture = match self.main.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.main.surface.configure(&self.device, &self.main.config);
-                return false;
-            }
-            _ => return false,
-        };
-
-        let view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
+        // Apply the texture delta BEFORE trying to acquire the swapchain image:
+        // egui emits each delta exactly once, so a dropped frame (surface
+        // Outdated/Lost after a monitor sleep or driver reset) that discarded
+        // its delta would desync this renderer's texture store from egui
+        // forever — fonts and layer-panel thumbnails then render blank until
+        // the app restarts. Uploads only need the device + queue, never the
+        // surface, so they are always safe to run here.
         for (id, delta) in &textures_delta.set {
             self.main
                 .egui_renderer
                 .update_texture(&self.device, &self.queue, *id, delta);
         }
+
+        let surface_texture = match self.main.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.main.surface.configure(&self.device, &self.main.config);
+                // Nothing gets drawn this frame, so the frees (textures egui no
+                // longer references) can be honoured immediately.
+                for id in &textures_delta.free {
+                    self.main.egui_renderer.free_texture(id);
+                }
+                return false;
+            }
+            _ => {
+                for id in &textures_delta.free {
+                    self.main.egui_renderer.free_texture(id);
+                }
+                return false;
+            }
+        };
+
+        let view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.main.config.width, self.main.config.height],
@@ -1634,24 +1651,34 @@ impl GpuState {
         backdrop: [f64; 4],
         canvas_uniforms: Option<CanvasUniforms>,
     ) -> bool {
+        // Same ordering rule as `render()`: egui emits each texture delta only
+        // once, so it must be applied even when the frame is dropped.
+        for (id, delta) in &textures_delta.set {
+            ws.egui_renderer
+                .update_texture(&self.device, &self.queue, *id, delta);
+        }
+
         let surface_texture = match ws.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 ws.surface.configure(&self.device, &ws.config);
+                for id in &textures_delta.free {
+                    ws.egui_renderer.free_texture(id);
+                }
                 return false;
             }
-            _ => return false,
+            _ => {
+                for id in &textures_delta.free {
+                    ws.egui_renderer.free_texture(id);
+                }
+                return false;
+            }
         };
 
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-
-        for (id, delta) in &textures_delta.set {
-            ws.egui_renderer
-                .update_texture(&self.device, &self.queue, *id, delta);
-        }
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [ws.config.width, ws.config.height],

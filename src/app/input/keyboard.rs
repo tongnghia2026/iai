@@ -425,8 +425,11 @@ impl App {
                 let dpi = canvas.metadata.resolution_ppi;
                 match self.edit.tools.active_id() {
                     ToolId::Crop => {
+                        // Same guard as the toolbar path: a fixed-size preset
+                        // (ID photo at 600 ppi) or a hand-typed resolution must
+                        // not be clobbered by the document's 72 ppi default.
                         let c = self.edit.tools.crop_mut();
-                        c.dpi = dpi;
+                        c.sync_dpi_on_activate(dpi);
                     }
                     ToolId::PerspectiveCrop => {
                         let t = self.edit.tools.perspective_crop_mut();
