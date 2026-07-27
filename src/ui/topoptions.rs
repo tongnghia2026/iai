@@ -4,27 +4,7 @@ use crate::tools::ToolId;
 use egui;
 use egui_phosphor::regular as ph;
 
-/// Move keyboard focus to a `DragValue` field AND select all of its text, so the
-/// next keystroke replaces the current number instead of appending to it.
-///
-/// egui only auto-selects a `DragValue` on `gained_focus`, which does NOT fire
-/// when focus is moved mid-frame with `request_focus()` (by then the widget was
-/// already "focused" earlier this pass). So we replicate egui's own click-path
-/// behaviour: request focus and stamp a select-all cursor range into the field's
-/// `TextEdit` state. The end index is deliberately large; egui clamps the cursor
-/// to the text, so it reliably selects the whole field whatever its length.
-fn focus_field_select_all(ui: &egui::Ui, response: &egui::Response) {
-    response.request_focus();
-    let id = response.id;
-    let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-    state
-        .cursor
-        .set_char_range(Some(egui::text::CCursorRange::two(
-            egui::text::CCursor::new(0),
-            egui::text::CCursor::new(64),
-        )));
-    state.store(ui.ctx(), id);
-}
+use crate::ui::widgets::focus_field_select_all;
 
 fn dimension_drag<'a>(
     value: &'a mut f32,

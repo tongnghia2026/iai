@@ -134,64 +134,91 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                     ui.end_row();
 
                     ui.label("Width:");
-                    ui.horizontal(|ui| {
-                        let typed_unit = std::cell::Cell::new(None);
-                        let response = ui
-                            .add(new_canvas_dimension_drag(&mut new_w_disp, &typed_unit))
-                            .on_hover_text("You can type a unit, for example: 10 cm, 15mm, 8 in");
-                        if let Some(unit) = typed_unit.get() {
-                            new_unit = unit;
-                            actions.doc.new_unit = Some(unit);
-                        }
-                        if response.changed() || typed_unit.get().is_some() {
-                            actions.doc.new_w_input = Some(new_w_disp);
-                        }
+                    let (w_response, unit_w_response) = ui
+                        .horizontal(|ui| {
+                            let typed_unit = std::cell::Cell::new(None);
+                            let response = ui
+                                .add(new_canvas_dimension_drag(&mut new_w_disp, &typed_unit))
+                                .on_hover_text(
+                                    "You can type a unit, for example: 10 cm, 15mm, 8 in",
+                                );
+                            if let Some(unit) = typed_unit.get() {
+                                new_unit = unit;
+                                actions.doc.new_unit = Some(unit);
+                            }
+                            if response.changed() || typed_unit.get().is_some() {
+                                actions.doc.new_w_input = Some(new_w_disp);
+                            }
 
-                        egui::ComboBox::from_id_salt("unit_select_w")
-                            .selected_text(new_unit.name())
-                            .width(60.0)
-                            .show_ui(ui, |ui| {
-                                for unit in crate::core::units::Unit::all() {
-                                    if ui
-                                        .selectable_value(&mut new_unit, unit, unit.name())
-                                        .changed()
-                                    {
-                                        // Changing the unit reinterprets the typed
-                                        // numbers; it must not rewrite them.
-                                        actions.doc.new_unit = Some(unit);
+                            let unit_response = egui::ComboBox::from_id_salt("unit_select_w")
+                                .selected_text(new_unit.name())
+                                .width(60.0)
+                                .show_ui(ui, |ui| {
+                                    for unit in crate::core::units::Unit::all() {
+                                        if ui
+                                            .selectable_value(&mut new_unit, unit, unit.name())
+                                            .changed()
+                                        {
+                                            // Changing the unit reinterprets the typed
+                                            // numbers; it must not rewrite them.
+                                            actions.doc.new_unit = Some(unit);
+                                        }
                                     }
-                                }
-                            });
-                    });
+                                })
+                                .response;
+                            (response, unit_response)
+                        })
+                        .inner;
                     ui.end_row();
 
                     ui.label("Height:");
                     let typed_unit = std::cell::Cell::new(None);
-                    let response = ui
+                    let h_response = ui
                         .add(new_canvas_dimension_drag(&mut new_h_disp, &typed_unit))
                         .on_hover_text("You can type a unit, for example: 10 cm, 15mm, 8 in");
                     if let Some(unit) = typed_unit.get() {
                         new_unit = unit;
                         actions.doc.new_unit = Some(unit);
                     }
-                    if response.changed() || typed_unit.get().is_some() {
+                    if h_response.changed() || typed_unit.get().is_some() {
                         actions.doc.new_h_input = Some(new_h_disp);
                     }
                     ui.end_row();
 
                     ui.label("Resolution:");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut new_dpi)
-                                .range(1.0..=1200.0)
-                                .suffix(" DPI")
-                                .speed(1.0),
-                        )
-                        .changed()
-                    {
+                    let res_response = ui.add(
+                        egui::DragValue::new(&mut new_dpi)
+                            .range(1.0..=1200.0)
+                            .suffix(" DPI")
+                            .speed(1.0),
+                    );
+                    if res_response.changed() {
                         actions.doc.new_dpi = Some(new_dpi);
                     }
                     ui.end_row();
+
+                    // Tab / Shift+Tab cycle Width → Height → Resolution (skipping
+                    // the unit picker), each field selected-all so typing replaces
+                    // the value — matching the Crop options bar. Runs here while all
+                    // three field responses are in scope.
+                    let (tab, shift) = ui
+                        .ctx()
+                        .input(|i| (i.key_pressed(egui::Key::Tab), i.modifiers.shift));
+                    if tab {
+                        if !shift && (w_response.has_focus() || unit_w_response.has_focus()) {
+                            crate::ui::widgets::focus_field_select_all(ui, &h_response);
+                        } else if !shift && h_response.has_focus() {
+                            crate::ui::widgets::focus_field_select_all(ui, &res_response);
+                        } else if !shift && res_response.has_focus() {
+                            crate::ui::widgets::focus_field_select_all(ui, &w_response);
+                        } else if shift && res_response.has_focus() {
+                            crate::ui::widgets::focus_field_select_all(ui, &h_response);
+                        } else if shift && h_response.has_focus() {
+                            crate::ui::widgets::focus_field_select_all(ui, &w_response);
+                        } else if shift && (w_response.has_focus() || unit_w_response.has_focus()) {
+                            crate::ui::widgets::focus_field_select_all(ui, &res_response);
+                        }
+                    }
 
                     ui.label("Background:");
                     egui::ComboBox::from_id_salt("bg_color")
