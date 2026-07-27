@@ -3425,6 +3425,13 @@ fn paint_v_ticks(painter: &egui::Painter, rect: egui::Rect, data: &UiData) {
     }
 }
 
+/// Edge length of the 2-D saturation/value square in the paint colour dialog.
+/// The dialog auto-sizes to hug it, so the square fills the width for a balanced
+/// layout (no empty gutter on the right).
+const PAINT_DIALOG_SQUARE: f32 = 300.0;
+/// Dialog outer width used for side-docking placement (square + window margins).
+const PAINT_DIALOG_WIDTH: f32 = PAINT_DIALOG_SQUARE + 16.0;
+
 fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     if !data.dialogs.show_paint_color_dialog {
         return;
@@ -3451,7 +3458,7 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
         _ => "Foreground Color",
     };
 
-    let side_pos = document_side_dialog_pos(ctx, data, 340.0, 96.0);
+    let side_pos = document_side_dialog_pos(ctx, data, PAINT_DIALOG_WIDTH, 96.0);
     let mut open = data.dialogs.show_paint_color_dialog;
     let mut window = egui::Window::new(title)
         .id(egui::Id::new("paint_color_dialog"))
@@ -3460,7 +3467,7 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
         .movable(true)
         .order(egui::Order::Foreground)
         .default_pos(side_pos)
-        .default_width(340.0)
+        .default_width(PAINT_DIALOG_WIDTH)
         .open(&mut open);
 
     if data.dialogs.paint_color_dialog_center_next {
@@ -3469,7 +3476,10 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
     }
 
     let dialog_resp = window.show(ctx, |ui| {
-        ui.spacing_mut().slider_width = 270.0;
+        // Wide square that fills the dialog width (balanced, no right gutter).
+        // The RGB row inside the picker now also carries an editable #hex field
+        // so a colour code can be copied out or pasted in.
+        ui.spacing_mut().slider_width = PAINT_DIALOG_SQUARE;
 
         let mut color = egui::Color32::from_rgba_unmultiplied(
             data.dialogs.paint_color_dialog_color[0],
@@ -3482,80 +3492,26 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
                 Some([color.r(), color.g(), color.b(), 255]);
         }
 
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            paint_color_preview(ui, "Current", data.dialogs.paint_color_dialog_original);
-            ui.add_space(8.0);
-            paint_color_preview(ui, "New", data.dialogs.paint_color_dialog_color);
-        });
-
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new("Swatches")
+        // Ink read-out only for CMYK (print) documents; hidden for RGB work so
+        // the dialog stays uncluttered.
+        if let Some(ink) = data.dialogs.paint_dialog_ink {
+            let pct = |v: u8| (v as f32 / 255.0 * 100.0).round() as u32;
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "C {} M {} Y {} K {} %",
+                    pct(ink[0]),
+                    pct(ink[1]),
+                    pct(ink[2]),
+                    pct(ink[3])
+                ))
+                .monospace()
                 .small()
                 .color(egui::Color32::GRAY),
-        );
-        ui.horizontal_wrapped(|ui| {
-            let sw = [
-                [0u8, 0, 0, 255],
-                [255, 255, 255, 255],
-                [192, 0, 0, 255],
-                [255, 0, 0, 255],
-                [255, 102, 0, 255],
-                [255, 192, 0, 255],
-                [255, 255, 0, 255],
-                [146, 208, 80, 255],
-                [0, 176, 80, 255],
-                [0, 176, 240, 255],
-                [0, 70, 127, 255],
-                [112, 48, 160, 255],
-            ];
-            for swatch in sw {
-                if ui
-                    .add(
-                        egui::Button::new("")
-                            .fill(egui::Color32::from_rgb(swatch[0], swatch[1], swatch[2]))
-                            .min_size(egui::vec2(22.0, 22.0)),
-                    )
-                    .clicked()
-                {
-                    actions.dialogs.set_paint_color_dialog_color = Some(swatch);
-                }
-            }
-        });
+            );
+        }
 
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let mut live = data.dialogs.paint_color_dialog_live_preview;
-            if ui.checkbox(&mut live, "Preview").changed() {
-                actions.dialogs.set_paint_color_dialog_live_preview = Some(live);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let [r, g, b, _] = data.dialogs.paint_color_dialog_color;
-                ui.label(
-                    egui::RichText::new(format!("#{r:02X}{g:02X}{b:02X}"))
-                        .monospace()
-                        .small()
-                        .color(egui::Color32::GRAY),
-                );
-                if let Some(ink) = data.dialogs.paint_dialog_ink {
-                    let pct = |v: u8| (v as f32 / 255.0 * 100.0).round() as u32;
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "C{} M{} Y{} K{} %",
-                            pct(ink[0]),
-                            pct(ink[1]),
-                            pct(ink[2]),
-                            pct(ink[3])
-                        ))
-                        .monospace()
-                        .small()
-                        .color(egui::Color32::GRAY),
-                    );
-                }
-            });
-        });
-
         ui.separator();
         ui.horizontal(|ui| {
             if ui.button("Default").clicked() {
@@ -3591,26 +3547,4 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
     if !open {
         actions.dialogs.paint_color_dialog_cancel = true;
     }
-}
-
-fn paint_color_preview(ui: &mut egui::Ui, label: &str, color: [u8; 4]) {
-    ui.vertical(|ui| {
-        ui.label(
-            egui::RichText::new(label)
-                .small()
-                .color(egui::Color32::GRAY),
-        );
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(86.0, 30.0), egui::Sense::hover());
-        ui.painter().rect_filled(
-            rect,
-            2.0,
-            egui::Color32::from_rgb(color[0], color[1], color[2]),
-        );
-        ui.painter().rect_stroke(
-            rect,
-            2.0,
-            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(90)),
-            egui::StrokeKind::Outside,
-        );
-    });
 }

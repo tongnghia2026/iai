@@ -450,6 +450,10 @@ pub struct PrintIntent {
 #[derive(Default)]
 pub struct DialogIntent {
     pub open_paint_color_dialog: Option<u8>,
+    /// Open the paint-colour dialog for `target` pre-seeded with a specific
+    /// colour (the palette right-click "Adjust colour…" gesture). `original`
+    /// stays the target's current colour so Cancel restores it.
+    pub open_paint_color_dialog_with: Option<(u8, [u8; 4])>,
     pub set_paint_color_dialog_color: Option<[u8; 4]>,
     pub set_paint_color_dialog_live_preview: Option<bool>,
     pub paint_color_dialog_default: bool,

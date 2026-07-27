@@ -122,8 +122,50 @@ fn color_slider_2d(
     response
 }
 
-/// Compact opaque colour picker (RGB row + 2D saturation/value square + hue
-/// slider) with a small selection indicator. Returns `true` if `srgba` changed.
+/// Editable `#RRGGBB` field for copy/paste. The in-progress text is kept in
+/// egui memory so a partial edit survives the per-frame model rebuild, and it is
+/// re-synced to `rgb` whenever the field is not focused (so external colour
+/// changes show through). Returns `true` when a complete, valid hex updated `rgb`.
+fn hex_field(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
+    let id = ui.id().with("iai_hex_field");
+    let live = format!("{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]);
+    let mut text = ui
+        .data(|d| d.get_temp::<String>(id))
+        .unwrap_or_else(|| live.clone());
+
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .desired_width(62.0)
+            .font(egui::TextStyle::Monospace)
+            .char_limit(7)
+            .hint_text("RRGGBB"),
+    );
+
+    let mut changed = false;
+    if resp.has_focus() || resp.lost_focus() {
+        // Editing: accept `#RRGGBB` or `RRGGBB`, keep the buffer verbatim.
+        let s = text.trim().trim_start_matches('#');
+        if s.len() == 6 {
+            if let Ok(v) = u32::from_str_radix(s, 16) {
+                *rgb = [
+                    ((v >> 16) & 0xFF) as u8,
+                    ((v >> 8) & 0xFF) as u8,
+                    (v & 0xFF) as u8,
+                ];
+                changed = true;
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(id, text));
+    } else {
+        // Idle: mirror the live colour (canonical upper-case form).
+        ui.data_mut(|d| d.insert_temp(id, live));
+    }
+    changed
+}
+
+/// Compact opaque colour picker (RGB + #hex row + 2D saturation/value square +
+/// hue slider) with a small selection indicator. Returns `true` if `srgba`
+/// changed.
 pub fn color_picker_compact(ui: &mut Ui, srgba: &mut Color32) -> bool {
     let before = *srgba;
 
@@ -147,6 +189,13 @@ pub fn color_picker_compact(ui: &mut Ui, srgba: &mut Color32) -> bool {
             rgb_edited |= ui
                 .add(DragValue::new(&mut rgba[2]).speed(0.5).prefix("B "))
                 .changed();
+            ui.add_space(4.0);
+            ui.label("#");
+            let mut rgb3 = [rgba[0], rgba[1], rgba[2]];
+            if hex_field(ui, &mut rgb3) {
+                rgba = [rgb3[0], rgb3[1], rgb3[2], 255];
+                rgb_edited = true;
+            }
         });
         if rgb_edited {
             rgba[3] = 255;

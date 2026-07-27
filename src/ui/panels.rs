@@ -560,41 +560,12 @@ fn text_preset_menu(
 /// selected), and document-swatch management. The quick colour chips live in
 /// the right-edge strip ([`vector_palette_strip`]) instead.
 fn color_brush_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    let pal = data.chrome.theme_mode.palette();
     {
         {
             ui.add_space(4.0);
 
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("#")
-                        .size(12.0)
-                        .color(pal.text_secondary),
-                );
-                let hex = format!(
-                    "{:02X}{:02X}{:02X}",
-                    data.tool.brush_color[0], data.tool.brush_color[1], data.tool.brush_color[2],
-                );
-                let mut hex_str = hex.clone();
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut hex_str)
-                        .desired_width(54.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                if resp.changed() && hex_str.len() == 6 {
-                    if let Ok(v) = u32::from_str_radix(&hex_str, 16) {
-                        actions.tool.brush_color = Some([
-                            ((v >> 16) & 0xFF) as u8,
-                            ((v >> 8) & 0xFF) as u8,
-                            (v & 0xFF) as u8,
-                            255,
-                        ]);
-                    }
-                }
-            });
-
-            ui.add_space(4.0);
-
+            // The compact picker now carries its own R/G/B + editable #hex row,
+            // so no separate hex field is needed here.
             ui.scope(|ui| {
                 ui.spacing_mut().slider_width = ui.available_width();
                 let mut c = egui::Color32::from_rgb(
@@ -951,9 +922,9 @@ fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
 
     let has_path = data.tool.path_style.is_some();
     let gesture = if has_path {
-        "Left: Fill · Right: Outline"
+        "Left: Fill · Right-click: Fill / Outline / Adjust…"
     } else {
-        "Left: Foreground · Right: Background"
+        "Left: Foreground · Right-click: menu"
     };
 
     // Small squares centred in the strip, like CorelDRAW's palette column.
@@ -976,7 +947,7 @@ fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
             let color = ColorValue::from_rgba8(rgba);
             let response =
                 palette_strip_button(ui, color).on_hover_text(format!("{name}\n{gesture}"));
-            palette_gesture(response, color, actions);
+            palette_gesture(response, color, has_path, actions);
         }
 
         if !data.doc.swatches.is_empty() {
@@ -986,7 +957,7 @@ fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
             for swatch in data.doc.swatches.iter() {
                 let response = palette_strip_button(ui, swatch.color)
                     .on_hover_text(format!("{}\n{gesture}", swatch_tooltip(swatch)));
-                palette_gesture(response, swatch.color, actions);
+                palette_gesture(response, swatch.color, has_path, actions);
             }
         }
     });
@@ -1108,14 +1079,37 @@ fn vector_palette_manage(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
 fn palette_gesture(
     response: egui::Response,
     color: crate::core::vector::color::ColorValue,
+    has_path: bool,
     actions: &mut UiActions,
 ) {
+    // Left click stays the fast "apply Fill" gesture. Right click opens a menu
+    // (Fill / Outline / Adjust colour…) so the exact shade can be tuned before
+    // applying — Corel-style palette editing.
     if response.clicked_by(egui::PointerButton::Primary) {
         actions.tool.apply_palette_fill = Some(color);
     }
-    if response.clicked_by(egui::PointerButton::Secondary) {
-        actions.tool.apply_palette_outline = Some(color);
-    }
+    response.context_menu(|ui| {
+        ui.set_min_width(150.0);
+        if ui.button("Set as Fill").clicked() {
+            actions.tool.apply_palette_fill = Some(color);
+            ui.close();
+        }
+        if ui.button("Set as Outline").clicked() {
+            actions.tool.apply_palette_outline = Some(color);
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .button("Adjust colour\u{2026}")
+            .on_hover_text("Open the colour editor seeded with this swatch")
+            .clicked()
+        {
+            // Path selected → tune its Fill (target 5); otherwise Foreground (0).
+            let target = if has_path { 5 } else { 0 };
+            actions.dialogs.open_paint_color_dialog_with = Some((target, color.to_rgba8()));
+            ui.close();
+        }
+    });
 }
 
 fn palette_color_button(

@@ -281,6 +281,35 @@ impl App {
         }
     }
 
+    /// Current colour a paint-colour dialog `target` edits (used to seed the
+    /// dialog and as the Cancel baseline). Mirrors [`Self::set_paint_color`].
+    fn paint_dialog_current_color(&self, target: u8) -> [u8; 4] {
+        let path_style = self.active_path_style_vm();
+        match target {
+            1 => self.edit.bg_color,
+            2 => self.edit.text_color,
+            3 => self.edit.tools.shape().fill_color,
+            4 => self.edit.tools.shape().stroke_color,
+            5 => path_style.map_or([0, 0, 0, 255], |s| s.fill_color),
+            6 => path_style.map_or([0, 0, 0, 255], |s| s.stroke_color),
+            7 => path_style.map_or([255, 255, 255, 255], |s| s.fill_end_color),
+            8..=15 => path_style.map_or([0, 0, 0, 255], |s| {
+                s.gradient_stop_colors[(target - 8) as usize]
+            }),
+            _ => self.edit.tools.brush().settings.color,
+        }
+    }
+
+    /// Open the paint-colour dialog for `target`, showing `color` in the picker
+    /// while `original` is the value Cancel restores.
+    fn open_paint_color_dialog_seeded(&mut self, target: u8, color: [u8; 4], original: [u8; 4]) {
+        self.shell.ui.show_paint_color_dialog = true;
+        self.shell.ui.paint_color_dialog_target = target;
+        self.shell.ui.paint_color_dialog_color = color;
+        self.shell.ui.paint_color_dialog_original = original;
+        self.shell.ui.paint_color_dialog_center_next = true;
+    }
+
     pub(super) fn handle_tool_color_actions(
         &mut self,
         actions: &mut UiActions,
@@ -390,35 +419,21 @@ impl App {
         }
         if let Some(target) = actions.dialogs.open_paint_color_dialog.take() {
             let target = match target {
-                1 => 1,
-                2 => 2,
-                3 => 3,
-                4 => 4,
-                5 => 5,
-                6 => 6,
-                7 => 7,
-                8..=15 => target,
+                1..=15 => target,
                 _ => 0,
             };
-            let path_style = self.active_path_style_vm();
-            let color = match target {
-                1 => self.edit.bg_color,
-                2 => self.edit.text_color,
-                3 => self.edit.tools.shape().fill_color,
-                4 => self.edit.tools.shape().stroke_color,
-                5 => path_style.map_or([0, 0, 0, 255], |s| s.fill_color),
-                6 => path_style.map_or([0, 0, 0, 255], |s| s.stroke_color),
-                7 => path_style.map_or([255, 255, 255, 255], |s| s.fill_end_color),
-                8..=15 => path_style.map_or([0, 0, 0, 255], |s| {
-                    s.gradient_stop_colors[(target - 8) as usize]
-                }),
-                _ => self.edit.tools.brush().settings.color,
+            let color = self.paint_dialog_current_color(target);
+            self.open_paint_color_dialog_seeded(target, color, color);
+        }
+        // Palette right-click "Adjust colour…": seed the picker with the chosen
+        // swatch but keep the target's real colour as the Cancel baseline.
+        if let Some((target, seed)) = actions.dialogs.open_paint_color_dialog_with.take() {
+            let target = match target {
+                1..=15 => target,
+                _ => 0,
             };
-            self.shell.ui.show_paint_color_dialog = true;
-            self.shell.ui.paint_color_dialog_target = target;
-            self.shell.ui.paint_color_dialog_color = color;
-            self.shell.ui.paint_color_dialog_original = color;
-            self.shell.ui.paint_color_dialog_center_next = true;
+            let original = self.paint_dialog_current_color(target);
+            self.open_paint_color_dialog_seeded(target, seed, original);
         }
         if actions.dialogs.paint_color_dialog_centered {
             self.shell.ui.paint_color_dialog_center_next = false;
