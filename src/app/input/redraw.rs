@@ -14,6 +14,27 @@ impl App {
         }
         self.win.rendering = true;
 
+        // While the window is minimized winit reports a zero inner size.
+        // Building an egui frame at 0×0 makes every docked panel and scroll
+        // area lay out — and PERSIST, keyed by id — a height clamped to the
+        // (zero) available space. On restore egui reloads that stored zero
+        // height instead of the default, so the docked Layers/Channels panel
+        // comes back collapsed and empty until the whole app is restarted
+        // (egui memory is process-local). Skip the frame entirely while
+        // minimized; the Resized event fired on restore requests the next
+        // real redraw. Startup hides the window at its true 1280×720 size, so
+        // this guard never suppresses the first frame.
+        if self
+            .win
+            .window
+            .as_ref()
+            .map(|w| w.inner_size())
+            .is_some_and(|s| s.width == 0 || s.height == 0)
+        {
+            self.win.rendering = false;
+            return;
+        }
+
         // A lost GPU device (driver reset / TDR — typically after a
         // heavy AI inference or an idle power cycle) invalidates every
         // texture and pipeline; without this rebuild the app freezes on
