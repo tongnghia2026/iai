@@ -352,6 +352,13 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        // Tell egui the adapter's REAL texture limit. Without this egui assumes
+        // a 2048px ceiling: big textures panic and — worse — the font atlas
+        // caps at 2048² and hits its "almost full → recreate" cycle far more
+        // often, each recreate being a full-image delta that must not be lost.
+        if let Some(state) = &mut self.win.egui_state {
+            state.set_max_texture_side(gpu.max_texture_dimension as usize);
+        }
         self.win.gpu = Some(gpu);
         self.win.window = Some(window);
 

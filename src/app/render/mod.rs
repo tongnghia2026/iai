@@ -185,7 +185,12 @@ impl App {
             &*window,
             None,
             None,
-            None,
+            // The recovered adapter's real texture ceiling — the egui default
+            // (2048) would panic on big textures and shrink the font atlas.
+            self.win
+                .gpu
+                .as_ref()
+                .map(|g| g.max_texture_dimension as usize),
         ));
         self.win.cached_egui_primitives = Vec::new();
         self.edit.refine_overlay_tex = None;
@@ -233,7 +238,10 @@ impl App {
                     &*dev_window,
                     None,
                     None,
-                    None,
+                    self.win
+                        .gpu
+                        .as_ref()
+                        .map(|g| g.max_texture_dimension as usize),
                 ));
                 self.win.develop_egui_ctx = Some(ctx);
                 dev_window.request_redraw();

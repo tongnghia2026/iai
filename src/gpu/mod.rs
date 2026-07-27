@@ -128,6 +128,10 @@ pub struct GpuState {
     /// device is invalid from that point; the App polls this each frame and
     /// rebuilds the whole GPU context instead of freezing on validation spam.
     pub device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Texture ids already reported as missing (see `render`) — the renderer
+    /// silently skips such meshes, so this is the only trace the "layer panel
+    /// went blank" class of bug leaves behind. One log line per id.
+    missing_texture_logged: std::collections::HashSet<egui::TextureId>,
     /// Retained so a second OS window (the Develop stage) can build its own
     /// surface on the SAME device: `instance.create_surface(window2)` +
     /// `adapter` for its capabilities. The shared pipelines were compiled for
@@ -730,6 +734,7 @@ impl GpuState {
             compositor,
             current_frame_is_ping: true,
             device_lost,
+            missing_texture_logged: std::collections::HashSet::new(),
             instance,
             adapter,
             surface_format: format,
@@ -1452,6 +1457,23 @@ impl GpuState {
             self.main
                 .egui_renderer
                 .update_texture(&self.device, &self.queue, *id, delta);
+        }
+
+        // A mesh whose texture the renderer doesn't know is silently skipped by
+        // egui-wgpu — whole UI regions (layer panel, thumbnails, text runs)
+        // just stop drawing with no error anywhere. Leave a crash-log trace so
+        // a field report of "the panel went blank" is diagnosable.
+        for prim in primitives {
+            if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive {
+                if self.main.egui_renderer.texture(&mesh.texture_id).is_none()
+                    && self.missing_texture_logged.insert(mesh.texture_id)
+                {
+                    crate::log_crash(&format!(
+                        "egui mesh references missing texture {:?} — that UI region will not draw",
+                        mesh.texture_id
+                    ));
+                }
+            }
         }
 
         let surface_texture = match self.main.surface.get_current_texture() {
