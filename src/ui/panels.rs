@@ -54,12 +54,10 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new())
                     .show_inside(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("layers_dock_scroll")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                layers_channels_panel(ui, data, actions);
-                            });
+                        // No outer scroll wrapper: the layer list scrolls
+                        // internally and grows to the panel height, so the
+                        // panel's real height is what `available_height` reports.
+                        layers_channels_panel(ui, data, actions);
                     });
             });
     }
@@ -951,7 +949,6 @@ const QUICK_PALETTE: [(&str, [u8; 4]); 12] = [
 fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     use crate::core::vector::color::ColorValue;
 
-    ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
     let has_path = data.tool.path_style.is_some();
     let gesture = if has_path {
         "Left: Fill · Right: Outline"
@@ -959,34 +956,40 @@ fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
         "Left: Foreground · Right: Background"
     };
 
-    let none = palette_none_button(ui).on_hover_text(if has_path {
-        "No colour\nLeft: remove Fill · Right: remove Outline"
-    } else {
-        "Select an editable Path to remove Fill/Outline"
-    });
-    if none.clicked_by(egui::PointerButton::Primary) {
-        actions.tool.clear_palette_fill = true;
-    }
-    if none.clicked_by(egui::PointerButton::Secondary) {
-        actions.tool.clear_palette_outline = true;
-    }
+    // Small squares centred in the strip, like CorelDRAW's palette column.
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
 
-    for (name, rgba) in QUICK_PALETTE {
-        let color = ColorValue::from_rgba8(rgba);
-        let response = palette_strip_button(ui, color).on_hover_text(format!("{name}\n{gesture}"));
-        palette_gesture(response, color, actions);
-    }
-
-    if !data.doc.swatches.is_empty() {
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(4.0);
-        for swatch in data.doc.swatches.iter() {
-            let response = palette_strip_button(ui, swatch.color)
-                .on_hover_text(format!("{}\n{gesture}", swatch_tooltip(swatch)));
-            palette_gesture(response, swatch.color, actions);
+        let none = palette_none_button(ui).on_hover_text(if has_path {
+            "No colour\nLeft: remove Fill · Right: remove Outline"
+        } else {
+            "Select an editable Path to remove Fill/Outline"
+        });
+        if none.clicked_by(egui::PointerButton::Primary) {
+            actions.tool.clear_palette_fill = true;
         }
-    }
+        if none.clicked_by(egui::PointerButton::Secondary) {
+            actions.tool.clear_palette_outline = true;
+        }
+
+        for (name, rgba) in QUICK_PALETTE {
+            let color = ColorValue::from_rgba8(rgba);
+            let response =
+                palette_strip_button(ui, color).on_hover_text(format!("{name}\n{gesture}"));
+            palette_gesture(response, color, actions);
+        }
+
+        if !data.doc.swatches.is_empty() {
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+            for swatch in data.doc.swatches.iter() {
+                let response = palette_strip_button(ui, swatch.color)
+                    .on_hover_text(format!("{}\n{gesture}", swatch_tooltip(swatch)));
+                palette_gesture(response, swatch.color, actions);
+            }
+        }
+    });
 }
 
 /// Document-swatch management + Overprint controls for the floating panel. The
@@ -1132,14 +1135,15 @@ fn palette_color_button(
     )
 }
 
-/// A full-width colour chip for the vertical strip: fills the strip so the
-/// swatches read as one continuous Corel-style column and give a large target.
+/// Edge length of one colour square in the vertical strip.
+const PALETTE_STRIP_CHIP: f32 = 24.0;
+
+/// A small square colour chip for the vertical strip (Corel-style palette).
 fn palette_strip_button(
     ui: &mut egui::Ui,
     color: crate::core::vector::color::ColorValue,
 ) -> egui::Response {
     let [r, g, b, _] = color.to_rgba8();
-    let w = ui.available_width().max(16.0);
     ui.add(
         egui::Button::new("")
             .fill(egui::Color32::from_rgb(r, g, b))
@@ -1147,15 +1151,17 @@ fn palette_strip_button(
                 1.0_f32,
                 ui.visuals().widgets.noninteractive.bg_stroke.color,
             ))
-            .min_size(egui::vec2(w, 18.0))
+            .min_size(egui::vec2(PALETTE_STRIP_CHIP, PALETTE_STRIP_CHIP))
             .corner_radius(0.0)
             .sense(egui::Sense::click()),
     )
 }
 
 fn palette_none_button(ui: &mut egui::Ui) -> egui::Response {
-    let w = ui.available_width().max(16.0);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(w, 18.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(PALETTE_STRIP_CHIP, PALETTE_STRIP_CHIP),
+        egui::Sense::click(),
+    );
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 1.0, egui::Color32::WHITE);
     painter.rect_stroke(
@@ -1982,7 +1988,12 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                     })
                     .collect();
                 let row_h = 50.0;
-                let list_h = (visible_indices.len().clamp(1, 8) as f32) * row_h;
+                // Grow the list to fill the panel instead of capping at 8 rows,
+                // so the empty area below the layers is used. Reserve room for
+                // the separator + toolbar row that follow; auto_shrink keeps the
+                // list from stretching past the actual layers when there are few.
+                let list_reserve = 52.0;
+                let list_h = (ui.available_height() - list_reserve).max(row_h * 2.0);
                 egui::ScrollArea::vertical()
                     .id_salt("layer_list_scroll")
                     .max_height(list_h)
