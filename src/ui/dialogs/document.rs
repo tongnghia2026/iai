@@ -150,6 +150,9 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                                 actions.doc.new_w_input = Some(new_w_disp);
                             }
 
+                            // Unit before the combo runs, so a change can convert
+                            // the typed W/H to the newly picked unit.
+                            let old_unit = new_unit;
                             let unit_response = egui::ComboBox::from_id_salt("unit_select_w")
                                 .selected_text(new_unit.name())
                                 .width(60.0)
@@ -159,8 +162,19 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                                             .selectable_value(&mut new_unit, unit, unit.name())
                                             .changed()
                                         {
-                                            // Changing the unit reinterprets the typed
-                                            // numbers; it must not rewrite them.
+                                            // Convert W/H through pixels so the real
+                                            // size is preserved when the unit changes
+                                            // (e.g. 2480 px @ 300 dpi → 21.00 cm),
+                                            // instead of keeping the raw number.
+                                            use crate::core::units::{from_pixels, to_pixels};
+                                            let w_px =
+                                                to_pixels(new_w_disp, old_unit, new_dpi, 0.0);
+                                            let h_px =
+                                                to_pixels(new_h_disp, old_unit, new_dpi, 0.0);
+                                            new_w_disp = from_pixels(w_px, unit, new_dpi, 0.0);
+                                            new_h_disp = from_pixels(h_px, unit, new_dpi, 0.0);
+                                            actions.doc.new_w_input = Some(new_w_disp);
+                                            actions.doc.new_h_input = Some(new_h_disp);
                                             actions.doc.new_unit = Some(unit);
                                         }
                                     }
