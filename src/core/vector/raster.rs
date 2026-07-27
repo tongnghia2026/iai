@@ -178,30 +178,36 @@ fn rasterize_impl(
     let paint_rows = |rgba: &mut [u8], cov: &[f32], paint: &PreparedPaint| {
         use rayon::prelude::*;
         let wu = w as usize;
-        rgba.par_chunks_mut(wu * 4).enumerate().for_each(|(py, row)| {
-            let y = py as f32 + off_y + 0.5;
-            let cov_row = &cov[py * wu..(py + 1) * wu];
-            for (px_i, px) in row.chunks_exact_mut(4).enumerate() {
-                let c = cov_row[px_i];
-                if c > 0.0015 {
-                    let [r, g, b, a] = paint.sample(Point::new(px_i as f32 + off_x + 0.5, y));
-                    let mut p = [px[0], px[1], px[2], px[3]];
-                    blend_straight(
-                        &mut p,
-                        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
-                        (a as f32 / 255.0) * opacity * c,
-                    );
-                    px.copy_from_slice(&p);
+        rgba.par_chunks_mut(wu * 4)
+            .enumerate()
+            .for_each(|(py, row)| {
+                let y = py as f32 + off_y + 0.5;
+                let cov_row = &cov[py * wu..(py + 1) * wu];
+                for (px_i, px) in row.chunks_exact_mut(4).enumerate() {
+                    let c = cov_row[px_i];
+                    if c > 0.0015 {
+                        let [r, g, b, a] = paint.sample(Point::new(px_i as f32 + off_x + 0.5, y));
+                        let mut p = [px[0], px[1], px[2], px[3]];
+                        blend_straight(
+                            &mut p,
+                            [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
+                            (a as f32 / 255.0) * opacity * c,
+                        );
+                        px.copy_from_slice(&p);
+                    }
                 }
-            }
-        });
+            });
     };
 
     // ── Fill ─────────────────────────────────────────────────────────────────
     if fill_visible {
         let even_odd = object.path.fill_rule == crate::core::vector::path::FillRule::EvenOdd;
         let cov = fill_coverage(&local, w, h, even_odd);
-        paint_rows(&mut rgba, &cov, &PreparedPaint::new(object.style.fill, object));
+        paint_rows(
+            &mut rgba,
+            &cov,
+            &PreparedPaint::new(object.style.fill, object),
+        );
     }
 
     // ── Stroke (over the fill) ───────────────────────────────────────────────

@@ -799,7 +799,12 @@ mod tests {
         cmd.execute(&mut edit_ctx(&mut c)).unwrap();
         let id = cmd.created_id().unwrap();
         c.record(Box::new(cmd));
-        let layer = c.layer_stack.layers.iter_mut().find(|l| l.id == id).unwrap();
+        let layer = c
+            .layer_stack
+            .layers
+            .iter_mut()
+            .find(|l| l.id == id)
+            .unwrap();
         let before = layer.tiles.revision_fingerprint();
 
         fold_offset_into_model(layer);

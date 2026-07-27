@@ -753,7 +753,9 @@ impl App {
                     }
                 }
                 let _ = canvas.execute(
-                    Box::new(crate::core::command_vector::ChangeVectorTransform::new(*id, *fin)),
+                    Box::new(crate::core::command_vector::ChangeVectorTransform::new(
+                        *id, *fin,
+                    )),
                     crate::core::gateway::ChangeKind::LayerStructure,
                 );
             }
