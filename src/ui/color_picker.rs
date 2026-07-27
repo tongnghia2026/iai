@@ -122,16 +122,27 @@ fn color_slider_2d(
     response
 }
 
-/// Editable `#RRGGBB` field for copy/paste. The in-progress text is kept in
-/// egui memory so a partial edit survives the per-frame model rebuild, and it is
-/// re-synced to `rgb` whenever the field is not focused (so external colour
-/// changes show through). Returns `true` when a complete, valid hex updated `rgb`.
+/// Editable `#RRGGBB` field for copy/paste. The in-progress text is kept in egui
+/// memory (alongside the colour it maps to) so a partial edit survives the
+/// per-frame model rebuild. Crucially, if the colour is changed from *elsewhere*
+/// in the picker (dragging the 2-D square or hue) while this field is focused,
+/// the buffer is dropped and focus surrendered so the field follows the picked
+/// colour instead of holding a stale value. Returns `true` when a complete,
+/// valid hex updated `rgb`.
 fn hex_field(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
     let id = ui.id().with("iai_hex_field");
-    let live = format!("{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]);
-    let mut text = ui
-        .data(|d| d.get_temp::<String>(id))
-        .unwrap_or_else(|| live.clone());
+    let live_rgb = *rgb;
+    let live = format!("{:02X}{:02X}{:02X}", live_rgb[0], live_rgb[1], live_rgb[2]);
+
+    // Keep the in-progress buffer only while it still maps to the live colour
+    // (small tolerance absorbs HSV round-trip noise); otherwise resync to live.
+    let close = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b.iter()).all(|(x, y)| x.abs_diff(*y) <= 2);
+    let prior: Option<(String, [u8; 3])> = ui.data(|d| d.get_temp(id));
+    let (mut text, resynced) = match prior {
+        Some((buf, buf_rgb)) if close(buf_rgb, live_rgb) => (buf, false),
+        Some(_) => (live.clone(), true),
+        None => (live.clone(), false),
+    };
 
     let resp = ui.add(
         egui::TextEdit::singleline(&mut text)
@@ -141,24 +152,33 @@ fn hex_field(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
             .hint_text("RRGGBB"),
     );
 
+    // The colour moved under a focused field (user clicked into the square):
+    // release the selection so it visibly deselects and tracks the new colour.
+    if resynced && resp.has_focus() {
+        resp.surrender_focus();
+    }
+
     let mut changed = false;
-    if resp.has_focus() || resp.lost_focus() {
+    let mut mapped = live_rgb;
+    if resp.has_focus() {
         // Editing: accept `#RRGGBB` or `RRGGBB`, keep the buffer verbatim.
         let s = text.trim().trim_start_matches('#');
         if s.len() == 6 {
             if let Ok(v) = u32::from_str_radix(s, 16) {
-                *rgb = [
+                let parsed = [
                     ((v >> 16) & 0xFF) as u8,
                     ((v >> 8) & 0xFF) as u8,
                     (v & 0xFF) as u8,
                 ];
+                *rgb = parsed;
+                mapped = parsed;
                 changed = true;
             }
         }
-        ui.data_mut(|d| d.insert_temp(id, text));
+        ui.data_mut(|d| d.insert_temp(id, (text, mapped)));
     } else {
         // Idle: mirror the live colour (canonical upper-case form).
-        ui.data_mut(|d| d.insert_temp(id, live));
+        ui.data_mut(|d| d.insert_temp(id, (live, live_rgb)));
     }
     changed
 }

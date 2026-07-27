@@ -922,9 +922,9 @@ fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
 
     let has_path = data.tool.path_style.is_some();
     let gesture = if has_path {
-        "Left: Fill · Right-click: Fill / Outline / Adjust…"
+        "Left: Fill · Hold: adjust colour · Right: Outline"
     } else {
-        "Left: Foreground · Right-click: menu"
+        "Left: Foreground · Hold: adjust colour · Right: Background"
     };
 
     // Small squares centred in the strip, like CorelDRAW's palette column.
@@ -947,7 +947,7 @@ fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
             let color = ColorValue::from_rgba8(rgba);
             let response =
                 palette_strip_button(ui, color).on_hover_text(format!("{name}\n{gesture}"));
-            palette_gesture(response, color, has_path, actions);
+            palette_gesture(ui, response, color, has_path, actions);
         }
 
         if !data.doc.swatches.is_empty() {
@@ -957,7 +957,7 @@ fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
             for swatch in data.doc.swatches.iter() {
                 let response = palette_strip_button(ui, swatch.color)
                     .on_hover_text(format!("{}\n{gesture}", swatch_tooltip(swatch)));
-                palette_gesture(response, swatch.color, has_path, actions);
+                palette_gesture(ui, response, swatch.color, has_path, actions);
             }
         }
     });
@@ -1076,40 +1076,62 @@ fn vector_palette_manage(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
     }
 }
 
+/// Hold duration (seconds) before a left press turns into "open the colour
+/// editor" instead of a plain Fill click — CorelDRAW's click-and-hold gesture.
+const PALETTE_HOLD_SECS: f64 = 0.4;
+
 fn palette_gesture(
+    ui: &egui::Ui,
     response: egui::Response,
     color: crate::core::vector::color::ColorValue,
     has_path: bool,
     actions: &mut UiActions,
 ) {
-    // Left click stays the fast "apply Fill" gesture. Right click opens a menu
-    // (Fill / Outline / Adjust colour…) so the exact shade can be tuned before
-    // applying — Corel-style palette editing.
-    if response.clicked_by(egui::PointerButton::Primary) {
-        actions.tool.apply_palette_fill = Some(color);
-    }
-    response.context_menu(|ui| {
-        ui.set_min_width(150.0);
-        if ui.button("Set as Fill").clicked() {
-            actions.tool.apply_palette_fill = Some(color);
-            ui.close();
-        }
-        if ui.button("Set as Outline").clicked() {
-            actions.tool.apply_palette_outline = Some(color);
-            ui.close();
-        }
-        ui.separator();
-        if ui
-            .button("Adjust colour\u{2026}")
-            .on_hover_text("Open the colour editor seeded with this swatch")
-            .clicked()
-        {
+    // Corel-style gestures:
+    //   • left click            → apply Fill (or Foreground) instantly
+    //   • left click and HOLD   → open the colour editor seeded with this swatch
+    //   • right click           → apply Outline (or Background) instantly
+    let id_start = response.id.with("iai_palette_hold_start");
+    let id_fired = response.id.with("iai_palette_hold_fired");
+    let now = ui.input(|i| i.time);
+    // Only the *primary* button arms the hold — a held right-click still means
+    // "apply Outline", not "open the editor".
+    let down = response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
+    let fired = ui.data(|d| d.get_temp::<bool>(id_fired)).unwrap_or(false);
+
+    if down {
+        let start = match ui.data(|d| d.get_temp::<f64>(id_start)) {
+            Some(t) => t,
+            None => {
+                ui.data_mut(|d| d.insert_temp(id_start, now));
+                now
+            }
+        };
+        if !fired && now - start >= PALETTE_HOLD_SECS {
             // Path selected → tune its Fill (target 5); otherwise Foreground (0).
             let target = if has_path { 5 } else { 0 };
             actions.dialogs.open_paint_color_dialog_with = Some((target, color.to_rgba8()));
-            ui.close();
+            ui.data_mut(|d| d.insert_temp(id_fired, true));
         }
-    });
+        // Keep the clock advancing while the button is held without moving.
+        ui.ctx().request_repaint();
+    }
+
+    // A quick left click (released before the hold fired) applies Fill.
+    if response.clicked_by(egui::PointerButton::Primary) && !fired {
+        actions.tool.apply_palette_fill = Some(color);
+    }
+    if response.clicked_by(egui::PointerButton::Secondary) {
+        actions.tool.apply_palette_outline = Some(color);
+    }
+
+    // Reset the hold timers once the button is no longer held on this chip.
+    if !down {
+        ui.data_mut(|d| {
+            d.remove::<f64>(id_start);
+            d.remove::<bool>(id_fired);
+        });
+    }
 }
 
 fn palette_color_button(
