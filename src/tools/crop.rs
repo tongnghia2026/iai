@@ -443,6 +443,31 @@ impl CropTool {
         }
     }
 
+    /// Switch the W/H display unit.
+    ///
+    /// In `FixedSize` mode `fixed_w`/`fixed_h` store a *physical* size in the
+    /// current unit, so the numbers are converted through pixels to keep the real
+    /// size unchanged (e.g. 2480 px at 300 dpi → 21.00 cm) rather than keeping the
+    /// raw number and merely relabelling the unit. The pixel selection is
+    /// unchanged, so it is only re-synced to the new numbers. In Free/Ratio mode
+    /// the crop is defined by the pixel selection and W/H is recomputed from it
+    /// each frame, so only the unit label changes — never the selection.
+    pub fn change_display_unit(&mut self, new_unit: Unit, cw: f32, ch: f32) {
+        use crate::core::units::{from_pixels, to_pixels};
+        if self.mode == CropMode::FixedSize {
+            let w_px = to_pixels(self.fixed_w, self.unit, self.dpi, cw);
+            let h_px = to_pixels(self.fixed_h, self.unit, self.dpi, ch);
+            self.unit = new_unit;
+            self.fixed_w = from_pixels(w_px, new_unit, self.dpi, cw);
+            self.fixed_h = from_pixels(h_px, new_unit, self.dpi, ch);
+            if self.has_selection() {
+                self.init_bounds(cw as u32, ch as u32);
+            }
+        } else {
+            self.unit = new_unit;
+        }
+    }
+
     /// Convert fixed_w/fixed_h (in current unit+dpi) to canvas pixels.
     pub fn fixed_size_pixels(&self, canvas_w: u32, canvas_h: u32) -> (f32, f32) {
         use crate::core::units::to_pixels;
@@ -1057,6 +1082,28 @@ mod tests {
         assert!((at_300.0 - 1181.1024).abs() < 0.001);
         assert!((at_300.1 - 1771.6536).abs() < 0.001);
         assert_eq!((crop.fixed_w, crop.fixed_h), (10.0, 15.0));
+    }
+
+    #[test]
+    fn switching_display_unit_converts_fixed_size_to_new_unit() {
+        // A4 at 300 ppi as a pixel-unit preset: 2480 × 3508 px.
+        let mut crop = CropTool::new();
+        crop.mode = CropMode::FixedSize;
+        crop.unit = Unit::Pixels;
+        crop.dpi = 300.0;
+        crop.fixed_w = 2480.0;
+        crop.fixed_h = 3508.0;
+
+        // Switching to cm must convert the real size, not keep the raw number.
+        crop.change_display_unit(Unit::Centimeters, 4000.0, 4000.0);
+        assert_eq!(crop.unit, Unit::Centimeters);
+        assert!((crop.fixed_w - 21.0).abs() < 0.05, "w = {}", crop.fixed_w);
+        assert!((crop.fixed_h - 29.7).abs() < 0.1, "h = {}", crop.fixed_h);
+
+        // Physical size is preserved on the round-trip back to pixels.
+        crop.change_display_unit(Unit::Pixels, 4000.0, 4000.0);
+        assert!((crop.fixed_w - 2480.0).abs() < 1.0, "w = {}", crop.fixed_w);
+        assert!((crop.fixed_h - 3508.0).abs() < 1.0, "h = {}", crop.fixed_h);
     }
 
     #[test]

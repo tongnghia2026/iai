@@ -4,6 +4,28 @@ use crate::tools::ToolId;
 use egui;
 use egui_phosphor::regular as ph;
 
+/// Move keyboard focus to a `DragValue` field AND select all of its text, so the
+/// next keystroke replaces the current number instead of appending to it.
+///
+/// egui only auto-selects a `DragValue` on `gained_focus`, which does NOT fire
+/// when focus is moved mid-frame with `request_focus()` (by then the widget was
+/// already "focused" earlier this pass). So we replicate egui's own click-path
+/// behaviour: request focus and stamp a select-all cursor range into the field's
+/// `TextEdit` state. The end index is deliberately large; egui clamps the cursor
+/// to the text, so it reliably selects the whole field whatever its length.
+fn focus_field_select_all(ui: &egui::Ui, response: &egui::Response) {
+    response.request_focus();
+    let id = response.id;
+    let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(64),
+        )));
+    state.store(ui.ctx(), id);
+}
+
 fn dimension_drag<'a>(
     value: &'a mut f32,
     parsed_unit: &'a std::cell::Cell<Option<crate::core::units::Unit>>,
@@ -956,19 +978,19 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         .input(|input| (input.key_pressed(egui::Key::Tab), input.modifiers.shift));
     if tab {
         if !shift && (w_response.has_focus() || swap_response.has_focus()) {
-            h_response.request_focus();
+            focus_field_select_all(ui, &h_response);
         } else if !shift && h_response.has_focus() {
-            dpi_response.request_focus();
+            focus_field_select_all(ui, &dpi_response);
         } else if !shift && unit_response.has_focus() {
-            dpi_response.request_focus();
+            focus_field_select_all(ui, &dpi_response);
         } else if shift && dpi_response.has_focus() {
-            h_response.request_focus();
+            focus_field_select_all(ui, &h_response);
         } else if shift && h_response.has_focus() {
-            w_response.request_focus();
+            focus_field_select_all(ui, &w_response);
         } else if shift && swap_response.has_focus() {
-            w_response.request_focus();
+            focus_field_select_all(ui, &w_response);
         } else if shift && unit_response.has_focus() {
-            h_response.request_focus();
+            focus_field_select_all(ui, &h_response);
         }
     }
 

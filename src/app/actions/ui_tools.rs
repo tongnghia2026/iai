@@ -741,45 +741,10 @@ impl App {
                 5 => crate::core::units::Unit::Picas,
                 _ => crate::core::units::Unit::Percent,
             };
-            let c = self.edit.tools.crop_mut();
-            let had_selection = c.has_selection();
-            let displayed = if c.mode == crate::tools::crop::CropMode::FixedSize {
-                Some((c.fixed_w, c.fixed_h))
-            } else if c.has_selection() {
-                Some((
-                    crate::core::units::from_pixels(
-                        (c.crop_x1 - c.crop_x0).abs(),
-                        c.unit,
-                        c.dpi,
-                        cw,
-                    ),
-                    crate::core::units::from_pixels(
-                        (c.crop_y1 - c.crop_y0).abs(),
-                        c.unit,
-                        c.dpi,
-                        ch,
-                    ),
-                ))
-            } else {
-                None
-            };
-            c.unit = new_unit;
-            if let Some((w, h)) = displayed {
-                c.fixed_w = w;
-                c.fixed_h = h;
-                if had_selection && c.mode == crate::tools::crop::CropMode::FixedSize {
-                    c.init_bounds(cw as u32, ch as u32);
-                } else if had_selection {
-                    let w_px = crate::core::units::to_pixels(w, new_unit, c.dpi, cw).max(1.0);
-                    let h_px = crate::core::units::to_pixels(h, new_unit, c.dpi, ch).max(1.0);
-                    let x0 = c.crop_x0.min(c.crop_x1);
-                    let y0 = c.crop_y0.min(c.crop_y1);
-                    c.crop_x0 = x0;
-                    c.crop_y0 = y0;
-                    c.crop_x1 = x0 + w_px;
-                    c.crop_y1 = y0 + h_px;
-                }
-            }
+            self.edit
+                .tools
+                .crop_mut()
+                .change_display_unit(new_unit, cw, ch);
             if let Some(win) = &self.win.window {
                 win.request_redraw();
             }
