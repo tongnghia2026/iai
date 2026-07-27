@@ -36,9 +36,19 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     // vector-appearance section above can grow or shrink (selecting a
                     // Path adds the Object editor) without ever shoving the layer list
                     // out of view. The two regions scroll independently.
+                    // A firm minimum height is what actually rescues the layer
+                    // list: egui stores this dock's laid-out height every frame
+                    // and reloads it next frame, so a height once clamped small
+                    // (e.g. laid out while the window was minimized) otherwise
+                    // sticks — the divider "slides down" and the layer list ends
+                    // up pushed off the bottom of the screen. `min_height` makes
+                    // egui clamp the reloaded height back up to a usable size on
+                    // the next normal-sized frame, so the panel self-heals even
+                    // if a bad height was already persisted.
                     egui::TopBottomPanel::bottom("right_layers_dock")
                         .resizable(true)
                         .default_height(360.0)
+                        .min_height(180.0)
                         .frame(egui::Frame::new())
                         .show_inside(ui, |ui| {
                             egui::ScrollArea::vertical()
