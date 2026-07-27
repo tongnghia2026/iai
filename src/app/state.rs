@@ -1325,7 +1325,10 @@ impl App {
                     toolbox_pos: None,
                     toolbox_single_column: false,
                     transform_interpolation: InterpolationMode::Bilinear,
-                    show_color_panel: true,
+                    // Color & Brush is now a floating panel opened on demand
+                    // (Window ▸ Color Panel), like the Levels dialog. Quick
+                    // colours are always available in the right-edge strip.
+                    show_color_panel: false,
                     show_text_panel: false,
                     show_layer_panel: true,
                     show_history_panel: false,
@@ -1363,7 +1366,10 @@ impl App {
                 close_requested: false,
                 canvas_unit: crate::core::units::Unit::Pixels,
                 toolbar_w: 48.0,
-                panel_r_w: 260.0,
+                // Layer/Channels width (260) plus the Corel-style vertical
+                // colour strip (VECTOR_PALETTE_STRIP_W = 40) that lives at the
+                // right edge of this band. Canvas layout reserves the whole width.
+                panel_r_w: 300.0,
                 proof_enabled: false,
                 proof_target: ProofTarget::default(),
                 proof_gamut_warn: false,

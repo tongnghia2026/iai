@@ -4,6 +4,10 @@ use crate::core::text::{TextAlign, TextFontFamily};
 use egui;
 use egui_phosphor::regular as ph;
 
+/// Width of the Corel-style vertical colour strip pinned to the right edge of
+/// the docked panel band. Included in `panel_r_w`, so the canvas layout already
+/// accounts for it.
+const VECTOR_PALETTE_STRIP_W: f32 = 40.0;
 const LAYER_PANEL_THUMB_SIZE: f32 = 38.0;
 const CHANNEL_PANEL_THUMB_SIZE: f32 = 38.0;
 const PANEL_ICON_BUTTON_SIZE: f32 = 22.0;
@@ -15,10 +19,13 @@ const LAYER_DRAG_THUMB_ALPHA: u8 = 128;
 #[allow(deprecated)]
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
-    if data.chrome.show_color_panel
-        || data.chrome.show_layer_panel
-        || data.chrome.show_channels_panel
-    {
+    // The docked right band now holds only Layers/Channels plus the Corel-style
+    // vertical colour strip pinned to the window edge. "Color & Brush" lives in
+    // a separate floating panel (added below with the other floating panels), so
+    // there is no resizable divider left that could slide the layer list off the
+    // bottom of the screen.
+    let show_right_band = data.chrome.show_layer_panel || data.chrome.show_channels_panel;
+    if show_right_band {
         #[allow(deprecated)]
         egui::SidePanel::right("right_panels")
             .exact_size(data.chrome.panel_r_w)
@@ -30,65 +37,35 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
             )
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 5.0);
-                let show_layers = data.chrome.show_layer_panel || data.chrome.show_channels_panel;
-                if show_layers && data.chrome.show_color_panel {
-                    // Pin Layers/Channels to the bottom of the dock so the color +
-                    // vector-appearance section above can grow or shrink (selecting a
-                    // Path adds the Object editor) without ever shoving the layer list
-                    // out of view. The two regions scroll independently.
-                    // A firm minimum height is what actually rescues the layer
-                    // list: egui stores this dock's laid-out height every frame
-                    // and reloads it next frame, so a height once clamped small
-                    // (e.g. laid out while the window was minimized) otherwise
-                    // sticks — the divider "slides down" and the layer list ends
-                    // up pushed off the bottom of the screen. `min_height` makes
-                    // egui clamp the reloaded height back up to a usable size on
-                    // the next normal-sized frame, so the panel self-heals even
-                    // if a bad height was already persisted.
-                    egui::TopBottomPanel::bottom("right_layers_dock")
-                        .resizable(true)
-                        .default_height(360.0)
-                        .min_height(180.0)
-                        .frame(egui::Frame::new())
-                        .show_inside(ui, |ui| {
-                            egui::ScrollArea::vertical()
-                                .id_salt("layers_dock_scroll")
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    layers_channels_panel(ui, data, actions);
-                                });
-                        });
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::new())
-                        .show_inside(ui, |ui| {
-                            egui::ScrollArea::vertical()
-                                .id_salt("color_dock_scroll")
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    color_panel(ui, data, actions);
-                                });
-                        });
-                } else {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            if data.chrome.show_color_panel {
-                                color_panel(ui, data, actions);
-                                ui.separator();
-                            }
-                            if show_layers {
+                // The colour strip is pinned to the far right edge; the layer
+                // list fills the rest. Both are fixed — nothing here resizes.
+                egui::SidePanel::right("vector_palette_strip")
+                    .exact_size(VECTOR_PALETTE_STRIP_W)
+                    .resizable(false)
+                    .frame(egui::Frame::new())
+                    .show_inside(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("vector_palette_strip_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                vector_palette_strip(ui, data, actions);
+                            });
+                    });
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new())
+                    .show_inside(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("layers_dock_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
                                 layers_channels_panel(ui, data, actions);
-                            }
-                        });
-                }
+                            });
+                    });
             });
     }
 
     let screen = ctx.content_rect();
-    let dock_width = if data.chrome.show_color_panel
-        || data.chrome.show_layer_panel
-        || data.chrome.show_channels_panel
-    {
+    let dock_width = if show_right_band {
         data.chrome.panel_r_w
     } else {
         0.0
@@ -96,6 +73,26 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let default_x = |width: f32| {
         (screen.max.x - dock_width - width - 12.0).max(screen.min.x + data.chrome.toolbar_w + 12.0)
     };
+
+    // Floating "Color & Brush": precise colour picker, the vector Object
+    // appearance editor, and swatch management. Opened on demand from
+    // Window ▸ Color Panel (like the Levels dialog). The toolbar's
+    // foreground/background chips still open a colour dialog when it is closed,
+    // and the right-edge strip covers quick swatch application.
+    if data.chrome.show_color_panel {
+        let mut open = true;
+        floating_panel(
+            ctx,
+            "Color & Brush",
+            egui::pos2(default_x(300.0), 96.0),
+            300.0,
+            &mut open,
+            |ui| color_brush_panel(ui, data, actions),
+        );
+        if !open {
+            actions.chrome.toggle_color_panel = true;
+        }
+    }
 
     if data.chrome.show_text_panel {
         let mut open = true;
@@ -560,11 +557,14 @@ fn text_preset_menu(
     picked
 }
 
-fn color_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+/// Contents of the floating "Color & Brush" panel: the precise foreground
+/// colour picker, the vector Object appearance editor (when a Path is
+/// selected), and document-swatch management. The quick colour chips live in
+/// the right-edge strip ([`vector_palette_strip`]) instead.
+fn color_brush_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
-    egui::CollapsingHeader::new("Color & Brush")
-        .default_open(true)
-        .show(ui, |ui| {
+    {
+        {
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
@@ -619,8 +619,9 @@ fn color_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
             ui.add_space(8.0);
             ui.separator();
-            vector_palette(ui, data, actions);
-        });
+            vector_palette_manage(ui, data, actions);
+        }
+    }
 }
 
 /// Full Fill / Outline / Gradient / Dash editor for the active vector object.
@@ -927,54 +928,84 @@ fn appearance_color_chip(ui: &mut egui::Ui, color: [u8; 4], tip: &str) -> bool {
         .clicked()
 }
 
-fn vector_palette(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+/// Quick colours as a set of named swatches, shared by the strip and elsewhere.
+const QUICK_PALETTE: [(&str, [u8; 4]); 12] = [
+    ("Black", [0, 0, 0, 255]),
+    ("White", [255, 255, 255, 255]),
+    ("Gray", [128, 128, 128, 255]),
+    ("Red", [237, 28, 36, 255]),
+    ("Orange", [247, 148, 30, 255]),
+    ("Yellow", [255, 242, 0, 255]),
+    ("Green", [0, 166, 81, 255]),
+    ("Cyan", [0, 174, 239, 255]),
+    ("Blue", [0, 84, 166, 255]),
+    ("Violet", [102, 45, 145, 255]),
+    ("Magenta", [236, 0, 140, 255]),
+    ("Brown", [117, 76, 36, 255]),
+];
+
+/// The Corel-style vertical colour strip pinned to the right edge: a "no fill"
+/// chip, the quick colours, then the document swatches — each full-width and
+/// stacked top to bottom. Left click applies Fill (or Foreground when no Path
+/// is selected); right click applies Outline (or Background).
+fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    use crate::core::vector::color::ColorValue;
+
+    ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+    let has_path = data.tool.path_style.is_some();
+    let gesture = if has_path {
+        "Left: Fill · Right: Outline"
+    } else {
+        "Left: Foreground · Right: Background"
+    };
+
+    let none = palette_none_button(ui).on_hover_text(if has_path {
+        "No colour\nLeft: remove Fill · Right: remove Outline"
+    } else {
+        "Select an editable Path to remove Fill/Outline"
+    });
+    if none.clicked_by(egui::PointerButton::Primary) {
+        actions.tool.clear_palette_fill = true;
+    }
+    if none.clicked_by(egui::PointerButton::Secondary) {
+        actions.tool.clear_palette_outline = true;
+    }
+
+    for (name, rgba) in QUICK_PALETTE {
+        let color = ColorValue::from_rgba8(rgba);
+        let response = palette_strip_button(ui, color).on_hover_text(format!("{name}\n{gesture}"));
+        palette_gesture(response, color, actions);
+    }
+
+    if !data.doc.swatches.is_empty() {
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+        for swatch in data.doc.swatches.iter() {
+            let response = palette_strip_button(ui, swatch.color)
+                .on_hover_text(format!("{}\n{gesture}", swatch_tooltip(swatch)));
+            palette_gesture(response, swatch.color, actions);
+        }
+    }
+}
+
+/// Document-swatch management + Overprint controls for the floating panel. The
+/// quick/document colour chips themselves live in [`vector_palette_strip`].
+fn vector_palette_manage(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     use crate::core::vector::color::ColorValue;
 
     let has_path = data.tool.path_style.is_some();
-    let gesture = if has_path {
-        "Left click: Fill · Right click: Outline"
-    } else {
-        "No editable Path selected · Left: Foreground · Right: Background"
-    };
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Quick Palette").strong().size(11.0));
-        ui.label(egui::RichText::new(gesture).small().weak());
-    });
-
-    let quick = [
-        ("Black", [0, 0, 0, 255]),
-        ("White", [255, 255, 255, 255]),
-        ("Gray", [128, 128, 128, 255]),
-        ("Red", [237, 28, 36, 255]),
-        ("Orange", [247, 148, 30, 255]),
-        ("Yellow", [255, 242, 0, 255]),
-        ("Green", [0, 166, 81, 255]),
-        ("Cyan", [0, 174, 239, 255]),
-        ("Blue", [0, 84, 166, 255]),
-        ("Violet", [102, 45, 145, 255]),
-        ("Magenta", [236, 0, 140, 255]),
-        ("Brown", [117, 76, 36, 255]),
-    ];
-    ui.horizontal_wrapped(|ui| {
-        let none = palette_none_button(ui).on_hover_text(if has_path {
-            "No color — left: remove Fill · right: remove Outline"
+    ui.label(
+        egui::RichText::new(if has_path {
+            "Palette (right strip) — Left: Fill · Right: Outline"
         } else {
-            "Select an editable Path to remove Fill/Outline"
-        });
-        if none.clicked_by(egui::PointerButton::Primary) {
-            actions.tool.clear_palette_fill = true;
-        }
-        if none.clicked_by(egui::PointerButton::Secondary) {
-            actions.tool.clear_palette_outline = true;
-        }
-        for (name, rgba) in quick {
-            let color = ColorValue::from_rgba8(rgba);
-            let response = palette_color_button(ui, color).on_hover_text(name);
-            palette_gesture(response, color, actions);
-        }
-    });
+            "Palette (right strip) — Left: Foreground · Right: Background"
+        })
+        .small()
+        .weak(),
+    );
 
-    ui.add_space(6.0);
+    ui.add_space(4.0);
     ui.label(
         egui::RichText::new(format!("Document Swatches ({})", data.doc.swatches.len()))
             .strong()
@@ -1042,14 +1073,6 @@ fn vector_palette(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 .small()
                 .weak(),
         );
-    } else {
-        ui.horizontal_wrapped(|ui| {
-            for swatch in data.doc.swatches.iter() {
-                let response =
-                    palette_color_button(ui, swatch.color).on_hover_text(swatch_tooltip(swatch));
-                palette_gesture(response, swatch.color, actions);
-            }
-        });
     }
 
     if let Some(style) = data.tool.path_style {
@@ -1109,8 +1132,30 @@ fn palette_color_button(
     )
 }
 
+/// A full-width colour chip for the vertical strip: fills the strip so the
+/// swatches read as one continuous Corel-style column and give a large target.
+fn palette_strip_button(
+    ui: &mut egui::Ui,
+    color: crate::core::vector::color::ColorValue,
+) -> egui::Response {
+    let [r, g, b, _] = color.to_rgba8();
+    let w = ui.available_width().max(16.0);
+    ui.add(
+        egui::Button::new("")
+            .fill(egui::Color32::from_rgb(r, g, b))
+            .stroke(egui::Stroke::new(
+                1.0_f32,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ))
+            .min_size(egui::vec2(w, 18.0))
+            .corner_radius(0.0)
+            .sense(egui::Sense::click()),
+    )
+}
+
 fn palette_none_button(ui: &mut egui::Ui) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+    let w = ui.available_width().max(16.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(w, 18.0), egui::Sense::click());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 1.0, egui::Color32::WHITE);
     painter.rect_stroke(
