@@ -618,6 +618,49 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.layers.convert_to_curves = Some(data.layers.active_layer_idx);
                             ui.close();
                         }
+                        {
+                            use crate::core::vector::boolean::BooleanOp;
+                            // Enabled once at least two selected vector objects
+                            // (Shape or Path, unlocked, non-background) exist.
+                            let shaping_enabled = (0..data.layers.layer_count)
+                                .filter(|&i| {
+                                    data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                                        && !data
+                                            .layers
+                                            .layer_locked
+                                            .get(i)
+                                            .copied()
+                                            .unwrap_or(false)
+                                        && !data
+                                            .layers
+                                            .layer_is_background
+                                            .get(i)
+                                            .copied()
+                                            .unwrap_or(false)
+                                        && data
+                                            .layers
+                                            .layer_types
+                                            .get(i)
+                                            .is_some_and(|t| t == "Shape" || t == "Path")
+                                })
+                                .count()
+                                >= 2;
+                            ui.add_enabled_ui(shaping_enabled, |ui| {
+                                ui.menu_button("Shaping (kết hợp hình)", |ui| {
+                                    for (label, op) in [
+                                        ("Weld — Hàn liền", BooleanOp::Union),
+                                        ("Trim — Cắt bớt", BooleanOp::Difference),
+                                        ("Intersect — Giao nhau", BooleanOp::Intersect),
+                                        ("Exclude — Loại trừ", BooleanOp::Exclude),
+                                    ] {
+                                        if ui.button(label).clicked() {
+                                            actions.layers.boolean_op = Some(op);
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            });
+                        }
                         ui.separator();
                         ui.menu_button("New Adjustment Layer", |ui| {
                             use crate::core::layer::AdjustmentType;

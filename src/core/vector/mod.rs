@@ -16,6 +16,7 @@
 //! These stay declared here as they land; nothing above depends on UI or GPU.
 
 pub mod affine;
+pub mod boolean;
 pub mod color;
 pub mod display;
 pub mod flatten;

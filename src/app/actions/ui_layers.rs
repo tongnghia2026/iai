@@ -154,6 +154,9 @@ impl App {
         if let Some(idx) = actions.layers.convert_to_curves.take() {
             self.convert_shape_to_path(idx);
         }
+        if let Some(op) = actions.layers.boolean_op.take() {
+            self.apply_boolean(op);
+        }
         if let Some(idx) = actions.layers.remove_layer.take() {
             if self.docs.documents[self.docs.active_doc_idx]
                 .canvas

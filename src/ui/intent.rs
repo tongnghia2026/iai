@@ -114,6 +114,8 @@ pub struct LayerIntent {
     pub rasterize_layer: Option<usize>,
     /// Convert the Shape layer (this index) into an editable vector Path layer.
     pub convert_to_curves: Option<usize>,
+    /// Weld/Trim/Intersect/Exclude the selected vector layers into one Path.
+    pub boolean_op: Option<crate::core::vector::boolean::BooleanOp>,
     pub select_layer: Option<(usize, bool, bool)>,
     /// Ctrl+click a layer's thumbnail → load that layer's alpha as a selection.
     pub load_layer_selection: Option<usize>,
