@@ -59,6 +59,10 @@ pub struct LayerViewModel {
     pub layer_is_background: std::sync::Arc<Vec<bool>>,
     pub layer_lock_alpha: std::sync::Arc<Vec<bool>>,
     pub layer_selected: std::sync::Arc<Vec<bool>>,
+    /// Clipped to the layer below (clipping mask / PowerClip content).
+    pub layer_is_clipped: std::sync::Arc<Vec<bool>>,
+    /// Base of a clipping mask (some layer clips to it) — name underlined.
+    pub layer_is_clip_base: std::sync::Arc<Vec<bool>>,
     pub layer_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
     pub layer_mask_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
     /// Group nesting depth per layer (0 = top level) — panel indentation.
@@ -586,6 +590,8 @@ impl Default for UiData {
                 layer_is_background: std::sync::Arc::new(vec![true]),
                 layer_lock_alpha: std::sync::Arc::new(vec![false]),
                 layer_selected: std::sync::Arc::new(vec![true]),
+                layer_is_clipped: std::sync::Arc::new(vec![false]),
+                layer_is_clip_base: std::sync::Arc::new(vec![false]),
                 layer_thumbnails: std::sync::Arc::new(Vec::new()),
                 layer_mask_thumbnails: std::sync::Arc::new(Vec::new()),
                 layer_depths: std::sync::Arc::new(vec![0]),

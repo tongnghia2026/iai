@@ -163,6 +163,9 @@ impl App {
         if actions.layers.powerclip_release {
             self.powerclip_release();
         }
+        if actions.layers.toggle_clipping_mask {
+            self.toggle_clipping_mask();
+        }
         if let Some(idx) = actions.layers.remove_layer.take() {
             if self.docs.documents[self.docs.active_doc_idx]
                 .canvas

@@ -120,6 +120,9 @@ pub struct LayerIntent {
     pub powerclip_place: bool,
     /// PowerClip: extract the selected content from its frame.
     pub powerclip_release: bool,
+    /// Clipping mask (Ctrl+Alt+G): clip the active layer to the one below, or
+    /// release it. Photoshop-style; shares the PowerClip clip engine.
+    pub toggle_clipping_mask: bool,
     pub select_layer: Option<(usize, bool, bool)>,
     /// Ctrl+click a layer's thumbnail → load that layer's alpha as a selection.
     pub load_layer_selection: Option<usize>,

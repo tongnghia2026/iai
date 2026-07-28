@@ -711,6 +711,21 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 }
                             });
                         }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Clipping Mask",
+                                "Ctrl+Alt+G",
+                                data.layers.layer_count > 1,
+                            ))
+                            .on_hover_text(
+                                "Cắt layer đang chọn theo hình của layer ngay bên dưới \
+                                 (bấm lại để bỏ). Dùng cho cả vector và pixel.",
+                            )
+                            .clicked()
+                        {
+                            actions.layers.toggle_clipping_mask = true;
+                            ui.close();
+                        }
                         ui.separator();
                         ui.menu_button("New Adjustment Layer", |ui| {
                             use crate::core::layer::AdjustmentType;

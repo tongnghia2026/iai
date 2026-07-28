@@ -919,6 +919,12 @@ pub struct UiDataCache {
     pub layer_is_background: std::sync::Arc<Vec<bool>>,
     pub layer_lock_alpha: std::sync::Arc<Vec<bool>>,
     pub layer_selected: std::sync::Arc<Vec<bool>>,
+    /// True when the layer is clipped to the one below (Photoshop clipping mask /
+    /// PowerClip content) — panel draws it indented with a ↓ arrow.
+    pub layer_is_clipped: std::sync::Arc<Vec<bool>>,
+    /// True when some other layer is clipped to this one (a clip base) — panel
+    /// underlines its name.
+    pub layer_is_clip_base: std::sync::Arc<Vec<bool>>,
     pub layer_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
     pub layer_mask_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
     pub print_preview_image: Option<std::sync::Arc<egui::ColorImage>>,

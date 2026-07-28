@@ -387,8 +387,22 @@ impl App {
                 std::sync::Arc::new(layers.iter().map(|l| l.blend_mode).collect());
             self.shell.ui_data_cache.layer_locked =
                 std::sync::Arc::new(layers.iter().map(|l| l.locked).collect());
-            self.shell.ui_data_cache.layer_has_mask =
-                std::sync::Arc::new(layers.iter().map(|l| l.mask.is_some()).collect());
+            // A clipped layer's mask IS the managed clip — hide it from the panel
+            // so it reads as a plain linked layer (Photoshop shows no mask there).
+            self.shell.ui_data_cache.layer_has_mask = std::sync::Arc::new(
+                layers
+                    .iter()
+                    .map(|l| l.mask.is_some() && l.clip_parent_id.is_none())
+                    .collect(),
+            );
+            self.shell.ui_data_cache.layer_is_clipped =
+                std::sync::Arc::new(layers.iter().map(|l| l.clip_parent_id.is_some()).collect());
+            {
+                let base_ids: std::collections::HashSet<u32> =
+                    layers.iter().filter_map(|l| l.clip_parent_id).collect();
+                self.shell.ui_data_cache.layer_is_clip_base =
+                    std::sync::Arc::new(layers.iter().map(|l| base_ids.contains(&l.id)).collect());
+            }
             self.shell.ui_data_cache.layer_mask_enabled = std::sync::Arc::new(
                 layers
                     .iter()
@@ -711,6 +725,8 @@ impl App {
                 layer_is_background: self.shell.ui_data_cache.layer_is_background.clone(),
                 layer_lock_alpha: self.shell.ui_data_cache.layer_lock_alpha.clone(),
                 layer_selected: self.shell.ui_data_cache.layer_selected.clone(),
+                layer_is_clipped: self.shell.ui_data_cache.layer_is_clipped.clone(),
+                layer_is_clip_base: self.shell.ui_data_cache.layer_is_clip_base.clone(),
                 layer_thumbnails: self.shell.ui_data_cache.layer_thumbnails.clone(),
                 layer_mask_thumbnails: self.shell.ui_data_cache.layer_mask_thumbnails.clone(),
                 layer_depths: self.shell.ui_data_cache.layer_depths.clone(),

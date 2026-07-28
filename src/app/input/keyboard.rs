@@ -407,7 +407,18 @@ impl App {
                     .active_idx;
                 self.do_ungroup(idx);
             }
-            PhysicalKey::Code(KeyCode::KeyG) if pressed && self.edit.input.ctrl_held => {
+            PhysicalKey::Code(KeyCode::KeyG)
+                if pressed
+                    && self.edit.input.ctrl_held
+                    && self.edit.input.alt_held
+                    && !self.edit.input.shift_held =>
+            {
+                // Photoshop clipping mask: clip the active layer to the one below.
+                self.toggle_clipping_mask();
+            }
+            PhysicalKey::Code(KeyCode::KeyG)
+                if pressed && self.edit.input.ctrl_held && !self.edit.input.alt_held =>
+            {
                 self.do_group_selected();
             }
             PhysicalKey::Code(KeyCode::KeyG) if pressed && !self.edit.input.ctrl_held => {

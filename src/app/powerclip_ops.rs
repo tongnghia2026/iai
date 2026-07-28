@@ -171,6 +171,114 @@ impl App {
         }
         true
     }
+
+    /// Whether the active layer is currently clipped (Photoshop clipping mask /
+    /// PowerClip content). Drives the menu label and shortcut toggle.
+    pub fn active_is_clipped(&self) -> bool {
+        let stack = &self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack;
+        stack
+            .layers
+            .get(stack.active_idx)
+            .is_some_and(|l| l.clip_parent_id.is_some())
+    }
+
+    /// Photoshop-style clipping mask (Ctrl+Alt+G): clip the active layer to the
+    /// layer directly below it — or, if that layer is itself clipped, join its
+    /// clipping group (clip to the same base). Toggles: a clipped active layer is
+    /// released instead. Works the same for vector and pixel layers because the
+    /// clip engine (`refresh_clip_masks`) reads the base layer's coverage, whatever
+    /// its type. One undo step.
+    pub fn toggle_clipping_mask(&mut self) -> bool {
+        #[derive(Clone, Copy)]
+        enum Action {
+            Release(usize),
+            Create(usize, u32),
+            None(&'static str),
+        }
+
+        let action = {
+            let stack = &self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .layer_stack;
+            let active = stack.active_idx;
+            match stack.layers.get(active) {
+                None => Action::None("Không có layer đang chọn"),
+                Some(l) if l.clip_parent_id.is_some() => Action::Release(active),
+                Some(l) if active == 0 => {
+                    let _ = l;
+                    Action::None("Không có layer bên dưới để cắt vào")
+                }
+                Some(l) => {
+                    // Base = the layer directly below; if IT is clipped, clip to
+                    // the same base so consecutive layers form one clipping group.
+                    let below = &stack.layers[active - 1];
+                    let base_id = below.clip_parent_id.unwrap_or(below.id);
+                    if stack.can_attach_clipped_child(l.id, base_id) {
+                        Action::Create(active, base_id)
+                    } else {
+                        Action::None("Không thể cắt vào layer bên dưới (nhóm/không hợp lệ)")
+                    }
+                }
+            }
+        };
+
+        if let Action::None(msg) = action {
+            self.shell.status_msg = msg.to_string();
+            return false;
+        }
+
+        let (cw, ch) = {
+            let d = &self.docs.documents[self.docs.active_doc_idx];
+            (d.canvas.width, d.canvas.height)
+        };
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let status = match action {
+            Action::Release(active) => {
+                let before = LayerStructureCommand::capture_before(
+                    "Release Clipping Mask",
+                    &canvas.layer_stack,
+                    cw,
+                    ch,
+                );
+                {
+                    let l = &mut canvas.layer_stack.layers[active];
+                    l.clip_parent_id = None;
+                    l.mask = None; // the mask was the managed clip
+                    l.mask_active = false;
+                }
+                canvas.clip_fp = 0;
+                canvas.refresh_clip_masks();
+                let mut cmd = before;
+                cmd.capture_after(&canvas.layer_stack, cw, ch);
+                canvas.record(Box::new(cmd));
+                "Đã bỏ clipping mask"
+            }
+            Action::Create(active, base_id) => {
+                let before = LayerStructureCommand::capture_before(
+                    "Clipping Mask",
+                    &canvas.layer_stack,
+                    cw,
+                    ch,
+                );
+                canvas.layer_stack.layers[active].clip_parent_id = Some(base_id);
+                canvas.refresh_clip_masks();
+                let mut cmd = before;
+                cmd.capture_after(&canvas.layer_stack, cw, ch);
+                canvas.record(Box::new(cmd));
+                "Đã tạo clipping mask (Ctrl+Alt+G)"
+            }
+            Action::None(_) => unreachable!(),
+        };
+
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = status.to_string();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -316,5 +424,72 @@ mod tests {
         canvas.layer_stack.layers[idx].selected = true;
         assert!(!app.can_powerclip_place());
         assert!(!app.powerclip_place());
+    }
+
+    /// App with a rectangle shape (below) and a full-canvas photo on top (active)
+    /// — the Ctrl+Alt+G arrangement: clip the top layer to the one below.
+    fn app_photo_over_shape() -> App {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(100, 100);
+        let canvas = &mut app.docs.documents[0].canvas;
+        // Shape frame first (ends up below).
+        let frame = canvas.layer_stack.add_layer(100, 100);
+        {
+            let l = &mut canvas.layer_stack.layers[frame];
+            l.layer_type = LayerType::Vector(VectorGeometry::Primitive(rect_shape(
+                30.0, 30.0, 70.0, 70.0,
+            )));
+            l.tiles = crate::core::tile::TileMap::from_rgba(&vec![255u8; 40 * 40 * 4], 40, 40);
+            l.width = 40;
+            l.height = 40;
+            l.offset = (30, 30);
+        }
+        // Photo on top, active.
+        let photo = canvas.layer_stack.add_layer(100, 100);
+        {
+            let l = &mut canvas.layer_stack.layers[photo];
+            l.tiles = crate::core::tile::TileMap::from_rgba(&vec![200u8; 100 * 100 * 4], 100, 100);
+        }
+        canvas.layer_stack.active_idx = photo;
+        app
+    }
+
+    #[test]
+    fn clipping_mask_clips_active_to_layer_below_and_toggles() {
+        let mut app = app_photo_over_shape();
+        assert!(app.active_is_clipped() == false);
+        assert!(app.toggle_clipping_mask());
+        assert!(app.active_is_clipped(), "active is now clipped");
+        let canvas = &app.docs.documents[0].canvas;
+        let active = &canvas.layer_stack.layers[canvas.layer_stack.active_idx];
+        // Clipped to the shape below; masked to its 40×40 area.
+        assert!(active.clip_parent_id.is_some());
+        let mask = active.mask.as_ref().expect("clip mask baked");
+        assert!(mask.sample(50, 50) > 0.9, "inside shape revealed");
+        assert!(mask.sample(5, 5) < 0.1, "outside shape hidden");
+
+        // Toggle again → released.
+        assert!(app.toggle_clipping_mask());
+        assert!(!app.active_is_clipped(), "toggled off");
+        let canvas = &app.docs.documents[0].canvas;
+        assert!(canvas.layer_stack.layers[canvas.layer_stack.active_idx]
+            .mask
+            .is_none());
+    }
+
+    #[test]
+    fn clipping_mask_undo_restores_free_layer() {
+        let mut app = app_photo_over_shape();
+        assert!(app.toggle_clipping_mask());
+        app.docs.documents[0].canvas.undo().expect("undo");
+        assert!(!app.active_is_clipped(), "undo unlinks the clip");
+    }
+
+    #[test]
+    fn clipping_mask_needs_a_layer_below() {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(40, 40);
+        // Only the background at index 0 is active — nothing below it.
+        assert!(!app.toggle_clipping_mask());
     }
 }

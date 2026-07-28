@@ -2416,6 +2416,18 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
     let depth = data.layers.layer_depths.get(idx).copied().unwrap_or(0);
     let is_group = layer_type == "Group";
     let expanded = data.layers.layer_expanded.get(idx).copied().unwrap_or(true);
+    let is_clipped = data
+        .layers
+        .layer_is_clipped
+        .get(idx)
+        .copied()
+        .unwrap_or(false);
+    let is_clip_base = data
+        .layers
+        .layer_is_clip_base
+        .get(idx)
+        .copied()
+        .unwrap_or(false);
 
     let item_id = egui::Id::new("layer_item").with(idx);
     let dragging_layer =
@@ -2463,6 +2475,19 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                 let eye_btn = ps_eye_button(ui, visible);
                 eye_rect = Some(eye_btn.rect);
                 eye_btn.on_hover_text(if visible { "Hide Layer" } else { "Show Layer" });
+
+                // Clipping-mask indicator: a small down-left elbow before the
+                // thumbnail marks a layer clipped to the one below it (Photoshop).
+                if is_clipped {
+                    ui.add_space(1.0);
+                    ui.label(
+                        egui::RichText::new(ph::ARROW_BEND_DOWN_LEFT)
+                            .size(12.0)
+                            .color(pal.text_dim),
+                    )
+                    .on_hover_text("Cắt theo layer bên dưới (clipping mask · Ctrl+Alt+G)");
+                    ui.add_space(1.0);
+                }
 
                 let thumb_resp = ps_layer_thumbnail(
                     ui,
@@ -2518,7 +2543,7 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                     .get(idx)
                     .map(|s| s.as_str())
                     .unwrap_or("Layer");
-                let name_text = if is_background {
+                let mut name_text = if is_background {
                     egui::RichText::new(name)
                         .size(12.0)
                         .color(name_color)
@@ -2526,6 +2551,10 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                 } else {
                     egui::RichText::new(name).size(12.0).color(name_color)
                 };
+                // The base of a clipping mask gets an underlined name (Photoshop).
+                if is_clip_base {
+                    name_text = name_text.underline();
+                }
                 let right_reserve = if locked || lock_alpha || is_background {
                     14.0
                 } else {
