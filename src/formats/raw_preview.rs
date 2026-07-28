@@ -29,7 +29,7 @@ pub struct RawPreview {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
-    /// Formatted EXIF line ("ISO … · f/… · …") parsed from the RAW's TIFF
+    /// Formatted camera, lens and exposure metadata parsed from the RAW's TIFF
     /// tags for the Develop window; `None` for non-TIFF containers. Filled by
     /// `extract` (which holds the file bytes anyway), not `extract_from_bytes`.
     pub exif: Option<String>,
