@@ -18,6 +18,7 @@ pub mod path_display;
 pub mod path_gradient;
 pub mod path_style;
 pub mod pen_ops;
+pub mod powerclip_ops;
 pub mod render;
 pub mod shape_ops;
 pub mod state;

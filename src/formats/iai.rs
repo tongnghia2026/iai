@@ -349,6 +349,9 @@ fn build_canvas_from_meta<R: Read + Seek>(
     // model — not the baked PNG fallback — is authoritative on reopen (Muc 3.8,
     // Buoc 5). No-op when there are no Path layers.
     canvas.rebuild_path_caches();
+    // PowerClip: the clip relation persists but its mask is derived — re-bake each
+    // content layer's clip from its frame (frames now have their tiles restored).
+    canvas.refresh_clip_masks();
 
     canvas.flatten_full();
     Ok(canvas)

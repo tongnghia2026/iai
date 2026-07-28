@@ -661,6 +661,65 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 });
                             });
                         }
+                        {
+                            // PowerClip: place selected content inside a selected
+                            // vector frame. Enabled when ≥2 layers are selected and
+                            // at least one of them is a vector (the frame); the
+                            // command re-validates the exact roles.
+                            let sel = |i: usize| {
+                                data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                                    && !data.layers.layer_locked.get(i).copied().unwrap_or(false)
+                                    && !data
+                                        .layers
+                                        .layer_is_background
+                                        .get(i)
+                                        .copied()
+                                        .unwrap_or(false)
+                            };
+                            let sel_total = (0..data.layers.layer_count).filter(|&i| sel(i)).count();
+                            let sel_vector = (0..data.layers.layer_count)
+                                .filter(|&i| {
+                                    sel(i)
+                                        && data
+                                            .layers
+                                            .layer_types
+                                            .get(i)
+                                            .is_some_and(|t| t == "Shape" || t == "Path")
+                                })
+                                .count();
+                            let place_enabled = sel_total >= 2 && sel_vector >= 1;
+                            ui.menu_button("PowerClip (khung chứa)", |ui| {
+                                if ui
+                                    .add(menu_item_enabled("Đưa vào khung", "", place_enabled))
+                                    .on_hover_text(
+                                        "Đưa nội dung đang chọn vào trong hình vector trên cùng \
+                                         (nội dung bị cắt theo hình khung)",
+                                    )
+                                    .clicked()
+                                {
+                                    actions.layers.powerclip_place = true;
+                                    ui.close();
+                                }
+                                if ui
+                                    .button("Tách khỏi khung")
+                                    .on_hover_text("Bỏ cắt: trả nội dung đang chọn về tự do")
+                                    .clicked()
+                                {
+                                    actions.layers.powerclip_release = true;
+                                    ui.close();
+                                }
+                                if ui
+                                    .button("Cập nhật khung")
+                                    .on_hover_text(
+                                        "Khớp lại nội dung với khung sau khi di chuyển/đổi kích thước",
+                                    )
+                                    .clicked()
+                                {
+                                    actions.layers.powerclip_refit = true;
+                                    ui.close();
+                                }
+                            });
+                        }
                         ui.separator();
                         ui.menu_button("New Adjustment Layer", |ui| {
                             use crate::core::layer::AdjustmentType;

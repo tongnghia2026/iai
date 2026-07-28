@@ -2,6 +2,7 @@
 //
 
 mod clip_ops;
+mod clip_render;
 mod color_mode;
 mod geometry_ops;
 mod history_gate;
@@ -297,6 +298,11 @@ pub struct Canvas {
     pub pending_alpha_stroke: Option<super::channels::PendingAlphaStroke>,
     /// Region of the viewed alpha plane painted since the last GPU upload.
     pub plane_dirty: DirtyRegion,
+    /// Combined fingerprint of PowerClip geometry (content offsets/sizes + frame
+    /// shapes) at the last [`refresh_clip_masks`](Self::refresh_clip_masks) bake.
+    /// Lets the per-event refit skip when nothing clip-relevant changed. Derived
+    /// state; never serialized.
+    pub clip_fp: u64,
 }
 
 /// Shortest distance from point `(px,py)` to segment `a–b`. Used by
@@ -378,6 +384,7 @@ impl Canvas {
             channels: super::channels::ChannelsState::default(),
             pending_alpha_stroke: None,
             plane_dirty: DirtyRegion::default(),
+            clip_fp: 0,
         }
     }
 
@@ -431,6 +438,7 @@ impl Canvas {
             channels: super::channels::ChannelsState::default(),
             pending_alpha_stroke: None,
             plane_dirty: DirtyRegion::default(),
+            clip_fp: 0,
         }
     }
 
@@ -479,6 +487,7 @@ impl Canvas {
             channels: super::channels::ChannelsState::default(),
             pending_alpha_stroke: None,
             plane_dirty: DirtyRegion::default(),
+            clip_fp: 0,
         }
     }
 

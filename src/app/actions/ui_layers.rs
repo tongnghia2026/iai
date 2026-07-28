@@ -157,6 +157,15 @@ impl App {
         if let Some(op) = actions.layers.boolean_op.take() {
             self.apply_boolean(op);
         }
+        if actions.layers.powerclip_place {
+            self.powerclip_place();
+        }
+        if actions.layers.powerclip_release {
+            self.powerclip_release();
+        }
+        if actions.layers.powerclip_refit {
+            self.powerclip_refit();
+        }
         if let Some(idx) = actions.layers.remove_layer.take() {
             if self.docs.documents[self.docs.active_doc_idx]
                 .canvas

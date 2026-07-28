@@ -41,6 +41,13 @@ impl App {
                 self.push_selection_uniforms();
             }
             CanvasEvent::LayerStructureChanged => {
+                // Re-pin PowerClip content masks to their frames before the full
+                // recomposite so any structural change (place, reorder, undo/redo,
+                // frame edit committed as structure) shows the correct clip. Cheap
+                // no-op when nothing is clipped or unchanged (fingerprint-gated).
+                self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .refresh_clip_masks();
                 self.docs.documents[self.docs.active_doc_idx]
                     .canvas
                     .layer_revision += 1;
