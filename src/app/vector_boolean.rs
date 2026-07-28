@@ -1,7 +1,7 @@
 // Boolean / shaping commands (Phase 7): Weld / Trim / Intersect / Exclude on the
 // selected vector layers. The geometry lives in `core::vector::boolean`; this is
 // the App-level glue that gathers the selection, composes it in CANVAS space,
-// runs the operation and replaces the selected layers with one result Path —
+// runs the operation and updates the layer stack per-op (see `apply_boolean`) —
 // all as a single undo step (mirrors `shape_ops::convert_shape_to_path`).
 //
 // Coordinate spaces: each vector layer is reduced to a canvas-space `PathData`
@@ -82,12 +82,21 @@ impl App {
             .count()
     }
 
-    /// Apply a boolean/shaping operation to the selected vector layers, replacing
-    /// them with a single result Path layer. Returns `false` (with a status
-    /// message) when there is nothing valid to do, leaving the document untouched.
+    /// Apply a boolean/shaping operation to the selected vector layers. Returns
+    /// `false` (with a status message) when there is nothing valid to do, leaving
+    /// the document untouched. The whole thing is one undo step.
+    ///
+    /// Per-op layer policy (settled with the user during GUI testing):
+    ///   Weld (Union)  → merge every source into ONE result (sources removed).
+    ///   Trim (Diff)   → merge bottom − uppers into ONE result (sources removed).
+    ///   Intersect     → KEEP every source; add the overlap as a NEW object on top.
+    ///   Exclude       → KEEP each source as its own layer, but cut out the region
+    ///                   it shares with the others (each layer minus the union of
+    ///                   the rest). Layers fully consumed by the overlap are removed.
     pub fn apply_boolean(&mut self, op: BooleanOp) -> bool {
-        // Selected vector layers, bottom-to-top (index 0 is the bottom layer).
-        let indices: Vec<usize> = {
+        // Selected vector layers bottom-to-top: (layer index, canvas-space path,
+        // style). Index 0 is the bottom layer.
+        let items: Vec<(usize, PathData, VectorStyle)> = {
             let stack = &self.docs.documents[self.docs.active_doc_idx]
                 .canvas
                 .layer_stack;
@@ -96,64 +105,18 @@ impl App {
                 .iter()
                 .enumerate()
                 .filter(|(_, l)| is_boolean_target(l))
-                .map(|(i, _)| i)
+                .filter_map(|(i, l)| layer_canvas_path(l).map(|(p, s)| (i, p, s)))
                 .collect()
         };
-        if indices.len() < 2 {
+        if items.len() < 2 {
             self.shell.status_msg = "Chọn ít nhất 2 đối tượng vector để kết hợp hình".to_string();
             return false;
         }
-
-        // Gather each layer's canvas-space path in z-order. For Trim the bottom
-        // object is the one that survives, so it must come first.
-        let paths: Vec<PathData> = {
-            let stack = &self.docs.documents[self.docs.active_doc_idx]
-                .canvas
-                .layer_stack;
-            indices
-                .iter()
-                .filter_map(|&i| layer_canvas_path(&stack.layers[i]).map(|(p, _)| p))
-                .collect()
-        };
-        if paths.len() < 2 {
-            self.shell.status_msg = "Không đủ đối tượng vector hợp lệ".to_string();
-            return false;
-        }
-
-        // Style/visual identity of the result = the bottom-most selected object
-        // (CorelDRAW's "result takes the target's properties").
+        let indices: Vec<usize> = items.iter().map(|(i, _, _)| *i).collect();
+        let paths: Vec<&PathData> = items.iter().map(|(_, p, _)| p).collect();
         let target_idx = indices[0];
-        let target_style = {
-            let stack = &self.docs.documents[self.docs.active_doc_idx]
-                .canvas
-                .layer_stack;
-            layer_canvas_path(&stack.layers[target_idx])
-                .map(|(_, s)| s)
-                .unwrap_or_default()
-        };
-
-        let refs: Vec<&PathData> = paths.iter().collect();
-        let result = match boolean_many(&refs, op) {
-            Some(r) => r,
-            None => {
-                self.shell.status_msg =
-                    "Không thực hiện được phép kết hợp (hình quá phức tạp)".to_string();
-                return false;
-            }
-        };
-        if result.contours.is_empty() {
-            self.shell.status_msg = match op {
-                BooleanOp::Intersect => "Không có phần giao nhau".to_string(),
-                BooleanOp::Difference => "Kết quả rỗng (bị cắt hết)".to_string(),
-                _ => "Kết quả rỗng".to_string(),
-            };
-            return false;
-        }
-        let object = VectorObjectData::new(result, target_style, AffineTransform::IDENTITY);
-        if object.validate().is_err() {
-            self.shell.status_msg = "Kết quả không hợp lệ".to_string();
-            return false;
-        }
+        // Merge results inherit the bottom (target) object's style.
+        let target_style = items[0].2;
 
         let name = match op {
             BooleanOp::Union => "Hàn",
@@ -162,6 +125,85 @@ impl App {
             BooleanOp::Exclude => "Loại trừ",
         };
 
+        // Compute the geometry up front so an empty/failed result aborts cleanly,
+        // before any layer is touched.
+        enum Plan {
+            /// Remove all sources, insert one result at the bottom (Weld / Trim).
+            Merge(VectorObjectData),
+            /// Keep all sources, add one result on top (Intersect).
+            AddOnTop(VectorObjectData),
+            /// Replace each source's geometry in place; `None` = fully consumed,
+            /// remove that layer (Exclude).
+            PerLayer(Vec<(usize, Option<VectorObjectData>)>),
+        }
+        let new_obj =
+            |p: PathData, s: VectorStyle| VectorObjectData::new(p, s, AffineTransform::IDENTITY);
+
+        let plan = match op {
+            BooleanOp::Union | BooleanOp::Difference => {
+                match boolean_many(&paths, op).filter(|r| !r.contours.is_empty()) {
+                    Some(r) => Plan::Merge(new_obj(r, target_style)),
+                    None => {
+                        self.shell.status_msg = if op == BooleanOp::Difference {
+                            "Kết quả rỗng (bị cắt hết)".to_string()
+                        } else {
+                            "Kết quả rỗng".to_string()
+                        };
+                        return false;
+                    }
+                }
+            }
+            BooleanOp::Intersect => {
+                match boolean_many(&paths, op).filter(|r| !r.contours.is_empty()) {
+                    Some(r) => Plan::AddOnTop(new_obj(r, target_style)),
+                    None => {
+                        self.shell.status_msg = "Không có phần giao nhau".to_string();
+                        return false;
+                    }
+                }
+            }
+            BooleanOp::Exclude => {
+                // Each layer keeps its identity but loses the region it shares with
+                // any other selected layer: layer_i ← layer_i − (union of the rest).
+                let mut per: Vec<(usize, Option<VectorObjectData>)> =
+                    Vec::with_capacity(items.len());
+                let mut any = false;
+                for (k, (idx, _p, style)) in items.iter().enumerate() {
+                    let mut refs: Vec<&PathData> = vec![paths[k]];
+                    for (j, pj) in paths.iter().enumerate() {
+                        if j != k {
+                            refs.push(pj);
+                        }
+                    }
+                    let r = boolean_many(&refs, BooleanOp::Difference)
+                        .filter(|r| !r.contours.is_empty());
+                    match r {
+                        Some(r) => {
+                            any = true;
+                            per.push((*idx, Some(new_obj(r, *style))));
+                        }
+                        None => per.push((*idx, None)),
+                    }
+                }
+                if !any {
+                    self.shell.status_msg = "Kết quả rỗng".to_string();
+                    return false;
+                }
+                Plan::PerLayer(per)
+            }
+        };
+
+        let valid = match &plan {
+            Plan::Merge(o) | Plan::AddOnTop(o) => o.validate().is_ok(),
+            Plan::PerLayer(v) => v
+                .iter()
+                .all(|(_, o)| o.as_ref().map_or(true, |o| o.validate().is_ok())),
+        };
+        if !valid {
+            self.shell.status_msg = "Kết quả không hợp lệ".to_string();
+            return false;
+        }
+
         let (cw, ch) = {
             let d = &self.docs.documents[self.docs.active_doc_idx];
             (d.canvas.width, d.canvas.height)
@@ -169,46 +211,16 @@ impl App {
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let before = LayerStructureCommand::capture_before(name, &canvas.layer_stack, cw, ch);
 
-        // Per-op layer policy (matches CorelDRAW's Shaping intent):
-        //   Trim      → change only the bottom target in place; KEEP the cutters
-        //               above so the user can move or delete them.
-        //   Intersect → KEEP every source object; add the overlap as a NEW object.
-        //   Weld/Excl → merge: remove all sources, leave one result.
-        let apply_as_new = |layer: &mut Layer, id: u32| {
-            layer.id = id;
-            layer.name = name.to_string();
-            layer.mask = None;
-            crate::core::command_vector::apply_object_to_layer(layer, object.clone());
-        };
-        match op {
-            BooleanOp::Difference => {
-                {
-                    let layer = &mut canvas.layer_stack.layers[target_idx];
-                    crate::core::command_vector::apply_object_to_layer(layer, object.clone());
-                }
-                canvas.layer_stack.active_idx = target_idx;
-                for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
-                    l.selected = i == target_idx;
-                }
-            }
-            BooleanOp::Intersect => {
+        let mut removed_empty = 0usize;
+        match plan {
+            Plan::Merge(object) => {
                 let new_id = canvas.layer_stack.next_id();
                 canvas.layer_stack.set_next_id(new_id + 1);
                 let mut new_layer = canvas.layer_stack.layers[target_idx].clone();
-                apply_as_new(&mut new_layer, new_id);
-                let top = *indices.last().unwrap_or(&target_idx);
-                let insert_at = (top + 1).min(canvas.layer_stack.layers.len());
-                canvas.layer_stack.layers.insert(insert_at, new_layer);
-                canvas.layer_stack.active_idx = insert_at;
-                for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
-                    l.selected = i == insert_at;
-                }
-            }
-            BooleanOp::Union | BooleanOp::Exclude => {
-                let new_id = canvas.layer_stack.next_id();
-                canvas.layer_stack.set_next_id(new_id + 1);
-                let mut new_layer = canvas.layer_stack.layers[target_idx].clone();
-                apply_as_new(&mut new_layer, new_id);
+                new_layer.id = new_id;
+                new_layer.name = name.to_string();
+                new_layer.mask = None;
+                crate::core::command_vector::apply_object_to_layer(&mut new_layer, object);
                 // Remove sources highest-index-first so lower indices stay valid.
                 let mut desc = indices.clone();
                 desc.sort_unstable_by(|a, b| b.cmp(a));
@@ -222,9 +234,52 @@ impl App {
                     l.selected = i == insert_at;
                 }
             }
+            Plan::AddOnTop(object) => {
+                let new_id = canvas.layer_stack.next_id();
+                canvas.layer_stack.set_next_id(new_id + 1);
+                let mut new_layer = canvas.layer_stack.layers[target_idx].clone();
+                new_layer.id = new_id;
+                new_layer.name = name.to_string();
+                new_layer.mask = None;
+                crate::core::command_vector::apply_object_to_layer(&mut new_layer, object);
+                let top = *indices.last().unwrap_or(&target_idx);
+                let insert_at = (top + 1).min(canvas.layer_stack.layers.len());
+                canvas.layer_stack.layers.insert(insert_at, new_layer);
+                canvas.layer_stack.active_idx = insert_at;
+                for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
+                    l.selected = i == insert_at;
+                }
+            }
+            Plan::PerLayer(per) => {
+                // In-place edits keep indices stable; collect the empties and drop
+                // them afterwards (highest-first). Edited layers stay selected.
+                let mut empties: Vec<usize> = Vec::new();
+                for (idx, obj) in per {
+                    match obj {
+                        Some(o) => {
+                            let layer = &mut canvas.layer_stack.layers[idx];
+                            crate::core::command_vector::apply_object_to_layer(layer, o);
+                        }
+                        None => empties.push(idx),
+                    }
+                }
+                empties.sort_unstable_by(|a, b| b.cmp(a));
+                for &i in &empties {
+                    canvas.layer_stack.layers.remove(i);
+                }
+                removed_empty = empties.len();
+                if let Some(pos) = canvas.layer_stack.layers.iter().position(|l| l.selected) {
+                    canvas.layer_stack.active_idx = pos;
+                } else {
+                    canvas.layer_stack.active_idx = canvas
+                        .layer_stack
+                        .active_idx
+                        .min(canvas.layer_stack.layers.len().saturating_sub(1));
+                }
+            }
         }
 
-        // CMYK: re-derive ink planes for the new Path raster from its RGB mirror.
+        // CMYK: re-derive ink planes for the new Path raster(s) from the RGB mirror.
         canvas.reconcile_path_ink();
         canvas.layer_revision += 1;
 
@@ -235,13 +290,13 @@ impl App {
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.apply_canvas_event(CanvasEvent::SelectionChanged);
         self.shell.status_msg = match op {
-            BooleanOp::Difference => format!(
-                "Đã cắt — giữ lại {} hình phía trên để di chuyển/xoá",
-                indices.len() - 1
-            ),
-            BooleanOp::Intersect => "Đã tạo hình giao (giữ nguyên các hình gốc)".to_string(),
             BooleanOp::Union => format!("Đã hàn {} đối tượng vector", indices.len()),
-            BooleanOp::Exclude => format!("Đã loại trừ {} đối tượng vector", indices.len()),
+            BooleanOp::Difference => format!("Đã cắt {} hình thành một", indices.len()),
+            BooleanOp::Intersect => "Đã tạo hình giao (giữ nguyên các hình gốc)".to_string(),
+            BooleanOp::Exclude => format!(
+                "Đã loại trừ phần chồng — giữ {} hình riêng",
+                indices.len() - removed_empty
+            ),
         };
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -397,16 +452,15 @@ mod tests {
     }
 
     #[test]
-    fn trim_keeps_cutters_and_trims_bottom() {
+    fn trim_merges_into_bottom_and_removes_cutters() {
         let mut app = app_with_two_rects();
         let before = app.docs.documents[0].canvas.layer_stack.layers.len();
         assert!(app.apply_boolean(BooleanOp::Difference));
-        // Trim edits the bottom object in place and keeps the upper cutter → the
-        // layer count is unchanged.
+        // Trim removes the cutter and leaves one result → one fewer layer.
         assert_eq!(
             app.docs.documents[0].canvas.layer_stack.layers.len(),
-            before,
-            "trim keeps every layer"
+            before - 1,
+            "trim merges into a single result"
         );
         // Bottom (80×80) minus the 40×40 overlap = 4800.
         let area = active_path_area(&app);
@@ -414,12 +468,31 @@ mod tests {
     }
 
     #[test]
-    fn exclude_removes_the_overlap() {
+    fn exclude_keeps_layers_and_cuts_overlap() {
         let mut app = app_with_two_rects();
+        let before = app.docs.documents[0].canvas.layer_stack.layers.len();
         assert!(app.apply_boolean(BooleanOp::Exclude));
-        // XOR area = 6400 + 6400 − 2×1600 = 9600.
+        // Both layers survive; the shared 40×40 is cut from each.
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before,
+            "exclude keeps each layer separate"
+        );
+        // Active is the bottom survivor = A − B = 6400 − 1600 = 4800.
         let area = active_path_area(&app);
-        assert!((area - 9600.0).abs() < 500.0, "exclude area {area}");
+        assert!((area - 4800.0).abs() < 300.0, "exclude bottom area {area}");
+        // Both selected layers are now editable Paths.
+        let canvas = &app.docs.documents[0].canvas;
+        let path_count = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .filter(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
+            .count();
+        assert!(
+            path_count >= 2,
+            "both sources became Paths, got {path_count}"
+        );
     }
 
     #[test]

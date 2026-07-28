@@ -1437,7 +1437,7 @@ fn shaping_buttons(ui: &mut egui::Ui, actions: &mut UiActions) {
         (
             ph::SUBTRACT,
             BooleanOp::Difference,
-            "Cắt bớt (Trim) — hình trên cắt hình dưới, vẫn giữ hình trên",
+            "Cắt bớt (Trim) — hình dưới bị các hình trên cắt, gộp thành một",
         ),
         (
             ph::INTERSECT,
@@ -1447,7 +1447,7 @@ fn shaping_buttons(ui: &mut egui::Ui, actions: &mut UiActions) {
         (
             ph::EXCLUDE,
             BooleanOp::Exclude,
-            "Loại trừ (Exclude) — bỏ phần chồng nhau",
+            "Loại trừ (Exclude) — bỏ phần chồng, giữ mỗi hình riêng",
         ),
     ] {
         if ui.button(icon).on_hover_text(tip).clicked() {
