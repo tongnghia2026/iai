@@ -2476,12 +2476,13 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                 eye_rect = Some(eye_btn.rect);
                 eye_btn.on_hover_text(if visible { "Hide Layer" } else { "Show Layer" });
 
-                // Clipping-mask indicator: a small down-left elbow before the
-                // thumbnail marks a layer clipped to the one below it (Photoshop).
+                // Clipping-mask indicator: a small right-angle arrow pointing DOWN
+                // into the layer below marks a layer clipped to it (Photoshop-style
+                // — an elbow that points at the base, not a curve toward the eye).
                 if is_clipped {
                     ui.add_space(1.0);
                     ui.label(
-                        egui::RichText::new(ph::ARROW_BEND_DOWN_LEFT)
+                        egui::RichText::new(ph::ARROW_ELBOW_LEFT_DOWN)
                             .size(12.0)
                             .color(pal.text_dim),
                     )

@@ -299,22 +299,20 @@ impl App {
     /// Full recomposite when `dirty_rect = None`; partial scissored composite when `Some`.
     /// The compositor guards correctness via `ping_initialized` — callers can freely
     /// pass `Some` and the compositor will fall back to full clear if needed.
-    pub fn recomposite_with_dirty(&mut self, mut dirty_rect: Option<(u32, u32, u32, u32)>) {
-        // Live clip move: a dragged clipping-mask / PowerClip child is pinned to
-        // its frame by the GPU clip-shift, so its VISIBLE region (the fixed frame)
-        // does NOT match its dirty rect (the moved content bounds). The partial-
-        // scissor + backdrop cache assumes those coincide; when they don't it can
-        // leave stale frozen pixels of the layer below — the "bóng ma" that doubles
-        // the base during the drag. Force a FULL, uncached recomposite for this
-        // case. There is no per-frame re-bake, so a viewport-sized full composite
-        // stays cheap.
+    pub fn recomposite_with_dirty(&mut self, dirty_rect: Option<(u32, u32, u32, u32)>) {
+        // Live clip move: the backdrop cache freezes the layers below the active
+        // one, but a dragged clip child is pinned to a FIXED frame that its moving
+        // dirty rect doesn't track, so the frozen base could show through stale —
+        // the "bóng ma" that doubled the layer below. Disable the backdrop for this
+        // case so the base is recomposited fresh inside the (cheap) partial scissor,
+        // which the moved content bounds already cover (the frame sits inside them).
+        // NB: keep the partial scissor — a FULL viewport recompose every frame gets
+        // throttled, which left newly-revealed frame regions showing the base until
+        // release (base "covers" the image mid-drag).
         let clip_live_move = self.is_interactive_edit()
             && self.docs.documents[self.docs.active_doc_idx]
                 .canvas
                 .has_clip_content();
-        if clip_live_move {
-            dirty_rect = None;
-        }
         // Pick Mode A/B (Mode B while interactively moving/transforming) and size
         // the compositor before computing the composite.
         self.sync_compositor_viewport();
