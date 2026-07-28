@@ -22,15 +22,20 @@ impl App {
     }
 
     pub fn flush_canvas(&mut self) {
-        // Keep clipping-mask / PowerClip content pinned to its base EVERY frame.
-        // A plain Move recomposites live here (no GPU transform preview), so
-        // rebaking the clip before the composite makes it follow the drag in real
-        // time; the new mask re-uploads via its revision fingerprint. The rebake
-        // is fingerprint-gated (Canvas::clip_fp), so a document with no clips — or
-        // one whose clip geometry didn't move — pays only a cheap hash.
-        if self.docs.documents[self.docs.active_doc_idx]
-            .canvas
-            .refresh_clip_masks()
+        // Re-pin clipping-mask / PowerClip content to its base — but NOT while a
+        // Move drag is in flight. Re-baking the clip is O(content area) on the CPU
+        // plus a GPU re-upload; doing that every frame made dragging a large
+        // clipped image unusably slow. While dragging, the content moves with its
+        // existing mask (as cheap as any layer move); on release — and on any
+        // other recomposite — we re-bake once so the clip snaps back onto the base.
+        // Fingerprint-gated (Canvas::clip_fp): no clip, or unchanged geometry, is a
+        // cheap hash.
+        let interactive_move =
+            self.edit.input.painting && self.edit.tools.active_id() == crate::tools::ToolId::Move;
+        if !interactive_move
+            && self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .refresh_clip_masks()
         {
             // The clip moved: mark its content's region dirty so this flush
             // actually recomposites it (a move already marks dirty, but a base

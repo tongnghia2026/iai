@@ -861,6 +861,26 @@ impl App {
                         self.edit.input.painting = false;
                         if releasing_move {
                             self.win.interactive_recompose_pending = false;
+                            // The clipping-mask / PowerClip re-fit is skipped every
+                            // frame during a Move drag (a full-content mask re-bake +
+                            // GPU re-upload per frame made large clipped images lag).
+                            // A plain Move release takes the `move_layer_release` fast
+                            // path and skips flush_canvas, so nothing would re-pin the
+                            // clip. Re-pin ONCE now that the move settled, so clipped
+                            // content snaps back onto its frame instead of being left
+                            // showing the dragged (stale) mask until an unrelated
+                            // recomposite. Fingerprint-gated inside refresh_clip_masks,
+                            // so a document with no clip that actually moved does no
+                            // recomposite work.
+                            if self.docs.documents[self.docs.active_doc_idx]
+                                .canvas
+                                .has_clip_content()
+                            {
+                                self.flush_canvas();
+                                if let Some(w) = &self.win.window {
+                                    w.request_redraw();
+                                }
+                            }
                         }
                     }
                 }
