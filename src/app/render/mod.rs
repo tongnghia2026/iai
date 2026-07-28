@@ -30,14 +30,9 @@ impl App {
     pub fn apply_canvas_event(&mut self, event: CanvasEvent) {
         match event {
             CanvasEvent::LayerPixelsChanged => {
-                // Re-pin PowerClip content to its frame whenever either is moved
-                // or resized (Move fires this event). Fingerprint-gated, so plain
-                // painting — which doesn't change any clip's geometry — is a
-                // no-op; the moved region is already marked dirty, so the
-                // following flush recomposites the content with its fresh clip.
-                self.docs.documents[self.docs.active_doc_idx]
-                    .canvas
-                    .refresh_clip_masks();
+                // flush_canvas re-pins any PowerClip / clipping-mask content to its
+                // base (fingerprint-gated), so a live Move — which recomposites
+                // through here every frame — follows the clip in real time.
                 self.flush_canvas();
             }
             CanvasEvent::SelectionChanged => {

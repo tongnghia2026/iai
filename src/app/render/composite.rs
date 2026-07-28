@@ -4,7 +4,39 @@
 use crate::app::state::App;
 
 impl App {
+    /// Mark every PowerClip / clipping-mask content layer's canvas region dirty,
+    /// so a re-fit is recomposited even when the base only changed coverage
+    /// (nothing moved to mark it). Called after a clip re-bake changed something.
+    fn mark_clip_content_dirty(&mut self) {
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let bounds: Vec<(i32, i32, u32, u32)> = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .filter(|l| l.clip_parent_id.is_some())
+            .map(|l| (l.offset.0, l.offset.1, l.width, l.height))
+            .collect();
+        for (x, y, w, h) in bounds {
+            canvas.mark_dirty_layer_bounds(x, y, w, h);
+        }
+    }
+
     pub fn flush_canvas(&mut self) {
+        // Keep clipping-mask / PowerClip content pinned to its base EVERY frame.
+        // A plain Move recomposites live here (no GPU transform preview), so
+        // rebaking the clip before the composite makes it follow the drag in real
+        // time; the new mask re-uploads via its revision fingerprint. The rebake
+        // is fingerprint-gated (Canvas::clip_fp), so a document with no clips — or
+        // one whose clip geometry didn't move — pays only a cheap hash.
+        if self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .refresh_clip_masks()
+        {
+            // The clip moved: mark its content's region dirty so this flush
+            // actually recomposites it (a move already marks dirty, but a base
+            // edit that only changed coverage might not).
+            self.mark_clip_content_dirty();
+        }
         if self.docs.documents[self.docs.active_doc_idx]
             .canvas
             .plane_dirty
