@@ -258,6 +258,9 @@ fn build_canvas_from_meta<R: Read + Seek>(
                 // Key added post-v1; older files default to enabled.
                 enabled: layer_info["mask_enabled"].as_bool().unwrap_or(true),
                 inverted: false,
+                // Derived on next clip re-bake for PowerClip content; harmless 0 here.
+                bake_offset: (0, 0),
+                bake_frame_offset: (0, 0),
             });
         }
 

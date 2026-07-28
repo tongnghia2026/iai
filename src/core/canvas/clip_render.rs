@@ -131,6 +131,13 @@ fn bake_clip_mask(frame: &Layer, content_offset: (i32, i32), cw: u32, ch: u32) -
         height: ch,
         enabled: true,
         inverted: false,
+        // Remember where the content AND its frame sat when this mask was baked.
+        // The live compositor pins the clip with
+        //   shift = (content.offset − bake_offset) − (frame.offset − bake_frame_offset)
+        // so dragging either the image or the frame keeps the clip live with no
+        // per-frame re-bake (that per-frame re-bake was the Move lag).
+        bake_offset: content_offset,
+        bake_frame_offset: (fox, foy),
     }
 }
 
@@ -199,6 +206,59 @@ mod tests {
         canvas.layer_stack.add_layer(16, 16);
         assert!(!canvas.has_clip_content());
         assert!(!canvas.refresh_clip_masks());
+    }
+
+    #[test]
+    fn clip_mask_records_bake_offsets_for_live_pin() {
+        // The live compositor pins a dragged clip by sampling the (unmoved) mask
+        // at layer_local + shift, where
+        //   shift = (content.offset − bake_offset) − (frame.offset − bake_frame_offset).
+        // So the bake must stamp BOTH the content's and the frame's offset; a later
+        // move that skips the re-bake then yields the exact live shift.
+        let (mut canvas, frame_id, content_id) = make_frame(40, 40);
+        canvas.refresh_clip_masks();
+        let ci = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == content_id)
+            .unwrap();
+        let fi = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == frame_id)
+            .unwrap();
+        {
+            let mask = canvas.layer_stack.layers[ci].mask.as_ref().unwrap();
+            assert_eq!(mask.bake_offset, (0, 0), "content offset at bake");
+            assert_eq!(mask.bake_frame_offset, (10, 10), "frame offset at bake");
+        }
+
+        // Mirror the compositor's shift formula.
+        let shift = |canvas: &Canvas| {
+            let m = canvas.layer_stack.layers[ci].mask.as_ref().unwrap();
+            let c = canvas.layer_stack.layers[ci].offset;
+            let f = canvas.layer_stack.layers[fi].offset;
+            (
+                (c.0 - m.bake_offset.0) - (f.0 - m.bake_frame_offset.0),
+                (c.1 - m.bake_offset.1) - (f.1 - m.bake_frame_offset.1),
+            )
+        };
+
+        // Drag the CONTENT (frame fixed), no re-bake: shift == drag delta.
+        canvas.layer_stack.layers[ci].offset = (7, -3);
+        assert_eq!(shift(&canvas), (7, -3), "content drag pins by +delta");
+
+        // Drag the FRAME (content back at 0,0), no re-bake: shift == −frame delta,
+        // so the clip window follows the frame instead of lagging behind.
+        canvas.layer_stack.layers[ci].offset = (0, 0);
+        canvas.layer_stack.layers[fi].offset = (15, 12);
+        assert_eq!(shift(&canvas), (-5, -2), "frame drag pins by −delta");
+
+        // Re-baking at the new positions resets the shift to zero.
+        canvas.refresh_clip_masks();
+        assert_eq!(shift(&canvas), (0, 0), "fresh bake ⇒ no shift");
     }
 
     #[test]

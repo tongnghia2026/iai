@@ -706,6 +706,17 @@ pub struct LayerMask {
     pub height: u32,
     pub enabled: bool,
     pub inverted: bool,
+    /// Canvas offset of the owning (content) layer when this mask was baked, and
+    /// (`bake_frame_offset`) the clip frame's offset at that same moment. Only
+    /// meaningful for a PowerClip / clipping-mask content layer: while either the
+    /// content or its frame is dragged, the clip re-bake is skipped (too slow per
+    /// frame), so the GPU pins the clip by sampling this unmoved mask at
+    /// `layer_local + shift`, where `shift = (content.offset − bake_offset) −
+    /// (frame.offset − bake_frame_offset)`. That keeps the image clipped inside
+    /// the frame live, with no per-frame re-bake. Both `(0, 0)` for every ordinary
+    /// mask (which simply move with their layer, delta 0).
+    pub bake_offset: (i32, i32),
+    pub bake_frame_offset: (i32, i32),
 }
 
 #[allow(dead_code)]
@@ -717,6 +728,8 @@ impl LayerMask {
             height,
             enabled: true,
             inverted: false,
+            bake_offset: (0, 0),
+            bake_frame_offset: (0, 0),
         }
     }
 
@@ -727,6 +740,8 @@ impl LayerMask {
             height,
             enabled: true,
             inverted: false,
+            bake_offset: (0, 0),
+            bake_frame_offset: (0, 0),
         }
     }
 

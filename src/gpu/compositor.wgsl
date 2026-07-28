@@ -31,7 +31,7 @@ struct CompositorUniforms {
     mask_inverted:  u32,
     adj_kind:       u32,
     adj_pad_a:      u32,
-    adj_pad_b:      u32,
+    clip_shift_packed: u32,  // live PowerClip pin: two i16 (dx<<16)|dy = offset − mask bake offset
     adj_pad_c:      u32,
     adj_p:          array<vec4<f32>, 3>,
     lut:            array<vec4<f32>, 192>,
@@ -1581,7 +1581,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let atlas_dim = vec2<f32>(textureDimensions(atlas_tex));
         let atlas_uv = vec2<f32>(atlas_x / atlas_dim.x, atlas_y / atlas_dim.y);
         src = textureSample(atlas_tex, samp, atlas_uv);
-        mask_a = sample_mask_nearest_i(i32(layer_x), i32(layer_y));
+        // Live PowerClip / clipping-mask pin. `clip_shift_packed` holds two i16
+        // (dx<<16)|dy = the clip child's (offset − mask bake_offset); it is 0 for
+        // every non-clip layer, so the branch below is a no-op for them. Adding
+        // the shift samples the (unmoved) clip mask at the canvas-fixed spot, so a
+        // dragged clipped image stays inside its frame in real time instead of
+        // sliding out. Out-of-bounds under the shift means the pixel fell outside
+        // the frame's baked footprint → hidden (0), not edge-clamped (which could
+        // smear a frame that reaches the content edge).
+        let clip_packed = bitcast<i32>(u.clip_shift_packed);
+        if (clip_packed == 0) {
+            mask_a = sample_mask_nearest_i(i32(layer_x), i32(layer_y));
+        } else {
+            let msx = i32(layer_x) + (clip_packed >> 16u);
+            let msy = i32(layer_y) + ((clip_packed << 16u) >> 16u);
+            if (msx < 0 || msy < 0 || msx >= i32(u.layer_w) || msy >= i32(u.layer_h)) {
+                mask_a = 0.0;
+            } else {
+                mask_a = sample_mask_nearest_i(msx, msy);
+            }
+        }
         filter_lx = layer_x;
         filter_ly = layer_y;
     }

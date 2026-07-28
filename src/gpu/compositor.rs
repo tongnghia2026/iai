@@ -409,7 +409,12 @@ pub struct CompositorUniformsData {
     pub mask_inverted: u32,
     pub adj_kind: u32,
     pub _adj_pad_a: u32,
-    pub _adj_pad_b: u32,
+    /// Live PowerClip / clipping-mask pin. Two i16 packed `(dx << 16) | dy`
+    /// (masking off sign bits) = owning layer's `offset − mask.bake_offset`.
+    /// The main compositor adds it to the mask sample coord so a clipped child
+    /// stays pinned to its frame while dragged, with no per-frame mask re-bake.
+    /// Zero for every non-clip layer (default, byte-identical to before).
+    pub clip_shift_packed: u32,
     pub _adj_pad_c: u32,
     /// Three vec4 values = 12 floats. Mapping depends on `adjustment_to_gpu`.
     pub adj_p: [f32; 12],
@@ -423,6 +428,20 @@ pub struct CompositorUniformsData {
 
 const _: () = assert!(std::mem::size_of::<CompositorUniformsData>() == 3248);
 const _: () = assert!(std::mem::offset_of!(CompositorUniformsData, adj_lut) == 176);
+
+/// Pack a clipping-mask / PowerClip child's live drag delta (canvas pixels,
+/// `layer.offset − mask.bake_offset`) into the single spare uniform slot as two
+/// i16: `(dx << 16) | (dy & 0xFFFF)`. The compositor shader unpacks it with an
+/// arithmetic right shift (`clip_shift_packed` in compositor.wgsl) and adds it to
+/// the mask sample coordinate, pinning the clip to its frame during a Move with
+/// no per-frame re-bake. Deltas clamp to i16 range (±32767 px — larger than any
+/// single-canvas drag; the shift is only a live preview that snaps exact on
+/// release when the mask is re-baked). Zero delta packs to 0 → no-op.
+fn pack_clip_shift(dx: i32, dy: i32) -> u32 {
+    let dx = dx.clamp(-32768, 32767);
+    let dy = dy.clamp(-32768, 32767);
+    ((dx as u16 as u32) << 16) | (dy as u16 as u32)
+}
 
 /// Converts `AdjustmentType` into shader kind, parameters, and LUT data.
 /// kind=0 means the adjustment is CPU-only for flattening. Kind 13 uses the LUT
@@ -3166,6 +3185,34 @@ struct VsOut {
                 }
             }
 
+            // Live clip pin: a clipping-mask / PowerClip child skips its clip
+            // re-bake while dragged (the per-frame re-bake was the Move lag), so
+            // its mask still sits at the drag-start position. Feed the shader the
+            // drag delta (offset − bake_offset) so it samples the mask at the
+            // canvas-fixed spot instead — the image stays clipped inside the frame
+            // live. Skipped under a LOD proxy (proxy coords are downscaled; that
+            // rare zoomed-out drag just falls back and corrects on release) and
+            // naturally zero when the mask is fresh (bake_offset == offset).
+            let clip_shift_packed = match (proxy, layer.clip_parent_id, layer.mask.as_ref()) {
+                (None, Some(frame_id), Some(m)) if m.enabled => {
+                    // Frame's CURRENT offset (live during a frame drag). If the
+                    // frame isn't in this composited stack (rare region composite),
+                    // fall back to its bake offset → Δframe = 0 → content-only pin.
+                    let frame_now = layer_stack
+                        .layers
+                        .iter()
+                        .find(|l| l.id == frame_id)
+                        .map(|f| f.offset)
+                        .unwrap_or(m.bake_frame_offset);
+                    let dx =
+                        (layer.offset.0 - m.bake_offset.0) - (frame_now.0 - m.bake_frame_offset.0);
+                    let dy =
+                        (layer.offset.1 - m.bake_offset.1) - (frame_now.1 - m.bake_frame_offset.1);
+                    pack_clip_shift(dx, dy)
+                }
+                _ => 0,
+            };
+
             let uniform = CompositorUniformsData {
                 opacity: layer.opacity,
                 blend_mode: Self::blend_mode_to_u32(&layer.blend_mode),
@@ -3197,7 +3244,7 @@ struct VsOut {
                 mask_inverted: u32::from(layer.mask.as_ref().map(|m| m.inverted).unwrap_or(false)),
                 adj_kind,
                 _adj_pad_a: dev_tone_active,
-                _adj_pad_b: 0,
+                clip_shift_packed,
                 _adj_pad_c: dev_scene_flag,
                 adj_p,
                 adj_lut,
@@ -3514,6 +3561,41 @@ mod shader_tests {
     fn shaders_are_valid_wgsl() {
         validate("compositor", super::COMPOSITOR_SHADER);
         validate("adjustment", super::ADJUSTMENT_SHADER);
+    }
+
+    /// The clip-shift is packed as two i16 on the CPU and unpacked with an
+    /// arithmetic shift in the shader. Mirror the WGSL unpack here so the two
+    /// stay in lockstep (a clipping mask drifting off its frame during a drag
+    /// would be this encoding breaking, not the shader).
+    fn unpack_clip_shift(packed: u32) -> (i32, i32) {
+        let p = packed as i32; // bitcast<i32>, matching the shader
+        (p >> 16, (p << 16) >> 16)
+    }
+
+    #[test]
+    fn clip_shift_packs_and_unpacks_signed_deltas() {
+        for (dx, dy) in [
+            (0, 0),
+            (1, -1),
+            (37, 512),
+            (-250, -3000),
+            (32767, -32768),
+            (-32768, 32767),
+        ] {
+            assert_eq!(
+                unpack_clip_shift(super::pack_clip_shift(dx, dy)),
+                (dx, dy),
+                "round-trip failed for ({dx}, {dy})"
+            );
+        }
+        // Zero delta must pack to exactly 0 so the shader's fast no-op branch
+        // (clip_packed == 0) fires for every non-dragged / non-clip layer.
+        assert_eq!(super::pack_clip_shift(0, 0), 0);
+        // Out-of-range deltas clamp instead of wrapping to a bogus small shift.
+        assert_eq!(
+            unpack_clip_shift(super::pack_clip_shift(90_000, -90_000)),
+            (32767, -32768)
+        );
     }
 
     #[test]

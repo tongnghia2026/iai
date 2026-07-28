@@ -590,6 +590,9 @@ fn bake_transform_commit(
                 height: new_h,
                 enabled: mask.enabled,
                 inverted: mask.inverted,
+                // Re-derived on the next clip re-bake for PowerClip content.
+                bake_offset: (0, 0),
+                bake_frame_offset: (0, 0),
             }
         });
 
@@ -1887,6 +1890,8 @@ mod tests {
                 height: 2,
                 enabled: true,
                 inverted: false,
+                bake_offset: (0, 0),
+                bake_frame_offset: (0, 0),
             }),
             offset: (0, 0),
             width: 2,
@@ -2350,6 +2355,8 @@ mod tests {
             height: mh,
             enabled: true,
             inverted: false,
+            bake_offset: (0, 0),
+            bake_frame_offset: (0, 0),
         });
         let sd = match &ls.layer_type {
             LayerType::Vector(VectorGeometry::Primitive(sd)) => sd.clone(),
