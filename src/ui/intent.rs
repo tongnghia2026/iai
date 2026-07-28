@@ -120,8 +120,6 @@ pub struct LayerIntent {
     pub powerclip_place: bool,
     /// PowerClip: extract the selected content from its frame.
     pub powerclip_release: bool,
-    /// PowerClip: re-fit clips to their frames' current position/shape.
-    pub powerclip_refit: bool,
     pub select_layer: Option<(usize, bool, bool)>,
     /// Ctrl+click a layer's thumbnail → load that layer's alpha as a selection.
     pub load_layer_selection: Option<usize>,

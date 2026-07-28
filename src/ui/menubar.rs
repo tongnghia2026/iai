@@ -676,7 +676,8 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                         .copied()
                                         .unwrap_or(false)
                             };
-                            let sel_total = (0..data.layers.layer_count).filter(|&i| sel(i)).count();
+                            let sel_total =
+                                (0..data.layers.layer_count).filter(|&i| sel(i)).count();
                             let sel_vector = (0..data.layers.layer_count)
                                 .filter(|&i| {
                                     sel(i)
@@ -706,16 +707,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                     .clicked()
                                 {
                                     actions.layers.powerclip_release = true;
-                                    ui.close();
-                                }
-                                if ui
-                                    .button("Cập nhật khung")
-                                    .on_hover_text(
-                                        "Khớp lại nội dung với khung sau khi di chuyển/đổi kích thước",
-                                    )
-                                    .clicked()
-                                {
-                                    actions.layers.powerclip_refit = true;
                                     ui.close();
                                 }
                             });

@@ -1,9 +1,11 @@
 // PowerClip commands (Bước 6, feature layer): place object(s) inside a vector
-// frame so they are clipped to its shape, extract them again, and re-fit after a
-// move. The clip RELATION lives in `Layer::clip_parent_id` (core::canvas::
-// clip_ops); the visible clip is a managed mask baked by `refresh_clip_masks`
-// (core::canvas::clip_render). Each command is one undo step via
-// `LayerStructureCommand`, mirroring the other structural vector ops.
+// frame so they are clipped to its shape, and extract them again. The clip
+// re-fits automatically when a frame or its content moves — the render path
+// calls `Canvas::refresh_clip_masks` on every pixel/structure change (it is
+// fingerprint-gated, so idle painting costs nothing). The clip RELATION lives in
+// `Layer::clip_parent_id` (core::canvas::clip_ops); the visible clip is a managed
+// mask baked by `refresh_clip_masks` (core::canvas::clip_render). Each command is
+// one undo step via `LayerStructureCommand`, like the other structural vector ops.
 
 use super::render::CanvasEvent;
 use super::state::App;
@@ -164,24 +166,6 @@ impl App {
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.shell.status_msg = format!("Đã tách {} đối tượng khỏi khung", targets.len());
-        if let Some(w) = &self.win.window {
-            w.request_redraw();
-        }
-        true
-    }
-
-    /// Re-fit every PowerClip to its frame's current position/shape. Use after
-    /// moving or resizing a frame or its content. Derived-only: no undo step.
-    pub fn powerclip_refit(&mut self) -> bool {
-        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
-        if !canvas.has_clip_content() {
-            self.shell.status_msg = "Không có PowerClip nào để cập nhật".to_string();
-            return false;
-        }
-        canvas.clip_fp = 0; // force a rebake against current geometry.
-        canvas.refresh_clip_masks();
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Đã cập nhật PowerClip".to_string();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
