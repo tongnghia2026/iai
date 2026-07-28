@@ -168,6 +168,19 @@ impl MoveTool {
                     | LayerType::SmartObject
             )
     }
+
+    /// True when a layer-local pixel is hidden by a clipping-mask / PowerClip
+    /// frame. Such pixels are invisible on canvas, so a click or a marquee
+    /// (including one drawn entirely outside the frame) must not select the layer
+    /// through them. Only clip children are gated — an ordinary layer mask keeps
+    /// its historic selectable-through-mask behaviour. `lx/ly` are layer-local.
+    fn clip_hides(layer: &crate::core::layer::Layer, lx: u32, ly: u32) -> bool {
+        layer.clip_parent_id.is_some()
+            && layer
+                .mask
+                .as_ref()
+                .is_some_and(|m| m.enabled && m.sample(lx, ly) < 0.5)
+    }
 }
 
 impl Tool for MoveTool {
@@ -212,7 +225,7 @@ impl Tool for MoveTool {
                 let ly = y - layer.offset.1;
                 if lx >= 0 && ly >= 0 && (lx as u32) < layer.width && (ly as u32) < layer.height {
                     let (_r, _g, _b, a) = layer.tiles.get_pixel(lx as u32, ly as u32);
-                    if a > 0 {
+                    if a > 0 && !Self::clip_hides(layer, lx as u32, ly as u32) {
                         hit_idx = Some(idx);
                         break;
                     }
@@ -490,7 +503,12 @@ impl Tool for MoveTool {
                                     * 4
                                     + 3)
                                     as usize];
-                                if a > 0 {
+                                // A clip child's hidden pixels are invisible, so a
+                                // marquee over them (e.g. drawn outside the frame)
+                                // must not select the layer through them.
+                                let lx = (pos.x * crate::core::tile::TILE_SIZE as i32 + j) as u32;
+                                let ly = (pos.y * crate::core::tile::TILE_SIZE as i32 + i) as u32;
+                                if a > 0 && !Self::clip_hides(layer, lx, ly) {
                                     hit = true;
                                     break;
                                 }

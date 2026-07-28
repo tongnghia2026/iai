@@ -14,6 +14,8 @@
 //! at the content's new position on the next refresh, so the clip stays pinned
 //! to the frame's shape.
 
+use rayon::prelude::*;
+
 use super::Canvas;
 use crate::core::layer::{Layer, LayerMask};
 use crate::core::tile::TileMap;
@@ -100,30 +102,46 @@ fn bake_clip_mask(frame: &Layer, content_offset: (i32, i32), cw: u32, ch: u32) -
 
     // Extract the frame's alpha once into a flat buffer so the (usually larger)
     // content loop is plain array indexing rather than a tile lookup per pixel.
+    // Row-parallel: get_pixel is an immutable tile lookup, so rows are independent.
     let mut frame_alpha = vec![0u8; (fw as usize) * (fh as usize)];
-    for y in 0..fh {
-        for x in 0..fw {
-            frame_alpha[(y as usize) * (fw as usize) + x as usize] = frame.tiles.get_pixel(x, y).3;
-        }
-    }
+    frame_alpha
+        .par_chunks_mut(fw as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y = y as u32;
+            for x in 0..fw {
+                row[x as usize] = frame.tiles.get_pixel(x, y).3;
+            }
+        });
 
+    // Fill row-parallel: baking a full-image-sized mask on one thread was the
+    // ~2s stall before the next drag (CPU pinned at ~one core). Rows are
+    // independent and only READ the shared frame_alpha, so rayon splits it across
+    // all cores. Rows wholly outside the frame short-circuit to transparent.
     let mut buf = vec![0u8; (cw as usize) * (ch as usize) * 4];
-    for ly in 0..ch {
-        let fy = content_offset.1 + ly as i32 - foy;
-        for lx in 0..cw {
-            let fx = content_offset.0 + lx as i32 - fox;
-            let a = if fx >= 0 && fy >= 0 && (fx as u32) < fw && (fy as u32) < fh {
-                frame_alpha[(fy as usize) * (fw as usize) + fx as usize]
-            } else {
-                0
-            };
-            let idx = ((ly as usize) * (cw as usize) + lx as usize) * 4;
-            buf[idx] = a;
-            buf[idx + 1] = a;
-            buf[idx + 2] = a;
-            buf[idx + 3] = 255;
-        }
-    }
+    let row_bytes = (cw as usize) * 4;
+    buf.par_chunks_mut(row_bytes)
+        .enumerate()
+        .for_each(|(ly, row)| {
+            let fy = content_offset.1 + ly as i32 - foy;
+            if fy < 0 || (fy as u32) >= fh {
+                return; // outside the frame vertically → row stays transparent
+            }
+            let frame_row = (fy as usize) * (fw as usize);
+            for lx in 0..cw as usize {
+                let fx = content_offset.0 + lx as i32 - fox;
+                let a = if fx >= 0 && (fx as u32) < fw {
+                    frame_alpha[frame_row + fx as usize]
+                } else {
+                    0
+                };
+                let idx = lx * 4;
+                row[idx] = a;
+                row[idx + 1] = a;
+                row[idx + 2] = a;
+                row[idx + 3] = 255;
+            }
+        });
 
     LayerMask {
         tiles: TileMap::from_rgba(&buf, cw, ch),
