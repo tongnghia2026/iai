@@ -3196,33 +3196,45 @@ struct VsOut {
             // live, through Move AND Free Transform. Naturally zero shift when the
             // mask is fresh; the bias encoding still flags it as a clip child so the
             // transform branches pin too.
-            let clip_shift_packed = match (layer.clip_parent_id, layer.mask.as_ref()) {
-                (Some(frame_id), Some(m)) if m.enabled => {
-                    // Frame's CURRENT offset (live during a frame drag). If the
-                    // frame isn't in this composited stack (rare region composite),
-                    // fall back to its bake offset → Δframe = 0 → content-only pin.
-                    let frame_now = layer_stack
-                        .layers
-                        .iter()
-                        .find(|l| l.id == frame_id)
-                        .map(|f| f.offset)
-                        .unwrap_or(m.bake_frame_offset);
-                    let dx =
-                        (layer.offset.0 - m.bake_offset.0) - (frame_now.0 - m.bake_frame_offset.0);
-                    let dy =
-                        (layer.offset.1 - m.bake_offset.1) - (frame_now.1 - m.bake_frame_offset.1);
-                    // The normal (non-transform) path composites through a LOD proxy
-                    // when one is engaged, so its layer_x is downscaled — scale the
-                    // pin to match. The transform branches sample at full-res canvas
-                    // coordinates, so they keep the full-res shift.
-                    let scale = if xform_active == 0 {
-                        proxy.map_or(1, |p| 1i32 << p.level)
-                    } else {
-                        1
-                    };
-                    pack_clip_shift(dx / scale, dy / scale)
-                }
-                _ => 0,
+            let clip_shift_eff: Option<(i32, i32)> =
+                match (layer.clip_parent_id, layer.mask.as_ref()) {
+                    (Some(frame_id), Some(m)) if m.enabled => {
+                        // Frame's CURRENT offset (live during a frame drag). If the
+                        // frame isn't in this composited stack (rare region composite),
+                        // fall back to its bake offset → Δframe = 0 → content-only pin.
+                        let frame_now = layer_stack
+                            .layers
+                            .iter()
+                            .find(|l| l.id == frame_id)
+                            .map(|f| f.offset)
+                            .unwrap_or(m.bake_frame_offset);
+                        let dx = (layer.offset.0 - m.bake_offset.0)
+                            - (frame_now.0 - m.bake_frame_offset.0);
+                        let dy = (layer.offset.1 - m.bake_offset.1)
+                            - (frame_now.1 - m.bake_frame_offset.1);
+                        // The normal (non-transform) path composites through a LOD proxy
+                        // when one is engaged, so its layer_x is downscaled — scale the
+                        // pin to match. The transform branches sample at full-res canvas
+                        // coordinates, so they keep the full-res shift.
+                        let scale = if xform_active == 0 {
+                            proxy.map_or(1, |p| 1i32 << p.level)
+                        } else {
+                            1
+                        };
+                        Some((dx / scale, dy / scale))
+                    }
+                    _ => None,
+                };
+            let clip_shift_packed = clip_shift_eff.map_or(0, |(dx, dy)| pack_clip_shift(dx, dy));
+            // The shader samples the clip mask at `layer_local + shift`, so the mask
+            // tiles it reads are those the layer would show if it sat at
+            // `offset − shift`. Gather the mask against THAT offset, or the shifted
+            // sample lands on a tile that was never uploaded (slot -1 = hidden) and
+            // the base bleeds through the moving image. (Transform passes gather the
+            // whole tileset, so they are unaffected.)
+            let eff_off_mask = match clip_shift_eff {
+                Some((sx, sy)) => (eff_off.0 - sx as f32, eff_off.1 - sy as f32),
+                None => eff_off,
             };
 
             let uniform = CompositorUniformsData {
@@ -3319,7 +3331,7 @@ struct VsOut {
                         band,
                         eff_zoom,
                         eff_view_off,
-                        eff_off,
+                        eff_off_mask,
                         eff_w,
                         eff_h,
                         eff_tiles_w,
@@ -3399,7 +3411,7 @@ struct VsOut {
                         band_src,
                         eff_zoom,
                         eff_view_off,
-                        eff_off,
+                        eff_off_mask,
                         eff_w,
                         eff_h,
                     );
