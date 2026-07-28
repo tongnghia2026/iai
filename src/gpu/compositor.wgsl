@@ -1331,6 +1331,24 @@ fn sample_mask_bilinear(lx: f32, ly: f32) -> f32 {
     return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
 }
 
+// Live clipping-mask / PowerClip pin. `clip_shift_packed` is 0 for a non-clip
+// layer, and for a clip child holds two i16 pin deltas biased by 0x8000 (so the
+// word is never 0). `clip_is_child` gates the pin; `clip_shift` unpacks it.
+fn clip_is_child() -> bool { return u.clip_shift_packed != 0u; }
+fn clip_shift() -> vec2<i32> {
+    return vec2<i32>(
+        i32(u.clip_shift_packed >> 16u) - 0x8000,
+        i32(u.clip_shift_packed & 0xFFFFu) - 0x8000,
+    );
+}
+// Sample the clip mask at a canvas-fixed layer-local coord. Out of the frame's
+// baked footprint reads as hidden (0) rather than edge-clamped, so a frame that
+// touches the content edge can't smear when the image is dragged/transformed.
+fn clip_mask_at(lx: i32, ly: i32, lw: f32, lh: f32) -> f32 {
+    if (lx < 0 || ly < 0 || lx >= i32(lw) || ly >= i32(lh)) { return 0.0; }
+    return sample_mask_nearest_i(lx, ly);
+}
+
 // ── Per-layer adjustment preview (adj_kind 1..=13) ────────────────────────────
 // These functions are a VERBATIM copy of the ones in ADJUSTMENT_SHADER so the
 // live Ctrl+L/M preview (applied to a raster layer's own pixels here) matches
@@ -1525,7 +1543,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             return dst;
         }
         src = sample_tile_bilinear(slx, sly);
-        mask_a = sample_mask_bilinear(slx, sly);
+        // A clip child's frame stays fixed in canvas space while the image is
+        // transformed, so sample the clip mask at the UN-transformed canvas
+        // position (layer origin is packed in xform_orig_oy/xform_orig_w here), not
+        // the rotated/scaled layer position. Non-clip masks transform with the layer.
+        if (clip_is_child()) {
+            let sh = clip_shift();
+            mask_a = clip_mask_at(
+                i32(canvas_x - u.xform_orig_oy) + sh.x,
+                i32(canvas_y - u.xform_orig_w) + sh.y,
+                u.layer_w, u.layer_h);
+        } else {
+            mask_a = sample_mask_bilinear(slx, sly);
+        }
         dev_local = vec2<f32>(slx / max(u.layer_w, 1.0), sly / max(u.layer_h, 1.0));
         filter_lx = slx;
         filter_ly = sly;
@@ -1544,7 +1574,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             return dst;
         }
         src = sample_tile_bilinear(slx, sly);
-        mask_a = sample_mask_bilinear(slx, sly);
+        // Clip child: sample the fixed frame at the un-transformed canvas position
+        // (layer origin is xform_orig_ox/xform_orig_oy in this branch).
+        if (clip_is_child()) {
+            let sh = clip_shift();
+            mask_a = clip_mask_at(
+                i32(canvas_x - u.xform_orig_ox) + sh.x,
+                i32(canvas_y - u.xform_orig_oy) + sh.y,
+                u.xform_orig_w, u.xform_orig_h);
+        } else {
+            mask_a = sample_mask_bilinear(slx, sly);
+        }
         dev_local = vec2<f32>(slx / max(u.xform_orig_w, 1.0), sly / max(u.xform_orig_h, 1.0));
         filter_lx = slx;
         filter_ly = sly;
@@ -1581,25 +1621,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let atlas_dim = vec2<f32>(textureDimensions(atlas_tex));
         let atlas_uv = vec2<f32>(atlas_x / atlas_dim.x, atlas_y / atlas_dim.y);
         src = textureSample(atlas_tex, samp, atlas_uv);
-        // Live PowerClip / clipping-mask pin. `clip_shift_packed` holds two i16
-        // (dx<<16)|dy = the clip child's (offset − mask bake_offset); it is 0 for
-        // every non-clip layer, so the branch below is a no-op for them. Adding
-        // the shift samples the (unmoved) clip mask at the canvas-fixed spot, so a
-        // dragged clipped image stays inside its frame in real time instead of
-        // sliding out. Out-of-bounds under the shift means the pixel fell outside
-        // the frame's baked footprint → hidden (0), not edge-clamped (which could
-        // smear a frame that reaches the content edge).
-        let clip_packed = bitcast<i32>(u.clip_shift_packed);
-        if (clip_packed == 0) {
-            mask_a = sample_mask_nearest_i(i32(layer_x), i32(layer_y));
+        // Live PowerClip / clipping-mask pin (Move path): sample the unmoved clip
+        // mask at the canvas-fixed spot so a dragged clipped image stays inside its
+        // frame. No-op for non-clip layers (clip_is_child false).
+        if (clip_is_child()) {
+            let sh = clip_shift();
+            mask_a = clip_mask_at(i32(layer_x) + sh.x, i32(layer_y) + sh.y, u.layer_w, u.layer_h);
         } else {
-            let msx = i32(layer_x) + (clip_packed >> 16u);
-            let msy = i32(layer_y) + ((clip_packed << 16u) >> 16u);
-            if (msx < 0 || msy < 0 || msx >= i32(u.layer_w) || msy >= i32(u.layer_h)) {
-                mask_a = 0.0;
-            } else {
-                mask_a = sample_mask_nearest_i(msx, msy);
-            }
+            mask_a = sample_mask_nearest_i(i32(layer_x), i32(layer_y));
         }
         filter_lx = layer_x;
         filter_ly = layer_y;

@@ -429,18 +429,21 @@ pub struct CompositorUniformsData {
 const _: () = assert!(std::mem::size_of::<CompositorUniformsData>() == 3248);
 const _: () = assert!(std::mem::offset_of!(CompositorUniformsData, adj_lut) == 176);
 
-/// Pack a clipping-mask / PowerClip child's live drag delta (canvas pixels,
-/// `layer.offset − mask.bake_offset`) into the single spare uniform slot as two
-/// i16: `(dx << 16) | (dy & 0xFFFF)`. The compositor shader unpacks it with an
-/// arithmetic right shift (`clip_shift_packed` in compositor.wgsl) and adds it to
-/// the mask sample coordinate, pinning the clip to its frame during a Move with
-/// no per-frame re-bake. Deltas clamp to i16 range (±32767 px — larger than any
-/// single-canvas drag; the shift is only a live preview that snaps exact on
-/// release when the mask is re-baked). Zero delta packs to 0 → no-op.
+/// Pack a clipping-mask / PowerClip child's live pin into the single spare
+/// uniform slot. The compositor samples the (unmoved) clip mask at a canvas-fixed
+/// coordinate `layer_local + (dx, dy)`, so a clipped image stays pinned to its
+/// frame while it is moved OR free-transformed, with no per-frame re-bake.
+///
+/// The same 32 bits also carry the "this layer IS a clip child" flag: each i16
+/// delta is stored biased by `0x8000`, so both halves are always ≥ 1 and the word
+/// is never zero for a clip child. A value of exactly 0 therefore means "not a
+/// clip child → no pin", which the shader fast-paths. Deltas clamp to ±32767 px
+/// (in the current composite's pixel scale — full-res, or downscaled by the LOD
+/// proxy level).
 fn pack_clip_shift(dx: i32, dy: i32) -> u32 {
-    let dx = dx.clamp(-32768, 32767);
-    let dy = dy.clamp(-32768, 32767);
-    ((dx as u16 as u32) << 16) | (dy as u16 as u32)
+    let dx = (dx.clamp(-32767, 32767) + 0x8000) as u32;
+    let dy = (dy.clamp(-32767, 32767) + 0x8000) as u32;
+    (dx << 16) | (dy & 0xFFFF)
 }
 
 /// Converts `AdjustmentType` into shader kind, parameters, and LUT data.
@@ -3186,15 +3189,15 @@ struct VsOut {
             }
 
             // Live clip pin: a clipping-mask / PowerClip child skips its clip
-            // re-bake while dragged (the per-frame re-bake was the Move lag), so
-            // its mask still sits at the drag-start position. Feed the shader the
-            // drag delta (offset − bake_offset) so it samples the mask at the
+            // re-bake while dragged/transformed (the per-frame re-bake was the Move
+            // lag), so its mask still sits at the bake position. Feed the shader the
+            // pin delta (Δcontent − Δframe) so it samples the mask at the
             // canvas-fixed spot instead — the image stays clipped inside the frame
-            // live. Skipped under a LOD proxy (proxy coords are downscaled; that
-            // rare zoomed-out drag just falls back and corrects on release) and
-            // naturally zero when the mask is fresh (bake_offset == offset).
-            let clip_shift_packed = match (proxy, layer.clip_parent_id, layer.mask.as_ref()) {
-                (None, Some(frame_id), Some(m)) if m.enabled => {
+            // live, through Move AND Free Transform. Naturally zero shift when the
+            // mask is fresh; the bias encoding still flags it as a clip child so the
+            // transform branches pin too.
+            let clip_shift_packed = match (layer.clip_parent_id, layer.mask.as_ref()) {
+                (Some(frame_id), Some(m)) if m.enabled => {
                     // Frame's CURRENT offset (live during a frame drag). If the
                     // frame isn't in this composited stack (rare region composite),
                     // fall back to its bake offset → Δframe = 0 → content-only pin.
@@ -3208,7 +3211,16 @@ struct VsOut {
                         (layer.offset.0 - m.bake_offset.0) - (frame_now.0 - m.bake_frame_offset.0);
                     let dy =
                         (layer.offset.1 - m.bake_offset.1) - (frame_now.1 - m.bake_frame_offset.1);
-                    pack_clip_shift(dx, dy)
+                    // The normal (non-transform) path composites through a LOD proxy
+                    // when one is engaged, so its layer_x is downscaled — scale the
+                    // pin to match. The transform branches sample at full-res canvas
+                    // coordinates, so they keep the full-res shift.
+                    let scale = if xform_active == 0 {
+                        proxy.map_or(1, |p| 1i32 << p.level)
+                    } else {
+                        1
+                    };
+                    pack_clip_shift(dx / scale, dy / scale)
                 }
                 _ => 0,
             };
@@ -3563,13 +3575,17 @@ mod shader_tests {
         validate("adjustment", super::ADJUSTMENT_SHADER);
     }
 
-    /// The clip-shift is packed as two i16 on the CPU and unpacked with an
-    /// arithmetic shift in the shader. Mirror the WGSL unpack here so the two
-    /// stay in lockstep (a clipping mask drifting off its frame during a drag
-    /// would be this encoding breaking, not the shader).
-    fn unpack_clip_shift(packed: u32) -> (i32, i32) {
-        let p = packed as i32; // bitcast<i32>, matching the shader
-        (p >> 16, (p << 16) >> 16)
+    /// Mirror of the shader's `clip_is_child()` + `clip_shift()`: 0 means "not a
+    /// clip child"; otherwise each half is the i16 delta biased by 0x8000. Keep in
+    /// lockstep — a clip mask drifting off its frame would be this encoding
+    /// breaking, not the shader.
+    fn unpack_clip_shift(packed: u32) -> Option<(i32, i32)> {
+        if packed == 0 {
+            return None;
+        }
+        let dx = (packed >> 16) as i32 - 0x8000;
+        let dy = (packed & 0xFFFF) as i32 - 0x8000;
+        Some((dx, dy))
     }
 
     #[test]
@@ -3579,22 +3595,25 @@ mod shader_tests {
             (1, -1),
             (37, 512),
             (-250, -3000),
-            (32767, -32768),
-            (-32768, 32767),
+            (32767, -32767),
+            (-32767, 32767),
         ] {
+            let packed = super::pack_clip_shift(dx, dy);
+            // A clip child is ALWAYS flagged non-zero, even at zero shift, so the
+            // transform branches know to pin (a zero word means "not a clip child").
+            assert_ne!(packed, 0, "clip child must stay flagged for ({dx}, {dy})");
             assert_eq!(
-                unpack_clip_shift(super::pack_clip_shift(dx, dy)),
-                (dx, dy),
+                unpack_clip_shift(packed),
+                Some((dx, dy)),
                 "round-trip failed for ({dx}, {dy})"
             );
         }
-        // Zero delta must pack to exactly 0 so the shader's fast no-op branch
-        // (clip_packed == 0) fires for every non-dragged / non-clip layer.
-        assert_eq!(super::pack_clip_shift(0, 0), 0);
+        // Exactly 0 is the reserved "not a clip child" value.
+        assert_eq!(unpack_clip_shift(0), None);
         // Out-of-range deltas clamp instead of wrapping to a bogus small shift.
         assert_eq!(
             unpack_clip_shift(super::pack_clip_shift(90_000, -90_000)),
-            (32767, -32768)
+            Some((32767, -32767))
         );
     }
 
