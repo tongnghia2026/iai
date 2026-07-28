@@ -1399,6 +1399,63 @@ fn eyedropper_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     }
 }
 
+/// How many currently-selected layers are boolean-eligible vector objects
+/// (Shape or Path, unlocked, non-background). The Shaping icons show once this
+/// reaches two.
+fn selected_vector_count(data: &UiData) -> usize {
+    (0..data.layers.layer_count)
+        .filter(|&i| {
+            data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                && !data.layers.layer_locked.get(i).copied().unwrap_or(false)
+                && !data
+                    .layers
+                    .layer_is_background
+                    .get(i)
+                    .copied()
+                    .unwrap_or(false)
+                && data
+                    .layers
+                    .layer_types
+                    .get(i)
+                    .is_some_and(|t| t == "Shape" || t == "Path")
+        })
+        .count()
+}
+
+/// Quick Weld/Trim/Intersect/Exclude icons for the options bar — the same
+/// commands as Layer ▸ Shaping, one click away. Only rendered when at least two
+/// vector objects are selected (the caller checks [`selected_vector_count`]).
+fn shaping_buttons(ui: &mut egui::Ui, actions: &mut UiActions) {
+    use crate::core::vector::boolean::BooleanOp;
+    ui.label("Kết hợp:");
+    for (icon, op, tip) in [
+        (
+            ph::UNITE,
+            BooleanOp::Union,
+            "Hàn liền (Weld) — gộp các vật thể thành một hình",
+        ),
+        (
+            ph::SUBTRACT,
+            BooleanOp::Difference,
+            "Cắt bớt (Trim) — hình trên cắt hình dưới, vẫn giữ hình trên",
+        ),
+        (
+            ph::INTERSECT,
+            BooleanOp::Intersect,
+            "Giao nhau (Intersect) — tạo hình phần chung, giữ nguyên hình gốc",
+        ),
+        (
+            ph::EXCLUDE,
+            BooleanOp::Exclude,
+            "Loại trừ (Exclude) — bỏ phần chồng nhau",
+        ),
+    ] {
+        if ui.button(icon).on_hover_text(tip).clicked() {
+            actions.layers.boolean_op = Some(op);
+        }
+    }
+}
+
 fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let ctrl_held = ui.input(|i| i.modifiers.ctrl);
     let mut auto_select = data.tool.move_auto_select ^ ctrl_held;
@@ -1525,6 +1582,12 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if data.tool.path_style.is_some() {
         ui.separator();
         path_style_quick(ui, data, actions);
+    }
+
+    // Shaping (Weld/Trim/Intersect/Exclude) once ≥2 vector objects are selected.
+    if selected_vector_count(data) >= 2 {
+        ui.separator();
+        shaping_buttons(ui, actions);
     }
 }
 

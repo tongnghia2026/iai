@@ -63,16 +63,17 @@ pub fn boolean(a: &PathData, b: &PathData, op: BooleanOp) -> Option<PathData> {
     let br = to_rings(b, BOOL_FLATTEN_TOL);
     let out = match op {
         BooleanOp::Exclude => {
-            // A ⊕ B = (A − B) ∪ (B − A).
-            let d1 = clip_with_retry(&ar, a.fill_rule, &br, b.fill_rule, BooleanOp::Difference)?;
+            // A ⊕ B = (A − B) ∪ (B − A). The two differences are AREA-disjoint —
+            // they abut only along the old overlap boundary — so a boolean union
+            // would just fight that fully-shared edge (every intersection
+            // degenerate) and often fail. Concatenating the rings under EvenOdd is
+            // both correct (a point is filled iff it lies in exactly one input)
+            // and robust.
+            let mut d1 =
+                clip_with_retry(&ar, a.fill_rule, &br, b.fill_rule, BooleanOp::Difference)?;
             let d2 = clip_with_retry(&br, b.fill_rule, &ar, a.fill_rule, BooleanOp::Difference)?;
-            clip_with_retry(
-                &d1,
-                FillRule::EvenOdd,
-                &d2,
-                FillRule::EvenOdd,
-                BooleanOp::Union,
-            )?
+            d1.extend(d2);
+            d1
         }
         _ => clip_with_retry(&ar, a.fill_rule, &br, b.fill_rule, op)?,
     };

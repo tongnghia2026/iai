@@ -169,30 +169,59 @@ impl App {
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let before = LayerStructureCommand::capture_before(name, &canvas.layer_stack, cw, ch);
 
-        // Build the result layer by inheriting the target's visual properties
-        // (opacity, blend, visibility, group membership), then swap in the boolean
-        // geometry. Cloning is the simplest way to carry those props across.
-        let new_id = canvas.layer_stack.next_id();
-        canvas.layer_stack.set_next_id(new_id + 1);
-        let mut new_layer = canvas.layer_stack.layers[target_idx].clone();
-        new_layer.id = new_id;
-        new_layer.name = name.to_string();
-        new_layer.mask = None;
-        new_layer.selected = true;
-        crate::core::command_vector::apply_object_to_layer(&mut new_layer, object);
-
-        // Remove the selected layers (highest index first so lower indices stay
-        // valid), then insert the result where the bottom object was.
-        let mut desc = indices.clone();
-        desc.sort_unstable_by(|a, b| b.cmp(a));
-        for &i in &desc {
-            canvas.layer_stack.layers.remove(i);
-        }
-        let insert_at = target_idx.min(canvas.layer_stack.layers.len());
-        canvas.layer_stack.layers.insert(insert_at, new_layer);
-        canvas.layer_stack.active_idx = insert_at;
-        for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
-            l.selected = i == insert_at;
+        // Per-op layer policy (matches CorelDRAW's Shaping intent):
+        //   Trim      → change only the bottom target in place; KEEP the cutters
+        //               above so the user can move or delete them.
+        //   Intersect → KEEP every source object; add the overlap as a NEW object.
+        //   Weld/Excl → merge: remove all sources, leave one result.
+        let apply_as_new = |layer: &mut Layer, id: u32| {
+            layer.id = id;
+            layer.name = name.to_string();
+            layer.mask = None;
+            crate::core::command_vector::apply_object_to_layer(layer, object.clone());
+        };
+        match op {
+            BooleanOp::Difference => {
+                {
+                    let layer = &mut canvas.layer_stack.layers[target_idx];
+                    crate::core::command_vector::apply_object_to_layer(layer, object.clone());
+                }
+                canvas.layer_stack.active_idx = target_idx;
+                for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
+                    l.selected = i == target_idx;
+                }
+            }
+            BooleanOp::Intersect => {
+                let new_id = canvas.layer_stack.next_id();
+                canvas.layer_stack.set_next_id(new_id + 1);
+                let mut new_layer = canvas.layer_stack.layers[target_idx].clone();
+                apply_as_new(&mut new_layer, new_id);
+                let top = *indices.last().unwrap_or(&target_idx);
+                let insert_at = (top + 1).min(canvas.layer_stack.layers.len());
+                canvas.layer_stack.layers.insert(insert_at, new_layer);
+                canvas.layer_stack.active_idx = insert_at;
+                for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
+                    l.selected = i == insert_at;
+                }
+            }
+            BooleanOp::Union | BooleanOp::Exclude => {
+                let new_id = canvas.layer_stack.next_id();
+                canvas.layer_stack.set_next_id(new_id + 1);
+                let mut new_layer = canvas.layer_stack.layers[target_idx].clone();
+                apply_as_new(&mut new_layer, new_id);
+                // Remove sources highest-index-first so lower indices stay valid.
+                let mut desc = indices.clone();
+                desc.sort_unstable_by(|a, b| b.cmp(a));
+                for &i in &desc {
+                    canvas.layer_stack.layers.remove(i);
+                }
+                let insert_at = target_idx.min(canvas.layer_stack.layers.len());
+                canvas.layer_stack.layers.insert(insert_at, new_layer);
+                canvas.layer_stack.active_idx = insert_at;
+                for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
+                    l.selected = i == insert_at;
+                }
+            }
         }
 
         // CMYK: re-derive ink planes for the new Path raster from its RGB mirror.
@@ -205,11 +234,15 @@ impl App {
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        self.shell.status_msg = format!(
-            "Đã {} {} đối tượng vector",
-            name.to_lowercase(),
-            indices.len()
-        );
+        self.shell.status_msg = match op {
+            BooleanOp::Difference => format!(
+                "Đã cắt — giữ lại {} hình phía trên để di chuyển/xoá",
+                indices.len() - 1
+            ),
+            BooleanOp::Intersect => "Đã tạo hình giao (giữ nguyên các hình gốc)".to_string(),
+            BooleanOp::Union => format!("Đã hàn {} đối tượng vector", indices.len()),
+            BooleanOp::Exclude => format!("Đã loại trừ {} đối tượng vector", indices.len()),
+        };
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -348,12 +381,45 @@ mod tests {
     }
 
     #[test]
-    fn intersect_keeps_only_overlap() {
+    fn intersect_adds_overlap_and_keeps_sources() {
         let mut app = app_with_two_rects();
+        let before = app.docs.documents[0].canvas.layer_stack.layers.len();
         assert!(app.apply_boolean(BooleanOp::Intersect));
+        // Sources are kept; the overlap is a NEW object → one more layer.
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before + 1,
+            "intersect keeps the sources and adds the overlap"
+        );
         // Overlap of the two 80×80 rects offset by (40,40) = 40×40 = 1600.
         let area = active_path_area(&app);
         assert!((area - 1600.0).abs() < 200.0, "intersect area {area}");
+    }
+
+    #[test]
+    fn trim_keeps_cutters_and_trims_bottom() {
+        let mut app = app_with_two_rects();
+        let before = app.docs.documents[0].canvas.layer_stack.layers.len();
+        assert!(app.apply_boolean(BooleanOp::Difference));
+        // Trim edits the bottom object in place and keeps the upper cutter → the
+        // layer count is unchanged.
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before,
+            "trim keeps every layer"
+        );
+        // Bottom (80×80) minus the 40×40 overlap = 4800.
+        let area = active_path_area(&app);
+        assert!((area - 4800.0).abs() < 300.0, "trim area {area}");
+    }
+
+    #[test]
+    fn exclude_removes_the_overlap() {
+        let mut app = app_with_two_rects();
+        assert!(app.apply_boolean(BooleanOp::Exclude));
+        // XOR area = 6400 + 6400 − 2×1600 = 9600.
+        let area = active_path_area(&app);
+        assert!((area - 9600.0).abs() < 500.0, "exclude area {area}");
     }
 
     #[test]
