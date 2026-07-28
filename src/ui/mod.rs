@@ -1924,13 +1924,12 @@ pub fn build(
 
         if let Some(ref ov) = data.tool.transform_overlay {
             // Canvas tool chrome must stay above the image but below floating
-            // windows/dialogs. It also must not escape the canvas when a rotated
-            // box extends into panels or modal UI.
-            let canvas_screen_rect = egui::Rect::from_min_max(
-                to_screen_pos(0.0, 0.0),
-                to_screen_pos(data.doc.canvas_w as f32, data.doc.canvas_h as f32),
-            );
-            let clip_rect = canvas_screen_rect.intersect(canvas_viewport);
+            // windows/dialogs, and must not escape into the side/top panels. Clip
+            // to the drawing viewport — NOT the paper rect — so a box larger than
+            // the page (e.g. an image bigger than the canvas, or one rotated so its
+            // corners fall outside the page) still shows its handles in the empty
+            // canvas margin where they can be grabbed.
+            let clip_rect = canvas_viewport;
             let painter = ctx
                 .layer_painter(egui::LayerId::new(
                     CANVAS_TOOL_OVERLAY_ORDER,
