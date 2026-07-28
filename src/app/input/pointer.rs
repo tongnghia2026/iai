@@ -876,6 +876,16 @@ impl App {
                                 .canvas
                                 .has_clip_content()
                             {
+                                // Defer the CPU flatten: a normal Move release skips
+                                // flush_canvas entirely, but we must flush here to
+                                // re-bake the clip. Marking pixels stale keeps the
+                                // flush to just the mask re-bake + GPU recomposite
+                                // (the CPU flatten rebuilds lazily when actually
+                                // needed), so a large clipped image doesn't stall the
+                                // next drag by a beat.
+                                self.docs.documents[self.docs.active_doc_idx]
+                                    .canvas
+                                    .pixels_stale = true;
                                 self.flush_canvas();
                                 if let Some(w) = &self.win.window {
                                     w.request_redraw();

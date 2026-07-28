@@ -299,7 +299,22 @@ impl App {
     /// Full recomposite when `dirty_rect = None`; partial scissored composite when `Some`.
     /// The compositor guards correctness via `ping_initialized` — callers can freely
     /// pass `Some` and the compositor will fall back to full clear if needed.
-    pub fn recomposite_with_dirty(&mut self, dirty_rect: Option<(u32, u32, u32, u32)>) {
+    pub fn recomposite_with_dirty(&mut self, mut dirty_rect: Option<(u32, u32, u32, u32)>) {
+        // Live clip move: a dragged clipping-mask / PowerClip child is pinned to
+        // its frame by the GPU clip-shift, so its VISIBLE region (the fixed frame)
+        // does NOT match its dirty rect (the moved content bounds). The partial-
+        // scissor + backdrop cache assumes those coincide; when they don't it can
+        // leave stale frozen pixels of the layer below — the "bóng ma" that doubles
+        // the base during the drag. Force a FULL, uncached recomposite for this
+        // case. There is no per-frame re-bake, so a viewport-sized full composite
+        // stays cheap.
+        let clip_live_move = self.is_interactive_edit()
+            && self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .has_clip_content();
+        if clip_live_move {
+            dirty_rect = None;
+        }
         // Pick Mode A/B (Mode B while interactively moving/transforming) and size
         // the compositor before computing the composite.
         self.sync_compositor_viewport();
@@ -433,9 +448,10 @@ impl App {
                 // view-independently, and Mode B (viewport-streaming) bakes the
                 // view in but the view transform is part of the snapshot key
                 // (`vp_sig`), so a zoom/pan simply misses and recomposites. Only
-                // disabled for the synthetic group-isolation stack, whose indices
-                // don't match the real stack the cut is computed from.
-                !has_groups,
+                // disabled for the synthetic group-isolation stack (whose indices
+                // don't match the real stack the cut is computed from) and for a
+                // live clip move (the frozen base would ghost — see above).
+                !has_groups && !clip_live_move,
             );
             // Remember which Develop-window view this Mode B composite baked, so
             // the Develop window recomposites only when its view actually moves.
