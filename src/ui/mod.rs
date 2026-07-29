@@ -189,6 +189,10 @@ pub struct PathStyleData {
 pub struct NodeOverlay {
     /// Flattened contours (each a polyline) to draw as the path outline.
     pub outlines: Vec<Vec<(f32, f32)>>,
+    /// Segment currently inside the enlarged insertion hit area.
+    pub hovered_segment: Option<Vec<(f32, f32)>>,
+    /// Exact canvas-space point where a click will insert a node.
+    pub insertion_marker: Option<(f32, f32)>,
     /// Anchor points: `(canvas_x, canvas_y, selected)`.
     pub nodes: Vec<(f32, f32, bool)>,
     /// Bézier handle arms of the selected node: `[anchor_x, anchor_y, ctrl_x, ctrl_y]`.
@@ -1445,6 +1449,27 @@ pub fn build(
                         line.iter().map(|&(x, y)| to_screen_pos(x, y)).collect();
                     painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0_f32, accent)));
                 }
+            }
+            // Make the insertion target unambiguous without thickening every
+            // contour: only the segment under the pointer is emphasized.
+            if let Some(line) = &overlay.hovered_segment {
+                if line.len() >= 2 {
+                    let pts: Vec<egui::Pos2> =
+                        line.iter().map(|&(x, y)| to_screen_pos(x, y)).collect();
+                    painter.add(egui::Shape::line(
+                        pts,
+                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(70, 190, 255)),
+                    ));
+                }
+            }
+            if let Some((x, y)) = overlay.insertion_marker {
+                let p = to_screen_pos(x, y);
+                painter.circle_filled(p, 4.0, egui::Color32::WHITE);
+                painter.circle_stroke(
+                    p,
+                    4.0,
+                    egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(30, 110, 230)),
+                );
             }
             // Handle arms of the selected node (thin line + round control point).
             for &[ax, ay, hx, hy] in &overlay.handles {

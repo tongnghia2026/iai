@@ -25,7 +25,7 @@ use crate::core::vector::path::PathData;
 /// Screen-space grab radius for an anchor.
 const NODE_HIT_PX: f32 = 8.0;
 /// Screen-space grab radius for a segment (insert an anchor).
-const SEG_HIT_PX: f32 = 6.0;
+const SEG_HIT_PX: f32 = 9.0;
 /// Samples per segment when locating the nearest split parameter.
 const SEG_SAMPLES: usize = 40;
 /// Maximum flattening error in screen pixels for the editable outline.
@@ -429,6 +429,30 @@ impl App {
             }
         }
 
+        let (hovered_segment, insertion_marker) =
+            match self.node_hit_at_screen(self.edit.input.mouse_x, self.edit.input.mouse_y) {
+                Some(NodeHit::Segment(ci, seg, tparam)) => {
+                    match path.contours.get(ci).and_then(|c| c.segment(seg)) {
+                        Some((p0, p1, p2, p3)) => {
+                            let line = crate::core::vector::flatten::flatten_cubic(
+                                p0,
+                                p1,
+                                p2,
+                                p3,
+                                outline_tol,
+                            )
+                            .into_iter()
+                            .map(map)
+                            .collect();
+                            let marker = map(cubic_bezier(p0, p1, p2, p3, tparam));
+                            (Some(line), Some(marker))
+                        }
+                        None => (None, None),
+                    }
+                }
+                _ => (None, None),
+            };
+
         let mut nodes: Vec<(f32, f32, bool)> = Vec::new();
         let mut handles: Vec<[f32; 4]> = Vec::new();
         for (ci, c) in path.contours.iter().enumerate() {
@@ -451,6 +475,8 @@ impl App {
         }
         Some(crate::ui::NodeOverlay {
             outlines,
+            hovered_segment,
+            insertion_marker,
             nodes,
             handles,
             marquee: self
@@ -1111,6 +1137,19 @@ mod tests {
         );
         app.docs.documents[0].canvas.undo().expect("undo");
         assert_eq!(model_path(&app, id).contours[0].nodes.len(), 4);
+    }
+
+    #[test]
+    fn segment_hover_exposes_highlight_and_exact_insertion_marker() {
+        let (mut app, _id) = app_with_path();
+        app.edit.input.mouse_x = 120.0;
+        app.edit.input.mouse_y = 127.5; // within the enlarged 9 px hit area
+
+        let overlay = app.active_node_overlay().expect("node overlay");
+        assert!(overlay.hovered_segment.is_some());
+        let marker = overlay.insertion_marker.expect("insertion marker");
+        assert!((marker.0 - 120.0).abs() < 0.6);
+        assert!((marker.1 - 120.0).abs() < 0.6);
     }
 
     fn node_at(app: &App, id: u32, ci: usize, ni: usize) -> crate::core::vector::path::Node {
