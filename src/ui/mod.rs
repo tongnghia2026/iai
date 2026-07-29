@@ -45,6 +45,19 @@ pub const CLONE_SOURCE_PREVIEW_MAX_SIZE: usize = 512;
 // have no reliable stacking relationship with window layers.
 const CANVAS_TOOL_OVERLAY_ORDER: egui::Order = egui::Order::Background;
 
+/// Shared layer for the editable Path raster and its editing chrome.
+///
+/// Keeping these in one layer makes call order authoritative: the display
+/// raster is emitted first, then outlines, handles and anchors. Separate layer
+/// ids at the same egui order can retain an older stacking order and let the
+/// curve cover the nodes that must remain visible and draggable.
+fn canvas_path_overlay_layer() -> egui::LayerId {
+    egui::LayerId::new(
+        CANVAS_TOOL_OVERLAY_ORDER,
+        egui::Id::new("canvas_path_overlay"),
+    )
+}
+
 pub(crate) fn document_side_dialog_pos(
     ctx: &egui::Context,
     data: &UiData,
@@ -1395,10 +1408,7 @@ pub fn build(
                     textures
                 });
             let painter = ctx
-                .layer_painter(egui::LayerId::new(
-                    CANVAS_TOOL_OVERLAY_ORDER,
-                    egui::Id::new("active_path_display"),
-                ))
+                .layer_painter(canvas_path_overlay_layer())
                 .with_clip_rect(canvas_viewport);
             let px_canvas_x = display.canvas_w / display.raster_w as f32;
             let px_canvas_y = display.canvas_h / display.raster_h as f32;
@@ -1425,10 +1435,7 @@ pub fn build(
         // the selected node's Bézier handle arms.
         if let Some(overlay) = &data.tool.node_overlay {
             let painter = ctx
-                .layer_painter(egui::LayerId::new(
-                    egui::Order::Foreground,
-                    egui::Id::new("node_overlay"),
-                ))
+                .layer_painter(canvas_path_overlay_layer())
                 .with_clip_rect(canvas_viewport);
             let accent = egui::Color32::from_rgb(64, 140, 240);
             // Path outline (steady blue line, like the Pen preview).
@@ -1498,10 +1505,7 @@ pub fn build(
         // radius and an ellipse preview.
         if let Some(overlay) = &data.tool.path_gradient_overlay {
             let painter = ctx
-                .layer_painter(egui::LayerId::new(
-                    egui::Order::Foreground,
-                    egui::Id::new("path_gradient_overlay"),
-                ))
+                .layer_painter(canvas_path_overlay_layer())
                 .with_clip_rect(canvas_viewport);
             let center = to_screen_pos(overlay.center.0, overlay.center.1);
             let axis_x = to_screen_pos(overlay.axis_x.0, overlay.axis_x.1);

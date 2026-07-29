@@ -28,8 +28,22 @@ const NODE_HIT_PX: f32 = 8.0;
 const SEG_HIT_PX: f32 = 6.0;
 /// Samples per segment when locating the nearest split parameter.
 const SEG_SAMPLES: usize = 40;
-/// Flatten tolerance (object-local units) for the overlay outline.
-const OUTLINE_TOL: f32 = 0.4;
+/// Maximum flattening error in screen pixels for the editable outline.
+///
+/// Keeping this in screen space is important: a fixed object-space tolerance
+/// turns into visibly angular chords when the user zooms in or when the Path's
+/// object transform scales it up.
+const OUTLINE_SCREEN_TOL: f32 = 0.15;
+
+fn node_outline_tolerance(t: AffineTransform, zoom: f32) -> f32 {
+    // The Frobenius norm is a safe upper bound for the linear transform's
+    // largest scale factor. Dividing by it keeps the flattened curve's error
+    // below OUTLINE_SCREEN_TOL after object→canvas→screen mapping.
+    let transform_scale = (t.a * t.a + t.b * t.b + t.c * t.c + t.d * t.d)
+        .sqrt()
+        .max(1e-4);
+    OUTLINE_SCREEN_TOL / (zoom.abs().max(1e-4) * transform_scale)
+}
 
 /// What the Node tool pointer is over on the active Path.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -404,12 +418,12 @@ impl App {
         };
 
         let mut outlines: Vec<Vec<(f32, f32)>> = Vec::new();
+        let outline_tol = node_outline_tolerance(t, self.edit.view.zoom);
         for c in &path.contours {
-            let poly = crate::core::vector::flatten::flatten_contour(c, OUTLINE_TOL);
-            let mut line: Vec<(f32, f32)> = poly.iter().map(|p| map(*p)).collect();
-            if c.closed && line.len() >= 2 {
-                line.push(line[0]);
-            }
+            // `flatten_contour` already returns the first anchor again for a
+            // closed contour, so no extra closing point is needed here.
+            let poly = crate::core::vector::flatten::flatten_contour(c, outline_tol);
+            let line: Vec<(f32, f32)> = poly.iter().map(|p| map(*p)).collect();
             if line.len() >= 2 {
                 outlines.push(line);
             }
@@ -961,6 +975,20 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_outline_tolerance_tracks_zoom_and_object_scale() {
+        let identity = node_outline_tolerance(AffineTransform::IDENTITY, 1.0);
+        let zoomed = node_outline_tolerance(AffineTransform::IDENTITY, 4.0);
+        let scaled = node_outline_tolerance(AffineTransform::scale(4.0, 4.0), 1.0);
+
+        assert!(zoomed < identity);
+        assert!(scaled < identity);
+        assert!((zoomed - identity / 4.0).abs() < 1e-6);
+        // The Frobenius bound for a uniform 4× transform is 4√2, so it is
+        // intentionally a little more conservative than the zoom-only case.
+        assert!(scaled <= identity / 4.0);
+    }
     use crate::core::canvas::Canvas;
     use crate::core::command_vector::CreatePathLayer;
     use crate::core::gateway::ChangeKind;

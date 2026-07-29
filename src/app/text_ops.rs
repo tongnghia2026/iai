@@ -175,10 +175,10 @@ impl App {
     /// sat. One structural undo restores the Text layer. Returns true when it
     /// converted.
     ///
-    /// A text layer's raster mask can't follow the reshaped curves, so it is
-    /// dropped (text layers rarely carry one); the vector opacity carries the
-    /// layer's own `Layer::opacity`, while `TextData::opacity` is folded into each
-    /// object's `VectorStyle::opacity` by [`crate::core::text::text_to_curves`].
+    /// The existing layer mask is preserved on the in-place Path layer, just like
+    /// Shape-to-Curves; the vector opacity carries the layer's own
+    /// `Layer::opacity`, while `TextData::opacity` is folded into each object's
+    /// `VectorStyle::opacity` by [`crate::core::text::text_to_curves`].
     pub fn text_to_curves(&mut self, idx: usize) -> bool {
         use crate::core::command_vector::apply_object_to_layer;
         use crate::core::vector::affine::AffineTransform;
@@ -239,7 +239,6 @@ impl App {
             let Some(layer) = canvas.layer_stack.layers.get_mut(idx) else {
                 return false;
             };
-            layer.mask = None;
             apply_object_to_layer(layer, objects[0].clone());
         }
         canvas.layer_stack.active_idx = idx;
@@ -262,11 +261,9 @@ impl App {
         canvas.reconcile_path_ink();
         canvas.layer_revision += 1;
 
-        let mut cmd = before;
-        cmd.capture_after(&canvas.layer_stack, cw, ch);
-        canvas.record(Box::new(cmd));
-
         // Select the converted layer so the Move box shows without an extra click.
+        // Do this before capturing the after-state so redo restores the exact
+        // selection produced by the original conversion.
         for l in &mut canvas.layer_stack.layers {
             l.selected = false;
         }
@@ -277,6 +274,10 @@ impl App {
         if let Some(l) = canvas.layer_stack.layers.get_mut(active) {
             l.selected = true;
         }
+
+        let mut cmd = before;
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.shell.status_msg = "Đã chuyển chữ thành đường cong (Path)".to_string();
@@ -850,6 +851,61 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app_with_text(content: &str) -> (App, usize) {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let canvas = &mut app.docs.documents[0].canvas;
+        let idx = canvas.layer_stack.add_layer(200, 200);
+        let td = TextData {
+            content: content.to_string(),
+            font_family: crate::core::text::TextFontFamily::DejaVuSans,
+            font_px: 48.0,
+            ..TextData::default()
+        };
+        rasterize_into_layer(canvas, idx, (20, 30), td);
+        canvas.layer_stack.active_idx = idx;
+        (app, idx)
+    }
+
+    #[test]
+    fn text_to_curves_preserves_mask_and_undo_redo_selection() {
+        let (mut app, idx) = app_with_text("Aa");
+        {
+            let layer = &mut app.docs.documents[0].canvas.layer_stack.layers[idx];
+            layer.add_mask(false);
+            layer.selected = false;
+        }
+
+        assert!(app.text_to_curves(idx));
+        let canvas = &mut app.docs.documents[0].canvas;
+        assert!(
+            canvas.layer_stack.layers[idx].mask.is_some(),
+            "conversion must preserve the text layer mask"
+        );
+        assert!(canvas.layer_stack.layers[idx].selected);
+        assert!(matches!(
+            canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(_))
+        ));
+
+        canvas.undo().expect("undo text-to-curves");
+        assert!(matches!(
+            canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Text(_)
+        ));
+        assert!(
+            !canvas.layer_stack.layers[idx].selected,
+            "undo restores the original selection"
+        );
+
+        canvas.redo().expect("redo text-to-curves");
+        assert!(canvas.layer_stack.layers[idx].mask.is_some());
+        assert!(
+            canvas.layer_stack.layers[idx].selected,
+            "redo restores the conversion's selection"
+        );
+    }
 
     #[test]
     fn click_outside_is_refused_while_editing() {

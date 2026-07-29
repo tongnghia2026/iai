@@ -54,6 +54,41 @@ pub struct PathBox {
     pub center: (f32, f32),
 }
 
+/// Cursor hint for one oriented-box resize handle.
+///
+/// Unit box axes make corner directions independent of aspect ratio. Using the
+/// raw centre-to-corner vector made tall, narrow text boxes report an edge
+/// cursor because that vector is almost vertical.
+fn path_handle_cursor_hint(bx: &PathBox, h: TransformHandle) -> u8 {
+    let unit = |x: f32, y: f32| {
+        let len = (x * x + y * y).sqrt().max(1e-6);
+        (x / len, y / len)
+    };
+    let (cx, cy) = bx.center;
+    let (ux, uy) = unit(bx.handles[4].0 - cx, bx.handles[4].1 - cy);
+    let (vx, vy) = unit(bx.handles[6].0 - cx, bx.handles[6].1 - cy);
+    let (dx, dy) = match h {
+        TransformHandle::TopLeft => (-ux - vx, -uy - vy),
+        TransformHandle::TopCenter => (-vx, -vy),
+        TransformHandle::TopRight => (ux - vx, uy - vy),
+        TransformHandle::MiddleLeft | TransformHandle::MiddleRight => (ux, uy),
+        TransformHandle::BottomLeft => (-ux + vx, -uy + vy),
+        TransformHandle::BottomCenter => (vx, vy),
+        TransformHandle::BottomRight => (ux + vx, uy + vy),
+        TransformHandle::Center => return 0,
+    };
+    let deg = dy.atan2(dx).to_degrees().rem_euclid(180.0);
+    if !(22.5..157.5).contains(&deg) {
+        5
+    } else if (67.5..112.5).contains(&deg) {
+        4
+    } else if (22.5..67.5).contains(&deg) {
+        2
+    } else {
+        3
+    }
+}
+
 /// The 8 scale handles, in the order the overlay expects.
 const HANDLE_ORDER: [TransformHandle; 8] = [
     TransformHandle::TopLeft,
@@ -410,24 +445,7 @@ impl App {
                 PathBoxHit::Rotate => return 6,
                 PathBoxHit::Handle(h) => {
                     if let Some(bx) = self.active_path_transform_box() {
-                        let zoom = self.edit.view.zoom;
-                        let vox = self.edit.view.offset_x;
-                        let voy = self.edit.view.offset_y;
-                        if let Some(i) = HANDLE_ORDER.iter().position(|x| *x == h) {
-                            let (hx, hy) = bx.handles[i];
-                            let dx = (hx * zoom + vox) - (bx.center.0 * zoom + vox);
-                            let dy = (hy * zoom + voy) - (bx.center.1 * zoom + voy);
-                            let deg = dy.atan2(dx).to_degrees().rem_euclid(180.0);
-                            return if !(22.5..157.5).contains(&deg) {
-                                5 // horizontal → EW
-                            } else if (67.5..112.5).contains(&deg) {
-                                4 // vertical → NS
-                            } else if (22.5..67.5).contains(&deg) {
-                                2 // "\" diagonal → NWSE
-                            } else {
-                                3 // "/" diagonal → NESW
-                            };
-                        }
+                        return path_handle_cursor_hint(&bx, h);
                     }
                     return 0;
                 }
@@ -829,6 +847,40 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tall_path_box_corner_cursors_stay_diagonal() {
+        let bx = PathBox {
+            corners: [(0.0, 0.0), (10.0, 0.0), (0.0, 200.0), (10.0, 200.0)],
+            handles: [
+                (0.0, 0.0),
+                (5.0, 0.0),
+                (10.0, 0.0),
+                (0.0, 100.0),
+                (10.0, 100.0),
+                (0.0, 200.0),
+                (5.0, 200.0),
+                (10.0, 200.0),
+            ],
+            center: (5.0, 100.0),
+        };
+
+        assert_eq!(path_handle_cursor_hint(&bx, TransformHandle::TopLeft), 2);
+        assert_eq!(
+            path_handle_cursor_hint(&bx, TransformHandle::BottomRight),
+            2
+        );
+        assert_eq!(path_handle_cursor_hint(&bx, TransformHandle::TopRight), 3);
+        assert_eq!(path_handle_cursor_hint(&bx, TransformHandle::BottomLeft), 3);
+        assert_eq!(
+            path_handle_cursor_hint(&bx, TransformHandle::MiddleRight),
+            5
+        );
+        assert_eq!(
+            path_handle_cursor_hint(&bx, TransformHandle::BottomCenter),
+            4
+        );
+    }
 
     #[test]
     fn gpu_path_preview_maps_pending_destination_back_to_original_canvas() {
