@@ -981,6 +981,29 @@ impl App {
     }
 
     pub fn update_transform_preview(&mut self) {
+        // A clip mask is derived from the child/base geometry. Make sure Free
+        // Transform starts every preview frame from the current derived mask,
+        // rather than carrying a stale bake into the GPU's fixed-frame sampling
+        // path. Unlike Move, the transform itself lives only in the preview
+        // matrix, so the fingerprint gate makes subsequent drag frames no-ops.
+        // Both affine and projective previews below then read the same fresh mask.
+        let clip_mask_changed = self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .refresh_clip_masks();
+        if clip_mask_changed {
+            let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+            let clip_bounds: Vec<(i32, i32, u32, u32)> = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .filter(|l| l.clip_parent_id.is_some())
+                .map(|l| (l.offset.0, l.offset.1, l.width, l.height))
+                .collect();
+            for (ox, oy, lw, lh) in clip_bounds {
+                canvas.mark_dirty_layer_bounds(ox, oy, lw, lh);
+            }
+        }
+
         let previews: Vec<TransformPreviewUniform> = if let Some(ts) = &self.edit.transform_state {
             let Some(inv_m) = ts.inverse_homography() else {
                 return;

@@ -450,9 +450,30 @@ impl Tool for MoveTool {
             self.total_dx = target_dx;
             self.total_dy = target_dy;
 
+            // Keep a clipping-mask child's derived mask in the same coordinate
+            // space as its moving image. The GPU live-pin preview deliberately
+            // keeps the previous bake, but that can make the image disappear
+            // where its source and mask tile maps diverge until mouse-up. Re-bake
+            // after the offset changes so the normal zero-shift path is exact
+            // throughout the drag. The fingerprint gate makes unrelated moves a
+            // cheap no-op.
+            let clip_mask_changed = canvas.refresh_clip_masks();
+
             for (ox, oy, lw, lh) in old_bounds {
                 canvas.mark_dirty_layer_bounds(ox, oy, lw, lh);
                 canvas.mark_dirty_layer_bounds(ox + dx, oy + dy, lw, lh);
+            }
+            if clip_mask_changed {
+                let clip_bounds: Vec<(i32, i32, u32, u32)> = canvas
+                    .layer_stack
+                    .layers
+                    .iter()
+                    .filter(|l| l.clip_parent_id.is_some())
+                    .map(|l| (l.offset.0, l.offset.1, l.width, l.height))
+                    .collect();
+                for (ox, oy, lw, lh) in clip_bounds {
+                    canvas.mark_dirty_layer_bounds(ox, oy, lw, lh);
+                }
             }
         }
 
