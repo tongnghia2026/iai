@@ -114,6 +114,8 @@ pub struct LayerIntent {
     pub rasterize_layer: Option<usize>,
     /// Convert the Shape layer (this index) into an editable vector Path layer.
     pub convert_to_curves: Option<usize>,
+    /// Convert the Text layer (this index) into editable vector Path layer(s).
+    pub text_to_curves: Option<usize>,
     /// Weld/Trim/Intersect/Exclude the selected vector layers into one Path.
     pub boolean_op: Option<crate::core::vector::boolean::BooleanOp>,
     /// PowerClip: place the selected content inside the selected vector frame.

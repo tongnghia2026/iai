@@ -21,6 +21,7 @@ pub mod color;
 pub mod display;
 pub mod flatten;
 pub mod from_shape;
+pub mod from_text;
 pub mod hittest;
 pub mod object;
 pub mod ops;

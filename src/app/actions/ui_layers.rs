@@ -154,6 +154,9 @@ impl App {
         if let Some(idx) = actions.layers.convert_to_curves.take() {
             self.convert_shape_to_path(idx);
         }
+        if let Some(idx) = actions.layers.text_to_curves.take() {
+            self.text_to_curves(idx);
+        }
         if let Some(op) = actions.layers.boolean_op.take() {
             self.apply_boolean(op);
         }

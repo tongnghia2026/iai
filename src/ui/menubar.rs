@@ -618,6 +618,20 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.layers.convert_to_curves = Some(data.layers.active_layer_idx);
                             ui.close();
                         }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Convert Text to Curves",
+                                "",
+                                data.layers
+                                    .layer_types
+                                    .get(data.layers.active_layer_idx)
+                                    .is_some_and(|t| t == "Text"),
+                            ))
+                            .clicked()
+                        {
+                            actions.layers.text_to_curves = Some(data.layers.active_layer_idx);
+                            ui.close();
+                        }
                         {
                             use crate::core::vector::boolean::BooleanOp;
                             // Enabled once at least two selected vector objects
