@@ -898,19 +898,43 @@ fn appearance_color_chip(ui: &mut egui::Ui, color: [u8; 4], tip: &str) -> bool {
 }
 
 /// Quick colours as a set of named swatches, shared by the strip and elsewhere.
-const QUICK_PALETTE: [(&str, [u8; 4]); 12] = [
+/// A broad, production-friendly colour rail ordered from neutrals through the
+/// colour wheel and into earth tones. Keeping the tones adjacent makes the
+/// long strip quick to scan while giving it enough entries to comfortably fill
+/// the space beside Layers on a normal-height window.
+const QUICK_PALETTE: [(&str, [u8; 4]); 32] = [
     ("Black", [0, 0, 0, 255]),
+    ("Charcoal", [51, 51, 51, 255]),
+    ("Gray", [112, 112, 112, 255]),
+    ("Silver", [192, 192, 192, 255]),
     ("White", [255, 255, 255, 255]),
-    ("Gray", [128, 128, 128, 255]),
+    ("Crimson", [160, 20, 48, 255]),
     ("Red", [237, 28, 36, 255]),
+    ("Coral", [255, 102, 94, 255]),
+    ("Vermilion", [242, 82, 32, 255]),
     ("Orange", [247, 148, 30, 255]),
-    ("Yellow", [255, 242, 0, 255]),
+    ("Amber", [255, 193, 7, 255]),
+    ("Yellow", [255, 235, 59, 255]),
+    ("Lemon", [255, 250, 120, 255]),
+    ("Lime", [139, 195, 74, 255]),
     ("Green", [0, 166, 81, 255]),
-    ("Cyan", [0, 174, 239, 255]),
-    ("Blue", [0, 84, 166, 255]),
-    ("Violet", [102, 45, 145, 255]),
+    ("Emerald", [0, 121, 83, 255]),
+    ("Mint", [102, 215, 170, 255]),
+    ("Teal", [0, 137, 123, 255]),
+    ("Cyan", [0, 188, 212, 255]),
+    ("Sky Blue", [41, 182, 246, 255]),
+    ("Blue", [30, 112, 210, 255]),
+    ("Royal Blue", [45, 75, 190, 255]),
+    ("Navy", [25, 45, 105, 255]),
+    ("Indigo", [63, 81, 181, 255]),
+    ("Violet", [103, 58, 183, 255]),
+    ("Purple", [142, 36, 170, 255]),
     ("Magenta", [236, 0, 140, 255]),
+    ("Pink", [244, 81, 130, 255]),
+    ("Rose", [194, 24, 91, 255]),
+    ("Ochre", [184, 134, 11, 255]),
     ("Brown", [117, 76, 36, 255]),
+    ("Dark Brown", [78, 52, 35, 255]),
 ];
 
 /// The Corel-style vertical colour strip pinned to the right edge: a "no fill"
@@ -929,7 +953,7 @@ fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
 
     // Small squares centred in the strip, like CorelDRAW's palette column.
     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+        ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
 
         let none = palette_none_button(ui).on_hover_text(if has_path {
             "No colour\nLeft: remove Fill · Right: remove Outline"
@@ -1152,7 +1176,7 @@ fn palette_color_button(
 }
 
 /// Edge length of one colour square in the vertical strip.
-const PALETTE_STRIP_CHIP: f32 = 24.0;
+const PALETTE_STRIP_CHIP: f32 = 22.0;
 
 /// A small square colour chip for the vertical strip (Corel-style palette).
 fn palette_strip_button(
