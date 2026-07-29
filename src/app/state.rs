@@ -2359,6 +2359,8 @@ impl App {
                     | ToolId::Smudge
                     | ToolId::Dodge
                     | ToolId::Burn
+                    // Vector Brush shows a size ring so the drawn width is visible.
+                    | ToolId::VectorBrush
             );
         if needs_native_ring {
             self.update_ring_cursor(event_loop);

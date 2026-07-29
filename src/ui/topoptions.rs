@@ -104,6 +104,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             ToolId::Node => node_options(ui, data, actions),
                             ToolId::PerspectiveCrop => perspective_crop_options(ui, data, actions),
                             ToolId::Pen => pen_options(ui, data, actions),
+                            ToolId::VectorBrush => vector_brush_options(ui, data, actions),
                             _ => default_options(ui, data),
                         }
                     });
@@ -274,6 +275,56 @@ fn pen_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             actions.tool.set_pen_stroke_width = Some(sw);
         }
     }
+}
+
+fn vector_brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    ui.label(egui::RichText::new("Vector Brush").strong());
+    ui.separator();
+
+    ui.label("Width:");
+    let mut w = data.tool.vector_brush_width;
+    if ui
+        .add(
+            egui::DragValue::new(&mut w)
+                .range(0.5..=500.0)
+                .suffix(" px")
+                .speed(0.2),
+        )
+        .changed()
+    {
+        actions.tool.set_vector_brush_width = Some(w);
+    }
+
+    ui.separator();
+    ui.label("Smoothing:");
+    let mut s = data.tool.vector_brush_smoothing;
+    if ui
+        .add(egui::Slider::new(&mut s, 0.0..=0.95).fixed_decimals(2))
+        .changed()
+    {
+        actions.tool.set_vector_brush_smoothing = Some(s);
+    }
+
+    ui.separator();
+    let mut pressure = data.tool.vector_brush_pressure;
+    if ui.checkbox(&mut pressure, "Pressure").changed() {
+        actions.tool.set_vector_brush_pressure = Some(pressure);
+    }
+    let mut velocity = data.tool.vector_brush_velocity;
+    if ui.checkbox(&mut velocity, "Speed taper").changed() {
+        actions.tool.set_vector_brush_velocity = Some(velocity);
+    }
+
+    ui.separator();
+    ui.add_enabled_ui(data.tool.vector_brush_can_expand, |ui| {
+        if ui
+            .button("Expand Stroke")
+            .on_hover_text("Chuyển nét vẽ thành đường viền kín (để tô/kết hợp hình)")
+            .clicked()
+        {
+            actions.tool.expand_vector_brush = true;
+        }
+    });
 }
 
 fn brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {

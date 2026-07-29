@@ -914,6 +914,19 @@ impl App {
                 wand_sample_merged: self.edit.tools.wand().sample_merged,
                 pen_mode: self.edit.tools.pen().mode.to_u8(),
                 pen_stroke_width: self.edit.tools.pen().stroke_width,
+                vector_brush_width: self.edit.tools.vector_brush().width,
+                vector_brush_color: self.edit.fg_color,
+                vector_brush_smoothing: self.edit.tools.vector_brush().smoothing,
+                vector_brush_pressure: self.edit.tools.vector_brush().pressure,
+                vector_brush_velocity: self.edit.tools.vector_brush().velocity,
+                vector_brush_path: if self.edit.tools.active_id()
+                    == crate::tools::ToolId::VectorBrush
+                {
+                    self.edit.tools.vector_brush().preview_points()
+                } else {
+                    Vec::new()
+                },
+                vector_brush_can_expand: self.active_brush_layer_id().is_some(),
                 shape_kind: self.edit.tools.shape().kind.to_u8(),
                 shape_fill: self.edit.tools.shape().fill,
                 shape_fill_color: self.edit.tools.shape().fill_color,

@@ -27,6 +27,7 @@ pub mod smart_select;
 pub mod smudge;
 pub mod text_tool;
 pub mod transform_tool;
+pub mod vector_brush;
 pub mod zoom_tool;
 
 use crate::core::selection::SelectionMode;
@@ -94,6 +95,7 @@ impl ToolId {
             ToolId::Burn => "Burn",
             ToolId::Patch => "Patch",
             ToolId::Node => "Node",
+            ToolId::VectorBrush => "Vector Brush",
         }
     }
 
@@ -127,6 +129,8 @@ impl ToolId {
                 // Node editing routes through the vector gateway, which
                 // re-derives ink from the mirror — no direct ink write.
                 | ToolId::Node
+                // The Vector Brush commits a Path layer through the same gateway.
+                | ToolId::VectorBrush
         )
     }
 }
@@ -187,6 +191,7 @@ pub struct ToolManager {
     eraser: eraser::EraserTool,
     move_tool: move_tool::MoveTool,
     node_tool: node_tool::NodeTool,
+    vector_brush: vector_brush::VectorBrushTool,
     eyedropper: eyedropper::EyedropperTool,
     fill: fill::FillTool,
     crop: crop::CropTool,
@@ -228,6 +233,7 @@ impl ToolManager {
             eraser: eraser::EraserTool::new(),
             move_tool: move_tool::MoveTool::new(),
             node_tool: node_tool::NodeTool::new(),
+            vector_brush: vector_brush::VectorBrushTool::new(),
             eyedropper: eyedropper::EyedropperTool::new(),
             fill: fill::FillTool::new(),
             crop: crop::CropTool::new(),
@@ -287,6 +293,7 @@ impl ToolManager {
             ToolId::Burn => &self.burn,
             ToolId::Patch => &self.patch,
             ToolId::Node => &self.node_tool,
+            ToolId::VectorBrush => &self.vector_brush,
         }
     }
 
@@ -320,6 +327,7 @@ impl ToolManager {
             ToolId::Burn => &mut self.burn,
             ToolId::Patch => &mut self.patch,
             ToolId::Node => &mut self.node_tool,
+            ToolId::VectorBrush => &mut self.vector_brush,
         }
     }
 
@@ -539,6 +547,12 @@ impl ToolManager {
     }
     pub fn pen_mut(&mut self) -> &mut pen::PenTool {
         &mut self.pen
+    }
+    pub fn vector_brush(&self) -> &vector_brush::VectorBrushTool {
+        &self.vector_brush
+    }
+    pub fn vector_brush_mut(&mut self) -> &mut vector_brush::VectorBrushTool {
+        &mut self.vector_brush
     }
     pub fn smudge(&self) -> &smudge::SmudgeTool {
         &self.smudge

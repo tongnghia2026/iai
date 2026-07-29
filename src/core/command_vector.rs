@@ -513,6 +513,60 @@ impl Command for RasterizeVectorLayer {
     }
 }
 
+// ── ExpandVectorStroke ───────────────────────────────────────────────────────
+
+/// Expand a Vector Brush stroke into a closed-outline Path (Phase 6B "Expand
+/// Stroke"): replaces the object's open centerline + brush appearance with a
+/// closed filled outline a Boolean/fill can consume. The whole object changes
+/// (geometry AND `brush` drop together), so undo restores the entire old object.
+pub struct ExpandVectorStroke {
+    layer_id: u32,
+    old: Option<VectorObjectData>,
+}
+
+impl ExpandVectorStroke {
+    pub fn new(layer_id: u32) -> Self {
+        Self {
+            layer_id,
+            old: None,
+        }
+    }
+}
+
+impl Command for ExpandVectorStroke {
+    fn execute(&mut self, ctx: &mut EditContext) -> Result<(), String> {
+        let obj = path_object(ctx, self.layer_id)?;
+        let brush = obj
+            .brush
+            .clone()
+            .ok_or_else(|| format!("Layer {} is not a brush stroke", self.layer_id))?;
+        let outline = crate::core::vector::brush::expand_stroke(&obj.path, &brush)
+            .ok_or_else(|| "brush stroke has no expandable outline".to_string())?;
+        let new_obj = VectorObjectData {
+            path: outline,
+            style: obj.style,
+            transform: obj.transform,
+            brush: None,
+        };
+        new_obj.validate()?;
+        self.old = Some(obj);
+        set_path_object(ctx, self.layer_id, new_obj)
+    }
+
+    fn undo(&mut self, ctx: &mut EditContext) -> Result<(), String> {
+        let old = self.old.clone().ok_or("nothing to undo")?;
+        set_path_object(ctx, self.layer_id, old)
+    }
+
+    fn label(&self) -> &str {
+        "Expand Stroke"
+    }
+
+    fn memory_bytes(&self) -> usize {
+        self.old.as_ref().map_or(0, |o| o.path.total_nodes() * 40)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,6 +899,89 @@ mod tests {
         c.rebuild_path_caches();
         let l = c.layer_stack.layers.iter().find(|l| l.id == id).unwrap();
         assert!(!l.tiles.tiles.is_empty(), "cache re-derived from the model");
+    }
+
+    #[test]
+    fn expand_stroke_converts_brush_to_closed_path_and_undo_restores() {
+        use crate::core::vector::brush::BrushStroke;
+        use crate::core::vector::style::LineCap;
+
+        // A brush stroke: open two-node centerline + uniform width.
+        let centerline = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(40.0, 0.0)),
+                ],
+                false,
+            )],
+            FillRule::NonZero,
+        );
+        let brush_obj = VectorObjectData::new_brush(
+            centerline,
+            VectorStyle::filled(ColorValue::rgb(0.0, 0.0, 0.0)),
+            AffineTransform::translate(20.0, 20.0),
+            BrushStroke::uniform(10.0, LineCap::Round),
+        );
+        let mut c = canvas();
+        let mut cmd = CreatePathLayer::new(brush_obj, "Brush 1");
+        cmd.execute(&mut edit_ctx(&mut c)).unwrap();
+        let id = cmd.created_id().unwrap();
+        c.record(Box::new(cmd));
+
+        c.execute(
+            Box::new(ExpandVectorStroke::new(id)),
+            ChangeKind::LayerStructure,
+        )
+        .expect("expand");
+        // Now a closed, brush-less filled outline.
+        let obj = match &c
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == id)
+            .unwrap()
+            .layer_type
+        {
+            LayerType::Vector(VectorGeometry::Path(o)) => o.clone(),
+            _ => panic!("not a path"),
+        };
+        assert!(obj.brush.is_none(), "brush appearance is baked away");
+        assert!(obj.path.contours[0].closed, "outline is closed");
+
+        c.undo().expect("undo");
+        let restored = match &c
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == id)
+            .unwrap()
+            .layer_type
+        {
+            LayerType::Vector(VectorGeometry::Path(o)) => o.clone(),
+            _ => panic!("not a path"),
+        };
+        assert!(restored.brush.is_some(), "undo restores the brush stroke");
+        assert!(
+            !restored.path.contours[0].closed,
+            "centerline is open again"
+        );
+    }
+
+    #[test]
+    fn expand_stroke_rejects_non_brush_layer() {
+        let mut c = canvas();
+        let mut cmd = CreatePathLayer::new(obj(40.0), "Path 1");
+        cmd.execute(&mut edit_ctx(&mut c)).unwrap();
+        let id = cmd.created_id().unwrap();
+        c.record(Box::new(cmd));
+        let err = c
+            .execute(
+                Box::new(ExpandVectorStroke::new(id)),
+                ChangeKind::LayerStructure,
+            )
+            .unwrap_err();
+        assert!(err.message.contains("not a brush stroke"));
     }
 
     // ── helpers ──

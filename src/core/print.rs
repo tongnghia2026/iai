@@ -651,8 +651,23 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
         if fill.is_none() && fill_gradient.is_none() && stroke.is_none() {
             continue;
         }
+        // A Vector Brush stroke is a variable-width ribbon over an OPEN centerline
+        // — filling that centerline as a polygon would be wrong. Emit its expanded
+        // closed outline instead (the same geometry Expand Stroke bakes), so the
+        // PDF ribbon matches the on-screen raster. If it can't be expanded, fall
+        // back to the raster base like any other unsupported object.
+        let emitted_path = match &obj.brush {
+            Some(brush) => match crate::core::vector::brush::expand_stroke(&obj.path, brush) {
+                Some(mut outline) => {
+                    outline.transform(&obj.transform);
+                    outline
+                }
+                None => break,
+            },
+            None => obj.path_in_layer_space(),
+        };
         objects.push(PdfVectorObject {
-            path: obj.path_in_layer_space(),
+            path: emitted_path,
             fill,
             fill_gradient,
             stroke,
@@ -1886,6 +1901,52 @@ mod tests {
         ));
         let selection = collect_pdf_vectors(&canvas);
         assert!(selection.promoted_layer_ids.is_empty());
+    }
+
+    #[test]
+    fn brush_stroke_promotes_as_closed_native_outline() {
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::brush::BrushStroke;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::{LineCap, VectorStyle};
+
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255; 60 * 60 * 4], 60, 60);
+        let index = canvas.add_layer();
+        // Open centerline + uniform brush, painted by a solid fill.
+        let centerline = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(10.0, 30.0)),
+                    Node::sharp(Point::new(50.0, 30.0)),
+                ],
+                false,
+            )],
+            FillRule::NonZero,
+        );
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new_brush(
+                centerline,
+                VectorStyle::filled(ColorValue::rgb(0.0, 0.0, 0.0)),
+                AffineTransform::IDENTITY,
+                BrushStroke::uniform(8.0, LineCap::Round),
+            ),
+        );
+        let selection = collect_pdf_vectors(&canvas);
+        assert_eq!(selection.objects.len(), 1, "brush ribbon promoted natively");
+        // The emitted path is the CLOSED expanded outline, not the open centerline.
+        assert!(
+            selection.objects[0].path.contours.iter().all(|c| c.closed),
+            "emitted brush outline must be closed"
+        );
+        assert!(
+            selection.objects[0].fill.is_some(),
+            "ribbon filled natively"
+        );
     }
 
     #[test]

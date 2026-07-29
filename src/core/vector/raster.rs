@@ -15,6 +15,7 @@
 
 use crate::core::geometry::Point;
 use crate::core::vector::affine::AffineTransform;
+use crate::core::vector::brush::BrushStroke;
 use crate::core::vector::flatten::flatten_path;
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::style::{GradientKind, Paint};
@@ -69,9 +70,25 @@ fn raster_layout(
     object: &VectorObjectData,
     clip: Option<crate::core::geometry::Rect>,
 ) -> Option<RasterLayout> {
-    let fill_visible = object.style.fill.is_visible();
-    let half = object.style.effective_stroke_width() * 0.5;
-    let stroke_visible = object.style.stroke.is_visible() && half > 0.0;
+    // A Vector Brush object paints a variable-width ribbon over its centerline,
+    // coloured by `fill`. Its bounds pad is the widest half-width (layer units);
+    // the ordinary fill/stroke pads apply only when there is no brush.
+    let (fill_visible, half, stroke_visible) = match &object.brush {
+        Some(brush) => {
+            let visible = brush.is_visible() && object.style.fill.is_visible();
+            (
+                visible,
+                brush.max_half_width() * object.transform_scale(),
+                false,
+            )
+        }
+        None => {
+            let fill_visible = object.style.fill.is_visible();
+            let half = object.style.effective_stroke_width() * 0.5;
+            let stroke_visible = object.style.stroke.is_visible() && half > 0.0;
+            (fill_visible, half, stroke_visible)
+        }
+    };
     if !fill_visible && !stroke_visible {
         return None;
     }
@@ -153,9 +170,6 @@ fn rasterize_impl(
         w,
         h,
     } = raster_layout(object, clip)?;
-    let fill_visible = object.style.fill.is_visible();
-    let half = object.style.effective_stroke_width() * 0.5;
-    let stroke_visible = object.style.stroke.is_visible() && half > 0.0;
     let offset = (off_x as i32, off_y as i32);
 
     // Shift every polyline into raster-local space once.
@@ -199,31 +213,49 @@ fn rasterize_impl(
             });
     };
 
-    // ── Fill ─────────────────────────────────────────────────────────────────
-    if fill_visible {
-        let even_odd = object.path.fill_rule == crate::core::vector::path::FillRule::EvenOdd;
-        let cov = fill_coverage(&local, w, h, even_odd);
-        paint_rows(
-            &mut rgba,
-            &cov,
-            &PreparedPaint::new(object.style.fill, object),
-        );
-    }
+    if let Some(brush) = &object.brush {
+        // ── Vector Brush ribbon (Phase 6B) ──────────────────────────────────
+        // A variable-width ribbon along the open centerline, coloured by `fill`.
+        // The width comes from the arc-length profile; round joins/caps fall out
+        // of unioning per-segment round cones.
+        if brush.is_visible() && object.style.fill.is_visible() {
+            if let Some(center) = local.first() {
+                let cov = ribbon_coverage(center, brush, object.transform_scale(), w, h);
+                paint_rows(
+                    &mut rgba,
+                    &cov,
+                    &PreparedPaint::new(object.style.fill, object),
+                );
+            }
+        }
+    } else {
+        // ── Fill ─────────────────────────────────────────────────────────────
+        if object.style.fill.is_visible() {
+            let even_odd = object.path.fill_rule == crate::core::vector::path::FillRule::EvenOdd;
+            let cov = fill_coverage(&local, w, h, even_odd);
+            paint_rows(
+                &mut rgba,
+                &cov,
+                &PreparedPaint::new(object.style.fill, object),
+            );
+        }
 
-    // ── Stroke (over the fill) ───────────────────────────────────────────────
-    if stroke_visible {
-        let (stroke_lines, stroke_closed) = dashed_polylines(
-            &local,
-            &closed,
-            object.style.stroke_style.dash.as_slice(),
-            object.style.stroke_style.dash.offset,
-        );
-        let cov = stroke_coverage(&stroke_lines, &stroke_closed, w, h, half);
-        paint_rows(
-            &mut rgba,
-            &cov,
-            &PreparedPaint::new(object.style.stroke, object),
-        );
+        // ── Stroke (over the fill) ─────────────────────────────────────────────
+        let half = object.style.effective_stroke_width() * 0.5;
+        if object.style.stroke.is_visible() && half > 0.0 {
+            let (stroke_lines, stroke_closed) = dashed_polylines(
+                &local,
+                &closed,
+                object.style.stroke_style.dash.as_slice(),
+                object.style.stroke_style.dash.offset,
+            );
+            let cov = stroke_coverage(&stroke_lines, &stroke_closed, w, h, half);
+            paint_rows(
+                &mut rgba,
+                &cov,
+                &PreparedPaint::new(object.style.stroke, object),
+            );
+        }
     }
 
     Some(PathRaster {
@@ -572,6 +604,111 @@ fn stroke_coverage(local: &[Vec<Point>], closed: &[bool], w: u32, h: u32, half: 
     cov
 }
 
+/// Variable-width brush ribbon coverage in `[0,1]` per pixel (Phase 6B). Each
+/// segment of the flattened layer-space centerline is a "round cone" — a capsule
+/// whose radius tapers from the half-width at one end to the half-width at the
+/// other — and consecutive cones are unioned via `max`, which yields round joins
+/// and round caps for free (the natural brush look). Only pixels inside each
+/// cone's padded bbox are touched, so a long thin stroke stays O(length·width).
+///
+/// `pts` is the centerline in RASTER-LOCAL space; `scale` maps the object-local
+/// profile width into layer/raster units. Widths are sampled along normalized
+/// arc length, so they stay aligned to the geometry regardless of node count.
+fn ribbon_coverage(pts: &[Point], brush: &BrushStroke, scale: f32, w: u32, h: u32) -> Vec<f32> {
+    let mut cov = vec![0f32; (w as usize) * (h as usize)];
+    if pts.is_empty() {
+        return cov;
+    }
+
+    // Per-vertex layer-space half-width from the arc-length profile.
+    let mut cum = vec![0.0_f32; pts.len()];
+    for i in 1..pts.len() {
+        cum[i] = cum[i - 1] + pts[i - 1].distance_to(pts[i]);
+    }
+    let total = *cum.last().unwrap();
+    let half: Vec<f32> = if total <= 1e-4 {
+        // A single dab (zero-length stroke): one disc of the endpoint width.
+        vec![brush.half_width_at(0.0) * scale; pts.len()]
+    } else {
+        cum.iter()
+            .map(|c| brush.half_width_at(c / total) * scale)
+            .collect()
+    };
+
+    let stamp = |cov: &mut [f32], a: Point, b: Point, ra: f32, rb: f32| {
+        let reach = ra.max(rb) + 0.75;
+        let min_x = (a.x.min(b.x) - reach).floor().max(0.0) as u32;
+        let max_x = ((a.x.max(b.x) + reach).ceil() as i64).clamp(0, w as i64) as u32;
+        let min_y = (a.y.min(b.y) - reach).floor().max(0.0) as u32;
+        let max_y = ((a.y.max(b.y) + reach).ceil() as i64).clamp(0, h as i64) as u32;
+        for py in min_y..max_y {
+            let row = (py as usize) * (w as usize);
+            for px in min_x..max_x {
+                let d = sd_round_cone(px as f32 + 0.5, py as f32 + 0.5, a, b, ra, rb);
+                let c = (0.5 - d).clamp(0.0, 1.0);
+                if c > 0.0 {
+                    let idx = row + px as usize;
+                    if c > cov[idx] {
+                        cov[idx] = c;
+                    }
+                }
+            }
+        }
+    };
+
+    if pts.len() == 1 {
+        stamp(&mut cov, pts[0], pts[0], half[0], half[0]);
+        return cov;
+    }
+    for i in 0..pts.len() - 1 {
+        stamp(
+            &mut cov,
+            pts[i],
+            pts[i + 1],
+            half[i].max(0.0),
+            half[i + 1].max(0.0),
+        );
+    }
+    cov
+}
+
+/// Signed distance from `(px,py)` to a 2D round cone: the convex hull of a circle
+/// of radius `r1` at `a` and radius `r2` at `b` (Inigo Quilez's `sdRoundCone`).
+/// Negative inside. Degenerate cases (coincident endpoints, one circle inside the
+/// other) fall back to the union of the two discs, which is always well-defined.
+fn sd_round_cone(px: f32, py: f32, a: Point, b: Point, r1: f32, r2: f32) -> f32 {
+    let bax = b.x - a.x;
+    let bay = b.y - a.y;
+    let l2 = bax * bax + bay * bay;
+    let rr = r1 - r2;
+    let a2 = l2 - rr * rr;
+    // Union-of-discs fallback when the axis is degenerate or one disc swallows
+    // the other (a2 ≤ 0): the closed-form third branch would take sqrt(<0).
+    if l2 < 1e-9 || a2 <= 1e-9 {
+        let da = ((px - a.x).powi(2) + (py - a.y).powi(2)).sqrt() - r1;
+        let db = ((px - b.x).powi(2) + (py - b.y).powi(2)).sqrt() - r2;
+        return da.min(db);
+    }
+    let il2 = 1.0 / l2;
+    let pax = px - a.x;
+    let pay = py - a.y;
+    let y = pax * bax + pay * bay;
+    let z = y - l2;
+    let vx = pax * l2 - bax * y;
+    let vy = pay * l2 - bay * y;
+    let x2 = vx * vx + vy * vy;
+    let y2 = y * y * l2;
+    let z2 = z * z * l2;
+    let k = rr.signum() * rr * rr * x2;
+    if z.signum() * a2 * z2 > k {
+        return (x2 + z2).sqrt() * il2 - r2;
+    }
+    if y.signum() * a2 * y2 < k {
+        return (x2 + y2).sqrt() * il2 - r1;
+    }
+    (x2 * a2 * il2).sqrt() * il2 + y * rr * il2 - r1
+}
+
 /// Distance from `(px,py)` to segment `a→b`.
 fn dist_to_segment(px: f32, py: f32, a: Point, b: Point) -> f32 {
     let dx = b.x - a.x;
@@ -753,6 +890,59 @@ mod tests {
         // A point on the left edge (layer x≈20) is painted.
         let ex = (20 - r.offset.0) as u32;
         assert!(alpha_at(&r, ex, cy) > 200, "edge painted");
+    }
+
+    #[test]
+    fn brush_ribbon_paints_along_centerline_and_tapers() {
+        use crate::core::vector::brush::{BrushStroke, WidthStop};
+        use crate::core::vector::path::Contour;
+        use crate::core::vector::style::LineCap;
+
+        // A horizontal centerline from (10,40)→(90,40) that tapers from full
+        // width at the start to a point at the end.
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(10.0, 40.0)),
+                    Node::sharp(Point::new(90.0, 40.0)),
+                ],
+                false,
+            )],
+            FillRule::NonZero,
+        );
+        let brush = BrushStroke {
+            base_width: 16.0,
+            profile: vec![
+                WidthStop { t: 0.0, width: 1.0 },
+                WidthStop { t: 1.0, width: 0.0 },
+            ],
+            cap: LineCap::Round,
+        };
+        let obj = VectorObjectData::new_brush(
+            path,
+            VectorStyle::filled(ColorValue::rgb(0.0, 0.0, 0.0)),
+            AffineTransform::IDENTITY,
+            brush,
+        );
+        let r = rasterize(&obj).expect("ribbon raster");
+
+        // On the centerline near the wide start: opaque.
+        let sx = (14 - r.offset.0) as u32;
+        let sy = (40 - r.offset.1) as u32;
+        assert!(alpha_at(&r, sx, sy) > 200, "wide end painted on the line");
+        // ~7px above the line at the wide start (half-width 8) is still covered.
+        let above = (33 - r.offset.1) as u32;
+        assert!(
+            alpha_at(&r, sx, above) > 100,
+            "wide end covers its half-width"
+        );
+        // The same vertical offset near the tapered (thin) end is NOT covered.
+        let ex = (86 - r.offset.0) as u32;
+        assert_eq!(
+            alpha_at(&r, ex, above),
+            0,
+            "tapered end is much thinner than the start"
+        );
     }
 
     #[test]

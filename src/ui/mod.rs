@@ -1128,6 +1128,32 @@ pub fn build(
             }
         }
 
+        // Vector Brush: preview the in-progress stroke at its true screen width so
+        // the drawn thickness is visible while dragging (committed on release).
+        if data.tool.vector_brush_path.len() >= 2 {
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("vector_brush_overlay"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            let pts: Vec<egui::Pos2> = data
+                .tool
+                .vector_brush_path
+                .iter()
+                .map(|&(x, y)| to_screen_pos(x, y))
+                .collect();
+            let fg = data.tool.vector_brush_color;
+            let width = (data.tool.vector_brush_width * zoom).max(1.0);
+            painter.add(egui::Shape::line(
+                pts,
+                egui::Stroke::new(
+                    width,
+                    egui::Color32::from_rgba_unmultiplied(fg[0], fg[1], fg[2], 150),
+                ),
+            ));
+        }
+
         if let Some([x0, y0, x1, y1]) = data.sel.rect_sel_preview {
             let painter = ctx
                 .layer_painter(egui::LayerId::new(

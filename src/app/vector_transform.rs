@@ -420,6 +420,19 @@ impl App {
                 continue;
             };
             let p = inv.apply_point(Point::new(cx, cy));
+            // A Vector Brush ribbon is an open centerline: hit it as a stroke of
+            // its widest half-width, not a filled polygon (whose "inside" of an
+            // open path is a near-zero sliver).
+            if let Some(brush) = &obj.brush {
+                let half = brush.max_half_width();
+                if brush.is_visible()
+                    && obj.style.fill.is_visible()
+                    && crate::core::vector::hittest::stroke_hit(&obj.path, p, half, tol)
+                {
+                    return Some(idx);
+                }
+                continue;
+            }
             let hit_fill = obj.style.fill.is_visible()
                 && crate::core::vector::hittest::fill_contains(&obj.path, p, tol);
             let half = obj.style.effective_stroke_width() * 0.5;

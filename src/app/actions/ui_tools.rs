@@ -509,6 +509,21 @@ impl App {
         if let Some(w) = actions.tool.set_pen_stroke_width.take() {
             self.edit.tools.pen_mut().stroke_width = w.clamp(1.0, 1000.0);
         }
+        if let Some(w) = actions.tool.set_vector_brush_width.take() {
+            self.edit.tools.vector_brush_mut().width = w.clamp(0.5, 1000.0);
+        }
+        if let Some(s) = actions.tool.set_vector_brush_smoothing.take() {
+            self.edit.tools.vector_brush_mut().smoothing = s.clamp(0.0, 0.95);
+        }
+        if let Some(p) = actions.tool.set_vector_brush_pressure.take() {
+            self.edit.tools.vector_brush_mut().pressure = p;
+        }
+        if let Some(v) = actions.tool.set_vector_brush_velocity.take() {
+            self.edit.tools.vector_brush_mut().velocity = v;
+        }
+        if std::mem::take(&mut actions.tool.expand_vector_brush) {
+            self.expand_active_brush_stroke();
+        }
         if let Some(k) = actions.tool.set_shape_kind.take() {
             self.edit.tools.shape_mut().kind = crate::tools::shape::ShapeKind::from_u8(k);
         }

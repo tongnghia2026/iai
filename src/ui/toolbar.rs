@@ -40,6 +40,12 @@ const PEN_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Pen, ph::PEN_NIB, "Pen (P)
 const NODE_GROUP: &[(ToolId, &str, &str)] =
     &[(ToolId::Node, ph::BEZIER_CURVE, "Node — edit points (A)")];
 
+const VECTOR_BRUSH_GROUP: &[(ToolId, &str, &str)] = &[(
+    ToolId::VectorBrush,
+    ph::SCRIBBLE_LOOP,
+    "Vector Brush — freehand editable stroke",
+)];
+
 const BRUSH_GROUP: &[(ToolId, &str, &str)] = &[
     (ToolId::Brush, ph::PAINT_BRUSH, "Brush (B)"),
     (ToolId::Pencil, ph::PENCIL, "Pencil (B)"),
@@ -89,6 +95,7 @@ const TOOL_GROUPS: &[&[(ToolId, &str, &str)]] = &[
     DODGE_GROUP,
     PEN_GROUP,
     NODE_GROUP,
+    VECTOR_BRUSH_GROUP,
     TEXT_GROUP,
     SHAPE_GROUP,
     HAND_GROUP,

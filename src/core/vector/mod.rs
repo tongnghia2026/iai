@@ -17,6 +17,7 @@
 
 pub mod affine;
 pub mod boolean;
+pub mod brush;
 pub mod color;
 pub mod display;
 pub mod flatten;

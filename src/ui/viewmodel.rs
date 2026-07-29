@@ -211,6 +211,16 @@ pub struct ToolViewModel {
     /// Pen tool: commit mode (0=Selection, 1=Fill, 2=Stroke) + stroke width.
     pub pen_mode: u8,
     pub pen_stroke_width: f32,
+    /// Vector Brush (Phase 6B) options-bar state.
+    pub vector_brush_width: f32,
+    pub vector_brush_color: [u8; 4],
+    pub vector_brush_smoothing: f32,
+    pub vector_brush_pressure: bool,
+    pub vector_brush_velocity: bool,
+    /// Live preview polyline of the in-progress Vector Brush stroke (canvas space).
+    pub vector_brush_path: Vec<(f32, f32)>,
+    /// True when the active layer is a Vector Brush stroke (enables Expand).
+    pub vector_brush_can_expand: bool,
     /// Gradient tool drag guide: [start_x, start_y, end_x, end_y] in canvas space.
     pub gradient_preview: Option<[f32; 4]>,
     pub wand_brush_size: f32,
@@ -695,6 +705,13 @@ impl Default for UiData {
                 path_style: None,
                 pen_mode: 0,
                 pen_stroke_width: 3.0,
+                vector_brush_width: 12.0,
+                vector_brush_color: [0, 0, 0, 255],
+                vector_brush_smoothing: 0.4,
+                vector_brush_pressure: true,
+                vector_brush_velocity: true,
+                vector_brush_path: Vec::new(),
+                vector_brush_can_expand: false,
                 gradient_preview: None,
                 wand_brush_size: 30.0,
                 wand_tolerance: 32,

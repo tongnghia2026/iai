@@ -36,6 +36,9 @@ pub enum ToolId {
     /// Direct-selection of a Path layer's nodes (edit anchor points). Companion
     /// to Pen (create) and Move (whole-object transform).
     Node,
+    /// Freehand vector drawing (Phase 6B): a drag commits an editable
+    /// variable-width Path stroke, distinct from the pixel Brush.
+    VectorBrush,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -20,6 +20,7 @@
 
 use crate::core::geometry::Point;
 use crate::core::vector::affine::AffineTransform;
+use crate::core::vector::brush::{BrushStroke, WidthStop, MAX_WIDTH_STOPS};
 use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
@@ -52,6 +53,18 @@ fn object_to_json(obj: &VectorObjectData) -> Value {
         "transform": affine_to_json(&obj.transform),
         "style": style_to_json(&obj.style),
         "contours": obj.path.contours.iter().map(contour_to_json).collect::<Vec<_>>(),
+        // Vector Brush appearance (Phase 6B). Additive: `null` / absent for an
+        // ordinary fill/outline Path, which decodes back to `brush = None`.
+        "brush": obj.brush.as_ref().map(brush_to_json),
+    })
+}
+
+fn brush_to_json(b: &BrushStroke) -> Value {
+    json!({
+        "base_width": b.base_width,
+        "cap": cap_u8(b.cap),
+        // Flat [t, width] pairs keep the payload compact for long strokes.
+        "profile": b.profile.iter().flat_map(|s| [s.t, s.width]).collect::<Vec<f32>>(),
     })
 }
 
@@ -184,7 +197,54 @@ fn json_to_object(v: &Value) -> Option<VectorObjectData> {
         .map(json_to_contour)
         .collect::<Option<Vec<_>>>()?;
     let path = PathData::new(contours, fill_rule);
-    Some(VectorObjectData::new(path, style, transform))
+    let brush = v.get("brush").and_then(json_to_brush);
+    Some(VectorObjectData {
+        path,
+        style,
+        transform,
+        brush,
+    })
+}
+
+/// Decode a Vector Brush appearance, or `None` when the field is absent/null (an
+/// ordinary Path). A malformed brush also yields `None`; the outer
+/// [`VectorObjectData::validate`] then rejects nothing new, and the object simply
+/// loads as a plain path — the safe fallback.
+fn json_to_brush(v: &Value) -> Option<BrushStroke> {
+    if v.is_null() {
+        return None;
+    }
+    let base_width = v.get("base_width").and_then(Value::as_f64)? as f32;
+    let cap = match v.get("cap").and_then(Value::as_u64) {
+        Some(1) => crate::core::vector::style::LineCap::Round,
+        Some(2) => crate::core::vector::style::LineCap::Square,
+        _ => crate::core::vector::style::LineCap::Butt,
+    };
+    let flat: Vec<f32> = v
+        .get("profile")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_f64)
+                .map(|n| n as f32)
+                .collect()
+        })
+        .unwrap_or_default();
+    if flat.len() / 2 > MAX_WIDTH_STOPS {
+        return None;
+    }
+    let profile: Vec<WidthStop> = flat
+        .chunks_exact(2)
+        .map(|p| WidthStop {
+            t: p[0],
+            width: p[1],
+        })
+        .collect();
+    Some(BrushStroke {
+        base_width,
+        profile,
+        cap,
+    })
 }
 
 fn json_to_contour(v: &Value) -> Option<Contour> {
@@ -421,6 +481,49 @@ mod tests {
         obj.style.stroke_style.dash = DashPattern::from_slice(&[6.0, 2.0, 1.0, 2.0], 1.5);
         let back = json_to_layer_path(&layer_path_to_json(&obj)).expect("decode");
         assert_eq!(back, obj);
+    }
+
+    #[test]
+    fn brush_stroke_round_trips() {
+        use crate::core::vector::brush::{BrushStroke, WidthStop};
+        use crate::core::vector::style::{LineCap, VectorStyle};
+        // An open centerline with a variable-width brush painted by a fill.
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::with_handles(
+                        Point::new(10.0, 5.0),
+                        Point::new(8.0, 3.0),
+                        Point::new(12.0, 7.0),
+                        NodeKind::Smooth,
+                    ),
+                    Node::sharp(Point::new(20.0, 0.0)),
+                ],
+                false,
+            )],
+            FillRule::NonZero,
+        );
+        let brush = BrushStroke {
+            base_width: 12.5,
+            profile: vec![
+                WidthStop { t: 0.0, width: 0.2 },
+                WidthStop { t: 0.5, width: 1.0 },
+                WidthStop { t: 1.0, width: 0.0 },
+            ],
+            cap: LineCap::Round,
+        };
+        let obj = VectorObjectData::new_brush(
+            path,
+            VectorStyle::filled(ColorValue::rgb(0.1, 0.2, 0.3)),
+            AffineTransform::translate(4.0, -2.0),
+            brush,
+        );
+        let back = json_to_layer_path(&layer_path_to_json(&obj)).expect("decode");
+        assert_eq!(back, obj, "brush stroke must round-trip exactly");
+        // A plain path (no brush) still decodes with brush = None.
+        let plain = json_to_layer_path(&layer_path_to_json(&sample())).expect("decode plain");
+        assert!(plain.brush.is_none());
     }
 
     #[test]

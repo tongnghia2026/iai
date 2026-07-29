@@ -709,6 +709,28 @@ impl App {
                                 if let Some(w) = &self.win.window {
                                     w.request_redraw();
                                 }
+                            } else if self.edit.tools.active_id() == ToolId::VectorBrush {
+                                // A freehand drag becomes one editable Path stroke
+                                // (handled at App level so the new layer is undoable).
+                                let event = self.tool_event();
+                                {
+                                    let mut ctx = ToolCtx::new(
+                                        &mut self.docs.documents[self.docs.active_doc_idx],
+                                        self.edit.fg_color,
+                                        self.edit.bg_color,
+                                        self.edit.view.zoom,
+                                        self.edit.view.offset_x,
+                                        self.edit.view.offset_y,
+                                    );
+                                    // Let the tool catch its stabilizer up to the
+                                    // release point before we read the stroke.
+                                    let _ = self.edit.tools.on_release(event, &mut ctx);
+                                }
+                                self.commit_vector_brush_stroke();
+                                self.edit.input.painting = false;
+                                if let Some(w) = &self.win.window {
+                                    w.request_redraw();
+                                }
                             } else {
                                 if !self.edit.pending_stroke_inputs.is_empty() {
                                     let events: Vec<_> =
@@ -1219,6 +1241,24 @@ impl App {
                         // A live node drag is handled above (node_drag branch); a
                         // press that hit nothing must NOT queue a pixel-tool stroke
                         // on the vector Path.
+                    }
+                    ToolId::VectorBrush => {
+                        // Capture the freehand stroke live so the preview grows as
+                        // the pointer moves (the pixel-tool `pending_stroke_inputs`
+                        // batch only flushes on release, which would drop samples).
+                        let event = self.tool_event();
+                        let mut ctx = ToolCtx::new(
+                            &mut self.docs.documents[self.docs.active_doc_idx],
+                            self.edit.fg_color,
+                            self.edit.bg_color,
+                            self.edit.view.zoom,
+                            self.edit.view.offset_x,
+                            self.edit.view.offset_y,
+                        );
+                        let _ = self.edit.tools.on_drag(event, &mut ctx);
+                        if let Some(w) = &self.win.window {
+                            w.request_redraw();
+                        }
                     }
                     _ => {
                         let event = self.tool_event();

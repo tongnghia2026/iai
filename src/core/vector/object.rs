@@ -21,6 +21,7 @@
 use crate::core::geometry::Rect;
 use crate::core::shape::ShapeData;
 use crate::core::vector::affine::AffineTransform;
+use crate::core::vector::brush::BrushStroke;
 use crate::core::vector::path::PathData;
 use crate::core::vector::style::VectorStyle;
 
@@ -46,13 +47,19 @@ impl VectorGeometry {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct VectorObjectData {
-    /// Geometry in object-local space.
+    /// Geometry in object-local space. For a Vector Brush stroke this is the
+    /// editable OPEN centerline; the width lives in `brush`.
     pub path: PathData,
-    /// Fill / outline / opacity.
+    /// Fill / outline / opacity. A Vector Brush ribbon is painted with `fill`.
     pub style: VectorStyle,
     /// Object-local → layer space. Kept separate from `Layer::offset` so an
     /// affine edit (move/scale/rotate) never has to bake node coordinates.
     pub transform: AffineTransform,
+    /// Vector Brush appearance (Phase 6B): a variable-width ribbon over the
+    /// `path` centerline, sampled along normalized arc length. `None` for an
+    /// ordinary fill/outline Path — the common case. Additive: an object with
+    /// `brush = None` behaves exactly as before this field existed.
+    pub brush: Option<BrushStroke>,
 }
 
 impl VectorObjectData {
@@ -61,7 +68,38 @@ impl VectorObjectData {
             path,
             style,
             transform,
+            brush: None,
         }
+    }
+
+    /// A Vector Brush object: an open centerline plus a variable-width `brush`
+    /// appearance, painted with `style.fill`.
+    pub fn new_brush(
+        path: PathData,
+        style: VectorStyle,
+        transform: AffineTransform,
+        brush: BrushStroke,
+    ) -> Self {
+        Self {
+            path,
+            style,
+            transform,
+            brush: Some(brush),
+        }
+    }
+
+    /// Whether this object renders as a Vector Brush ribbon rather than a filled/
+    /// stroked path.
+    pub fn is_brush(&self) -> bool {
+        self.brush.is_some()
+    }
+
+    /// Uniform scale factor of the object transform's linear part, used to map an
+    /// object-local width into layer units. Exact for uniform scale/rotate,
+    /// a reasonable average under shear/non-uniform scale (same limitation the
+    /// outline stroke pad already carries).
+    pub fn transform_scale(&self) -> f32 {
+        self.transform.determinant().abs().sqrt().max(1e-4)
     }
 
     /// A solid-black-filled object at the identity transform — the freshly-drawn
@@ -71,6 +109,7 @@ impl VectorObjectData {
             path,
             style: VectorStyle::default(),
             transform: AffineTransform::IDENTITY,
+            brush: None,
         }
     }
 
@@ -91,6 +130,9 @@ impl VectorObjectData {
         }
         self.path.validate()?;
         self.style.validate()?;
+        if let Some(brush) = &self.brush {
+            brush.validate()?;
+        }
         Ok(())
     }
 
@@ -99,7 +141,12 @@ impl VectorObjectData {
     pub fn layer_bounds(&self, tol: f32) -> Option<Rect> {
         let lpath = self.path_in_layer_space();
         let core = crate::core::vector::flatten::tight_bounds(&lpath, tol)?;
-        let pad = self.style.effective_stroke_width() * 0.5;
+        // A brush ribbon extends half its widest width past the centerline (in
+        // layer units); an ordinary path extends half its outline width.
+        let pad = match &self.brush {
+            Some(brush) => brush.max_half_width() * self.transform_scale(),
+            None => self.style.effective_stroke_width() * 0.5,
+        };
         if pad > 0.0 {
             Some(Rect::new(
                 core.x - pad,

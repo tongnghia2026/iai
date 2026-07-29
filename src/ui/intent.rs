@@ -289,6 +289,13 @@ pub struct ToolIntent {
     pub set_patch_mode: Option<u8>,
     pub set_pen_mode: Option<u8>,
     pub set_pen_stroke_width: Option<f32>,
+    /// Vector Brush (Phase 6B) options.
+    pub set_vector_brush_width: Option<f32>,
+    pub set_vector_brush_smoothing: Option<f32>,
+    pub set_vector_brush_pressure: Option<bool>,
+    pub set_vector_brush_velocity: Option<bool>,
+    /// Bake the active Vector Brush stroke into a closed outline.
+    pub expand_vector_brush: bool,
     pub set_shape_kind: Option<u8>,
     pub set_shape_fill: Option<bool>,
     pub set_shape_stroke_width: Option<f32>,
