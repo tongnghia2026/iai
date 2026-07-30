@@ -181,6 +181,13 @@ impl MoveTool {
                 .as_ref()
                 .is_some_and(|m| m.enabled && m.sample(lx, ly) < 0.5)
     }
+
+    /// Canvas-space point `(x,y)` inside a layer's raster bounding box.
+    fn point_in_layer_bounds(layer: &crate::core::layer::Layer, x: i32, y: i32) -> bool {
+        let lx = x - layer.offset.0;
+        let ly = y - layer.offset.1;
+        lx >= 0 && ly >= 0 && (lx as u32) < layer.width && (ly as u32) < layer.height
+    }
 }
 
 impl Tool for MoveTool {
@@ -226,6 +233,27 @@ impl Tool for MoveTool {
                 if lx >= 0 && ly >= 0 && (lx as u32) < layer.width && (ly as u32) < layer.height {
                     let (_r, _g, _b, a) = layer.tiles.get_pixel(lx as u32, ly as u32);
                     if a > 0 && !Self::clip_hides(layer, lx as u32, ly as u32) {
+                        hit_idx = Some(idx);
+                        break;
+                    }
+                }
+            }
+
+            // CorelDRAW "treat as filled" for an already-SELECTED vector object:
+            // when no opaque pixel sits under the cursor, still grab a selected,
+            // movable Vector layer whose bounding box contains the press. This lets
+            // a thin Vector Brush stroke (or an unfilled outline path) be dragged
+            // from anywhere in its wide selection box, not only by clicking exactly
+            // on the visible stroke. Opaque pixel hits are resolved FIRST above, so
+            // this never steals a click that lands on another object.
+            if hit_idx.is_none() {
+                for (idx, layer) in canvas.layer_stack.layers.iter().enumerate().rev() {
+                    if layer.selected
+                        && layer.visible
+                        && Self::can_move_layer(layer)
+                        && matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
+                        && Self::point_in_layer_bounds(layer, x, y)
+                    {
                         hit_idx = Some(idx);
                         break;
                     }
@@ -676,5 +704,93 @@ impl Tool for MoveTool {
         self.snap_targets_y.clear();
         self.snap_context_dirty = false;
         ToolResponse::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::document::{Document, DocumentId};
+    use crate::core::geometry::Point;
+    use crate::core::layer::LayerType;
+    use crate::core::vector::object::{VectorGeometry, VectorObjectData};
+    use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+
+    fn ctx(doc: &mut Document) -> ToolCtx<'_> {
+        ToolCtx::new(doc, [0, 0, 0, 255], [255, 255, 255, 255], 1.0, 0.0, 0.0)
+    }
+
+    /// A Vector Path layer occupying `[ox,ox+w)×[oy,oy+h)` with NO raster content
+    /// (fully transparent) — mimicking a thin brush stroke whose wide bounding box
+    /// is mostly empty, so a press in its interior misses the opaque-pixel pass.
+    fn add_empty_vector_layer(
+        doc: &mut Document,
+        ox: i32,
+        oy: i32,
+        w: u32,
+        h: u32,
+        selected: bool,
+    ) -> usize {
+        let idx = doc.canvas.layer_stack.add_layer(w, h);
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(w as f32, h as f32)),
+                ],
+                false,
+            )],
+            FillRule::NonZero,
+        );
+        let obj = VectorObjectData::from_path(path);
+        let layer = &mut doc.canvas.layer_stack.layers[idx];
+        layer.offset = (ox, oy);
+        layer.width = w;
+        layer.height = h;
+        layer.layer_type = LayerType::Vector(VectorGeometry::Path(obj));
+        layer.selected = selected;
+        idx
+    }
+
+    #[test]
+    fn selected_vector_grabs_from_empty_bbox_interior() {
+        // The A-fix: a selected Vector Brush / unfilled path is draggable from
+        // anywhere in its box, not only by clicking the visible stroke.
+        let mut t = MoveTool::new();
+        let mut doc = Document::new(DocumentId(1), 300, 300);
+        let idx = add_empty_vector_layer(&mut doc, 50, 50, 100, 100, true);
+        doc.canvas.layer_stack.active_idx = idx;
+
+        {
+            let mut c = ctx(&mut doc);
+            // Deep inside the box, on transparent area (no stroke pixel here).
+            t.on_press(PointerEvent::new(100.0, 100.0), &mut c);
+        }
+        assert!(
+            !t.marquee_dragging,
+            "a selected vector must be grabbed for moving, not marquee-selected"
+        );
+        assert!(
+            doc.canvas.layer_stack.layers[idx].selected,
+            "the selection is kept so the drag moves it"
+        );
+    }
+
+    #[test]
+    fn unselected_vector_box_still_marquees() {
+        // The grab is scoped to the SELECTED object, so an unselected empty box
+        // keeps the old behaviour (clears selection, starts a marquee).
+        let mut t = MoveTool::new();
+        let mut doc = Document::new(DocumentId(1), 300, 300);
+        add_empty_vector_layer(&mut doc, 50, 50, 100, 100, false);
+
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(PointerEvent::new(100.0, 100.0), &mut c);
+        }
+        assert!(
+            t.marquee_dragging,
+            "an unselected empty vector box must not be grabbed"
+        );
     }
 }

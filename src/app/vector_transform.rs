@@ -468,7 +468,34 @@ impl App {
         if self.path_layer_hit_at(ev.canvas_x, ev.canvas_y).is_some() {
             return 1;
         }
+        // Corel "treat as filled": a selected vector object is grabbable from
+        // anywhere inside its bounding box (see `selected_vector_bbox_hit`), so
+        // show the Move cursor there too — matching what a press will do.
+        if self.selected_vector_bbox_hit(ev.canvas_x, ev.canvas_y) {
+            return 1;
+        }
         0
+    }
+
+    /// True when `(cx,cy)` (canvas space) lies inside the raster bounding box of a
+    /// selected, movable Vector layer. Mirrors the Move tool's "treat a selected
+    /// vector as filled" grab (see `MoveTool::on_press`) so the Vector Brush — a
+    /// thin stroke inside a wide box — can be dragged from anywhere in that box.
+    pub fn selected_vector_bbox_hit(&self, cx: f32, cy: f32) -> bool {
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let (x, y) = (cx as i32, cy as i32);
+        canvas.layer_stack.layers.iter().any(|layer| {
+            layer.selected
+                && layer.visible
+                && !layer.locked
+                && !layer.is_background
+                && matches!(layer.layer_type, LayerType::Vector(_))
+                && {
+                    let lx = x - layer.offset.0;
+                    let ly = y - layer.offset.1;
+                    lx >= 0 && ly >= 0 && (lx as u32) < layer.width && (ly as u32) < layer.height
+                }
+        })
     }
 
     /// Begin an on-canvas Path transform gesture. `(cx, cy)` is the press point in
