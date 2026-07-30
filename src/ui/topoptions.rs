@@ -6,6 +6,13 @@ use egui_phosphor::regular as ph;
 
 use crate::ui::widgets::focus_field_select_all;
 
+const TOP_OPTIONS_ICON_SIZE: f32 = 17.0;
+const TOP_OPTIONS_NAV_ICON_SIZE: f32 = 18.0;
+
+fn top_options_icon(icon: &str) -> egui::RichText {
+    egui::RichText::new(icon.to_owned()).size(TOP_OPTIONS_ICON_SIZE)
+}
+
 fn dimension_drag<'a>(
     value: &'a mut f32,
     parsed_unit: &'a std::cell::Cell<Option<crate::core::units::Unit>>,
@@ -53,7 +60,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    egui::RichText::new(ph::HOUSE).size(15.0).color(pal.icon),
+                                    egui::RichText::new(ph::HOUSE)
+                                        .size(TOP_OPTIONS_NAV_ICON_SIZE)
+                                        .color(pal.icon),
                                 )
                                 .min_size(egui::vec2(26.0, 24.0)),
                             )
@@ -67,7 +76,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             .add(
                                 egui::Button::new(
                                     egui::RichText::new(ph::GRID_NINE)
-                                        .size(15.0)
+                                        .size(TOP_OPTIONS_NAV_ICON_SIZE)
                                         .color(pal.icon),
                                 )
                                 .min_size(egui::vec2(26.0, 24.0)),
@@ -210,15 +219,14 @@ fn perspective_crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAc
     ui.separator();
 
     if data.tool.persp_has_quad {
-        let cancel_btn = egui::Button::new(egui::RichText::new(ph::X).size(13.0).color(pal.danger))
+        let cancel_btn = egui::Button::new(top_options_icon(ph::X).color(pal.danger))
             .min_size(egui::vec2(26.0, 22.0));
         let cancel_btn = modal_flash_btn(cancel_btn, ui, data);
         if ui.add(cancel_btn).on_hover_text("Cancel (Esc)").clicked() {
             actions.tool.crop_cancel = true;
         }
-        let confirm_btn =
-            egui::Button::new(egui::RichText::new(ph::CHECK).size(13.0).color(pal.success))
-                .min_size(egui::vec2(26.0, 22.0));
+        let confirm_btn = egui::Button::new(top_options_icon(ph::CHECK).color(pal.success))
+            .min_size(egui::vec2(26.0, 22.0));
         let confirm_btn = modal_flash_btn(confirm_btn, ui, data);
         if ui.add(confirm_btn).on_hover_text("Apply (Enter)").clicked() {
             actions.tool.crop_confirm = true;
@@ -952,7 +960,7 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.tool.set_crop_w_value = Some(w_disp);
     }
 
-    let swap_btn = egui::Button::new(egui::RichText::new(ph::SWAP).size(12.0).color(pal.icon))
+    let swap_btn = egui::Button::new(top_options_icon(ph::SWAP).color(pal.icon))
         .min_size(egui::vec2(22.0, 22.0));
     let swap_response = ui.add(swap_btn).on_hover_text("Swap Width and Height");
     if swap_response.clicked() {
@@ -1026,7 +1034,7 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
 
     if ui
-        .small_button("\u{2B}")
+        .small_button(top_options_icon(ph::PLUS))
         .on_hover_text("Save current W/H/DPI as new preset")
         .clicked()
         && w_disp > 0.0
@@ -1075,7 +1083,7 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
     if data.tool.crop_rect.is_some() {
         ui.separator();
-        let cancel_btn = egui::Button::new(egui::RichText::new(ph::X).size(13.0).color(pal.danger))
+        let cancel_btn = egui::Button::new(top_options_icon(ph::X).color(pal.danger))
             .min_size(egui::vec2(26.0, 22.0));
         let cancel_btn = modal_flash_btn(cancel_btn, ui, data);
         if ui
@@ -1085,9 +1093,8 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         {
             actions.tool.crop_cancel = true;
         }
-        let confirm_btn =
-            egui::Button::new(egui::RichText::new(ph::CHECK).size(13.0).color(pal.success))
-                .min_size(egui::vec2(26.0, 22.0));
+        let confirm_btn = egui::Button::new(top_options_icon(ph::CHECK).color(pal.success))
+            .min_size(egui::vec2(26.0, 22.0));
         let confirm_btn = modal_flash_btn(confirm_btn, ui, data);
         if ui
             .add(confirm_btn)
@@ -1501,7 +1508,11 @@ fn shaping_buttons(ui: &mut egui::Ui, actions: &mut UiActions) {
             "Loại trừ (Exclude) — bỏ phần chồng, giữ mỗi hình riêng",
         ),
     ] {
-        if ui.button(icon).on_hover_text(tip).clicked() {
+        if ui
+            .button(top_options_icon(icon))
+            .on_hover_text(tip)
+            .clicked()
+        {
             actions.layers.boolean_op = Some(op);
         }
     }
@@ -1561,14 +1572,14 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     );
     ui.separator();
     if ui
-        .button(ph::ARROWS_LEFT_RIGHT)
+        .button(top_options_icon(ph::ARROWS_LEFT_RIGHT))
         .on_hover_text("Distribute horizontal centres of 3 or more selected objects")
         .clicked()
     {
         actions.layers.distribute_layers = Some(LayerDistribute::HorizontalCenters);
     }
     if ui
-        .button(ph::ARROWS_DOWN_UP)
+        .button(top_options_icon(ph::ARROWS_DOWN_UP))
         .on_hover_text("Distribute vertical centres of 3 or more selected objects")
         .clicked()
     {
@@ -1699,21 +1710,21 @@ fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     // left/centre/right, Y for top/middle/bottom; a no-op below 2 selected nodes.
     ui.label("Align:");
     if ui
-        .button(ph::ALIGN_LEFT)
+        .button(top_options_icon(ph::ALIGN_LEFT))
         .on_hover_text("Align left (selected points, ≥2)")
         .clicked()
     {
         actions.tool.node_align = Some((Axis::Vertical, AlignRef::Min));
     }
     if ui
-        .button(ph::ALIGN_CENTER_VERTICAL)
+        .button(top_options_icon(ph::ALIGN_CENTER_VERTICAL))
         .on_hover_text("Align horizontal centres")
         .clicked()
     {
         actions.tool.node_align = Some((Axis::Vertical, AlignRef::Average));
     }
     if ui
-        .button(ph::ALIGN_RIGHT)
+        .button(top_options_icon(ph::ALIGN_RIGHT))
         .on_hover_text("Align right")
         .clicked()
     {
@@ -1721,21 +1732,21 @@ fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
     ui.separator();
     if ui
-        .button(ph::ALIGN_TOP)
+        .button(top_options_icon(ph::ALIGN_TOP))
         .on_hover_text("Align top")
         .clicked()
     {
         actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Min));
     }
     if ui
-        .button(ph::ALIGN_CENTER_HORIZONTAL)
+        .button(top_options_icon(ph::ALIGN_CENTER_HORIZONTAL))
         .on_hover_text("Align vertical centres")
         .clicked()
     {
         actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Average));
     }
     if ui
-        .button(ph::ALIGN_BOTTOM)
+        .button(top_options_icon(ph::ALIGN_BOTTOM))
         .on_hover_text("Align bottom")
         .clicked()
     {
@@ -1992,16 +2003,24 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
 }
 
 fn align_button(ui: &mut egui::Ui, actions: &mut UiActions, align: LayerAlign, tooltip: &str) {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), egui::Sense::click());
-    let resp = resp.on_hover_text(tooltip);
-    let fill = if resp.hovered() {
-        ui.visuals().widgets.hovered.bg_fill
-    } else {
-        ui.visuals().widgets.inactive.bg_fill
+    let icon = match align {
+        LayerAlign::Left => ph::ALIGN_LEFT,
+        LayerAlign::HorizontalCenter => ph::ALIGN_CENTER_VERTICAL,
+        LayerAlign::Right => ph::ALIGN_RIGHT,
+        LayerAlign::Top => ph::ALIGN_TOP,
+        LayerAlign::VerticalCenter => ph::ALIGN_CENTER_HORIZONTAL,
+        LayerAlign::Bottom => ph::ALIGN_BOTTOM,
     };
-    let icon_col = ui.visuals().text_color();
-    ui.painter().rect_filled(rect, 2.0, fill);
-    paint_align_icon(ui.painter(), rect, align, icon_col);
+    let resp = ui
+        .add(
+            egui::Button::new(
+                egui::RichText::new(icon)
+                    .size(TOP_OPTIONS_ICON_SIZE)
+                    .color(ui.visuals().text_color()),
+            )
+            .min_size(egui::vec2(24.0, 22.0)),
+        )
+        .on_hover_text(tooltip);
     if resp.clicked() {
         actions.layers.align_layers = Some(align);
     }
@@ -2018,7 +2037,7 @@ fn move_transform_button(
         .add(
             egui::Button::new(
                 egui::RichText::new(icon)
-                    .size(14.0)
+                    .size(TOP_OPTIONS_ICON_SIZE)
                     .color(ui.visuals().text_color()),
             )
             .min_size(egui::vec2(24.0, 22.0)),
@@ -2027,78 +2046,6 @@ fn move_transform_button(
         .clicked()
     {
         actions.tool.move_transform = Some(action);
-    }
-}
-
-fn paint_align_icon(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    align: LayerAlign,
-    color: egui::Color32,
-) {
-    let stroke = egui::Stroke::new(1.4_f32, color);
-    let pad = 5.0;
-    let r = rect.shrink(4.0);
-
-    match align {
-        LayerAlign::Left | LayerAlign::HorizontalCenter | LayerAlign::Right => {
-            let guide_x = match align {
-                LayerAlign::Left => r.left(),
-                LayerAlign::HorizontalCenter => r.center().x,
-                LayerAlign::Right => r.right(),
-                _ => r.left(),
-            };
-            painter.line_segment(
-                [
-                    egui::pos2(guide_x, r.top()),
-                    egui::pos2(guide_x, r.bottom()),
-                ],
-                stroke,
-            );
-            let bar_h = 4.0;
-            for (y, w) in [(r.top() + 2.0, 10.0), (r.bottom() - 6.0, 14.0)] {
-                let x = match align {
-                    LayerAlign::Left => guide_x + pad,
-                    LayerAlign::HorizontalCenter => guide_x - w * 0.5,
-                    LayerAlign::Right => guide_x - pad - w,
-                    _ => guide_x,
-                };
-                painter.rect_filled(
-                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, bar_h)),
-                    0.8,
-                    color,
-                );
-            }
-        }
-        LayerAlign::Top | LayerAlign::VerticalCenter | LayerAlign::Bottom => {
-            let guide_y = match align {
-                LayerAlign::Top => r.top(),
-                LayerAlign::VerticalCenter => r.center().y,
-                LayerAlign::Bottom => r.bottom(),
-                _ => r.top(),
-            };
-            painter.line_segment(
-                [
-                    egui::pos2(r.left(), guide_y),
-                    egui::pos2(r.right(), guide_y),
-                ],
-                stroke,
-            );
-            let bar_w = 4.0;
-            for (x, h) in [(r.left() + 3.0, 10.0), (r.right() - 7.0, 14.0)] {
-                let y = match align {
-                    LayerAlign::Top => guide_y + pad,
-                    LayerAlign::VerticalCenter => guide_y - h * 0.5,
-                    LayerAlign::Bottom => guide_y - pad - h,
-                    _ => guide_y,
-                };
-                painter.rect_filled(
-                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bar_w, h)),
-                    0.8,
-                    color,
-                );
-            }
-        }
     }
 }
 
@@ -2146,13 +2093,17 @@ fn smart_select_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
     ];
     for (mode, label, tooltip) in &modes {
         let selected = data.sel.selection_mode == *mode;
-        let btn = egui::Button::new(*label)
-            .fill(if selected {
-                ui.visuals().selection.bg_fill
-            } else {
-                ui.visuals().widgets.inactive.bg_fill
-            })
-            .min_size(egui::vec2(24.0, 22.0));
+        let btn = if *mode == SelectionMode::New {
+            egui::Button::new(*label)
+        } else {
+            egui::Button::new(top_options_icon(label))
+        }
+        .fill(if selected {
+            ui.visuals().selection.bg_fill
+        } else {
+            ui.visuals().widgets.inactive.bg_fill
+        })
+        .min_size(egui::vec2(24.0, 22.0));
         if ui.add(btn).on_hover_text(*tooltip).clicked() {
             actions.sel.set_selection_mode = Some(*mode);
         }
@@ -2278,13 +2229,17 @@ fn selection_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
 
     for (mode, label, tooltip) in &modes {
         let selected = data.sel.selection_mode == *mode;
-        let btn = egui::Button::new(*label)
-            .fill(if selected {
-                ui.visuals().selection.bg_fill
-            } else {
-                ui.visuals().widgets.inactive.bg_fill
-            })
-            .min_size(egui::vec2(24.0, 22.0));
+        let btn = if *mode == SelectionMode::New {
+            egui::Button::new(*label)
+        } else {
+            egui::Button::new(top_options_icon(label))
+        }
+        .fill(if selected {
+            ui.visuals().selection.bg_fill
+        } else {
+            ui.visuals().widgets.inactive.bg_fill
+        })
+        .min_size(egui::vec2(24.0, 22.0));
         if ui.add(btn).on_hover_text(*tooltip).clicked() {
             actions.sel.set_selection_mode = Some(*mode);
         }
@@ -2327,7 +2282,7 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         return;
     }
 
-    let panel_btn = egui::Button::new(egui::RichText::new(ph::TEXT_T).size(14.0).color(pal.icon))
+    let panel_btn = egui::Button::new(top_options_icon(ph::TEXT_T).color(pal.icon))
         .min_size(egui::vec2(26.0, 22.0));
     if ui.add(panel_btn).on_hover_text("Show Text panel").clicked() {
         actions.chrome.show_text_panel = Some(true);
@@ -2354,7 +2309,7 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         (data.tool.text_italic, ph::TEXT_ITALIC, "Italic", 1),
         (data.tool.text_underline, ph::TEXT_UNDERLINE, "Underline", 2),
     ] {
-        let btn = egui::Button::new(egui::RichText::new(icon).size(14.0))
+        let btn = egui::Button::new(top_options_icon(icon))
             .fill(if selected {
                 pal.accent_selected_bg
             } else {
@@ -2377,7 +2332,7 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         (TextAlign::Right, ph::TEXT_ALIGN_RIGHT, "Right align"),
     ] {
         let selected = data.tool.text_align == align;
-        let btn = egui::Button::new(egui::RichText::new(icon).size(14.0))
+        let btn = egui::Button::new(top_options_icon(icon))
             .fill(if selected {
                 pal.accent_selected_bg
             } else {
@@ -2527,7 +2482,7 @@ fn transform_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
     }
 
     ui.separator();
-    let cancel_btn = egui::Button::new(egui::RichText::new(ph::X).size(13.0).color(pal.danger))
+    let cancel_btn = egui::Button::new(top_options_icon(ph::X).color(pal.danger))
         .min_size(egui::vec2(26.0, 22.0));
     let cancel_btn = modal_flash_btn(cancel_btn, ui, data);
     if ui
@@ -2537,9 +2492,8 @@ fn transform_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
     {
         actions.tool.transform_cancel = true;
     }
-    let commit_btn =
-        egui::Button::new(egui::RichText::new(ph::CHECK).size(13.0).color(pal.success))
-            .min_size(egui::vec2(26.0, 22.0));
+    let commit_btn = egui::Button::new(top_options_icon(ph::CHECK).color(pal.success))
+        .min_size(egui::vec2(26.0, 22.0));
     let commit_btn = modal_flash_btn(commit_btn, ui, data);
     if ui
         .add(commit_btn)

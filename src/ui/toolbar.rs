@@ -115,6 +115,8 @@ const TOOLBOX_THREE_COLUMN_EXTRA_H: f32 = 38.0;
 const TOOLBAR_TOP_H: f32 = 86.0;
 const RULER_SIZE: f32 = 20.0;
 const STATUSBAR_H: f32 = 22.0;
+const TOOLBAR_ICON_SIZE: f32 = 19.0;
+const TOOLBAR_HEADER_ICON_SIZE: f32 = 18.0;
 
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
@@ -146,7 +148,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
 fn toolbox_toggle_btn(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
-    let mut btn = egui::Button::new(egui::RichText::new(ph::TOOLBOX).size(18.0).color(pal.icon))
+    let mut btn = egui::Button::new(egui::RichText::new(ph::TOOLBOX).size(21.0).color(pal.icon))
         .min_size(egui::vec2(36.0, 34.0));
     if data.chrome.toolbox_open {
         btn = btn.fill(pal.accent_selected_bg);
@@ -305,7 +307,7 @@ fn toolbox_drag_button(
         .add(
             egui::Button::new(
                 egui::RichText::new(ph::TOOLBOX)
-                    .size(16.0)
+                    .size(TOOLBAR_HEADER_ICON_SIZE)
                     .color(data.chrome.theme_mode.palette().icon),
             )
             .min_size(egui::vec2(28.0, 28.0)),
@@ -338,7 +340,7 @@ fn toolbox_drag_grip(
         drag_rect.center(),
         egui::Align2::CENTER_CENTER,
         ph::DOTS_SIX_VERTICAL,
-        egui::FontId::proportional(15.0),
+        egui::FontId::proportional(TOOLBAR_HEADER_ICON_SIZE),
         pal.icon,
     );
     if drag_resp.dragged() {
@@ -369,7 +371,7 @@ fn toolbox_mode_button(
         .add(
             egui::Button::new(
                 egui::RichText::new(icon)
-                    .size(15.0)
+                    .size(TOOLBAR_HEADER_ICON_SIZE)
                     .color(data.chrome.theme_mode.palette().icon),
             )
             .min_size(egui::vec2(28.0, 28.0)),
@@ -386,8 +388,12 @@ fn toolbox_mode_button(
 
 fn toolbox_close_button(ui: &mut egui::Ui, actions: &mut UiActions) {
     let icon_color = ui.visuals().text_color();
-    let close = egui::Button::new(egui::RichText::new(ph::X).size(14.0).color(icon_color))
-        .min_size(egui::vec2(28.0, 28.0));
+    let close = egui::Button::new(
+        egui::RichText::new(ph::X)
+            .size(TOOLBAR_HEADER_ICON_SIZE)
+            .color(icon_color),
+    )
+    .min_size(egui::vec2(28.0, 28.0));
     if ui.add(close).on_hover_text("Close").clicked() {
         actions.chrome.set_toolbox_open = Some(false);
     }
@@ -550,7 +556,7 @@ fn group_btn(
     let icon_color = pal.icon;
     let mut btn = egui::Button::new(
         egui::RichText::new(*shown_icon)
-            .size(15.0)
+            .size(TOOLBAR_ICON_SIZE)
             .color(icon_color),
     )
     .min_size(egui::vec2(TOOLBOX_TOOL_W, TOOLBOX_TOOL_H));
@@ -586,7 +592,26 @@ fn group_btn(
             ui.set_min_width(160.0);
             for &(entry_id, entry_icon, entry_name) in entries {
                 let checked = entry_id == data.tool.active_tool;
-                let label = format!("{} {}", entry_icon, entry_name);
+                let mut label = egui::text::LayoutJob::default();
+                label.append(
+                    entry_icon,
+                    0.0,
+                    egui::TextFormat {
+                        font_id: egui::FontId::proportional(TOOLBAR_ICON_SIZE),
+                        color: ui.visuals().text_color(),
+                        ..Default::default()
+                    },
+                );
+                label.append(
+                    &format!("  {entry_name}"),
+                    0.0,
+                    egui::TextFormat {
+                        font_id: egui::TextStyle::Button.resolve(ui.style()),
+                        color: ui.visuals().text_color(),
+                        valign: egui::Align::Center,
+                        ..Default::default()
+                    },
+                );
                 if ui.add(egui::Button::selectable(checked, label)).clicked() {
                     actions.tool.select_tool = Some(entry_id);
                     ui.close();
@@ -692,7 +717,7 @@ fn paint_swap_button(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         ph::SWAP,
-        egui::FontId::proportional(9.0),
+        egui::FontId::proportional(11.0),
         pal.icon,
     );
 }

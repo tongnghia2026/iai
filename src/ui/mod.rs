@@ -1721,7 +1721,7 @@ pub fn build(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 let del_btn = egui::Button::new(
-                                                    egui::RichText::new("\u{00D7}").color(
+                                                    egui::RichText::new(ph::X).color(
                                                         egui::Color32::from_rgb(220, 80, 80),
                                                     ),
                                                 )

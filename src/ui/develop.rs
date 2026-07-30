@@ -4,6 +4,7 @@ use crate::core::develop::{
     DevelopMixerMode, DevelopSettings, LocalMaskKind, LocalMaskShape, CONTROL_LIMIT,
     EXPOSURE_LIMIT, MIXER_COLORS, MIXER_LABELS,
 };
+use egui_phosphor::regular as ph;
 
 const PANEL_W: f32 = 326.0;
 const MIN_STABLE_VIEWPORT_H: f32 = 320.0;
@@ -191,7 +192,7 @@ pub(crate) fn develop_panel_contents(
                                         apply_idx = Some(i);
                                     }
                                     if ui
-                                        .small_button("×")
+                                        .small_button(ph::X)
                                         .on_hover_text("Delete preset")
                                         .clicked()
                                     {
@@ -659,7 +660,11 @@ fn local_masks_ui(
             if ui.selectable_label(selected, name).clicked() {
                 actions.develop.select_develop_local = Some(if selected { None } else { Some(i) });
             }
-            if ui.small_button("×").on_hover_text("Delete mask").clicked() {
+            if ui
+                .small_button(ph::X)
+                .on_hover_text("Delete mask")
+                .clicked()
+            {
                 delete_idx = Some(i);
             }
         });

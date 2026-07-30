@@ -1,5 +1,6 @@
 use super::{UiActions, UiData};
 use egui;
+use egui_phosphor::regular as ph;
 
 pub(super) const HEIGHT: f32 = 22.0;
 
@@ -18,7 +19,11 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
 
-                if ui.small_button("-").on_hover_text("Zoom Out").clicked() {
+                if ui
+                    .small_button(ph::MINUS)
+                    .on_hover_text("Zoom Out")
+                    .clicked()
+                {
                     actions.doc.zoom_out = true;
                 }
 
@@ -31,7 +36,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     actions.doc.zoom_100 = true;
                 }
 
-                if ui.small_button("+").on_hover_text("Zoom In").clicked() {
+                if ui.small_button(ph::PLUS).on_hover_text("Zoom In").clicked() {
                     actions.doc.zoom_in = true;
                 }
 

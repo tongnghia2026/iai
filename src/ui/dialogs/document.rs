@@ -302,7 +302,7 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                                             apply_idx = Some(i);
                                         }
                                         if ui
-                                            .small_button("×")
+                                            .small_button(ph::X)
                                             .on_hover_text("Delete preset")
                                             .clicked()
                                         {
