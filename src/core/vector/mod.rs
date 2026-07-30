@@ -20,6 +20,7 @@ pub mod boolean;
 pub mod brush;
 pub mod color;
 pub mod display;
+pub mod fit;
 pub mod flatten;
 pub mod from_shape;
 pub mod from_text;

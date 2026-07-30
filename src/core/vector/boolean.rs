@@ -41,6 +41,12 @@ pub enum BooleanOp {
 /// pixel of error for on-screen shapes.
 const BOOL_FLATTEN_TOL: f32 = 0.4;
 
+/// Curve-fit tolerance for the boolean *output*. The result polygon is re-fitted
+/// to clean cubic curves (see [`crate::core::vector::fit`]); this bounds how far
+/// the smoothed boundary may sit from that polygon. Kept near the flatten
+/// tolerance so combined shapes stay faithful while collapsing to few nodes.
+const BOOL_FIT_TOL: f32 = 0.5;
+
 /// Points closer than this (in path units) are treated as coincident.
 const EPS: f32 = 1e-4;
 
@@ -140,10 +146,23 @@ fn rings_to_path(rings: Vec<Ring>) -> PathData {
         if r.len() < 3 || signed_area(&r).abs() < 1e-3 {
             continue;
         }
-        let nodes = r.into_iter().map(Node::sharp).collect();
-        contours.push(Contour::new(nodes, true));
+        contours.push(fit_ring_to_contour(r));
     }
     PathData::new(contours, FillRule::EvenOdd)
+}
+
+/// Re-fit a boolean-result ring to a clean cubic-Bézier contour so the user edits
+/// a handful of nodes instead of the raw flattened polygon. Sharp corners survive
+/// as cusps; on any failure (or a fit that would not reduce the node count) the
+/// raw sharp polygon is kept — the boolean *topology* is never affected.
+fn fit_ring_to_contour(r: Ring) -> Contour {
+    if let Some(contour) = crate::core::vector::fit::fit_closed_ring(&r, BOOL_FIT_TOL) {
+        if contour.nodes.len() >= 3 && contour.nodes.len() <= r.len() {
+            return contour;
+        }
+    }
+    let nodes = r.into_iter().map(Node::sharp).collect();
+    Contour::new(nodes, true)
 }
 
 /// Drop a vertex that is collinear with its neighbours (within a small angular
