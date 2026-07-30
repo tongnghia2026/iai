@@ -299,7 +299,7 @@ impl App {
             PhysicalKey::Code(KeyCode::NumpadAdd)
                 if pressed && !self.edit.input.ctrl_held && !self.is_tool_modal_active() =>
             {
-                self.duplicate_selected_with_step((10, 10));
+                self.duplicate_selected_with_step((0, 0));
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
@@ -310,7 +310,7 @@ impl App {
                     && !self.edit.input.ctrl_held
                     && !self.is_tool_modal_active() =>
             {
-                self.duplicate_selected_with_step((10, 10));
+                self.duplicate_selected_with_step((0, 0));
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }

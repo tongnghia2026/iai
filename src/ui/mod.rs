@@ -382,10 +382,10 @@ pub struct TransformOverlayData {
     /// and for a Path whose pivot has not been moved; otherwise the relocated
     /// centre of rotation (CorelDRAW style).
     pub pivot: (f32, f32),
-    /// True while the pivot is being dragged AND is snapped to the box centre —
-    /// the overlay shows a highlighted "Center" cue so the user knows a release
-    /// now lands dead-centre.
-    pub pivot_snapping: bool,
+    /// While the pivot is being dragged and snapped to a box anchor, the label to
+    /// show beside it ("Center" / "Corner" / "Middle"); `None` when it sits free.
+    /// The overlay highlights the marker + guides when this is `Some`.
+    pub pivot_snap_label: Option<&'static str>,
 }
 
 fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
@@ -2063,10 +2063,10 @@ pub fn build(
             // Rotation-pivot marker (⊕). Drawn at the pivot — the box centre by
             // default, or wherever the user dragged the centre of rotation.
             let cp = cs(ov.pivot.0, ov.pivot.1);
-            if ov.pivot_snapping {
-                // Snapped to the box centre while dragging: bright guides through
-                // the centre + an amber marker + a "Center" label, so the user
-                // knows releasing now lands the pivot dead-centre.
+            if let Some(label) = ov.pivot_snap_label {
+                // Snapped to a box anchor while dragging: bright guides through the
+                // point + an amber marker + a label ("Center"/"Corner"/"Middle"), so
+                // the user knows exactly where a release lands the pivot.
                 let amber = egui::Color32::from_rgb(255, 190, 40);
                 let guide = egui::Stroke::new(
                     1.0_f32,
@@ -2088,7 +2088,6 @@ pub fn build(
                 );
                 painter.circle_filled(cp, 6.0, amber);
                 painter.circle_stroke(cp, 6.0, border_stroke);
-                let label = "Center";
                 let lp = egui::pos2(cp.x + 10.0, cp.y - 10.0);
                 let font = egui::FontId::proportional(12.0);
                 for (dx, dy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0_f32), (0.0, 1.0)] {

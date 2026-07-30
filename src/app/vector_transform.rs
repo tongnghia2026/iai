@@ -725,15 +725,38 @@ impl App {
         let Some(inv) = transform.inverse() else {
             return;
         };
-        let center_canvas = transform.apply_point(Point::new(lb.x + lb.w * 0.5, lb.y + lb.h * 0.5));
-        let snap = 6.0 / self.edit.view.zoom.max(1e-4);
-        if (cx - center_canvas.x).hypot(cy - center_canvas.y) < snap {
-            self.edit.path_pivot = None;
+        // Snap to the box anchors — centre, 4 corners, 4 edge midpoints — so the
+        // pivot lands exactly on a corner / the middle of a side, with a label.
+        let (cxm, cym) = (lb.x + lb.w * 0.5, lb.y + lb.h * 0.5);
+        let anchors: [(Point, &'static str); 9] = [
+            (Point::new(cxm, cym), "Center"),
+            (Point::new(lb.x, lb.y), "Corner"),
+            (Point::new(lb.x + lb.w, lb.y), "Corner"),
+            (Point::new(lb.x, lb.y + lb.h), "Corner"),
+            (Point::new(lb.x + lb.w, lb.y + lb.h), "Corner"),
+            (Point::new(cxm, lb.y), "Middle"),
+            (Point::new(cxm, lb.y + lb.h), "Middle"),
+            (Point::new(lb.x, cym), "Middle"),
+            (Point::new(lb.x + lb.w, cym), "Middle"),
+        ];
+        let snap = 7.0 / self.edit.view.zoom.max(1e-4);
+        let mut best: Option<(f32, Point, &'static str)> = None;
+        for (lp, label) in anchors {
+            let cp = transform.apply_point(lp);
+            let d = (cx - cp.x).hypot(cy - cp.y);
+            if d < snap && best.map_or(true, |(bd, _, _)| d < bd) {
+                best = Some((d, lp, label));
+            }
+        }
+        if let Some((_, lp, label)) = best {
+            self.edit.path_pivot = Some((layer_id, lp));
+            self.edit.path_pivot_snap = Some(label);
         } else {
             let local = inv.apply_point(Point::new(cx, cy));
             if local.x.is_finite() && local.y.is_finite() {
                 self.edit.path_pivot = Some((layer_id, local));
             }
+            self.edit.path_pivot_snap = None;
         }
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -743,6 +766,7 @@ impl App {
     /// End the pivot drag. Nothing to commit — the new pivot is already stored.
     pub fn path_pivot_drag_finish(&mut self) {
         self.edit.path_pivot_dragging = false;
+        self.edit.path_pivot_snap = None;
     }
 
     /// True while the rotation-pivot marker is being dragged.
@@ -979,6 +1003,10 @@ impl App {
                 );
             }
             canvas.end_undo_group();
+            // The union delta `M` becomes the repeatable step (canvas-space).
+            if drag.pending.is_finite() {
+                self.edit.last_repeat_transform = Some(drag.pending);
+            }
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
             if let Some(w) = &self.win.window {
                 w.request_redraw();
@@ -1038,6 +1066,14 @@ impl App {
             )),
             crate::core::gateway::ChangeKind::LayerStructure,
         );
+        // Remember this rotate/scale so Repeat / Ctrl+D can replay it on a fresh
+        // copy — this is how a plain rotation becomes a flower-petal step.
+        if let Some(inv) = drag.orig_transform.inverse() {
+            let m = final_t.then(&inv);
+            if m.is_finite() {
+                self.edit.last_repeat_transform = Some(m);
+            }
+        }
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -1608,6 +1644,20 @@ mod tests {
         assert_eq!(
             app.docs.documents[0].canvas.layer_stack.layers.len(),
             before
+        );
+    }
+
+    #[test]
+    fn plain_rotate_captures_repeat_step() {
+        let (mut app, _id) = app_with_active_path();
+        assert!(app.edit.last_repeat_transform.is_none());
+        // Plain rotate (no Alt): grab the rotate ring, turn ~90° about the centre.
+        app.path_transform_begin(PathBoxHit::Rotate, 140.0, 130.0);
+        app.path_transform_update(120.0, 150.0, false, false);
+        app.path_transform_finish();
+        assert!(
+            app.edit.last_repeat_transform.is_some(),
+            "a plain rotation is captured so Repeat can replay it as a petal step"
         );
     }
 

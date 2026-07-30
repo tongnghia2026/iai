@@ -1015,7 +1015,7 @@ impl App {
             self.distribute_selected_layers(distribute);
         }
         if actions.layers.duplicate_selected_step {
-            self.duplicate_selected_with_step((10, 10));
+            self.duplicate_selected_with_step((0, 0));
         }
         if actions.layers.repeat_duplicate_step {
             self.repeat_last_step();

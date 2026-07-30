@@ -71,6 +71,10 @@ pub struct EditorInteraction {
     /// True while the rotation-pivot marker itself is being dragged (Move tool),
     /// as opposed to a scale/rotate handle.
     pub(in crate::app) path_pivot_dragging: bool,
+    /// While dragging the pivot, the label of the box anchor it has snapped to
+    /// ("Center" / "Corner" / "Middle"), shown next to the marker; `None` when it
+    /// sits free between anchors.
+    pub(in crate::app) path_pivot_snap: Option<&'static str>,
     /// The last repeatable "duplicate + transform" step, as a CANVAS-space affine
     /// `M`: Repeat (Ctrl+D / the button) duplicates the selection and applies `M`
     /// to each copy, so a single sample fans out into a row / ring / spiral.
