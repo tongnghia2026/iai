@@ -395,7 +395,14 @@ impl App {
                                 let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
                                 if let Some(hit) = self.path_box_hit_at_screen(msx, msy) {
                                     let ev = self.tool_event();
-                                    self.path_transform_begin(hit, ev.canvas_x, ev.canvas_y);
+                                    // Grabbing the pivot marker relocates the rotation
+                                    // centre (CorelDRAW style); a handle/ring starts a
+                                    // scale/rotate.
+                                    if hit == crate::app::vector_transform::PathBoxHit::Pivot {
+                                        self.path_pivot_drag_begin();
+                                    } else {
+                                        self.path_transform_begin(hit, ev.canvas_x, ev.canvas_y);
+                                    }
                                     self.edit.input.painting = true;
                                     if let Some(w) = &self.win.window {
                                         w.request_redraw();
@@ -643,6 +650,18 @@ impl App {
                             self.path_gradient_finish();
                             self.edit.input.last_left_release_time =
                                 Some(std::time::Instant::now());
+                            if let Some(w) = &self.win.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        if self.edit.path_pivot_dragging {
+                            // Finish relocating the rotation-pivot marker. Pure tool
+                            // state — nothing recorded, no Move-tool release path.
+                            self.path_pivot_drag_finish();
+                            self.edit.input.last_left_release_time =
+                                Some(std::time::Instant::now());
+                            self.edit.input.painting = false;
                             if let Some(w) = &self.win.window {
                                 w.request_redraw();
                             }
@@ -1106,6 +1125,13 @@ impl App {
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
+        } else if self.edit.input.painting
+            && !self.edit.input.was_over_ui
+            && self.edit.path_pivot_dragging
+        {
+            // Live drag of the rotation-pivot marker.
+            let ev = self.tool_event();
+            self.path_pivot_drag_update(ev.canvas_x, ev.canvas_y);
         } else if self.edit.input.painting
             && !self.edit.input.was_over_ui
             && self.edit.path_transform.is_some()

@@ -376,6 +376,10 @@ pub struct TransformOverlayData {
     pub handles: [(f32, f32); 8],
     /// Center handle in canvas space
     pub center: (f32, f32),
+    /// Rotation-pivot marker in canvas space. Equals `center` for Free Transform
+    /// and for a Path whose pivot has not been moved; otherwise the relocated
+    /// centre of rotation (CorelDRAW style).
+    pub pivot: (f32, f32),
 }
 
 fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
@@ -2015,7 +2019,9 @@ pub fn build(
                 painter.rect_stroke(rect, 1.0, border_stroke, egui::StrokeKind::Outside);
             }
 
-            let cp = cs(ov.center.0, ov.center.1);
+            // Rotation-pivot marker (⊕). Drawn at the pivot — the box centre by
+            // default, or wherever the user dragged the centre of rotation.
+            let cp = cs(ov.pivot.0, ov.pivot.1);
             painter.circle_filled(cp, 5.0, center_fill);
             painter.circle_stroke(cp, 5.0, border_stroke);
             painter.line_segment(

@@ -41,9 +41,14 @@ fn path_preview_inverse(original: AffineTransform, pending: AffineTransform) -> 
 pub enum PathBoxHit {
     /// A corner/edge handle → scale about the opposite handle (or centre on Alt).
     Handle(TransformHandle),
-    /// The ring just outside a corner → rotate about the box centre.
+    /// The ring just outside a corner → rotate about the pivot.
     Rotate,
+    /// The rotation-pivot marker → drag it to relocate the rotation centre.
+    Pivot,
 }
+
+/// Screen-space grab radius for the rotation-pivot marker.
+const PIVOT_HIT_PX: f32 = 8.0;
 
 /// The active Path's oriented transform box in CANVAS space, ready for the
 /// shared transform overlay: 4 corners `[TL, TR, BL, BR]`, 8 handles
@@ -52,6 +57,9 @@ pub struct PathBox {
     pub corners: [(f32, f32); 4],
     pub handles: [(f32, f32); 8],
     pub center: (f32, f32),
+    /// Rotation centre marker (canvas space). Equals `center` unless the user has
+    /// dragged the pivot elsewhere.
+    pub pivot: (f32, f32),
 }
 
 /// Cursor hint for one oriented-box resize handle.
@@ -189,6 +197,9 @@ fn box_from(t: AffineTransform, b: Rect) -> PathBox {
         corners,
         handles,
         center,
+        // Default: pivot sits on the box centre. `active_path_transform_box`
+        // overrides this when the user has relocated the rotation centre.
+        pivot: center,
     }
 }
 
@@ -328,15 +339,22 @@ impl App {
             return None;
         }
         // Hide the box during a plain layer-move drag (it would lag the cursor);
-        // keep it while a handle drag is live so it tracks the gesture.
-        if self.edit.input.painting && self.edit.path_transform.is_none() {
+        // keep it while a handle drag OR a pivot drag is live so it tracks the
+        // gesture.
+        if self.edit.input.painting
+            && self.edit.path_transform.is_none()
+            && !self.edit.path_pivot_dragging
+        {
             return None;
         }
         // Live gesture: the box tracks `pending` every frame (the single object
         // target, or the multi-Path canvas-space delta) so it stays glued to the
-        // cursor rather than the throttled, re-rastered model.
+        // cursor rather than the throttled, re-rastered model. The pivot marker
+        // stays pinned at the fixed rotation centre for the duration.
         if let Some(d) = &self.edit.path_transform {
-            return Some(box_from(d.pending, d.local_bounds));
+            let mut bx = box_from(d.pending, d.local_bounds);
+            bx.pivot = (d.pivot.x, d.pivot.y);
+            return Some(bx);
         }
         // Idle: a clean multi-Path selection shows one union box around them all
         // (the reported "frame only wraps one layer" bug).
@@ -357,8 +375,21 @@ impl App {
         {
             return None;
         }
-        let (_, model_t, b) = self.active_path_object()?;
-        Some(box_from(model_t, b))
+        let (layer_id, model_t, b) = self.active_path_object()?;
+        let mut bx = box_from(model_t, b);
+        let pc = model_t.apply_point(self.pivot_local_for(layer_id, b));
+        bx.pivot = (pc.x, pc.y);
+        Some(bx)
+    }
+
+    /// The active Path's rotation pivot in object-LOCAL coordinates: the value the
+    /// user dragged to (kept in [`crate::app::editor_interaction`]'s `path_pivot`)
+    /// when it belongs to this layer, else the default box centre.
+    fn pivot_local_for(&self, layer_id: u32, b: Rect) -> Point {
+        match self.edit.path_pivot {
+            Some((id, p)) if id == layer_id => p,
+            _ => Point::new(b.x + b.w * 0.5, b.y + b.h * 0.5),
+        }
     }
 
     /// Which part of the active Path's box is under the screen point, if any.
@@ -373,6 +404,13 @@ impl App {
         let dist = |(ax, ay): (f32, f32), (bx, by): (f32, f32)| {
             ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt()
         };
+
+        // Grab the rotation-pivot marker (single Path only — a multi-Path union
+        // keeps a fixed centre for now). Tested first so it stays reachable even
+        // if dragged onto a corner handle.
+        if self.multi_path_targets().is_none() && dist((sx, sy), c2s(bx.pivot)) <= PIVOT_HIT_PX {
+            return Some(PathBoxHit::Pivot);
+        }
 
         let mut best: Option<(f32, TransformHandle)> = None;
         for (i, h) in HANDLE_ORDER.iter().enumerate() {
@@ -456,6 +494,9 @@ impl App {
         if let Some(hit) = self.path_box_hit_at_screen(sx, sy) {
             match hit {
                 PathBoxHit::Rotate => return 6,
+                // Over the pivot marker → a move cursor (you drag it to relocate
+                // the rotation centre).
+                PathBoxHit::Pivot => return 1,
                 PathBoxHit::Handle(h) => {
                     if let Some(bx) = self.active_path_transform_box() {
                         return path_handle_cursor_hint(&bx, h);
@@ -511,6 +552,8 @@ impl App {
         let Some(idx) = self.active_path_layer() else {
             return;
         };
+        // Read the user's stored pivot before the mutable canvas borrow.
+        let stored_pivot = self.edit.path_pivot;
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let layer = &mut canvas.layer_stack.layers[idx];
         // Normalise any residual offset↔model drift (no-op in the common case).
@@ -523,10 +566,19 @@ impl App {
         let Some(lb) = obj.local_bounds(BOX_TOL) else {
             return;
         };
-        let pivot = orig.apply_point(Point::new(lb.x + lb.w * 0.5, lb.y + lb.h * 0.5));
+        // Rotate about the user-relocated pivot when set for this layer, else the
+        // box centre. Stored in object-local space, so it maps through the current
+        // transform to the right canvas point.
+        let pivot_local = match stored_pivot {
+            Some((id, p)) if id == layer_id => p,
+            _ => Point::new(lb.x + lb.w * 0.5, lb.y + lb.h * 0.5),
+        };
+        let pivot = orig.apply_point(pivot_local);
         let handle = match hit {
             PathBoxHit::Handle(h) => Some(h),
             PathBoxHit::Rotate => None,
+            // A pivot grab never starts a transform gesture (routed separately).
+            PathBoxHit::Pivot => return,
         };
         self.edit.path_transform = Some(PathTransformDrag {
             layer_id,
@@ -573,6 +625,8 @@ impl App {
         let handle = match hit {
             PathBoxHit::Handle(h) => Some(h),
             PathBoxHit::Rotate => None,
+            // A pivot grab never starts a transform gesture (routed separately).
+            PathBoxHit::Pivot => return,
         };
         let layer_id = targets[0].0;
         self.edit.path_transform = Some(PathTransformDrag {
@@ -593,6 +647,55 @@ impl App {
     /// True while a Path transform handle is being dragged.
     pub fn path_transform_active(&self) -> bool {
         self.edit.path_transform.is_some()
+    }
+
+    /// Begin dragging the rotation-pivot marker (Move tool). The pivot is transient
+    /// tool state, not part of the document, so there is nothing to undo.
+    pub fn path_pivot_drag_begin(&mut self) {
+        if self.active_path_layer().is_some() {
+            self.edit.path_pivot_dragging = true;
+        }
+    }
+
+    /// Move the pivot to `(cx, cy)` (canvas space). Stored in the active Path's
+    /// object-LOCAL frame so it stays glued to the object as it is later moved,
+    /// scaled or rotated. Snaps back to the box centre (cleared to the default)
+    /// when the cursor is near it, so the pivot is easy to reset and small
+    /// accidental nudges don't bias rotation.
+    pub fn path_pivot_drag_update(&mut self, cx: f32, cy: f32) {
+        if !self.edit.path_pivot_dragging {
+            return;
+        }
+        let Some((layer_id, transform, lb)) = self.active_path_object() else {
+            self.edit.path_pivot_dragging = false;
+            return;
+        };
+        let Some(inv) = transform.inverse() else {
+            return;
+        };
+        let center_canvas = transform.apply_point(Point::new(lb.x + lb.w * 0.5, lb.y + lb.h * 0.5));
+        let snap = 6.0 / self.edit.view.zoom.max(1e-4);
+        if (cx - center_canvas.x).hypot(cy - center_canvas.y) < snap {
+            self.edit.path_pivot = None;
+        } else {
+            let local = inv.apply_point(Point::new(cx, cy));
+            if local.x.is_finite() && local.y.is_finite() {
+                self.edit.path_pivot = Some((layer_id, local));
+            }
+        }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// End the pivot drag. Nothing to commit — the new pivot is already stored.
+    pub fn path_pivot_drag_finish(&mut self) {
+        self.edit.path_pivot_dragging = false;
+    }
+
+    /// True while the rotation-pivot marker is being dragged.
+    pub fn path_pivot_dragging(&self) -> bool {
+        self.edit.path_pivot_dragging
     }
 
     /// Compute the target transform for the in-progress gesture at cursor
@@ -903,6 +1006,7 @@ mod tests {
                 (10.0, 200.0),
             ],
             center: (5.0, 100.0),
+            pivot: (5.0, 100.0),
         };
 
         assert_eq!(path_handle_cursor_hint(&bx, TransformHandle::TopLeft), 2);
@@ -977,6 +1081,26 @@ mod tests {
         assert!(close(
             t.apply_point(Point::new(50.0, 0.0)),
             Point::new(100.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn rotate_turns_about_the_supplied_pivot_not_the_box_centre() {
+        // Fix B: the rotation uses `drag.pivot`, so a relocated pivot changes the
+        // centre of rotation. Pivot at the origin (top-left corner): a +90° turn
+        // maps (100,0) → (0,100) and leaves the pivot itself fixed.
+        let mut d = drag(None); // handle None = rotate
+        d.pivot = Point::new(0.0, 0.0);
+        d.start_cx = 100.0;
+        d.start_cy = 0.0;
+        let t = App::path_transform_target(&d, 0.0, 100.0, false, false).unwrap();
+        assert!(close(
+            t.apply_point(Point::new(100.0, 0.0)),
+            Point::new(0.0, 100.0)
+        ));
+        assert!(close(
+            t.apply_point(Point::new(0.0, 0.0)),
+            Point::new(0.0, 0.0)
         ));
     }
 

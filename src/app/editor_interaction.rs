@@ -61,6 +61,16 @@ pub struct EditorInteraction {
     /// Active on-canvas Path transform (scale/rotate) under the Move tool. See
     /// [`PathTransformDrag`]. None unless a handle is being dragged.
     pub(in crate::app) path_transform: Option<PathTransformDrag>,
+    /// User-moved rotation pivot for the active single Path: `(layer_id, pivot in
+    /// object-LOCAL coords)`. `None` — or an id that isn't the active layer —
+    /// means the default (the box centre). CorelDRAW-style: dragging the centre
+    /// marker relocates the point every rotation turns about. Kept per-layer so a
+    /// different object resets to centre; a material (local) point so it stays
+    /// glued to the object as it moves/scales/rotates.
+    pub(in crate::app) path_pivot: Option<(u32, crate::core::geometry::Point)>,
+    /// True while the rotation-pivot marker itself is being dragged (Move tool),
+    /// as opposed to a scale/rotate handle.
+    pub(in crate::app) path_pivot_dragging: bool,
     /// Active on-canvas vector-gradient transform handle drag.
     pub(in crate::app) path_gradient_drag: Option<PathGradientDrag>,
     /// Active node-edit drag under the Node tool. See [`NodeDrag`]. None unless a

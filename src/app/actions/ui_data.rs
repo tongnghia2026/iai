@@ -1061,6 +1061,8 @@ impl App {
                             corners,
                             handles,
                             center,
+                            // Free Transform has no relocatable pivot: marker on centre.
+                            pivot: center,
                         }
                     })
                     // No modal Free Transform: the Move tool's active Path shows
@@ -1071,6 +1073,7 @@ impl App {
                                 corners: b.corners,
                                 handles: b.handles,
                                 center: b.center,
+                                pivot: b.pivot,
                             })
                     }),
                 transform_scale_x: self
