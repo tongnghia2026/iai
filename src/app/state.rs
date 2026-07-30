@@ -394,9 +394,6 @@ pub struct UiState {
     pub export_format: crate::formats::ExportFormat,
     /// "Embed Color Profile (ICC)" toggle for export (default on).
     pub export_embed_icc: bool,
-    pub toolbox_open: bool,
-    pub toolbox_pos: Option<(f32, f32)>,
-    pub toolbox_single_column: bool,
     pub transform_interpolation: InterpolationMode,
     pub show_color_panel: bool,
     pub show_text_panel: bool,
@@ -1327,9 +1324,6 @@ impl App {
                     rename_text: String::new(),
                     export_format: crate::formats::ExportFormat::Png { compression: 6 },
                     export_embed_icc: true,
-                    toolbox_open: false,
-                    toolbox_pos: None,
-                    toolbox_single_column: false,
                     transform_interpolation: InterpolationMode::Bilinear,
                     // Color & Brush is now a floating panel opened on demand
                     // (Window ▸ Color Panel), like the Levels dialog. Quick

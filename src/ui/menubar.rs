@@ -665,7 +665,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                         ("Weld — Hàn liền", BooleanOp::Union),
                                         ("Trim — Cắt bớt", BooleanOp::Difference),
                                         ("Intersect — Giao nhau", BooleanOp::Intersect),
-                                        ("Exclude — Loại trừ", BooleanOp::Exclude),
+                                        ("Simplify — Đơn giản hóa", BooleanOp::Exclude),
                                     ] {
                                         if ui.button(label).clicked() {
                                             actions.layers.boolean_op = Some(op);

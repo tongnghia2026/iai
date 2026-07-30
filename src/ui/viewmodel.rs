@@ -453,9 +453,6 @@ pub struct ChromeViewModel {
     pub hovered_guide: Option<usize>,
     /// Smart-guide lines from the Move tool's snapping (magenta = align, red = page edge).
     pub snap_guides: Vec<crate::core::snapping::SnapLine>,
-    pub toolbox_open: bool,
-    pub toolbox_pos: Option<(f32, f32)>,
-    pub toolbox_single_column: bool,
     pub toolbar_w: f32,
     pub panel_r_w: f32,
     /// Strict modal lock is active (Crop/Free Transform/Text editing/dialog):
@@ -892,9 +889,6 @@ impl Default for UiData {
                 guide_preview: None,
                 hovered_guide: None,
                 snap_guides: Vec::new(),
-                toolbox_open: false,
-                toolbox_pos: None,
-                toolbox_single_column: false,
                 toolbar_w: 48.0,
                 panel_r_w: 300.0,
                 is_tool_modal: false,

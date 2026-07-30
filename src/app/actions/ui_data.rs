@@ -1382,9 +1382,6 @@ impl App {
                 } else {
                     Vec::new()
                 },
-                toolbox_open: self.shell.ui.toolbox_open,
-                toolbox_pos: self.shell.ui.toolbox_pos,
-                toolbox_single_column: self.shell.ui.toolbox_single_column,
                 toolbar_w: self.shell.toolbar_w,
                 panel_r_w: self.shell.panel_r_w,
                 is_tool_modal: self.modal_lock_active(),

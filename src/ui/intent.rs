@@ -116,7 +116,7 @@ pub struct LayerIntent {
     pub convert_to_curves: Option<usize>,
     /// Convert the Text layer (this index) into editable vector Path layer(s).
     pub text_to_curves: Option<usize>,
-    /// Weld/Trim/Intersect/Exclude the selected vector layers into one Path.
+    /// Weld/Trim/Intersect/Simplify the selected vector layers.
     pub boolean_op: Option<crate::core::vector::boolean::BooleanOp>,
     /// PowerClip: place the selected content inside the selected vector frame.
     pub powerclip_place: bool,
@@ -543,9 +543,6 @@ pub struct ChromeIntent {
     /// A click landed on UI that is disabled by the strict modal lock (tab
     /// bar, menus, …) — the app rings the bell and flashes Commit/Cancel.
     pub modal_denied: bool,
-    pub set_toolbox_open: Option<bool>,
-    pub set_toolbox_pos: Option<(f32, f32)>,
-    pub set_toolbox_single_column: Option<bool>,
     pub set_theme_mode: Option<theme::ThemeMode>,
     pub show_welcome: Option<bool>,
     /// Toggle the Library grid browser (Track B). `true` also leaves the welcome

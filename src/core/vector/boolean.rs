@@ -2,16 +2,13 @@
 //! Boolean / shaping operations on vector paths (Phase 7 — Weld/Trim/Intersect/
 //! Exclude). UI-free, like the rest of `core::vector`.
 //!
-//! Approach (MVP, honest about its limits):
+//! Approach:
 //!   1. Flatten every input path to closed polygons (`flatten`, coarse tolerance
 //!      to keep node counts sane — the result is re-rasterised for display anyway).
-//!   2. Run a self-contained Greiner–Hormann polygon clip on the flattened rings.
-//!      Both polygons live in ONE vertex arena so traversal across them is uniform.
-//!   3. Coincident/degenerate edges (two rectangles sharing a side — very common
-//!      when users snap shapes) break classic GH; we detect that and retry after
-//!      nudging the clip polygon by a sub-pixel offset, which is invisible once the
-//!      result is re-rasterised.
-//!   4. The result is a *polygonal* [`PathData`] (straight segments) with the
+//!   2. Run the integer-backed `i_overlay` sweep-line engine on the flattened
+//!      rings. It handles coincident edges and repeated multi-object folds without
+//!      perturbing geometry between pairs.
+//!   3. The result is a *polygonal* [`PathData`] (straight segments) with the
 //!      EvenOdd fill rule, so nested holes render correctly without orientation
 //!      bookkeeping.
 //!
@@ -22,6 +19,9 @@
 use crate::core::geometry::Point;
 use crate::core::vector::flatten::flatten_path;
 use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+use i_overlay::core::fill_rule::FillRule as OverlayFillRule;
+use i_overlay::core::overlay_rule::OverlayRule;
+use i_overlay::float::single::SingleFloatOverlay;
 
 /// The four shaping operations, in CorelDRAW vocabulary.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,23 +67,39 @@ type Ring = Vec<Point>;
 pub fn boolean(a: &PathData, b: &PathData, op: BooleanOp) -> Option<PathData> {
     let ar = to_rings(a, BOOL_FLATTEN_TOL);
     let br = to_rings(b, BOOL_FLATTEN_TOL);
-    let out = match op {
-        BooleanOp::Exclude => {
-            // A ⊕ B = (A − B) ∪ (B − A). The two differences are AREA-disjoint —
-            // they abut only along the old overlap boundary — so a boolean union
-            // would just fight that fully-shared edge (every intersection
-            // degenerate) and often fail. Concatenating the rings under EvenOdd is
-            // both correct (a point is filled iff it lies in exactly one input)
-            // and robust.
-            let mut d1 =
-                clip_with_retry(&ar, a.fill_rule, &br, b.fill_rule, BooleanOp::Difference)?;
-            let d2 = clip_with_retry(&br, b.fill_rule, &ar, a.fill_rule, BooleanOp::Difference)?;
-            d1.extend(d2);
-            d1
-        }
-        _ => clip_with_retry(&ar, a.fill_rule, &br, b.fill_rule, op)?,
-    };
+    let out = boolean_rings(&ar, a.fill_rule, &br, b.fill_rule, op)?;
     Some(rings_to_path(out))
+}
+
+fn boolean_rings(
+    subject: &[Ring],
+    _subject_fill: FillRule,
+    clip: &[Ring],
+    _clip_fill: FillRule,
+    op: BooleanOp,
+) -> Option<Vec<Ring>> {
+    let subject: Vec<Vec<[f32; 2]>> = subject
+        .iter()
+        .map(|ring| ring.iter().map(|p| [p.x, p.y]).collect())
+        .collect();
+    let clip: Vec<Vec<[f32; 2]>> = clip
+        .iter()
+        .map(|ring| ring.iter().map(|p| [p.x, p.y]).collect())
+        .collect();
+    let rule = match op {
+        BooleanOp::Union => OverlayRule::Union,
+        BooleanOp::Intersect => OverlayRule::Intersect,
+        BooleanOp::Difference => OverlayRule::Difference,
+        BooleanOp::Exclude => OverlayRule::Xor,
+    };
+    let shapes = subject.overlay_as::<i64>(&clip, rule, OverlayFillRule::EvenOdd);
+    Some(
+        shapes
+            .into_iter()
+            .flatten()
+            .map(|ring| ring.into_iter().map(|p| Point::new(p[0], p[1])).collect())
+            .collect(),
+    )
 }
 
 /// Fold a boolean over many paths, left to right. Weld/Intersect/Exclude are
@@ -91,15 +107,65 @@ pub fn boolean(a: &PathData, b: &PathData, op: BooleanOp) -> Option<PathData> {
 /// non-empty.
 pub fn boolean_many(paths: &[&PathData], op: BooleanOp) -> Option<PathData> {
     let mut it = paths.iter();
-    let mut acc = (*it.next()?).clone();
+    let first = *it.next()?;
+    let mut acc = to_rings(first, BOOL_FLATTEN_TOL);
+    let mut acc_fill = first.fill_rule;
     for p in it {
-        acc = boolean(&acc, p, op)?;
+        let next = to_rings(p, BOOL_FLATTEN_TOL);
+        acc = boolean_rings(&acc, acc_fill, &next, p.fill_rule, op)?;
+        // Do not curve-fit an intermediate pair: fitting perturbs the boundary
+        // before the next selected layer is folded in and can lose crossings.
+        acc_fill = FillRule::EvenOdd;
         // Intersect/Difference can only shrink; once empty they stay empty.
-        if acc.contours.is_empty() && matches!(op, BooleanOp::Intersect | BooleanOp::Difference) {
+        if acc.is_empty() && matches!(op, BooleanOp::Intersect | BooleanOp::Difference) {
             break;
         }
     }
-    Some(acc)
+    Some(rings_to_path(acc))
+}
+
+/// CorelDRAW-style multi-object Intersect: return every region covered by at
+/// least two inputs. Pairwise intersections are unioned, so a three-way overlap
+/// appears once while chain overlaps survive even when no point belongs to all
+/// selected objects.
+pub fn intersect_overlaps(paths: &[&PathData]) -> Option<PathData> {
+    if paths.len() < 2 {
+        return None;
+    }
+
+    let rings: Vec<Vec<Ring>> = paths
+        .iter()
+        .map(|path| to_rings(path, BOOL_FLATTEN_TOL))
+        .collect();
+    let mut overlap: Vec<Ring> = Vec::new();
+
+    for i in 0..rings.len() {
+        for j in (i + 1)..rings.len() {
+            let pair = boolean_rings(
+                &rings[i],
+                paths[i].fill_rule,
+                &rings[j],
+                paths[j].fill_rule,
+                BooleanOp::Intersect,
+            )?;
+            if pair.is_empty() {
+                continue;
+            }
+            overlap = if overlap.is_empty() {
+                pair
+            } else {
+                boolean_rings(
+                    &overlap,
+                    FillRule::EvenOdd,
+                    &pair,
+                    FillRule::EvenOdd,
+                    BooleanOp::Union,
+                )?
+            };
+        }
+    }
+
+    Some(rings_to_path(overlap))
 }
 
 // ── flatten <-> ring conversion ──────────────────────────────────────────────
@@ -779,6 +845,16 @@ mod tests {
         // 300 − 2 overlaps of 2×10 = 300 − 40 = 260.
         let area = filled_area(&u);
         assert!((area - 260.0).abs() < 10.0, "three-way weld area {area}");
+    }
+
+    #[test]
+    fn multi_intersect_keeps_coverage_of_two_without_common_coverage_of_three() {
+        let a = rect(0.0, 0.0, 80.0, 80.0);
+        let b = rect(40.0, 0.0, 80.0, 80.0);
+        let c = rect(80.0, 0.0, 80.0, 80.0);
+        let overlap = intersect_overlaps(&[&a, &b, &c]).unwrap();
+        let area = filled_area(&overlap);
+        assert!((area - 6400.0).abs() < 20.0, "coverage>=2 area {area}");
     }
 
     #[test]

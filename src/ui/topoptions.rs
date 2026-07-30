@@ -1480,7 +1480,7 @@ fn selected_vector_count(data: &UiData) -> usize {
         .count()
 }
 
-/// Quick Weld/Trim/Intersect/Exclude icons for the options bar — the same
+/// Quick Weld/Trim/Intersect/Simplify icons for the options bar — the same
 /// commands as Layer ▸ Shaping, one click away. Only rendered when at least two
 /// vector objects are selected (the caller checks [`selected_vector_count`]).
 fn shaping_buttons(ui: &mut egui::Ui, actions: &mut UiActions) {
@@ -1495,17 +1495,17 @@ fn shaping_buttons(ui: &mut egui::Ui, actions: &mut UiActions) {
         (
             ph::SUBTRACT,
             BooleanOp::Difference,
-            "Cắt bớt (Trim) — hình dưới bị các hình trên cắt, gộp thành một",
+            "Cắt bớt (Trim) — các hình trên cắt target dưới cùng; giữ nguyên các hình cắt",
         ),
         (
             ph::INTERSECT,
             BooleanOp::Intersect,
-            "Giao nhau (Intersect) — tạo hình phần chung, giữ nguyên hình gốc",
+            "Giao nhau (Intersect) — tạo hình từ mọi vùng có ít nhất 2 vật thể chồng lên nhau, giữ nguyên hình gốc",
         ),
         (
             ph::EXCLUDE,
             BooleanOp::Exclude,
-            "Loại trừ (Exclude) — bỏ phần chồng, giữ mỗi hình riêng",
+            "Đơn giản hóa (Simplify) — bỏ phần bị các vật thể phía trên che khuất, giữ các hình riêng",
         ),
     ] {
         if ui
@@ -1646,7 +1646,7 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         path_style_quick(ui, data, actions);
     }
 
-    // Shaping (Weld/Trim/Intersect/Exclude) once ≥2 vector objects are selected.
+    // Shaping (Weld/Trim/Intersect/Simplify) once ≥2 vector objects are selected.
     if selected_vector_count(data) >= 2 {
         ui.separator();
         shaping_buttons(ui, actions);
