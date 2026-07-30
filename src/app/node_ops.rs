@@ -26,6 +26,9 @@ use crate::core::vector::path::PathData;
 const NODE_HIT_PX: f32 = 8.0;
 /// Screen-space grab radius for a segment (insert an anchor).
 const SEG_HIT_PX: f32 = 9.0;
+/// Screen-space radius within which a segment insertion snaps to the exact
+/// midpoint (t=0.5) — makes "add a node at the middle of an edge" easy.
+const MID_SNAP_PX: f32 = 6.0;
 /// Samples per segment when locating the nearest split parameter.
 const SEG_SAMPLES: usize = 40;
 /// Maximum flattening error in screen pixels for the editable outline.
@@ -237,7 +240,7 @@ impl App {
             return false;
         };
         if sel.len() < 2 {
-            self.shell.status_msg = "Cần chọn ít nhất 2 điểm để căn".to_string();
+            self.shell.status_msg = "Select at least 2 points to align".to_string();
             return true;
         }
         let Some((_, _t, mut path)) = self.active_node_object() else {
@@ -283,7 +286,7 @@ impl App {
             crate::core::gateway::ChangeKind::LayerStructure,
         );
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Đã căn các điểm".to_string();
+        self.shell.status_msg = "Points aligned".to_string();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -311,7 +314,7 @@ impl App {
     /// there, or split an open contour into two. Rejected at an open endpoint.
     pub fn node_break_at_selected(&mut self) -> bool {
         let Some((id, ci, ni)) = self.edit.node_selected else {
-            self.shell.status_msg = "Chọn một điểm để tách".to_string();
+            self.shell.status_msg = "Select a point to break".to_string();
             return false;
         };
         let Some((layer_id, _t, mut path)) = self.active_node_object() else {
@@ -321,11 +324,11 @@ impl App {
             return false;
         }
         if crate::core::vector::ops::break_at_node(&mut path, ci, ni).is_err() {
-            self.shell.status_msg = "Không tách được tại điểm đầu/cuối".to_string();
+            self.shell.status_msg = "Can't break at an endpoint".to_string();
             return true;
         }
         self.clear_node_selection();
-        self.commit_node_geometry(layer_id, path, "Đã tách đường");
+        self.commit_node_geometry(layer_id, path, "Break Path");
         true
     }
 
@@ -343,7 +346,7 @@ impl App {
             return false;
         }
         if sel.len() != 2 {
-            self.shell.status_msg = "Chọn đúng 2 điểm đầu/cuối để nối".to_string();
+            self.shell.status_msg = "Select exactly 2 endpoints to join".to_string();
             return true;
         }
         let (a, b) = (sel[0], sel[1]);
@@ -354,7 +357,7 @@ impl App {
         };
         let (a_ok, b_ok) = (endpoint_ok(a.0, a.1), endpoint_ok(b.0, b.1));
         if !a_ok || !b_ok {
-            self.shell.status_msg = "Nối cần 2 điểm đầu/cuối của đường mở".to_string();
+            self.shell.status_msg = "Join needs 2 endpoints of an open path".to_string();
             return true;
         }
         const WELD: f32 = 6.0;
@@ -376,7 +379,7 @@ impl App {
             return false;
         }
         self.clear_node_selection();
-        self.commit_node_geometry(layer_id, path, "Đã nối đường");
+        self.commit_node_geometry(layer_id, path, "Join Path");
         true
     }
 
@@ -429,7 +432,7 @@ impl App {
             }
         }
 
-        let (hovered_segment, insertion_marker) =
+        let (hovered_segment, insertion_marker, insertion_at_mid) =
             match self.node_hit_at_screen(self.edit.input.mouse_x, self.edit.input.mouse_y) {
                 Some(NodeHit::Segment(ci, seg, tparam)) => {
                     match path.contours.get(ci).and_then(|c| c.segment(seg)) {
@@ -445,12 +448,15 @@ impl App {
                             .map(map)
                             .collect();
                             let marker = map(cubic_bezier(p0, p1, p2, p3, tparam));
-                            (Some(line), Some(marker))
+                            // node_hit_at_screen snaps tparam to exactly 0.5 at the
+                            // midpoint, so this flags the "Middle" insertion.
+                            let at_mid = (tparam - 0.5).abs() < 1e-4;
+                            (Some(line), Some(marker), at_mid)
                         }
-                        None => (None, None),
+                        None => (None, None, false),
                     }
                 }
-                _ => (None, None),
+                _ => (None, None, false),
             };
 
         let mut nodes: Vec<(f32, f32, bool)> = Vec::new();
@@ -477,6 +483,7 @@ impl App {
             outlines,
             hovered_segment,
             insertion_marker,
+            insertion_at_mid,
             nodes,
             handles,
             marquee: self
@@ -564,7 +571,15 @@ impl App {
             }
         }
         if let Some((_, ci, seg, lp)) = best_seg {
-            let tparam = nearest_segment_t(&path.contours[ci], seg, lp);
+            let mut tparam = nearest_segment_t(&path.contours[ci], seg, lp);
+            // Snap to the segment's exact midpoint when the cursor is near it, so a
+            // node lands dead-centre on an edge (mirrors the pivot's snap-to-centre).
+            if let Some((p0, p1, p2, p3)) = path.contours[ci].segment(seg) {
+                let mid = cubic_bezier(p0, p1, p2, p3, 0.5);
+                if dist2(to_screen(mid)) <= MID_SNAP_PX * MID_SNAP_PX {
+                    tparam = 0.5;
+                }
+            }
             return Some(NodeHit::Segment(ci, seg, tparam));
         }
         None
@@ -872,7 +887,7 @@ impl App {
             }
         }
         if deleted == 0 {
-            self.shell.status_msg = "Không thể xoá: đường cần ít nhất 2 điểm".to_string();
+            self.shell.status_msg = "Can't delete: a path needs at least 2 points".to_string();
             return true;
         }
         self.clear_node_selection();
@@ -885,9 +900,9 @@ impl App {
         );
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.shell.status_msg = if deleted == 1 {
-            "Đã xoá điểm".to_string()
+            "Deleted point".to_string()
         } else {
-            format!("Đã xoá {deleted} điểm")
+            format!("Deleted {deleted} points")
         };
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -913,9 +928,9 @@ impl App {
             return false;
         };
         let (res, label) = match kind {
-            NodeKind::Cusp => (ops::set_node_smooth(c, ni), "Điểm trơn (Smooth)"),
-            NodeKind::Smooth => (ops::set_node_symmetric(c, ni), "Điểm đối xứng (Symmetric)"),
-            NodeKind::Symmetric => (ops::set_node_cusp(c, ni), "Điểm góc (Cusp)"),
+            NodeKind::Cusp => (ops::set_node_smooth(c, ni), "Smooth point"),
+            NodeKind::Smooth => (ops::set_node_symmetric(c, ni), "Symmetric point"),
+            NodeKind::Symmetric => (ops::set_node_cusp(c, ni), "Corner point (Cusp)"),
         };
         if res.is_err() {
             return false;
@@ -975,9 +990,9 @@ impl App {
         let straight =
             c.nodes[seg].out_handle.is_none() && c.nodes[(seg + 1) % n].in_handle.is_none();
         let (res, label) = if straight {
-            (ops::set_segment_curved(c, seg), "Đoạn cong (Curve)")
+            (ops::set_segment_curved(c, seg), "Curved segment")
         } else {
-            (ops::set_segment_straight(c, seg), "Đoạn thẳng (Line)")
+            (ops::set_segment_straight(c, seg), "Straight segment")
         };
         if res.is_err() {
             return false;

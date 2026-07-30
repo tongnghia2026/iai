@@ -327,7 +327,7 @@ fn vector_brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
     ui.add_enabled_ui(data.tool.vector_brush_can_expand, |ui| {
         if ui
             .button("Expand Stroke")
-            .on_hover_text("Chuyển nét vẽ thành đường viền kín (để tô/kết hợp hình)")
+            .on_hover_text("Convert the brush stroke into a closed outline (for fill / shaping)")
             .clicked()
         {
             actions.tool.expand_vector_brush = true;
@@ -1485,27 +1485,27 @@ fn selected_vector_count(data: &UiData) -> usize {
 /// vector objects are selected (the caller checks [`selected_vector_count`]).
 fn shaping_buttons(ui: &mut egui::Ui, actions: &mut UiActions) {
     use crate::core::vector::boolean::BooleanOp;
-    ui.label("Kết hợp:");
+    ui.label("Shaping:");
     for (icon, op, tip) in [
         (
             ph::UNITE,
             BooleanOp::Union,
-            "Hàn liền (Weld) — gộp các vật thể thành một hình",
+            "Weld — merge the objects into a single shape",
         ),
         (
             ph::SUBTRACT,
             BooleanOp::Difference,
-            "Cắt bớt (Trim) — các hình trên cắt target dưới cùng; giữ nguyên các hình cắt",
+            "Trim — the upper shapes cut the bottom target; the cutters are kept",
         ),
         (
             ph::INTERSECT,
             BooleanOp::Intersect,
-            "Giao nhau (Intersect) — tạo hình từ mọi vùng có ít nhất 2 vật thể chồng lên nhau, giữ nguyên hình gốc",
+            "Intersect — make a shape from every region where at least two objects overlap; the originals are kept",
         ),
         (
             ph::EXCLUDE,
             BooleanOp::Exclude,
-            "Đơn giản hóa (Simplify) — bỏ phần bị các vật thể phía trên che khuất, giữ các hình riêng",
+            "Simplify — remove the parts hidden by the objects above, keeping the shapes separate",
         ),
     ] {
         if ui
@@ -2487,7 +2487,7 @@ fn transform_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
     let cancel_btn = modal_flash_btn(cancel_btn, ui, data);
     if ui
         .add(cancel_btn)
-        .on_hover_text("Hủy transform (Esc)")
+        .on_hover_text("Cancel transform (Esc)")
         .clicked()
     {
         actions.tool.transform_cancel = true;
@@ -2497,7 +2497,7 @@ fn transform_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
     let commit_btn = modal_flash_btn(commit_btn, ui, data);
     if ui
         .add(commit_btn)
-        .on_hover_text("Xác nhận transform (Enter)")
+        .on_hover_text("Apply transform (Enter)")
         .clicked()
     {
         actions.tool.transform_commit = true;

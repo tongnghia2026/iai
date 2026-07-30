@@ -108,7 +108,7 @@ impl App {
                 .collect()
         };
         if items.len() < 2 {
-            self.shell.status_msg = "Chọn ít nhất 2 đối tượng vector để kết hợp hình".to_string();
+            self.shell.status_msg = "Select at least 2 vector objects to shape".to_string();
             return false;
         }
         let indices: Vec<usize> = items.iter().map(|(i, _, _)| *i).collect();
@@ -118,10 +118,10 @@ impl App {
         let target_style = items[0].2;
 
         let name = match op {
-            BooleanOp::Union => "Hàn",
-            BooleanOp::Intersect => "Giao",
-            BooleanOp::Difference => "Cắt",
-            BooleanOp::Exclude => "Đơn giản hóa",
+            BooleanOp::Union => "Weld",
+            BooleanOp::Intersect => "Intersect",
+            BooleanOp::Difference => "Trim",
+            BooleanOp::Exclude => "Simplify",
         };
 
         // Compute the geometry up front so an empty/failed result aborts cleanly,
@@ -144,7 +144,7 @@ impl App {
             BooleanOp::Union => match boolean_many(&paths, op).filter(|r| !r.contours.is_empty()) {
                 Some(r) => Plan::Merge(new_obj(r, target_style)),
                 None => {
-                    self.shell.status_msg = "Kết quả rỗng".to_string();
+                    self.shell.status_msg = "Empty result".to_string();
                     return false;
                 }
             },
@@ -158,7 +158,7 @@ impl App {
                 match intersect_overlaps(&paths).filter(|r| !r.contours.is_empty()) {
                     Some(r) => Plan::AddOnTop(new_obj(r, target_style)),
                     None => {
-                        self.shell.status_msg = "Không có phần giao nhau".to_string();
+                        self.shell.status_msg = "No intersection".to_string();
                         return false;
                     }
                 }
@@ -192,7 +192,7 @@ impl App {
                 .all(|(_, o)| o.as_ref().map_or(true, |o| o.validate().is_ok())),
         };
         if !valid {
-            self.shell.status_msg = "Kết quả không hợp lệ".to_string();
+            self.shell.status_msg = "Invalid result".to_string();
             return false;
         }
 
@@ -300,20 +300,20 @@ impl App {
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.apply_canvas_event(CanvasEvent::SelectionChanged);
         self.shell.status_msg = match op {
-            BooleanOp::Union => format!("Đã hàn {} đối tượng vector", indices.len()),
+            BooleanOp::Union => format!("Welded {} vector objects", indices.len()),
             BooleanOp::Difference => {
                 if removed_empty == 0 {
                     format!(
-                        "Đã cắt target bằng {} source — giữ nguyên các source",
+                        "Trimmed the target with {} source(s) — sources kept",
                         indices.len() - 1
                     )
                 } else {
-                    "Target đã bị cắt hết — giữ nguyên các source".to_string()
+                    "Target fully trimmed away — sources kept".to_string()
                 }
             }
-            BooleanOp::Intersect => "Đã tạo hình giao (giữ nguyên các hình gốc)".to_string(),
+            BooleanOp::Intersect => "Created the intersection (originals kept)".to_string(),
             BooleanOp::Exclude => format!(
-                "Đã đơn giản hóa vùng chồng — còn {} hình",
+                "Simplified the overlap — {} shapes remain",
                 indices.len() - removed_empty
             ),
         };

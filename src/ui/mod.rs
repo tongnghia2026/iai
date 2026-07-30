@@ -193,6 +193,8 @@ pub struct NodeOverlay {
     pub hovered_segment: Option<Vec<(f32, f32)>>,
     /// Exact canvas-space point where a click will insert a node.
     pub insertion_marker: Option<(f32, f32)>,
+    /// True when the insertion point has snapped to the segment's exact midpoint.
+    pub insertion_at_mid: bool,
     /// Anchor points: `(canvas_x, canvas_y, selected)`.
     pub nodes: Vec<(f32, f32, bool)>,
     /// Bézier handle arms of the selected node: `[anchor_x, anchor_y, ctrl_x, ctrl_y]`.
@@ -380,6 +382,10 @@ pub struct TransformOverlayData {
     /// and for a Path whose pivot has not been moved; otherwise the relocated
     /// centre of rotation (CorelDRAW style).
     pub pivot: (f32, f32),
+    /// True while the pivot is being dragged AND is snapped to the box centre —
+    /// the overlay shows a highlighted "Center" cue so the user knows a release
+    /// now lands dead-centre.
+    pub pivot_snapping: bool,
 }
 
 fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
@@ -1494,11 +1500,46 @@ pub fn build(
             }
             if let Some((x, y)) = overlay.insertion_marker {
                 let p = to_screen_pos(x, y);
-                painter.circle_filled(p, 4.0, egui::Color32::WHITE);
-                painter.circle_stroke(
-                    p,
-                    4.0,
-                    egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(30, 110, 230)),
+                let mid = overlay.insertion_at_mid;
+                // Snapped to the edge midpoint → bright amber; otherwise blue.
+                let ring = if mid {
+                    egui::Color32::from_rgb(255, 190, 40)
+                } else {
+                    egui::Color32::from_rgb(30, 110, 230)
+                };
+                let r = if mid { 6.0 } else { 5.0 };
+                painter.circle_filled(p, r, egui::Color32::WHITE);
+                painter.circle_stroke(p, r, egui::Stroke::new(1.5_f32, ring));
+                // A "+" inside the marker so it clearly reads "add a node here".
+                let arm = r - 2.0;
+                let plus = egui::Stroke::new(1.5_f32, ring);
+                painter.line_segment(
+                    [egui::pos2(p.x - arm, p.y), egui::pos2(p.x + arm, p.y)],
+                    plus,
+                );
+                painter.line_segment(
+                    [egui::pos2(p.x, p.y - arm), egui::pos2(p.x, p.y + arm)],
+                    plus,
+                );
+                // Text label so the affordance is unmistakable.
+                let label = if mid { "Middle" } else { "Add node" };
+                let lp = egui::pos2(p.x + 10.0, p.y - 10.0);
+                let font = egui::FontId::proportional(12.0);
+                for (dx, dy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0_f32), (0.0, 1.0)] {
+                    painter.text(
+                        egui::pos2(lp.x + dx, lp.y + dy),
+                        egui::Align2::LEFT_BOTTOM,
+                        label,
+                        font.clone(),
+                        egui::Color32::from_black_alpha(200),
+                    );
+                }
+                painter.text(
+                    lp,
+                    egui::Align2::LEFT_BOTTOM,
+                    label,
+                    font,
+                    egui::Color32::WHITE,
                 );
             }
             // Handle arms of the selected node (thin line + round control point).
@@ -2022,16 +2063,62 @@ pub fn build(
             // Rotation-pivot marker (⊕). Drawn at the pivot — the box centre by
             // default, or wherever the user dragged the centre of rotation.
             let cp = cs(ov.pivot.0, ov.pivot.1);
-            painter.circle_filled(cp, 5.0, center_fill);
-            painter.circle_stroke(cp, 5.0, border_stroke);
-            painter.line_segment(
-                [egui::pos2(cp.x - 4.0, cp.y), egui::pos2(cp.x + 4.0, cp.y)],
-                egui::Stroke::new(1.0_f32, handle_border),
-            );
-            painter.line_segment(
-                [egui::pos2(cp.x, cp.y - 4.0), egui::pos2(cp.x, cp.y + 4.0)],
-                egui::Stroke::new(1.0_f32, handle_border),
-            );
+            if ov.pivot_snapping {
+                // Snapped to the box centre while dragging: bright guides through
+                // the centre + an amber marker + a "Center" label, so the user
+                // knows releasing now lands the pivot dead-centre.
+                let amber = egui::Color32::from_rgb(255, 190, 40);
+                let guide = egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_unmultiplied(255, 190, 40, 180),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(clip_rect.left(), cp.y),
+                        egui::pos2(clip_rect.right(), cp.y),
+                    ],
+                    guide,
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(cp.x, clip_rect.top()),
+                        egui::pos2(cp.x, clip_rect.bottom()),
+                    ],
+                    guide,
+                );
+                painter.circle_filled(cp, 6.0, amber);
+                painter.circle_stroke(cp, 6.0, border_stroke);
+                let label = "Center";
+                let lp = egui::pos2(cp.x + 10.0, cp.y - 10.0);
+                let font = egui::FontId::proportional(12.0);
+                for (dx, dy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0_f32), (0.0, 1.0)] {
+                    painter.text(
+                        egui::pos2(lp.x + dx, lp.y + dy),
+                        egui::Align2::LEFT_BOTTOM,
+                        label,
+                        font.clone(),
+                        egui::Color32::from_black_alpha(200),
+                    );
+                }
+                painter.text(
+                    lp,
+                    egui::Align2::LEFT_BOTTOM,
+                    label,
+                    font,
+                    egui::Color32::WHITE,
+                );
+            } else {
+                painter.circle_filled(cp, 5.0, center_fill);
+                painter.circle_stroke(cp, 5.0, border_stroke);
+                painter.line_segment(
+                    [egui::pos2(cp.x - 4.0, cp.y), egui::pos2(cp.x + 4.0, cp.y)],
+                    egui::Stroke::new(1.0_f32, handle_border),
+                );
+                painter.line_segment(
+                    [egui::pos2(cp.x, cp.y - 4.0), egui::pos2(cp.x, cp.y + 4.0)],
+                    egui::Stroke::new(1.0_f32, handle_border),
+                );
+            }
 
             if data.tool.transform_cursor_hint == 1 {
                 if let Some(mouse_pos) = ctx.pointer_hover_pos() {

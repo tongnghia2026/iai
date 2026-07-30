@@ -222,7 +222,7 @@ impl App {
             }
         }
         if objects.is_empty() {
-            self.shell.status_msg = "Không có chữ để chuyển thành đường cong".to_string();
+            self.shell.status_msg = "No text to convert to curves".to_string();
             return false;
         }
 
@@ -280,7 +280,7 @@ impl App {
         canvas.record(Box::new(cmd));
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Đã chuyển chữ thành đường cong (Path)".to_string();
+        self.shell.status_msg = "Converted text to curves (Path)".to_string();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }

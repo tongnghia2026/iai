@@ -1063,6 +1063,7 @@ impl App {
                             center,
                             // Free Transform has no relocatable pivot: marker on centre.
                             pivot: center,
+                            pivot_snapping: false,
                         }
                     })
                     // No modal Free Transform: the Move tool's active Path shows
@@ -1074,6 +1075,10 @@ impl App {
                                 handles: b.handles,
                                 center: b.center,
                                 pivot: b.pivot,
+                                // During a pivot drag, a cleared pivot means it is
+                                // snapped to the box centre → show the "Center" cue.
+                                pivot_snapping: self.edit.path_pivot_dragging
+                                    && self.edit.path_pivot.is_none(),
                             })
                     }),
                 transform_scale_x: self

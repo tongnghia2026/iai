@@ -660,12 +660,12 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 .count()
                                 >= 2;
                             ui.add_enabled_ui(shaping_enabled, |ui| {
-                                ui.menu_button("Shaping (kết hợp hình)", |ui| {
+                                ui.menu_button("Shaping", |ui| {
                                     for (label, op) in [
-                                        ("Weld — Hàn liền", BooleanOp::Union),
-                                        ("Trim — Cắt bớt", BooleanOp::Difference),
-                                        ("Intersect — Giao nhau", BooleanOp::Intersect),
-                                        ("Simplify — Đơn giản hóa", BooleanOp::Exclude),
+                                        ("Weld", BooleanOp::Union),
+                                        ("Trim", BooleanOp::Difference),
+                                        ("Intersect", BooleanOp::Intersect),
+                                        ("Simplify", BooleanOp::Exclude),
                                     ] {
                                         if ui.button(label).clicked() {
                                             actions.layers.boolean_op = Some(op);
@@ -703,12 +703,12 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 })
                                 .count();
                             let place_enabled = sel_total >= 2 && sel_vector >= 1;
-                            ui.menu_button("PowerClip (khung chứa)", |ui| {
+                            ui.menu_button("PowerClip", |ui| {
                                 if ui
-                                    .add(menu_item_enabled("Đưa vào khung", "", place_enabled))
+                                    .add(menu_item_enabled("Place Inside Frame", "", place_enabled))
                                     .on_hover_text(
-                                        "Đưa nội dung đang chọn vào trong hình vector trên cùng \
-                                         (nội dung bị cắt theo hình khung)",
+                                        "Place the selected content inside the topmost vector \
+                                         shape (content is clipped to the frame)",
                                     )
                                     .clicked()
                                 {
@@ -716,8 +716,8 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                     ui.close();
                                 }
                                 if ui
-                                    .button("Tách khỏi khung")
-                                    .on_hover_text("Bỏ cắt: trả nội dung đang chọn về tự do")
+                                    .button("Extract From Frame")
+                                    .on_hover_text("Remove the clip: release the selected content")
                                     .clicked()
                                 {
                                     actions.layers.powerclip_release = true;
@@ -732,8 +732,8 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 data.layers.layer_count > 1,
                             ))
                             .on_hover_text(
-                                "Cắt layer đang chọn theo hình của layer ngay bên dưới \
-                                 (bấm lại để bỏ). Dùng cho cả vector và pixel.",
+                                "Clip the selected layer to the shape of the layer directly \
+                                 below (click again to release). Works for both vector and pixel.",
                             )
                             .clicked()
                         {

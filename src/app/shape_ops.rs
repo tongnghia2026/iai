@@ -174,7 +174,7 @@ impl App {
         canvas.record(Box::new(cmd));
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Đã chuyển Shape thành đường cong (Path)".to_string();
+        self.shell.status_msg = "Converted the shape to curves (Path)".to_string();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }

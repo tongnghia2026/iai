@@ -47,7 +47,7 @@ impl App {
         canvas.reconcile_path_ink();
         canvas.layer_revision += 1;
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Nét vẽ vector".to_string();
+        self.shell.status_msg = "Vector brush stroke".to_string();
     }
 
     /// The active layer's id if it is a Path holding a Vector Brush stroke, else
@@ -68,7 +68,8 @@ impl App {
     /// Stroke), so it can be filled/booleaned like any object. One undo step.
     pub fn expand_active_brush_stroke(&mut self) {
         let Some(id) = self.active_brush_layer_id() else {
-            self.shell.status_msg = "Chọn một nét vẽ vector để chuyển thành đường viền".to_string();
+            self.shell.status_msg =
+                "Select a vector brush stroke to convert into an outline".to_string();
             return;
         };
         let doc_idx = self.docs.active_doc_idx;
@@ -81,7 +82,7 @@ impl App {
                 canvas.reconcile_path_ink();
                 canvas.layer_revision += 1;
                 self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-                self.shell.status_msg = "Đã chuyển nét vẽ thành đường viền".to_string();
+                self.shell.status_msg = "Converted the brush stroke into an outline".to_string();
             }
             Err(e) => {
                 self.shell.status_msg = e.message;

@@ -153,7 +153,7 @@ impl App {
                 .canvas
                 .is_cmyk()
             {
-                self.shell.status_msg = "Free Transform chưa dùng được ở chế độ CMYK".to_string();
+                self.shell.status_msg = "Free Transform is not available in CMYK mode".to_string();
             } else {
                 self.begin_transform();
                 self.sync_cursor(event_loop);
@@ -558,7 +558,7 @@ impl App {
             self.path_set_fill_overprint(on);
             if on {
                 self.shell.status_msg =
-                    "Overprint Fill đã bật; PDF hiện giữ đúng artwork bằng raster fallback"
+                    "Overprint Fill enabled; PDF preserves the artwork via raster fallback"
                         .to_string();
             }
         }
@@ -566,7 +566,7 @@ impl App {
             self.path_set_stroke_overprint(on);
             if on {
                 self.shell.status_msg =
-                    "Overprint Outline đã bật; PDF hiện giữ đúng artwork bằng raster fallback"
+                    "Overprint Outline enabled; PDF preserves the artwork via raster fallback"
                         .to_string();
             }
         }
@@ -574,25 +574,23 @@ impl App {
             if !self.path_apply_palette_fill(color) {
                 let rgba = color.to_rgba8();
                 self.set_paint_color(0, rgba);
-                self.shell.status_msg =
-                    "Không có Path đang chọn; màu đã đặt thành Foreground".to_string();
+                self.shell.status_msg = "No Path selected; colour set as Foreground".to_string();
             }
         }
         if let Some(color) = actions.tool.apply_palette_outline.take() {
             if !self.path_apply_palette_outline(color) {
                 let rgba = color.to_rgba8();
                 self.set_paint_color(1, rgba);
-                self.shell.status_msg =
-                    "Không có Path đang chọn; màu đã đặt thành Background".to_string();
+                self.shell.status_msg = "No Path selected; colour set as Background".to_string();
             }
         }
         if std::mem::take(&mut actions.tool.clear_palette_fill) && !self.path_clear_palette_fill() {
-            self.shell.status_msg = "Hãy chọn một Path để bỏ Fill".to_string();
+            self.shell.status_msg = "Select a Path to remove its Fill".to_string();
         }
         if std::mem::take(&mut actions.tool.clear_palette_outline)
             && !self.path_clear_palette_outline()
         {
-            self.shell.status_msg = "Hãy chọn một Path để bỏ Outline".to_string();
+            self.shell.status_msg = "Select a Path to remove its Outline".to_string();
         }
         if let Some(color) = actions.tool.add_document_swatch.take() {
             self.add_document_swatch(color);

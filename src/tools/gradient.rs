@@ -797,7 +797,7 @@ impl Tool for GradientTool {
         }
         if !Canvas::fits_flat_buffer(ctx.canvas().width, ctx.canvas().height) {
             return ToolResponse::blocked(
-                "Gradient không hỗ trợ canvas > 25M pixels (Viewport Streaming mode)",
+                "Gradient does not support canvases > 25M pixels (Viewport Streaming mode)",
             );
         }
         self.apply_gradient(ctx.canvas_mut(), ex, ey);

@@ -70,7 +70,8 @@ impl App {
     /// the clip. One undo step. The content shows only inside the frame's shape.
     pub fn powerclip_place(&mut self) -> bool {
         let Some((frame_idx, content_idx)) = self.powerclip_selection() else {
-            self.shell.status_msg = "Chọn nội dung và một hình vector làm khung chứa".to_string();
+            self.shell.status_msg =
+                "Select content and a vector shape to use as the frame".to_string();
             return false;
         };
 
@@ -121,7 +122,7 @@ impl App {
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        self.shell.status_msg = format!("Đã đưa {count} đối tượng vào khung PowerClip");
+        self.shell.status_msg = format!("Placed {count} object(s) into the PowerClip frame");
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -145,7 +146,7 @@ impl App {
             .map(|(i, _)| i)
             .collect();
         if targets.is_empty() {
-            self.shell.status_msg = "Không có nội dung PowerClip nào đang chọn".to_string();
+            self.shell.status_msg = "No PowerClip content selected".to_string();
             return false;
         }
 
@@ -165,7 +166,7 @@ impl App {
         canvas.record(Box::new(cmd));
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = format!("Đã tách {} đối tượng khỏi khung", targets.len());
+        self.shell.status_msg = format!("Extracted {} object(s) from the frame", targets.len());
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -204,11 +205,11 @@ impl App {
                 .layer_stack;
             let active = stack.active_idx;
             match stack.layers.get(active) {
-                None => Action::None("Không có layer đang chọn"),
+                None => Action::None("No layer selected"),
                 Some(l) if l.clip_parent_id.is_some() => Action::Release(active),
                 Some(l) if active == 0 => {
                     let _ = l;
-                    Action::None("Không có layer bên dưới để cắt vào")
+                    Action::None("No layer below to clip into")
                 }
                 Some(l) => {
                     // Base = the layer directly below; if IT is clipped, clip to
@@ -218,7 +219,7 @@ impl App {
                     if stack.can_attach_clipped_child(l.id, base_id) {
                         Action::Create(active, base_id)
                     } else {
-                        Action::None("Không thể cắt vào layer bên dưới (nhóm/không hợp lệ)")
+                        Action::None("Can't clip into the layer below (group/invalid)")
                     }
                 }
             }
@@ -253,7 +254,7 @@ impl App {
                 let mut cmd = before;
                 cmd.capture_after(&canvas.layer_stack, cw, ch);
                 canvas.record(Box::new(cmd));
-                "Đã bỏ clipping mask"
+                "Clipping mask removed"
             }
             Action::Create(active, base_id) => {
                 let before = LayerStructureCommand::capture_before(
@@ -267,7 +268,7 @@ impl App {
                 let mut cmd = before;
                 cmd.capture_after(&canvas.layer_stack, cw, ch);
                 canvas.record(Box::new(cmd));
-                "Đã tạo clipping mask (Ctrl+Alt+G)"
+                "Clipping mask created (Ctrl+Alt+G)"
             }
             Action::None(_) => unreachable!(),
         };
