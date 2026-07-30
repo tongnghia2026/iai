@@ -595,6 +595,58 @@ impl App {
         });
     }
 
+    /// Alt+rotate / Ctrl+scale on the single active Path: duplicate it and
+    /// transform the COPY (the original stays put), so a first sample can be fanned
+    /// out with Repeat. The duplicate + its transform commit as ONE undo step (via
+    /// `path_dup_before`) and the gesture's transform is stored as the repeatable
+    /// step on release. A multi-Path selection falls back to a plain transform.
+    pub fn path_transform_begin_duplicate(&mut self, hit: PathBoxHit, cx: f32, cy: f32) {
+        if self.multi_path_targets().is_some() {
+            self.path_transform_begin(hit, cx, cy);
+            return;
+        }
+        let Some(idx) = self.active_path_layer() else {
+            return;
+        };
+        let (cw, ch) = {
+            let d = &self.docs.documents[self.docs.active_doc_idx];
+            (d.canvas.width, d.canvas.height)
+        };
+        let (orig_id, new_id, before) = {
+            let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+            crate::core::command_vector::fold_offset_into_model(
+                &mut canvas.layer_stack.layers[idx],
+            );
+            let orig_id = canvas.layer_stack.layers[idx].id;
+            let before = crate::core::command::LayerStructureCommand::capture_before(
+                "Duplicate & Transform",
+                &canvas.layer_stack,
+                cw,
+                ch,
+            );
+            let new_idx = canvas.layer_stack.duplicate_layer(idx);
+            let new_id = canvas.layer_stack.layers[new_idx].id;
+            for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
+                l.selected = i == new_idx;
+            }
+            canvas.layer_stack.active_idx = new_idx;
+            (orig_id, new_id, before)
+        };
+        // Re-key the rotation pivot onto the copy (same object-local point) so the
+        // rotate turns about the pivot the user set on the original, not the centre.
+        if let Some((pid, p)) = self.edit.path_pivot {
+            if pid == orig_id {
+                self.edit.path_pivot = Some((new_id, p));
+            }
+        }
+        self.edit.path_dup_before = Some(before);
+        self.path_transform_begin(hit, cx, cy);
+        // If the gesture failed to start, don't leave a dangling snapshot.
+        if self.edit.path_transform.is_none() {
+            self.edit.path_dup_before = None;
+        }
+    }
+
     /// Begin a union scale/rotate over several selected Paths. The gesture builds
     /// a CANVAS-space delta `M` about the union box (identity `orig_transform`,
     /// union AABB as `local_bounds`); every target's new transform is `M ∘ orig_i`
@@ -848,6 +900,12 @@ impl App {
     /// for a single Path, or every target's transform in ONE undo group for a
     /// union drag. A no-op drag (a click on a handle) records nothing.
     pub fn path_transform_finish(&mut self) {
+        // A duplicate-transform gesture (Alt+rotate / Ctrl+scale) commits the
+        // duplicate + its transform as one structural undo instead.
+        if self.edit.path_dup_before.is_some() {
+            self.finish_duplicate_transform();
+            return;
+        }
         let Some(drag) = self.edit.path_transform.take() else {
             return;
         };
@@ -980,6 +1038,68 @@ impl App {
             )),
             crate::core::gateway::ChangeKind::LayerStructure,
         );
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Commit an Alt+rotate / Ctrl+scale duplicate gesture: the copy (already the
+    /// active target) takes the final transform, and the whole thing — the
+    /// duplicate plus its transform — is recorded as ONE structural undo from the
+    /// pre-duplicate snapshot in `path_dup_before`. The gesture's canvas-space
+    /// delta `M = final ∘ orig⁻¹` becomes the repeatable step.
+    fn finish_duplicate_transform(&mut self) {
+        let before = self.edit.path_dup_before.take();
+        let Some(drag) = self.edit.path_transform.take() else {
+            return;
+        };
+        let Some(mut before) = before else {
+            return;
+        };
+        if let Some(gpu) = &mut self.win.gpu {
+            gpu.compositor.transform_previews.clear();
+        }
+        self.recomposite_visible();
+        self.cancel_path_bake();
+
+        let (cw, ch) = {
+            let d = &self.docs.documents[self.docs.active_doc_idx];
+            (d.canvas.width, d.canvas.height)
+        };
+        let final_t = drag.pending;
+        let changed = drag.changed && final_t != drag.orig_transform;
+        let repeat_m = if changed {
+            drag.orig_transform
+                .inverse()
+                .map(|inv| final_t.then(&inv))
+                .filter(|m| m.is_finite())
+        } else {
+            None
+        };
+        {
+            let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+            if changed {
+                if let Some(pos) = canvas
+                    .layer_stack
+                    .layers
+                    .iter()
+                    .position(|l| l.id == drag.layer_id)
+                {
+                    let layer = &mut canvas.layer_stack.layers[pos];
+                    if let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type {
+                        let mut o = o.clone();
+                        o.transform = final_t;
+                        crate::core::command_vector::apply_object_to_layer(layer, o);
+                    }
+                }
+            }
+            before.capture_after(&canvas.layer_stack, cw, ch);
+            canvas.record(Box::new(before));
+        }
+        if let Some(m) = repeat_m {
+            self.edit.last_repeat_transform = Some(m);
+        }
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -1451,6 +1571,83 @@ mod tests {
         assert!(
             app.multi_path_targets().is_none(),
             "a mixed selection is not a clean multi-Path target set"
+        );
+    }
+
+    #[test]
+    fn repeat_step_duplicates_and_applies_transform() {
+        let (mut app, id) = app_with_active_path();
+        // Nothing captured yet → Repeat is a no-op.
+        assert!(!app.repeat_last_step());
+
+        let orig_t = match &find_layer(&app, id).layer_type {
+            LayerType::Vector(VectorGeometry::Path(o)) => o.transform,
+            _ => panic!("path"),
+        };
+        app.edit.last_repeat_transform = Some(AffineTransform::translate(50.0, 0.0));
+
+        let before = app.docs.documents[0].canvas.layer_stack.layers.len();
+        assert!(app.repeat_last_step());
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before + 1,
+            "one copy added"
+        );
+
+        // The active layer is the new copy; its transform is M ∘ orig (+50 in x).
+        let active = app.docs.documents[0].canvas.layer_stack.active_idx;
+        let copy_t = match &app.docs.documents[0].canvas.layer_stack.layers[active].layer_type {
+            LayerType::Vector(VectorGeometry::Path(o)) => o.transform,
+            _ => panic!("copy is a path"),
+        };
+        assert!((copy_t.e - (orig_t.e + 50.0)).abs() < 1e-3);
+        assert!((copy_t.f - orig_t.f).abs() < 1e-3);
+
+        // Undo removes the copy.
+        app.docs.documents[0].canvas.undo().expect("undo repeat");
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before
+        );
+    }
+
+    #[test]
+    fn alt_rotate_duplicate_keeps_original_and_captures_step() {
+        let (mut app, id) = app_with_active_path();
+        let orig_t = match &find_layer(&app, id).layer_type {
+            LayerType::Vector(VectorGeometry::Path(o)) => o.transform,
+            _ => panic!("path"),
+        };
+        let before = app.docs.documents[0].canvas.layer_stack.layers.len();
+
+        // Alt+rotate: duplicate, then turn the copy ~90° about the box centre.
+        app.path_transform_begin_duplicate(PathBoxHit::Rotate, 140.0, 130.0);
+        app.path_transform_update(120.0, 150.0, false, false);
+        app.path_transform_finish();
+
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before + 1,
+            "duplicate-rotate adds exactly one copy"
+        );
+        let after_orig = match &find_layer(&app, id).layer_type {
+            LayerType::Vector(VectorGeometry::Path(o)) => o.transform,
+            _ => panic!("path"),
+        };
+        assert_eq!(after_orig, orig_t, "the original stays put");
+        assert!(
+            app.edit.last_repeat_transform.is_some(),
+            "the rotation is captured as the repeatable step"
+        );
+
+        // One structural undo removes the duplicate.
+        app.docs.documents[0]
+            .canvas
+            .undo()
+            .expect("undo dup-rotate");
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before
         );
     }
 }

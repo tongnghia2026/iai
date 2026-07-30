@@ -1174,6 +1174,8 @@ impl App {
                 path_transform: None,
                 path_pivot: None,
                 path_pivot_dragging: false,
+                last_repeat_transform: None,
+                path_dup_before: None,
                 path_gradient_drag: None,
                 node_drag: None,
                 node_selected: None,

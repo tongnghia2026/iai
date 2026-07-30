@@ -71,6 +71,15 @@ pub struct EditorInteraction {
     /// True while the rotation-pivot marker itself is being dragged (Move tool),
     /// as opposed to a scale/rotate handle.
     pub(in crate::app) path_pivot_dragging: bool,
+    /// The last repeatable "duplicate + transform" step, as a CANVAS-space affine
+    /// `M`: Repeat (Ctrl+D / the button) duplicates the selection and applies `M`
+    /// to each copy, so a single sample fans out into a row / ring / spiral.
+    /// Captured from Alt+move (translate), Alt+rotate (rotate about the pivot) and
+    /// Ctrl+scale (scale about the anchor). `None` = nothing to repeat yet.
+    pub(in crate::app) last_repeat_transform: Option<crate::core::vector::affine::AffineTransform>,
+    /// Layer-stack snapshot captured at the START of an Alt/Ctrl duplicate-transform
+    /// gesture, so the duplicate + its transform commit as ONE undo step on release.
+    pub(in crate::app) path_dup_before: Option<crate::core::command::LayerStructureCommand>,
     /// Active on-canvas vector-gradient transform handle drag.
     pub(in crate::app) path_gradient_drag: Option<PathGradientDrag>,
     /// Active node-edit drag under the Node tool. See [`NodeDrag`]. None unless a

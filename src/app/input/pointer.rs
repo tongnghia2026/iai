@@ -394,12 +394,25 @@ impl App {
                             {
                                 let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
                                 if let Some(hit) = self.path_box_hit_at_screen(msx, msy) {
+                                    use crate::app::vector_transform::PathBoxHit;
                                     let ev = self.tool_event();
                                     // Grabbing the pivot marker relocates the rotation
                                     // centre (CorelDRAW style); a handle/ring starts a
-                                    // scale/rotate.
-                                    if hit == crate::app::vector_transform::PathBoxHit::Pivot {
+                                    // scale/rotate. Alt+rotate or Ctrl+scale instead
+                                    // transforms a fresh COPY (the repeat sample).
+                                    let dup = match hit {
+                                        PathBoxHit::Rotate => self.edit.input.alt_held,
+                                        PathBoxHit::Handle(_) => self.edit.input.ctrl_held,
+                                        PathBoxHit::Pivot => false,
+                                    };
+                                    if hit == PathBoxHit::Pivot {
                                         self.path_pivot_drag_begin();
+                                    } else if dup {
+                                        self.path_transform_begin_duplicate(
+                                            hit,
+                                            ev.canvas_x,
+                                            ev.canvas_y,
+                                        );
                                     } else {
                                         self.path_transform_begin(hit, ev.canvas_x, ev.canvas_y);
                                     }
@@ -797,6 +810,27 @@ impl App {
                                 }
                                 if active_tool == ToolId::Crop {
                                     self.update_crop_preview();
+                                }
+
+                                // Mirror an Alt+drag duplicate into the unified
+                                // repeatable step so Repeat / Ctrl+D continues the row.
+                                if active_tool == ToolId::Move {
+                                    let dup = {
+                                        let mt = self.edit.tools.move_tool_mut();
+                                        if mt.took_duplicate {
+                                            mt.took_duplicate = false;
+                                            mt.last_duplicate_delta
+                                        } else {
+                                            None
+                                        }
+                                    };
+                                    if let Some((dx, dy)) = dup {
+                                        self.edit.last_repeat_transform = Some(
+                                            crate::core::vector::affine::AffineTransform::translate(
+                                                dx as f32, dy as f32,
+                                            ),
+                                        );
+                                    }
                                 }
 
                                 if self.edit.tools.active_id() == crate::tools::ToolId::Repair {

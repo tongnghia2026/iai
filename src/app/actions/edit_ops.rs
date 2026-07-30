@@ -442,14 +442,23 @@ impl App {
         true
     }
 
-    /// Duplicate the selected movable objects and translate the copies by
-    /// `delta`. The copies become the new selection, making repeated calls a
-    /// deterministic step-and-repeat chain. Geometry remains editable: Path
-    /// offsets are folded into their affine model before the single history
-    /// snapshot is recorded.
-    pub(in crate::app) fn duplicate_selected_with_step(&mut self, delta: (i32, i32)) -> bool {
+    /// Duplicate the selected movable objects and apply the CANVAS-space affine
+    /// `m` to each copy. The copies become the new selection, so repeated calls
+    /// build a step-and-repeat chain (row / ring / spiral). Path copies transform
+    /// their editable affine model exactly (`new = M ∘ orig`); other layer types
+    /// follow only the displacement of their centre under `m` — their pixels are
+    /// not rotated (decision #2 for the Repeat feature). Records ONE history
+    /// snapshot and stores `m` as the repeatable step.
+    pub(in crate::app) fn duplicate_selected_with_transform(
+        &mut self,
+        m: crate::core::vector::affine::AffineTransform,
+    ) -> bool {
+        use crate::core::geometry::Point;
         use crate::core::layer::LayerType;
 
+        if !m.is_finite() {
+            return false;
+        }
         let duplicated = {
             let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
             let indices: Vec<usize> = canvas
@@ -476,7 +485,7 @@ impl App {
                 0
             } else {
                 let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
-                    "Duplicate Step",
+                    "Repeat",
                     &canvas.layer_stack,
                     canvas.width,
                     canvas.height,
@@ -488,10 +497,24 @@ impl App {
                 for &idx in indices.iter().rev() {
                     let new_idx = canvas.layer_stack.duplicate_layer(idx);
                     let layer = &mut canvas.layer_stack.layers[new_idx];
-                    layer.offset.0 += delta.0;
-                    layer.offset.1 += delta.1;
-                    if matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_))) {
-                        crate::core::command_vector::fold_offset_into_model(layer);
+                    match &layer.layer_type {
+                        // Vector Path: transform the editable affine model exactly.
+                        LayerType::Vector(VectorGeometry::Path(obj)) => {
+                            let mut o = obj.clone();
+                            o.transform = m.then(&obj.transform);
+                            if o.transform.is_finite() {
+                                crate::core::command_vector::apply_object_to_layer(layer, o);
+                            }
+                        }
+                        // Raster/Text/Shape/Smart: move the copy so its centre lands
+                        // where `m` maps it; the pixels themselves are not rotated.
+                        _ => {
+                            let cx = layer.offset.0 as f32 + layer.width as f32 * 0.5;
+                            let cy = layer.offset.1 as f32 + layer.height as f32 * 0.5;
+                            let p = m.apply_point(Point::new(cx, cy));
+                            layer.offset.0 += (p.x - cx).round() as i32;
+                            layer.offset.1 += (p.y - cy).round() as i32;
+                        }
                     }
                     layer.selected = true;
                     new_ids.push(layer.id);
@@ -515,15 +538,39 @@ impl App {
             self.shell.status_msg = "No movable objects selected".to_string();
             return false;
         }
-        self.edit.tools.move_tool_mut().last_duplicate_delta = Some(delta);
+        self.edit.last_repeat_transform = Some(m);
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.shell.status_msg = format!(
-            "Duplicated {duplicated} object{} by {}, {}",
-            if duplicated == 1 { "" } else { "s" },
-            delta.0,
-            delta.1
+            "Duplicated {duplicated} object{}",
+            if duplicated == 1 { "" } else { "s" }
         );
         true
+    }
+
+    /// Duplicate the selection translated by `delta` — the Duplicate button and
+    /// the "+" key. Records the translation as the repeatable step.
+    pub(in crate::app) fn duplicate_selected_with_step(&mut self, delta: (i32, i32)) -> bool {
+        let m =
+            crate::core::vector::affine::AffineTransform::translate(delta.0 as f32, delta.1 as f32);
+        let ok = self.duplicate_selected_with_transform(m);
+        if ok {
+            self.edit.tools.move_tool_mut().last_duplicate_delta = Some(delta);
+        }
+        ok
+    }
+
+    /// Replay the last captured duplicate-transform step (Repeat button / Ctrl+D):
+    /// duplicate the current selection and re-apply the same move/rotate/scale, so
+    /// each press extends the pattern from the previous copy.
+    pub(in crate::app) fn repeat_last_step(&mut self) -> bool {
+        match self.edit.last_repeat_transform {
+            Some(m) => self.duplicate_selected_with_transform(m),
+            None => {
+                self.shell.status_msg =
+                    "No step to repeat — duplicate, or Alt/Ctrl-drag a copy first".to_string();
+                false
+            }
+        }
     }
 
     pub(super) fn apply_move_transform_action(&mut self, action: MoveTransformAction) {

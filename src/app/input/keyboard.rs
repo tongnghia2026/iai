@@ -272,19 +272,45 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::KeyD) if pressed && self.edit.input.ctrl_held => {
+                let has_selection = self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .selection
+                    .active;
                 if self.edit.input.shift_held {
-                    if let Some(delta) = self.edit.tools.move_tool().last_duplicate_delta {
-                        self.duplicate_selected_with_step(delta);
-                    } else {
-                        self.shell.status_msg = "No duplicate step to repeat".to_string();
-                    }
-                } else {
+                    // Ctrl+Shift+D: always Repeat (explicit).
+                    self.repeat_last_step();
+                } else if has_selection {
+                    // Ctrl+D with an active pixel selection = Deselect (Photoshop).
                     self.docs.documents[self.docs.active_doc_idx]
                         .canvas
                         .deselect();
                     self.upload_selection_mask();
                     self.push_selection_uniforms();
+                } else {
+                    // Ctrl+D with no selection = Repeat the last duplicate step.
+                    self.repeat_last_step();
                 }
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            // "+" duplicates the selection in place-ish (Corel-style), recording it
+            // as the repeatable step. NumpadAdd, or Shift+"=" on the main row.
+            PhysicalKey::Code(KeyCode::NumpadAdd)
+                if pressed && !self.edit.input.ctrl_held && !self.is_tool_modal_active() =>
+            {
+                self.duplicate_selected_with_step((10, 10));
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            PhysicalKey::Code(KeyCode::Equal)
+                if pressed
+                    && self.edit.input.shift_held
+                    && !self.edit.input.ctrl_held
+                    && !self.is_tool_modal_active() =>
+            {
+                self.duplicate_selected_with_step((10, 10));
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }

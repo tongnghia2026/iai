@@ -27,6 +27,9 @@ pub struct MoveTool {
     /// Last committed duplicate translation. Repeating it duplicates the current
     /// selection by the same vector (Corel-style step-and-repeat).
     pub last_duplicate_delta: Option<(i32, i32)>,
+    /// Set on the release that recorded an Alt+drag duplicate, so the app can
+    /// mirror the translation into the unified repeatable step (`last_repeat_transform`).
+    pub took_duplicate: bool,
 
     // --- Snapping (③) ---
     /// Master snap toggle (mirrors UiState.snap_enabled; set by the app each frame).
@@ -67,6 +70,7 @@ impl MoveTool {
             marquee_end_y: 0.0,
             pending_dup_cmd: None,
             last_duplicate_delta: None,
+            took_duplicate: false,
             snap_enabled: true,
             press_cx: 0.0,
             press_cy: 0.0,
@@ -692,6 +696,7 @@ impl Tool for MoveTool {
             canvas.end_undo_group();
             if duplicated && moved {
                 self.last_duplicate_delta = Some((self.total_dx, self.total_dy));
+                self.took_duplicate = true;
             }
         }
 

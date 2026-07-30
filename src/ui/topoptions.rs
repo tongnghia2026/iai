@@ -1587,15 +1587,18 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
     ui.separator();
     if ui
-        .button("Dup")
-        .on_hover_text("Duplicate selected objects with a 10 × 10 px step")
+        .button("Duplicate")
+        .on_hover_text("Duplicate the selected objects (shortcut: +)")
         .clicked()
     {
         actions.layers.duplicate_selected_step = true;
     }
     if ui
         .button("Repeat")
-        .on_hover_text("Repeat the last duplicate translation (Ctrl+Shift+D)")
+        .on_hover_text(
+            "Repeat the last step on a new copy — move, or Alt+rotate / Ctrl+scale \
+             a copy first to set the pattern (Ctrl+D)",
+        )
         .clicked()
     {
         actions.layers.repeat_duplicate_step = true;
