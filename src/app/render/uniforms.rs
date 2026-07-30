@@ -210,6 +210,9 @@ impl App {
                     | crate::tools::ToolId::Smudge
                     | crate::tools::ToolId::Dodge
                     | crate::tools::ToolId::Burn
+                    // Vector Brush uses the OS ring like the pixel brushes; without
+                    // this it would get the OS ring AND the GPU ring (two cursors).
+                    | crate::tools::ToolId::VectorBrush
             );
             let uses_os_ring = matches!(
                 self.edit.tools.active_id(),
@@ -223,6 +226,7 @@ impl App {
                     | crate::tools::ToolId::Smudge
                     | crate::tools::ToolId::Dodge
                     | crate::tools::ToolId::Burn
+                    | crate::tools::ToolId::VectorBrush
             );
             let ring_screen_radius = self.edit.tools.cursor_size() * self.edit.view.zoom;
             let os_ring_too_big = uses_os_ring
