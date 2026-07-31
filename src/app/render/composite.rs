@@ -520,7 +520,19 @@ impl App {
         if let Some(gpu) = &mut self.win.gpu {
             let canvas_pixels = (cw as u64).saturating_mul(ch as u64);
             let viewport_streaming = canvas_pixels > 12_000_000;
-            let canvas_space = !gpu.is_large_canvas && !viewport_streaming && !interactive;
+            // Native vectors must render into a viewport-sized target using the
+            // live view transform. Mode A composites at document resolution with
+            // (off=0, zoom=1) and only magnifies that texture during the final
+            // blit, so its `!canvas_space` eligibility guard would otherwise keep
+            // every ordinary small-canvas Path on the sequential CPU display
+            // bake forever. The flag defaults off, preserving the old Mode A/B
+            // decision byte-for-byte outside the experimental hybrid canvas.
+            let canvas_space = choose_canvas_space(
+                gpu.is_large_canvas,
+                viewport_streaming,
+                interactive,
+                crate::gpu::vector::runtime_enabled(),
+            );
             if gpu.compositor.canvas_space != canvas_space {
                 mode_changed = true;
             }
@@ -673,5 +685,39 @@ impl App {
             self.win.view_recompose_last = Some(end);
         }
         true
+    }
+}
+
+fn choose_canvas_space(
+    is_large_canvas: bool,
+    viewport_streaming: bool,
+    interactive: bool,
+    gpu_vector_canvas: bool,
+) -> bool {
+    !is_large_canvas && !viewport_streaming && !interactive && !gpu_vector_canvas
+}
+
+#[cfg(test)]
+mod hybrid_canvas_mode_tests {
+    use super::choose_canvas_space;
+
+    #[test]
+    fn gpu_vector_flag_forces_viewport_space_for_small_static_canvas() {
+        assert!(choose_canvas_space(false, false, false, false));
+        assert!(!choose_canvas_space(false, false, false, true));
+    }
+
+    #[test]
+    fn legacy_mode_selection_is_unchanged_when_gpu_vector_flag_is_off() {
+        for is_large in [false, true] {
+            for streaming in [false, true] {
+                for interactive in [false, true] {
+                    assert_eq!(
+                        choose_canvas_space(is_large, streaming, interactive, false),
+                        !is_large && !streaming && !interactive
+                    );
+                }
+            }
+        }
     }
 }
