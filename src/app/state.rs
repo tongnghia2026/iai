@@ -894,8 +894,9 @@ pub struct DisplayBakeOutput {
 /// [`PathBakeInFlight`]). `key` pins exactly what was requested so a result for a
 /// stale zoom/geometry is matched (or ignored) correctly.
 pub struct DisplayBakeInFlight {
-    pub key: PathDisplayCacheKey,
-    pub rx: std::sync::mpsc::Receiver<Option<DisplayBakeOutput>>,
+    pub keys: Vec<PathDisplayCacheKey>,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub rx: std::sync::mpsc::Receiver<Vec<(PathDisplayCacheKey, Option<DisplayBakeOutput>)>>,
 }
 
 #[derive(Default)]
@@ -958,7 +959,7 @@ pub struct UiDataCache {
     /// Rebuild throttle: the colour plates force a full CPU flatten, so they
     /// refresh at most every few hundred ms while the panel is open.
     pub channel_thumbs_built_at: Option<Instant>,
-    pub path_display: Option<PathDisplayCacheEntry>,
+    pub path_displays: Vec<PathDisplayCacheEntry>,
     pub path_display_serial: u64,
     /// Top visible vector run omitted from the coarse document composite while
     /// its supersampled display raster is drawn above it.

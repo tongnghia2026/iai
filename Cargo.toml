@@ -46,6 +46,8 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 hayro = "0.7.1"
 lopdf = { version = "0.43", default-features = false }
 i_overlay = "7.0.2"
+lyon_path = "1"
+lyon_tessellation = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_UI_Shell"] }

@@ -8,6 +8,7 @@ use winit::window::Window;
 
 pub mod compositor;
 pub mod tile_atlas;
+pub mod vector;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]

@@ -119,8 +119,8 @@ pub struct BackgroundJobs {
     /// Zoom-bucket changes rebuild HERE instead of on the UI thread, so zooming a
     /// large Path never stalls. See [`crate::app::state::DisplayBakeInFlight`].
     pub(in crate::app) display_bake: Option<crate::app::state::DisplayBakeInFlight>,
-    /// Newest display key requested while a display bake ran (latest wins).
-    pub(in crate::app) display_bake_next: Option<crate::app::state::PathDisplayCacheKey>,
+    /// Newest per-object display batch requested while a batch ran (latest wins).
+    pub(in crate::app) display_bake_next: Option<Vec<crate::app::state::PathDisplayCacheKey>>,
     pub(in crate::app) select_subject: crate::core::select_subject::SelectSubjectEngine,
     /// Gemini AI image-edit engine (see core/ai/edit.rs).
     pub(in crate::app) ai_engine: crate::core::ai::edit::AiEditEngine,
