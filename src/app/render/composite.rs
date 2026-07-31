@@ -379,7 +379,12 @@ impl App {
                 });
             let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
             gpu.compositor.develop_preview = dev_preview;
-            let has_groups = canvas.layer_stack.has_effected_groups();
+            let has_effected_groups = canvas.layer_stack.has_effected_groups();
+            let gpu_isolates_groups = has_effected_groups
+                && gpu
+                    .compositor
+                    .can_gpu_isolate_opacity_groups(&canvas.layer_stack, allow_active_gpu_vector);
+            let has_groups = has_effected_groups && !gpu_isolates_groups;
             let effective_dirty = if has_groups {
                 dirty_rect.filter(|_| gpu.compositor.ping_initialized)
             } else {
@@ -450,7 +455,7 @@ impl App {
                 // disabled for the synthetic group-isolation stack (whose indices
                 // don't match the real stack the cut is computed from) and for a
                 // live clip move (the frozen base would ghost — see above).
-                !has_groups && !clip_live_move,
+                !has_effected_groups && !clip_live_move,
                 allow_active_gpu_vector,
             );
             // Remember which Develop-window view this Mode B composite baked, so

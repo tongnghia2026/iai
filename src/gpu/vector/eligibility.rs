@@ -109,6 +109,58 @@ pub fn layer_eligibility(layer: &Layer, enabled: bool) -> Eligibility {
     layer_eligibility_impl(layer, enabled, false, false)
 }
 
+fn opacity_group_supported(stack: &crate::core::layer::LayerStack, group_id: u32) -> bool {
+    let Some(group) = stack
+        .layers
+        .iter()
+        .find(|candidate| candidate.id == group_id)
+    else {
+        return false;
+    };
+    if !group.is_group()
+        || !group.visible
+        || group.parent_id.is_some()
+        || group.opacity >= 0.999
+        || group.blend_mode != BlendMode::Normal
+        || group.mask.as_ref().is_some_and(|mask| mask.enabled)
+    {
+        return false;
+    }
+    let children: Vec<&Layer> = stack
+        .layers
+        .iter()
+        .enumerate()
+        .filter(|(index, child)| {
+            child.parent_id == Some(group_id) && stack.is_effectively_visible(*index)
+        })
+        .map(|(_, child)| child)
+        .collect();
+    !children.is_empty()
+        && children.iter().all(|child| {
+            !child.is_group()
+                && child.mask.as_ref().is_none_or(|mask| !mask.enabled)
+                && child.clip_parent_id.is_none()
+                && matches!(
+                    layer_eligibility_impl(child, true, true, false),
+                    Eligibility::GpuVector
+                )
+        })
+}
+
+/// True only for the deliberately narrow first isolation slice: every visible
+/// effected group is a top-level Normal-opacity group whose visible direct
+/// children can form one unmasked/unclipped GPU-vector run.
+pub fn stack_supports_gpu_opacity_groups(stack: &crate::core::layer::LayerStack) -> bool {
+    stack.layers.iter().enumerate().all(|(index, group)| {
+        let effected = group.is_group()
+            && stack.is_effectively_visible(index)
+            && (group.opacity < 0.999
+                || group.blend_mode != BlendMode::Normal
+                || group.mask.as_ref().is_some_and(|mask| mask.enabled));
+        !effected || opacity_group_supported(stack, group.id)
+    })
+}
+
 /// Stack-aware eligibility for group children. A plain Normal/100%/unmasked
 /// group is pass-through in the CPU compositor, so its children may be rendered
 /// inline without changing z-order. Any missing, hidden, or effected ancestor
@@ -135,12 +187,12 @@ pub fn layer_eligibility_in_stack(
         let Some(parent) = stack.layers.iter().find(|candidate| candidate.id == id) else {
             return Eligibility::RasterFallback(FallbackReason::Group);
         };
-        if !parent.is_group()
-            || !parent.visible
-            || parent.opacity < 0.999
-            || parent.blend_mode != BlendMode::Normal
-            || parent.mask.as_ref().is_some_and(|mask| mask.enabled)
-        {
+        let pass_through = parent.is_group()
+            && parent.visible
+            && parent.opacity >= 0.999
+            && parent.blend_mode == BlendMode::Normal
+            && parent.mask.as_ref().is_none_or(|mask| !mask.enabled);
+        if !pass_through && !opacity_group_supported(stack, parent.id) {
             return Eligibility::RasterFallback(FallbackReason::Group);
         }
         parent_id = parent.parent_id;
@@ -280,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_group_ancestors_allow_gpu_children() {
+    fn plain_and_vector_only_opacity_groups_allow_gpu_children() {
         let mut child = layer_with(square());
         child.parent_id = Some(8);
         let mut group = Layer::new_group(8, "plain", 64, 64);
@@ -293,6 +345,17 @@ mod tests {
 
         group.opacity = 0.5;
         stack.layers[1] = group;
+        assert_eq!(
+            layer_eligibility_in_stack(&stack.layers[0], &stack, true),
+            Eligibility::GpuVector
+        );
+        assert!(stack_supports_gpu_opacity_groups(&stack));
+
+        let mut raster = Layer::new(9, "mixed", 64, 64);
+        raster.parent_id = Some(8);
+        raster.tiles.set_pixel(0, 0, 255, 255, 255, 255);
+        stack.layers.insert(1, raster);
+        assert!(!stack_supports_gpu_opacity_groups(&stack));
         assert_eq!(
             layer_eligibility_in_stack(&stack.layers[0], &stack, true),
             Eligibility::RasterFallback(FallbackReason::Group)

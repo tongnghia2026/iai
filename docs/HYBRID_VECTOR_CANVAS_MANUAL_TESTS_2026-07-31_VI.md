@@ -165,7 +165,8 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 | Gradient có stop CMYK, blend≠Normal | Raster fallback |
 | Raster mask thường trên vector | GPU (Phase 7, lát 2) |
 | PowerClip có frame + derived mask hợp lệ | GPU (Phase 7, lát 3) |
-| Vector mask / group isolation | Raster fallback |
+| Group Normal opacity, chỉ direct GPU vectors | GPU (Phase 7, lát 4) |
+| Vector mask / mixed/nested/masked/blended group | Raster fallback |
 | CMYK paint / soft-proof | Raster fallback |
 
 Bất cứ ô "Raster fallback" nào mà **khác hình so với khi tắt cờ** đều là lỗi cần
@@ -202,3 +203,15 @@ báo. Bất cứ ô "GPU" nào mà chậm đi hoặc kém nét hơn tắt cờ c
 5. Kỳ vọng: derived mask cập nhật và PowerClip đổi theo frame, không giữ mask cũ.
 6. Release clip hoặc xóa frame/mask làm quan hệ tạm thiếu dữ liệu.
 7. Kỳ vọng: không render sai hay crash; quan hệ không hợp lệ rơi về raster.
+
+## Phase 7 — lát 4: group opacity isolation
+
+1. Tạo group top-level, blend Normal, opacity khoảng 50%; đặt hai vector RGB đặc
+   chồng lên nhau trong group và raster layer ở cả dưới lẫn trên group.
+2. Zoom/pan qua 100%, đổi opacity group và di chuyển từng vector.
+3. Kỳ vọng: vùng hai vector chồng nhau được composite trong group trước, rồi mới
+   nhận opacity group một lần; không tối/nhạt kép và z-order ngoài group giữ đúng.
+4. Thêm raster child, mask/PowerClip child, nested group, group mask hoặc đổi blend.
+5. Kỳ vọng: toàn group chuyển về synthetic raster fallback và giống khi tắt flag.
+6. Khi đang live-edit active vector trong group, kỳ vọng fallback tạm thời an toàn;
+   thả chuột xong mới trở lại GPU-native.

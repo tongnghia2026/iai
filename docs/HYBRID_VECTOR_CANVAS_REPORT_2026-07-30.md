@@ -379,8 +379,14 @@ gate test, the full library suite, and all six serialized local GPU snapshots.
   `(content delta - frame delta)` live-pin shift as the raster compositor, so
   moving either participant changes only a uniform and does not re-upload the
   cached mask. Missing frames/masks still fall back, and a dedicated planner test
-  locks frame/content/upper-raster z-order. Vector masks and group isolation
-  remain fallback until later reference-tested slices.
+  locks frame/content/upper-raster z-order. Vector masks remain fallback. The
+  fourth slice handles
+  one narrow isolation case: a top-level Normal group with opacity below 100%
+  whose visible direct children are all unmasked, unclipped GPU vectors. Its
+  children render into one run, then group opacity is applied once to the resolved
+  run (not independently to overlapping children). Mixed raster/vector, nested,
+  masked, or non-Normal groups keep the synthetic CPU raster fallback. GPU tests
+  cover overlapping children and planner tests lock surrounding raster z-order.
   slice-by-slice, each slice needs a defined semantics + reference image; unsafe
   to land without manual verification.
 - **Phase 8 retire `path_display` — shipped for GPU-native paths.** Active idle

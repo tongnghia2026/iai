@@ -13,7 +13,7 @@ struct MaskUniform {
     // layer_offset_x, layer_offset_y, mask_width, mask_height.
     data0: vec4<f32>,
     data1: vec4<f32>,
-    // mask sample shift (PowerClip live pin), padding.
+    // mask sample shift (PowerClip live pin), isolated-run opacity, padding.
     data2: vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> mask_u: MaskUniform;
@@ -57,7 +57,7 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let coord_mask = clamp(vec2<i32>(local), vec2<i32>(0), upper);
         mask_a = textureLoad(mask_tex, coord_mask, 0).r;
     }
-    let sa = vpm.a * mask_a;
+    let sa = vpm.a * mask_a * mask_u.data2.z;
     if (sa <= 0.00001) {
         return dst;
     }

@@ -339,6 +339,7 @@ impl VectorCompositeStage {
         // be applied so the GPU shape follows the pointer like the raster preview.
         objects: &[(&VectorObjectData, (i32, i32), f32)],
         mask: Option<VectorMask<'_>>,
+        run_opacity: f32,
     ) {
         self.ensure_size(device, viewport_w, viewport_h);
         let bucket = zoom_bucket(zoom);
@@ -484,7 +485,20 @@ impl VectorCompositeStage {
             &sized.run_view
         };
         let mask_data = mask.map_or(
-            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                run_opacity,
+                0.0,
+            ],
             |spec| {
                 [
                     1.0,
@@ -497,7 +511,7 @@ impl VectorCompositeStage {
                     spec.mask.height.max(1) as f32,
                     spec.sample_shift.0 as f32,
                     spec.sample_shift.1 as f32,
-                    0.0,
+                    run_opacity,
                     0.0,
                 ]
             },

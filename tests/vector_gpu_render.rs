@@ -675,14 +675,22 @@ fn gpu_composite_run_over_background() {
         VectorStyle::filled(ColorValue::rgb(0.0, 1.0, 0.0)),
         AffineTransform::translate(10.0, 10.0),
     );
+    let blue = VectorObjectData::new(
+        square(40.0),
+        VectorStyle::filled(ColorValue::rgb(0.0, 0.0, 1.0)),
+        AffineTransform::translate(20.0, 10.0),
+    );
     // The settled invariant: layer.offset == the model raster origin (drift 0).
     let origin = iai::core::vector::raster::raster_geometry(&sq)
         .map(|(o, _, _)| o)
         .unwrap_or((0, 0));
+    let blue_origin = iai::core::vector::raster::raster_geometry(&blue)
+        .map(|(o, _, _)| o)
+        .unwrap_or((0, 0));
     let mut mask = LayerMask::new_black(42, 42);
     for y in 0..42 {
-        for x in 0..28 {
-            let value = if x < 14 { 255 } else { 128 };
+        for x in 0..35 {
+            let value = if x < 28 { 255 } else { 128 };
             mask.tiles.set_pixel(x, y, value, value, value, 255);
         }
     }
@@ -698,13 +706,14 @@ fn gpu_composite_run_over_background() {
         0.0,
         0.0,
         1.0,
-        &[(&sq, origin, 1.0)],
+        &[(&sq, origin, 1.0), (&blue, blue_origin, 1.0)],
         Some(VectorMask {
             layer_id: 77,
             layer_offset: origin,
             sample_shift: (5, 0),
             mask: &mask,
         }),
+        0.5,
     );
 
     // Read back dst_write.
@@ -743,15 +752,25 @@ fn gpu_composite_run_over_background() {
 
     // Inside the square → green over red = green (opaque). Outside → red background.
     assert!(
-        at(15, 30, 1) >= 250 && at(15, 30, 0) <= 5,
-        "shifted white mask region must reveal green"
+        (120..=135).contains(&at(15, 30, 0))
+            && (120..=135).contains(&at(15, 30, 1))
+            && at(15, 30, 2) <= 5,
+        "isolated run opacity must blend the green-only region once"
     );
     assert!(
-        (120..=135).contains(&at(25, 30, 0)) && (120..=135).contains(&at(25, 30, 1)),
-        "shifted soft mask must source-over in sRGB byte space"
+        (120..=135).contains(&at(25, 30, 0))
+            && at(25, 30, 1) <= 5
+            && (120..=135).contains(&at(25, 30, 2)),
+        "overlapping children must resolve to blue before group opacity"
     );
     assert!(
-        at(35, 30, 0) >= 250 && at(35, 30, 1) <= 5,
+        (185..=200).contains(&at(35, 30, 0))
+            && at(35, 30, 1) <= 5
+            && (55..=70).contains(&at(35, 30, 2)),
+        "soft shifted mask and group opacity must multiply coverage"
+    );
+    assert!(
+        at(45, 30, 0) >= 250 && at(45, 30, 1) <= 5 && at(45, 30, 2) <= 5,
         "shifted black mask region must preserve red background"
     );
     assert!(
@@ -759,7 +778,7 @@ fn gpu_composite_run_over_background() {
         "outside run must stay red background"
     );
     assert_eq!(at(15, 30, 3), 255, "revealed area stays opaque");
-    eprintln!("PowerClip-shifted composite-run over background ok");
+    eprintln!("isolated opacity + PowerClip-shift composite-run ok");
 }
 
 /// Phase 3 acceptance: the GPU mesh cache must re-tessellate + re-upload **zero**
@@ -824,6 +843,7 @@ fn gpu_mesh_cache_is_transform_invariant() {
             zoom,
             &[(obj, origin(obj), 1.0)],
             None,
+            1.0,
         );
         (stage.last_frame_tessellations(), stage.last_frame_uploads())
     };

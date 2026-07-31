@@ -30,6 +30,7 @@ impl SceneRun {
 pub fn plan_runs(stack: &LayerStack, enabled: bool) -> Vec<SceneRun> {
     let mut runs: Vec<SceneRun> = Vec::new();
     let mut previous_gpu_masked = false;
+    let mut previous_parent_id = None;
     for (index, layer) in stack.layers.iter().enumerate() {
         if layer.is_group()
             || !stack.is_effectively_visible(index)
@@ -43,7 +44,10 @@ pub fn plan_runs(stack: &LayerStack, enabled: bool) -> Vec<SceneRun> {
             Eligibility::GpuVector
         );
         let gpu_masked = gpu && layer.mask.as_ref().is_some_and(|mask| mask.enabled);
-        if runs.last().is_some_and(|run| run.same_kind(gpu)) && !gpu_masked && !previous_gpu_masked
+        if runs.last().is_some_and(|run| run.same_kind(gpu))
+            && layer.parent_id == previous_parent_id
+            && !gpu_masked
+            && !previous_gpu_masked
         {
             runs.last_mut().unwrap().push(layer.id);
         } else if gpu {
@@ -52,6 +56,7 @@ pub fn plan_runs(stack: &LayerStack, enabled: bool) -> Vec<SceneRun> {
             runs.push(SceneRun::Raster(vec![layer.id]));
         }
         previous_gpu_masked = gpu_masked;
+        previous_parent_id = layer.parent_id;
     }
     runs
 }
@@ -168,6 +173,33 @@ mod tests {
                 SceneRun::Raster(vec![1]),
                 SceneRun::GpuVector(vec![2]),
                 SceneRun::Raster(vec![3]),
+            ]
+        );
+    }
+
+    #[test]
+    fn opacity_group_children_form_one_isolated_run_in_z_order() {
+        let mut stack = LayerStack::new(1, 1);
+        let mut below = Layer::new(1, "below", 1, 1);
+        below.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+        let make_child = |id| {
+            let mut child = Layer::new(id, "child", 1, 1);
+            child.layer_type = LayerType::Vector(VectorGeometry::Path(VectorObjectData::default()));
+            child.parent_id = Some(4);
+            child.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+            child
+        };
+        let mut group = Layer::new_group(4, "opacity", 1, 1);
+        group.opacity = 0.5;
+        let mut above = Layer::new(5, "above", 1, 1);
+        above.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+        stack.layers = vec![below, make_child(2), make_child(3), group, above];
+        assert_eq!(
+            plan_runs(&stack, true),
+            vec![
+                SceneRun::Raster(vec![1]),
+                SceneRun::GpuVector(vec![2, 3]),
+                SceneRun::Raster(vec![5]),
             ]
         );
     }

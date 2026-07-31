@@ -967,6 +967,30 @@ pub struct CompositorState {
 }
 
 impl CompositorState {
+    pub fn can_gpu_isolate_opacity_groups(&self, stack: &LayerStack, allow_active: bool) -> bool {
+        crate::gpu::vector::eligibility::stack_supports_gpu_opacity_groups(stack)
+            && stack.layers.iter().enumerate().all(|(index, layer)| {
+                let in_effected_group = layer.parent_id.is_some_and(|parent_id| {
+                    stack.layers.iter().any(|group| {
+                        group.id == parent_id
+                            && group.is_group()
+                            && group.opacity < 0.999
+                            && group.blend_mode == crate::core::blend::BlendMode::Normal
+                            && group.mask.as_ref().is_none_or(|mask| !mask.enabled)
+                    })
+                });
+                !in_effected_group
+                    || !stack.is_effectively_visible(index)
+                    || self.will_draw_vector_layer_on_gpu(
+                        layer,
+                        stack,
+                        index,
+                        stack.active_idx,
+                        allow_active,
+                    )
+            })
+    }
+
     /// Whether `layer` will use the native GPU-vector path in the current
     /// compositor state. Keep this as the single policy entry point for both
     /// scene planning and `path_display`: consulting the ids drawn by the
@@ -3061,6 +3085,7 @@ struct VsOut {
                 let layer_has_mask = layer.mask.as_ref().is_some_and(|mask| mask.enabled);
                 let previous_joins = layer_slot > 0
                     && gpu_eligible[layer_slot - 1]
+                    && visible_layers[layer_slot - 1].1.parent_id == layer.parent_id
                     && !layer_has_mask
                     && !visible_layers[layer_slot - 1]
                         .1
@@ -3077,6 +3102,7 @@ struct VsOut {
                     } else {
                         while run_end < n_layers
                             && gpu_eligible[run_end]
+                            && visible_layers[run_end].1.parent_id == layer.parent_id
                             && !visible_layers[run_end]
                                 .1
                                 .mask
@@ -3136,6 +3162,13 @@ struct VsOut {
                         }
                     }
                     if !objects.is_empty() {
+                        let run_opacity = layer.parent_id.map_or(1.0, |parent_id| {
+                            layer_stack
+                                .layers
+                                .iter()
+                                .find(|candidate| candidate.id == parent_id)
+                                .map_or(1.0, |group| group.opacity)
+                        });
                         let vw = self.viewport_w;
                         let vh = self.viewport_h;
                         let ping_v = self.ping_view.clone();
@@ -3207,6 +3240,7 @@ struct VsOut {
                                         mask,
                                     }
                                 }),
+                                run_opacity,
                             );
                         }
                         command_buffers.push(enc.finish());
