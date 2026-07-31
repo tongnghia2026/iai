@@ -14,7 +14,6 @@ pub enum FallbackReason {
     Group,
     BlendMode,
     Cmyk,
-    Gradient,
     Dash,
     VectorBrush,
     InvalidGeometry,
@@ -31,7 +30,17 @@ fn paint_supported(paint: Paint) -> Result<(), FallbackReason> {
         Paint::None => Ok(()),
         Paint::Solid(ColorValue::Rgb { .. }) => Ok(()),
         Paint::Solid(ColorValue::Cmyk { .. }) => Err(FallbackReason::Cmyk),
-        Paint::Gradient(_) => Err(FallbackReason::Gradient),
+        Paint::Gradient(gradient) => {
+            if gradient
+                .active_stops()
+                .iter()
+                .all(|stop| matches!(stop.color, ColorValue::Rgb { .. }))
+            {
+                Ok(())
+            } else {
+                Err(FallbackReason::Cmyk)
+            }
+        }
     }
 }
 
@@ -170,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn solid_primitive_is_eligible_but_gradient_primitive_falls_back() {
+    fn rgb_gradient_primitive_is_eligible() {
         use crate::core::shape::{ShapeData, ShapeKind};
         let (shape, _off) = ShapeData::from_canvas_span(
             ShapeKind::Rectangle,
@@ -196,10 +205,7 @@ mod tests {
             AffineTransform::IDENTITY,
         ));
         layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(grad));
-        assert_eq!(
-            layer_eligibility(&layer, true),
-            Eligibility::RasterFallback(FallbackReason::Gradient)
-        );
+        assert_eq!(layer_eligibility(&layer, true), Eligibility::GpuVector);
     }
 
     #[test]
@@ -214,14 +220,14 @@ mod tests {
         if let LayerType::Vector(VectorGeometry::Path(object)) = &mut layer.layer_type {
             object.style.fill = Paint::Gradient(Gradient::two_color(
                 GradientKind::Linear,
-                ColorValue::BLACK,
+                ColorValue::cmyk(0.0, 0.0, 0.0, 1.0),
                 ColorValue::WHITE,
                 AffineTransform::IDENTITY,
             ));
         }
         assert_eq!(
             layer_eligibility(&layer, true),
-            Eligibility::RasterFallback(FallbackReason::Gradient)
+            Eligibility::RasterFallback(FallbackReason::Cmyk)
         );
     }
 }

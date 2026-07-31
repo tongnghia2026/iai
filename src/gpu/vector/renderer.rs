@@ -21,6 +21,8 @@ use wgpu::util::DeviceExt;
 
 use super::mesh::{VectorMesh, VectorVertex};
 use crate::core::vector::affine::AffineTransform;
+use crate::core::vector::color::ColorValue;
+use crate::core::vector::style::{GradientKind, Paint, MAX_GRADIENT_STOPS};
 
 /// The colour target format the hybrid canvas draws into. Matches
 /// `GpuState::canvas_texture`.
@@ -134,11 +136,42 @@ pub struct VectorDraw<'a> {
     pub mesh: &'a GpuMesh,
     pub object_to_canvas: AffineTransform,
     /// Fill colour, straight-alpha sRGB-byte space in `[0,1]`.
-    pub fill: Option<[f32; 4]>,
+    pub fill: Option<GpuPaint>,
     /// Stroke colour, straight-alpha sRGB-byte space in `[0,1]`.
-    pub stroke: Option<[f32; 4]>,
+    pub stroke: Option<GpuPaint>,
     /// Object × layer opacity for Normal source-over compositing.
     pub opacity: f32,
+}
+
+#[derive(Clone, Copy)]
+pub enum GpuPaint {
+    Solid([f32; 4]),
+    Gradient(crate::core::vector::style::Gradient),
+}
+
+impl GpuPaint {
+    pub fn from_model(paint: Paint) -> Option<Self> {
+        match paint {
+            Paint::None => None,
+            Paint::Solid(ColorValue::Rgb { r, g, b, a }) => Self::Solid([r, g, b, a]).into(),
+            Paint::Gradient(gradient)
+                if gradient
+                    .active_stops()
+                    .iter()
+                    .all(|stop| matches!(stop.color, ColorValue::Rgb { .. })) =>
+            {
+                Some(Self::Gradient(gradient))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct StopRaw {
+    color: [f32; 4],
+    meta: [f32; 4],
 }
 
 #[repr(C)]
@@ -146,7 +179,9 @@ pub struct VectorDraw<'a> {
 struct DrawRaw {
     object_to_canvas: [[f32; 4]; 3],
     canvas_to_clip: [[f32; 4]; 3],
-    color: [f32; 4],
+    object_to_gradient: [[f32; 4]; 3],
+    paint_meta: [u32; 4],
+    stops: [StopRaw; MAX_GRADIENT_STOPS],
 }
 
 fn affine_cols(m: &AffineTransform) -> [[f32; 4]; 3] {
@@ -276,32 +311,60 @@ impl VectorRenderer {
         let mut blob: Vec<u8> = Vec::new();
         let mut items: Vec<DrawItem> = Vec::new();
         let stride = self.uniform_stride as usize;
-        let mut push = |mut color: [f32; 4],
-                        opacity: f32,
-                        obj: &AffineTransform,
-                        range: std::ops::Range<u32>| {
-            if range.is_empty() {
-                return;
-            }
-            color[3] *= opacity.clamp(0.0, 1.0);
-            let raw = DrawRaw {
-                object_to_canvas: affine_cols(obj),
-                canvas_to_clip: clip,
-                color: [
-                    srgb_to_linear(color[0]),
-                    srgb_to_linear(color[1]),
-                    srgb_to_linear(color[2]),
-                    color[3],
-                ],
+        let mut push =
+            |paint: GpuPaint, opacity: f32, obj: &AffineTransform, range: std::ops::Range<u32>| {
+                if range.is_empty() {
+                    return;
+                }
+                let mut stops = [StopRaw::zeroed(); MAX_GRADIENT_STOPS];
+                let (paint_kind, stop_count, object_to_gradient) = match paint {
+                    GpuPaint::Solid(mut color) => {
+                        color[3] *= opacity.clamp(0.0, 1.0);
+                        stops[0] = StopRaw {
+                            color,
+                            meta: [0.0; 4],
+                        };
+                        (0, 1, AffineTransform::IDENTITY)
+                    }
+                    GpuPaint::Gradient(gradient) => {
+                        for (dst, stop) in stops.iter_mut().zip(gradient.active_stops()) {
+                            let ColorValue::Rgb { r, g, b, a } = stop.color else {
+                                continue;
+                            };
+                            *dst = StopRaw {
+                                color: [r, g, b, a * opacity.clamp(0.0, 1.0)],
+                                meta: [stop.offset, 0.0, 0.0, 0.0],
+                            };
+                        }
+                        let kind = match gradient.kind {
+                            GradientKind::Linear => 1,
+                            GradientKind::Radial => 2,
+                        };
+                        (
+                            kind,
+                            gradient.stop_count.min(MAX_GRADIENT_STOPS as u8) as u32,
+                            gradient
+                                .transform
+                                .inverse()
+                                .unwrap_or(AffineTransform::IDENTITY),
+                        )
+                    }
+                };
+                let raw = DrawRaw {
+                    object_to_canvas: affine_cols(obj),
+                    canvas_to_clip: clip,
+                    object_to_gradient: affine_cols(&object_to_gradient),
+                    paint_meta: [paint_kind, stop_count, 0, 0],
+                    stops,
+                };
+                let offset = items.len() * stride;
+                blob.resize(offset, 0);
+                blob.extend_from_slice(bytemuck::bytes_of(&raw));
+                items.push(DrawItem {
+                    offset: offset as u32,
+                    index_range: range,
+                });
             };
-            let offset = items.len() * stride;
-            blob.resize(offset, 0);
-            blob.extend_from_slice(bytemuck::bytes_of(&raw));
-            items.push(DrawItem {
-                offset: offset as u32,
-                index_range: range,
-            });
-        };
         for draw in draws {
             if let Some(fill) = draw.fill {
                 push(
@@ -589,9 +652,9 @@ mod tests {
 
     #[test]
     fn draw_uniform_is_16_byte_aligned() {
-        // WGSL uniform blocks must be a multiple of 16 bytes; two padded mat3x3
-        // (48 each) + a vec4 (16) = 112.
-        assert_eq!(std::mem::size_of::<DrawRaw>(), 112);
+        // WGSL uniform blocks must be a multiple of 16 bytes: three padded
+        // mat3x3 (48 each) + paint vec4 (16) + eight 32-byte stops = 416.
+        assert_eq!(std::mem::size_of::<DrawRaw>(), 416);
         assert_eq!(std::mem::size_of::<DrawRaw>() % 16, 0);
     }
 

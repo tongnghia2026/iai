@@ -21,9 +21,11 @@ use iai::core::vector::color::ColorValue;
 use iai::core::vector::object::VectorObjectData;
 use iai::core::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
 use iai::core::vector::raster::{rasterize, PathRaster};
-use iai::core::vector::style::VectorStyle;
+use iai::core::vector::style::{Gradient, GradientKind, Paint, VectorStyle};
 use iai::gpu::vector::mesh::tessellate;
-use iai::gpu::vector::renderer::{srgb_to_linear, CanvasView, GpuMesh, VectorDraw, VectorRenderer};
+use iai::gpu::vector::renderer::{
+    srgb_to_linear, CanvasView, GpuMesh, GpuPaint, VectorDraw, VectorRenderer,
+};
 
 /// sRGB fill applied to every fixture; a mid-tone exercises the gamma round-trip
 /// harder than pure black/white.
@@ -218,7 +220,7 @@ fn assert_matches_reference(
     let draws = [VectorDraw {
         mesh: &mesh,
         object_to_canvas: object.transform,
-        fill: Some([0.10, 0.55, 0.85, 1.0]),
+        fill: GpuPaint::from_model(object.style.fill),
         stroke: None,
         opacity: object.style.opacity,
     }];
@@ -289,6 +291,90 @@ fn gpu_fill_matches_cpu_reference() {
                 &zoomed,
             );
         }
+    }
+}
+
+#[test]
+#[ignore = "local GPU snapshot; run with --ignored --nocapture"]
+fn gpu_rgb_gradients_match_cpu_reference() {
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter; skipping gradient snapshots");
+        return;
+    };
+    let renderer = VectorRenderer::new(
+        &device,
+        iai::gpu::vector::renderer::VECTOR_TARGET_FORMAT,
+        iai::gpu::vector::renderer::VECTOR_SAMPLE_COUNT,
+    );
+    for kind in [GradientKind::Linear, GradientKind::Radial] {
+        let mut object = styled(square(48.0), AffineTransform::translate(4.0, 4.0));
+        object.style.fill = Paint::Gradient(Gradient::two_color(
+            kind,
+            ColorValue::rgb(0.1, 0.3, 0.9),
+            ColorValue::rgb(0.9, 0.7, 0.1),
+            AffineTransform::scale(48.0, 48.0),
+        ));
+        assert_matches_reference(
+            &renderer,
+            &device,
+            &queue,
+            match kind {
+                GradientKind::Linear => "linear_gradient",
+                GradientKind::Radial => "radial_gradient",
+            },
+            &object,
+        );
+    }
+}
+
+#[test]
+#[ignore = "local GPU snapshot; run with --ignored --nocapture"]
+fn gpu_gradient_alpha_stops_match_cpu_alpha() {
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter; skipping gradient alpha snapshot");
+        return;
+    };
+    let renderer = VectorRenderer::new(
+        &device,
+        iai::gpu::vector::renderer::VECTOR_TARGET_FORMAT,
+        iai::gpu::vector::renderer::VECTOR_SAMPLE_COUNT,
+    );
+    let mut object = styled(square(48.0), AffineTransform::translate(4.0, 4.0));
+    object.style.fill = Paint::Gradient(Gradient::two_color(
+        GradientKind::Linear,
+        ColorValue::rgba(0.2, 0.6, 0.9, 0.1),
+        ColorValue::rgba(0.9, 0.2, 0.3, 0.9),
+        AffineTransform::scale(48.0, 48.0),
+    ));
+    let cpu = rasterize(&object).unwrap();
+    let mesh = GpuMesh::upload(&device, &tessellate(&object, 0.1).unwrap());
+    let draws = [VectorDraw {
+        mesh: &mesh,
+        object_to_canvas: object.transform,
+        fill: GpuPaint::from_model(object.style.fill),
+        stroke: None,
+        opacity: 1.0,
+    }];
+    let gpu = renderer.render_offscreen(
+        &device,
+        &queue,
+        CanvasView::tight(
+            cpu.width,
+            cpu.height,
+            cpu.offset.0 as f32,
+            cpu.offset.1 as f32,
+        ),
+        &draws,
+    );
+    for x in [12u32, 28, 44] {
+        let y = 28u32;
+        let i = ((y * cpu.width + x) * 4 + 3) as usize;
+        assert!(
+            (gpu[i] as i32 - cpu.rgba[i] as i32).abs() <= 3,
+            "alpha stop mismatch at x={x}: gpu={} cpu={}",
+            gpu[i],
+            cpu.rgba[i]
+        );
     }
 }
 
@@ -393,7 +479,7 @@ fn gpu_stroke_matches_cpu_reference() {
         mesh: &mesh,
         object_to_canvas: object.transform,
         fill: None,
-        stroke: Some([0.90, 0.20, 0.20, 1.0]),
+        stroke: Some(GpuPaint::Solid([0.90, 0.20, 0.20, 1.0])),
         opacity: object.style.opacity,
     }];
     let gpu = renderer.render_offscreen(&device, &queue, view, &draws);
@@ -442,7 +528,7 @@ fn gpu_normal_opacity_multiplies_object_and_layer_alpha() {
     let draws = [VectorDraw {
         mesh: &mesh,
         object_to_canvas: object.transform,
-        fill: Some([0.10, 0.55, 0.85, 1.0]),
+        fill: Some(GpuPaint::Solid([0.10, 0.55, 0.85, 1.0])),
         stroke: None,
         opacity: object.style.opacity * 0.5,
     }];
@@ -481,14 +567,14 @@ fn gpu_run_preserves_intra_run_z_order() {
         VectorDraw {
             mesh: &mesh_a,
             object_to_canvas: a.transform,
-            fill: Some(red),
+            fill: Some(GpuPaint::Solid(red)),
             stroke: None,
             opacity: 1.0,
         },
         VectorDraw {
             mesh: &mesh_b,
             object_to_canvas: b.transform,
-            fill: Some(green),
+            fill: Some(GpuPaint::Solid(green)),
             stroke: None,
             opacity: 1.0,
         },

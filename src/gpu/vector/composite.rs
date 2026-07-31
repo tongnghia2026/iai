@@ -21,12 +21,12 @@ use std::collections::{HashMap, HashSet};
 
 use super::cache::{geometry_fingerprint, ByteLru};
 use super::mesh::tessellate;
-use super::renderer::{CanvasView, GpuMesh, VectorDraw, VectorRenderer, VECTOR_SAMPLE_COUNT};
+use super::renderer::{
+    CanvasView, GpuMesh, GpuPaint, VectorDraw, VectorRenderer, VECTOR_SAMPLE_COUNT,
+};
 use crate::core::vector::affine::AffineTransform;
-use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::raster::raster_geometry;
-use crate::core::vector::style::Paint;
 
 /// GPU mesh cache byte budget (source vertex/index bytes). A 500-layer flower
 /// fixture tessellates to a few MB total, so this comfortably holds a stress
@@ -336,9 +336,9 @@ impl VectorCompositeStage {
                 Some(VectorDraw {
                     mesh,
                     object_to_canvas,
-                    fill: paint_rgba(object.style.fill),
+                    fill: GpuPaint::from_model(object.style.fill),
                     stroke: if object.style.effective_stroke_width() > 0.0 {
-                        paint_rgba(object.style.stroke)
+                        GpuPaint::from_model(object.style.stroke)
                     } else {
                         None
                     },
@@ -410,15 +410,6 @@ impl VectorCompositeStage {
             self.cache.lru.bytes(),
             self.cache.lru.len(),
         );
-    }
-}
-
-/// The straight-alpha sRGB `[0,1]` colour of a solid RGB paint, or `None`. Only
-/// `Paint::Solid(Rgb)` reaches here — eligibility already rejected CMYK/gradient.
-fn paint_rgba(paint: Paint) -> Option<[f32; 4]> {
-    match paint {
-        Paint::Solid(ColorValue::Rgb { r, g, b, a }) => Some([r, g, b, a]),
-        _ => None,
     }
 }
 

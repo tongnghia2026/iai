@@ -99,14 +99,16 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
    liền; không bao giờ hiện fill mà thiếu nét của nó.
 4. Dấu hiệu lỗi: nét mất, cap bị cắt, dash thành liền, hoặc viền đôi.
 
-## 7. Opacity Normal GPU; gradient / mask / group / CMYK fallback
+## 7. Gradient RGB + opacity Normal GPU; mask / group / CMYK fallback
 
 1. Path RGB đặc, blend Normal: đặt object opacity 50%, layer opacity 50%.
    Mong đợi đi GPU và alpha hiệu dụng 25%, khớp hình khi tắt cờ.
-2. Gradient linear & radial (có alpha stop); layer mask trên Path; vector mask;
+2. Tạo gradient RGB linear và radial, 2–8 stop, có alpha stop; kéo/xoay/scale
+   gradient transform rồi zoom/pan. Mong đợi đi GPU, stop/alpha/vị trí khớp bản
+   tắt cờ và không tessellate lại khi chỉ đổi stop.
+3. Gradient có ít nhất một stop CMYK; layer mask trên Path; vector mask;
    PowerClip; group lồng nhau + group opacity; blend khác Normal; tài liệu CMYK
-   có paint CMYK + bật soft proof.
-3. Mong đợi: các ca ở bước 2 về raster fallback và khớp y như tắt cờ.
+   có soft proof. Mong đợi các ca này raster fallback và khớp bản tắt cờ.
 3. Dấu hiệu lỗi: gradient thành màu đặc, sai alpha, gradient trôi theo view, mask
    bị bỏ qua, group alpha áp theo từng con, CMYK ra RGB sai màu, hoặc GPU bật
    nhầm cho các ca này (viền đôi/hào quang).
@@ -159,7 +161,8 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 | Layer đang có live edit/pending preview | Raster fallback tạm thời |
 | Dash / vector brush | Raster fallback |
 | Object/layer opacity, blend Normal | GPU (Phase 5) |
-| Gradient, blend≠Normal | Raster fallback (Phase 5 còn tiếp) |
+| Gradient RGB linear/radial + alpha stops | GPU (Phase 5) |
+| Gradient có stop CMYK, blend≠Normal | Raster fallback |
 | Mask / clip / PowerClip / group | Raster fallback (Phase 7 chưa làm) |
 | CMYK paint / soft-proof | Raster fallback |
 
