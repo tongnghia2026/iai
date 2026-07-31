@@ -99,6 +99,18 @@ impl App {
         }
         let scale = crate::core::vector::display::zoom_bucket(self.edit.view.zoom)?;
         let visible = self.visible_canvas_rect()?;
+        // Layers the compositor draws natively on the GPU keep themselves sharp
+        // every frame, so re-baking their crisp overlay is the redundant per-zoom
+        // "re-sharpen sweep". Stop the overlay run at the first such layer
+        // (top-down) so the remaining overlaid layers keep their z-order (Phase 8).
+        // Empty unless the GPU vector flag is on.
+        let gpu_drawn: std::collections::HashSet<u32> = self
+            .win
+            .gpu
+            .as_ref()
+            .filter(|_| crate::gpu::vector::runtime_enabled())
+            .map(|g| g.compositor.gpu_drawn_layer_ids.iter().copied().collect())
+            .unwrap_or_default();
         let doc = &self.docs.documents[self.docs.active_doc_idx];
         let stack = &doc.canvas.layer_stack;
         let mut objects = Vec::new();
@@ -107,6 +119,11 @@ impl App {
         for (index, layer) in stack.layers.iter().enumerate().rev() {
             if !stack.is_effectively_visible(index) || layer.is_group() {
                 continue;
+            }
+            // A GPU-drawn layer is already sharp; treat it as an interruption so
+            // its overlay is not re-baked and nothing below it is drawn over it.
+            if gpu_drawn.contains(&layer.id) {
+                break;
             }
             let object = match &layer.layer_type {
                 LayerType::Vector(VectorGeometry::Path(object)) => object.clone(),

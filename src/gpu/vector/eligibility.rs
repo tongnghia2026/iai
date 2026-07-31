@@ -2,7 +2,7 @@ use crate::core::blend::BlendMode;
 use crate::core::layer::{Layer, LayerType};
 use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::{VectorGeometry, VectorObjectData};
-use crate::core::vector::style::{LineCap, LineJoin, Paint};
+use crate::core::vector::style::Paint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FallbackReason {
@@ -18,11 +18,6 @@ pub enum FallbackReason {
     Cmyk,
     Gradient,
     Dash,
-    /// The CPU rasteriser draws every stroke as round capsules (it ignores the
-    /// cap/join style). A butt/square cap or miter/bevel join would render
-    /// differently on the GPU, so those fall back until the CPU reference honours
-    /// them too. See `core::vector::raster::stroke_coverage`.
-    StrokeStyle,
     VectorBrush,
     InvalidGeometry,
 }
@@ -52,15 +47,10 @@ pub fn style_eligibility(style: &crate::core::vector::style::VectorStyle) -> Eli
     if !style.stroke_style.dash.is_solid() {
         return Eligibility::RasterFallback(FallbackReason::Dash);
     }
-    // A visible stroke must be round to match the CPU capsule rasteriser; other
-    // caps/joins fall back the whole layer (the fill would otherwise be shown with
-    // a differently-shaped stroke).
-    if style.stroke.is_visible()
-        && style.effective_stroke_width() > 0.0
-        && (style.stroke_style.cap != LineCap::Round || style.stroke_style.join != LineJoin::Round)
-    {
-        return Eligibility::RasterFallback(FallbackReason::StrokeStyle);
-    }
+    // Cap/join style is NOT gated: the GPU tessellates every stroke round (see
+    // `mesh::tessellate`) to match the CPU capsule rasteriser, which also ignores
+    // cap/join. So a butt/miter outline renders identically to the raster twin and
+    // is eligible; only dash still falls back (the GPU does not dash yet).
     for paint in [style.fill, style.stroke] {
         if let Err(reason) = paint_supported(paint) {
             return Eligibility::RasterFallback(reason);
@@ -152,19 +142,24 @@ mod tests {
     }
 
     #[test]
-    fn non_round_stroke_falls_back_but_round_stroke_is_eligible() {
+    fn any_solid_stroke_cap_join_is_eligible() {
         use crate::core::vector::color::ColorValue;
         use crate::core::vector::style::{LineCap, LineJoin, VectorStyle};
         let mut object = square();
-        // Default stroked style is butt cap / miter join — the CPU draws round.
+        // Default stroked style is butt cap / miter join. The GPU draws it round
+        // (matching the CPU capsule rasteriser), so it is eligible either way.
         object.style = VectorStyle::stroked(ColorValue::BLACK, 3.0);
-        assert_eq!(
-            object_eligibility(&object),
-            Eligibility::RasterFallback(FallbackReason::StrokeStyle)
-        );
+        assert_eq!(object_eligibility(&object), Eligibility::GpuVector);
         object.style.stroke_style.cap = LineCap::Round;
         object.style.stroke_style.join = LineJoin::Round;
         assert_eq!(object_eligibility(&object), Eligibility::GpuVector);
+        // Dash still falls back (the GPU does not dash yet).
+        object.style.stroke_style.dash =
+            crate::core::vector::style::DashPattern::from_slice(&[4.0, 4.0], 0.0);
+        assert_eq!(
+            object_eligibility(&object),
+            Eligibility::RasterFallback(FallbackReason::Dash)
+        );
     }
 
     #[test]

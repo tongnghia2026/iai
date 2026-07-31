@@ -960,6 +960,11 @@ pub struct CompositorState {
     /// Hybrid-canvas GPU vector stage. `Some` only when `IAI_GPU_VECTOR_CANVAS` is
     /// on; `None` leaves the raster pipeline unchanged. See `gpu::vector::composite`.
     vector_stage: Option<crate::gpu::vector::composite::VectorCompositeStage>,
+    /// Layer ids the last composite drew natively on the GPU (empty when the GPU
+    /// vector path is inactive). `path_display` reads this to stop the CPU
+    /// crisp-overlay re-bake for those layers — the GPU already keeps them sharp,
+    /// so re-baking them is the redundant per-zoom "re-sharpen sweep" (Phase 8).
+    pub gpu_drawn_layer_ids: Vec<u32>,
 }
 
 impl CompositorState {
@@ -1453,6 +1458,7 @@ struct VsOut {
                     wgpu::TextureFormat::Rgba8UnormSrgb,
                 )
             }),
+            gpu_drawn_layer_ids: Vec::new(),
         }
     }
 
@@ -2689,6 +2695,19 @@ struct VsOut {
             vec![false; n_layers]
         };
         let gpu_vector_active = gpu_eligible.iter().any(|&e| e);
+
+        // Record exactly the layers this composite draws on the GPU, so
+        // `path_display` can drop their redundant CPU crisp-overlay bake (Phase 8).
+        // Cleared when the GPU path is inactive so a stale set never suppresses a
+        // layer that is back on the raster path.
+        self.gpu_drawn_layer_ids.clear();
+        if gpu_vector_active {
+            for (slot, &(_, layer)) in visible_layers.iter().enumerate() {
+                if gpu_eligible[slot] {
+                    self.gpu_drawn_layer_ids.push(layer.id);
+                }
+            }
+        }
 
         let use_partial = dirty_rect.is_some()
             && self.ping_initialized

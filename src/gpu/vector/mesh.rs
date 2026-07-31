@@ -8,7 +8,6 @@ use lyon_tessellation::{
 
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::path::{FillRule, PathData};
-use crate::core::vector::style::{LineCap, LineJoin};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -80,22 +79,17 @@ pub fn tessellate(object: &VectorObjectData, tolerance: f32) -> Result<VectorMes
     }
 
     if object.style.stroke.is_visible() && object.style.stroke_style.width > 0.0 {
-        let cap = match object.style.stroke_style.cap {
-            LineCap::Butt => LyonLineCap::Butt,
-            LineCap::Round => LyonLineCap::Round,
-            LineCap::Square => LyonLineCap::Square,
-        };
-        let join = match object.style.stroke_style.join {
-            LineJoin::Miter => LyonLineJoin::Miter,
-            LineJoin::Round => LyonLineJoin::Round,
-            LineJoin::Bevel => LyonLineJoin::Bevel,
-        };
+        // The CPU reference (`core::vector::raster::stroke_coverage`) unions
+        // per-segment round capsules, i.e. it draws every stroke with round caps
+        // and round joins regardless of the style's cap/join. To match it exactly
+        // (so the GPU output equals the raster twin and the flag toggles cleanly),
+        // the GPU stroke is always tessellated round too — the cap/join style is
+        // intentionally ignored here, mirroring the rasteriser.
         let options = StrokeOptions::default()
             .with_line_width(object.style.stroke_style.width)
-            .with_start_cap(cap)
-            .with_end_cap(cap)
-            .with_line_join(join)
-            .with_miter_limit(object.style.stroke_style.miter_limit)
+            .with_start_cap(LyonLineCap::Round)
+            .with_end_cap(LyonLineCap::Round)
+            .with_line_join(LyonLineJoin::Round)
             .with_tolerance(tolerance.max(0.001));
         StrokeTessellator::new()
             .tessellate_path(
