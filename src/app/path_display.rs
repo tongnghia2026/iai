@@ -116,6 +116,7 @@ impl App {
             if self.win.gpu.as_ref().is_some_and(|gpu| {
                 gpu.compositor.will_draw_vector_layer_on_gpu(
                     layer,
+                    stack,
                     index,
                     stack.active_idx,
                     allow_active_gpu_vector,

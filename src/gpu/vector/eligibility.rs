@@ -73,7 +73,7 @@ pub fn object_eligibility(object: &VectorObjectData) -> Eligibility {
     style_eligibility(&object.style)
 }
 
-pub fn layer_eligibility(layer: &Layer, enabled: bool) -> Eligibility {
+fn layer_eligibility_impl(layer: &Layer, enabled: bool, allow_group_child: bool) -> Eligibility {
     if !enabled {
         return Eligibility::RasterFallback(FallbackReason::Disabled);
     }
@@ -86,7 +86,7 @@ pub fn layer_eligibility(layer: &Layer, enabled: bool) -> Eligibility {
     if layer.clip_parent_id.is_some() {
         return Eligibility::RasterFallback(FallbackReason::PowerClip);
     }
-    if layer.parent_id.is_some() {
+    if layer.parent_id.is_some() && !allow_group_child {
         return Eligibility::RasterFallback(FallbackReason::Group);
     }
     if layer.blend_mode != BlendMode::Normal {
@@ -101,6 +101,37 @@ pub fn layer_eligibility(layer: &Layer, enabled: bool) -> Eligibility {
         LayerType::Vector(VectorGeometry::Primitive(shape)) => style_eligibility(&shape.style),
         _ => Eligibility::RasterFallback(FallbackReason::NotVector),
     }
+}
+
+pub fn layer_eligibility(layer: &Layer, enabled: bool) -> Eligibility {
+    layer_eligibility_impl(layer, enabled, false)
+}
+
+/// Stack-aware eligibility for group children. A plain Normal/100%/unmasked
+/// group is pass-through in the CPU compositor, so its children may be rendered
+/// inline without changing z-order. Any missing, hidden, or effected ancestor
+/// keeps the conservative whole-layer raster fallback.
+pub fn layer_eligibility_in_stack(
+    layer: &Layer,
+    stack: &crate::core::layer::LayerStack,
+    enabled: bool,
+) -> Eligibility {
+    let mut parent_id = layer.parent_id;
+    while let Some(id) = parent_id {
+        let Some(parent) = stack.layers.iter().find(|candidate| candidate.id == id) else {
+            return Eligibility::RasterFallback(FallbackReason::Group);
+        };
+        if !parent.is_group()
+            || !parent.visible
+            || parent.opacity < 0.999
+            || parent.blend_mode != BlendMode::Normal
+            || parent.mask.as_ref().is_some_and(|mask| mask.enabled)
+        {
+            return Eligibility::RasterFallback(FallbackReason::Group);
+        }
+        parent_id = parent.parent_id;
+    }
+    layer_eligibility_impl(layer, enabled, true)
 }
 
 #[cfg(test)]
@@ -228,6 +259,31 @@ mod tests {
         assert_eq!(
             layer_eligibility(&layer, true),
             Eligibility::RasterFallback(FallbackReason::Cmyk)
+        );
+    }
+
+    #[test]
+    fn only_plain_group_ancestors_allow_gpu_children() {
+        let mut child = layer_with(square());
+        child.parent_id = Some(8);
+        let mut group = Layer::new_group(8, "plain", 64, 64);
+        let mut stack = crate::core::layer::LayerStack::new(64, 64);
+        stack.layers = vec![child.clone(), group.clone()];
+        assert_eq!(
+            layer_eligibility_in_stack(&stack.layers[0], &stack, true),
+            Eligibility::GpuVector
+        );
+
+        group.opacity = 0.5;
+        stack.layers[1] = group;
+        assert_eq!(
+            layer_eligibility_in_stack(&stack.layers[0], &stack, true),
+            Eligibility::RasterFallback(FallbackReason::Group)
+        );
+        assert_eq!(
+            layer_eligibility(&child, true),
+            Eligibility::RasterFallback(FallbackReason::Group),
+            "context-free callers remain conservative"
         );
     }
 }

@@ -975,6 +975,7 @@ impl CompositorState {
     pub fn will_draw_vector_layer_on_gpu(
         &self,
         layer: &Layer,
+        layer_stack: &LayerStack,
         stack_idx: usize,
         active_idx: usize,
         allow_active: bool,
@@ -989,7 +990,11 @@ impl CompositorState {
                 .iter()
                 .any(|preview| preview.layer_id == layer.id)
             && matches!(
-                crate::gpu::vector::eligibility::layer_eligibility(layer, true),
+                crate::gpu::vector::eligibility::layer_eligibility_in_stack(
+                    layer,
+                    layer_stack,
+                    true,
+                ),
                 crate::gpu::vector::eligibility::Eligibility::GpuVector
             )
     }
@@ -2707,6 +2712,7 @@ struct VsOut {
                 // offset drift correction in `composite_run`.
                 self.will_draw_vector_layer_on_gpu(
                     layer,
+                    layer_stack,
                     stack_idx,
                     active_idx,
                     allow_active_gpu_vector,

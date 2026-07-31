@@ -364,7 +364,14 @@ gate test, the full library suite, and all six serialized local GPU snapshots.
   `0.5 × 0.5 = 0.25` snapshot. Blend modes other than Normal remain fallback.
   Real-GPU snapshots compare linear/radial transformed gradients and alpha stops
   directly against `core::vector::raster`.
-- **Phase 7 mask / clip / PowerClip / group — not started.** High-risk,
+- **Phase 7 mask / clip / PowerClip / group — sliced implementation started.**
+  Vector children of a pass-through group (Normal, 100%, no enabled mask) may
+  now remain GPU-native because CPU semantics are exactly inline compositing.
+  Stack-aware eligibility walks every ancestor; missing, hidden, isolated,
+  blended, translucent, or masked groups retain whole-layer raster fallback.
+  A byte-exact inline CPU reference and interleaved z-order planner test lock
+  this first group slice. Raster/vector masks, PowerClip, and group isolation
+  remain fallback and will be enabled only in later reference-tested slices.
   slice-by-slice, each slice needs a defined semantics + reference image; unsafe
   to land without manual verification.
 - **Phase 8 retire `path_display` — shipped for GPU-native paths.** Active idle

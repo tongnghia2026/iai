@@ -1,7 +1,7 @@
 use crate::core::layer::{LayerStack, LayerType};
 use crate::core::vector::object::VectorGeometry;
 
-use super::eligibility::{layer_eligibility, Eligibility};
+use super::eligibility::{layer_eligibility_in_stack, Eligibility};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SceneRun {
@@ -37,7 +37,10 @@ pub fn plan_runs(stack: &LayerStack, enabled: bool) -> Vec<SceneRun> {
         {
             continue;
         }
-        let gpu = matches!(layer_eligibility(layer, enabled), Eligibility::GpuVector);
+        let gpu = matches!(
+            layer_eligibility_in_stack(layer, stack, enabled),
+            Eligibility::GpuVector
+        );
         if runs.last().is_some_and(|run| run.same_kind(gpu)) {
             runs.last_mut().unwrap().push(layer.id);
         } else if gpu {
@@ -89,5 +92,32 @@ mod tests {
                 SceneRun::Raster(vec![3])
             ]
         );
+    }
+
+    #[test]
+    fn pass_through_group_child_preserves_inline_z_order() {
+        let mut stack = LayerStack::new(1, 1);
+        let mut raster = Layer::new(1, "below", 1, 1);
+        raster.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+        let mut vector = Layer::new(2, "child", 1, 1);
+        vector.layer_type = LayerType::Vector(VectorGeometry::Path(VectorObjectData::default()));
+        vector.parent_id = Some(3);
+        vector.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+        let group = Layer::new_group(3, "plain", 1, 1);
+        stack.layers = vec![raster, vector, group];
+
+        assert_eq!(
+            plan_runs(&stack, true),
+            vec![SceneRun::Raster(vec![1]), SceneRun::GpuVector(vec![2])]
+        );
+
+        // Reference image: a plain group is defined as byte-identical to its
+        // children composited inline. The raster twins provide the CPU oracle;
+        // the GPU planner above must preserve that same ordering.
+        let grouped_reference = stack.flatten(1, 1);
+        let mut inline = stack.clone();
+        inline.layers.retain(|layer| !layer.is_group());
+        inline.layers[1].parent_id = None;
+        assert_eq!(grouped_reference, inline.flatten(1, 1));
     }
 }

@@ -168,3 +168,11 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 
 Bất cứ ô "Raster fallback" nào mà **khác hình so với khi tắt cờ** đều là lỗi cần
 báo. Bất cứ ô "GPU" nào mà chậm đi hoặc kém nét hơn tắt cờ cũng cần báo.
+## Phase 7 — lát 1: group pass-through
+
+1. Bật `IAI_GPU_VECTOR_CANVAS=1`, tạo một raster layer dưới cùng.
+2. Tạo group Normal, opacity 100%, không mask; đặt một vector RGB vào group.
+3. Zoom/pan qua 100%, bật/tắt group và đổi thứ tự vector/raster quanh group.
+4. Kỳ vọng: hình và z-order không đổi, không mờ/lặp; vector con vẫn GPU-native.
+5. Đổi opacity group xuống dưới 100%, thêm mask hoặc blend khác Normal.
+6. Kỳ vọng: cả subtree rơi về raster an toàn; kết quả giống khi tắt flag.
