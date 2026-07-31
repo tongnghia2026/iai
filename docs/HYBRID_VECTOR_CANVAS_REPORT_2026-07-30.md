@@ -165,48 +165,63 @@ it ignores the cap/join style. `eligibility.rs` now falls back
 (`FallbackReason::StrokeStyle`) any visible stroke whose cap ≠ Round or join ≠
 Round, so a stroke can only go GPU-native when it will match the reference.
 
-## Phase 2 — production wiring: design, deliberately NOT shipped this session
+## Phase 2 — production wiring: SHIPPED behind the default-off flag
 
-Phase 1 changes nothing the user sees; it is an off-screen harness. Wiring the
-run into the live compositor is specified below but was **not** applied, because
-the ping/pong compositor's correctness (parity, Mode A/B, partial dirty-rect,
-backdrop cache) is validated by manual GUI testing that was unavailable in this
-non-interactive session, and a subtle error there silently corrupts the image —
-the one outcome the plan forbids. The safe, opt-in `IAI_GPU_VECTOR_CANVAS` flag
-still gates nothing in production; the raster path is byte-for-byte unchanged.
+The vector run is now composited into the live ping/pong accumulator at its
+z-position. It is gated by `IAI_GPU_VECTOR_CANVAS`; with the flag unset the
+`vector_stage` is never built, the eligibility scan never runs, and the raster
+pipeline is byte-for-byte unchanged (verified: full suite green with the flag
+off). New files: `gpu/vector/composite.rs` (`VectorCompositeStage`) and
+`gpu/vector/vector_composite.wgsl`.
 
-Recommended integration (do it behind the flag, validate with a headless
-`CompositorState` test — `CompositorState::new` needs only a `device`):
+How it works (`CompositorState::composite_layers`):
 
-1. **Own a `VectorRenderer` in `GpuState`**, built in `new` and rebuilt on device
-   loss like every other pipeline. Construct it only when the flag is on.
-2. **Simplify the frame when a GPU vector run is present.** Force
-   `use_partial = false`, `allow_backdrop_cache = false`, and skip the LOD proxy.
-   This sidesteps the partial-composite parity pre-count and the backdrop-cache
-   staleness — the two hardest traps — at the cost of a full recomposite
-   (Phase 3 re-optimises). Correctness first.
-3. **Twin suppression = skip the tile pass** for each eligible GPU-vector layer;
-   the layer contributes through the vector pass instead. There is exactly one
-   representation per layer, so no halo/double-edge.
-4. **Vector run pass:** render the run's meshes to a viewport-sized MSAA target,
-   resolve, `unpremultiply_srgb`, then source-over-composite that straight-alpha
-   texture into the current accumulator buffer *in place* (hardware straight
-   blend, or a fullscreen pass matching `compositor.wgsl`'s sRGB-space Normal
-   blend). In-place means no parity flip, so the ping/pong bookkeeping is
-   untouched.
-5. **Coordinate spaces.** Build `canvas_to_clip` from the compositor's mode:
-   Mode A (`canvas_space`) composites 1:1 in canvas pixels (view applied at
-   blit) → no view in the matrix; the default viewport mode folds
-   `zoom`/`view_offset` into the matrix. `object_to_canvas` is
-   `translate(layer.offset) ∘ object.transform`.
-6. **Fallback everything else** (mask, clip, PowerClip, group, non-Normal blend,
-   opacity ≠ 1, gradient, dash, non-round stroke, CMYK, primitives) — the run
-   planner already isolates only the eligible contiguous layers.
+1. **`GpuState`/`CompositorState` own the stage** (`vector_stage: Option<…>`),
+   built in `new` only when the flag is on, rebuilt with the whole GPU context on
+   device loss.
+2. **Simple-mode gating.** A present GPU vector run forces `use_partial = false`
+   and disables the backdrop cache, sidestepping the partial-composite parity
+   pre-count and cache-staleness traps at the cost of a full recomposite
+   (Phase 3 re-optimises). Only the full viewport path is used
+   (`!canvas_space && render_scale == 1 && crop_preview.is_none()`); otherwise the
+   frame falls back to raster.
+3. **Only static, non-active vector layers go GPU.** The ACTIVE layer stays on the
+   raster + crisp-overlay path, because node/style/shape drags update a pending
+   raster preview (the tiles) rather than the committed model the GPU reads.
+   Free-transform-preview layers are excluded by id. A live multi-Move of other
+   selected layers is followed by the offset **drift correction**
+   (`layer.offset − model raster origin`) in `composite_run`, so those shapes
+   track the pointer.
+4. **Twin suppression = skip the tile pass** for each GPU layer; it contributes
+   only through the vector run. One representation per layer → no halo.
+5. **Vector run pass:** consecutive eligible layers form one run, rendered to an
+   owned MSAA target, resolved (premultiplied), then composited over the current
+   accumulator buffer into the other buffer by `vector_composite.wgsl`, which
+   un-premultiplies and runs the same straight-alpha sRGB Normal blend as
+   `compositor.wgsl` (mode 0). The run is one ping/pong step (one parity flip).
+6. **Meshes cache per (geometry fingerprint, zoom bucket)** so pan/zoom/move never
+   re-tessellate; the bucket re-tessellates finer as the run is magnified so
+   curves stay crisp.
+7. **Coordinates:** `object_to_canvas = translate(drift) ∘ object.transform`;
+   `canvas_to_clip` folds `zoom`/`view_offset` (default viewport mode).
 
-Then Phases 3–8 proceed as the plan describes (mesh cache upload keyed by the
-existing `geometry_fingerprint`; strokes are already tessellated; gradients need
-a shader stop table; primitives convert to a temporary path; mask/clip/group is
-the high-risk slice-by-slice phase; `path_display` retirement is last).
+Validation: `tests/vector_gpu_render.rs::gpu_composite_run_over_background`
+exercises the real `composite_run` (a vector run over a known background → correct
+placement + straight-alpha blend). Remaining verification is manual/GUI (the doc
+`HYBRID_VECTOR_CANVAS_HUONG_DAN_TEST_VI.md`, Vietnamese).
+
+### Deliberately still raster (fallback), by design
+
+- the ACTIVE (edited) layer, and any free-transform / crop preview;
+- `canvas_space` (Mode A large-canvas) and low-res interactive previews;
+- mask, clip, PowerClip, group, non-Normal blend, opacity ≠ 1, gradient, dash,
+  non-round stroke, CMYK, primitives (Shape) — the run planner isolates only the
+  eligible contiguous static Path layers.
+
+Then Phases 3–8 proceed as the plan describes (GPU-buffer mesh cache; gradients
+need a shader stop table; primitives convert to a temporary path; the active-layer
+live-edit path could later go GPU by feeding the pending geometry; mask/clip/group
+is the high-risk slice-by-slice phase; `path_display` retirement is last).
 
 ## Commands
 

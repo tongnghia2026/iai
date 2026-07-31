@@ -209,12 +209,12 @@ fn assert_matches_reference(
     let cpu = rasterize(object).expect("reference raster");
     let tol = 0.1 / transform_scale(&object.transform);
     let mesh = tessellate(object, tol).expect("tessellate");
-    let view = CanvasView {
-        width: cpu.width,
-        height: cpu.height,
-        off_x: cpu.offset.0 as f32,
-        off_y: cpu.offset.1 as f32,
-    };
+    let view = CanvasView::tight(
+        cpu.width,
+        cpu.height,
+        cpu.offset.0 as f32,
+        cpu.offset.1 as f32,
+    );
     let draws = [VectorDraw {
         mesh: &mesh,
         object_to_canvas: object.transform,
@@ -332,12 +332,12 @@ fn gpu_stroke_matches_cpu_reference() {
         !mesh.stroke_range.is_empty() && mesh.fill_range.is_empty(),
         "stroke-only object must produce stroke geometry and no fill"
     );
-    let view = CanvasView {
-        width: cpu.width,
-        height: cpu.height,
-        off_x: cpu.offset.0 as f32,
-        off_y: cpu.offset.1 as f32,
-    };
+    let view = CanvasView::tight(
+        cpu.width,
+        cpu.height,
+        cpu.offset.0 as f32,
+        cpu.offset.1 as f32,
+    );
     let draws = [VectorDraw {
         mesh: &mesh,
         object_to_canvas: object.transform,
@@ -408,12 +408,7 @@ fn gpu_run_preserves_intra_run_z_order() {
         },
     ];
     let (w, h) = (80u32, 80u32);
-    let view = CanvasView {
-        width: w,
-        height: h,
-        off_x: 0.0,
-        off_y: 0.0,
-    };
+    let view = CanvasView::tight(w, h, 0.0, 0.0);
     let out = renderer.render_offscreen(&device, &queue, view, &draws);
     let byte = |x: u32, y: u32, c: usize| out[((y * w + x) * 4) as usize + c];
     let expect = |x: u32, y: u32, want: [u8; 3], label: &str| {
@@ -435,4 +430,139 @@ fn gpu_run_preserves_intra_run_z_order() {
     assert_eq!(byte(3, 3, 3), 0, "outside both → transparent");
     assert_eq!(byte(72, 12, 3), 0, "outside both (corner) → transparent");
     eprintln!("intra-run z-order ok");
+}
+
+/// Exercise the live-compositor stage (`VectorCompositeStage::composite_run`): a
+/// vector run composited over a known opaque background must place the shape
+/// correctly and blend straight-alpha over the background (the Phase 2 path).
+#[test]
+#[ignore = "local GPU snapshot; run with --ignored --nocapture"]
+fn gpu_composite_run_over_background() {
+    use iai::gpu::vector::composite::VectorCompositeStage;
+
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter; skipping composite-run test");
+        return;
+    };
+    let fmt = iai::gpu::vector::renderer::VECTOR_TARGET_FORMAT;
+    let mut stage = VectorCompositeStage::new(&device, fmt);
+    let (w, h) = (80u32, 80u32);
+    let extent = wgpu::Extent3d {
+        width: w,
+        height: h,
+        depth_or_array_layers: 1,
+    };
+    let mk = |usage| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: fmt,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let dst_read =
+        mk(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+    let dst_write = mk(wgpu::TextureUsages::RENDER_ATTACHMENT
+        | wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::COPY_SRC);
+    let read_view = dst_read.create_view(&Default::default());
+    let write_view = dst_write.create_view(&Default::default());
+
+    // Opaque red background (primaries are gamma-clean → exact bytes).
+    let mut enc = device.create_command_encoder(&Default::default());
+    {
+        enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("bg_clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &read_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+    }
+
+    // A pure-green square over [10,50] in canvas space; zoom 1, no view offset.
+    let sq = VectorObjectData::new(
+        square(40.0),
+        VectorStyle::filled(ColorValue::rgb(0.0, 1.0, 0.0)),
+        AffineTransform::translate(10.0, 10.0),
+    );
+    // The settled invariant: layer.offset == the model raster origin (drift 0).
+    let origin = iai::core::vector::raster::raster_geometry(&sq)
+        .map(|(o, _, _)| o)
+        .unwrap_or((0, 0));
+    stage.begin_frame();
+    stage.composite_run(
+        &device,
+        &mut enc,
+        &read_view,
+        &write_view,
+        w,
+        h,
+        0.0,
+        0.0,
+        1.0,
+        &[(&sq, origin)],
+    );
+
+    // Read back dst_write.
+    let unpadded = w * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = unpadded.div_ceil(align) * align;
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (padded * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &dst_write,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(h),
+            },
+        },
+        extent,
+    );
+    queue.submit([enc.finish()]);
+    let slice = buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).ok();
+    let data = slice.get_mapped_range();
+    let at = |x: u32, y: u32, c: usize| data[(y * padded + x * 4) as usize + c];
+
+    // Inside the square → green over red = green (opaque). Outside → red background.
+    assert!(
+        at(30, 30, 1) >= 250 && at(30, 30, 0) <= 5,
+        "inside run must be green"
+    );
+    assert!(
+        at(70, 70, 0) >= 250 && at(70, 70, 1) <= 5,
+        "outside run must stay red background"
+    );
+    assert_eq!(at(30, 30, 3), 255, "inside opaque");
+    eprintln!("composite-run over background ok");
 }

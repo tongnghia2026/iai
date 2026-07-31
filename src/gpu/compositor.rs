@@ -957,6 +957,9 @@ pub struct CompositorState {
     /// requests a repaint while any build is pending so the proxy engages even if
     /// the zoom gesture already stopped.
     proxy_builds: std::collections::HashMap<(u32, u32), ProxyBuild>,
+    /// Hybrid-canvas GPU vector stage. `Some` only when `IAI_GPU_VECTOR_CANVAS` is
+    /// on; `None` leaves the raster pipeline unchanged. See `gpu::vector::composite`.
+    vector_stage: Option<crate::gpu::vector::composite::VectorCompositeStage>,
 }
 
 impl CompositorState {
@@ -1441,6 +1444,15 @@ struct VsOut {
             proxy_frame: 0,
             proxy_build_suspend: None,
             proxy_builds: std::collections::HashMap::new(),
+            // Built only when the hybrid-canvas flag is on; None keeps the raster
+            // pipeline byte-for-byte unchanged. Rebuilt with the whole GpuState on
+            // device loss.
+            vector_stage: crate::gpu::vector::runtime_enabled().then(|| {
+                crate::gpu::vector::composite::VectorCompositeStage::new(
+                    device,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                )
+            }),
         }
     }
 
@@ -2633,8 +2645,6 @@ struct VsOut {
         dirty_rect: Option<(u32, u32, u32, u32)>,
         allow_backdrop_cache: bool,
     ) -> bool {
-        let use_partial = dirty_rect.is_some() && self.ping_initialized && self.render_scale == 1;
-
         let mut command_buffers: Vec<wgpu::CommandBuffer> = Vec::new();
 
         // Each entry keeps its original stack index; `boundary` is the backdrop
@@ -2644,6 +2654,51 @@ struct VsOut {
         let (visible_layers, boundary) = Self::visible_layers_and_boundary(layer_stack);
         let n_layers = visible_layers.len();
         let active_idx = layer_stack.active_idx;
+
+        // Hybrid canvas (Phase 2): per visible layer, is it an eligible GPU vector
+        // layer this frame? Only in the full viewport path (not canvas_space / not
+        // low-res preview); a present vector run forces a full composite (no partial
+        // dirty-rect, no backdrop cache) so the ping/pong parity stays trivial.
+        // Crop transforms the whole stack per-layer (not by id), so a crop preview
+        // disables the GPU vector path entirely for the frame.
+        let can_gpu_vector = self.vector_stage.is_some()
+            && !self.canvas_space
+            && self.render_scale == 1
+            && self.crop_preview.is_none();
+        let gpu_eligible: Vec<bool> = if can_gpu_vector {
+            visible_layers
+                .iter()
+                .map(|&(stack_idx, l)| {
+                    // The ACTIVE layer is the one being edited: node/style/shape
+                    // drags update a pending raster preview (its tiles), not the
+                    // committed model the GPU reads, so keep it on the existing
+                    // raster + crisp-overlay path. Free-transform previews (which
+                    // can target several layers) are excluded by id. Non-active
+                    // static vector layers render natively on the GPU. A live
+                    // multi-Move of other selected layers is followed via the
+                    // offset drift correction in `composite_run`.
+                    stack_idx != active_idx
+                        && !self.transform_previews.iter().any(|t| t.layer_id == l.id)
+                        && matches!(
+                            crate::gpu::vector::eligibility::layer_eligibility(l, true),
+                            crate::gpu::vector::eligibility::Eligibility::GpuVector
+                        )
+                })
+                .collect()
+        } else {
+            vec![false; n_layers]
+        };
+        let gpu_vector_active = gpu_eligible.iter().any(|&e| e);
+
+        let use_partial = dirty_rect.is_some()
+            && self.ping_initialized
+            && self.render_scale == 1
+            && !gpu_vector_active;
+        if let Some(stage) = self.vector_stage.as_mut() {
+            if gpu_vector_active {
+                stage.begin_frame();
+            }
+        }
         // A live preview (Develop / Ctrl+L·M / filter) targeting a layer inside
         // the frozen prefix would make the snapshot stale — its parameters live
         // in compositor state, not in the layer fingerprint. In practice previews
@@ -2714,6 +2769,7 @@ struct VsOut {
             && boundary > 0
             && boundary < n_layers
             && !preview_conflict
+            && !gpu_vector_active
             && (!use_partial || clamped_scissor.is_some());
         let cur_sig: Vec<u64> = if cache_enabled {
             visible_layers[..boundary]
@@ -2951,6 +3007,84 @@ struct VsOut {
         for (layer_slot, &(_stack_idx, layer)) in visible_layers.iter().enumerate() {
             // Resume: the frozen prefix is already in the accumulator.
             if layer_slot < start_slot {
+                continue;
+            }
+            // Hybrid canvas: an eligible GPU vector layer is drawn natively by the
+            // vector run, not by the raster tile pass (its one representation — no
+            // halo). Handle the whole contiguous run at its first layer, then skip
+            // the members here. A run participates in the ping/pong as one step.
+            if gpu_eligible[layer_slot] {
+                let is_run_start = layer_slot == 0 || !gpu_eligible[layer_slot - 1];
+                if is_run_start {
+                    let mut objects: Vec<(
+                        &crate::core::vector::object::VectorObjectData,
+                        (i32, i32),
+                    )> = Vec::new();
+                    let mut j = layer_slot;
+                    while j < n_layers && gpu_eligible[j] {
+                        let run_layer = visible_layers[j].1;
+                        if let crate::core::layer::LayerType::Vector(
+                            crate::core::vector::object::VectorGeometry::Path(obj),
+                        ) = &run_layer.layer_type
+                        {
+                            objects.push((obj, run_layer.offset));
+                        }
+                        j += 1;
+                    }
+                    if !objects.is_empty() {
+                        let vw = self.viewport_w;
+                        let vh = self.viewport_h;
+                        let ping_v = self.ping_view.clone();
+                        let pong_v = self.pong_view.clone();
+                        let (dst_read, dst_write) = if current_dst_is_ping {
+                            (&ping_v, &pong_v)
+                        } else {
+                            (&pong_v, &ping_v)
+                        };
+                        let mut enc =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("vector_run_enc"),
+                            });
+                        // First drawn content: seed its background (dst_read)
+                        // transparent, mirroring the raster first-layer clear.
+                        if first_layer && !use_partial {
+                            let rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("vector_run_clear"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: dst_read,
+                                    resolve_target: None,
+                                    depth_slice: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                ..Default::default()
+                            });
+                            drop(rp);
+                            self.ping_initialized = true;
+                        }
+                        first_layer = false;
+                        if let Some(stage) = self.vector_stage.as_mut() {
+                            stage.composite_run(
+                                device,
+                                &mut enc,
+                                dst_read,
+                                dst_write,
+                                vw,
+                                vh,
+                                view_offset_x,
+                                view_offset_y,
+                                zoom,
+                                &objects,
+                            );
+                        }
+                        command_buffers.push(enc.finish());
+                        // The run is one ping/pong step: flip parity exactly once.
+                        current_dst_is_ping = !current_dst_is_ping;
+                    }
+                }
                 continue;
             }
             // Snapshot: capture the accumulated prefix [0..boundary) the moment

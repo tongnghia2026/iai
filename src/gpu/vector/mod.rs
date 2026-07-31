@@ -4,6 +4,7 @@
 //! this module mutates the vector model or its raster twin.
 
 pub mod cache;
+pub mod composite;
 pub mod eligibility;
 pub mod mesh;
 pub mod renderer;
@@ -11,6 +12,7 @@ pub mod scene;
 pub mod telemetry;
 
 pub const VECTOR_SHADER: &str = include_str!("vector.wgsl");
+pub const VECTOR_COMPOSITE_SHADER: &str = include_str!("vector_composite.wgsl");
 
 /// Emergency switch. It is deliberately opt-in while the native draw pass is
 /// being qualified on each backend; an unset/false value preserves the old
@@ -26,5 +28,17 @@ mod tests {
     #[test]
     fn vector_shader_parses() {
         naga::front::wgsl::parse_str(super::VECTOR_SHADER).expect("vector.wgsl must parse");
+    }
+
+    #[test]
+    fn vector_composite_shader_parses() {
+        let module = naga::front::wgsl::parse_str(super::VECTOR_COMPOSITE_SHADER)
+            .expect("vector_composite.wgsl must parse");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("vector_composite.wgsl must validate");
     }
 }

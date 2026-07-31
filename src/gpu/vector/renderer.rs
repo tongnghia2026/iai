@@ -75,32 +75,46 @@ pub fn unpremultiply_srgb(rgba: &mut [u8]) {
     }
 }
 
-/// The layer→clip mapping for one render call: the mesh is drawn in *layer* space
-/// (`object_to_canvas` maps object-local vertices to layer pixels) and this frame
-/// maps a `width × height` window whose top-left sits at `(off_x, off_y)` in layer
-/// space onto normalised device coordinates.
+/// The layer→clip mapping for one render call. A layer point `(lx, ly)` maps to
+/// target pixel `screen = (l - off) * scale`, and that maps into a `width × height`
+/// target. For the POC harness `scale == 1` and `(off_x, off_y)` is the tight
+/// frame's top-left; for the live viewport composite `scale == zoom` and
+/// `(off_x, off_y)` is the view offset.
 #[derive(Debug, Clone, Copy)]
 pub struct CanvasView {
     pub width: u32,
     pub height: u32,
     pub off_x: f32,
     pub off_y: f32,
+    pub scale: f32,
 }
 
 impl CanvasView {
+    /// A tight-frame view at 1:1 scale (the POC / snapshot-test convention).
+    pub fn tight(width: u32, height: u32, off_x: f32, off_y: f32) -> Self {
+        Self {
+            width,
+            height,
+            off_x,
+            off_y,
+            scale: 1.0,
+        }
+    }
+
     /// Column-major `mat3x3` mapping a layer point `(lx, ly, 1)` to clip space,
     /// with the Y axis flipped for wgpu's NDC. Pixel `(px, py)` centre `+0.5`
     /// lands on the same sample the CPU rasteriser reads, because a layer point at
-    /// integer `lx` maps to framebuffer edge `lx - off_x`.
+    /// integer `lx` maps to framebuffer edge `(lx - off) * scale`.
     fn canvas_to_clip(&self) -> [[f32; 4]; 3] {
         let w = self.width.max(1) as f32;
         let h = self.height.max(1) as f32;
+        let s = self.scale;
         [
-            [2.0 / w, 0.0, 0.0, 0.0],
-            [0.0, -2.0 / h, 0.0, 0.0],
+            [2.0 * s / w, 0.0, 0.0, 0.0],
+            [0.0, -2.0 * s / h, 0.0, 0.0],
             [
-                -2.0 * self.off_x / w - 1.0,
-                2.0 * self.off_y / h + 1.0,
+                -2.0 * s * self.off_x / w - 1.0,
+                2.0 * s * self.off_y / h + 1.0,
                 1.0,
                 0.0,
             ],
@@ -358,8 +372,47 @@ impl VectorRenderer {
         })
     }
 
+    /// Encode one MSAA render pass that draws `draws` into `msaa_view` and resolves
+    /// into `resolve_view` (both sized to `view`). The caller owns the textures and
+    /// the encoder, so this is used by both the POC readback path and the live
+    /// compositor (which resolves into a texture it then composites). Clears the
+    /// target to transparent first; the resolve is premultiplied-alpha.
+    pub fn encode_run(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        msaa_view: &wgpu::TextureView,
+        resolve_view: &wgpu::TextureView,
+        view: CanvasView,
+        draws: &[VectorDraw],
+    ) {
+        let uniforms = self.build_uniforms(device, &view, draws);
+        let mesh_buffers = self.upload_meshes(device, draws);
+        // The bind group must outlive the render pass, so build it up front.
+        let bound = uniforms
+            .as_ref()
+            .map(|(buffer, items)| (self.bind_group(device, buffer), items));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vector_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: msaa_view,
+                resolve_target: Some(resolve_view),
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        if let Some((bind_group, items)) = &bound {
+            self.record(&mut pass, bind_group, &mesh_buffers, draws, items);
+        }
+    }
+
     /// Proof-of-concept path: render `draws` into a fresh MSAA target, resolve to a
-    /// sample-count-1 texture, read it back, and return tight straight-alpha RGBA
+    /// sample-count-1 texture, read it back, and return tight premultiplied RGBA
     /// (row-unpadded, `width * height * 4` bytes). Used by the local snapshot tests
     /// that compare against `core::vector::raster`.
     pub fn render_offscreen(
@@ -399,34 +452,9 @@ impl VectorRenderer {
         let msaa_view = msaa.create_view(&wgpu::TextureViewDescriptor::default());
         let resolve_view = resolve.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let uniforms = self.build_uniforms(device, &view, draws);
-        let mesh_buffers = self.upload_meshes(device, draws);
-        // The bind group must outlive the render pass, so build it up front.
-        let bound = uniforms
-            .as_ref()
-            .map(|(buffer, items)| (self.bind_group(device, buffer), items));
-
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("vector_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &msaa_view,
-                    resolve_target: Some(&resolve_view),
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                ..Default::default()
-            });
-            if let Some((bind_group, items)) = &bound {
-                self.record(&mut pass, bind_group, &mesh_buffers, draws, items);
-            }
-        }
+        self.encode_run(device, &mut encoder, &msaa_view, &resolve_view, view, draws);
 
         // Copy the resolved texture into a padded readback buffer.
         let bytes_per_pixel = 4u32;
