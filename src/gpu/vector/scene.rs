@@ -30,6 +30,7 @@ impl SceneRun {
 pub fn plan_runs(stack: &LayerStack, enabled: bool) -> Vec<SceneRun> {
     let mut runs: Vec<SceneRun> = Vec::new();
     let mut previous_gpu_masked = false;
+    let mut previous_gpu_blended = false;
     let mut previous_parent_id = None;
     for (index, layer) in stack.layers.iter().enumerate() {
         if layer.is_group()
@@ -44,10 +45,13 @@ pub fn plan_runs(stack: &LayerStack, enabled: bool) -> Vec<SceneRun> {
             Eligibility::GpuVector
         );
         let gpu_masked = gpu && layer.mask.as_ref().is_some_and(|mask| mask.enabled);
+        let gpu_blended = gpu && layer.blend_mode != crate::core::blend::BlendMode::Normal;
         if runs.last().is_some_and(|run| run.same_kind(gpu))
             && layer.parent_id == previous_parent_id
             && !gpu_masked
             && !previous_gpu_masked
+            && !gpu_blended
+            && !previous_gpu_blended
         {
             runs.last_mut().unwrap().push(layer.id);
         } else if gpu {
@@ -56,6 +60,7 @@ pub fn plan_runs(stack: &LayerStack, enabled: bool) -> Vec<SceneRun> {
             runs.push(SceneRun::Raster(vec![layer.id]));
         }
         previous_gpu_masked = gpu_masked;
+        previous_gpu_blended = gpu_blended;
         previous_parent_id = layer.parent_id;
     }
     runs
@@ -144,6 +149,30 @@ mod tests {
         masked.mask = Some(crate::core::layer::LayerMask::new_white(1, 1));
         let above = make_vector(3);
         stack.layers = vec![below, masked, above];
+        assert_eq!(
+            plan_runs(&stack, true),
+            vec![
+                SceneRun::GpuVector(vec![1]),
+                SceneRun::GpuVector(vec![2]),
+                SceneRun::GpuVector(vec![3]),
+            ]
+        );
+    }
+
+    #[test]
+    fn blended_vector_is_isolated_from_normal_neighbours() {
+        let mut stack = LayerStack::new(1, 1);
+        let make_vector = |id| {
+            let mut layer = Layer::new(id, "v", 1, 1);
+            layer.layer_type = LayerType::Vector(VectorGeometry::Path(VectorObjectData::default()));
+            layer.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+            layer
+        };
+        let below = make_vector(1);
+        let mut multiply = make_vector(2);
+        multiply.blend_mode = crate::core::blend::BlendMode::Multiply;
+        let above = make_vector(3);
+        stack.layers = vec![below, multiply, above];
         assert_eq!(
             plan_runs(&stack, true),
             vec![

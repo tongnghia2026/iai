@@ -8,6 +8,7 @@ use lyon_tessellation::{
 
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::path::{FillRule, PathData};
+use crate::core::vector::{flatten::flatten_path, raster::dashed_polylines};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -53,6 +54,34 @@ pub fn to_lyon_path(path: &PathData) -> lyon_path::Path {
     builder.build()
 }
 
+fn dashed_lyon_path(object: &VectorObjectData, tolerance: f32) -> lyon_path::Path {
+    let polylines = flatten_path(&object.path, tolerance.max(0.001));
+    let closed: Vec<bool> = object
+        .path
+        .contours
+        .iter()
+        .map(|contour| contour.closed)
+        .collect();
+    let (segments, _) = dashed_polylines(
+        &polylines,
+        &closed,
+        object.style.stroke_style.dash.as_slice(),
+        object.style.stroke_style.dash.offset,
+    );
+    let mut builder = lyon_path::Path::builder();
+    for segment in segments {
+        let Some(first) = segment.first() else {
+            continue;
+        };
+        builder.begin(point(first.x, first.y));
+        for p in &segment[1..] {
+            builder.line_to(point(p.x, p.y));
+        }
+        builder.end(false);
+    }
+    builder.build()
+}
+
 pub fn tessellate(object: &VectorObjectData, tolerance: f32) -> Result<VectorMesh, String> {
     object.validate()?;
     let path = to_lyon_path(&object.path);
@@ -91,9 +120,16 @@ pub fn tessellate(object: &VectorObjectData, tolerance: f32) -> Result<VectorMes
             .with_end_cap(LyonLineCap::Round)
             .with_line_join(LyonLineJoin::Round)
             .with_tolerance(tolerance.max(0.001));
+        let dashed_path;
+        let stroke_path = if object.style.stroke_style.dash.is_solid() {
+            &path
+        } else {
+            dashed_path = dashed_lyon_path(object, tolerance);
+            &dashed_path
+        };
         StrokeTessellator::new()
             .tessellate_path(
-                &path,
+                stroke_path,
                 &options,
                 &mut BuffersBuilder::new(&mut buffers, |v: StrokeVertex| VectorVertex {
                     position: [v.position().x, v.position().y],
@@ -152,5 +188,31 @@ mod tests {
         let mesh = tessellate(&object, 0.1).unwrap();
         assert!(mesh.fill_range.is_empty());
         assert!(!mesh.stroke_range.is_empty());
+    }
+
+    #[test]
+    fn dashed_stroke_generates_less_geometry_than_solid() {
+        use crate::core::vector::style::DashPattern;
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(100.0, 0.0)),
+                ],
+                false,
+            )],
+            FillRule::NonZero,
+        );
+        let mut solid = VectorObjectData::from_path(path);
+        solid.style = VectorStyle::stroked(ColorValue::BLACK, 4.0);
+        let solid_mesh = tessellate(&solid, 0.1).unwrap();
+        let mut dashed = solid;
+        dashed.style.stroke_style.dash = DashPattern::from_slice(&[10.0, 10.0], 0.0);
+        let dashed_mesh = tessellate(&dashed, 0.1).unwrap();
+        assert!(!dashed_mesh.stroke_range.is_empty());
+        assert!(
+            dashed_mesh.vertices.len() < solid_mesh.vertices.len() * 8,
+            "dash tessellation must stay bounded"
+        );
     }
 }

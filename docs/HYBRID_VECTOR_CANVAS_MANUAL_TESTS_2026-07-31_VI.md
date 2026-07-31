@@ -159,10 +159,13 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 | Transform (pan/zoom/move/xoay/scale) | GPU, 0 tessellate lại (Phase 3) |
 | Layer active, đang idle | GPU (Phase 8) |
 | Layer đang có live edit/pending preview | Raster fallback tạm thời |
-| Dash / vector brush | Raster fallback |
+| Dash + dash offset | GPU (Phase 4) |
+| Vector brush | Raster fallback |
 | Object/layer opacity, blend Normal | GPU (Phase 5) |
 | Gradient RGB linear/radial + alpha stops | GPU (Phase 5) |
-| Gradient có stop CMYK, blend≠Normal | Raster fallback |
+| Multiply/Screen/Overlay/Darken/Lighten/Dodge/Burn/Hard Light/Soft Light/Linear Light/Difference/Exclusion | GPU (Phase 5, isolated run) |
+| Hue/Saturation/Color/Luminosity (non-separable) | GPU (Phase 5, isolated run) |
+| Gradient có stop CMYK; Dissolve | Raster fallback |
 | Raster mask thường trên vector | GPU (Phase 7, lát 2) |
 | PowerClip có frame + derived mask hợp lệ | GPU (Phase 7, lát 3) |
 | Group Normal opacity, chỉ direct GPU vectors | GPU (Phase 7, lát 4) |
@@ -171,6 +174,23 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 
 Bất cứ ô "Raster fallback" nào mà **khác hình so với khi tắt cờ** đều là lỗi cần
 báo. Bất cứ ô "GPU" nào mà chậm đi hoặc kém nét hơn tắt cờ cũng cần báo.
+## Phase 4/5 — dash và blend mode
+
+1. Tạo một Path hở và một Path kín, đặt dash pattern lẻ/chẵn và thay đổi dash offset.
+2. Zoom, xoay và scale; kỳ vọng dash không biến mất, không nối nhầm qua khoảng trống và
+   không phát sinh CPU sharp-bake khi layer idle.
+3. Đặt một vector màu sáng giữa hai raster layer tương phản. Lần lượt thử Multiply,
+   Screen, Overlay, Darken, Lighten, Color Dodge/Burn, Hard/Soft/Linear Light,
+   Difference và Exclusion.
+4. Với từng mode, bật/tắt `IAI_GPU_VECTOR_CANVAS`; kỳ vọng màu, opacity và z-order giữ
+   nguyên. Hai vector blend liền nhau phải tác động tuần tự, không bị gộp thành một run.
+5. Bốn mode non-separable **Hue, Saturation, Color, Luminosity** giờ cũng chạy GPU:
+   dùng một vector nhiều màu (ví dụ vàng cam) trên nền ảnh raster nhiều sắc độ,
+   bật/tắt cờ và kỳ vọng hình GIỐNG HỆT bản raster — Hue giữ độ sáng nền, Color
+   giữ độ sáng nền, Luminosity giữ màu nền. Sai sắc/độ sáng giữa on/off là lỗi.
+6. Chỉ còn **Dissolve** đi raster fallback: bật/tắt cờ phải cho hình giống nhau,
+   không được mất layer hoặc đổi z-order.
+
 ## Phase 7 — lát 1: group pass-through
 
 1. Bật `IAI_GPU_VECTOR_CANVAS=1`, tạo một raster layer dưới cùng.

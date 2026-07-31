@@ -3241,6 +3241,7 @@ struct VsOut {
                                     }
                                 }),
                                 run_opacity,
+                                layer.blend_mode,
                             );
                         }
                         command_buffers.push(enc.finish());

@@ -386,7 +386,10 @@ pub(crate) fn sample_paint_in_object_space(paint: Paint, object_point: Point) ->
     }
 }
 
-fn dashed_polylines(
+/// Split flattened contours into the visible dash segments. Kept here as the
+/// single CPU/GPU semantic reference so dash phase and odd-length repetition do
+/// not drift between the raster fallback and the native vector renderer.
+pub(crate) fn dashed_polylines(
     input: &[Vec<Point>],
     closed: &[bool],
     pattern: &[f32],

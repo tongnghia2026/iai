@@ -44,17 +44,40 @@ fn paint_supported(paint: Paint) -> Result<(), FallbackReason> {
     }
 }
 
+pub fn blend_mode_supported(mode: BlendMode) -> bool {
+    matches!(
+        mode,
+        BlendMode::Normal
+            | BlendMode::Multiply
+            | BlendMode::ColorBurn
+            | BlendMode::Darken
+            | BlendMode::Screen
+            | BlendMode::ColorDodge
+            | BlendMode::Lighten
+            | BlendMode::Overlay
+            | BlendMode::SoftLight
+            | BlendMode::HardLight
+            | BlendMode::LinearLight
+            | BlendMode::Difference
+            | BlendMode::Exclusion
+            | BlendMode::Hue
+            | BlendMode::Saturation
+            | BlendMode::Color
+            | BlendMode::Luminosity
+    )
+    // Dissolve is intentionally excluded: it is stochastic per pixel and cannot
+    // match the CPU raster reference across zoom/transform.
+}
+
 /// Style-only eligibility, shared by [`object_eligibility`] and the primitive
 /// path (a primitive's geometry is always valid and never carries a brush, so its
 /// eligibility is decided entirely by its style — no path allocation needed).
 pub fn style_eligibility(style: &crate::core::vector::style::VectorStyle) -> Eligibility {
-    if !style.stroke_style.dash.is_solid() {
-        return Eligibility::RasterFallback(FallbackReason::Dash);
-    }
     // Cap/join style is NOT gated: the GPU tessellates every stroke round (see
     // `mesh::tessellate`) to match the CPU capsule rasteriser, which also ignores
     // cap/join. So a butt/miter outline renders identically to the raster twin and
-    // is eligible; only dash still falls back (the GPU does not dash yet).
+    // is eligible. Dashed strokes are split with the raster reference's exact
+    // dash walker before Lyon tessellation.
     for paint in [style.fill, style.stroke] {
         if let Err(reason) = paint_supported(paint) {
             return Eligibility::RasterFallback(reason);
@@ -91,7 +114,7 @@ fn layer_eligibility_impl(
     if layer.parent_id.is_some() && !allow_group_child {
         return Eligibility::RasterFallback(FallbackReason::Group);
     }
-    if layer.blend_mode != BlendMode::Normal {
+    if !blend_mode_supported(layer.blend_mode) {
         return Eligibility::RasterFallback(FallbackReason::BlendMode);
     }
     match &layer.layer_type {
@@ -138,6 +161,7 @@ fn opacity_group_supported(stack: &crate::core::layer::LayerStack, group_id: u32
     !children.is_empty()
         && children.iter().all(|child| {
             !child.is_group()
+                && child.blend_mode == BlendMode::Normal
                 && child.mask.as_ref().is_none_or(|mask| !mask.enabled)
                 && child.clip_parent_id.is_none()
                 && matches!(
@@ -251,13 +275,10 @@ mod tests {
         object.style.stroke_style.cap = LineCap::Round;
         object.style.stroke_style.join = LineJoin::Round;
         assert_eq!(object_eligibility(&object), Eligibility::GpuVector);
-        // Dash still falls back (the GPU does not dash yet).
+        // Dash uses the shared CPU/GPU dash splitter and remains GPU eligible.
         object.style.stroke_style.dash =
             crate::core::vector::style::DashPattern::from_slice(&[4.0, 4.0], 0.0);
-        assert_eq!(
-            object_eligibility(&object),
-            Eligibility::RasterFallback(FallbackReason::Dash)
-        );
+        assert_eq!(object_eligibility(&object), Eligibility::GpuVector);
     }
 
     #[test]
@@ -269,6 +290,12 @@ mod tests {
         }
         assert_eq!(layer_eligibility(&layer, true), Eligibility::GpuVector);
         layer.blend_mode = BlendMode::Multiply;
+        assert_eq!(layer_eligibility(&layer, true), Eligibility::GpuVector);
+        // The non-separable modes are GPU-native too (mirroring the CPU reference).
+        layer.blend_mode = BlendMode::Luminosity;
+        assert_eq!(layer_eligibility(&layer, true), Eligibility::GpuVector);
+        // Dissolve remains the one unsupported mode → whole-layer raster fallback.
+        layer.blend_mode = BlendMode::Dissolve;
         assert_eq!(
             layer_eligibility(&layer, true),
             Eligibility::RasterFallback(FallbackReason::BlendMode)

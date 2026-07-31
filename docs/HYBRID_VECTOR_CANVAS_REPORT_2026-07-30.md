@@ -345,14 +345,43 @@ confirmed that zoom/pan above 100% no longer sweeps layers through CPU bakes.
 Verification: current-frame policy regression tests, active-idle/style-session
 gate test, the full library suite, and all six serialized local GPU snapshots.
 
+## Continuation: Phase 4 dash + Phase 5 separable blends (2026-07-31)
+
+- **Dash is GPU-native.** The CPU rasterizer's dash walker is now the shared
+  semantic implementation. GPU tessellation flattens the path at the current
+  mesh tolerance, splits it with that same odd-pattern/offset logic, and feeds
+  the visible open segments to Lyon with the existing round-capsule reference.
+  Dash changes remain part of the geometry fingerprint. Vector brush remains
+  raster fallback.
+- **Separable blend modes are GPU-native per isolated layer run:** Multiply,
+  Screen, Overlay, Darken, Lighten, Color Dodge, Color Burn, Hard Light, Soft
+  Light, Linear Light, Difference, and Exclusion. The vector composite shader
+  uses the same sRGB-space PDF/W3C equations and straight-alpha overlap terms as
+  `compositor.wgsl`. The scene planner isolates a blended vector from both
+  neighbours so it reads the correct accumulator exactly once.
+- **Non-separable blend modes are now GPU-native too:** Hue, Saturation, Color,
+  and Luminosity. `vector_composite.wgsl` carries a byte-identical copy of the
+  main compositor's `lum`/`sat`/`set_lum`/`set_sat` helpers (legacy blend-space
+  luminosity 0.30/0.59/0.11 and saturation = max − min, matching the CPU
+  reference `core::blend`) and switch arms 12–15, so a vector layer set to any of
+  these modes matches its raster twin. `blend_mode_code` maps them to 12/13/14/15
+  exactly as `compositor.wgsl` does; a CI-safe invariant test asserts every
+  GPU-eligible non-Normal mode has a distinct non-zero code so none can silently
+  fall through to Normal.
+- Dissolve is the one remaining blend fallback: it is stochastic per pixel and
+  cannot match the CPU raster reference across zoom/transform.
+- Stored butt/square cap and miter/bevel join still intentionally render as the
+  legacy CPU reference's round capsules. Changing that requires upgrading the
+  authoritative CPU raster appearance and is not silently enabled here.
+
 ## Remaining phases (honest status, 2026-07-31)
 
-- **Phase 4 stroke — partially shipped.** Every solid stroke is GPU-native and
+- **Phase 4 stroke — mostly shipped.** Solid and dashed strokes are GPU-native and
   tessellated as round capsules regardless of stored cap/join, matching the CPU
-  reference `stroke_coverage` exactly. Dash and vector brush remain raster
-  fallback. Honouring butt/square/miter/bevel visually still requires upgrading
+  reference `stroke_coverage` exactly. Vector brush remains raster fallback.
+  Honouring butt/square/miter/bevel visually still requires upgrading
   the CPU reference and is a separate appearance-changing decision.
-- **Phase 5 gradient / opacity / blend — gradient + Normal opacity shipped.**
+- **Phase 5 gradient / opacity / blend — mostly shipped.**
   Linear and radial RGB gradients are evaluated in `vector.wgsl` with the model's
   object→gradient inverse transform, up to eight sorted stops, clamp semantics,
   and alpha-stop interpolation matching the CPU reference. Stop colours interpolate
@@ -361,7 +390,9 @@ gate test, the full library suite, and all six serialized local GPU snapshots.
   uniforms without changing the geometry fingerprint. Normal object and layer
   opacity are GPU-native; the draw alpha is
   `paint alpha × object opacity × layer opacity`, verified by a real-GPU
-  `0.5 × 0.5 = 0.25` snapshot. Blend modes other than Normal remain fallback.
+  `0.5 × 0.5 = 0.25` snapshot. Sixteen blend modes are GPU-native in isolated
+  runs — the twelve separable modes plus non-separable Hue/Saturation/Color/
+  Luminosity — leaving only Dissolve (stochastic) on raster fallback.
   Real-GPU snapshots compare linear/radial transformed gradients and alpha stops
   directly against `core::vector::raster`.
 - **Phase 7 mask / clip / PowerClip / group — sliced implementation started.**

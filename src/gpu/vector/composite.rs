@@ -25,6 +25,7 @@ use super::mesh::tessellate;
 use super::renderer::{
     CanvasView, GpuMesh, GpuPaint, VectorDraw, VectorRenderer, VECTOR_SAMPLE_COUNT,
 };
+use crate::core::blend::BlendMode;
 use crate::core::layer::LayerMask;
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::object::VectorObjectData;
@@ -340,6 +341,7 @@ impl VectorCompositeStage {
         objects: &[(&VectorObjectData, (i32, i32), f32)],
         mask: Option<VectorMask<'_>>,
         run_opacity: f32,
+        blend_mode: BlendMode,
     ) {
         self.ensure_size(device, viewport_w, viewport_h);
         let bucket = zoom_bucket(zoom);
@@ -497,7 +499,7 @@ impl VectorCompositeStage {
                 0.0,
                 0.0,
                 run_opacity,
-                0.0,
+                blend_mode_code(blend_mode) as f32,
             ],
             |spec| {
                 [
@@ -512,7 +514,7 @@ impl VectorCompositeStage {
                     spec.sample_shift.0 as f32,
                     spec.sample_shift.1 as f32,
                     run_opacity,
-                    0.0,
+                    blend_mode_code(blend_mode) as f32,
                 ]
             },
         );
@@ -576,10 +578,72 @@ impl VectorCompositeStage {
     }
 }
 
+fn blend_mode_code(mode: BlendMode) -> u32 {
+    match mode {
+        BlendMode::Normal => 0,
+        BlendMode::Multiply => 1,
+        BlendMode::Screen => 2,
+        BlendMode::Overlay => 3,
+        BlendMode::Darken => 4,
+        BlendMode::Lighten => 5,
+        BlendMode::ColorDodge => 6,
+        BlendMode::ColorBurn => 7,
+        BlendMode::HardLight => 8,
+        BlendMode::SoftLight => 9,
+        BlendMode::Difference => 10,
+        BlendMode::Exclusion => 11,
+        BlendMode::Hue => 12,
+        BlendMode::Saturation => 13,
+        BlendMode::Color => 14,
+        BlendMode::Luminosity => 15,
+        BlendMode::LinearLight => 16,
+        // Dissolve (17) is stochastic per-pixel and cannot match the CPU raster
+        // reference across zoom/transform, so it stays a raster fallback (never
+        // reaches here — see `eligibility::blend_mode_supported`).
+        _ => 0,
+    }
+}
+
 /// Zoom → mesh bucket: curves are re-tessellated finer as the run is magnified, so
 /// they stay crisp, while pan and small zoom jitter reuse the same mesh. Powers of
 /// two up to 16 mirror the display-raster buckets.
 fn zoom_bucket(zoom: f32) -> u32 {
     let z = (zoom.max(1.0).min(16.0).ceil() as u32).max(1);
     z.next_power_of_two().min(16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blend_mode_code;
+    use crate::core::blend::BlendMode;
+    use crate::gpu::vector::eligibility::blend_mode_supported;
+
+    #[test]
+    fn every_supported_blend_maps_to_a_distinct_gpu_code() {
+        // A GPU-eligible non-Normal mode that fell through to code 0 would render
+        // as Normal — the plan's forbidden "silent wrong render". Lock every
+        // supported mode to a non-zero code and make sure none collide.
+        let mut seen = std::collections::HashSet::new();
+        for &mode in BlendMode::all() {
+            if !blend_mode_supported(mode) {
+                continue;
+            }
+            let code = blend_mode_code(mode);
+            if mode == BlendMode::Normal {
+                assert_eq!(code, 0, "Normal must stay code 0");
+            } else {
+                assert_ne!(code, 0, "{mode:?} is GPU-eligible but maps to Normal");
+                assert!(seen.insert(code), "{mode:?} reuses blend code {code}");
+            }
+        }
+    }
+
+    #[test]
+    fn non_separable_codes_match_the_compositor_shader() {
+        // These must equal the switch arms in compositor.wgsl / vector_composite.wgsl.
+        assert_eq!(blend_mode_code(BlendMode::Hue), 12);
+        assert_eq!(blend_mode_code(BlendMode::Saturation), 13);
+        assert_eq!(blend_mode_code(BlendMode::Color), 14);
+        assert_eq!(blend_mode_code(BlendMode::Luminosity), 15);
+    }
 }

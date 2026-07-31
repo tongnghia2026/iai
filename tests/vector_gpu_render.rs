@@ -714,6 +714,7 @@ fn gpu_composite_run_over_background() {
             mask: &mask,
         }),
         0.5,
+        iai::core::blend::BlendMode::Normal,
     );
 
     // Read back dst_write.
@@ -844,6 +845,7 @@ fn gpu_mesh_cache_is_transform_invariant() {
             &[(obj, origin(obj), 1.0)],
             None,
             1.0,
+            iai::core::blend::BlendMode::Normal,
         );
         (stage.last_frame_tessellations(), stage.last_frame_uploads())
     };
