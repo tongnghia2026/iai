@@ -961,13 +961,38 @@ pub struct CompositorState {
     /// on; `None` leaves the raster pipeline unchanged. See `gpu::vector::composite`.
     vector_stage: Option<crate::gpu::vector::composite::VectorCompositeStage>,
     /// Layer ids the last composite drew natively on the GPU (empty when the GPU
-    /// vector path is inactive). `path_display` reads this to stop the CPU
-    /// crisp-overlay re-bake for those layers — the GPU already keeps them sharp,
-    /// so re-baking them is the redundant per-zoom "re-sharpen sweep" (Phase 8).
+    /// vector path is inactive). Kept as frame telemetry/debug state; callers that
+    /// plan the current frame must use `will_draw_vector_layer_on_gpu` instead.
     pub gpu_drawn_layer_ids: Vec<u32>,
 }
 
 impl CompositorState {
+    /// Whether `layer` will use the native GPU-vector path in the current
+    /// compositor state. Keep this as the single policy entry point for both
+    /// scene planning and `path_display`: consulting the ids drawn by the
+    /// previous frame creates a feedback loop because the crisp overlay itself
+    /// temporarily hides raster twins from the next composite.
+    pub fn will_draw_vector_layer_on_gpu(
+        &self,
+        layer: &Layer,
+        stack_idx: usize,
+        active_idx: usize,
+    ) -> bool {
+        self.vector_stage.is_some()
+            && !self.canvas_space
+            && self.render_scale == 1
+            && self.crop_preview.is_none()
+            && stack_idx != active_idx
+            && !self
+                .transform_previews
+                .iter()
+                .any(|preview| preview.layer_id == layer.id)
+            && matches!(
+                crate::gpu::vector::eligibility::layer_eligibility(layer, true),
+                crate::gpu::vector::eligibility::Eligibility::GpuVector
+            )
+    }
+
     pub fn new(
         device: &wgpu::Device,
         viewport_w: u32,
@@ -2667,33 +2692,20 @@ struct VsOut {
         // dirty-rect, no backdrop cache) so the ping/pong parity stays trivial.
         // Crop transforms the whole stack per-layer (not by id), so a crop preview
         // disables the GPU vector path entirely for the frame.
-        let can_gpu_vector = self.vector_stage.is_some()
-            && !self.canvas_space
-            && self.render_scale == 1
-            && self.crop_preview.is_none();
-        let gpu_eligible: Vec<bool> = if can_gpu_vector {
-            visible_layers
-                .iter()
-                .map(|&(stack_idx, l)| {
-                    // The ACTIVE layer is the one being edited: node/style/shape
-                    // drags update a pending raster preview (its tiles), not the
-                    // committed model the GPU reads, so keep it on the existing
-                    // raster + crisp-overlay path. Free-transform previews (which
-                    // can target several layers) are excluded by id. Non-active
-                    // static vector layers render natively on the GPU. A live
-                    // multi-Move of other selected layers is followed via the
-                    // offset drift correction in `composite_run`.
-                    stack_idx != active_idx
-                        && !self.transform_previews.iter().any(|t| t.layer_id == l.id)
-                        && matches!(
-                            crate::gpu::vector::eligibility::layer_eligibility(l, true),
-                            crate::gpu::vector::eligibility::Eligibility::GpuVector
-                        )
-                })
-                .collect()
-        } else {
-            vec![false; n_layers]
-        };
+        let gpu_eligible: Vec<bool> = visible_layers
+            .iter()
+            .map(|&(stack_idx, layer)| {
+                // The ACTIVE layer is the one being edited: node/style/shape
+                // drags update a pending raster preview (its tiles), not the
+                // committed model the GPU reads, so keep it on the existing
+                // raster + crisp-overlay path. Free-transform previews (which
+                // can target several layers) are excluded by id. Non-active
+                // static vector layers render natively on the GPU. A live
+                // multi-Move of other selected layers is followed via the
+                // offset drift correction in `composite_run`.
+                self.will_draw_vector_layer_on_gpu(layer, stack_idx, active_idx)
+            })
+            .collect();
         let gpu_vector_active = gpu_eligible.iter().any(|&e| e);
 
         // Record exactly the layers this composite draws on the GPU, so
