@@ -23,7 +23,7 @@ use iai::core::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
 use iai::core::vector::raster::{rasterize, PathRaster};
 use iai::core::vector::style::VectorStyle;
 use iai::gpu::vector::mesh::tessellate;
-use iai::gpu::vector::renderer::{srgb_to_linear, CanvasView, VectorDraw, VectorRenderer};
+use iai::gpu::vector::renderer::{srgb_to_linear, CanvasView, GpuMesh, VectorDraw, VectorRenderer};
 
 /// sRGB fill applied to every fixture; a mid-tone exercises the gamma round-trip
 /// harder than pure black/white.
@@ -208,7 +208,7 @@ fn assert_matches_reference(
 ) {
     let cpu = rasterize(object).expect("reference raster");
     let tol = 0.1 / transform_scale(&object.transform);
-    let mesh = tessellate(object, tol).expect("tessellate");
+    let mesh = GpuMesh::upload(device, &tessellate(object, tol).expect("tessellate"));
     let view = CanvasView::tight(
         cpu.width,
         cpu.height,
@@ -291,6 +291,55 @@ fn gpu_fill_matches_cpu_reference() {
     }
 }
 
+/// Phase 6: a parametric primitive (`VectorGeometry::Primitive`) is drawn by
+/// converting it to the same `PathData` its raster twin uses. Each shape kind must
+/// therefore match the CPU reference exactly, just like a hand-authored Path.
+#[test]
+#[ignore = "local GPU snapshot; run with --ignored --nocapture"]
+fn gpu_primitive_matches_cpu_reference() {
+    use iai::core::shape::{ShapeData, ShapeKind};
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter available; skipping primitive snapshot");
+        return;
+    };
+    let renderer = VectorRenderer::new(
+        &device,
+        iai::gpu::vector::renderer::VECTOR_TARGET_FORMAT,
+        iai::gpu::vector::renderer::VECTOR_SAMPLE_COUNT,
+    );
+    // Solid fill on each primitive kind. `assert_matches_reference` draws the GPU
+    // fill as `fill_color()` (= sRGB bytes [26,140,217]); match that so the CPU
+    // reference colour agrees. from_canvas_span returns the shape (layer-local
+    // geometry) + the layer offset that places it in canvas space.
+    let make = |kind, radius| {
+        let (mut shape, off) = ShapeData::from_canvas_span(
+            kind,
+            15.0,
+            15.0,
+            65.0,
+            55.0,
+            radius,
+            true,
+            [26, 140, 217, 255],
+            0.0,
+            [0, 0, 0, 0],
+        );
+        shape.sides = 5;
+        shape.star_inner = 0.5;
+        shape.to_vector_object(off)
+    };
+    let cases: Vec<(&str, VectorObjectData)> = vec![
+        ("prim_rect", make(ShapeKind::Rectangle, 0.0)),
+        ("prim_rounded_rect", make(ShapeKind::Rectangle, 10.0)),
+        ("prim_ellipse", make(ShapeKind::Ellipse, 0.0)),
+        ("prim_polygon", make(ShapeKind::Polygon, 0.0)),
+        ("prim_star", make(ShapeKind::Star, 0.0)),
+    ];
+    for (label, object) in &cases {
+        assert_matches_reference(&renderer, &device, &queue, label, object);
+    }
+}
+
 /// A thick open line with round caps, matching the CPU capsule stroke model
 /// (`stroke_coverage` is always round regardless of the style flags — a real
 /// Phase 4 constraint: non-round caps/joins must fall back to raster).
@@ -327,11 +376,12 @@ fn gpu_stroke_matches_cpu_reference() {
     );
     let object = stroked_line();
     let cpu = rasterize(&object).expect("reference stroke raster");
-    let mesh = tessellate(&object, 0.1).expect("tessellate stroke");
+    let cpu_mesh = tessellate(&object, 0.1).expect("tessellate stroke");
     assert!(
-        !mesh.stroke_range.is_empty() && mesh.fill_range.is_empty(),
+        !cpu_mesh.stroke_range.is_empty() && cpu_mesh.fill_range.is_empty(),
         "stroke-only object must produce stroke geometry and no fill"
     );
+    let mesh = GpuMesh::upload(&device, &cpu_mesh);
     let view = CanvasView::tight(
         cpu.width,
         cpu.height,
@@ -391,8 +441,8 @@ fn gpu_run_preserves_intra_run_z_order() {
     let green = [0.15, 0.75, 0.20, 1.0];
     let a = styled(square(40.0), AffineTransform::translate(10.0, 10.0)); // [10,50]
     let b = styled(square(40.0), AffineTransform::translate(30.0, 30.0)); // [30,70]
-    let mesh_a = tessellate(&a, 0.1).unwrap();
-    let mesh_b = tessellate(&b, 0.1).unwrap();
+    let mesh_a = GpuMesh::upload(&device, &tessellate(&a, 0.1).unwrap());
+    let mesh_b = GpuMesh::upload(&device, &tessellate(&b, 0.1).unwrap());
     let draws = [
         VectorDraw {
             mesh: &mesh_a,
@@ -565,4 +615,111 @@ fn gpu_composite_run_over_background() {
     );
     assert_eq!(at(30, 30, 3), 255, "inside opaque");
     eprintln!("composite-run over background ok");
+}
+
+/// Phase 3 acceptance: the GPU mesh cache must re-tessellate + re-upload **zero**
+/// meshes on pan, zoom (within a bucket), move, rotate and non-uniform scale — the
+/// transform is uniform-only — and rebuild exactly **one** mesh when a node moves.
+#[test]
+#[ignore = "local GPU snapshot; run with --ignored --nocapture"]
+fn gpu_mesh_cache_is_transform_invariant() {
+    use iai::core::vector::raster::raster_geometry;
+    use iai::gpu::vector::composite::VectorCompositeStage;
+
+    let Some((device, _queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter; skipping mesh-cache test");
+        return;
+    };
+    let fmt = iai::gpu::vector::renderer::VECTOR_TARGET_FORMAT;
+    let mut stage = VectorCompositeStage::new(&device, fmt);
+    let (w, h) = (96u32, 96u32);
+    let extent = wgpu::Extent3d {
+        width: w,
+        height: h,
+        depth_or_array_layers: 1,
+    };
+    let mk = || {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: fmt,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default())
+    };
+    let read_view = mk();
+    let write_view = mk();
+
+    // One eligible solid-fill square. `offset` is the model raster origin so the
+    // drag-drift correction is a no-op (it never affects tessellation anyway).
+    let mut obj = styled(square(20.0), AffineTransform::translate(20.0, 20.0));
+    let origin = |o: &VectorObjectData| raster_geometry(o).map(|(p, _, _)| p).unwrap_or((0, 0));
+
+    // A single frame at (offset, zoom) with the current object; returns
+    // (tessellations, uploads) charged this frame.
+    let run = |stage: &mut VectorCompositeStage, obj: &VectorObjectData, ox, oy, zoom| {
+        let mut enc = device.create_command_encoder(&Default::default());
+        stage.begin_frame();
+        stage.composite_run(
+            &device,
+            &mut enc,
+            &read_view,
+            &write_view,
+            w,
+            h,
+            ox,
+            oy,
+            zoom,
+            &[(obj, origin(obj))],
+        );
+        (stage.last_frame_tessellations(), stage.last_frame_uploads())
+    };
+
+    // Frame 1: cold cache → exactly one tessellation + upload. Zoom 2.5 → bucket 4.
+    assert_eq!(run(&mut stage, &obj, 0.0, 0.0, 2.5), (1, 1), "cold build");
+    assert_eq!(stage.cache_len(), 1);
+
+    // Pan (view offset changes only) → uniform-only, no rebuild.
+    assert_eq!(run(&mut stage, &obj, 12.0, -8.0, 2.5), (0, 0), "pan");
+
+    // Zoom within the same bucket (2.5 → 3.5 both bucket 4) → no rebuild.
+    assert_eq!(
+        run(&mut stage, &obj, 12.0, -8.0, 3.5),
+        (0, 0),
+        "zoom in-bucket"
+    );
+
+    // Move (object translate) → fingerprint ignores the transform → no rebuild.
+    obj.transform = AffineTransform::translate(35.0, 30.0);
+    assert_eq!(run(&mut stage, &obj, 0.0, 0.0, 2.5), (0, 0), "move");
+
+    // Rotate around the origin → transform-only → no rebuild.
+    obj.transform = AffineTransform::translate(40.0, 40.0).then(&AffineTransform::rotate(0.6));
+    assert_eq!(run(&mut stage, &obj, 0.0, 0.0, 2.5), (0, 0), "rotate");
+
+    // Non-uniform scale → transform-only (tolerance is keyed only by bucket) → no
+    // rebuild.
+    obj.transform = AffineTransform::scale(1.7, 0.8).then(&AffineTransform::translate(20.0, 20.0));
+    assert_eq!(run(&mut stage, &obj, 0.0, 0.0, 2.5), (0, 0), "scale");
+
+    assert_eq!(stage.cache_len(), 1, "no transform re-tessellated");
+
+    // Node edit → the geometry fingerprint changes → exactly one mesh rebuilt, and
+    // a second cache entry now exists (same bucket, new fingerprint).
+    obj.path.contours[0].nodes[1].anchor = Point::new(28.0, -4.0);
+    assert_eq!(run(&mut stage, &obj, 0.0, 0.0, 2.5), (1, 1), "node edit");
+    assert_eq!(stage.cache_len(), 2, "edited path added one entry");
+
+    eprintln!(
+        "mesh-cache transform-invariance ok: {} entries, {} bytes, {} evictions",
+        stage.cache_len(),
+        stage.cache_bytes(),
+        stage.cache_evictions()
+    );
 }

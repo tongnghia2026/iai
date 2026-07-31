@@ -122,12 +122,16 @@ impl CanvasView {
     }
 }
 
-/// One mesh + its object→layer transform + a solid colour, as handed to the
-/// renderer for a single draw. Colour is the straight-alpha sRGB-byte value in
-/// `[0,1]` (i.e. `ColorValue::Rgb` channels); the renderer performs the linear
+/// One GPU-resident mesh + its object→layer transform + a solid colour, as handed
+/// to the renderer for a single draw. Colour is the straight-alpha sRGB-byte value
+/// in `[0,1]` (i.e. `ColorValue::Rgb` channels); the renderer performs the linear
 /// conversion described in the module docs.
+///
+/// The mesh is a [`GpuMesh`] (buffers already uploaded), not a CPU [`VectorMesh`],
+/// so the compositor can cache it by geometry fingerprint and reuse it across
+/// pan/zoom/move/rotate/scale with no re-tessellation *and* no re-upload (Phase 3).
 pub struct VectorDraw<'a> {
-    pub mesh: &'a VectorMesh,
+    pub mesh: &'a GpuMesh,
     pub object_to_canvas: AffineTransform,
     /// Fill colour, straight-alpha sRGB-byte space in `[0,1]`.
     pub fill: Option<[f32; 4]>,
@@ -317,23 +321,23 @@ impl VectorRenderer {
     }
 
     /// Record every draw into an already-open render pass targeting a texture of
-    /// this renderer's sample count. `mesh_buffers` must be built once per frame
-    /// with [`Self::upload_meshes`] and index-aligned with `draws`. Used by the
-    /// compositor integration (Phase 2) so the vector run draws straight into the
-    /// accumulator attachment.
+    /// this renderer's sample count. Each draw carries its own already-uploaded
+    /// [`GpuMesh`] buffers, so nothing is uploaded here. Used by the compositor
+    /// integration (Phase 2/3) so the vector run draws straight into the
+    /// accumulator attachment reusing cached buffers.
     pub fn record<'p>(
         &'p self,
         pass: &mut wgpu::RenderPass<'p>,
         bind_group: &'p wgpu::BindGroup,
-        mesh_buffers: &'p [MeshBuffers],
-        draws: &[VectorDraw],
+        draws: &[VectorDraw<'p>],
         items: &[DrawItem],
     ) {
         pass.set_pipeline(&self.pipeline);
         // `items` interleaves fill-then-stroke per draw exactly as `build_uniforms`
         // produced them; walk the same order to pair each with its mesh buffer.
         let mut item = 0usize;
-        for (draw, buffers) in draws.iter().zip(mesh_buffers) {
+        for draw in draws {
+            let buffers = &draw.mesh.buffers;
             pass.set_vertex_buffer(0, buffers.vertices.slice(..));
             pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
             for present in [draw.fill.is_some(), draw.stroke.is_some()] {
@@ -347,14 +351,6 @@ impl VectorRenderer {
                 }
             }
         }
-    }
-
-    /// Upload the vertex/index buffers for one frame's draws.
-    pub fn upload_meshes(&self, device: &wgpu::Device, draws: &[VectorDraw]) -> Vec<MeshBuffers> {
-        draws
-            .iter()
-            .map(|draw| MeshBuffers::new(device, draw.mesh))
-            .collect()
     }
 
     pub fn bind_group(&self, device: &wgpu::Device, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
@@ -377,17 +373,16 @@ impl VectorRenderer {
     /// the encoder, so this is used by both the POC readback path and the live
     /// compositor (which resolves into a texture it then composites). Clears the
     /// target to transparent first; the resolve is premultiplied-alpha.
-    pub fn encode_run(
-        &self,
+    pub fn encode_run<'a>(
+        &'a self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         msaa_view: &wgpu::TextureView,
         resolve_view: &wgpu::TextureView,
         view: CanvasView,
-        draws: &[VectorDraw],
+        draws: &[VectorDraw<'a>],
     ) {
         let uniforms = self.build_uniforms(device, &view, draws);
-        let mesh_buffers = self.upload_meshes(device, draws);
         // The bind group must outlive the render pass, so build it up front.
         let bound = uniforms
             .as_ref()
@@ -407,7 +402,7 @@ impl VectorRenderer {
             ..Default::default()
         });
         if let Some((bind_group, items)) = &bound {
-            self.record(&mut pass, bind_group, &mesh_buffers, draws, items);
+            self.record(&mut pass, bind_group, draws, items);
         }
     }
 
@@ -415,12 +410,12 @@ impl VectorRenderer {
     /// sample-count-1 texture, read it back, and return tight premultiplied RGBA
     /// (row-unpadded, `width * height * 4` bytes). Used by the local snapshot tests
     /// that compare against `core::vector::raster`.
-    pub fn render_offscreen(
-        &self,
+    pub fn render_offscreen<'a>(
+        &'a self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         view: CanvasView,
-        draws: &[VectorDraw],
+        draws: &[VectorDraw<'a>],
     ) -> Vec<u8> {
         let width = view.width.max(1);
         let height = view.height.max(1);
@@ -513,6 +508,33 @@ pub struct DrawItem {
 pub struct MeshBuffers {
     pub vertices: wgpu::Buffer,
     pub indices: wgpu::Buffer,
+}
+
+/// A GPU-resident mesh: uploaded vertex/index buffers plus the fill and stroke
+/// index ranges. Built once per (geometry fingerprint, tolerance) and cached by
+/// the compositor (Phase 3) so pan/zoom/move/rotate/scale reuse it with no
+/// re-tessellation and no re-upload — only the per-frame uniform (view + object
+/// transform + colour) changes.
+pub struct GpuMesh {
+    pub buffers: MeshBuffers,
+    pub fill_range: std::ops::Range<u32>,
+    pub stroke_range: std::ops::Range<u32>,
+    /// Source-mesh byte size (vertices + indices), used for cache budgeting.
+    pub byte_len: usize,
+}
+
+impl GpuMesh {
+    /// Upload a tessellated [`VectorMesh`] to GPU buffers, retaining its index
+    /// ranges. This is the only place the vector pipeline touches the GPU with
+    /// geometry data; everything else is a uniform update.
+    pub fn upload(device: &wgpu::Device, mesh: &VectorMesh) -> Self {
+        Self {
+            buffers: MeshBuffers::new(device, mesh),
+            fill_range: mesh.fill_range.clone(),
+            stroke_range: mesh.stroke_range.clone(),
+            byte_len: mesh.byte_len(),
+        }
+    }
 }
 
 impl MeshBuffers {

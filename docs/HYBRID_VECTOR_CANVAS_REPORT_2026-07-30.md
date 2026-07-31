@@ -240,3 +240,104 @@ GPU snapshots are intentionally `#[ignore]` (local/manual), never a blocking CI
 gate. The Phase 1 render tests were run and pass on the development GPU this
 session.
 
+---
+
+## Phase 3 — GPU mesh cache + uniform-only transforms: SHIPPED (2026-07-31)
+
+**Problem it fixes.** Phase 2 cached the *CPU* mesh (no re-tessellation on
+pan/zoom/move), but `renderer.encode_run` re-created the GPU vertex/index buffers
+**every frame** (`upload_meshes` → `create_buffer_init` per object). For a
+500-layer stress scene that is ~1000 buffer allocations per frame during a pure
+pan. Phase 3 caches the *GPU buffers* too, so pan/zoom(within a bucket)/move/
+rotate/scale upload nothing.
+
+**What changed.**
+
+- `renderer.rs`: a mesh handed to a draw is now a **`GpuMesh`** — the uploaded
+  vertex/index buffers plus the fill/stroke index ranges plus a byte size —
+  instead of a CPU `VectorMesh`. `VectorDraw.mesh: &GpuMesh`. `record` reads
+  `draw.mesh.buffers` directly; `upload_meshes` is gone. Uploading happens once,
+  in `GpuMesh::upload`.
+- `cache.rs`: a generic, value-free **`ByteLru<K>`** holds the byte-budget +
+  LRU-eviction policy (unit-tested with no GPU). It never evicts a key the caller
+  marks protected, and never evicts the key it just inserted.
+- `composite.rs`: `VectorCompositeStage` now owns a **`GpuMeshCache`** =
+  `HashMap<(fingerprint, bucket), GpuMesh>` + `ByteLru`. `composite_run` runs in
+  three passes: (A) compute each object's `(fingerprint, bucket)` key + tolerance
+  and collect the frame's working set; (B) `ensure` every key resident —
+  tessellate + upload only on a miss, protecting the working set from eviction;
+  (C) build the draws from the resident cached meshes. Budget:
+  `MESH_CACHE_BYTE_BUDGET = 96 MiB` of source vertex/index bytes.
+- `telemetry.rs`: `mesh_frame(tessellations, uploads, evictions, bytes, entries)`
+  publishes the per-frame cache activity + size (debug-only). The stage also
+  exposes `last_frame_tessellations/uploads`, `cache_len/bytes/evictions`.
+
+**Invalidation.** A node/geometry/style edit changes the fingerprint → only that
+one path's mesh is rebuilt. Device loss rebuilds the whole stage (empty cache).
+The cache is content-keyed (no document id), so identical shapes across documents
+share a mesh correctly, and stale entries from a closed document are LRU-evicted.
+
+**Verification.** `cargo test gpu::vector --lib` (20 tests incl. 5 `ByteLru`
+cases) is green on CI-safe hardware. The local GPU test
+`gpu_mesh_cache_is_transform_invariant` drives `composite_run` across frames and
+asserts **(tessellations, uploads) == (0, 0)** for pan, zoom-in-bucket, move,
+rotate and non-uniform scale, and **== (1, 1)** for a node edit (ending at 2 cache
+entries, 0 evictions). Passes on the development GPU this session.
+
+**Still fallback / not yet done in Phase 3.** The **active (edited) layer stays
+raster** — moving it to GPU during a pure move/rotate would need the pending live
+geometry fed to the GPU, deferred to the `path_display`-retirement work (Phase 8).
+Object-scale no longer re-tessellates (tolerance is keyed by zoom bucket only), a
+deliberate trade for "scale = 0 tessellation"; view zoom keeps curves crisp.
+
+## Phase 6 — parametric primitives (Shape): SHIPPED (2026-07-31)
+
+`VectorGeometry::Primitive(ShapeData)` (rectangle, rounded rectangle, ellipse,
+line, polygon, star) is now GPU-native. It is drawn by converting the shape to the
+**exact same `PathData` its raster twin uses** — `ShapeData::to_vector_object`,
+the same conversion `path_display` already relies on — so the GPU output matches
+the CPU reference and the flag toggles cleanly.
+
+- `eligibility.rs`: `layer_eligibility` gates a Primitive by `style_eligibility`
+  (a primitive's geometry is always valid and never has a brush, so only its style
+  decides — no per-frame path allocation). Solid RGB fill / round stroke = GPU;
+  gradient / CMYK / dash / non-round stroke / opacity ≠ 1 = fallback, same rules
+  as a Path.
+- `compositor.rs`: the run collector materialises converted primitives into an
+  owned `Vec<VectorObjectData>` (capacity reserved so references stay valid), then
+  borrows them alongside the Path objects in z-order. Each converted primitive is
+  passed with **its own raster origin as the offset**, so the drag-drift
+  correction is a no-op and the shape draws exactly where its (now-suppressed)
+  raster twin sat. Shape coordinates are layer-local; `to_vector_object(offset)`
+  maps them to canvas space.
+
+**Verification.** `solid_primitive_is_eligible_but_gradient_primitive_falls_back`
+(CI-safe) proves the eligibility gate. The local GPU test
+`gpu_primitive_matches_cpu_reference` renders converted rectangle / rounded-rect /
+ellipse / polygon / star primitives and asserts each matches `raster::rasterize`
+within the fixed Phase 0 interior/exterior thresholds. Passes on the development
+GPU this session.
+
+## Remaining phases (honest status, 2026-07-31)
+
+- **Phase 4 stroke — partially shipped.** Solid **round** cap/join strokes are
+  already GPU-native (Phase 1/2). Butt/square caps, miter/bevel joins and dash
+  stay raster-fallback **by necessity**: the CPU reference `stroke_coverage` draws
+  every stroke as a round capsule, so honouring cap/join on GPU would disagree
+  with the reference and change appearance on flag toggle. Landing them correctly
+  first requires upgrading the CPU rasteriser to honour cap/join — a separate
+  change to existing raster output, out of scope for an unattended pass.
+- **Phase 5 gradient / opacity / blend — not started.** Additive (gradients
+  currently fall back), but needs real WGSL work (linear/radial stop evaluation,
+  gradient transform, alpha stops) plus snapshot verification against the CPU
+  gradient rasteriser, and CMYK gradients must stay fallback. Left as the next
+  substantial feature.
+- **Phase 7 mask / clip / PowerClip / group — not started.** High-risk,
+  slice-by-slice, each slice needs a defined semantics + reference image; unsafe
+  to land without manual verification.
+- **Phase 8 retire `path_display` — not started.** Gated on common paths being
+  GPU-supported *and* the active-layer live-edit path going GPU; this is where the
+  50–60 % CPU AA spike finally disappears for GPU-native paths.
+- **Phase 9 export — not started, intentionally.** The plan marks it independent
+  of the hybrid canvas.
+

@@ -3016,20 +3016,59 @@ struct VsOut {
             if gpu_eligible[layer_slot] {
                 let is_run_start = layer_slot == 0 || !gpu_eligible[layer_slot - 1];
                 if is_run_start {
+                    use crate::core::layer::LayerType;
+                    use crate::core::vector::object::VectorGeometry;
+                    let mut run_end = layer_slot;
+                    while run_end < n_layers && gpu_eligible[run_end] {
+                        run_end += 1;
+                    }
+                    // Phase 6: a Primitive is drawn by converting it to the same
+                    // `PathData` its raster twin uses (`ShapeData::to_vector_object`).
+                    // The converted objects are owned temporaries, so they are built
+                    // into `converted` *first* (capacity reserved so references never
+                    // dangle), then borrowed alongside the Path objects in z-order.
+                    let prim_count = (layer_slot..run_end)
+                        .filter(|&j| {
+                            matches!(
+                                &visible_layers[j].1.layer_type,
+                                LayerType::Vector(VectorGeometry::Primitive(_))
+                            )
+                        })
+                        .count();
+                    let mut converted: Vec<crate::core::vector::object::VectorObjectData> =
+                        Vec::with_capacity(prim_count);
+                    for j in layer_slot..run_end {
+                        if let LayerType::Vector(VectorGeometry::Primitive(shape)) =
+                            &visible_layers[j].1.layer_type
+                        {
+                            converted.push(shape.to_vector_object(visible_layers[j].1.offset));
+                        }
+                    }
                     let mut objects: Vec<(
                         &crate::core::vector::object::VectorObjectData,
                         (i32, i32),
-                    )> = Vec::new();
-                    let mut j = layer_slot;
-                    while j < n_layers && gpu_eligible[j] {
+                    )> = Vec::with_capacity(run_end - layer_slot);
+                    let mut ci = 0usize;
+                    for j in layer_slot..run_end {
                         let run_layer = visible_layers[j].1;
-                        if let crate::core::layer::LayerType::Vector(
-                            crate::core::vector::object::VectorGeometry::Path(obj),
-                        ) = &run_layer.layer_type
-                        {
-                            objects.push((obj, run_layer.offset));
+                        match &run_layer.layer_type {
+                            LayerType::Vector(VectorGeometry::Path(obj)) => {
+                                objects.push((obj, run_layer.offset));
+                            }
+                            LayerType::Vector(VectorGeometry::Primitive(_)) => {
+                                // The position is already baked into the converted
+                                // object's transform, so pass its own raster origin:
+                                // the drag-drift correction becomes a no-op and the
+                                // shape draws exactly where its raster twin sat.
+                                let obj = &converted[ci];
+                                let origin = crate::core::vector::raster::raster_geometry(obj)
+                                    .map(|(o, _, _)| o)
+                                    .unwrap_or(run_layer.offset);
+                                objects.push((obj, origin));
+                                ci += 1;
+                            }
+                            _ => {}
                         }
-                        j += 1;
                     }
                     if !objects.is_empty() {
                         let vw = self.viewport_w;

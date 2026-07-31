@@ -1,27 +1,37 @@
 //! Live-compositor stage: draw a run of eligible vector layers straight into the
-//! ping/pong accumulator at the correct z-position (Phase 2).
+//! ping/pong accumulator at the correct z-position (Phase 2/3).
 //!
 //! A run is rendered to an owned MSAA target, resolved to a premultiplied texture,
 //! then composited over the current accumulator buffer into the other buffer with
 //! a shader that mirrors `compositor.wgsl`'s straight-alpha sRGB Normal blend — so
 //! the vector run behaves exactly like one raster layer in the ping/pong loop
-//! (one parity flip). Meshes are cached per (geometry fingerprint, zoom bucket) so
-//! pan/zoom/move never re-tessellate.
+//! (one parity flip).
+//!
+//! ## Phase 3 — cache GPU buffers, keep transforms uniform-only
+//!
+//! The geometry is tessellated *and uploaded to GPU vertex/index buffers* once per
+//! (geometry fingerprint, zoom bucket) and kept in [`GpuMeshCache`]. Pan, zoom
+//! (within a bucket), move, rotate and scale change only the per-draw uniform
+//! (view + object transform + colour): they re-tessellate 0 meshes and re-upload
+//! 0 buffers. Only a node/geometry edit changes the fingerprint, so only the
+//! edited path's mesh is rebuilt. The cache has a byte budget and evicts
+//! least-recently-used meshes, never dropping one the current frame needs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use super::cache::geometry_fingerprint;
-use super::mesh::{tessellate, VectorMesh};
-use super::renderer::{CanvasView, VectorDraw, VectorRenderer, VECTOR_SAMPLE_COUNT};
+use super::cache::{geometry_fingerprint, ByteLru};
+use super::mesh::tessellate;
+use super::renderer::{CanvasView, GpuMesh, VectorDraw, VectorRenderer, VECTOR_SAMPLE_COUNT};
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::raster::raster_geometry;
 use crate::core::vector::style::Paint;
 
-/// Cap on cached meshes; a full clear past it bounds memory (rare — the run only
-/// ever holds the visible eligible layers).
-const MESH_CACHE_CAP: usize = 4096;
+/// GPU mesh cache byte budget (source vertex/index bytes). A 500-layer flower
+/// fixture tessellates to a few MB total, so this comfortably holds a stress
+/// scene across several zoom buckets while still bounding memory.
+const MESH_CACHE_BYTE_BUDGET: usize = 96 * 1024 * 1024;
 
 struct Sized {
     width: u32,
@@ -30,14 +40,77 @@ struct Sized {
     run_view: wgpu::TextureView,
 }
 
+/// GPU-resident mesh cache keyed by `(geometry fingerprint, zoom bucket)`. Owns
+/// the uploaded [`GpuMesh`]es; [`ByteLru`] holds the byte-budget/eviction policy.
+struct GpuMeshCache {
+    entries: HashMap<(u64, u32), GpuMesh>,
+    lru: ByteLru<(u64, u32)>,
+    /// Meshes tessellated (== uploaded) during the current frame.
+    frame_tessellations: u32,
+    frame_uploads: u32,
+}
+
+impl GpuMeshCache {
+    fn new(byte_budget: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            lru: ByteLru::new(byte_budget),
+            frame_tessellations: 0,
+            frame_uploads: 0,
+        }
+    }
+
+    fn begin_frame(&mut self) {
+        self.frame_tessellations = 0;
+        self.frame_uploads = 0;
+    }
+
+    /// Ensure `key` is resident, tessellating + uploading on a miss. `protect`
+    /// guards the current frame's working set from eviction. Returns whether the
+    /// mesh is present afterwards (a tessellation failure returns `false`).
+    fn ensure(
+        &mut self,
+        device: &wgpu::Device,
+        key: (u64, u32),
+        object: &VectorObjectData,
+        tolerance: f32,
+        protect: &dyn Fn(&(u64, u32)) -> bool,
+    ) -> bool {
+        if self.entries.contains_key(&key) {
+            self.lru.touch(&key);
+            return true;
+        }
+        let mesh = match tessellate(object, tolerance) {
+            Ok(mesh) => mesh,
+            Err(_) => return false,
+        };
+        self.frame_tessellations += 1;
+        let gpu = GpuMesh::upload(device, &mesh);
+        self.frame_uploads += 1;
+        let bytes = gpu.byte_len.max(1);
+        self.entries.insert(key, gpu);
+        for evicted in self.lru.insert(key, bytes, protect) {
+            self.entries.remove(&evicted);
+        }
+        true
+    }
+
+    fn get(&self, key: &(u64, u32)) -> Option<&GpuMesh> {
+        self.entries.get(key)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+    }
+}
+
 pub struct VectorCompositeStage {
     renderer: VectorRenderer,
     composite_pipeline: wgpu::RenderPipeline,
     composite_bgl: wgpu::BindGroupLayout,
     sized: Option<Sized>,
-    /// (geometry fingerprint, zoom bucket) → tessellated mesh + frame last used.
-    meshes: HashMap<(u64, u32), (VectorMesh, u64)>,
-    frame: u64,
+    cache: GpuMeshCache,
 }
 
 impl VectorCompositeStage {
@@ -109,14 +182,46 @@ impl VectorCompositeStage {
             composite_pipeline,
             composite_bgl,
             sized: None,
-            meshes: HashMap::new(),
-            frame: 0,
+            cache: GpuMeshCache::new(MESH_CACHE_BYTE_BUDGET),
         }
     }
 
-    /// Bump the frame counter once per composite so stale meshes can be pruned.
+    /// Reset per-frame counters before a composite. Cached GPU meshes persist
+    /// across frames; only the current-frame tessellation/upload counts reset.
     pub fn begin_frame(&mut self) {
-        self.frame = self.frame.wrapping_add(1);
+        self.cache.begin_frame();
+    }
+
+    /// Drop every cached GPU mesh (e.g. when the flag is toggled off). Device loss
+    /// already rebuilds the whole stage, so it does not need this.
+    pub fn clear_cache(&mut self) {
+        self.cache.clear();
+    }
+
+    /// Meshes tessellated + uploaded during the last [`Self::composite_run`]. Zero
+    /// on a pure pan/zoom(within bucket)/move/rotate/scale frame (Phase 3 budget).
+    pub fn last_frame_tessellations(&self) -> u32 {
+        self.cache.frame_tessellations
+    }
+
+    /// GPU vertex/index buffer uploads during the last composite (== tessellations).
+    pub fn last_frame_uploads(&self) -> u32 {
+        self.cache.frame_uploads
+    }
+
+    /// Cached GPU mesh count.
+    pub fn cache_len(&self) -> usize {
+        self.cache.lru.len()
+    }
+
+    /// Cached GPU mesh size in bytes (source vertex/index bytes).
+    pub fn cache_bytes(&self) -> usize {
+        self.cache.lru.bytes()
+    }
+
+    /// Total meshes evicted by the byte-budget LRU since creation.
+    pub fn cache_evictions(&self) -> u64 {
+        self.cache.lru.evictions()
     }
 
     fn ensure_size(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -185,36 +290,37 @@ impl VectorCompositeStage {
         self.ensure_size(device, viewport_w, viewport_h);
         let bucket = zoom_bucket(zoom);
 
-        // Tessellate/refresh the cache first (mutable), then borrow it immutably
-        // to build the draws so both borrows are disjoint from the renderer.
-        let mut keys: Vec<Option<(u64, u32)>> = Vec::with_capacity(objects.len());
+        // Pass A — geometry key + tessellation tolerance per object. The `touched`
+        // set is this frame's working set; it protects those keys from eviction
+        // while later cache misses insert (a mesh needed this frame is never
+        // dropped mid-frame).
+        let mut plan: Vec<((u64, u32), f32)> = Vec::with_capacity(objects.len());
+        let mut touched: HashSet<(u64, u32)> = HashSet::with_capacity(objects.len());
         for (object, _) in objects {
             let obj_scale = (object.transform.determinant().abs().sqrt()).max(1e-3);
             let tol = (0.25 / (bucket as f32 * obj_scale)).clamp(0.02, 1.0);
             let key = (geometry_fingerprint(object), bucket);
-            if !self.meshes.contains_key(&key) {
-                match tessellate(object, tol) {
-                    Ok(mesh) => {
-                        self.meshes.insert(key, (mesh, self.frame));
-                    }
-                    Err(_) => {
-                        keys.push(None);
-                        continue;
-                    }
-                }
-            }
-            if let Some(entry) = self.meshes.get_mut(&key) {
-                entry.1 = self.frame;
-            }
-            keys.push(Some(key));
+            touched.insert(key);
+            plan.push((key, tol));
         }
 
+        // Pass B — make every mesh resident. A cache hit (pan/zoom-in-bucket/move/
+        // rotate/scale) tessellates and uploads nothing; only a fingerprint change
+        // (node/geometry/style edit) misses and rebuilds that one mesh.
+        let protect = |k: &(u64, u32)| touched.contains(k);
+        let mut resident: Vec<Option<(u64, u32)>> = Vec::with_capacity(objects.len());
+        for ((object, _), (key, tol)) in objects.iter().zip(&plan) {
+            let ok = self.cache.ensure(device, *key, object, *tol, &protect);
+            resident.push(ok.then_some(*key));
+        }
+
+        // Pass C — build the draws from the resident cached GPU meshes.
         let draws: Vec<VectorDraw> = objects
             .iter()
-            .zip(&keys)
+            .zip(&resident)
             .filter_map(|((object, layer_offset), key)| {
                 let key = (*key)?;
-                let mesh = &self.meshes.get(&key)?.0;
+                let mesh = self.cache.get(&key)?;
                 // Drag drift: layer.offset − model raster origin (0 when settled).
                 let drift = raster_geometry(object).map_or((0.0, 0.0), |(origin, _, _)| {
                     (
@@ -294,10 +400,15 @@ impl VectorCompositeStage {
             pass.draw(0..3, 0..1);
         }
 
-        if self.meshes.len() > MESH_CACHE_CAP {
-            let cur = self.frame;
-            self.meshes.retain(|_, (_, f)| cur.wrapping_sub(*f) <= 1);
-        }
+        // Publish this frame's cache activity + size for the hybrid-canvas telemetry
+        // (no-op in release). The byte-budget LRU already bounds memory in `ensure`.
+        super::telemetry::mesh_frame(
+            self.cache.frame_tessellations,
+            self.cache.frame_uploads,
+            self.cache.lru.evictions(),
+            self.cache.lru.bytes(),
+            self.cache.lru.len(),
+        );
     }
 }
 
