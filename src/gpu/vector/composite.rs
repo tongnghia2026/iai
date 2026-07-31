@@ -285,7 +285,7 @@ impl VectorCompositeStage {
         // its raster origin; a live Move drag shifts `layer.offset` before it is
         // folded back into the model, so the difference is the drag delta and must
         // be applied so the GPU shape follows the pointer like the raster preview.
-        objects: &[(&VectorObjectData, (i32, i32))],
+        objects: &[(&VectorObjectData, (i32, i32), f32)],
     ) {
         self.ensure_size(device, viewport_w, viewport_h);
         let bucket = zoom_bucket(zoom);
@@ -296,7 +296,7 @@ impl VectorCompositeStage {
         // dropped mid-frame).
         let mut plan: Vec<((u64, u32), f32)> = Vec::with_capacity(objects.len());
         let mut touched: HashSet<(u64, u32)> = HashSet::with_capacity(objects.len());
-        for (object, _) in objects {
+        for (object, _, _) in objects {
             let obj_scale = (object.transform.determinant().abs().sqrt()).max(1e-3);
             let tol = (0.25 / (bucket as f32 * obj_scale)).clamp(0.02, 1.0);
             let key = (geometry_fingerprint(object), bucket);
@@ -309,7 +309,7 @@ impl VectorCompositeStage {
         // (node/geometry/style edit) misses and rebuilds that one mesh.
         let protect = |k: &(u64, u32)| touched.contains(k);
         let mut resident: Vec<Option<(u64, u32)>> = Vec::with_capacity(objects.len());
-        for ((object, _), (key, tol)) in objects.iter().zip(&plan) {
+        for ((object, _, _), (key, tol)) in objects.iter().zip(&plan) {
             let ok = self.cache.ensure(device, *key, object, *tol, &protect);
             resident.push(ok.then_some(*key));
         }
@@ -318,7 +318,7 @@ impl VectorCompositeStage {
         let draws: Vec<VectorDraw> = objects
             .iter()
             .zip(&resident)
-            .filter_map(|((object, layer_offset), key)| {
+            .filter_map(|((object, layer_offset, layer_opacity), key)| {
                 let key = (*key)?;
                 let mesh = self.cache.get(&key)?;
                 // Drag drift: layer.offset − model raster origin (0 when settled).
@@ -342,6 +342,7 @@ impl VectorCompositeStage {
                     } else {
                         None
                     },
+                    opacity: object.style.opacity * *layer_opacity,
                 })
             })
             .collect();

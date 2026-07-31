@@ -137,6 +137,8 @@ pub struct VectorDraw<'a> {
     pub fill: Option<[f32; 4]>,
     /// Stroke colour, straight-alpha sRGB-byte space in `[0,1]`.
     pub stroke: Option<[f32; 4]>,
+    /// Object × layer opacity for Normal source-over compositing.
+    pub opacity: f32,
 }
 
 #[repr(C)]
@@ -274,10 +276,14 @@ impl VectorRenderer {
         let mut blob: Vec<u8> = Vec::new();
         let mut items: Vec<DrawItem> = Vec::new();
         let stride = self.uniform_stride as usize;
-        let mut push = |color: [f32; 4], obj: &AffineTransform, range: std::ops::Range<u32>| {
+        let mut push = |mut color: [f32; 4],
+                        opacity: f32,
+                        obj: &AffineTransform,
+                        range: std::ops::Range<u32>| {
             if range.is_empty() {
                 return;
             }
+            color[3] *= opacity.clamp(0.0, 1.0);
             let raw = DrawRaw {
                 object_to_canvas: affine_cols(obj),
                 canvas_to_clip: clip,
@@ -298,11 +304,17 @@ impl VectorRenderer {
         };
         for draw in draws {
             if let Some(fill) = draw.fill {
-                push(fill, &draw.object_to_canvas, draw.mesh.fill_range.clone());
+                push(
+                    fill,
+                    draw.opacity,
+                    &draw.object_to_canvas,
+                    draw.mesh.fill_range.clone(),
+                );
             }
             if let Some(stroke) = draw.stroke {
                 push(
                     stroke,
+                    draw.opacity,
                     &draw.object_to_canvas,
                     draw.mesh.stroke_range.clone(),
                 );

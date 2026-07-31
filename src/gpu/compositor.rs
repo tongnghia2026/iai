@@ -3085,13 +3085,14 @@ struct VsOut {
                     let mut objects: Vec<(
                         &crate::core::vector::object::VectorObjectData,
                         (i32, i32),
+                        f32,
                     )> = Vec::with_capacity(run_end - layer_slot);
                     let mut ci = 0usize;
                     for j in layer_slot..run_end {
                         let run_layer = visible_layers[j].1;
                         match &run_layer.layer_type {
                             LayerType::Vector(VectorGeometry::Path(obj)) => {
-                                objects.push((obj, run_layer.offset));
+                                objects.push((obj, run_layer.offset, run_layer.opacity));
                             }
                             LayerType::Vector(VectorGeometry::Primitive(_)) => {
                                 // The position is already baked into the converted
@@ -3102,7 +3103,7 @@ struct VsOut {
                                 let origin = crate::core::vector::raster::raster_geometry(obj)
                                     .map(|(o, _, _)| o)
                                     .unwrap_or(run_layer.offset);
-                                objects.push((obj, origin));
+                                objects.push((obj, origin, run_layer.opacity));
                                 ci += 1;
                             }
                             _ => {}

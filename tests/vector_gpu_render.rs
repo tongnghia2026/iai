@@ -220,6 +220,7 @@ fn assert_matches_reference(
         object_to_canvas: object.transform,
         fill: Some([0.10, 0.55, 0.85, 1.0]),
         stroke: None,
+        opacity: object.style.opacity,
     }];
     let gpu = renderer.render_offscreen(device, queue, view, &draws);
     let c = compare(&cpu, &gpu);
@@ -393,6 +394,7 @@ fn gpu_stroke_matches_cpu_reference() {
         object_to_canvas: object.transform,
         fill: None,
         stroke: Some([0.90, 0.20, 0.20, 1.0]),
+        opacity: object.style.opacity,
     }];
     let gpu = renderer.render_offscreen(&device, &queue, view, &draws);
     let c = compare(&cpu, &gpu);
@@ -424,6 +426,38 @@ fn gpu_stroke_matches_cpu_reference() {
 
 #[test]
 #[ignore = "local GPU snapshot; run with --ignored --nocapture"]
+fn gpu_normal_opacity_multiplies_object_and_layer_alpha() {
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter; skipping opacity snapshot");
+        return;
+    };
+    let renderer = VectorRenderer::new(
+        &device,
+        iai::gpu::vector::renderer::VECTOR_TARGET_FORMAT,
+        iai::gpu::vector::renderer::VECTOR_SAMPLE_COUNT,
+    );
+    let mut object = styled(square(40.0), AffineTransform::translate(2.0, 2.0));
+    object.style.opacity = 0.5;
+    let mesh = GpuMesh::upload(&device, &tessellate(&object, 0.1).unwrap());
+    let draws = [VectorDraw {
+        mesh: &mesh,
+        object_to_canvas: object.transform,
+        fill: Some([0.10, 0.55, 0.85, 1.0]),
+        stroke: None,
+        opacity: object.style.opacity * 0.5,
+    }];
+    let out =
+        renderer.render_offscreen(&device, &queue, CanvasView::tight(48, 48, 0.0, 0.0), &draws);
+    let center = ((20 * 48 + 20) * 4) as usize;
+    assert!(
+        (out[center + 3] as i32 - 64).abs() <= 2,
+        "object 0.5 × layer 0.5 must produce alpha 0.25, got {}",
+        out[center + 3]
+    );
+}
+
+#[test]
+#[ignore = "local GPU snapshot; run with --ignored --nocapture"]
 fn gpu_run_preserves_intra_run_z_order() {
     // Two overlapping opaque fills drawn as one run (multiple draws, one pass):
     // the later draw must occlude the earlier one in the overlap. This is the
@@ -449,12 +483,14 @@ fn gpu_run_preserves_intra_run_z_order() {
             object_to_canvas: a.transform,
             fill: Some(red),
             stroke: None,
+            opacity: 1.0,
         },
         VectorDraw {
             mesh: &mesh_b,
             object_to_canvas: b.transform,
             fill: Some(green),
             stroke: None,
+            opacity: 1.0,
         },
     ];
     let (w, h) = (80u32, 80u32);
@@ -567,7 +603,7 @@ fn gpu_composite_run_over_background() {
         0.0,
         0.0,
         1.0,
-        &[(&sq, origin)],
+        &[(&sq, origin, 1.0)],
     );
 
     // Read back dst_write.
@@ -676,7 +712,7 @@ fn gpu_mesh_cache_is_transform_invariant() {
             ox,
             oy,
             zoom,
-            &[(obj, origin(obj))],
+            &[(obj, origin(obj), 1.0)],
         );
         (stage.last_frame_tessellations(), stage.last_frame_uploads())
     };

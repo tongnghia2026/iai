@@ -13,8 +13,6 @@ pub enum FallbackReason {
     PowerClip,
     Group,
     BlendMode,
-    LayerOpacity,
-    ObjectOpacity,
     Cmyk,
     Gradient,
     Dash,
@@ -41,9 +39,6 @@ fn paint_supported(paint: Paint) -> Result<(), FallbackReason> {
 /// path (a primitive's geometry is always valid and never carries a brush, so its
 /// eligibility is decided entirely by its style — no path allocation needed).
 pub fn style_eligibility(style: &crate::core::vector::style::VectorStyle) -> Eligibility {
-    if style.opacity != 1.0 {
-        return Eligibility::RasterFallback(FallbackReason::ObjectOpacity);
-    }
     if !style.stroke_style.dash.is_solid() {
         return Eligibility::RasterFallback(FallbackReason::Dash);
     }
@@ -87,9 +82,6 @@ pub fn layer_eligibility(layer: &Layer, enabled: bool) -> Eligibility {
     }
     if layer.blend_mode != BlendMode::Normal {
         return Eligibility::RasterFallback(FallbackReason::BlendMode);
-    }
-    if layer.opacity != 1.0 {
-        return Eligibility::RasterFallback(FallbackReason::LayerOpacity);
     }
     match &layer.layer_type {
         LayerType::Vector(VectorGeometry::Path(object)) => object_eligibility(object),
@@ -159,6 +151,21 @@ mod tests {
         assert_eq!(
             object_eligibility(&object),
             Eligibility::RasterFallback(FallbackReason::Dash)
+        );
+    }
+
+    #[test]
+    fn normal_object_and_layer_opacity_are_gpu_eligible() {
+        let mut layer = layer_with(square());
+        layer.opacity = 0.4;
+        if let LayerType::Vector(VectorGeometry::Path(object)) = &mut layer.layer_type {
+            object.style.opacity = 0.5;
+        }
+        assert_eq!(layer_eligibility(&layer, true), Eligibility::GpuVector);
+        layer.blend_mode = BlendMode::Multiply;
+        assert_eq!(
+            layer_eligibility(&layer, true),
+            Eligibility::RasterFallback(FallbackReason::BlendMode)
         );
     }
 

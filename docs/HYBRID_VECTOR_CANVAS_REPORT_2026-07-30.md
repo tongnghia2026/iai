@@ -352,11 +352,12 @@ gate test, the full library suite, and all six serialized local GPU snapshots.
   reference `stroke_coverage` exactly. Dash and vector brush remain raster
   fallback. Honouring butt/square/miter/bevel visually still requires upgrading
   the CPU reference and is a separate appearance-changing decision.
-- **Phase 5 gradient / opacity / blend — not started.** Additive (gradients
-  currently fall back), but needs real WGSL work (linear/radial stop evaluation,
-  gradient transform, alpha stops) plus snapshot verification against the CPU
-  gradient rasteriser, and CMYK gradients must stay fallback. Left as the next
-  substantial feature.
+- **Phase 5 gradient / opacity / blend — opacity shipped, gradient pending.**
+  Normal object and layer opacity are GPU-native; the draw alpha is
+  `paint alpha × object opacity × layer opacity`, verified by a real-GPU
+  `0.5 × 0.5 = 0.25` snapshot. Blend modes other than Normal remain fallback.
+  Linear/radial gradients still fall back pending real WGSL stop evaluation,
+  transform/alpha-stop snapshots, and explicit CMYK fallback.
 - **Phase 7 mask / clip / PowerClip / group — not started.** High-risk,
   slice-by-slice, each slice needs a defined semantics + reference image; unsafe
   to land without manual verification.
