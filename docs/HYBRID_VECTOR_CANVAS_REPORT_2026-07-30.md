@@ -318,15 +318,40 @@ ellipse / polygon / star primitives and asserts each matches `raster::rasterize`
 within the fixed Phase 0 interior/exterior thresholds. Passes on the development
 GPU this session.
 
+## Phase 8 — active idle vector + retire its CPU AA bake: SHIPPED (2026-07-31)
+
+The active layer now joins the native GPU run whenever no live edit owns pending
+state. `App::active_vector_gpu_idle` is the conservative gate shared with
+`path_display`: Move painting, free/path transform, gradient drag, node drag,
+Path style session, Shape drag/style scrub, and an in-flight Shape bake keep the
+active layer on its existing raster preview. Once idle, compositor eligibility
+allows the active layer and `path_display` stops before it, so a GPU-native Path
+or Shape no longer launches the supersampled CPU worker merely because it is
+selected.
+
+The GPU decision remains centralized in
+`CompositorState::will_draw_vector_layer_on_gpu`, including the runtime stage,
+viewport mode, crop/transform-preview guards, and `eligibility.rs` fallback.
+Unsupported gradients, opacity/blend, masks/groups, dash/brush and CMYK still use
+the raster twin. The module is intentionally retained for those fallback layers
+and for live edit previews; only its GPU-native consumer path is retired.
+
+Ordinary small canvases now use viewport-space Mode B while the default-off GPU
+flag is enabled. Mode A composites at document resolution and magnifies only in
+the final blit, so it cannot host sharp view-dependent vectors. With the flag
+off, the legacy Mode A/B choice is unchanged. The Repeat flower GUI checkpoint
+confirmed that zoom/pan above 100% no longer sweeps layers through CPU bakes.
+
+Verification: current-frame policy regression tests, active-idle/style-session
+gate test, the full library suite, and all six serialized local GPU snapshots.
+
 ## Remaining phases (honest status, 2026-07-31)
 
-- **Phase 4 stroke — partially shipped.** Solid **round** cap/join strokes are
-  already GPU-native (Phase 1/2). Butt/square caps, miter/bevel joins and dash
-  stay raster-fallback **by necessity**: the CPU reference `stroke_coverage` draws
-  every stroke as a round capsule, so honouring cap/join on GPU would disagree
-  with the reference and change appearance on flag toggle. Landing them correctly
-  first requires upgrading the CPU rasteriser to honour cap/join — a separate
-  change to existing raster output, out of scope for an unattended pass.
+- **Phase 4 stroke — partially shipped.** Every solid stroke is GPU-native and
+  tessellated as round capsules regardless of stored cap/join, matching the CPU
+  reference `stroke_coverage` exactly. Dash and vector brush remain raster
+  fallback. Honouring butt/square/miter/bevel visually still requires upgrading
+  the CPU reference and is a separate appearance-changing decision.
 - **Phase 5 gradient / opacity / blend — not started.** Additive (gradients
   currently fall back), but needs real WGSL work (linear/radial stop evaluation,
   gradient transform, alpha stops) plus snapshot verification against the CPU
@@ -335,9 +360,8 @@ GPU this session.
 - **Phase 7 mask / clip / PowerClip / group — not started.** High-risk,
   slice-by-slice, each slice needs a defined semantics + reference image; unsafe
   to land without manual verification.
-- **Phase 8 retire `path_display` — not started.** Gated on common paths being
-  GPU-supported *and* the active-layer live-edit path going GPU; this is where the
-  50–60 % CPU AA spike finally disappears for GPU-native paths.
+- **Phase 8 retire `path_display` — shipped for GPU-native paths.** Active idle
+  Paths/Shapes now go GPU and never enter the CPU AA worker. `path_display`
+  remains only for unsupported/fallback features and live edit previews.
 - **Phase 9 export — not started, intentionally.** The plan marks it independent
   of the hybrid canvas.
-

@@ -1402,6 +1402,7 @@ impl GpuState {
         zoom: f32,
         dirty_rect: Option<(u32, u32, u32, u32)>,
         allow_backdrop_cache: bool,
+        allow_active_gpu_vector: bool,
     ) {
         let final_is_ping = self.compositor.composite_layers(
             &self.device,
@@ -1412,6 +1413,7 @@ impl GpuState {
             zoom,
             dirty_rect,
             allow_backdrop_cache,
+            allow_active_gpu_vector,
         );
 
         self.current_frame_is_ping = final_is_ping;

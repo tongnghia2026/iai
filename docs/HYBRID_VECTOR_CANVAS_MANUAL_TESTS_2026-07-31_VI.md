@@ -84,18 +84,17 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 3. Kéo, xoay, scale các shape này (nhưng **không** đang sửa handle của chúng).
 4. Mong đợi: hình khớp y như bản tắt cờ; nét ở zoom lớn; **các tay nắm
    (handle) tham số vẫn còn** — model Shape không bị phá thành đường cong.
-5. Đang **sửa handle** một shape (đang active): shape đó tạm về raster/overlay cũ
-   là đúng thiết kế (layer đang sửa luôn dùng raster). Nhả tay → GPU vẽ lại.
+5. Shape **đang active nhưng không sửa** vẫn đi GPU và phải nét ngay. Khi đang
+   sửa handle, shape đó tạm về raster/overlay cũ là đúng thiết kế. Nhả tay → GPU
+   vẽ lại.
 6. Dấu hiệu lỗi: shape bị convert phá huỷ, mất handle, lệch vị trí so với tắt cờ,
    hoặc raster twin lẫn với bản GPU (viền đôi).
 
 ## 6. Nét (stroke)
 
-1. Path có nét **round cap + round join** (đầu tròn, góc tròn), màu đặc: nét này
-   đi GPU. So với tắt cờ phải khớp.
-2. Path có nét butt/square cap hoặc miter/bevel join, hoặc **nét đứt (dash)**:
-   các trường hợp này **về raster fallback cả layer** (đúng thiết kế — CPU vẽ nét
-   kiểu viên nang tròn, nên chỉ round mới khớp GPU).
+1. Path có nét đặc màu RGB với mọi cap/join lưu trong model đều đi GPU, nhưng hình
+   hiện tại vẫn là viên nang tròn để khớp rasterizer CPU. So với tắt cờ phải khớp.
+2. Path có **nét đứt (dash)** hoặc vector brush vẫn về raster fallback cả layer.
 3. Mong đợi: hình khớp bản tắt cờ ở mọi trường hợp; dash không biến thành nét
    liền; không bao giờ hiện fill mà thiếu nét của nó.
 4. Dấu hiệu lỗi: nét mất, cap bị cắt, dash thành liền, hoặc viền đôi.
@@ -121,6 +120,19 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 4. Dấu hiệu lỗi: kết quả worker của bản sửa cũ nhảy vào, hình mờ vĩnh viễn, RAM
    tăng vô hạn, mất GPU (device loss), hoặc sai z-order.
 
+## 8A. Active layer GPU / kết thúc CPU AA (Phase 8)
+
+1. Trong vườn hoa, chọn lần lượt một Path ở đáy, giữa và đỉnh stack; không kéo
+   handle hay mở phiên chỉnh style.
+2. Zoom/pan liên tục trên 100%, rồi dừng ở 800% và 1600%.
+3. Mong đợi: layer đang chọn sắc như các layer khác, đúng z-order; không có hiệu
+   ứng quét nét tuần tự từ dưới lên và CPU không tiếp tục chạy worker AA nền.
+4. Bắt đầu kéo node, handle Shape, gradient, transform hoặc scrub style.
+5. Mong đợi: đúng layer đang sửa tạm fallback raster; không mất hình/viền đôi.
+   Nhả tay hoặc commit/cancel thì active layer trở lại GPU ngay.
+6. Dấu hiệu lỗi: active layer dưới GPU layer bị mờ, overlay nổi sai z-order, hoặc
+   zoom/pan lại khởi động quét toàn bộ Repeat layers.
+
 ## 9. Lưu file / tab / phục hồi thiết bị
 
 1. Lưu `.iai`, đóng, mở lại, so với bản trước khi lưu.
@@ -139,11 +151,12 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 | Tính năng | Trạng thái khi cờ BẬT |
 |---|---|
 | Path fill đặc, fill-rule/lỗ | GPU |
-| Nét round cap + round join, màu đặc | GPU |
+| Nét đặc RGB (mọi cap/join; render tròn như CPU) | GPU |
 | Shape/Primitive (rect/bo góc/ellipse/polygon/star), màu đặc | GPU (Phase 6) |
 | Transform (pan/zoom/move/xoay/scale) | GPU, 0 tessellate lại (Phase 3) |
-| Layer đang sửa (active) | Raster (đúng thiết kế) |
-| Nét butt/square/miter/bevel, dash | Raster fallback |
+| Layer active, đang idle | GPU (Phase 8) |
+| Layer đang có live edit/pending preview | Raster fallback tạm thời |
+| Dash / vector brush | Raster fallback |
 | Gradient, opacity≠1, blend≠Normal | Raster fallback (Phase 5 chưa làm) |
 | Mask / clip / PowerClip / group | Raster fallback (Phase 7 chưa làm) |
 | CMYK paint / soft-proof | Raster fallback |

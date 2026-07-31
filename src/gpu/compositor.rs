@@ -977,12 +977,13 @@ impl CompositorState {
         layer: &Layer,
         stack_idx: usize,
         active_idx: usize,
+        allow_active: bool,
     ) -> bool {
         self.vector_stage.is_some()
             && !self.canvas_space
             && self.render_scale == 1
             && self.crop_preview.is_none()
-            && stack_idx != active_idx
+            && (stack_idx != active_idx || allow_active)
             && !self
                 .transform_previews
                 .iter()
@@ -2675,6 +2676,7 @@ struct VsOut {
         zoom: f32,
         dirty_rect: Option<(u32, u32, u32, u32)>,
         allow_backdrop_cache: bool,
+        allow_active_gpu_vector: bool,
     ) -> bool {
         let mut command_buffers: Vec<wgpu::CommandBuffer> = Vec::new();
 
@@ -2703,7 +2705,12 @@ struct VsOut {
                 // static vector layers render natively on the GPU. A live
                 // multi-Move of other selected layers is followed via the
                 // offset drift correction in `composite_run`.
-                self.will_draw_vector_layer_on_gpu(layer, stack_idx, active_idx)
+                self.will_draw_vector_layer_on_gpu(
+                    layer,
+                    stack_idx,
+                    active_idx,
+                    allow_active_gpu_vector,
+                )
             })
             .collect();
         let gpu_vector_active = gpu_eligible.iter().any(|&e| e);

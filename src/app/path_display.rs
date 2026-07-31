@@ -99,6 +99,7 @@ impl App {
         }
         let scale = crate::core::vector::display::zoom_bucket(self.edit.view.zoom)?;
         let visible = self.visible_canvas_rect()?;
+        let allow_active_gpu_vector = self.active_vector_gpu_idle();
         let doc = &self.docs.documents[self.docs.active_doc_idx];
         let stack = &doc.canvas.layer_stack;
         let mut objects = Vec::new();
@@ -113,8 +114,12 @@ impl App {
             // raster twins, which can make that next frame's id set temporarily
             // empty and enqueue the entire Repeat stack for a fresh CPU bake.
             if self.win.gpu.as_ref().is_some_and(|gpu| {
-                gpu.compositor
-                    .will_draw_vector_layer_on_gpu(layer, index, stack.active_idx)
+                gpu.compositor.will_draw_vector_layer_on_gpu(
+                    layer,
+                    index,
+                    stack.active_idx,
+                    allow_active_gpu_vector,
+                )
             }) {
                 break;
             }

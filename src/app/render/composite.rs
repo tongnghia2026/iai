@@ -331,6 +331,7 @@ impl App {
             None
         };
         let dev_preview = self.build_develop_gpu_preview();
+        let allow_active_gpu_vector = self.active_vector_gpu_idle();
         if let Some(gpu) = &mut self.win.gpu {
             // Mode A composites in canvas-space (identity view); the dirty rect is
             // already in canvas pixels. Mode B bakes the view transform, so the
@@ -450,6 +451,7 @@ impl App {
                 // don't match the real stack the cut is computed from) and for a
                 // live clip move (the frozen base would ghost — see above).
                 !has_groups && !clip_live_move,
+                allow_active_gpu_vector,
             );
             // Remember which Develop-window view this Mode B composite baked, so
             // the Develop window recomposites only when its view actually moves.
@@ -565,6 +567,23 @@ impl App {
             || (self.edit.input.painting
                 && self.edit.tools.active_id() == crate::tools::ToolId::Move)
             || self.edit.shape_drag.is_some()
+    }
+
+    /// The committed active vector may use the native GPU path whenever no live
+    /// editing session owns a pending preview. During any such session the raster
+    /// twin remains authoritative until its existing commit/cancel path finishes.
+    pub(in crate::app) fn active_vector_gpu_idle(&self) -> bool {
+        let live_move =
+            self.edit.input.painting && self.edit.tools.active_id() == crate::tools::ToolId::Move;
+        !live_move
+            && self.edit.transform_state.is_none()
+            && self.edit.path_transform.is_none()
+            && self.edit.path_gradient_drag.is_none()
+            && self.edit.node_drag.is_none()
+            && self.edit.pending_path_style.is_none()
+            && self.edit.shape_drag.is_none()
+            && !self.shape_style_scrub_active()
+            && self.jobs.shape_bake.is_none()
     }
 
     pub fn on_view_changed(&mut self) {
@@ -699,7 +718,7 @@ fn choose_canvas_space(
 
 #[cfg(test)]
 mod hybrid_canvas_mode_tests {
-    use super::choose_canvas_space;
+    use super::{choose_canvas_space, App};
 
     #[test]
     fn gpu_vector_flag_forces_viewport_space_for_small_static_canvas() {
@@ -719,5 +738,20 @@ mod hybrid_canvas_mode_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn active_vector_is_gpu_eligible_only_outside_live_style_session() {
+        let mut app = App::new();
+        assert!(app.active_vector_gpu_idle());
+
+        app.edit.pending_path_style = Some((
+            app.docs.documents[0].canvas.layer_stack.layers[0].id,
+            crate::core::vector::style::VectorStyle::default(),
+        ));
+        assert!(!app.active_vector_gpu_idle());
+
+        app.edit.pending_path_style = None;
+        assert!(app.active_vector_gpu_idle());
     }
 }
