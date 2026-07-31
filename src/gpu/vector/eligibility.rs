@@ -80,9 +80,6 @@ fn layer_eligibility_impl(layer: &Layer, enabled: bool, allow_group_child: bool)
     if !layer.visible {
         return Eligibility::RasterFallback(FallbackReason::Hidden);
     }
-    if layer.mask.as_ref().is_some_and(|m| m.enabled) {
-        return Eligibility::RasterFallback(FallbackReason::Mask);
-    }
     if layer.clip_parent_id.is_some() {
         return Eligibility::RasterFallback(FallbackReason::PowerClip);
     }
@@ -243,10 +240,13 @@ mod tests {
     fn unsupported_features_fallback_whole_layer() {
         let mut layer = layer_with(square());
         layer.mask = Some(crate::core::layer::LayerMask::new_white(64, 64));
+        assert_eq!(layer_eligibility(&layer, true), Eligibility::GpuVector);
+        layer.clip_parent_id = Some(99);
         assert_eq!(
             layer_eligibility(&layer, true),
-            Eligibility::RasterFallback(FallbackReason::Mask)
+            Eligibility::RasterFallback(FallbackReason::PowerClip)
         );
+        layer.clip_parent_id = None;
         layer.mask = None;
         if let LayerType::Vector(VectorGeometry::Path(object)) = &mut layer.layer_type {
             object.style.fill = Paint::Gradient(Gradient::two_color(

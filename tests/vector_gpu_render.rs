@@ -610,7 +610,8 @@ fn gpu_run_preserves_intra_run_z_order() {
 #[test]
 #[ignore = "local GPU snapshot; run with --ignored --nocapture"]
 fn gpu_composite_run_over_background() {
-    use iai::gpu::vector::composite::VectorCompositeStage;
+    use iai::core::layer::LayerMask;
+    use iai::gpu::vector::composite::{VectorCompositeStage, VectorMask};
 
     let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
         eprintln!("no GPU adapter; skipping composite-run test");
@@ -678,9 +679,17 @@ fn gpu_composite_run_over_background() {
     let origin = iai::core::vector::raster::raster_geometry(&sq)
         .map(|(o, _, _)| o)
         .unwrap_or((0, 0));
+    let mut mask = LayerMask::new_black(42, 42);
+    for y in 0..42 {
+        for x in 0..28 {
+            let value = if x < 14 { 255 } else { 128 };
+            mask.tiles.set_pixel(x, y, value, value, value, 255);
+        }
+    }
     stage.begin_frame();
     stage.composite_run(
         &device,
+        &queue,
         &mut enc,
         &read_view,
         &write_view,
@@ -690,6 +699,11 @@ fn gpu_composite_run_over_background() {
         0.0,
         1.0,
         &[(&sq, origin, 1.0)],
+        Some(VectorMask {
+            layer_id: 77,
+            layer_offset: origin,
+            mask: &mask,
+        }),
     );
 
     // Read back dst_write.
@@ -728,15 +742,23 @@ fn gpu_composite_run_over_background() {
 
     // Inside the square → green over red = green (opaque). Outside → red background.
     assert!(
-        at(30, 30, 1) >= 250 && at(30, 30, 0) <= 5,
-        "inside run must be green"
+        at(20, 30, 1) >= 250 && at(20, 30, 0) <= 5,
+        "white mask half must reveal green"
+    );
+    assert!(
+        (120..=135).contains(&at(30, 30, 0)) && (120..=135).contains(&at(30, 30, 1)),
+        "soft mask must source-over in sRGB byte space"
+    );
+    assert!(
+        at(45, 30, 0) >= 250 && at(45, 30, 1) <= 5,
+        "black mask half must preserve red background"
     );
     assert!(
         at(70, 70, 0) >= 250 && at(70, 70, 1) <= 5,
         "outside run must stay red background"
     );
-    assert_eq!(at(30, 30, 3), 255, "inside opaque");
-    eprintln!("composite-run over background ok");
+    assert_eq!(at(20, 30, 3), 255, "revealed area stays opaque");
+    eprintln!("masked composite-run over background ok");
 }
 
 /// Phase 3 acceptance: the GPU mesh cache must re-tessellate + re-upload **zero**
@@ -748,7 +770,7 @@ fn gpu_mesh_cache_is_transform_invariant() {
     use iai::core::vector::raster::raster_geometry;
     use iai::gpu::vector::composite::VectorCompositeStage;
 
-    let Some((device, _queue)) = iai::gpu::vector::renderer::headless_device() else {
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
         eprintln!("no GPU adapter; skipping mesh-cache test");
         return;
     };
@@ -790,6 +812,7 @@ fn gpu_mesh_cache_is_transform_invariant() {
         stage.begin_frame();
         stage.composite_run(
             &device,
+            &queue,
             &mut enc,
             &read_view,
             &write_view,
@@ -799,6 +822,7 @@ fn gpu_mesh_cache_is_transform_invariant() {
             oy,
             zoom,
             &[(obj, origin(obj), 1.0)],
+            None,
         );
         (stage.last_frame_tessellations(), stage.last_frame_uploads())
     };

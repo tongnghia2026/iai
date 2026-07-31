@@ -370,8 +370,12 @@ gate test, the full library suite, and all six serialized local GPU snapshots.
   Stack-aware eligibility walks every ancestor; missing, hidden, isolated,
   blended, translucent, or masked groups retain whole-layer raster fallback.
   A byte-exact inline CPU reference and interleaved z-order planner test lock
-  this first group slice. Raster/vector masks, PowerClip, and group isolation
-  remain fallback and will be enabled only in later reference-tested slices.
+  this first group slice. The second slice supports an ordinary raster layer
+  mask on one GPU vector layer: masked layers are isolated into their own run,
+  the R8 mask texture is cached by tile revision, and the composite samples it
+  nearest/clamp-to-edge in layer-local space. A real-GPU hard/soft-mask snapshot
+  locks coverage and sRGB source-over. PowerClip, vector masks, and group
+  isolation remain fallback until later reference-tested slices.
   slice-by-slice, each slice needs a defined semantics + reference image; unsafe
   to land without manual verification.
 - **Phase 8 retire `path_display` — shipped for GPU-native paths.** Active idle

@@ -29,6 +29,7 @@ impl SceneRun {
 /// succeeds for the complete run.
 pub fn plan_runs(stack: &LayerStack, enabled: bool) -> Vec<SceneRun> {
     let mut runs: Vec<SceneRun> = Vec::new();
+    let mut previous_gpu_masked = false;
     for (index, layer) in stack.layers.iter().enumerate() {
         if layer.is_group()
             || !stack.is_effectively_visible(index)
@@ -41,13 +42,16 @@ pub fn plan_runs(stack: &LayerStack, enabled: bool) -> Vec<SceneRun> {
             layer_eligibility_in_stack(layer, stack, enabled),
             Eligibility::GpuVector
         );
-        if runs.last().is_some_and(|run| run.same_kind(gpu)) {
+        let gpu_masked = gpu && layer.mask.as_ref().is_some_and(|mask| mask.enabled);
+        if runs.last().is_some_and(|run| run.same_kind(gpu)) && !gpu_masked && !previous_gpu_masked
+        {
             runs.last_mut().unwrap().push(layer.id);
         } else if gpu {
             runs.push(SceneRun::GpuVector(vec![layer.id]));
         } else {
             runs.push(SceneRun::Raster(vec![layer.id]));
         }
+        previous_gpu_masked = gpu_masked;
     }
     runs
 }
@@ -119,5 +123,29 @@ mod tests {
         inline.layers.retain(|layer| !layer.is_group());
         inline.layers[1].parent_id = None;
         assert_eq!(grouped_reference, inline.flatten(1, 1));
+    }
+
+    #[test]
+    fn masked_vectors_are_isolated_runs() {
+        let mut stack = LayerStack::new(1, 1);
+        let make_vector = |id| {
+            let mut layer = Layer::new(id, "v", 1, 1);
+            layer.layer_type = LayerType::Vector(VectorGeometry::Path(VectorObjectData::default()));
+            layer.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+            layer
+        };
+        let below = make_vector(1);
+        let mut masked = make_vector(2);
+        masked.mask = Some(crate::core::layer::LayerMask::new_white(1, 1));
+        let above = make_vector(3);
+        stack.layers = vec![below, masked, above];
+        assert_eq!(
+            plan_runs(&stack, true),
+            vec![
+                SceneRun::GpuVector(vec![1]),
+                SceneRun::GpuVector(vec![2]),
+                SceneRun::GpuVector(vec![3]),
+            ]
+        );
     }
 }

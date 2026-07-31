@@ -3058,13 +3058,33 @@ struct VsOut {
             // halo). Handle the whole contiguous run at its first layer, then skip
             // the members here. A run participates in the ping/pong as one step.
             if gpu_eligible[layer_slot] {
-                let is_run_start = layer_slot == 0 || !gpu_eligible[layer_slot - 1];
+                let layer_has_mask = layer.mask.as_ref().is_some_and(|mask| mask.enabled);
+                let previous_joins = layer_slot > 0
+                    && gpu_eligible[layer_slot - 1]
+                    && !layer_has_mask
+                    && !visible_layers[layer_slot - 1]
+                        .1
+                        .mask
+                        .as_ref()
+                        .is_some_and(|mask| mask.enabled);
+                let is_run_start = !previous_joins;
                 if is_run_start {
                     use crate::core::layer::LayerType;
                     use crate::core::vector::object::VectorGeometry;
                     let mut run_end = layer_slot;
-                    while run_end < n_layers && gpu_eligible[run_end] {
+                    if layer_has_mask {
                         run_end += 1;
+                    } else {
+                        while run_end < n_layers
+                            && gpu_eligible[run_end]
+                            && !visible_layers[run_end]
+                                .1
+                                .mask
+                                .as_ref()
+                                .is_some_and(|mask| mask.enabled)
+                        {
+                            run_end += 1;
+                        }
                     }
                     // Phase 6: a Primitive is drawn by converting it to the same
                     // `PathData` its raster twin uses (`ShapeData::to_vector_object`).
@@ -3153,6 +3173,7 @@ struct VsOut {
                         if let Some(stage) = self.vector_stage.as_mut() {
                             stage.composite_run(
                                 device,
+                                queue,
                                 &mut enc,
                                 dst_read,
                                 dst_write,
@@ -3162,6 +3183,13 @@ struct VsOut {
                                 view_offset_y,
                                 zoom,
                                 &objects,
+                                layer.mask.as_ref().filter(|mask| mask.enabled).map(|mask| {
+                                    crate::gpu::vector::composite::VectorMask {
+                                        layer_id: layer.id,
+                                        layer_offset: layer.offset,
+                                        mask,
+                                    }
+                                }),
                             );
                         }
                         command_buffers.push(enc.finish());

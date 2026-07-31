@@ -163,7 +163,8 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 | Object/layer opacity, blend Normal | GPU (Phase 5) |
 | Gradient RGB linear/radial + alpha stops | GPU (Phase 5) |
 | Gradient có stop CMYK, blend≠Normal | Raster fallback |
-| Mask / clip / PowerClip / group | Raster fallback (Phase 7 chưa làm) |
+| Raster mask thường trên vector | GPU (Phase 7, lát 2) |
+| PowerClip / vector mask / group isolation | Raster fallback |
 | CMYK paint / soft-proof | Raster fallback |
 
 Bất cứ ô "Raster fallback" nào mà **khác hình so với khi tắt cờ** đều là lỗi cần
@@ -176,3 +177,15 @@ báo. Bất cứ ô "GPU" nào mà chậm đi hoặc kém nét hơn tắt cờ c
 4. Kỳ vọng: hình và z-order không đổi, không mờ/lặp; vector con vẫn GPU-native.
 5. Đổi opacity group xuống dưới 100%, thêm mask hoặc blend khác Normal.
 6. Kỳ vọng: cả subtree rơi về raster an toàn; kết quả giống khi tắt flag.
+
+## Phase 7 — lát 2: raster mask trên vector
+
+1. Tạo vector RGB nằm giữa hai raster layer có màu tương phản.
+2. Thêm raster mask cho vector; vẽ vùng trắng, đen và xám mềm trên mask.
+3. Zoom/pan qua 100%, di chuyển vector, bật/tắt và invert mask.
+4. Kỳ vọng: trắng hiện đủ, đen ẩn đủ, xám blend mềm; mask đi cùng vector và
+   z-order không đổi, không có halo hoặc hình vector thứ hai.
+5. Đặt một vector GPU khác ngay trên/dưới layer có mask.
+6. Kỳ vọng: mask chỉ tác động đúng layer của nó. Tắt flag phải cho cùng hình.
+7. Chuyển sang PowerClip hoặc đặt vector vào group có opacity/blend/mask.
+8. Kỳ vọng: raster fallback an toàn; chưa dùng đường GPU của lát này.

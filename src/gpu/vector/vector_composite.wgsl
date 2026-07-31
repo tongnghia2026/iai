@@ -6,6 +6,15 @@
 
 @group(0) @binding(0) var dst_tex: texture_2d<f32>;
 @group(0) @binding(1) var vec_tex: texture_2d<f32>;
+@group(0) @binding(2) var mask_tex: texture_2d<f32>;
+
+struct MaskUniform {
+    // enabled, view_offset_x, view_offset_y, zoom,
+    // layer_offset_x, layer_offset_y, mask_width, mask_height.
+    data0: vec4<f32>,
+    data1: vec4<f32>,
+};
+@group(0) @binding(3) var<uniform> mask_u: MaskUniform;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -38,11 +47,19 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let coord = vec2<i32>(pos.xy);
     let dst = textureLoad(dst_tex, coord, 0); // linear, straight alpha
     let vpm = textureLoad(vec_tex, coord, 0); // linear, premultiplied
-    let sa = vpm.a;
+    var mask_a = 1.0;
+    if (mask_u.data0.x > 0.5) {
+        let canvas = pos.xy / mask_u.data0.w + mask_u.data0.yz;
+        let local = floor(canvas - mask_u.data1.xy);
+        let upper = vec2<i32>(max(mask_u.data1.zw - vec2<f32>(1.0), vec2<f32>(0.0)));
+        let coord_mask = clamp(vec2<i32>(local), vec2<i32>(0), upper);
+        mask_a = textureLoad(mask_tex, coord_mask, 0).r;
+    }
+    let sa = vpm.a * mask_a;
     if (sa <= 0.00001) {
         return dst;
     }
-    let v_lin = vpm.rgb / sa; // straight, linear
+    let v_lin = vpm.rgb / max(vpm.a, 0.00001); // straight, linear
     let src_rgb = to_srgb(v_lin); // byte space
     let dst_rgb = to_srgb(dst.rgb);
     let da = dst.a;

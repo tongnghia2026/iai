@@ -18,12 +18,14 @@
 //! least-recently-used meshes, never dropping one the current frame needs.
 
 use std::collections::{HashMap, HashSet};
+use wgpu::util::DeviceExt;
 
 use super::cache::{geometry_fingerprint, ByteLru};
 use super::mesh::tessellate;
 use super::renderer::{
     CanvasView, GpuMesh, GpuPaint, VectorDraw, VectorRenderer, VECTOR_SAMPLE_COUNT,
 };
+use crate::core::layer::LayerMask;
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::raster::raster_geometry;
@@ -111,6 +113,29 @@ pub struct VectorCompositeStage {
     composite_bgl: wgpu::BindGroupLayout,
     sized: Option<Sized>,
     cache: GpuMeshCache,
+    mask_cache: HashMap<u32, CachedMask>,
+}
+
+struct CachedMask {
+    fingerprint: u64,
+    width: u32,
+    height: u32,
+    inverted: bool,
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+#[derive(Clone, Copy)]
+pub struct VectorMask<'a> {
+    pub layer_id: u32,
+    pub layer_offset: (i32, i32),
+    pub mask: &'a LayerMask,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MaskUniform {
+    data: [f32; 8],
 }
 
 impl VectorCompositeStage {
@@ -140,6 +165,26 @@ impl VectorCompositeStage {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
@@ -183,6 +228,7 @@ impl VectorCompositeStage {
             composite_bgl,
             sized: None,
             cache: GpuMeshCache::new(MESH_CACHE_BYTE_BUDGET),
+            mask_cache: HashMap::new(),
         }
     }
 
@@ -196,6 +242,7 @@ impl VectorCompositeStage {
     /// already rebuilds the whole stage, so it does not need this.
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+        self.mask_cache.clear();
     }
 
     /// Meshes tessellated + uploaded during the last [`Self::composite_run`]. Zero
@@ -272,6 +319,7 @@ impl VectorCompositeStage {
     pub fn composite_run(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         dst_read: &wgpu::TextureView,
         dst_write: &wgpu::TextureView,
@@ -286,6 +334,7 @@ impl VectorCompositeStage {
         // folded back into the model, so the difference is the drag delta and must
         // be applied so the GPU shape follows the pointer like the raster preview.
         objects: &[(&VectorObjectData, (i32, i32), f32)],
+        mask: Option<VectorMask<'_>>,
     ) {
         self.ensure_size(device, viewport_w, viewport_h);
         let bucket = zoom_bucket(zoom);
@@ -366,6 +415,87 @@ impl VectorCompositeStage {
             view,
             &draws,
         );
+        let mask_view = if let Some(spec) = mask {
+            let width = spec.mask.width.max(1);
+            let height = spec.mask.height.max(1);
+            let fingerprint = spec.mask.tiles.revision_fingerprint();
+            let stale = self.mask_cache.get(&spec.layer_id).is_none_or(|cached| {
+                cached.fingerprint != fingerprint
+                    || cached.width != width
+                    || cached.height != height
+                    || cached.inverted != spec.mask.inverted
+            });
+            if stale {
+                let mut bytes = vec![0u8; width as usize * height as usize];
+                for y in 0..height {
+                    for x in 0..width {
+                        bytes[(y * width + x) as usize] =
+                            (spec.mask.sample(x, y) * 255.0).round() as u8;
+                    }
+                }
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("vector_layer_mask"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                queue.write_texture(
+                    texture.as_image_copy(),
+                    &bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(width),
+                        rows_per_image: Some(height),
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                let view = texture.create_view(&Default::default());
+                self.mask_cache.insert(
+                    spec.layer_id,
+                    CachedMask {
+                        fingerprint,
+                        width,
+                        height,
+                        inverted: spec.mask.inverted,
+                        _texture: texture,
+                        view,
+                    },
+                );
+            }
+            &self.mask_cache.get(&spec.layer_id).unwrap().view
+        } else {
+            // Binding 2 is mandatory. The shader skips this texture when disabled.
+            &sized.run_view
+        };
+        let mask_data = mask.map_or([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0], |spec| {
+            [
+                1.0,
+                view_offset_x,
+                view_offset_y,
+                zoom,
+                spec.layer_offset.0 as f32,
+                spec.layer_offset.1 as f32,
+                spec.mask.width.max(1) as f32,
+                spec.mask.height.max(1) as f32,
+            ]
+        });
+        let mask_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vector_mask_uniform"),
+            contents: bytemuck::bytes_of(&MaskUniform { data: mask_data }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
         // Pass 2: composite run_view over dst_read into dst_write.
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vector_composite_bg"),
@@ -378,6 +508,14 @@ impl VectorCompositeStage {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&sized.run_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: mask_buffer.as_entire_binding(),
                 },
             ],
         });
