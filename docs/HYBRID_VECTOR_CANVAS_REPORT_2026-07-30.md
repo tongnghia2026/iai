@@ -374,8 +374,13 @@ gate test, the full library suite, and all six serialized local GPU snapshots.
   mask on one GPU vector layer: masked layers are isolated into their own run,
   the R8 mask texture is cached by tile revision, and the composite samples it
   nearest/clamp-to-edge in layer-local space. A real-GPU hard/soft-mask snapshot
-  locks coverage and sRGB source-over. PowerClip, vector masks, and group
-  isolation remain fallback until later reference-tested slices.
+  locks coverage and sRGB source-over. The third slice enables PowerClip content
+  when its frame and derived raster mask are both valid. It applies the same
+  `(content delta - frame delta)` live-pin shift as the raster compositor, so
+  moving either participant changes only a uniform and does not re-upload the
+  cached mask. Missing frames/masks still fall back, and a dedicated planner test
+  locks frame/content/upper-raster z-order. Vector masks and group isolation
+  remain fallback until later reference-tested slices.
   slice-by-slice, each slice needs a defined semantics + reference image; unsafe
   to land without manual verification.
 - **Phase 8 retire `path_display` — shipped for GPU-native paths.** Active idle

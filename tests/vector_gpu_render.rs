@@ -702,6 +702,7 @@ fn gpu_composite_run_over_background() {
         Some(VectorMask {
             layer_id: 77,
             layer_offset: origin,
+            sample_shift: (5, 0),
             mask: &mask,
         }),
     );
@@ -742,23 +743,23 @@ fn gpu_composite_run_over_background() {
 
     // Inside the square → green over red = green (opaque). Outside → red background.
     assert!(
-        at(20, 30, 1) >= 250 && at(20, 30, 0) <= 5,
-        "white mask half must reveal green"
+        at(15, 30, 1) >= 250 && at(15, 30, 0) <= 5,
+        "shifted white mask region must reveal green"
     );
     assert!(
-        (120..=135).contains(&at(30, 30, 0)) && (120..=135).contains(&at(30, 30, 1)),
-        "soft mask must source-over in sRGB byte space"
+        (120..=135).contains(&at(25, 30, 0)) && (120..=135).contains(&at(25, 30, 1)),
+        "shifted soft mask must source-over in sRGB byte space"
     );
     assert!(
-        at(45, 30, 0) >= 250 && at(45, 30, 1) <= 5,
-        "black mask half must preserve red background"
+        at(35, 30, 0) >= 250 && at(35, 30, 1) <= 5,
+        "shifted black mask region must preserve red background"
     );
     assert!(
         at(70, 70, 0) >= 250 && at(70, 70, 1) <= 5,
         "outside run must stay red background"
     );
-    assert_eq!(at(20, 30, 3), 255, "revealed area stays opaque");
-    eprintln!("masked composite-run over background ok");
+    assert_eq!(at(15, 30, 3), 255, "revealed area stays opaque");
+    eprintln!("PowerClip-shifted composite-run over background ok");
 }
 
 /// Phase 3 acceptance: the GPU mesh cache must re-tessellate + re-upload **zero**

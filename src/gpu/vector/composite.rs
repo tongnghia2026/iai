@@ -129,13 +129,17 @@ struct CachedMask {
 pub struct VectorMask<'a> {
     pub layer_id: u32,
     pub layer_offset: (i32, i32),
+    /// Layer-local mask sample delta. Zero for ordinary masks; PowerClip uses
+    /// `(content delta - frame delta)` to keep the clip pinned while either
+    /// participant moves without forcing a mask re-bake every frame.
+    pub sample_shift: (i32, i32),
     pub mask: &'a LayerMask,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct MaskUniform {
-    data: [f32; 8],
+    data: [f32; 12],
 }
 
 impl VectorCompositeStage {
@@ -479,18 +483,25 @@ impl VectorCompositeStage {
             // Binding 2 is mandatory. The shader skips this texture when disabled.
             &sized.run_view
         };
-        let mask_data = mask.map_or([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0], |spec| {
-            [
-                1.0,
-                view_offset_x,
-                view_offset_y,
-                zoom,
-                spec.layer_offset.0 as f32,
-                spec.layer_offset.1 as f32,
-                spec.mask.width.max(1) as f32,
-                spec.mask.height.max(1) as f32,
-            ]
-        });
+        let mask_data = mask.map_or(
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            |spec| {
+                [
+                    1.0,
+                    view_offset_x,
+                    view_offset_y,
+                    zoom,
+                    spec.layer_offset.0 as f32,
+                    spec.layer_offset.1 as f32,
+                    spec.mask.width.max(1) as f32,
+                    spec.mask.height.max(1) as f32,
+                    spec.sample_shift.0 as f32,
+                    spec.sample_shift.1 as f32,
+                    0.0,
+                    0.0,
+                ]
+            },
+        );
         let mask_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vector_mask_uniform"),
             contents: bytemuck::bytes_of(&MaskUniform { data: mask_data }),

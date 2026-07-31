@@ -164,7 +164,8 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 | Gradient RGB linear/radial + alpha stops | GPU (Phase 5) |
 | Gradient có stop CMYK, blend≠Normal | Raster fallback |
 | Raster mask thường trên vector | GPU (Phase 7, lát 2) |
-| PowerClip / vector mask / group isolation | Raster fallback |
+| PowerClip có frame + derived mask hợp lệ | GPU (Phase 7, lát 3) |
+| Vector mask / group isolation | Raster fallback |
 | CMYK paint / soft-proof | Raster fallback |
 
 Bất cứ ô "Raster fallback" nào mà **khác hình so với khi tắt cờ** đều là lỗi cần
@@ -187,5 +188,17 @@ báo. Bất cứ ô "GPU" nào mà chậm đi hoặc kém nét hơn tắt cờ c
    z-order không đổi, không có halo hoặc hình vector thứ hai.
 5. Đặt một vector GPU khác ngay trên/dưới layer có mask.
 6. Kỳ vọng: mask chỉ tác động đúng layer của nó. Tắt flag phải cho cùng hình.
-7. Chuyển sang PowerClip hoặc đặt vector vào group có opacity/blend/mask.
+7. Chuyển sang vector mask hoặc đặt vector vào group có opacity/blend/mask.
 8. Kỳ vọng: raster fallback an toàn; chưa dùng đường GPU của lát này.
+
+## Phase 7 — lát 3: PowerClip
+
+1. Tạo raster frame có alpha rõ ràng, rồi tạo/attach một vector RGB làm nội dung
+   PowerClip; đặt thêm raster layer phía trên để kiểm tra z-order.
+2. Zoom/pan qua 100%; di chuyển riêng content, rồi di chuyển riêng frame.
+3. Kỳ vọng: vector chỉ hiện trong alpha của frame, cửa sổ clip bám frame trong
+   lúc kéo, không nháy full-vector và layer phía trên luôn nằm trên cùng.
+4. Sửa alpha/biên của frame rồi thả chuột.
+5. Kỳ vọng: derived mask cập nhật và PowerClip đổi theo frame, không giữ mask cũ.
+6. Release clip hoặc xóa frame/mask làm quan hệ tạm thiếu dữ liệu.
+7. Kỳ vọng: không render sai hay crash; quan hệ không hợp lệ rơi về raster.

@@ -148,4 +148,27 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn powerclip_child_stays_between_frame_and_upper_raster() {
+        let mut stack = LayerStack::new(1, 1);
+        let mut frame = Layer::new(1, "frame", 1, 1);
+        frame.tiles.set_pixel(0, 0, 255, 255, 255, 255);
+        let mut child = Layer::new(2, "clip content", 1, 1);
+        child.layer_type = LayerType::Vector(VectorGeometry::Path(VectorObjectData::default()));
+        child.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+        child.clip_parent_id = Some(frame.id);
+        child.mask = Some(crate::core::layer::LayerMask::new_white(1, 1));
+        let mut upper = Layer::new(3, "upper", 1, 1);
+        upper.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+        stack.layers = vec![frame, child, upper];
+        assert_eq!(
+            plan_runs(&stack, true),
+            vec![
+                SceneRun::Raster(vec![1]),
+                SceneRun::GpuVector(vec![2]),
+                SceneRun::Raster(vec![3]),
+            ]
+        );
+    }
 }

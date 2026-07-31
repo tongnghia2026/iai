@@ -3187,6 +3187,23 @@ struct VsOut {
                                     crate::gpu::vector::composite::VectorMask {
                                         layer_id: layer.id,
                                         layer_offset: layer.offset,
+                                        sample_shift: layer.clip_parent_id.map_or(
+                                            (0, 0),
+                                            |frame_id| {
+                                                let frame_now = layer_stack
+                                                    .layers
+                                                    .iter()
+                                                    .find(|candidate| candidate.id == frame_id)
+                                                    .map(|frame| frame.offset)
+                                                    .unwrap_or(mask.bake_frame_offset);
+                                                (
+                                                    (layer.offset.0 - mask.bake_offset.0)
+                                                        - (frame_now.0 - mask.bake_frame_offset.0),
+                                                    (layer.offset.1 - mask.bake_offset.1)
+                                                        - (frame_now.1 - mask.bake_frame_offset.1),
+                                                )
+                                            },
+                                        ),
                                         mask,
                                     }
                                 }),

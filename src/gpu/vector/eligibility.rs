@@ -73,14 +73,19 @@ pub fn object_eligibility(object: &VectorObjectData) -> Eligibility {
     style_eligibility(&object.style)
 }
 
-fn layer_eligibility_impl(layer: &Layer, enabled: bool, allow_group_child: bool) -> Eligibility {
+fn layer_eligibility_impl(
+    layer: &Layer,
+    enabled: bool,
+    allow_group_child: bool,
+    allow_powerclip: bool,
+) -> Eligibility {
     if !enabled {
         return Eligibility::RasterFallback(FallbackReason::Disabled);
     }
     if !layer.visible {
         return Eligibility::RasterFallback(FallbackReason::Hidden);
     }
-    if layer.clip_parent_id.is_some() {
+    if layer.clip_parent_id.is_some() && !allow_powerclip {
         return Eligibility::RasterFallback(FallbackReason::PowerClip);
     }
     if layer.parent_id.is_some() && !allow_group_child {
@@ -101,7 +106,7 @@ fn layer_eligibility_impl(layer: &Layer, enabled: bool, allow_group_child: bool)
 }
 
 pub fn layer_eligibility(layer: &Layer, enabled: bool) -> Eligibility {
-    layer_eligibility_impl(layer, enabled, false)
+    layer_eligibility_impl(layer, enabled, false, false)
 }
 
 /// Stack-aware eligibility for group children. A plain Normal/100%/unmasked
@@ -113,6 +118,18 @@ pub fn layer_eligibility_in_stack(
     stack: &crate::core::layer::LayerStack,
     enabled: bool,
 ) -> Eligibility {
+    let powerclip_ok = match layer.clip_parent_id {
+        None => false,
+        Some(frame_id) => {
+            layer.mask.as_ref().is_some_and(|mask| mask.enabled)
+                && stack.layers.iter().any(|frame| {
+                    frame.id == frame_id && frame.visible && frame.has_renderable_content()
+                })
+        }
+    };
+    if layer.clip_parent_id.is_some() && !powerclip_ok {
+        return Eligibility::RasterFallback(FallbackReason::PowerClip);
+    }
     let mut parent_id = layer.parent_id;
     while let Some(id) = parent_id {
         let Some(parent) = stack.layers.iter().find(|candidate| candidate.id == id) else {
@@ -128,7 +145,7 @@ pub fn layer_eligibility_in_stack(
         }
         parent_id = parent.parent_id;
     }
-    layer_eligibility_impl(layer, enabled, true)
+    layer_eligibility_impl(layer, enabled, true, powerclip_ok)
 }
 
 #[cfg(test)]
@@ -284,6 +301,27 @@ mod tests {
             layer_eligibility(&child, true),
             Eligibility::RasterFallback(FallbackReason::Group),
             "context-free callers remain conservative"
+        );
+    }
+
+    #[test]
+    fn powerclip_needs_a_live_frame_and_derived_mask() {
+        let mut child = layer_with(square());
+        child.clip_parent_id = Some(8);
+        child.mask = Some(crate::core::layer::LayerMask::new_white(64, 64));
+        let mut frame = Layer::new(8, "frame", 64, 64);
+        frame.tiles.set_pixel(0, 0, 255, 255, 255, 255);
+        let mut stack = crate::core::layer::LayerStack::new(64, 64);
+        stack.layers = vec![frame, child];
+        assert_eq!(
+            layer_eligibility_in_stack(&stack.layers[1], &stack, true),
+            Eligibility::GpuVector
+        );
+
+        stack.layers[1].mask = None;
+        assert_eq!(
+            layer_eligibility_in_stack(&stack.layers[1], &stack, true),
+            Eligibility::RasterFallback(FallbackReason::PowerClip)
         );
     }
 }
