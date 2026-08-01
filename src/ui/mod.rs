@@ -2949,7 +2949,13 @@ pub fn build(
                 Some(range) if !range.is_empty() => Some(range),
                 Some(range) if resp.has_focus() => Some(range),
                 Some(range) => cached_text_range.or(Some(range)),
-                None => cached_text_range,
+                None => cached_text_range.or_else(|| {
+                    data.tool.text_caret.map(|caret| {
+                        egui::text::CCursorRange::one(egui::text::CCursor::new(
+                            caret.min(buf.chars().count()),
+                        ))
+                    })
+                }),
             };
 
             // Pointer→caret mapping in raster space. egui's built-in hit-test
@@ -3069,7 +3075,12 @@ pub fn build(
                     .with_clip_rect(canvas_viewport);
                 let origin = egui::pos2(mx, my);
                 if range.is_empty() {
-                    if resp.has_focus() {
+                    // The Text session owns keyboard input even when egui's
+                    // invisible TextEdit reports a transient focus loss between
+                    // KeyboardInput/IME and the following UI frame. Keep the
+                    // visible raster-space caret alive from the cached session
+                    // cursor; the colour dialog deliberately owns focus/canvas.
+                    if !data.dialogs.show_paint_color_dialog {
                         ctx.request_repaint_after(std::time::Duration::from_millis(250));
                         if let Some(rect) =
                             crate::core::text::caret_rect(&caret_td, range.primary.index)
