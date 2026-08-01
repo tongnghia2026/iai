@@ -590,6 +590,40 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
         {
             break;
         }
+        // Editable text is promoted through transient glyph outlines. The layer
+        // remains Text in the document; only the PDF representation is curves.
+        if let LayerType::Text(text) = &layer.layer_type {
+            let text_objects = crate::core::text::text_vector_objects(text, layer.offset);
+            if text_objects.is_empty()
+                || text_objects.iter().any(|object| {
+                    (object.style.opacity - 1.0).abs() > 1e-3
+                        || !matches!(object.style.fill, Paint::Solid(color) if color.alpha() >= 1.0 - 1e-3)
+                })
+            {
+                break;
+            }
+            for object in text_objects {
+                let fill = rgb(object.style.fill);
+                if fill.is_none() {
+                    break;
+                }
+                objects.push(PdfVectorObject {
+                    path: object.path_in_layer_space(),
+                    fill,
+                    fill_gradient: None,
+                    stroke: None,
+                    stroke_width_px: 0.0,
+                    stroke_cap: object.style.stroke_style.cap,
+                    stroke_join: object.style.stroke_style.join,
+                    stroke_miter_limit: object.style.stroke_style.miter_limit,
+                    stroke_dash: Vec::new(),
+                    stroke_dash_offset: 0.0,
+                    even_odd: false,
+                });
+            }
+            promoted_layer_ids.push(layer.id);
+            continue;
+        }
         let shape_object;
         let obj = match &layer.layer_type {
             LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(object)) => object,
@@ -1678,6 +1712,46 @@ mod tests {
             !String::from_utf8_lossy(&plain).contains(" rg\n"),
             "raster-only PDF has no vector overlay"
         );
+    }
+
+    #[test]
+    fn editable_text_is_promoted_to_crisp_pdf_curves() {
+        use crate::core::layer::LayerType;
+        use crate::core::text::TextData;
+
+        let mut canvas = crate::core::canvas::Canvas::new_blank(320, 120);
+        let index = canvas.layer_stack.active_idx;
+        let text = TextData {
+            content: "Sharp PDF text".to_string(),
+            font_px: 42.0,
+            color: [12, 34, 56, 255],
+            ..TextData::default()
+        };
+        let layer_id = {
+            let layer = &mut canvas.layer_stack.layers[index];
+            layer.layer_type = LayerType::Text(text);
+            layer.offset = (18, 22);
+            layer.id
+        };
+
+        let selection = collect_pdf_vectors(&canvas);
+        assert_eq!(selection.promoted_layer_ids, vec![layer_id]);
+        assert!(!selection.objects.is_empty());
+        assert!(selection.objects.iter().all(|object| object.fill.is_some()));
+
+        let base = pdf_raster_base(&canvas, &selection);
+        let pdf = build_pdf_with_vectors(
+            &base,
+            canvas.width,
+            canvas.height,
+            72.0,
+            &selection.objects,
+            &PrintLayout::default(),
+            None,
+        )
+        .expect("text PDF");
+        let source = String::from_utf8_lossy(&pdf);
+        assert!(source.contains(" m\n") && source.contains("f\nQ"));
     }
 
     #[test]

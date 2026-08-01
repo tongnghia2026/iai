@@ -125,6 +125,19 @@ fn layer_eligibility_impl(
         // GPU-native under the same style rules as a Path. Its geometry is always
         // valid, so only the style gates it.
         LayerType::Vector(VectorGeometry::Primitive(shape)) => style_eligibility(&shape.style),
+        LayerType::Text(text) => {
+            let objects = crate::core::text::text_vector_objects(text, layer.offset);
+            if objects.is_empty() {
+                Eligibility::RasterFallback(FallbackReason::InvalidGeometry)
+            } else if objects
+                .iter()
+                .all(|object| matches!(object_eligibility(object), Eligibility::GpuVector))
+            {
+                Eligibility::GpuVector
+            } else {
+                Eligibility::RasterFallback(FallbackReason::Cmyk)
+            }
+        }
         _ => Eligibility::RasterFallback(FallbackReason::NotVector),
     }
 }
@@ -264,6 +277,18 @@ mod tests {
             layer_eligibility(&layer, false),
             Eligibility::RasterFallback(FallbackReason::Disabled)
         );
+    }
+
+    #[test]
+    fn editable_text_is_gpu_vector_eligible() {
+        let mut layer = Layer::new(8, "text", 256, 128);
+        layer.offset = (12, 16);
+        layer.layer_type = LayerType::Text(crate::core::text::TextData {
+            content: "Sharp canvas text".to_string(),
+            font_px: 36.0,
+            ..Default::default()
+        });
+        assert_eq!(layer_eligibility(&layer, true), Eligibility::GpuVector);
     }
 
     #[test]

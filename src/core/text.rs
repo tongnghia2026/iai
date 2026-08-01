@@ -1382,6 +1382,32 @@ pub struct TextCurveGroup {
     pub path: crate::core::vector::path::PathData,
 }
 
+/// Build transient vector objects for display/export while keeping the source
+/// [`TextData`] editable. Unlike "Convert Text to Curves", this does not mutate
+/// the layer stack.
+pub fn text_vector_objects(
+    td: &TextData,
+    layer_offset: (i32, i32),
+) -> Vec<crate::core::vector::object::VectorObjectData> {
+    use crate::core::vector::affine::AffineTransform;
+    use crate::core::vector::color::ColorValue;
+    use crate::core::vector::object::VectorObjectData;
+    use crate::core::vector::style::VectorStyle;
+
+    let opacity = td.opacity.clamp(0.0, 1.0);
+    text_to_curves(td, layer_offset)
+        .into_iter()
+        .filter_map(|group| {
+            let style = VectorStyle {
+                opacity,
+                ..VectorStyle::filled(ColorValue::from_rgba8(group.color))
+            };
+            let object = VectorObjectData::new(group.path, style, AffineTransform::IDENTITY);
+            object.validate().is_ok().then_some(object)
+        })
+        .collect()
+}
+
 /// Accumulate contours under their colour, preserving first-seen order so the
 /// resulting layer order is deterministic.
 fn add_curve_group(

@@ -587,6 +587,11 @@ impl App {
             && self.edit.node_drag.is_none()
             && self.edit.pending_path_style.is_none()
             && self.edit.shape_drag.is_none()
+            // An open text-editing session rewrites the active layer's glyphs on
+            // every keystroke and caret blink. Promoting it to GPU vector would
+            // rebuild all glyph outlines each frame; keep it on the raster + caret
+            // path while editing. Crisp vector resumes once the edit commits.
+            && self.edit.text_edit.is_none()
             && !self.shape_style_scrub_active()
             && self.jobs.shape_bake.is_none()
     }
@@ -757,6 +762,39 @@ mod hybrid_canvas_mode_tests {
         assert!(!app.active_vector_gpu_idle());
 
         app.edit.pending_path_style = None;
+        assert!(app.active_vector_gpu_idle());
+    }
+
+    #[test]
+    fn open_text_edit_session_keeps_active_layer_off_gpu_vector() {
+        use crate::app::state::TextEditState;
+        let mut app = App::new();
+        assert!(app.active_vector_gpu_idle());
+
+        let doc_id = app.docs.documents[0].id;
+        let layer_id = app.docs.documents[0].canvas.layer_stack.layers[0].id;
+        app.edit.text_edit = Some(TextEditState {
+            doc_id,
+            layer_id,
+            buffer: "typing".to_string(),
+            origin: (0, 0),
+            rotation_deg: 0.0,
+            stretch_x: 1.0,
+            flip_x: false,
+            flip_y: false,
+            is_new: true,
+            orig: None,
+            before_cmd: None,
+            glyph_styles: Vec::new(),
+            selection: None,
+            caret: Some(0),
+            pending_style: None,
+        });
+        // While editing, the glyphs change every keystroke: the active text
+        // layer must stay on the raster path, not be re-tessellated on the GPU.
+        assert!(!app.active_vector_gpu_idle());
+
+        app.edit.text_edit = None;
         assert!(app.active_vector_gpu_idle());
     }
 }
