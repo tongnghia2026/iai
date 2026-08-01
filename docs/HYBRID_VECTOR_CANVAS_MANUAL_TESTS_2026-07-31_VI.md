@@ -154,7 +154,7 @@ Giữ tài liệu này để so sánh với cờ bật ở các bước sau.
 | Tính năng | Trạng thái khi cờ BẬT |
 |---|---|
 | Path fill đặc, fill-rule/lỗ | GPU |
-| Nét đặc RGB (mọi cap/join; render tròn như CPU) | GPU |
+| Nét đặc RGB — cap thật (butt/tròn/vuông) + join thật (miter/bevel/tròn) + miter limit | GPU (Phase 4) |
 | Shape/Primitive (rect/bo góc/ellipse/polygon/star), màu đặc | GPU (Phase 6) |
 | Transform (pan/zoom/move/xoay/scale) | GPU, 0 tessellate lại (Phase 3) |
 | Layer active, đang idle | GPU (Phase 8) |
@@ -176,6 +176,20 @@ Bất cứ ô "Raster fallback" nào mà **khác hình so với khi tắt cờ**
 báo. Bất cứ ô "GPU" nào mà chậm đi hoặc kém nét hơn tắt cờ cũng cần báo.
 ## Phase 4/5 — dash và blend mode
 
+**LƯU Ý ĐỔI HÌNH (đã duyệt):** từ bản 2026-08-01 nét vẽ TÔN TRỌNG kiểu đầu/góc thật.
+Bản cũ vẽ mọi nét thành bo tròn; giờ nét mặc định (đầu Butt + góc Miter) sẽ ra
+**đầu cắt phẳng + góc nhọn**. Đây là ĐÚNG (giống CorelDRAW). Nét trong file cũ có
+đặt đầu/góc ≠ tròn sẽ trông khác bản trước — đó là hành vi mong muốn, không phải lỗi.
+
+Cap/join — cả bật lẫn tắt cờ phải cho hình GIỐNG NHAU (CPU và GPU cùng tô một outline):
+1. Vẽ một nét dày (≥12px) HỞ có một góc vuông. Lần lượt đổi đầu nét **Butt → Round →
+   Square**: Butt cắt phẳng ngay điểm cuối, Round bo nửa tròn, Square nhô ra thêm nửa
+   độ rộng. Đổi góc **Miter → Round → Bevel**: Miter nhọn, Round bo, Bevel vát.
+2. Với một góc rất nhọn, tăng/giảm **miter limit**: dưới ngưỡng ra mũi nhọn, quá ngưỡng
+   tự chuyển sang vát (bevel). Bật/tắt cờ phải khớp nhau.
+3. Zoom sâu: nét vẫn nét ở mọi mức, đầu/góc không rung hay đổi kiểu.
+
+Dash và blend:
 1. Tạo một Path hở và một Path kín, đặt dash pattern lẻ/chẵn và thay đổi dash offset.
 2. Zoom, xoay và scale; kỳ vọng dash không biến mất, không nối nhầm qua khoảng trống và
    không phát sinh CPU sharp-bake khi layer idle.

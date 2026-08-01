@@ -29,4 +29,5 @@ pub mod object;
 pub mod ops;
 pub mod path;
 pub mod raster;
+pub mod stroke;
 pub mod style;

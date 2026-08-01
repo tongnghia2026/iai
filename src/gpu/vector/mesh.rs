@@ -1,13 +1,11 @@
 use bytemuck::{Pod, Zeroable};
 use lyon_path::math::point;
 use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
-use lyon_tessellation::{
-    FillOptions, FillRule as LyonFillRule, FillTessellator, FillVertex, LineCap as LyonLineCap,
-    LineJoin as LyonLineJoin, StrokeOptions, StrokeTessellator, StrokeVertex,
-};
+use lyon_tessellation::{FillOptions, FillRule as LyonFillRule, FillTessellator, FillVertex};
 
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::path::{FillRule, PathData};
+use crate::core::vector::stroke::stroke_outline_contours;
 use crate::core::vector::{flatten::flatten_path, raster::dashed_polylines};
 
 #[repr(C)]
@@ -54,30 +52,39 @@ pub fn to_lyon_path(path: &PathData) -> lyon_path::Path {
     builder.build()
 }
 
-fn dashed_lyon_path(object: &VectorObjectData, tolerance: f32) -> lyon_path::Path {
-    let polylines = flatten_path(&object.path, tolerance.max(0.001));
-    let closed: Vec<bool> = object
-        .path
-        .contours
-        .iter()
-        .map(|contour| contour.closed)
-        .collect();
-    let (segments, _) = dashed_polylines(
-        &polylines,
-        &closed,
-        object.style.stroke_style.dash.as_slice(),
-        object.style.stroke_style.dash.offset,
+/// The stroke's filled outline as a Lyon path, built from the shared CPU/GPU
+/// [`stroke_outline_contours`] reference so the GPU fills the exact same shape the
+/// rasteriser does. Every contour is one closed subpath; overlaps union under a
+/// NonZero fill.
+fn stroke_outline_lyon_path(object: &VectorObjectData, tolerance: f32) -> lyon_path::Path {
+    let tol = tolerance.max(0.001);
+    let flat = flatten_path(&object.path, tol);
+    let closed: Vec<bool> = object.path.contours.iter().map(|c| c.closed).collect();
+    let ss = object.style.stroke_style;
+    let (lines, line_closed) = if ss.dash.is_solid() {
+        (flat, closed)
+    } else {
+        dashed_polylines(&flat, &closed, ss.dash.as_slice(), ss.dash.offset)
+    };
+    let contours = stroke_outline_contours(
+        &lines,
+        &line_closed,
+        ss.width * 0.5,
+        ss.cap,
+        ss.join,
+        ss.miter_limit,
+        tol,
     );
     let mut builder = lyon_path::Path::builder();
-    for segment in segments {
-        let Some(first) = segment.first() else {
+    for ring in &contours {
+        let Some(first) = ring.first() else {
             continue;
         };
         builder.begin(point(first.x, first.y));
-        for p in &segment[1..] {
+        for p in &ring[1..] {
             builder.line_to(point(p.x, p.y));
         }
-        builder.end(false);
+        builder.end(true);
     }
     builder.build()
 }
@@ -108,34 +115,22 @@ pub fn tessellate(object: &VectorObjectData, tolerance: f32) -> Result<VectorMes
     }
 
     if object.style.stroke.is_visible() && object.style.stroke_style.width > 0.0 {
-        // The CPU reference (`core::vector::raster::stroke_coverage`) unions
-        // per-segment round capsules, i.e. it draws every stroke with round caps
-        // and round joins regardless of the style's cap/join. To match it exactly
-        // (so the GPU output equals the raster twin and the flag toggles cleanly),
-        // the GPU stroke is always tessellated round too — the cap/join style is
-        // intentionally ignored here, mirroring the rasteriser.
-        let options = StrokeOptions::default()
-            .with_line_width(object.style.stroke_style.width)
-            .with_start_cap(LyonLineCap::Round)
-            .with_end_cap(LyonLineCap::Round)
-            .with_line_join(LyonLineJoin::Round)
-            .with_tolerance(tolerance.max(0.001));
-        let dashed_path;
-        let stroke_path = if object.style.stroke_style.dash.is_solid() {
-            &path
-        } else {
-            dashed_path = dashed_lyon_path(object, tolerance);
-            &dashed_path
-        };
-        StrokeTessellator::new()
+        // The stroke is drawn by FILLING its true outline (honouring cap/join)
+        // with a NonZero fill — the exact same outline the CPU rasteriser fills
+        // (`core::vector::stroke::stroke_outline_contours`), so the GPU twin
+        // matches the reference and the flag toggles cleanly.
+        let outline = stroke_outline_lyon_path(object, tolerance);
+        FillTessellator::new()
             .tessellate_path(
-                stroke_path,
-                &options,
-                &mut BuffersBuilder::new(&mut buffers, |v: StrokeVertex| VectorVertex {
+                &outline,
+                &FillOptions::default()
+                    .with_fill_rule(LyonFillRule::NonZero)
+                    .with_tolerance(tolerance.max(0.001)),
+                &mut BuffersBuilder::new(&mut buffers, |v: FillVertex| VectorVertex {
                     position: [v.position().x, v.position().y],
                 }),
             )
-            .map_err(|e| format!("stroke tessellation failed: {e:?}"))?;
+            .map_err(|e| format!("stroke outline tessellation failed: {e:?}"))?;
     }
     let index_end = buffers.indices.len() as u32;
     Ok(VectorMesh {
@@ -191,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn dashed_stroke_generates_less_geometry_than_solid() {
+    fn dashed_stroke_tessellates_bounded_nonempty_geometry() {
         use crate::core::vector::style::DashPattern;
         let path = PathData::new(
             vec![Contour::new(
@@ -203,16 +198,48 @@ mod tests {
             )],
             FillRule::NonZero,
         );
-        let mut solid = VectorObjectData::from_path(path);
-        solid.style = VectorStyle::stroked(ColorValue::BLACK, 4.0);
-        let solid_mesh = tessellate(&solid, 0.1).unwrap();
-        let mut dashed = solid;
+        let mut dashed = VectorObjectData::from_path(path);
+        dashed.style = VectorStyle::stroked(ColorValue::BLACK, 4.0);
         dashed.style.stroke_style.dash = DashPattern::from_slice(&[10.0, 10.0], 0.0);
-        let dashed_mesh = tessellate(&dashed, 0.1).unwrap();
-        assert!(!dashed_mesh.stroke_range.is_empty());
+        let mesh = tessellate(&dashed, 0.1).unwrap();
+        // ~5 visible dashes, each a small butt-capped outline quad: the stroke is
+        // non-empty but the dash split keeps the geometry bounded.
+        assert!(!mesh.stroke_range.is_empty());
         assert!(
-            dashed_mesh.vertices.len() < solid_mesh.vertices.len() * 8,
-            "dash tessellation must stay bounded"
+            mesh.vertices.len() < 200,
+            "dash tessellation must stay bounded, got {}",
+            mesh.vertices.len()
+        );
+    }
+
+    #[test]
+    fn cap_style_changes_gpu_stroke_geometry() {
+        use crate::core::vector::style::LineCap;
+        // A single open segment: round caps add arc geometry that a butt cap does
+        // not, proving the GPU now honours the stored cap (no longer forced round).
+        let make = |cap: LineCap| {
+            let path = PathData::new(
+                vec![Contour::new(
+                    vec![
+                        Node::sharp(Point::new(0.0, 0.0)),
+                        Node::sharp(Point::new(50.0, 0.0)),
+                    ],
+                    false,
+                )],
+                FillRule::NonZero,
+            );
+            let mut o = VectorObjectData::from_path(path);
+            o.style = VectorStyle::stroked(ColorValue::BLACK, 10.0);
+            o.style.stroke_style.cap = cap;
+            tessellate(&o, 0.1).unwrap()
+        };
+        let butt = make(LineCap::Butt);
+        let round = make(LineCap::Round);
+        assert!(
+            round.vertices.len() > butt.vertices.len(),
+            "round caps add geometry vs butt ({} vs {})",
+            round.vertices.len(),
+            butt.vertices.len()
         );
     }
 }

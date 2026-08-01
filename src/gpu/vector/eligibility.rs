@@ -73,11 +73,12 @@ pub fn blend_mode_supported(mode: BlendMode) -> bool {
 /// path (a primitive's geometry is always valid and never carries a brush, so its
 /// eligibility is decided entirely by its style — no path allocation needed).
 pub fn style_eligibility(style: &crate::core::vector::style::VectorStyle) -> Eligibility {
-    // Cap/join style is NOT gated: the GPU tessellates every stroke round (see
-    // `mesh::tessellate`) to match the CPU capsule rasteriser, which also ignores
-    // cap/join. So a butt/miter outline renders identically to the raster twin and
-    // is eligible. Dashed strokes are split with the raster reference's exact
-    // dash walker before Lyon tessellation.
+    // Cap/join style is NOT gated: the GPU fills the stroke's true outline from the
+    // shared `core::vector::stroke::stroke_outline_contours` reference (see
+    // `mesh::tessellate`), the same outline the CPU rasteriser fills, so any
+    // butt/round/square cap and miter/round/bevel join renders identically to the
+    // raster twin. Dashed strokes are split with the raster reference's exact dash
+    // walker before the outline is built.
     for paint in [style.fill, style.stroke] {
         if let Err(reason) = paint_supported(paint) {
             return Eligibility::RasterFallback(reason);

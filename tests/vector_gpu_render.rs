@@ -427,9 +427,9 @@ fn gpu_primitive_matches_cpu_reference() {
     }
 }
 
-/// A thick open line with round caps, matching the CPU capsule stroke model
-/// (`stroke_coverage` is always round regardless of the style flags — a real
-/// Phase 4 constraint: non-round caps/joins must fall back to raster).
+/// A thick open line with round caps. The CPU rasteriser and the GPU tessellator
+/// now both fill the same `stroke_outline_contours` reference, so the round cap
+/// outline agrees on either path.
 fn stroked_line() -> VectorObjectData {
     use iai::core::vector::style::{LineCap, LineJoin};
     let path = PathData::new(
@@ -447,6 +447,31 @@ fn stroked_line() -> VectorObjectData {
     style.stroke_style.join = LineJoin::Round;
     style.fill = iai::core::vector::style::Paint::None;
     VectorObjectData::new(path, style, AffineTransform::translate(20.0, 30.0))
+}
+
+/// A thick open polyline with a right-angle corner drawn with the DEFAULT stroke
+/// style — butt caps and a miter join. This exercises the sharp cap/join outline
+/// (not a round capsule), so the flat ends and mitred corner must match on both
+/// the CPU rasteriser and the GPU twin.
+fn stroked_corner() -> VectorObjectData {
+    use iai::core::vector::style::{LineCap, LineJoin};
+    let path = PathData::new(
+        vec![Contour::new(
+            vec![
+                Node::sharp(Point::new(0.0, 0.0)),
+                Node::sharp(Point::new(80.0, 0.0)),
+                Node::sharp(Point::new(80.0, 80.0)),
+            ],
+            false,
+        )],
+        FillRule::NonZero,
+    );
+    let mut style = VectorStyle::stroked(ColorValue::rgb(0.20, 0.40, 0.90), 14.0);
+    style.stroke_style.cap = LineCap::Butt;
+    style.stroke_style.join = LineJoin::Miter;
+    style.stroke_style.miter_limit = 4.0;
+    style.fill = iai::core::vector::style::Paint::None;
+    VectorObjectData::new(path, style, AffineTransform::translate(30.0, 30.0))
 }
 
 #[test]
@@ -506,6 +531,61 @@ fn gpu_stroke_matches_cpu_reference() {
     );
     eprintln!(
         "stroke: {}x{} interior={} ok",
+        cpu.width, cpu.height, c.interior
+    );
+}
+
+#[test]
+#[ignore = "local GPU snapshot; run with --ignored --nocapture"]
+fn gpu_stroke_cap_join_matches_cpu_reference() {
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter available; skipping GPU cap/join snapshot");
+        return;
+    };
+    let renderer = VectorRenderer::new(
+        &device,
+        iai::gpu::vector::renderer::VECTOR_TARGET_FORMAT,
+        iai::gpu::vector::renderer::VECTOR_SAMPLE_COUNT,
+    );
+    let object = stroked_corner();
+    let cpu = rasterize(&object).expect("reference stroke raster");
+    let cpu_mesh = tessellate(&object, 0.1).expect("tessellate stroke");
+    let mesh = GpuMesh::upload(&device, &cpu_mesh);
+    let view = CanvasView::tight(
+        cpu.width,
+        cpu.height,
+        cpu.offset.0 as f32,
+        cpu.offset.1 as f32,
+    );
+    let draws = [VectorDraw {
+        mesh: &mesh,
+        object_to_canvas: object.transform,
+        fill: None,
+        stroke: Some(GpuPaint::Solid([0.20, 0.40, 0.90, 1.0])),
+        opacity: object.style.opacity,
+    }];
+    let gpu = renderer.render_offscreen(&device, &queue, view, &draws);
+    let c = compare(&cpu, &gpu);
+    assert!(
+        c.interior > 40,
+        "cap/join stroke: too few interior pixels ({})",
+        c.interior
+    );
+    let bad_frac = c.interior_bad as f32 / c.interior as f32;
+    assert!(
+        bad_frac < 0.01,
+        "cap/join stroke: {} / {} interior pixels differ ({:.2}%)",
+        c.interior_bad,
+        c.interior,
+        bad_frac * 100.0
+    );
+    assert_eq!(
+        c.exterior_bad, 0,
+        "cap/join stroke: {} exterior pixels wrongly painted (butt cap / miter corner leaked)",
+        c.exterior_bad
+    );
+    eprintln!(
+        "cap/join stroke: {}x{} interior={} ok",
         cpu.width, cpu.height, c.interior
     );
 }

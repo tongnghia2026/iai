@@ -18,7 +18,8 @@ use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::brush::BrushStroke;
 use crate::core::vector::flatten::flatten_path;
 use crate::core::vector::object::VectorObjectData;
-use crate::core::vector::style::{GradientKind, Paint};
+use crate::core::vector::stroke::stroke_outline_contours;
+use crate::core::vector::style::{GradientKind, LineCap, LineJoin, Paint};
 
 /// Flatten tolerance in layer pixels. Small enough to be invisible at 100%, large
 /// enough that a page-sized curve does not explode the polyline.
@@ -118,8 +119,27 @@ fn raster_layout(
         return None;
     }
 
-    // AA margin: half the stroke plus a pixel for the coverage ramp.
-    let pad = half.max(0.0) + 1.0;
+    // AA margin: half the stroke plus a pixel for the coverage ramp. Miter joins
+    // and square caps push the outline past `half`, so the frame must grow to fit
+    // them or the spike/cap would be clipped at the raster edge.
+    let base = half.max(0.0);
+    let cap_join_extra = if stroke_visible && object.brush.is_none() {
+        let ss = object.style.stroke_style;
+        let miter = if matches!(ss.join, LineJoin::Miter) {
+            base * ss.miter_limit
+        } else {
+            0.0
+        };
+        let cap = if matches!(ss.cap, LineCap::Square) {
+            base * std::f32::consts::SQRT_2
+        } else {
+            0.0
+        };
+        miter.max(cap)
+    } else {
+        0.0
+    };
+    let pad = base.max(cap_join_extra) + 1.0;
     let mut off_x = (min_x - pad).floor();
     let mut off_y = (min_y - pad).floor();
     let mut end_x = (max_x + pad).ceil();
@@ -249,7 +269,19 @@ fn rasterize_impl(
                 object.style.stroke_style.dash.as_slice(),
                 object.style.stroke_style.dash.offset,
             );
-            let cov = stroke_coverage(&stroke_lines, &stroke_closed, w, h, half);
+            // Fill the stroke's true outline (honouring cap/join) with the fill
+            // coverage path — the same NonZero scanline the GPU twin fills.
+            let ss = object.style.stroke_style;
+            let outline = stroke_outline_contours(
+                &stroke_lines,
+                &stroke_closed,
+                half,
+                ss.cap,
+                ss.join,
+                ss.miter_limit,
+                FLATTEN_TOL,
+            );
+            let cov = fill_coverage(&outline, w, h, false);
             paint_rows(
                 &mut rgba,
                 &cov,
@@ -563,50 +595,6 @@ fn add_span(row: &mut [f32], xa: f32, xb: f32, weight: f32) {
     }
 }
 
-/// Per-segment capsule stroke coverage in `[0,1]` per pixel, unioned via max so
-/// overlapping segments/joins stay opaque without double-counting. Only pixels
-/// inside each segment's expanded bbox are touched, so a page-sized thin outline
-/// costs O(perimeter·width), not O(area).
-fn stroke_coverage(local: &[Vec<Point>], closed: &[bool], w: u32, h: u32, half: f32) -> Vec<f32> {
-    let mut cov = vec![0f32; (w as usize) * (h as usize)];
-    let reach = half + 0.5; // coverage ramp reaches half a pixel past the edge
-    for (ci, pl) in local.iter().enumerate() {
-        if pl.len() < 2 {
-            continue;
-        }
-        let n = pl.len();
-        // A closed flattened contour already ends at its start point, so edges
-        // 0..n-1 cover the ring; an open one stops before wrapping.
-        let seg_count = if closed.get(ci).copied().unwrap_or(false) {
-            n // includes the wrap edge (pl[n-1] == pl[0] for a closed ring)
-        } else {
-            n - 1
-        };
-        for i in 0..seg_count {
-            let a = pl[i];
-            let b = pl[(i + 1) % n];
-            let min_x = (a.x.min(b.x) - reach).floor().max(0.0) as u32;
-            let max_x = ((a.x.max(b.x) + reach).ceil() as i64).clamp(0, w as i64) as u32;
-            let min_y = (a.y.min(b.y) - reach).floor().max(0.0) as u32;
-            let max_y = ((a.y.max(b.y) + reach).ceil() as i64).clamp(0, h as i64) as u32;
-            for py in min_y..max_y {
-                let row = (py as usize) * (w as usize);
-                for px in min_x..max_x {
-                    let d = dist_to_segment(px as f32 + 0.5, py as f32 + 0.5, a, b);
-                    let c = (0.5 - (d - half)).clamp(0.0, 1.0);
-                    if c > 0.0 {
-                        let idx = row + px as usize;
-                        if c > cov[idx] {
-                            cov[idx] = c;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    cov
-}
-
 /// Variable-width brush ribbon coverage in `[0,1]` per pixel (Phase 6B). Each
 /// segment of the flattened layer-space centerline is a "round cone" — a capsule
 /// whose radius tapers from the half-width at one end to the half-width at the
@@ -710,24 +698,6 @@ fn sd_round_cone(px: f32, py: f32, a: Point, b: Point, r1: f32, r2: f32) -> f32 
         return (x2 + y2).sqrt() * il2 - r1;
     }
     (x2 * a2 * il2).sqrt() * il2 + y * rr * il2 - r1
-}
-
-/// Distance from `(px,py)` to segment `a→b`.
-fn dist_to_segment(px: f32, py: f32, a: Point, b: Point) -> f32 {
-    let dx = b.x - a.x;
-    let dy = b.y - a.y;
-    let len2 = dx * dx + dy * dy;
-    if len2 < 1e-6 {
-        let ex = px - a.x;
-        let ey = py - a.y;
-        return (ex * ex + ey * ey).sqrt();
-    }
-    let t = (((px - a.x) * dx + (py - a.y) * dy) / len2).clamp(0.0, 1.0);
-    let cx = a.x + t * dx;
-    let cy = a.y + t * dy;
-    let ex = px - cx;
-    let ey = py - cy;
-    (ex * ex + ey * ey).sqrt()
 }
 
 /// Source-over blend of a straight-alpha colour into an `[r,g,b,a]` pixel (u8),

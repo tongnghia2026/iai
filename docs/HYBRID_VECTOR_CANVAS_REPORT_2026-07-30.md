@@ -370,17 +370,47 @@ gate test, the full library suite, and all six serialized local GPU snapshots.
   fall through to Normal.
 - Dissolve is the one remaining blend fallback: it is stochastic per pixel and
   cannot match the CPU raster reference across zoom/transform.
-- Stored butt/square cap and miter/bevel join still intentionally render as the
-  legacy CPU reference's round capsules. Changing that requires upgrading the
-  authoritative CPU raster appearance and is not silently enabled here.
+
+## Continuation: Phase 4 real cap/join (2026-08-01)
+
+Strokes now honour their stored cap and join on both paths (user-approved: it
+changes how existing sharp/flat strokes render — the previous build drew every
+stroke as round capsules, so even the *default* Butt-cap / Miter-join stroke came
+out round).
+
+- **New shared reference `core::vector::stroke::stroke_outline_contours`.** It
+  turns a flattened centreline into the *filled outline* of the stroke — offset
+  quad per segment, a join wedge (bevel triangle / round fan / miter quad with the
+  SVG miter-limit → bevel fallback) at each interior/closed vertex, and a cap
+  (butt = nothing / projecting square / round semicircle) at each open end. Every
+  contour is emitted with one winding orientation so a NonZero fill unions them;
+  the hollow interior of a closed outline stays at winding zero. Round caps/joins
+  flatten to `tolerance`.
+- **CPU** (`raster.rs`): the stroke is now filled through the existing
+  `fill_coverage` NonZero scanline instead of the round-capsule `stroke_coverage`
+  (removed). The raster frame pad grew to fit miter spikes (`miter_limit × half`)
+  and projecting square caps (`√2 × half`) so they are not clipped.
+- **GPU** (`mesh.rs`): the stroke is fill-tessellated (Lyon NonZero) from the
+  *same* outline contours instead of Lyon's stroke tessellator, so CPU and GPU
+  fill an identical polygon and agree by construction. Cap/join/miter-limit are
+  already part of the geometry fingerprint, so changing them rebuilds the mesh.
+- **Verification.** Six CPU unit tests in `stroke.rs` lock butt/square/round caps,
+  miter/bevel joins, the miter-limit bevel fallback, and closed-ring hollowness.
+  A CI-safe GPU mesh test proves round caps now add geometry a butt cap does not
+  (cap style is honoured, no longer forced round). The real-GPU
+  `gpu_stroke_cap_join_matches_cpu_reference` snapshot renders a thick butt-cap /
+  miter-join corner and asserts it matches `core::vector::raster` (interior within
+  2/255 linear, no exterior leak, ±1 px AA band excluded). Vector brush (variable
+  width) is the only stroke feature still on raster fallback.
 
 ## Remaining phases (honest status, 2026-07-31)
 
-- **Phase 4 stroke — mostly shipped.** Solid and dashed strokes are GPU-native and
-  tessellated as round capsules regardless of stored cap/join, matching the CPU
-  reference `stroke_coverage` exactly. Vector brush remains raster fallback.
-  Honouring butt/square/miter/bevel visually still requires upgrading
-  the CPU reference and is a separate appearance-changing decision.
+- **Phase 4 stroke — shipped.** Solid and dashed strokes are GPU-native and honour
+  the stored cap (butt/round/square) and join (miter/bevel/round) with the SVG
+  miter limit, via the shared `stroke_outline_contours` reference filled on both
+  the CPU and GPU. The 2026-08-01 continuation above covers the appearance change
+  (user-approved) and the parity verification. Vector brush (variable width) is
+  the only stroke feature still on raster fallback.
 - **Phase 5 gradient / opacity / blend — mostly shipped.**
   Linear and radial RGB gradients are evaluated in `vector.wgsl` with the model's
   object→gradient inverse transform, up to eight sorted stops, clamp semantics,
