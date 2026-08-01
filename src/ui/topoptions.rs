@@ -1693,6 +1693,39 @@ fn path_style_quick(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if resp.drag_stopped() || resp.lost_focus() {
         actions.tool.commit_path_style = true;
     }
+    // Cap/join right on the bar so the stroke ends/corners are one click away.
+    let mut cap = style.cap;
+    egui::ComboBox::from_id_salt("quick_line_cap")
+        .selected_text(match cap {
+            1 => "Round cap",
+            2 => "Square cap",
+            _ => "Butt cap",
+        })
+        .width(96.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut cap, 0, "Butt cap");
+            ui.selectable_value(&mut cap, 1, "Round cap");
+            ui.selectable_value(&mut cap, 2, "Square cap");
+        });
+    if cap != style.cap {
+        actions.tool.set_path_cap = Some(cap);
+    }
+    let mut join = style.join;
+    egui::ComboBox::from_id_salt("quick_line_join")
+        .selected_text(match join {
+            1 => "Round join",
+            2 => "Bevel join",
+            _ => "Miter join",
+        })
+        .width(96.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut join, 0, "Miter join");
+            ui.selectable_value(&mut join, 1, "Round join");
+            ui.selectable_value(&mut join, 2, "Bevel join");
+        });
+    if join != style.join {
+        actions.tool.set_path_join = Some(join);
+    }
     ui.label(
         egui::RichText::new("More in Color panel")
             .size(10.0)
