@@ -462,21 +462,37 @@ impl App {
         canvas.layer_stack.active_idx = idx;
         canvas.layer_revision += 1;
 
+        // Seed the edit buffer as canonical NFC so the on-screen caret lines up
+        // with the fused glyphs and a later commit stays precomposed (see
+        // `update_text_buffer`). Legacy text saved as decomposed diacritics is
+        // repaired the moment it is re-opened.
+        let (nfc_chars, style_src) = crate::core::text::normalize_nfc_with_style_src(&td.content);
+        let buffer: String = nfc_chars.iter().collect();
+        let glyph_styles = if td.glyph_styles.is_empty() {
+            Vec::new()
+        } else {
+            style_src
+                .iter()
+                .map(|&i| td.glyph_style(i))
+                .collect::<Vec<_>>()
+        };
+        let caret = Some(nfc_chars.len());
+
         self.edit.tools.select(ToolId::Text);
         self.shell.ui.show_text_panel = true;
         self.edit.text_edit = Some(TextEditState {
             doc_id,
             layer_id,
-            buffer: td.content.clone(),
+            buffer,
             origin,
             rotation_deg: td.rotation_deg,
             stretch_x: td.stretch_x,
             flip_x: td.flip_x,
             flip_y: td.flip_y,
             is_new: false,
-            glyph_styles: td.glyph_styles.clone(),
+            glyph_styles,
             selection: None,
-            caret: Some(td.content.chars().count()),
+            caret,
             pending_style: None,
             orig: Some(td),
             before_cmd: Some(before),
@@ -493,6 +509,11 @@ impl App {
     /// overlay shows the text until commit). Keeps per-character styles aligned
     /// with the edited string.
     pub fn update_text_buffer(&mut self, new: String) {
+        // Store canonical (precomposed) text: decomposed diacritics would render
+        // with detached accents (ab_glyph has no mark positioning) and the caret
+        // would count the invisible combining marks. NFC also matches how most
+        // Vietnamese IMEs deliver text.
+        let new = crate::core::text::normalize_nfc(&new);
         let base = crate::core::text::GlyphStyle {
             color: self.edit.text_color,
             font_px: self.edit.text_font_px,

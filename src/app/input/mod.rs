@@ -895,6 +895,15 @@ impl ApplicationHandler for App {
                     if !self.win.window_visible {
                         w.set_visible(true);
                         self.win.window_visible = true;
+                        // The window is created hidden + borderless, then shown
+                        // here. On Windows, showing a hidden borderless window
+                        // does not reliably make it the active/foreground window,
+                        // so it never gets a clean WM_SETFOCUS — the IME context
+                        // stays unassociated and Windows rings the default bell on
+                        // every keystroke until the user minimises + restores
+                        // (which forces activation). Activate it explicitly here,
+                        // reproducing that fix on first reveal.
+                        w.focus_window();
                     }
                     w.request_redraw();
                 }

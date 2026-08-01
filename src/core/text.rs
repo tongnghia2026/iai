@@ -11,6 +11,46 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
+use unicode_normalization::char::canonical_combining_class;
+use unicode_normalization::UnicodeNormalization;
+
+/// Normalize `content` to NFC (precomposed), returning the resulting chars plus,
+/// for each output char, the index of the source character whose per-glyph style
+/// it should inherit.
+///
+/// Why: `ab_glyph` does no OpenType mark positioning. A decomposed (NFD) sequence
+/// like `E` + `◌̂` + `◌̉` (Vietnamese "Ể") lays the two combining marks out with
+/// zero advance at the pen *after* the base letter, so the accents render detached
+/// up and to the right instead of stacked over the letter. Fusing to the single
+/// precomposed glyph the font already positions correctly fixes it. Clusters are
+/// `starter + following combining marks`, so per-character styling survives (each
+/// fused glyph keeps its base letter's style).
+pub(crate) fn normalize_nfc_with_style_src(content: &str) -> (Vec<char>, Vec<usize>) {
+    let src: Vec<char> = content.chars().collect();
+    let mut out_chars = Vec::with_capacity(src.len());
+    let mut out_src = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        let base = i;
+        let mut j = i + 1;
+        // Absorb the trailing combining marks that belong to this starter.
+        while j < src.len() && canonical_combining_class(src[j]) != 0 {
+            j += 1;
+        }
+        for c in src[base..j].iter().collect::<String>().nfc() {
+            out_chars.push(c);
+            out_src.push(base);
+        }
+        i = j;
+    }
+    (out_chars, out_src)
+}
+
+/// Convenience NFC of a whole string (used where per-character styles are not
+/// tracked, e.g. storing the edit buffer).
+pub fn normalize_nfc(content: &str) -> String {
+    content.nfc().collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextAlign {
@@ -784,8 +824,12 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
     let base_ascent = base_font.as_scaled(PxScale::from(base_px)).ascent();
     let base_descent = base_font.as_scaled(PxScale::from(base_px)).descent();
 
-    let chars: Vec<char> = td.content.chars().collect();
-    let styles: Vec<GlyphStyle> = (0..chars.len()).map(|i| td.glyph_style(i)).collect();
+    // Fuse decomposed diacritics to precomposed glyphs so accents sit on their
+    // base letter (ab_glyph has no mark positioning). Per-glyph styles follow the
+    // base character of each fused cluster. All layout consumers (raster / curves
+    // / caret / hit-test) run through here, so screen and PDF stay identical.
+    let (chars, style_src) = normalize_nfc_with_style_src(&td.content);
+    let styles: Vec<GlyphStyle> = style_src.iter().map(|&i| td.glyph_style(i)).collect();
     let max_px = styles
         .iter()
         .map(|style| style.font_px.max(1.0))
@@ -1655,6 +1699,49 @@ mod tests {
         .expect("font was available for plain text");
 
         assert!(alpha_sum(&underlined.rgba) > alpha_sum(&plain.rgba));
+    }
+
+    #[test]
+    fn nfc_normalization_fuses_decomposed_diacritics() {
+        // "Ể" precomposed (U+1EC2) vs "E" + combining circumflex + hook above.
+        // ab_glyph has no mark positioning, so without NFC the decomposed form
+        // lays the accents out detached past the base letter — a wider raster
+        // with ink far to the right. After NFC both must be byte-identical.
+        let precomposed = match rasterize(&text("BI\u{1EC2}N")) {
+            Some(r) => r,
+            None => return, // no font in this environment
+        };
+        let decomposed =
+            rasterize(&text("BIE\u{0302}\u{0309}N")).expect("font available for decomposed text");
+        assert_eq!(
+            (precomposed.width, precomposed.height),
+            (decomposed.width, decomposed.height),
+            "decomposed diacritics must fuse to the same footprint as precomposed"
+        );
+        assert_eq!(
+            precomposed.rgba, decomposed.rgba,
+            "NFC normalization must make decomposed text render identically"
+        );
+    }
+
+    #[test]
+    fn nfc_normalization_maps_per_glyph_styles_to_base_letter() {
+        // A per-character red override on the single precomposed "Ể" must land on
+        // the fused glyph when the source is decomposed (base + two marks).
+        let mut td = text("\u{1EC2}");
+        td.ensure_glyph_styles();
+        td.glyph_styles[0].color = [255, 0, 0, 255];
+        let precomposed = match rasterize(&td) {
+            Some(r) => r,
+            None => return,
+        };
+        let mut dtd = text("E\u{0302}\u{0309}");
+        dtd.ensure_glyph_styles(); // 3 entries
+        for s in &mut dtd.glyph_styles {
+            s.color = [255, 0, 0, 255];
+        }
+        let decomposed = rasterize(&dtd).expect("font available");
+        assert_eq!(precomposed.rgba, decomposed.rgba);
     }
 
     #[test]

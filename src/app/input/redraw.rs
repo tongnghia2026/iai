@@ -197,6 +197,10 @@ impl App {
                 if !self.win.window_visible {
                     window.set_visible(true);
                     self.win.window_visible = true;
+                    // Activate on first reveal so Windows gives the hidden-created
+                    // borderless window a real WM_SETFOCUS (IME association),
+                    // otherwise it dings on every keystroke until minimise+restore.
+                    window.focus_window();
                 }
             } else {
                 // Push the theme into egui's global Visuals only when it
@@ -283,6 +287,10 @@ impl App {
                 if !self.win.window_visible {
                     window.set_visible(true);
                     self.win.window_visible = true;
+                    // Activate on first reveal so Windows gives the hidden-created
+                    // borderless window a real WM_SETFOCUS (IME association),
+                    // otherwise it dings on every keystroke until minimise+restore.
+                    window.focus_window();
                 }
             }
             if main_frame_presented {

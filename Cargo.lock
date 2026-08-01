@@ -2097,6 +2097,7 @@ dependencies = [
  "serde_json",
  "tiff",
  "tungstenite",
+ "unicode-normalization",
  "wgpu",
  "windows-sys 0.61.2",
  "winit",
