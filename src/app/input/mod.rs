@@ -715,6 +715,16 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::Occluded(occluded) => {
+                self.win.window_occluded = occluded;
+                if !occluded {
+                    self.win.egui_repaint_deadline = None;
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+
             WindowEvent::Resized(sz) => {
                 if sz.width > 0 && sz.height > 0 {
                     if let Some(gpu) = &mut self.win.gpu {
@@ -888,6 +898,46 @@ impl ApplicationHandler for App {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(
                     std::time::Instant::now() + std::time::Duration::from_millis(16),
                 ));
+            }
+            return;
+        }
+
+        let main_window_hidden = self.win.window_occluded
+            || self
+                .win
+                .window
+                .as_ref()
+                .map(|window| window.inner_size())
+                .is_some_and(|size| size.width == 0 || size.height == 0);
+        if main_window_hidden {
+            let background_busy = self.jobs.pending_file_dialog.is_some()
+                || !self.jobs.pending_loads.is_empty()
+                || self.edit.pending_transform_commit.is_some()
+                || self.jobs.select_subject.is_busy()
+                || self.jobs.ai_engine.has_jobs()
+                || crate::core::lama::is_downloading()
+                || self
+                    .shell
+                    .filter_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.processing)
+                || self.dev.develop_preview.as_ref().is_some_and(|preview| {
+                    preview.processing || preview.detail_refine_at.is_some()
+                })
+                || self.jobs.ext.busy();
+            if background_busy {
+                // Poll real background work slowly, without rebuilding or
+                // presenting the hidden window.
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    std::time::Instant::now() + std::time::Duration::from_millis(100),
+                ));
+            } else {
+                // Ignore stale egui/selection animation deadlines. Keeping Poll
+                // here was the full-core minimized spin.
+                event_loop.set_control_flow(ControlFlow::Wait);
             }
             return;
         }

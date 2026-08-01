@@ -13,6 +13,9 @@ pub struct WindowRuntime {
     pub(in crate::app) window: Option<Arc<Window>>,
     pub(in crate::app) window_visible: bool,
     pub(in crate::app) window_focused: bool,
+    /// Authoritative minimized/covered state; Windows does not always report a
+    /// zero inner size for a minimized window.
+    pub(in crate::app) window_occluded: bool,
     /// The Develop stage's second OS window (Track D / D1), when open. It has
     /// its own egui context + egui-winit state (VN font + theme applied on
     /// creation); its GPU surface lives in `GpuState::develop`. `None` when the

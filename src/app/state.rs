@@ -1068,6 +1068,7 @@ impl App {
                 window: None,
                 window_visible: false,
                 window_focused: false,
+                window_occluded: false,
                 develop_window: None,
                 retiring_develop_window: None,
                 develop_egui_ctx: None,

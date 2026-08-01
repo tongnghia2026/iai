@@ -14,27 +14,6 @@ impl App {
         }
         self.win.rendering = true;
 
-        // While the window is minimized winit reports a zero inner size.
-        // Building an egui frame at 0×0 makes every docked panel and scroll
-        // area lay out — and PERSIST, keyed by id — a height clamped to the
-        // (zero) available space. On restore egui reloads that stored zero
-        // height instead of the default, so the docked Layers/Channels panel
-        // comes back collapsed and empty until the whole app is restarted
-        // (egui memory is process-local). Skip the frame entirely while
-        // minimized; the Resized event fired on restore requests the next
-        // real redraw. Startup hides the window at its true 1280×720 size, so
-        // this guard never suppresses the first frame.
-        if self
-            .win
-            .window
-            .as_ref()
-            .map(|w| w.inner_size())
-            .is_some_and(|s| s.width == 0 || s.height == 0)
-        {
-            self.win.rendering = false;
-            return;
-        }
-
         // A lost GPU device (driver reset / TDR — typically after a
         // heavy AI inference or an idle power cycle) invalidates every
         // texture and pipeline; without this rebuild the app freezes on
@@ -132,6 +111,20 @@ impl App {
         self.poll_ext_bridge();
 
         self.update_refine_overlay_tex();
+
+        // Background jobs above must still make progress while minimized, but
+        // never build egui or acquire/present a hidden surface. A 0x0 egui frame
+        // also persists collapsed dock dimensions into egui memory.
+        let zero_sized = self
+            .win
+            .window
+            .as_ref()
+            .map(|window| window.inner_size())
+            .is_some_and(|size| size.width == 0 || size.height == 0);
+        if self.win.window_occluded || zero_sized {
+            self.win.rendering = false;
+            return;
+        }
 
         if let Some(window) = self.win.window.as_ref().cloned() {
             let mut main_frame_presented = self.win.gpu.is_none();
