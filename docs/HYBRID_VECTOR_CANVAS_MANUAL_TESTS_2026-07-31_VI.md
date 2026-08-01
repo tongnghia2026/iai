@@ -24,21 +24,21 @@ chú ý:
 - `gpu_primitive_matches_cpu_reference` → rect / rounded / ellipse / polygon /
   star đều khớp CPU (Phase 6).
 
-Bật cờ trên Windows PowerShell rồi mở app:
+Đường GPU hiện được bật mặc định, nên chạy app bình thường:
 
 ```powershell
-$env:IAI_GPU_VECTOR_CANVAS = "1"
+cargo run
 ```
 
-(Chạy `iai.exe` từ đúng cửa sổ PowerShell đã đặt biến. Muốn về pipeline cũ: đóng
-app, `Remove-Item Env:IAI_GPU_VECTOR_CANVAS`, mở lại.)
+(Muốn về pipeline raster cũ để đối chứng/khẩn cấp: đóng app, đặt
+`$env:IAI_GPU_VECTOR_CANVAS = "0"`, rồi mở lại. Xóa biến sẽ bật lại GPU mặc định.)
 
 Trong dist portable đã kèm sẵn 1 file `.bat` không? Nếu không, chỉ cần đặt biến
 môi trường như trên trước khi chạy.
 
 ## 1. Cờ tắt = y hệt bản cũ (đối chứng)
 
-1. Mở app **không** đặt cờ. Mở tài liệu có đủ raster, text, Shape, Path.
+1. Mở app với `IAI_GPU_VECTOR_CANVAS=0`. Mở tài liệu có đủ raster, text, Shape, Path.
 2. Zoom 25% → 100% → 800% → cao nhất; vừa zoom vừa pan.
 3. Mong đợi: mọi layer hiện đủ, đúng thứ tự, nét Path lên dần như trước.
 4. Dấu hiệu lỗi: mất Path, viền đôi/hào quang, đảo thứ tự, khung đen/trong suốt.

@@ -4,12 +4,12 @@ Date: 2026-07-30
 
 ## Safety state
 
-The raster tile compositor remains the production renderer and the source
-vector model is unchanged. `IAI_GPU_VECTOR_CANVAS=1` is the opt-in emergency
-switch read by the new subsystem, but production compositing does not suppress
-any raster twin until a complete GPU draw transaction is connected. Therefore
-the current build cannot silently omit, double-render, or reorder a vector
-layer. Export and `.iai` serialization are unchanged.
+The source vector model and its raster twins remain unchanged. The qualified
+hybrid GPU path is enabled by default; `IAI_GPU_VECTOR_CANVAS=0` is the emergency
+switch back to the byte-identical raster compositor. Eligibility remains
+conservative: unsupported content keeps its raster twin and a GPU run suppresses
+that twin only after the complete draw path is selected. Export and `.iai`
+serialization are unchanged.
 
 ## Phase 0
 
