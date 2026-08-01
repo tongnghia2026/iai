@@ -975,8 +975,8 @@ impl CompositorState {
                         group.id == parent_id
                             && group.is_group()
                             && (group.opacity < 0.999
-                                || group.blend_mode != crate::core::blend::BlendMode::Normal)
-                            && group.mask.as_ref().is_none_or(|mask| !mask.enabled)
+                                || group.blend_mode != crate::core::blend::BlendMode::Normal
+                                || group.mask.as_ref().is_some_and(|mask| mask.enabled))
                     })
                 });
                 !in_effected_group
@@ -3171,6 +3171,7 @@ struct VsOut {
                         let run_opacity = run_group.map_or(1.0, |group| group.opacity);
                         let run_blend_mode =
                             run_group.map_or(layer.blend_mode, |group| group.blend_mode);
+                        let run_mask_owner = run_group.unwrap_or(layer);
                         let vw = self.viewport_w;
                         let vh = self.viewport_h;
                         let ping_v = self.ping_view.clone();
@@ -3218,30 +3219,40 @@ struct VsOut {
                                 view_offset_y,
                                 zoom,
                                 &objects,
-                                layer.mask.as_ref().filter(|mask| mask.enabled).map(|mask| {
-                                    crate::gpu::vector::composite::VectorMask {
-                                        layer_id: layer.id,
-                                        layer_offset: layer.offset,
-                                        sample_shift: layer.clip_parent_id.map_or(
-                                            (0, 0),
-                                            |frame_id| {
-                                                let frame_now = layer_stack
-                                                    .layers
-                                                    .iter()
-                                                    .find(|candidate| candidate.id == frame_id)
-                                                    .map(|frame| frame.offset)
-                                                    .unwrap_or(mask.bake_frame_offset);
-                                                (
-                                                    (layer.offset.0 - mask.bake_offset.0)
-                                                        - (frame_now.0 - mask.bake_frame_offset.0),
-                                                    (layer.offset.1 - mask.bake_offset.1)
-                                                        - (frame_now.1 - mask.bake_frame_offset.1),
-                                                )
+                                run_mask_owner
+                                    .mask
+                                    .as_ref()
+                                    .filter(|mask| mask.enabled)
+                                    .map(|mask| {
+                                        crate::gpu::vector::composite::VectorMask {
+                                            layer_id: run_mask_owner.id,
+                                            // Group masks use canvas coordinates in
+                                            // the CPU synthetic-layer reference.
+                                            layer_offset: run_group
+                                                .map_or(layer.offset, |_| (0, 0)),
+                                            sample_shift: if run_group.is_some() {
+                                                (0, 0)
+                                            } else {
+                                                layer.clip_parent_id.map_or((0, 0), |frame_id| {
+                                                    let frame_now = layer_stack
+                                                        .layers
+                                                        .iter()
+                                                        .find(|candidate| candidate.id == frame_id)
+                                                        .map(|frame| frame.offset)
+                                                        .unwrap_or(mask.bake_frame_offset);
+                                                    (
+                                                        (layer.offset.0 - mask.bake_offset.0)
+                                                            - (frame_now.0
+                                                                - mask.bake_frame_offset.0),
+                                                        (layer.offset.1 - mask.bake_offset.1)
+                                                            - (frame_now.1
+                                                                - mask.bake_frame_offset.1),
+                                                    )
+                                                })
                                             },
-                                        ),
-                                        mask,
-                                    }
-                                }),
+                                            mask,
+                                        }
+                                    }),
                                 run_opacity,
                                 run_blend_mode,
                             );

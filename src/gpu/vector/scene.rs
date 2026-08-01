@@ -260,4 +260,28 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn masked_group_children_form_one_isolated_run_and_match_cpu_mask_semantics() {
+        let mut stack = LayerStack::new(1, 1);
+        let mut below = Layer::new(1, "below", 1, 1);
+        below.tiles.set_pixel(0, 0, 255, 255, 255, 255);
+        let mut child = Layer::new(2, "child", 1, 1);
+        child.layer_type = LayerType::Vector(VectorGeometry::Path(VectorObjectData::default()));
+        child.parent_id = Some(3);
+        child.tiles.set_pixel(0, 0, 255, 0, 0, 255);
+        let mut group = Layer::new_group(3, "masked", 1, 1);
+        group.mask = Some(crate::core::layer::LayerMask::new_black(1, 1));
+        stack.layers = vec![below, child, group];
+
+        assert_eq!(
+            plan_runs(&stack, true),
+            vec![SceneRun::Raster(vec![1]), SceneRun::GpuVector(vec![2]),]
+        );
+        assert_eq!(
+            stack.flatten(1, 1),
+            vec![255, 255, 255, 255],
+            "the CPU oracle applies the black group mask after resolving children"
+        );
+    }
 }

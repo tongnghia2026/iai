@@ -144,9 +144,10 @@ fn isolated_group_supported(stack: &crate::core::layer::LayerStack, group_id: u3
     if !group.is_group()
         || !group.visible
         || group.parent_id.is_some()
-        || (group.opacity >= 0.999 && group.blend_mode == BlendMode::Normal)
+        || (group.opacity >= 0.999
+            && group.blend_mode == BlendMode::Normal
+            && group.mask.as_ref().is_none_or(|mask| !mask.enabled))
         || !blend_mode_supported(group.blend_mode)
-        || group.mask.as_ref().is_some_and(|mask| mask.enabled)
     {
         return false;
     }
@@ -391,6 +392,13 @@ mod tests {
         stack.layers[1].blend_mode = BlendMode::Dissolve;
         assert!(!stack_supports_gpu_opacity_groups(&stack));
         stack.layers[1].blend_mode = BlendMode::Multiply;
+
+        stack.layers[1].mask = Some(crate::core::layer::LayerMask::new_white(64, 64));
+        assert_eq!(
+            layer_eligibility_in_stack(&stack.layers[0], &stack, true),
+            Eligibility::GpuVector
+        );
+        assert!(stack_supports_gpu_opacity_groups(&stack));
 
         let mut raster = Layer::new(9, "mixed", 64, 64);
         raster.parent_id = Some(8);

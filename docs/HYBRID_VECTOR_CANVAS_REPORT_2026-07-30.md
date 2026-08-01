@@ -451,9 +451,15 @@ out round).
   The fifth slice extends that same isolated vector-only run to the sixteen
   deterministic blend modes already supported by the accumulator. The group
   blend is applied once after all children resolve, never per child; Dissolve,
-  mixed raster/vector, nested, masked, clipped-child, or effected-child groups
+  mixed raster/vector, nested, clipped-child, or effected-child groups
   remain whole-group raster fallback. Eligibility and planner tests lock the
   fallback boundary and surrounding z-order.
+  The sixth slice applies an ordinary raster mask to that isolated vector-only
+  group. Children and overlaps resolve first; the group mask, opacity, and blend
+  are then applied once in canvas coordinates, matching the CPU synthetic-group
+  reference. The existing R8 mask cache is reused, keyed by group id and tile
+  revision. Nested groups, vector masks, and mixed raster/vector groups remain
+  raster fallback.
   slice-by-slice, each slice needs a defined semantics + reference image; unsafe
   to land without manual verification.
 - **Phase 8 retire `path_display` — shipped for GPU-native paths.** Active idle
