@@ -133,7 +133,7 @@ pub fn layer_eligibility(layer: &Layer, enabled: bool) -> Eligibility {
     layer_eligibility_impl(layer, enabled, false, false)
 }
 
-fn opacity_group_supported(stack: &crate::core::layer::LayerStack, group_id: u32) -> bool {
+fn isolated_group_supported(stack: &crate::core::layer::LayerStack, group_id: u32) -> bool {
     let Some(group) = stack
         .layers
         .iter()
@@ -144,8 +144,8 @@ fn opacity_group_supported(stack: &crate::core::layer::LayerStack, group_id: u32
     if !group.is_group()
         || !group.visible
         || group.parent_id.is_some()
-        || group.opacity >= 0.999
-        || group.blend_mode != BlendMode::Normal
+        || (group.opacity >= 0.999 && group.blend_mode == BlendMode::Normal)
+        || !blend_mode_supported(group.blend_mode)
         || group.mask.as_ref().is_some_and(|mask| mask.enabled)
     {
         return false;
@@ -172,9 +172,10 @@ fn opacity_group_supported(stack: &crate::core::layer::LayerStack, group_id: u32
         })
 }
 
-/// True only for the deliberately narrow first isolation slice: every visible
-/// effected group is a top-level Normal-opacity group whose visible direct
-/// children can form one unmasked/unclipped GPU-vector run.
+/// True only for the deliberately narrow isolation slice: every visible
+/// effected group is a top-level group whose supported opacity/blend can be
+/// applied once after its visible direct children form one unmasked/unclipped
+/// GPU-vector run.
 pub fn stack_supports_gpu_opacity_groups(stack: &crate::core::layer::LayerStack) -> bool {
     stack.layers.iter().enumerate().all(|(index, group)| {
         let effected = group.is_group()
@@ -182,7 +183,7 @@ pub fn stack_supports_gpu_opacity_groups(stack: &crate::core::layer::LayerStack)
             && (group.opacity < 0.999
                 || group.blend_mode != BlendMode::Normal
                 || group.mask.as_ref().is_some_and(|mask| mask.enabled));
-        !effected || opacity_group_supported(stack, group.id)
+        !effected || isolated_group_supported(stack, group.id)
     })
 }
 
@@ -217,7 +218,7 @@ pub fn layer_eligibility_in_stack(
             && parent.opacity >= 0.999
             && parent.blend_mode == BlendMode::Normal
             && parent.mask.as_ref().is_none_or(|mask| !mask.enabled);
-        if !pass_through && !opacity_group_supported(stack, parent.id) {
+        if !pass_through && !isolated_group_supported(stack, parent.id) {
             return Eligibility::RasterFallback(FallbackReason::Group);
         }
         parent_id = parent.parent_id;
@@ -360,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_and_vector_only_opacity_groups_allow_gpu_children() {
+    fn plain_and_vector_only_effect_groups_allow_gpu_children() {
         let mut child = layer_with(square());
         child.parent_id = Some(8);
         let mut group = Layer::new_group(8, "plain", 64, 64);
@@ -378,6 +379,18 @@ mod tests {
             Eligibility::GpuVector
         );
         assert!(stack_supports_gpu_opacity_groups(&stack));
+
+        stack.layers[1].opacity = 1.0;
+        stack.layers[1].blend_mode = BlendMode::Multiply;
+        assert_eq!(
+            layer_eligibility_in_stack(&stack.layers[0], &stack, true),
+            Eligibility::GpuVector
+        );
+        assert!(stack_supports_gpu_opacity_groups(&stack));
+
+        stack.layers[1].blend_mode = BlendMode::Dissolve;
+        assert!(!stack_supports_gpu_opacity_groups(&stack));
+        stack.layers[1].blend_mode = BlendMode::Multiply;
 
         let mut raster = Layer::new(9, "mixed", 64, 64);
         raster.parent_id = Some(8);

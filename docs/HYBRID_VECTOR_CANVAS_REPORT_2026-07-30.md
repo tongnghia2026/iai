@@ -446,8 +446,14 @@ out round).
   whose visible direct children are all unmasked, unclipped GPU vectors. Its
   children render into one run, then group opacity is applied once to the resolved
   run (not independently to overlapping children). Mixed raster/vector, nested,
-  masked, or non-Normal groups keep the synthetic CPU raster fallback. GPU tests
+  or masked groups keep the synthetic CPU raster fallback. GPU tests
   cover overlapping children and planner tests lock surrounding raster z-order.
+  The fifth slice extends that same isolated vector-only run to the sixteen
+  deterministic blend modes already supported by the accumulator. The group
+  blend is applied once after all children resolve, never per child; Dissolve,
+  mixed raster/vector, nested, masked, clipped-child, or effected-child groups
+  remain whole-group raster fallback. Eligibility and planner tests lock the
+  fallback boundary and surrounding z-order.
   slice-by-slice, each slice needs a defined semantics + reference image; unsafe
   to land without manual verification.
 - **Phase 8 retire `path_display` — shipped for GPU-native paths.** Active idle

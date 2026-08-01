@@ -974,8 +974,8 @@ impl CompositorState {
                     stack.layers.iter().any(|group| {
                         group.id == parent_id
                             && group.is_group()
-                            && group.opacity < 0.999
-                            && group.blend_mode == crate::core::blend::BlendMode::Normal
+                            && (group.opacity < 0.999
+                                || group.blend_mode != crate::core::blend::BlendMode::Normal)
                             && group.mask.as_ref().is_none_or(|mask| !mask.enabled)
                     })
                 });
@@ -3162,13 +3162,15 @@ struct VsOut {
                         }
                     }
                     if !objects.is_empty() {
-                        let run_opacity = layer.parent_id.map_or(1.0, |parent_id| {
+                        let run_group = layer.parent_id.and_then(|parent_id| {
                             layer_stack
                                 .layers
                                 .iter()
                                 .find(|candidate| candidate.id == parent_id)
-                                .map_or(1.0, |group| group.opacity)
                         });
+                        let run_opacity = run_group.map_or(1.0, |group| group.opacity);
+                        let run_blend_mode =
+                            run_group.map_or(layer.blend_mode, |group| group.blend_mode);
                         let vw = self.viewport_w;
                         let vh = self.viewport_h;
                         let ping_v = self.ping_view.clone();
@@ -3241,7 +3243,7 @@ struct VsOut {
                                     }
                                 }),
                                 run_opacity,
-                                layer.blend_mode,
+                                run_blend_mode,
                             );
                         }
                         command_buffers.push(enc.finish());

@@ -232,4 +232,32 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn blended_group_children_form_one_isolated_run_in_z_order() {
+        let mut stack = LayerStack::new(1, 1);
+        let mut below = Layer::new(1, "below", 1, 1);
+        below.tiles.set_pixel(0, 0, 255, 255, 255, 255);
+        let make_child = |id| {
+            let mut child = Layer::new(id, "child", 1, 1);
+            child.layer_type = LayerType::Vector(VectorGeometry::Path(VectorObjectData::default()));
+            child.parent_id = Some(4);
+            child.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+            child
+        };
+        let mut group = Layer::new_group(4, "multiply", 1, 1);
+        group.blend_mode = crate::core::blend::BlendMode::Multiply;
+        let mut above = Layer::new(5, "above", 1, 1);
+        above.tiles.set_pixel(0, 0, 0, 0, 0, 255);
+        stack.layers = vec![below, make_child(2), make_child(3), group, above];
+
+        assert_eq!(
+            plan_runs(&stack, true),
+            vec![
+                SceneRun::Raster(vec![1]),
+                SceneRun::GpuVector(vec![2, 3]),
+                SceneRun::Raster(vec![5]),
+            ]
+        );
+    }
 }
