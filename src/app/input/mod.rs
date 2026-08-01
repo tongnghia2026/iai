@@ -509,7 +509,11 @@ impl ApplicationHandler for App {
                             );
                     }
                     if !view_key {
-                        self.win.text_input_frame_pending = true;
+                        // Keep the bell quiet for a short window, not just this
+                        // frame: the incidental denial can land a frame or two
+                        // later (caret-blink redraw / IME preedit→commit).
+                        self.win.text_input_quiet_until =
+                            Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
                         return;
                     }
                 }
