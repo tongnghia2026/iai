@@ -179,11 +179,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             }
                             ui.separator();
                             if ui.button("Exit").clicked() {
-                                if data.doc.is_modified {
-                                    actions.dialogs.show_exit_dialog = Some(true);
-                                } else {
-                                    actions.doc.exit = true;
-                                }
+                                actions.doc.exit = true;
                                 ui.close();
                             }
                         });
@@ -1279,11 +1275,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     );
                     ctx.data_mut(|d| d.insert_temp(close_hovered_id, close_resp.hovered()));
                     if close_resp.clicked() {
-                        if data.doc.is_modified {
-                            actions.dialogs.show_exit_dialog = Some(true);
-                        } else {
-                            actions.doc.exit = true;
-                        }
+                        actions.doc.exit = true;
                     }
 
                     let max_hovered_id = egui::Id::new("tb_max_hovered");

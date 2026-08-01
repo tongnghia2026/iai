@@ -408,6 +408,50 @@ mod tests {
     }
 
     #[test]
+    fn app_exit_prompts_each_dirty_tab_and_skips_clean_tabs() {
+        let mut app = App::new();
+        let first_id = app.docs.documents[0].id;
+        app.docs.documents[0].canvas.deselect();
+
+        app.open_new_doc_tab();
+        let second_id = app.docs.documents[1].id;
+        app.docs.documents[1].canvas.deselect();
+
+        app.open_new_doc_tab(); // clean tab, active when exit is requested
+        assert!(!app.request_app_exit());
+        assert_eq!(app.docs.pending_exit_docs.len(), 2);
+        assert_eq!(app.docs.pending_exit_docs.front(), Some(&first_id));
+        assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, first_id);
+
+        app.discard_current_exit_document();
+        assert_eq!(app.docs.pending_exit_docs.front(), Some(&second_id));
+        assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, second_id);
+        assert!(app.shell.ui.show_exit_dialog);
+
+        app.discard_current_exit_document();
+        assert!(app.docs.pending_exit_docs.is_empty());
+        assert!(app.shell.exit_requested);
+        assert!(!app.shell.ui.show_exit_dialog);
+    }
+
+    #[test]
+    fn cancelling_a_per_tab_exit_prompt_keeps_all_documents_open() {
+        let mut app = App::new();
+        app.docs.documents[0].canvas.deselect();
+        app.open_new_doc_tab();
+        app.docs.documents[1].canvas.deselect();
+
+        assert!(!app.request_app_exit());
+        app.cancel_app_exit();
+
+        assert_eq!(app.docs.documents.len(), 2);
+        assert!(app.docs.documents.iter().all(Document::is_modified));
+        assert!(app.docs.pending_exit_docs.is_empty());
+        assert!(!app.shell.exit_requested);
+        assert!(!app.shell.ui.show_exit_dialog);
+    }
+
+    #[test]
     fn one_pdf_document_swaps_and_restores_an_edited_page() {
         let mut app = App::new();
         let source = std::path::PathBuf::from("many-pages.pdf");

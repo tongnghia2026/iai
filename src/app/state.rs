@@ -1056,6 +1056,7 @@ impl App {
                 current_file: None,
                 next_doc_id: 2,
                 pending_close_doc_idx: None,
+                pending_exit_docs: std::collections::VecDeque::new(),
                 next_pdf_group_id: 1,
                 pdf_render_services: std::collections::HashMap::new(),
                 last_autosave: std::time::Instant::now(),
@@ -1369,6 +1370,7 @@ impl App {
                 },
                 status_msg: String::new(),
                 exit_requested: false,
+                exit_save_pending: false,
                 close_requested: false,
                 canvas_unit: crate::core::units::Unit::Pixels,
                 toolbar_w: 48.0,
@@ -2263,24 +2265,62 @@ impl App {
         if self.block_exit_if_active_operation() {
             return false;
         }
-        // App exit must consider the whole active document, not only the page
-        // currently visible. A PDF can have dirty pages cached in its session
-        // while the page on screen is clean; exiting in that state would
-        // otherwise silently discard those edits.
-        let document_is_modified = self
+        // Finalize edits before taking the snapshot of dirty tabs.
+        if self.edit.text_edit.is_some() {
+            self.commit_text_edit();
+        }
+        self.path_style_commit();
+        self.docs.documents[self.docs.active_doc_idx].reconcile_pdf_page_modified();
+
+        self.docs.pending_exit_docs = self
             .docs
             .documents
-            .get(self.docs.active_doc_idx)
-            .is_some_and(|document| document.is_modified());
-        if document_is_modified {
+            .iter()
+            .filter(|document| document.is_modified())
+            .map(|document| document.id)
+            .collect();
+        if self.docs.pending_exit_docs.is_empty() {
+            return true;
+        }
+        self.present_next_exit_document();
+        false
+    }
+
+    /// Select and prompt the next still-dirty tab in an app-exit sweep.
+    pub(crate) fn present_next_exit_document(&mut self) {
+        while let Some(id) = self.docs.pending_exit_docs.front().copied() {
+            let Some(idx) = self.docs.documents.iter().position(|doc| doc.id == id) else {
+                self.docs.pending_exit_docs.pop_front();
+                continue;
+            };
+            if !self.docs.documents[idx].is_modified() {
+                self.docs.pending_exit_docs.pop_front();
+                continue;
+            }
+            if idx != self.docs.active_doc_idx {
+                self.switch_to_doc(idx);
+            }
             self.shell.ui.show_exit_dialog = true;
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
-            false
-        } else {
-            true
+            return;
         }
+        self.shell.ui.show_exit_dialog = false;
+        self.shell.exit_requested = true;
+    }
+
+    pub(crate) fn discard_current_exit_document(&mut self) {
+        self.docs.pending_exit_docs.pop_front();
+        self.shell.ui.show_exit_dialog = false;
+        self.present_next_exit_document();
+    }
+
+    pub(crate) fn cancel_app_exit(&mut self) {
+        self.docs.pending_exit_docs.clear();
+        self.shell.exit_save_pending = false;
+        self.shell.exit_requested = false;
+        self.shell.ui.show_exit_dialog = false;
     }
 
     /// Returns a reference to the currently active document.

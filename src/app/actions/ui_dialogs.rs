@@ -420,6 +420,25 @@ impl App {
         if let Some(v) = actions.dialogs.show_adjustment_dialog.take() {
             self.shell.ui.show_adjustment_dialog = v;
         }
+        if actions.doc.exit_cancel {
+            self.cancel_app_exit();
+        }
+        if actions.doc.exit_discard_current {
+            self.discard_current_exit_document();
+        }
+        if actions.doc.exit_save_current {
+            self.shell.ui.show_exit_dialog = false;
+            self.do_save_project();
+            if self.jobs.pending_file_dialog.is_some() {
+                self.shell.exit_save_pending = true;
+            } else if !self.docs.documents[self.docs.active_doc_idx].is_modified() {
+                self.docs.pending_exit_docs.pop_front();
+                self.present_next_exit_document();
+            } else {
+                // A synchronous write failed; keep this tab in the sweep.
+                self.shell.ui.show_exit_dialog = true;
+            }
+        }
         if let Some(v) = actions.dialogs.show_exit_dialog.take() {
             if !v || !self.block_exit_if_active_operation() {
                 self.shell.ui.show_exit_dialog = v;

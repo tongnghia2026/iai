@@ -698,6 +698,13 @@ impl App {
                     self.shell.close_requested = false;
                     self.execute_close();
                 }
+                if self.shell.exit_save_pending {
+                    self.shell.exit_save_pending = false;
+                    if !self.docs.documents[self.docs.active_doc_idx].is_modified() {
+                        self.docs.pending_exit_docs.pop_front();
+                    }
+                    self.present_next_exit_document();
+                }
                 if self.shell.exit_requested {
                     self.shell.exit_requested = false;
                     self.clear_all_autosave();
@@ -711,6 +718,10 @@ impl App {
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.jobs.pending_file_dialog = None;
+                if self.shell.exit_save_pending {
+                    self.shell.exit_save_pending = false;
+                    self.shell.ui.show_exit_dialog = true;
+                }
                 self.shell.exit_requested = false;
                 self.shell.close_requested = false;
             }

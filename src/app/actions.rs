@@ -154,7 +154,7 @@ impl App {
         self.handle_direct_adjustment_actions(&mut actions);
         self.handle_tool_options_actions(&mut actions, event_loop);
 
-        if actions.doc.exit && !self.block_exit_if_active_operation() {
+        if actions.doc.exit && self.request_app_exit() {
             self.shell.exit_requested = true;
         }
 

@@ -14,6 +14,8 @@ pub struct UiShell {
     /// Exit the app after the Save (Save & Exit) dialog finishes writing. Cancelled
     /// if the user cancels the dialog. Honored in poll_file_dialog.
     pub(in crate::app) exit_requested: bool,
+    /// A Save chosen by the per-tab exit sweep is waiting for its file dialog.
+    pub(in crate::app) exit_save_pending: bool,
     /// Close the file after the Save (Save & Close) dialog finishes (see exit_requested).
     pub(in crate::app) close_requested: bool,
     pub(in crate::app) toolbar_w: f32,
