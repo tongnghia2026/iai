@@ -3117,43 +3117,46 @@ struct VsOut {
                     // The converted objects are owned temporaries, so they are built
                     // into `converted` *first* (capacity reserved so references never
                     // dangle), then borrowed alongside the Path objects in z-order.
-                    let mut converted: Vec<Vec<crate::core::vector::object::VectorObjectData>> =
-                        Vec::with_capacity(run_end - layer_slot);
+                    let prim_count = (layer_slot..run_end)
+                        .filter(|&j| {
+                            matches!(
+                                &visible_layers[j].1.layer_type,
+                                LayerType::Vector(VectorGeometry::Primitive(_))
+                            )
+                        })
+                        .count();
+                    let mut converted: Vec<crate::core::vector::object::VectorObjectData> =
+                        Vec::with_capacity(prim_count);
                     for j in layer_slot..run_end {
-                        let run_layer = visible_layers[j].1;
-                        converted.push(match &run_layer.layer_type {
-                            LayerType::Vector(VectorGeometry::Primitive(shape)) => {
-                                vec![shape.to_vector_object(run_layer.offset)]
-                            }
-                            LayerType::Text(text) => {
-                                crate::core::text::text_vector_objects(text, run_layer.offset)
-                            }
-                            _ => Vec::new(),
-                        });
+                        if let LayerType::Vector(VectorGeometry::Primitive(shape)) =
+                            &visible_layers[j].1.layer_type
+                        {
+                            converted.push(shape.to_vector_object(visible_layers[j].1.offset));
+                        }
                     }
                     let mut objects: Vec<(
                         &crate::core::vector::object::VectorObjectData,
                         (i32, i32),
                         f32,
                     )> = Vec::with_capacity(run_end - layer_slot);
+                    let mut ci = 0usize;
                     for j in layer_slot..run_end {
                         let run_layer = visible_layers[j].1;
                         match &run_layer.layer_type {
                             LayerType::Vector(VectorGeometry::Path(obj)) => {
                                 objects.push((obj, run_layer.offset, run_layer.opacity));
                             }
-                            LayerType::Vector(VectorGeometry::Primitive(_))
-                            | LayerType::Text(_) => {
+                            LayerType::Vector(VectorGeometry::Primitive(_)) => {
                                 // The position is already baked into the converted
                                 // object's transform, so pass its own raster origin:
                                 // the drag-drift correction becomes a no-op and the
                                 // shape draws exactly where its raster twin sat.
-                                for obj in &converted[j - layer_slot] {
-                                    let origin = crate::core::vector::raster::raster_geometry(obj)
-                                        .map(|(o, _, _)| o)
-                                        .unwrap_or(run_layer.offset);
-                                    objects.push((obj, origin, run_layer.opacity));
-                                }
+                                let obj = &converted[ci];
+                                let origin = crate::core::vector::raster::raster_geometry(obj)
+                                    .map(|(o, _, _)| o)
+                                    .unwrap_or(run_layer.offset);
+                                objects.push((obj, origin, run_layer.opacity));
+                                ci += 1;
                             }
                             _ => {}
                         }
