@@ -22,6 +22,10 @@ mod ui_layers;
 mod ui_selection;
 mod ui_tools;
 
+fn should_ring_modal_denial(denied: bool, text_input_frame: bool) -> bool {
+    denied && !text_input_frame
+}
+
 impl App {
     fn set_refine_overlay_tint(&mut self, color: [u8; 4]) {
         self.edit.refine_overlay_color = color;
@@ -116,6 +120,7 @@ impl App {
         // Strict modal lock (standard design-app behavior): while a modal
         // operation or dialog is open, features outside its scope are refused
         // with the system bell until the user commits or cancels.
+        let text_input_frame = std::mem::take(&mut self.win.text_input_frame_pending);
         if self.modal_lock_active() {
             let mut denied = actions.chrome.modal_denied;
             denied |= actions.doc.switch_doc.take().is_some();
@@ -140,7 +145,12 @@ impl App {
                 actions.chrome.show_library = None;
                 denied = true;
             }
-            if denied {
+            // Keyboard/IME events owned by the live TextEdit can make egui emit
+            // incidental UI bookkeeping in the same frame. They are not an
+            // attempted action outside the modal and must never ring Windows'
+            // attention bell. Pointer/menu/tab denials arrive in other frames;
+            // Ctrl+N is intercepted before egui and keeps its explicit denial.
+            if should_ring_modal_denial(denied, text_input_frame) {
                 self.deny_modal_action();
             }
         }
@@ -195,5 +205,17 @@ impl App {
         if !self.docs.documents.is_empty() {
             self.docs.documents[self.docs.active_doc_idx].reconcile_pdf_page_modified();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_ring_modal_denial;
+
+    #[test]
+    fn text_input_frames_never_ring_the_modal_bell() {
+        assert!(!should_ring_modal_denial(true, true));
+        assert!(should_ring_modal_denial(true, false));
+        assert!(!should_ring_modal_denial(false, false));
     }
 }

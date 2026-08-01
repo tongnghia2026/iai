@@ -509,6 +509,7 @@ impl ApplicationHandler for App {
                             );
                     }
                     if !view_key {
+                        self.win.text_input_frame_pending = true;
                         return;
                     }
                 }
