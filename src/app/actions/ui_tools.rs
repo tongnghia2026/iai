@@ -619,6 +619,12 @@ impl App {
         if let Some(kind) = actions.tool.set_path_dash_kind.take() {
             self.path_set_dash_kind(kind);
         }
+        if let Some(code) = actions.tool.set_path_cap.take() {
+            self.path_set_cap(code);
+        }
+        if let Some(code) = actions.tool.set_path_join.take() {
+            self.path_set_join(code);
+        }
         if let Some((values, len)) = actions.tool.set_path_dash_values.take() {
             self.path_set_dash_values(values, len);
         }

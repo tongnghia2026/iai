@@ -683,6 +683,44 @@ fn vector_appearance(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
         }
     });
 
+    ui.horizontal(|ui| {
+        ui.label("Cap");
+        let mut cap = style.cap;
+        egui::ComboBox::from_id_salt("appearance_line_cap")
+            .selected_text(match cap {
+                1 => "Round",
+                2 => "Square",
+                _ => "Butt",
+            })
+            .width(84.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut cap, 0, "Butt");
+                ui.selectable_value(&mut cap, 1, "Round");
+                ui.selectable_value(&mut cap, 2, "Square");
+            });
+        if cap != style.cap {
+            actions.tool.set_path_cap = Some(cap);
+        }
+
+        ui.label("Join");
+        let mut join = style.join;
+        egui::ComboBox::from_id_salt("appearance_line_join")
+            .selected_text(match join {
+                1 => "Round",
+                2 => "Bevel",
+                _ => "Miter",
+            })
+            .width(84.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut join, 0, "Miter");
+                ui.selectable_value(&mut join, 1, "Round");
+                ui.selectable_value(&mut join, 2, "Bevel");
+            });
+        if join != style.join {
+            actions.tool.set_path_join = Some(join);
+        }
+    });
+
     if style.dash_len > 0 {
         dash_editor(ui, &style, actions);
     }

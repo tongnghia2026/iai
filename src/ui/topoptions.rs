@@ -1941,6 +1941,36 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     if dash_kind != style.dash_kind {
         actions.tool.set_path_dash_kind = Some(dash_kind);
     }
+    let mut cap = style.cap;
+    egui::ComboBox::from_id_salt("path_line_cap")
+        .selected_text(match cap {
+            1 => "Round cap",
+            2 => "Square cap",
+            _ => "Butt cap",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut cap, 0, "Butt cap");
+            ui.selectable_value(&mut cap, 1, "Round cap");
+            ui.selectable_value(&mut cap, 2, "Square cap");
+        });
+    if cap != style.cap {
+        actions.tool.set_path_cap = Some(cap);
+    }
+    let mut join = style.join;
+    egui::ComboBox::from_id_salt("path_line_join")
+        .selected_text(match join {
+            1 => "Round join",
+            2 => "Bevel join",
+            _ => "Miter join",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut join, 0, "Miter join");
+            ui.selectable_value(&mut join, 1, "Round join");
+            ui.selectable_value(&mut join, 2, "Bevel join");
+        });
+    if join != style.join {
+        actions.tool.set_path_join = Some(join);
+    }
     ui.add_enabled_ui(style.dash_len > 0, |ui| {
         ui.menu_button("Dash\u{2026}", |ui| {
             ui.set_min_width(330.0);

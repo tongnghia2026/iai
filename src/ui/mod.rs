@@ -180,6 +180,10 @@ pub struct PathStyleData {
     pub dash_values: [f32; crate::core::vector::style::MAX_DASHES],
     pub dash_len: u8,
     pub dash_offset: f32,
+    /// Outline end cap: 0 Butt, 1 Round, 2 Square.
+    pub cap: u8,
+    /// Outline corner join: 0 Miter, 1 Round, 2 Bevel.
+    pub join: u8,
 }
 
 /// On-canvas editing overlay for the Node tool: the active Path's outline,

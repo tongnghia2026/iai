@@ -325,6 +325,10 @@ pub struct ToolIntent {
     pub add_path_gradient_stop: bool,
     pub remove_path_gradient_stop: Option<u8>,
     pub set_path_dash_kind: Option<u8>,
+    /// Outline end cap (0 Butt, 1 Round, 2 Square) and corner join (0 Miter, 1
+    /// Round, 2 Bevel). Each is a discrete selection recorded as one undo step.
+    pub set_path_cap: Option<u8>,
+    pub set_path_join: Option<u8>,
     /// Live preview of the custom dash array and phase.
     pub set_path_dash_values: Option<([f32; crate::core::vector::style::MAX_DASHES], u8)>,
     pub set_path_dash_offset: Option<f32>,

@@ -18,8 +18,8 @@ use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorGeometry;
 use crate::core::vector::style::{
-    DashPattern, Gradient, GradientKind, GradientStop, Paint, VectorStyle, MAX_DASHES,
-    MAX_GRADIENT_STOPS,
+    DashPattern, Gradient, GradientKind, GradientStop, LineCap, LineJoin, Paint, VectorStyle,
+    MAX_DASHES, MAX_GRADIENT_STOPS,
 };
 
 impl App {
@@ -269,6 +269,16 @@ impl App {
             dash_values: style.stroke_style.dash.values,
             dash_len: style.stroke_style.dash.len,
             dash_offset: style.stroke_style.dash.offset,
+            cap: match style.stroke_style.cap {
+                LineCap::Round => 1,
+                LineCap::Square => 2,
+                LineCap::Butt => 0,
+            },
+            join: match style.stroke_style.join {
+                LineJoin::Round => 1,
+                LineJoin::Bevel => 2,
+                LineJoin::Miter => 0,
+            },
         })
     }
 
@@ -743,6 +753,28 @@ impl App {
         });
     }
 
+    /// Set the outline end cap (0 Butt, 1 Round, 2 Square) as one undo step.
+    pub fn path_set_cap(&mut self, code: u8) {
+        self.commit_path_style_change(|s| {
+            s.stroke_style.cap = match code {
+                1 => LineCap::Round,
+                2 => LineCap::Square,
+                _ => LineCap::Butt,
+            };
+        });
+    }
+
+    /// Set the outline corner join (0 Miter, 1 Round, 2 Bevel) as one undo step.
+    pub fn path_set_join(&mut self, code: u8) {
+        self.commit_path_style_change(|s| {
+            s.stroke_style.join = match code {
+                1 => LineJoin::Round,
+                2 => LineJoin::Bevel,
+                _ => LineJoin::Miter,
+            };
+        });
+    }
+
     /// Live-preview a custom dash/gap array. Invalid UI values are normalised
     /// here as a final guard so the model never receives an invalid length.
     pub fn path_set_dash_values(&mut self, mut values: [f32; MAX_DASHES], len: u8) {
@@ -1082,6 +1114,26 @@ mod tests {
         app.docs.documents[0].canvas.undo().expect("undo");
         assert!(style(&app, id).stroke_style.dash.is_solid());
         assert!(matches!(style(&app, id).stroke, Paint::None));
+    }
+
+    #[test]
+    fn set_cap_and_join_round_trip_as_separate_undo_steps() {
+        let (mut app, id) = app_with_path();
+        // Defaults: butt cap, miter join.
+        assert_eq!(style(&app, id).stroke_style.cap, LineCap::Butt);
+        assert_eq!(style(&app, id).stroke_style.join, LineJoin::Miter);
+
+        app.path_set_cap(2); // Square
+        app.path_set_join(2); // Bevel
+        assert_eq!(style(&app, id).stroke_style.cap, LineCap::Square);
+        assert_eq!(style(&app, id).stroke_style.join, LineJoin::Bevel);
+
+        // Each selection is its own undo step (discrete, not a scrub).
+        app.docs.documents[0].canvas.undo().expect("undo join");
+        assert_eq!(style(&app, id).stroke_style.join, LineJoin::Miter);
+        assert_eq!(style(&app, id).stroke_style.cap, LineCap::Square);
+        app.docs.documents[0].canvas.undo().expect("undo cap");
+        assert_eq!(style(&app, id).stroke_style.cap, LineCap::Butt);
     }
 
     #[test]
