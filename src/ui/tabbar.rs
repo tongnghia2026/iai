@@ -187,7 +187,7 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                     egui::FontId::proportional(12.0),
                     pal.text_dim,
                 );
-                badge_resp.on_hover_text(format!("Trong hàng chờ (vị trí {pos})"));
+                badge_resp.on_hover_text(format!("Queued (position {pos})"));
             } else {
                 let font = egui::FontId::proportional(12.0);
                 let galley =
@@ -199,7 +199,7 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                         .with_angle_and_anchor(angle, egui::Align2::CENTER_CENTER),
                 );
                 badge_resp.on_hover_text(format!(
-                    "Đang xử lý ({})… {}s",
+                    "Processing ({})… {}s",
                     busy.label,
                     busy.elapsed_secs.unwrap_or(0)
                 ));

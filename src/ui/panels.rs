@@ -2571,7 +2571,7 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                             .size(12.0)
                             .color(pal.text_dim),
                     )
-                    .on_hover_text("Cắt theo layer bên dưới (clipping mask · Ctrl+Alt+G)");
+                    .on_hover_text("Clip to the layer below (clipping mask · Ctrl+Alt+G)");
                     ui.add_space(1.0);
                 }
 

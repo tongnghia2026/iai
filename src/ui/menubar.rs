@@ -106,15 +106,24 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 ui.close();
                             }
                             ui.menu_button("Open Recent", |ui| {
-                                if ui.button("Clear Recent").clicked() {
-                                    ui.close();
+                                if data.welcome.recent.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("(No recent files)")
+                                            .color(pal.text_secondary)
+                                            .size(11.0),
+                                    );
+                                } else {
+                                    for item in data.welcome.recent.iter().take(15) {
+                                        if ui
+                                            .button(&item.name)
+                                            .on_hover_text(item.path.display().to_string())
+                                            .clicked()
+                                        {
+                                            actions.doc.open_recent = Some(item.path.clone());
+                                            ui.close();
+                                        }
+                                    }
                                 }
-                                ui.separator();
-                                ui.label(
-                                    egui::RichText::new("(No recent files)")
-                                        .color(pal.text_secondary)
-                                        .size(11.0),
-                                );
                             });
                             if ui
                                 .add(menu_item_enabled("Close", "Ctrl+W", data.doc.has_doc))
@@ -1219,16 +1228,23 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     });
 
                     ui.menu_button("Help", |ui| {
-                        if ui.button("About iAi").clicked() {
-                            ui.close();
-                        }
-                        if ui.button("Keyboard Shortcuts").clicked() {
-                            ui.close();
-                        }
+                        ui.menu_button("Keyboard Shortcuts", |ui| {
+                            keyboard_shortcuts_list(ui, pal);
+                        });
                         ui.separator();
-                        if ui.button("GitHub").clicked() {
-                            ui.close();
-                        }
+                        ui.menu_button("About iAi", |ui| {
+                            ui.label(egui::RichText::new("iAi").strong());
+                            ui.label(
+                                egui::RichText::new("Image & vector editor")
+                                    .color(pal.text_secondary)
+                                    .size(11.0),
+                            );
+                            ui.label(
+                                egui::RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
+                                    .color(pal.text_secondary)
+                                    .size(11.0),
+                            );
+                        });
                     });
 
                     // AI Studio is a direct action, not a drop-down menu. Keep it
@@ -1361,4 +1377,110 @@ fn menu_item_enabled<'a>(
         ui.add_enabled_ui(enabled, |ui| ui.add(menu_item(label, shortcut)))
             .inner
     }
+}
+
+/// Static keyboard-shortcut reference rendered inside the Help ▸ Keyboard
+/// Shortcuts submenu (the app has no other shortcut reference). Keys mirror the
+/// bindings in `app/input/keyboard.rs` and the menu accelerators.
+fn keyboard_shortcuts_list(ui: &mut egui::Ui, pal: crate::ui::theme::Palette) {
+    ui.set_max_width(300.0);
+    egui::ScrollArea::vertical()
+        .max_height(460.0)
+        .show(ui, |ui| {
+            let sections: &[(&str, &[(&str, &str)])] = &[
+                (
+                    "Tools",
+                    &[
+                        ("V", "Move / select"),
+                        ("M", "Marquee selection"),
+                        ("L", "Lasso"),
+                        ("W", "Smart Select"),
+                        ("C", "Crop"),
+                        ("I", "Eyedropper"),
+                        ("B", "Brush / Pencil"),
+                        ("E", "Eraser"),
+                        ("G", "Fill / Gradient"),
+                        ("S", "Clone"),
+                        ("J", "Repair / Patch"),
+                        ("O", "Dodge / Burn"),
+                        ("P", "Pen"),
+                        ("A", "Node — edit points"),
+                        ("U", "Shapes / Arrow (cycle)"),
+                        ("T", "Type"),
+                        ("Z", "Zoom"),
+                        ("H", "Hand"),
+                        ("X", "Swap colours"),
+                        ("D", "Reset colours"),
+                    ],
+                ),
+                (
+                    "File",
+                    &[
+                        ("Ctrl+N", "New"),
+                        ("Ctrl+O", "Open"),
+                        ("Ctrl+S", "Save"),
+                        ("Ctrl+Shift+S", "Save As"),
+                        ("Ctrl+W", "Close"),
+                        ("Ctrl+P", "Print"),
+                        ("Ctrl+,", "Preferences"),
+                    ],
+                ),
+                (
+                    "Edit",
+                    &[
+                        ("Ctrl+Z", "Undo"),
+                        ("Ctrl+Shift+Z", "Redo"),
+                        ("Ctrl+X", "Cut"),
+                        ("Ctrl+C", "Copy"),
+                        ("Ctrl+V", "Paste"),
+                        ("Ctrl+A", "Select All"),
+                        ("Ctrl+D", "Deselect / Repeat"),
+                        ("Ctrl+T", "Free Transform"),
+                    ],
+                ),
+                (
+                    "Layers & objects",
+                    &[
+                        ("Ctrl+G", "Group"),
+                        ("Ctrl+Shift+G", "Ungroup"),
+                        ("Ctrl+E", "Merge Down"),
+                        ("Ctrl+Shift+E", "Stamp Visible"),
+                        ("Ctrl+Q", "Convert to Curves"),
+                    ],
+                ),
+                (
+                    "View",
+                    &[
+                        ("Ctrl+0", "Fit to window"),
+                        ("Ctrl+1", "100%"),
+                        ("Ctrl+R", "Rulers"),
+                        ("[  ]", "Brush size"),
+                        ("Space+Drag", "Pan"),
+                    ],
+                ),
+            ];
+            for (title, rows) in sections {
+                ui.add_space(3.0);
+                ui.label(egui::RichText::new(*title).strong().size(11.0));
+                egui::Grid::new(*title)
+                    .num_columns(2)
+                    .spacing(egui::vec2(12.0, 2.0))
+                    .show(ui, |ui| {
+                        for (keys, action) in *rows {
+                            ui.label(
+                                egui::RichText::new(*keys)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(pal.text_primary),
+                            );
+                            ui.label(
+                                egui::RichText::new(*action)
+                                    .size(11.0)
+                                    .color(pal.text_secondary),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            }
+        });
 }
