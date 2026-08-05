@@ -189,6 +189,8 @@ pub struct ToolViewModel {
     pub shape_stroke_width: f32,
     pub shape_stroke_color: [u8; 4],
     pub shape_corner_radius: f32,
+    /// Rectangle corner style: 0 Round, 1 Scallop, 2 Chamfer.
+    pub shape_corner_type: u8,
     /// Polygon edge count / Star point count.
     pub shape_sides: u32,
     /// Star inner-radius fraction.
@@ -692,6 +694,7 @@ impl Default for UiData {
                 shape_stroke_width: 2.0,
                 shape_stroke_color: [0, 0, 0, 255],
                 shape_corner_radius: 0.0,
+                shape_corner_type: 0,
                 shape_sides: 5,
                 shape_star_inner: 0.5,
                 shape_preview: None,

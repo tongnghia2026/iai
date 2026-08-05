@@ -8,6 +8,7 @@
 // geometry, and editing handles work in canvas space via `canvas_span`.
 
 use crate::core::geometry::Point;
+use crate::core::vector::from_shape::RectCorner;
 use crate::core::vector::style::{Paint, VectorStyle};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,6 +120,9 @@ pub struct ShapeData {
     pub y1: f32,
     /// Rounded-rectangle corner radius (canvas px). 0 = sharp.
     pub corner_radius: f32,
+    /// Rectangle corner style (Round/Scallop/Chamfer). Only meaningful for a
+    /// Rectangle with `corner_radius > 0`; ignored for other kinds.
+    pub corner_type: RectCorner,
     /// Polygon edge count / Star point count (ignored for other kinds).
     pub sides: u32,
     /// Star inner-radius fraction of the outer radius, in `(0,1)` (Star only).
@@ -189,9 +193,10 @@ impl ShapeData {
             x1: cx1 - off_x,
             y1: cy1 - off_y,
             corner_radius: corner_radius.max(0.0),
-            // Defaults; Polygon/Star callers overwrite these (kept out of the
-            // signature so existing call sites are unchanged). `rebuilt` copies
-            // them from `self`, so a resize never resets them.
+            // Defaults; Polygon/Star and Rectangle-corner callers overwrite these
+            // (kept out of the signature so existing call sites are unchanged).
+            // `rebuilt` copies them from `self`, so a resize never resets them.
+            corner_type: RectCorner::Round,
             sides: 5,
             star_inner: 0.5,
             style,
@@ -250,7 +255,19 @@ impl ShapeData {
         use crate::core::vector::from_shape;
         let path = match self.kind {
             ShapeKind::Rectangle => {
-                from_shape::rect_path(self.x0, self.y0, self.x1, self.y1, self.effective_radius())
+                let r = self.effective_radius();
+                if self.corner_type == RectCorner::Round || r <= 0.0 {
+                    from_shape::rect_path(self.x0, self.y0, self.x1, self.y1, r)
+                } else {
+                    from_shape::rect_path_corners(
+                        self.x0,
+                        self.y0,
+                        self.x1,
+                        self.y1,
+                        [r; 4],
+                        [self.corner_type; 4],
+                    )
+                }
             }
             ShapeKind::Ellipse => from_shape::ellipse_path(self.x0, self.y0, self.x1, self.y1),
             ShapeKind::Line => from_shape::line_path(self.x0, self.y0, self.x1, self.y1),
@@ -376,7 +393,9 @@ impl ShapeData {
         let w = (cx1 - cx0).abs();
         let h = (cy1 - cy0).abs();
         data.corner_radius = data.corner_radius.min(w * 0.5).min(h * 0.5).max(0.0);
-        // Polygon/Star parameters are not derived from the span — carry them over.
+        // Corner style / Polygon-Star parameters are not derived from the span —
+        // carry them over.
+        data.corner_type = self.corner_type;
         data.sides = self.sides;
         data.star_inner = self.star_inner;
         (data, off)
@@ -494,16 +513,16 @@ impl ShapeData {
                     let rx1 = self.x0.max(self.x1);
                     let ry0 = self.y0.min(self.y1);
                     let ry1 = self.y0.max(self.y1);
-                    if self.corner_radius > 0.0 {
-                        let r = self
-                            .corner_radius
-                            .min((rx1 - rx0) * 0.5)
-                            .min((ry1 - ry0) * 0.5)
-                            .max(0.0);
-                        sdf_round_box(px, py, rx0, ry0, rx1, ry1, r)
-                    } else {
-                        sdf_box(px, py, rx0, ry0, rx1, ry1)
-                    }
+                    sdf_rect_corners(
+                        px,
+                        py,
+                        rx0,
+                        ry0,
+                        rx1,
+                        ry1,
+                        self.corner_radius,
+                        self.corner_type,
+                    )
                 }
                 ShapeKind::Ellipse => {
                     let cx = (self.x0 + self.x1) * 0.5;
@@ -611,16 +630,16 @@ impl ShapeData {
                 let rx1 = self.x0.max(self.x1);
                 let ry0 = self.y0.min(self.y1);
                 let ry1 = self.y0.max(self.y1);
-                let sd = if self.corner_radius > 0.0 {
-                    let r = self
-                        .corner_radius
-                        .min((rx1 - rx0) * 0.5)
-                        .min((ry1 - ry0) * 0.5)
-                        .max(0.0);
-                    sdf_round_box(px, py, rx0, ry0, rx1, ry1, r)
-                } else {
-                    sdf_box(px, py, rx0, ry0, rx1, ry1)
-                };
+                let sd = sdf_rect_corners(
+                    px,
+                    py,
+                    rx0,
+                    ry0,
+                    rx1,
+                    ry1,
+                    self.corner_radius,
+                    self.corner_type,
+                );
                 self.fill_stroke_parts(sd, half)
             }
             ShapeKind::Ellipse => {
@@ -795,6 +814,56 @@ fn sdf_box(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {
     let ox = dx.max(0.0);
     let oy = dy.max(0.0);
     (ox * ox + oy * oy).sqrt() + dx.max(dy).min(0.0)
+}
+
+/// Signed distance to a rectangle with a uniform corner radius and [`RectCorner`]
+/// style (negative inside). Round = rounded box; Chamfer = the 8-vertex cut
+/// octagon; Scallop = the box minus a quarter-disk at each vertex (concave bites).
+/// All three are 1-Lipschitz, so `render`'s run-skipping stays valid. Matches the
+/// `from_shape::rect_path_corners` geometry that the GPU/PDF backends draw.
+fn sdf_rect_corners(
+    px: f32,
+    py: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    corner_radius: f32,
+    corner_type: RectCorner,
+) -> f32 {
+    let r = corner_radius
+        .min((x1 - x0) * 0.5)
+        .min((y1 - y0) * 0.5)
+        .max(0.0);
+    if r <= 0.0 {
+        return sdf_box(px, py, x0, y0, x1, y1);
+    }
+    match corner_type {
+        RectCorner::Round => sdf_round_box(px, py, x0, y0, x1, y1, r),
+        RectCorner::Chamfer => {
+            let v = [
+                (x0 + r, y0),
+                (x1 - r, y0),
+                (x1, y0 + r),
+                (x1, y1 - r),
+                (x1 - r, y1),
+                (x0 + r, y1),
+                (x0, y1 - r),
+                (x0, y0 + r),
+            ];
+            sdf_polygon(px, py, &v)
+        }
+        RectCorner::Scallop => {
+            // box ∩ complement(4 corner disks) → max of the box sd and each
+            // disk-complement sd `r − dist(p, vertex)`.
+            let d = |vx: f32, vy: f32| r - ((px - vx).hypot(py - vy));
+            sdf_box(px, py, x0, y0, x1, y1)
+                .max(d(x0, y0))
+                .max(d(x1, y0))
+                .max(d(x1, y1))
+                .max(d(x0, y1))
+        }
+    }
 }
 
 /// Signed distance to a rounded box with corner radius `r` (negative inside).

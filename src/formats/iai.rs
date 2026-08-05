@@ -1024,6 +1024,7 @@ fn shape_to_json(sd: &crate::core::shape::ShapeData) -> serde_json::Value {
         "x1": sd.x1,
         "y1": sd.y1,
         "corner_radius": sd.corner_radius,
+        "corner_type": sd.corner_type.to_u8(),
         "sides": sd.sides,
         "star_inner": sd.star_inner,
         "style": super::iai_vector::style_to_json(&sd.style),
@@ -1076,6 +1077,9 @@ fn json_to_shape_data(v: &serde_json::Value) -> Option<crate::core::shape::Shape
         x1: f("x1")?,
         y1: f("y1")?,
         corner_radius: f("corner_radius").unwrap_or(0.0),
+        corner_type: crate::core::vector::from_shape::RectCorner::from_u8(
+            v["corner_type"].as_u64().unwrap_or(0) as u8,
+        ),
         sides: v["sides"].as_u64().unwrap_or(5) as u32,
         star_inner: f("star_inner").unwrap_or(0.5),
         style,

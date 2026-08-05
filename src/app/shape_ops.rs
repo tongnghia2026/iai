@@ -21,7 +21,17 @@ impl App {
     /// Create a new Shape layer from a canvas-space drag span, using the Shape
     /// tool's current style (kind, fill/stroke colours, width, corner radius).
     pub fn begin_new_shape(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
-        let (kind, fill, fill_color, stroke_width, stroke_color, corner_radius, sides, star_inner) = {
+        let (
+            kind,
+            fill,
+            fill_color,
+            stroke_width,
+            stroke_color,
+            corner_radius,
+            corner_type,
+            sides,
+            star_inner,
+        ) = {
             let s = self.edit.tools.shape();
             (
                 s.kind,
@@ -30,6 +40,7 @@ impl App {
                 s.stroke_width,
                 s.stroke_color,
                 s.corner_radius,
+                s.corner_type,
                 s.sides,
                 s.star_inner,
             )
@@ -46,7 +57,8 @@ impl App {
             stroke_width,
             stroke_color,
         );
-        // Polygon/Star parameters live on the tool, not the span.
+        // Corner style / Polygon-Star parameters live on the tool, not the span.
+        data.corner_type = corner_type;
         data.sides = sides.clamp(3, 100);
         data.star_inner = star_inner.clamp(0.05, 0.95);
         let Some(raster) = data.render() else {
@@ -215,6 +227,7 @@ impl App {
                         .id
         }) {
             data.corner_radius = self.edit.tools.shape().corner_radius;
+            data.corner_type = self.edit.tools.shape().corner_type;
         }
         let mut handles: Vec<(u8, f32, f32)> = data
             .handle_points(offset)
@@ -720,7 +733,8 @@ impl App {
             s.corner_radius,
             style,
         );
-        // Sides / inner-radius are live-editable like the corner radius.
+        // Corner style / sides / inner-radius are live-editable like the radius.
+        new_data.corner_type = s.corner_type;
         new_data.sides = s.sides.clamp(3, 100);
         new_data.star_inner = s.star_inner.clamp(0.05, 0.95);
         Some((idx, new_data, new_offset))
@@ -859,6 +873,7 @@ mod tests {
             x1: 80.0,
             y1: 70.0,
             corner_radius: radius,
+            corner_type: crate::core::vector::from_shape::RectCorner::Round,
             sides: 5,
             star_inner: 0.5,
             style: crate::core::vector::style::VectorStyle::from_shape_fields(

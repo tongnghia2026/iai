@@ -933,6 +933,7 @@ impl App {
                 shape_stroke_width: self.edit.tools.shape().stroke_width,
                 shape_stroke_color: self.edit.tools.shape().stroke_color,
                 shape_corner_radius: self.edit.tools.shape().corner_radius,
+                shape_corner_type: self.edit.tools.shape().corner_type.to_u8(),
                 shape_sides: self.edit.tools.shape().sides,
                 shape_star_inner: self.edit.tools.shape().star_inner,
                 shape_preview: if self.edit.tools.active_id() == crate::tools::ToolId::Shape {

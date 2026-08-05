@@ -1369,9 +1369,25 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.dialogs.open_paint_color_dialog = Some(4);
     }
 
-    // Rounded-rectangle corner radius.
+    // Rectangle corner radius + style (Round / Scallop / Chamfer).
     if kind == 0 {
         ui.separator();
+        ui.label("Corner:");
+        let mut ct = data.tool.shape_corner_type;
+        egui::ComboBox::from_id_salt("rect_corner_type")
+            .selected_text(match ct {
+                1 => "Scallop",
+                2 => "Chamfer",
+                _ => "Round",
+            })
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for (v, name) in [(0u8, "Round"), (1, "Scallop"), (2, "Chamfer")] {
+                    if ui.selectable_value(&mut ct, v, name).changed() {
+                        actions.tool.set_shape_corner_type = Some(ct);
+                    }
+                }
+            });
         ui.label("Radius:");
         let mut r = data.tool.shape_corner_radius;
         if ui

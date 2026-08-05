@@ -539,6 +539,11 @@ impl App {
             self.edit.tools.shape_mut().corner_radius = r.clamp(0.0, 5000.0);
             self.update_selected_shape_style(false, false);
         }
+        if let Some(t) = actions.tool.set_shape_corner_type.take() {
+            self.edit.tools.shape_mut().corner_type =
+                crate::core::vector::from_shape::RectCorner::from_u8(t);
+            self.update_selected_shape_style(false, false);
+        }
         if let Some(n) = actions.tool.set_shape_sides.take() {
             self.edit.tools.shape_mut().sides = n.clamp(3, 100);
             self.update_selected_shape_style(false, false);

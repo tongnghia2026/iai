@@ -22,6 +22,43 @@ fn corner_node(anchor: Point, in_handle: Option<Point>, out_handle: Option<Point
     }
 }
 
+/// Rectangle corner style, CorelDRAW-like. `Round` reproduces the convex
+/// quarter-circle of [`rect_path`]; `Scallop` is a concave quarter-arc biting
+/// into the corner (a circle centred ON the box vertex); `Chamfer` cuts the
+/// corner off with a straight diagonal. Serialized as a small u8 tag so new
+/// variants stay additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RectCorner {
+    #[default]
+    Round,
+    Scallop,
+    Chamfer,
+}
+
+impl RectCorner {
+    pub fn from_u8(v: u8) -> RectCorner {
+        match v {
+            1 => RectCorner::Scallop,
+            2 => RectCorner::Chamfer,
+            _ => RectCorner::Round,
+        }
+    }
+    pub fn to_u8(self) -> u8 {
+        match self {
+            RectCorner::Round => 0,
+            RectCorner::Scallop => 1,
+            RectCorner::Chamfer => 2,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            RectCorner::Round => "Round",
+            RectCorner::Scallop => "Scallop",
+            RectCorner::Chamfer => "Chamfer",
+        }
+    }
+}
+
 /// A rectangle (or rounded rectangle when `radius > 0`) inscribed in the box with
 /// opposite corners `(x0,y0)`–`(x1,y1)`, as one closed contour. Sharp corners for
 /// radius 0; otherwise each corner is a cubic quarter-arc and the sides are
@@ -99,6 +136,72 @@ pub fn rect_path(x0: f32, y0: f32, x1: f32, y1: f32, radius: f32) -> PathData {
         Contour::new(nodes, true)
     };
     PathData::new(vec![contour], FillRule::NonZero)
+}
+
+/// A rectangle with a per-corner `radius` and [`RectCorner`] style (corners in
+/// clockwise order: top-left, top-right, bottom-right, bottom-left). Each corner
+/// emits a single sharp node when its clamped radius is ~0, otherwise two Cusp
+/// nodes joined by the corner arc/cut; straight sides between corners. This is a
+/// superset of [`rect_path`] (which stays the uniform-`Round` fast path), used
+/// for Scallop/Chamfer and any mixed-corner rectangle.
+pub fn rect_path_corners(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    radii: [f32; 4],
+    corners: [RectCorner; 4],
+) -> PathData {
+    let (lx, rx) = (x0.min(x1), x0.max(x1));
+    let (ty, by) = (y0.min(y1), y0.max(y1));
+    // Clamp every corner to half the short side. Because each radius is capped at
+    // half the short side, two corners sharing an edge sum to at most the short
+    // side (≤ that edge), so they can never overlap even with per-corner radii.
+    let half_short = (rx - lx).min(by - ty) * 0.5;
+    // Corner vertex `v` plus the unit edge directions from `v` toward the arc
+    // start `s` and end `e`, clockwise (TL, TR, BR, BL).
+    let geom = [
+        (Point::new(lx, ty), (0.0f32, 1.0f32), (1.0f32, 0.0f32)),
+        (Point::new(rx, ty), (-1.0, 0.0), (0.0, 1.0)),
+        (Point::new(rx, by), (0.0, -1.0), (-1.0, 0.0)),
+        (Point::new(lx, by), (1.0, 0.0), (0.0, -1.0)),
+    ];
+    let mut nodes: Vec<Node> = Vec::with_capacity(8);
+    for i in 0..4 {
+        let (v, a, b) = geom[i];
+        let rc = radii[i].max(0.0).min(half_short);
+        if rc <= f32::EPSILON {
+            nodes.push(Node::sharp(v));
+            continue;
+        }
+        let k = KAPPA * rc;
+        let s = Point::new(v.x + rc * a.0, v.y + rc * a.1);
+        let e = Point::new(v.x + rc * b.0, v.y + rc * b.1);
+        let (s_out, e_in) = match corners[i] {
+            // Handles run along the edges toward the vertex → convex quarter circle.
+            RectCorner::Round => (
+                Some(Point::new(v.x + (rc - k) * a.0, v.y + (rc - k) * a.1)),
+                Some(Point::new(v.x + (rc - k) * b.0, v.y + (rc - k) * b.1)),
+            ),
+            // Handles pushed perpendicular-into the interior → concave quarter arc
+            // (a circle centred on the vertex biting into the corner).
+            RectCorner::Scallop => (
+                Some(Point::new(
+                    v.x + rc * a.0 + k * b.0,
+                    v.y + rc * a.1 + k * b.1,
+                )),
+                Some(Point::new(
+                    v.x + rc * b.0 + k * a.0,
+                    v.y + rc * b.1 + k * a.1,
+                )),
+            ),
+            // No handles → the segment collapses to a straight diagonal cut.
+            RectCorner::Chamfer => (None, None),
+        };
+        nodes.push(corner_node(s, None, s_out));
+        nodes.push(corner_node(e, e_in, None));
+    }
+    PathData::new(vec![Contour::new(nodes, true)], FillRule::NonZero)
 }
 
 /// An axis-aligned ellipse inscribed in the box `(x0,y0)`–`(x1,y1)`, as a closed
@@ -252,6 +355,64 @@ mod tests {
         // On the short (vertical) axis the two right-side nodes coincide at cy=20.
         let ys: Vec<f32> = c.nodes.iter().map(|n| n.anchor.y).collect();
         assert!(ys.iter().any(|y| (*y - 20.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn corners_round_matches_uniform_bounds_and_node_count() {
+        // A uniform-Round rect_path_corners is geometrically the same box as
+        // rect_path (only the node rotation differs), so bounds/area match.
+        let a = rect_path_corners(0.0, 0.0, 100.0, 60.0, [10.0; 4], [RectCorner::Round; 4]);
+        let b = rect_path(0.0, 0.0, 100.0, 60.0, 10.0);
+        assert_eq!(a.contours[0].nodes.len(), 8);
+        assert_eq!(a.control_bounds(), b.control_bounds());
+    }
+
+    #[test]
+    fn chamfer_cuts_corners_with_straight_diagonals() {
+        let p = rect_path_corners(0.0, 0.0, 100.0, 60.0, [10.0; 4], [RectCorner::Chamfer; 4]);
+        let c = &p.contours[0];
+        assert_eq!(c.nodes.len(), 8);
+        // No handles anywhere → every segment is straight, including the cuts.
+        assert!(c
+            .nodes
+            .iter()
+            .all(|n| n.in_handle.is_none() && n.out_handle.is_none()));
+        // The top-left cut (segment 0: S_TL→E_TL) is the straight diagonal; its
+        // midpoint sits off both edges, inside the box, near the corner.
+        let (p0, p1, p2, p3) = c.segment(0).unwrap();
+        let mid = cubic_bezier(p0, p1, p2, p3, 0.5);
+        assert!(
+            (mid.x - 5.0).abs() < 1e-3 && (mid.y - 5.0).abs() < 1e-3,
+            "{mid:?}"
+        );
+    }
+
+    #[test]
+    fn scallop_bites_a_concave_arc_toward_the_vertex() {
+        let r = 12.0f32;
+        let p = rect_path_corners(0.0, 0.0, 100.0, 60.0, [r; 4], [RectCorner::Scallop; 4]);
+        let c = &p.contours[0];
+        assert_eq!(c.nodes.len(), 8);
+        // The top-left corner arc (segment 0) is the circle of radius r centred on
+        // the box vertex (0,0): its midpoint lies ~r away from the vertex.
+        let (p0, p1, p2, p3) = c.segment(0).unwrap();
+        let mid = cubic_bezier(p0, p1, p2, p3, 0.5);
+        let d = (mid.x * mid.x + mid.y * mid.y).sqrt();
+        assert!((d - r).abs() < 0.05, "scallop arc radius {d}, want {r}");
+    }
+
+    #[test]
+    fn zero_radius_corner_is_a_single_sharp_node() {
+        // A mixed rect: TL sharp (r=0), others rounded → 1 + 2·3 = 7 nodes.
+        let p = rect_path_corners(
+            0.0,
+            0.0,
+            100.0,
+            60.0,
+            [0.0, 10.0, 10.0, 10.0],
+            [RectCorner::Round; 4],
+        );
+        assert_eq!(p.contours[0].nodes.len(), 7);
     }
 
     #[test]

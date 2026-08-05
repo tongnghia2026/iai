@@ -298,6 +298,7 @@ mod tests {
             x1,
             y1,
             corner_radius: 0.0,
+            corner_type: crate::core::vector::from_shape::RectCorner::Round,
             sides: 5,
             star_inner: 0.5,
             style: VectorStyle::from_shape_fields(true, [40, 120, 220, 255], 0.0, [0, 0, 0, 0]),

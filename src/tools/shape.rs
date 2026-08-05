@@ -25,6 +25,8 @@ pub struct ShapeTool {
     pub stroke_color: [u8; 4],
     /// Rounded-rectangle corner radius in canvas pixels. 0 = sharp corners.
     pub corner_radius: f32,
+    /// Rectangle corner style (Round/Scallop/Chamfer).
+    pub corner_type: crate::core::vector::from_shape::RectCorner,
     /// Polygon edge count / Star point count (3–100).
     pub sides: u32,
     /// Star inner-radius fraction of the outer radius (0–1).
@@ -47,6 +49,7 @@ impl Default for ShapeTool {
             stroke_width: 2.0,
             stroke_color: [0, 0, 0, 255],
             corner_radius: 0.0,
+            corner_type: crate::core::vector::from_shape::RectCorner::Round,
             sides: 5,
             star_inner: 0.5,
             start_x: 0.0,

@@ -303,6 +303,7 @@ pub struct ToolIntent {
     pub set_shape_fill: Option<bool>,
     pub set_shape_stroke_width: Option<f32>,
     pub set_shape_corner_radius: Option<f32>,
+    pub set_shape_corner_type: Option<u8>,
     /// Polygon edge count / Star point count.
     pub set_shape_sides: Option<u32>,
     /// Star inner-radius fraction.
