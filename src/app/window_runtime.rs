@@ -13,6 +13,10 @@ pub struct WindowRuntime {
     pub(in crate::app) window: Option<Arc<Window>>,
     pub(in crate::app) window_visible: bool,
     pub(in crate::app) window_focused: bool,
+    /// Short first-reveal retry window for activating the hidden-created main
+    /// window. Windows can ignore the first `focus_window()` when it is issued
+    /// in the same turn as `set_visible(true)`; retry until WM_SETFOCUS arrives.
+    pub(in crate::app) startup_focus_until: Option<std::time::Instant>,
     /// Authoritative minimized/covered state; Windows does not always report a
     /// zero inner size for a minimized window.
     pub(in crate::app) window_occluded: bool,

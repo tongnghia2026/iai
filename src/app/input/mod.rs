@@ -702,6 +702,9 @@ impl ApplicationHandler for App {
             // the drag flags so we neither lose the edit nor get stuck "painting".
             WindowEvent::Focused(focused) => {
                 self.win.window_focused = focused;
+                if focused {
+                    self.win.startup_focus_until = None;
+                }
                 if !focused {
                     if self.edit.input.painting {
                         self.docs.documents[self.docs.active_doc_idx]
@@ -886,6 +889,21 @@ impl ApplicationHandler for App {
     /// Called when the event queue is empty — the right place to set ControlFlow.
     /// Without this, winit defaults to Poll → spin loop → 12-14% idle CPU.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.win.window_visible && !self.win.window_focused {
+            if let Some(until) = self.win.startup_focus_until {
+                let now = std::time::Instant::now();
+                if now < until {
+                    if let Some(window) = &self.win.window {
+                        window.focus_window();
+                    }
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(
+                        now + std::time::Duration::from_millis(50),
+                    ));
+                    return;
+                }
+                self.win.startup_focus_until = None;
+            }
+        }
         if matches!(
             self.win.startup_phase,
             crate::app::state::StartupPhase::Loading(_)
@@ -895,6 +913,9 @@ impl ApplicationHandler for App {
                     if !self.win.window_visible {
                         w.set_visible(true);
                         self.win.window_visible = true;
+                        self.win.startup_focus_until = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(1500),
+                        );
                         // The window is created hidden + borderless, then shown
                         // here. On Windows, showing a hidden borderless window
                         // does not reliably make it the active/foreground window,

@@ -1068,6 +1068,7 @@ impl App {
                 window: None,
                 window_visible: false,
                 window_focused: false,
+                startup_focus_until: None,
                 window_occluded: false,
                 text_input_quiet_until: None,
                 develop_window: None,

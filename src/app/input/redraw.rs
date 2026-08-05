@@ -197,6 +197,8 @@ impl App {
                 if !self.win.window_visible {
                     window.set_visible(true);
                     self.win.window_visible = true;
+                    self.win.startup_focus_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
                     // Activate on first reveal so Windows gives the hidden-created
                     // borderless window a real WM_SETFOCUS (IME association),
                     // otherwise it dings on every keystroke until minimise+restore.
@@ -287,6 +289,8 @@ impl App {
                 if !self.win.window_visible {
                     window.set_visible(true);
                     self.win.window_visible = true;
+                    self.win.startup_focus_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
                     // Activate on first reveal so Windows gives the hidden-created
                     // borderless window a real WM_SETFOCUS (IME association),
                     // otherwise it dings on every keystroke until minimise+restore.
