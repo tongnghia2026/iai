@@ -1,4 +1,8 @@
-# Bàn giao cho Codex — Mũi tên + Kiểu góc chữ nhật (2026-08-05)
+# Bàn giao cho Codex — Mũi tên + Kiểu góc chữ nhật (HOÀN TẤT 2026-08-05)
+
+> **Trạng thái cuối: HOÀN TẤT A/B/C.** Người dùng đã GUI-test và xác nhận OK.
+> Các commit local: Stage A `695fa32`, Stage B `5df8750`, Stage C + sửa cache zoom
+> `ecf0b8e`. Chưa push theo quy tắc Actions budget.
 
 Bản giao ca để **Codex code tiếp** hai tính năng vector cho iAi. Người dùng (nghề
 in ấn/quảng cáo) chốt làm: (1) **kiểu góc hình chữ nhật kiểu CorelDRAW** — bo tròn,
@@ -18,13 +22,15 @@ Nhánh: `feat/vector-core-foundation`.
 - **GIAI ĐOẠN A (kiểu góc chữ nhật) XONG** — commit local **`695fa32`** (CHƯA PUSH).
   `cargo check` sạch; `from_shape` 12 test pass (gồm 4 test góc mới), `shape_ops`
   6 pass, `formats::iai` 27 pass. Đây là tính năng độc lập, dùng được ngay.
-- **GIAI ĐOẠN B (đầu mũi tên) — CHƯA LÀM.**
-- **GIAI ĐOẠN C (công cụ Mũi tên/Đường nối) — CHƯA LÀM.** Phụ thuộc B.
-- Trước đó: origin ở `1b3d5a5` (đã push 2026-08-05). Từ `1b3d5a5` → `695fa32` là
-  các commit local chưa push (dọn docs `4454f25` + Stage A `695fa32`). **Đừng push
+- **GIAI ĐOẠN B (đầu mũi tên) — XONG** — commit local **`5df8750`**.
+- **GIAI ĐOẠN C (công cụ Mũi tên/Đường nối) — XONG** — commit local **`ecf0b8e`**.
+- **GUI TEST A/B/C — OK**, người dùng xác nhận ngày 2026-08-05, gồm lỗi hiển thị
+  khi zoom 9× đã hết sau khi bổ sung arrow style vào GPU geometry fingerprint.
+- Trước đó: origin ở `1b3d5a5` (đã push 2026-08-05). Từ `1b3d5a5` → `ecf0b8e` là
+  các commit local chưa push (dọn docs + Stage A/B/C). **Đừng push
   cho tới khi người dùng bảo** (quy tắc Actions budget).
 
-### Cây làm việc: SẠCH (đã commit Stage A). Build được.
+### Cây làm việc: code SẠCH (đã commit Stage A/B/C). Build và test được.
 
 ---
 
@@ -68,14 +74,18 @@ Mẫu để lặp lại cho B/C. Các file đã sửa ở `695fa32`:
 - Literal `ShapeData {…}` khác đã thêm field: `app/powerclip_ops.rs`,
   `app/vector_boolean.rs` (test helpers).
 
-### Giai đoạn A còn NỢ: người dùng GUI-test (chưa test). Kiểm:
+### Giai đoạn A: người dùng đã GUI-test OK. Checklist đã kiểm:
 - Vẽ chữ nhật, đổi combo Corner + Radius → thấy bo tròn / lõm / vát trên canvas,
   cả lúc đang chọn (active raster) lẫn khi bỏ chọn (GPU vector).
 - Convert to Curves giữ đúng hình. Xuất PDF sắc nét đúng kiểu góc. Save/mở `.iai`.
 
 ---
 
-## 4. GIAI ĐOẠN B — Đầu mũi tên (arrowhead) trên nét
+## 4. GIAI ĐOẠN B — Đầu mũi tên (arrowhead) trên nét — XONG (`5df8750`)
+
+Đã hoàn tất model, hình học CPU/GPU dùng chung, raster bounds, `.iai`, PDF và UI
+Start/End/Size. File cũ mặc định `None`. Arrowhead chỉ sinh trên contour hở và sinh từ
+centerline chưa dash. Test winding, tangent suy biến, serde và toàn bộ lib đều pass.
 
 **Mục tiêu:** thêm đầu mũi tên đầu/cuối cho nét (Triangle/Stealth/Circle/Diamond +
 cỡ), hiện trên canvas (CPU+GPU) và xuất PDF. Cho **path hở** (line/connector). Model
@@ -181,7 +191,15 @@ raster → lệch).
 
 ---
 
-## 5. GIAI ĐOẠN C — Công cụ Mũi tên / Đường nối
+## 5. GIAI ĐOẠN C — Công cụ Mũi tên / Đường nối — XONG (`ecf0b8e`)
+
+Đã có nút toolbar, công cụ kéo-thả một lần, live overlay, options Width/Arrow Head/Route,
+commit Path qua gateway, selection, undo/redo và CMYK reconcile. Bốn route đã có:
+Straight, Elbow H-V, Elbow V-H, Elbow Center. Không gán phím tắt để tránh xung đột.
+
+Sửa bổ sung trong cùng commit: GPU `geometry_fingerprint` hash cả kind/size của đầu/cuối
+mũi tên. Đây là nguyên nhân mesh cũ chỉ thay đổi khi zoom vượt bucket 8× sang 16× (thấy
+rõ tại zoom 9×). Raster bounds cũng không còn nới dư khi arrow kind là `None`.
 
 **Mục tiêu:** kéo A→B ra 1 nét (mũi tên) với `end_arrow` (dùng B). Có chế độ
 **bẻ góc vuông (elbow)** cho sơ đồ phòng ban/gia phả. Làm **1-drag** (không dùng hệ
@@ -240,9 +258,12 @@ Enum bắt buộc: sửa 4 chỗ, build sẽ báo đúng chỗ thiếu.
 
 ## 6. Kiểm thử & bàn giao lại
 
-- Sau mỗi giai đoạn: `cargo fmt` + `cargo test --lib <module>` liên quan; cuối cùng
-  `cargo test --locked --lib` (toàn bộ, ~1050 test) + build release + copy vào
-  `dist/iAi-portable/iai.exe` để người dùng GUI-test.
+**Kết quả cuối:** `cargo fmt --check` sạch; `cargo check --locked` pass;
+`cargo test --locked --lib`: **1057 pass, 4 ignored, 0 fail** (1061 test). Người dùng đã
+GUI-test OK. Theo yêu cầu cuối, không cần tạo/copy bản portable.
+
+- Đã chạy `cargo fmt`, test module liên quan và `cargo test --locked --lib` toàn bộ.
+  Người dùng yêu cầu không cần tạo/copy bản portable cho lượt hoàn tất này.
 - **ĐỪNG push** cho tới khi người dùng bảo. Gom commit, báo cáo ngôn ngữ thường
   (người dùng là end-user, không hỏi câu kỹ thuật).
 - Thứ tự đề xuất: hoàn tất **B** (mũi tên hiện được trên nét/Line trước), rồi **C**
