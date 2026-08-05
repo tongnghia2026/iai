@@ -39,6 +39,7 @@ pub enum ToolId {
     /// Freehand vector drawing (Phase 6B): a drag commits an editable
     /// variable-width Path stroke, distinct from the pixel Brush.
     VectorBrush,
+    Arrow,
 }
 
 #[derive(Debug, Clone, Copy)]

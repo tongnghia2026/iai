@@ -43,6 +43,10 @@ pub fn geometry_fingerprint(object: &VectorObjectData) -> u64 {
     for value in stroke.dash.as_slice() {
         value.to_bits().hash(&mut h);
     }
+    (stroke.start_arrow.kind as u8).hash(&mut h);
+    stroke.start_arrow.size.to_bits().hash(&mut h);
+    (stroke.end_arrow.kind as u8).hash(&mut h);
+    stroke.end_arrow.size.to_bits().hash(&mut h);
     h.finish()
 }
 
@@ -327,6 +331,12 @@ mod tests {
         assert_eq!(first, geometry_fingerprint(&object));
         object.style.stroke_style.width = 4.0;
         assert_ne!(first, geometry_fingerprint(&object));
+        let width_key = geometry_fingerprint(&object);
+        object.style.stroke_style.end_arrow.kind = crate::core::vector::style::ArrowHead::Triangle;
+        assert_ne!(width_key, geometry_fingerprint(&object));
+        let arrow_key = geometry_fingerprint(&object);
+        object.style.stroke_style.end_arrow.size = 7.0;
+        assert_ne!(arrow_key, geometry_fingerprint(&object));
         let _ = VectorStyle::default();
     }
 }

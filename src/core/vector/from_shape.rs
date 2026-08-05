@@ -13,6 +13,48 @@ use crate::core::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
 /// `4/3·(√2−1)`. A quarter arc of radius `r` uses handles `KAPPA·r` long.
 const KAPPA: f32 = 0.552_284_75;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConnectorRoute {
+    #[default]
+    Straight,
+    ElbowHv,
+    ElbowVh,
+    ElbowCenter,
+}
+
+impl ConnectorRoute {
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::ElbowHv,
+            2 => Self::ElbowVh,
+            3 => Self::ElbowCenter,
+            _ => Self::Straight,
+        }
+    }
+}
+
+pub fn elbow_connector_path(sx: f32, sy: f32, ex: f32, ey: f32, route: ConnectorRoute) -> PathData {
+    let mut points = vec![Point::new(sx, sy)];
+    match route {
+        ConnectorRoute::Straight => {}
+        ConnectorRoute::ElbowHv => points.push(Point::new(ex, sy)),
+        ConnectorRoute::ElbowVh => points.push(Point::new(sx, ey)),
+        ConnectorRoute::ElbowCenter => {
+            let mx = (sx + ex) * 0.5;
+            points.push(Point::new(mx, sy));
+            points.push(Point::new(mx, ey));
+        }
+    }
+    points.push(Point::new(ex, ey));
+    PathData::new(
+        vec![Contour::new(
+            points.into_iter().map(Node::sharp).collect(),
+            false,
+        )],
+        FillRule::NonZero,
+    )
+}
+
 fn corner_node(anchor: Point, in_handle: Option<Point>, out_handle: Option<Point>) -> Node {
     Node {
         anchor,
@@ -471,5 +513,20 @@ mod tests {
         };
         assert!((d(0) - 50.0).abs() < 0.5, "outer ~50, got {}", d(0));
         assert!((d(1) - 25.0).abs() < 0.5, "inner ~25, got {}", d(1));
+    }
+
+    #[test]
+    fn connector_routes_emit_expected_open_waypoints() {
+        let cases = [
+            (ConnectorRoute::Straight, 2),
+            (ConnectorRoute::ElbowHv, 3),
+            (ConnectorRoute::ElbowVh, 3),
+            (ConnectorRoute::ElbowCenter, 4),
+        ];
+        for (route, count) in cases {
+            let path = elbow_connector_path(10.0, 20.0, 90.0, 70.0, route);
+            assert!(!path.contours[0].closed);
+            assert_eq!(path.contours[0].nodes.len(), count);
+        }
     }
 }

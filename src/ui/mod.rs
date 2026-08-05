@@ -1171,6 +1171,44 @@ pub fn build(
             ));
         }
 
+        if data.tool.arrow_path.len() >= 2 {
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("arrow_tool_overlay"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            let points: Vec<_> = data
+                .tool
+                .arrow_path
+                .iter()
+                .map(|&(x, y)| to_screen_pos(x, y))
+                .collect();
+            let color = data.tool.vector_brush_color;
+            painter.add(egui::Shape::line(
+                points.clone(),
+                egui::Stroke::new(
+                    (data.tool.arrow_width * zoom).max(1.0),
+                    egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 190),
+                ),
+            ));
+            if let (Some(tip), Some(previous)) = (points.last(), points.iter().rev().nth(1)) {
+                let direction = (*tip - *previous).normalized();
+                let normal = egui::vec2(-direction.y, direction.x);
+                let length = (data.tool.arrow_width * zoom * 6.0).max(8.0);
+                let base = *tip - direction * length;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        *tip,
+                        base + normal * length * 0.42,
+                        base - normal * length * 0.42,
+                    ],
+                    egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 190),
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+
         if let Some([x0, y0, x1, y1]) = data.sel.rect_sel_preview {
             let painter = ctx
                 .layer_painter(egui::LayerId::new(

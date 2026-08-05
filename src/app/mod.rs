@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod arrow_ops;
 pub mod autosave;
 pub mod background_jobs;
 pub mod develop_shell;

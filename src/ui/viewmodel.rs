@@ -223,6 +223,10 @@ pub struct ToolViewModel {
     pub vector_brush_path: Vec<(f32, f32)>,
     /// True when the active layer is a Vector Brush stroke (enables Expand).
     pub vector_brush_can_expand: bool,
+    pub arrow_width: f32,
+    pub arrow_end: u8,
+    pub arrow_route: u8,
+    pub arrow_path: Vec<(f32, f32)>,
     /// Gradient tool drag guide: [start_x, start_y, end_x, end_y] in canvas space.
     pub gradient_preview: Option<[f32; 4]>,
     pub wand_brush_size: f32,
@@ -712,6 +716,10 @@ impl Default for UiData {
                 vector_brush_velocity: true,
                 vector_brush_path: Vec::new(),
                 vector_brush_can_expand: false,
+                arrow_width: 3.0,
+                arrow_end: 1,
+                arrow_route: 0,
+                arrow_path: Vec::new(),
                 gradient_preview: None,
                 wand_brush_size: 30.0,
                 wand_tolerance: 32,

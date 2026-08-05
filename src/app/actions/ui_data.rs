@@ -927,6 +927,26 @@ impl App {
                     Vec::new()
                 },
                 vector_brush_can_expand: self.active_brush_layer_id().is_some(),
+                arrow_width: self.edit.tools.arrow().width,
+                arrow_end: self.edit.tools.arrow().end_arrow,
+                arrow_route: self.edit.tools.arrow().route,
+                arrow_path: if self.edit.tools.active_id() == crate::tools::ToolId::Arrow {
+                    self.edit
+                        .tools
+                        .arrow()
+                        .preview_path()
+                        .and_then(|path| path.contours.into_iter().next())
+                        .map(|contour| {
+                            contour
+                                .nodes
+                                .into_iter()
+                                .map(|node| (node.anchor.x, node.anchor.y))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
                 shape_kind: self.edit.tools.shape().kind.to_u8(),
                 shape_fill: self.edit.tools.shape().fill,
                 shape_fill_color: self.edit.tools.shape().fill_color,

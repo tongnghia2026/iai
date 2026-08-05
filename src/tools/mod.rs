@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod arrow;
 pub mod brush;
 pub mod clone_tool;
 pub mod crop;
@@ -96,6 +97,7 @@ impl ToolId {
             ToolId::Patch => "Patch",
             ToolId::Node => "Node",
             ToolId::VectorBrush => "Vector Brush",
+            ToolId::Arrow => "Arrow / Connector",
         }
     }
 
@@ -131,6 +133,7 @@ impl ToolId {
                 | ToolId::Node
                 // The Vector Brush commits a Path layer through the same gateway.
                 | ToolId::VectorBrush
+                | ToolId::Arrow
         )
     }
 }
@@ -192,6 +195,7 @@ pub struct ToolManager {
     move_tool: move_tool::MoveTool,
     node_tool: node_tool::NodeTool,
     vector_brush: vector_brush::VectorBrushTool,
+    arrow: arrow::ArrowTool,
     eyedropper: eyedropper::EyedropperTool,
     fill: fill::FillTool,
     crop: crop::CropTool,
@@ -234,6 +238,7 @@ impl ToolManager {
             move_tool: move_tool::MoveTool::new(),
             node_tool: node_tool::NodeTool::new(),
             vector_brush: vector_brush::VectorBrushTool::new(),
+            arrow: arrow::ArrowTool::new(),
             eyedropper: eyedropper::EyedropperTool::new(),
             fill: fill::FillTool::new(),
             crop: crop::CropTool::new(),
@@ -294,6 +299,7 @@ impl ToolManager {
             ToolId::Patch => &self.patch,
             ToolId::Node => &self.node_tool,
             ToolId::VectorBrush => &self.vector_brush,
+            ToolId::Arrow => &self.arrow,
         }
     }
 
@@ -328,6 +334,7 @@ impl ToolManager {
             ToolId::Patch => &mut self.patch,
             ToolId::Node => &mut self.node_tool,
             ToolId::VectorBrush => &mut self.vector_brush,
+            ToolId::Arrow => &mut self.arrow,
         }
     }
 
@@ -553,6 +560,12 @@ impl ToolManager {
     }
     pub fn vector_brush_mut(&mut self) -> &mut vector_brush::VectorBrushTool {
         &mut self.vector_brush
+    }
+    pub fn arrow(&self) -> &arrow::ArrowTool {
+        &self.arrow
+    }
+    pub fn arrow_mut(&mut self) -> &mut arrow::ArrowTool {
+        &mut self.arrow
     }
     pub fn smudge(&self) -> &smudge::SmudgeTool {
         &self.smudge

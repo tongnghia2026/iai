@@ -114,6 +114,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             ToolId::PerspectiveCrop => perspective_crop_options(ui, data, actions),
                             ToolId::Pen => pen_options(ui, data, actions),
                             ToolId::VectorBrush => vector_brush_options(ui, data, actions),
+                            ToolId::Arrow => arrow_options(ui, data, actions),
                             _ => default_options(ui, data),
                         }
                     });
@@ -282,6 +283,57 @@ fn pen_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         {
             actions.tool.set_pen_stroke_width = Some(sw);
         }
+    }
+}
+
+fn arrow_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    ui.label(egui::RichText::new("Arrow / Connector").strong());
+    ui.separator();
+    ui.label("Width:");
+    let mut width = data.tool.arrow_width;
+    if ui
+        .add(
+            egui::DragValue::new(&mut width)
+                .range(0.1..=500.0)
+                .suffix(" px"),
+        )
+        .changed()
+    {
+        actions.tool.set_arrow_width = Some(width);
+    }
+    let arrow_label = |kind| match kind {
+        2 => "Stealth",
+        3 => "Circle",
+        4 => "Diamond",
+        _ => "Triangle",
+    };
+    let mut arrow = data.tool.arrow_end;
+    egui::ComboBox::from_id_salt("arrow_tool_head")
+        .selected_text(arrow_label(arrow))
+        .show_ui(ui, |ui| {
+            for kind in 1..=4 {
+                ui.selectable_value(&mut arrow, kind, arrow_label(kind));
+            }
+        });
+    if arrow != data.tool.arrow_end {
+        actions.tool.set_arrow_end = Some(arrow);
+    }
+    let route_label = |route| match route {
+        1 => "Elbow H-V",
+        2 => "Elbow V-H",
+        3 => "Elbow Center",
+        _ => "Straight",
+    };
+    let mut route = data.tool.arrow_route;
+    egui::ComboBox::from_id_salt("arrow_tool_route")
+        .selected_text(route_label(route))
+        .show_ui(ui, |ui| {
+            for value in 0..=3 {
+                ui.selectable_value(&mut route, value, route_label(value));
+            }
+        });
+    if route != data.tool.arrow_route {
+        actions.tool.set_arrow_route = Some(route);
     }
 }
 

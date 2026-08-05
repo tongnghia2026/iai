@@ -46,6 +46,9 @@ const VECTOR_BRUSH_GROUP: &[(ToolId, &str, &str)] = &[(
     "Vector Brush — freehand editable stroke",
 )];
 
+const ARROW_GROUP: &[(ToolId, &str, &str)] =
+    &[((ToolId::Arrow, ph::ARROW_UP_RIGHT, "Arrow / Connector"))];
+
 const BRUSH_GROUP: &[(ToolId, &str, &str)] = &[
     (ToolId::Brush, ph::PAINT_BRUSH, "Brush (B)"),
     (ToolId::Pencil, ph::PENCIL, "Pencil (B)"),
@@ -104,6 +107,7 @@ const COMMON_BOTTOM_GROUPS: &[&[(ToolId, &str, &str)]] = &[
     GRADIENT_GROUP,
     PEN_GROUP,
     VECTOR_BRUSH_GROUP,
+    ARROW_GROUP,
     TEXT_GROUP,
     SHAPE_GROUP,
     HAND_GROUP,
@@ -938,6 +942,7 @@ mod tests {
             ToolId::Pen,
             ToolId::Shape,
             ToolId::VectorBrush,
+            ToolId::Arrow,
             ToolId::Text,
             ToolId::Gradient,
         ] {

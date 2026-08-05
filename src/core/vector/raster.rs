@@ -135,8 +135,11 @@ fn raster_layout(
         } else {
             0.0
         };
-        let arrow =
-            ss.start_arrow.size.max(ss.end_arrow.size) * object.style.effective_stroke_width();
+        let arrow = [ss.start_arrow, ss.end_arrow]
+            .into_iter()
+            .filter(|arrow| arrow.kind != crate::core::vector::style::ArrowHead::None)
+            .map(|arrow| arrow.size * object.style.effective_stroke_width())
+            .fold(0.0_f32, f32::max);
         miter.max(cap).max(arrow)
     } else {
         0.0
