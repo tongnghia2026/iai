@@ -831,7 +831,7 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::KeyU) if pressed && !self.edit.input.ctrl_held => {
-                self.edit.tools.select(ToolId::Shape);
+                self.edit.tools.select_group(crate::tools::SHAPE_GROUP);
                 self.sync_cursor(event_loop);
                 if let Some(w) = &self.win.window {
                     w.request_redraw();

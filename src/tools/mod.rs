@@ -40,6 +40,7 @@ pub const BRUSH_GROUP: &[ToolId] = &[ToolId::Brush, ToolId::Pencil];
 pub const FILL_GROUP: &[ToolId] = &[ToolId::Fill, ToolId::Gradient];
 pub const CROP_GROUP: &[ToolId] = &[ToolId::Crop, ToolId::PerspectiveCrop];
 pub const DODGE_GROUP: &[ToolId] = &[ToolId::Dodge, ToolId::Burn];
+pub const SHAPE_GROUP: &[ToolId] = &[ToolId::Shape, ToolId::Arrow];
 
 const TOOL_GROUPS: &[&[ToolId]] = &[
     SEL_GROUP,
@@ -48,6 +49,7 @@ const TOOL_GROUPS: &[&[ToolId]] = &[
     FILL_GROUP,
     CROP_GROUP,
     DODGE_GROUP,
+    SHAPE_GROUP,
 ];
 
 fn group_for(id: ToolId) -> Option<&'static [ToolId]> {
@@ -626,7 +628,16 @@ impl Default for ToolManager {
 
 #[cfg(test)]
 mod tests {
-    use super::ToolId;
+    use super::{ToolId, ToolManager, SHAPE_GROUP};
+
+    #[test]
+    fn shape_group_keeps_arrow_as_the_preferred_tool() {
+        let mut tools = ToolManager::new();
+        tools.select(ToolId::Arrow);
+        tools.select(ToolId::Move);
+        tools.select_group(SHAPE_GROUP);
+        assert_eq!(tools.active_id(), ToolId::Arrow);
+    }
 
     #[test]
     fn cmyk_allows_non_pixel_tools_and_blocks_writers() {

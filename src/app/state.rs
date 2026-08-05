@@ -673,6 +673,9 @@ pub struct TextEditState {
 pub struct ShapeDragState {
     pub layer_id: u32,
     pub handle: crate::core::shape::ShapeHandle,
+    /// Stable gesture baseline so toggling Shift/Alt mid-drag never compounds
+    /// already-previewed geometry.
+    pub original: (crate::core::shape::ShapeData, (i32, i32)),
     /// Undo command snapshotting the stack before the edit; finalized on release.
     pub before_cmd: Option<crate::core::command::LayerStructureCommand>,
     /// True once the drag actually changed the geometry (so a no-op click over a
@@ -2433,7 +2436,7 @@ impl App {
             && !self.edit.input.mid_dragging
             && matches!(
                 self.edit.tools.active_id(),
-                ToolId::SelectionRect | ToolId::SelectionEllipse
+                ToolId::SelectionRect | ToolId::SelectionEllipse | ToolId::Arrow
             );
         if needs_selection_cursor && self.win.cursor_selection_crosshair.is_none() {
             self.win.cursor_selection_crosshair = Some(Self::make_selection_cursor(event_loop));
@@ -2598,7 +2601,18 @@ impl App {
                         // a handle, move over its fill. The native four-way Move
                         // cursor is visually heavy, so a plain layer body still uses
                         // the compact OS pointer; guide edges take priority.
-                        let path_cursor = match self.move_hover_hint() {
+                        let hint = {
+                            let path = self.move_hover_hint();
+                            if path != 0 {
+                                path
+                            } else {
+                                self.move_selection_transform_cursor_hint(
+                                    self.edit.input.mouse_x,
+                                    self.edit.input.mouse_y,
+                                )
+                            }
+                        };
+                        let path_cursor = match hint {
                             2 => Some(CursorIcon::NwseResize),
                             3 => Some(CursorIcon::NeswResize),
                             4 => Some(CursorIcon::NsResize),
@@ -2691,7 +2705,25 @@ impl App {
                             }
                         }
                     }
-                    ToolId::SelectionRect | ToolId::SelectionEllipse | ToolId::Shape => {
+                    ToolId::Shape => {
+                        w.set_cursor_visible(true);
+                        match self.shape_cursor_hint() {
+                            1 => w.set_cursor(CursorIcon::NwseResize),
+                            2 => w.set_cursor(CursorIcon::NeswResize),
+                            3 => w.set_cursor(CursorIcon::NsResize),
+                            4 => w.set_cursor(CursorIcon::EwResize),
+                            5 => w.set_cursor(CursorIcon::Default),
+                            6 => w.set_cursor(CursorIcon::Move),
+                            _ => {
+                                if let Some(cc) = &self.win.cursor_selection_crosshair {
+                                    w.set_cursor(cc.clone());
+                                } else {
+                                    w.set_cursor(CursorIcon::Crosshair);
+                                }
+                            }
+                        }
+                    }
+                    ToolId::SelectionRect | ToolId::SelectionEllipse | ToolId::Arrow => {
                         if let Some(cc) = &self.win.cursor_selection_crosshair {
                             w.set_cursor_visible(true);
                             w.set_cursor(cc.clone());

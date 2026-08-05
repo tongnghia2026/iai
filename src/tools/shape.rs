@@ -71,7 +71,7 @@ impl ShapeTool {
     /// End point after applying Shift constrain (square/circle/45°-line),
     /// relative to the drag start (before any Alt centring).
     fn effective_end(&self) -> (f32, f32) {
-        if !self.shift {
+        if !self.shift && !self.alt {
             return (self.cur_x, self.cur_y);
         }
         let dx = self.cur_x - self.start_x;
@@ -140,7 +140,7 @@ impl ShapeTool {
     ) -> Option<(f32, f32, f32, f32)> {
         self.cur_x = cx;
         self.cur_y = cy;
-        self.shift = shift;
+        self.shift = shift || alt;
         self.alt = alt;
         self.is_dragging = false;
         let (x0, y0, x1, y1) = self.resolved_span();
@@ -173,7 +173,7 @@ impl Tool for ShapeTool {
         self.start_y = event.canvas_y;
         self.cur_x = event.canvas_x;
         self.cur_y = event.canvas_y;
-        self.shift = event.shift;
+        self.shift = event.shift || event.alt;
         self.alt = event.alt;
         self.is_dragging = true;
         ToolResponse::redraw()
@@ -187,7 +187,7 @@ impl Tool for ShapeTool {
     ) -> ToolResponse {
         self.cur_x = event.canvas_x;
         self.cur_y = event.canvas_y;
-        self.shift = event.shift;
+        self.shift = event.shift || event.alt;
         self.alt = event.alt;
         ToolResponse::redraw()
     }
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn alt_draws_from_center() {
+    fn alt_draws_from_center_and_constrains() {
         let mut t = ShapeTool::new();
         t.start_x = 50.0;
         t.start_y = 50.0;
@@ -232,8 +232,8 @@ mod tests {
         t.cur_y = 60.0;
         t.alt = true;
         let (x0, y0, x1, y1) = t.resolved_span();
-        assert_eq!((x0, y0), (30.0, 40.0));
-        assert_eq!((x1, y1), (70.0, 60.0));
+        assert_eq!((x0, y0), (30.0, 30.0));
+        assert_eq!((x1, y1), (70.0, 70.0));
         assert_eq!((x0 + x1) * 0.5, 50.0);
         assert_eq!((y0 + y1) * 0.5, 50.0);
     }

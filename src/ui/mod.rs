@@ -1425,7 +1425,19 @@ pub fn build(
             }
             for &(hid, hx, hy) in &overlay.handles {
                 let c = to_screen_pos(hx, hy);
-                if hid == 8 {
+                if hid == 11 {
+                    // Corel-style centre move node: small circle + crosshair.
+                    painter.circle_filled(c, 5.0, egui::Color32::WHITE);
+                    painter.circle_stroke(c, 5.0, egui::Stroke::new(1.0_f32, accent));
+                    painter.line_segment(
+                        [c - egui::vec2(3.0, 0.0), c + egui::vec2(3.0, 0.0)],
+                        egui::Stroke::new(1.0_f32, accent),
+                    );
+                    painter.line_segment(
+                        [c - egui::vec2(0.0, 3.0), c + egui::vec2(0.0, 3.0)],
+                        egui::Stroke::new(1.0_f32, accent),
+                    );
+                } else if hid == 8 {
                     // Corner-radius node: a small diamond.
                     let r = 4.5;
                     let pts = vec![

@@ -436,6 +436,23 @@ impl App {
                                     }
                                     return;
                                 }
+                                // Other selected layer kinds use the same eight
+                                // handles and rotate ring directly in Move. Start
+                                // the transform engine only after a handle/ring
+                                // hit, so ordinary clicking and marquee selection
+                                // remain available while the idle box is visible.
+                                if self.move_selection_transform_hit(msx, msy) {
+                                    let ev = self.tool_event();
+                                    self.begin_move_transform();
+                                    if self.edit.transform_state.is_some() {
+                                        self.transform_on_press(ev.canvas_x, ev.canvas_y, msx, msy);
+                                        self.edit.input.painting = true;
+                                        if let Some(w) = &self.win.window {
+                                            w.request_redraw();
+                                        }
+                                        return;
+                                    }
+                                }
                             }
 
                             // Node tool: double-click an anchor cycles its kind
@@ -1312,7 +1329,12 @@ impl App {
                         let ev = self.tool_event();
                         if self.shape_drag_active() {
                             // Live resize / corner-radius / endpoint edit.
-                            self.shape_drag_update(ev.canvas_x, ev.canvas_y);
+                            self.shape_drag_update(
+                                ev.canvas_x,
+                                ev.canvas_y,
+                                self.edit.input.shift_held,
+                                self.edit.input.alt_held,
+                            );
                         } else {
                             // Immediate rubber-band preview (no throttle).
                             let mut ctx = ToolCtx::new(
@@ -1387,6 +1409,7 @@ impl App {
             || active == ToolId::PerspectiveCrop
             || active == ToolId::Transform
             || active == ToolId::Move
+            || active == ToolId::Shape
             || active == ToolId::Text
             || self.edit.warp_state.is_some()
         {

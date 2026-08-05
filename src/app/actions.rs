@@ -106,6 +106,7 @@ impl App {
                 self.set_paint_color(self.shell.ui.paint_color_dialog_target, color);
             }
         } else {
+            self.edit.tools.eyedropper_mut().remember_color(color);
             self.set_paint_color(0, color);
         }
         self.shell.status_msg = format!("Picked #{:02X}{:02X}{:02X}", color[0], color[1], color[2]);

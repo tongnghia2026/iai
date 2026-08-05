@@ -18,7 +18,7 @@ use crate::core::shape::{ShapeData, ShapeKind};
 use crate::core::snapping::{best_snap, SnapKind, SnapLine, SNAP_THRESHOLD_PX};
 use crate::core::text::{rasterize_placed, TextData};
 use crate::core::tile::TileMap;
-use crate::core::vector::object::VectorGeometry;
+use crate::core::vector::object::{VectorGeometry, VectorObjectData};
 use crate::gpu::compositor::TransformPreviewUniform;
 use rayon::prelude::*;
 
@@ -369,6 +369,40 @@ fn transformed_shape_span(
     Some((nx0, ny0, nx1, ny1, radius, stroke))
 }
 
+/// Convert a parametric Shape to an editable Path when an affine rotation can
+/// no longer be represented by ShapeData's axis-aligned span. The geometry and
+/// paint remain vector; only the primitive-specific controls are relinquished.
+fn rotated_shape_as_path(
+    sd: &ShapeData,
+    ls: &LayerOrigState,
+    ts: &TransformState,
+) -> Option<(VectorObjectData, TileMap, u32, u32, (i32, i32))> {
+    if ts.quad.is_some()
+        || !ts.scale_x.is_finite()
+        || !ts.scale_y.is_finite()
+        || !ts.angle_deg.is_finite()
+        || ts.scale_x.abs() <= TRANSFORM_EPS
+        || ts.scale_y.abs() <= TRANSFORM_EPS
+    {
+        return None;
+    }
+    use crate::core::vector::affine::AffineTransform;
+    let pivot = AffineTransform::translate(ts.pivot_cx, ts.pivot_cy);
+    let unpivot = AffineTransform::translate(-ts.pivot_cx, -ts.pivot_cy);
+    let gesture = AffineTransform::translate(ts.translate_x, ts.translate_y)
+        .then(&pivot)
+        .then(&AffineTransform::rotate(ts.angle_deg.to_radians()))
+        .then(&AffineTransform::scale(ts.scale_x, ts.scale_y))
+        .then(&unpivot);
+    let mut object = sd.to_vector_object(ls.offset);
+    object.transform = gesture.then(&object.transform);
+    object.style.stroke_style.width =
+        (object.style.stroke_style.width * (ts.scale_x * ts.scale_y).abs().sqrt()).max(0.0);
+    let raster = crate::core::vector::raster::rasterize(&object)?;
+    let tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+    Some((object, tiles, raster.width, raster.height, raster.offset))
+}
+
 /// Rebuild a Shape layer at its transformed span and re-render it crisply from
 /// the vector (the analogue of `rasterized_text_layer_at`).
 fn rasterized_shape_layer_at(
@@ -505,7 +539,14 @@ fn bake_transform_commit(
                         after_layer_type = LayerType::Raster;
                     }
                 }
-                None => after_layer_type = LayerType::Raster,
+                None => {
+                    if let Some((object, tiles, w, h, off)) = rotated_shape_as_path(sd, ls, &ts) {
+                        after_layer_type = LayerType::Vector(VectorGeometry::Path(object));
+                        crisp_vector_layer = Some((tiles, w, h, off));
+                    } else {
+                        after_layer_type = LayerType::Raster;
+                    }
+                }
             }
         }
 
@@ -646,7 +687,127 @@ fn bake_transform_commit(
 }
 
 impl App {
+    /// Axis-aligned selection box shown by Move before a transform session is
+    /// started. Path objects have their own oriented affine box.
+    pub fn move_selection_transform_box(
+        &self,
+    ) -> Option<([(f32, f32); 4], [(f32, f32); 8], (f32, f32))> {
+        if self.edit.tools.active_id() != crate::tools::ToolId::Move
+            || self.edit.transform_state.is_some()
+            || self.edit.input.painting
+        {
+            return None;
+        }
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let selected: Vec<_> = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .filter(|l| l.selected && !l.locked && !l.is_background)
+            .collect();
+        if selected.is_empty()
+            || selected
+                .iter()
+                .any(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
+        {
+            return None;
+        }
+        let x0 = selected.iter().map(|l| l.offset.0).min()? as f32;
+        let y0 = selected.iter().map(|l| l.offset.1).min()? as f32;
+        let x1 = selected.iter().map(|l| l.offset.0 + l.width as i32).max()? as f32;
+        let y1 = selected
+            .iter()
+            .map(|l| l.offset.1 + l.height as i32)
+            .max()? as f32;
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+        Some((
+            [(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
+            [
+                (x0, y0),
+                (cx, y0),
+                (x1, y0),
+                (x0, cy),
+                (x1, cy),
+                (x0, y1),
+                (cx, y1),
+                (x1, y1),
+            ],
+            (cx, cy),
+        ))
+    }
+
+    /// True when the pointer is on a Move selection handle or rotation ring.
+    pub fn move_selection_transform_hit(&self, sx: f32, sy: f32) -> bool {
+        let (corners, handles, center) = match self.move_selection_transform_box() {
+            Some(v) => v,
+            None => return false,
+        };
+        let zoom = self.edit.view.zoom;
+        let ox = self.edit.view.offset_x;
+        let oy = self.edit.view.offset_y;
+        let screen = |p: (f32, f32)| (p.0 * zoom + ox, p.1 * zoom + oy);
+        let dist =
+            |a: (f32, f32), b: (f32, f32)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+        if handles
+            .iter()
+            .any(|&p| dist((sx, sy), screen(p)) <= HANDLE_RADIUS)
+        {
+            return true;
+        }
+        let cs = screen(center);
+        corners.iter().any(|&p| {
+            let ps = screen(p);
+            let d = dist((sx, sy), ps);
+            d > HANDLE_RADIUS && d <= ROTATE_ZONE && dist((sx, sy), cs) >= dist(ps, cs) - 2.0
+        })
+    }
+
+    pub fn move_selection_transform_cursor_hint(&self, sx: f32, sy: f32) -> u8 {
+        let (corners, handles, center) = match self.move_selection_transform_box() {
+            Some(v) => v,
+            None => return 0,
+        };
+        let zoom = self.edit.view.zoom;
+        let ox = self.edit.view.offset_x;
+        let oy = self.edit.view.offset_y;
+        let screen = |p: (f32, f32)| (p.0 * zoom + ox, p.1 * zoom + oy);
+        let dist =
+            |a: (f32, f32), b: (f32, f32)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+        let hints = [2, 4, 3, 5, 5, 3, 4, 2];
+        if let Some((i, _)) = handles
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (i, dist((sx, sy), screen(p))))
+            .filter(|(_, d)| *d <= HANDLE_RADIUS)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+        {
+            return hints[i];
+        }
+        let cs = screen(center);
+        if corners.iter().any(|&p| {
+            let ps = screen(p);
+            let d = dist((sx, sy), ps);
+            d > HANDLE_RADIUS && d <= ROTATE_ZONE && dist((sx, sy), cs) >= dist(ps, cs) - 2.0
+        }) {
+            return 6;
+        }
+        0
+    }
+
     pub fn begin_transform(&mut self) {
+        self.begin_transform_for_tool(true);
+    }
+
+    /// Start the existing transform engine without leaving Move.  This is used
+    /// by the Move tool's on-canvas handles; Ctrl+T still selects Free Transform.
+    pub fn begin_move_transform(&mut self) {
+        self.begin_transform_for_tool(false);
+    }
+
+    fn begin_transform_for_tool(&mut self, select_transform_tool: bool) {
         if self.edit.transform_state.is_some() {
             return;
         }
@@ -796,14 +957,20 @@ impl App {
         });
 
         self.update_transform_preview();
-        self.edit.tools.select(crate::tools::ToolId::Transform);
+        if select_transform_tool {
+            self.edit.tools.select(crate::tools::ToolId::Transform);
+        }
         let n = self
             .edit
             .transform_state
             .as_ref()
             .map(|ts| ts.layer_states.len())
             .unwrap_or(0);
-        self.shell.status_msg = if n > 1 {
+        self.shell.status_msg = if !select_transform_tool && n > 1 {
+            format!("Move transform ({n} layers) — drag handles to scale, drag outside a corner to rotate")
+        } else if !select_transform_tool {
+            "Move transform — drag handles to scale, drag outside a corner to rotate".to_string()
+        } else if n > 1 {
             format!("Free Transform ({n} layers) — corner=proportional • Shift+edge=distort • Alt=from-center • Enter=commit • Esc=cancel")
         } else {
             "Free Transform — corner=proportional • Shift+edge=distort • Alt=from-center • Enter/Esc".to_string()
@@ -1518,6 +1685,12 @@ impl App {
             ts.drag_handle = None;
         }
         self.edit.transform_snap_guides.clear();
+        // Move-tool transforms are direct manipulation, not a modal Ctrl+T
+        // session. Commit one undoable operation as soon as the gesture ends;
+        // the idle selection box is rebuilt from the resulting layer bounds.
+        if self.edit.tools.active_id() == crate::tools::ToolId::Move {
+            self.commit_transform();
+        }
     }
 
     pub fn transform_set_scale_x(&mut self, v: f32) {
@@ -2334,7 +2507,7 @@ mod tests {
     }
 
     #[test]
-    fn shape_rotation_rasterizes_rect_but_keeps_line() {
+    fn shape_rotation_converts_rect_to_path_but_keeps_line() {
         let (_, rect_ls) = shape_orig_state(ShapeKind::Rectangle, 9);
         let ts = shape_transform_state(rect_ls, 1.0, 1.0, 45.0);
         let result = bake_transform_commit(
@@ -2344,8 +2517,11 @@ mod tests {
         )
         .expect("bake succeeds");
         assert!(
-            matches!(result.layers[0].layer_type, LayerType::Raster),
-            "a rotated rectangle can't stay a live axis-aligned shape"
+            matches!(
+                result.layers[0].layer_type,
+                LayerType::Vector(VectorGeometry::Path(_))
+            ),
+            "a rotated rectangle becomes editable curves, never pixels"
         );
 
         let (line_sd, line_ls) = shape_orig_state(ShapeKind::Line, 9);

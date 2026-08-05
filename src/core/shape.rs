@@ -74,6 +74,8 @@ pub enum ShapeHandle {
     Radius,
     LineStart,
     LineEnd,
+    /// Centre node: drag the whole primitive without switching to Move.
+    Center,
 }
 
 impl ShapeHandle {
@@ -90,6 +92,7 @@ impl ShapeHandle {
             ShapeHandle::Radius => 8,
             ShapeHandle::LineStart => 9,
             ShapeHandle::LineEnd => 10,
+            ShapeHandle::Center => 11,
         }
     }
     pub fn from_u8(v: u8) -> ShapeHandle {
@@ -104,6 +107,7 @@ impl ShapeHandle {
             8 => ShapeHandle::Radius,
             9 => ShapeHandle::LineStart,
             10 => ShapeHandle::LineEnd,
+            11 => ShapeHandle::Center,
             _ => ShapeHandle::TopLeft,
         }
     }
@@ -309,6 +313,7 @@ impl ShapeData {
             return vec![
                 (ShapeHandle::LineStart, x0, y0),
                 (ShapeHandle::LineEnd, x1, y1),
+                (ShapeHandle::Center, (x0 + x1) * 0.5, (y0 + y1) * 0.5),
             ];
         }
         let minx = x0.min(x1);
@@ -326,6 +331,7 @@ impl ShapeData {
             (ShapeHandle::Bottom, midx, maxy),
             (ShapeHandle::BottomLeft, minx, maxy),
             (ShapeHandle::Left, minx, midy),
+            (ShapeHandle::Center, midx, midy),
         ]
     }
 
@@ -411,10 +417,57 @@ impl ShapeData {
         cx: f32,
         cy: f32,
     ) -> (ShapeData, (i32, i32)) {
+        self.resize_by_handle_with_modifiers(offset, handle, cx, cy, false, false)
+    }
+
+    /// Resize with Free-Transform modifiers: Shift preserves the original
+    /// aspect ratio on corner/line endpoint drags; Alt scales around the
+    /// original centre instead of keeping the opposite handle fixed.
+    pub fn resize_by_handle_with_modifiers(
+        &self,
+        offset: (i32, i32),
+        handle: ShapeHandle,
+        cx: f32,
+        cy: f32,
+        shift: bool,
+        alt: bool,
+    ) -> (ShapeData, (i32, i32)) {
         let (sx0, sy0, sx1, sy1) = self.canvas_span(offset);
         match handle {
-            ShapeHandle::LineStart => self.rebuilt(cx, cy, sx1, sy1),
-            ShapeHandle::LineEnd => self.rebuilt(sx0, sy0, cx, cy),
+            ShapeHandle::Center => {
+                let center = ((sx0 + sx1) * 0.5, (sy0 + sy1) * 0.5);
+                let dx = cx - center.0;
+                let dy = cy - center.1;
+                self.rebuilt(sx0 + dx, sy0 + dy, sx1 + dx, sy1 + dy)
+            }
+            ShapeHandle::LineStart | ShapeHandle::LineEnd => {
+                let moving_start = handle == ShapeHandle::LineStart;
+                let fixed = if moving_start { (sx1, sy1) } else { (sx0, sy0) };
+                let center = ((sx0 + sx1) * 0.5, (sy0 + sy1) * 0.5);
+                let anchor = if alt { center } else { fixed };
+                let (mut tx, mut ty) = (cx, cy);
+                if shift {
+                    let dx = tx - anchor.0;
+                    let dy = ty - anchor.1;
+                    let len = (dx * dx + dy * dy).sqrt();
+                    if len > 0.001 {
+                        let step = std::f32::consts::FRAC_PI_4;
+                        let angle = (dy.atan2(dx) / step).round() * step;
+                        tx = anchor.0 + len * angle.cos();
+                        ty = anchor.1 + len * angle.sin();
+                    }
+                }
+                let opposite = if alt {
+                    (2.0 * center.0 - tx, 2.0 * center.1 - ty)
+                } else {
+                    fixed
+                };
+                if moving_start {
+                    self.rebuilt(tx, ty, opposite.0, opposite.1)
+                } else {
+                    self.rebuilt(opposite.0, opposite.1, tx, ty)
+                }
+            }
             ShapeHandle::Radius => {
                 // Node rides the top edge inset from the top-left corner; its
                 // horizontal distance from that corner is the radius.
@@ -446,17 +499,79 @@ impl ShapeData {
                     ShapeHandle::Left => (true, false, false, false),
                     _ => (false, false, false, false),
                 };
+                let center = ((minx + maxx) * 0.5, (miny + maxy) * 0.5);
+                let orig_w = (maxx - minx).max(0.001);
+                let orig_h = (maxy - miny).max(0.001);
                 if left {
                     minx = cx;
+                    if alt {
+                        maxx = 2.0 * center.0 - cx;
+                    }
                 }
                 if right {
                     maxx = cx;
+                    if alt {
+                        minx = 2.0 * center.0 - cx;
+                    }
                 }
                 if top {
                     miny = cy;
+                    if alt {
+                        maxy = 2.0 * center.1 - cy;
+                    }
                 }
                 if bottom {
                     maxy = cy;
+                    if alt {
+                        miny = 2.0 * center.1 - cy;
+                    }
+                }
+                let is_corner = (left || right) && (top || bottom);
+                if shift && is_corner {
+                    let anchor = if alt {
+                        center
+                    } else {
+                        (
+                            if left { sx0.max(sx1) } else { sx0.min(sx1) },
+                            if top { sy0.max(sy1) } else { sy0.min(sy1) },
+                        )
+                    };
+                    let base_w = if alt { orig_w * 0.5 } else { orig_w };
+                    let base_h = if alt { orig_h * 0.5 } else { orig_h };
+                    let dx = cx - anchor.0;
+                    let dy = cy - anchor.1;
+                    let scale = (dx.abs() / base_w).max(dy.abs() / base_h);
+                    let fallback_x = if left { -1.0 } else { 1.0 };
+                    let fallback_y = if top { -1.0 } else { 1.0 };
+                    let tx = anchor.0
+                        + base_w * scale * if dx == 0.0 { fallback_x } else { dx.signum() };
+                    let ty = anchor.1
+                        + base_h * scale * if dy == 0.0 { fallback_y } else { dy.signum() };
+                    if alt {
+                        minx = 2.0 * center.0 - tx;
+                        maxx = tx;
+                        miny = 2.0 * center.1 - ty;
+                        maxy = ty;
+                    } else {
+                        if left {
+                            minx = tx
+                        } else {
+                            maxx = tx
+                        }
+                        if top {
+                            miny = ty
+                        } else {
+                            maxy = ty
+                        }
+                    }
+                } else if shift && (left || right) {
+                    let new_h = (maxx - minx).abs() * orig_h / orig_w;
+                    miny = center.1 - new_h * 0.5;
+                    maxy = center.1 + new_h * 0.5;
+                } else if shift && (top || bottom) {
+                    let new_w = (maxy - miny).abs() * orig_w / orig_h;
+                    minx = center.0 - new_w * 0.5;
+                    maxx = center.0 + new_w * 0.5;
                 }
                 self.rebuilt(minx, miny, maxx, maxy)
             }
@@ -1226,5 +1341,75 @@ mod tests {
         // Clamped to half the shorter side (40).
         let (d3, _) = d.resize_by_handle(off, ShapeHandle::Radius, 999.0, 0.0);
         assert!((d3.corner_radius - 40.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn shift_corner_resize_preserves_original_aspect_ratio() {
+        let (d, off) = ShapeData::from_canvas_span(
+            ShapeKind::Rectangle,
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 255],
+        );
+        let (next, next_off) = d.resize_by_handle_with_modifiers(
+            off,
+            ShapeHandle::BottomRight,
+            160.0,
+            60.0,
+            true,
+            false,
+        );
+        let (x0, y0, x1, y1) = next.canvas_span(next_off);
+        assert!((((x1 - x0) / (y1 - y0)) - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn alt_edge_resize_keeps_original_center() {
+        let (d, off) = ShapeData::from_canvas_span(
+            ShapeKind::Rectangle,
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 255],
+        );
+        let (next, next_off) =
+            d.resize_by_handle_with_modifiers(off, ShapeHandle::Right, 130.0, 25.0, true, true);
+        let (x0, y0, x1, y1) = next.canvas_span(next_off);
+        assert!(((x0 + x1) * 0.5 - 50.0).abs() < 0.001);
+        assert!(((y0 + y1) * 0.5 - 25.0).abs() < 0.001);
+        assert!((((x1 - x0) / (y1 - y0)) - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn center_handle_moves_shape_without_resizing() {
+        let (d, off) = ShapeData::from_canvas_span(
+            ShapeKind::Ellipse,
+            10.0,
+            20.0,
+            110.0,
+            70.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 255],
+        );
+        let (next, next_off) = d.resize_by_handle(off, ShapeHandle::Center, 90.0, 65.0);
+        let (x0, y0, x1, y1) = next.canvas_span(next_off);
+        assert!(((x0 + x1) * 0.5 - 90.0).abs() < 0.001);
+        assert!(((y0 + y1) * 0.5 - 65.0).abs() < 0.001);
+        assert!(((x1 - x0) - 100.0).abs() < 0.001);
+        assert!(((y1 - y0) - 50.0).abs() < 0.001);
     }
 }

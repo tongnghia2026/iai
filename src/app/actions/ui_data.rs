@@ -596,6 +596,7 @@ impl App {
                 })
                 .collect(),
         );
+        let selected_arrow_settings = self.active_arrow_settings();
 
         UiData {
             doc: DocumentViewModel {
@@ -885,6 +886,8 @@ impl App {
                 show_gradient_editor: self.shell.ui.show_gradient_editor,
                 eyedropper_sample: self.edit.tools.eyedropper().sample_size as u8,
                 eyedropper_sample_merged: self.edit.tools.eyedropper().sample_merged,
+                eyedropper_picked_color: self.edit.tools.eyedropper().picked_color,
+                eyedropper_picked_colors: self.edit.tools.eyedropper().picked_colors.clone(),
                 move_auto_select: self.edit.tools.move_tool().auto_select,
                 move_show_transform: self.edit.tools.move_tool().show_transform,
                 clone_size: self.edit.tools.clone_like().size,
@@ -927,9 +930,12 @@ impl App {
                     Vec::new()
                 },
                 vector_brush_can_expand: self.active_brush_layer_id().is_some(),
-                arrow_width: self.edit.tools.arrow().width,
-                arrow_end: self.edit.tools.arrow().end_arrow,
-                arrow_route: self.edit.tools.arrow().route,
+                arrow_width: selected_arrow_settings
+                    .map_or(self.edit.tools.arrow().width, |settings| settings.0),
+                arrow_end: selected_arrow_settings
+                    .map_or(self.edit.tools.arrow().end_arrow, |settings| settings.1),
+                arrow_route: selected_arrow_settings
+                    .map_or(self.edit.tools.arrow().route, |settings| settings.2),
                 arrow_path: if self.edit.tools.active_id() == crate::tools::ToolId::Arrow {
                     self.edit
                         .tools
@@ -1102,6 +1108,16 @@ impl App {
                                 } else {
                                     None
                                 },
+                            })
+                    })
+                    .or_else(|| {
+                        self.move_selection_transform_box()
+                            .map(|(corners, handles, center)| TransformOverlayData {
+                                corners,
+                                handles,
+                                center,
+                                pivot: center,
+                                pivot_snap_label: None,
                             })
                     }),
                 transform_scale_x: self

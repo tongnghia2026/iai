@@ -522,13 +522,23 @@ impl App {
             self.edit.tools.vector_brush_mut().velocity = v;
         }
         if let Some(width) = actions.tool.set_arrow_width.take() {
-            self.edit.tools.arrow_mut().width = width.clamp(0.1, 500.0);
+            let width = width.clamp(0.1, 500.0);
+            self.edit.tools.arrow_mut().width = width;
+            if self.active_arrow_settings().is_some() {
+                self.path_set_stroke_width(width);
+            }
         }
         if let Some(kind) = actions.tool.set_arrow_end.take() {
-            self.edit.tools.arrow_mut().end_arrow = kind.min(4);
+            let kind = kind.clamp(1, 4);
+            if self.active_arrow_settings().is_some() {
+                self.path_set_arrow_end(kind);
+            }
+            self.edit.tools.arrow_mut().end_arrow = kind;
         }
         if let Some(route) = actions.tool.set_arrow_route.take() {
-            self.edit.tools.arrow_mut().route = route.min(3);
+            let route = route.min(3);
+            self.set_active_arrow_route(route);
+            self.edit.tools.arrow_mut().route = route;
         }
         if std::mem::take(&mut actions.tool.expand_vector_brush) {
             self.expand_active_brush_stroke();

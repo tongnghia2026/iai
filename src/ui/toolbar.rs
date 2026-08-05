@@ -33,7 +33,14 @@ const CROP_GROUP: &[(ToolId, &str, &str)] = &[
 
 const TEXT_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Text, ph::TEXT_T, "Type (T)")];
 
-const SHAPE_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Shape, ph::SHAPES, "Shape (U)")];
+const SHAPE_GROUP: &[(ToolId, &str, &str)] = &[
+    (ToolId::Shape, ph::RECTANGLE, "Rectangle (U)"),
+    (ToolId::Shape, ph::CIRCLE, "Ellipse (U)"),
+    (ToolId::Shape, ph::LINE_SEGMENT, "Line (U)"),
+    (ToolId::Shape, ph::POLYGON, "Polygon (U)"),
+    (ToolId::Shape, ph::STAR, "Star (U)"),
+    (ToolId::Arrow, ph::ARROW_UP_RIGHT, "Arrow / Connector"),
+];
 
 const PEN_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Pen, ph::PEN_NIB, "Pen (P)")];
 
@@ -45,9 +52,6 @@ const VECTOR_BRUSH_GROUP: &[(ToolId, &str, &str)] = &[(
     ph::SCRIBBLE_LOOP,
     "Vector Brush — freehand editable stroke",
 )];
-
-const ARROW_GROUP: &[(ToolId, &str, &str)] =
-    &[((ToolId::Arrow, ph::ARROW_UP_RIGHT, "Arrow / Connector"))];
 
 const BRUSH_GROUP: &[(ToolId, &str, &str)] = &[
     (ToolId::Brush, ph::PAINT_BRUSH, "Brush (B)"),
@@ -107,7 +111,6 @@ const COMMON_BOTTOM_GROUPS: &[&[(ToolId, &str, &str)]] = &[
     GRADIENT_GROUP,
     PEN_GROUP,
     VECTOR_BRUSH_GROUP,
-    ARROW_GROUP,
     TEXT_GROUP,
     SHAPE_GROUP,
     HAND_GROUP,
@@ -656,14 +659,26 @@ fn group_btn(
     entries: &[(ToolId, &str, &str)],
 ) {
     let pal = data.chrome.theme_mode.palette();
-    let active_entry = entries
-        .iter()
-        .find(|&&(id, _, _)| id == data.tool.active_tool);
+    let is_shape_group = entries.iter().any(|&(id, _, _)| id == ToolId::Shape)
+        && entries.iter().any(|&(id, _, _)| id == ToolId::Arrow);
+    let active_entry = if is_shape_group && data.tool.active_tool == ToolId::Shape {
+        entries.get(data.tool.shape_kind.min(4) as usize)
+    } else {
+        entries
+            .iter()
+            .find(|&&(id, _, _)| id == data.tool.active_tool)
+    };
     let preferred_entry = data
         .tool
         .tool_group_preferences
         .iter()
         .find_map(|pref| entries.iter().find(|&&(id, _, _)| id == *pref));
+    let preferred_entry =
+        if is_shape_group && preferred_entry.is_some_and(|&(id, _, _)| id == ToolId::Shape) {
+            entries.get(data.tool.shape_kind.min(4) as usize)
+        } else {
+            preferred_entry
+        };
     let (shown_id, shown_icon, shown_tip) = active_entry.or(preferred_entry).unwrap_or(&entries[0]);
     let is_active = active_entry.is_some();
     let has_multi = entries.len() > 1;
@@ -707,8 +722,11 @@ fn group_btn(
 
         resp.context_menu(|ui| {
             ui.set_min_width(160.0);
-            for &(entry_id, entry_icon, entry_name) in entries {
-                let checked = entry_id == data.tool.active_tool;
+            for (entry_index, &(entry_id, entry_icon, entry_name)) in entries.iter().enumerate() {
+                let checked = entry_id == data.tool.active_tool
+                    && (!is_shape_group
+                        || entry_id == ToolId::Arrow
+                        || data.tool.shape_kind as usize == entry_index);
                 let mut label = egui::text::LayoutJob::default();
                 label.append(
                     entry_icon,
@@ -730,6 +748,9 @@ fn group_btn(
                     },
                 );
                 if ui.add(egui::Button::selectable(checked, label)).clicked() {
+                    if is_shape_group && entry_id == ToolId::Shape {
+                        actions.tool.set_shape_kind = Some(entry_index.min(4) as u8);
+                    }
                     actions.tool.select_tool = Some(entry_id);
                     ui.close();
                 }

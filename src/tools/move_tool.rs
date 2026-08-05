@@ -798,4 +798,26 @@ mod tests {
             "an unselected empty vector box must not be grabbed"
         );
     }
+
+    #[test]
+    fn shift_moves_multiple_selected_layers_on_one_axis() {
+        let mut t = MoveTool::new();
+        t.snap_enabled = false;
+        let mut doc = Document::new(DocumentId(1), 400, 300);
+        let first = add_empty_vector_layer(&mut doc, 40, 50, 80, 80, true);
+        let second = add_empty_vector_layer(&mut doc, 70, 70, 80, 80, true);
+        doc.canvas.layer_stack.active_idx = second;
+
+        let press = PointerEvent::new(90.0, 90.0);
+        let mut drag = PointerEvent::new(150.0, 105.0);
+        drag.shift = true;
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(press, &mut c);
+            t.on_drag(drag, &press, &mut c);
+        }
+
+        assert_eq!(doc.canvas.layer_stack.layers[first].offset, (100, 50));
+        assert_eq!(doc.canvas.layer_stack.layers[second].offset, (130, 70));
+    }
 }

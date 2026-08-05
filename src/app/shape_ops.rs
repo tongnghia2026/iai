@@ -273,6 +273,32 @@ impl App {
         best.map(|(_, h)| ShapeHandle::from_u8(h))
     }
 
+    /// Native OS resize-cursor hint for the active/hovered Shape handle.
+    /// 0=crosshair, 1=NW-SE, 2=NE-SW, 3=NS, 4=EW, 5=default, 6=move.
+    pub fn shape_cursor_hint(&self) -> u8 {
+        let handle = self
+            .edit
+            .shape_drag
+            .as_ref()
+            .map(|drag| drag.handle)
+            .or_else(|| {
+                let cx = (self.edit.input.mouse_x - self.edit.view.offset_x)
+                    / self.edit.view.zoom.max(1e-4);
+                let cy = (self.edit.input.mouse_y - self.edit.view.offset_y)
+                    / self.edit.view.zoom.max(1e-4);
+                self.shape_handle_at(cx, cy)
+            });
+        match handle {
+            Some(ShapeHandle::TopLeft | ShapeHandle::BottomRight) => 1,
+            Some(ShapeHandle::TopRight | ShapeHandle::BottomLeft) => 2,
+            Some(ShapeHandle::Top | ShapeHandle::Bottom) => 3,
+            Some(ShapeHandle::Left | ShapeHandle::Right) => 4,
+            Some(ShapeHandle::Radius | ShapeHandle::LineStart | ShapeHandle::LineEnd) => 5,
+            Some(ShapeHandle::Center) => 6,
+            None => 0,
+        }
+    }
+
     /// Begin dragging the given handle of the active Shape layer.
     pub fn shape_begin_handle_drag(&mut self, handle: ShapeHandle) {
         let Some(idx) = self.active_shape_index() else {
@@ -284,11 +310,18 @@ impl App {
         };
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let layer_id = canvas.layer_stack.layers[idx].id;
+        let LayerType::Vector(VectorGeometry::Primitive(original_data)) =
+            &canvas.layer_stack.layers[idx].layer_type
+        else {
+            return;
+        };
+        let original = (original_data.clone(), canvas.layer_stack.layers[idx].offset);
         let before =
             LayerStructureCommand::capture_before("Edit Shape", &canvas.layer_stack, cw, ch);
         self.edit.shape_drag = Some(ShapeDragState {
             layer_id,
             handle,
+            original,
             before_cmd: Some(before),
             changed: false,
             pending: None,
@@ -314,27 +347,13 @@ impl App {
     /// stored as the drag's pending target every move (the vector overlay
     /// tracks it at full frame rate); the CPU rasterization into the layer is
     /// throttled by its own measured cost so huge shapes can't stall the drag.
-    pub fn shape_drag_update(&mut self, cx: f32, cy: f32) {
-        let (handle, layer_id, pending) = match &self.edit.shape_drag {
-            Some(d) => (d.handle, d.layer_id, d.pending.clone()),
+    pub fn shape_drag_update(&mut self, cx: f32, cy: f32, shift: bool, alt: bool) {
+        let (handle, layer_id, data, offset) = match &self.edit.shape_drag {
+            Some(d) => (d.handle, d.layer_id, d.original.0.clone(), d.original.1),
             None => return,
         };
-        // Resize from the live target, not the (possibly stale) baked layer.
-        let (data, offset) = match pending {
-            Some(p) => p,
-            None => {
-                let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
-                let Some(layer) = canvas.layer_stack.layers.iter().find(|l| l.id == layer_id)
-                else {
-                    return;
-                };
-                let LayerType::Vector(VectorGeometry::Primitive(d)) = &layer.layer_type else {
-                    return;
-                };
-                (d.clone(), layer.offset)
-            }
-        };
-        let (new_data, new_offset) = data.resize_by_handle(offset, handle, cx, cy);
+        let (new_data, new_offset) =
+            data.resize_by_handle_with_modifiers(offset, handle, cx, cy, shift || alt, alt);
         if new_data == data && new_offset == offset {
             return;
         }

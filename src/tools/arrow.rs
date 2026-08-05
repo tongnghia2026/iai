@@ -33,6 +33,24 @@ impl ArrowTool {
         self.drawing
     }
 
+    /// Shift constrains an arrow to the dominant canvas axis, matching Move:
+    /// horizontal when |dx| >= |dy|, otherwise vertical.
+    fn constrained_end(&self, point: Point, shift: bool) -> Point {
+        let Some(start) = self.start else {
+            return point;
+        };
+        if !shift {
+            return point;
+        }
+        let dx = point.x - start.x;
+        let dy = point.y - start.y;
+        if dx.abs() >= dy.abs() {
+            Point::new(point.x, start.y)
+        } else {
+            Point::new(start.x, point.y)
+        }
+    }
+
     pub fn preview_path(&self) -> Option<crate::core::vector::path::PathData> {
         let (start, end) = (self.start?, self.end?);
         Some(elbow_connector_path(
@@ -115,14 +133,16 @@ impl Tool for ArrowTool {
         _ctx: &mut ToolCtx,
     ) -> ToolResponse {
         if self.drawing {
-            self.end = Some(Point::new(event.canvas_x, event.canvas_y));
+            self.end =
+                Some(self.constrained_end(Point::new(event.canvas_x, event.canvas_y), event.shift));
         }
         ToolResponse::redraw()
     }
 
     fn on_release(&mut self, event: PointerEvent, _ctx: &mut ToolCtx) -> ToolResponse {
         if self.drawing {
-            self.end = Some(Point::new(event.canvas_x, event.canvas_y));
+            self.end =
+                Some(self.constrained_end(Point::new(event.canvas_x, event.canvas_y), event.shift));
             self.drawing = false;
         }
         ToolResponse::redraw()
@@ -150,6 +170,25 @@ mod tests {
         assert_eq!(
             object.style.stroke_style.end_arrow.kind,
             ArrowHead::Triangle
+        );
+    }
+
+    #[test]
+    fn shift_constrains_arrow_to_dominant_axis() {
+        let mut tool = ArrowTool::new();
+        tool.start = Some(Point::new(10.0, 20.0));
+
+        assert_eq!(
+            tool.constrained_end(Point::new(70.0, 35.0), true),
+            Point::new(70.0, 20.0)
+        );
+        assert_eq!(
+            tool.constrained_end(Point::new(25.0, 90.0), true),
+            Point::new(10.0, 90.0)
+        );
+        assert_eq!(
+            tool.constrained_end(Point::new(70.0, 35.0), false),
+            Point::new(70.0, 35.0)
         );
     }
 }

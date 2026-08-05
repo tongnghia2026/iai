@@ -156,6 +156,10 @@ pub struct ToolViewModel {
     pub show_gradient_editor: bool,
     pub eyedropper_sample: u8,
     pub eyedropper_sample_merged: bool,
+    /// Most recently sampled canvas colour, exposed as a Corel-style status-bar swatch.
+    pub eyedropper_picked_color: Option<[u8; 4]>,
+    /// Session history of sampled colours for the bottom Corel-style palette.
+    pub eyedropper_picked_colors: Vec<[u8; 4]>,
     pub move_auto_select: bool,
     pub move_show_transform: bool,
     pub clone_size: f32,
@@ -672,6 +676,8 @@ impl Default for UiData {
                 show_gradient_editor: false,
                 eyedropper_sample: 0,
                 eyedropper_sample_merged: true,
+                eyedropper_picked_color: None,
+                eyedropper_picked_colors: Vec::new(),
                 move_auto_select: false,
                 move_show_transform: false,
                 clone_size: 30.0,

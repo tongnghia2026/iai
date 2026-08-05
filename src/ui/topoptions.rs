@@ -406,15 +406,16 @@ fn arrow_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.label(top_options_icon(ph::RULER))
         .on_hover_text("Outline width");
     let mut width = data.tool.arrow_width;
-    if ui
-        .add(
-            egui::DragValue::new(&mut width)
-                .range(0.1..=500.0)
-                .suffix(" px"),
-        )
-        .changed()
-    {
+    let width_response = ui.add(
+        egui::DragValue::new(&mut width)
+            .range(0.1..=500.0)
+            .suffix(" px"),
+    );
+    if width_response.changed() {
         actions.tool.set_arrow_width = Some(width);
+    }
+    if width_response.drag_stopped() || width_response.lost_focus() {
+        actions.tool.commit_path_style = true;
     }
     let arrow_meta = |kind| match kind {
         2 => (ph::FLOW_ARROW, "Stealth"),
@@ -1491,31 +1492,7 @@ fn shape_color_chip(ui: &mut egui::Ui, color: [u8; 4], tip: &str) -> bool {
 }
 
 fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    let mut kind = data.tool.shape_kind;
-    let shape_meta = |kind| match kind {
-        1 => (ph::CIRCLE, "Ellipse"),
-        2 => (ph::LINE_SEGMENT, "Line"),
-        3 => (ph::POLYGON, "Polygon"),
-        4 => (ph::STAR, "Star"),
-        _ => (ph::RECTANGLE, "Rectangle"),
-    };
-    let (shape_icon, shape_name) = shape_meta(kind);
-    egui::ComboBox::from_id_salt("shape_kind")
-        .selected_text(format!("{shape_icon} {shape_name}"))
-        .width(112.0)
-        .show_ui(ui, |ui| {
-            for v in 0u8..=4 {
-                let (icon, name) = shape_meta(v);
-                if ui
-                    .selectable_value(&mut kind, v, format!("{icon}  {name}"))
-                    .changed()
-                {
-                    actions.tool.set_shape_kind = Some(kind);
-                }
-            }
-        });
-
-    ui.separator();
+    let kind = data.tool.shape_kind;
 
     // Fill: enable toggle only (not for lines). The colour comes from the
     // right-edge palette, so the redundant swatch is gone.
@@ -1576,29 +1553,71 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     // Polygon edge count / Star point count, and the star's inner radius.
     if kind == 3 || kind == 4 {
         ui.separator();
-        ui.label(if kind == 4 { "Points:" } else { "Sides:" });
+        ui.label(if kind == 4 {
+            "Points / wings:"
+        } else {
+            "Sides:"
+        });
         let mut n = data.tool.shape_sides as i32;
-        if ui
-            .add(egui::DragValue::new(&mut n).range(3..=100).speed(0.15))
-            .changed()
-        {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if ui
+                .small_button(ph::MINUS)
+                .on_hover_text("Remove one point / side")
+                .clicked()
+            {
+                n -= 1;
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::DragValue::new(&mut n)
+                        .range(3..=100)
+                        .speed(0.15)
+                        .min_decimals(0)
+                        .max_decimals(0),
+                )
+                .on_hover_text("Type the exact number of points / sides")
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .small_button(ph::PLUS)
+                .on_hover_text("Add one point / side")
+                .clicked()
+            {
+                n += 1;
+                changed = true;
+            }
+        });
+        if changed {
             actions.tool.set_shape_sides = Some(n.clamp(3, 100) as u32);
         }
     }
     if kind == 4 {
-        ui.label("Inner:");
-        let mut f = data.tool.shape_star_inner;
+        ui.label("Sharpness:");
+        // The model stores inner radius; Corel exposes the inverse concept:
+        // a smaller inner radius produces sharper star points.
+        let mut sharpness = (1.0 - data.tool.shape_star_inner) * 100.0;
         if ui
-            .add(egui::DragValue::new(&mut f).range(0.05..=0.95).speed(0.005))
+            .add(
+                egui::DragValue::new(&mut sharpness)
+                    .range(5.0..=95.0)
+                    .suffix(" %")
+                    .speed(0.5),
+            )
+            .on_hover_text("Higher values make the star points sharper")
             .changed()
         {
-            actions.tool.set_shape_star_inner = Some(f);
+            actions.tool.set_shape_star_inner = Some(1.0 - sharpness / 100.0);
         }
     }
 
     ui.separator();
     ui.label(
-        egui::RichText::new("Drag · Shift = constrain · Alt = from center")
+        egui::RichText::new("Drag · Shift = constrain · Alt = centered + constrain")
             .size(11.0)
             .color(egui::Color32::from_gray(150)),
     );
