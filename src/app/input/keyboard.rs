@@ -831,7 +831,26 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::KeyU) if pressed && !self.edit.input.ctrl_held => {
-                self.edit.tools.select_group(crate::tools::SHAPE_GROUP);
+                // U walks the shape group: Rectangle → Ellipse → Line → Polygon →
+                // Star → Arrow/Connector → (back to Rectangle). This gives every
+                // primitive and the Arrow tool a keyboard route.
+                match self.edit.tools.active_id() {
+                    ToolId::Shape => {
+                        let k = self.edit.tools.shape().kind.to_u8();
+                        if k >= 4 {
+                            self.edit.tools.select(ToolId::Arrow);
+                        } else {
+                            self.edit.tools.shape_mut().kind =
+                                crate::tools::shape::ShapeKind::from_u8(k + 1);
+                        }
+                    }
+                    ToolId::Arrow => {
+                        self.edit.tools.shape_mut().kind =
+                            crate::tools::shape::ShapeKind::from_u8(0);
+                        self.edit.tools.select(ToolId::Shape);
+                    }
+                    _ => self.edit.tools.select_group(crate::tools::SHAPE_GROUP),
+                }
                 self.sync_cursor(event_loop);
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
