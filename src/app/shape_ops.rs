@@ -162,7 +162,10 @@ impl App {
         // Shape geometry is layer-local; convert to canvas space so the Path lands
         // in the same place (its transform is then identity — delta-0 invariant).
         let path = match data.kind {
-            ShapeKind::Rectangle => from_shape::rect_path(x0, y0, x1, y1, data.effective_radius()),
+            ShapeKind::Rectangle => {
+                let radius = data.effective_radius();
+                from_shape::rect_path_corners(x0, y0, x1, y1, [radius; 4], [data.corner_type; 4])
+            }
             ShapeKind::Ellipse => from_shape::ellipse_path(x0, y0, x1, y1),
             ShapeKind::Line => from_shape::line_path(x0, y0, x1, y1),
             ShapeKind::Polygon => from_shape::polygon_path(x0, y0, x1, y1, data.sides),
@@ -925,6 +928,31 @@ mod tests {
                 assert_eq!(o.path.contours[0].nodes.len(), 8)
             }
             _ => panic!("expected Path"),
+        }
+    }
+
+    #[test]
+    fn convert_rectangle_preserves_every_corner_style_geometry() {
+        use crate::core::vector::from_shape::{rect_path_corners, RectCorner};
+
+        for corner in [RectCorner::Round, RectCorner::Scallop, RectCorner::Chamfer] {
+            let (mut app, idx) = app_with_shape(ShapeKind::Rectangle, 10.0);
+            if let LayerType::Vector(VectorGeometry::Primitive(shape)) =
+                &mut app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type
+            {
+                shape.corner_type = corner;
+            }
+            let expected = rect_path_corners(20.0, 30.0, 80.0, 70.0, [10.0; 4], [corner; 4]);
+            assert!(app.convert_shape_to_path(idx));
+            match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+                LayerType::Vector(VectorGeometry::Path(object)) => {
+                    assert_eq!(
+                        object.path, expected,
+                        "corner {corner:?} changed on convert"
+                    );
+                }
+                _ => panic!("expected Path"),
+            }
         }
     }
 
