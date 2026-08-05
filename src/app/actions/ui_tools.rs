@@ -538,28 +538,28 @@ impl App {
         }
         if let Some(f) = actions.tool.set_shape_fill.take() {
             self.edit.tools.shape_mut().fill = f;
-            self.update_selected_shape_style(true, false);
+            self.update_selected_shape_style(true, false, false);
         }
         if let Some(w) = actions.tool.set_shape_stroke_width.take() {
             self.edit.tools.shape_mut().stroke_width = w.clamp(0.0, 1000.0);
-            self.update_selected_shape_style(false, true);
+            self.update_selected_shape_style(false, true, false);
         }
         if let Some(r) = actions.tool.set_shape_corner_radius.take() {
             self.edit.tools.shape_mut().corner_radius = r.clamp(0.0, 5000.0);
-            self.update_selected_shape_style(false, false);
+            self.update_selected_shape_style(false, false, true);
         }
         if let Some(t) = actions.tool.set_shape_corner_type.take() {
             self.edit.tools.shape_mut().corner_type =
                 crate::core::vector::from_shape::RectCorner::from_u8(t);
-            self.update_selected_shape_style(false, false);
+            self.update_selected_shape_style(false, false, true);
         }
         if let Some(n) = actions.tool.set_shape_sides.take() {
             self.edit.tools.shape_mut().sides = n.clamp(3, 100);
-            self.update_selected_shape_style(false, false);
+            self.update_selected_shape_style(false, false, true);
         }
         if let Some(f) = actions.tool.set_shape_star_inner.take() {
             self.edit.tools.shape_mut().star_inner = f.clamp(0.05, 0.95);
-            self.update_selected_shape_style(false, false);
+            self.update_selected_shape_style(false, false, true);
         }
         // Path layer Fill/Outline (Move / Node options bar).
         if let Some(on) = actions.tool.set_path_fill_enabled.take() {

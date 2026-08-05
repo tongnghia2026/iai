@@ -807,6 +807,10 @@ pub struct ShapeStylePending {
     pub apply_fill: bool,
     /// The outline controls were explicitly changed.
     pub apply_stroke: bool,
+    /// The corner / sides / star controls were explicitly changed. A fill or
+    /// outline edit leaves this false so it never overwrites geometry the user
+    /// shaped on canvas — e.g. a corner radius dragged with the shape handle.
+    pub apply_corner: bool,
     pub last_bake: Option<std::time::Instant>,
     pub bake_cost_secs: f32,
 }

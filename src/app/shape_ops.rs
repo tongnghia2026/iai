@@ -227,6 +227,7 @@ impl App {
         // target radius while the raster bake catches up.
         if self.edit.shape_style_pending.as_ref().is_some_and(|p| {
             p.dirty
+                && p.apply_corner
                 && p.doc_id == self.docs.documents[self.docs.active_doc_idx].id
                 && p.layer_id
                     == self.docs.documents[self.docs.active_doc_idx]
@@ -598,7 +599,12 @@ impl App {
     /// DragValue emits a tick per frame, so like handle drags the CPU
     /// rasterization is throttled by its own measured cost — this just pins
     /// the target layer and lets `flush_pending_shape_style` decide.
-    pub fn update_selected_shape_style(&mut self, apply_fill: bool, apply_stroke: bool) {
+    pub fn update_selected_shape_style(
+        &mut self,
+        apply_fill: bool,
+        apply_stroke: bool,
+        apply_corner: bool,
+    ) {
         let Some(idx) = self.active_shape_index() else {
             return;
         };
@@ -613,6 +619,7 @@ impl App {
                 p.dirty = true;
                 p.apply_fill |= apply_fill;
                 p.apply_stroke |= apply_stroke;
+                p.apply_corner |= apply_corner;
             }
             _ => {
                 self.edit.shape_style_pending = Some(crate::app::state::ShapeStylePending {
@@ -621,6 +628,7 @@ impl App {
                     dirty: true,
                     apply_fill,
                     apply_stroke,
+                    apply_corner,
                     last_bake: None,
                     bake_cost_secs: 0.0,
                 });
@@ -669,6 +677,7 @@ impl App {
                 p.dirty = false; // consumed by the job (re-set by newer ticks)
                 p.apply_fill = false;
                 p.apply_stroke = false;
+                p.apply_corner = false;
             }
             if !same {
                 self.spawn_shape_bake(doc_id, layer_id, new_data, new_offset);
@@ -732,20 +741,28 @@ impl App {
                 crate::core::vector::style::Paint::None
             };
         }
-        // Keep the shape's own kind — the options combo only affects new shapes.
-        let (mut new_data, new_offset) = ShapeData::from_canvas_span_with_style(
-            data.kind,
-            x0,
-            y0,
-            x1,
-            y1,
-            s.corner_radius,
-            style,
-        );
-        // Corner style / sides / inner-radius are live-editable like the radius.
-        new_data.corner_type = s.corner_type;
-        new_data.sides = s.sides.clamp(3, 100);
-        new_data.star_inner = s.star_inner.clamp(0.05, 0.95);
+        // Corner radius / style / sides / inner-radius come from the options bar
+        // ONLY when the user actually changed a corner control this scrub. A fill
+        // or outline edit must preserve the shape's own geometry — otherwise it
+        // would stamp the tool's (stale) corner over one the user dragged on the
+        // canvas handle, resetting the rounding. Keep the shape's own kind too —
+        // the kind combo only affects new shapes.
+        let corner_radius = if pending.apply_corner {
+            s.corner_radius
+        } else {
+            data.corner_radius
+        };
+        let (mut new_data, new_offset) =
+            ShapeData::from_canvas_span_with_style(data.kind, x0, y0, x1, y1, corner_radius, style);
+        if pending.apply_corner {
+            new_data.corner_type = s.corner_type;
+            new_data.sides = s.sides.clamp(3, 100);
+            new_data.star_inner = s.star_inner.clamp(0.05, 0.95);
+        } else {
+            new_data.corner_type = data.corner_type;
+            new_data.sides = data.sides;
+            new_data.star_inner = data.star_inner;
+        }
         Some((idx, new_data, new_offset))
     }
 
@@ -792,6 +809,7 @@ impl App {
                 p.dirty = false;
                 p.apply_fill = false;
                 p.apply_stroke = false;
+                p.apply_corner = false;
             }
             return;
         }
@@ -801,6 +819,7 @@ impl App {
                 p.dirty = false;
                 p.apply_fill = false;
                 p.apply_stroke = false;
+                p.apply_corner = false;
             }
             return;
         };
@@ -824,6 +843,7 @@ impl App {
             p.dirty = false;
             p.apply_fill = false;
             p.apply_stroke = false;
+            p.apply_corner = false;
             p.bake_cost_secs = bake_start.elapsed().as_secs_f32();
             p.last_bake = Some(std::time::Instant::now());
         }
@@ -1015,6 +1035,7 @@ mod tests {
             dirty: true,
             apply_fill: false,
             apply_stroke: false,
+            apply_corner: true,
             last_bake: None,
             bake_cost_secs: 0.0,
         });
@@ -1023,6 +1044,37 @@ mod tests {
             .expect("geometry target");
         assert_eq!(target.corner_radius, 12.0);
         assert_eq!(target.style.fill, Paint::Gradient(gradient));
+    }
+
+    #[test]
+    fn fill_change_keeps_the_dragged_corner_radius() {
+        // Repro: draw a rounded rectangle (corner lives on the layer), then pick
+        // a fill colour. A fill-only restyle must NOT stamp the tool's stale
+        // corner radius over the one shaped on the canvas handle.
+        let (mut app, idx) = app_with_shape(ShapeKind::Rectangle, 15.0);
+        // The options-bar radius is a stale value that must be ignored here.
+        app.edit.tools.shape_mut().corner_radius = 0.0;
+        app.edit.tools.shape_mut().fill = true;
+        app.edit.tools.shape_mut().fill_color = [10, 20, 30, 255];
+        let doc_id = app.docs.documents[0].id;
+        let layer_id = app.docs.documents[0].canvas.layer_stack.layers[idx].id;
+        app.edit.shape_style_pending = Some(crate::app::state::ShapeStylePending {
+            doc_id,
+            layer_id,
+            dirty: true,
+            apply_fill: true,
+            apply_stroke: false,
+            apply_corner: false,
+            last_bake: None,
+            bake_cost_secs: 0.0,
+        });
+        let (_, target, _) = app
+            .styled_shape_target(doc_id, layer_id)
+            .expect("style target");
+        assert_eq!(
+            target.corner_radius, 15.0,
+            "a fill change kept the layer's dragged corner radius"
+        );
     }
 
     #[test]

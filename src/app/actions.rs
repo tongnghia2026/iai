@@ -62,11 +62,11 @@ impl App {
             }
             3 => {
                 self.edit.tools.shape_mut().fill_color = color;
-                self.update_selected_shape_style(true, false);
+                self.update_selected_shape_style(true, false, false);
             }
             4 => {
                 self.edit.tools.shape_mut().stroke_color = color;
-                self.update_selected_shape_style(false, true);
+                self.update_selected_shape_style(false, true, false);
             }
             5 => self.path_set_fill_color(color),
             6 => self.path_set_stroke_color(color),
