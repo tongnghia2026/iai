@@ -31,7 +31,7 @@ fn icon_menu_button(
 }
 
 fn corner_thumbnail(ui: &mut egui::Ui, kind: u8, selected: bool, label: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(76.0, 54.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(34.0, 26.0), egui::Sense::click());
     let visuals = ui.style().interact_selectable(&response, selected);
     ui.painter().rect(
         rect,
@@ -42,45 +42,51 @@ fn corner_thumbnail(ui: &mut egui::Ui, kind: u8, selected: bool, label: &str) ->
     );
     let p = ui.painter();
     let stroke = egui::Stroke::new(2.0_f32, visuals.fg_stroke.color);
-    let x0 = rect.left() + 13.0;
-    let y0 = rect.top() + 9.0;
-    let x1 = rect.right() - 13.0;
-    let y1 = rect.top() + 33.0;
+    let x0 = rect.left() + 6.0;
+    let y0 = rect.top() + 6.0;
+    let x1 = rect.right() - 6.0;
+    let y1 = rect.bottom() - 5.0;
+    let radius = 8.0_f32.min(x1 - x0).min(y1 - y0);
     match kind {
         1 => {
-            p.line_segment([egui::pos2(x0 + 10.0, y0), egui::pos2(x1, y0)], stroke);
-            p.line_segment([egui::pos2(x0, y0 + 10.0), egui::pos2(x0, y1)], stroke);
-            p.add(egui::Shape::line(
-                vec![
-                    egui::pos2(x0 + 10.0, y0),
-                    egui::pos2(x0 + 3.0, y0 + 3.0),
-                    egui::pos2(x0, y0 + 10.0),
-                ],
-                stroke,
-            ));
+            p.line_segment([egui::pos2(x0, y0), egui::pos2(x1 - radius, y0)], stroke);
+            let mut arc = Vec::new();
+            for step in 0..=8 {
+                let angle =
+                    std::f32::consts::PI - std::f32::consts::FRAC_PI_2 * (step as f32 / 8.0);
+                arc.push(egui::pos2(
+                    x1 + radius * angle.cos(),
+                    y0 + radius * angle.sin(),
+                ));
+            }
+            p.add(egui::Shape::line(arc, stroke));
+            p.line_segment([egui::pos2(x1, y0 + radius), egui::pos2(x1, y1)], stroke);
         }
         2 => {
-            p.line_segment([egui::pos2(x0 + 10.0, y0), egui::pos2(x1, y0)], stroke);
-            p.line_segment([egui::pos2(x0, y0 + 10.0), egui::pos2(x0, y1)], stroke);
+            p.line_segment([egui::pos2(x0, y0), egui::pos2(x1 - radius, y0)], stroke);
             p.line_segment(
-                [egui::pos2(x0 + 10.0, y0), egui::pos2(x0, y0 + 10.0)],
+                [egui::pos2(x1 - radius, y0), egui::pos2(x1, y0 + radius)],
                 stroke,
             );
+            p.line_segment([egui::pos2(x1, y0 + radius), egui::pos2(x1, y1)], stroke);
         }
         _ => {
-            p.line_segment([egui::pos2(x0 + 10.0, y0), egui::pos2(x1, y0)], stroke);
-            p.line_segment([egui::pos2(x0, y0 + 10.0), egui::pos2(x0, y1)], stroke);
-            p.circle_stroke(egui::pos2(x0 + 10.0, y0 + 10.0), 10.0, stroke);
+            p.line_segment([egui::pos2(x0, y0), egui::pos2(x1 - radius, y0)], stroke);
+            let centre = egui::pos2(x1 - radius, y0 + radius);
+            let mut arc = Vec::new();
+            for step in 0..=8 {
+                let angle = -std::f32::consts::FRAC_PI_2
+                    + std::f32::consts::FRAC_PI_2 * (step as f32 / 8.0);
+                arc.push(egui::pos2(
+                    centre.x + radius * angle.cos(),
+                    centre.y + radius * angle.sin(),
+                ));
+            }
+            p.add(egui::Shape::line(arc, stroke));
+            p.line_segment([egui::pos2(x1, y0 + radius), egui::pos2(x1, y1)], stroke);
         }
     }
-    p.text(
-        egui::pos2(rect.center().x, rect.bottom() - 4.0),
-        egui::Align2::CENTER_BOTTOM,
-        label,
-        egui::FontId::proportional(10.0),
-        visuals.text_color(),
-    );
-    response
+    response.on_hover_text(label)
 }
 
 pub(super) fn corner_palette(ui: &mut egui::Ui, current: u8, actions: &mut UiActions) {
@@ -1518,18 +1524,18 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     // Rectangle corner radius + style (Round / Scallop / Chamfer).
     if kind == 0 {
         ui.separator();
-        let corner_name = match data.tool.shape_corner_type {
-            1 => "Scallop",
-            2 => "Chamfer",
-            _ => "Round",
-        };
-        let response = ui
-            .menu_button(format!("{} {corner_name}", ph::CORNERS_IN), |ui| {
-                corner_palette(ui, data.tool.shape_corner_type, actions)
-            })
-            .response
-            .on_hover_text("Corner style — right-click also opens the visual palette");
-        response.context_menu(|ui| corner_palette(ui, data.tool.shape_corner_type, actions));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 1.0;
+            for (corner, label) in [(0, "Round"), (1, "Scallop"), (2, "Chamfer")] {
+                let response =
+                    corner_thumbnail(ui, corner, data.tool.shape_corner_type == corner, label);
+                if response.clicked() {
+                    actions.tool.set_shape_corner_type = Some(corner);
+                }
+                response
+                    .context_menu(|ui| corner_palette(ui, data.tool.shape_corner_type, actions));
+            }
+        });
         ui.label(top_options_icon(ph::RULER))
             .on_hover_text("Corner radius");
         let mut r = data.tool.shape_corner_radius;
