@@ -727,6 +727,43 @@ impl App {
                     self.open_print_dialog();
                 }
             }
+            // Ctrl+Q → Convert to Curves (Corel muscle memory). Routes to the
+            // shape→path conversion for a parametric Shape, or text→curves for a
+            // Text layer; both already handle their own undo + invalidation.
+            PhysicalKey::Code(KeyCode::KeyQ) if pressed && !repeat && self.edit.input.ctrl_held => {
+                use crate::core::layer::LayerType;
+                use crate::core::vector::object::VectorGeometry;
+                let idx = self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .layer_stack
+                    .active_idx;
+                let kind = self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .layer_stack
+                    .layers
+                    .get(idx)
+                    .map(|l| match &l.layer_type {
+                        LayerType::Vector(VectorGeometry::Primitive(_)) => 1u8,
+                        LayerType::Text(_) => 2,
+                        _ => 0,
+                    })
+                    .unwrap_or(0);
+                match kind {
+                    1 => {
+                        self.convert_shape_to_path(idx);
+                    }
+                    2 => {
+                        self.text_to_curves(idx);
+                    }
+                    _ => {
+                        self.shell.status_msg =
+                            "Convert to Curves: chọn một Shape hoặc Text trước".to_string();
+                        if let Some(w) = &self.win.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
+            }
             PhysicalKey::Code(KeyCode::KeyA)
                 if pressed && self.edit.input.ctrl_held && self.edit.input.shift_held =>
             {

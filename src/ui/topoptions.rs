@@ -344,15 +344,41 @@ fn pen_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.separator();
 
     ui.label("On Enter:");
-    let mut mode = data.tool.pen_mode;
-    for (v, name) in [
-        (0u8, "Selection"),
-        (1, "Fill"),
-        (2, "Stroke"),
-        (3, "Path (Vector)"),
+    let mode = data.tool.pen_mode;
+    // Icon + label so a new user sees at a glance what each commit does — and that
+    // "Path (Vector)" yields a directly editable curve with no convert step.
+    for (v, icon, name, tip) in [
+        (
+            0u8,
+            ph::SELECTION,
+            "Selection",
+            "Commit as a pixel selection (Photoshop-style)",
+        ),
+        (
+            1,
+            ph::PAINT_BUCKET,
+            "Fill",
+            "Fill the enclosed path with the fill colour",
+        ),
+        (
+            2,
+            ph::SCRIBBLE_LOOP,
+            "Stroke",
+            "Stroke the path outline with the given width",
+        ),
+        (
+            3,
+            ph::BEZIER_CURVE,
+            "Path (Vector)",
+            "Commit as an editable vector Path — edit nodes right away, no convert",
+        ),
     ] {
-        if ui.selectable_value(&mut mode, v, name).changed() {
-            actions.tool.set_pen_mode = Some(mode);
+        if ui
+            .selectable_label(mode == v, format!("{icon}  {name}"))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            actions.tool.set_pen_mode = Some(v);
         }
     }
 
@@ -2022,14 +2048,14 @@ fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
     // Break the path at the selected node / join two selected endpoints.
     if ui
-        .button("Break")
+        .button(format!("{}  Break", ph::LINK_SIMPLE_HORIZONTAL_BREAK))
         .on_hover_text("Break the path at the selected point")
         .clicked()
     {
         actions.tool.node_break = true;
     }
     if ui
-        .button("Join")
+        .button(format!("{}  Join", ph::LINK_SIMPLE_HORIZONTAL))
         .on_hover_text("Join the two selected endpoints (close or weld the path)")
         .clicked()
     {
@@ -2077,14 +2103,14 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     let mut fill_kind = style.fill_kind;
     egui::ComboBox::from_id_salt("path_fill_kind")
         .selected_text(match fill_kind {
-            1 => "Linear",
-            2 => "Radial",
-            _ => "Solid",
+            1 => format!("{}  Linear", ph::GRADIENT),
+            2 => format!("{}  Radial", ph::CIRCLE),
+            _ => format!("{}  Solid", ph::SQUARE),
         })
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut fill_kind, 0, "Solid");
-            ui.selectable_value(&mut fill_kind, 1, "Linear");
-            ui.selectable_value(&mut fill_kind, 2, "Radial");
+            ui.selectable_value(&mut fill_kind, 0, format!("{}  Solid", ph::SQUARE));
+            ui.selectable_value(&mut fill_kind, 1, format!("{}  Linear", ph::GRADIENT));
+            ui.selectable_value(&mut fill_kind, 2, format!("{}  Radial", ph::CIRCLE));
         });
     if fill_kind != style.fill_kind {
         actions.tool.set_path_fill_kind = Some(fill_kind);
@@ -2207,14 +2233,14 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     let mut cap = style.cap;
     egui::ComboBox::from_id_salt("path_line_cap")
         .selected_text(match cap {
-            1 => "Round cap",
-            2 => "Square cap",
-            _ => "Butt cap",
+            1 => format!("{}  Round cap", ph::CIRCLE),
+            2 => format!("{}  Square cap", ph::SQUARE),
+            _ => format!("{}  Butt cap", ph::LINE_SEGMENT),
         })
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut cap, 0, "Butt cap");
-            ui.selectable_value(&mut cap, 1, "Round cap");
-            ui.selectable_value(&mut cap, 2, "Square cap");
+            ui.selectable_value(&mut cap, 0, format!("{}  Butt cap", ph::LINE_SEGMENT));
+            ui.selectable_value(&mut cap, 1, format!("{}  Round cap", ph::CIRCLE));
+            ui.selectable_value(&mut cap, 2, format!("{}  Square cap", ph::SQUARE));
         });
     if cap != style.cap {
         actions.tool.set_path_cap = Some(cap);
@@ -2222,14 +2248,14 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     let mut join = style.join;
     egui::ComboBox::from_id_salt("path_line_join")
         .selected_text(match join {
-            1 => "Round join",
-            2 => "Bevel join",
-            _ => "Miter join",
+            1 => format!("{}  Round join", ph::CIRCLE),
+            2 => format!("{}  Bevel join", ph::CORNERS_IN),
+            _ => format!("{}  Miter join", ph::TRIANGLE),
         })
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut join, 0, "Miter join");
-            ui.selectable_value(&mut join, 1, "Round join");
-            ui.selectable_value(&mut join, 2, "Bevel join");
+            ui.selectable_value(&mut join, 0, format!("{}  Miter join", ph::TRIANGLE));
+            ui.selectable_value(&mut join, 1, format!("{}  Round join", ph::CIRCLE));
+            ui.selectable_value(&mut join, 2, format!("{}  Bevel join", ph::CORNERS_IN));
         });
     if join != style.join {
         actions.tool.set_path_join = Some(join);

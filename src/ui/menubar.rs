@@ -603,7 +603,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         if ui
                             .add(menu_item_enabled(
                                 "Convert to Curves",
-                                "",
+                                "Ctrl+Q",
                                 data.layers
                                     .layer_types
                                     .get(data.layers.active_layer_idx)
@@ -617,7 +617,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         if ui
                             .add(menu_item_enabled(
                                 "Convert Text to Curves",
-                                "",
+                                "Ctrl+Q",
                                 data.layers
                                     .layer_types
                                     .get(data.layers.active_layer_idx)
