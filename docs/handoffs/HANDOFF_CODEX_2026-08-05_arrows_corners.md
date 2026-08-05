@@ -1,8 +1,9 @@
 # Bàn giao cho Codex — Mũi tên + Kiểu góc chữ nhật (HOÀN TẤT 2026-08-05)
 
 > **Trạng thái cuối: HOÀN TẤT A/B/C.** Người dùng đã GUI-test và xác nhận OK.
-> Các commit local: Stage A `695fa32`, Stage B `5df8750`, Stage C + sửa cache zoom
-> `ecf0b8e`. Chưa push theo quy tắc Actions budget.
+> HEAD bàn giao cho Claude: **`41feb53`**. Các commit local: Stage A `695fa32`,
+> Stage B `5df8750`, Stage C + sửa cache zoom `ecf0b8e`, UI gọn `0f0867a`, icon góc
+> kiểu Corel `0f3148c`, sửa Convert to Curves `41feb53`. Chưa push.
 
 Bản giao ca để **Codex code tiếp** hai tính năng vector cho iAi. Người dùng (nghề
 in ấn/quảng cáo) chốt làm: (1) **kiểu góc hình chữ nhật kiểu CorelDRAW** — bo tròn,
@@ -26,8 +27,8 @@ Nhánh: `feat/vector-core-foundation`.
 - **GIAI ĐOẠN C (công cụ Mũi tên/Đường nối) — XONG** — commit local **`ecf0b8e`**.
 - **GUI TEST A/B/C — OK**, người dùng xác nhận ngày 2026-08-05, gồm lỗi hiển thị
   khi zoom 9× đã hết sau khi bổ sung arrow style vào GPU geometry fingerprint.
-- Trước đó: origin ở `1b3d5a5` (đã push 2026-08-05). Từ `1b3d5a5` → `ecf0b8e` là
-  các commit local chưa push (dọn docs + Stage A/B/C). **Đừng push
+- Trước đó: origin ở `1b3d5a5` (đã push 2026-08-05). Từ `1b3d5a5` → `41feb53` là
+  các commit local chưa push (dọn docs + Stage A/B/C + UI polish + bugfix). **Đừng push
   cho tới khi người dùng bảo** (quy tắc Actions budget).
 
 ### Cây làm việc: code SẠCH (đã commit Stage A/B/C). Build và test được.
@@ -259,7 +260,7 @@ Enum bắt buộc: sửa 4 chỗ, build sẽ báo đúng chỗ thiếu.
 ## 6. Kiểm thử & bàn giao lại
 
 **Kết quả cuối:** `cargo fmt --check` sạch; `cargo check --locked` pass;
-`cargo test --locked --lib`: **1057 pass, 4 ignored, 0 fail** (1061 test). Người dùng đã
+`cargo test --locked --lib`: **1058 pass, 4 ignored, 0 fail** (1062 test). Người dùng đã
 GUI-test OK. Theo yêu cầu cuối, không cần tạo/copy bản portable.
 
 - Đã chạy `cargo fmt`, test module liên quan và `cargo test --locked --lib` toàn bộ.
@@ -276,3 +277,17 @@ GUI-test OK. Theo yêu cầu cuối, không cần tạo/copy bản portable.
 - Wiring tool mẫu: `ToolId::VectorBrush` (grep toàn repo ra đủ chỗ phải đụng).
 - PDF vector: `collect_pdf_vectors`, `PdfVectorObject`, `append_vector_content`
   (`core/print.rs`).
+
+## 8. Giao ca cho Claude — trạng thái sau GUI polish
+
+- Người dùng đã GUI-test và xác nhận OK cho Arrow/Connector, lỗi zoom 9× và bộ icon
+  Corner kiểu Corel.
+- Top-options đã gom Stroke/Arrow vào palette icon; Shape và Arrow options có icon trực
+  quan. Round/Scallop/Chamfer là ba nút hình học đặt cạnh nhau; click phải trên nút hoặc
+  trên Rectangle đang chọn mở Corner palette.
+- Bug phát hiện sau GUI-test: Convert to Curves từng gọi `rect_path` nên ép Scallop/
+  Chamfer về Round. Commit `41feb53` đổi sang `rect_path_corners` với đúng
+  `[effective_radius; 4]` và `[corner_type; 4]`; test khóa hình học cả ba kiểu đã thêm.
+- Người dùng đã test lại và báo OK trước khi yêu cầu giao ca.
+- Không còn hạng mục mở trong kế hoạch arrows/corners. Claude nên tin filesystem/HEAD,
+  giữ working tree sạch, không push nếu chưa được người dùng yêu cầu.
