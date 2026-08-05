@@ -1136,6 +1136,7 @@ impl App {
                     .unwrap_or(0.0),
                 transform_cursor_hint: self.transform_cursor_hint(),
                 transform_ctx_menu_pos: self.edit.transform_ctx_menu_pos,
+                selected_rect_corner_type: self.active_rectangle_corner_type(),
             },
             sel: SelectionViewModel {
                 selection_mode: self.edit.selection_mode,

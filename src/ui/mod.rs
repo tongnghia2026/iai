@@ -2261,6 +2261,10 @@ pub fn build(
                         .inner_margin(egui::Margin::same(4))
                         .show(ui, |ui| {
                             ui.set_min_width(menu_w - 8.0);
+                            if let Some(corner) = data.tool.selected_rect_corner_type {
+                                topoptions::corner_palette(ui, corner, &mut actions);
+                                ui.separator();
+                            }
                             ui.label(egui::RichText::new("Free Transform").strong());
                             ui.separator();
                             if ui.selectable_label(false, "Reset Transform").clicked() {

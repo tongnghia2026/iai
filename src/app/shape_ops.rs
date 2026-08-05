@@ -136,6 +136,12 @@ impl App {
         }
     }
 
+    pub fn active_rectangle_corner_type(&self) -> Option<u8> {
+        let idx = self.active_shape_index()?;
+        let (shape, _) = self.shape_at(idx)?;
+        (shape.kind == ShapeKind::Rectangle).then(|| shape.corner_type.to_u8())
+    }
+
     /// Convert the Shape layer at `idx` into an editable vector Path layer
     /// ("Convert to Curves", Giai đoạn 4). The primitive geometry becomes a
     /// `PathData` (rectangle/rounded-rect/ellipse → closed curves, line → open),

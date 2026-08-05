@@ -13,6 +13,88 @@ fn top_options_icon(icon: &str) -> egui::RichText {
     egui::RichText::new(icon.to_owned()).size(TOP_OPTIONS_ICON_SIZE)
 }
 
+fn icon_menu_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    selected: bool,
+    tip: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    let display = if selected {
+        top_options_icon(icon).strong()
+    } else {
+        top_options_icon(icon)
+    };
+    ui.menu_button(display, add_contents)
+        .response
+        .on_hover_text(tip)
+}
+
+fn corner_thumbnail(ui: &mut egui::Ui, kind: u8, selected: bool, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(76.0, 54.0), egui::Sense::click());
+    let visuals = ui.style().interact_selectable(&response, selected);
+    ui.painter().rect(
+        rect,
+        3.0,
+        visuals.bg_fill,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    let p = ui.painter();
+    let stroke = egui::Stroke::new(2.0_f32, visuals.fg_stroke.color);
+    let x0 = rect.left() + 13.0;
+    let y0 = rect.top() + 9.0;
+    let x1 = rect.right() - 13.0;
+    let y1 = rect.top() + 33.0;
+    match kind {
+        1 => {
+            p.line_segment([egui::pos2(x0 + 10.0, y0), egui::pos2(x1, y0)], stroke);
+            p.line_segment([egui::pos2(x0, y0 + 10.0), egui::pos2(x0, y1)], stroke);
+            p.add(egui::Shape::line(
+                vec![
+                    egui::pos2(x0 + 10.0, y0),
+                    egui::pos2(x0 + 3.0, y0 + 3.0),
+                    egui::pos2(x0, y0 + 10.0),
+                ],
+                stroke,
+            ));
+        }
+        2 => {
+            p.line_segment([egui::pos2(x0 + 10.0, y0), egui::pos2(x1, y0)], stroke);
+            p.line_segment([egui::pos2(x0, y0 + 10.0), egui::pos2(x0, y1)], stroke);
+            p.line_segment(
+                [egui::pos2(x0 + 10.0, y0), egui::pos2(x0, y0 + 10.0)],
+                stroke,
+            );
+        }
+        _ => {
+            p.line_segment([egui::pos2(x0 + 10.0, y0), egui::pos2(x1, y0)], stroke);
+            p.line_segment([egui::pos2(x0, y0 + 10.0), egui::pos2(x0, y1)], stroke);
+            p.circle_stroke(egui::pos2(x0 + 10.0, y0 + 10.0), 10.0, stroke);
+        }
+    }
+    p.text(
+        egui::pos2(rect.center().x, rect.bottom() - 4.0),
+        egui::Align2::CENTER_BOTTOM,
+        label,
+        egui::FontId::proportional(10.0),
+        visuals.text_color(),
+    );
+    response
+}
+
+pub(super) fn corner_palette(ui: &mut egui::Ui, current: u8, actions: &mut UiActions) {
+    ui.label(egui::RichText::new("Rectangle corner").strong());
+    ui.horizontal(|ui| {
+        for (kind, label) in [(0, "Round"), (1, "Scallop"), (2, "Chamfer")] {
+            if corner_thumbnail(ui, kind, current == kind, label).clicked() {
+                actions.tool.set_shape_corner_type = Some(kind);
+                ui.close();
+            }
+        }
+    });
+}
+
 fn dimension_drag<'a>(
     value: &'a mut f32,
     parsed_unit: &'a std::cell::Cell<Option<crate::core::units::Unit>>,
@@ -289,7 +371,8 @@ fn pen_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 fn arrow_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.label(egui::RichText::new("Arrow / Connector").strong());
     ui.separator();
-    ui.label("Width:");
+    ui.label(top_options_icon(ph::RULER))
+        .on_hover_text("Outline width");
     let mut width = data.tool.arrow_width;
     if ui
         .add(
@@ -301,40 +384,52 @@ fn arrow_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     {
         actions.tool.set_arrow_width = Some(width);
     }
-    let arrow_label = |kind| match kind {
-        2 => "Stealth",
-        3 => "Circle",
-        4 => "Diamond",
-        _ => "Triangle",
+    let arrow_meta = |kind| match kind {
+        2 => (ph::FLOW_ARROW, "Stealth"),
+        3 => (ph::CIRCLE, "Circle"),
+        4 => (ph::DIAMOND, "Diamond"),
+        _ => (ph::TRIANGLE, "Triangle"),
     };
-    let mut arrow = data.tool.arrow_end;
-    egui::ComboBox::from_id_salt("arrow_tool_head")
-        .selected_text(arrow_label(arrow))
-        .show_ui(ui, |ui| {
+    let (arrow_icon, arrow_name) = arrow_meta(data.tool.arrow_end);
+    ui.menu_button(format!("{arrow_icon} {arrow_name}"), |ui| {
+        ui.label(egui::RichText::new("Arrow head").strong());
+        ui.horizontal(|ui| {
             for kind in 1..=4 {
-                ui.selectable_value(&mut arrow, kind, arrow_label(kind));
+                let (icon, name) = arrow_meta(kind);
+                if ui
+                    .selectable_label(data.tool.arrow_end == kind, icon)
+                    .on_hover_text(name)
+                    .clicked()
+                {
+                    actions.tool.set_arrow_end = Some(kind);
+                    ui.close();
+                }
             }
         });
-    if arrow != data.tool.arrow_end {
-        actions.tool.set_arrow_end = Some(arrow);
-    }
-    let route_label = |route| match route {
-        1 => "Elbow H-V",
-        2 => "Elbow V-H",
-        3 => "Elbow Center",
-        _ => "Straight",
+    });
+    let route_meta = |route| match route {
+        1 => (ph::ARROW_ELBOW_RIGHT_DOWN, "Elbow H-V"),
+        2 => (ph::ARROW_ELBOW_DOWN_RIGHT, "Elbow V-H"),
+        3 => (ph::FLOW_ARROW, "Elbow Center"),
+        _ => (ph::ARROW_RIGHT, "Straight"),
     };
-    let mut route = data.tool.arrow_route;
-    egui::ComboBox::from_id_salt("arrow_tool_route")
-        .selected_text(route_label(route))
-        .show_ui(ui, |ui| {
+    let (route_icon, route_name) = route_meta(data.tool.arrow_route);
+    ui.menu_button(format!("{route_icon} {route_name}"), |ui| {
+        ui.label(egui::RichText::new("Connector route").strong());
+        ui.horizontal(|ui| {
             for value in 0..=3 {
-                ui.selectable_value(&mut route, value, route_label(value));
+                let (icon, name) = route_meta(value);
+                if ui
+                    .selectable_label(data.tool.arrow_route == value, icon)
+                    .on_hover_text(name)
+                    .clicked()
+                {
+                    actions.tool.set_arrow_route = Some(value);
+                    ui.close();
+                }
             }
         });
-    if route != data.tool.arrow_route {
-        actions.tool.set_arrow_route = Some(route);
-    }
+    });
 }
 
 fn vector_brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
@@ -1364,26 +1459,25 @@ fn shape_color_chip(ui: &mut egui::Ui, color: [u8; 4], tip: &str) -> bool {
 }
 
 fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    ui.label("Shape:");
     let mut kind = data.tool.shape_kind;
+    let shape_meta = |kind| match kind {
+        1 => (ph::CIRCLE, "Ellipse"),
+        2 => (ph::LINE_SEGMENT, "Line"),
+        3 => (ph::POLYGON, "Polygon"),
+        4 => (ph::STAR, "Star"),
+        _ => (ph::RECTANGLE, "Rectangle"),
+    };
+    let (shape_icon, shape_name) = shape_meta(kind);
     egui::ComboBox::from_id_salt("shape_kind")
-        .selected_text(match kind {
-            1 => "Ellipse",
-            2 => "Line",
-            3 => "Polygon",
-            4 => "Star",
-            _ => "Rectangle",
-        })
-        .width(100.0)
+        .selected_text(format!("{shape_icon} {shape_name}"))
+        .width(112.0)
         .show_ui(ui, |ui| {
-            for (v, name) in [
-                (0u8, "Rectangle"),
-                (1, "Ellipse"),
-                (2, "Line"),
-                (3, "Polygon"),
-                (4, "Star"),
-            ] {
-                if ui.selectable_value(&mut kind, v, name).changed() {
+            for v in 0u8..=4 {
+                let (icon, name) = shape_meta(v);
+                if ui
+                    .selectable_value(&mut kind, v, format!("{icon}  {name}"))
+                    .changed()
+                {
                     actions.tool.set_shape_kind = Some(kind);
                 }
             }
@@ -1424,23 +1518,20 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     // Rectangle corner radius + style (Round / Scallop / Chamfer).
     if kind == 0 {
         ui.separator();
-        ui.label("Corner:");
-        let mut ct = data.tool.shape_corner_type;
-        egui::ComboBox::from_id_salt("rect_corner_type")
-            .selected_text(match ct {
-                1 => "Scallop",
-                2 => "Chamfer",
-                _ => "Round",
+        let corner_name = match data.tool.shape_corner_type {
+            1 => "Scallop",
+            2 => "Chamfer",
+            _ => "Round",
+        };
+        let response = ui
+            .menu_button(format!("{} {corner_name}", ph::CORNERS_IN), |ui| {
+                corner_palette(ui, data.tool.shape_corner_type, actions)
             })
-            .width(90.0)
-            .show_ui(ui, |ui| {
-                for (v, name) in [(0u8, "Round"), (1, "Scallop"), (2, "Chamfer")] {
-                    if ui.selectable_value(&mut ct, v, name).changed() {
-                        actions.tool.set_shape_corner_type = Some(ct);
-                    }
-                }
-            });
-        ui.label("Radius:");
+            .response
+            .on_hover_text("Corner style — right-click also opens the visual palette");
+        response.context_menu(|ui| corner_palette(ui, data.tool.shape_corner_type, actions));
+        ui.label(top_options_icon(ph::RULER))
+            .on_hover_text("Corner radius");
         let mut r = data.tool.shape_corner_radius;
         if ui
             .add(
@@ -1761,45 +1852,54 @@ fn path_style_quick(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if resp.drag_stopped() || resp.lost_focus() {
         actions.tool.commit_path_style = true;
     }
-    // Cap/join right on the bar so the stroke ends/corners are one click away.
-    let mut cap = style.cap;
-    egui::ComboBox::from_id_salt("quick_line_cap")
-        .selected_text(match cap {
-            1 => "Round cap",
-            2 => "Square cap",
-            _ => "Butt cap",
-        })
-        .width(96.0)
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut cap, 0, "Butt cap");
-            ui.selectable_value(&mut cap, 1, "Round cap");
-            ui.selectable_value(&mut cap, 2, "Square cap");
-        });
-    if cap != style.cap {
-        actions.tool.set_path_cap = Some(cap);
-    }
-    let mut join = style.join;
-    egui::ComboBox::from_id_salt("quick_line_join")
-        .selected_text(match join {
-            1 => "Round join",
-            2 => "Bevel join",
-            _ => "Miter join",
-        })
-        .width(96.0)
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut join, 0, "Miter join");
-            ui.selectable_value(&mut join, 1, "Round join");
-            ui.selectable_value(&mut join, 2, "Bevel join");
-        });
-    if join != style.join {
-        actions.tool.set_path_join = Some(join);
-    }
-    arrow_controls(ui, style, actions, "quick");
-    ui.label(
-        egui::RichText::new("More in Color panel")
-            .size(10.0)
-            .color(egui::Color32::from_gray(140)),
+    icon_menu_button(ui, ph::PATH, false, "Stroke cap and join", |ui| {
+        stroke_style_palette(ui, style, actions)
+    });
+    icon_menu_button(
+        ui,
+        ph::FLOW_ARROW,
+        style.arrow_start != 0 || style.arrow_end != 0,
+        "Arrowheads",
+        |ui| arrow_controls(ui, style, actions, "quick"),
     );
+}
+
+fn stroke_style_palette(
+    ui: &mut egui::Ui,
+    style: crate::ui::PathStyleData,
+    actions: &mut UiActions,
+) {
+    ui.label(egui::RichText::new("Line cap").strong());
+    ui.horizontal(|ui| {
+        for (value, icon, label) in [
+            (0, ph::LINE_SEGMENT, "Butt"),
+            (1, ph::CIRCLE, "Round"),
+            (2, ph::SQUARE, "Square"),
+        ] {
+            if ui
+                .selectable_label(style.cap == value, format!("{icon} {label}"))
+                .clicked()
+            {
+                actions.tool.set_path_cap = Some(value);
+            }
+        }
+    });
+    ui.separator();
+    ui.label(egui::RichText::new("Line join").strong());
+    ui.horizontal(|ui| {
+        for (value, icon, label) in [
+            (0, ph::TRIANGLE, "Miter"),
+            (1, ph::CIRCLE, "Round"),
+            (2, ph::CORNERS_IN, "Bevel"),
+        ] {
+            if ui
+                .selectable_label(style.join == value, format!("{icon} {label}"))
+                .clicked()
+            {
+                actions.tool.set_path_join = Some(value);
+            }
+        }
+    });
 }
 
 fn arrow_controls(
@@ -1808,43 +1908,53 @@ fn arrow_controls(
     actions: &mut UiActions,
     id: &str,
 ) {
-    let label = |kind| match kind {
-        1 => "Triangle",
-        2 => "Stealth",
-        3 => "Circle",
-        4 => "Diamond",
-        _ => "None",
+    let meta = |kind| match kind {
+        1 => (ph::TRIANGLE, "Triangle"),
+        2 => (ph::FLOW_ARROW, "Stealth"),
+        3 => (ph::CIRCLE, "Circle"),
+        4 => (ph::DIAMOND, "Diamond"),
+        _ => (ph::MINUS, "None"),
     };
-    for (suffix, current, action) in [
+    for (title, current, action) in [
         (
-            "start",
+            "Start arrow",
             style.arrow_start,
             &mut actions.tool.set_path_arrow_start,
         ),
-        ("end", style.arrow_end, &mut actions.tool.set_path_arrow_end),
+        (
+            "End arrow",
+            style.arrow_end,
+            &mut actions.tool.set_path_arrow_end,
+        ),
     ] {
-        let mut kind = current;
-        egui::ComboBox::from_id_salt(format!("{id}_arrow_{suffix}"))
-            .selected_text(format!("{suffix}: {}", label(kind)))
-            .width(108.0)
-            .show_ui(ui, |ui| {
-                for value in 0..=4 {
-                    ui.selectable_value(&mut kind, value, label(value));
+        ui.label(egui::RichText::new(title).strong());
+        ui.horizontal(|ui| {
+            for value in 0..=4 {
+                let (icon, label) = meta(value);
+                if ui
+                    .selectable_label(current == value, icon)
+                    .on_hover_text(label)
+                    .clicked()
+                {
+                    *action = Some(value);
                 }
-            });
-        if kind != current {
-            *action = Some(kind);
+            }
+        });
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(top_options_icon(ph::RULER))
+            .on_hover_text("Arrow size");
+        let mut size = style.arrow_size;
+        let response = ui.add(egui::DragValue::new(&mut size).range(0.0..=20.0).speed(0.1));
+        if response.changed() {
+            actions.tool.set_path_arrow_size = Some(size);
         }
-    }
-    ui.label("Arrow size:");
-    let mut size = style.arrow_size;
-    let response = ui.add(egui::DragValue::new(&mut size).range(0.0..=20.0).speed(0.1));
-    if response.changed() {
-        actions.tool.set_path_arrow_size = Some(size);
-    }
-    if response.drag_stopped() || response.lost_focus() {
-        actions.tool.commit_path_style = true;
-    }
+        if response.drag_stopped() || response.lost_focus() {
+            actions.tool.commit_path_style = true;
+        }
+    });
+    let _ = id;
 }
 
 fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
