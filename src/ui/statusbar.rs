@@ -153,6 +153,22 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         crate::tools::ToolId::Fill => "G=Fill | Click to flood fill",
                         crate::tools::ToolId::Zoom => "Z=Zoom | Drag right/down=In | left/up=Out",
                         crate::tools::ToolId::Hand => "H=Hand | Click+Drag to pan",
+                        crate::tools::ToolId::Pen => {
+                            "P=Pen | Click=add point · Enter=finish · Esc=cancel"
+                        }
+                        crate::tools::ToolId::Node => {
+                            "A=Node | Drag point · Click edge=add · Delete=remove"
+                        }
+                        crate::tools::ToolId::Shape => {
+                            "U=Shape | Drag=draw · Shift=constrain · Alt=from center"
+                        }
+                        crate::tools::ToolId::VectorBrush => {
+                            "Vector Brush | Drag=draw stroke · edit its points afterwards"
+                        }
+                        crate::tools::ToolId::Arrow => {
+                            "Arrow / Connector | Drag from point to point"
+                        }
+                        crate::tools::ToolId::Text => "T=Type | Click on canvas to add text",
                         _ => "Space+Drag=Pan | Alt+Scroll=Zoom",
                     };
 

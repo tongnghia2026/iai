@@ -1333,6 +1333,29 @@ fn ps_layer_thumbnail(
             }
         }
     }
+    if matches!(layer_type, "Shape" | "Path") {
+        // Vector layers render a plain raster thumbnail like any other layer; a small
+        // curve badge in the corner tells them apart at a glance.
+        let badge = egui::Rect::from_min_size(
+            egui::pos2(
+                target_frame_rect.right() - 12.0,
+                target_frame_rect.bottom() - 12.0,
+            ),
+            egui::vec2(11.0, 11.0),
+        );
+        painter.rect_filled(
+            badge,
+            2.0,
+            egui::Color32::from_rgba_unmultiplied(28, 28, 30, 200),
+        );
+        painter.text(
+            badge.center(),
+            egui::Align2::CENTER_CENTER,
+            ph::BEZIER_CURVE,
+            egui::FontId::proportional(9.0),
+            egui::Color32::from_rgb(122, 200, 255),
+        );
+    }
     let anim = ui
         .ctx()
         .animate_bool_with_time(texture_cache_id.with("active_anim"), active, 0.22);

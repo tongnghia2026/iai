@@ -84,8 +84,10 @@ const ZOOM_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Zoom, ph::MAGNIFYING_GLAS
 
 const HAND_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Hand, ph::HAND, "Hand (H)")];
 
+// Move is emitted first on its own (see `visible_groups`) so the Node tool can sit
+// directly beneath it in the vector context; these are the remaining shared top
+// tools that follow.
 const COMMON_TOP_GROUPS: &[&[(ToolId, &str, &str)]] = &[
-    MOVE_GROUP,
     SEL_GROUP,
     LASSO_GROUP,
     WAND_GROUP,
@@ -203,16 +205,23 @@ fn active_background_locked(data: &UiData) -> bool {
 fn visible_groups(
     context: ToolbarContext,
 ) -> impl Iterator<Item = &'static [(ToolId, &'static str, &'static str)]> {
-    let contextual = match context {
-        ToolbarContext::Pixel => PIXEL_GROUPS,
+    // Node edits a vector object's points; keep it directly beneath Move in the
+    // vector context so the "select/move object → edit its points" relationship
+    // reads straight from the toolbar layout (no Corel-style renaming needed).
+    let node_under_move: &[&[(ToolId, &str, &str)]] = match context {
         ToolbarContext::Vector => VECTOR_GROUPS,
-        ToolbarContext::Neutral => NO_CONTEXT_GROUPS,
+        _ => NO_CONTEXT_GROUPS,
     };
-    COMMON_TOP_GROUPS
-        .iter()
-        .chain(contextual)
-        .chain(COMMON_BOTTOM_GROUPS)
-        .copied()
+    // Pixel-only retouch tools sit in the middle band on raster layers.
+    let mid: &[&[(ToolId, &str, &str)]] = match context {
+        ToolbarContext::Pixel => PIXEL_GROUPS,
+        _ => NO_CONTEXT_GROUPS,
+    };
+    std::iter::once(MOVE_GROUP)
+        .chain(node_under_move.iter().copied())
+        .chain(COMMON_TOP_GROUPS.iter().copied())
+        .chain(mid.iter().copied())
+        .chain(COMMON_BOTTOM_GROUPS.iter().copied())
 }
 
 fn tool_writes_active_layer(entries: &[(ToolId, &str, &str)]) -> bool {
@@ -251,7 +260,7 @@ fn contextual_group_btn(
     if background_locked {
         ui.add_enabled_ui(false, |ui| group_btn(ui, data, actions, entries))
             .response
-            .on_disabled_hover_text("Background đang khóa — mở khóa để chỉnh sửa");
+            .on_disabled_hover_text("Background is locked — unlock it to edit");
     } else {
         group_btn(ui, data, actions, entries);
     }

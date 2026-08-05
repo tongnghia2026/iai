@@ -137,10 +137,12 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
             ui.spacing_mut().button_padding = egui::vec2(7.0, 3.0);
             // Keep every tool's options reachable: when the row is wider than the
             // window (e.g. Move with a vector object selected) it scrolls instead
-            // of pushing controls off the right edge.
+            // of pushing controls off the right edge. A floating scrollbar makes the
+            // overflow discoverable without stealing height from the 32px row.
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::floating();
             egui::ScrollArea::horizontal()
                 .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                 .show(ui, |ui| {
                     ui.horizontal_centered(|ui| {
                         ui.add_space(4.0);
