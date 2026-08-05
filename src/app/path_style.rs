@@ -1252,6 +1252,56 @@ mod tests {
     }
 
     #[test]
+    fn palette_fill_keeps_the_shape_corner_style() {
+        use crate::core::shape::{ShapeData, ShapeKind};
+        use crate::core::vector::from_shape::RectCorner;
+
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let idx = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let idx = canvas.layer_stack.add_layer(200, 200);
+            let data = ShapeData {
+                kind: ShapeKind::Rectangle,
+                x0: 0.0,
+                y0: 0.0,
+                x1: 60.0,
+                y1: 40.0,
+                corner_radius: 12.0,
+                corner_type: RectCorner::Chamfer,
+                sides: 5,
+                star_inner: 0.5,
+                style: VectorStyle::from_shape_fields(
+                    true,
+                    [200, 40, 40, 255],
+                    3.0,
+                    [0, 0, 0, 255],
+                ),
+            };
+            let layer = &mut canvas.layer_stack.layers[idx];
+            layer.offset = (0, 0);
+            layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(data));
+            canvas.layer_stack.active_idx = idx;
+            idx
+        };
+
+        // A palette-strip fill goes through apply_style_to_layer, which rebuilds
+        // the primitive; it must not reset the chamfer corner style back to Round.
+        assert!(app.path_apply_palette_fill(ColorValue::rgb(0.1, 0.2, 0.9)));
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Vector(VectorGeometry::Primitive(shape)) => {
+                assert_eq!(
+                    shape.corner_type,
+                    RectCorner::Chamfer,
+                    "palette fill kept the chamfer corner style"
+                );
+                assert_eq!(shape.corner_radius, 12.0, "and the corner radius");
+            }
+            _ => panic!("expected a primitive shape"),
+        }
+    }
+
+    #[test]
     fn overprint_fill_and_outline_are_independent_undo_steps() {
         let (mut app, id) = app_with_path();
         app.path_apply_palette_outline(ColorValue::BLACK);

@@ -382,6 +382,12 @@ fn rasterized_shape_layer_at(
     let (mut next, off) = ShapeData::from_canvas_span_with_style(
         sd.kind, span.0, span.1, span.2, span.3, radius, style,
     );
+    // `from_canvas_span_with_style` returns defaults for these; carry the source
+    // shape's own values so a transform never resets the corner style, polygon
+    // sides or star inner-radius.
+    next.corner_type = sd.corner_type;
+    next.sides = sd.sides;
+    next.star_inner = sd.star_inner;
     let w = (span.2 - span.0).abs();
     let h = (span.3 - span.1).abs();
     next.corner_radius = next.corner_radius.min(w * 0.5).min(h * 0.5).max(0.0);

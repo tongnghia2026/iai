@@ -160,6 +160,11 @@ pub(crate) fn apply_style_to_layer(layer: &mut Layer, style: VectorStyle) -> Res
                 shape.corner_radius,
                 style,
             );
+            // `from_canvas_span_with_style` fills these with defaults — the caller
+            // MUST copy the shape's own values back or a style change (e.g. a
+            // palette fill) silently resets the rectangle corner style, polygon
+            // sides and star inner-radius.
+            next.corner_type = shape.corner_type;
             next.sides = shape.sides;
             next.star_inner = shape.star_inner;
             let raster = next
