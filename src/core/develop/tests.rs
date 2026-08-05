@@ -2935,6 +2935,85 @@ fn edge_suppression_fades_edit_created_boundary_at_constant_luma() {
 }
 
 #[test]
+fn orange_luminance_does_not_carve_a_dark_rim_into_skin_proxy() {
+    // Regression for a face/blue-background boundary: the old generic edge
+    // suppressor reduced Orange Luminance on the last skin texels, drawing a
+    // darker duplicate contour inside the cheek.  Selective-luminance edges are
+    // gated at full resolution, so the proxy must retain the skin-side lift.
+    let (pw, ph) = (24usize, 8usize);
+    let skin = [0.78f32, 0.55, 0.42];
+    let blue = [0.08f32, 0.40, 0.66];
+    let mut region = vec![skin; pw * ph];
+    for y in 0..ph {
+        for x in (pw / 2)..pw {
+            region[y * pw + x] = blue;
+        }
+    }
+    let mut settings = DevelopSettings::default();
+    settings.mixer_luminance[O] = CONTROL_LIMIT;
+    let adjusted = apply_color_to_region(&region, &settings, pw, ph);
+    let lift = |x: usize| {
+        let k = 4 * pw + x;
+        luminance_f32(adjusted[k][0], adjusted[k][1], adjusted[k][2])
+            - luminance_f32(region[k][0], region[k][1], region[k][2])
+    };
+    let interior = lift(3);
+    let skin_edge = lift(pw / 2 - 1);
+    assert!(
+        interior > 0.03,
+        "test setup: Orange lift too weak: {interior}"
+    );
+    assert!(
+        skin_edge > interior * 0.92,
+        "Orange lift carved a dark inner rim: edge={skin_edge} interior={interior}"
+    );
+}
+
+#[test]
+fn orange_luminance_tile_bake_keeps_unsuppressed_boundary_correction() {
+    // Exercise the separate CPU tile/bake builder.  This path previously kept
+    // calling suppress_edge_correction even after the live proxy was fixed.
+    let (w, h) = (96u32, 48u32);
+    let skin = [199u8, 140, 107];
+    let blue = [20u8, 102, 168];
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let rgb = if x < w as usize / 2 { skin } else { blue };
+            let k = (y * w as usize + x) * 4;
+            px[k..k + 3].copy_from_slice(&rgb);
+            px[k + 3] = 255;
+        }
+    }
+    let source = TileMap::from_rgba(&px, w, h);
+    let mut settings = DevelopSettings::default();
+    settings.mixer_luminance[O] = CONTROL_LIMIT;
+    let (_toned, region, adjusted) =
+        build_color_lowpass(&source, &None, &settings, 0, 0, w, h, false, None);
+
+    // At every sampled point the bake proxy must contain the direct Color Mixer
+    // transform of that same regional colour, with no second spatial fade.
+    let curves = build_mixer_curves_opt(&settings);
+    for (x, y) in [(12usize, 24usize), (46, 24), (47, 24), (48, 24)] {
+        let k = y * w as usize + x;
+        let [mut er, mut eg, mut eb] = region[k];
+        apply_color(&settings, curves.as_ref(), &mut er, &mut eg, &mut eb);
+        let expected = [er, eg, eb];
+        // Transform-then-upsample is not exactly equal to
+        // upsample-then-transform at the two mixed boundary texels, so compare
+        // correction luminance.  The bake may interpolate slightly stronger,
+        // but must not attenuate it like the removed edge suppressor did.
+        let base_l = luminance_f32(region[k][0], region[k][1], region[k][2]);
+        let actual_lift = luminance_f32(adjusted[k][0], adjusted[k][1], adjusted[k][2]) - base_l;
+        let expected_lift = luminance_f32(expected[0], expected[1], expected[2]) - base_l;
+        assert!(
+            actual_lift + 0.002 >= expected_lift * 0.88,
+            "tile bake reintroduced edge fade at ({x},{y}): actual={actual_lift} expected={expected_lift}"
+        );
+    }
+}
+
+#[test]
 fn every_band_saturation_has_clear_plus100_and_plus200_strength() {
     let cases = [
         ("red", R, [170, 45, 48]),

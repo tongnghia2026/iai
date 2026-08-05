@@ -100,7 +100,9 @@ pub(crate) fn build_color_lowpass(
         apply_color(settings, curves.as_ref(), &mut r0, &mut g0, &mut b0);
         *p = [r0.clamp(0.0, 1.0), g0.clamp(0.0, 1.0), b0.clamp(0.0, 1.0)];
     }
-    suppress_edge_correction(&region_low, &mut adjusted_low, lw, lh);
+    if should_suppress_color_edges(settings) {
+        suppress_edge_correction(&region_low, &mut adjusted_low, lw, lh);
+    }
     let region_full = upsample_bilinear(&region_low, lw, lh, hw, hh, s);
     let adjusted_full = upsample_bilinear(&adjusted_low, lw, lh, hw, hh, s);
 
@@ -506,8 +508,25 @@ pub fn apply_color_to_region(
             [r0.clamp(0.0, 1.0), g0.clamp(0.0, 1.0), b0.clamp(0.0, 1.0)]
         })
         .collect();
-    suppress_edge_correction(region, &mut adjusted, pw, ph);
+    // A selective Luminance edit is already confined during full-resolution
+    // reconstruction by `mixer_edit_affinity`.  Fading its proxy correction a
+    // second time here removes light from the edited side of the boundary and
+    // produces the familiar dark/doubled rim around brightened skin.  Keep the
+    // suppressor for colour-only edits, where it can still soften chroma edges,
+    // but let the reconstruction gate own Luminance boundaries.
+    if should_suppress_color_edges(settings) {
+        suppress_edge_correction(region, &mut adjusted, pw, ph);
+    }
     adjusted
+}
+
+/// Luminance-band edits are already confined by the full-resolution mixer gate.
+/// Applying the generic proxy edge fade as well creates an under-corrected strip
+/// on the edited side (the doubled jaw/cheek contour).  This predicate is shared
+/// by both the live full-layer proxy and the CPU tile/bake path so they cannot
+/// drift again.
+fn should_suppress_color_edges(settings: &DevelopSettings) -> bool {
+    !settings.mixer_luminance.iter().any(|v| v.abs() > 0.001)
 }
 
 /// Edge/halo suppression of the low-res colour correction: a gradient weight
