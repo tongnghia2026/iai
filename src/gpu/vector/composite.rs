@@ -51,6 +51,11 @@ struct GpuMeshCache {
     /// Meshes tessellated (== uploaded) during the current frame.
     frame_tessellations: u32,
     frame_uploads: u32,
+    /// Geometry keys whose tessellation has failed and been logged. An eligible
+    /// layer that fails to tessellate is dropped from the draw list (it would
+    /// otherwise vanish silently), so — like `missing_texture_logged` in
+    /// `gpu/mod.rs` — this leaves one log line per geometry instead of per frame.
+    failed_logged: HashSet<(u64, u32)>,
 }
 
 impl GpuMeshCache {
@@ -60,6 +65,7 @@ impl GpuMeshCache {
             lru: ByteLru::new(byte_budget),
             frame_tessellations: 0,
             frame_uploads: 0,
+            failed_logged: HashSet::new(),
         }
     }
 
@@ -85,7 +91,18 @@ impl GpuMeshCache {
         }
         let mesh = match tessellate(object, tolerance) {
             Ok(mesh) => mesh,
-            Err(_) => return false,
+            Err(_) => {
+                if self.failed_logged.insert(key) {
+                    eprintln!(
+                        "gpu vector: tessellation failed for geometry {:#x} (zoom bucket {}), \
+                         {} nodes — layer will not draw on the GPU vector path this frame",
+                        key.0,
+                        key.1,
+                        object.path.total_nodes(),
+                    );
+                }
+                return false;
+            }
         };
         self.frame_tessellations += 1;
         let gpu = GpuMesh::upload(device, &mesh);
@@ -105,6 +122,7 @@ impl GpuMeshCache {
     fn clear(&mut self) {
         self.entries.clear();
         self.lru.clear();
+        self.failed_logged.clear();
     }
 }
 

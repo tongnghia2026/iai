@@ -17,7 +17,16 @@ pub enum FallbackReason {
     Dash,
     VectorBrush,
     InvalidGeometry,
+    TooComplex,
 }
+
+/// Above this node count a Path is routed to the CPU raster reference instead of
+/// GPU tessellation. Tessellation runs synchronously on the render thread (the
+/// raster twin bakes off-thread), so a very large path — a long Text→Curves
+/// result, a heavy imported/Boolean path — would otherwise stall the frame and
+/// re-stall on every zoom-bucket change. Normal design work (logos, headings) is
+/// far below this, so it stays on the crisp GPU path.
+pub const MAX_GPU_VECTOR_NODES: usize = 8_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Eligibility {
@@ -93,6 +102,12 @@ pub fn object_eligibility(object: &VectorObjectData) -> Eligibility {
     }
     if object.brush.is_some() {
         return Eligibility::RasterFallback(FallbackReason::VectorBrush);
+    }
+    // Keep heavy paths off the synchronous render-thread tessellator (see
+    // MAX_GPU_VECTOR_NODES); the off-thread raster bake handles them without a
+    // frame stall.
+    if object.path.total_nodes() > MAX_GPU_VECTOR_NODES {
+        return Eligibility::RasterFallback(FallbackReason::TooComplex);
     }
     style_eligibility(&object.style)
 }
@@ -358,6 +373,23 @@ mod tests {
         assert_eq!(
             layer_eligibility(&layer, true),
             Eligibility::RasterFallback(FallbackReason::Cmyk)
+        );
+    }
+
+    #[test]
+    fn very_large_path_falls_back_to_raster() {
+        // A path over the node cap must not reach the synchronous GPU tessellator;
+        // it renders through the off-thread raster bake instead.
+        let nodes: Vec<Node> = (0..=MAX_GPU_VECTOR_NODES)
+            .map(|i| Node::sharp(Point::new(i as f32, (i % 7) as f32)))
+            .collect();
+        let object = VectorObjectData::from_path(PathData::new(
+            vec![Contour::new(nodes, true)],
+            FillRule::NonZero,
+        ));
+        assert_eq!(
+            object_eligibility(&object),
+            Eligibility::RasterFallback(FallbackReason::TooComplex)
         );
     }
 
