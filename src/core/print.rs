@@ -593,7 +593,31 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
         // Editable text is promoted through transient glyph outlines. The layer
         // remains Text in the document; only the PDF representation is curves.
         if let LayerType::Text(text) = &layer.layer_type {
-            let text_objects = crate::core::text::text_vector_objects(text, layer.offset);
+            let mut text_objects = crate::core::text::text_vector_objects(text, layer.offset);
+            // The tiles are the authoritative appearance of an editable Text
+            // layer.  After move/transform/edit round-trips, their ink bounds
+            // can differ from the origin reconstructed from TextData (notably
+            // for older .iai files).  Screen compositing uses those tiles, so
+            // register the transient PDF outlines to the same ink top-left.
+            // This prevents exported text drifting right/down or being clipped
+            // even though it still looks correctly positioned in the editor.
+            if let (Some((tile_x, tile_y, _, _)), Some(vector_bounds)) = (
+                layer.tiles.content_bounds(),
+                text_objects
+                    .iter()
+                    .filter_map(|object| object.path_in_layer_space().control_bounds())
+                    .reduce(|a, b| a.union(b)),
+            ) {
+                let dx = layer.offset.0 as f32 + tile_x as f32 - vector_bounds.x;
+                let dy = layer.offset.1 as f32 + tile_y as f32 - vector_bounds.y;
+                if dx.abs() > 0.01 || dy.abs() > 0.01 {
+                    let correction =
+                        crate::core::vector::affine::AffineTransform::translate(dx, dy);
+                    for object in &mut text_objects {
+                        object.transform = correction.then(&object.transform);
+                    }
+                }
+            }
             if text_objects.is_empty()
                 || text_objects.iter().any(|object| {
                     (object.style.opacity - 1.0).abs() > 1e-3
@@ -1752,6 +1776,52 @@ mod tests {
         .expect("text PDF");
         let source = String::from_utf8_lossy(&pdf);
         assert!(source.contains(" m\n") && source.contains("f\nQ"));
+    }
+
+    #[test]
+    fn pdf_text_curves_follow_the_visible_tile_ink_position() {
+        use crate::core::layer::LayerType;
+        use crate::core::text::{rasterize, TextData};
+        use crate::core::tile::TileMap;
+
+        let text = TextData {
+            content: "Visible text".to_string(),
+            font_px: 36.0,
+            ..TextData::default()
+        };
+        let Some(raster) = rasterize(&text) else {
+            return;
+        };
+        let inset = (37u32, 19u32);
+        let (w, h) = (raster.width + inset.0 + 4, raster.height + inset.1 + 4);
+        let mut rgba = vec![0u8; w as usize * h as usize * 4];
+        for y in 0..raster.height {
+            let src = y as usize * raster.width as usize * 4;
+            let dst = ((y + inset.1) as usize * w as usize + inset.0 as usize) * 4;
+            rgba[dst..dst + raster.width as usize * 4]
+                .copy_from_slice(&raster.rgba[src..src + raster.width as usize * 4]);
+        }
+
+        let mut canvas = crate::core::canvas::Canvas::new_blank(500, 200);
+        let layer = &mut canvas.layer_stack.layers[canvas.layer_stack.active_idx];
+        layer.layer_type = LayerType::Text(text);
+        layer.offset = (11, 23);
+        layer.width = w;
+        layer.height = h;
+        layer.tiles = TileMap::from_rgba(&rgba, w, h);
+        let (ink_x, ink_y, _, _) = layer.tiles.content_bounds().expect("tile ink bounds");
+        let expected_x = (layer.offset.0 + ink_x) as f32;
+        let expected_y = (layer.offset.1 + ink_y) as f32;
+
+        let selection = collect_pdf_vectors(&canvas);
+        let bounds = selection
+            .objects
+            .iter()
+            .filter_map(|object| object.path.control_bounds())
+            .reduce(|a, b| a.union(b))
+            .expect("text vector bounds");
+        assert!((bounds.x - expected_x).abs() < 0.01);
+        assert!((bounds.y - expected_y).abs() < 0.01);
     }
 
     #[test]
