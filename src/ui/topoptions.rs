@@ -1517,19 +1517,17 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
     ui.separator();
 
-    // Fill: enable toggle + colour chip (not for lines, which are stroke-only).
+    // Fill: enable toggle only (not for lines). The colour comes from the
+    // right-edge palette, so the redundant swatch is gone.
     if kind != 2 {
         let mut fill = data.tool.shape_fill;
         if ui.checkbox(&mut fill, "Fill").changed() {
             actions.tool.set_shape_fill = Some(fill);
         }
-        if shape_color_chip(ui, data.tool.shape_fill_color, "Fill color") {
-            actions.dialogs.open_paint_color_dialog = Some(3);
-        }
         ui.separator();
     }
 
-    // Stroke: width + colour chip.
+    // Stroke: width only — colour comes from the right-edge palette.
     ui.label(if kind == 2 { "Width:" } else { "Stroke:" });
     let mut sw = data.tool.shape_stroke_width;
     if ui
@@ -1542,9 +1540,6 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         .changed()
     {
         actions.tool.set_shape_stroke_width = Some(sw);
-    }
-    if shape_color_chip(ui, data.tool.shape_stroke_color, "Stroke color") {
-        actions.dialogs.open_paint_color_dialog = Some(4);
     }
 
     // Rectangle corner radius + style (Round / Scallop / Chamfer).
@@ -1859,16 +1854,10 @@ fn path_style_quick(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui.checkbox(&mut fill, "Fill").changed() {
         actions.tool.set_path_fill_enabled = Some(fill);
     }
-    if shape_color_chip(ui, style.fill_color, "Fill colour") {
-        actions.dialogs.open_paint_color_dialog = Some(5);
-    }
     ui.separator();
     let mut stroke = style.stroke_enabled;
     if ui.checkbox(&mut stroke, "Outline").changed() {
         actions.tool.set_path_stroke_enabled = Some(stroke);
-    }
-    if shape_color_chip(ui, style.stroke_color, "Outline colour") {
-        actions.dialogs.open_paint_color_dialog = Some(6);
     }
     ui.label("Width:");
     let mut w = style.stroke_width;
@@ -2074,20 +2063,19 @@ fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     );
 }
 
-/// Fill/Outline colour + outline width for the active Path layer. Shared by the
-/// Move and Node options bars. Colours open the paint dialog (targets 5/6);
-/// the width scrub previews live and commits one undo on release.
+/// Fill/Outline toggles + outline parameters for the active Path layer. Shared by
+/// the Move and Node options bars. Solid colours come from the right-edge palette
+/// (the redundant swatches were removed); the width scrub previews live and
+/// commits one undo on release.
 fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let Some(style) = data.tool.path_style else {
         return;
     };
-    // Fill.
+    // Fill. Solid colour comes from the right-edge palette; only the enable
+    // toggle and gradient controls stay here.
     let mut fill = style.fill_enabled;
     if ui.checkbox(&mut fill, "Fill").changed() {
         actions.tool.set_path_fill_enabled = Some(fill);
-    }
-    if shape_color_chip(ui, style.fill_color, "Fill colour") {
-        actions.dialogs.open_paint_color_dialog = Some(5);
     }
     let mut fill_overprint = style.fill_overprint;
     if ui
@@ -2181,13 +2169,11 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
         });
     }
     ui.separator();
-    // Outline.
+    // Outline. Colour comes from the right-edge palette; the width and
+    // cap/join/dash parameters stay here.
     let mut stroke = style.stroke_enabled;
     if ui.checkbox(&mut stroke, "Outline").changed() {
         actions.tool.set_path_stroke_enabled = Some(stroke);
-    }
-    if shape_color_chip(ui, style.stroke_color, "Outline colour") {
-        actions.dialogs.open_paint_color_dialog = Some(6);
     }
     let mut stroke_overprint = style.stroke_overprint;
     if ui
