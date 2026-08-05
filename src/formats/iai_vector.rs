@@ -25,8 +25,8 @@ use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
 use crate::core::vector::style::{
-    DashPattern, Gradient, GradientKind, GradientStop, LineCap, LineJoin, Paint, StrokeStyle,
-    VectorStyle, MAX_GRADIENT_STOPS,
+    ArrowHead, ArrowStyle, DashPattern, Gradient, GradientKind, GradientStop, LineCap, LineJoin,
+    Paint, StrokeStyle, VectorStyle, MAX_GRADIENT_STOPS,
 };
 use serde_json::{json, Value};
 
@@ -103,6 +103,8 @@ fn stroke_style_to_json(s: &StrokeStyle) -> Value {
         "miter_limit": s.miter_limit,
         "dash": s.dash.as_slice(),
         "dash_offset": s.dash.offset,
+        "start_arrow": { "kind": s.start_arrow.kind.to_u8(), "size": s.start_arrow.size },
+        "end_arrow": { "kind": s.end_arrow.kind.to_u8(), "size": s.end_arrow.size },
     })
 }
 
@@ -325,7 +327,21 @@ fn json_to_stroke_style(v: &Value) -> Option<StrokeStyle> {
                 .unwrap_or_default(),
             v.get("dash_offset").and_then(Value::as_f64).unwrap_or(0.0) as f32,
         ),
+        start_arrow: json_to_arrow_style(v.get("start_arrow")),
+        end_arrow: json_to_arrow_style(v.get("end_arrow")),
     })
+}
+
+fn json_to_arrow_style(v: Option<&Value>) -> ArrowStyle {
+    let default = ArrowStyle::default();
+    let Some(v) = v else { return default };
+    ArrowStyle {
+        kind: ArrowHead::from_u8(v.get("kind").and_then(Value::as_u64).unwrap_or(0) as u8),
+        size: v
+            .get("size")
+            .and_then(Value::as_f64)
+            .unwrap_or(default.size as f64) as f32,
+    }
 }
 
 fn json_to_paint(v: &Value) -> Option<Paint> {
@@ -440,6 +456,14 @@ mod tests {
             join: LineJoin::Bevel,
             miter_limit: 2.0,
             dash: DashPattern::default(),
+            start_arrow: ArrowStyle {
+                kind: ArrowHead::Circle,
+                size: 2.5,
+            },
+            end_arrow: ArrowStyle {
+                kind: ArrowHead::Triangle,
+                size: 4.0,
+            },
         };
         style.stroke_overprint = true;
         style.opacity = 0.75;
@@ -615,6 +639,8 @@ mod tests {
                                 join: *join,
                                 miter_limit: 1.0 + k,
                                 dash: DashPattern::default(),
+                                start_arrow: ArrowStyle::default(),
+                                end_arrow: ArrowStyle::default(),
                             },
                             stroke_overprint: ji % 2 == 1,
                             opacity: (0.3 + 0.1 * k).min(1.0),

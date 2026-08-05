@@ -12,7 +12,7 @@
 //! Nothing here allocates GPU state or depends on UI.
 
 use crate::core::geometry::Point;
-use crate::core::vector::style::{LineCap, LineJoin};
+use crate::core::vector::style::{ArrowHead, ArrowStyle, LineCap, LineJoin};
 
 /// Points closer than this (in the target space) are treated as coincident.
 const EPS: f32 = 1e-4;
@@ -48,6 +48,78 @@ pub fn stroke_outline_contours(
         stroke_one(&pts, is_closed, half, cap, join, miter_limit, tol, &mut out);
     }
     out
+}
+
+/// Build filled arrowhead rings for the free ends of open centrelines.
+pub fn arrowhead_contours(
+    polylines: &[Vec<Point>],
+    closed: &[bool],
+    half: f32,
+    start: ArrowStyle,
+    end: ArrowStyle,
+    tolerance: f32,
+) -> Vec<Vec<Point>> {
+    let mut out = Vec::new();
+    if !(half > 0.0) {
+        return out;
+    }
+    for (index, pl) in polylines.iter().enumerate() {
+        if closed.get(index).copied().unwrap_or(false) || pl.len() < 2 {
+            continue;
+        }
+        if let Some((p, u)) = endpoint_direction(pl, true) {
+            add_arrowhead(p, u, half, start, tolerance, &mut out);
+        }
+        if let Some((p, u)) = endpoint_direction(pl, false) {
+            add_arrowhead(p, u, half, end, tolerance, &mut out);
+        }
+    }
+    out
+}
+
+fn endpoint_direction(pl: &[Point], start: bool) -> Option<(Point, (f32, f32))> {
+    let p = if start { pl[0] } else { *pl.last()? };
+    let candidates: Box<dyn Iterator<Item = &Point> + '_> = if start {
+        Box::new(pl[1..].iter())
+    } else {
+        Box::new(pl[..pl.len() - 1].iter().rev())
+    };
+    candidates
+        .filter_map(|neighbour| norm(sub(p, *neighbour)))
+        .next()
+        .map(|u| (p, u))
+}
+
+fn add_arrowhead(
+    p: Point,
+    u: (f32, f32),
+    half: f32,
+    style: ArrowStyle,
+    tolerance: f32,
+    out: &mut Vec<Vec<Point>>,
+) {
+    if style.kind == ArrowHead::None || !(style.size > 0.0) {
+        return;
+    }
+    let length = style.size * (2.0 * half);
+    let nm = perp(u);
+    let wing = (length * 0.42).max(2.0 * half);
+    let left = along(p, nm, wing);
+    let right = along(p, nm, -wing);
+    let tip = along(p, u, length);
+    let ring = match style.kind {
+        ArrowHead::None => return,
+        ArrowHead::Triangle => vec![left, tip, right],
+        ArrowHead::Stealth => vec![left, tip, right, along(p, u, length * 0.4)],
+        ArrowHead::Diamond => vec![
+            p,
+            along(along(p, u, length * 0.5), nm, wing),
+            tip,
+            along(along(p, u, length * 0.5), nm, -wing),
+        ],
+        ArrowHead::Circle => circle(along(p, u, length * 0.5), length * 0.5, tolerance),
+    };
+    push_ring(out, ring);
 }
 
 /// Drop consecutive coincident points; for a closed ring also drop the flattener's
@@ -537,5 +609,42 @@ mod tests {
         assert!(inside(&rings, Point::new(20.0, 40.0)), "left edge painted");
         assert!(!inside(&rings, Point::new(40.0, 40.0)), "interior hollow");
         assert!(inside(&rings, Point::new(60.0, 40.0)), "right edge painted");
+    }
+
+    #[test]
+    fn arrowheads_extend_open_path_and_keep_positive_winding() {
+        let lines = vec![vec![Point::new(0.0, 0.0), Point::new(10.0, 0.0)]];
+        let rings = arrowhead_contours(
+            &lines,
+            &[false],
+            1.0,
+            ArrowStyle::default(),
+            ArrowStyle {
+                kind: ArrowHead::Triangle,
+                size: 3.0,
+            },
+            0.25,
+        );
+        assert_eq!(rings.len(), 1);
+        assert!(rings[0].iter().any(|point| point.x > 10.0));
+        assert!(signed_area(&rings[0]) > 0.0);
+    }
+
+    #[test]
+    fn arrowheads_ignore_closed_paths_and_find_noncoincident_tangent() {
+        let repeated = vec![vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 0.0),
+        ]];
+        let arrow = ArrowStyle {
+            kind: ArrowHead::Diamond,
+            size: 3.0,
+        };
+        assert!(
+            !arrowhead_contours(&repeated, &[false], 1.0, ArrowStyle::default(), arrow, 0.25)
+                .is_empty()
+        );
+        assert!(arrowhead_contours(&repeated, &[true], 1.0, arrow, arrow, 0.25).is_empty());
     }
 }

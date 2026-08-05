@@ -162,6 +162,55 @@ pub enum LineJoin {
     Bevel,
 }
 
+/// Decoration drawn at either free end of an open stroked path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArrowHead {
+    #[default]
+    None,
+    Triangle,
+    Stealth,
+    Circle,
+    Diamond,
+}
+
+impl ArrowHead {
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Triangle,
+            2 => Self::Stealth,
+            3 => Self::Circle,
+            4 => Self::Diamond,
+            _ => Self::None,
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Triangle => 1,
+            Self::Stealth => 2,
+            Self::Circle => 3,
+            Self::Diamond => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArrowStyle {
+    /// Arrow length as a multiple of the full stroke width.
+    pub kind: ArrowHead,
+    pub size: f32,
+}
+
+impl Default for ArrowStyle {
+    fn default() -> Self {
+        Self {
+            kind: ArrowHead::None,
+            size: 3.0,
+        }
+    }
+}
+
 /// What paints a fill or an outline. `None` is Corel's explicit "no fill / no
 /// outline" — distinct from a fully transparent colour.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -202,6 +251,8 @@ pub struct StrokeStyle {
     pub join: LineJoin,
     pub miter_limit: f32,
     pub dash: DashPattern,
+    pub start_arrow: ArrowStyle,
+    pub end_arrow: ArrowStyle,
 }
 
 impl Default for StrokeStyle {
@@ -212,6 +263,8 @@ impl Default for StrokeStyle {
             join: LineJoin::default(),
             miter_limit: 4.0,
             dash: DashPattern::default(),
+            start_arrow: ArrowStyle::default(),
+            end_arrow: ArrowStyle::default(),
         }
     }
 }
@@ -287,6 +340,11 @@ impl VectorStyle {
         }
         if !self.stroke_style.miter_limit.is_finite() || self.stroke_style.miter_limit < 1.0 {
             return Err("miter limit must be finite and >= 1".into());
+        }
+        for arrow in [self.stroke_style.start_arrow, self.stroke_style.end_arrow] {
+            if !arrow.size.is_finite() || arrow.size < 0.0 {
+                return Err("arrow size must be finite and >= 0".into());
+            }
         }
         self.stroke_style.dash.validate()?;
         for p in [self.fill, self.stroke] {

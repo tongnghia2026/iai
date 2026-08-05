@@ -5,7 +5,7 @@ use lyon_tessellation::{FillOptions, FillRule as LyonFillRule, FillTessellator, 
 
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::path::{FillRule, PathData};
-use crate::core::vector::stroke::stroke_outline_contours;
+use crate::core::vector::stroke::{arrowhead_contours, stroke_outline_contours};
 use crate::core::vector::{flatten::flatten_path, raster::dashed_polylines};
 
 #[repr(C)]
@@ -62,11 +62,11 @@ fn stroke_outline_lyon_path(object: &VectorObjectData, tolerance: f32) -> lyon_p
     let closed: Vec<bool> = object.path.contours.iter().map(|c| c.closed).collect();
     let ss = object.style.stroke_style;
     let (lines, line_closed) = if ss.dash.is_solid() {
-        (flat, closed)
+        (flat.clone(), closed.clone())
     } else {
         dashed_polylines(&flat, &closed, ss.dash.as_slice(), ss.dash.offset)
     };
-    let contours = stroke_outline_contours(
+    let mut contours = stroke_outline_contours(
         &lines,
         &line_closed,
         ss.width * 0.5,
@@ -75,6 +75,14 @@ fn stroke_outline_lyon_path(object: &VectorObjectData, tolerance: f32) -> lyon_p
         ss.miter_limit,
         tol,
     );
+    contours.extend(arrowhead_contours(
+        &flat,
+        &closed,
+        ss.width * 0.5,
+        ss.start_arrow,
+        ss.end_arrow,
+        tol,
+    ));
     let mut builder = lyon_path::Path::builder();
     for ring in &contours {
         let Some(first) = ring.first() else {

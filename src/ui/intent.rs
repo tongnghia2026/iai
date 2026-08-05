@@ -333,6 +333,9 @@ pub struct ToolIntent {
     /// Round, 2 Bevel). Each is a discrete selection recorded as one undo step.
     pub set_path_cap: Option<u8>,
     pub set_path_join: Option<u8>,
+    pub set_path_arrow_start: Option<u8>,
+    pub set_path_arrow_end: Option<u8>,
+    pub set_path_arrow_size: Option<f32>,
     /// Live preview of the custom dash array and phase.
     pub set_path_dash_values: Option<([f32; crate::core::vector::style::MAX_DASHES], u8)>,
     pub set_path_dash_offset: Option<f32>,

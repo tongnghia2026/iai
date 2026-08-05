@@ -534,6 +534,32 @@ fn shape_as_vector(
     shape.to_vector_object(layer_offset)
 }
 
+fn arrowheads_as_pdf_path(
+    path: &crate::core::vector::path::PathData,
+    half: f32,
+    start: crate::core::vector::style::ArrowStyle,
+    end: crate::core::vector::style::ArrowStyle,
+) -> Option<crate::core::vector::path::PathData> {
+    use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+    let lines = crate::core::vector::flatten::flatten_path(path, 0.25);
+    let closed: Vec<bool> = path.contours.iter().map(|contour| contour.closed).collect();
+    let rings =
+        crate::core::vector::stroke::arrowhead_contours(&lines, &closed, half, start, end, 0.25);
+    if rings.is_empty() {
+        return None;
+    }
+    Some(PathData {
+        contours: rings
+            .into_iter()
+            .map(|ring| Contour {
+                nodes: ring.into_iter().map(Node::sharp).collect(),
+                closed: true,
+            })
+            .collect(),
+        fill_rule: FillRule::NonZero,
+    })
+}
+
 pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSelection {
     use crate::core::layer::{BlendMode, LayerType};
     use crate::core::vector::path::FillRule;
@@ -724,6 +750,16 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
             },
             None => obj.path_in_layer_space(),
         };
+        let arrow_path = if obj.brush.is_none() && stroke.is_some() {
+            arrowheads_as_pdf_path(
+                &emitted_path,
+                obj.style.effective_stroke_width() * 0.5,
+                obj.style.stroke_style.start_arrow,
+                obj.style.stroke_style.end_arrow,
+            )
+        } else {
+            None
+        };
         objects.push(PdfVectorObject {
             path: emitted_path,
             fill,
@@ -737,6 +773,21 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
             stroke_dash_offset: obj.style.stroke_style.dash.offset,
             even_odd: obj.path.fill_rule == FillRule::EvenOdd,
         });
+        if let (Some(path), Some(fill)) = (arrow_path, stroke) {
+            objects.push(PdfVectorObject {
+                path,
+                fill: Some(fill),
+                fill_gradient: None,
+                stroke: None,
+                stroke_width_px: 0.0,
+                stroke_cap: obj.style.stroke_style.cap,
+                stroke_join: obj.style.stroke_style.join,
+                stroke_miter_limit: obj.style.stroke_style.miter_limit,
+                stroke_dash: Vec::new(),
+                stroke_dash_offset: 0.0,
+                even_odd: false,
+            });
+        }
         promoted_layer_ids.push(layer.id);
     }
     objects.reverse();

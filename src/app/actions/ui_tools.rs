@@ -630,6 +630,15 @@ impl App {
         if let Some(code) = actions.tool.set_path_join.take() {
             self.path_set_join(code);
         }
+        if let Some(code) = actions.tool.set_path_arrow_start.take() {
+            self.path_set_arrow_start(code);
+        }
+        if let Some(code) = actions.tool.set_path_arrow_end.take() {
+            self.path_set_arrow_end(code);
+        }
+        if let Some(size) = actions.tool.set_path_arrow_size.take() {
+            self.path_set_arrow_size(size);
+        }
         if let Some((values, len)) = actions.tool.set_path_dash_values.take() {
             self.path_set_dash_values(values, len);
         }

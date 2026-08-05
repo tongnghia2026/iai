@@ -184,6 +184,9 @@ pub struct PathStyleData {
     pub cap: u8,
     /// Outline corner join: 0 Miter, 1 Round, 2 Bevel.
     pub join: u8,
+    pub arrow_start: u8,
+    pub arrow_end: u8,
+    pub arrow_size: f32,
 }
 
 /// On-canvas editing overlay for the Node tool: the active Path's outline,

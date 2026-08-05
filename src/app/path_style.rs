@@ -18,8 +18,8 @@ use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorGeometry;
 use crate::core::vector::style::{
-    DashPattern, Gradient, GradientKind, GradientStop, LineCap, LineJoin, Paint, VectorStyle,
-    MAX_DASHES, MAX_GRADIENT_STOPS,
+    ArrowHead, DashPattern, Gradient, GradientKind, GradientStop, LineCap, LineJoin, Paint,
+    VectorStyle, MAX_DASHES, MAX_GRADIENT_STOPS,
 };
 
 impl App {
@@ -279,6 +279,13 @@ impl App {
                 LineJoin::Bevel => 2,
                 LineJoin::Miter => 0,
             },
+            arrow_start: style.stroke_style.start_arrow.kind.to_u8(),
+            arrow_end: style.stroke_style.end_arrow.kind.to_u8(),
+            arrow_size: style
+                .stroke_style
+                .start_arrow
+                .size
+                .max(style.stroke_style.end_arrow.size),
         })
     }
 
@@ -773,6 +780,28 @@ impl App {
                 _ => LineJoin::Miter,
             };
         });
+    }
+
+    pub fn path_set_arrow_start(&mut self, code: u8) {
+        self.commit_path_style_change(|s| {
+            s.stroke_style.start_arrow.kind = ArrowHead::from_u8(code);
+        });
+    }
+
+    pub fn path_set_arrow_end(&mut self, code: u8) {
+        self.commit_path_style_change(|s| {
+            s.stroke_style.end_arrow.kind = ArrowHead::from_u8(code);
+        });
+    }
+
+    pub fn path_set_arrow_size(&mut self, size: f32) {
+        self.path_style_begin();
+        if let Some((id, mut style)) = self.active_path_style() {
+            let size = size.clamp(0.0, 20.0);
+            style.stroke_style.start_arrow.size = size;
+            style.stroke_style.end_arrow.size = size;
+            self.preview_path_style_live(id, style);
+        }
     }
 
     /// Live-preview a custom dash/gap array. Invalid UI values are normalised

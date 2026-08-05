@@ -1742,11 +1742,57 @@ fn path_style_quick(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if join != style.join {
         actions.tool.set_path_join = Some(join);
     }
+    arrow_controls(ui, style, actions, "quick");
     ui.label(
         egui::RichText::new("More in Color panel")
             .size(10.0)
             .color(egui::Color32::from_gray(140)),
     );
+}
+
+fn arrow_controls(
+    ui: &mut egui::Ui,
+    style: crate::ui::PathStyleData,
+    actions: &mut UiActions,
+    id: &str,
+) {
+    let label = |kind| match kind {
+        1 => "Triangle",
+        2 => "Stealth",
+        3 => "Circle",
+        4 => "Diamond",
+        _ => "None",
+    };
+    for (suffix, current, action) in [
+        (
+            "start",
+            style.arrow_start,
+            &mut actions.tool.set_path_arrow_start,
+        ),
+        ("end", style.arrow_end, &mut actions.tool.set_path_arrow_end),
+    ] {
+        let mut kind = current;
+        egui::ComboBox::from_id_salt(format!("{id}_arrow_{suffix}"))
+            .selected_text(format!("{suffix}: {}", label(kind)))
+            .width(108.0)
+            .show_ui(ui, |ui| {
+                for value in 0..=4 {
+                    ui.selectable_value(&mut kind, value, label(value));
+                }
+            });
+        if kind != current {
+            *action = Some(kind);
+        }
+    }
+    ui.label("Arrow size:");
+    let mut size = style.arrow_size;
+    let response = ui.add(egui::DragValue::new(&mut size).range(0.0..=20.0).speed(0.1));
+    if response.changed() {
+        actions.tool.set_path_arrow_size = Some(size);
+    }
+    if response.drag_stopped() || response.lost_focus() {
+        actions.tool.commit_path_style = true;
+    }
 }
 
 fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {

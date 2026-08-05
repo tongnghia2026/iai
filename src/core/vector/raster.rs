@@ -18,7 +18,7 @@ use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::brush::BrushStroke;
 use crate::core::vector::flatten::flatten_path;
 use crate::core::vector::object::VectorObjectData;
-use crate::core::vector::stroke::stroke_outline_contours;
+use crate::core::vector::stroke::{arrowhead_contours, stroke_outline_contours};
 use crate::core::vector::style::{GradientKind, LineCap, LineJoin, Paint};
 
 /// Flatten tolerance in layer pixels. Small enough to be invisible at 100%, large
@@ -135,7 +135,9 @@ fn raster_layout(
         } else {
             0.0
         };
-        miter.max(cap)
+        let arrow =
+            ss.start_arrow.size.max(ss.end_arrow.size) * object.style.effective_stroke_width();
+        miter.max(cap).max(arrow)
     } else {
         0.0
     };
@@ -272,7 +274,7 @@ fn rasterize_impl(
             // Fill the stroke's true outline (honouring cap/join) with the fill
             // coverage path — the same NonZero scanline the GPU twin fills.
             let ss = object.style.stroke_style;
-            let outline = stroke_outline_contours(
+            let mut outline = stroke_outline_contours(
                 &stroke_lines,
                 &stroke_closed,
                 half,
@@ -281,6 +283,14 @@ fn rasterize_impl(
                 ss.miter_limit,
                 FLATTEN_TOL,
             );
+            outline.extend(arrowhead_contours(
+                &local,
+                &closed,
+                half,
+                ss.start_arrow,
+                ss.end_arrow,
+                FLATTEN_TOL,
+            ));
             let cov = fill_coverage(&outline, w, h, false);
             paint_rows(
                 &mut rgba,
