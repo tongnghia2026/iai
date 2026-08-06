@@ -44,7 +44,9 @@ impl Default for ShapeTool {
     fn default() -> Self {
         Self {
             kind: ShapeKind::Rectangle,
-            fill: true,
+            // Outline-only by default, like CorelDRAW: a new shape draws its outline
+            // and the user fills it afterwards via the selected object's Fill control.
+            fill: false,
             fill_color: [0, 0, 0, 255],
             stroke_width: 2.0,
             stroke_color: [0, 0, 0, 255],

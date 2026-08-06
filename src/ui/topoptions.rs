@@ -1495,15 +1495,8 @@ fn shape_color_chip(ui: &mut egui::Ui, color: [u8; 4], tip: &str) -> bool {
 fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let kind = data.tool.shape_kind;
 
-    // Fill: enable toggle only (not for lines). The colour comes from the
-    // right-edge palette, so the redundant swatch is gone.
-    if kind != 2 {
-        let mut fill = data.tool.shape_fill;
-        if ui.checkbox(&mut fill, "Fill").changed() {
-            actions.tool.set_shape_fill = Some(fill);
-        }
-        ui.separator();
-    }
+    // No fill toggle here: shapes draw as outline-only (like CorelDRAW). The user
+    // fills a shape after drawing, via its Fill control once it is selected.
 
     // Stroke: width only — colour comes from the right-edge palette.
     ui.label(if kind == 2 { "Width:" } else { "Stroke:" });
