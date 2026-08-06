@@ -476,6 +476,8 @@ pub struct PrintIntent {
     pub export_cmyk_separations: bool,
     /// File ▸ Export ▸ PDF (multi-page)… — write all open tabs as one PDF.
     pub export_multipage_pdf: bool,
+    /// File ▸ Export ▸ SVG (Vector)… — write the document as an SVG.
+    pub export_svg: bool,
     /// Print dialog: send the current page to the default printer.
     pub print_send: bool,
     /// Print dialog: save the print-ready PDF (deferred rfd save).

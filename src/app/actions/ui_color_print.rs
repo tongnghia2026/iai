@@ -124,6 +124,10 @@ impl App {
             self.export_multipage_pdf((0..self.docs.documents.len()).collect());
         }
 
+        if actions.print.export_svg {
+            self.export_svg();
+        }
+
         // -- Printing (File > Print) --
         if let Some(v) = actions.print.show_print_dialog.take() {
             if v {

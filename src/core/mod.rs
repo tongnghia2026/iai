@@ -40,6 +40,7 @@ pub mod print;
 pub mod print_gdi;
 pub mod select_subject;
 pub mod snapping;
+pub mod svg;
 pub mod text;
 pub mod tile;
 

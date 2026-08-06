@@ -348,6 +348,46 @@ impl App {
         }
     }
 
+    /// File ▸ Export ▸ SVG (Vector) — write the active document as an SVG: its
+    /// qualifying vector objects as native `<path>` elements over an embedded PNG
+    /// of the raster beneath them (a pure-vector document embeds no image). Meant
+    /// for the web and cut plotters. Blocking rfd is fine here.
+    pub fn export_svg(&mut self) {
+        self.sync_brush_gpu_to_cpu();
+        let idx = self.docs.active_doc_idx;
+        let svg = match crate::core::svg::build_svg(&self.docs.documents[idx].canvas) {
+            Ok(svg) => svg,
+            Err(e) => {
+                self.shell.status_msg = format!("SVG export error: {e}");
+                return;
+            }
+        };
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let parent = file_io::dialog_parent(window);
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("SVG", &["svg"])
+            .set_file_name("artwork.svg");
+        if let Some(p) = &parent {
+            dialog = dialog.set_parent(p);
+        }
+        let Some(mut path) = dialog.save_file() else {
+            return;
+        };
+        path.set_extension("svg");
+        match std::fs::write(&path, svg.as_bytes()) {
+            Ok(_) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("artwork.svg");
+                self.shell.status_msg = format!("Exported SVG: {name}");
+            }
+            Err(e) => self.shell.status_msg = format!("Error writing SVG: {e}"),
+        }
+    }
+
     /// File ▸ Export ▸ CMYK Separations… — write four grayscale ink plates
     /// (`<base>_C/_M/_Y/_K.png`, print convention: full ink = black). On a CMYK
     /// document the plates come straight from the ink planes (`flatten_ink`,
