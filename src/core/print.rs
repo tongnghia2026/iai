@@ -311,8 +311,10 @@ pub fn build_pdf_encoded(
 }
 
 /// Like [`build_pdf_encoded`], but overlays crisp vector paths (see
-/// [`PdfVectorObject`]) on an RGB page. CMYK ink pages ignore `vectors` so their
-/// DeviceCMYK colour space is never mixed with sRGB, matching the multipage path.
+/// [`PdfVectorObject`]) over the raster image. On an RGB page the paths carry
+/// sRGB colour; on a DeviceCMYK ink page they carry process ink (`PdfPaintColor`
+/// resolves each colour to the page's space), so a CMYK design keeps its vector
+/// artwork instead of flattening to one image. Gradient shadings are RGB-only.
 pub fn build_pdf_encoded_with_vectors(
     page: &EncodedPdfPage,
     vectors: &[PdfVectorObject],
@@ -353,10 +355,9 @@ pub fn build_pdf_encoded_with_vectors(
     let mut content = format!(
         "q\n{clip_x:.2} {clip_y:.2} {clip_w:.2} {clip_h:.2} re W n\n{dw:.2} 0 0 {dh:.2} {tx:.2} {ty:.2} cm\n/Im0 Do\nQ\n"
     );
-    // Overlay crisp vector paths on RGB pages (CMYK ink pages stay pure raster).
-    if page.components == 3 {
-        append_vector_content(&mut content, vectors, w, h, dw, dh, tx, ty);
-    }
+    // Overlay crisp vector paths. RGB pages emit rg/RG; DeviceCMYK ink pages emit
+    // k/K (each object's PdfPaintColor already matches the page's colour space).
+    append_vector_content(&mut content, vectors, w, h, dw, dh, tx, ty);
     offsets.push(pdf.len());
     pdf.extend_from_slice(format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes());
     pdf.extend_from_slice(content.as_bytes());
@@ -491,23 +492,53 @@ pub fn encode_pdf_page_cmyk(
     })
 }
 
+/// A resolved paint colour for a PDF vector object, already in the page's output
+/// colour space: sRGB for an RGB page, process ink for a CMYK page. CMYK is kept
+/// verbatim (never round-tripped through RGB) so pure/rich-black intent reaches
+/// the separations, matching the DeviceCMYK raster base drawn on the same page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PdfPaintColor {
+    /// sRGB channels in `0..1` → PDF `rg` (fill) / `RG` (stroke).
+    Rgb([f32; 3]),
+    /// Process CMYK ink fractions in `0..1` → PDF `k` (fill) / `K` (stroke).
+    Cmyk([f32; 4]),
+}
+
+impl PdfPaintColor {
+    /// The PDF fill-colour operator line (`… rg` for RGB, `… k` for CMYK).
+    fn fill_op(&self) -> String {
+        match self {
+            PdfPaintColor::Rgb([r, g, b]) => format!("{r:.4} {g:.4} {b:.4} rg\n"),
+            PdfPaintColor::Cmyk([c, m, y, k]) => format!("{c:.4} {m:.4} {y:.4} {k:.4} k\n"),
+        }
+    }
+    /// The PDF stroke-colour operator line (`… RG` for RGB, `… K` for CMYK).
+    fn stroke_op(&self) -> String {
+        match self {
+            PdfPaintColor::Rgb([r, g, b]) => format!("{r:.4} {g:.4} {b:.4} RG\n"),
+            PdfPaintColor::Cmyk([c, m, y, k]) => format!("{c:.4} {m:.4} {y:.4} {k:.4} K\n"),
+        }
+    }
+}
+
 /// One vector object drawn crisply on a PDF page, ON TOP of the raster image.
 /// Geometry is in CANVAS PIXEL coordinates (the object transform already
 /// applied); the page builder maps it to points with the SAME placement as the
 /// image, so each vector lands exactly over its rasterised twin and sharpens the
 /// edges at any zoom / print size (true resolution independence). Colours are
-/// sRGB in `0..1`. Only opaque, unmasked, Normal-blend Path layers that sit above
-/// all raster content become vectors; everything else stays in the image, so the
-/// output is always visually correct.
+/// resolved to the page's colour space ([`PdfPaintColor`]). Only opaque, unmasked,
+/// Normal-blend Path layers that sit above all raster content become vectors;
+/// everything else stays in the image, so the output is always visually correct.
 #[derive(Clone)]
 pub struct PdfVectorObject {
     pub path: crate::core::vector::path::PathData,
-    pub fill: Option<[f32; 3]>,
+    pub fill: Option<PdfPaintColor>,
     /// Gradient transform maps unit gradient space directly into canvas pixels.
     /// Keeping it here lets the PDF writer paint axial/radial shadings through
     /// the same affine transform as the editable object, including ellipses.
+    /// RGB pages only — CMYK gradient shadings aren't emitted yet.
     pub fill_gradient: Option<crate::core::vector::style::Gradient>,
-    pub stroke: Option<[f32; 3]>,
+    pub stroke: Option<PdfPaintColor>,
     pub stroke_width_px: f32,
     pub stroke_cap: crate::core::vector::style::LineCap,
     pub stroke_join: crate::core::vector::style::LineJoin,
@@ -565,19 +596,44 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
     use crate::core::vector::path::FillRule;
     use crate::core::vector::style::Paint;
 
-    if canvas.is_cmyk() {
-        return PdfVectorSelection {
-            objects: Vec::new(),
-            promoted_layer_ids: Vec::new(),
-        };
-    }
-    let layers = &canvas.layer_stack.layers;
-    let rgb = |p: Paint| -> Option<[f32; 3]> {
-        match p {
-            Paint::Solid(c) => {
-                let [r, g, b, _] = c.to_rgba8();
-                Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+    // A CMYK document resolves every paint to process ink under its OWN profile,
+    // so the native vectors separate identically to the DeviceCMYK raster base on
+    // the page (K stays K). If the profile is unusable we cannot separate safely,
+    // so keep the whole page raster (empty selection) rather than guess.
+    let cmyk_conv = if canvas.is_cmyk() {
+        match canvas.cmyk_converter() {
+            Some(conv) => Some(conv),
+            None => {
+                return PdfVectorSelection {
+                    objects: Vec::new(),
+                    promoted_layer_ids: Vec::new(),
+                };
             }
+        }
+    } else {
+        None
+    };
+    let layers = &canvas.layer_stack.layers;
+    // Resolve a solid paint into the page's output colour space: verbatim/
+    // separated ink on a CMYK doc, sRGB otherwise. Non-solid paints have no flat
+    // colour here (gradients are handled separately).
+    let paint_color = |p: Paint| -> Option<PdfPaintColor> {
+        match p {
+            Paint::Solid(c) => Some(match &cmyk_conv {
+                Some(conv) => {
+                    let [ci, m, y, k] = c.to_cmyk8(conv);
+                    PdfPaintColor::Cmyk([
+                        ci as f32 / 255.0,
+                        m as f32 / 255.0,
+                        y as f32 / 255.0,
+                        k as f32 / 255.0,
+                    ])
+                }
+                None => {
+                    let [r, g, b, _] = c.to_rgba8();
+                    PdfPaintColor::Rgb([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+                }
+            }),
             Paint::Gradient(_) => None,
             Paint::None => None,
         }
@@ -653,7 +709,7 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
                 break;
             }
             for object in text_objects {
-                let fill = rgb(object.style.fill);
+                let fill = paint_color(object.style.fill);
                 if fill.is_none() {
                     break;
                 }
@@ -698,6 +754,12 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
         if matches!(obj.style.stroke, Paint::Gradient(_)) {
             break;
         }
+        // CMYK gradient shadings aren't emitted yet (the shading resource is
+        // DeviceRGB). Keep gradient-FILLED objects in the ink raster base on a
+        // CMYK page rather than dropping the gradient or mixing colour spaces.
+        if cmyk_conv.is_some() && matches!(obj.style.fill, Paint::Gradient(_)) {
+            break;
+        }
         // The native writer does not yet emit transparency graphics states.
         // Keep any translucent paint in the raster base rather than changing
         // its appearance.
@@ -718,7 +780,7 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
             break;
         }
         let fill = match obj.style.fill {
-            Paint::Solid(_) => rgb(obj.style.fill),
+            Paint::Solid(_) => paint_color(obj.style.fill),
             Paint::None | Paint::Gradient(_) => None,
         };
         let fill_gradient = match obj.style.fill {
@@ -730,7 +792,7 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
         };
         let half = obj.style.effective_stroke_width() * 0.5;
         let stroke = (obj.style.stroke.is_visible() && half > 0.0)
-            .then(|| rgb(obj.style.stroke))
+            .then(|| paint_color(obj.style.stroke))
             .flatten();
         if fill.is_none() && fill_gradient.is_none() && stroke.is_none() {
             continue;
@@ -816,6 +878,20 @@ pub fn pdf_raster_base(
         }
     }
     stack.flatten(canvas.width, canvas.height)
+}
+
+/// The DeviceCMYK ink raster base for a CMYK page: the flattened ink planes with
+/// the promoted vector layers hidden (they are redrawn as native CMYK paths on
+/// top), mirroring [`pdf_raster_base`] for RGB. Returns `None` when the stack is
+/// not ink-exact (group / blend / mask / adjustment / ink-less pixel) — the
+/// caller then rasterises the whole page without native vectors.
+pub fn pdf_ink_base(
+    canvas: &crate::core::canvas::Canvas,
+    selection: &PdfVectorSelection,
+) -> Option<Vec<u8>> {
+    let hidden: std::collections::HashSet<u32> =
+        selection.promoted_layer_ids.iter().copied().collect();
+    canvas.flatten_ink_excluding(&hidden)
 }
 
 /// Append the PDF content-stream operators that draw `objects` (in canvas pixel
@@ -995,11 +1071,11 @@ pub(crate) fn append_vector_content(
 
         if has_solid_fill || has_stroke {
             out.push_str("q\n");
-            if let Some([r, g, b]) = o.fill {
-                out.push_str(&format!("{r:.4} {g:.4} {b:.4} rg\n"));
+            if let Some(color) = o.fill {
+                out.push_str(&color.fill_op());
             }
             if has_stroke {
-                if let Some([r, g, b]) = o.stroke {
+                if let Some(color) = o.stroke {
                     use crate::core::vector::style::{LineCap, LineJoin};
                     let cap = match o.stroke_cap {
                         LineCap::Butt => 0,
@@ -1017,8 +1093,9 @@ pub(crate) fn append_vector_content(
                         .map(|value| format!("{:.3}", value * sx))
                         .collect::<Vec<_>>()
                         .join(" ");
+                    out.push_str(&color.stroke_op());
                     out.push_str(&format!(
-                        "{r:.4} {g:.4} {b:.4} RG\n{:.3} w\n{cap} J\n{join} j\n{:.3} M\n[{dash}] {:.3} d\n",
+                        "{:.3} w\n{cap} J\n{join} j\n{:.3} M\n[{dash}] {:.3} d\n",
                         o.stroke_width_px * sx,
                         o.stroke_miter_limit.max(1.0),
                         o.stroke_dash_offset * sx,
@@ -1171,12 +1248,10 @@ pub fn build_pdf_multipage_encoded(
             "q\n0 0 {:.2} {:.2} re W n\n{:.2} 0 0 {:.2} {:.2} {:.2} cm\n/Im0 Do\nQ\n",
             e.pw, e.ph, e.dw, e.dh, e.tx, e.ty
         );
-        // Overlay crisp vector paths on RGB pages (CMYK ink pages stay pure
-        // raster so their DeviceCMYK colour space isn't mixed with sRGB).
-        if e.components == 3 {
-            if let Some(objs) = vectors.get(i) {
-                append_vector_content(&mut content, objs, e.w, e.h, e.dw, e.dh, e.tx, e.ty);
-            }
+        // Overlay crisp vector paths. RGB pages emit rg/RG; DeviceCMYK ink pages
+        // emit k/K (each object's PdfPaintColor matches the page's colour space).
+        if let Some(objs) = vectors.get(i) {
+            append_vector_content(&mut content, objs, e.w, e.h, e.dw, e.dh, e.tx, e.ty);
         }
         offsets.push(pdf.len());
         pdf.extend_from_slice(
@@ -1752,7 +1827,7 @@ mod tests {
         );
         let obj = PdfVectorObject {
             path,
-            fill: Some([0.0, 0.0, 1.0]),
+            fill: Some(PdfPaintColor::Rgb([0.0, 0.0, 1.0])),
             fill_gradient: None,
             stroke: None,
             stroke_width_px: 0.0,
@@ -2199,7 +2274,7 @@ mod tests {
         );
         let obj = PdfVectorObject {
             path,
-            fill: Some([1.0, 0.0, 0.0]),
+            fill: Some(PdfPaintColor::Rgb([1.0, 0.0, 0.0])),
             fill_gradient: None,
             stroke: None,
             stroke_width_px: 0.0,
@@ -2226,11 +2301,12 @@ mod tests {
     }
 
     #[test]
-    fn vector_overlay_skipped_on_cmyk_pages() {
+    fn cmyk_page_gets_native_devicecmyk_vector_overlay() {
         use crate::core::geometry::Point;
         use crate::core::vector::path::{Contour, FillRule, Node, PathData};
 
-        // A DeviceCMYK ink page must NOT get an sRGB vector overlay.
+        // A DeviceCMYK ink page carries its vectors as native DeviceCMYK paths
+        // (k operator), keeping the artwork crisp with no sRGB leak.
         let ink = vec![0u8; 4 * 4 * 4];
         let page = encode_pdf_page_cmyk(&ink, 4, 4, 72.0).expect("encode cmyk");
         let path = PathData::new(
@@ -2246,7 +2322,7 @@ mod tests {
         );
         let obj = PdfVectorObject {
             path,
-            fill: Some([1.0, 0.0, 0.0]),
+            fill: Some(PdfPaintColor::Cmyk([0.0, 1.0, 1.0, 0.0])),
             fill_gradient: None,
             stroke: None,
             stroke_width_px: 0.0,
@@ -2261,8 +2337,12 @@ mod tests {
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/DeviceCMYK"), "ink page is DeviceCMYK");
         assert!(
+            text.contains(" k\n"),
+            "vector fill uses the DeviceCMYK k operator"
+        );
+        assert!(
             !text.contains(" rg\n"),
-            "no sRGB fill overlay on a CMYK page"
+            "no sRGB fill leaks onto a CMYK page"
         );
     }
 
@@ -2358,5 +2438,175 @@ mod tests {
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/ColorSpace /DeviceCMYK"));
         assert!(pdf.ends_with(b"%%EOF\n"), "missing EOF");
+    }
+
+    #[test]
+    fn pdf_paint_color_emits_devicecmyk_operators() {
+        assert_eq!(
+            PdfPaintColor::Rgb([1.0, 0.0, 0.0]).fill_op(),
+            "1.0000 0.0000 0.0000 rg\n"
+        );
+        assert_eq!(
+            PdfPaintColor::Cmyk([0.0, 0.0, 0.0, 1.0]).fill_op(),
+            "0.0000 0.0000 0.0000 1.0000 k\n"
+        );
+        assert_eq!(
+            PdfPaintColor::Cmyk([0.1, 0.2, 0.3, 0.4]).stroke_op(),
+            "0.1000 0.2000 0.3000 0.4000 K\n"
+        );
+    }
+
+    /// A CMYK document keeps its vector artwork as native DeviceCMYK paths, and a
+    /// CMYK-authored pure black stays pure K (verbatim, never round-tripped
+    /// through RGB) all the way to the promoted PDF colour.
+    #[test]
+    fn cmyk_document_promotes_vectors_with_verbatim_process_ink() {
+        use crate::core::canvas::CmykProfile;
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255; 32 * 32 * 4], 32, 32);
+        canvas
+            .convert_to_cmyk(CmykProfile::Naive)
+            .expect("convert to CMYK");
+        let index = canvas.add_layer();
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(4.0, 4.0)),
+                    Node::sharp(Point::new(28.0, 4.0)),
+                    Node::sharp(Point::new(28.0, 28.0)),
+                    Node::sharp(Point::new(4.0, 28.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                path,
+                VectorStyle::filled(ColorValue::cmyk(0.0, 0.0, 0.0, 1.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+
+        let selection = collect_pdf_vectors(&canvas);
+        assert_eq!(
+            selection.objects.len(),
+            1,
+            "the top CMYK vector is promoted"
+        );
+        match selection.objects[0].fill {
+            Some(PdfPaintColor::Cmyk([c, m, y, k])) => {
+                assert!(
+                    c == 0.0 && m == 0.0 && y == 0.0 && k >= 0.999,
+                    "pure K must stay pure K, got {c},{m},{y},{k}"
+                );
+            }
+            other => panic!("expected a DeviceCMYK fill, got {other:?}"),
+        }
+    }
+
+    /// The DeviceCMYK ink base drops the promoted vector layers so they aren't
+    /// painted twice (once baked, once as the native path on top).
+    #[test]
+    fn pdf_ink_base_excludes_promoted_layers() {
+        use crate::core::canvas::CmykProfile;
+
+        // Red → M+Y ink; a single ink-exact raster layer.
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255, 0, 0, 255], 1, 1);
+        canvas
+            .convert_to_cmyk(CmykProfile::Naive)
+            .expect("convert to CMYK");
+        let layer_id = canvas.layer_stack.layers[0].id;
+
+        let none = PdfVectorSelection {
+            objects: Vec::new(),
+            promoted_layer_ids: Vec::new(),
+        };
+        assert_eq!(
+            pdf_ink_base(&canvas, &none).expect("ink base")[..4],
+            [0, 255, 255, 0],
+            "with nothing promoted the base carries the red ink"
+        );
+
+        let promoted = PdfVectorSelection {
+            objects: Vec::new(),
+            promoted_layer_ids: vec![layer_id],
+        };
+        assert_eq!(
+            pdf_ink_base(&canvas, &promoted).expect("ink base")[..4],
+            [0, 0, 0, 0],
+            "the only layer is promoted, so the base is bare paper"
+        );
+    }
+
+    /// End to end: a CMYK page carries both the DeviceCMYK raster base and native
+    /// CMYK vector paths (k/K operators), never sRGB (rg/RG).
+    #[test]
+    fn cmyk_vector_pdf_uses_devicecmyk_operators() {
+        use crate::core::canvas::CmykProfile;
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255; 24 * 24 * 4], 24, 24);
+        canvas
+            .convert_to_cmyk(CmykProfile::Naive)
+            .expect("convert to CMYK");
+        let index = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(3.0, 3.0)),
+                            Node::sharp(Point::new(21.0, 3.0)),
+                            Node::sharp(Point::new(21.0, 21.0)),
+                            Node::sharp(Point::new(3.0, 21.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                VectorStyle::filled(ColorValue::cmyk(0.0, 1.0, 1.0, 0.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+
+        let selection = collect_pdf_vectors(&canvas);
+        let ink = pdf_ink_base(&canvas, &selection).expect("ink base");
+        let page = encode_pdf_page_cmyk(&ink, 24, 24, 72.0).expect("cmyk page");
+        let pdf = build_pdf_encoded_with_vectors(
+            &page,
+            &selection.objects,
+            &PrintLayout::default(),
+            None,
+        )
+        .expect("cmyk vector pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(
+            text.contains("/ColorSpace /DeviceCMYK"),
+            "raster base is DeviceCMYK"
+        );
+        assert!(
+            text.contains(" k\n"),
+            "vector fill uses the DeviceCMYK k operator"
+        );
+        assert!(
+            !text.contains(" rg\n"),
+            "no sRGB fill leaks onto a CMYK page"
+        );
     }
 }

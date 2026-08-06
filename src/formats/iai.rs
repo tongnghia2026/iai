@@ -1923,17 +1923,19 @@ mod tests {
         // PDF: an eligible top RGB Path becomes a native vector over the raster.
         let sel = crate::core::print::collect_pdf_vectors(&loaded);
         assert_eq!(sel.objects.len(), 1, "RGB Path promoted to a PDF vector");
-        let fill = sel.objects[0].fill.expect("red fill present");
-        assert!(
-            (fill[0] - 1.0).abs() < 1e-3 && fill[1].abs() < 1e-3 && fill[2].abs() < 1e-3,
-            "promoted fill colour is red"
-        );
+        match sel.objects[0].fill.expect("red fill present") {
+            crate::core::print::PdfPaintColor::Rgb([r, g, b]) => assert!(
+                (r - 1.0).abs() < 1e-3 && g.abs() < 1e-3 && b.abs() < 1e-3,
+                "promoted fill colour is red"
+            ),
+            other => panic!("expected an sRGB fill, got {other:?}"),
+        }
         assert!(!sel.promoted_layer_ids.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn m1_end_to_end_cmyk_roundtrips_and_pdf_uses_raster_fallback() {
+    fn m1_end_to_end_cmyk_roundtrips_and_pdf_uses_native_vectors() {
         use crate::core::command_vector::{
             ChangeVectorStyle, ChangeVectorTransform, CreatePathLayer, ReplacePathGeometry,
         };
@@ -2005,13 +2007,22 @@ mod tests {
             "CMYK model (incl. pure-K fill) round-trips verbatim"
         );
 
-        // M1 allows a raster PDF fallback on CMYK: nothing is promoted to native
-        // vector (ink-native separations stay in the image).
+        // The top CMYK Path is promoted to a native DeviceCMYK vector; the pure-K
+        // fill survives verbatim (no RGB round-trip) all the way to the PDF colour.
         let sel = crate::core::print::collect_pdf_vectors(&loaded);
-        assert!(
-            sel.objects.is_empty() && sel.promoted_layer_ids.is_empty(),
-            "CMYK PDF uses the raster fallback (M1 allowance)"
+        assert_eq!(
+            sel.objects.len(),
+            1,
+            "CMYK Path promoted to a native vector"
         );
+        match sel.objects[0].fill {
+            Some(crate::core::print::PdfPaintColor::Cmyk([c, m, y, k])) => assert!(
+                c == 0.0 && m == 0.0 && y == 0.0 && k >= 0.999,
+                "pure K stays pure K, got {c},{m},{y},{k}"
+            ),
+            other => panic!("expected a DeviceCMYK fill, got {other:?}"),
+        }
+        assert!(!sel.promoted_layer_ids.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

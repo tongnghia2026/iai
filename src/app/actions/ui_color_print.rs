@@ -291,30 +291,50 @@ impl App {
                 if !actions.print.print_save_pdf && !send_via_pdf {
                     return;
                 }
-                // Save-as-PDF on a CMYK document embeds the flattened ink
-                // planes as a DeviceCMYK image — a press-ready hand-off with
-                // no RGB round trip. The to-printer path stays RGB: consumer
-                // drivers mishandle CMYK PDFs the same way they mishandled
-                // ICC-tagged ones (the printer-managed B&W bug). Ink needs a
-                // full flat buffer, so past the flat-buffer cap this falls
-                // back to the streamed RGB path (status message says which).
-                let ink_page = if actions.print.print_save_pdf
+                // Save-as-PDF on a CMYK document: promote qualifying vectors to
+                // native DeviceCMYK paths over an ink raster base — a press-ready,
+                // resolution-independent hand-off with no RGB round trip. The
+                // to-printer path stays RGB: consumer drivers mishandle CMYK PDFs
+                // the same way they mishandled ICC-tagged ones (the printer-managed
+                // B&W bug). Ink needs a full flat buffer, so past the flat-buffer
+                // cap this falls back to the streamed RGB path.
+                let cmyk_pdf = actions.print.print_save_pdf
                     && !actions.print.print_send
-                    && crate::core::canvas::Canvas::fits_flat_buffer(cw, ch)
-                {
-                    self.docs.documents[self.docs.active_doc_idx]
+                    && self.docs.documents[self.docs.active_doc_idx]
                         .canvas
-                        .flatten_ink()
+                        .is_cmyk()
+                    && crate::core::canvas::Canvas::fits_flat_buffer(cw, ch);
+                let cmyk_selection = if cmyk_pdf {
+                    crate::core::print::collect_pdf_vectors(
+                        &self.docs.documents[self.docs.active_doc_idx].canvas,
+                    )
+                } else {
+                    crate::core::print::PdfVectorSelection {
+                        objects: Vec::new(),
+                        promoted_layer_ids: Vec::new(),
+                    }
+                };
+                let ink_page = if cmyk_pdf {
+                    crate::core::print::pdf_ink_base(
+                        &self.docs.documents[self.docs.active_doc_idx].canvas,
+                        &cmyk_selection,
+                    )
                 } else {
                     None
                 };
                 let ink_native = ink_page.is_some();
-                // Crisp vector overlay for RGB pages: the same qualifying Path
-                // layers the File ▸ Export path draws as true PDF vectors, so a
-                // Ctrl+P Save-as-PDF / send-to-printer is resolution-independent
-                // too (it used to be pure raster → "PDF răng cưa"). CMYK ink
-                // pages stay pure raster (empty overlay).
+                // Crisp vector overlay: an RGB page draws the qualifying Path /
+                // Shape / Text layers as true PDF vectors (Ctrl+P Save-as-PDF /
+                // send-to-printer is resolution-independent too — no "PDF răng
+                // cưa"); a CMYK ink page draws them as native DeviceCMYK vectors
+                // over the ink base. CMYK pages that aren't ink-exact, and the
+                // send-to-printer RGB path, stay pure raster (empty overlay).
                 let vector_selection = if ink_native {
+                    cmyk_selection
+                } else if self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .is_cmyk()
+                {
                     crate::core::print::PdfVectorSelection {
                         objects: Vec::new(),
                         promoted_layer_ids: Vec::new(),
@@ -329,7 +349,12 @@ impl App {
                 // (Viewport Streaming) - same bytes, no canvas-sized buffer.
                 let pdf_result = if let Some(ink) = ink_page {
                     crate::core::print::encode_pdf_page_cmyk(&ink, cw, ch, dpi).and_then(|page| {
-                        crate::core::print::build_pdf_encoded(&page, &layout, None)
+                        crate::core::print::build_pdf_encoded_with_vectors(
+                            &page,
+                            &vector_selection.objects,
+                            &layout,
+                            None,
+                        )
                     })
                 } else if crate::core::canvas::Canvas::fits_flat_buffer(cw, ch) {
                     let mut rgba = crate::core::print::pdf_raster_base(

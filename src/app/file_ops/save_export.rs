@@ -708,28 +708,28 @@ impl App {
                     doc.canvas.height,
                     doc.canvas.metadata.resolution_ppi,
                 );
-                // CMYK documents embed their ink planes as a DeviceCMYK page
-                // (same press-ready path as Ctrl+P Save-as-PDF); anything that
-                // isn't ink-exact falls back to the RGB mirror.
-                let ink_page = if doc.canvas.is_cmyk()
-                    && crate::core::canvas::Canvas::pixel_count(w, h)
-                        .is_some_and(|p| p <= PDF_EXPORT_MAX_PIXELS)
-                {
-                    doc.canvas.flatten_ink()
-                } else {
-                    None
-                };
-                if let Some(ink) = ink_page {
-                    ink_pages += 1;
-                    crate::core::print::encode_pdf_page_cmyk(&ink, w, h, dpi)
-                } else {
-                    if crate::core::canvas::Canvas::pixel_count(w, h)
-                        .is_none_or(|p| p > PDF_EXPORT_MAX_PIXELS)
-                    {
-                        self.shell.status_msg =
-                            format!("Document {} is too large to export safely", idx + 1);
-                        return;
+                let too_large = crate::core::canvas::Canvas::pixel_count(w, h)
+                    .is_none_or(|p| p > PDF_EXPORT_MAX_PIXELS);
+                if too_large {
+                    self.shell.status_msg =
+                        format!("Document {} is too large to export safely", idx + 1);
+                    return;
+                }
+                if doc.canvas.is_cmyk() {
+                    // CMYK page: promote qualifying vectors to native DeviceCMYK
+                    // paths over an ink raster base (press-ready + resolution
+                    // independent). When the stack isn't ink-exact, flatten the
+                    // RGB mirror instead (no native vectors) — same as before.
+                    let selection = crate::core::print::collect_pdf_vectors(&doc.canvas);
+                    if let Some(ink) = crate::core::print::pdf_ink_base(&doc.canvas, &selection) {
+                        ink_pages += 1;
+                        page_vectors = selection.objects;
+                        crate::core::print::encode_pdf_page_cmyk(&ink, w, h, dpi)
+                    } else {
+                        let rgba = doc.canvas.export_flat();
+                        crate::core::print::encode_pdf_page(&rgba, w, h, dpi)
                     }
+                } else {
                     // RGB page: split native PDF paths out of the raster base so
                     // their anti-aliased cache cannot leave a jagged halo.
                     let selection = crate::core::print::collect_pdf_vectors(&doc.canvas);

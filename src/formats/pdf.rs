@@ -1090,7 +1090,7 @@ mod tests {
                 )],
                 FillRule::NonZero,
             ),
-            fill: Some([1.0, 0.0, 0.0]),
+            fill: Some(crate::core::print::PdfPaintColor::Rgb([1.0, 0.0, 0.0])),
             fill_gradient: None,
             stroke: None,
             stroke_width_px: 0.0,

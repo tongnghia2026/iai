@@ -33,6 +33,19 @@ impl Canvas {
     /// an adjustment layer, or a painted pixel without ink all disqualify it.
     /// Callers then fall back to converting the flattened RGB mirror.
     pub fn flatten_ink(&self) -> Option<Vec<u8>> {
+        self.flatten_ink_excluding(&std::collections::HashSet::new())
+    }
+
+    /// Like [`Self::flatten_ink`] but skips the layers whose id is in `hidden`.
+    /// PDF export uses this to build the DeviceCMYK raster base with the vector
+    /// layers it promotes to native paths hidden, so they aren't drawn twice.
+    /// Excluded layers are top-level opaque Normal vectors (that is why they were
+    /// promotable), so removing them never changes whether the remainder is
+    /// ink-exact.
+    pub fn flatten_ink_excluding(
+        &self,
+        hidden: &std::collections::HashSet<u32>,
+    ) -> Option<Vec<u8>> {
         use crate::core::tile::TILE_SIZE;
         if !self.is_cmyk() {
             return None;
@@ -49,7 +62,7 @@ impl Canvas {
         let len = Self::checked_rgba_len(self.width, self.height)?;
         let mut out = vec![0u8; len];
         for layer in &self.layer_stack.layers {
-            if !layer.visible {
+            if !layer.visible || hidden.contains(&layer.id) {
                 continue;
             }
             if matches!(
