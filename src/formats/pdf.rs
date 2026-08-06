@@ -1100,6 +1100,8 @@ mod tests {
             stroke_dash: Vec::new(),
             stroke_dash_offset: 0.0,
             even_odd: false,
+            fill_overprint: false,
+            stroke_overprint: false,
         };
         let mut gradient_vector = vector.clone();
         gradient_vector.fill = None;

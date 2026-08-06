@@ -344,10 +344,11 @@ pub fn build_pdf_encoded_with_vectors(
     } else {
         String::new()
     };
+    let extgstate_resources = pdf_extgstate_resources(vectors);
     pdf.extend_from_slice(
         format!(
             "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}] \
-             /Resources << /XObject << /Im0 5 0 R >> {shading_resources} >> /Contents 4 0 R >>\nendobj\n"
+             /Resources << /XObject << /Im0 5 0 R >> {shading_resources} {extgstate_resources} >> /Contents 4 0 R >>\nendobj\n"
         )
         .as_bytes(),
     );
@@ -546,6 +547,12 @@ pub struct PdfVectorObject {
     pub stroke_dash: Vec<f32>,
     pub stroke_dash_offset: f32,
     pub even_odd: bool,
+    /// Overprint the fill on the separations (leave the underlying inks, don't
+    /// knock them out). Only meaningful on a DeviceCMYK page; the writer emits an
+    /// overprint `ExtGState` (`/op true /OPM 1`) when set.
+    pub fill_overprint: bool,
+    /// Overprint the outline, independent of the fill (`/OP true /OPM 1`).
+    pub stroke_overprint: bool,
 }
 
 /// A PDF-ready split of a canvas: opaque Path layers that PDF can represent
@@ -725,6 +732,8 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
                     stroke_dash: Vec::new(),
                     stroke_dash_offset: 0.0,
                     even_odd: false,
+                    fill_overprint: false,
+                    stroke_overprint: false,
                 });
             }
             promoted_layer_ids.push(layer.id);
@@ -742,10 +751,12 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
         if (obj.style.opacity - 1.0).abs() > 1e-3 {
             break;
         }
-        // The current native writer has no ExtGState overprint operators. Keep
-        // these objects in the raster fallback rather than silently emitting a
-        // visually similar path that has different press/separation semantics.
-        if obj.style.fill_overprint || obj.style.stroke_overprint {
+        // Overprint only has separation meaning on a DeviceCMYK page: the writer
+        // emits an overprint ExtGState so the ink leaves the planes underneath
+        // (e.g. black text over colour doesn't knock a hole in it). On an RGB
+        // page there are no separations to overprint, so keep such an object in
+        // the raster base rather than emit a path with knockout semantics.
+        if cmyk_conv.is_none() && (obj.style.fill_overprint || obj.style.stroke_overprint) {
             break;
         }
         // Gradient outlines still need a PDF pattern-stroke implementation.
@@ -834,6 +845,8 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
             stroke_dash: obj.style.stroke_style.dash.as_slice().to_vec(),
             stroke_dash_offset: obj.style.stroke_style.dash.offset,
             even_odd: obj.path.fill_rule == FillRule::EvenOdd,
+            fill_overprint: obj.style.fill_overprint,
+            stroke_overprint: obj.style.stroke_overprint,
         });
         if let (Some(path), Some(fill)) = (arrow_path, stroke) {
             objects.push(PdfVectorObject {
@@ -848,6 +861,10 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
                 stroke_dash: Vec::new(),
                 stroke_dash_offset: 0.0,
                 even_odd: false,
+                // The arrowhead is drawn with the outline's ink, so it follows
+                // the outline's overprint setting.
+                fill_overprint: obj.style.stroke_overprint,
+                stroke_overprint: false,
             });
         }
         promoted_layer_ids.push(layer.id);
@@ -1022,6 +1039,59 @@ pub(crate) fn pdf_shading_resources(objects: &[PdfVectorObject]) -> String {
     }
 }
 
+/// The effective overprint of an object: fill overprint counts only when the
+/// object actually paints a fill, stroke overprint only when it strokes.
+fn object_overprint(o: &PdfVectorObject) -> (bool, bool) {
+    let has_fill = o.fill.is_some() || o.fill_gradient.is_some();
+    let has_stroke = o.stroke.is_some() && o.stroke_width_px > 0.0;
+    (
+        o.fill_overprint && has_fill,
+        o.stroke_overprint && has_stroke,
+    )
+}
+
+/// The named `ExtGState` for an object's fill/stroke overprint combination, or
+/// `None` when it overprints nothing. `/op` governs non-stroking (fill) and
+/// `/OP` stroking; `/OPM 1` is the standard mode where a zero colorant leaves
+/// that separation untouched.
+fn overprint_state_name(fill_op: bool, stroke_op: bool) -> Option<&'static str> {
+    match (fill_op, stroke_op) {
+        (true, true) => Some("IaiOPa"),
+        (true, false) => Some("IaiOPf"),
+        (false, true) => Some("IaiOPs"),
+        (false, false) => None,
+    }
+}
+
+/// The `/ExtGState` resource entry for the page, holding only the overprint
+/// graphics states the `objects` actually reference. Empty when none overprint.
+pub(crate) fn pdf_extgstate_resources(objects: &[PdfVectorObject]) -> String {
+    let (mut both, mut fill_only, mut stroke_only) = (false, false, false);
+    for o in objects {
+        match object_overprint(o) {
+            (true, true) => both = true,
+            (true, false) => fill_only = true,
+            (false, true) => stroke_only = true,
+            (false, false) => {}
+        }
+    }
+    if !(both || fill_only || stroke_only) {
+        return String::new();
+    }
+    let mut dict = String::from("/ExtGState << ");
+    if both {
+        dict.push_str("/IaiOPa << /Type /ExtGState /OP true /op true /OPM 1 >> ");
+    }
+    if fill_only {
+        dict.push_str("/IaiOPf << /Type /ExtGState /OP false /op true /OPM 1 >> ");
+    }
+    if stroke_only {
+        dict.push_str("/IaiOPs << /Type /ExtGState /OP true /op false /OPM 1 >> ");
+    }
+    dict.push_str(">>");
+    dict
+}
+
 pub(crate) fn append_vector_content(
     out: &mut String,
     objects: &[PdfVectorObject],
@@ -1071,6 +1141,13 @@ pub(crate) fn append_vector_content(
 
         if has_solid_fill || has_stroke {
             out.push_str("q\n");
+            // Set the overprint graphics state for this object (scoped by q/Q),
+            // so its ink leaves the separations underneath instead of knocking
+            // them out. Only DeviceCMYK objects carry these flags.
+            let (fill_op, stroke_op) = object_overprint(o);
+            if let Some(name) = overprint_state_name(fill_op, stroke_op) {
+                out.push_str(&format!("/{name} gs\n"));
+            }
             if let Some(color) = o.fill {
                 out.push_str(&color.fill_op());
             }
@@ -1233,12 +1310,16 @@ pub fn build_pdf_multipage_encoded(
         } else {
             String::new()
         };
+        let extgstate_resources = vectors
+            .get(i)
+            .map(|objects| pdf_extgstate_resources(objects))
+            .unwrap_or_default();
 
         offsets.push(pdf.len());
         pdf.extend_from_slice(
             format!(
                 "{page_obj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] \
-                 /Resources << /XObject << /Im0 {image_obj} 0 R >> {shading_resources} >> /Contents {content_obj} 0 R >>\nendobj\n",
+                 /Resources << /XObject << /Im0 {image_obj} 0 R >> {shading_resources} {extgstate_resources} >> /Contents {content_obj} 0 R >>\nendobj\n",
                 e.pw, e.ph
             )
             .as_bytes(),
@@ -1837,6 +1918,8 @@ mod tests {
             stroke_dash: Vec::new(),
             stroke_dash_offset: 0.0,
             even_odd: false,
+            fill_overprint: false,
+            stroke_overprint: false,
         };
         let pdf = build_pdf_with_vectors(
             &rgba,
@@ -2220,7 +2303,7 @@ mod tests {
     }
 
     #[test]
-    fn overprint_path_is_not_promoted_without_pdf_overprint_support() {
+    fn rgb_overprint_path_stays_in_raster_base() {
         use crate::core::command_vector::apply_object_to_layer;
         use crate::core::geometry::Point;
         use crate::core::vector::affine::AffineTransform;
@@ -2229,6 +2312,9 @@ mod tests {
         use crate::core::vector::path::{Contour, FillRule, Node, PathData};
         use crate::core::vector::style::VectorStyle;
 
+        // Overprint is meaningful on separations, not on an additive RGB page, so
+        // an RGB overprint object is left in the raster base (CMYK is promoted —
+        // see cmyk_overprint_object_is_promoted_and_emits_extgstate).
         let mut style = VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0));
         style.fill_overprint = true;
         let path = PathData::new(
@@ -2284,6 +2370,8 @@ mod tests {
             stroke_dash: Vec::new(),
             stroke_dash_offset: 0.0,
             even_odd: false,
+            fill_overprint: false,
+            stroke_overprint: false,
         };
         let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], None).expect("pdf");
         let text = String::from_utf8_lossy(&pdf);
@@ -2332,6 +2420,8 @@ mod tests {
             stroke_dash: Vec::new(),
             stroke_dash_offset: 0.0,
             even_odd: false,
+            fill_overprint: false,
+            stroke_overprint: false,
         };
         let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], None).expect("pdf");
         let text = String::from_utf8_lossy(&pdf);
@@ -2607,6 +2697,133 @@ mod tests {
         assert!(
             !text.contains(" rg\n"),
             "no sRGB fill leaks onto a CMYK page"
+        );
+    }
+
+    #[test]
+    fn pdf_extgstate_resources_lists_only_used_overprint_states() {
+        use crate::core::geometry::Point;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+
+        let tri = || {
+            PathData::new(
+                vec![Contour::new(
+                    vec![
+                        Node::sharp(Point::new(0.0, 0.0)),
+                        Node::sharp(Point::new(4.0, 0.0)),
+                        Node::sharp(Point::new(2.0, 4.0)),
+                    ],
+                    true,
+                )],
+                FillRule::NonZero,
+            )
+        };
+        let base = PdfVectorObject {
+            path: tri(),
+            fill: Some(PdfPaintColor::Cmyk([0.0, 0.0, 0.0, 1.0])),
+            fill_gradient: None,
+            stroke: None,
+            stroke_width_px: 0.0,
+            stroke_cap: crate::core::vector::style::LineCap::Butt,
+            stroke_join: crate::core::vector::style::LineJoin::Miter,
+            stroke_miter_limit: 4.0,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
+            even_odd: false,
+            fill_overprint: false,
+            stroke_overprint: false,
+        };
+        // Nothing overprints → no ExtGState resource.
+        assert!(pdf_extgstate_resources(&[base.clone()]).is_empty());
+
+        // A fill-overprint object references only the fill-overprint state.
+        let mut fill_op = base.clone();
+        fill_op.fill_overprint = true;
+        let res = pdf_extgstate_resources(&[fill_op]);
+        assert!(
+            res.contains("/IaiOPf"),
+            "fill-overprint state present: {res}"
+        );
+        assert!(res.contains("/op true"));
+        assert!(res.contains("/OPM 1"));
+        assert!(!res.contains("/IaiOPa"), "unused states are omitted: {res}");
+
+        // A fill overprint flag with no visible fill draws nothing to overprint.
+        let mut ghost = base;
+        ghost.fill = None;
+        ghost.fill_overprint = true;
+        assert!(pdf_extgstate_resources(&[ghost]).is_empty());
+    }
+
+    /// A CMYK document with an overprint fill promotes the object AND carries the
+    /// overprint flag through, so the writer can emit the ExtGState.
+    #[test]
+    fn cmyk_overprint_object_is_promoted_and_emits_extgstate() {
+        use crate::core::canvas::CmykProfile;
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255; 24 * 24 * 4], 24, 24);
+        canvas
+            .convert_to_cmyk(CmykProfile::Naive)
+            .expect("convert to CMYK");
+        let index = canvas.add_layer();
+        let mut style = VectorStyle::filled(ColorValue::cmyk(0.0, 0.0, 0.0, 1.0));
+        style.fill_overprint = true;
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(3.0, 3.0)),
+                            Node::sharp(Point::new(21.0, 3.0)),
+                            Node::sharp(Point::new(21.0, 21.0)),
+                            Node::sharp(Point::new(3.0, 21.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                style,
+                AffineTransform::IDENTITY,
+            ),
+        );
+
+        let selection = collect_pdf_vectors(&canvas);
+        assert_eq!(
+            selection.objects.len(),
+            1,
+            "overprint object is still promoted"
+        );
+        assert!(
+            selection.objects[0].fill_overprint,
+            "the fill overprint flag reaches the PDF object"
+        );
+
+        let ink = pdf_ink_base(&canvas, &selection).expect("ink base");
+        let page = encode_pdf_page_cmyk(&ink, 24, 24, 72.0).expect("cmyk page");
+        let pdf = build_pdf_encoded_with_vectors(
+            &page,
+            &selection.objects,
+            &PrintLayout::default(),
+            None,
+        )
+        .expect("cmyk overprint pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(
+            text.contains("/ExtGState"),
+            "page declares an ExtGState resource"
+        );
+        assert!(text.contains("/OPM 1"), "standard overprint mode set");
+        assert!(
+            text.contains("/IaiOPf gs\n"),
+            "overprint state applied to the object"
         );
     }
 }
