@@ -315,6 +315,10 @@ impl App {
             }
         }
         canvas.layer_revision += 1;
+        // `apply_style_to_layer` rebuilds the mirror as ink-less tiles; on a CMYK
+        // document re-derive this one layer's ink so the preview (and the commit /
+        // error-restore that reuse this) stay ink-exact. Targeted, no-op on RGB.
+        canvas.reconcile_path_ink();
         let (new_off, new_w, new_h) = {
             let l = &canvas.layer_stack.layers[idx];
             (l.offset, l.width, l.height)
@@ -429,14 +433,14 @@ impl App {
         // Remove both before rebuilding the committed raster so the very next
         // composite is sourced only from the final model.
         self.invalidate_vector_display();
-        // The preview already owns the final model. Rebuild its cache once,
-        // then record a command carrying the captured baseline directly.
+        // The preview already owns the final model. Rebuild its cache once
+        // (`preview_path_style` re-derives CMYK ink for the rebuilt layer), then
+        // record a command carrying the captured baseline directly.
         if !self.preview_path_style(id, final_style) {
             let _ = self.preview_path_style(id, baseline);
             return;
         }
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
-        canvas.reconcile_path_ink();
         let _ = canvas.record_as(
             Box::new(
                 crate::core::command_vector::ChangeVectorStyle::already_applied(

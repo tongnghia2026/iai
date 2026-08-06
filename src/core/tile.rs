@@ -759,6 +759,16 @@ impl TileMap {
         self.tiles.values().any(|t| t.ink.is_some())
     }
 
+    /// True when at least one tile is missing its CMYK ink plane. A Path/vector
+    /// layer's raster is rebuilt wholesale by `from_rgba` (which produces ink-less
+    /// tiles), so this flags a layer whose mirror was just re-rasterized and whose
+    /// ink planes must be re-derived. A layer already fully inked returns `false`,
+    /// letting [`Canvas::reconcile_path_ink`] skip layers nothing touched instead
+    /// of re-encoding every vector layer on every edit.
+    pub fn needs_ink_encode(&self) -> bool {
+        self.tiles.values().any(|t| t.ink.is_none())
+    }
+
     /// RGB→CMYK convert of this whole map (document mode conversion): every
     /// tile gets an ink plane encoded from its RGB mirror, and the mirror is
     /// re-projected from that ink so it shows what the ink actually reproduces

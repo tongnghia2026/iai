@@ -836,18 +836,25 @@ pub struct ShapeBakeInFlight {
     pub rx: std::sync::mpsc::Receiver<Option<(crate::core::tile::TileMap, u32, u32)>>,
 }
 
-/// An off-thread Path rasterization (a live scale/rotate or node drag on an RGB
-/// document): the worker renders the whole [`VectorObjectData`] and its tight
-/// `TileMap` + placement offset; the UI thread polls per frame
-/// (`poll_path_bake`) and swaps the result in, so a page-sized filled path never
-/// stalls the drag. One job at a time — its completion starts whatever
-/// `path_bake_next` holds by then (latest wins). `doc_id`/`layer_id` pin the
-/// destination; a result for anything no longer active is dropped.
+/// An off-thread Path rasterization (a live scale/rotate or node drag): the
+/// worker renders the whole [`VectorObjectData`] and its tight `TileMap` +
+/// placement offset; the UI thread polls per frame (`poll_path_bake`) and swaps
+/// the result in, so a page-sized filled path never stalls the drag. On a CMYK
+/// document the worker *also* encodes each tile's ink plane (building the ICC
+/// converter on the worker thread), so the swapped-in preview stays ink-exact
+/// without any synchronous UI-thread rasterization. One job at a time — its
+/// completion starts whatever `path_bake_next` holds by then (latest wins).
+/// `doc_id`/`layer_id` pin the destination; a result for anything no longer
+/// active (or whose colour mode changed mid-flight) is dropped.
 pub struct PathBakeInFlight {
     pub doc_id: crate::core::document::DocumentId,
     pub layer_id: u32,
     /// The object being rendered (its model becomes the layer's on completion).
     pub object: crate::core::vector::object::VectorObjectData,
+    /// The document's colour mode when this bake was spawned (the worker encoded
+    /// ink iff this is true). A result is dropped if the mode changed since, so a
+    /// CMYK job never lands ink-less tiles on the layer and vice-versa.
+    pub is_cmyk: bool,
     pub started: std::time::Instant,
     #[allow(clippy::type_complexity)]
     pub rx: std::sync::mpsc::Receiver<Option<(crate::core::tile::TileMap, u32, u32, (i32, i32))>>,

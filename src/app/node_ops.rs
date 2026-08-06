@@ -810,6 +810,11 @@ impl App {
             crate::core::command_vector::apply_object_to_layer(layer, new_obj);
         }
         canvas.layer_revision += 1;
+        // `apply_object_to_layer` rebuilds the mirror as ink-less tiles; on a CMYK
+        // document re-derive this one layer's ink so a no-op node press/finish (or
+        // the rewind before an edit commits) never leaves it ink-less — which
+        // would break separations/export. Targeted + a no-op on RGB.
+        canvas.reconcile_path_ink();
         let (new_off, new_w, new_h) = {
             let l = &canvas.layer_stack.layers[idx];
             (l.offset, l.width, l.height)
