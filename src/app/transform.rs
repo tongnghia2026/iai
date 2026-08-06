@@ -162,12 +162,12 @@ fn transformed_content_bounds(
     let cx1 = cx0 + ls.content_w as f32;
     let cy1 = cy0 + ls.content_h as f32;
 
-    let corners = [
-        ts.transform_point(cx0, cy0),
-        ts.transform_point(cx1, cy0),
-        ts.transform_point(cx0, cy1),
-        ts.transform_point(cx1, cy1),
-    ];
+    let final_map = mat3_mul(transform_forward_homography(ts)?, ls.source_to_current);
+    let map = |x, y| {
+        let p = crate::core::geometry::Homography { m: final_map }.apply(x, y);
+        (p.x, p.y)
+    };
+    let corners = [map(cx0, cy0), map(cx1, cy0), map(cx0, cy1), map(cx1, cy1)];
     let min_cx = corners
         .iter()
         .map(|(x, _)| *x)
@@ -189,10 +189,14 @@ fn transformed_content_bounds(
         return None;
     }
 
-    let floor_x = min_cx.floor();
-    let floor_y = min_cy.floor();
-    let width = (max_cx.ceil() - floor_x).max(1.0);
-    let height = (max_cy.ceil() - floor_y).max(1.0);
+    // Matrix composition can leave an exact integer edge a few ULPs outside
+    // (e.g. rotate 20°, then -20° -> 28.000002). Snap that numerical noise
+    // before floor/ceil or a reversible transform grows a transparent row/col.
+    const BOUNDS_EPS: f32 = 1.0e-4;
+    let floor_x = (min_cx + BOUNDS_EPS).floor();
+    let floor_y = (min_cy + BOUNDS_EPS).floor();
+    let width = ((max_cx - BOUNDS_EPS).ceil() - floor_x).max(1.0);
+    let height = ((max_cy - BOUNDS_EPS).ceil() - floor_y).max(1.0);
 
     if floor_x < i32::MIN as f32
         || floor_x > i32::MAX as f32
@@ -205,6 +209,41 @@ fn transformed_content_bounds(
     }
 
     Some((floor_x as i32, floor_y as i32, width as u32, height as u32))
+}
+
+const MAT3_IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+fn mat3_mul(a: [f32; 9], b: [f32; 9]) -> [f32; 9] {
+    let mut out = [0.0; 9];
+    for r in 0..3 {
+        for c in 0..3 {
+            out[r * 3 + c] = (0..3).map(|k| a[r * 3 + k] * b[k * 3 + c]).sum();
+        }
+    }
+    out
+}
+
+fn tile_content_fingerprint(tiles: &TileMap) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut entries: Vec<_> = tiles.tiles.iter().collect();
+    entries.sort_unstable_by_key(|(pos, _)| (pos.x, pos.y));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tiles.width.hash(&mut hasher);
+    tiles.height.hash(&mut hasher);
+    for (pos, tile) in entries {
+        pos.x.hash(&mut hasher);
+        pos.y.hash(&mut hasher);
+        tile.pixels.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn transform_forward_homography(ts: &TransformState) -> Option<[f32; 9]> {
+    crate::core::geometry::Homography {
+        m: ts.inverse_homography()?,
+    }
+    .inverse()
+    .map(|h| h.m)
 }
 
 fn translate_only(ts: &TransformState) -> Option<(i32, i32)> {
@@ -469,6 +508,7 @@ fn layer_orig_state(layer: &Layer, layer_idx: usize) -> LayerOrigState {
         content_offset: (c_ox, c_oy),
         content_w: c_w,
         content_h: c_h,
+        source_to_current: MAT3_IDENTITY,
     }
 }
 
@@ -554,30 +594,85 @@ fn bake_transform_commit(
         let orig_oy = ls.offset.1 as f32;
         let orig_w = ls.width as f32;
         let orig_h = ls.height as f32;
+        let final_source_to_canvas = mat3_mul(
+            transform_forward_homography(&ts)
+                .ok_or_else(|| "Transform bi huy: ma tran khong hop le".to_string())?,
+            ls.source_to_current,
+        );
+        let canvas_to_source = crate::core::geometry::Homography {
+            m: final_source_to_canvas,
+        }
+        .inverse()
+        .ok_or_else(|| "Transform bi huy: ma tran khong the dao".to_string())?;
 
         let Some(pixel_len) = Canvas::checked_rgba_len(new_w, new_h) else {
             continue;
         };
         let mut pixels = vec![0u8; pixel_len];
         let src_tiles = &ls.tiles;
+        // A rotated/projective raster needs one bilinear coverage ramp at its
+        // boundary. Do not add a second supersampling filter: that widens a
+        // Photoshop-style one-pixel edge into two visibly different alpha steps.
+        let filter_transform_edge = ts.quad.is_some() || !axis_preserving_angle(ts.angle_deg);
         pixels
             .par_chunks_mut((new_w * 4) as usize)
             .enumerate()
             .for_each(|(py, row)| {
-                let canvas_y = py as f32 + new_oy as f32;
+                // Transform pixel centres. Canvas-space layer bounds describe
+                // pixel edges, whereas TileMap samplers use integer pixel-centre
+                // coordinates.
+                let canvas_y = py as f32 + new_oy as f32 + 0.5;
                 for px in 0..new_w as usize {
-                    let canvas_x = px as f32 + new_ox as f32;
-                    let Some((src_x, src_y)) = ts.inverse_canvas_point(canvas_x, canvas_y) else {
-                        continue;
-                    };
-                    let lx = src_x - orig_ox;
-                    let ly = src_y - orig_oy;
-                    if lx < 0.0 || ly < 0.0 || lx >= orig_w || ly >= orig_h {
+                    let canvas_x = px as f32 + new_ox as f32 + 0.5;
+                    let src = canvas_to_source.apply(canvas_x, canvas_y);
+                    let (src_x, src_y) = (src.x, src.y);
+                    let edge_x = src_x - orig_ox;
+                    let edge_y = src_y - orig_oy;
+                    if edge_x < 0.0 || edge_y < 0.0 || edge_x >= orig_w || edge_y >= orig_h {
                         continue;
                     }
+                    let lx = edge_x - 0.5;
+                    let ly = edge_y - 0.5;
                     let (r, g, b, a) = match interpolation {
                         crate::core::geometry::InterpolationMode::Bilinear => {
-                            src_tiles.sample_bilinear(lx, ly)
+                            // The continuous source rectangle extends to
+                            // `width/height`, while pixel centres end at
+                            // `width-1/height-1`. Clamp only after the rectangle
+                            // inclusion test above so bilinear filtering does not
+                            // mix a valid edge pixel with transparent out-of-bounds
+                            // samples and create a wide faded fringe after scaling.
+                            if filter_transform_edge {
+                                let filtered = src_tiles.sample_bilinear(lx, ly);
+                                let clamped = src_tiles.sample_bilinear(
+                                    lx.clamp(0.0, (orig_w - 1.0).max(0.0)),
+                                    ly.clamp(0.0, (orig_h - 1.0).max(0.0)),
+                                );
+                                if filtered.3 == 0 || clamped.3 == 0 {
+                                    filtered
+                                } else {
+                                    // Bilinear's transparent-border contribution is
+                                    // a coverage term. Sharpen that term independently
+                                    // from the source alpha: the inner fringe becomes
+                                    // opaque while the outer fringe carries the single
+                                    // AA ramp, matching Photoshop's transformed edge.
+                                    let coverage = filtered.3 as f32 / clamped.3 as f32;
+                                    let sharp_coverage = (coverage * 2.0).min(1.0);
+                                    (
+                                        filtered.0,
+                                        filtered.1,
+                                        filtered.2,
+                                        (clamped.3 as f32 * sharp_coverage)
+                                            .round()
+                                            .clamp(0.0, 255.0)
+                                            as u8,
+                                    )
+                                }
+                            } else {
+                                src_tiles.sample_bilinear(
+                                    lx.clamp(0.0, (orig_w - 1.0).max(0.0)),
+                                    ly.clamp(0.0, (orig_h - 1.0).max(0.0)),
+                                )
+                            }
                         }
                         crate::core::geometry::InterpolationMode::NearestNeighbor => {
                             src_tiles.sample_nearest(lx, ly)
@@ -605,17 +700,15 @@ fn bake_transform_commit(
                 .par_chunks_mut((new_w * 4) as usize)
                 .enumerate()
                 .for_each(|(py, row)| {
-                    let canvas_y = py as f32 + new_oy as f32;
+                    let canvas_y = py as f32 + new_oy as f32 + 0.5;
                     for px in 0..new_w as usize {
-                        let canvas_x = px as f32 + new_ox as f32;
-                        let Some((src_x, src_y)) = ts.inverse_canvas_point(canvas_x, canvas_y)
-                        else {
-                            continue;
-                        };
+                        let canvas_x = px as f32 + new_ox as f32 + 0.5;
+                        let src = canvas_to_source.apply(canvas_x, canvas_y);
+                        let (src_x, src_y) = (src.x, src.y);
                         // Clamp-to-edge: pixels mapping outside the source mask
                         // take the nearest edge value instead of a hard reveal.
-                        let lx = (src_x - orig_ox).clamp(0.0, mw - 1.0);
-                        let ly = (src_y - orig_oy).clamp(0.0, mh - 1.0);
+                        let lx = (src_x - orig_ox - 0.5).clamp(0.0, mw - 1.0);
+                        let ly = (src_y - orig_oy - 0.5).clamp(0.0, mh - 1.0);
                         let g = match interpolation {
                             crate::core::geometry::InterpolationMode::Bilinear => {
                                 mask_tiles.sample_bilinear(lx, ly).0
@@ -668,6 +761,15 @@ fn bake_transform_commit(
             out_h,
             out_offset,
         );
+        let lineage = matches!(after_layer_type, LayerType::Raster).then(|| {
+            let mut source = ls.clone();
+            source.source_to_current = MAT3_IDENTITY;
+            crate::app::state::RasterTransformLineage {
+                source,
+                source_to_current: final_source_to_canvas,
+                rendered_fingerprint: tile_content_fingerprint(&new_tiles),
+            }
+        });
         updates.push(TransformCommitLayer {
             layer_id: ls.layer_id,
             layer_type: after_layer_type,
@@ -676,6 +778,7 @@ fn bake_transform_commit(
             width: out_w,
             height: out_h,
             offset: out_offset,
+            lineage,
         });
     }
 
@@ -687,8 +790,9 @@ fn bake_transform_commit(
 }
 
 impl App {
-    /// Axis-aligned selection box shown by Move before a transform session is
-    /// started. Path objects have their own oriented affine box.
+    /// Axis-aligned selection box shown by Move for selected vector primitives
+    /// before a transform session is started. Path objects have their own
+    /// oriented affine box; pixel layers only get a box through Ctrl+T.
     pub fn move_selection_transform_box(
         &self,
     ) -> Option<([(f32, f32); 4], [(f32, f32); 8], (f32, f32))> {
@@ -706,9 +810,12 @@ impl App {
             .filter(|l| l.selected && !l.locked && !l.is_background)
             .collect();
         if selected.is_empty()
-            || selected
-                .iter()
-                .any(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
+            || selected.iter().any(|l| {
+                !matches!(
+                    l.layer_type,
+                    LayerType::Vector(VectorGeometry::Primitive(_))
+                )
+            })
         {
             return None;
         }
@@ -724,7 +831,10 @@ impl App {
         }
         let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
         Some((
-            [(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
+            // Transform overlays consistently use TL, TR, BL, BR. Keeping that
+            // order is important: the painter joins 0-1-3-2-0; returning the
+            // usual clockwise TL,TR,BR,BL order draws an accidental X.
+            [(x0, y0), (x1, y0), (x0, y1), (x1, y1)],
             [
                 (x0, y0),
                 (cx, y0),
@@ -925,6 +1035,32 @@ impl App {
         let pivot_cx = u_x0 as f32 + orig_w as f32 / 2.0;
         let pivot_cy = u_y0 as f32 + orig_h as f32 / 2.0;
 
+        // Reuse the untouched raster source from preceding Free Transform
+        // commits. The current layer bounds above remain the UI box for this
+        // session, while the worker receives the original pixels plus the
+        // accumulated source→current mapping. Any intervening pixel edit changes
+        // the fingerprint and automatically breaks the lineage.
+        let doc_id = self.docs.documents[self.docs.active_doc_idx].id;
+        for ls in &mut layer_states {
+            if !matches!(ls.layer_type, LayerType::Raster) {
+                continue;
+            }
+            let key = (doc_id, ls.layer_id);
+            let current_fp = tile_content_fingerprint(&ls.tiles);
+            match self.edit.raster_transform_lineage.get(&key) {
+                Some(lineage) if lineage.rendered_fingerprint == current_fp => {
+                    let layer_idx = ls.layer_idx;
+                    *ls = lineage.source.clone();
+                    ls.layer_idx = layer_idx;
+                    ls.source_to_current = lineage.source_to_current;
+                }
+                Some(_) => {
+                    self.edit.raster_transform_lineage.remove(&key);
+                }
+                None => {}
+            }
+        }
+
         let layer_id = layer_states[0].layer_id;
         let layer_idx = layer_states[0].layer_idx;
 
@@ -1103,6 +1239,8 @@ impl App {
                 self.clear_transform_preview();
                 if self.docs.documents[self.docs.active_doc_idx].id == result.doc_id {
                     for update in result.layers {
+                        let layer_id = update.layer_id;
+                        let lineage = update.lineage.clone();
                         if let Some(layer) = self.docs.documents[self.docs.active_doc_idx]
                             .canvas
                             .layer_stack
@@ -1116,6 +1254,12 @@ impl App {
                             layer.height = update.height;
                             layer.offset = update.offset;
                             layer.layer_type = update.layer_type;
+                        }
+                        let key = (result.doc_id, layer_id);
+                        if let Some(lineage) = lineage {
+                            self.edit.raster_transform_lineage.insert(key, lineage);
+                        } else {
+                            self.edit.raster_transform_lineage.remove(&key);
                         }
                     }
                     self.docs.documents[self.docs.active_doc_idx]
@@ -1181,14 +1325,26 @@ impl App {
             let Some(inv_m) = ts.inverse_homography() else {
                 return;
             };
+            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
             ts.layer_states
                 .iter()
                 .chain(ts.preview_layer_states.iter())
-                .map(|ls| TransformPreviewUniform {
-                    layer_id: ls.layer_id,
-                    inv_m,
-                    orig_ox: ls.offset.0 as f32,
-                    orig_oy: ls.offset.1 as f32,
+                .filter_map(|ls| {
+                    // `ls` may hold the retained pre-transform source for CPU
+                    // commit. GPU preview, however, samples the raster currently
+                    // resident in the layer atlas, so its texture origin must
+                    // come from the live layer rather than the retained source.
+                    let layer = canvas
+                        .layer_stack
+                        .layers
+                        .iter()
+                        .find(|layer| layer.id == ls.layer_id)?;
+                    Some(TransformPreviewUniform {
+                        layer_id: ls.layer_id,
+                        inv_m,
+                        orig_ox: layer.offset.0 as f32,
+                        orig_oy: layer.offset.1 as f32,
+                    })
                 })
                 .collect()
         } else {
@@ -2101,6 +2257,7 @@ mod tests {
             content_offset: (0, 0),
             content_w: 2,
             content_h: 2,
+            source_to_current: MAT3_IDENTITY,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -2140,12 +2297,97 @@ mod tests {
         assert_eq!(result.layers.len(), 1);
         let layer = &result.layers[0];
         assert_eq!((layer.width, layer.height), (4, 4));
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(
+                    layer.tiles.get_pixel(x, y),
+                    (255, 0, 0, 255),
+                    "opaque source edge must not fade at ({x},{y})"
+                );
+            }
+        }
         let mask = layer.mask.as_ref().expect("mask survives the transform");
         assert_eq!((mask.width, mask.height), (4, 4));
         assert!(mask.enabled);
         // 2x scale keeps left side black, right side white.
         assert!(mask.tiles.get_pixel(0, 1).0 < 10, "left edge stays black");
         assert!(mask.tiles.get_pixel(3, 1).0 > 245, "right edge stays white");
+    }
+
+    #[test]
+    fn repeated_raster_transforms_render_from_the_original_source() {
+        let pixels = [0u8, 180, 80, 255].repeat(64);
+        let source = LayerOrigState {
+            layer_id: 17,
+            layer_idx: 0,
+            layer_type: LayerType::Raster,
+            tiles: TileMap::from_rgba(&pixels, 8, 8),
+            mask: None,
+            offset: (20, 20),
+            width: 8,
+            height: 8,
+            content_offset: (20, 20),
+            content_w: 8,
+            content_h: 8,
+            source_to_current: MAT3_IDENTITY,
+        };
+        let make_state = |ls: LayerOrigState, offset, w, h, angle| TransformState {
+            layer_states: vec![ls],
+            preview_layer_states: Vec::new(),
+            layer_idx: 0,
+            layer_id: 17,
+            orig_offset: offset,
+            orig_w: w,
+            orig_h: h,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            angle_deg: angle,
+            translate_x: 0.0,
+            translate_y: 0.0,
+            pivot_cx: offset.0 as f32 + w as f32 * 0.5,
+            pivot_cy: offset.1 as f32 + h as f32 * 0.5,
+            drag_handle: None,
+            drag_start_cx: 0.0,
+            drag_start_cy: 0.0,
+            drag_start_sx: 1.0,
+            drag_start_sy: 1.0,
+            drag_start_angle: 0.0,
+            drag_start_tx: 0.0,
+            drag_start_ty: 0.0,
+            quad: None,
+            drag_start_quad: [(0.0, 0.0); 4],
+            mode: crate::app::state::TransformMode::Free,
+        };
+
+        let first = bake_transform_commit(
+            DocumentId(1),
+            make_state(source, (20, 20), 8, 8, 20.0),
+            crate::core::geometry::InterpolationMode::Bilinear,
+        )
+        .unwrap();
+        let first_layer = &first.layers[0];
+        let lineage = first_layer.lineage.clone().expect("raster keeps source");
+        let mut second_source = lineage.source;
+        second_source.source_to_current = lineage.source_to_current;
+        let second = bake_transform_commit(
+            DocumentId(1),
+            make_state(
+                second_source,
+                first_layer.offset,
+                first_layer.width,
+                first_layer.height,
+                -20.0,
+            ),
+            crate::core::geometry::InterpolationMode::Bilinear,
+        )
+        .unwrap();
+        let restored = &second.layers[0];
+        assert_eq!((restored.width, restored.height), (8, 8));
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(restored.tiles.get_pixel(x, y), (0, 180, 80, 255));
+            }
+        }
     }
 
     #[test]
@@ -2179,6 +2421,7 @@ mod tests {
             content_offset,
             content_w,
             content_h,
+            source_to_current: MAT3_IDENTITY,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -2281,6 +2524,7 @@ mod tests {
             content_offset,
             content_w,
             content_h,
+            source_to_current: MAT3_IDENTITY,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -2366,6 +2610,7 @@ mod tests {
             content_offset,
             content_w,
             content_h,
+            source_to_current: MAT3_IDENTITY,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -2443,6 +2688,7 @@ mod tests {
             content_offset,
             content_w,
             content_h,
+            source_to_current: MAT3_IDENTITY,
         };
         (sd, ls)
     }

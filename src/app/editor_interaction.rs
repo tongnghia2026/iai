@@ -28,6 +28,11 @@ pub struct EditorInteraction {
     pub(in crate::app) transform_snap_guides: Vec<crate::core::snapping::SnapLine>,
     pub(in crate::app) pending_transform_commit:
         Option<std::sync::mpsc::Receiver<Result<TransformCommitResult, String>>>,
+    /// Non-destructive source retained between consecutive raster Free
+    /// Transforms. A fingerprint mismatch means another pixel operation touched
+    /// the layer and causes the entry to be discarded on the next Ctrl+T.
+    pub(in crate::app) raster_transform_lineage:
+        std::collections::HashMap<(crate::core::document::DocumentId, u32), RasterTransformLineage>,
     /// Continue into mesh Warp after an asynchronous transform bake.
     pub(in crate::app) warp_after_transform_commit: bool,
     /// Internal layer clipboard: whole cloned `Layer`s (preserving offset, opacity,

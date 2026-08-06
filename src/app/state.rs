@@ -81,6 +81,17 @@ pub struct LayerOrigState {
     pub content_offset: (i32, i32),
     pub content_w: u32,
     pub content_h: u32,
+    /// Original-source canvas to the layer's canvas placement at the start of
+    /// this session. Identity for the first transform; accumulated for later
+    /// raster transforms so commits never resample an already filtered result.
+    pub source_to_current: [f32; 9],
+}
+
+#[derive(Clone)]
+pub struct RasterTransformLineage {
+    pub source: LayerOrigState,
+    pub source_to_current: [f32; 9],
+    pub rendered_fingerprint: u64,
 }
 
 /// All state for an ongoing Ctrl+T free-transform session.
@@ -125,6 +136,7 @@ pub struct TransformCommitLayer {
     pub width: u32,
     pub height: u32,
     pub offset: (i32, i32),
+    pub lineage: Option<RasterTransformLineage>,
 }
 
 pub struct TransformCommitResult {
@@ -1180,6 +1192,7 @@ impl App {
                 guide_op: None,
                 transform_snap_guides: Vec::new(),
                 pending_transform_commit: None,
+                raster_transform_lineage: std::collections::HashMap::new(),
                 warp_after_transform_commit: false,
                 clipboard: None,
                 clipboard_image_new_doc_hint: None,

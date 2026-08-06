@@ -2103,6 +2103,8 @@ pub fn build(
 
             let cs = |cx: f32, cy: f32| egui::pos2(cx * zoom + ox, cy * zoom + oy);
 
+            // `corners` is TL, TR, BL, BR. Walk the outside perimeter only;
+            // never connect opposite corners (the Move box must not show an X).
             let c = ov.corners;
             painter.line_segment([cs(c[0].0, c[0].1), cs(c[1].0, c[1].1)], bbox_stroke);
             painter.line_segment([cs(c[1].0, c[1].1), cs(c[3].0, c[3].1)], bbox_stroke);
