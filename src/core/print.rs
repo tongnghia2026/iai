@@ -70,6 +70,40 @@ impl RenderIntent {
     }
 }
 
+/// Press marks written around the artwork on a PDF page (File ▸ Export / Save
+/// as PDF). The document canvas is the printed area (the **bleed box**); the
+/// **trim box** is that rectangle inset by `bleed_mm` on every side — so a design
+/// that already carries bleed is marked correctly without fabricating pixels.
+/// Crop marks show the cut (trim), registration targets align the plates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PrintMarks {
+    /// Distance the trim line sits inside the artwork edge, in millimetres.
+    pub bleed_mm: f32,
+    pub crop_marks: bool,
+    pub registration_marks: bool,
+}
+
+impl Default for PrintMarks {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl PrintMarks {
+    pub const fn none() -> Self {
+        Self {
+            bleed_mm: 0.0,
+            crop_marks: false,
+            registration_marks: false,
+        }
+    }
+
+    /// Whether anything is drawn / any box overrides the plain page.
+    pub fn is_active(&self) -> bool {
+        self.crop_marks || self.registration_marks || self.bleed_mm > 0.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PrintLayout {
     pub page_points: Option<(f32, f32)>,
@@ -79,6 +113,8 @@ pub struct PrintLayout {
     /// ICC rendering intent for colour-managed printing (copies & printer device
     /// are tracked separately on the app — see `print_copies`/`print_selected_printer`).
     pub intent: RenderIntent,
+    /// Crop / registration marks and bleed for a press-ready PDF.
+    pub marks: PrintMarks,
 }
 
 impl Default for PrintLayout {
@@ -89,6 +125,7 @@ impl Default for PrintLayout {
             margin_mm: 0.0,
             center: true,
             intent: RenderIntent::Perceptual,
+            marks: PrintMarks::none(),
         }
     }
 }
@@ -345,9 +382,21 @@ pub fn build_pdf_encoded_with_vectors(
         String::new()
     };
     let extgstate_resources = pdf_extgstate_resources(vectors);
+    // TrimBox / BleedBox tag the cut size for a press when marks are on: the
+    // artwork is the bleed box, the trim box is that inset by the bleed.
+    let box_entries = if layout.marks.is_active() {
+        let (trx0, try0, trx1, try1) = marks_trim_box(tx, ty, dw, dh, layout.marks.bleed_mm);
+        format!(
+            " /BleedBox [{tx:.2} {ty:.2} {:.2} {:.2}] /TrimBox [{trx0:.2} {try0:.2} {trx1:.2} {try1:.2}]",
+            tx + dw,
+            ty + dh
+        )
+    } else {
+        String::new()
+    };
     pdf.extend_from_slice(
         format!(
-            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}] \
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}]{box_entries} \
              /Resources << /XObject << /Im0 5 0 R >> {shading_resources} {extgstate_resources} >> /Contents 4 0 R >>\nendobj\n"
         )
         .as_bytes(),
@@ -359,6 +408,16 @@ pub fn build_pdf_encoded_with_vectors(
     // Overlay crisp vector paths. RGB pages emit rg/RG; DeviceCMYK ink pages emit
     // k/K (each object's PdfPaintColor already matches the page's colour space).
     append_vector_content(&mut content, vectors, w, h, dw, dh, tx, ty);
+    // Crop / registration marks sit in the page margin around the artwork.
+    append_print_marks(
+        &mut content,
+        tx,
+        ty,
+        dw,
+        dh,
+        &layout.marks,
+        page.components == 4,
+    );
     offsets.push(pdf.len());
     pdf.extend_from_slice(format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes());
     pdf.extend_from_slice(content.as_bytes());
@@ -1090,6 +1149,145 @@ pub(crate) fn pdf_extgstate_resources(objects: &[PdfVectorObject]) -> String {
     }
     dict.push_str(">>");
     dict
+}
+
+/// Millimetres → PDF points.
+const MM_TO_PT: f32 = 72.0 / 25.4;
+
+/// The trim box `(x0, y0, x1, y1)` in points for an artwork placed at `(tx, ty)`
+/// with size `dw × dh` (the bleed box) and the given bleed in millimetres. The
+/// trim is the bleed box inset by the bleed, clamped so it never crosses centre.
+pub(crate) fn marks_trim_box(
+    tx: f32,
+    ty: f32,
+    dw: f32,
+    dh: f32,
+    bleed_mm: f32,
+) -> (f32, f32, f32, f32) {
+    let bleed = (bleed_mm * MM_TO_PT)
+        .max(0.0)
+        .min(dw * 0.5 - 0.5)
+        .min(dh * 0.5 - 0.5)
+        .max(0.0);
+    (tx + bleed, ty + bleed, tx + dw - bleed, ty + dh - bleed)
+}
+
+/// Append a full circle centred at `(cx, cy)` with radius `r` as four cubic
+/// Bézier arcs (path operators only — the caller strokes or fills it).
+fn append_pdf_circle(out: &mut String, cx: f32, cy: f32, r: f32) {
+    let k = 0.552_284_75 * r;
+    out.push_str(&format!("{:.3} {:.3} m\n", cx + r, cy));
+    out.push_str(&format!(
+        "{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} c\n",
+        cx + r,
+        cy + k,
+        cx + k,
+        cy + r,
+        cx,
+        cy + r
+    ));
+    out.push_str(&format!(
+        "{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} c\n",
+        cx - k,
+        cy + r,
+        cx - r,
+        cy + k,
+        cx - r,
+        cy
+    ));
+    out.push_str(&format!(
+        "{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} c\n",
+        cx - r,
+        cy - k,
+        cx - k,
+        cy - r,
+        cx,
+        cy - r
+    ));
+    out.push_str(&format!(
+        "{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} c\n",
+        cx + k,
+        cy - r,
+        cx + r,
+        cy - k,
+        cx + r,
+        cy
+    ));
+    out.push_str("h\n");
+}
+
+/// Append the crop and registration marks for an artwork rectangle placed at
+/// `(tx, ty)` (bottom-left, PDF points) with size `dw × dh`. That rectangle is the
+/// bleed box; the trim box is inset by the bleed. Marks paint in registration
+/// colour so they land on every separation — all-ink on a DeviceCMYK page, black
+/// on RGB — and sit OUTSIDE the artwork so they never touch the design.
+pub(crate) fn append_print_marks(
+    out: &mut String,
+    tx: f32,
+    ty: f32,
+    dw: f32,
+    dh: f32,
+    marks: &PrintMarks,
+    cmyk: bool,
+) {
+    if !marks.is_active() || dw <= 0.0 || dh <= 0.0 {
+        return;
+    }
+    const GAP: f32 = 3.0;
+    const CROP_LEN: f32 = 12.0;
+    const REG_RADIUS: f32 = 4.0;
+    let (l, r, b, t) = (tx, tx + dw, ty, ty + dh); // bleed-box edges
+    let (tl, tr, tb, tt) = marks_trim_box(tx, ty, dw, dh, marks.bleed_mm); // trim edges
+
+    let stroke = if cmyk { "1 1 1 1 K" } else { "0 0 0 RG" };
+    out.push_str("q\n");
+    out.push_str(&format!("{stroke}\n0.5 w\n0 J\n"));
+
+    if marks.crop_marks {
+        let mut line = |x1: f32, y1: f32, x2: f32, y2: f32| {
+            out.push_str(&format!("{x1:.3} {y1:.3} m\n{x2:.3} {y2:.3} l\nS\n"));
+        };
+        // Horizontal marks continue the bottom/top trim lines past the L/R edges.
+        line(l - GAP - CROP_LEN, tb, l - GAP, tb);
+        line(l - GAP - CROP_LEN, tt, l - GAP, tt);
+        line(r + GAP, tb, r + GAP + CROP_LEN, tb);
+        line(r + GAP, tt, r + GAP + CROP_LEN, tt);
+        // Vertical marks continue the left/right trim lines past the B/T edges.
+        line(tl, b - GAP - CROP_LEN, tl, b - GAP);
+        line(tr, b - GAP - CROP_LEN, tr, b - GAP);
+        line(tl, t + GAP, tl, t + GAP + CROP_LEN);
+        line(tr, t + GAP, tr, t + GAP + CROP_LEN);
+    }
+
+    if marks.registration_marks {
+        let reg_offset = GAP + REG_RADIUS + 3.0;
+        let cross = REG_RADIUS + 3.0;
+        let centers = [
+            (tx + dw * 0.5, b - reg_offset), // bottom edge
+            (tx + dw * 0.5, t + reg_offset), // top edge
+            (l - reg_offset, ty + dh * 0.5), // left edge
+            (r + reg_offset, ty + dh * 0.5), // right edge
+        ];
+        for (cx, cy) in centers {
+            append_pdf_circle(out, cx, cy, REG_RADIUS);
+            out.push_str("S\n");
+            out.push_str(&format!(
+                "{:.3} {:.3} m\n{:.3} {:.3} l\nS\n",
+                cx - cross,
+                cy,
+                cx + cross,
+                cy
+            ));
+            out.push_str(&format!(
+                "{:.3} {:.3} m\n{:.3} {:.3} l\nS\n",
+                cx,
+                cy - cross,
+                cx,
+                cy + cross
+            ));
+        }
+    }
+    out.push_str("Q\n");
 }
 
 pub(crate) fn append_vector_content(
@@ -2825,5 +3023,98 @@ mod tests {
             text.contains("/IaiOPf gs\n"),
             "overprint state applied to the object"
         );
+    }
+
+    #[test]
+    fn marks_trim_box_insets_by_bleed() {
+        // No bleed → the trim box equals the bleed box (the artwork).
+        assert_eq!(
+            marks_trim_box(10.0, 20.0, 100.0, 80.0, 0.0),
+            (10.0, 20.0, 110.0, 100.0)
+        );
+        // 25.4 mm = 72 pt inset on every side.
+        let (x0, y0, x1, y1) = marks_trim_box(0.0, 0.0, 300.0, 300.0, 25.4);
+        assert!((x0 - 72.0).abs() < 0.01 && (y0 - 72.0).abs() < 0.01);
+        assert!((x1 - 228.0).abs() < 0.01 && (y1 - 228.0).abs() < 0.01);
+        // An absurd bleed clamps so the trim never crosses the centre.
+        let (x0, _, x1, _) = marks_trim_box(0.0, 0.0, 100.0, 100.0, 1000.0);
+        assert!((0.0..=1.0).contains(&(x1 - x0)));
+    }
+
+    #[test]
+    fn append_print_marks_draws_crop_and_registration_in_registration_colour() {
+        // CMYK page: registration colour is all-ink so marks hit every plate.
+        let mut cmyk = String::new();
+        append_print_marks(
+            &mut cmyk,
+            50.0,
+            50.0,
+            120.0,
+            90.0,
+            &PrintMarks {
+                bleed_mm: 3.0,
+                crop_marks: true,
+                registration_marks: true,
+            },
+            true,
+        );
+        assert!(
+            cmyk.contains("1 1 1 1 K"),
+            "registration ink on CMYK: {cmyk}"
+        );
+        assert!(cmyk.contains(" l\nS\n"), "crop mark line stroked");
+        assert!(cmyk.contains(" c\n"), "registration circle arcs present");
+
+        // RGB page: registration marks fall back to black.
+        let mut rgb = String::new();
+        append_print_marks(
+            &mut rgb,
+            0.0,
+            0.0,
+            100.0,
+            100.0,
+            &PrintMarks {
+                bleed_mm: 0.0,
+                crop_marks: true,
+                registration_marks: false,
+            },
+            false,
+        );
+        assert!(rgb.contains("0 0 0 RG"), "black marks on RGB");
+        assert!(
+            !rgb.contains(" c\n"),
+            "no registration circle when disabled"
+        );
+
+        // Nothing to draw when marks are off.
+        let mut off = String::new();
+        append_print_marks(&mut off, 0.0, 0.0, 100.0, 100.0, &PrintMarks::none(), true);
+        assert!(off.is_empty());
+    }
+
+    #[test]
+    fn print_marks_write_trim_and_bleed_boxes() {
+        let rgba = vec![255u8; 4 * 4 * 4];
+        let layout = PrintLayout {
+            page_points: Some((300.0, 300.0)),
+            marks: PrintMarks {
+                bleed_mm: 2.0,
+                crop_marks: true,
+                registration_marks: true,
+            },
+            ..Default::default()
+        };
+        let pdf = build_pdf(&rgba, 4, 4, 72.0, &layout, None).expect("pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/TrimBox ["), "trim box tagged for the press");
+        assert!(
+            text.contains("/BleedBox ["),
+            "bleed box tagged for the press"
+        );
+
+        // Default layout (marks off) leaves the page exactly as before.
+        let plain = build_pdf(&rgba, 4, 4, 72.0, &PrintLayout::default(), None).expect("pdf");
+        let plain = String::from_utf8_lossy(&plain);
+        assert!(!plain.contains("/TrimBox"), "no press boxes without marks");
     }
 }
