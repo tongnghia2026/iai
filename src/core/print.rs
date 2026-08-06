@@ -382,6 +382,7 @@ pub fn build_pdf_encoded_with_vectors(
         String::new()
     };
     let extgstate_resources = pdf_extgstate_resources(vectors);
+    let colorspace_resources = pdf_colorspace_resources(vectors);
     // TrimBox / BleedBox tag the cut size for a press when marks are on: the
     // artwork is the bleed box, the trim box is that inset by the bleed.
     let box_entries = if layout.marks.is_active() {
@@ -397,7 +398,7 @@ pub fn build_pdf_encoded_with_vectors(
     pdf.extend_from_slice(
         format!(
             "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}]{box_entries} \
-             /Resources << /XObject << /Im0 5 0 R >> {shading_resources} {extgstate_resources} >> /Contents 4 0 R >>\nendobj\n"
+             /Resources << /XObject << /Im0 5 0 R >> {shading_resources} {extgstate_resources} {colorspace_resources} >> /Contents 4 0 R >>\nendobj\n"
         )
         .as_bytes(),
     );
@@ -562,23 +563,47 @@ pub enum PdfPaintColor {
     Rgb([f32; 3]),
     /// Process CMYK ink fractions in `0..1` → PDF `k` (fill) / `K` (stroke).
     Cmyk([f32; 4]),
+    /// A named spot ink at a tint, painted through a `Separation` colour space so
+    /// it lands on its own plate. `alt` is the process-CMYK the ink approximates
+    /// at full strength (the separation's tint-transform target).
+    Spot {
+        name: crate::core::vector::color::SpotName,
+        tint: f32,
+        alt: [f32; 4],
+    },
 }
 
 impl PdfPaintColor {
-    /// The PDF fill-colour operator line (`… rg` for RGB, `… k` for CMYK).
+    /// The PDF fill-colour operator line for a device colour (`… rg` / `… k`).
+    /// Spot inks are painted via a colour-space resource, not here (see
+    /// [`append_vector_content`]); this falls back to the process alternate.
     fn fill_op(&self) -> String {
         match self {
             PdfPaintColor::Rgb([r, g, b]) => format!("{r:.4} {g:.4} {b:.4} rg\n"),
             PdfPaintColor::Cmyk([c, m, y, k]) => format!("{c:.4} {m:.4} {y:.4} {k:.4} k\n"),
+            PdfPaintColor::Spot { alt, tint, .. } => {
+                let [c, m, y, k] = scale_alt(*alt, *tint);
+                format!("{c:.4} {m:.4} {y:.4} {k:.4} k\n")
+            }
         }
     }
-    /// The PDF stroke-colour operator line (`… RG` for RGB, `… K` for CMYK).
+    /// The PDF stroke-colour operator line for a device colour (`… RG` / `… K`).
     fn stroke_op(&self) -> String {
         match self {
             PdfPaintColor::Rgb([r, g, b]) => format!("{r:.4} {g:.4} {b:.4} RG\n"),
             PdfPaintColor::Cmyk([c, m, y, k]) => format!("{c:.4} {m:.4} {y:.4} {k:.4} K\n"),
+            PdfPaintColor::Spot { alt, tint, .. } => {
+                let [c, m, y, k] = scale_alt(*alt, *tint);
+                format!("{c:.4} {m:.4} {y:.4} {k:.4} K\n")
+            }
         }
     }
+}
+
+/// Scale a process-CMYK alternate (floats in `0..1`) by a spot tint.
+fn scale_alt(alt: [f32; 4], tint: f32) -> [f32; 4] {
+    let t = tint.clamp(0.0, 1.0);
+    [alt[0] * t, alt[1] * t, alt[2] * t, alt[3] * t]
 }
 
 /// One vector object drawn crisply on a PDF page, ON TOP of the raster image.
@@ -684,7 +709,22 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
     // separated ink on a CMYK doc, sRGB otherwise. Non-solid paints have no flat
     // colour here (gradients are handled separately).
     let paint_color = |p: Paint| -> Option<PdfPaintColor> {
+        use crate::core::vector::color::ColorValue;
         match p {
+            // A spot ink keeps its plate identity on ANY page (it becomes a PDF
+            // Separation colour space); it is never folded into process here.
+            Paint::Solid(ColorValue::Spot {
+                name, tint, alt, ..
+            }) => Some(PdfPaintColor::Spot {
+                name,
+                tint,
+                alt: [
+                    alt[0] as f32 / 255.0,
+                    alt[1] as f32 / 255.0,
+                    alt[2] as f32 / 255.0,
+                    alt[3] as f32 / 255.0,
+                ],
+            }),
             Paint::Solid(c) => Some(match &cmyk_conv {
                 Some(conv) => {
                     let [ci, m, y, k] = c.to_cmyk8(conv);
@@ -1151,6 +1191,65 @@ pub(crate) fn pdf_extgstate_resources(objects: &[PdfVectorObject]) -> String {
     dict
 }
 
+/// A unique spot plate referenced on a page: the colorant name and the process
+/// CMYK it approximates at full strength (the `Separation` tint-transform target).
+struct SpotPlate {
+    name: crate::core::vector::color::SpotName,
+    alt: [f32; 4],
+}
+
+/// The spot plates referenced by `objects`, in first-use order (deduped by name).
+fn spot_plates(objects: &[PdfVectorObject]) -> Vec<SpotPlate> {
+    let mut plates: Vec<SpotPlate> = Vec::new();
+    for o in objects {
+        for paint in [o.fill, o.stroke].into_iter().flatten() {
+            if let PdfPaintColor::Spot { name, alt, .. } = paint {
+                if !plates.iter().any(|p| p.name == name) {
+                    plates.push(SpotPlate { name, alt });
+                }
+            }
+        }
+    }
+    plates
+}
+
+/// Escape a colorant name into a PDF name token (`/Name`), `#`-encoding anything
+/// that isn't a plain printable-ASCII non-delimiter (so spaces etc. are legal).
+fn pdf_name_escape(name: &str) -> String {
+    let mut out = String::from("/");
+    for &b in name.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("#{b:02X}"));
+        }
+    }
+    if out.len() == 1 {
+        out.push_str("Spot");
+    }
+    out
+}
+
+/// The `/ColorSpace` resource declaring one `Separation` colour space per spot
+/// plate (`/IaiSp{i}`), each with a Type-2 tint transform to its CMYK alternate
+/// so the ink previews correctly and knocks out onto its own plate.
+pub(crate) fn pdf_colorspace_resources(objects: &[PdfVectorObject]) -> String {
+    let plates = spot_plates(objects);
+    if plates.is_empty() {
+        return String::new();
+    }
+    let mut entries = String::new();
+    for (i, plate) in plates.iter().enumerate() {
+        let [c, m, y, k] = plate.alt;
+        entries.push_str(&format!(
+            "/IaiSp{i} [/Separation {} /DeviceCMYK << /FunctionType 2 /Domain [0 1] \
+             /C0 [0 0 0 0] /C1 [{c:.5} {m:.5} {y:.5} {k:.5}] /N 1 >>] ",
+            pdf_name_escape(plate.name.as_str())
+        ));
+    }
+    format!("/ColorSpace << {entries}>>")
+}
+
 /// Millimetres → PDF points.
 const MM_TO_PT: f32 = 72.0 / 25.4;
 
@@ -1309,6 +1408,10 @@ pub(crate) fn append_vector_content(
     let mx = |x: f32| tx + x * sx;
     let my = |y: f32| ty + dh - y * sy;
 
+    // Spot inks paint through page-level Separation colour spaces (/IaiSp{i}).
+    let plates = spot_plates(objects);
+    let spot_index = |name| plates.iter().position(|p| p.name == name).unwrap_or(0);
+
     out.push_str("q\n");
     for (index, o) in objects.iter().enumerate() {
         let has_solid_fill = o.fill.is_some();
@@ -1347,7 +1450,12 @@ pub(crate) fn append_vector_content(
                 out.push_str(&format!("/{name} gs\n"));
             }
             if let Some(color) = o.fill {
-                out.push_str(&color.fill_op());
+                match color {
+                    PdfPaintColor::Spot { name, tint, .. } => {
+                        out.push_str(&format!("/IaiSp{} cs\n{tint:.4} scn\n", spot_index(name)))
+                    }
+                    _ => out.push_str(&color.fill_op()),
+                }
             }
             if has_stroke {
                 if let Some(color) = o.stroke {
@@ -1368,7 +1476,12 @@ pub(crate) fn append_vector_content(
                         .map(|value| format!("{:.3}", value * sx))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    out.push_str(&color.stroke_op());
+                    match color {
+                        PdfPaintColor::Spot { name, tint, .. } => {
+                            out.push_str(&format!("/IaiSp{} CS\n{tint:.4} SCN\n", spot_index(name)))
+                        }
+                        _ => out.push_str(&color.stroke_op()),
+                    }
                     out.push_str(&format!(
                         "{:.3} w\n{cap} J\n{join} j\n{:.3} M\n[{dash}] {:.3} d\n",
                         o.stroke_width_px * sx,
@@ -1512,12 +1625,16 @@ pub fn build_pdf_multipage_encoded(
             .get(i)
             .map(|objects| pdf_extgstate_resources(objects))
             .unwrap_or_default();
+        let colorspace_resources = vectors
+            .get(i)
+            .map(|objects| pdf_colorspace_resources(objects))
+            .unwrap_or_default();
 
         offsets.push(pdf.len());
         pdf.extend_from_slice(
             format!(
                 "{page_obj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] \
-                 /Resources << /XObject << /Im0 {image_obj} 0 R >> {shading_resources} {extgstate_resources} >> /Contents {content_obj} 0 R >>\nendobj\n",
+                 /Resources << /XObject << /Im0 {image_obj} 0 R >> {shading_resources} {extgstate_resources} {colorspace_resources} >> /Contents {content_obj} 0 R >>\nendobj\n",
                 e.pw, e.ph
             )
             .as_bytes(),
@@ -3116,5 +3233,138 @@ mod tests {
         let plain = build_pdf(&rgba, 4, 4, 72.0, &PrintLayout::default(), None).expect("pdf");
         let plain = String::from_utf8_lossy(&plain);
         assert!(!plain.contains("/TrimBox"), "no press boxes without marks");
+    }
+
+    #[test]
+    fn pdf_name_escape_encodes_spaces_and_specials() {
+        assert_eq!(pdf_name_escape("PANTONE 185 C"), "/PANTONE#20185#20C");
+        assert_eq!(pdf_name_escape("Silver"), "/Silver");
+        assert_eq!(pdf_name_escape(""), "/Spot");
+    }
+
+    /// A spot-filled object exports as a PDF `Separation` colour space (its own
+    /// plate) rather than being folded into process, on an RGB or CMYK page.
+    #[test]
+    fn spot_object_exports_as_a_separation_colour_space() {
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255; 24 * 24 * 4], 24, 24);
+        let index = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(3.0, 3.0)),
+                            Node::sharp(Point::new(21.0, 3.0)),
+                            Node::sharp(Point::new(21.0, 21.0)),
+                            Node::sharp(Point::new(3.0, 21.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                // Full-tint warm-red spot ink (alt = M+Y process).
+                VectorStyle::filled(ColorValue::spot(
+                    "PANTONE Warm Red C",
+                    [0, 255, 255, 0],
+                    1.0,
+                )),
+                AffineTransform::IDENTITY,
+            ),
+        );
+
+        let selection = collect_pdf_vectors(&canvas);
+        assert_eq!(selection.objects.len(), 1, "the spot object is promoted");
+        assert!(
+            matches!(selection.objects[0].fill, Some(PdfPaintColor::Spot { .. })),
+            "fill kept as a spot ink, not converted to process"
+        );
+
+        let base = pdf_raster_base(&canvas, &selection);
+        let pdf = build_pdf_with_vectors(
+            &base,
+            24,
+            24,
+            72.0,
+            &selection.objects,
+            &PrintLayout::default(),
+            None,
+        )
+        .expect("spot pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(
+            text.contains("/Separation /PANTONE#20Warm#20Red#20C /DeviceCMYK"),
+            "declares the named Separation plate: {text}"
+        );
+        assert!(
+            text.contains("/IaiSp0 cs\n"),
+            "paints through the spot colour space"
+        );
+        assert!(text.contains("1.0000 scn\n"), "full-tint fill");
+        // The tint transform maps full tint to the process alternate (M+Y).
+        assert!(text.contains("/C1 [0.00000 1.00000 1.00000 0.00000]"));
+    }
+
+    #[test]
+    fn half_tint_spot_paints_at_reduced_coverage() {
+        let obj = PdfVectorObject {
+            path: crate::core::vector::path::PathData::new(
+                vec![crate::core::vector::path::Contour::new(
+                    vec![
+                        crate::core::vector::path::Node::sharp(crate::core::geometry::Point::new(
+                            0.0, 0.0,
+                        )),
+                        crate::core::vector::path::Node::sharp(crate::core::geometry::Point::new(
+                            4.0, 0.0,
+                        )),
+                        crate::core::vector::path::Node::sharp(crate::core::geometry::Point::new(
+                            2.0, 4.0,
+                        )),
+                    ],
+                    true,
+                )],
+                crate::core::vector::path::FillRule::NonZero,
+            ),
+            fill: Some(PdfPaintColor::Spot {
+                name: crate::core::vector::color::SpotName::new("Spot Green"),
+                tint: 0.5,
+                alt: [1.0, 0.0, 1.0, 0.0],
+            }),
+            fill_gradient: None,
+            stroke: None,
+            stroke_width_px: 0.0,
+            stroke_cap: crate::core::vector::style::LineCap::Butt,
+            stroke_join: crate::core::vector::style::LineJoin::Miter,
+            stroke_miter_limit: 4.0,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
+            even_odd: false,
+            fill_overprint: false,
+            stroke_overprint: false,
+        };
+        let mut content = String::new();
+        append_vector_content(
+            &mut content,
+            std::slice::from_ref(&obj),
+            4,
+            4,
+            4.0,
+            4.0,
+            0.0,
+            0.0,
+        );
+        assert!(
+            content.contains("/IaiSp0 cs\n0.5000 scn\n"),
+            "half tint: {content}"
+        );
+        assert!(pdf_colorspace_resources(std::slice::from_ref(&obj)).contains("/Separation"));
     }
 }

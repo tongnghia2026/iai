@@ -39,6 +39,9 @@ fn paint_supported(paint: Paint) -> Result<(), FallbackReason> {
         Paint::None => Ok(()),
         Paint::Solid(ColorValue::Rgb { .. }) => Ok(()),
         Paint::Solid(ColorValue::Cmyk { .. }) => Err(FallbackReason::Cmyk),
+        // A spot ink is a named separation; the GPU path has no such colour space,
+        // so render it on the CPU raster reference (its process alternate).
+        Paint::Solid(ColorValue::Spot { .. }) => Err(FallbackReason::Cmyk),
         Paint::Gradient(gradient) => {
             if gradient
                 .active_stops()

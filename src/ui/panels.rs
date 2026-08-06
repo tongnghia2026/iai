@@ -1047,12 +1047,12 @@ fn vector_palette_manage(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
             .strong()
             .size(11.0),
     );
+    let add_color = data
+        .tool
+        .path_style
+        .and_then(|style| style.fill_value.or(style.stroke_value))
+        .unwrap_or_else(|| ColorValue::from_rgba8(data.tool.brush_color));
     ui.horizontal_wrapped(|ui| {
-        let add_color = data
-            .tool
-            .path_style
-            .and_then(|style| style.fill_value.or(style.stroke_value))
-            .unwrap_or_else(|| ColorValue::from_rgba8(data.tool.brush_color));
         if ui
             .small_button(format!("{} Add current", ph::PLUS))
             .on_hover_text("Add the selected Path colour (or Foreground) to this document")
@@ -1103,9 +1103,39 @@ fn vector_palette_manage(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
         });
     });
 
+    // Spot ink: a named separation plate. The current Fill/Foreground colour
+    // becomes the ink's process alternate; applying the swatch (left-click) sets
+    // a Path's Fill to this spot ink, which exports as a PDF Separation plate.
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let edit_id = ui.id().with("iai_spot_name");
+        let mut spot_name = ui
+            .data(|memory| memory.get_temp::<String>(edit_id))
+            .unwrap_or_default();
+        ui.label("Spot ink:");
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut spot_name)
+                .desired_width(150.0)
+                .hint_text("Plate name")
+                .char_limit(crate::core::vector::color::SPOT_NAME_CAP),
+        );
+        if response.changed() {
+            ui.data_mut(|memory| memory.insert_temp(edit_id, spot_name.clone()));
+        }
+        let can_add = !spot_name.trim().is_empty();
+        if ui
+            .add_enabled(can_add, egui::Button::new(format!("{} Add Spot", ph::DROP)))
+            .on_hover_text("Make a spot ink from the current colour — its own separation plate")
+            .clicked()
+        {
+            actions.tool.add_spot_swatch = Some((spot_name.trim().to_string(), add_color));
+            ui.data_mut(|memory| memory.insert_temp(edit_id, String::new()));
+        }
+    });
+
     if data.doc.swatches.is_empty() {
         ui.label(
-            egui::RichText::new("Add named RGB/CMYK colours used by this project.")
+            egui::RichText::new("Add named RGB/CMYK/spot colours used by this project.")
                 .small()
                 .weak(),
         );
@@ -1272,6 +1302,10 @@ fn swatch_tooltip(swatch: &crate::core::palette::DocumentSwatch) -> String {
                 p(y),
                 p(k)
             )
+        }
+        ColorValue::Spot { name, tint, .. } => {
+            let p = |v: f32| (v.clamp(0.0, 1.0) * 100.0).round() as u8;
+            format!("{}\nSpot ink “{}” {}%", swatch.name, name.as_str(), p(tint))
         }
     }
 }

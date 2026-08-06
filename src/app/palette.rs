@@ -74,6 +74,40 @@ impl App {
         }
     }
 
+    /// Create a spot-ink swatch. `base` is the colour the ink approximates; it is
+    /// separated to a process-CMYK alternate (through the document converter when
+    /// the document is CMYK, otherwise the built-in transform) and stored inline
+    /// so the spot previews and flattens correctly. Applying the swatch later sets
+    /// a path's Fill/Outline to this spot ink via the normal palette gestures.
+    pub fn add_spot_swatch(&mut self, name: String, base: ColorValue) {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            self.shell.status_msg = "Spot ink cần có tên".to_string();
+            return;
+        }
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let converter = canvas
+            .cmyk_converter()
+            .unwrap_or(crate::core::cms::CmykConverter::Naive);
+        let alt = base.to_cmyk8(&converter);
+        let spot = ColorValue::spot(&name, alt, 1.0);
+        let current = &canvas.metadata.swatches;
+        if current.len() >= MAX_DOCUMENT_SWATCHES {
+            self.shell.status_msg = format!("Bảng màu đã đạt tối đa {MAX_DOCUMENT_SWATCHES} màu");
+            return;
+        }
+        if current.iter().any(|swatch| swatch.color == spot) {
+            self.shell.status_msg = "Spot ink này đã có trong bảng màu".to_string();
+            return;
+        }
+        let swatch_name = unique_swatch_name(current, &name);
+        let mut palette = current.clone();
+        palette.push(DocumentSwatch::new(swatch_name.clone(), spot));
+        if self.commit_document_palette(palette) {
+            self.shell.status_msg = format!("Đã thêm spot ink: {swatch_name}");
+        }
+    }
+
     pub fn rename_document_swatch(&mut self, index: usize, name: String) {
         let name = name.trim();
         if name.is_empty() {
@@ -139,6 +173,7 @@ fn swatch_default_name(color: ColorValue) -> String {
                 percent(k)
             )
         }
+        ColorValue::Spot { name, .. } => name.as_str().to_string(),
     }
 }
 
@@ -156,6 +191,26 @@ mod tests {
             swatch_default_name(ColorValue::cmyk(0.0, 1.0, 1.0, 0.0)),
             "CMYK C0 M100 Y100 K0"
         );
+    }
+
+    #[test]
+    fn add_spot_swatch_creates_a_named_spot_ink() {
+        let mut app = App::new();
+        app.add_spot_swatch("PANTONE 185 C".to_string(), ColorValue::rgb(1.0, 0.0, 0.0));
+        let swatches = &app.docs.documents[0].canvas.metadata.swatches;
+        assert_eq!(swatches.len(), 1);
+        assert!(swatches[0].color.is_spot(), "swatch holds a spot ink");
+        assert_eq!(
+            swatches[0]
+                .color
+                .spot_name()
+                .map(|n| n.as_str().to_string())
+                .as_deref(),
+            Some("PANTONE 185 C")
+        );
+        // A nameless spot is refused.
+        app.add_spot_swatch("   ".to_string(), ColorValue::rgb(0.0, 0.0, 1.0));
+        assert_eq!(app.docs.documents[0].canvas.metadata.swatches.len(), 1);
     }
 
     #[test]

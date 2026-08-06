@@ -127,6 +127,13 @@ fn color_to_json(c: ColorValue) -> Value {
     match c {
         ColorValue::Rgb { r, g, b, a } => json!({ "space": "rgb", "v": [r, g, b, a] }),
         ColorValue::Cmyk { c, m, y, k, a } => json!({ "space": "cmyk", "v": [c, m, y, k, a] }),
+        ColorValue::Spot { name, tint, alt, a } => json!({
+            "space": "spot",
+            "name": name.as_str(),
+            "tint": tint,
+            "alt": [alt[0], alt[1], alt[2], alt[3]],
+            "a": a,
+        }),
     }
 }
 
@@ -375,6 +382,34 @@ fn json_to_paint(v: &Value) -> Option<Paint> {
 }
 
 fn json_to_color(v: &Value) -> Option<ColorValue> {
+    if v.get("space").and_then(Value::as_str) == Some("spot") {
+        let name = v.get("name").and_then(Value::as_str).unwrap_or("");
+        if name.trim().is_empty() {
+            return None;
+        }
+        let tint = v
+            .get("tint")
+            .and_then(Value::as_f64)
+            .map(|n| n as f32)
+            .unwrap_or(1.0);
+        let a = v
+            .get("a")
+            .and_then(Value::as_f64)
+            .map(|n| n as f32)
+            .unwrap_or(1.0);
+        let alt = v.get("alt").and_then(Value::as_array);
+        let ab = |i: usize| {
+            alt.and_then(|arr| arr.get(i))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u8
+        };
+        return Some(ColorValue::Spot {
+            name: crate::core::vector::color::SpotName::new(name),
+            tint: tint.clamp(0.0, 1.0),
+            alt: [ab(0), ab(1), ab(2), ab(3)],
+            a,
+        });
+    }
     let arr = v.get("v")?.as_array()?;
     let f = |i: usize| arr.get(i).and_then(Value::as_f64).map(|n| n as f32);
     match v.get("space").and_then(Value::as_str) {

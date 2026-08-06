@@ -619,6 +619,9 @@ impl App {
         if let Some(color) = actions.tool.add_document_swatch.take() {
             self.add_document_swatch(color);
         }
+        if let Some((name, base)) = actions.tool.add_spot_swatch.take() {
+            self.add_spot_swatch(name, base);
+        }
         if let Some((index, name)) = actions.tool.rename_document_swatch.take() {
             self.rename_document_swatch(index, name);
         }

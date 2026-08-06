@@ -57,10 +57,47 @@ fn color_to_json(color: ColorValue) -> Value {
             "space": "cmyk",
             "values": [c, m, y, k, a],
         }),
+        ColorValue::Spot { name, tint, alt, a } => json!({
+            "space": "spot",
+            "name": name.as_str(),
+            "tint": tint,
+            "alt": [alt[0], alt[1], alt[2], alt[3]],
+            "a": a,
+        }),
     }
 }
 
 fn json_to_color(value: &Value) -> Option<ColorValue> {
+    if value.get("space").and_then(Value::as_str) == Some("spot") {
+        let name = value.get("name").and_then(Value::as_str)?;
+        if name.trim().is_empty() {
+            return None;
+        }
+        let tint = value
+            .get("tint")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32)
+            .unwrap_or(1.0);
+        let a = value
+            .get("a")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32)
+            .unwrap_or(1.0);
+        let alt = value.get("alt").and_then(Value::as_array);
+        let ab = |i: usize| {
+            alt.and_then(|arr| arr.get(i))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u8
+        };
+        let color = ColorValue::Spot {
+            name: crate::core::vector::color::SpotName::new(name),
+            tint: tint.clamp(0.0, 1.0),
+            alt: [ab(0), ab(1), ab(2), ab(3)],
+            a,
+        };
+        color.validate().ok()?;
+        return Some(color);
+    }
     let values = value.get("values")?.as_array()?;
     let channel = |index: usize| values.get(index)?.as_f64().map(|v| v as f32);
     let color = match value.get("space").and_then(Value::as_str) {
@@ -97,5 +134,16 @@ mod tests {
     fn malformed_palette_is_rejected_as_a_unit() {
         let bad = json!([{"name": "", "color": {"space": "rgb", "values": [0,0,0,1]}}]);
         assert!(json_to_palette(Some(&bad)).is_empty());
+    }
+
+    #[test]
+    fn palette_json_round_trips_spot_inks() {
+        let palette = vec![DocumentSwatch::new(
+            "PANTONE 185 C",
+            ColorValue::spot("PANTONE 185 C", [0, 240, 200, 10], 1.0),
+        )];
+        let restored = json_to_palette(Some(&palette_to_json(&palette)));
+        assert_eq!(restored, palette, "spot ink survives the .iai round-trip");
+        assert!(restored[0].color.is_spot());
     }
 }

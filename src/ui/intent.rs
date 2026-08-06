@@ -323,6 +323,9 @@ pub struct ToolIntent {
     pub clear_palette_fill: bool,
     pub clear_palette_outline: bool,
     pub add_document_swatch: Option<crate::core::vector::color::ColorValue>,
+    /// Create a spot-ink swatch: `(plate name, base colour used as the process
+    /// alternate)`.
+    pub add_spot_swatch: Option<(String, crate::core::vector::color::ColorValue)>,
     pub rename_document_swatch: Option<(usize, String)>,
     pub remove_document_swatch: Option<usize>,
     /// Live preview of the outline width; `commit_path_style` finalises the scrub.
