@@ -137,12 +137,11 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
             ui.spacing_mut().button_padding = egui::vec2(7.0, 3.0);
             // Keep every tool's options reachable: when the row is wider than the
             // window (e.g. Move with a vector object selected) it scrolls instead
-            // of pushing controls off the right edge. A floating scrollbar makes the
-            // overflow discoverable without stealing height from the 32px row.
-            ui.spacing_mut().scroll = egui::style::ScrollStyle::floating();
+            // of pushing controls off the right edge. The scrollbar is hidden to
+            // keep the 32px row clean; gesture help lives in Help, not on the bar.
             egui::ScrollArea::horizontal()
                 .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal_centered(|ui| {
                         ui.add_space(4.0);
@@ -1496,37 +1495,6 @@ fn shape_color_chip(ui: &mut egui::Ui, color: [u8; 4], tip: &str) -> bool {
 fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let kind = data.tool.shape_kind;
 
-    // Inline primitive picker: the current shape is visible and switchable right
-    // here, instead of only via the toolbar right-click flyout. Pressing U also
-    // cycles through these.
-    let pal = data.chrome.theme_mode.palette();
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 1.0;
-        for (k, icon, name) in [
-            (0u8, ph::RECTANGLE, "Rectangle"),
-            (1, ph::CIRCLE, "Ellipse"),
-            (2, ph::LINE_SEGMENT, "Line"),
-            (3, ph::POLYGON, "Polygon"),
-            (4, ph::STAR, "Star"),
-        ] {
-            let btn = egui::Button::selectable(
-                kind == k,
-                egui::RichText::new(icon)
-                    .size(TOP_OPTIONS_NAV_ICON_SIZE)
-                    .color(pal.icon),
-            )
-            .min_size(egui::vec2(24.0, 24.0));
-            if ui
-                .add(btn)
-                .on_hover_text(format!("{name} (U to cycle)"))
-                .clicked()
-            {
-                actions.tool.set_shape_kind = Some(k);
-            }
-        }
-    });
-    ui.separator();
-
     // Fill: enable toggle only (not for lines). The colour comes from the
     // right-edge palette, so the redundant swatch is gone.
     if kind != 2 {
@@ -1894,42 +1862,6 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
 }
 
-/// A small clickable colour square for the options bar. A checkerboard shows
-/// through for transparency so "no colour"/low alpha reads clearly.
-fn quick_color_chip(ui: &mut egui::Ui, rgba: [u8; 4], tip: &str) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-    let resp = resp.on_hover_text(tip);
-    let painter = ui.painter();
-    if rgba[3] < 255 {
-        // Checkerboard backing for translucent/none colours.
-        let mid = rect.center();
-        for (i, quad) in [
-            egui::Rect::from_min_max(rect.min, mid),
-            egui::Rect::from_min_max(egui::pos2(mid.x, rect.min.y), egui::pos2(rect.max.x, mid.y)),
-            egui::Rect::from_min_max(egui::pos2(rect.min.x, mid.y), egui::pos2(mid.x, rect.max.y)),
-            egui::Rect::from_min_max(mid, rect.max),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let shade = if i % 2 == 0 { 235 } else { 170 };
-            painter.rect_filled(quad, 0.0, egui::Color32::from_gray(shade));
-        }
-    }
-    painter.rect_filled(
-        rect,
-        2.0,
-        egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]),
-    );
-    painter.rect_stroke(
-        rect,
-        2.0,
-        egui::Stroke::new(1.0_f32, ui.visuals().weak_text_color()),
-        egui::StrokeKind::Inside,
-    );
-    resp
-}
-
 /// Compact Fill/Outline/Width quick-access for the crowded Move options bar.
 /// Full styling (gradient ramp, dash, overprint, fill/dash kinds) lives in the
 /// Color panel's Object section, so this row stays short. Same `path_*` actions
@@ -1942,31 +1874,10 @@ fn path_style_quick(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui.checkbox(&mut fill, "Fill").changed() {
         actions.tool.set_path_fill_enabled = Some(fill);
     }
-    // Always-visible current fill swatch so the selected object's fill is legible
-    // at a glance; clicking opens the same picker as the Color panel (target 5).
-    if quick_color_chip(
-        ui,
-        style.fill_color,
-        "Current fill colour — click to change",
-    )
-    .clicked()
-    {
-        actions.dialogs.open_paint_color_dialog = Some(5);
-    }
     ui.separator();
     let mut stroke = style.stroke_enabled;
     if ui.checkbox(&mut stroke, "Outline").changed() {
         actions.tool.set_path_stroke_enabled = Some(stroke);
-    }
-    // Current outline swatch (Color panel target 6).
-    if quick_color_chip(
-        ui,
-        style.stroke_color,
-        "Current outline colour — click to change",
-    )
-    .clicked()
-    {
-        actions.dialogs.open_paint_color_dialog = Some(6);
     }
     ui.label("Width:");
     let mut w = style.stroke_width;
