@@ -1994,7 +1994,7 @@ fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.tool.node_align = Some((Axis::Vertical, AlignRef::Min));
     }
     if ui
-        .button(top_options_icon(ph::ALIGN_CENTER_VERTICAL))
+        .button(top_options_icon(ph::ALIGN_CENTER_HORIZONTAL))
         .on_hover_text("Align horizontal centres")
         .clicked()
     {
@@ -2016,7 +2016,7 @@ fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Min));
     }
     if ui
-        .button(top_options_icon(ph::ALIGN_CENTER_HORIZONTAL))
+        .button(top_options_icon(ph::ALIGN_CENTER_VERTICAL))
         .on_hover_text("Align vertical centres")
         .clicked()
     {
@@ -2309,10 +2309,13 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
 fn align_button(ui: &mut egui::Ui, actions: &mut UiActions, align: LayerAlign, tooltip: &str) {
     let icon = match align {
         LayerAlign::Left => ph::ALIGN_LEFT,
-        LayerAlign::HorizontalCenter => ph::ALIGN_CENTER_VERTICAL,
+        // Phosphor names these by the bars' orientation: `align-center-horizontal`
+        // draws horizontal bars on a VERTICAL centre line → aligns X centres
+        // (HorizontalCenter). These two were previously swapped.
+        LayerAlign::HorizontalCenter => ph::ALIGN_CENTER_HORIZONTAL,
         LayerAlign::Right => ph::ALIGN_RIGHT,
         LayerAlign::Top => ph::ALIGN_TOP,
-        LayerAlign::VerticalCenter => ph::ALIGN_CENTER_HORIZONTAL,
+        LayerAlign::VerticalCenter => ph::ALIGN_CENTER_VERTICAL,
         LayerAlign::Bottom => ph::ALIGN_BOTTOM,
     };
     let resp = ui
