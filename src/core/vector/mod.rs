@@ -25,6 +25,7 @@ pub mod flatten;
 pub mod from_shape;
 pub mod from_text;
 pub mod hittest;
+pub mod mask_trace;
 pub mod object;
 pub mod ops;
 pub mod path;

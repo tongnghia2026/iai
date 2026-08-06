@@ -368,32 +368,48 @@ impl App {
             _ => return false,
         }
 
-        // v1 supports a solid rectangular marquee only.
-        let rect = {
+        // Build the cutter from the selection: a solid rectangular marquee maps
+        // exactly to its bounding box; any other shape (ellipse / lasso / wand) is
+        // traced from its coverage mask into a smooth curved cutter.
+        let cutter = {
             let canvas = &mut self.docs.documents[doc].canvas;
             if !canvas.selection.active {
                 return false;
             }
-            if !canvas.selection.is_solid_rect() {
-                self.shell.status_msg =
-                    "Trim vector chỉ hỗ trợ vùng chọn chữ nhật (dùng công cụ chọn khung)"
-                        .to_string();
-                return true;
+            let (bx0, by0, bx1, by1) = canvas.selection.bounding_box();
+            if bx1 - bx0 < 1.0 || by1 - by0 < 1.0 {
+                return false;
             }
-            canvas.selection.bounding_box()
+            if canvas.selection.is_solid_rect() {
+                from_shape::rect_path(bx0, by0, bx1, by1, 0.0)
+            } else {
+                let sel = &canvas.selection;
+                let off = sel.offset;
+                // Selection bbox in MASK space (canvas bbox minus the mask origin).
+                let scan = (
+                    (bx0 as i32 - off.0).max(0) as u32,
+                    (by0 as i32 - off.1).max(0) as u32,
+                    (bx1 as i32 - off.0).max(0) as u32,
+                    (by1 as i32 - off.1).max(0) as u32,
+                );
+                match crate::core::vector::mask_trace::trace_mask_to_path(
+                    &sel.mask, sel.width, sel.height, off, scan, 128,
+                ) {
+                    Some(p) => p,
+                    None => {
+                        self.shell.status_msg = "Empty selection".to_string();
+                        return true;
+                    }
+                }
+            }
         };
-        let (x0, y0, x1, y1) = rect;
-        if x1 - x0 < 1.0 || y1 - y0 < 1.0 {
-            return false;
-        }
 
-        // Reduce the target to a canvas-space fill path, then subtract the rect.
+        // Reduce the target to a canvas-space fill path, then subtract the cutter.
         let Some((path, style)) =
             layer_canvas_path(&self.docs.documents[doc].canvas.layer_stack.layers[target_idx])
         else {
             return false;
         };
-        let cutter = from_shape::rect_path(x0, y0, x1, y1, 0.0);
         let result = boolean(&path, &cutter, BooleanOp::Difference)
             .filter(|r| !r.contours.is_empty())
             .map(|r| VectorObjectData::new(r, style, AffineTransform::IDENTITY));
@@ -844,30 +860,46 @@ mod tests {
     }
 
     #[test]
-    fn trim_declines_a_non_rectangular_selection() {
+    fn trim_by_ellipse_selection_cuts_a_curved_bite() {
+        // 100×100 filled rect at (20,20)-(120,120); a round selection over its
+        // centre. Not a solid rectangle → the cutter is traced from the mask.
         let (mut app, idx) =
-            app_with_one_rect_and_rect_selection((20.0, 20.0, 120.0, 120.0), (30, 30, 110, 110));
-        // Poke a hole in the middle of the marquee so it is no longer a solid rect.
+            app_with_one_rect_and_rect_selection((20.0, 20.0, 120.0, 120.0), (0, 0, 1, 1));
         {
             let sel = &mut app.docs.documents[0].canvas.selection;
-            let w = sel.width;
-            sel.mask[(60 * w + 60) as usize] = 0;
+            let (w, h) = (sel.width, sel.height);
+            for p in sel.mask.iter_mut() {
+                *p = 0;
+            }
+            // Disk radius 25 at (70,70) — fully inside the rectangle.
+            for y in 0..h {
+                for x in 0..w {
+                    let dx = x as f32 + 0.5 - 70.0;
+                    let dy = y as f32 + 0.5 - 70.0;
+                    if dx * dx + dy * dy <= 25.0 * 25.0 {
+                        sel.mask[(y * w + x) as usize] = 255;
+                    }
+                }
+            }
+            sel.active = true;
             sel.mark_bbox_dirty();
         }
-        let before = app.docs.documents[0].canvas.layer_stack.layers.len();
-        // Handled (returns true) but the geometry is untouched — still a Primitive.
-        assert!(app.trim_active_vector_by_selection());
-        assert_eq!(
-            app.docs.documents[0].canvas.layer_stack.layers.len(),
-            before
+        assert!(
+            app.trim_active_vector_by_selection(),
+            "{}",
+            app.shell.status_msg
         );
         let l = &app.docs.documents[0].canvas.layer_stack.layers[idx];
         assert!(
-            matches!(
-                l.layer_type,
-                LayerType::Vector(VectorGeometry::Primitive(_))
-            ),
-            "a non-rectangular selection must not alter the shape"
+            matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))),
+            "trimmed shape becomes a Path"
+        );
+        // Remaining ≈ 10000 − π·25² ≈ 8037.
+        let area = active_path_area(&app);
+        let expected = 10000.0 - std::f32::consts::PI * 25.0 * 25.0;
+        assert!(
+            (area - expected).abs() < 500.0,
+            "ellipse-trim area {area} vs {expected}"
         );
     }
 
