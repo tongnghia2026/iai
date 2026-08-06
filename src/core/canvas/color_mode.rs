@@ -25,6 +25,26 @@ impl Canvas {
         }
     }
 
+    /// The CMYK ICC profile bytes to embed when exporting this document to a
+    /// DeviceCMYK PDF, so a colour-managed viewer/press reproduces the on-screen
+    /// preview instead of applying its own default DeviceCMYK interpretation. An
+    /// ICC-profiled document embeds its own profile; the built-in "Generic CMYK
+    /// (naive)" space embeds a synthesized profile matching that model. `None`
+    /// for an RGB document, or if the CMYK profile bytes are unusable (the caller
+    /// then writes plain, untagged DeviceCMYK).
+    pub fn cmyk_pdf_profile(&self) -> Option<Vec<u8>> {
+        match &self.color_mode {
+            ColorMode::Rgb => None,
+            ColorMode::Cmyk(CmykProfile::Naive) => {
+                let bytes = crate::core::cms::generic_cmyk_icc_bytes();
+                (!bytes.is_empty()).then(|| bytes.to_vec())
+            }
+            ColorMode::Cmyk(CmykProfile::Icc { data, .. }) => {
+                crate::core::cms::profile_is_cmyk(data).then(|| data.clone())
+            }
+        }
+    }
+
     /// Flatten the document's ink planes onto white paper: per-channel
     /// source-over with each pixel's mirror alpha × layer opacity (the same
     /// ink-space compositing model the CMYK brush uses). Returns a packed

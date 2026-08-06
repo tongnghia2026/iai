@@ -61,7 +61,9 @@ pub struct DocumentIntent {
     pub pdf_nav_goto: Option<usize>,
     /// PDF navigator strip: export the active PDF group as a multi-page PDF.
     pub pdf_nav_export: bool,
-    pub new_canvas_confirmed: Option<(String, u32, u32, f32, u8, Unit)>,
+    /// New canvas: `(name, w, h, dpi, background, unit, cmyk)`. `cmyk` starts the
+    /// document in CMYK (Generic naive) instead of RGB.
+    pub new_canvas_confirmed: Option<(String, u32, u32, f32, u8, Unit, bool)>,
     pub rename_confirmed: Option<(usize, String)>,
     pub export_confirmed: Option<(ExportFormat, String)>,
     /// Request the Save dialog (rfd) to pick an export path. MUST be handled in

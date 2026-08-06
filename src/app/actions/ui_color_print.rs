@@ -352,12 +352,18 @@ impl App {
                 // cap the page is composited and zlib-encoded in row bands
                 // (Viewport Streaming) - same bytes, no canvas-sized buffer.
                 let pdf_result = if let Some(ink) = ink_page {
+                    // Embed the document's CMYK profile so the DeviceCMYK ink (and
+                    // the native CMYK vector paths over it) render the colours the
+                    // app previews, not the viewer's default CMYK interpretation.
+                    let cmyk_profile = self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .cmyk_pdf_profile();
                     crate::core::print::encode_pdf_page_cmyk(&ink, cw, ch, dpi).and_then(|page| {
                         crate::core::print::build_pdf_encoded_with_vectors(
                             &page,
                             &vector_selection.objects,
                             &layout,
-                            None,
+                            cmyk_profile.as_deref(),
                         )
                     })
                 } else if crate::core::canvas::Canvas::fits_flat_buffer(cw, ch) {

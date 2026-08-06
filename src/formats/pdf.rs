@@ -991,8 +991,15 @@ impl Exporter for PdfExporter {
                     canvas.height,
                     canvas.metadata.resolution_ppi,
                 )?;
-                let pdf =
-                    crate::core::print::build_pdf_encoded(&page, &PrintLayout::default(), None)?;
+                // Embed the document's CMYK profile so the DeviceCMYK ink renders
+                // the same colours the app previews, instead of the viewer's own
+                // default CMYK interpretation.
+                let profile = canvas.cmyk_pdf_profile();
+                let pdf = crate::core::print::build_pdf_encoded(
+                    &page,
+                    &PrintLayout::default(),
+                    profile.as_deref(),
+                )?;
                 return std::fs::write(path, &pdf).map_err(|e| e.to_string());
             }
         }

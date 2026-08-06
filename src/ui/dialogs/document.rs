@@ -109,6 +109,12 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
     let mut new_h_disp = data.dialogs.new_h_input;
 
     let mut new_bg_color = data.dialogs.new_bg_color;
+    // RGB vs CMYK is only consulted when the canvas is created, so it lives in the
+    // dialog's transient egui store rather than in persistent app state.
+    let mut cmyk_mode = ctx.data_mut(|d| {
+        d.get_temp::<bool>(egui::Id::new("nd_cmyk"))
+            .unwrap_or(false)
+    });
     let mut do_create = false;
     let mut do_cancel = false;
 
@@ -257,6 +263,20 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                         });
                     ui.end_row();
 
+                    ui.label("Color mode:");
+                    egui::ComboBox::from_id_salt("color_mode")
+                        .selected_text(if cmyk_mode {
+                            "CMYK (for print)"
+                        } else {
+                            "RGB (for screen)"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut cmyk_mode, false, "RGB (for screen)");
+                            ui.selectable_value(&mut cmyk_mode, true, "CMYK (for print)");
+                        });
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("nd_cmyk"), cmyk_mode));
+                    ui.end_row();
+
                     ui.label("Quick:");
                     egui::ComboBox::from_id_salt("preset_select")
                         .selected_text("Built-in presets...")
@@ -399,6 +419,7 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
             new_dpi,
             new_bg_color,
             new_unit,
+            cmyk_mode,
         ));
         actions.dialogs.show_new_dialog = Some(false);
     }

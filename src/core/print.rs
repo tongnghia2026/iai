@@ -238,6 +238,18 @@ fn flatten_onto_white(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     rgb
 }
 
+/// Flate-compress arbitrary bytes for a PDF stream (used for embedded ICC
+/// profiles — the synthesized CMYK profile is ~0.5 MB, so it is never stored raw).
+fn zlib_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(bytes)
+        .map_err(|e| format!("PDF stream compression error: {e}"))?;
+    encoder
+        .finish()
+        .map_err(|e| format!("PDF stream compression error: {e}"))
+}
+
 fn compress_rgb_lossless(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     let rgb = flatten_onto_white(rgba, w, h);
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
@@ -361,6 +373,25 @@ pub fn build_pdf_encoded_with_vectors(
     let (w, h, dpi) = (page.w, page.h, page.dpi);
     let compressed = &page.compressed_rgb;
 
+    // A CMYK ink page embeds a CMYK profile (matching the app's converter) so a
+    // colour-managed viewer/press reproduces the on-screen preview instead of its
+    // own default DeviceCMYK interpretation; an RGB page keeps the working RGB
+    // profile. An RGB profile handed to a CMYK page (e.g. a printer profile) is
+    // ignored — it cannot describe ink.
+    let icc = if page.components == 4 {
+        icc.filter(|bytes| crate::core::cms::profile_is_cmyk(bytes))
+    } else {
+        icc
+    };
+    // Declaring the embedded ink profile as the page's output intent lets the
+    // DeviceCMYK vector paths and marks (which stay `k`/`K` so overprint keeps
+    // working) separate and preview through the same profile as the image.
+    let output_intents = if page.components == 4 && icc.is_some() {
+        " /OutputIntents [<< /Type /OutputIntent /S /GTS_PDFX /OutputConditionIdentifier (iAi CMYK) /Info (iAi CMYK) /DestOutputProfile 6 0 R >>]"
+    } else {
+        ""
+    };
+
     let (pw, ph) = page_points(layout, w, h, dpi);
     let (dw, dh, tx, ty) = placement(layout, w, h, dpi);
     let (clip_x, clip_y, clip_w, clip_h) = printable_area_points(layout, w, h, dpi);
@@ -370,7 +401,9 @@ pub fn build_pdf_encoded_with_vectors(
     pdf.extend_from_slice(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
     offsets.push(pdf.len());
-    pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    pdf.extend_from_slice(
+        format!("1 0 obj\n<< /Type /Catalog /Pages 2 0 R{output_intents} >>\nendobj\n").as_bytes(),
+    );
 
     offsets.push(pdf.len());
     pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
@@ -424,13 +457,12 @@ pub fn build_pdf_encoded_with_vectors(
     pdf.extend_from_slice(content.as_bytes());
     pdf.extend_from_slice(b"\nendstream\nendobj\n");
 
-    // DeviceCMYK ink pages ignore the (RGB) printer profile; RGB pages get an
-    // ICCBased colour space (object 6) when a profile is supplied.
-    let icc = if page.components == 4 { None } else { icc };
-    let colorspace = if page.components == 4 {
-        "/DeviceCMYK".to_string()
-    } else if icc.is_some() {
+    // With a profile (object 6) the image is ICCBased — RGB or, for an ink page,
+    // the embedded CMYK profile; without one it is the plain device space.
+    let colorspace = if icc.is_some() {
         "[/ICCBased 6 0 R]".to_string()
+    } else if page.components == 4 {
+        "/DeviceCMYK".to_string()
     } else {
         "/DeviceRGB".to_string()
     };
@@ -448,15 +480,21 @@ pub fn build_pdf_encoded_with_vectors(
     pdf.extend_from_slice(b"\nendstream\nendobj\n");
 
     if let Some(icc) = icc {
+        let (n, alternate) = if page.components == 4 {
+            (4, "/DeviceCMYK")
+        } else {
+            (3, "/DeviceRGB")
+        };
+        let compressed_icc = zlib_bytes(icc)?;
         offsets.push(pdf.len());
         pdf.extend_from_slice(
             format!(
-                "6 0 obj\n<< /N 3 /Alternate /DeviceRGB /Length {} >>\nstream\n",
-                icc.len()
+                "6 0 obj\n<< /N {n} /Alternate {alternate} /Filter /FlateDecode /Length {} >>\nstream\n",
+                compressed_icc.len()
             )
             .as_bytes(),
         );
-        pdf.extend_from_slice(icc);
+        pdf.extend_from_slice(&compressed_icc);
         pdf.extend_from_slice(b"\nendstream\nendobj\n");
     }
 
@@ -2805,6 +2843,34 @@ mod tests {
             .read_to_end(&mut decoded)
             .expect("decompress");
         assert_eq!(decoded, cmyk);
+    }
+
+    #[test]
+    fn cmyk_pdf_page_embeds_matching_cmyk_profile() {
+        // A CMYK page given a CMYK profile tags the ink as ICCBased(N=4) and
+        // declares it as the page output intent, so a colour-managed viewer/press
+        // renders the same colours the app previews (this is the CMYK-export fix).
+        let cmyk: Vec<u8> = (0..2 * 2 * 4).map(|i| (i * 7) as u8).collect();
+        let page = encode_pdf_page_cmyk(&cmyk, 2, 2, 72.0).expect("encode");
+        let icc = crate::core::cms::generic_cmyk_icc_bytes();
+        assert!(
+            !icc.is_empty(),
+            "synthesized CMYK profile must be available"
+        );
+        let pdf = build_pdf_encoded(&page, &PrintLayout::default(), Some(icc)).expect("pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(
+            text.contains("/ColorSpace [/ICCBased 6 0 R]"),
+            "ink image must be tagged with the embedded CMYK profile"
+        );
+        assert!(
+            text.contains("/N 4 /Alternate /DeviceCMYK"),
+            "embedded profile object must be 4-component CMYK"
+        );
+        assert!(
+            text.contains("/OutputIntents"),
+            "page must declare the CMYK output intent"
+        );
     }
 
     #[test]

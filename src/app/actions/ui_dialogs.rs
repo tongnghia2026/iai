@@ -387,13 +387,14 @@ impl App {
     }
 
     pub(super) fn handle_misc_dialog_actions(&mut self, actions: &mut UiActions) {
-        let created_new_canvas =
-            if let Some((name, w, h, dpi, bg, unit)) = actions.doc.new_canvas_confirmed.take() {
-                self.do_new_tab(name, w, h, dpi, bg, unit);
-                true
-            } else {
-                false
-            };
+        let created_new_canvas = if let Some((name, w, h, dpi, bg, unit, cmyk)) =
+            actions.doc.new_canvas_confirmed.take()
+        {
+            self.do_new_tab(name, w, h, dpi, bg, unit, cmyk);
+            true
+        } else {
+            false
+        };
 
         if let Some(v) = actions.dialogs.show_new_dialog.take() {
             if v {

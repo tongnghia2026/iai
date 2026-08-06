@@ -283,6 +283,130 @@ impl CmykConverter {
     }
 }
 
+// ── Generic CMYK ICC synthesis ───────────────────────────────────────────────
+//
+// Exported CMYK PDFs used to embed raw DeviceCMYK with no colour space, so every
+// viewer/press interpreted the ink with its OWN default CMYK→RGB model — visibly
+// different from the app's on-screen preview. To make the export match the app we
+// tag the DeviceCMYK content with a CMYK ICC profile whose device→display
+// transform reproduces the app's converter. The built-in "Generic CMYK (naive)"
+// space has no vendor profile, so synthesize one: a standard ICC v4 CMYK output
+// profile whose AToB0 CLUT maps naive ink straight to the Lab of
+// [`naive_cmyk_to_rgb`]. A 17⁴ grid reproduces the model within ~1/255.
+
+/// Grid points per CMYK axis in the synthesized profile's AToB0 CLUT.
+const GENERIC_CMYK_GRID: usize = 17;
+
+/// The synthesized "Generic CMYK (naive)" ICC profile bytes, built once and
+/// cached (~0.5 MB). Empty if lcms could not assemble the profile — callers then
+/// skip tagging and fall back to plain DeviceCMYK (no worse than before).
+pub fn generic_cmyk_icc_bytes() -> &'static [u8] {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| build_generic_cmyk_icc().unwrap_or_default())
+}
+
+fn build_generic_cmyk_icc() -> Option<Vec<u8>> {
+    use foreign_types_shared::ForeignType;
+    use lcms2::{
+        ColorSpaceSignature, GlobalContext, Pipeline, ProfileClassSignature, Stage, Tag,
+        TagSignature, CIEXYZ, MLU,
+    };
+
+    let d50 = CIExyY {
+        x: 0.3457,
+        y: 0.3585,
+        Y: 1.0,
+    };
+    let srgb = srgb_profile();
+    let lab = Profile::new_lab4_context(GlobalContext::new(), &d50).ok()?;
+    // sRGB(RGB_8) → Lab_16 yields lcms's own 16-bit Lab encoding, matched to the
+    // 16-bit CLUT the profile stores (no hand-rolled Lab encoding to get wrong).
+    let to_lab: Transform<[u8; 3], [u16; 3]> = Transform::new(
+        &srgb,
+        PixelFormat::RGB_8,
+        &lab,
+        PixelFormat::Lab_16,
+        Intent::RelativeColorimetric,
+    )
+    .ok()?;
+
+    let n = GENERIC_CMYK_GRID;
+    let node = |i: usize| (i as f32 / (n - 1) as f32 * 255.0).round() as u8;
+    // CLUT node order: first input channel (C) slowest, last (K) fastest.
+    let mut rgb = Vec::with_capacity(n * n * n * n);
+    for ci in 0..n {
+        for mi in 0..n {
+            for yi in 0..n {
+                for ki in 0..n {
+                    rgb.push(naive_cmyk_to_rgb([node(ci), node(mi), node(yi), node(ki)]));
+                }
+            }
+        }
+    }
+    let mut lab_nodes = vec![[0u16; 3]; rgb.len()];
+    to_lab.transform_pixels(&rgb, &mut lab_nodes);
+    let table: Vec<u16> = lab_nodes.into_iter().flatten().collect();
+
+    let clut = Stage::new_clut::<u16>(n, 4, 3, Some(&table)).ok()?;
+    // lcms's mAB (lutAToB) writer only serializes the full canonical structure:
+    // A-curves, CLUT, M-curves, Matrix, B-curves. All but the CLUT are identity.
+    let ident = ToneCurve::new(1.0);
+    let acurves = Stage::new_tone_curves(&[&ident, &ident, &ident, &ident]).ok()?;
+    let mcurves = Stage::new_tone_curves(&[&ident, &ident, &ident]).ok()?;
+    let bcurves = Stage::new_tone_curves(&[&ident, &ident, &ident]).ok()?;
+    let matrix = Stage::new_matrix(
+        &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        3,
+        3,
+        Some(&[0.0, 0.0, 0.0]),
+    )
+    .ok()?;
+    let pipeline = Pipeline::new(4, 3).ok()?;
+    // SAFETY: each stage is freshly allocated above and moved in via into_ptr();
+    // cmsPipelineInsertStage takes ownership, and the pipeline frees them on drop.
+    unsafe {
+        for stage in [
+            acurves.into_ptr(),
+            clut.into_ptr(),
+            mcurves.into_ptr(),
+            matrix.into_ptr(),
+            bcurves.into_ptr(),
+        ] {
+            if lcms2_sys::cmsPipelineInsertStage(
+                pipeline.as_ptr(),
+                lcms2_sys::StageLoc::AT_END,
+                stage,
+            ) == 0
+            {
+                return None;
+            }
+        }
+    }
+
+    let mut profile = Profile::new_placeholder();
+    profile.set_device_class(ProfileClassSignature::OutputClass);
+    profile.set_color_space(ColorSpaceSignature::CmykData);
+    profile.set_pcs(ColorSpaceSignature::LabData);
+    profile.set_version(4.3);
+    profile.set_header_rendering_intent(Intent::RelativeColorimetric);
+    let mut desc = MLU::new(1);
+    desc.set_text_ascii("Generic CMYK (naive)", Locale::none());
+    profile.write_tag(TagSignature::ProfileDescriptionTag, Tag::MLU(&desc));
+    let mut cprt = MLU::new(1);
+    cprt.set_text_ascii("iAi", Locale::none());
+    profile.write_tag(TagSignature::CopyrightTag, Tag::MLU(&cprt));
+    let wtpt = CIEXYZ {
+        X: 0.9642,
+        Y: 1.0,
+        Z: 0.8249,
+    };
+    profile.write_tag(TagSignature::MediaWhitePointTag, Tag::CIEXYZ(&wtpt));
+    if !profile.write_tag(TagSignature::AToB0Tag, Tag::Pipeline(&pipeline)) {
+        return None;
+    }
+    profile.icc().ok()
+}
+
 /// Serialize a profile to ICC bytes for embedding on export.
 pub fn icc_bytes(p: &Profile) -> Vec<u8> {
     p.icc().unwrap_or_default()
@@ -625,6 +749,47 @@ mod tests {
             assert_eq!(conv.rgb_to_cmyk_one(rgb[i]), ink[i]);
             assert_eq!(conv.cmyk_to_rgb_one(ink[i]), rgb[i]);
         }
+    }
+
+    #[test]
+    fn generic_cmyk_icc_reproduces_naive_model() {
+        // The synthesized "Generic CMYK (naive)" profile must be a valid CMYK
+        // profile whose DeviceCMYK→sRGB transform matches naive_cmyk_to_rgb — this
+        // is what makes an exported CMYK PDF render the same colours as the app.
+        let icc = generic_cmyk_icc_bytes();
+        assert!(!icc.is_empty(), "generic CMYK profile must build");
+        assert!(profile_is_cmyk(icc), "synthesized profile must be CMYK");
+
+        let cmyk = profile_from_bytes(icc).expect("reload synthesized CMYK profile");
+        let srgb = srgb_profile();
+        let t: Transform<[u8; 4], [u8; 3]> = Transform::new(
+            &cmyk,
+            PixelFormat::CMYK_8,
+            &srgb,
+            PixelFormat::RGB_8,
+            DEFAULT_INTENT,
+        )
+        .expect("build CMYK→sRGB transform");
+        let samples = [0u8, 32, 64, 96, 128, 160, 192, 224, 255];
+        let mut max = 0i32;
+        for &c in &samples {
+            for &m in &samples {
+                for &y in &samples {
+                    for &k in &samples {
+                        let want = naive_cmyk_to_rgb([c, m, y, k]);
+                        let mut got = [[0u8; 3]];
+                        t.transform_pixels(&[[c, m, y, k]], &mut got);
+                        for i in 0..3 {
+                            max = max.max((want[i] as i32 - got[0][i] as i32).abs());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            max <= 4,
+            "synthesized CMYK profile drifts from naive by {max}"
+        );
     }
 
     #[test]
