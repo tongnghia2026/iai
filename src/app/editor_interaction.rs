@@ -80,6 +80,8 @@ pub struct EditorInteraction {
     /// ("Center" / "Corner" / "Middle"), shown next to the marker; `None` when it
     /// sits free between anchors.
     pub(in crate::app) path_pivot_snap: Option<&'static str>,
+    /// Path id currently showing CorelDRAW-style rotate/skew handles.
+    pub(in crate::app) path_rotate_mode: Option<u32>,
     /// The last repeatable "duplicate + transform" step, as a CANVAS-space affine
     /// `M`: Repeat (Ctrl+D / the button) duplicates the selection and applies `M`
     /// to each copy, so a single sample fans out into a row / ring / spiral.

@@ -1091,6 +1091,7 @@ impl App {
                             // Free Transform has no relocatable pivot: marker on centre.
                             pivot: center,
                             pivot_snap_label: None,
+                            alternate_handles: false,
                         }
                     })
                     // No modal Free Transform: the Move tool's active Path shows
@@ -1108,6 +1109,7 @@ impl App {
                                 } else {
                                     None
                                 },
+                                alternate_handles: self.path_alternate_mode(),
                             })
                     })
                     .or_else(|| {
@@ -1118,6 +1120,7 @@ impl App {
                                 center,
                                 pivot: center,
                                 pivot_snap_label: None,
+                                alternate_handles: false,
                             })
                     }),
                 transform_scale_x: self

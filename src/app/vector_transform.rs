@@ -43,6 +43,8 @@ pub enum PathBoxHit {
     Handle(TransformHandle),
     /// The ring just outside a corner → rotate about the pivot.
     Rotate,
+    /// A middle handle in the second-click box: shear along that edge.
+    Skew(TransformHandle),
     /// The rotation-pivot marker → drag it to relocate the rotation centre.
     Pivot,
 }
@@ -204,6 +206,30 @@ fn box_from(t: AffineTransform, b: Rect) -> PathBox {
 }
 
 impl App {
+    pub(crate) fn path_alternate_mode(&self) -> bool {
+        let Some(idx) = self.active_path_layer() else {
+            return false;
+        };
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        self.edit.path_rotate_mode == Some(canvas.layer_stack.layers[idx].id)
+            && self.multi_path_targets().is_none()
+    }
+
+    pub(crate) fn toggle_path_transform_mode(&mut self) {
+        let Some(idx) = self.active_path_layer() else {
+            return;
+        };
+        if self.multi_path_targets().is_some() {
+            return;
+        }
+        let id = self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack
+            .layers[idx]
+            .id;
+        self.edit.path_rotate_mode = (self.edit.path_rotate_mode != Some(id)).then_some(id);
+    }
+
     /// Active layer index if it is an on-canvas-transformable Path (visible,
     /// unlocked, not the background). The box shows for this layer under Move;
     /// the Node tool reuses it for the layer it edits.
@@ -211,7 +237,7 @@ impl App {
         let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
         let idx = canvas.layer_stack.active_idx;
         let layer = canvas.layer_stack.layers.get(idx)?;
-        if matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
+        if matches!(layer.layer_type, LayerType::Vector(_))
             && layer.visible
             && !layer.locked
             && !layer.is_background
@@ -229,8 +255,14 @@ impl App {
             .canvas
             .layer_stack
             .layers[idx];
-        let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type else {
-            return None;
+        let primitive_object;
+        let obj = match &layer.layer_type {
+            LayerType::Vector(VectorGeometry::Path(obj)) => obj,
+            LayerType::Vector(VectorGeometry::Primitive(shape)) => {
+                primitive_object = shape.to_vector_object(layer.offset);
+                &primitive_object
+            }
+            _ => return None,
         };
         let lb = obj.local_bounds(BOX_TOL)?;
         Some((layer.id, obj.transform, lb))
@@ -408,21 +440,45 @@ impl App {
         // Grab the rotation-pivot marker (single Path only — a multi-Path union
         // keeps a fixed centre for now). Tested first so it stays reachable even
         // if dragged onto a corner handle.
-        if self.multi_path_targets().is_none() && dist((sx, sy), c2s(bx.pivot)) <= PIVOT_HIT_PX {
+        let alternate = self.path_alternate_mode();
+        if alternate && dist((sx, sy), c2s(bx.pivot)) <= PIVOT_HIT_PX {
             return Some(PathBoxHit::Pivot);
         }
 
         let mut best: Option<(f32, TransformHandle)> = None;
+        let box_center_s = c2s(bx.center);
         for (i, h) in HANDLE_ORDER.iter().enumerate() {
-            let d = dist((sx, sy), c2s(bx.handles[i]));
-            if d <= HANDLE_HIT_PX && best.map_or(true, |(bd, _)| d < bd) {
+            let mut hp = c2s(bx.handles[i]);
+            if alternate {
+                // UI draws alternate-mode glyphs 11 px outside the mathematical
+                // handles. Hit-test the visible icon, not an invisible old square.
+                let (dx, dy) = (hp.0 - box_center_s.0, hp.1 - box_center_s.1);
+                let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                hp.0 += dx / len * 11.0;
+                hp.1 += dy / len * 11.0;
+            }
+            let d = dist((sx, sy), hp);
+            let radius = if alternate { 15.0 } else { HANDLE_HIT_PX };
+            if d <= radius && best.map_or(true, |(bd, _)| d < bd) {
                 best = Some((d, *h));
             }
         }
         if let Some((_, h)) = best {
+            if alternate {
+                return Some(match h {
+                    TransformHandle::TopLeft
+                    | TransformHandle::TopRight
+                    | TransformHandle::BottomLeft
+                    | TransformHandle::BottomRight => PathBoxHit::Rotate,
+                    _ => PathBoxHit::Skew(h),
+                });
+            }
             return Some(PathBoxHit::Handle(h));
         }
 
+        if !alternate {
+            return None;
+        }
         let center_s = c2s(bx.center);
         for &corner in &bx.corners {
             let cs = c2s(corner);
@@ -451,8 +507,14 @@ impl App {
             if !layer.visible {
                 continue;
             }
-            let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type else {
-                continue;
+            let primitive_object;
+            let obj = match &layer.layer_type {
+                LayerType::Vector(VectorGeometry::Path(obj)) => obj,
+                LayerType::Vector(VectorGeometry::Primitive(shape)) => {
+                    primitive_object = shape.to_vector_object(layer.offset);
+                    &primitive_object
+                }
+                _ => continue,
             };
             let Some(inv) = obj.transform.inverse() else {
                 continue;
@@ -494,6 +556,7 @@ impl App {
         if let Some(hit) = self.path_box_hit_at_screen(sx, sy) {
             match hit {
                 PathBoxHit::Rotate => return 6,
+                PathBoxHit::Skew(_) => return 1,
                 // Over the pivot marker → a move cursor (you drag it to relocate
                 // the rotation centre).
                 PathBoxHit::Pivot => return 1,
@@ -552,6 +615,20 @@ impl App {
         let Some(idx) = self.active_path_layer() else {
             return;
         };
+        // Primitive Shapes share the same Move-tool box. Convert only when an
+        // affine handle is actually dragged; merely selecting/clicking the Shape
+        // keeps all of its parametric controls intact.
+        let is_primitive = matches!(
+            self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .layer_stack
+                .layers[idx]
+                .layer_type,
+            LayerType::Vector(VectorGeometry::Primitive(_))
+        );
+        if is_primitive && !self.convert_shape_to_path(idx) {
+            return;
+        }
         // Read the user's stored pivot before the mutable canvas borrow.
         let stored_pivot = self.edit.path_pivot;
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
@@ -577,12 +654,17 @@ impl App {
         let handle = match hit {
             PathBoxHit::Handle(h) => Some(h),
             PathBoxHit::Rotate => None,
+            PathBoxHit::Skew(h) => Some(h),
             // A pivot grab never starts a transform gesture (routed separately).
             PathBoxHit::Pivot => return,
         };
         self.edit.path_transform = Some(PathTransformDrag {
             layer_id,
             handle,
+            skew_handle: match hit {
+                PathBoxHit::Skew(h) => Some(h),
+                _ => None,
+            },
             orig_transform: orig,
             pending: orig,
             local_bounds: lb,
@@ -677,6 +759,7 @@ impl App {
         let handle = match hit {
             PathBoxHit::Handle(h) => Some(h),
             PathBoxHit::Rotate => None,
+            PathBoxHit::Skew(h) => Some(h),
             // A pivot grab never starts a transform gesture (routed separately).
             PathBoxHit::Pivot => return,
         };
@@ -684,6 +767,10 @@ impl App {
         self.edit.path_transform = Some(PathTransformDrag {
             layer_id,
             handle,
+            skew_handle: match hit {
+                PathBoxHit::Skew(h) => Some(h),
+                _ => None,
+            },
             orig_transform: AffineTransform::IDENTITY,
             pending: AffineTransform::IDENTITY,
             local_bounds: b,
@@ -739,11 +826,16 @@ impl App {
             (Point::new(lb.x, cym), "Middle"),
             (Point::new(lb.x + lb.w, cym), "Middle"),
         ];
-        let snap = 7.0 / self.edit.view.zoom.max(1e-4);
+        // The default centre gets a deliberately generous magnetic target so a
+        // relocated pivot is easy to return home. Corners/middles retain a
+        // tighter radius and therefore do not steal nearby free placement.
+        let center_snap = 18.0 / self.edit.view.zoom.max(1e-4);
+        let anchor_snap = 9.0 / self.edit.view.zoom.max(1e-4);
         let mut best: Option<(f32, Point, &'static str)> = None;
-        for (lp, label) in anchors {
+        for (index, (lp, label)) in anchors.into_iter().enumerate() {
             let cp = transform.apply_point(lp);
             let d = (cx - cp.x).hypot(cy - cp.y);
+            let snap = if index == 0 { center_snap } else { anchor_snap };
             if d < snap && best.map_or(true, |(bd, _, _)| d < bd) {
                 best = Some((d, lp, label));
             }
@@ -787,6 +879,43 @@ impl App {
         alt: bool,
     ) -> Option<AffineTransform> {
         let orig = drag.orig_transform;
+        if let Some(h) = drag.skew_handle {
+            let inv = orig.inverse()?;
+            let cl = inv.apply_point(Point::new(cx, cy));
+            let b = drag.local_bounds;
+            let moving = local_handle_point(b, h);
+            let anchor = local_handle_point(b, opposite_handle(h));
+            let (mut shx, mut shy) = (0.0f32, 0.0f32);
+            match h {
+                TransformHandle::TopCenter | TransformHandle::BottomCenter => {
+                    let span = moving.y - anchor.y;
+                    if span.abs() > 1e-3 {
+                        shx = (cl.x - moving.x) / span;
+                    }
+                }
+                TransformHandle::MiddleLeft | TransformHandle::MiddleRight => {
+                    let span = moving.x - anchor.x;
+                    if span.abs() > 1e-3 {
+                        shy = (cl.y - moving.y) / span;
+                    }
+                }
+                _ => return None,
+            }
+            // Keep the opposite edge fixed while the grabbed edge follows the pointer.
+            let shear = AffineTransform {
+                a: 1.0,
+                b: shy,
+                c: shx,
+                d: 1.0,
+                e: 0.0,
+                f: 0.0,
+            };
+            let local = AffineTransform::translate(anchor.x, anchor.y)
+                .then(&shear)
+                .then(&AffineTransform::translate(-anchor.x, -anchor.y));
+            let new = orig.then(&local);
+            return (new.is_finite() && new.determinant().abs() > 1e-6).then_some(new);
+        }
         match drag.handle {
             // Rotate about the box centre (canvas space). Shift snaps to 15°.
             None => {
@@ -1204,6 +1333,7 @@ mod tests {
         PathTransformDrag {
             layer_id: 1,
             handle,
+            skew_handle: None,
             orig_transform: AffineTransform::IDENTITY,
             pending: AffineTransform::IDENTITY,
             local_bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -1237,6 +1367,36 @@ mod tests {
         assert!(close(
             t.apply_point(Point::new(50.0, 0.0)),
             Point::new(100.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn top_middle_skews_horizontally_and_keeps_bottom_edge_fixed() {
+        let mut d = drag(Some(TransformHandle::TopCenter));
+        d.skew_handle = Some(TransformHandle::TopCenter);
+        let t = App::path_transform_target(&d, 75.0, 0.0, false, false).unwrap();
+        assert!(close(
+            t.apply_point(Point::new(0.0, 100.0)),
+            Point::new(0.0, 100.0)
+        ));
+        assert!(close(
+            t.apply_point(Point::new(50.0, 0.0)),
+            Point::new(75.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn right_middle_skews_vertically_and_keeps_left_edge_fixed() {
+        let mut d = drag(Some(TransformHandle::MiddleRight));
+        d.skew_handle = Some(TransformHandle::MiddleRight);
+        let t = App::path_transform_target(&d, 100.0, 80.0, false, false).unwrap();
+        assert!(close(
+            t.apply_point(Point::new(0.0, 0.0)),
+            Point::new(0.0, 0.0)
+        ));
+        assert!(close(
+            t.apply_point(Point::new(100.0, 50.0)),
+            Point::new(100.0, 80.0)
         ));
     }
 
@@ -1395,6 +1555,46 @@ mod tests {
         app.edit.view.offset_x = 0.0;
         app.edit.view.offset_y = 0.0;
         (app, id)
+    }
+
+    #[test]
+    fn primitive_shape_gets_move_box_and_second_click_mode_before_conversion() {
+        use crate::core::canvas::Canvas;
+        use crate::core::shape::{ShapeData, ShapeKind};
+        use crate::core::vector::from_shape::RectCorner;
+        use crate::core::vector::style::VectorStyle;
+
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(300, 300);
+        let canvas = &mut app.docs.documents[0].canvas;
+        let idx = canvas.layer_stack.add_layer(300, 300);
+        let layer = &mut canvas.layer_stack.layers[idx];
+        layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(ShapeData {
+            kind: ShapeKind::Rectangle,
+            x0: 20.0,
+            y0: 30.0,
+            x1: 80.0,
+            y1: 70.0,
+            corner_radius: 0.0,
+            corner_type: RectCorner::Round,
+            sides: 5,
+            star_inner: 0.5,
+            style: VectorStyle::default(),
+        }));
+        layer.selected = true;
+        let id = layer.id;
+        canvas.layer_stack.active_idx = idx;
+        app.edit.tools.select(crate::tools::ToolId::Move);
+
+        assert!(app.active_path_transform_box().is_some());
+        assert!(!app.path_alternate_mode());
+        app.toggle_path_transform_mode();
+        assert!(app.path_alternate_mode());
+        assert_eq!(app.edit.path_rotate_mode, Some(id));
+        assert!(matches!(
+            app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Vector(VectorGeometry::Primitive(_))
+        ));
     }
 
     fn find_layer(app: &App, id: u32) -> &crate::core::layer::Layer {

@@ -30,6 +30,9 @@ pub struct MoveTool {
     /// Set on the release that recorded an Alt+drag duplicate, so the app can
     /// mirror the translation into the unified repeatable step (`last_repeat_transform`).
     pub took_duplicate: bool,
+    /// Consumed by App after a click (without a drag) on an already-selected vector.
+    pub toggle_vector_transform_requested: bool,
+    click_selected_vector: bool,
 
     // --- Snapping (③) ---
     /// Master snap toggle (mirrors UiState.snap_enabled; set by the app each frame).
@@ -71,6 +74,8 @@ impl MoveTool {
             pending_dup_cmd: None,
             last_duplicate_delta: None,
             took_duplicate: false,
+            toggle_vector_transform_requested: false,
+            click_selected_vector: false,
             snap_enabled: true,
             press_cx: 0.0,
             press_cy: 0.0,
@@ -159,6 +164,13 @@ impl MoveTool {
         }
     }
 
+    /// Arm the second-click toggle from App-level vector-model hit testing.
+    /// This supplements the raster-cache bounds check in `on_press`, which can
+    /// be stale for a transformed Path before its asynchronous bake settles.
+    pub fn arm_vector_transform_toggle(&mut self) {
+        self.click_selected_vector = true;
+    }
+
     fn can_move_layer(layer: &crate::core::layer::Layer) -> bool {
         use crate::core::layer::LayerType;
 
@@ -211,6 +223,14 @@ impl Tool for MoveTool {
     fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         let (cx, cy) = (event.canvas_x, event.canvas_y);
         let canvas = ctx.canvas_mut();
+        self.toggle_vector_transform_requested = false;
+        self.click_selected_vector = canvas.layer_stack.layers.iter().any(|layer| {
+            layer.selected
+                && layer.visible
+                && Self::can_move_layer(layer)
+                && matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
+                && Self::point_in_layer_bounds(layer, cx as i32, cy as i32)
+        });
         let mut changed_selection = false;
 
         if canvas.selection.active && canvas.selection.is_selected(cx as u32, cy as u32) {
@@ -615,6 +635,13 @@ impl Tool for MoveTool {
         let dup_cmd = self.pending_dup_cmd.take();
         let duplicated = dup_cmd.is_some();
         let moved = self.total_dx != 0 || self.total_dy != 0;
+        self.toggle_vector_transform_requested = self.click_selected_vector
+            && !moved
+            && !duplicated
+            && !event.shift
+            && !event.ctrl
+            && !event.alt;
+        self.click_selected_vector = false;
         if dup_cmd.is_some() || moved {
             let canvas = ctx.canvas_mut();
             canvas.begin_undo_group("Duplicate & Move");

@@ -717,6 +717,7 @@ pub struct PathTransformDrag {
     pub layer_id: u32,
     /// The grabbed handle. `Some(h)` = scale via that handle; `None` = rotate.
     pub handle: Option<TransformHandle>,
+    pub skew_handle: Option<TransformHandle>,
     /// Object `transform` captured at press (after folding any pending Move
     /// drag). The undo baseline AND the frame every drag frame recomputes from.
     pub orig_transform: crate::core::vector::affine::AffineTransform,
@@ -1207,6 +1208,7 @@ impl App {
                 path_pivot: None,
                 path_pivot_dragging: false,
                 path_pivot_snap: None,
+                path_rotate_mode: None,
                 last_repeat_transform: None,
                 path_dup_before: None,
                 path_gradient_drag: None,

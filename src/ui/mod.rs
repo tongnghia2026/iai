@@ -393,6 +393,8 @@ pub struct TransformOverlayData {
     /// show beside it ("Center" / "Corner" / "Middle"); `None` when it sits free.
     /// The overlay highlights the marker + guides when this is `Some`.
     pub pivot_snap_label: Option<&'static str>,
+    /// Whether this is the Path's second-click rotate/skew handle set.
+    pub alternate_handles: bool,
 }
 
 fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
@@ -2112,70 +2114,111 @@ pub fn build(
             painter.line_segment([cs(c[2].0, c[2].1), cs(c[0].0, c[0].1)], bbox_stroke);
 
             let hs = 4.5;
-            for &(hx, hy) in &ov.handles {
+            for (i, &(hx, hy)) in ov.handles.iter().enumerate() {
                 let sp = cs(hx, hy);
-                let rect = egui::Rect::from_center_size(sp, egui::vec2(hs * 2.0, hs * 2.0));
-                painter.rect_filled(rect, 1.0, handle_fill);
-                painter.rect_stroke(rect, 1.0, border_stroke, egui::StrokeKind::Outside);
+                if ov.alternate_handles {
+                    // Phosphor supplies close matches for Corel's curved rotate
+                    // and two-headed skew marks. Put them just outside the box,
+                    // along the centre-to-handle ray, like the reference chrome.
+                    let center = cs(ov.center.0, ov.center.1);
+                    let ray = sp - center;
+                    let len = ray.length().max(1.0);
+                    let icon_pos = sp + ray / len * 11.0;
+                    let glyph = match i {
+                        0 | 2 | 5 | 7 => ph::ARROW_COUNTER_CLOCKWISE,
+                        1 | 6 => ph::ARROWS_LEFT_RIGHT,
+                        3 | 4 => ph::ARROWS_DOWN_UP,
+                        _ => "",
+                    };
+                    let font = egui::FontId::proportional(if matches!(i, 0 | 2 | 5 | 7) {
+                        20.0
+                    } else {
+                        18.0
+                    });
+                    // Four-way dark halo keeps the white glyph readable over
+                    // both the canvas margin and bright artwork.
+                    for (dx, dy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                        painter.text(
+                            icon_pos + egui::vec2(dx, dy),
+                            egui::Align2::CENTER_CENTER,
+                            glyph,
+                            font.clone(),
+                            egui::Color32::from_black_alpha(230),
+                        );
+                    }
+                    painter.text(
+                        icon_pos,
+                        egui::Align2::CENTER_CENTER,
+                        glyph,
+                        font,
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    let rect = egui::Rect::from_center_size(sp, egui::vec2(hs * 2.0, hs * 2.0));
+                    painter.rect_filled(rect, 1.0, handle_fill);
+                    painter.rect_stroke(rect, 1.0, border_stroke, egui::StrokeKind::Outside);
+                }
             }
 
             // Rotation-pivot marker (⊕). Drawn at the pivot — the box centre by
             // default, or wherever the user dragged the centre of rotation.
-            let cp = cs(ov.pivot.0, ov.pivot.1);
-            if let Some(label) = ov.pivot_snap_label {
-                // Snapped to a box anchor while dragging: bright guides through the
-                // point + an amber marker + a label ("Center"/"Corner"/"Middle"), so
-                // the user knows exactly where a release lands the pivot.
-                let amber = egui::Color32::from_rgb(255, 190, 40);
-                let guide = egui::Stroke::new(
-                    1.0_f32,
-                    egui::Color32::from_rgba_unmultiplied(255, 190, 40, 180),
-                );
-                painter.line_segment(
-                    [
-                        egui::pos2(clip_rect.left(), cp.y),
-                        egui::pos2(clip_rect.right(), cp.y),
-                    ],
-                    guide,
-                );
-                painter.line_segment(
-                    [
-                        egui::pos2(cp.x, clip_rect.top()),
-                        egui::pos2(cp.x, clip_rect.bottom()),
-                    ],
-                    guide,
-                );
-                painter.circle_filled(cp, 6.0, amber);
-                painter.circle_stroke(cp, 6.0, border_stroke);
-                let lp = egui::pos2(cp.x + 10.0, cp.y - 10.0);
-                let font = egui::FontId::proportional(12.0);
-                for (dx, dy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0_f32), (0.0, 1.0)] {
+            if ov.alternate_handles {
+                let cp = cs(ov.pivot.0, ov.pivot.1);
+                if let Some(label) = ov.pivot_snap_label {
+                    // Snapped to a box anchor while dragging: bright guides through the
+                    // point + an amber marker + a label ("Center"/"Corner"/"Middle"), so
+                    // the user knows exactly where a release lands the pivot.
+                    let amber = egui::Color32::from_rgb(255, 190, 40);
+                    let guide = egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgba_unmultiplied(255, 190, 40, 180),
+                    );
+                    painter.line_segment(
+                        [
+                            egui::pos2(clip_rect.left(), cp.y),
+                            egui::pos2(clip_rect.right(), cp.y),
+                        ],
+                        guide,
+                    );
+                    painter.line_segment(
+                        [
+                            egui::pos2(cp.x, clip_rect.top()),
+                            egui::pos2(cp.x, clip_rect.bottom()),
+                        ],
+                        guide,
+                    );
+                    painter.circle_filled(cp, 6.0, amber);
+                    painter.circle_stroke(cp, 6.0, border_stroke);
+                    let lp = egui::pos2(cp.x + 10.0, cp.y - 10.0);
+                    let font = egui::FontId::proportional(12.0);
+                    for (dx, dy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0_f32), (0.0, 1.0)] {
+                        painter.text(
+                            egui::pos2(lp.x + dx, lp.y + dy),
+                            egui::Align2::LEFT_BOTTOM,
+                            label,
+                            font.clone(),
+                            egui::Color32::from_black_alpha(200),
+                        );
+                    }
                     painter.text(
-                        egui::pos2(lp.x + dx, lp.y + dy),
+                        lp,
                         egui::Align2::LEFT_BOTTOM,
                         label,
-                        font.clone(),
-                        egui::Color32::from_black_alpha(200),
+                        font,
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    painter.circle_filled(cp, 5.0, center_fill);
+                    painter.circle_stroke(cp, 5.0, border_stroke);
+                    painter.line_segment(
+                        [egui::pos2(cp.x - 4.0, cp.y), egui::pos2(cp.x + 4.0, cp.y)],
+                        egui::Stroke::new(1.0_f32, handle_border),
+                    );
+                    painter.line_segment(
+                        [egui::pos2(cp.x, cp.y - 4.0), egui::pos2(cp.x, cp.y + 4.0)],
+                        egui::Stroke::new(1.0_f32, handle_border),
                     );
                 }
-                painter.text(
-                    lp,
-                    egui::Align2::LEFT_BOTTOM,
-                    label,
-                    font,
-                    egui::Color32::WHITE,
-                );
-            } else {
-                painter.circle_filled(cp, 5.0, center_fill);
-                painter.circle_stroke(cp, 5.0, border_stroke);
-                painter.line_segment(
-                    [egui::pos2(cp.x - 4.0, cp.y), egui::pos2(cp.x + 4.0, cp.y)],
-                    egui::Stroke::new(1.0_f32, handle_border),
-                );
-                painter.line_segment(
-                    [egui::pos2(cp.x, cp.y - 4.0), egui::pos2(cp.x, cp.y + 4.0)],
-                    egui::Stroke::new(1.0_f32, handle_border),
-                );
             }
 
             if data.tool.transform_cursor_hint == 1 {

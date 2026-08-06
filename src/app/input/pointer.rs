@@ -416,6 +416,7 @@ impl App {
                                     // transforms a fresh COPY (the repeat sample).
                                     let dup = match hit {
                                         PathBoxHit::Rotate => self.edit.input.alt_held,
+                                        PathBoxHit::Skew(_) => false,
                                         PathBoxHit::Handle(_) => self.edit.input.ctrl_held,
                                         PathBoxHit::Pivot => false,
                                     };
@@ -586,6 +587,15 @@ impl App {
                             } else {
                                 let event = self.tool_event();
                                 let active_tool = self.edit.tools.active_id();
+                                // Use the editable vector model for the second-click
+                                // candidate. Raster bounds can lag behind an affine
+                                // transform, which previously made this click silently
+                                // fail and left the newly-hidden pivot unreachable.
+                                let arm_path_toggle = active_tool == ToolId::Move
+                                    && self.active_path_layer().is_some_and(|active| {
+                                        self.path_layer_hit_at(event.canvas_x, event.canvas_y)
+                                            == Some(active)
+                                    });
                                 let tool_resp = {
                                     let mut ctx = ToolCtx::new(
                                         &mut self.docs.documents[self.docs.active_doc_idx],
@@ -597,6 +607,12 @@ impl App {
                                     );
                                     self.edit.tools.on_press(event, &mut ctx)
                                 };
+                                if arm_path_toggle {
+                                    self.edit
+                                        .tools
+                                        .move_tool_mut()
+                                        .arm_vector_transform_toggle();
+                                }
                                 if let Some(msg) = tool_resp.status {
                                     self.shell.status_msg = msg.to_string();
                                 }
@@ -864,6 +880,15 @@ impl App {
                                 // Mirror an Alt+drag duplicate into the unified
                                 // repeatable step so Repeat / Ctrl+D continues the row.
                                 if active_tool == ToolId::Move {
+                                    let toggle = {
+                                        let mt = self.edit.tools.move_tool_mut();
+                                        let value = mt.toggle_vector_transform_requested;
+                                        mt.toggle_vector_transform_requested = false;
+                                        value
+                                    };
+                                    if toggle {
+                                        self.toggle_path_transform_mode();
+                                    }
                                     let dup = {
                                         let mt = self.edit.tools.move_tool_mut();
                                         if mt.took_duplicate {
