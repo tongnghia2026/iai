@@ -232,6 +232,21 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
+                if pressed
+                    && !repeat
+                    && !self.edit.input.alt_held
+                    && !self.edit.input.ctrl_held
+                    && self.can_trim_active_vector() =>
+            {
+                // Vector layer + active selection: Delete TRIMS the selected
+                // region out of the shape (reuses the boolean Trim engine) rather
+                // than clearing raster pixels, which is a no-op on vector layers.
+                self.trim_active_vector_by_selection();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
                 if pressed && !repeat =>
             {
                 if self.edit.input.alt_held {

@@ -261,6 +261,42 @@ impl Selection {
         self.bbox_dirty = true;
     }
 
+    /// True when the whole bounding box is solidly selected — i.e. the selection
+    /// is an axis-aligned rectangle (a marquee), not a lasso/ellipse/feathered
+    /// mask. Gates vector Trim, which in v1 only cuts a rectangular region (any
+    /// other shape would over-cut to its bounding box). Rectangularity is a
+    /// property of the mask itself, so `offset` is irrelevant and the cached
+    /// mask-space bbox is scanned directly. O(bbox area); runs on a Delete
+    /// keypress, not per frame.
+    pub fn is_solid_rect(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        if self.bbox_dirty {
+            self.recompute_bbox();
+        }
+        let (x0, y0, x1, y1) = (
+            self.cached_x0,
+            self.cached_y0,
+            self.cached_x1,
+            self.cached_y1,
+        );
+        if x1 <= x0 || y1 <= y0 {
+            return false;
+        }
+        let w = self.width;
+        for y in y0..y1 {
+            let row = (y * w) as usize;
+            for x in x0..x1 {
+                let i = row + x as usize;
+                if i >= self.mask.len() || self.mask[i] <= 127 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn recompute_bbox(&mut self) {
         use rayon::prelude::*;
         let w = self.width as usize;

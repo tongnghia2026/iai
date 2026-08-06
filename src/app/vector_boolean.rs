@@ -15,7 +15,7 @@ use super::state::App;
 use crate::core::command::LayerStructureCommand;
 use crate::core::layer::{Layer, LayerType};
 use crate::core::vector::affine::AffineTransform;
-use crate::core::vector::boolean::{boolean_many, intersect_overlaps, BooleanOp};
+use crate::core::vector::boolean::{boolean, boolean_many, intersect_overlaps, BooleanOp};
 use crate::core::vector::from_shape;
 use crate::core::vector::object::{VectorGeometry, VectorObjectData};
 use crate::core::vector::path::PathData;
@@ -316,6 +316,137 @@ impl App {
                 "Simplified the overlap — {} shapes remain",
                 indices.len() - removed_empty
             ),
+        };
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
+    /// Whether the active layer can be trimmed by the current selection: there is
+    /// an active selection AND the active layer is an unlocked, non-background
+    /// vector layer. Gates the Delete-key Trim branch (kept cheap — no mask scan).
+    pub fn can_trim_active_vector(&self) -> bool {
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        if !canvas.selection.active {
+            return false;
+        }
+        match canvas.layer_stack.layers.get(canvas.layer_stack.active_idx) {
+            Some(l) => {
+                !l.locked && !l.is_background && matches!(l.layer_type, LayerType::Vector(_))
+            }
+            None => false,
+        }
+    }
+
+    /// Trim (subtract) the current RECTANGULAR selection out of the active vector
+    /// layer's fill — the vector-layer meaning of Delete-with-a-selection. The
+    /// cutter is the marquee rectangle; the kept shape stays an editable curve
+    /// path (re-fit by the boolean engine, exactly like the object Trim in
+    /// [`App::apply_boolean`]). v1 handles a SOLID rectangular selection only; a
+    /// lasso/ellipse mask would over-cut to its bounding box, so those are
+    /// declined with a hint rather than silently mangling the shape. One undo
+    /// step. Returns true when it handled the key (including the decline hint), so
+    /// the caller does not fall through to whole-layer delete.
+    pub fn trim_active_vector_by_selection(&mut self) -> bool {
+        let doc = self.docs.active_doc_idx;
+        let target_idx = self.docs.documents[doc].canvas.layer_stack.active_idx;
+
+        // Guard: the active layer must be an unlocked, non-background vector.
+        match self.docs.documents[doc]
+            .canvas
+            .layer_stack
+            .layers
+            .get(target_idx)
+        {
+            Some(l) if matches!(l.layer_type, LayerType::Vector(_)) => {
+                if l.locked || l.is_background {
+                    self.shell.status_msg = "Layer is locked".to_string();
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+
+        // v1 supports a solid rectangular marquee only.
+        let rect = {
+            let canvas = &mut self.docs.documents[doc].canvas;
+            if !canvas.selection.active {
+                return false;
+            }
+            if !canvas.selection.is_solid_rect() {
+                self.shell.status_msg =
+                    "Trim vector chỉ hỗ trợ vùng chọn chữ nhật (dùng công cụ chọn khung)"
+                        .to_string();
+                return true;
+            }
+            canvas.selection.bounding_box()
+        };
+        let (x0, y0, x1, y1) = rect;
+        if x1 - x0 < 1.0 || y1 - y0 < 1.0 {
+            return false;
+        }
+
+        // Reduce the target to a canvas-space fill path, then subtract the rect.
+        let Some((path, style)) =
+            layer_canvas_path(&self.docs.documents[doc].canvas.layer_stack.layers[target_idx])
+        else {
+            return false;
+        };
+        let cutter = from_shape::rect_path(x0, y0, x1, y1, 0.0);
+        let result = boolean(&path, &cutter, BooleanOp::Difference)
+            .filter(|r| !r.contours.is_empty())
+            .map(|r| VectorObjectData::new(r, style, AffineTransform::IDENTITY));
+
+        if let Some(obj) = &result {
+            if obj.validate().is_err() {
+                self.shell.status_msg = "Invalid result".to_string();
+                return true;
+            }
+        }
+
+        let (cw, ch) = {
+            let d = &self.docs.documents[doc];
+            (d.canvas.width, d.canvas.height)
+        };
+        let canvas = &mut self.docs.documents[doc].canvas;
+        let before = LayerStructureCommand::capture_before("Trim", &canvas.layer_stack, cw, ch);
+
+        let removed = result.is_none();
+        match result {
+            Some(object) => {
+                crate::core::command_vector::apply_object_to_layer(
+                    &mut canvas.layer_stack.layers[target_idx],
+                    object,
+                );
+                canvas.layer_stack.active_idx = target_idx;
+            }
+            None => {
+                // The rectangle covered the whole shape — drop the now-empty layer
+                // (matches the object Trim, which removes a fully-trimmed target).
+                canvas.layer_stack.layers.remove(target_idx);
+                canvas.layer_stack.active_idx =
+                    target_idx.min(canvas.layer_stack.layers.len().saturating_sub(1));
+            }
+        }
+        let active = canvas.layer_stack.active_idx;
+        for (i, layer) in canvas.layer_stack.layers.iter_mut().enumerate() {
+            layer.selected = i == active;
+        }
+
+        // CMYK: re-derive ink planes for the edited Path raster from the RGB mirror.
+        canvas.reconcile_path_ink();
+        canvas.layer_revision += 1;
+
+        let mut cmd = before;
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
+
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = if removed {
+            "Trimmed the whole shape away".to_string()
+        } else {
+            "Trimmed the selected region".to_string()
         };
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -645,6 +776,129 @@ mod tests {
             (area - 1600.0).abs() < 200.0,
             "three-way simplify bottom area {area}"
         );
+    }
+
+    /// One rectangle-primitive vector layer on a 200×200 canvas, made active,
+    /// with a rectangular marquee selection already set. Returns the app and the
+    /// active layer index.
+    fn app_with_one_rect_and_rect_selection(
+        shape: (f32, f32, f32, f32),
+        sel: (u32, u32, u32, u32),
+    ) -> (App, usize) {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let canvas = &mut app.docs.documents[0].canvas;
+        let idx = canvas.layer_stack.add_layer(200, 200);
+        let layer = &mut canvas.layer_stack.layers[idx];
+        layer.offset = (0, 0);
+        layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(rect_shape(
+            shape.0, shape.1, shape.2, shape.3,
+        )));
+        layer.selected = true;
+        canvas.layer_stack.active_idx = idx;
+        canvas.selection.select_rect(sel.0, sel.1, sel.2, sel.3);
+        (app, idx)
+    }
+
+    #[test]
+    fn trim_by_rect_selection_cuts_the_region_from_active_vector() {
+        // 100×100 rect; marquee over the right half (x 70..120, y 20..120).
+        let (mut app, idx) =
+            app_with_one_rect_and_rect_selection((20.0, 20.0, 120.0, 120.0), (70, 20, 120, 120));
+        let before = app.docs.documents[0].canvas.layer_stack.layers.len();
+        assert!(
+            app.trim_active_vector_by_selection(),
+            "{}",
+            app.shell.status_msg
+        );
+        // Partial trim keeps the layer; it is now an editable Path.
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before
+        );
+        let l = &app.docs.documents[0].canvas.layer_stack.layers[idx];
+        assert!(
+            matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))),
+            "trimmed primitive should become a Path"
+        );
+        // Remaining = left half: 50 wide × 100 tall = 5000.
+        let area = active_path_area(&app);
+        assert!((area - 5000.0).abs() < 400.0, "trim area {area}");
+    }
+
+    #[test]
+    fn trim_covering_the_whole_shape_removes_the_layer() {
+        let (mut app, _idx) =
+            app_with_one_rect_and_rect_selection((20.0, 20.0, 120.0, 120.0), (0, 0, 200, 200));
+        let before = app.docs.documents[0].canvas.layer_stack.layers.len();
+        assert!(
+            app.trim_active_vector_by_selection(),
+            "{}",
+            app.shell.status_msg
+        );
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before - 1,
+            "a fully-covered shape is removed"
+        );
+    }
+
+    #[test]
+    fn trim_declines_a_non_rectangular_selection() {
+        let (mut app, idx) =
+            app_with_one_rect_and_rect_selection((20.0, 20.0, 120.0, 120.0), (30, 30, 110, 110));
+        // Poke a hole in the middle of the marquee so it is no longer a solid rect.
+        {
+            let sel = &mut app.docs.documents[0].canvas.selection;
+            let w = sel.width;
+            sel.mask[(60 * w + 60) as usize] = 0;
+            sel.mark_bbox_dirty();
+        }
+        let before = app.docs.documents[0].canvas.layer_stack.layers.len();
+        // Handled (returns true) but the geometry is untouched — still a Primitive.
+        assert!(app.trim_active_vector_by_selection());
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before
+        );
+        let l = &app.docs.documents[0].canvas.layer_stack.layers[idx];
+        assert!(
+            matches!(
+                l.layer_type,
+                LayerType::Vector(VectorGeometry::Primitive(_))
+            ),
+            "a non-rectangular selection must not alter the shape"
+        );
+    }
+
+    #[test]
+    fn trim_then_undo_restores_the_original_primitive() {
+        let (mut app, idx) =
+            app_with_one_rect_and_rect_selection((20.0, 20.0, 120.0, 120.0), (70, 20, 120, 120));
+        assert!(app.trim_active_vector_by_selection());
+        // After the trim the layer is a Path.
+        assert!(matches!(
+            app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Vector(VectorGeometry::Path(_))
+        ));
+        app.docs.documents[0].canvas.undo().expect("undo");
+        // Undo brings back the original parametric rectangle, unchanged.
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Vector(VectorGeometry::Primitive(s)) => {
+                assert!(
+                    (s.x0 - 20.0).abs() < 0.5
+                        && (s.y0 - 20.0).abs() < 0.5
+                        && (s.x1 - 120.0).abs() < 0.5
+                        && (s.y1 - 120.0).abs() < 0.5,
+                    "restored rect span ({},{},{},{})",
+                    s.x0,
+                    s.y0,
+                    s.x1,
+                    s.y1
+                );
+            }
+            _ => panic!("undo should restore the original Primitive shape"),
+        }
     }
 
     #[test]
