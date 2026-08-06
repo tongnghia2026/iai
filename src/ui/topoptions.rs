@@ -1724,14 +1724,6 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.tool.set_move_auto_select = Some(auto_select ^ ctrl_held);
     }
     ui.separator();
-    let mut show_transform = data.tool.move_show_transform;
-    if ui
-        .checkbox(&mut show_transform, "Show Transform Controls")
-        .changed()
-    {
-        actions.tool.set_move_show_transform = Some(show_transform);
-    }
-    ui.separator();
     align_button(
         ui,
         actions,
@@ -1855,23 +1847,14 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
 }
 
-/// Compact Fill/Outline/Width quick-access for the crowded Move options bar.
-/// Full styling (gradient ramp, dash, overprint, fill/dash kinds) lives in the
-/// Color panel's Object section, so this row stays short. Same `path_*` actions
-/// as the panel, so the two surfaces stay in sync.
+/// Compact outline width + cap/join + arrowhead quick-access for the Move
+/// options bar. Enabling/disabling Fill and Outline and picking their colours
+/// lives in the Color panel's Object section and the right-edge palette, so this
+/// row stays lean. Same `path_*` actions as the panel, so they stay in sync.
 fn path_style_quick(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let Some(style) = data.tool.path_style else {
         return;
     };
-    let mut fill = style.fill_enabled;
-    if ui.checkbox(&mut fill, "Fill").changed() {
-        actions.tool.set_path_fill_enabled = Some(fill);
-    }
-    ui.separator();
-    let mut stroke = style.stroke_enabled;
-    if ui.checkbox(&mut stroke, "Outline").changed() {
-        actions.tool.set_path_stroke_enabled = Some(stroke);
-    }
     ui.label("Width:");
     let mut w = style.stroke_width;
     let resp = ui.add(
