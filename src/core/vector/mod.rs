@@ -30,5 +30,6 @@ pub mod object;
 pub mod ops;
 pub mod path;
 pub mod raster;
+pub mod segment_cut;
 pub mod stroke;
 pub mod style;

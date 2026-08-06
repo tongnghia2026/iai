@@ -110,6 +110,44 @@ impl BrushStroke {
         0.5 * self.base_width.max(0.0) * self.max_ratio()
     }
 
+    /// The width profile restricted to the arc-length sub-range `[a0,a1]` of the
+    /// original stroke and re-normalized to `[0,1]` — used when an open stroke is
+    /// cut into pieces so each piece keeps the correct taper. `base_width` and
+    /// `cap` carry over; a uniform (empty) profile stays uniform.
+    pub fn sliced(&self, a0: f32, a1: f32) -> BrushStroke {
+        let (a0, a1) = (a0.clamp(0.0, 1.0), a1.clamp(0.0, 1.0));
+        if self.profile.is_empty() || (a1 - a0) <= 1e-6 {
+            return BrushStroke {
+                base_width: self.base_width,
+                profile: self.profile.clone(),
+                cap: self.cap,
+            };
+        }
+        let span = a1 - a0;
+        let mut profile = Vec::with_capacity(self.profile.len() + 2);
+        profile.push(WidthStop {
+            t: 0.0,
+            width: self.width_ratio_at(a0),
+        });
+        for s in &self.profile {
+            if s.t > a0 + 1e-6 && s.t < a1 - 1e-6 {
+                profile.push(WidthStop {
+                    t: ((s.t - a0) / span).clamp(0.0, 1.0),
+                    width: s.width,
+                });
+            }
+        }
+        profile.push(WidthStop {
+            t: 1.0,
+            width: self.width_ratio_at(a1),
+        });
+        BrushStroke {
+            base_width: self.base_width,
+            profile,
+            cap: self.cap,
+        }
+    }
+
     /// Whether the stroke would paint anything (a positive width). Paint
     /// visibility is checked separately on the object's fill.
     pub fn is_visible(&self) -> bool {
@@ -527,6 +565,30 @@ mod tests {
         assert_eq!(b.width_ratio_at(2.0), 1.0);
         assert!((b.half_width_at(1.0) - 5.0).abs() < 1e-4);
         assert!((b.max_half_width() - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn sliced_profile_remaps_to_local_arc() {
+        // A linear taper 0→1 over the whole stroke.
+        let b = BrushStroke {
+            base_width: 10.0,
+            profile: vec![
+                WidthStop { t: 0.0, width: 0.0 },
+                WidthStop { t: 1.0, width: 1.0 },
+            ],
+            cap: LineCap::Round,
+        };
+        // The second half [0.5,1.0]: local 0 = width 0.5, local 1 = width 1.0.
+        let s = b.sliced(0.5, 1.0);
+        assert!((s.width_ratio_at(0.0) - 0.5).abs() < 1e-4);
+        assert!((s.width_ratio_at(1.0) - 1.0).abs() < 1e-4);
+        // Local midpoint maps to original arc 0.75.
+        assert!((s.width_ratio_at(0.5) - 0.75).abs() < 1e-4);
+        assert!(s.validate().is_ok());
+        // A uniform (empty) profile stays uniform when sliced.
+        let u = BrushStroke::uniform(5.0, LineCap::Round).sliced(0.2, 0.6);
+        assert_eq!(u.width_ratio_at(0.3), 1.0);
+        assert!(u.validate().is_ok());
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::core::command::LayerStructureCommand;
 use crate::core::layer::{Layer, LayerType};
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::boolean::{boolean, boolean_many, intersect_overlaps, BooleanOp};
+use crate::core::vector::brush::BrushStroke;
 use crate::core::vector::from_shape;
 use crate::core::vector::object::{VectorGeometry, VectorObjectData};
 use crate::core::vector::path::PathData;
@@ -67,6 +68,22 @@ fn layer_canvas_path(layer: &Layer) -> Option<(PathData, VectorStyle)> {
         }
         _ => None,
     }
+}
+
+/// Like [`layer_canvas_path`] but also returns the object's Vector Brush (its
+/// width scaled into canvas units) when the layer is a brush stroke, so an
+/// open-stroke cut can preserve the variable width. `None` for non-vector layers.
+fn layer_canvas_object(layer: &Layer) -> Option<(PathData, VectorStyle, Option<BrushStroke>)> {
+    let (path, style) = layer_canvas_path(layer)?;
+    let brush = match &layer.layer_type {
+        LayerType::Vector(VectorGeometry::Path(obj)) => obj.brush.as_ref().map(|b| BrushStroke {
+            base_width: b.base_width * obj.transform_scale(),
+            profile: b.profile.clone(),
+            cap: b.cap,
+        }),
+        _ => None,
+    };
+    Some((path, style, brush))
 }
 
 impl App {
@@ -339,16 +356,25 @@ impl App {
         }
     }
 
-    /// Trim (subtract) the current RECTANGULAR selection out of the active vector
-    /// layer's fill — the vector-layer meaning of Delete-with-a-selection. The
-    /// cutter is the marquee rectangle; the kept shape stays an editable curve
-    /// path (re-fit by the boolean engine, exactly like the object Trim in
-    /// [`App::apply_boolean`]). v1 handles a SOLID rectangular selection only; a
-    /// lasso/ellipse mask would over-cut to its bounding box, so those are
-    /// declined with a hint rather than silently mangling the shape. One undo
-    /// step. Returns true when it handled the key (including the decline hint), so
-    /// the caller does not fall through to whole-layer delete.
+    /// Trim the active vector layer with the current selection — the vector-layer
+    /// meaning of Delete-with-a-selection.
+    ///
+    /// CLOSED (filled / outline) contours are carved by the boolean Difference
+    /// against a cutter built from the selection: a solid rectangular marquee maps
+    /// exactly to its bounding box, while an ellipse / lasso / wand selection is
+    /// traced from its coverage mask into a smooth curved cutter. The kept shape
+    /// stays an editable curve path (re-fit by the boolean engine, like the object
+    /// Trim in [`App::apply_boolean`]).
+    ///
+    /// OPEN contours (pen lines, the Line primitive, Vector Brush centerlines) are
+    /// cut where they cross the selection into separate open sub-paths; a cut
+    /// Vector Brush keeps its variable width (profile re-sliced per piece), each
+    /// piece on its own layer. One undo step. Returns true when it handled the key.
     pub fn trim_active_vector_by_selection(&mut self) -> bool {
+        use crate::core::geometry::Point;
+        use crate::core::vector::path::{Contour, FillRule};
+        use crate::core::vector::segment_cut::{cut_open_contour, OpenPiece};
+
         let doc = self.docs.active_doc_idx;
         let target_idx = self.docs.documents[doc].canvas.layer_stack.active_idx;
 
@@ -368,6 +394,17 @@ impl App {
             _ => return false,
         }
 
+        // Raster bounds of the active layer — a cheap overlap gate.
+        let layer_bounds = {
+            let l = &self.docs.documents[doc].canvas.layer_stack.layers[target_idx];
+            (
+                l.offset.0 as f32,
+                l.offset.1 as f32,
+                (l.offset.0 + l.width as i32) as f32,
+                (l.offset.1 + l.height as i32) as f32,
+            )
+        };
+
         // Build the cutter from the selection: a solid rectangular marquee maps
         // exactly to its bounding box; any other shape (ellipse / lasso / wand) is
         // traced from its coverage mask into a smooth curved cutter.
@@ -379,6 +416,12 @@ impl App {
             let (bx0, by0, bx1, by1) = canvas.selection.bounding_box();
             if bx1 - bx0 < 1.0 || by1 - by0 < 1.0 {
                 return false;
+            }
+            // Nothing to do if the selection doesn't overlap the shape at all.
+            let (lx0, ly0, lx1, ly1) = layer_bounds;
+            if bx1 <= lx0 || bx0 >= lx1 || by1 <= ly0 || by0 >= ly1 {
+                self.shell.status_msg = "Selection doesn't overlap the shape".to_string();
+                return true;
             }
             if canvas.selection.is_solid_rect() {
                 from_shape::rect_path(bx0, by0, bx1, by1, 0.0)
@@ -404,32 +447,146 @@ impl App {
             }
         };
 
-        // Reduce the target to a canvas-space fill path, then subtract the cutter.
-        let Some((path, style)) =
-            layer_canvas_path(&self.docs.documents[doc].canvas.layer_stack.layers[target_idx])
+        // The active object in canvas space: fill path, style, and (canvas-scaled)
+        // brush when it is a Vector Brush stroke.
+        let Some((path, style, brush)) =
+            layer_canvas_object(&self.docs.documents[doc].canvas.layer_stack.layers[target_idx])
         else {
             return false;
         };
-        let result = boolean(&path, &cutter, BooleanOp::Difference)
-            .filter(|r| !r.contours.is_empty())
-            .map(|r| VectorObjectData::new(r, style, AffineTransform::IDENTITY));
 
-        if let Some(obj) = &result {
-            if obj.validate().is_err() {
-                self.shell.status_msg = "Invalid result".to_string();
-                return true;
+        // Partition into CLOSED contours (carved by the boolean) and OPEN contours
+        // (cut into pieces where they cross the selection).
+        let mut closed: Vec<Contour> = Vec::new();
+        let mut open: Vec<Contour> = Vec::new();
+        for c in &path.contours {
+            if c.closed {
+                closed.push(c.clone());
+            } else {
+                open.push(c.clone());
             }
         }
+
+        // Carve the closed part with the cutter.
+        let had_closed = !closed.is_empty();
+        let mut closed_result: Vec<Contour> = Vec::new();
+        if had_closed {
+            let closed_path = PathData::new(closed, path.fill_rule);
+            if let Some(r) = boolean(&closed_path, &cutter, BooleanOp::Difference)
+                .filter(|r| !r.contours.is_empty())
+            {
+                closed_result = r.contours;
+            }
+        }
+
+        // Cut the open contours against the true selection region.
+        let open_pieces: Vec<OpenPiece> = {
+            let sel = &self.docs.documents[doc].canvas.selection;
+            let inside = |p: Point| {
+                if p.x < 0.0 || p.y < 0.0 {
+                    false
+                } else {
+                    sel.is_selected(p.x.round() as u32, p.y.round() as u32)
+                }
+            };
+            open.iter()
+                .flat_map(|c| cut_open_contour(c, &inside))
+                .collect()
+        };
 
         let (cw, ch) = {
             let d = &self.docs.documents[doc];
             (d.canvas.width, d.canvas.height)
         };
+
+        // ── Vector Brush: each surviving piece becomes its own brush layer, so the
+        //    variable width is preserved (the ribbon rasteriser is one-contour). ──
+        if let Some(canvas_brush) = brush {
+            let canvas = &mut self.docs.documents[doc].canvas;
+            let before = LayerStructureCommand::capture_before("Trim", &canvas.layer_stack, cw, ch);
+            let orig_id = canvas.layer_stack.layers[target_idx].id;
+            let template = canvas.layer_stack.layers[target_idx].clone();
+            let removed = open_pieces.is_empty();
+
+            canvas.layer_stack.layers.remove(target_idx);
+            for (k, piece) in open_pieces.iter().enumerate() {
+                let mut nl = template.clone();
+                nl.id = if k == 0 {
+                    orig_id
+                } else {
+                    let id = canvas.layer_stack.next_id();
+                    canvas.layer_stack.set_next_id(id + 1);
+                    id
+                };
+                nl.mask = None;
+                let sliced = canvas_brush.sliced(piece.arc0, piece.arc1);
+                let obj = VectorObjectData::new_brush(
+                    PathData::new(vec![piece.contour.clone()], FillRule::NonZero),
+                    style,
+                    AffineTransform::IDENTITY,
+                    sliced,
+                );
+                crate::core::command_vector::apply_object_to_layer(&mut nl, obj);
+                let at = (target_idx + k).min(canvas.layer_stack.layers.len());
+                canvas.layer_stack.layers.insert(at, nl);
+            }
+            canvas.layer_stack.active_idx =
+                target_idx.min(canvas.layer_stack.layers.len().saturating_sub(1));
+            let active = canvas.layer_stack.active_idx;
+            for (i, layer) in canvas.layer_stack.layers.iter_mut().enumerate() {
+                layer.selected = i == active;
+            }
+            canvas.reconcile_path_ink();
+            canvas.layer_revision += 1;
+            let mut cmd = before;
+            cmd.capture_after(&canvas.layer_stack, cw, ch);
+            canvas.record(Box::new(cmd));
+
+            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            self.shell.status_msg = if removed {
+                "Trimmed the whole stroke away".to_string()
+            } else {
+                format!("Cut the stroke into {} piece(s)", open_pieces.len())
+            };
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return true;
+        }
+
+        // ── Plain path: one layer holding the carved closed part plus every open
+        //    stroke piece (multiple open sub-paths coexist on one layer). ──
+        let mut result_contours = closed_result;
+        for piece in &open_pieces {
+            result_contours.push(piece.contour.clone());
+        }
+        // The carved closed part relies on EvenOdd (holes); open strokes don't fill,
+        // so EvenOdd is safe for them too. With no closed part, keep the original.
+        let result_fill = if had_closed {
+            FillRule::EvenOdd
+        } else {
+            path.fill_rule
+        };
+
+        let object = if result_contours.is_empty() {
+            None
+        } else {
+            let obj = VectorObjectData::new(
+                PathData::new(result_contours, result_fill),
+                style,
+                AffineTransform::IDENTITY,
+            );
+            if obj.validate().is_err() {
+                self.shell.status_msg = "Invalid result".to_string();
+                return true;
+            }
+            Some(obj)
+        };
+
         let canvas = &mut self.docs.documents[doc].canvas;
         let before = LayerStructureCommand::capture_before("Trim", &canvas.layer_stack, cw, ch);
-
-        let removed = result.is_none();
-        match result {
+        let removed = object.is_none();
+        match object {
             Some(object) => {
                 crate::core::command_vector::apply_object_to_layer(
                     &mut canvas.layer_stack.layers[target_idx],
@@ -438,7 +595,7 @@ impl App {
                 canvas.layer_stack.active_idx = target_idx;
             }
             None => {
-                // The rectangle covered the whole shape — drop the now-empty layer
+                // The selection covered the whole shape — drop the now-empty layer
                 // (matches the object Trim, which removes a fully-trimmed target).
                 canvas.layer_stack.layers.remove(target_idx);
                 canvas.layer_stack.active_idx =
@@ -475,9 +632,12 @@ impl App {
 mod tests {
     use super::*;
     use crate::core::canvas::Canvas;
+    use crate::core::geometry::Point;
     use crate::core::shape::{ShapeData, ShapeKind};
+    use crate::core::vector::color::ColorValue;
     use crate::core::vector::flatten::flatten_path;
-    use crate::core::vector::path::FillRule;
+    use crate::core::vector::path::{Contour, FillRule, Node};
+    use crate::core::vector::style::{LineCap, Paint};
 
     fn rect_shape(x0: f32, y0: f32, x1: f32, y1: f32) -> ShapeData {
         ShapeData {
@@ -931,6 +1091,131 @@ mod tests {
             }
             _ => panic!("undo should restore the original Primitive shape"),
         }
+    }
+
+    /// An open stroked line as a Path layer on a 200×200 canvas, made active.
+    /// Built through `apply_object_to_layer` so `offset` matches the raster origin
+    /// (the delta-0 invariant the trim relies on).
+    fn app_with_open_line(a: (f32, f32), b: (f32, f32)) -> (App, usize) {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let canvas = &mut app.docs.documents[0].canvas;
+        let idx = canvas.layer_stack.add_layer(200, 200);
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(a.0, a.1)),
+                    Node::sharp(Point::new(b.0, b.1)),
+                ],
+                false,
+            )],
+            FillRule::NonZero,
+        );
+        let mut style = VectorStyle::default();
+        style.fill = Paint::None;
+        style.stroke = Paint::Solid(ColorValue::BLACK);
+        style.stroke_style.width = 3.0;
+        let obj = VectorObjectData::new(path, style, AffineTransform::IDENTITY);
+        crate::core::command_vector::apply_object_to_layer(
+            &mut canvas.layer_stack.layers[idx],
+            obj,
+        );
+        canvas.layer_stack.layers[idx].selected = true;
+        canvas.layer_stack.active_idx = idx;
+        (app, idx)
+    }
+
+    #[test]
+    fn trim_open_line_splits_into_two_pieces() {
+        let (mut app, idx) = app_with_open_line((20.0, 100.0), (180.0, 100.0));
+        // A rectangular selection over the middle of the line.
+        app.docs.documents[0]
+            .canvas
+            .selection
+            .select_rect(90, 90, 110, 110);
+        assert!(
+            app.trim_active_vector_by_selection(),
+            "{}",
+            app.shell.status_msg
+        );
+        let l = &app.docs.documents[0].canvas.layer_stack.layers[idx];
+        let LayerType::Vector(VectorGeometry::Path(obj)) = &l.layer_type else {
+            panic!("active layer is not a Path");
+        };
+        assert_eq!(
+            obj.path.contours.len(),
+            2,
+            "the open line is cut into two open sub-paths"
+        );
+        assert!(
+            obj.path.contours.iter().all(|c| !c.closed),
+            "both pieces stay open"
+        );
+    }
+
+    #[test]
+    fn trim_brush_stroke_cuts_into_two_layers() {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let idx = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let idx = canvas.layer_stack.add_layer(200, 200);
+            let path = PathData::new(
+                vec![Contour::new(
+                    vec![
+                        Node::sharp(Point::new(20.0, 100.0)),
+                        Node::sharp(Point::new(180.0, 100.0)),
+                    ],
+                    false,
+                )],
+                FillRule::NonZero,
+            );
+            let brush = crate::core::vector::brush::BrushStroke::uniform(10.0, LineCap::Round);
+            let obj = VectorObjectData::new_brush(
+                path,
+                VectorStyle::filled(ColorValue::BLACK),
+                AffineTransform::IDENTITY,
+                brush,
+            );
+            crate::core::command_vector::apply_object_to_layer(
+                &mut canvas.layer_stack.layers[idx],
+                obj,
+            );
+            canvas.layer_stack.layers[idx].selected = true;
+            canvas.layer_stack.active_idx = idx;
+            idx
+        };
+        let _ = idx;
+        let before = app.docs.documents[0].canvas.layer_stack.layers.len();
+        app.docs.documents[0]
+            .canvas
+            .selection
+            .select_rect(90, 90, 110, 110);
+        assert!(
+            app.trim_active_vector_by_selection(),
+            "{}",
+            app.shell.status_msg
+        );
+        // The single stroke becomes two brush pieces → one more layer.
+        assert_eq!(
+            app.docs.documents[0].canvas.layer_stack.layers.len(),
+            before + 1,
+            "a mid cut yields two brush pieces"
+        );
+        let brush_layers = app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .filter(|l| {
+                matches!(&l.layer_type,
+                    LayerType::Vector(VectorGeometry::Path(o)) if o.is_brush())
+            })
+            .count();
+        assert!(
+            brush_layers >= 2,
+            "both pieces keep the brush, got {brush_layers}"
+        );
     }
 
     #[test]
