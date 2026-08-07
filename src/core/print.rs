@@ -415,7 +415,22 @@ pub fn build_pdf_encoded_with_vectors(
         String::new()
     };
     let extgstate_resources = pdf_extgstate_resources(vectors);
-    let colorspace_resources = pdf_colorspace_resources(vectors);
+    // On a colour-managed ink page, expose the embedded CMYK profile (object 6) as
+    // a named colour space (`/IaiCmyk`) so the vector paths paint through the same
+    // profile as the raster image — otherwise they render with the viewer's own
+    // default CMYK and come out the wrong colour.
+    let cmyk_cs = (page.components == 4 && icc.is_some()).then_some("IaiCmyk");
+    let colorspace_resources = {
+        let mut entries = pdf_spot_colorspace_entries(vectors);
+        if let Some(name) = cmyk_cs {
+            entries.push_str(&format!("/{name} [/ICCBased 6 0 R] "));
+        }
+        if entries.is_empty() {
+            String::new()
+        } else {
+            format!("/ColorSpace << {entries}>>")
+        }
+    };
     // TrimBox / BleedBox tag the cut size for a press when marks are on: the
     // artwork is the bleed box, the trim box is that inset by the bleed.
     let box_entries = if layout.marks.is_active() {
@@ -439,9 +454,10 @@ pub fn build_pdf_encoded_with_vectors(
     let mut content = format!(
         "q\n{clip_x:.2} {clip_y:.2} {clip_w:.2} {clip_h:.2} re W n\n{dw:.2} 0 0 {dh:.2} {tx:.2} {ty:.2} cm\n/Im0 Do\nQ\n"
     );
-    // Overlay crisp vector paths. RGB pages emit rg/RG; DeviceCMYK ink pages emit
-    // k/K (each object's PdfPaintColor already matches the page's colour space).
-    append_vector_content(&mut content, vectors, w, h, dw, dh, tx, ty);
+    // Overlay crisp vector paths. RGB pages emit rg/RG; a colour-managed ink page
+    // paints CMYK through the embedded profile (/IaiCmyk cs … scn); an untagged
+    // ink page falls back to raw k/K.
+    append_vector_content(&mut content, vectors, w, h, dw, dh, tx, ty, cmyk_cs);
     // Crop / registration marks sit in the page margin around the artwork.
     append_print_marks(
         &mut content,
@@ -1271,11 +1287,11 @@ fn pdf_name_escape(name: &str) -> String {
 /// The `/ColorSpace` resource declaring one `Separation` colour space per spot
 /// plate (`/IaiSp{i}`), each with a Type-2 tint transform to its CMYK alternate
 /// so the ink previews correctly and knocks out onto its own plate.
-pub(crate) fn pdf_colorspace_resources(objects: &[PdfVectorObject]) -> String {
+/// The `/ColorSpace` dictionary entries for the spot `Separation` plates (no
+/// surrounding `/ColorSpace << >>`), so a caller can append the process-CMYK
+/// ICCBased entry (`/IaiCmyk`) into the same dictionary.
+fn pdf_spot_colorspace_entries(objects: &[PdfVectorObject]) -> String {
     let plates = spot_plates(objects);
-    if plates.is_empty() {
-        return String::new();
-    }
     let mut entries = String::new();
     for (i, plate) in plates.iter().enumerate() {
         let [c, m, y, k] = plate.alt;
@@ -1285,7 +1301,16 @@ pub(crate) fn pdf_colorspace_resources(objects: &[PdfVectorObject]) -> String {
             pdf_name_escape(plate.name.as_str())
         ));
     }
-    format!("/ColorSpace << {entries}>>")
+    entries
+}
+
+pub(crate) fn pdf_colorspace_resources(objects: &[PdfVectorObject]) -> String {
+    let entries = pdf_spot_colorspace_entries(objects);
+    if entries.is_empty() {
+        String::new()
+    } else {
+        format!("/ColorSpace << {entries}>>")
+    }
 }
 
 /// Millimetres → PDF points.
@@ -1427,6 +1452,7 @@ pub(crate) fn append_print_marks(
     out.push_str("Q\n");
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_vector_content(
     out: &mut String,
     objects: &[PdfVectorObject],
@@ -1436,6 +1462,12 @@ pub(crate) fn append_vector_content(
     dh: f32,
     tx: f32,
     ty: f32,
+    // When the page embeds a CMYK ICC profile (colour-managed ink page), process
+    // CMYK fills/strokes are painted through that named ICCBased colour space
+    // (`… cs / … scn`) so the vectors match the ICC-tagged raster image and the
+    // app's preview — rather than raw `k`/`K`, which a viewer renders with its own
+    // default CMYK space (the exported vectors looked right-shaped but wrong-hued).
+    cmyk_cs: Option<&str>,
 ) {
     if objects.is_empty() || w == 0 || h == 0 {
         return;
@@ -1492,6 +1524,12 @@ pub(crate) fn append_vector_content(
                     PdfPaintColor::Spot { name, tint, .. } => {
                         out.push_str(&format!("/IaiSp{} cs\n{tint:.4} scn\n", spot_index(name)))
                     }
+                    PdfPaintColor::Cmyk([c, m, y, k]) if cmyk_cs.is_some() => {
+                        out.push_str(&format!(
+                            "/{} cs\n{c:.4} {m:.4} {y:.4} {k:.4} scn\n",
+                            cmyk_cs.unwrap()
+                        ))
+                    }
                     _ => out.push_str(&color.fill_op()),
                 }
             }
@@ -1517,6 +1555,12 @@ pub(crate) fn append_vector_content(
                     match color {
                         PdfPaintColor::Spot { name, tint, .. } => {
                             out.push_str(&format!("/IaiSp{} CS\n{tint:.4} SCN\n", spot_index(name)))
+                        }
+                        PdfPaintColor::Cmyk([c, m, y, k]) if cmyk_cs.is_some() => {
+                            out.push_str(&format!(
+                                "/{} CS\n{c:.4} {m:.4} {y:.4} {k:.4} SCN\n",
+                                cmyk_cs.unwrap()
+                            ))
                         }
                         _ => out.push_str(&color.stroke_op()),
                     }
@@ -1683,9 +1727,9 @@ pub fn build_pdf_multipage_encoded(
             e.pw, e.ph, e.dw, e.dh, e.tx, e.ty
         );
         // Overlay crisp vector paths. RGB pages emit rg/RG; DeviceCMYK ink pages
-        // emit k/K (each object's PdfPaintColor matches the page's colour space).
+        // emit raw k/K (multipage pages carry no embedded CMYK profile).
         if let Some(objs) = vectors.get(i) {
-            append_vector_content(&mut content, objs, e.w, e.h, e.dw, e.dh, e.tx, e.ty);
+            append_vector_content(&mut content, objs, e.w, e.h, e.dw, e.dh, e.tx, e.ty, None);
         }
         offsets.push(pdf.len());
         pdf.extend_from_slice(
@@ -3426,6 +3470,7 @@ mod tests {
             4.0,
             0.0,
             0.0,
+            None,
         );
         assert!(
             content.contains("/IaiSp0 cs\n0.5000 scn\n"),

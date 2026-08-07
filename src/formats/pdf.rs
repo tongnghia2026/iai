@@ -797,6 +797,7 @@ fn add_vector_overlay(
         rect.height,
         rect.x,
         rect.y,
+        None,
     );
     if content.is_empty() {
         return Ok(false);
@@ -1143,16 +1144,22 @@ mod tests {
             "crisp native vector path present (not a flattened raster)"
         );
         assert!(
-            text.contains(" k\n"),
-            "DeviceCMYK fill operator present for the vector"
-        );
-        assert!(
             text.contains("[/ICCBased"),
             "ink base is tagged with the embedded CMYK profile"
         );
         assert!(
             text.contains("/OutputIntents"),
             "page declares the CMYK output intent"
+        );
+        // The vector paints through the embedded CMYK profile (/IaiCmyk cs … scn),
+        // not raw `k`, so it matches the ICC-tagged raster and the app's preview.
+        assert!(
+            text.contains("/IaiCmyk") && text.contains(" scn\n"),
+            "vector fill is colour-managed through the embedded CMYK space"
+        );
+        assert!(
+            !text.contains(" k\n"),
+            "no raw DeviceCMYK fill operator (would be the viewer's default colour)"
         );
         let _ = std::fs::remove_file(output);
     }
