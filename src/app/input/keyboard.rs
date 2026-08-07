@@ -1106,6 +1106,14 @@ impl App {
                     if let Some(w) = &self.win.window {
                         w.request_redraw();
                     }
+                } else if self.edit.tools.active_id() == ToolId::Arrow {
+                    // Finish the current branch-arrow group: the next drag starts a
+                    // fresh trunk instead of adding to this object.
+                    self.edit.arrow_multi_layer = None;
+                    self.edit.tools.active_on_cancel();
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
                 }
             }
             PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter)
@@ -1121,6 +1129,10 @@ impl App {
                     self.commit_active_crop();
                 } else if self.edit.tools.active_id() == ToolId::PerspectiveCrop {
                     self.commit_active_perspective_crop();
+                } else if self.edit.tools.active_id() == ToolId::Arrow {
+                    // Finish the current branch-arrow group; the next drag starts a
+                    // new trunk. (Each drag already committed its own segment.)
+                    self.edit.arrow_multi_layer = None;
                 } else if matches!(
                     self.edit.tools.active_id(),
                     ToolId::PolygonLasso | ToolId::Pen

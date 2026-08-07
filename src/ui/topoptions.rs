@@ -448,22 +448,38 @@ fn arrow_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         _ => (ph::ARROW_RIGHT, "Straight"),
     };
     let (route_icon, route_name) = route_meta(data.tool.arrow_route);
-    ui.menu_button(format!("{route_icon} {route_name}"), |ui| {
-        ui.label(egui::RichText::new("Connector route").strong());
-        ui.horizontal(|ui| {
-            for value in 0..=3 {
-                let (icon, name) = route_meta(value);
-                if ui
-                    .selectable_label(data.tool.arrow_route == value, icon)
-                    .on_hover_text(name)
-                    .clicked()
-                {
-                    actions.tool.set_arrow_route = Some(value);
-                    ui.close();
+    // The connector route only applies to a single arrow; branch mode is always
+    // straight, so hide the route picker there to keep the bar honest.
+    if !data.tool.arrow_multi {
+        ui.menu_button(format!("{route_icon} {route_name}"), |ui| {
+            ui.label(egui::RichText::new("Connector route").strong());
+            ui.horizontal(|ui| {
+                for value in 0..=3 {
+                    let (icon, name) = route_meta(value);
+                    if ui
+                        .selectable_label(data.tool.arrow_route == value, icon)
+                        .on_hover_text(name)
+                        .clicked()
+                    {
+                        actions.tool.set_arrow_route = Some(value);
+                        ui.close();
+                    }
                 }
-            }
+            });
         });
-    });
+    }
+    ui.separator();
+    // Branch mode: draw a straight trunk, then keep dragging from it to add
+    // sub-arrows onto the same object.
+    let mut multi = data.tool.arrow_multi;
+    if ui
+        .selectable_label(multi, format!("{} Branch", ph::TREE_STRUCTURE))
+        .on_hover_text("Branch arrow: draw a line, then drag again to add sub-arrows onto it")
+        .clicked()
+    {
+        multi = !multi;
+        actions.tool.set_arrow_multi = Some(multi);
+    }
 }
 
 fn vector_brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {

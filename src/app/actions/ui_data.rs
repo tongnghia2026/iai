@@ -936,6 +936,7 @@ impl App {
                     .map_or(self.edit.tools.arrow().end_arrow, |settings| settings.1),
                 arrow_route: selected_arrow_settings
                     .map_or(self.edit.tools.arrow().route, |settings| settings.2),
+                arrow_multi: self.edit.tools.arrow().multi,
                 arrow_path: if self.edit.tools.active_id() == crate::tools::ToolId::Arrow {
                     self.edit
                         .tools

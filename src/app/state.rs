@@ -1209,6 +1209,7 @@ impl App {
                 path_pivot_dragging: false,
                 path_pivot_snap: None,
                 path_rotate_mode: None,
+                arrow_multi_layer: None,
                 last_repeat_transform: None,
                 path_dup_before: None,
                 path_gradient_drag: None,

@@ -82,6 +82,12 @@ pub struct EditorInteraction {
     pub(in crate::app) path_pivot_snap: Option<&'static str>,
     /// Path id currently showing CorelDRAW-style rotate/skew handles.
     pub(in crate::app) path_rotate_mode: Option<u32>,
+    /// The Path layer being built by the Arrow tool in "branch" (multi-arrow)
+    /// mode: the first drag makes this trunk line, each later drag appends a
+    /// sub-arrow contour to the SAME layer. `None` = no trunk yet (the next drag
+    /// starts one). Cleared when the tool is (re)selected or the gesture is
+    /// cancelled, so entering the Arrow tool always starts a fresh group.
+    pub(in crate::app) arrow_multi_layer: Option<u32>,
     /// The last repeatable "duplicate + transform" step, as a CANVAS-space affine
     /// `M`: Repeat (Ctrl+D / the button) duplicates the selection and applies `M`
     /// to each copy, so a single sample fans out into a row / ring / spiral.

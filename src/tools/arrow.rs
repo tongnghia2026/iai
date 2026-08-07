@@ -20,6 +20,11 @@ pub struct ArrowTool {
     /// the Move tool). When on, both endpoints snap to nearby vector objects so
     /// arrows / connectors join at their corners and edges.
     pub snap_enabled: bool,
+    /// "Branch" (multi-arrow) mode: the first drag lays a straight trunk line,
+    /// each later drag adds a sub-arrow onto the SAME object (see
+    /// `App::commit_arrow`). Every drag is a straight segment here; the trunk and
+    /// each branch get the chosen arrowhead at their far end.
+    pub multi: bool,
     start: Option<Point>,
     end: Option<Point>,
     drawing: bool,
@@ -35,6 +40,7 @@ impl ArrowTool {
             end_arrow: ArrowHead::Triangle.to_u8(),
             route: 0,
             snap_enabled: true,
+            multi: false,
             start: None,
             end: None,
             drawing: false,
@@ -83,6 +89,16 @@ impl ArrowTool {
         }
     }
 
+    /// The connector route in force: branch mode is always a straight segment
+    /// (trunk + each sub-arrow), otherwise the user's chosen route.
+    fn effective_route(&self) -> ConnectorRoute {
+        if self.multi {
+            ConnectorRoute::from_u8(0)
+        } else {
+            ConnectorRoute::from_u8(self.route)
+        }
+    }
+
     pub fn preview_path(&self) -> Option<crate::core::vector::path::PathData> {
         let (start, end) = (self.start?, self.end?);
         Some(elbow_connector_path(
@@ -90,11 +106,25 @@ impl ArrowTool {
             start.y,
             end.x,
             end.y,
-            ConnectorRoute::from_u8(self.route),
+            self.effective_route(),
         ))
     }
 
+    /// The outline/arrowhead style a committed arrow (or branch) is drawn with.
+    /// Shared by the single-arrow object and the App's branch builder so both
+    /// stay identical.
+    pub fn make_style(&self, fg: [u8; 4]) -> VectorStyle {
+        let mut style = VectorStyle::stroked(ColorValue::from_rgba8(fg), self.width.max(0.1));
+        style.fill = Paint::None;
+        style.stroke_style.end_arrow = ArrowStyle {
+            kind: ArrowHead::from_u8(self.end_arrow),
+            size: 3.0,
+        };
+        style
+    }
+
     pub fn take_arrow_object(&mut self, fg: [u8; 4]) -> Option<VectorObjectData> {
+        let route = self.effective_route();
         let start = self.start.take()?;
         let end = self.end.take()?;
         self.drawing = false;
@@ -102,23 +132,24 @@ impl ArrowTool {
         if start.distance_to(end) < 1.0 {
             return None;
         }
-        let mut style = VectorStyle::stroked(ColorValue::from_rgba8(fg), self.width.max(0.1));
-        style.fill = Paint::None;
-        style.stroke_style.end_arrow = ArrowStyle {
-            kind: ArrowHead::from_u8(self.end_arrow),
-            size: 3.0,
-        };
         Some(VectorObjectData::new(
-            elbow_connector_path(
-                start.x,
-                start.y,
-                end.x,
-                end.y,
-                ConnectorRoute::from_u8(self.route),
-            ),
-            style,
+            elbow_connector_path(start.x, start.y, end.x, end.y, route),
+            self.make_style(fg),
             AffineTransform::IDENTITY,
         ))
+    }
+
+    /// Consume the in-progress straight segment `(start, end)` for branch mode,
+    /// resetting the tool. `None` when there is no segment or it is too short.
+    pub fn take_straight_segment(&mut self) -> Option<(Point, Point)> {
+        let start = self.start.take()?;
+        let end = self.end.take()?;
+        self.drawing = false;
+        self.snap_marker = None;
+        if start.distance_to(end) < 1.0 {
+            return None;
+        }
+        Some((start, end))
     }
 
     pub fn clear(&mut self) {

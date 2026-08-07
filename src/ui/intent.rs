@@ -302,6 +302,8 @@ pub struct ToolIntent {
     pub set_arrow_width: Option<f32>,
     pub set_arrow_end: Option<u8>,
     pub set_arrow_route: Option<u8>,
+    /// Toggle the Arrow tool's "branch" (multi-arrow) mode.
+    pub set_arrow_multi: Option<bool>,
     /// Bake the active Vector Brush stroke into a closed outline.
     pub expand_vector_brush: bool,
     pub set_shape_kind: Option<u8>,

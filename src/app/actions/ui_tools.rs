@@ -318,6 +318,9 @@ impl App {
         if let Some(id) = actions.tool.select_tool.take() {
             if !self.is_tool_modal_active() {
                 self.edit.tools.select(id);
+                // Entering (or re-entering) a tool ends any Arrow branch group in
+                // progress, so the next trunk drag starts a fresh multi-arrow.
+                self.edit.arrow_multi_layer = None;
                 if id == crate::tools::ToolId::Text {
                     self.shell.ui.show_text_panel = true;
                 }
@@ -539,6 +542,12 @@ impl App {
             let route = route.min(3);
             self.set_active_arrow_route(route);
             self.edit.tools.arrow_mut().route = route;
+        }
+        if let Some(on) = actions.tool.set_arrow_multi.take() {
+            self.edit.tools.arrow_mut().multi = on;
+            // Switching mode ends any trunk in progress; the next drag starts fresh.
+            self.edit.arrow_multi_layer = None;
+            self.edit.tools.arrow_mut().clear();
         }
         if std::mem::take(&mut actions.tool.expand_vector_brush) {
             self.expand_active_brush_stroke();
