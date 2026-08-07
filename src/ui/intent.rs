@@ -193,6 +193,9 @@ pub struct ToolIntent {
     pub cancel_text_font_family_preview: bool,
     pub set_text_color: Option<[u8; 4]>,
     pub set_text_align: Option<crate::core::text::TextAlign>,
+    /// Text panel case buttons (discoverable Shift+F3): recase the selection
+    /// (or whole buffer) to lowercase / UPPERCASE / Title Case.
+    pub set_text_case: Option<crate::core::text::TextCase>,
     pub set_text_bold: Option<bool>,
     pub set_text_italic: Option<bool>,
     pub set_text_underline: Option<bool>,

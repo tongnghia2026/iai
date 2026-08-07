@@ -624,16 +624,10 @@ impl App {
         s.caret = caret.map(|idx| idx.min(n)).or(s.caret).or(Some(n));
     }
 
-    /// Shift+F3 while editing: cycle the case of the selected text — or the
-    /// whole buffer when nothing is selected — through lowercase → UPPERCASE →
-    /// Title Case. Per-glyph styles stay aligned (re-spread across any case
-    /// expansion), the selection is preserved so repeated presses keep cycling,
-    /// and the change lands in the live buffer (committed with the rest of the
-    /// edit; no separate undo step).
-    pub fn text_cycle_case(&mut self) {
-        use crate::core::text::{next_text_case, transform_text_case};
-
-        // Target span: the current selection, else the whole buffer.
+    /// Resolve the case-switch target while editing: the selected char range
+    /// (else the whole buffer), the buffer's chars, and whether a real selection
+    /// was in play. `None` when there's nothing editable to recase.
+    fn text_case_target(&self) -> Option<(Vec<char>, std::ops::Range<usize>, bool)> {
         let selection = self
             .edit
             .text_edit
@@ -643,33 +637,48 @@ impl App {
                 self.text_overlay_selection()
                     .filter(|range| range.start < range.end)
             });
-        let Some(session) = self.edit.text_edit.as_mut() else {
-            return;
-        };
+        let session = self.edit.text_edit.as_ref()?;
         let chars: Vec<char> = session.buffer.chars().collect();
         let n = chars.len();
         if n == 0 {
-            return;
+            return None;
         }
         let range = match &selection {
             Some(r) => r.start.min(n)..r.end.min(n),
             None => 0..n,
         };
         if range.start >= range.end {
-            return;
+            return None;
         }
+        Some((chars, range, selection.is_some()))
+    }
 
-        let span: String = chars[range.clone()].iter().collect();
-        let target = next_text_case(&span);
-        let (new_chars, style_src) = transform_text_case(&chars, range.clone(), target);
+    /// Recase `chars[range]` to `target` and write it back into the live edit
+    /// session. Per-glyph styles stay aligned (re-spread across any case
+    /// expansion like ß→SS), the selection is preserved so repeated presses keep
+    /// working, and the change lands in the buffer (committed with the rest of
+    /// the edit; no separate undo step).
+    fn apply_text_case(
+        &mut self,
+        chars: Vec<char>,
+        range: std::ops::Range<usize>,
+        had_selection: bool,
+        target: crate::core::text::TextCase,
+    ) {
+        let n = chars.len();
+        let (new_chars, style_src) =
+            crate::core::text::transform_text_case(&chars, range.clone(), target);
         if new_chars == chars {
-            // Uncased text (digits/punctuation) — nothing to toggle.
+            // Uncased text (digits/punctuation), or already that case.
             return;
         }
         // New selection end after any expansion; the tail length is unchanged.
         let new_end = new_chars.len().saturating_sub(n - range.end);
-        let new_selection = selection.as_ref().map(|_| range.start..new_end);
+        let new_selection = had_selection.then(|| range.start..new_end);
 
+        let Some(session) = self.edit.text_edit.as_mut() else {
+            return;
+        };
         // Re-spread aligned per-glyph styles across the (possibly expanded) span.
         let old_styles = std::mem::take(&mut session.glyph_styles);
         if old_styles.len() == n {
@@ -682,7 +691,7 @@ impl App {
         session.pending_style = None;
 
         // Push the new caret/selection into egui's invisible TextEdit so the
-        // visible selection survives and further Shift+F3 presses keep cycling.
+        // visible selection survives and further presses keep working.
         let te_id = egui::Id::new("text_overlay_te");
         if let Some(mut state) = egui::TextEdit::load_state(&self.win.egui_ctx, te_id) {
             use egui::text::{CCursor, CCursorRange};
@@ -697,6 +706,28 @@ impl App {
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
+    }
+
+    /// Shift+F3 while editing: cycle the case of the selected text — or the
+    /// whole buffer when nothing is selected — through lowercase → UPPERCASE →
+    /// Title Case.
+    pub fn text_cycle_case(&mut self) {
+        let Some((chars, range, had_selection)) = self.text_case_target() else {
+            return;
+        };
+        let span: String = chars[range.clone()].iter().collect();
+        let target = crate::core::text::next_text_case(&span);
+        self.apply_text_case(chars, range, had_selection, target);
+    }
+
+    /// Set an explicit case (lowercase / UPPERCASE / Title Case) on the selected
+    /// text — or the whole buffer — while editing. Drives the Text panel's case
+    /// buttons (the discoverable form of the Shift+F3 shortcut).
+    pub fn text_set_case(&mut self, target: crate::core::text::TextCase) {
+        let Some((chars, range, had_selection)) = self.text_case_target() else {
+            return;
+        };
+        self.apply_text_case(chars, range, had_selection, target);
     }
 
     /// Apply a colour and/or size override to the current text selection while
@@ -1101,6 +1132,24 @@ mod tests {
         app.text_cycle_case();
         assert_eq!(app.edit.text_edit.as_ref().unwrap().buffer, "Hello World");
         app.text_cycle_case();
+        assert_eq!(app.edit.text_edit.as_ref().unwrap().buffer, "hello world");
+    }
+
+    #[test]
+    fn text_panel_case_buttons_set_explicit_case() {
+        let mut app = App::new();
+        app.text_tool_click(5.0, 5.0);
+        app.update_text_buffer("hello world".to_string());
+        app.update_text_cursor_cache(None, Some(11));
+
+        app.text_set_case(crate::core::text::TextCase::Upper);
+        assert_eq!(app.edit.text_edit.as_ref().unwrap().buffer, "HELLO WORLD");
+        // Idempotent: the same button again is a no-op, not a cycle.
+        app.text_set_case(crate::core::text::TextCase::Upper);
+        assert_eq!(app.edit.text_edit.as_ref().unwrap().buffer, "HELLO WORLD");
+        app.text_set_case(crate::core::text::TextCase::Title);
+        assert_eq!(app.edit.text_edit.as_ref().unwrap().buffer, "Hello World");
+        app.text_set_case(crate::core::text::TextCase::Lower);
         assert_eq!(app.edit.text_edit.as_ref().unwrap().buffer, "hello world");
     }
 

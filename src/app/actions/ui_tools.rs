@@ -112,6 +112,9 @@ impl App {
                 w.request_redraw();
             }
         }
+        if let Some(case) = actions.tool.set_text_case.take() {
+            self.text_set_case(case);
+        }
         if let Some((cx, cy)) = actions.tool.text_canvas_click.take() {
             self.text_tool_click(cx, cy);
         }

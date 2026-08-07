@@ -359,6 +359,38 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         }
     });
 
+    // Change-case buttons — the discoverable form of the Shift+F3 shortcut.
+    // Only meaningful while a text session is open (recases the selection, or
+    // the whole text when nothing is selected), so they're disabled otherwise.
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Case")
+                .size(10.5)
+                .color(pal.text_secondary),
+        );
+        for (case, label, tip) in [
+            (crate::core::text::TextCase::Lower, "aa", "lowercase"),
+            (crate::core::text::TextCase::Upper, "AA", "UPPERCASE"),
+            (
+                crate::core::text::TextCase::Title,
+                "Aa",
+                "Capitalize Each Word",
+            ),
+        ] {
+            let btn = egui::Button::new(egui::RichText::new(label).size(12.5))
+                .fill(pal.button_bg)
+                .min_size(egui::vec2(30.0, 22.0));
+            if ui
+                .add_enabled(data.tool.text_editing, btn)
+                .on_hover_text(format!("{tip} (Shift+F3 cycles)"))
+                .clicked()
+            {
+                actions.tool.set_text_case = Some(case);
+            }
+        }
+    });
+
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.label(
