@@ -415,6 +415,30 @@ impl ApplicationHandler for App {
             }
         }
 
+        // Shift+F3 cycles the case of the selected text (or the whole buffer)
+        // while editing: lowercase → UPPERCASE → Title Case. Caught before egui
+        // so the invisible overlay TextEdit doesn't swallow the function key.
+        // (Shift's own key event, processed by the egui block below, has already
+        // set `shift_held` by the time F3 arrives.)
+        if self.edit.text_edit.is_some() {
+            if let WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::F3),
+                        state: ElementState::Pressed,
+                        repeat,
+                        ..
+                    },
+                ..
+            } = &event
+            {
+                if !repeat && self.edit.input.shift_held {
+                    self.text_cycle_case();
+                    return;
+                }
+            }
+        }
+
         // Ctrl+N is handled by the app shortcut layer below and also advertised
         // as an egui menu shortcut. If the key is first queued into egui and then
         // opens the modal here, the same raw input is replayed during the next UI

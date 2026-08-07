@@ -1037,6 +1037,133 @@ fn band_distance(v: f32, lo: f32, hi: f32) -> f32 {
 
 /// Character span of the same-class run (word / whitespace / punctuation)
 /// around `char_idx`, for double-click word selection. Runs never cross '\n'.
+/// Letter-case classification used by the Shift+F3 case switch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextCase {
+    Lower,
+    Upper,
+    Title,
+}
+
+/// A word starts at the first alphabetic char, or at any alphabetic char that
+/// follows a non-alphabetic one. Shared by [`text_case_of`] and
+/// [`transform_text_case`] so detection and transformation agree on where words
+/// begin (whitespace, punctuation and digits all break a word).
+fn is_word_start(prev: Option<char>) -> bool {
+    match prev {
+        None => true,
+        Some(c) => !c.is_alphabetic(),
+    }
+}
+
+/// Classify `s` for the Shift+F3 cycle: all-lowercase (or no cased letters) →
+/// `Lower`, all-uppercase → `Upper`, Title Case → `Title`. Anything mixed that
+/// is not Title Case reports `Lower` so the next press normalises it up to
+/// `Upper`.
+pub fn text_case_of(s: &str) -> TextCase {
+    let mut has_lower = false;
+    let mut has_upper = false;
+    let mut has_letter = false;
+    let mut title = true;
+    let mut prev: Option<char> = None;
+    for c in s.chars() {
+        if c.is_alphabetic() {
+            has_letter = true;
+            let lower = c.is_lowercase();
+            let upper = c.is_uppercase();
+            has_lower |= lower;
+            has_upper |= upper;
+            if is_word_start(prev) {
+                // A Title-Case word must begin uppercase.
+                if !upper {
+                    title = false;
+                }
+            } else if upper {
+                // Interior uppercase breaks Title Case.
+                title = false;
+            }
+        }
+        prev = Some(c);
+    }
+    if !has_upper {
+        TextCase::Lower
+    } else if !has_lower {
+        TextCase::Upper
+    } else if title && has_letter {
+        TextCase::Title
+    } else {
+        TextCase::Lower
+    }
+}
+
+/// The next case in the Shift+F3 cycle for `s`:
+/// lowercase → UPPERCASE → Title Case → lowercase.
+pub fn next_text_case(s: &str) -> TextCase {
+    match text_case_of(s) {
+        TextCase::Lower => TextCase::Upper,
+        TextCase::Upper => TextCase::Title,
+        TextCase::Title => TextCase::Lower,
+    }
+}
+
+/// Recase `chars[range]` to `target`, returning the full transformed char
+/// vector plus a `style_src` map (new char index → original char index) so
+/// aligned per-glyph styles can be re-spread across a case expansion (e.g.
+/// `ß`→`SS`). Chars outside `range` are copied unchanged.
+pub fn transform_text_case(
+    chars: &[char],
+    range: Range<usize>,
+    target: TextCase,
+) -> (Vec<char>, Vec<usize>) {
+    let start = range.start.min(chars.len());
+    let end = range.end.min(chars.len());
+    let mut out = Vec::with_capacity(chars.len());
+    let mut src = Vec::with_capacity(chars.len());
+    for (i, &c) in chars.iter().enumerate().take(start) {
+        out.push(c);
+        src.push(i);
+    }
+    let mut prev = start.checked_sub(1).map(|p| chars[p]);
+    for (i, &c) in chars.iter().enumerate().take(end).skip(start) {
+        match target {
+            TextCase::Lower => {
+                for ch in c.to_lowercase() {
+                    out.push(ch);
+                    src.push(i);
+                }
+            }
+            TextCase::Upper => {
+                for ch in c.to_uppercase() {
+                    out.push(ch);
+                    src.push(i);
+                }
+            }
+            TextCase::Title => {
+                if c.is_alphabetic() && is_word_start(prev) {
+                    for ch in c.to_uppercase() {
+                        out.push(ch);
+                        src.push(i);
+                    }
+                } else if c.is_alphabetic() {
+                    for ch in c.to_lowercase() {
+                        out.push(ch);
+                        src.push(i);
+                    }
+                } else {
+                    out.push(c);
+                    src.push(i);
+                }
+            }
+        }
+        prev = Some(c);
+    }
+    for (i, &c) in chars.iter().enumerate().skip(end) {
+        out.push(c);
+        src.push(i);
+    }
+    (out, src)
+}
+
 pub fn word_char_span(content: &str, char_idx: usize) -> (usize, usize) {
     #[derive(PartialEq)]
     enum Kind {
@@ -1619,7 +1746,75 @@ pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveG
 
 #[cfg(test)]
 mod tests {
-    use super::{rasterize, rasterize_placed, TextData, TextFontFamily};
+    use super::{
+        next_text_case, rasterize, rasterize_placed, text_case_of, transform_text_case, TextCase,
+        TextData, TextFontFamily,
+    };
+
+    fn recase(s: &str, target: TextCase) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let (out, _) = transform_text_case(&chars, 0..chars.len(), target);
+        out.into_iter().collect()
+    }
+
+    #[test]
+    fn case_classification() {
+        assert_eq!(text_case_of("hello world"), TextCase::Lower);
+        assert_eq!(text_case_of("HELLO WORLD"), TextCase::Upper);
+        assert_eq!(text_case_of("Hello World"), TextCase::Title);
+        // Mixed / sentence case is not Title Case → reported as Lower.
+        assert_eq!(text_case_of("Hello world"), TextCase::Lower);
+        assert_eq!(text_case_of("hELLO"), TextCase::Lower);
+        // No cased letters.
+        assert_eq!(text_case_of("123 !?"), TextCase::Lower);
+    }
+
+    #[test]
+    fn case_cycle_is_lower_upper_title() {
+        // lowercase → UPPERCASE → Title Case → lowercase
+        assert_eq!(next_text_case("hello world"), TextCase::Upper);
+        assert_eq!(
+            recase("hello world", next_text_case("hello world")),
+            "HELLO WORLD"
+        );
+        assert_eq!(next_text_case("HELLO WORLD"), TextCase::Title);
+        assert_eq!(
+            recase("HELLO WORLD", next_text_case("HELLO WORLD")),
+            "Hello World"
+        );
+        assert_eq!(next_text_case("Hello World"), TextCase::Lower);
+        assert_eq!(
+            recase("Hello World", next_text_case("Hello World")),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn case_transform_preserves_untouched_span_and_style_map() {
+        let chars: Vec<char> = "abcdef".chars().collect();
+        // Recase only "cd"→"CD"; the rest is copied verbatim.
+        let (out, src) = transform_text_case(&chars, 2..4, TextCase::Upper);
+        assert_eq!(out.into_iter().collect::<String>(), "abCDef");
+        // 1:1 char count (no expansion) → identity style map.
+        assert_eq!(src, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn case_transform_expansion_maps_styles_to_source() {
+        // German ß uppercases to "SS": both new chars must map to source index 1.
+        let chars: Vec<char> = "aßb".chars().collect();
+        let (out, src) = transform_text_case(&chars, 0..chars.len(), TextCase::Upper);
+        assert_eq!(out.into_iter().collect::<String>(), "ASSB");
+        assert_eq!(src, vec![0, 1, 1, 2]);
+    }
+
+    #[test]
+    fn case_transform_vietnamese_diacritics_roundtrip() {
+        // Vietnamese precomposed letters must upper/lower-case cleanly.
+        assert_eq!(recase("chữ hoa", TextCase::Upper), "CHỮ HOA");
+        assert_eq!(recase("CHỮ HOA", TextCase::Lower), "chữ hoa");
+        assert_eq!(recase("chữ hoa", TextCase::Title), "Chữ Hoa");
+    }
 
     fn text(content: &str) -> TextData {
         TextData {

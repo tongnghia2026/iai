@@ -217,6 +217,33 @@ impl App {
                     w.request_redraw();
                 }
             }
+            // Text layer selected + Alt/Ctrl+Delete: recolour the type to the
+            // foreground (Alt) or background (Ctrl) colour — Photoshop's fill
+            // shortcut applied to a Text layer — instead of filling raster pixels.
+            PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
+                if pressed
+                    && !repeat
+                    && self.edit.text_edit.is_none()
+                    && (self.edit.input.alt_held || self.edit.input.ctrl_held)
+                    && self.active_layer_is_text() =>
+            {
+                let color = if self.edit.input.alt_held {
+                    self.edit.tools.brush().settings.color
+                } else {
+                    self.edit.bg_color
+                };
+                let idx = self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .layer_stack
+                    .active_idx;
+                // No-op if it returns false (layer locked, or already that
+                // colour) — never fall through to a raster fill, which would
+                // paint the whole layer box solid over the glyphs.
+                self.recolor_text_layer(idx, color);
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
             PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
                 if pressed
                     && !repeat

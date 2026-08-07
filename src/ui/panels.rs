@@ -97,8 +97,8 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         let response = floating_panel(
             ctx,
             "Text",
-            egui::pos2(default_x(360.0), 128.0),
-            360.0,
+            egui::pos2(default_x(420.0), 128.0),
+            420.0,
             &mut open,
             |ui| text_panel(ui, data, actions),
         );
@@ -190,10 +190,10 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let font_search_id = egui::Id::new("text_panel_font_family_search");
     let font_combo = egui::ComboBox::from_id_salt("text_panel_font_family")
         .selected_text(data.tool.text_font_family.name())
-        .width(ui.available_width().min(190.0))
+        .width(ui.available_width().min(250.0))
         .height(420.0)
         .show_ui(ui, |ui| {
-            ui.set_min_width(260.0);
+            ui.set_min_width(320.0);
 
             let had_search_state = ui.data(|d| d.get_temp::<String>(font_search_id).is_some());
             let mut search = ui

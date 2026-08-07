@@ -287,6 +287,64 @@ impl App {
         true
     }
 
+    /// True when the active layer is an editable Text layer.
+    pub fn active_layer_is_text(&self) -> bool {
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        canvas
+            .layer_stack
+            .layers
+            .get(canvas.layer_stack.active_idx)
+            .is_some_and(|l| matches!(l.layer_type, LayerType::Text(_)))
+    }
+
+    /// Fill a Text layer's colour (Move-tool Alt/Ctrl+Delete): recolour the
+    /// whole type to `color`, overriding any per-glyph colours, then re-rasterize
+    /// in place so the layer stays an editable Text layer. Returns true when it
+    /// recoloured; recorded as one undo step.
+    pub fn recolor_text_layer(&mut self, idx: usize, color: [u8; 4]) -> bool {
+        let (cw, ch) = {
+            let d = &self.docs.documents[self.docs.active_doc_idx];
+            (d.canvas.width, d.canvas.height)
+        };
+        let (mut new_td, origin) = {
+            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+            let Some(layer) = canvas.layer_stack.layers.get(idx) else {
+                return false;
+            };
+            if layer.locked && !layer.is_background {
+                return false;
+            }
+            let LayerType::Text(td) = &layer.layer_type else {
+                return false;
+            };
+            // Already that colour everywhere → nothing to do.
+            if td.color == color && td.glyph_styles.iter().all(|g| g.color == color) {
+                return false;
+            }
+            let origin = text_edit_origin_for_layer(td, layer);
+            (td.clone(), origin)
+        };
+        new_td.color = color;
+        for g in &mut new_td.glyph_styles {
+            g.color = color;
+        }
+
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let before =
+            LayerStructureCommand::capture_before("Fill Text Colour", &canvas.layer_stack, cw, ch);
+        rasterize_into_layer(canvas, idx, origin, new_td);
+        canvas.layer_revision += 1;
+        let mut cmd = before;
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
+
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     /// Build a `TextData` from the current app-level text style + the given
     /// content and per-glyph overrides (compacted when uniform).
     fn text_data_from_state(
@@ -564,6 +622,81 @@ impl App {
             (start < end).then_some(start..end)
         });
         s.caret = caret.map(|idx| idx.min(n)).or(s.caret).or(Some(n));
+    }
+
+    /// Shift+F3 while editing: cycle the case of the selected text — or the
+    /// whole buffer when nothing is selected — through lowercase → UPPERCASE →
+    /// Title Case. Per-glyph styles stay aligned (re-spread across any case
+    /// expansion), the selection is preserved so repeated presses keep cycling,
+    /// and the change lands in the live buffer (committed with the rest of the
+    /// edit; no separate undo step).
+    pub fn text_cycle_case(&mut self) {
+        use crate::core::text::{next_text_case, transform_text_case};
+
+        // Target span: the current selection, else the whole buffer.
+        let selection = self
+            .edit
+            .text_edit
+            .as_ref()
+            .and_then(|s| s.selection.clone())
+            .or_else(|| {
+                self.text_overlay_selection()
+                    .filter(|range| range.start < range.end)
+            });
+        let Some(session) = self.edit.text_edit.as_mut() else {
+            return;
+        };
+        let chars: Vec<char> = session.buffer.chars().collect();
+        let n = chars.len();
+        if n == 0 {
+            return;
+        }
+        let range = match &selection {
+            Some(r) => r.start.min(n)..r.end.min(n),
+            None => 0..n,
+        };
+        if range.start >= range.end {
+            return;
+        }
+
+        let span: String = chars[range.clone()].iter().collect();
+        let target = next_text_case(&span);
+        let (new_chars, style_src) = transform_text_case(&chars, range.clone(), target);
+        if new_chars == chars {
+            // Uncased text (digits/punctuation) — nothing to toggle.
+            return;
+        }
+        // New selection end after any expansion; the tail length is unchanged.
+        let new_end = new_chars.len().saturating_sub(n - range.end);
+        let new_selection = selection.as_ref().map(|_| range.start..new_end);
+
+        // Re-spread aligned per-glyph styles across the (possibly expanded) span.
+        let old_styles = std::mem::take(&mut session.glyph_styles);
+        if old_styles.len() == n {
+            session.glyph_styles = style_src.iter().map(|&i| old_styles[i].clone()).collect();
+        }
+        session.buffer = new_chars.into_iter().collect();
+        session.selection = new_selection.clone();
+        session.caret = Some(new_end);
+        // The pending style is pinned to a caret index in the old buffer.
+        session.pending_style = None;
+
+        // Push the new caret/selection into egui's invisible TextEdit so the
+        // visible selection survives and further Shift+F3 presses keep cycling.
+        let te_id = egui::Id::new("text_overlay_te");
+        if let Some(mut state) = egui::TextEdit::load_state(&self.win.egui_ctx, te_id) {
+            use egui::text::{CCursor, CCursorRange};
+            let cursor_range = match &new_selection {
+                Some(r) => CCursorRange::two(CCursor::new(r.start), CCursor::new(r.end)),
+                None => CCursorRange::one(CCursor::new(new_end)),
+            };
+            state.cursor.set_char_range(Some(cursor_range));
+            state.store(&self.win.egui_ctx, te_id);
+        }
+
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
     }
 
     /// Apply a colour and/or size override to the current text selection while
@@ -953,6 +1086,74 @@ mod tests {
             app.edit.text_edit.is_none(),
             "explicit commit ends the session"
         );
+    }
+
+    #[test]
+    fn shift_f3_cycles_case_of_whole_buffer() {
+        let mut app = App::new();
+        app.text_tool_click(5.0, 5.0);
+        app.update_text_buffer("hello world".to_string());
+        // No selection → operate on the whole buffer.
+        app.update_text_cursor_cache(None, Some(11));
+
+        app.text_cycle_case();
+        assert_eq!(app.edit.text_edit.as_ref().unwrap().buffer, "HELLO WORLD");
+        app.text_cycle_case();
+        assert_eq!(app.edit.text_edit.as_ref().unwrap().buffer, "Hello World");
+        app.text_cycle_case();
+        assert_eq!(app.edit.text_edit.as_ref().unwrap().buffer, "hello world");
+    }
+
+    #[test]
+    fn shift_f3_recases_only_the_selection_and_keeps_glyph_styles_aligned() {
+        let mut app = App::new();
+        app.text_tool_click(5.0, 5.0);
+        app.update_text_buffer("abcd".to_string());
+        // Give char 1 a distinct colour so we can prove styles stay aligned.
+        app.update_text_cursor_cache(Some(1..2), Some(2));
+        app.apply_text_style_to_selection(Some([200, 30, 30, 255]), None, None, None, None, None);
+
+        // Select "bc" and cycle case → "BC".
+        app.update_text_cursor_cache(Some(1..3), Some(3));
+        app.text_cycle_case();
+
+        let s = app.edit.text_edit.as_ref().unwrap();
+        assert_eq!(s.buffer, "aBCd", "only the selected span is recased");
+        assert_eq!(s.selection, Some(1..3), "the selection is preserved");
+        assert_eq!(s.glyph_styles.len(), 4);
+        assert_eq!(
+            s.glyph_styles[1].color,
+            [200, 30, 30, 255],
+            "per-glyph colour follows its character through the recase"
+        );
+    }
+
+    #[test]
+    fn recolor_text_layer_recolours_type_and_is_undoable() {
+        let (mut app, idx) = app_with_text("Hi");
+        let orig = match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Text(td) => td.color,
+            _ => panic!("expected a text layer"),
+        };
+        let new_color = [10, 120, 200, 255];
+        assert_ne!(orig, new_color);
+
+        assert!(app.recolor_text_layer(idx, new_color));
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Text(td) => assert_eq!(td.color, new_color),
+            _ => panic!("still a text layer"),
+        }
+        // Re-applying the same colour is a no-op (nothing to record).
+        assert!(!app.recolor_text_layer(idx, new_color));
+
+        app.docs.documents[0]
+            .canvas
+            .undo()
+            .expect("undo the recolour");
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Text(td) => assert_eq!(td.color, orig, "undo restores the original colour"),
+            _ => panic!("undo keeps it a text layer"),
+        }
     }
 
     #[test]
