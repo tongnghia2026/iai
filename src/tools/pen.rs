@@ -172,6 +172,10 @@ pub struct PenTool {
     pub mode: PenMode,
     /// Line width (canvas px) for `PenMode::Stroke`.
     pub stroke_width: f32,
+    /// Master snap toggle, mirrored from `UiState.snap_enabled`. When on, a newly
+    /// placed anchor snaps to nearby vector objects so a line joins another
+    /// object's corner or edge.
+    pub snap_enabled: bool,
     anchors: Vec<PenAnchor>,
     closed: bool,
     /// The press-drag gesture in flight, or `None` between gestures.
@@ -188,6 +192,7 @@ impl PenTool {
             anti_alias: true,
             mode: PenMode::Selection,
             stroke_width: 3.0,
+            snap_enabled: true,
             anchors: Vec::new(),
             closed: false,
             dragging: None,
@@ -572,7 +577,16 @@ impl Tool for PenTool {
 
         // Empty space: append a new corner anchor (a press-drag smooths it). The
         // newest anchor becomes the selected one, so its handles stay visible until
-        // the next point is placed.
+        // the next point is placed. Snap it onto a nearby vector object first so a
+        // line joins another object's corner or edge exactly.
+        let (cx, cy) = if self.snap_enabled {
+            match ctx.snap_vector_point(Point::new(cx, cy), None, ANCHOR_HIT_PX) {
+                Some(hit) => (hit.point.x, hit.point.y),
+                None => (cx, cy),
+            }
+        } else {
+            (cx, cy)
+        };
         self.anchors.push(PenAnchor::corner((cx, cy)));
         let last = self.anchors.len() - 1;
         self.selected = Some(last);

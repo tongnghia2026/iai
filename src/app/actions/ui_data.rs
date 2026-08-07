@@ -953,6 +953,11 @@ impl App {
                 } else {
                     Vec::new()
                 },
+                arrow_snap_marker: if self.edit.tools.active_id() == crate::tools::ToolId::Arrow {
+                    self.edit.tools.arrow().snap_marker().map(|p| (p.x, p.y))
+                } else {
+                    None
+                },
                 shape_kind: self.edit.tools.shape().kind.to_u8(),
                 shape_fill: self.edit.tools.shape().fill,
                 shape_fill_color: self.edit.tools.shape().fill_color,

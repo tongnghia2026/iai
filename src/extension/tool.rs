@@ -1,6 +1,10 @@
 use crate::core::canvas::Canvas;
 use crate::core::document::{Document, DocumentId};
+use crate::core::geometry::Point;
+use crate::core::layer::LayerType;
 use crate::core::selection::SelectionMode;
+use crate::core::vector::object::VectorGeometry;
+use crate::core::vector::snap::{snap_to_paths, SnapHit};
 
 /// Identity of every tool IAI ships. Lives beside the [`Tool`] trait that
 /// returns it so this layer never depends on the concrete `tools` module.
@@ -188,6 +192,44 @@ impl<'a> ToolCtx<'a> {
 
     pub fn canvas_to_screen(&self, cx: f32, cy: f32) -> (f32, f32) {
         (cx * self.zoom + self.pan_x, cy * self.zoom + self.pan_y)
+    }
+
+    /// Snap a canvas-space `query` point to nearby vector geometry so a line /
+    /// arrow endpoint *connects* to another object's corner or edge. Node anchors
+    /// win over outlines (see [`snap_to_paths`]).
+    ///
+    /// `exclude` skips one layer id (the object currently being drawn/edited so it
+    /// can't snap to itself). `threshold_px` is a SCREEN-pixel radius, divided by
+    /// the active zoom so the pull feels the same at every magnification. Returns
+    /// `None` when snapping finds nothing close enough.
+    ///
+    /// Candidate geometry is taken in canvas space via the same `transform`-maps-
+    /// local→canvas invariant the Move-tool pick relies on (`path_layer_hit_at`):
+    /// a settled layer's object transform maps object-local straight to canvas, so
+    /// `path_in_layer_space()` is already canvas-space.
+    pub fn snap_vector_point(
+        &self,
+        query: Point,
+        exclude: Option<u32>,
+        threshold_px: f32,
+    ) -> Option<SnapHit> {
+        let threshold = threshold_px / self.zoom.max(1e-4);
+        let mut paths = Vec::new();
+        for layer in &self.document.canvas.layer_stack.layers {
+            if !layer.visible || Some(layer.id) == exclude {
+                continue;
+            }
+            match &layer.layer_type {
+                LayerType::Vector(VectorGeometry::Path(obj)) => {
+                    paths.push(obj.path_in_layer_space());
+                }
+                LayerType::Vector(VectorGeometry::Primitive(shape)) => {
+                    paths.push(shape.to_vector_object(layer.offset).path_in_layer_space());
+                }
+                _ => {}
+            }
+        }
+        snap_to_paths(query, &paths, threshold)
     }
 }
 

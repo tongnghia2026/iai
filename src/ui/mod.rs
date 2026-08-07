@@ -1211,6 +1211,30 @@ pub fn build(
             }
         }
 
+        // Snap feedback: a small diamond at the corner/edge the Arrow endpoint is
+        // snapped to, so it's clear the line will connect there.
+        if let Some((mx, my)) = data.tool.arrow_snap_marker {
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("arrow_snap_marker"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            let c = to_screen_pos(mx, my);
+            let r = 5.0;
+            let diamond = vec![
+                c + egui::vec2(0.0, -r),
+                c + egui::vec2(r, 0.0),
+                c + egui::vec2(0.0, r),
+                c + egui::vec2(-r, 0.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                diamond,
+                egui::Color32::from_rgba_unmultiplied(255, 60, 60, 180),
+                egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
+            ));
+        }
+
         if let Some([x0, y0, x1, y1]) = data.sel.rect_sel_preview {
             let painter = ctx
                 .layer_painter(egui::LayerId::new(

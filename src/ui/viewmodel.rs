@@ -231,6 +231,9 @@ pub struct ToolViewModel {
     pub arrow_end: u8,
     pub arrow_route: u8,
     pub arrow_path: Vec<(f32, f32)>,
+    /// Canvas-space point the Arrow endpoint is snapped to (a nearby vector
+    /// object's corner/edge), for the on-canvas snap marker. `None` when unsnapped.
+    pub arrow_snap_marker: Option<(f32, f32)>,
     /// Gradient tool drag guide: [start_x, start_y, end_x, end_y] in canvas space.
     pub gradient_preview: Option<[f32; 4]>,
     pub wand_brush_size: f32,
@@ -727,6 +730,7 @@ impl Default for UiData {
                 arrow_end: 1,
                 arrow_route: 0,
                 arrow_path: Vec::new(),
+                arrow_snap_marker: None,
                 gradient_preview: None,
                 wand_brush_size: 30.0,
                 wand_tolerance: 32,

@@ -73,7 +73,12 @@ impl App {
         }
         if actions.chrome.toggle_snap {
             self.shell.ui.snap_enabled = !self.shell.ui.snap_enabled;
-            self.edit.tools.move_tool_mut().snap_enabled = self.shell.ui.snap_enabled;
+            let on = self.shell.ui.snap_enabled;
+            self.edit.tools.move_tool_mut().snap_enabled = on;
+            // The vector drawing tools share the same master Snap toggle so an
+            // arrow / line joins other objects at their corners and edges.
+            self.edit.tools.arrow_mut().snap_enabled = on;
+            self.edit.tools.pen_mut().snap_enabled = on;
         }
         if actions.chrome.clear_guides {
             self.docs.documents[self.docs.active_doc_idx].guides.clear();
