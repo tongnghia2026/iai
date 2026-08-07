@@ -11,6 +11,46 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
+use unicode_normalization::char::canonical_combining_class;
+use unicode_normalization::UnicodeNormalization;
+
+/// Normalize `content` to NFC (precomposed), returning the resulting chars plus,
+/// for each output char, the index of the source character whose per-glyph style
+/// it should inherit.
+///
+/// Why: `ab_glyph` does no OpenType mark positioning. A decomposed (NFD) sequence
+/// like `E` + `◌̂` + `◌̉` (Vietnamese "Ể") lays the two combining marks out with
+/// zero advance at the pen *after* the base letter, so the accents render detached
+/// up and to the right instead of stacked over the letter. Fusing to the single
+/// precomposed glyph the font already positions correctly fixes it. Clusters are
+/// `starter + following combining marks`, so per-character styling survives (each
+/// fused glyph keeps its base letter's style).
+pub(crate) fn normalize_nfc_with_style_src(content: &str) -> (Vec<char>, Vec<usize>) {
+    let src: Vec<char> = content.chars().collect();
+    let mut out_chars = Vec::with_capacity(src.len());
+    let mut out_src = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        let base = i;
+        let mut j = i + 1;
+        // Absorb the trailing combining marks that belong to this starter.
+        while j < src.len() && canonical_combining_class(src[j]) != 0 {
+            j += 1;
+        }
+        for c in src[base..j].iter().collect::<String>().nfc() {
+            out_chars.push(c);
+            out_src.push(base);
+        }
+        i = j;
+    }
+    (out_chars, out_src)
+}
+
+/// Convenience NFC of a whole string (used where per-character styles are not
+/// tracked, e.g. storing the edit buffer).
+pub fn normalize_nfc(content: &str) -> String {
+    content.nfc().collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextAlign {
@@ -784,8 +824,12 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
     let base_ascent = base_font.as_scaled(PxScale::from(base_px)).ascent();
     let base_descent = base_font.as_scaled(PxScale::from(base_px)).descent();
 
-    let chars: Vec<char> = td.content.chars().collect();
-    let styles: Vec<GlyphStyle> = (0..chars.len()).map(|i| td.glyph_style(i)).collect();
+    // Fuse decomposed diacritics to precomposed glyphs so accents sit on their
+    // base letter (ab_glyph has no mark positioning). Per-glyph styles follow the
+    // base character of each fused cluster. All layout consumers (raster / curves
+    // / caret / hit-test) run through here, so screen and PDF stay identical.
+    let (chars, style_src) = normalize_nfc_with_style_src(&td.content);
+    let styles: Vec<GlyphStyle> = style_src.iter().map(|&i| td.glyph_style(i)).collect();
     let max_px = styles
         .iter()
         .map(|style| style.font_px.max(1.0))
@@ -1372,6 +1416,207 @@ pub fn rasterize_placed(td: &TextData) -> Option<(Rasterized, (i32, i32))> {
     ))
 }
 
+/// One fill colour's worth of curves extracted from a text layer.
+pub struct TextCurveGroup {
+    /// The straight RGBA colour every glyph in this group was drawn with.
+    pub color: [u8; 4],
+    /// Those glyphs' outlines as one multi-contour path in CANVAS space. NonZero
+    /// fill preserves each glyph's native winding, so counters render as holes and
+    /// touching same-colour glyphs union cleanly.
+    pub path: crate::core::vector::path::PathData,
+}
+
+/// Build transient vector objects for display/export while keeping the source
+/// [`TextData`] editable. Unlike "Convert Text to Curves", this does not mutate
+/// the layer stack.
+pub fn text_vector_objects(
+    td: &TextData,
+    layer_offset: (i32, i32),
+) -> Vec<crate::core::vector::object::VectorObjectData> {
+    use crate::core::vector::affine::AffineTransform;
+    use crate::core::vector::color::ColorValue;
+    use crate::core::vector::object::VectorObjectData;
+    use crate::core::vector::style::VectorStyle;
+
+    let opacity = td.opacity.clamp(0.0, 1.0);
+    text_to_curves(td, layer_offset)
+        .into_iter()
+        .filter_map(|group| {
+            let style = VectorStyle {
+                opacity,
+                ..VectorStyle::filled(ColorValue::from_rgba8(group.color))
+            };
+            let object = VectorObjectData::new(group.path, style, AffineTransform::IDENTITY);
+            object.validate().is_ok().then_some(object)
+        })
+        .collect()
+}
+
+/// Accumulate contours under their colour, preserving first-seen order so the
+/// resulting layer order is deterministic.
+fn add_curve_group(
+    groups: &mut Vec<([u8; 4], Vec<crate::core::vector::path::Contour>)>,
+    color: [u8; 4],
+    mut contours: Vec<crate::core::vector::path::Contour>,
+) {
+    if contours.is_empty() {
+        return;
+    }
+    match groups.iter_mut().find(|(c, _)| *c == color) {
+        Some(slot) => slot.1.append(&mut contours),
+        None => groups.push((color, contours)),
+    }
+}
+
+/// Convert a text layer's `TextData` into editable vector curves ("Convert Text
+/// to Curves"). Returns one [`TextCurveGroup`] per distinct fill colour (a single
+/// group in the common single-colour case), every contour already mapped into
+/// CANVAS space so it lands exactly where the rasterized text sits.
+///
+/// `layer_offset` is the text layer's current `Layer::offset`; the upright text
+/// anchor is recovered as `layer_offset − placement_delta` — the exact inverse of
+/// how [`rasterize_placed`]/`rasterize_into_layer` place the raster — so a text
+/// layer moved with the Move tool converts at its moved position, and the floored
+/// placement delta cancels out. The output reproduces the raster's appearance:
+/// per-glyph font/size (each glyph outlined at its own scale), per-glyph colour,
+/// faux-bold double strike, faux-italic shear, underline bars, and the layer's
+/// stretch / rotation / flip placement. `TextData::opacity` is deliberately NOT
+/// baked into the colour: the caller puts it on each object's
+/// `VectorStyle::opacity`, matching how the raster pipeline multiplies it in.
+///
+/// KNOWN LIMITATION (multi-colour text only): each colour becomes its own Path
+/// layer that alpha-composites, whereas [`rasterize`] unions all glyphs with
+/// coverage-max (winner-takes-all). For single-colour text these are identical.
+/// For multi-colour text they differ ONLY along the ~1px antialiased fringe where
+/// glyphs of DIFFERENT colours physically overlap (heavy negative tracking, or an
+/// italic-sheared glyph reaching into a differently-coloured neighbour) — solid
+/// interiors still match because reading order == raster draw order. Exact
+/// reproduction is impossible with independent alpha-composited layers, and the
+/// only alternative (booleaning the overlaps away) would flatten the smooth glyph
+/// curves to polygons — strictly worse — so this fringe is accepted.
+pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveGroup> {
+    use crate::core::geometry::Point;
+    use crate::core::vector::from_text::{glyph_contours, GlyphSegment};
+    use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+    use ab_glyph::OutlineCurve;
+
+    let Some(base_font) = font_for(&td.font_family) else {
+        return Vec::new();
+    };
+    let Some(layout) = layout_text(td) else {
+        return Vec::new();
+    };
+
+    // Recover the upright raster origin, then map upright-layout points through
+    // stretch → flip → rotation exactly as `rasterize_stretched`/`rasterize_placed`
+    // transform the pixels. `delta` is (0,0) unless the layer is rotated/flipped.
+    let delta = rasterize_placed(td).map(|(_, d)| d).unwrap_or((0, 0));
+    let origin = (
+        layer_offset.0 as f32 - delta.0 as f32,
+        layer_offset.1 as f32 - delta.1 as f32,
+    );
+    let stretch = if td.stretch_x.is_finite() && td.stretch_x > 0.001 {
+        td.stretch_x
+    } else {
+        1.0
+    };
+    let angle = td.rotation_deg.rem_euclid(360.0).to_radians();
+    let (cos_a, sin_a) = (angle.cos(), angle.sin());
+    let fx = if td.flip_x { -1.0 } else { 1.0 };
+    let fy = if td.flip_y { -1.0 } else { 1.0 };
+    // upright-layout (lx, ly) → canvas.
+    let place = |lx: f32, ly: f32| -> Point {
+        let (sx, sy) = (lx * stretch, ly);
+        let (fxv, fyv) = (fx * sx, fy * sy);
+        Point::new(
+            origin.0 + cos_a * fxv - sin_a * fyv,
+            origin.1 + sin_a * fxv + cos_a * fyv,
+        )
+    };
+
+    let mut groups: Vec<([u8; 4], Vec<Contour>)> = Vec::new();
+
+    for line in &layout.lines {
+        let baseline_y = line.baseline;
+        for k in 0..line.len {
+            let g = &layout.glyphs[line.glyph0 + k];
+            let font = font_for(&g.font_family).unwrap_or(base_font);
+            let sf = font.as_scaled(PxScale::from(g.scale.max(1.0)));
+            let sh = sf.h_scale_factor();
+            let sv = sf.v_scale_factor();
+
+            // A font-unit outline point (y-up) at pen `pen_x` → canvas: to
+            // upright-layout pixels first (matching `rasterize`), apply the
+            // faux-italic shear there, then place.
+            let to_canvas = |gp: ab_glyph::Point, pen_x: f32| -> Point {
+                let mut lx = pen_x + gp.x * sh;
+                let ly = baseline_y - gp.y * sv;
+                if g.italic {
+                    lx += (baseline_y - ly) * 0.22;
+                }
+                place(lx, ly)
+            };
+
+            if let Some(outline) = font.outline(font.glyph_id(g.ch)) {
+                // Faux bold strikes the glyph again 1px to the right (matching the
+                // raster's two-pass max coverage); NonZero unions the copies.
+                let pens: &[f32] = if g.bold { &[0.0, 1.0] } else { &[0.0] };
+                let mut segs: Vec<GlyphSegment> = Vec::with_capacity(outline.curves.len());
+                for &pen_off in pens {
+                    let pen_x = g.x + pen_off;
+                    segs.clear();
+                    for curve in &outline.curves {
+                        segs.push(match *curve {
+                            OutlineCurve::Line(a, b) => {
+                                GlyphSegment::Line(to_canvas(a, pen_x), to_canvas(b, pen_x))
+                            }
+                            OutlineCurve::Quad(a, c, b) => GlyphSegment::Quad(
+                                to_canvas(a, pen_x),
+                                to_canvas(c, pen_x),
+                                to_canvas(b, pen_x),
+                            ),
+                            OutlineCurve::Cubic(a, c1, c2, b) => GlyphSegment::Cubic(
+                                to_canvas(a, pen_x),
+                                to_canvas(c1, pen_x),
+                                to_canvas(c2, pen_x),
+                                to_canvas(b, pen_x),
+                            ),
+                        });
+                    }
+                    add_curve_group(&mut groups, g.color, glyph_contours(&segs));
+                }
+            }
+
+            // Underline: an axis-aligned bar (no italic shear), placed like the
+            // glyphs. Mirrors `rasterize`'s underline metrics.
+            if g.underline && g.advance > 0.0 {
+                let y0 = (baseline_y + g.scale * 0.08).round();
+                let thickness = (g.scale / 16.0).round().max(1.0);
+                let x0 = g.x.floor();
+                let x1 = (g.x + g.advance).ceil();
+                let bar = Contour::new(
+                    vec![
+                        Node::sharp(place(x0, y0)),
+                        Node::sharp(place(x1, y0)),
+                        Node::sharp(place(x1, y0 + thickness)),
+                        Node::sharp(place(x0, y0 + thickness)),
+                    ],
+                    true,
+                );
+                add_curve_group(&mut groups, g.color, vec![bar]);
+            }
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(color, contours)| TextCurveGroup {
+            color,
+            path: PathData::new(contours, FillRule::NonZero),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{rasterize, rasterize_placed, TextData, TextFontFamily};
@@ -1454,6 +1699,49 @@ mod tests {
         .expect("font was available for plain text");
 
         assert!(alpha_sum(&underlined.rgba) > alpha_sum(&plain.rgba));
+    }
+
+    #[test]
+    fn nfc_normalization_fuses_decomposed_diacritics() {
+        // "Ể" precomposed (U+1EC2) vs "E" + combining circumflex + hook above.
+        // ab_glyph has no mark positioning, so without NFC the decomposed form
+        // lays the accents out detached past the base letter — a wider raster
+        // with ink far to the right. After NFC both must be byte-identical.
+        let precomposed = match rasterize(&text("BI\u{1EC2}N")) {
+            Some(r) => r,
+            None => return, // no font in this environment
+        };
+        let decomposed =
+            rasterize(&text("BIE\u{0302}\u{0309}N")).expect("font available for decomposed text");
+        assert_eq!(
+            (precomposed.width, precomposed.height),
+            (decomposed.width, decomposed.height),
+            "decomposed diacritics must fuse to the same footprint as precomposed"
+        );
+        assert_eq!(
+            precomposed.rgba, decomposed.rgba,
+            "NFC normalization must make decomposed text render identically"
+        );
+    }
+
+    #[test]
+    fn nfc_normalization_maps_per_glyph_styles_to_base_letter() {
+        // A per-character red override on the single precomposed "Ể" must land on
+        // the fused glyph when the source is decomposed (base + two marks).
+        let mut td = text("\u{1EC2}");
+        td.ensure_glyph_styles();
+        td.glyph_styles[0].color = [255, 0, 0, 255];
+        let precomposed = match rasterize(&td) {
+            Some(r) => r,
+            None => return,
+        };
+        let mut dtd = text("E\u{0302}\u{0309}");
+        dtd.ensure_glyph_styles(); // 3 entries
+        for s in &mut dtd.glyph_styles {
+            s.color = [255, 0, 0, 255];
+        }
+        let decomposed = rasterize(&dtd).expect("font available");
+        assert_eq!(precomposed.rgba, decomposed.rgba);
     }
 
     #[test]
@@ -1689,5 +1977,76 @@ mod tests {
         // Lines never leak across '\n'.
         assert_eq!(super::line_char_span(content, 1), (0, 8));
         assert_eq!(super::line_char_span(content, 10), (9, 17));
+    }
+
+    #[test]
+    fn text_to_curves_positions_glyphs_over_the_raster() {
+        let td = TextData {
+            content: "Ag".to_string(),
+            font_family: TextFontFamily::DejaVuSans,
+            font_px: 64.0,
+            ..TextData::default()
+        };
+        let Some((placed, _)) = rasterize_placed(&td) else {
+            return; // no font in this environment
+        };
+        let offset = (100, 50);
+        let groups = super::text_to_curves(&td, offset);
+        assert_eq!(groups.len(), 1, "single colour → single group");
+        let path = &groups[0].path;
+        assert!(!path.contours.is_empty(), "letters produce contours");
+        assert!(path.validate().is_ok());
+        let b = path.control_bounds().expect("non-empty bounds");
+        // The curves must sit within (a small margin of) the placed raster's
+        // canvas rect — i.e. right where the ink was drawn, not off elsewhere.
+        let m = 4.0;
+        assert!(b.x >= offset.0 as f32 - m, "left edge {} too far left", b.x);
+        assert!(b.y >= offset.1 as f32 - m, "top edge {} too far up", b.y);
+        assert!(b.x + b.w <= offset.0 as f32 + placed.width as f32 + m);
+        assert!(b.y + b.h <= offset.1 as f32 + placed.height as f32 + m);
+    }
+
+    #[test]
+    fn text_to_curves_splits_by_colour() {
+        let mut td = TextData {
+            content: "AB".to_string(),
+            font_family: TextFontFamily::DejaVuSans,
+            font_px: 48.0,
+            ..TextData::default()
+        };
+        if super::font_for(&td.font_family).is_none() {
+            return;
+        }
+        td.glyph_styles = "AB"
+            .chars()
+            .enumerate()
+            .map(|(i, _)| super::GlyphStyle {
+                color: if i == 0 {
+                    [220, 20, 20, 255]
+                } else {
+                    [20, 20, 220, 255]
+                },
+                font_px: td.font_px,
+                font_family: td.font_family.clone(),
+                bold: false,
+                italic: false,
+                underline: false,
+            })
+            .collect();
+        let groups = super::text_to_curves(&td, (0, 0));
+        assert_eq!(groups.len(), 2, "two colours → two groups");
+        assert!(groups.iter().any(|g| g.color == [220, 20, 20, 255]));
+        assert!(groups.iter().any(|g| g.color == [20, 20, 220, 255]));
+        assert!(groups.iter().all(|g| !g.path.contours.is_empty()));
+    }
+
+    #[test]
+    fn text_to_curves_empty_is_no_groups() {
+        let td = TextData {
+            content: "   ".to_string(),
+            font_family: TextFontFamily::DejaVuSans,
+            ..TextData::default()
+        };
+        assert!(super::text_to_curves(&td, (0, 0)).is_empty());
     }
 }

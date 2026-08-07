@@ -28,6 +28,9 @@ pub struct EditContext<'a> {
     /// Channels-panel state (alpha channels). Only alpha-channel commands
     /// need it; other construction sites leave it `None`.
     pub channels: Option<&'a mut crate::core::channels::ChannelsState>,
+    /// Document metadata is optional for low-level command tests that operate
+    /// on a bare LayerStack. Canvas gateway contexts always provide it.
+    pub metadata: Option<&'a mut crate::core::canvas::CanvasMetadata>,
 }
 
 impl<'a> EditContext<'a> {
@@ -43,11 +46,17 @@ impl<'a> EditContext<'a> {
             canvas_height: h,
             selection: sel,
             channels: None,
+            metadata: None,
         }
     }
 
     pub fn with_channels(mut self, channels: &'a mut crate::core::channels::ChannelsState) -> Self {
         self.channels = Some(channels);
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: &'a mut crate::core::canvas::CanvasMetadata) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 }
@@ -151,11 +160,13 @@ impl DeltaSnapshot {
     /// Apply after_pixels to the layer (execute).
     pub fn apply_after(&self, layer_tiles: &mut crate::core::tile::TileMap) {
         *layer_tiles = self.after_tiles.clone();
+        layer_tiles.bump_changed_revisions(&self.before_tiles);
     }
 
     /// Apply before_pixels to the layer (undo).
     pub fn apply_before(&self, layer_tiles: &mut crate::core::tile::TileMap) {
         *layer_tiles = self.before_tiles.clone();
+        layer_tiles.bump_changed_revisions(&self.after_tiles);
     }
 }
 
@@ -1578,6 +1589,32 @@ impl Command for ResizeCanvasCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paint_undo_refreshes_tile_revision_before_the_next_edit() {
+        use crate::core::tile::TilePos;
+
+        let before = crate::core::tile::TileMap::from_rgba(&[10, 20, 30, 255], 1, 1);
+        let mut after = before.clone();
+        after.get_tile_mut(TilePos { x: 0, y: 0 }).pixels[0] = 200;
+        let stale_filled_revision = after.tiles.get(&TilePos { x: 0, y: 0 }).unwrap().revision;
+
+        let snapshot = DeltaSnapshot {
+            layer_id: 1,
+            target: crate::core::layer::PaintTarget::Pixels,
+            before_tiles: before,
+            after_tiles: after,
+        };
+        let mut live = snapshot.after_tiles.clone();
+
+        snapshot.apply_before(&mut live);
+        let restored_revision = live.tiles.get(&TilePos { x: 0, y: 0 }).unwrap().revision;
+        assert_ne!(restored_revision, stale_filled_revision);
+
+        live.get_tile_mut(TilePos { x: 0, y: 0 }).pixels[1] = 210;
+        let next_fill_revision = live.tiles.get(&TilePos { x: 0, y: 0 }).unwrap().revision;
+        assert_ne!(next_fill_revision, stale_filled_revision);
+    }
 
     struct FailingCommand;
 

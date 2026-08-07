@@ -438,7 +438,7 @@ impl Canvas {
                     l.layer_type,
                     LayerType::Raster
                         | LayerType::Text(_)
-                        | LayerType::Shape(_)
+                        | LayerType::Vector(_)
                         | LayerType::SmartObject
                 )
         };

@@ -137,6 +137,38 @@ impl App {
                 }
             }
         }
+        if let Some(idx) = actions.layers.rasterize_layer.take() {
+            let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+            if let Some(id) = canvas.layer_stack.layers.get(idx).map(|l| l.id) {
+                if canvas
+                    .execute(
+                        Box::new(crate::core::command_vector::RasterizeVectorLayer::new(id)),
+                        crate::core::gateway::ChangeKind::LayerStructure,
+                    )
+                    .is_ok()
+                {
+                    self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+                }
+            }
+        }
+        if let Some(idx) = actions.layers.convert_to_curves.take() {
+            self.convert_shape_to_path(idx);
+        }
+        if let Some(idx) = actions.layers.text_to_curves.take() {
+            self.text_to_curves(idx);
+        }
+        if let Some(op) = actions.layers.boolean_op.take() {
+            self.apply_boolean(op);
+        }
+        if actions.layers.powerclip_place {
+            self.powerclip_place();
+        }
+        if actions.layers.powerclip_release {
+            self.powerclip_release();
+        }
+        if actions.layers.toggle_clipping_mask {
+            self.toggle_clipping_mask();
+        }
         if let Some(idx) = actions.layers.remove_layer.take() {
             if self.docs.documents[self.docs.active_doc_idx]
                 .canvas

@@ -1015,7 +1015,7 @@ pub(crate) fn curves_editor_ui(
                                                 changed = true;
                                             }
                                             if ui
-                                                .small_button("×")
+                                                .small_button(ph::X)
                                                 .on_hover_text("Delete preset")
                                                 .clicked()
                                             {
@@ -1489,7 +1489,7 @@ pub(crate) fn levels_editor_ui(
                                                 changed = true;
                                             }
                                             if ui
-                                                .small_button("×")
+                                                .small_button(ph::X)
                                                 .on_hover_text("Delete preset")
                                                 .clicked()
                                             {

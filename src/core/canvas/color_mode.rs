@@ -25,6 +25,26 @@ impl Canvas {
         }
     }
 
+    /// The CMYK ICC profile bytes to embed when exporting this document to a
+    /// DeviceCMYK PDF, so a colour-managed viewer/press reproduces the on-screen
+    /// preview instead of applying its own default DeviceCMYK interpretation. An
+    /// ICC-profiled document embeds its own profile; the built-in "Generic CMYK
+    /// (naive)" space embeds a synthesized profile matching that model. `None`
+    /// for an RGB document, or if the CMYK profile bytes are unusable (the caller
+    /// then writes plain, untagged DeviceCMYK).
+    pub fn cmyk_pdf_profile(&self) -> Option<Vec<u8>> {
+        match &self.color_mode {
+            ColorMode::Rgb => None,
+            ColorMode::Cmyk(CmykProfile::Naive) => {
+                let bytes = crate::core::cms::generic_cmyk_icc_bytes();
+                (!bytes.is_empty()).then(|| bytes.to_vec())
+            }
+            ColorMode::Cmyk(CmykProfile::Icc { data, .. }) => {
+                crate::core::cms::profile_is_cmyk(data).then(|| data.clone())
+            }
+        }
+    }
+
     /// Flatten the document's ink planes onto white paper: per-channel
     /// source-over with each pixel's mirror alpha × layer opacity (the same
     /// ink-space compositing model the CMYK brush uses). Returns a packed
@@ -33,6 +53,19 @@ impl Canvas {
     /// an adjustment layer, or a painted pixel without ink all disqualify it.
     /// Callers then fall back to converting the flattened RGB mirror.
     pub fn flatten_ink(&self) -> Option<Vec<u8>> {
+        self.flatten_ink_excluding(&std::collections::HashSet::new())
+    }
+
+    /// Like [`Self::flatten_ink`] but skips the layers whose id is in `hidden`.
+    /// PDF export uses this to build the DeviceCMYK raster base with the vector
+    /// layers it promotes to native paths hidden, so they aren't drawn twice.
+    /// Excluded layers are top-level opaque Normal vectors (that is why they were
+    /// promotable), so removing them never changes whether the remainder is
+    /// ink-exact.
+    pub fn flatten_ink_excluding(
+        &self,
+        hidden: &std::collections::HashSet<u32>,
+    ) -> Option<Vec<u8>> {
         use crate::core::tile::TILE_SIZE;
         if !self.is_cmyk() {
             return None;
@@ -49,7 +82,7 @@ impl Canvas {
         let len = Self::checked_rgba_len(self.width, self.height)?;
         let mut out = vec![0u8; len];
         for layer in &self.layer_stack.layers {
-            if !layer.visible {
+            if !layer.visible || hidden.contains(&layer.id) {
                 continue;
             }
             if matches!(

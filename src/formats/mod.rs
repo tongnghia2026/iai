@@ -1,11 +1,15 @@
 #![allow(dead_code)]
 
 pub mod iai;
+pub mod iai_palette;
+pub mod iai_vector;
 pub mod jpeg;
 pub mod pdf;
 pub mod png;
 pub mod psd;
 pub mod psd_adjust;
+pub mod psd_descriptor;
+pub mod psd_text;
 pub mod raw;
 pub mod raw_exif;
 pub mod raw_preview;

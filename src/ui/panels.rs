@@ -4,6 +4,10 @@ use crate::core::text::{TextAlign, TextFontFamily};
 use egui;
 use egui_phosphor::regular as ph;
 
+/// Width of the Corel-style vertical colour strip pinned to the right edge of
+/// the docked panel band. Included in `panel_r_w`, so the canvas layout already
+/// accounts for it.
+const VECTOR_PALETTE_STRIP_W: f32 = 40.0;
 const LAYER_PANEL_THUMB_SIZE: f32 = 38.0;
 const CHANNEL_PANEL_THUMB_SIZE: f32 = 38.0;
 const PANEL_ICON_BUTTON_SIZE: f32 = 22.0;
@@ -15,10 +19,13 @@ const LAYER_DRAG_THUMB_ALPHA: u8 = 128;
 #[allow(deprecated)]
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
-    if data.chrome.show_color_panel
-        || data.chrome.show_layer_panel
-        || data.chrome.show_channels_panel
-    {
+    // The docked right band now holds only Layers/Channels plus the Corel-style
+    // vertical colour strip pinned to the window edge. "Color & Brush" lives in
+    // a separate floating panel (added below with the other floating panels), so
+    // there is no resizable divider left that could slide the layer list off the
+    // bottom of the screen.
+    let show_right_band = data.chrome.show_layer_panel || data.chrome.show_channels_panel;
+    if show_right_band {
         #[allow(deprecated)]
         egui::SidePanel::right("right_panels")
             .exact_size(data.chrome.panel_r_w)
@@ -30,25 +37,33 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
             )
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 5.0);
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        if data.chrome.show_color_panel {
-                            color_panel(ui, data, actions);
-                            ui.separator();
-                        }
-                        if data.chrome.show_layer_panel || data.chrome.show_channels_panel {
-                            layers_channels_panel(ui, data, actions);
-                        }
+                // The colour strip is pinned to the far right edge; the layer
+                // list fills the rest. Both are fixed — nothing here resizes.
+                egui::SidePanel::right("vector_palette_strip")
+                    .exact_size(VECTOR_PALETTE_STRIP_W)
+                    .resizable(false)
+                    .frame(egui::Frame::new())
+                    .show_inside(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("vector_palette_strip_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                vector_palette_strip(ui, data, actions);
+                            });
+                    });
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new())
+                    .show_inside(ui, |ui| {
+                        // No outer scroll wrapper: the layer list scrolls
+                        // internally and grows to the panel height, so the
+                        // panel's real height is what `available_height` reports.
+                        layers_channels_panel(ui, data, actions);
                     });
             });
     }
 
     let screen = ctx.content_rect();
-    let dock_width = if data.chrome.show_color_panel
-        || data.chrome.show_layer_panel
-        || data.chrome.show_channels_panel
-    {
+    let dock_width = if show_right_band {
         data.chrome.panel_r_w
     } else {
         0.0
@@ -56,6 +71,26 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let default_x = |width: f32| {
         (screen.max.x - dock_width - width - 12.0).max(screen.min.x + data.chrome.toolbar_w + 12.0)
     };
+
+    // Floating "Color & Brush": precise colour picker, the vector Object
+    // appearance editor, and swatch management. Opened on demand from
+    // Window ▸ Color Panel (like the Levels dialog). The toolbar's
+    // foreground/background chips still open a colour dialog when it is closed,
+    // and the right-edge strip covers quick swatch application.
+    if data.chrome.show_color_panel {
+        let mut open = true;
+        floating_panel(
+            ctx,
+            "Color & Brush",
+            egui::pos2(default_x(300.0), 96.0),
+            300.0,
+            &mut open,
+            |ui| color_brush_panel(ui, data, actions),
+        );
+        if !open {
+            actions.chrome.toggle_color_panel = true;
+        }
+    }
 
     if data.chrome.show_text_panel {
         let mut open = true;
@@ -520,43 +555,17 @@ fn text_preset_menu(
     picked
 }
 
-fn color_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    let pal = data.chrome.theme_mode.palette();
-    egui::CollapsingHeader::new("Color & Brush")
-        .default_open(true)
-        .show(ui, |ui| {
+/// Contents of the floating "Color & Brush" panel: the precise foreground
+/// colour picker, the vector Object appearance editor (when a Path is
+/// selected), and document-swatch management. The quick colour chips live in
+/// the right-edge strip ([`vector_palette_strip`]) instead.
+fn color_brush_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    {
+        {
             ui.add_space(4.0);
 
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("#")
-                        .size(12.0)
-                        .color(pal.text_secondary),
-                );
-                let hex = format!(
-                    "{:02X}{:02X}{:02X}",
-                    data.tool.brush_color[0], data.tool.brush_color[1], data.tool.brush_color[2],
-                );
-                let mut hex_str = hex.clone();
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut hex_str)
-                        .desired_width(54.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                if resp.changed() && hex_str.len() == 6 {
-                    if let Ok(v) = u32::from_str_radix(&hex_str, 16) {
-                        actions.tool.brush_color = Some([
-                            ((v >> 16) & 0xFF) as u8,
-                            ((v >> 8) & 0xFF) as u8,
-                            (v & 0xFF) as u8,
-                            255,
-                        ]);
-                    }
-                }
-            });
-
-            ui.add_space(4.0);
-
+            // The compact picker now carries its own R/G/B + editable #hex row,
+            // so no separate hex field is needed here.
             ui.scope(|ui| {
                 ui.spacing_mut().slider_width = ui.available_width();
                 let mut c = egui::Color32::from_rgb(
@@ -568,7 +577,737 @@ fn color_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                     actions.tool.brush_color = Some([c.r(), c.g(), c.b(), 255]);
                 }
             });
+
+            if data.tool.path_style.is_some() {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(egui::RichText::new("Object").strong().size(11.0));
+                ui.add_space(2.0);
+                vector_appearance(ui, data, actions);
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            vector_palette_manage(ui, data, actions);
+        }
+    }
+}
+
+/// Full Fill / Outline / Gradient / Dash editor for the active vector object.
+/// It lives in the docked Color panel so the controls are laid out vertically
+/// with room to breathe, unlike the crowded single-row top options bar where
+/// they used to overflow off screen. Every edit goes through the same `path_*`
+/// actions as the options bar, so both surfaces stay perfectly in sync.
+fn vector_appearance(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    let Some(style) = data.tool.path_style else {
+        return;
+    };
+
+    // ---- Fill ----
+    ui.horizontal(|ui| {
+        let mut fill = style.fill_enabled;
+        if ui.checkbox(&mut fill, "Fill").changed() {
+            actions.tool.set_path_fill_enabled = Some(fill);
+        }
+        if appearance_color_chip(ui, style.fill_color, "Fill colour") {
+            actions.dialogs.open_paint_color_dialog = Some(5);
+        }
+        let mut fill_kind = style.fill_kind;
+        egui::ComboBox::from_id_salt("appearance_fill_kind")
+            .selected_text(match fill_kind {
+                1 => "Linear",
+                2 => "Radial",
+                _ => "Solid",
+            })
+            .width(84.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut fill_kind, 0, "Solid");
+                ui.selectable_value(&mut fill_kind, 1, "Linear");
+                ui.selectable_value(&mut fill_kind, 2, "Radial");
+            });
+        if fill_kind != style.fill_kind {
+            actions.tool.set_path_fill_kind = Some(fill_kind);
+        }
+    });
+
+    // Interactive gradient ramp — only shown for gradient fills.
+    if style.fill_kind != 0 && style.gradient_stop_count >= 2 {
+        gradient_ramp(ui, &style, actions);
+    }
+
+    ui.add_space(6.0);
+
+    // ---- Outline ----
+    ui.horizontal(|ui| {
+        let mut stroke = style.stroke_enabled;
+        if ui.checkbox(&mut stroke, "Outline").changed() {
+            actions.tool.set_path_stroke_enabled = Some(stroke);
+        }
+        if appearance_color_chip(ui, style.stroke_color, "Outline colour") {
+            actions.dialogs.open_paint_color_dialog = Some(6);
+        }
+        ui.label("Width");
+        let mut w = style.stroke_width;
+        let resp = ui.add(
+            egui::DragValue::new(&mut w)
+                .range(0.0..=500.0)
+                .suffix(" px")
+                .speed(0.2),
+        );
+        if resp.changed() {
+            actions.tool.set_path_stroke_width = Some(w);
+        }
+        // One undo step per scrub: commit when the drag stops or focus leaves.
+        if resp.drag_stopped() || resp.lost_focus() {
+            actions.tool.commit_path_style = true;
+        }
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Dash");
+        let mut dash_kind = style.dash_kind;
+        egui::ComboBox::from_id_salt("appearance_dash_kind")
+            .selected_text(match dash_kind {
+                1 => "Dashed",
+                2 => "Dotted",
+                _ => "Solid",
+            })
+            .width(84.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut dash_kind, 0, "Solid");
+                ui.selectable_value(&mut dash_kind, 1, "Dashed");
+                ui.selectable_value(&mut dash_kind, 2, "Dotted");
+            });
+        if dash_kind != style.dash_kind {
+            actions.tool.set_path_dash_kind = Some(dash_kind);
+        }
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Cap");
+        let mut cap = style.cap;
+        egui::ComboBox::from_id_salt("appearance_line_cap")
+            .selected_text(match cap {
+                1 => "Round",
+                2 => "Square",
+                _ => "Butt",
+            })
+            .width(84.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut cap, 0, "Butt");
+                ui.selectable_value(&mut cap, 1, "Round");
+                ui.selectable_value(&mut cap, 2, "Square");
+            });
+        if cap != style.cap {
+            actions.tool.set_path_cap = Some(cap);
+        }
+
+        ui.label("Join");
+        let mut join = style.join;
+        egui::ComboBox::from_id_salt("appearance_line_join")
+            .selected_text(match join {
+                1 => "Round",
+                2 => "Bevel",
+                _ => "Miter",
+            })
+            .width(84.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut join, 0, "Miter");
+                ui.selectable_value(&mut join, 1, "Round");
+                ui.selectable_value(&mut join, 2, "Bevel");
+            });
+        if join != style.join {
+            actions.tool.set_path_join = Some(join);
+        }
+    });
+
+    if style.dash_len > 0 {
+        dash_editor(ui, &style, actions);
+    }
+}
+
+/// A draggable gradient ramp: a live preview bar with one handle per stop.
+/// Drag a handle to move its offset (clamped between its neighbours); click to
+/// select it; the row beneath edits the selected stop's colour and position and
+/// adds/removes stops. Replaces the buried "Stops…" nested menu.
+fn gradient_ramp(ui: &mut egui::Ui, style: &crate::ui::PathStyleData, actions: &mut UiActions) {
+    use crate::core::vector::style::MAX_GRADIENT_STOPS;
+    let count = (style.gradient_stop_count as usize).clamp(2, MAX_GRADIENT_STOPS);
+
+    // The selected stop persists across frames in egui temp memory.
+    let sel_id = egui::Id::new("vector_appearance_stop_sel");
+    let handle_base = egui::Id::new("vector_appearance_stop_handle");
+    let mut selected = ui.data(|d| d.get_temp::<usize>(sel_id)).unwrap_or(0);
+    if selected >= count {
+        selected = count - 1;
+    }
+
+    // Gradient preview bar plus a strip below it for the handles.
+    let bar_h = 18.0;
+    let handle_h = 9.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), bar_h + handle_h + 4.0),
+        egui::Sense::hover(),
+    );
+    let bar_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), bar_h));
+
+    let stops: Vec<(f32, [u8; 4])> = (0..count)
+        .map(|i| {
+            (
+                style.gradient_stop_offsets[i],
+                style.gradient_stop_colors[i],
+            )
+        })
+        .collect();
+    crate::ui::dialogs::paint_gradient_bar(&ui.painter_at(bar_rect), bar_rect, &stops, true);
+
+    let mut new_selected = selected;
+    for i in 0..count {
+        let off = style.gradient_stop_offsets[i].clamp(0.0, 1.0);
+        let cx = bar_rect.left() + off * bar_rect.width();
+        let handle_rect = egui::Rect::from_center_size(
+            egui::pos2(cx, bar_rect.bottom() + handle_h * 0.5 + 1.0),
+            egui::vec2(12.0, handle_h + 2.0),
+        );
+        let resp = ui.interact(
+            handle_rect,
+            handle_base.with(i),
+            egui::Sense::click_and_drag(),
+        );
+
+        let [r, g, b, _] = style.gradient_stop_colors[i];
+        let fill = egui::Color32::from_rgb(r, g, b);
+        let top = egui::pos2(cx, bar_rect.bottom() + 1.0);
+        let bl = egui::pos2(cx - 5.0, bar_rect.bottom() + handle_h + 1.0);
+        let br = egui::pos2(cx + 5.0, bar_rect.bottom() + handle_h + 1.0);
+        let outline = if i == selected {
+            ui.visuals().selection.stroke.color
+        } else {
+            ui.visuals().widgets.inactive.fg_stroke.color
+        };
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![top, bl, br],
+            fill,
+            egui::Stroke::new(1.5_f32, outline),
+        ));
+
+        if resp.clicked() {
+            new_selected = i;
+        }
+        if resp.dragged() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let raw = ((p.x - bar_rect.left()) / bar_rect.width().max(1.0)).clamp(0.0, 1.0);
+                let lo = if i == 0 {
+                    0.0
+                } else {
+                    style.gradient_stop_offsets[i - 1]
+                };
+                let hi = if i + 1 == count {
+                    1.0
+                } else {
+                    style.gradient_stop_offsets[i + 1]
+                };
+                actions.tool.set_path_gradient_stop_offset = Some((i as u8, raw.clamp(lo, hi)));
+                new_selected = i;
+            }
+        }
+        if resp.drag_stopped() {
+            actions.tool.commit_path_style = true;
+        }
+    }
+    if new_selected != selected {
+        selected = new_selected;
+        ui.data_mut(|d| d.insert_temp(sel_id, selected));
+    }
+
+    // Selected-stop editor.
+    ui.horizontal_wrapped(|ui| {
+        ui.label(format!("Stop {}", selected + 1));
+        if appearance_color_chip(ui, style.gradient_stop_colors[selected], "Stop colour") {
+            actions.dialogs.open_paint_color_dialog = Some(8 + selected as u8);
+        }
+        let lo = if selected == 0 {
+            0.0
+        } else {
+            style.gradient_stop_offsets[selected - 1]
+        };
+        let hi = if selected + 1 == count {
+            1.0
+        } else {
+            style.gradient_stop_offsets[selected + 1]
+        };
+        let mut percent = style.gradient_stop_offsets[selected] * 100.0;
+        let resp = ui.add(
+            egui::DragValue::new(&mut percent)
+                .range((lo * 100.0)..=(hi * 100.0))
+                .suffix("%")
+                .speed(0.25)
+                .max_decimals(1),
+        );
+        if resp.changed() {
+            actions.tool.set_path_gradient_stop_offset = Some((selected as u8, percent / 100.0));
+        }
+        if resp.drag_stopped() || resp.lost_focus() {
+            actions.tool.commit_path_style = true;
+        }
+        if ui
+            .add_enabled(count > 2, egui::Button::new("Delete"))
+            .on_hover_text("Remove this stop")
+            .clicked()
+        {
+            actions.tool.remove_path_gradient_stop = Some(selected as u8);
+        }
+        if ui
+            .add_enabled(count < MAX_GRADIENT_STOPS, egui::Button::new("Add"))
+            .on_hover_text("Add a stop")
+            .clicked()
+        {
+            actions.tool.add_path_gradient_stop = true;
+        }
+    });
+}
+
+/// Free dash/gap length editor for the active outline. Mirrors the options-bar
+/// "Dash…" menu but stays open in the panel instead of a transient popup.
+fn dash_editor(ui: &mut egui::Ui, style: &crate::ui::PathStyleData, actions: &mut UiActions) {
+    let mut values = style.dash_values;
+    let mut len = style.dash_len.clamp(1, 8);
+    ui.horizontal(|ui| {
+        ui.label("Segments");
+        let resp = ui.add(egui::DragValue::new(&mut len).range(1..=8));
+        if resp.changed() {
+            let old_len = style.dash_len.max(1) as usize;
+            for index in old_len..len as usize {
+                values[index] = values[index % old_len].max(0.01);
+            }
+            actions.tool.set_path_dash_values = Some((values, len));
+        }
+        if resp.drag_stopped() || resp.lost_focus() {
+            actions.tool.commit_path_style = true;
+        }
+    });
+
+    let mut values_changed = false;
+    let mut values_finished = false;
+    ui.horizontal_wrapped(|ui| {
+        for (index, value) in values[..len as usize].iter_mut().enumerate() {
+            ui.label(format!("{}:", index + 1));
+            let resp = ui.add(
+                egui::DragValue::new(value)
+                    .range(0.01..=10_000.0)
+                    .speed(0.1)
+                    .max_decimals(2),
+            );
+            values_changed |= resp.changed();
+            values_finished |= resp.drag_stopped() || resp.lost_focus();
+        }
+    });
+    if values_changed {
+        actions.tool.set_path_dash_values = Some((values, len));
+    }
+    if values_finished {
+        actions.tool.commit_path_style = true;
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Offset");
+        let mut offset = style.dash_offset;
+        let resp = ui.add(
+            egui::DragValue::new(&mut offset)
+                .range(-10_000.0..=10_000.0)
+                .speed(0.1)
+                .max_decimals(2),
+        );
+        if resp.changed() {
+            actions.tool.set_path_dash_offset = Some(offset);
+        }
+        if resp.drag_stopped() || resp.lost_focus() {
+            actions.tool.commit_path_style = true;
+        }
+    });
+}
+
+/// A small clickable colour chip for the Appearance editor; returns true on click.
+fn appearance_color_chip(ui: &mut egui::Ui, color: [u8; 4], tip: &str) -> bool {
+    let c = egui::Color32::from_rgb(color[0], color[1], color[2]);
+    ui.add_sized([26.0, 20.0], egui::Button::new("").fill(c))
+        .on_hover_text(tip)
+        .clicked()
+}
+
+/// Quick colours as a set of named swatches, shared by the strip and elsewhere.
+/// A broad, production-friendly colour rail ordered from neutrals through the
+/// colour wheel and into earth tones. Keeping the tones adjacent makes the
+/// long strip quick to scan while giving it enough entries to comfortably fill
+/// the space beside Layers on a normal-height window.
+const QUICK_PALETTE: [(&str, [u8; 4]); 32] = [
+    ("Black", [0, 0, 0, 255]),
+    ("Charcoal", [51, 51, 51, 255]),
+    ("Gray", [112, 112, 112, 255]),
+    ("Silver", [192, 192, 192, 255]),
+    ("White", [255, 255, 255, 255]),
+    ("Crimson", [160, 20, 48, 255]),
+    ("Red", [237, 28, 36, 255]),
+    ("Coral", [255, 102, 94, 255]),
+    ("Vermilion", [242, 82, 32, 255]),
+    ("Orange", [247, 148, 30, 255]),
+    ("Amber", [255, 193, 7, 255]),
+    ("Yellow", [255, 235, 59, 255]),
+    ("Lemon", [255, 250, 120, 255]),
+    ("Lime", [139, 195, 74, 255]),
+    ("Green", [0, 166, 81, 255]),
+    ("Emerald", [0, 121, 83, 255]),
+    ("Mint", [102, 215, 170, 255]),
+    ("Teal", [0, 137, 123, 255]),
+    ("Cyan", [0, 188, 212, 255]),
+    ("Sky Blue", [41, 182, 246, 255]),
+    ("Blue", [30, 112, 210, 255]),
+    ("Royal Blue", [45, 75, 190, 255]),
+    ("Navy", [25, 45, 105, 255]),
+    ("Indigo", [63, 81, 181, 255]),
+    ("Violet", [103, 58, 183, 255]),
+    ("Purple", [142, 36, 170, 255]),
+    ("Magenta", [236, 0, 140, 255]),
+    ("Pink", [244, 81, 130, 255]),
+    ("Rose", [194, 24, 91, 255]),
+    ("Ochre", [184, 134, 11, 255]),
+    ("Brown", [117, 76, 36, 255]),
+    ("Dark Brown", [78, 52, 35, 255]),
+];
+
+/// The Corel-style vertical colour strip pinned to the right edge: a "no fill"
+/// chip, the quick colours, then the document swatches — each full-width and
+/// stacked top to bottom. Left click applies Fill (or Foreground when no Path
+/// is selected); right click applies Outline (or Background).
+fn vector_palette_strip(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    use crate::core::vector::color::ColorValue;
+
+    let has_path = data.tool.path_style.is_some();
+    let gesture = if has_path {
+        "Left: Fill · Hold: adjust colour · Right: Outline"
+    } else {
+        "Left: Foreground · Hold: adjust colour · Right: Background"
+    };
+
+    // Small squares centred in the strip, like CorelDRAW's palette column.
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+
+        let none = palette_none_button(ui).on_hover_text(if has_path {
+            "No colour\nLeft: remove Fill · Right: remove Outline"
+        } else {
+            "Select an editable Path to remove Fill/Outline"
         });
+        if none.clicked_by(egui::PointerButton::Primary) {
+            actions.tool.clear_palette_fill = true;
+        }
+        if none.clicked_by(egui::PointerButton::Secondary) {
+            actions.tool.clear_palette_outline = true;
+        }
+
+        for (name, rgba) in QUICK_PALETTE {
+            let color = ColorValue::from_rgba8(rgba);
+            let response =
+                palette_strip_button(ui, color).on_hover_text(format!("{name}\n{gesture}"));
+            palette_gesture(ui, response, color, has_path, actions);
+        }
+
+        if !data.doc.swatches.is_empty() {
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+            for swatch in data.doc.swatches.iter() {
+                let response = palette_strip_button(ui, swatch.color)
+                    .on_hover_text(format!("{}\n{gesture}", swatch_tooltip(swatch)));
+                palette_gesture(ui, response, swatch.color, has_path, actions);
+            }
+        }
+    });
+}
+
+/// Document-swatch management + Overprint controls for the floating panel. The
+/// quick/document colour chips themselves live in [`vector_palette_strip`].
+fn vector_palette_manage(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    use crate::core::vector::color::ColorValue;
+
+    let has_path = data.tool.path_style.is_some();
+    ui.label(
+        egui::RichText::new(if has_path {
+            "Palette (right strip) — Left: Fill · Right: Outline"
+        } else {
+            "Palette (right strip) — Left: Foreground · Right: Background"
+        })
+        .small()
+        .weak(),
+    );
+
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(format!("Document Swatches ({})", data.doc.swatches.len()))
+            .strong()
+            .size(11.0),
+    );
+    let add_color = data
+        .tool
+        .path_style
+        .and_then(|style| style.fill_value.or(style.stroke_value))
+        .unwrap_or_else(|| ColorValue::from_rgba8(data.tool.brush_color));
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .small_button(format!("{} Add current", ph::PLUS))
+            .on_hover_text("Add the selected Path colour (or Foreground) to this document")
+            .clicked()
+        {
+            actions.tool.add_document_swatch = Some(add_color);
+        }
+        ui.menu_button("Manage\u{2026}", |ui| {
+            ui.set_min_width(300.0);
+            if data.doc.swatches.is_empty() {
+                ui.weak("No document swatches yet");
+            }
+            for (index, swatch) in data.doc.swatches.iter().enumerate() {
+                ui.push_id(("manage_document_swatch", index), |ui| {
+                    ui.horizontal(|ui| {
+                        let _ = palette_color_button(ui, swatch.color);
+                        let edit_id = ui.id().with("name");
+                        let mut name = ui
+                            .data(|memory| memory.get_temp::<String>(edit_id))
+                            .unwrap_or_else(|| swatch.name.clone());
+                        let changed = ui
+                            .add(
+                                egui::TextEdit::singleline(&mut name)
+                                    .desired_width(170.0)
+                                    .char_limit(crate::core::palette::MAX_SWATCH_NAME_BYTES),
+                            )
+                            .changed();
+                        if changed {
+                            ui.data_mut(|memory| memory.insert_temp(edit_id, name.clone()));
+                        }
+                        if ui
+                            .small_button(ph::CHECK)
+                            .on_hover_text("Rename swatch")
+                            .clicked()
+                        {
+                            actions.tool.rename_document_swatch = Some((index, name));
+                        }
+                        if ui
+                            .small_button(ph::TRASH)
+                            .on_hover_text("Remove swatch")
+                            .clicked()
+                        {
+                            actions.tool.remove_document_swatch = Some(index);
+                        }
+                    });
+                });
+            }
+        });
+    });
+
+    // Spot ink: a named separation plate. The current Fill/Foreground colour
+    // becomes the ink's process alternate; applying the swatch (left-click) sets
+    // a Path's Fill to this spot ink, which exports as a PDF Separation plate.
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let edit_id = ui.id().with("iai_spot_name");
+        let mut spot_name = ui
+            .data(|memory| memory.get_temp::<String>(edit_id))
+            .unwrap_or_default();
+        ui.label("Spot ink:");
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut spot_name)
+                .desired_width(150.0)
+                .hint_text("Plate name")
+                .char_limit(crate::core::vector::color::SPOT_NAME_CAP),
+        );
+        if response.changed() {
+            ui.data_mut(|memory| memory.insert_temp(edit_id, spot_name.clone()));
+        }
+        let can_add = !spot_name.trim().is_empty();
+        if ui
+            .add_enabled(can_add, egui::Button::new(format!("{} Add Spot", ph::DROP)))
+            .on_hover_text("Make a spot ink from the current colour — its own separation plate")
+            .clicked()
+        {
+            actions.tool.add_spot_swatch = Some((spot_name.trim().to_string(), add_color));
+            ui.data_mut(|memory| memory.insert_temp(edit_id, String::new()));
+        }
+    });
+
+    if data.doc.swatches.is_empty() {
+        ui.label(
+            egui::RichText::new("Add named RGB/CMYK/spot colours used by this project.")
+                .small()
+                .weak(),
+        );
+    }
+
+    if let Some(style) = data.tool.path_style {
+        ui.add_space(5.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Overprint").strong().size(11.0));
+            let mut fill = style.fill_overprint;
+            if ui
+                .add_enabled(style.fill_enabled, egui::Checkbox::new(&mut fill, "Fill"))
+                .on_hover_text("Overprint Fill — preserve underlying inks on output")
+                .changed()
+            {
+                actions.tool.set_path_fill_overprint = Some(fill);
+            }
+            let mut outline = style.stroke_overprint;
+            if ui
+                .add_enabled(
+                    style.stroke_enabled,
+                    egui::Checkbox::new(&mut outline, "Outline"),
+                )
+                .on_hover_text("Overprint Outline — preserve underlying inks on output")
+                .changed()
+            {
+                actions.tool.set_path_stroke_overprint = Some(outline);
+            }
+        });
+    }
+}
+
+/// Hold duration (seconds) before a left press turns into "open the colour
+/// editor" instead of a plain Fill click — CorelDRAW's click-and-hold gesture.
+const PALETTE_HOLD_SECS: f64 = 0.4;
+
+fn palette_gesture(
+    ui: &egui::Ui,
+    response: egui::Response,
+    color: crate::core::vector::color::ColorValue,
+    has_path: bool,
+    actions: &mut UiActions,
+) {
+    // Corel-style gestures:
+    //   • left click            → apply Fill (or Foreground) instantly
+    //   • left click and HOLD   → open the colour editor seeded with this swatch
+    //   • right click           → apply Outline (or Background) instantly
+    let id_start = response.id.with("iai_palette_hold_start");
+    let id_fired = response.id.with("iai_palette_hold_fired");
+    let now = ui.input(|i| i.time);
+    // Only the *primary* button arms the hold — a held right-click still means
+    // "apply Outline", not "open the editor".
+    let down = response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
+    let fired = ui.data(|d| d.get_temp::<bool>(id_fired)).unwrap_or(false);
+
+    if down {
+        let start = match ui.data(|d| d.get_temp::<f64>(id_start)) {
+            Some(t) => t,
+            None => {
+                ui.data_mut(|d| d.insert_temp(id_start, now));
+                now
+            }
+        };
+        if !fired && now - start >= PALETTE_HOLD_SECS {
+            // Path selected → tune its Fill (target 5); otherwise Foreground (0).
+            let target = if has_path { 5 } else { 0 };
+            actions.dialogs.open_paint_color_dialog_with = Some((target, color.to_rgba8()));
+            ui.data_mut(|d| d.insert_temp(id_fired, true));
+        }
+        // Keep the clock advancing while the button is held without moving.
+        ui.ctx().request_repaint();
+    }
+
+    // A quick left click (released before the hold fired) applies Fill.
+    if response.clicked_by(egui::PointerButton::Primary) && !fired {
+        actions.tool.apply_palette_fill = Some(color);
+    }
+    if response.clicked_by(egui::PointerButton::Secondary) {
+        actions.tool.apply_palette_outline = Some(color);
+    }
+
+    // Reset the hold timers once the button is no longer held on this chip.
+    if !down {
+        ui.data_mut(|d| {
+            d.remove::<f64>(id_start);
+            d.remove::<bool>(id_fired);
+        });
+    }
+}
+
+fn palette_color_button(
+    ui: &mut egui::Ui,
+    color: crate::core::vector::color::ColorValue,
+) -> egui::Response {
+    let [r, g, b, _] = color.to_rgba8();
+    ui.add(
+        egui::Button::new("")
+            .fill(egui::Color32::from_rgb(r, g, b))
+            .stroke(egui::Stroke::new(
+                1.0_f32,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ))
+            .min_size(egui::vec2(22.0, 22.0))
+            .sense(egui::Sense::click()),
+    )
+}
+
+/// Edge length of one colour square in the vertical strip.
+const PALETTE_STRIP_CHIP: f32 = 22.0;
+
+/// A small square colour chip for the vertical strip (Corel-style palette).
+fn palette_strip_button(
+    ui: &mut egui::Ui,
+    color: crate::core::vector::color::ColorValue,
+) -> egui::Response {
+    let [r, g, b, _] = color.to_rgba8();
+    ui.add(
+        egui::Button::new("")
+            .fill(egui::Color32::from_rgb(r, g, b))
+            .stroke(egui::Stroke::new(
+                1.0_f32,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ))
+            .min_size(egui::vec2(PALETTE_STRIP_CHIP, PALETTE_STRIP_CHIP))
+            .corner_radius(0.0)
+            .sense(egui::Sense::click()),
+    )
+}
+
+fn palette_none_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(PALETTE_STRIP_CHIP, PALETTE_STRIP_CHIP),
+        egui::Sense::click(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 1.0, egui::Color32::WHITE);
+    painter.rect_stroke(
+        rect,
+        1.0,
+        egui::Stroke::new(1.0_f32, egui::Color32::GRAY),
+        egui::StrokeKind::Inside,
+    );
+    painter.line_segment(
+        [rect.left_bottom(), rect.right_top()],
+        egui::Stroke::new(2.0_f32, egui::Color32::RED),
+    );
+    response
+}
+
+fn swatch_tooltip(swatch: &crate::core::palette::DocumentSwatch) -> String {
+    use crate::core::vector::color::ColorValue;
+    match swatch.color {
+        ColorValue::Rgb { .. } => {
+            let [r, g, b, _] = swatch.color.to_rgba8();
+            format!("{}\nRGB #{r:02X}{g:02X}{b:02X}", swatch.name)
+        }
+        ColorValue::Cmyk { c, m, y, k, .. } => {
+            let p = |v: f32| (v.clamp(0.0, 1.0) * 100.0).round() as u8;
+            format!(
+                "{}\nCMYK C{} M{} Y{} K{}",
+                swatch.name,
+                p(c),
+                p(m),
+                p(y),
+                p(k)
+            )
+        }
+        ColorValue::Spot { name, tint, .. } => {
+            let p = |v: f32| (v.clamp(0.0, 1.0) * 100.0).round() as u8;
+            format!("{}\nSpot ink “{}” {}%", swatch.name, name.as_str(), p(tint))
+        }
+    }
 }
 
 fn ps_layer_thumbnail(
@@ -627,6 +1366,29 @@ fn ps_layer_thumbnail(
                 draw_ps_checkerboard(ui, rect.shrink(1.0), 4.0);
             }
         }
+    }
+    if matches!(layer_type, "Shape" | "Path") {
+        // Vector layers render a plain raster thumbnail like any other layer; a small
+        // curve badge in the corner tells them apart at a glance.
+        let badge = egui::Rect::from_min_size(
+            egui::pos2(
+                target_frame_rect.right() - 12.0,
+                target_frame_rect.bottom() - 12.0,
+            ),
+            egui::vec2(11.0, 11.0),
+        );
+        painter.rect_filled(
+            badge,
+            2.0,
+            egui::Color32::from_rgba_unmultiplied(28, 28, 30, 200),
+        );
+        painter.text(
+            badge.center(),
+            egui::Align2::CENTER_CENTER,
+            ph::BEZIER_CURVE,
+            egui::FontId::proportional(9.0),
+            egui::Color32::from_rgb(122, 200, 255),
+        );
     }
     let anim = ui
         .ctx()
@@ -1361,7 +2123,12 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                     })
                     .collect();
                 let row_h = 50.0;
-                let list_h = (visible_indices.len().clamp(1, 8) as f32) * row_h;
+                // Grow the list to fill the panel instead of capping at 8 rows,
+                // so the empty area below the layers is used. Reserve room for
+                // the separator + toolbar row that follow; auto_shrink keeps the
+                // list from stretching past the actual layers when there are few.
+                let list_reserve = 52.0;
+                let list_h = (ui.available_height() - list_reserve).max(row_h * 2.0);
                 egui::ScrollArea::vertical()
                     .id_salt("layer_list_scroll")
                     .max_height(list_h)
@@ -1768,6 +2535,18 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
     let depth = data.layers.layer_depths.get(idx).copied().unwrap_or(0);
     let is_group = layer_type == "Group";
     let expanded = data.layers.layer_expanded.get(idx).copied().unwrap_or(true);
+    let is_clipped = data
+        .layers
+        .layer_is_clipped
+        .get(idx)
+        .copied()
+        .unwrap_or(false);
+    let is_clip_base = data
+        .layers
+        .layer_is_clip_base
+        .get(idx)
+        .copied()
+        .unwrap_or(false);
 
     let item_id = egui::Id::new("layer_item").with(idx);
     let dragging_layer =
@@ -1815,6 +2594,20 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                 let eye_btn = ps_eye_button(ui, visible);
                 eye_rect = Some(eye_btn.rect);
                 eye_btn.on_hover_text(if visible { "Hide Layer" } else { "Show Layer" });
+
+                // Clipping-mask indicator: a small right-angle arrow pointing DOWN
+                // into the layer below marks a layer clipped to it (Photoshop-style
+                // — an elbow that points at the base, not a curve toward the eye).
+                if is_clipped {
+                    ui.add_space(1.0);
+                    ui.label(
+                        egui::RichText::new(ph::ARROW_ELBOW_LEFT_DOWN)
+                            .size(12.0)
+                            .color(pal.text_dim),
+                    )
+                    .on_hover_text("Clip to the layer below (clipping mask · Ctrl+Alt+G)");
+                    ui.add_space(1.0);
+                }
 
                 let thumb_resp = ps_layer_thumbnail(
                     ui,
@@ -1870,7 +2663,7 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                     .get(idx)
                     .map(|s| s.as_str())
                     .unwrap_or("Layer");
-                let name_text = if is_background {
+                let mut name_text = if is_background {
                     egui::RichText::new(name)
                         .size(12.0)
                         .color(name_color)
@@ -1878,6 +2671,10 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                 } else {
                     egui::RichText::new(name).size(12.0).color(name_color)
                 };
+                // The base of a clipping mask gets an underlined name (Photoshop).
+                if is_clip_base {
+                    name_text = name_text.underline();
+                }
                 let right_reserve = if locked || lock_alpha || is_background {
                     14.0
                 } else {

@@ -81,6 +81,17 @@ pub struct LayerOrigState {
     pub content_offset: (i32, i32),
     pub content_w: u32,
     pub content_h: u32,
+    /// Original-source canvas to the layer's canvas placement at the start of
+    /// this session. Identity for the first transform; accumulated for later
+    /// raster transforms so commits never resample an already filtered result.
+    pub source_to_current: [f32; 9],
+}
+
+#[derive(Clone)]
+pub struct RasterTransformLineage {
+    pub source: LayerOrigState,
+    pub source_to_current: [f32; 9],
+    pub rendered_fingerprint: u64,
 }
 
 /// All state for an ongoing Ctrl+T free-transform session.
@@ -125,6 +136,7 @@ pub struct TransformCommitLayer {
     pub width: u32,
     pub height: u32,
     pub offset: (i32, i32),
+    pub lineage: Option<RasterTransformLineage>,
 }
 
 pub struct TransformCommitResult {
@@ -394,9 +406,6 @@ pub struct UiState {
     pub export_format: crate::formats::ExportFormat,
     /// "Embed Color Profile (ICC)" toggle for export (default on).
     pub export_embed_icc: bool,
-    pub toolbox_open: bool,
-    pub toolbox_pos: Option<(f32, f32)>,
-    pub toolbox_single_column: bool,
     pub transform_interpolation: InterpolationMode,
     pub show_color_panel: bool,
     pub show_text_panel: bool,
@@ -676,6 +685,9 @@ pub struct TextEditState {
 pub struct ShapeDragState {
     pub layer_id: u32,
     pub handle: crate::core::shape::ShapeHandle,
+    /// Stable gesture baseline so toggling Shift/Alt mid-drag never compounds
+    /// already-previewed geometry.
+    pub original: (crate::core::shape::ShapeData, (i32, i32)),
     /// Undo command snapshotting the stack before the edit; finalized on release.
     pub before_cmd: Option<crate::core::command::LayerStructureCommand>,
     /// True once the drag actually changed the geometry (so a no-op click over a
@@ -690,6 +702,111 @@ pub struct ShapeDragState {
     pub bake_cost_secs: f32,
 }
 
+/// An in-progress on-canvas transform of a Path layer under the Move tool:
+/// dragging a corner/edge handle scales, dragging the rotate ring outside a
+/// corner rotates. The gesture edits the vector object's affine `transform`
+/// (never bakes node coordinates); on release it records ONE
+/// [`crate::core::command_vector::ChangeVectorTransform`] so the object stays
+/// editable and the edit is a single undo step.
+///
+/// The overlay box follows `pending` every frame (smooth at 60 fps) while the
+/// fill re-raster runs OFF-THREAD (see [`PathBakeInFlight`]) — rasterising a big
+/// filled path on the UI thread each frame stalled the drag and made a rotation
+/// look very laggy.
+pub struct PathTransformDrag {
+    pub layer_id: u32,
+    /// The grabbed handle. `Some(h)` = scale via that handle; `None` = rotate.
+    pub handle: Option<TransformHandle>,
+    pub skew_handle: Option<TransformHandle>,
+    /// Object `transform` captured at press (after folding any pending Move
+    /// drag). The undo baseline AND the frame every drag frame recomputes from.
+    pub orig_transform: crate::core::vector::affine::AffineTransform,
+    /// Latest target transform for this cursor position. Drives the overlay box
+    /// every frame and is committed on release, independent of the throttled bake.
+    pub pending: crate::core::vector::affine::AffineTransform,
+    /// Fill geometry bounds in OBJECT-LOCAL space at press: its four corners map
+    /// through the transform to the displayed box.
+    pub local_bounds: crate::core::geometry::Rect,
+    /// Canvas-space pivot (box centre) at press — the rotation centre.
+    pub pivot: crate::core::geometry::Point,
+    /// Cursor canvas position at press (rotation reference angle).
+    pub start_cx: f32,
+    pub start_cy: f32,
+    /// True once the gesture actually changed the transform (so a no-op click on
+    /// a handle pushes no undo entry).
+    pub changed: bool,
+    /// `false` (single Path): `orig_transform`/`pending` are the object's own
+    /// transform and `local_bounds` is in OBJECT-LOCAL space — scaling runs in the
+    /// object's local frame so it stays square to a rotated object.
+    /// `true` (multi-Path union): `orig_transform` is the identity, `pending` is a
+    /// CANVAS-space delta `M`, and `local_bounds` is the union AABB in CANVAS
+    /// space. Each target's new transform is `M ∘ orig_i`.
+    pub canvas_frame: bool,
+    /// Every Path moved by this gesture: `(layer_id, transform captured at press)`.
+    /// One entry for a single-Path drag; the whole selection for a union drag.
+    /// Drives the per-layer GPU preview and the one-undo-group commit.
+    pub targets: Vec<(u32, crate::core::vector::affine::AffineTransform)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathGradientHandle {
+    Center,
+    AxisX,
+    AxisY,
+}
+
+/// An in-progress drag of a vector fill gradient's on-canvas transform handles.
+pub struct PathGradientDrag {
+    pub layer_id: u32,
+    pub handle: PathGradientHandle,
+    pub original: crate::core::vector::affine::AffineTransform,
+    pub start_local: crate::core::geometry::Point,
+}
+
+/// What a [`NodeDrag`] is moving.
+#[derive(Clone, Copy, PartialEq)]
+pub enum NodeDragTarget {
+    /// The node's anchor — the whole node (anchor + both handles) shifts rigidly.
+    Anchor,
+    /// One Bézier control handle; the opposite handle is coupled per the node's
+    /// [`crate::core::vector::path::NodeKind`] (see
+    /// [`crate::core::vector::ops::apply_handle_move`]).
+    Handle(crate::core::vector::ops::HandleSide),
+}
+
+/// An in-progress node edit of a Path layer under the Node tool: dragging an
+/// anchor moves it (handles follow), dragging a control handle reshapes the
+/// curve, and a press on a segment first INSERTS an anchor then drags it. The
+/// gesture edits only `PathData` geometry (object transform kept) and, on
+/// release, records ONE
+/// [`crate::core::command_vector::ReplacePathGeometry`] so an insert+move is a
+/// single undo step. Like [`PathTransformDrag`], the overlay follows `pending`
+/// every frame while the fill re-raster runs off-thread.
+pub struct NodeDrag {
+    pub layer_id: u32,
+    /// Which contour + node index is being dragged (in `pending`).
+    pub contour: usize,
+    pub node: usize,
+    /// Whether the gesture moves the anchor (handles follow rigidly) or one of
+    /// the node's Bézier control handles (kind-coupled — see [`NodeDragTarget`]).
+    pub target: NodeDragTarget,
+    /// Path geometry BEFORE the whole gesture (incl. before any insert). The undo
+    /// baseline and the state the model is rewound to before the commit.
+    pub orig_path: crate::core::vector::path::PathData,
+    /// Latest geometry for this cursor position (drives the overlay + commit).
+    pub pending: crate::core::vector::path::PathData,
+    /// Grab point in OBJECT-LOCAL space, and the dragged node (anchor + handles)
+    /// at press, so the node — and its handles — track the cursor rigidly without
+    /// jumping to it.
+    pub grab_local: crate::core::geometry::Point,
+    pub base_node: crate::core::vector::path::Node,
+    pub changed: bool,
+    /// For a multi-node move: the OTHER selected nodes `(contour, node, base)`
+    /// dragged rigidly alongside the primary. Empty for a single-node drag or a
+    /// handle drag.
+    pub group: Vec<(usize, usize, crate::core::vector::path::Node)>,
+}
+
 /// A deferred options-bar style edit (Radius/Stroke/colour scrub) for a Shape
 /// layer. Scrubbing emits a tick per frame and each tick used to re-rasterize
 /// the whole shape; bakes are now throttled by measured cost (like
@@ -701,6 +818,15 @@ pub struct ShapeStylePending {
     pub layer_id: u32,
     /// A style tick arrived since the last bake.
     pub dirty: bool,
+    /// The fill controls were explicitly changed. Geometry-only edits must
+    /// preserve an existing vector gradient.
+    pub apply_fill: bool,
+    /// The outline controls were explicitly changed.
+    pub apply_stroke: bool,
+    /// The corner / sides / star controls were explicitly changed. A fill or
+    /// outline edit leaves this false so it never overwrites geometry the user
+    /// shaped on canvas — e.g. a corner radius dragged with the shape handle.
+    pub apply_corner: bool,
     pub last_bake: Option<std::time::Instant>,
     pub bake_cost_secs: f32,
 }
@@ -723,6 +849,30 @@ pub struct ShapeBakeInFlight {
     pub rx: std::sync::mpsc::Receiver<Option<(crate::core::tile::TileMap, u32, u32)>>,
 }
 
+/// An off-thread Path rasterization (a live scale/rotate or node drag): the
+/// worker renders the whole [`VectorObjectData`] and its tight `TileMap` +
+/// placement offset; the UI thread polls per frame (`poll_path_bake`) and swaps
+/// the result in, so a page-sized filled path never stalls the drag. On a CMYK
+/// document the worker *also* encodes each tile's ink plane (building the ICC
+/// converter on the worker thread), so the swapped-in preview stays ink-exact
+/// without any synchronous UI-thread rasterization. One job at a time — its
+/// completion starts whatever `path_bake_next` holds by then (latest wins).
+/// `doc_id`/`layer_id` pin the destination; a result for anything no longer
+/// active (or whose colour mode changed mid-flight) is dropped.
+pub struct PathBakeInFlight {
+    pub doc_id: crate::core::document::DocumentId,
+    pub layer_id: u32,
+    /// The object being rendered (its model becomes the layer's on completion).
+    pub object: crate::core::vector::object::VectorObjectData,
+    /// The document's colour mode when this bake was spawned (the worker encoded
+    /// ink iff this is true). A result is dropped if the mode changed since, so a
+    /// CMYK job never lands ink-less tiles on the layer and vice-versa.
+    pub is_cmyk: bool,
+    pub started: std::time::Instant,
+    #[allow(clippy::type_complexity)]
+    pub rx: std::sync::mpsc::Receiver<Option<(crate::core::tile::TileMap, u32, u32, (i32, i32))>>,
+}
+
 pub struct TextFontPreviewSession {
     pub glyph_styles: Vec<crate::core::text::GlyphStyle>,
     pub pending_style: Option<(usize, crate::core::text::GlyphStyle)>,
@@ -733,6 +883,47 @@ pub struct TextFontPreviewSession {
 pub struct TextFontPreviewState {
     pub font_family: crate::core::text::TextFontFamily,
     pub session: Option<TextFontPreviewSession>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct PathDisplayObjectKey {
+    pub layer_id: u32,
+    pub layer_offset: (i32, i32),
+    pub object: crate::core::vector::object::VectorObjectData,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct PathDisplayCacheKey {
+    pub doc_id: u32,
+    pub scale: u8,
+    pub clip: (u32, u32, u32, u32),
+    pub objects: Vec<PathDisplayObjectKey>,
+}
+
+pub struct PathDisplayCacheEntry {
+    pub key: PathDisplayCacheKey,
+    pub display: crate::ui::PathDisplayRaster,
+}
+
+/// Finished off-thread bake of the crisp active-Path display overlay. Built on a
+/// worker so zooming across scale buckets never rasterizes on the UI thread.
+pub struct DisplayBakeOutput {
+    pub tiles: Vec<crate::ui::PathDisplayTile>,
+    pub canvas_x: f32,
+    pub canvas_y: f32,
+    pub canvas_w: f32,
+    pub canvas_h: f32,
+    pub raster_w: u32,
+    pub raster_h: u32,
+}
+
+/// In-flight off-thread bake of the crisp display overlay (mirrors
+/// [`PathBakeInFlight`]). `key` pins exactly what was requested so a result for a
+/// stale zoom/geometry is matched (or ignored) correctly.
+pub struct DisplayBakeInFlight {
+    pub keys: Vec<PathDisplayCacheKey>,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub rx: std::sync::mpsc::Receiver<Vec<(PathDisplayCacheKey, Option<DisplayBakeOutput>)>>,
 }
 
 #[derive(Default)]
@@ -753,6 +944,12 @@ pub struct UiDataCache {
     pub layer_is_background: std::sync::Arc<Vec<bool>>,
     pub layer_lock_alpha: std::sync::Arc<Vec<bool>>,
     pub layer_selected: std::sync::Arc<Vec<bool>>,
+    /// True when the layer is clipped to the one below (Photoshop clipping mask /
+    /// PowerClip content) — panel draws it indented with a ↓ arrow.
+    pub layer_is_clipped: std::sync::Arc<Vec<bool>>,
+    /// True when some other layer is clipped to this one (a clip base) — panel
+    /// underlines its name.
+    pub layer_is_clip_base: std::sync::Arc<Vec<bool>>,
     pub layer_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
     pub layer_mask_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
     pub print_preview_image: Option<std::sync::Arc<egui::ColorImage>>,
@@ -789,6 +986,11 @@ pub struct UiDataCache {
     /// Rebuild throttle: the colour plates force a full CPU flatten, so they
     /// refresh at most every few hundred ms while the panel is open.
     pub channel_thumbs_built_at: Option<Instant>,
+    pub path_displays: Vec<PathDisplayCacheEntry>,
+    pub path_display_serial: u64,
+    /// Top visible vector run omitted from the coarse document composite while
+    /// its supersampled display raster is drawn above it.
+    pub path_display_suppressed_layers: Option<(u32, Vec<u32>)>,
 }
 
 /// In-progress guide gesture (preview is rendered until committed).
@@ -881,6 +1083,7 @@ impl App {
                 current_file: None,
                 next_doc_id: 2,
                 pending_close_doc_idx: None,
+                pending_exit_docs: std::collections::VecDeque::new(),
                 next_pdf_group_id: 1,
                 pdf_render_services: std::collections::HashMap::new(),
                 last_autosave: std::time::Instant::now(),
@@ -892,6 +1095,9 @@ impl App {
                 window: None,
                 window_visible: false,
                 window_focused: false,
+                startup_focus_until: None,
+                window_occluded: false,
+                text_input_quiet_until: None,
                 develop_window: None,
                 retiring_develop_window: None,
                 develop_egui_ctx: None,
@@ -987,6 +1193,7 @@ impl App {
                 guide_op: None,
                 transform_snap_guides: Vec::new(),
                 pending_transform_commit: None,
+                raster_transform_lineage: std::collections::HashMap::new(),
                 warp_after_transform_commit: false,
                 clipboard: None,
                 clipboard_image_new_doc_hint: None,
@@ -997,6 +1204,19 @@ impl App {
                 adjustment_layer_edit: None,
                 text_edit: None,
                 shape_drag: None,
+                path_transform: None,
+                path_pivot: None,
+                path_pivot_dragging: false,
+                path_pivot_snap: None,
+                path_rotate_mode: None,
+                last_repeat_transform: None,
+                path_dup_before: None,
+                path_gradient_drag: None,
+                node_drag: None,
+                node_selected: None,
+                node_multi: Vec::new(),
+                node_marquee: None,
+                pending_path_style: None,
                 shape_style_pending: None,
                 text_font_px: 48.0,
                 text_font_px_auto: true,
@@ -1061,6 +1281,10 @@ impl App {
                 pending_iai_projects: Vec::new(),
                 pending_printer_refresh: None,
                 shape_bake: None,
+                path_bake: None,
+                path_bake_next: None,
+                display_bake: None,
+                display_bake_next: None,
                 select_subject: crate::core::select_subject::SelectSubjectEngine::new(),
                 ai_engine: crate::core::ai::edit::AiEditEngine::new(),
                 ext: crate::app::ext_bridge::ExtBridge::new(),
@@ -1139,11 +1363,11 @@ impl App {
                     rename_text: String::new(),
                     export_format: crate::formats::ExportFormat::Png { compression: 6 },
                     export_embed_icc: true,
-                    toolbox_open: false,
-                    toolbox_pos: None,
-                    toolbox_single_column: false,
                     transform_interpolation: InterpolationMode::Bilinear,
-                    show_color_panel: true,
+                    // Color & Brush is now a floating panel opened on demand
+                    // (Window ▸ Color Panel), like the Levels dialog. Quick
+                    // colours are always available in the right-edge strip.
+                    show_color_panel: false,
                     show_text_panel: false,
                     show_layer_panel: true,
                     show_history_panel: false,
@@ -1178,10 +1402,14 @@ impl App {
                 },
                 status_msg: String::new(),
                 exit_requested: false,
+                exit_save_pending: false,
                 close_requested: false,
                 canvas_unit: crate::core::units::Unit::Pixels,
                 toolbar_w: 48.0,
-                panel_r_w: 260.0,
+                // Layer/Channels width (260) plus the Corel-style vertical
+                // colour strip (VECTOR_PALETTE_STRIP_W = 40) that lives at the
+                // right edge of this band. Canvas layout reserves the whole width.
+                panel_r_w: 300.0,
                 proof_enabled: false,
                 proof_target: ProofTarget::default(),
                 proof_gamut_warn: false,
@@ -2069,24 +2297,62 @@ impl App {
         if self.block_exit_if_active_operation() {
             return false;
         }
-        // App exit must consider the whole active document, not only the page
-        // currently visible. A PDF can have dirty pages cached in its session
-        // while the page on screen is clean; exiting in that state would
-        // otherwise silently discard those edits.
-        let document_is_modified = self
+        // Finalize edits before taking the snapshot of dirty tabs.
+        if self.edit.text_edit.is_some() {
+            self.commit_text_edit();
+        }
+        self.path_style_commit();
+        self.docs.documents[self.docs.active_doc_idx].reconcile_pdf_page_modified();
+
+        self.docs.pending_exit_docs = self
             .docs
             .documents
-            .get(self.docs.active_doc_idx)
-            .is_some_and(|document| document.is_modified());
-        if document_is_modified {
+            .iter()
+            .filter(|document| document.is_modified())
+            .map(|document| document.id)
+            .collect();
+        if self.docs.pending_exit_docs.is_empty() {
+            return true;
+        }
+        self.present_next_exit_document();
+        false
+    }
+
+    /// Select and prompt the next still-dirty tab in an app-exit sweep.
+    pub(crate) fn present_next_exit_document(&mut self) {
+        while let Some(id) = self.docs.pending_exit_docs.front().copied() {
+            let Some(idx) = self.docs.documents.iter().position(|doc| doc.id == id) else {
+                self.docs.pending_exit_docs.pop_front();
+                continue;
+            };
+            if !self.docs.documents[idx].is_modified() {
+                self.docs.pending_exit_docs.pop_front();
+                continue;
+            }
+            if idx != self.docs.active_doc_idx {
+                self.switch_to_doc(idx);
+            }
             self.shell.ui.show_exit_dialog = true;
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
-            false
-        } else {
-            true
+            return;
         }
+        self.shell.ui.show_exit_dialog = false;
+        self.shell.exit_requested = true;
+    }
+
+    pub(crate) fn discard_current_exit_document(&mut self) {
+        self.docs.pending_exit_docs.pop_front();
+        self.shell.ui.show_exit_dialog = false;
+        self.present_next_exit_document();
+    }
+
+    pub(crate) fn cancel_app_exit(&mut self) {
+        self.docs.pending_exit_docs.clear();
+        self.shell.exit_save_pending = false;
+        self.shell.exit_requested = false;
+        self.shell.ui.show_exit_dialog = false;
     }
 
     /// Returns a reference to the currently active document.
@@ -2165,6 +2431,8 @@ impl App {
                     | ToolId::Smudge
                     | ToolId::Dodge
                     | ToolId::Burn
+                    // Vector Brush shows a size ring so the drawn width is visible.
+                    | ToolId::VectorBrush
             );
         if needs_native_ring {
             self.update_ring_cursor(event_loop);
@@ -2190,7 +2458,7 @@ impl App {
             && !self.edit.input.mid_dragging
             && matches!(
                 self.edit.tools.active_id(),
-                ToolId::SelectionRect | ToolId::SelectionEllipse
+                ToolId::SelectionRect | ToolId::SelectionEllipse | ToolId::Arrow
             );
         if needs_selection_cursor && self.win.cursor_selection_crosshair.is_none() {
             self.win.cursor_selection_crosshair = Some(Self::make_selection_cursor(event_loop));
@@ -2351,10 +2619,31 @@ impl App {
                                     GuideOrientation::Vertical => CursorIcon::EwResize,
                                 })
                         });
-                        // The native four-way Move cursor is visually heavy on
-                        // Windows. Use the compact OS pointer for layer movement;
-                        // guide edges still advertise their resize direction.
-                        w.set_cursor(guide_cursor.unwrap_or(CursorIcon::Default));
+                        // A vector Path shows its transform box: resize/rotate over
+                        // a handle, move over its fill. The native four-way Move
+                        // cursor is visually heavy, so a plain layer body still uses
+                        // the compact OS pointer; guide edges take priority.
+                        let hint = {
+                            let path = self.move_hover_hint();
+                            if path != 0 {
+                                path
+                            } else {
+                                self.move_selection_transform_cursor_hint(
+                                    self.edit.input.mouse_x,
+                                    self.edit.input.mouse_y,
+                                )
+                            }
+                        };
+                        let path_cursor = match hint {
+                            2 => Some(CursorIcon::NwseResize),
+                            3 => Some(CursorIcon::NeswResize),
+                            4 => Some(CursorIcon::NsResize),
+                            5 => Some(CursorIcon::EwResize),
+                            6 => Some(CursorIcon::Grab),
+                            1 => Some(CursorIcon::Move),
+                            _ => None,
+                        };
+                        w.set_cursor(guide_cursor.or(path_cursor).unwrap_or(CursorIcon::Default));
                     }
                     ToolId::Hand => {
                         w.set_cursor_visible(true);
@@ -2438,7 +2727,25 @@ impl App {
                             }
                         }
                     }
-                    ToolId::SelectionRect | ToolId::SelectionEllipse | ToolId::Shape => {
+                    ToolId::Shape => {
+                        w.set_cursor_visible(true);
+                        match self.shape_cursor_hint() {
+                            1 => w.set_cursor(CursorIcon::NwseResize),
+                            2 => w.set_cursor(CursorIcon::NeswResize),
+                            3 => w.set_cursor(CursorIcon::NsResize),
+                            4 => w.set_cursor(CursorIcon::EwResize),
+                            5 => w.set_cursor(CursorIcon::Default),
+                            6 => w.set_cursor(CursorIcon::Move),
+                            _ => {
+                                if let Some(cc) = &self.win.cursor_selection_crosshair {
+                                    w.set_cursor(cc.clone());
+                                } else {
+                                    w.set_cursor(CursorIcon::Crosshair);
+                                }
+                            }
+                        }
+                    }
+                    ToolId::SelectionRect | ToolId::SelectionEllipse | ToolId::Arrow => {
                         if let Some(cc) = &self.win.cursor_selection_crosshair {
                             w.set_cursor_visible(true);
                             w.set_cursor(cc.clone());
@@ -2515,6 +2822,19 @@ impl App {
                             w.set_cursor(ring.clone());
                         } else {
                             w.set_cursor_visible(false);
+                        }
+                    }
+                    ToolId::Node => {
+                        // Direct-selection: a plain arrow, a Move cursor over an
+                        // anchor, a crosshair over a segment (insert). Without this
+                        // arm the Node tool fell through to the brush-ring default
+                        // and HID the cursor over the canvas (nothing to test with).
+                        w.set_cursor_visible(true);
+                        match self.node_cursor_hint() {
+                            4 => w.set_cursor(CursorIcon::Crosshair),
+                            2 => w.set_cursor(CursorIcon::Move),
+                            3 => w.set_cursor(CursorIcon::Crosshair),
+                            _ => w.set_cursor(CursorIcon::Default),
                         }
                     }
                     _ => {

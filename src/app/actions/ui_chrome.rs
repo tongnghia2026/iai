@@ -16,27 +16,6 @@ impl App {
                 }
             }
         }
-
-        if let Some(open) = actions.chrome.set_toolbox_open.take() {
-            if self.shell.ui.toolbox_open != open {
-                self.shell.ui.toolbox_open = open;
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
-            }
-        }
-        if let Some(pos) = actions.chrome.set_toolbox_pos.take() {
-            self.shell.ui.toolbox_pos = Some(pos);
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
-        }
-        if let Some(single_column) = actions.chrome.set_toolbox_single_column.take() {
-            self.shell.ui.toolbox_single_column = single_column;
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
-        }
     }
 
     pub(super) fn handle_panel_guide_actions(&mut self, actions: &mut UiActions) {

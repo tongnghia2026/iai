@@ -10,9 +10,10 @@
 //   • RGB and Grayscale colour modes, optional alpha channel
 //   • embedded ICC profiles (resource 1039) through the shared
 //     colour-managed import path, same rules as PNG/TIFF
-// Unsupported colour modes (CMYK, Lab, Indexed, Bitmap, Duotone,
-// Multichannel) and 32-bit depth return a specific message instead of a
-// panic or wrong pixels.
+// CMYK files import as an editable ink document (flat composite; the ink
+// separation is preserved). Still-unsupported colour modes (Lab, Indexed,
+// Bitmap, Duotone, Multichannel) and 32-bit depth return a specific message
+// instead of a panic or wrong pixels.
 //
 // When the Layer & Mask section carries an editable layer stack it is rebuilt in
 // full: layers (name/opacity/blend/visibility/offset), per-layer masks, and
@@ -21,6 +22,7 @@
 // regresses to an error. PSD stores layers bottom→top, matching our stack order.
 
 use super::psd_adjust;
+use super::psd_text;
 use super::{ExportOptions, Exporter, Importer};
 use crate::core::blend::BlendMode;
 use crate::core::canvas::{BitDepth, Canvas};
@@ -88,6 +90,10 @@ fn import_bytes(data: &[u8]) -> Result<Canvas, String> {
     // when there is no usable Layer & Mask section).
     let compression = r.u16()?;
     let channels = decode_channels(&mut r, &header, compression)?;
+
+    if header.color_mode == 4 {
+        return import_cmyk_composite(&channels, &header, icc.as_deref());
+    }
 
     match header.depth {
         8 => {
@@ -244,10 +250,9 @@ fn parse_header(r: &mut Reader) -> Result<Header, String> {
 
 fn check_supported(h: &Header) -> Result<(), String> {
     let mode_name = match h.color_mode {
-        1 | 3 => None,
+        1 | 3 | 4 => None, // Grayscale, RGB, CMYK
         0 => Some("Bitmap (1-bit)"),
         2 => Some("Indexed color"),
-        4 => Some("CMYK"),
         7 => Some("Multichannel"),
         8 => Some("Duotone"),
         9 => Some("Lab"),
@@ -258,7 +263,11 @@ fn check_supported(h: &Header) -> Result<(), String> {
             "PSD {name} chưa được hỗ trợ — hãy chuyển sang RGB (Image ▸ Mode) rồi lưu lại"
         ));
     }
-    let required = if h.color_mode == 3 { 3 } else { 1 };
+    let required = match h.color_mode {
+        3 => 3, // RGB
+        4 => 4, // CMYK
+        _ => 1, // Grayscale
+    };
     if h.channels < required {
         return Err("PSD: thiếu kênh màu".to_string());
     }
@@ -459,6 +468,91 @@ fn assemble_rgba16(channels: &[Vec<u8>], h: &Header) -> Result<Vec<u16>, String>
     Ok(out)
 }
 
+/// Import a flat CMYK composite as an editable ink document. PSD stores CMYK
+/// channels **inverted** (255 = no ink); we un-invert to iAi's convention
+/// (255 = full ink), keep the file's exact ink separation, and project an sRGB
+/// mirror through the document's CMYK space — the embedded profile when it is
+/// CMYK, otherwise the built-in naive space. 16-bit ink is reduced to iAi's
+/// 8-bit ink planes. The 5th channel, when present, is a normal (non-inverted)
+/// alpha plane.
+fn import_cmyk_composite(
+    channels: &[Vec<u8>],
+    h: &Header,
+    icc: Option<&[u8]>,
+) -> Result<Canvas, String> {
+    use crate::core::canvas::{CmykProfile, ColorMode};
+    use crate::core::cms;
+
+    if channels.len() < 4 {
+        return Err("PSD CMYK: thiếu kênh mực".to_string());
+    }
+    let n = (h.width as usize) * (h.height as usize);
+    let bps = (h.depth / 8) as usize;
+    // 8-bit ink sample of channel `c` at pixel `i`, un-inverted from PSD storage.
+    let ink_at = |c: usize, i: usize| -> u8 {
+        let plane = &channels[c];
+        let v = if bps == 2 {
+            (u16::from_be_bytes([plane[i * 2], plane[i * 2 + 1]]) >> 8) as u8
+        } else {
+            plane[i]
+        };
+        255 - v
+    };
+    // Packed ink planes: C, M, Y, K per pixel.
+    let mut ink = vec![0u8; n * 4];
+    for i in 0..n {
+        ink[i * 4] = ink_at(0, i);
+        ink[i * 4 + 1] = ink_at(1, i);
+        ink[i * 4 + 2] = ink_at(2, i);
+        ink[i * 4 + 3] = ink_at(3, i);
+    }
+    let alpha_plane = channels.get(4);
+    let alpha_at = |i: usize| -> u8 {
+        match alpha_plane {
+            Some(a) if bps == 2 => (u16::from_be_bytes([a[i * 2], a[i * 2 + 1]]) >> 8) as u8,
+            Some(a) => a[i],
+            None => 255,
+        }
+    };
+
+    // Choose the CMYK space: an embedded CMYK ICC, else the naive built-in.
+    let profile = match icc {
+        Some(bytes) if cms::profile_is_cmyk(bytes) => {
+            let name = cms::profile_from_bytes(bytes)
+                .map(|p| cms::profile_name(&p))
+                .unwrap_or_else(|| "CMYK profile".to_string());
+            CmykProfile::Icc {
+                name,
+                data: bytes.to_vec(),
+            }
+        }
+        _ => CmykProfile::Naive,
+    };
+    let profile_name = profile.display_name().to_string();
+    let conv = profile.converter().unwrap_or(cms::CmykConverter::Naive);
+
+    // Project ink → sRGB for the display mirror, carrying the alpha plane.
+    let cmyk_px: &[[u8; 4]] = bytemuck::cast_slice(&ink);
+    let mut rgb = vec![[0u8; 3]; n];
+    conv.cmyk_to_rgb_slice(cmyk_px, &mut rgb);
+    let mut mirror = vec![0u8; n * 4];
+    for i in 0..n {
+        mirror[i * 4] = rgb[i][0];
+        mirror[i * 4 + 1] = rgb[i][1];
+        mirror[i * 4 + 2] = rgb[i][2];
+        mirror[i * 4 + 3] = alpha_at(i);
+    }
+
+    let mut canvas = Canvas::from_rgba(mirror, h.width, h.height);
+    if let Some(layer) = canvas.layer_stack.layers.first_mut() {
+        layer.tiles.write_ink_region(0, 0, h.width, h.height, &ink);
+    }
+    canvas.color_mode = ColorMode::Cmyk(profile);
+    canvas.channels.select_composite();
+    canvas.metadata.source_profile = profile_name;
+    Ok(canvas)
+}
+
 // ---------------------------------------------------------------------------
 // Layer & Mask section — editable layer stack (layers, masks, nested groups).
 // ---------------------------------------------------------------------------
@@ -484,6 +578,10 @@ struct RawLayer {
     /// even for recognised-but-unmapped types so they are not read as raster.
     adjustment: Option<AdjustmentType>,
     is_adjustment: bool,
+    /// Some when the layer carries a `TySh` type-tool block we decoded into
+    /// editable text; the layer's rasterized pixels are still imported for the
+    /// initial appearance (see the consumption loop).
+    text: Option<crate::core::text::TextData>,
     /// channel id → decoded plane (raw bytes, big-endian samples for 16-bit).
     planes: HashMap<i16, Vec<u8>>,
 }
@@ -516,6 +614,12 @@ fn import_layer_stack(
     icc_is_srgb: bool,
 ) -> Result<Option<Canvas>, String> {
     if lm.is_empty() {
+        return Ok(None);
+    }
+    // CMYK layers carry C/M/Y/K planes, not RGB; the per-layer raster path would
+    // misread them as RGB. Route CMYK files to the flat-composite path, which
+    // imports them as an editable ink document.
+    if header.color_mode == 4 {
         return Ok(None);
     }
     // 16-bit + a non-sRGB profile needs the colour-managed 8-bit composite path;
@@ -703,10 +807,11 @@ fn parse_layer_record(r: &mut Reader, header: &Header) -> Result<RawLayer, Strin
     // Additional layer info: Unicode name ('luni') overrides the Pascal name;
     // section divider ('lsct'/'lsdk') marks group folders; adjustment blocks
     // ('levl'/'hue2'/…) mark — and, when we can map them, define — an adjustment
-    // layer.
+    // layer; the type-tool block ('TySh') carries editable text.
     let mut section = 0u8;
     let mut adjustment: Option<AdjustmentType> = None;
     let mut is_adjustment = false;
+    let mut text = None;
     while es.remaining() >= 12 {
         let sig = es.take(4)?;
         if sig != b"8BIM" && sig != b"8B64" {
@@ -729,6 +834,11 @@ fn parse_layer_record(r: &mut Reader, header: &Header) -> Result<RawLayer, Strin
             b"lsct" | b"lsdk" => {
                 if data.len() >= 4 {
                     section = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u8;
+                }
+            }
+            b"TySh" => {
+                if text.is_none() {
+                    text = psd_text::parse_type_tool(data).map(|t| t.td);
                 }
             }
             _ if psd_adjust::is_adjustment_key(&key) => {
@@ -759,6 +869,7 @@ fn parse_layer_record(r: &mut Reader, header: &Header) -> Result<RawLayer, Strin
         section,
         adjustment,
         is_adjustment,
+        text,
         planes: HashMap::new(),
     })
 }
@@ -942,8 +1053,8 @@ fn build_app_layers(raw: &[RawLayer], header: &Header, icc: Option<&[u8]>) -> Ve
                     out.push(l);
                     continue;
                 }
-                // A recognised adjustment layer we can't map yet (e.g. Curves in
-                // Phase 1): skip it rather than import an empty raster that would
+                // A recognised adjustment layer we can't map yet (e.g. Selective
+                // Colour): skip it rather than import an empty raster that would
                 // punch a transparent hole in the composite.
                 if rl.is_adjustment {
                     continue;
@@ -955,6 +1066,12 @@ fn build_app_layers(raw: &[RawLayer], header: &Header, icc: Option<&[u8]>) -> Ve
                 next_id += 1;
                 if let Some(mut l) = build_raster_layer(id, rl, header, icc) {
                     l.parent_id = stack.last().copied();
+                    // A type-tool ('TySh') layer keeps Photoshop's rasterized
+                    // pixels for a pixel-perfect look, but becomes an editable iAi
+                    // text layer (re-rasterized from `TextData` only on edit).
+                    if let Some(td) = rl.text.clone() {
+                        l.layer_type = crate::core::layer::LayerType::Text(td);
+                    }
                     out.push(l);
                 }
             }
@@ -1384,11 +1501,28 @@ mod tests {
     }
 
     #[test]
-    fn cmyk_rejected_with_clear_message() {
-        let img = vec![0u8, 0];
-        let psd = build_psd(1, 4, 1, 1, 8, 4, &[], &img);
-        let err = expect_err(&psd);
-        assert!(err.contains("CMYK"), "{err}");
+    fn cmyk_imports_as_editable_ink_document() {
+        // 2×1, RAW, 4 channels. PSD stores CMYK inverted (255 = no ink).
+        // px0 = pure cyan ink (iAi C=255); px1 = 50% black (iAi K=128).
+        // Planar: C=[0,255] M=[255,255] Y=[255,255] K=[255,127].
+        let mut img = vec![0u8, 0]; // compression RAW
+        img.extend_from_slice(&[0, 255]); // C
+        img.extend_from_slice(&[255, 255]); // M
+        img.extend_from_slice(&[255, 255]); // Y
+        img.extend_from_slice(&[255, 127]); // K
+        let psd = build_psd(1, 4, 2, 1, 8, 4, &[], &img);
+        let canvas = import_bytes(&psd).unwrap();
+
+        assert!(canvas.is_cmyk(), "CMYK file must open as an ink document");
+        // Ink planes hold the un-inverted separation (255 = full ink).
+        let mut ink = vec![0u8; 2 * 4];
+        canvas.layer_stack.layers[0]
+            .tiles
+            .extract_ink_region_into(0, 0, 2, 1, &mut ink);
+        assert_eq!(&ink[0..4], &[255, 0, 0, 0], "px0 = pure cyan ink");
+        assert_eq!(&ink[4..8], &[0, 0, 0, 128], "px1 = 50% black ink");
+        // The naive-space mirror of pure cyan is (0,255,255).
+        assert_eq!(pixel(&canvas, 0, 0), (0, 255, 255, 255));
     }
 
     #[test]
@@ -1706,6 +1840,142 @@ mod tests {
         assert_eq!((layers[1].width, layers[1].height), (2, 1));
     }
 
+    /// Version-1 Curves, master channel only (bitmask bit 0), lifting the midtone.
+    fn curv_block() -> Vec<u8> {
+        let mut d = Vec::new();
+        d.push(0); // is_map = points
+        d.extend_from_slice(&1u16.to_be_bytes()); // version
+        d.extend_from_slice(&0b0001u32.to_be_bytes()); // master only
+        d.extend_from_slice(&3u16.to_be_bytes()); // point count
+        for (out, inp) in [(0u16, 0u16), (160, 128), (255, 255)] {
+            d.extend_from_slice(&out.to_be_bytes());
+            d.extend_from_slice(&inp.to_be_bytes());
+        }
+        d
+    }
+
+    #[test]
+    fn imports_curves_adjustment_layer() {
+        let base = layer_record(
+            (0, 0, 1, 2),
+            "Base",
+            255,
+            b"norm",
+            0,
+            None,
+            &[
+                (0, vec![100, 100]),
+                (1, vec![100, 100]),
+                (2, vec![100, 100]),
+            ],
+        );
+        let adj = adjustment_layer_record("My Curves", b"curv", &curv_block());
+        let psd = build_layered_psd(2, 1, &[base, adj]);
+        let canvas = import_bytes(&psd).unwrap();
+
+        let layers = &canvas.layer_stack.layers;
+        assert_eq!(layers.len(), 2, "base raster + curves layer, not dropped");
+        assert_eq!(layers[1].name, "My Curves");
+        match &layers[1].layer_type {
+            crate::core::layer::LayerType::Adjustment(AdjustmentType::Curves { channels }) => {
+                assert_eq!(channels[0].len(), 3);
+                assert!((channels[0][1].0 - 128.0 / 255.0).abs() < 1e-4);
+                assert!((channels[0][1].1 - 160.0 / 255.0).abs() < 1e-4);
+            }
+            _ => panic!("expected a Curves adjustment layer"),
+        }
+        assert_eq!((layers[1].width, layers[1].height), (2, 1));
+    }
+
+    /// A minimal `TySh` block: identity transform + a text descriptor whose only
+    /// item is the `Txt ` string. Enough to exercise the import wiring.
+    fn tysh_block(text: &str) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(&1u16.to_be_bytes()); // version
+                                                  // identity transform (xx, xy, yx, yy, tx, ty)
+        for x in [1.0f64, 0.0, 0.0, 1.0, 0.0, 0.0] {
+            d.extend_from_slice(&x.to_be_bytes());
+        }
+        d.extend_from_slice(&50u16.to_be_bytes()); // text version
+        d.extend_from_slice(&16u32.to_be_bytes()); // descriptor version
+        d.extend_from_slice(&1u32.to_be_bytes()); // unicode name len (1 = NUL only)
+        d.extend_from_slice(&0u16.to_be_bytes()); // NUL
+        d.extend_from_slice(&4u32.to_be_bytes()); // classID "TxLr"
+        d.extend_from_slice(b"TxLr");
+        d.extend_from_slice(&1u32.to_be_bytes()); // item count
+        d.extend_from_slice(&4u32.to_be_bytes()); // key "Txt "
+        d.extend_from_slice(b"Txt ");
+        d.extend_from_slice(b"TEXT");
+        let units: Vec<u16> = text.encode_utf16().collect();
+        d.extend_from_slice(&(units.len() as u32 + 1).to_be_bytes());
+        for u in units {
+            d.extend_from_slice(&u.to_be_bytes());
+        }
+        d.extend_from_slice(&0u16.to_be_bytes()); // NUL
+        d
+    }
+
+    /// A raster layer that also carries a `TySh` type-tool block, appended to the
+    /// record's extra-data section (with the extra-length field patched to match).
+    fn text_layer_record(name: &str, text: &str) -> (Vec<u8>, Vec<u8>) {
+        let channels: &[(i16, Vec<u8>)] =
+            &[(0, vec![200, 200]), (1, vec![40, 40]), (2, vec![40, 40])];
+        let (mut rec, cdata) = layer_record((0, 0, 1, 2), name, 255, b"norm", 0, None, channels);
+
+        // Build the 8BIM/TySh additional-info block (even-padded).
+        let block = tysh_block(text);
+        let mut tysh = Vec::new();
+        tysh.extend_from_slice(b"8BIM");
+        tysh.extend_from_slice(b"TySh");
+        tysh.extend_from_slice(&(block.len() as u32).to_be_bytes());
+        tysh.extend_from_slice(&block);
+        if block.len() % 2 == 1 {
+            tysh.push(0);
+        }
+
+        // The extra-length u32 sits right after the 4-byte-aligned per-layer header:
+        // 16 (bounds) + 2 (channel count) + 6*n (channel infos) + 4 (8BIM) + 4
+        // (blend) + 4 (opacity/clip/flags/filler). Patch it to include the block.
+        let extra_len_pos = 16 + 2 + 6 * channels.len() + 4 + 4 + 4;
+        let old = u32::from_be_bytes([
+            rec[extra_len_pos],
+            rec[extra_len_pos + 1],
+            rec[extra_len_pos + 2],
+            rec[extra_len_pos + 3],
+        ]);
+        let new = old + tysh.len() as u32;
+        rec[extra_len_pos..extra_len_pos + 4].copy_from_slice(&new.to_be_bytes());
+        rec.extend_from_slice(&tysh);
+        (rec, cdata)
+    }
+
+    #[test]
+    fn imports_text_layer_as_editable() {
+        let base = layer_record(
+            (0, 0, 1, 2),
+            "BG",
+            255,
+            b"norm",
+            0,
+            None,
+            &[(0, vec![1, 1]), (1, vec![1, 1]), (2, vec![1, 1])],
+        );
+        let text = text_layer_record("ignored-pascal", "Hello world");
+        let psd = build_layered_psd(2, 1, &[base, text]);
+        let canvas = import_bytes(&psd).unwrap();
+
+        let layers = &canvas.layer_stack.layers;
+        assert_eq!(layers.len(), 2, "base + text layer");
+        match &layers[1].layer_type {
+            crate::core::layer::LayerType::Text(td) => {
+                assert_eq!(td.content, "Hello world");
+            }
+            other => panic!("expected an editable Text layer, got {other:?}"),
+        }
+        // The rasterized pixels are still imported for the initial appearance.
+        assert_eq!((layers[1].width, layers[1].height), (2, 1));
+    }
+
     /// Build a bare layer-info blob (count + one record + its channel data), the
     /// payload a TIFF `Layr` block carries.
     fn one_layer_info_blob() -> Vec<u8> {
@@ -1762,8 +2032,9 @@ mod tests {
 
     #[test]
     fn unmapped_adjustment_layer_is_skipped_not_a_hole() {
-        // 'curv' is recognised as an adjustment but not decoded in Phase 1 — the
-        // layer must be dropped, never imported as an empty (transparent) raster.
+        // 'selc' (Selective Colour) is recognised as an adjustment but not decoded
+        // yet — the layer must be dropped, never imported as an empty (transparent)
+        // raster that would punch a hole in the composite.
         let base = layer_record(
             (0, 0, 1, 2),
             "Base",
@@ -1777,14 +2048,14 @@ mod tests {
                 (2, vec![100, 100]),
             ],
         );
-        let adj = adjustment_layer_record("Curves 1", b"curv", &[0u8; 8]);
+        let adj = adjustment_layer_record("Selective Colour 1", b"selc", &[0u8; 8]);
         let psd = build_layered_psd(2, 1, &[base, adj]);
         let canvas = import_bytes(&psd).unwrap();
         let layers = &canvas.layer_stack.layers;
         assert_eq!(
             layers.len(),
             1,
-            "only the base raster; curves skipped for now"
+            "only the base raster; unmapped adjustment skipped"
         );
         assert_eq!(layers[0].name, "Base");
     }

@@ -218,6 +218,35 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
+                if pressed
+                    && !repeat
+                    && self.edit.tools.active_id() == ToolId::Node
+                    && self.edit.node_selected.is_some()
+                    && !self.edit.input.alt_held
+                    && !self.edit.input.ctrl_held =>
+            {
+                // Node tool: Delete removes the selected anchor (not the layer).
+                self.node_delete_selected();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
+                if pressed
+                    && !repeat
+                    && !self.edit.input.alt_held
+                    && !self.edit.input.ctrl_held
+                    && self.can_trim_active_vector() =>
+            {
+                // Vector layer + active selection: Delete TRIMS the selected
+                // region out of the shape (reuses the boolean Trim engine) rather
+                // than clearing raster pixels, which is a no-op on vector layers.
+                self.trim_active_vector_by_selection();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
                 if pressed && !repeat =>
             {
                 if self.edit.input.alt_held {
@@ -258,11 +287,45 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::KeyD) if pressed && self.edit.input.ctrl_held => {
-                self.docs.documents[self.docs.active_doc_idx]
+                let has_selection = self.docs.documents[self.docs.active_doc_idx]
                     .canvas
-                    .deselect();
-                self.upload_selection_mask();
-                self.push_selection_uniforms();
+                    .selection
+                    .active;
+                if self.edit.input.shift_held {
+                    // Ctrl+Shift+D: always Repeat (explicit).
+                    self.repeat_last_step();
+                } else if has_selection {
+                    // Ctrl+D with an active pixel selection = Deselect (Photoshop).
+                    self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .deselect();
+                    self.upload_selection_mask();
+                    self.push_selection_uniforms();
+                } else {
+                    // Ctrl+D with no selection = Repeat the last duplicate step.
+                    self.repeat_last_step();
+                }
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            // "+" duplicates the selection in place-ish (Corel-style), recording it
+            // as the repeatable step. NumpadAdd, or Shift+"=" on the main row.
+            PhysicalKey::Code(KeyCode::NumpadAdd)
+                if pressed && !self.edit.input.ctrl_held && !self.is_tool_modal_active() =>
+            {
+                self.duplicate_selected_with_step((0, 0));
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            PhysicalKey::Code(KeyCode::Equal)
+                if pressed
+                    && self.edit.input.shift_held
+                    && !self.edit.input.ctrl_held
+                    && !self.is_tool_modal_active() =>
+            {
+                self.duplicate_selected_with_step((0, 0));
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
@@ -385,7 +448,18 @@ impl App {
                     .active_idx;
                 self.do_ungroup(idx);
             }
-            PhysicalKey::Code(KeyCode::KeyG) if pressed && self.edit.input.ctrl_held => {
+            PhysicalKey::Code(KeyCode::KeyG)
+                if pressed
+                    && self.edit.input.ctrl_held
+                    && self.edit.input.alt_held
+                    && !self.edit.input.shift_held =>
+            {
+                // Photoshop clipping mask: clip the active layer to the one below.
+                self.toggle_clipping_mask();
+            }
+            PhysicalKey::Code(KeyCode::KeyG)
+                if pressed && self.edit.input.ctrl_held && !self.edit.input.alt_held =>
+            {
                 self.do_group_selected();
             }
             PhysicalKey::Code(KeyCode::KeyG) if pressed && !self.edit.input.ctrl_held => {
@@ -403,8 +477,11 @@ impl App {
                 let dpi = canvas.metadata.resolution_ppi;
                 match self.edit.tools.active_id() {
                     ToolId::Crop => {
+                        // Same guard as the toolbar path: a fixed-size preset
+                        // (ID photo at 600 ppi) or a hand-typed resolution must
+                        // not be clobbered by the document's 72 ppi default.
                         let c = self.edit.tools.crop_mut();
-                        c.dpi = dpi;
+                        c.sync_dpi_on_activate(dpi);
                     }
                     ToolId::PerspectiveCrop => {
                         let t = self.edit.tools.perspective_crop_mut();
@@ -426,6 +503,14 @@ impl App {
             }
             PhysicalKey::Code(KeyCode::KeyP) if pressed && !self.edit.input.ctrl_held => {
                 self.edit.tools.select(ToolId::Pen);
+                self.sync_cursor(event_loop);
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            PhysicalKey::Code(KeyCode::KeyA) if pressed && !self.edit.input.ctrl_held => {
+                // Direct-selection: edit a Path layer's anchor points.
+                self.edit.tools.select(ToolId::Node);
                 self.sync_cursor(event_loop);
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
@@ -657,6 +742,43 @@ impl App {
                     self.open_print_dialog();
                 }
             }
+            // Ctrl+Q → Convert to Curves (Corel muscle memory). Routes to the
+            // shape→path conversion for a parametric Shape, or text→curves for a
+            // Text layer; both already handle their own undo + invalidation.
+            PhysicalKey::Code(KeyCode::KeyQ) if pressed && !repeat && self.edit.input.ctrl_held => {
+                use crate::core::layer::LayerType;
+                use crate::core::vector::object::VectorGeometry;
+                let idx = self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .layer_stack
+                    .active_idx;
+                let kind = self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .layer_stack
+                    .layers
+                    .get(idx)
+                    .map(|l| match &l.layer_type {
+                        LayerType::Vector(VectorGeometry::Primitive(_)) => 1u8,
+                        LayerType::Text(_) => 2,
+                        _ => 0,
+                    })
+                    .unwrap_or(0);
+                match kind {
+                    1 => {
+                        self.convert_shape_to_path(idx);
+                    }
+                    2 => {
+                        self.text_to_curves(idx);
+                    }
+                    _ => {
+                        self.shell.status_msg =
+                            "Convert to Curves: chọn một Shape hoặc Text trước".to_string();
+                        if let Some(w) = &self.win.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
+            }
             PhysicalKey::Code(KeyCode::KeyA)
                 if pressed && self.edit.input.ctrl_held && self.edit.input.shift_held =>
             {
@@ -724,7 +846,10 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::KeyU) if pressed && !self.edit.input.ctrl_held => {
-                self.edit.tools.select(ToolId::Shape);
+                // U selects the shape group (keeps the last-used shape); the shape
+                // kind is chosen by right-clicking the toolbar Shape tool. No key
+                // cycling — that would jump shapes when re-selecting mid-edit.
+                self.edit.tools.select_group(crate::tools::SHAPE_GROUP);
                 self.sync_cursor(event_loop);
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
@@ -1000,34 +1125,47 @@ impl App {
                     self.edit.tools.active_id(),
                     ToolId::PolygonLasso | ToolId::Pen
                 ) {
+                    // Pen in Path mode commits an editable vector layer, which
+                    // needs app-level (layer-structure) invalidation — handle it
+                    // before building the raster ToolCtx. Ctrl+Enter still forces
+                    // a selection regardless of mode.
+                    if self.edit.tools.active_id() == ToolId::Pen
+                        && !self.edit.input.ctrl_held
+                        && self.edit.tools.pen().mode == crate::tools::pen::PenMode::Path
                     {
-                        let mut ctx = ToolCtx::new(
-                            &mut self.docs.documents[self.docs.active_doc_idx],
-                            self.edit.fg_color,
-                            self.edit.bg_color,
-                            self.edit.view.zoom,
-                            self.edit.view.offset_x,
-                            self.edit.view.offset_y,
-                        );
-                        // Ctrl+Enter forces a Pen path to a selection,
-                        // regardless of its Selection/Fill/Stroke mode.
-                        if self.edit.input.ctrl_held && self.edit.tools.active_id() == ToolId::Pen {
-                            self.edit
-                                .tools
-                                .pen_mut()
-                                .commit_as_selection(ctx.canvas_mut());
-                        } else {
-                            self.edit.tools.active_on_confirm(&mut ctx);
+                        self.commit_pen_as_path();
+                    } else {
+                        {
+                            let mut ctx = ToolCtx::new(
+                                &mut self.docs.documents[self.docs.active_doc_idx],
+                                self.edit.fg_color,
+                                self.edit.bg_color,
+                                self.edit.view.zoom,
+                                self.edit.view.offset_x,
+                                self.edit.view.offset_y,
+                            );
+                            // Ctrl+Enter forces a Pen path to a selection,
+                            // regardless of its Selection/Fill/Stroke mode.
+                            if self.edit.input.ctrl_held
+                                && self.edit.tools.active_id() == ToolId::Pen
+                            {
+                                self.edit
+                                    .tools
+                                    .pen_mut()
+                                    .commit_as_selection(ctx.canvas_mut());
+                            } else {
+                                self.edit.tools.active_on_confirm(&mut ctx);
+                            }
                         }
-                    }
-                    self.docs.documents[self.docs.active_doc_idx]
-                        .canvas
-                        .selection
-                        .refresh_bbox();
-                    self.upload_selection_mask();
-                    self.push_selection_uniforms();
-                    if let Some(w) = &self.win.window {
-                        w.request_redraw();
+                        self.docs.documents[self.docs.active_doc_idx]
+                            .canvas
+                            .selection
+                            .refresh_bbox();
+                        self.upload_selection_mask();
+                        self.push_selection_uniforms();
+                        if let Some(w) = &self.win.window {
+                            w.request_redraw();
+                        }
                     }
                 }
             }

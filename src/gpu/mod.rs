@@ -8,6 +8,7 @@ use winit::window::Window;
 
 pub mod compositor;
 pub mod tile_atlas;
+pub mod vector;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -128,6 +129,10 @@ pub struct GpuState {
     /// device is invalid from that point; the App polls this each frame and
     /// rebuilds the whole GPU context instead of freezing on validation spam.
     pub device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Texture ids already reported as missing (see `render`) — the renderer
+    /// silently skips such meshes, so this is the only trace the "layer panel
+    /// went blank" class of bug leaves behind. One log line per id.
+    missing_texture_logged: std::collections::HashSet<egui::TextureId>,
     /// Retained so a second OS window (the Develop stage) can build its own
     /// surface on the SAME device: `instance.create_surface(window2)` +
     /// `adapter` for its capabilities. The shared pipelines were compiled for
@@ -730,6 +735,7 @@ impl GpuState {
             compositor,
             current_frame_is_ping: true,
             device_lost,
+            missing_texture_logged: std::collections::HashSet::new(),
             instance,
             adapter,
             surface_format: format,
@@ -1396,6 +1402,7 @@ impl GpuState {
         zoom: f32,
         dirty_rect: Option<(u32, u32, u32, u32)>,
         allow_backdrop_cache: bool,
+        allow_active_gpu_vector: bool,
     ) {
         let final_is_ping = self.compositor.composite_layers(
             &self.device,
@@ -1406,6 +1413,7 @@ impl GpuState {
             zoom,
             dirty_rect,
             allow_backdrop_cache,
+            allow_active_gpu_vector,
         );
 
         self.current_frame_is_ping = final_is_ping;
@@ -1441,25 +1449,59 @@ impl GpuState {
         canvas_clip: Option<(u32, u32, u32, u32)>,
         draw_canvas: bool,
     ) -> bool {
-        let surface_texture = match self.main.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.main.surface.configure(&self.device, &self.main.config);
-                return false;
-            }
-            _ => return false,
-        };
-
-        let view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
+        // Apply the texture delta BEFORE trying to acquire the swapchain image:
+        // egui emits each delta exactly once, so a dropped frame (surface
+        // Outdated/Lost after a monitor sleep or driver reset) that discarded
+        // its delta would desync this renderer's texture store from egui
+        // forever — fonts and layer-panel thumbnails then render blank until
+        // the app restarts. Uploads only need the device + queue, never the
+        // surface, so they are always safe to run here.
         for (id, delta) in &textures_delta.set {
             self.main
                 .egui_renderer
                 .update_texture(&self.device, &self.queue, *id, delta);
         }
+
+        // A mesh whose texture the renderer doesn't know is silently skipped by
+        // egui-wgpu — whole UI regions (layer panel, thumbnails, text runs)
+        // just stop drawing with no error anywhere. Leave a crash-log trace so
+        // a field report of "the panel went blank" is diagnosable.
+        for prim in primitives {
+            if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive {
+                if self.main.egui_renderer.texture(&mesh.texture_id).is_none()
+                    && self.missing_texture_logged.insert(mesh.texture_id)
+                {
+                    crate::log_crash(&format!(
+                        "egui mesh references missing texture {:?} — that UI region will not draw",
+                        mesh.texture_id
+                    ));
+                }
+            }
+        }
+
+        let surface_texture = match self.main.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.main.surface.configure(&self.device, &self.main.config);
+                // Nothing gets drawn this frame, so the frees (textures egui no
+                // longer references) can be honoured immediately.
+                for id in &textures_delta.free {
+                    self.main.egui_renderer.free_texture(id);
+                }
+                return false;
+            }
+            _ => {
+                for id in &textures_delta.free {
+                    self.main.egui_renderer.free_texture(id);
+                }
+                return false;
+            }
+        };
+
+        let view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.main.config.width, self.main.config.height],
@@ -1634,24 +1676,34 @@ impl GpuState {
         backdrop: [f64; 4],
         canvas_uniforms: Option<CanvasUniforms>,
     ) -> bool {
+        // Same ordering rule as `render()`: egui emits each texture delta only
+        // once, so it must be applied even when the frame is dropped.
+        for (id, delta) in &textures_delta.set {
+            ws.egui_renderer
+                .update_texture(&self.device, &self.queue, *id, delta);
+        }
+
         let surface_texture = match ws.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 ws.surface.configure(&self.device, &ws.config);
+                for id in &textures_delta.free {
+                    ws.egui_renderer.free_texture(id);
+                }
                 return false;
             }
-            _ => return false,
+            _ => {
+                for id in &textures_delta.free {
+                    ws.egui_renderer.free_texture(id);
+                }
+                return false;
+            }
         };
 
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-
-        for (id, delta) in &textures_delta.set {
-            ws.egui_renderer
-                .update_texture(&self.device, &self.queue, *id, delta);
-        }
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [ws.config.width, ws.config.height],

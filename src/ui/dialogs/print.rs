@@ -189,6 +189,55 @@ pub(crate) fn print_preview_panel(
         egui::StrokeKind::Inside,
     );
 
+    // Crop / registration marks around the artwork, matching the exported PDF.
+    if layout.marks.is_active() && data.doc.canvas_w > 0 && data.doc.canvas_h > 0 {
+        let (dw, dh, ax, ay) = placement(
+            layout,
+            data.doc.canvas_w,
+            data.doc.canvas_h,
+            data.doc.canvas_dpi,
+        );
+        let to_screen = |px: f32, py: f32| page.min + egui::vec2(px * s, (ph - py) * s);
+        let (trx0, try0, trx1, try1) =
+            crate::core::print::marks_trim_box(ax, ay, dw, dh, layout.marks.bleed_mm);
+        let stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(60));
+        let seg = |x1: f32, y1: f32, x2: f32, y2: f32| {
+            painter.line_segment([to_screen(x1, y1), to_screen(x2, y2)], stroke);
+        };
+        // The trim (cut) rectangle.
+        painter.rect_stroke(
+            egui::Rect::from_two_pos(to_screen(trx0, try0), to_screen(trx1, try1)),
+            0.0,
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+        let (l, r, b, t) = (ax, ax + dw, ay, ay + dh);
+        let (gap, clen) = (3.0, 12.0);
+        if layout.marks.crop_marks {
+            seg(l - gap - clen, try0, l - gap, try0);
+            seg(l - gap - clen, try1, l - gap, try1);
+            seg(r + gap, try0, r + gap + clen, try0);
+            seg(r + gap, try1, r + gap + clen, try1);
+            seg(trx0, b - gap - clen, trx0, b - gap);
+            seg(trx1, b - gap - clen, trx1, b - gap);
+            seg(trx0, t + gap, trx0, t + gap + clen);
+            seg(trx1, t + gap, trx1, t + gap + clen);
+        }
+        if layout.marks.registration_marks {
+            let (rr, reg_off, cross) = (4.0_f32, 10.0, 7.0);
+            for (cx, cy) in [
+                (ax + dw * 0.5, b - reg_off),
+                (ax + dw * 0.5, t + reg_off),
+                (l - reg_off, ay + dh * 0.5),
+                (r + reg_off, ay + dh * 0.5),
+            ] {
+                painter.circle_stroke(to_screen(cx, cy), rr * s, stroke);
+                seg(cx - cross, cy, cx + cross, cy);
+                seg(cx, cy - cross, cx, cy + cross);
+            }
+        }
+    }
+
     let (iw, ih) = document_page_points(data.doc.canvas_w, data.doc.canvas_h, data.doc.canvas_dpi);
     let size_label = format!(
         "Paper {:.3} x {:.3} in   Printable {:.3} x {:.3} in   Image {:.3} x {:.3} in",
@@ -488,6 +537,51 @@ pub(crate) fn print_settings_panel(
                             .size(10.0),
                         );
                     }
+                });
+        });
+
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            egui::CollapsingHeader::new("Print Marks")
+                .default_open(false)
+                .show(ui, |ui| {
+                    if ui
+                        .checkbox(&mut layout.marks.crop_marks, "Crop marks")
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                    if ui
+                        .checkbox(&mut layout.marks.registration_marks, "Registration marks")
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Bleed:");
+                        let mut bleed = layout.marks.bleed_mm;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut bleed)
+                                    .range(0.0..=20.0)
+                                    .speed(0.1)
+                                    .suffix(" mm"),
+                            )
+                            .changed()
+                        {
+                            layout.marks.bleed_mm = bleed.clamp(0.0, 20.0);
+                            *changed = true;
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "Applies to Save as PDF. The document is the bleed area; the trim (cut) \
+                             line is inset by the bleed. Choose a paper larger than the artwork so \
+                             the marks have room.",
+                        )
+                        .color(egui::Color32::GRAY)
+                        .size(10.0),
+                    );
                 });
         });
     });

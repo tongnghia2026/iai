@@ -1,6 +1,6 @@
 use super::{ExportOptions, Exporter, Importer};
 use crate::core::canvas::Canvas;
-use crate::core::print::{build_pdf, PrintLayout};
+use crate::core::print::PrintLayout;
 use lopdf::dictionary;
 use std::io::Write;
 use std::path::Path;
@@ -347,6 +347,7 @@ pub enum HybridPageContent {
     Original,
     Overlay {
         rgba: Vec<u8>,
+        vectors: Vec<crate::core::print::PdfVectorObject>,
         width: u32,
         height: u32,
         dpi: f32,
@@ -550,13 +551,15 @@ fn inherit_resources_onto_page(
                 .cloned()
         })
         .unwrap_or_default();
-    let detached_xobjects = resources.get(b"XObject").ok().and_then(|xobjects| {
-        dereferenced_object(document, xobjects)
-            .and_then(|object| object.as_dict().ok())
-            .cloned()
-    });
-    if let Some(xobjects) = detached_xobjects {
-        resources.set("XObject", xobjects);
+    for key in [b"XObject".as_slice(), b"Shading".as_slice()] {
+        let detached = resources.get(key).ok().and_then(|value| {
+            dereferenced_object(document, value)
+                .and_then(|object| object.as_dict().ok())
+                .cloned()
+        });
+        if let Some(dictionary) = detached {
+            resources.set(key, dictionary);
+        }
     }
     document
         .get_dictionary_mut(page_id)
@@ -638,6 +641,167 @@ fn add_overlay(
         "q\n{draw_width:.4} 0 0 {draw_height:.4} {draw_x:.4} {draw_y:.4} cm\n/{} Do\nQ\n",
         String::from_utf8_lossy(name)
     );
+    document
+        .add_page_contents(page_id, content.into_bytes())
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn pdf_real(value: f32) -> lopdf::Object {
+    lopdf::Object::Real(value)
+}
+
+fn pdf_real_array(values: impl IntoIterator<Item = f32>) -> lopdf::Object {
+    lopdf::Object::Array(values.into_iter().map(pdf_real).collect())
+}
+
+fn gradient_function_object(gradient: &crate::core::vector::style::Gradient) -> lopdf::Object {
+    let color = |value: crate::core::vector::color::ColorValue| {
+        let [r, g, b, _] = value.to_rgba8();
+        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+    };
+    let mut stops: Vec<(f32, [f32; 3])> = Vec::new();
+    for stop in gradient.active_stops() {
+        let offset = stop.offset.clamp(0.0, 1.0);
+        if stops
+            .last()
+            .is_some_and(|(previous, _)| (offset - *previous).abs() < 1e-6)
+        {
+            if let Some(last) = stops.last_mut() {
+                last.1 = color(stop.color);
+            }
+        } else {
+            stops.push((offset, color(stop.color)));
+        }
+    }
+    if stops.is_empty() {
+        stops.push((0.0, [0.0; 3]));
+    }
+    if stops[0].0 > 0.0 {
+        stops.insert(0, (0.0, stops[0].1));
+    }
+    if stops.last().is_some_and(|(offset, _)| *offset < 1.0) {
+        let last = stops.last().expect("checked").1;
+        stops.push((1.0, last));
+    }
+    if stops.len() == 1 {
+        stops.push((1.0, stops[0].1));
+    }
+    let type2 = |a: [f32; 3], b: [f32; 3]| {
+        lopdf::Object::Dictionary(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => pdf_real_array([0.0, 1.0]),
+            "C0" => pdf_real_array(a),
+            "C1" => pdf_real_array(b),
+            "N" => pdf_real(1.0),
+        })
+    };
+    if stops.len() == 2 {
+        return type2(stops[0].1, stops[1].1);
+    }
+    let functions = lopdf::Object::Array(
+        stops
+            .windows(2)
+            .map(|pair| type2(pair[0].1, pair[1].1))
+            .collect(),
+    );
+    let bounds = pdf_real_array(stops[1..stops.len() - 1].iter().map(|(offset, _)| *offset));
+    let encode = pdf_real_array((0..stops.len() - 1).flat_map(|_| [0.0, 1.0]));
+    lopdf::Object::Dictionary(dictionary! {
+        "FunctionType" => 3,
+        "Domain" => pdf_real_array([0.0, 1.0]),
+        "Functions" => functions,
+        "Bounds" => bounds,
+        "Encode" => encode,
+    })
+}
+
+fn add_vector_shading_resources(
+    document: &mut lopdf::Document,
+    page_id: lopdf::ObjectId,
+    objects: &[crate::core::print::PdfVectorObject],
+) -> Result<(), String> {
+    use crate::core::vector::style::GradientKind;
+    let mut additions = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        let Some(gradient) = object.fill_gradient else {
+            continue;
+        };
+        let (kind, coords) = match gradient.kind {
+            GradientKind::Linear => (2, pdf_real_array([0.0, 0.0, 1.0, 0.0])),
+            GradientKind::Radial => (3, pdf_real_array([0.0, 0.0, 0.0, 0.0, 0.0, 1.0])),
+        };
+        additions.push((
+            format!("IaiSh{index}"),
+            lopdf::Object::Dictionary(dictionary! {
+                "ShadingType" => kind,
+                "ColorSpace" => "DeviceRGB",
+                "Coords" => coords,
+                "Function" => gradient_function_object(&gradient),
+                "Extend" => lopdf::Object::Array(vec![
+                    lopdf::Object::Boolean(true),
+                    lopdf::Object::Boolean(true),
+                ]),
+            }),
+        ));
+    }
+    if additions.is_empty() {
+        return Ok(());
+    }
+    let page = document
+        .get_dictionary_mut(page_id)
+        .map_err(|error| error.to_string())?;
+    let resources = page
+        .get_mut(b"Resources")
+        .map_err(|error| error.to_string())?
+        .as_dict_mut()
+        .map_err(|error| error.to_string())?;
+    let mut shadings = resources
+        .get(b"Shading")
+        .ok()
+        .and_then(|object| object.as_dict().ok())
+        .cloned()
+        .unwrap_or_default();
+    for (name, shading) in additions {
+        shadings.set(name, shading);
+    }
+    resources.set("Shading", shadings);
+    Ok(())
+}
+
+fn add_vector_overlay(
+    document: &mut lopdf::Document,
+    page_id: lopdf::ObjectId,
+    objects: &[crate::core::print::PdfVectorObject],
+    width: u32,
+    height: u32,
+    dpi: f32,
+) -> Result<bool, String> {
+    if objects.is_empty() {
+        return Ok(false);
+    }
+    if !page_accepts_overlay(document, page_id, width, height, dpi) {
+        return Err("PDF page geometry is not safe for a vector overlay".to_string());
+    }
+    let rect =
+        page_rect(document, page_id).ok_or_else(|| "PDF page has no page box".to_string())?;
+    inherit_resources_onto_page(document, page_id)?;
+    add_vector_shading_resources(document, page_id, objects)?;
+    let mut content = String::new();
+    crate::core::print::append_vector_content(
+        &mut content,
+        objects,
+        width,
+        height,
+        rect.width,
+        rect.height,
+        rect.x,
+        rect.y,
+        None,
+    );
+    if content.is_empty() {
+        return Ok(false);
+    }
     document
         .add_page_contents(page_id, content.into_bytes())
         .map_err(|error| error.to_string())?;
@@ -743,11 +907,16 @@ pub fn build_hybrid_pdf(path: &Path, pages: &[HybridPage]) -> Result<HybridPdf, 
             HybridPageContent::Original => vector_pages += 1,
             HybridPageContent::Overlay {
                 rgba,
+                vectors,
                 width,
                 height,
                 dpi,
             } => {
-                if add_overlay(&mut document, page_id, &name, rgba, *width, *height, *dpi)? {
+                let raster_added =
+                    add_overlay(&mut document, page_id, &name, rgba, *width, *height, *dpi)?;
+                let vector_added =
+                    add_vector_overlay(&mut document, page_id, vectors, *width, *height, *dpi)?;
+                if raster_added || vector_added {
                     overlay_pages += 1;
                 } else {
                     vector_pages += 1;
@@ -811,15 +980,57 @@ impl Exporter for PdfExporter {
     }
 
     fn export(&self, canvas: &Canvas, path: &Path, _opts: &ExportOptions) -> Result<(), String> {
-        let rgba = canvas
-            .export_flat_up_to(MAX_PDF_PAGE_PIXELS)
-            .ok_or_else(|| "PDF canvas is too large to export safely".to_string())?;
+        if Canvas::pixel_count(canvas.width, canvas.height).is_none_or(|p| p > MAX_PDF_PAGE_PIXELS)
+        {
+            return Err("PDF canvas is too large to export safely".to_string());
+        }
+        if canvas.is_cmyk() {
+            // Promote qualifying Path/Shape/Text layers to native DeviceCMYK vector
+            // paths over an ink raster base — crisp at any size (no "răng cưa"),
+            // colour-managed via the embedded CMYK profile so the PDF matches the
+            // app's preview. Mirrors the RGB path below.
+            let selection = crate::core::print::collect_pdf_vectors(canvas);
+            if let Some(ink) = crate::core::print::pdf_ink_base(canvas, &selection) {
+                let page = crate::core::print::encode_pdf_page_cmyk(
+                    &ink,
+                    canvas.width,
+                    canvas.height,
+                    canvas.metadata.resolution_ppi,
+                )?;
+                let profile = canvas.cmyk_pdf_profile();
+                let pdf = crate::core::print::build_pdf_encoded_with_vectors(
+                    &page,
+                    &selection.objects,
+                    &PrintLayout::default(),
+                    profile.as_deref(),
+                )?;
+                return std::fs::write(path, &pdf).map_err(|e| e.to_string());
+            }
+            // Not ink-exact (group / adjustment / mask / ink-less pixel): fall back
+            // to a colour-managed RGB raster of the on-screen mirror (no vectors, so
+            // no CMYK operators leak onto an RGB page). Still matches the preview.
+            let rgba = canvas.export_flat();
+            let icc = super::export_icc_bytes(canvas);
+            let pdf = crate::core::print::build_pdf_with_vectors(
+                &rgba,
+                canvas.width,
+                canvas.height,
+                canvas.metadata.resolution_ppi,
+                &[],
+                &PrintLayout::default(),
+                Some(&icc),
+            )?;
+            return std::fs::write(path, &pdf).map_err(|e| e.to_string());
+        }
+        let selection = crate::core::print::collect_pdf_vectors(canvas);
+        let rgba = crate::core::print::pdf_raster_base(canvas, &selection);
         let icc = super::export_icc_bytes(canvas);
-        let pdf = build_pdf(
+        let pdf = crate::core::print::build_pdf_with_vectors(
             &rgba,
             canvas.width,
             canvas.height,
             canvas.metadata.resolution_ppi,
+            &selection.objects,
             &PrintLayout::default(),
             Some(&icc),
         )?;
@@ -840,6 +1051,197 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn generic_pdf_exporter_writes_native_path_content() {
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        let mut canvas = Canvas::from_rgba(vec![255; 8 * 8 * 4], 8, 8);
+        let index = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(1.0, 1.0)),
+                            Node::sharp(Point::new(7.0, 1.0)),
+                            Node::sharp(Point::new(4.0, 7.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                VectorStyle::filled(ColorValue::rgb(0.0, 0.0, 1.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+        let output = temp_pdf_path("generic-native-vector");
+        PdfExporter
+            .export(&canvas, &output, &ExportOptions::default())
+            .expect("export");
+        let bytes = std::fs::read(&output).expect("read pdf");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains(" m\n") && text.contains("f\nQ"));
+        let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    fn cmyk_pdf_exporter_writes_native_vectors_not_flat_raster() {
+        // File ▸ Export ▸ PDF on a CMYK document must keep vectors crisp (native
+        // DeviceCMYK paths over an ink base), colour-managed via the embedded
+        // profile — not flatten the whole page to a raster (which looked jagged).
+        use crate::core::canvas::CmykProfile;
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        // Convert to CMYK first, then add the vector (conversion merges prior
+        // layers), matching how a CMYK design is authored.
+        let mut canvas = Canvas::from_rgba(vec![255; 16 * 16 * 4], 16, 16);
+        canvas
+            .convert_to_cmyk(CmykProfile::Naive)
+            .expect("convert to CMYK");
+        let index = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(2.0, 2.0)),
+                            Node::sharp(Point::new(14.0, 2.0)),
+                            Node::sharp(Point::new(8.0, 14.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                VectorStyle::filled(ColorValue::cmyk(0.0, 1.0, 1.0, 0.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+
+        let output = temp_pdf_path("cmyk-native-vector");
+        PdfExporter
+            .export(&canvas, &output, &ExportOptions::default())
+            .expect("export");
+        let bytes = std::fs::read(&output).expect("read pdf");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains(" m\n"),
+            "crisp native vector path present (not a flattened raster)"
+        );
+        assert!(
+            text.contains("[/ICCBased"),
+            "ink base is tagged with the embedded CMYK profile"
+        );
+        assert!(
+            text.contains("/OutputIntents"),
+            "page declares the CMYK output intent"
+        );
+        // The vector paints through the embedded CMYK profile (/IaiCmyk cs … scn),
+        // not raw `k`, so it matches the ICC-tagged raster and the app's preview.
+        assert!(
+            text.contains("/IaiCmyk") && text.contains(" scn\n"),
+            "vector fill is colour-managed through the embedded CMYK space"
+        );
+        assert!(
+            !text.contains(" k\n"),
+            "no raw DeviceCMYK fill operator (would be the viewer's default colour)"
+        );
+        let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    fn hybrid_pdf_keeps_new_path_edit_as_native_vector() {
+        use crate::core::geometry::Point;
+        use crate::core::print::PdfVectorObject;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::{Gradient, GradientKind};
+
+        let source = temp_pdf_path("hybrid-vector-source");
+        std::fs::write(&source, minimal_pdf(&[(40, 40)])).expect("write source");
+        let vector = PdfVectorObject {
+            path: PathData::new(
+                vec![Contour::new(
+                    vec![
+                        Node::sharp(Point::new(4.0, 4.0)),
+                        Node::sharp(Point::new(36.0, 4.0)),
+                        Node::sharp(Point::new(20.0, 36.0)),
+                    ],
+                    true,
+                )],
+                FillRule::NonZero,
+            ),
+            fill: Some(crate::core::print::PdfPaintColor::Rgb([1.0, 0.0, 0.0])),
+            fill_gradient: None,
+            stroke: None,
+            stroke_width_px: 0.0,
+            stroke_cap: crate::core::vector::style::LineCap::Butt,
+            stroke_join: crate::core::vector::style::LineJoin::Miter,
+            stroke_miter_limit: 4.0,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
+            even_odd: false,
+            fill_overprint: false,
+            stroke_overprint: false,
+        };
+        let mut gradient_vector = vector.clone();
+        gradient_vector.fill = None;
+        gradient_vector.fill_gradient = Some(Gradient::two_color(
+            GradientKind::Linear,
+            ColorValue::BLACK,
+            ColorValue::WHITE,
+            AffineTransform::translate(4.0, 4.0).then(&AffineTransform::scale(32.0, 32.0)),
+        ));
+        let hybrid = build_hybrid_pdf(
+            &source,
+            &[HybridPage {
+                source_index: 0,
+                content: HybridPageContent::Overlay {
+                    rgba: vec![0; 40 * 40 * 4],
+                    vectors: vec![vector, gradient_vector],
+                    width: 40,
+                    height: 40,
+                    dpi: 72.0,
+                },
+            }],
+        )
+        .expect("hybrid export");
+        let document = lopdf::Document::load_mem(&hybrid.bytes).expect("parse hybrid");
+        let page_id = *document.get_pages().values().next().expect("page");
+        let content = document.get_page_content(page_id).expect("page content");
+        let text = String::from_utf8_lossy(&content);
+        assert!(text.contains("1.0000 0.0000 0.0000 rg"));
+        assert!(text.contains(" m\n") && text.contains("f\nQ"));
+        assert!(text.contains("/IaiSh1 sh"));
+        let page = document.get_dictionary(page_id).expect("page dictionary");
+        let resources = page
+            .get(b"Resources")
+            .expect("resources")
+            .as_dict()
+            .expect("resource dictionary");
+        let shadings = resources
+            .get(b"Shading")
+            .expect("shading resources")
+            .as_dict()
+            .expect("shading dictionary");
+        assert!(shadings.has(b"IaiSh1"));
+        let _ = std::fs::remove_file(source);
     }
 
     fn minimal_pdf(page_sizes: &[(u32, u32)]) -> Vec<u8> {
@@ -890,7 +1292,8 @@ mod tests {
     fn imports_a_generated_pdf_page_at_auto_dpi() {
         let path = temp_pdf_path("pdf-import");
         let rgba = vec![255u8; 8 * 6 * 4];
-        let pdf = build_pdf(&rgba, 8, 6, 72.0, &PrintLayout::default(), None).unwrap();
+        let pdf = crate::core::print::build_pdf(&rgba, 8, 6, 72.0, &PrintLayout::default(), None)
+            .unwrap();
         std::fs::write(&path, pdf).unwrap();
 
         let imported = PdfImporter.import_many(&path).unwrap();
@@ -1107,6 +1510,7 @@ mod tests {
                     source_index: 1,
                     content: HybridPageContent::Overlay {
                         rgba: overlay,
+                        vectors: Vec::new(),
                         width: 40,
                         height: 10,
                         dpi: 72.0,

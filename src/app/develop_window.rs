@@ -229,7 +229,11 @@ impl App {
             &window,
             None,
             None,
-            None,
+            // Real adapter texture ceiling (egui's default is a 2048px guess).
+            self.win
+                .gpu
+                .as_ref()
+                .map(|g| g.max_texture_dimension as usize),
         );
 
         if let Some(gpu) = &mut self.win.gpu {

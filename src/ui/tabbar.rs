@@ -187,7 +187,7 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                     egui::FontId::proportional(12.0),
                     pal.text_dim,
                 );
-                badge_resp.on_hover_text(format!("Trong hàng chờ (vị trí {pos})"));
+                badge_resp.on_hover_text(format!("Queued (position {pos})"));
             } else {
                 let font = egui::FontId::proportional(12.0);
                 let galley =
@@ -199,7 +199,7 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                         .with_angle_and_anchor(angle, egui::Align2::CENTER_CENTER),
                 );
                 badge_resp.on_hover_text(format!(
-                    "Đang xử lý ({})… {}s",
+                    "Processing ({})… {}s",
                     busy.label,
                     busy.elapsed_secs.unwrap_or(0)
                 ));
@@ -222,7 +222,7 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         painter.text(
             close_rect.center(),
             egui::Align2::CENTER_CENTER,
-            "\u{00D7}",
+            ph::X,
             egui::FontId::proportional(13.0),
             close_col,
         );
@@ -246,7 +246,7 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.painter().text(
         new_rect.center(),
         egui::Align2::CENTER_CENTER,
-        "+",
+        ph::PLUS,
         egui::FontId::proportional(16.0),
         pal.text_dim,
     );
@@ -273,7 +273,7 @@ fn build_document_list(
         (ctx.content_rect().bottom() - ui.max_rect().bottom() - super::statusbar::HEIGHT - 12.0)
             .max(DOC_LIST_ROW_H);
     let button = egui::Button::new(
-        egui::RichText::new("\u{25BE}")
+        egui::RichText::new(ph::CARET_DOWN)
             .size(12.0)
             .color(pal.text_dim),
     )
@@ -322,7 +322,7 @@ fn build_document_list(
                                     let close = ui
                                         .add_sized(
                                             [DOC_LIST_ROW_H, DOC_LIST_ROW_H],
-                                            egui::Button::new("\u{00D7}").frame(false),
+                                            egui::Button::new(ph::X).frame(false),
                                         )
                                         .on_hover_text(format!("Close {}", title));
 

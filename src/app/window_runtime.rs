@@ -13,6 +13,22 @@ pub struct WindowRuntime {
     pub(in crate::app) window: Option<Arc<Window>>,
     pub(in crate::app) window_visible: bool,
     pub(in crate::app) window_focused: bool,
+    /// Short first-reveal retry window for activating the hidden-created main
+    /// window. Windows can ignore the first `focus_window()` when it is issued
+    /// in the same turn as `set_visible(true)`; retry until WM_SETFOCUS arrives.
+    pub(in crate::app) startup_focus_until: Option<std::time::Instant>,
+    /// Authoritative minimized/covered state; Windows does not always report a
+    /// zero inner size for a minimized window.
+    pub(in crate::app) window_occluded: bool,
+    /// Deadline until which keyboard/IME-driven strict-modal bookkeeping must
+    /// NOT ring the blocked-action bell. Set a short window ahead each time a
+    /// key/IME event is handed to the live TextEdit. A window (not a one-shot
+    /// per-frame flag) is required because the incidental denial egui emits can
+    /// surface a frame or two later than the input event — e.g. behind the
+    /// caret-blink redraw loop or across an IME preedit→commit pair — by which
+    /// point a single-frame flag has already been consumed. Real pointer/menu
+    /// denials arrive well outside this window and stay audible.
+    pub(in crate::app) text_input_quiet_until: Option<std::time::Instant>,
     /// The Develop stage's second OS window (Track D / D1), when open. It has
     /// its own egui context + egui-winit state (VN font + theme applied on
     /// creation); its GPU surface lives in `GpuState::develop`. `None` when the

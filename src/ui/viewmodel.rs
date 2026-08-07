@@ -23,6 +23,8 @@ pub struct DocumentViewModel {
     pub cmyk_profile_name: String,
     /// Whether "Embed Color Profile (ICC)" is enabled for export.
     pub export_embed_icc: bool,
+    /// Named RGB/CMYK process colours stored in this document.
+    pub swatches: std::sync::Arc<Vec<crate::core::palette::DocumentSwatch>>,
     pub zoom: f32,
     pub offset_x: f32,
     pub offset_y: f32,
@@ -57,6 +59,10 @@ pub struct LayerViewModel {
     pub layer_is_background: std::sync::Arc<Vec<bool>>,
     pub layer_lock_alpha: std::sync::Arc<Vec<bool>>,
     pub layer_selected: std::sync::Arc<Vec<bool>>,
+    /// Clipped to the layer below (clipping mask / PowerClip content).
+    pub layer_is_clipped: std::sync::Arc<Vec<bool>>,
+    /// Base of a clipping mask (some layer clips to it) — name underlined.
+    pub layer_is_clip_base: std::sync::Arc<Vec<bool>>,
     pub layer_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
     pub layer_mask_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
     /// Group nesting depth per layer (0 = top level) — panel indentation.
@@ -139,6 +145,8 @@ pub struct ToolViewModel {
     pub fill_contiguous: bool,
     pub fill_anti_alias: bool,
     pub fill_all_layers: bool,
+    /// Context-sensitive Gradient target: 0 disabled, 1 pixel, 2 vector, 3 mask.
+    pub gradient_mode: u8,
     pub gradient_type: u8,
     pub gradient_opacity: f32,
     pub gradient_reverse: bool,
@@ -148,6 +156,10 @@ pub struct ToolViewModel {
     pub show_gradient_editor: bool,
     pub eyedropper_sample: u8,
     pub eyedropper_sample_merged: bool,
+    /// Most recently sampled canvas colour, exposed as a Corel-style status-bar swatch.
+    pub eyedropper_picked_color: Option<[u8; 4]>,
+    /// Session history of sampled colours for the bottom Corel-style palette.
+    pub eyedropper_picked_colors: Vec<[u8; 4]>,
     pub move_auto_select: bool,
     pub move_show_transform: bool,
     pub clone_size: f32,
@@ -181,13 +193,44 @@ pub struct ToolViewModel {
     pub shape_stroke_width: f32,
     pub shape_stroke_color: [u8; 4],
     pub shape_corner_radius: f32,
+    /// Rectangle corner style: 0 Round, 1 Scallop, 2 Chamfer.
+    pub shape_corner_type: u8,
+    /// Polygon edge count / Star point count.
+    pub shape_sides: u32,
+    /// Star inner-radius fraction.
+    pub shape_star_inner: f32,
     pub shape_preview: Option<[f32; 4]>,
     /// On-canvas editing overlay for the active Shape layer (Shape tool):
     /// bounding-box span + handle positions in canvas space.
     pub shape_overlay: Option<ShapeOverlay>,
+    /// On-canvas editing overlay for the active Path layer (Node tool): outline
+    /// + anchor points + selected-node handle arms.
+    pub node_overlay: Option<super::NodeOverlay>,
+    /// Transform handles for the active Path's vector gradient fill.
+    pub path_gradient_overlay: Option<super::PathGradientOverlay>,
+    /// Zoom-bucketed raster for the active Path. Display-only; document tiles
+    /// and export continue to use the normal document-resolution cache.
+    pub path_display: Option<super::PathDisplayRaster>,
+    /// Fill/Outline of the active Path layer for the options-bar controls
+    /// (Move / Node). `None` when the active layer isn't an editable Path.
+    pub path_style: Option<super::PathStyleData>,
     /// Pen tool: commit mode (0=Selection, 1=Fill, 2=Stroke) + stroke width.
     pub pen_mode: u8,
     pub pen_stroke_width: f32,
+    /// Vector Brush (Phase 6B) options-bar state.
+    pub vector_brush_width: f32,
+    pub vector_brush_color: [u8; 4],
+    pub vector_brush_smoothing: f32,
+    pub vector_brush_pressure: bool,
+    pub vector_brush_velocity: bool,
+    /// Live preview polyline of the in-progress Vector Brush stroke (canvas space).
+    pub vector_brush_path: Vec<(f32, f32)>,
+    /// True when the active layer is a Vector Brush stroke (enables Expand).
+    pub vector_brush_can_expand: bool,
+    pub arrow_width: f32,
+    pub arrow_end: u8,
+    pub arrow_route: u8,
+    pub arrow_path: Vec<(f32, f32)>,
     /// Gradient tool drag guide: [start_x, start_y, end_x, end_y] in canvas space.
     pub gradient_preview: Option<[f32; 4]>,
     pub wand_brush_size: f32,
@@ -232,6 +275,7 @@ pub struct ToolViewModel {
     pub transform_ty: f32,
     pub transform_cursor_hint: u8,
     pub transform_ctx_menu_pos: Option<(f32, f32)>,
+    pub selected_rect_corner_type: Option<u8>,
 }
 /// Selection: mode, previews, Select Subject and the Refine panel.
 pub struct SelectionViewModel {
@@ -420,9 +464,6 @@ pub struct ChromeViewModel {
     pub hovered_guide: Option<usize>,
     /// Smart-guide lines from the Move tool's snapping (magenta = align, red = page edge).
     pub snap_guides: Vec<crate::core::snapping::SnapLine>,
-    pub toolbox_open: bool,
-    pub toolbox_pos: Option<(f32, f32)>,
-    pub toolbox_single_column: bool,
     pub toolbar_w: f32,
     pub panel_r_w: f32,
     /// Strict modal lock is active (Crop/Free Transform/Text editing/dialog):
@@ -534,6 +575,7 @@ impl Default for UiData {
                 is_cmyk: false,
                 cmyk_profile_name: String::new(),
                 export_embed_icc: true,
+                swatches: std::sync::Arc::new(Vec::new()),
                 zoom: 1.0,
                 offset_x: 0.0,
                 offset_y: 0.0,
@@ -566,6 +608,8 @@ impl Default for UiData {
                 layer_is_background: std::sync::Arc::new(vec![true]),
                 layer_lock_alpha: std::sync::Arc::new(vec![false]),
                 layer_selected: std::sync::Arc::new(vec![true]),
+                layer_is_clipped: std::sync::Arc::new(vec![false]),
+                layer_is_clip_base: std::sync::Arc::new(vec![false]),
                 layer_thumbnails: std::sync::Arc::new(Vec::new()),
                 layer_mask_thumbnails: std::sync::Arc::new(Vec::new()),
                 layer_depths: std::sync::Arc::new(vec![0]),
@@ -623,6 +667,7 @@ impl Default for UiData {
                 fill_contiguous: true,
                 fill_anti_alias: true,
                 fill_all_layers: false,
+                gradient_mode: 1,
                 gradient_type: 0,
                 gradient_opacity: 1.0,
                 gradient_reverse: false,
@@ -631,6 +676,8 @@ impl Default for UiData {
                 show_gradient_editor: false,
                 eyedropper_sample: 0,
                 eyedropper_sample_merged: true,
+                eyedropper_picked_color: None,
+                eyedropper_picked_colors: Vec::new(),
                 move_auto_select: false,
                 move_show_transform: false,
                 clone_size: 30.0,
@@ -658,10 +705,28 @@ impl Default for UiData {
                 shape_stroke_width: 2.0,
                 shape_stroke_color: [0, 0, 0, 255],
                 shape_corner_radius: 0.0,
+                shape_corner_type: 0,
+                shape_sides: 5,
+                shape_star_inner: 0.5,
                 shape_preview: None,
                 shape_overlay: None,
+                node_overlay: None,
+                path_gradient_overlay: None,
+                path_display: None,
+                path_style: None,
                 pen_mode: 0,
                 pen_stroke_width: 3.0,
+                vector_brush_width: 12.0,
+                vector_brush_color: [0, 0, 0, 255],
+                vector_brush_smoothing: 0.4,
+                vector_brush_pressure: true,
+                vector_brush_velocity: true,
+                vector_brush_path: Vec::new(),
+                vector_brush_can_expand: false,
+                arrow_width: 3.0,
+                arrow_end: 1,
+                arrow_route: 0,
+                arrow_path: Vec::new(),
                 gradient_preview: None,
                 wand_brush_size: 30.0,
                 wand_tolerance: 32,
@@ -692,6 +757,7 @@ impl Default for UiData {
                 transform_ty: 0.0,
                 transform_cursor_hint: 0,
                 transform_ctx_menu_pos: None,
+                selected_rect_corner_type: None,
             },
             sel: SelectionViewModel {
                 selection_mode: crate::core::selection::SelectionMode::New,
@@ -828,7 +894,7 @@ impl Default for UiData {
                 show_welcome: true,
                 show_library: false,
                 theme_mode: theme::ThemeMode::Dark,
-                show_color_panel: true,
+                show_color_panel: false,
                 show_text_panel: false,
                 show_layer_panel: true,
                 show_history_panel: false,
@@ -842,11 +908,8 @@ impl Default for UiData {
                 guide_preview: None,
                 hovered_guide: None,
                 snap_guides: Vec::new(),
-                toolbox_open: false,
-                toolbox_pos: None,
-                toolbox_single_column: false,
                 toolbar_w: 48.0,
-                panel_r_w: 260.0,
+                panel_r_w: 300.0,
                 is_tool_modal: false,
                 modal_flash: false,
             },

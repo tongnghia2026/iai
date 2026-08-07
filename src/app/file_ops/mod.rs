@@ -1,6 +1,6 @@
 mod open;
 mod pdf_session;
-mod save_export;
+pub(crate) mod save_export;
 
 use super::state::App;
 use crate::core::canvas::{Canvas, CanvasMetadata};
@@ -161,6 +161,7 @@ impl App {
     /// Create a new blank canvas in a new tab and switch to it.
     /// Called from the New Canvas dialog (Ctrl+N confirm).
     /// Unlike `do_new`, this never overwrites an existing document.
+    #[allow(clippy::too_many_arguments)]
     pub fn do_new_tab(
         &mut self,
         name: String,
@@ -169,6 +170,7 @@ impl App {
         dpi: f32,
         bg: u8,
         unit: crate::core::units::Unit,
+        cmyk: bool,
     ) {
         let w = w.max(1);
         let h = h.max(1);
@@ -197,6 +199,12 @@ impl App {
         let mut metadata = CanvasMetadata::default();
         metadata.resolution_ppi = dpi;
         canvas.metadata = metadata;
+
+        // A CMYK document is created as RGB then converted through the built-in
+        // Generic naive space (flattens onto ink planes, clears the empty history).
+        if cmyk {
+            let _ = canvas.convert_to_cmyk(crate::core::canvas::CmykProfile::Naive);
+        }
 
         let mut doc = crate::core::document::Document::new(id, w, h);
         doc.canvas = canvas;

@@ -153,7 +153,7 @@ impl App {
                 .canvas
                 .is_cmyk()
             {
-                self.shell.status_msg = "Free Transform chưa dùng được ở chế độ CMYK".to_string();
+                self.shell.status_msg = "Free Transform is not available in CMYK mode".to_string();
             } else {
                 self.begin_transform();
                 self.sync_cursor(event_loop);
@@ -281,6 +281,35 @@ impl App {
         }
     }
 
+    /// Current colour a paint-colour dialog `target` edits (used to seed the
+    /// dialog and as the Cancel baseline). Mirrors [`Self::set_paint_color`].
+    fn paint_dialog_current_color(&self, target: u8) -> [u8; 4] {
+        let path_style = self.active_path_style_vm();
+        match target {
+            1 => self.edit.bg_color,
+            2 => self.edit.text_color,
+            3 => self.edit.tools.shape().fill_color,
+            4 => self.edit.tools.shape().stroke_color,
+            5 => path_style.map_or([0, 0, 0, 255], |s| s.fill_color),
+            6 => path_style.map_or([0, 0, 0, 255], |s| s.stroke_color),
+            7 => path_style.map_or([255, 255, 255, 255], |s| s.fill_end_color),
+            8..=15 => path_style.map_or([0, 0, 0, 255], |s| {
+                s.gradient_stop_colors[(target - 8) as usize]
+            }),
+            _ => self.edit.tools.brush().settings.color,
+        }
+    }
+
+    /// Open the paint-colour dialog for `target`, showing `color` in the picker
+    /// while `original` is the value Cancel restores.
+    fn open_paint_color_dialog_seeded(&mut self, target: u8, color: [u8; 4], original: [u8; 4]) {
+        self.shell.ui.show_paint_color_dialog = true;
+        self.shell.ui.paint_color_dialog_target = target;
+        self.shell.ui.paint_color_dialog_color = color;
+        self.shell.ui.paint_color_dialog_original = original;
+        self.shell.ui.paint_color_dialog_center_next = true;
+    }
+
     pub(super) fn handle_tool_color_actions(
         &mut self,
         actions: &mut UiActions,
@@ -390,24 +419,21 @@ impl App {
         }
         if let Some(target) = actions.dialogs.open_paint_color_dialog.take() {
             let target = match target {
-                1 => 1,
-                2 => 2,
-                3 => 3,
-                4 => 4,
+                1..=15 => target,
                 _ => 0,
             };
-            let color = match target {
-                1 => self.edit.bg_color,
-                2 => self.edit.text_color,
-                3 => self.edit.tools.shape().fill_color,
-                4 => self.edit.tools.shape().stroke_color,
-                _ => self.edit.tools.brush().settings.color,
+            let color = self.paint_dialog_current_color(target);
+            self.open_paint_color_dialog_seeded(target, color, color);
+        }
+        // Palette right-click "Adjust colour…": seed the picker with the chosen
+        // swatch but keep the target's real colour as the Cancel baseline.
+        if let Some((target, seed)) = actions.dialogs.open_paint_color_dialog_with.take() {
+            let target = match target {
+                1..=15 => target,
+                _ => 0,
             };
-            self.shell.ui.show_paint_color_dialog = true;
-            self.shell.ui.paint_color_dialog_target = target;
-            self.shell.ui.paint_color_dialog_color = color;
-            self.shell.ui.paint_color_dialog_original = color;
-            self.shell.ui.paint_color_dialog_center_next = true;
+            let original = self.paint_dialog_current_color(target);
+            self.open_paint_color_dialog_seeded(target, seed, original);
         }
         if actions.dialogs.paint_color_dialog_centered {
             self.shell.ui.paint_color_dialog_center_next = false;
@@ -444,6 +470,10 @@ impl App {
             self.shell.ui.show_paint_color_dialog = false;
             self.shell.ui.paint_color_dialog_center_next = false;
             self.set_paint_color(target, color);
+            // A Path colour was previewed live; commit the single undo step.
+            if (5..=15).contains(&target) {
+                self.path_style_commit();
+            }
         }
         if actions.dialogs.paint_color_dialog_cancel {
             let target = self.shell.ui.paint_color_dialog_target;
@@ -452,6 +482,10 @@ impl App {
             self.shell.ui.paint_color_dialog_color = color;
             self.shell.ui.paint_color_dialog_center_next = false;
             self.set_paint_color(target, color);
+            // Restore the baseline and record nothing (final == baseline).
+            if (5..=15).contains(&target) {
+                self.path_style_commit();
+            }
         }
     }
 
@@ -460,26 +494,181 @@ impl App {
         actions: &mut UiActions,
         event_loop: &ActiveEventLoop,
     ) {
+        if let Some((axis, reference)) = actions.tool.node_align.take() {
+            self.node_align(axis, reference);
+        }
+        if std::mem::take(&mut actions.tool.node_break) {
+            self.node_break_at_selected();
+        }
+        if std::mem::take(&mut actions.tool.node_join) {
+            self.node_join_selected();
+        }
         if let Some(m) = actions.tool.set_pen_mode.take() {
             self.edit.tools.pen_mut().mode = crate::tools::pen::PenMode::from_u8(m);
         }
         if let Some(w) = actions.tool.set_pen_stroke_width.take() {
             self.edit.tools.pen_mut().stroke_width = w.clamp(1.0, 1000.0);
         }
+        if let Some(w) = actions.tool.set_vector_brush_width.take() {
+            self.edit.tools.vector_brush_mut().width = w.clamp(0.5, 1000.0);
+        }
+        if let Some(s) = actions.tool.set_vector_brush_smoothing.take() {
+            self.edit.tools.vector_brush_mut().smoothing = s.clamp(0.0, 0.95);
+        }
+        if let Some(p) = actions.tool.set_vector_brush_pressure.take() {
+            self.edit.tools.vector_brush_mut().pressure = p;
+        }
+        if let Some(v) = actions.tool.set_vector_brush_velocity.take() {
+            self.edit.tools.vector_brush_mut().velocity = v;
+        }
+        if let Some(width) = actions.tool.set_arrow_width.take() {
+            let width = width.clamp(0.1, 500.0);
+            self.edit.tools.arrow_mut().width = width;
+            if self.active_arrow_settings().is_some() {
+                self.path_set_stroke_width(width);
+            }
+        }
+        if let Some(kind) = actions.tool.set_arrow_end.take() {
+            let kind = kind.clamp(1, 4);
+            if self.active_arrow_settings().is_some() {
+                self.path_set_arrow_end(kind);
+            }
+            self.edit.tools.arrow_mut().end_arrow = kind;
+        }
+        if let Some(route) = actions.tool.set_arrow_route.take() {
+            let route = route.min(3);
+            self.set_active_arrow_route(route);
+            self.edit.tools.arrow_mut().route = route;
+        }
+        if std::mem::take(&mut actions.tool.expand_vector_brush) {
+            self.expand_active_brush_stroke();
+        }
         if let Some(k) = actions.tool.set_shape_kind.take() {
             self.edit.tools.shape_mut().kind = crate::tools::shape::ShapeKind::from_u8(k);
         }
         if let Some(f) = actions.tool.set_shape_fill.take() {
             self.edit.tools.shape_mut().fill = f;
-            self.update_selected_shape_style();
+            self.update_selected_shape_style(true, false, false);
         }
         if let Some(w) = actions.tool.set_shape_stroke_width.take() {
             self.edit.tools.shape_mut().stroke_width = w.clamp(0.0, 1000.0);
-            self.update_selected_shape_style();
+            self.update_selected_shape_style(false, true, false);
         }
         if let Some(r) = actions.tool.set_shape_corner_radius.take() {
             self.edit.tools.shape_mut().corner_radius = r.clamp(0.0, 5000.0);
-            self.update_selected_shape_style();
+            self.update_selected_shape_style(false, false, true);
+        }
+        if let Some(t) = actions.tool.set_shape_corner_type.take() {
+            self.edit.tools.shape_mut().corner_type =
+                crate::core::vector::from_shape::RectCorner::from_u8(t);
+            self.update_selected_shape_style(false, false, true);
+        }
+        if let Some(n) = actions.tool.set_shape_sides.take() {
+            self.edit.tools.shape_mut().sides = n.clamp(3, 100);
+            self.update_selected_shape_style(false, false, true);
+        }
+        if let Some(f) = actions.tool.set_shape_star_inner.take() {
+            self.edit.tools.shape_mut().star_inner = f.clamp(0.05, 0.95);
+            self.update_selected_shape_style(false, false, true);
+        }
+        // Path layer Fill/Outline (Move / Node options bar).
+        if let Some(on) = actions.tool.set_path_fill_enabled.take() {
+            self.path_set_fill_enabled(on);
+        }
+        if let Some(on) = actions.tool.set_path_stroke_enabled.take() {
+            self.path_set_stroke_enabled(on);
+        }
+        if let Some(on) = actions.tool.set_path_fill_overprint.take() {
+            self.path_set_fill_overprint(on);
+            if on {
+                self.shell.status_msg =
+                    "Overprint Fill enabled; PDF preserves the artwork via raster fallback"
+                        .to_string();
+            }
+        }
+        if let Some(on) = actions.tool.set_path_stroke_overprint.take() {
+            self.path_set_stroke_overprint(on);
+            if on {
+                self.shell.status_msg =
+                    "Overprint Outline enabled; PDF preserves the artwork via raster fallback"
+                        .to_string();
+            }
+        }
+        if let Some(color) = actions.tool.apply_palette_fill.take() {
+            if !self.path_apply_palette_fill(color) {
+                let rgba = color.to_rgba8();
+                self.set_paint_color(0, rgba);
+                self.shell.status_msg = "No Path selected; colour set as Foreground".to_string();
+            }
+        }
+        if let Some(color) = actions.tool.apply_palette_outline.take() {
+            if !self.path_apply_palette_outline(color) {
+                let rgba = color.to_rgba8();
+                self.set_paint_color(1, rgba);
+                self.shell.status_msg = "No Path selected; colour set as Background".to_string();
+            }
+        }
+        if std::mem::take(&mut actions.tool.clear_palette_fill) && !self.path_clear_palette_fill() {
+            self.shell.status_msg = "Select a Path to remove its Fill".to_string();
+        }
+        if std::mem::take(&mut actions.tool.clear_palette_outline)
+            && !self.path_clear_palette_outline()
+        {
+            self.shell.status_msg = "Select a Path to remove its Outline".to_string();
+        }
+        if let Some(color) = actions.tool.add_document_swatch.take() {
+            self.add_document_swatch(color);
+        }
+        if let Some((name, base)) = actions.tool.add_spot_swatch.take() {
+            self.add_spot_swatch(name, base);
+        }
+        if let Some((index, name)) = actions.tool.rename_document_swatch.take() {
+            self.rename_document_swatch(index, name);
+        }
+        if let Some(index) = actions.tool.remove_document_swatch.take() {
+            self.remove_document_swatch(index);
+        }
+        if let Some(w) = actions.tool.set_path_stroke_width.take() {
+            self.path_set_stroke_width(w);
+        }
+        if let Some(kind) = actions.tool.set_path_fill_kind.take() {
+            self.path_set_fill_kind(kind);
+        }
+        if let Some((index, offset)) = actions.tool.set_path_gradient_stop_offset.take() {
+            self.path_set_gradient_stop_offset(index, offset);
+        }
+        if std::mem::take(&mut actions.tool.add_path_gradient_stop) {
+            self.path_add_gradient_stop();
+        }
+        if let Some(index) = actions.tool.remove_path_gradient_stop.take() {
+            self.path_remove_gradient_stop(index);
+        }
+        if let Some(kind) = actions.tool.set_path_dash_kind.take() {
+            self.path_set_dash_kind(kind);
+        }
+        if let Some(code) = actions.tool.set_path_cap.take() {
+            self.path_set_cap(code);
+        }
+        if let Some(code) = actions.tool.set_path_join.take() {
+            self.path_set_join(code);
+        }
+        if let Some(code) = actions.tool.set_path_arrow_start.take() {
+            self.path_set_arrow_start(code);
+        }
+        if let Some(code) = actions.tool.set_path_arrow_end.take() {
+            self.path_set_arrow_end(code);
+        }
+        if let Some(size) = actions.tool.set_path_arrow_size.take() {
+            self.path_set_arrow_size(size);
+        }
+        if let Some((values, len)) = actions.tool.set_path_dash_values.take() {
+            self.path_set_dash_values(values, len);
+        }
+        if let Some(offset) = actions.tool.set_path_dash_offset.take() {
+            self.path_set_dash_offset(offset);
+        }
+        if actions.tool.commit_path_style {
+            self.path_style_commit();
         }
         if actions.tool.swap_colors {
             std::mem::swap(
@@ -607,45 +796,10 @@ impl App {
                 5 => crate::core::units::Unit::Picas,
                 _ => crate::core::units::Unit::Percent,
             };
-            let c = self.edit.tools.crop_mut();
-            let had_selection = c.has_selection();
-            let displayed = if c.mode == crate::tools::crop::CropMode::FixedSize {
-                Some((c.fixed_w, c.fixed_h))
-            } else if c.has_selection() {
-                Some((
-                    crate::core::units::from_pixels(
-                        (c.crop_x1 - c.crop_x0).abs(),
-                        c.unit,
-                        c.dpi,
-                        cw,
-                    ),
-                    crate::core::units::from_pixels(
-                        (c.crop_y1 - c.crop_y0).abs(),
-                        c.unit,
-                        c.dpi,
-                        ch,
-                    ),
-                ))
-            } else {
-                None
-            };
-            c.unit = new_unit;
-            if let Some((w, h)) = displayed {
-                c.fixed_w = w;
-                c.fixed_h = h;
-                if had_selection && c.mode == crate::tools::crop::CropMode::FixedSize {
-                    c.init_bounds(cw as u32, ch as u32);
-                } else if had_selection {
-                    let w_px = crate::core::units::to_pixels(w, new_unit, c.dpi, cw).max(1.0);
-                    let h_px = crate::core::units::to_pixels(h, new_unit, c.dpi, ch).max(1.0);
-                    let x0 = c.crop_x0.min(c.crop_x1);
-                    let y0 = c.crop_y0.min(c.crop_y1);
-                    c.crop_x0 = x0;
-                    c.crop_y0 = y0;
-                    c.crop_x1 = x0 + w_px;
-                    c.crop_y1 = y0 + h_px;
-                }
-            }
+            self.edit
+                .tools
+                .crop_mut()
+                .change_display_unit(new_unit, cw, ch);
             if let Some(win) = &self.win.window {
                 win.request_redraw();
             }
@@ -674,7 +828,7 @@ impl App {
                 } else {
                     None
                 };
-            c.dpi = d.max(1.0);
+            c.set_user_dpi(d);
             if had_selection && c.mode == crate::tools::crop::CropMode::FixedSize {
                 c.init_bounds(cw as u32, ch as u32);
             } else if let Some((w, h)) = displayed {
@@ -831,33 +985,51 @@ impl App {
         }
 
         if let Some(t) = actions.tool.set_gradient_type.take() {
-            self.edit.tools.gradient_mut().gradient_type = match t {
-                0 => crate::tools::gradient::GradientType::Linear,
-                1 => crate::tools::gradient::GradientType::Radial,
-                2 => crate::tools::gradient::GradientType::Angle,
-                3 => crate::tools::gradient::GradientType::Reflected,
-                _ => crate::tools::gradient::GradientType::Diamond,
-            };
+            let handled_by_vector =
+                self.active_gradient_mode() == 2 && self.vector_gradient_set_kind(t);
+            if !handled_by_vector {
+                self.edit.tools.gradient_mut().gradient_type = match t {
+                    0 => crate::tools::gradient::GradientType::Linear,
+                    1 => crate::tools::gradient::GradientType::Radial,
+                    2 => crate::tools::gradient::GradientType::Angle,
+                    3 => crate::tools::gradient::GradientType::Reflected,
+                    _ => crate::tools::gradient::GradientType::Diamond,
+                };
+            }
         }
         if let Some(o) = actions.tool.set_gradient_opacity.take() {
             self.edit.tools.gradient_mut().opacity = o;
         }
         if let Some(r) = actions.tool.set_gradient_reverse.take() {
-            self.edit.tools.gradient_mut().reverse = r;
+            if self.active_gradient_mode() == 2 {
+                if r {
+                    self.vector_gradient_reverse();
+                }
+            } else {
+                self.edit.tools.gradient_mut().reverse = r;
+            }
         }
         if let Some(d) = actions.tool.set_gradient_dither.take() {
             self.edit.tools.gradient_mut().dither = d;
         }
         if let Some(stops) = actions.tool.set_gradient_stops.take() {
-            let g = &mut self.edit.tools.gradient_mut().gradient;
-            g.name = "Custom".to_string();
-            g.stops = stops
-                .into_iter()
-                .map(|(position, color)| crate::tools::gradient::GradientStop { position, color })
-                .collect();
+            if self.active_gradient_mode() != 2 || !self.vector_gradient_set_stops(stops.clone()) {
+                let g = &mut self.edit.tools.gradient_mut().gradient;
+                g.name = "Custom".to_string();
+                g.stops = stops
+                    .into_iter()
+                    .map(|(position, color)| crate::tools::gradient::GradientStop {
+                        position,
+                        color,
+                    })
+                    .collect();
+            }
         }
         if let Some(v) = actions.tool.toggle_gradient_editor.take() {
             self.shell.ui.show_gradient_editor = v;
+            if !v && self.active_gradient_mode() == 2 {
+                self.path_style_commit();
+            }
         }
 
         if let Some(s) = actions.tool.set_eyedropper_sample.take() {
@@ -880,6 +1052,15 @@ impl App {
         }
         if let Some(align) = actions.layers.align_layers.take() {
             self.align_selected_layers_to_canvas(align);
+        }
+        if let Some(distribute) = actions.layers.distribute_layers.take() {
+            self.distribute_selected_layers(distribute);
+        }
+        if actions.layers.duplicate_selected_step {
+            self.duplicate_selected_with_step((0, 0));
+        }
+        if actions.layers.repeat_duplicate_step {
+            self.repeat_last_step();
         }
         if let Some(action) = actions.tool.move_transform.take() {
             self.apply_move_transform_action(action);

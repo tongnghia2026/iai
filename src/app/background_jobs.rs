@@ -107,6 +107,20 @@ pub struct BackgroundJobs {
         Option<std::sync::mpsc::Receiver<Result<Vec<crate::core::print::PrinterInfo>, String>>>,
     /// Off-thread Shape rasterization in flight. See [`ShapeBakeInFlight`].
     pub(in crate::app) shape_bake: Option<ShapeBakeInFlight>,
+    /// Off-thread Path (vector) rasterization in flight — used by the live
+    /// scale/rotate and node drags so re-rastering a filled path never stalls
+    /// the UI thread. See [`PathBakeInFlight`].
+    pub(in crate::app) path_bake: Option<PathBakeInFlight>,
+    /// The newest Path bake requested while one was already running (latest
+    /// wins): `(layer_id, object)`. `poll_path_bake` starts it once the running
+    /// job lands.
+    pub(in crate::app) path_bake_next: Option<(u32, crate::core::vector::object::VectorObjectData)>,
+    /// Off-thread rasterization of the crisp active-Path display overlay in flight.
+    /// Zoom-bucket changes rebuild HERE instead of on the UI thread, so zooming a
+    /// large Path never stalls. See [`crate::app::state::DisplayBakeInFlight`].
+    pub(in crate::app) display_bake: Option<crate::app::state::DisplayBakeInFlight>,
+    /// Newest per-object display batch requested while a batch ran (latest wins).
+    pub(in crate::app) display_bake_next: Option<Vec<crate::app::state::PathDisplayCacheKey>>,
     pub(in crate::app) select_subject: crate::core::select_subject::SelectSubjectEngine,
     /// Gemini AI image-edit engine (see core/ai/edit.rs).
     pub(in crate::app) ai_engine: crate::core::ai::edit::AiEditEngine,

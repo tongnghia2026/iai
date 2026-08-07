@@ -145,6 +145,16 @@ impl PdfPageRef {
     }
 
     pub fn safe_overlay_rgba(&self, canvas: &Canvas) -> Option<Vec<u8>> {
+        self.safe_overlay_pdf_parts(canvas).map(|(rgba, _)| rgba)
+    }
+
+    /// Split edits above a pristine imported-PDF base into a transparent raster
+    /// overlay and native PDF vectors. Promoted Path layers are omitted from the
+    /// raster overlay so their cached anti-aliasing cannot leave a jagged twin.
+    pub fn safe_overlay_pdf_parts(
+        &self,
+        canvas: &Canvas,
+    ) -> Option<(Vec<u8>, Vec<crate::core::print::PdfVectorObject>)> {
         use crate::core::layer::{BlendMode, LayerType};
 
         if !self.base_is_pristine(canvas) {
@@ -162,7 +172,12 @@ impl PdfPageRef {
             .active_idx
             .saturating_sub(1)
             .min(overlay_stack.layers.len().saturating_sub(1));
-        Some(overlay_stack.flatten(canvas.width, canvas.height))
+        let mut overlay_canvas = Canvas::new(canvas.width, canvas.height);
+        overlay_canvas.layer_stack = overlay_stack;
+        overlay_canvas.metadata = canvas.metadata.clone();
+        let selection = crate::core::print::collect_pdf_vectors(&overlay_canvas);
+        let rgba = crate::core::print::pdf_raster_base(&overlay_canvas, &selection);
+        Some((rgba, selection.objects))
     }
 }
 

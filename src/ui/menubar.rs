@@ -106,15 +106,24 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 ui.close();
                             }
                             ui.menu_button("Open Recent", |ui| {
-                                if ui.button("Clear Recent").clicked() {
-                                    ui.close();
+                                if data.welcome.recent.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("(No recent files)")
+                                            .color(pal.text_secondary)
+                                            .size(11.0),
+                                    );
+                                } else {
+                                    for item in data.welcome.recent.iter().take(15) {
+                                        if ui
+                                            .button(&item.name)
+                                            .on_hover_text(item.path.display().to_string())
+                                            .clicked()
+                                        {
+                                            actions.doc.open_recent = Some(item.path.clone());
+                                            ui.close();
+                                        }
+                                    }
                                 }
-                                ui.separator();
-                                ui.label(
-                                    egui::RichText::new("(No recent files)")
-                                        .color(pal.text_secondary)
-                                        .size(11.0),
-                                );
                             });
                             if ui
                                 .add(menu_item_enabled("Close", "Ctrl+W", data.doc.has_doc))
@@ -172,6 +181,13 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 actions.print.export_cmyk_separations = true;
                                 ui.close();
                             }
+                            if ui
+                                .add(menu_item_enabled("SVG (Vector)...", "", data.doc.has_doc))
+                                .clicked()
+                            {
+                                actions.print.export_svg = true;
+                                ui.close();
+                            }
                             ui.separator();
                             if ui.add(menu_item("Preferences", "Ctrl+,")).clicked() {
                                 actions.dialogs.show_preferences = Some(true);
@@ -179,11 +195,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             }
                             ui.separator();
                             if ui.button("Exit").clicked() {
-                                if data.doc.is_modified {
-                                    actions.dialogs.show_exit_dialog = Some(true);
-                                } else {
-                                    actions.doc.exit = true;
-                                }
+                                actions.doc.exit = true;
                                 ui.close();
                             }
                         });
@@ -588,6 +600,156 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             .clicked()
                         {
                             actions.layers.remove_layer = Some(data.layers.active_layer_idx);
+                            ui.close();
+                        }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Rasterize Layer",
+                                "",
+                                data.layers
+                                    .layer_types
+                                    .get(data.layers.active_layer_idx)
+                                    .is_some_and(|t| t == "Path"),
+                            ))
+                            .clicked()
+                        {
+                            actions.layers.rasterize_layer = Some(data.layers.active_layer_idx);
+                            ui.close();
+                        }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Convert to Curves",
+                                "Ctrl+Q",
+                                data.layers
+                                    .layer_types
+                                    .get(data.layers.active_layer_idx)
+                                    .is_some_and(|t| t == "Shape"),
+                            ))
+                            .clicked()
+                        {
+                            actions.layers.convert_to_curves = Some(data.layers.active_layer_idx);
+                            ui.close();
+                        }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Convert Text to Curves",
+                                "Ctrl+Q",
+                                data.layers
+                                    .layer_types
+                                    .get(data.layers.active_layer_idx)
+                                    .is_some_and(|t| t == "Text"),
+                            ))
+                            .clicked()
+                        {
+                            actions.layers.text_to_curves = Some(data.layers.active_layer_idx);
+                            ui.close();
+                        }
+                        {
+                            use crate::core::vector::boolean::BooleanOp;
+                            // Enabled once at least two selected vector objects
+                            // (Shape or Path, unlocked, non-background) exist.
+                            let shaping_enabled = (0..data.layers.layer_count)
+                                .filter(|&i| {
+                                    data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                                        && !data
+                                            .layers
+                                            .layer_locked
+                                            .get(i)
+                                            .copied()
+                                            .unwrap_or(false)
+                                        && !data
+                                            .layers
+                                            .layer_is_background
+                                            .get(i)
+                                            .copied()
+                                            .unwrap_or(false)
+                                        && data
+                                            .layers
+                                            .layer_types
+                                            .get(i)
+                                            .is_some_and(|t| t == "Shape" || t == "Path")
+                                })
+                                .count()
+                                >= 2;
+                            ui.add_enabled_ui(shaping_enabled, |ui| {
+                                ui.menu_button("Shaping", |ui| {
+                                    for (label, op) in [
+                                        ("Weld", BooleanOp::Union),
+                                        ("Trim", BooleanOp::Difference),
+                                        ("Intersect", BooleanOp::Intersect),
+                                        ("Simplify", BooleanOp::Exclude),
+                                    ] {
+                                        if ui.button(label).clicked() {
+                                            actions.layers.boolean_op = Some(op);
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                        {
+                            // PowerClip: place selected content inside a selected
+                            // vector frame. Enabled when ≥2 layers are selected and
+                            // at least one of them is a vector (the frame); the
+                            // command re-validates the exact roles.
+                            let sel = |i: usize| {
+                                data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                                    && !data.layers.layer_locked.get(i).copied().unwrap_or(false)
+                                    && !data
+                                        .layers
+                                        .layer_is_background
+                                        .get(i)
+                                        .copied()
+                                        .unwrap_or(false)
+                            };
+                            let sel_total =
+                                (0..data.layers.layer_count).filter(|&i| sel(i)).count();
+                            let sel_vector = (0..data.layers.layer_count)
+                                .filter(|&i| {
+                                    sel(i)
+                                        && data
+                                            .layers
+                                            .layer_types
+                                            .get(i)
+                                            .is_some_and(|t| t == "Shape" || t == "Path")
+                                })
+                                .count();
+                            let place_enabled = sel_total >= 2 && sel_vector >= 1;
+                            ui.menu_button("PowerClip", |ui| {
+                                if ui
+                                    .add(menu_item_enabled("Place Inside Frame", "", place_enabled))
+                                    .on_hover_text(
+                                        "Place the selected content inside the topmost vector \
+                                         shape (content is clipped to the frame)",
+                                    )
+                                    .clicked()
+                                {
+                                    actions.layers.powerclip_place = true;
+                                    ui.close();
+                                }
+                                if ui
+                                    .button("Extract From Frame")
+                                    .on_hover_text("Remove the clip: release the selected content")
+                                    .clicked()
+                                {
+                                    actions.layers.powerclip_release = true;
+                                    ui.close();
+                                }
+                            });
+                        }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Clipping Mask",
+                                "Ctrl+Alt+G",
+                                data.layers.layer_count > 1,
+                            ))
+                            .on_hover_text(
+                                "Clip the selected layer to the shape of the layer directly \
+                                 below (click again to release). Works for both vector and pixel.",
+                            )
+                            .clicked()
+                        {
+                            actions.layers.toggle_clipping_mask = true;
                             ui.close();
                         }
                         ui.separator();
@@ -1073,16 +1235,23 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     });
 
                     ui.menu_button("Help", |ui| {
-                        if ui.button("About iAi").clicked() {
-                            ui.close();
-                        }
-                        if ui.button("Keyboard Shortcuts").clicked() {
-                            ui.close();
-                        }
+                        ui.menu_button("Keyboard Shortcuts", |ui| {
+                            keyboard_shortcuts_list(ui, pal);
+                        });
                         ui.separator();
-                        if ui.button("GitHub").clicked() {
-                            ui.close();
-                        }
+                        ui.menu_button("About iAi", |ui| {
+                            ui.label(egui::RichText::new("iAi").strong());
+                            ui.label(
+                                egui::RichText::new("Image & vector editor")
+                                    .color(pal.text_secondary)
+                                    .size(11.0),
+                            );
+                            ui.label(
+                                egui::RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
+                                    .color(pal.text_secondary)
+                                    .size(11.0),
+                            );
+                        });
                     });
 
                     // AI Studio is a direct action, not a drop-down menu. Keep it
@@ -1129,11 +1298,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     );
                     ctx.data_mut(|d| d.insert_temp(close_hovered_id, close_resp.hovered()));
                     if close_resp.clicked() {
-                        if data.doc.is_modified {
-                            actions.dialogs.show_exit_dialog = Some(true);
-                        } else {
-                            actions.doc.exit = true;
-                        }
+                        actions.doc.exit = true;
                     }
 
                     let max_hovered_id = egui::Id::new("tb_max_hovered");
@@ -1219,4 +1384,110 @@ fn menu_item_enabled<'a>(
         ui.add_enabled_ui(enabled, |ui| ui.add(menu_item(label, shortcut)))
             .inner
     }
+}
+
+/// Static keyboard-shortcut reference rendered inside the Help ▸ Keyboard
+/// Shortcuts submenu (the app has no other shortcut reference). Keys mirror the
+/// bindings in `app/input/keyboard.rs` and the menu accelerators.
+fn keyboard_shortcuts_list(ui: &mut egui::Ui, pal: crate::ui::theme::Palette) {
+    ui.set_max_width(300.0);
+    egui::ScrollArea::vertical()
+        .max_height(460.0)
+        .show(ui, |ui| {
+            let sections: &[(&str, &[(&str, &str)])] = &[
+                (
+                    "Tools",
+                    &[
+                        ("V", "Move / select"),
+                        ("M", "Marquee selection"),
+                        ("L", "Lasso"),
+                        ("W", "Smart Select"),
+                        ("C", "Crop"),
+                        ("I", "Eyedropper"),
+                        ("B", "Brush / Pencil"),
+                        ("E", "Eraser"),
+                        ("G", "Fill / Gradient"),
+                        ("S", "Clone"),
+                        ("J", "Repair / Patch"),
+                        ("O", "Dodge / Burn"),
+                        ("P", "Pen"),
+                        ("A", "Node — edit points"),
+                        ("U", "Shapes / Arrow (cycle)"),
+                        ("T", "Type"),
+                        ("Z", "Zoom"),
+                        ("H", "Hand"),
+                        ("X", "Swap colours"),
+                        ("D", "Reset colours"),
+                    ],
+                ),
+                (
+                    "File",
+                    &[
+                        ("Ctrl+N", "New"),
+                        ("Ctrl+O", "Open"),
+                        ("Ctrl+S", "Save"),
+                        ("Ctrl+Shift+S", "Save As"),
+                        ("Ctrl+W", "Close"),
+                        ("Ctrl+P", "Print"),
+                        ("Ctrl+,", "Preferences"),
+                    ],
+                ),
+                (
+                    "Edit",
+                    &[
+                        ("Ctrl+Z", "Undo"),
+                        ("Ctrl+Shift+Z", "Redo"),
+                        ("Ctrl+X", "Cut"),
+                        ("Ctrl+C", "Copy"),
+                        ("Ctrl+V", "Paste"),
+                        ("Ctrl+A", "Select All"),
+                        ("Ctrl+D", "Deselect / Repeat"),
+                        ("Ctrl+T", "Free Transform"),
+                    ],
+                ),
+                (
+                    "Layers & objects",
+                    &[
+                        ("Ctrl+G", "Group"),
+                        ("Ctrl+Shift+G", "Ungroup"),
+                        ("Ctrl+E", "Merge Down"),
+                        ("Ctrl+Shift+E", "Stamp Visible"),
+                        ("Ctrl+Q", "Convert to Curves"),
+                    ],
+                ),
+                (
+                    "View",
+                    &[
+                        ("Ctrl+0", "Fit to window"),
+                        ("Ctrl+1", "100%"),
+                        ("Ctrl+R", "Rulers"),
+                        ("[  ]", "Brush size"),
+                        ("Space+Drag", "Pan"),
+                    ],
+                ),
+            ];
+            for (title, rows) in sections {
+                ui.add_space(3.0);
+                ui.label(egui::RichText::new(*title).strong().size(11.0));
+                egui::Grid::new(*title)
+                    .num_columns(2)
+                    .spacing(egui::vec2(12.0, 2.0))
+                    .show(ui, |ui| {
+                        for (keys, action) in *rows {
+                            ui.label(
+                                egui::RichText::new(*keys)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(pal.text_primary),
+                            );
+                            ui.label(
+                                egui::RichText::new(*action)
+                                    .size(11.0)
+                                    .color(pal.text_secondary),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            }
+        });
 }

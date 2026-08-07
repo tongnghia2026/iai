@@ -107,7 +107,7 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, _data: &UiData, actions: &
     }
 }
 
-pub(crate) fn exit_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut UiActions) {
+pub(crate) fn exit_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut do_save_exit = enter_pressed;
     let mut do_exit_no_save = false;
@@ -122,7 +122,13 @@ pub(crate) fn exit_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut UiA
         .order(DIALOG_ORDER)
         .show(ctx, |ui| {
             ui.add_space(8.0);
-            ui.label("You have unsaved changes. Do you want to save before exiting?");
+            let title = data
+                .doc
+                .doc_titles
+                .get(data.doc.active_doc_idx)
+                .map(String::as_str)
+                .unwrap_or("Untitled");
+            ui.label(format!("Save changes to “{title}” before exiting?"));
             ui.add_space(16.0);
             ui.horizontal(|ui| {
                 if ui.button("Save & Exit").clicked() {
@@ -138,16 +144,13 @@ pub(crate) fn exit_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut UiA
         });
 
     if do_save_exit {
-        actions.doc.save_project = true;
-        actions.doc.exit = true;
-        actions.dialogs.show_exit_dialog = Some(false);
+        actions.doc.exit_save_current = true;
     }
     if do_exit_no_save {
-        actions.doc.exit = true;
-        actions.dialogs.show_exit_dialog = Some(false);
+        actions.doc.exit_discard_current = true;
     }
     if do_cancel {
-        actions.dialogs.show_exit_dialog = Some(false);
+        actions.doc.exit_cancel = true;
     }
 }
 

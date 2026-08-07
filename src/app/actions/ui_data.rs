@@ -387,8 +387,22 @@ impl App {
                 std::sync::Arc::new(layers.iter().map(|l| l.blend_mode).collect());
             self.shell.ui_data_cache.layer_locked =
                 std::sync::Arc::new(layers.iter().map(|l| l.locked).collect());
-            self.shell.ui_data_cache.layer_has_mask =
-                std::sync::Arc::new(layers.iter().map(|l| l.mask.is_some()).collect());
+            // A clipped layer's mask IS the managed clip — hide it from the panel
+            // so it reads as a plain linked layer (Photoshop shows no mask there).
+            self.shell.ui_data_cache.layer_has_mask = std::sync::Arc::new(
+                layers
+                    .iter()
+                    .map(|l| l.mask.is_some() && l.clip_parent_id.is_none())
+                    .collect(),
+            );
+            self.shell.ui_data_cache.layer_is_clipped =
+                std::sync::Arc::new(layers.iter().map(|l| l.clip_parent_id.is_some()).collect());
+            {
+                let base_ids: std::collections::HashSet<u32> =
+                    layers.iter().filter_map(|l| l.clip_parent_id).collect();
+                self.shell.ui_data_cache.layer_is_clip_base =
+                    std::sync::Arc::new(layers.iter().map(|l| base_ids.contains(&l.id)).collect());
+            }
             self.shell.ui_data_cache.layer_mask_enabled = std::sync::Arc::new(
                 layers
                     .iter()
@@ -402,13 +416,7 @@ impl App {
             self.shell.ui_data_cache.layer_types = std::sync::Arc::new(
                 layers
                     .iter()
-                    .map(|l| {
-                        format!("{:?}", l.layer_type)
-                            .split('(')
-                            .next()
-                            .unwrap_or("Raster")
-                            .to_string()
-                    })
+                    .map(|layer| layer_ui_type(&layer.layer_type).to_string())
                     .collect(),
             );
             self.shell.ui_data_cache.layer_is_background =
@@ -588,6 +596,7 @@ impl App {
                 })
                 .collect(),
         );
+        let selected_arrow_settings = self.active_arrow_settings();
 
         UiData {
             doc: DocumentViewModel {
@@ -626,6 +635,13 @@ impl App {
                     crate::core::canvas::ColorMode::Rgb => String::new(),
                 },
                 export_embed_icc: self.shell.ui.export_embed_icc,
+                swatches: std::sync::Arc::new(
+                    self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .metadata
+                        .swatches
+                        .clone(),
+                ),
                 zoom: self.edit.view.zoom,
                 offset_x: self.edit.view.offset_x,
                 offset_y: self.edit.view.offset_y,
@@ -710,6 +726,8 @@ impl App {
                 layer_is_background: self.shell.ui_data_cache.layer_is_background.clone(),
                 layer_lock_alpha: self.shell.ui_data_cache.layer_lock_alpha.clone(),
                 layer_selected: self.shell.ui_data_cache.layer_selected.clone(),
+                layer_is_clipped: self.shell.ui_data_cache.layer_is_clipped.clone(),
+                layer_is_clip_base: self.shell.ui_data_cache.layer_is_clip_base.clone(),
                 layer_thumbnails: self.shell.ui_data_cache.layer_thumbnails.clone(),
                 layer_mask_thumbnails: self.shell.ui_data_cache.layer_mask_thumbnails.clone(),
                 layer_depths: self.shell.ui_data_cache.layer_depths.clone(),
@@ -859,22 +877,17 @@ impl App {
                 fill_contiguous: self.edit.tools.fill().contiguous,
                 fill_anti_alias: self.edit.tools.fill().anti_alias,
                 fill_all_layers: self.edit.tools.fill().sample_merged,
-                gradient_type: self.edit.tools.gradient().gradient_type as u8,
+                gradient_mode: self.active_gradient_mode(),
+                gradient_type: self.active_gradient_ui_type(),
                 gradient_opacity: self.edit.tools.gradient().opacity,
                 gradient_reverse: self.edit.tools.gradient().reverse,
                 gradient_dither: self.edit.tools.gradient().dither,
-                gradient_stops: self
-                    .edit
-                    .tools
-                    .gradient()
-                    .gradient
-                    .stops
-                    .iter()
-                    .map(|s| (s.position, s.color))
-                    .collect(),
+                gradient_stops: self.active_gradient_ui_stops(),
                 show_gradient_editor: self.shell.ui.show_gradient_editor,
                 eyedropper_sample: self.edit.tools.eyedropper().sample_size as u8,
                 eyedropper_sample_merged: self.edit.tools.eyedropper().sample_merged,
+                eyedropper_picked_color: self.edit.tools.eyedropper().picked_color,
+                eyedropper_picked_colors: self.edit.tools.eyedropper().picked_colors.clone(),
                 move_auto_select: self.edit.tools.move_tool().auto_select,
                 move_show_transform: self.edit.tools.move_tool().show_transform,
                 clone_size: self.edit.tools.clone_like().size,
@@ -904,12 +917,51 @@ impl App {
                 wand_sample_merged: self.edit.tools.wand().sample_merged,
                 pen_mode: self.edit.tools.pen().mode.to_u8(),
                 pen_stroke_width: self.edit.tools.pen().stroke_width,
+                vector_brush_width: self.edit.tools.vector_brush().width,
+                vector_brush_color: self.edit.fg_color,
+                vector_brush_smoothing: self.edit.tools.vector_brush().smoothing,
+                vector_brush_pressure: self.edit.tools.vector_brush().pressure,
+                vector_brush_velocity: self.edit.tools.vector_brush().velocity,
+                vector_brush_path: if self.edit.tools.active_id()
+                    == crate::tools::ToolId::VectorBrush
+                {
+                    self.edit.tools.vector_brush().preview_points()
+                } else {
+                    Vec::new()
+                },
+                vector_brush_can_expand: self.active_brush_layer_id().is_some(),
+                arrow_width: selected_arrow_settings
+                    .map_or(self.edit.tools.arrow().width, |settings| settings.0),
+                arrow_end: selected_arrow_settings
+                    .map_or(self.edit.tools.arrow().end_arrow, |settings| settings.1),
+                arrow_route: selected_arrow_settings
+                    .map_or(self.edit.tools.arrow().route, |settings| settings.2),
+                arrow_path: if self.edit.tools.active_id() == crate::tools::ToolId::Arrow {
+                    self.edit
+                        .tools
+                        .arrow()
+                        .preview_path()
+                        .and_then(|path| path.contours.into_iter().next())
+                        .map(|contour| {
+                            contour
+                                .nodes
+                                .into_iter()
+                                .map(|node| (node.anchor.x, node.anchor.y))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
                 shape_kind: self.edit.tools.shape().kind.to_u8(),
                 shape_fill: self.edit.tools.shape().fill,
                 shape_fill_color: self.edit.tools.shape().fill_color,
                 shape_stroke_width: self.edit.tools.shape().stroke_width,
                 shape_stroke_color: self.edit.tools.shape().stroke_color,
                 shape_corner_radius: self.edit.tools.shape().corner_radius,
+                shape_corner_type: self.edit.tools.shape().corner_type.to_u8(),
+                shape_sides: self.edit.tools.shape().sides,
+                shape_star_inner: self.edit.tools.shape().star_inner,
                 shape_preview: if self.edit.tools.active_id() == crate::tools::ToolId::Shape {
                     self.edit.tools.shape().preview_rect()
                 } else {
@@ -931,6 +983,14 @@ impl App {
                 } else {
                     None
                 },
+                path_display: self.active_path_display(),
+                // On-canvas node editing overlay for the active Path (Node tool).
+                node_overlay: self.active_node_overlay(),
+                path_gradient_overlay: self.active_path_gradient_overlay(),
+                // Fill/Outline of the active Path (options bar under Move / Node).
+                // Kept available outside Move/Node as well: the document Palette
+                // applies Fill/Outline to the selected editable Path.
+                path_style: self.active_path_style_vm(),
                 gradient_preview: if self.edit.tools.active_id() == crate::tools::ToolId::Gradient {
                     self.edit.tools.gradient().preview_line()
                 } else {
@@ -1016,16 +1076,53 @@ impl App {
                 pen_closed: self.edit.tools.active_id() == crate::tools::ToolId::Pen
                     && self.edit.tools.pen().is_closed(),
                 crop_cursor_hint: self.crop_cursor_hint(),
-                transform_overlay: self.edit.transform_state.as_ref().map(|ts| {
-                    let corners = ts.corners();
-                    let handles = ts.handle_positions();
-                    let center = ts.transform_point(ts.pivot_cx, ts.pivot_cy);
-                    TransformOverlayData {
-                        corners,
-                        handles,
-                        center,
-                    }
-                }),
+                transform_overlay: self
+                    .edit
+                    .transform_state
+                    .as_ref()
+                    .map(|ts| {
+                        let corners = ts.corners();
+                        let handles = ts.handle_positions();
+                        let center = ts.transform_point(ts.pivot_cx, ts.pivot_cy);
+                        TransformOverlayData {
+                            corners,
+                            handles,
+                            center,
+                            // Free Transform has no relocatable pivot: marker on centre.
+                            pivot: center,
+                            pivot_snap_label: None,
+                            alternate_handles: false,
+                        }
+                    })
+                    // No modal Free Transform: the Move tool's active Path shows
+                    // the same oriented box for on-canvas scale/rotate.
+                    .or_else(|| {
+                        self.active_path_transform_box()
+                            .map(|b| TransformOverlayData {
+                                corners: b.corners,
+                                handles: b.handles,
+                                center: b.center,
+                                pivot: b.pivot,
+                                // Snap label shown only while the pivot is dragged.
+                                pivot_snap_label: if self.edit.path_pivot_dragging {
+                                    self.edit.path_pivot_snap
+                                } else {
+                                    None
+                                },
+                                alternate_handles: self.path_alternate_mode(),
+                            })
+                    })
+                    .or_else(|| {
+                        self.move_selection_transform_box()
+                            .map(|(corners, handles, center)| TransformOverlayData {
+                                corners,
+                                handles,
+                                center,
+                                pivot: center,
+                                pivot_snap_label: None,
+                                alternate_handles: false,
+                            })
+                    }),
                 transform_scale_x: self
                     .edit
                     .transform_state
@@ -1058,6 +1155,7 @@ impl App {
                     .unwrap_or(0.0),
                 transform_cursor_hint: self.transform_cursor_hint(),
                 transform_ctx_menu_pos: self.edit.transform_ctx_menu_pos,
+                selected_rect_corner_type: self.active_rectangle_corner_type(),
             },
             sel: SelectionViewModel {
                 selection_mode: self.edit.selection_mode,
@@ -1335,9 +1433,6 @@ impl App {
                 } else {
                     Vec::new()
                 },
-                toolbox_open: self.shell.ui.toolbox_open,
-                toolbox_pos: self.shell.ui.toolbox_pos,
-                toolbox_single_column: self.shell.ui.toolbox_single_column,
                 toolbar_w: self.shell.toolbar_w,
                 panel_r_w: self.shell.panel_r_w,
                 is_tool_modal: self.modal_lock_active(),
@@ -1392,6 +1487,24 @@ impl App {
         let mut ink = [[0u8; 4]; 1];
         conv.rgb_to_cmyk_slice(&[[color[0], color[1], color[2]]], &mut ink);
         Some(ink[0])
+    }
+}
+
+/// Stable UI-facing layer kind. Do not derive this from `Debug`: unified
+/// `LayerType::Vector` deliberately contains both parametric Shape and curve
+/// Path geometry, but the Layer menu needs to distinguish them for
+/// Convert-to-Curves and Rasterize.
+fn layer_ui_type(layer_type: &crate::core::layer::LayerType) -> &'static str {
+    use crate::core::layer::LayerType;
+    use crate::core::vector::object::VectorGeometry;
+    match layer_type {
+        LayerType::Raster => "Raster",
+        LayerType::Adjustment(_) => "Adjustment",
+        LayerType::Text(_) => "Text",
+        LayerType::Group => "Group",
+        LayerType::SmartObject => "SmartObject",
+        LayerType::Vector(VectorGeometry::Primitive(_)) => "Shape",
+        LayerType::Vector(VectorGeometry::Path(_)) => "Path",
     }
 }
 
@@ -1561,6 +1674,8 @@ fn thumbnail_fit(src_w: usize, src_h: usize, thumb: usize) -> (usize, usize, usi
 mod tests {
     use super::*;
     use crate::core::layer::{Layer, LayerMask};
+    use crate::core::shape::{ShapeData, ShapeKind};
+    use crate::core::vector::object::{VectorGeometry, VectorObjectData};
 
     #[test]
     fn layer_thumbnail_preserves_wide_aspect_ratio() {
@@ -1594,5 +1709,33 @@ mod tests {
         assert_eq!(alpha_at(16, 32), 255);
         assert_eq!(alpha_at(47, 32), 255);
         assert_eq!(alpha_at(48, 32), 0);
+    }
+
+    #[test]
+    fn unified_vector_geometry_keeps_shape_and_path_ui_kinds() {
+        let (shape, _) = ShapeData::from_canvas_span(
+            ShapeKind::Star,
+            10.0,
+            10.0,
+            90.0,
+            90.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 255],
+        );
+        assert_eq!(
+            layer_ui_type(&crate::core::layer::LayerType::Vector(
+                VectorGeometry::Primitive(shape)
+            )),
+            "Shape"
+        );
+        assert_eq!(
+            layer_ui_type(&crate::core::layer::LayerType::Vector(
+                VectorGeometry::Path(VectorObjectData::default())
+            )),
+            "Path"
+        );
     }
 }

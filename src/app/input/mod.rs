@@ -352,6 +352,13 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        // Tell egui the adapter's REAL texture limit. Without this egui assumes
+        // a 2048px ceiling: big textures panic and — worse — the font atlas
+        // caps at 2048² and hits its "almost full → recreate" cycle far more
+        // often, each recreate being a full-image delta that must not be lost.
+        if let Some(state) = &mut self.win.egui_state {
+            state.set_max_texture_side(gpu.max_texture_dimension as usize);
+        }
         self.win.gpu = Some(gpu);
         self.win.window = Some(window);
 
@@ -502,6 +509,11 @@ impl ApplicationHandler for App {
                             );
                     }
                     if !view_key {
+                        // Keep the bell quiet for a short window, not just this
+                        // frame: the incidental denial can land a frame or two
+                        // later (caret-blink redraw / IME preedit→commit).
+                        self.win.text_input_quiet_until =
+                            Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
                         return;
                     }
                 }
@@ -619,6 +631,9 @@ impl ApplicationHandler for App {
         // Tools/states that legitimately act on the gray pasteboard outside the
         // page. Brush-like tools need their center to cross the page edge so they
         // can paint cleanly up to it; the actual pixel writes remain canvas-clipped.
+        // The vector tools (Pen/Shape/Node/Gradient/Text) work in canvas space —
+        // their anchors, geometry, handles and layers may legitimately sit off the
+        // page — so they must keep receiving pointer events there too.
         // For these tools, only the surrounding chrome counts as UI.
         let pasteboard_ok = self.edit.transform_state.is_some()
             || matches!(
@@ -635,6 +650,11 @@ impl ApplicationHandler for App {
                     | ToolId::Crop
                     | ToolId::PerspectiveCrop
                     | ToolId::Move
+                    | ToolId::Pen
+                    | ToolId::Shape
+                    | ToolId::Node
+                    | ToolId::Gradient
+                    | ToolId::Text
                     | ToolId::SelectionRect
                     | ToolId::SelectionEllipse
                     | ToolId::Lasso
@@ -682,6 +702,9 @@ impl ApplicationHandler for App {
             // the drag flags so we neither lose the edit nor get stuck "painting".
             WindowEvent::Focused(focused) => {
                 self.win.window_focused = focused;
+                if focused {
+                    self.win.startup_focus_until = None;
+                }
                 if !focused {
                     if self.edit.input.painting {
                         self.docs.documents[self.docs.active_doc_idx]
@@ -697,6 +720,16 @@ impl ApplicationHandler for App {
                     self.edit.input.alt_right_dragging = false;
                     self.edit.input.zoom_dragging = false;
                     self.edit.input.zoom_drag_moved = false;
+                }
+            }
+
+            WindowEvent::Occluded(occluded) => {
+                self.win.window_occluded = occluded;
+                if !occluded {
+                    self.win.egui_repaint_deadline = None;
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
                 }
             }
 
@@ -856,6 +889,21 @@ impl ApplicationHandler for App {
     /// Called when the event queue is empty — the right place to set ControlFlow.
     /// Without this, winit defaults to Poll → spin loop → 12-14% idle CPU.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.win.window_visible && !self.win.window_focused {
+            if let Some(until) = self.win.startup_focus_until {
+                let now = std::time::Instant::now();
+                if now < until {
+                    if let Some(window) = &self.win.window {
+                        window.focus_window();
+                    }
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(
+                        now + std::time::Duration::from_millis(50),
+                    ));
+                    return;
+                }
+                self.win.startup_focus_until = None;
+            }
+        }
         if matches!(
             self.win.startup_phase,
             crate::app::state::StartupPhase::Loading(_)
@@ -865,6 +913,18 @@ impl ApplicationHandler for App {
                     if !self.win.window_visible {
                         w.set_visible(true);
                         self.win.window_visible = true;
+                        self.win.startup_focus_until = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(1500),
+                        );
+                        // The window is created hidden + borderless, then shown
+                        // here. On Windows, showing a hidden borderless window
+                        // does not reliably make it the active/foreground window,
+                        // so it never gets a clean WM_SETFOCUS — the IME context
+                        // stays unassociated and Windows rings the default bell on
+                        // every keystroke until the user minimises + restores
+                        // (which forces activation). Activate it explicitly here,
+                        // reproducing that fix on first reveal.
+                        w.focus_window();
                     }
                     w.request_redraw();
                 }
@@ -873,6 +933,46 @@ impl ApplicationHandler for App {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(
                     std::time::Instant::now() + std::time::Duration::from_millis(16),
                 ));
+            }
+            return;
+        }
+
+        let main_window_hidden = self.win.window_occluded
+            || self
+                .win
+                .window
+                .as_ref()
+                .map(|window| window.inner_size())
+                .is_some_and(|size| size.width == 0 || size.height == 0);
+        if main_window_hidden {
+            let background_busy = self.jobs.pending_file_dialog.is_some()
+                || !self.jobs.pending_loads.is_empty()
+                || self.edit.pending_transform_commit.is_some()
+                || self.jobs.select_subject.is_busy()
+                || self.jobs.ai_engine.has_jobs()
+                || crate::core::lama::is_downloading()
+                || self
+                    .shell
+                    .filter_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.processing)
+                || self.dev.develop_preview.as_ref().is_some_and(|preview| {
+                    preview.processing || preview.detail_refine_at.is_some()
+                })
+                || self.jobs.ext.busy();
+            if background_busy {
+                // Poll real background work slowly, without rebuilding or
+                // presenting the hidden window.
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    std::time::Instant::now() + std::time::Duration::from_millis(100),
+                ));
+            } else {
+                // Ignore stale egui/selection animation deadlines. Keeping Poll
+                // here was the full-core minimized spin.
+                event_loop.set_control_flow(ControlFlow::Wait);
             }
             return;
         }

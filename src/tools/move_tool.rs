@@ -1,6 +1,7 @@
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::document::GuideOrientation;
 use crate::core::snapping::{best_snap, SnapKind, SnapLine, SNAP_THRESHOLD_PX};
+use crate::core::vector::object::VectorGeometry;
 
 pub struct MoveTool {
     pub drag_start_x: f32,
@@ -23,6 +24,15 @@ pub struct MoveTool {
     /// Structure command captured on Alt+drag duplicate, pushed in the same group
     /// as the TranslateLayerCommand on release so undo also removes the copy.
     pub pending_dup_cmd: Option<crate::core::command::LayerStructureCommand>,
+    /// Last committed duplicate translation. Repeating it duplicates the current
+    /// selection by the same vector (Corel-style step-and-repeat).
+    pub last_duplicate_delta: Option<(i32, i32)>,
+    /// Set on the release that recorded an Alt+drag duplicate, so the app can
+    /// mirror the translation into the unified repeatable step (`last_repeat_transform`).
+    pub took_duplicate: bool,
+    /// Consumed by App after a click (without a drag) on an already-selected vector.
+    pub toggle_vector_transform_requested: bool,
+    click_selected_vector: bool,
 
     // --- Snapping (③) ---
     /// Master snap toggle (mirrors UiState.snap_enabled; set by the app each frame).
@@ -62,6 +72,10 @@ impl MoveTool {
             marquee_end_x: 0.0,
             marquee_end_y: 0.0,
             pending_dup_cmd: None,
+            last_duplicate_delta: None,
+            took_duplicate: false,
+            toggle_vector_transform_requested: false,
+            click_selected_vector: false,
             snap_enabled: true,
             press_cx: 0.0,
             press_cy: 0.0,
@@ -150,6 +164,13 @@ impl MoveTool {
         }
     }
 
+    /// Arm the second-click toggle from App-level vector-model hit testing.
+    /// This supplements the raster-cache bounds check in `on_press`, which can
+    /// be stale for a transformed Path before its asynchronous bake settles.
+    pub fn arm_vector_transform_toggle(&mut self) {
+        self.click_selected_vector = true;
+    }
+
     fn can_move_layer(layer: &crate::core::layer::Layer) -> bool {
         use crate::core::layer::LayerType;
 
@@ -159,9 +180,29 @@ impl MoveTool {
                 layer.layer_type,
                 LayerType::Raster
                     | LayerType::Text(_)
-                    | LayerType::Shape(_)
+                    | LayerType::Vector(_)
                     | LayerType::SmartObject
             )
+    }
+
+    /// True when a layer-local pixel is hidden by a clipping-mask / PowerClip
+    /// frame. Such pixels are invisible on canvas, so a click or a marquee
+    /// (including one drawn entirely outside the frame) must not select the layer
+    /// through them. Only clip children are gated — an ordinary layer mask keeps
+    /// its historic selectable-through-mask behaviour. `lx/ly` are layer-local.
+    fn clip_hides(layer: &crate::core::layer::Layer, lx: u32, ly: u32) -> bool {
+        layer.clip_parent_id.is_some()
+            && layer
+                .mask
+                .as_ref()
+                .is_some_and(|m| m.enabled && m.sample(lx, ly) < 0.5)
+    }
+
+    /// Canvas-space point `(x,y)` inside a layer's raster bounding box.
+    fn point_in_layer_bounds(layer: &crate::core::layer::Layer, x: i32, y: i32) -> bool {
+        let lx = x - layer.offset.0;
+        let ly = y - layer.offset.1;
+        lx >= 0 && ly >= 0 && (lx as u32) < layer.width && (ly as u32) < layer.height
     }
 }
 
@@ -182,6 +223,14 @@ impl Tool for MoveTool {
     fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         let (cx, cy) = (event.canvas_x, event.canvas_y);
         let canvas = ctx.canvas_mut();
+        self.toggle_vector_transform_requested = false;
+        self.click_selected_vector = canvas.layer_stack.layers.iter().any(|layer| {
+            layer.selected
+                && layer.visible
+                && Self::can_move_layer(layer)
+                && matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
+                && Self::point_in_layer_bounds(layer, cx as i32, cy as i32)
+        });
         let mut changed_selection = false;
 
         if canvas.selection.active && canvas.selection.is_selected(cx as u32, cy as u32) {
@@ -207,7 +256,28 @@ impl Tool for MoveTool {
                 let ly = y - layer.offset.1;
                 if lx >= 0 && ly >= 0 && (lx as u32) < layer.width && (ly as u32) < layer.height {
                     let (_r, _g, _b, a) = layer.tiles.get_pixel(lx as u32, ly as u32);
-                    if a > 0 {
+                    if a > 0 && !Self::clip_hides(layer, lx as u32, ly as u32) {
+                        hit_idx = Some(idx);
+                        break;
+                    }
+                }
+            }
+
+            // CorelDRAW "treat as filled" for an already-SELECTED vector object:
+            // when no opaque pixel sits under the cursor, still grab a selected,
+            // movable Vector layer whose bounding box contains the press. This lets
+            // a thin Vector Brush stroke (or an unfilled outline path) be dragged
+            // from anywhere in its wide selection box, not only by clicking exactly
+            // on the visible stroke. Opaque pixel hits are resolved FIRST above, so
+            // this never steals a click that lands on another object.
+            if hit_idx.is_none() {
+                for (idx, layer) in canvas.layer_stack.layers.iter().enumerate().rev() {
+                    if layer.selected
+                        && layer.visible
+                        && Self::can_move_layer(layer)
+                        && matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
+                        && Self::point_in_layer_bounds(layer, x, y)
+                    {
                         hit_idx = Some(idx);
                         break;
                     }
@@ -432,9 +502,30 @@ impl Tool for MoveTool {
             self.total_dx = target_dx;
             self.total_dy = target_dy;
 
+            // Keep a clipping-mask child's derived mask in the same coordinate
+            // space as its moving image. The GPU live-pin preview deliberately
+            // keeps the previous bake, but that can make the image disappear
+            // where its source and mask tile maps diverge until mouse-up. Re-bake
+            // after the offset changes so the normal zero-shift path is exact
+            // throughout the drag. The fingerprint gate makes unrelated moves a
+            // cheap no-op.
+            let clip_mask_changed = canvas.refresh_clip_masks();
+
             for (ox, oy, lw, lh) in old_bounds {
                 canvas.mark_dirty_layer_bounds(ox, oy, lw, lh);
                 canvas.mark_dirty_layer_bounds(ox + dx, oy + dy, lw, lh);
+            }
+            if clip_mask_changed {
+                let clip_bounds: Vec<(i32, i32, u32, u32)> = canvas
+                    .layer_stack
+                    .layers
+                    .iter()
+                    .filter(|l| l.clip_parent_id.is_some())
+                    .map(|l| (l.offset.0, l.offset.1, l.width, l.height))
+                    .collect();
+                for (ox, oy, lw, lh) in clip_bounds {
+                    canvas.mark_dirty_layer_bounds(ox, oy, lw, lh);
+                }
             }
         }
 
@@ -485,7 +576,12 @@ impl Tool for MoveTool {
                                     * 4
                                     + 3)
                                     as usize];
-                                if a > 0 {
+                                // A clip child's hidden pixels are invisible, so a
+                                // marquee over them (e.g. drawn outside the frame)
+                                // must not select the layer through them.
+                                let lx = (pos.x * crate::core::tile::TILE_SIZE as i32 + j) as u32;
+                                let ly = (pos.y * crate::core::tile::TILE_SIZE as i32 + i) as u32;
+                                if a > 0 && !Self::clip_hides(layer, lx, ly) {
                                     hit = true;
                                     break;
                                 }
@@ -537,7 +633,15 @@ impl Tool for MoveTool {
         let _res = ToolResponse::none();
 
         let dup_cmd = self.pending_dup_cmd.take();
+        let duplicated = dup_cmd.is_some();
         let moved = self.total_dx != 0 || self.total_dy != 0;
+        self.toggle_vector_transform_requested = self.click_selected_vector
+            && !moved
+            && !duplicated
+            && !event.shift
+            && !event.ctrl
+            && !event.alt;
+        self.click_selected_vector = false;
         if dup_cmd.is_some() || moved {
             let canvas = ctx.canvas_mut();
             canvas.begin_undo_group("Duplicate & Move");
@@ -561,17 +665,66 @@ impl Tool for MoveTool {
                         }
                     }
                 }
-                if !layer_ids.is_empty() {
+                // A Path layer carries its position in the vector MODEL (the raster
+                // is a cache), so fold the drag into the model transform via
+                // ChangeVectorTransform — the object stays editable, the offset
+                // and model never drift apart (so the on-canvas transform box is
+                // always exact), and the position survives a reload. Everything
+                // else keeps the relative TranslateLayerCommand.
+                let (path_ids, other_ids): (Vec<u32>, Vec<u32>) =
+                    layer_ids.into_iter().partition(|id| {
+                        canvas
+                            .layer_stack
+                            .layers
+                            .iter()
+                            .find(|l| l.id == *id)
+                            .is_some_and(|l| {
+                                matches!(
+                                    l.layer_type,
+                                    crate::core::layer::LayerType::Vector(VectorGeometry::Path(_))
+                                )
+                            })
+                    });
+                if !other_ids.is_empty() {
                     let cmd = crate::core::command::TranslateLayerCommand::from_applied_move(
-                        layer_ids,
+                        other_ids,
                         self.total_dx,
                         self.total_dy,
                         &canvas.layer_stack,
                     );
                     canvas.record(Box::new(cmd));
                 }
+                let (tdx, tdy) = (self.total_dx as f32, self.total_dy as f32);
+                for id in path_ids {
+                    let m0 = canvas
+                        .layer_stack
+                        .layers
+                        .iter()
+                        .find(|l| l.id == id)
+                        .and_then(|l| match &l.layer_type {
+                            crate::core::layer::LayerType::Vector(VectorGeometry::Path(o)) => {
+                                Some(o.transform)
+                            }
+                            _ => None,
+                        });
+                    if let Some(m0) = m0 {
+                        let new_t =
+                            crate::core::vector::affine::AffineTransform::translate(tdx, tdy)
+                                .then(&m0);
+                        let _ = canvas.execute(
+                            Box::new(crate::core::command_vector::ChangeVectorTransform::new(
+                                id, new_t,
+                            )),
+                            crate::core::gateway::ChangeKind::LayerStructure,
+                        );
+                    }
+                }
             }
             canvas.end_undo_group();
+            if duplicated && moved {
+                self.last_duplicate_delta = Some((self.total_dx, self.total_dy));
+                self.took_duplicate = true;
+            }
         }
 
         let _ = event;
@@ -583,5 +736,115 @@ impl Tool for MoveTool {
         self.snap_targets_y.clear();
         self.snap_context_dirty = false;
         ToolResponse::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::document::{Document, DocumentId};
+    use crate::core::geometry::Point;
+    use crate::core::layer::LayerType;
+    use crate::core::vector::object::{VectorGeometry, VectorObjectData};
+    use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+
+    fn ctx(doc: &mut Document) -> ToolCtx<'_> {
+        ToolCtx::new(doc, [0, 0, 0, 255], [255, 255, 255, 255], 1.0, 0.0, 0.0)
+    }
+
+    /// A Vector Path layer occupying `[ox,ox+w)×[oy,oy+h)` with NO raster content
+    /// (fully transparent) — mimicking a thin brush stroke whose wide bounding box
+    /// is mostly empty, so a press in its interior misses the opaque-pixel pass.
+    fn add_empty_vector_layer(
+        doc: &mut Document,
+        ox: i32,
+        oy: i32,
+        w: u32,
+        h: u32,
+        selected: bool,
+    ) -> usize {
+        let idx = doc.canvas.layer_stack.add_layer(w, h);
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(w as f32, h as f32)),
+                ],
+                false,
+            )],
+            FillRule::NonZero,
+        );
+        let obj = VectorObjectData::from_path(path);
+        let layer = &mut doc.canvas.layer_stack.layers[idx];
+        layer.offset = (ox, oy);
+        layer.width = w;
+        layer.height = h;
+        layer.layer_type = LayerType::Vector(VectorGeometry::Path(obj));
+        layer.selected = selected;
+        idx
+    }
+
+    #[test]
+    fn selected_vector_grabs_from_empty_bbox_interior() {
+        // The A-fix: a selected Vector Brush / unfilled path is draggable from
+        // anywhere in its box, not only by clicking the visible stroke.
+        let mut t = MoveTool::new();
+        let mut doc = Document::new(DocumentId(1), 300, 300);
+        let idx = add_empty_vector_layer(&mut doc, 50, 50, 100, 100, true);
+        doc.canvas.layer_stack.active_idx = idx;
+
+        {
+            let mut c = ctx(&mut doc);
+            // Deep inside the box, on transparent area (no stroke pixel here).
+            t.on_press(PointerEvent::new(100.0, 100.0), &mut c);
+        }
+        assert!(
+            !t.marquee_dragging,
+            "a selected vector must be grabbed for moving, not marquee-selected"
+        );
+        assert!(
+            doc.canvas.layer_stack.layers[idx].selected,
+            "the selection is kept so the drag moves it"
+        );
+    }
+
+    #[test]
+    fn unselected_vector_box_still_marquees() {
+        // The grab is scoped to the SELECTED object, so an unselected empty box
+        // keeps the old behaviour (clears selection, starts a marquee).
+        let mut t = MoveTool::new();
+        let mut doc = Document::new(DocumentId(1), 300, 300);
+        add_empty_vector_layer(&mut doc, 50, 50, 100, 100, false);
+
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(PointerEvent::new(100.0, 100.0), &mut c);
+        }
+        assert!(
+            t.marquee_dragging,
+            "an unselected empty vector box must not be grabbed"
+        );
+    }
+
+    #[test]
+    fn shift_moves_multiple_selected_layers_on_one_axis() {
+        let mut t = MoveTool::new();
+        t.snap_enabled = false;
+        let mut doc = Document::new(DocumentId(1), 400, 300);
+        let first = add_empty_vector_layer(&mut doc, 40, 50, 80, 80, true);
+        let second = add_empty_vector_layer(&mut doc, 70, 70, 80, 80, true);
+        doc.canvas.layer_stack.active_idx = second;
+
+        let press = PointerEvent::new(90.0, 90.0);
+        let mut drag = PointerEvent::new(150.0, 105.0);
+        drag.shift = true;
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(press, &mut c);
+            t.on_drag(drag, &press, &mut c);
+        }
+
+        assert_eq!(doc.canvas.layer_stack.layers[first].offset, (100, 50));
+        assert_eq!(doc.canvas.layer_stack.layers[second].offset, (130, 70));
     }
 }

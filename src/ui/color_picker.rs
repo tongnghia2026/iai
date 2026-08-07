@@ -122,8 +122,70 @@ fn color_slider_2d(
     response
 }
 
-/// Compact opaque colour picker (RGB row + 2D saturation/value square + hue
-/// slider) with a small selection indicator. Returns `true` if `srgba` changed.
+/// Editable `#RRGGBB` field for copy/paste. The in-progress text is kept in egui
+/// memory (alongside the colour it maps to) so a partial edit survives the
+/// per-frame model rebuild. Crucially, if the colour is changed from *elsewhere*
+/// in the picker (dragging the 2-D square or hue) while this field is focused,
+/// the buffer is dropped and focus surrendered so the field follows the picked
+/// colour instead of holding a stale value. Returns `true` when a complete,
+/// valid hex updated `rgb`.
+fn hex_field(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
+    let id = ui.id().with("iai_hex_field");
+    let live_rgb = *rgb;
+    let live = format!("{:02X}{:02X}{:02X}", live_rgb[0], live_rgb[1], live_rgb[2]);
+
+    // Keep the in-progress buffer only while it still maps to the live colour
+    // (small tolerance absorbs HSV round-trip noise); otherwise resync to live.
+    let close = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b.iter()).all(|(x, y)| x.abs_diff(*y) <= 2);
+    let prior: Option<(String, [u8; 3])> = ui.data(|d| d.get_temp(id));
+    let (mut text, resynced) = match prior {
+        Some((buf, buf_rgb)) if close(buf_rgb, live_rgb) => (buf, false),
+        Some(_) => (live.clone(), true),
+        None => (live.clone(), false),
+    };
+
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .desired_width(62.0)
+            .font(egui::TextStyle::Monospace)
+            .char_limit(7)
+            .hint_text("RRGGBB"),
+    );
+
+    // The colour moved under a focused field (user clicked into the square):
+    // release the selection so it visibly deselects and tracks the new colour.
+    if resynced && resp.has_focus() {
+        resp.surrender_focus();
+    }
+
+    let mut changed = false;
+    let mut mapped = live_rgb;
+    if resp.has_focus() {
+        // Editing: accept `#RRGGBB` or `RRGGBB`, keep the buffer verbatim.
+        let s = text.trim().trim_start_matches('#');
+        if s.len() == 6 {
+            if let Ok(v) = u32::from_str_radix(s, 16) {
+                let parsed = [
+                    ((v >> 16) & 0xFF) as u8,
+                    ((v >> 8) & 0xFF) as u8,
+                    (v & 0xFF) as u8,
+                ];
+                *rgb = parsed;
+                mapped = parsed;
+                changed = true;
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(id, (text, mapped)));
+    } else {
+        // Idle: mirror the live colour (canonical upper-case form).
+        ui.data_mut(|d| d.insert_temp(id, (live, live_rgb)));
+    }
+    changed
+}
+
+/// Compact opaque colour picker (RGB + #hex row + 2D saturation/value square +
+/// hue slider) with a small selection indicator. Returns `true` if `srgba`
+/// changed.
 pub fn color_picker_compact(ui: &mut Ui, srgba: &mut Color32) -> bool {
     let before = *srgba;
 
@@ -147,6 +209,13 @@ pub fn color_picker_compact(ui: &mut Ui, srgba: &mut Color32) -> bool {
             rgb_edited |= ui
                 .add(DragValue::new(&mut rgba[2]).speed(0.5).prefix("B "))
                 .changed();
+            ui.add_space(4.0);
+            ui.label("#");
+            let mut rgb3 = [rgba[0], rgba[1], rgba[2]];
+            if hex_field(ui, &mut rgb3) {
+                rgba = [rgb3[0], rgb3[1], rgb3[2], 255];
+                rgb_edited = true;
+            }
         });
         if rgb_edited {
             rgba[3] = 255;

@@ -33,6 +33,13 @@ pub enum ToolId {
     Dodge,
     Burn,
     Patch,
+    /// Direct-selection of a Path layer's nodes (edit anchor points). Companion
+    /// to Pen (create) and Move (whole-object transform).
+    Node,
+    /// Freehand vector drawing (Phase 6B): a drag commits an editable
+    /// variable-width Path stroke, distinct from the pixel Brush.
+    VectorBrush,
+    Arrow,
 }
 
 #[derive(Debug, Clone, Copy)]

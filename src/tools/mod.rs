@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod arrow;
 pub mod brush;
 pub mod clone_tool;
 pub mod crop;
@@ -11,6 +12,7 @@ pub mod gradient;
 pub mod hand_tool;
 pub mod lasso;
 pub mod move_tool;
+pub mod node_tool;
 pub mod patch;
 pub mod pen;
 pub mod pencil;
@@ -26,6 +28,7 @@ pub mod smart_select;
 pub mod smudge;
 pub mod text_tool;
 pub mod transform_tool;
+pub mod vector_brush;
 pub mod zoom_tool;
 
 use crate::core::selection::SelectionMode;
@@ -37,6 +40,7 @@ pub const BRUSH_GROUP: &[ToolId] = &[ToolId::Brush, ToolId::Pencil];
 pub const FILL_GROUP: &[ToolId] = &[ToolId::Fill, ToolId::Gradient];
 pub const CROP_GROUP: &[ToolId] = &[ToolId::Crop, ToolId::PerspectiveCrop];
 pub const DODGE_GROUP: &[ToolId] = &[ToolId::Dodge, ToolId::Burn];
+pub const SHAPE_GROUP: &[ToolId] = &[ToolId::Shape, ToolId::Arrow];
 
 const TOOL_GROUPS: &[&[ToolId]] = &[
     SEL_GROUP,
@@ -45,6 +49,7 @@ const TOOL_GROUPS: &[&[ToolId]] = &[
     FILL_GROUP,
     CROP_GROUP,
     DODGE_GROUP,
+    SHAPE_GROUP,
 ];
 
 fn group_for(id: ToolId) -> Option<&'static [ToolId]> {
@@ -92,6 +97,9 @@ impl ToolId {
             ToolId::Dodge => "Dodge",
             ToolId::Burn => "Burn",
             ToolId::Patch => "Patch",
+            ToolId::Node => "Node",
+            ToolId::VectorBrush => "Vector Brush",
+            ToolId::Arrow => "Arrow / Connector",
         }
     }
 
@@ -122,6 +130,12 @@ impl ToolId {
                 | ToolId::PolygonLasso
                 | ToolId::SmartSelect
                 | ToolId::RefineBrush
+                // Node editing routes through the vector gateway, which
+                // re-derives ink from the mirror — no direct ink write.
+                | ToolId::Node
+                // The Vector Brush commits a Path layer through the same gateway.
+                | ToolId::VectorBrush
+                | ToolId::Arrow
         )
     }
 }
@@ -181,6 +195,9 @@ pub struct ToolManager {
     brush: brush::BrushTool,
     eraser: eraser::EraserTool,
     move_tool: move_tool::MoveTool,
+    node_tool: node_tool::NodeTool,
+    vector_brush: vector_brush::VectorBrushTool,
+    arrow: arrow::ArrowTool,
     eyedropper: eyedropper::EyedropperTool,
     fill: fill::FillTool,
     crop: crop::CropTool,
@@ -221,6 +238,9 @@ impl ToolManager {
             brush: brush::BrushTool::new(),
             eraser: eraser::EraserTool::new(),
             move_tool: move_tool::MoveTool::new(),
+            node_tool: node_tool::NodeTool::new(),
+            vector_brush: vector_brush::VectorBrushTool::new(),
+            arrow: arrow::ArrowTool::new(),
             eyedropper: eyedropper::EyedropperTool::new(),
             fill: fill::FillTool::new(),
             crop: crop::CropTool::new(),
@@ -279,6 +299,9 @@ impl ToolManager {
             ToolId::Dodge => &self.dodge,
             ToolId::Burn => &self.burn,
             ToolId::Patch => &self.patch,
+            ToolId::Node => &self.node_tool,
+            ToolId::VectorBrush => &self.vector_brush,
+            ToolId::Arrow => &self.arrow,
         }
     }
 
@@ -311,6 +334,9 @@ impl ToolManager {
             ToolId::Dodge => &mut self.dodge,
             ToolId::Burn => &mut self.burn,
             ToolId::Patch => &mut self.patch,
+            ToolId::Node => &mut self.node_tool,
+            ToolId::VectorBrush => &mut self.vector_brush,
+            ToolId::Arrow => &mut self.arrow,
         }
     }
 
@@ -531,6 +557,18 @@ impl ToolManager {
     pub fn pen_mut(&mut self) -> &mut pen::PenTool {
         &mut self.pen
     }
+    pub fn vector_brush(&self) -> &vector_brush::VectorBrushTool {
+        &self.vector_brush
+    }
+    pub fn vector_brush_mut(&mut self) -> &mut vector_brush::VectorBrushTool {
+        &mut self.vector_brush
+    }
+    pub fn arrow(&self) -> &arrow::ArrowTool {
+        &self.arrow
+    }
+    pub fn arrow_mut(&mut self) -> &mut arrow::ArrowTool {
+        &mut self.arrow
+    }
     pub fn smudge(&self) -> &smudge::SmudgeTool {
         &self.smudge
     }
@@ -590,7 +628,16 @@ impl Default for ToolManager {
 
 #[cfg(test)]
 mod tests {
-    use super::ToolId;
+    use super::{ToolId, ToolManager, SHAPE_GROUP};
+
+    #[test]
+    fn shape_group_keeps_arrow_as_the_preferred_tool() {
+        let mut tools = ToolManager::new();
+        tools.select(ToolId::Arrow);
+        tools.select(ToolId::Move);
+        tools.select_group(SHAPE_GROUP);
+        assert_eq!(tools.active_id(), ToolId::Arrow);
+    }
 
     #[test]
     fn cmyk_allows_non_pixel_tools_and_blocks_writers() {

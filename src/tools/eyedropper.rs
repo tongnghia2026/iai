@@ -33,6 +33,8 @@ pub struct EyedropperTool {
     pub sample_size: SampleSize,
     pub sample_merged: bool,
     pub picked_color: Option<[u8; 4]>,
+    /// Session palette built from explicit canvas picks (oldest to newest).
+    pub picked_colors: Vec<[u8; 4]>,
 }
 
 impl EyedropperTool {
@@ -41,7 +43,20 @@ impl EyedropperTool {
             sample_size: SampleSize::Point,
             sample_merged: true,
             picked_color: None,
+            picked_colors: Vec::new(),
         }
+    }
+
+    pub fn remember_color(&mut self, color: [u8; 4]) {
+        self.picked_color = Some(color);
+        if self.picked_colors.last().copied() == Some(color) {
+            return;
+        }
+        const MAX_PICKED_COLORS: usize = 24;
+        if self.picked_colors.len() == MAX_PICKED_COLORS {
+            self.picked_colors.remove(0);
+        }
+        self.picked_colors.push(color);
     }
 
     pub fn sample(&self, canvas: &Canvas, cx: u32, cy: u32) -> [u8; 4] {
@@ -158,5 +173,22 @@ impl Tool for EyedropperTool {
 
     fn on_release(&mut self, _event: PointerEvent, _ctx: &mut ToolCtx) -> ToolResponse {
         ToolResponse::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EyedropperTool;
+
+    #[test]
+    fn picked_palette_accumulates_and_skips_consecutive_duplicates() {
+        let mut tool = EyedropperTool::new();
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255];
+        tool.remember_color(red);
+        tool.remember_color(red);
+        tool.remember_color(blue);
+        assert_eq!(tool.picked_colors, vec![red, blue]);
+        assert_eq!(tool.picked_color, Some(blue));
     }
 }

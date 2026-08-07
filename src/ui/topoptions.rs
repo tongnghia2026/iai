@@ -1,8 +1,105 @@
-use super::{modal_flash_btn, LayerAlign, MoveTransformAction, UiActions, UiData};
+use super::{modal_flash_btn, LayerAlign, LayerDistribute, MoveTransformAction, UiActions, UiData};
 use crate::core::text::TextAlign;
 use crate::tools::ToolId;
 use egui;
 use egui_phosphor::regular as ph;
+
+use crate::ui::widgets::focus_field_select_all;
+
+const TOP_OPTIONS_ICON_SIZE: f32 = 17.0;
+const TOP_OPTIONS_NAV_ICON_SIZE: f32 = 18.0;
+
+fn top_options_icon(icon: &str) -> egui::RichText {
+    egui::RichText::new(icon.to_owned()).size(TOP_OPTIONS_ICON_SIZE)
+}
+
+fn icon_menu_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    selected: bool,
+    tip: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    let display = if selected {
+        top_options_icon(icon).strong()
+    } else {
+        top_options_icon(icon)
+    };
+    ui.menu_button(display, add_contents)
+        .response
+        .on_hover_text(tip)
+}
+
+fn corner_thumbnail(ui: &mut egui::Ui, kind: u8, selected: bool, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(34.0, 26.0), egui::Sense::click());
+    let visuals = ui.style().interact_selectable(&response, selected);
+    ui.painter().rect(
+        rect,
+        3.0,
+        visuals.bg_fill,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    let p = ui.painter();
+    let stroke = egui::Stroke::new(2.0_f32, visuals.fg_stroke.color);
+    let x0 = rect.left() + 6.0;
+    let y0 = rect.top() + 6.0;
+    let x1 = rect.right() - 6.0;
+    let y1 = rect.bottom() - 5.0;
+    let radius = 8.0_f32.min(x1 - x0).min(y1 - y0);
+    match kind {
+        1 => {
+            p.line_segment([egui::pos2(x0, y0), egui::pos2(x1 - radius, y0)], stroke);
+            let mut arc = Vec::new();
+            for step in 0..=8 {
+                let angle =
+                    std::f32::consts::PI - std::f32::consts::FRAC_PI_2 * (step as f32 / 8.0);
+                arc.push(egui::pos2(
+                    x1 + radius * angle.cos(),
+                    y0 + radius * angle.sin(),
+                ));
+            }
+            p.add(egui::Shape::line(arc, stroke));
+            p.line_segment([egui::pos2(x1, y0 + radius), egui::pos2(x1, y1)], stroke);
+        }
+        2 => {
+            p.line_segment([egui::pos2(x0, y0), egui::pos2(x1 - radius, y0)], stroke);
+            p.line_segment(
+                [egui::pos2(x1 - radius, y0), egui::pos2(x1, y0 + radius)],
+                stroke,
+            );
+            p.line_segment([egui::pos2(x1, y0 + radius), egui::pos2(x1, y1)], stroke);
+        }
+        _ => {
+            p.line_segment([egui::pos2(x0, y0), egui::pos2(x1 - radius, y0)], stroke);
+            let centre = egui::pos2(x1 - radius, y0 + radius);
+            let mut arc = Vec::new();
+            for step in 0..=8 {
+                let angle = -std::f32::consts::FRAC_PI_2
+                    + std::f32::consts::FRAC_PI_2 * (step as f32 / 8.0);
+                arc.push(egui::pos2(
+                    centre.x + radius * angle.cos(),
+                    centre.y + radius * angle.sin(),
+                ));
+            }
+            p.add(egui::Shape::line(arc, stroke));
+            p.line_segment([egui::pos2(x1, y0 + radius), egui::pos2(x1, y1)], stroke);
+        }
+    }
+    response.on_hover_text(label)
+}
+
+pub(super) fn corner_palette(ui: &mut egui::Ui, current: u8, actions: &mut UiActions) {
+    ui.label(egui::RichText::new("Rectangle corner").strong());
+    ui.horizontal(|ui| {
+        for (kind, label) in [(0, "Round"), (1, "Scallop"), (2, "Chamfer")] {
+            if corner_thumbnail(ui, kind, current == kind, label).clicked() {
+                actions.tool.set_shape_corner_type = Some(kind);
+                ui.close();
+            }
+        }
+    });
+}
 
 fn dimension_drag<'a>(
     value: &'a mut f32,
@@ -38,65 +135,79 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.spacing_mut().button_padding = egui::vec2(7.0, 3.0);
-            ui.horizontal_centered(|ui| {
-                ui.add_space(4.0);
+            // Keep every tool's options reachable: when the row is wider than the
+            // window (e.g. Move with a vector object selected) it scrolls instead
+            // of pushing controls off the right edge. The scrollbar is hidden to
+            // keep the 32px row clean; gesture help lives in Help, not on the bar.
+            egui::ScrollArea::horizontal()
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.add_space(4.0);
 
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(ph::HOUSE).size(15.0).color(pal.icon),
-                        )
-                        .min_size(egui::vec2(26.0, 24.0)),
-                    )
-                    .on_hover_text("Home — Welcome Screen")
-                    .clicked()
-                {
-                    actions.chrome.show_welcome = Some(true);
-                }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(ph::HOUSE)
+                                        .size(TOP_OPTIONS_NAV_ICON_SIZE)
+                                        .color(pal.icon),
+                                )
+                                .min_size(egui::vec2(26.0, 24.0)),
+                            )
+                            .on_hover_text("Home — Welcome Screen")
+                            .clicked()
+                        {
+                            actions.chrome.show_welcome = Some(true);
+                        }
 
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(ph::GRID_NINE)
-                                .size(15.0)
-                                .color(pal.icon),
-                        )
-                        .min_size(egui::vec2(26.0, 24.0)),
-                    )
-                    .on_hover_text("Library — browse a folder of photos")
-                    .clicked()
-                {
-                    actions.chrome.show_library = Some(true);
-                }
-                ui.separator();
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(ph::GRID_NINE)
+                                        .size(TOP_OPTIONS_NAV_ICON_SIZE)
+                                        .color(pal.icon),
+                                )
+                                .min_size(egui::vec2(26.0, 24.0)),
+                            )
+                            .on_hover_text("Library — browse a folder of photos")
+                            .clicked()
+                        {
+                            actions.chrome.show_library = Some(true);
+                        }
+                        ui.separator();
 
-                match data.tool.active_tool {
-                    ToolId::Brush | ToolId::Pencil => brush_options(ui, data, actions),
-                    ToolId::Eraser => eraser_options(ui, data, actions),
-                    ToolId::Crop => crop_options(ui, data, actions),
-                    ToolId::Fill => fill_options(ui, data, actions),
-                    ToolId::Gradient => gradient_options(ui, data, actions),
-                    ToolId::Eyedropper => eyedropper_options(ui, data, actions),
-                    ToolId::Clone => clone_tool_options(ui, data, actions, false),
-                    ToolId::Repair => clone_tool_options(ui, data, actions, true),
-                    ToolId::Smudge => smudge_options(ui, data, actions),
-                    ToolId::Dodge | ToolId::Burn => dodge_burn_options(ui, data, actions),
-                    ToolId::Patch => patch_options(ui, data, actions),
-                    ToolId::Move => move_options(ui, data, actions),
-                    ToolId::Zoom => zoom_options(ui, data, actions),
-                    ToolId::SmartSelect => smart_select_options(ui, data, actions),
-                    ToolId::SelectionRect
-                    | ToolId::SelectionEllipse
-                    | ToolId::Lasso
-                    | ToolId::PolygonLasso => selection_options(ui, data, actions),
-                    ToolId::Transform => transform_options(ui, data, actions),
-                    ToolId::Text => text_options(ui, data, actions),
-                    ToolId::Shape => shape_options(ui, data, actions),
-                    ToolId::PerspectiveCrop => perspective_crop_options(ui, data, actions),
-                    ToolId::Pen => pen_options(ui, data, actions),
-                    _ => default_options(ui, data),
-                }
-            });
+                        match data.tool.active_tool {
+                            ToolId::Brush | ToolId::Pencil => brush_options(ui, data, actions),
+                            ToolId::Eraser => eraser_options(ui, data, actions),
+                            ToolId::Crop => crop_options(ui, data, actions),
+                            ToolId::Fill => fill_options(ui, data, actions),
+                            ToolId::Gradient => gradient_options(ui, data, actions),
+                            ToolId::Eyedropper => eyedropper_options(ui, data, actions),
+                            ToolId::Clone => clone_tool_options(ui, data, actions, false),
+                            ToolId::Repair => clone_tool_options(ui, data, actions, true),
+                            ToolId::Smudge => smudge_options(ui, data, actions),
+                            ToolId::Dodge | ToolId::Burn => dodge_burn_options(ui, data, actions),
+                            ToolId::Patch => patch_options(ui, data, actions),
+                            ToolId::Move => move_options(ui, data, actions),
+                            ToolId::Zoom => zoom_options(ui, data, actions),
+                            ToolId::SmartSelect => smart_select_options(ui, data, actions),
+                            ToolId::SelectionRect
+                            | ToolId::SelectionEllipse
+                            | ToolId::Lasso
+                            | ToolId::PolygonLasso => selection_options(ui, data, actions),
+                            ToolId::Transform => transform_options(ui, data, actions),
+                            ToolId::Text => text_options(ui, data, actions),
+                            ToolId::Shape => shape_options(ui, data, actions),
+                            ToolId::Node => node_options(ui, data, actions),
+                            ToolId::PerspectiveCrop => perspective_crop_options(ui, data, actions),
+                            ToolId::Pen => pen_options(ui, data, actions),
+                            ToolId::VectorBrush => vector_brush_options(ui, data, actions),
+                            ToolId::Arrow => arrow_options(ui, data, actions),
+                            _ => default_options(ui, data),
+                        }
+                    });
+                });
         });
 }
 
@@ -198,15 +309,14 @@ fn perspective_crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAc
     ui.separator();
 
     if data.tool.persp_has_quad {
-        let cancel_btn = egui::Button::new(egui::RichText::new(ph::X).size(13.0).color(pal.danger))
+        let cancel_btn = egui::Button::new(top_options_icon(ph::X).color(pal.danger))
             .min_size(egui::vec2(26.0, 22.0));
         let cancel_btn = modal_flash_btn(cancel_btn, ui, data);
         if ui.add(cancel_btn).on_hover_text("Cancel (Esc)").clicked() {
             actions.tool.crop_cancel = true;
         }
-        let confirm_btn =
-            egui::Button::new(egui::RichText::new(ph::CHECK).size(13.0).color(pal.success))
-                .min_size(egui::vec2(26.0, 22.0));
+        let confirm_btn = egui::Button::new(top_options_icon(ph::CHECK).color(pal.success))
+            .min_size(egui::vec2(26.0, 22.0));
         let confirm_btn = modal_flash_btn(confirm_btn, ui, data);
         if ui.add(confirm_btn).on_hover_text("Apply (Enter)").clicked() {
             actions.tool.crop_confirm = true;
@@ -235,10 +345,41 @@ fn pen_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.separator();
 
     ui.label("On Enter:");
-    let mut mode = data.tool.pen_mode;
-    for (v, name) in [(0u8, "Selection"), (1, "Fill"), (2, "Stroke")] {
-        if ui.selectable_value(&mut mode, v, name).changed() {
-            actions.tool.set_pen_mode = Some(mode);
+    let mode = data.tool.pen_mode;
+    // Icon + label so a new user sees at a glance what each commit does — and that
+    // "Path (Vector)" yields a directly editable curve with no convert step.
+    for (v, icon, name, tip) in [
+        (
+            0u8,
+            ph::SELECTION,
+            "Selection",
+            "Commit as a pixel selection (Photoshop-style)",
+        ),
+        (
+            1,
+            ph::PAINT_BUCKET,
+            "Fill",
+            "Fill the enclosed path with the fill colour",
+        ),
+        (
+            2,
+            ph::SCRIBBLE_LOOP,
+            "Stroke",
+            "Stroke the path outline with the given width",
+        ),
+        (
+            3,
+            ph::BEZIER_CURVE,
+            "Path (Vector)",
+            "Commit as an editable vector Path — edit nodes right away, no convert",
+        ),
+    ] {
+        if ui
+            .selectable_label(mode == v, format!("{icon}  {name}"))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            actions.tool.set_pen_mode = Some(v);
         }
     }
 
@@ -258,11 +399,121 @@ fn pen_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             actions.tool.set_pen_stroke_width = Some(sw);
         }
     }
+}
+
+fn arrow_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    ui.label(egui::RichText::new("Arrow / Connector").strong());
+    ui.separator();
+    ui.label(top_options_icon(ph::RULER))
+        .on_hover_text("Outline width");
+    let mut width = data.tool.arrow_width;
+    let width_response = ui.add(
+        egui::DragValue::new(&mut width)
+            .range(0.1..=500.0)
+            .suffix(" px"),
+    );
+    if width_response.changed() {
+        actions.tool.set_arrow_width = Some(width);
+    }
+    if width_response.drag_stopped() || width_response.lost_focus() {
+        actions.tool.commit_path_style = true;
+    }
+    let arrow_meta = |kind| match kind {
+        2 => (ph::FLOW_ARROW, "Stealth"),
+        3 => (ph::CIRCLE, "Circle"),
+        4 => (ph::DIAMOND, "Diamond"),
+        _ => (ph::TRIANGLE, "Triangle"),
+    };
+    let (arrow_icon, arrow_name) = arrow_meta(data.tool.arrow_end);
+    ui.menu_button(format!("{arrow_icon} {arrow_name}"), |ui| {
+        ui.label(egui::RichText::new("Arrow head").strong());
+        ui.horizontal(|ui| {
+            for kind in 1..=4 {
+                let (icon, name) = arrow_meta(kind);
+                if ui
+                    .selectable_label(data.tool.arrow_end == kind, icon)
+                    .on_hover_text(name)
+                    .clicked()
+                {
+                    actions.tool.set_arrow_end = Some(kind);
+                    ui.close();
+                }
+            }
+        });
+    });
+    let route_meta = |route| match route {
+        1 => (ph::ARROW_ELBOW_RIGHT_DOWN, "Elbow H-V"),
+        2 => (ph::ARROW_ELBOW_DOWN_RIGHT, "Elbow V-H"),
+        3 => (ph::FLOW_ARROW, "Elbow Center"),
+        _ => (ph::ARROW_RIGHT, "Straight"),
+    };
+    let (route_icon, route_name) = route_meta(data.tool.arrow_route);
+    ui.menu_button(format!("{route_icon} {route_name}"), |ui| {
+        ui.label(egui::RichText::new("Connector route").strong());
+        ui.horizontal(|ui| {
+            for value in 0..=3 {
+                let (icon, name) = route_meta(value);
+                if ui
+                    .selectable_label(data.tool.arrow_route == value, icon)
+                    .on_hover_text(name)
+                    .clicked()
+                {
+                    actions.tool.set_arrow_route = Some(value);
+                    ui.close();
+                }
+            }
+        });
+    });
+}
+
+fn vector_brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    ui.label(egui::RichText::new("Vector Brush").strong());
+    ui.separator();
+
+    ui.label("Width:");
+    let mut w = data.tool.vector_brush_width;
+    if ui
+        .add(
+            egui::DragValue::new(&mut w)
+                .range(0.5..=500.0)
+                .suffix(" px")
+                .speed(0.2),
+        )
+        .changed()
+    {
+        actions.tool.set_vector_brush_width = Some(w);
+    }
 
     ui.separator();
-    ui.label(
-        "Click = corner · drag = curve · click 1st point = close · Alt-click = corner · Ctrl-drag = move/reshape · Ctrl-click path = add node · Ctrl+Alt = break joint · Ctrl+Z = undo point · Enter = apply · Ctrl+Enter = selection · Esc = cancel",
-    );
+    ui.label("Smoothing:");
+    let mut s = data.tool.vector_brush_smoothing;
+    if ui
+        .add(egui::Slider::new(&mut s, 0.0..=0.95).fixed_decimals(2))
+        .changed()
+    {
+        actions.tool.set_vector_brush_smoothing = Some(s);
+    }
+
+    ui.separator();
+    let mut pressure = data.tool.vector_brush_pressure;
+    if ui.checkbox(&mut pressure, "Pressure").changed() {
+        actions.tool.set_vector_brush_pressure = Some(pressure);
+    }
+    let mut velocity = data.tool.vector_brush_velocity;
+    if ui.checkbox(&mut velocity, "Speed taper").changed() {
+        actions.tool.set_vector_brush_velocity = Some(velocity);
+    }
+
+    ui.separator();
+    ui.add_enabled_ui(data.tool.vector_brush_can_expand, |ui| {
+        if ui
+            .button("Expand Stroke")
+            .on_hover_text("Convert the brush stroke into a closed outline (for fill / shaping)")
+            .clicked()
+        {
+            actions.tool.expand_vector_brush = true;
+        }
+    });
 }
 
 fn brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
@@ -890,7 +1141,7 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.tool.set_crop_w_value = Some(w_disp);
     }
 
-    let swap_btn = egui::Button::new(egui::RichText::new(ph::SWAP).size(12.0).color(pal.icon))
+    let swap_btn = egui::Button::new(top_options_icon(ph::SWAP).color(pal.icon))
         .min_size(egui::vec2(22.0, 22.0));
     let swap_response = ui.add(swap_btn).on_hover_text("Swap Width and Height");
     if swap_response.clicked() {
@@ -947,24 +1198,24 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         .input(|input| (input.key_pressed(egui::Key::Tab), input.modifiers.shift));
     if tab {
         if !shift && (w_response.has_focus() || swap_response.has_focus()) {
-            h_response.request_focus();
+            focus_field_select_all(ui, &h_response);
         } else if !shift && h_response.has_focus() {
-            dpi_response.request_focus();
+            focus_field_select_all(ui, &dpi_response);
         } else if !shift && unit_response.has_focus() {
-            dpi_response.request_focus();
+            focus_field_select_all(ui, &dpi_response);
         } else if shift && dpi_response.has_focus() {
-            h_response.request_focus();
+            focus_field_select_all(ui, &h_response);
         } else if shift && h_response.has_focus() {
-            w_response.request_focus();
+            focus_field_select_all(ui, &w_response);
         } else if shift && swap_response.has_focus() {
-            w_response.request_focus();
+            focus_field_select_all(ui, &w_response);
         } else if shift && unit_response.has_focus() {
-            h_response.request_focus();
+            focus_field_select_all(ui, &h_response);
         }
     }
 
     if ui
-        .small_button("\u{2B}")
+        .small_button(top_options_icon(ph::PLUS))
         .on_hover_text("Save current W/H/DPI as new preset")
         .clicked()
         && w_disp > 0.0
@@ -1013,7 +1264,7 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
     if data.tool.crop_rect.is_some() {
         ui.separator();
-        let cancel_btn = egui::Button::new(egui::RichText::new(ph::X).size(13.0).color(pal.danger))
+        let cancel_btn = egui::Button::new(top_options_icon(ph::X).color(pal.danger))
             .min_size(egui::vec2(26.0, 22.0));
         let cancel_btn = modal_flash_btn(cancel_btn, ui, data);
         if ui
@@ -1023,9 +1274,8 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         {
             actions.tool.crop_cancel = true;
         }
-        let confirm_btn =
-            egui::Button::new(egui::RichText::new(ph::CHECK).size(13.0).color(pal.success))
-                .min_size(egui::vec2(26.0, 22.0));
+        let confirm_btn = egui::Button::new(top_options_icon(ph::CHECK).color(pal.success))
+            .min_size(egui::vec2(26.0, 22.0));
         let confirm_btn = modal_flash_btn(confirm_btn, ui, data);
         if ui
             .add(confirm_btn)
@@ -1136,6 +1386,27 @@ fn fill_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 }
 
 fn gradient_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    let vector_mode = data.tool.gradient_mode == 2;
+    let mode_label = match data.tool.gradient_mode {
+        1 => "Pixel",
+        2 => "Vector",
+        3 => "Mask",
+        _ => "Unavailable",
+    };
+    ui.label(
+        egui::RichText::new(mode_label)
+            .strong()
+            .color(if vector_mode {
+                egui::Color32::from_rgb(90, 190, 255)
+            } else {
+                egui::Color32::from_gray(190)
+            }),
+    );
+    ui.separator();
+    if data.tool.gradient_mode == 0 {
+        ui.label("Select an editable Raster, Vector, or Mask target");
+        return;
+    }
     // Clickable gradient swatch → opens the Gradient Editor (pick the ramp colors).
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(88.0, 20.0), egui::Sense::click());
     crate::ui::dialogs::paint_gradient_bar(
@@ -1168,40 +1439,48 @@ fn gradient_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             if ui.selectable_value(&mut g_type, 1, "Radial").changed() {
                 actions.tool.set_gradient_type = Some(g_type);
             }
-            if ui.selectable_value(&mut g_type, 2, "Angle").changed() {
-                actions.tool.set_gradient_type = Some(g_type);
-            }
-            if ui.selectable_value(&mut g_type, 3, "Reflected").changed() {
-                actions.tool.set_gradient_type = Some(g_type);
-            }
-            if ui.selectable_value(&mut g_type, 4, "Diamond").changed() {
-                actions.tool.set_gradient_type = Some(g_type);
+            if !vector_mode {
+                if ui.selectable_value(&mut g_type, 2, "Angle").changed() {
+                    actions.tool.set_gradient_type = Some(g_type);
+                }
+                if ui.selectable_value(&mut g_type, 3, "Reflected").changed() {
+                    actions.tool.set_gradient_type = Some(g_type);
+                }
+                if ui.selectable_value(&mut g_type, 4, "Diamond").changed() {
+                    actions.tool.set_gradient_type = Some(g_type);
+                }
             }
         });
 
     ui.separator();
-    ui.label("Opacity:");
-    let mut op = data.tool.gradient_opacity * 100.0;
-    if ui
-        .add(
-            egui::DragValue::new(&mut op)
-                .range(0.0..=100.0)
-                .suffix("%")
-                .speed(0.5),
-        )
-        .changed()
-    {
-        actions.tool.set_gradient_opacity = Some(op / 100.0);
-    }
+    if vector_mode {
+        if ui.button("Reverse").clicked() {
+            actions.tool.set_gradient_reverse = Some(true);
+        }
+    } else {
+        ui.label("Opacity:");
+        let mut op = data.tool.gradient_opacity * 100.0;
+        if ui
+            .add(
+                egui::DragValue::new(&mut op)
+                    .range(0.0..=100.0)
+                    .suffix("%")
+                    .speed(0.5),
+            )
+            .changed()
+        {
+            actions.tool.set_gradient_opacity = Some(op / 100.0);
+        }
 
-    ui.separator();
-    let mut reverse = data.tool.gradient_reverse;
-    if ui.checkbox(&mut reverse, "Reverse").changed() {
-        actions.tool.set_gradient_reverse = Some(reverse);
-    }
-    let mut dither = data.tool.gradient_dither;
-    if ui.checkbox(&mut dither, "Dither").changed() {
-        actions.tool.set_gradient_dither = Some(dither);
+        ui.separator();
+        let mut reverse = data.tool.gradient_reverse;
+        if ui.checkbox(&mut reverse, "Reverse").changed() {
+            actions.tool.set_gradient_reverse = Some(reverse);
+        }
+        let mut dither = data.tool.gradient_dither;
+        if ui.checkbox(&mut dither, "Dither").changed() {
+            actions.tool.set_gradient_dither = Some(dither);
+        }
     }
 }
 
@@ -1214,38 +1493,12 @@ fn shape_color_chip(ui: &mut egui::Ui, color: [u8; 4], tip: &str) -> bool {
 }
 
 fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    ui.label("Shape:");
-    let mut kind = data.tool.shape_kind;
-    egui::ComboBox::from_id_salt("shape_kind")
-        .selected_text(match kind {
-            1 => "Ellipse",
-            2 => "Line",
-            _ => "Rectangle",
-        })
-        .width(100.0)
-        .show_ui(ui, |ui| {
-            for (v, name) in [(0u8, "Rectangle"), (1, "Ellipse"), (2, "Line")] {
-                if ui.selectable_value(&mut kind, v, name).changed() {
-                    actions.tool.set_shape_kind = Some(kind);
-                }
-            }
-        });
+    let kind = data.tool.shape_kind;
 
-    ui.separator();
+    // No fill toggle here: shapes draw as outline-only (like CorelDRAW). The user
+    // fills a shape after drawing, via its Fill control once it is selected.
 
-    // Fill: enable toggle + colour chip (not for lines, which are stroke-only).
-    if kind != 2 {
-        let mut fill = data.tool.shape_fill;
-        if ui.checkbox(&mut fill, "Fill").changed() {
-            actions.tool.set_shape_fill = Some(fill);
-        }
-        if shape_color_chip(ui, data.tool.shape_fill_color, "Fill color") {
-            actions.dialogs.open_paint_color_dialog = Some(3);
-        }
-        ui.separator();
-    }
-
-    // Stroke: width + colour chip.
+    // Stroke: width only — colour comes from the right-edge palette.
     ui.label(if kind == 2 { "Width:" } else { "Stroke:" });
     let mut sw = data.tool.shape_stroke_width;
     if ui
@@ -1259,14 +1512,24 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     {
         actions.tool.set_shape_stroke_width = Some(sw);
     }
-    if shape_color_chip(ui, data.tool.shape_stroke_color, "Stroke color") {
-        actions.dialogs.open_paint_color_dialog = Some(4);
-    }
 
-    // Rounded-rectangle corner radius.
+    // Rectangle corner radius + style (Round / Scallop / Chamfer).
     if kind == 0 {
         ui.separator();
-        ui.label("Radius:");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 1.0;
+            for (corner, label) in [(0, "Round"), (1, "Scallop"), (2, "Chamfer")] {
+                let response =
+                    corner_thumbnail(ui, corner, data.tool.shape_corner_type == corner, label);
+                if response.clicked() {
+                    actions.tool.set_shape_corner_type = Some(corner);
+                }
+                response
+                    .context_menu(|ui| corner_palette(ui, data.tool.shape_corner_type, actions));
+            }
+        });
+        ui.label(top_options_icon(ph::RULER))
+            .on_hover_text("Corner radius");
         let mut r = data.tool.shape_corner_radius;
         if ui
             .add(
@@ -1281,9 +1544,74 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         }
     }
 
+    // Polygon edge count / Star point count, and the star's inner radius.
+    if kind == 3 || kind == 4 {
+        ui.separator();
+        ui.label(if kind == 4 {
+            "Points / wings:"
+        } else {
+            "Sides:"
+        });
+        let mut n = data.tool.shape_sides as i32;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if ui
+                .small_button(ph::MINUS)
+                .on_hover_text("Remove one point / side")
+                .clicked()
+            {
+                n -= 1;
+                changed = true;
+            }
+            if ui
+                .add(
+                    egui::DragValue::new(&mut n)
+                        .range(3..=100)
+                        .speed(0.15)
+                        .min_decimals(0)
+                        .max_decimals(0),
+                )
+                .on_hover_text("Type the exact number of points / sides")
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .small_button(ph::PLUS)
+                .on_hover_text("Add one point / side")
+                .clicked()
+            {
+                n += 1;
+                changed = true;
+            }
+        });
+        if changed {
+            actions.tool.set_shape_sides = Some(n.clamp(3, 100) as u32);
+        }
+    }
+    if kind == 4 {
+        ui.label("Sharpness:");
+        // The model stores inner radius; Corel exposes the inverse concept:
+        // a smaller inner radius produces sharper star points.
+        let mut sharpness = (1.0 - data.tool.shape_star_inner) * 100.0;
+        if ui
+            .add(
+                egui::DragValue::new(&mut sharpness)
+                    .range(5.0..=95.0)
+                    .suffix(" %")
+                    .speed(0.5),
+            )
+            .on_hover_text("Higher values make the star points sharper")
+            .changed()
+        {
+            actions.tool.set_shape_star_inner = Some(1.0 - sharpness / 100.0);
+        }
+    }
+
     ui.separator();
     ui.label(
-        egui::RichText::new("Drag · Shift = constrain · Alt = from center")
+        egui::RichText::new("Drag · Shift = constrain · Alt = centered + constrain")
             .size(11.0)
             .color(egui::Color32::from_gray(150)),
     );
@@ -1328,19 +1656,72 @@ fn eyedropper_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     }
 }
 
+/// How many currently-selected layers are boolean-eligible vector objects
+/// (Shape or Path, unlocked, non-background). The Shaping icons show once this
+/// reaches two.
+fn selected_vector_count(data: &UiData) -> usize {
+    (0..data.layers.layer_count)
+        .filter(|&i| {
+            data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                && !data.layers.layer_locked.get(i).copied().unwrap_or(false)
+                && !data
+                    .layers
+                    .layer_is_background
+                    .get(i)
+                    .copied()
+                    .unwrap_or(false)
+                && data
+                    .layers
+                    .layer_types
+                    .get(i)
+                    .is_some_and(|t| t == "Shape" || t == "Path")
+        })
+        .count()
+}
+
+/// Quick Weld/Trim/Intersect/Simplify icons for the options bar — the same
+/// commands as Layer ▸ Shaping, one click away. Only rendered when at least two
+/// vector objects are selected (the caller checks [`selected_vector_count`]).
+fn shaping_buttons(ui: &mut egui::Ui, actions: &mut UiActions) {
+    use crate::core::vector::boolean::BooleanOp;
+    ui.label("Shaping:");
+    for (icon, op, tip) in [
+        (
+            ph::UNITE,
+            BooleanOp::Union,
+            "Weld — merge the objects into a single shape",
+        ),
+        (
+            ph::SUBTRACT,
+            BooleanOp::Difference,
+            "Trim — the upper shapes cut the bottom target; the cutters are kept",
+        ),
+        (
+            ph::INTERSECT,
+            BooleanOp::Intersect,
+            "Intersect — make a shape from every region where at least two objects overlap; the originals are kept",
+        ),
+        (
+            ph::EXCLUDE,
+            BooleanOp::Exclude,
+            "Simplify — remove the parts hidden by the objects above, keeping the shapes separate",
+        ),
+    ] {
+        if ui
+            .button(top_options_icon(icon))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            actions.layers.boolean_op = Some(op);
+        }
+    }
+}
+
 fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let ctrl_held = ui.input(|i| i.modifiers.ctrl);
     let mut auto_select = data.tool.move_auto_select ^ ctrl_held;
     if ui.checkbox(&mut auto_select, "Auto-Select Layer").changed() {
         actions.tool.set_move_auto_select = Some(auto_select ^ ctrl_held);
-    }
-    ui.separator();
-    let mut show_transform = data.tool.move_show_transform;
-    if ui
-        .checkbox(&mut show_transform, "Show Transform Controls")
-        .changed()
-    {
-        actions.tool.set_move_show_transform = Some(show_transform);
     }
     ui.separator();
     align_button(
@@ -1381,6 +1762,39 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         "Align bottom edges to selection bounds; single layer uses canvas",
     );
     ui.separator();
+    if ui
+        .button(top_options_icon(ph::ARROWS_LEFT_RIGHT))
+        .on_hover_text("Distribute horizontal centres of 3 or more selected objects")
+        .clicked()
+    {
+        actions.layers.distribute_layers = Some(LayerDistribute::HorizontalCenters);
+    }
+    if ui
+        .button(top_options_icon(ph::ARROWS_DOWN_UP))
+        .on_hover_text("Distribute vertical centres of 3 or more selected objects")
+        .clicked()
+    {
+        actions.layers.distribute_layers = Some(LayerDistribute::VerticalCenters);
+    }
+    ui.separator();
+    if ui
+        .button("Duplicate")
+        .on_hover_text("Duplicate the selected objects (shortcut: +)")
+        .clicked()
+    {
+        actions.layers.duplicate_selected_step = true;
+    }
+    if ui
+        .button("Repeat")
+        .on_hover_text(
+            "Repeat the last step on a new copy — move, or Alt+rotate / Ctrl+scale \
+             a copy first to set the pattern (Ctrl+D)",
+        )
+        .clicked()
+    {
+        actions.layers.repeat_duplicate_step = true;
+    }
+    ui.separator();
     move_transform_button(
         ui,
         actions,
@@ -1417,19 +1831,503 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ph::FLIP_VERTICAL,
         "Flip selected layers vertically",
     );
+
+    // When a vector object is active, expose a compact Fill/Outline/Width here;
+    // the full editor (gradient stops, dash, overprint) lives in the Color panel
+    // so this already-crowded bar stays reachable.
+    if data.tool.path_style.is_some() {
+        ui.separator();
+        path_style_quick(ui, data, actions);
+    }
+
+    // Shaping (Weld/Trim/Intersect/Simplify) once ≥2 vector objects are selected.
+    if selected_vector_count(data) >= 2 {
+        ui.separator();
+        shaping_buttons(ui, actions);
+    }
+}
+
+/// Compact outline width + cap/join + arrowhead quick-access for the Move
+/// options bar. Enabling/disabling Fill and Outline and picking their colours
+/// lives in the Color panel's Object section and the right-edge palette, so this
+/// row stays lean. Same `path_*` actions as the panel, so they stay in sync.
+fn path_style_quick(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    let Some(style) = data.tool.path_style else {
+        return;
+    };
+    ui.label("Width:");
+    let mut w = style.stroke_width;
+    let resp = ui.add(
+        egui::DragValue::new(&mut w)
+            .range(0.0..=500.0)
+            .suffix(" px")
+            .speed(0.2),
+    );
+    if resp.changed() {
+        actions.tool.set_path_stroke_width = Some(w);
+    }
+    if resp.drag_stopped() || resp.lost_focus() {
+        actions.tool.commit_path_style = true;
+    }
+    icon_menu_button(ui, ph::PATH, false, "Stroke cap and join", |ui| {
+        stroke_style_palette(ui, style, actions)
+    });
+    icon_menu_button(
+        ui,
+        ph::FLOW_ARROW,
+        style.arrow_start != 0 || style.arrow_end != 0,
+        "Arrowheads",
+        |ui| arrow_controls(ui, style, actions, "quick"),
+    );
+}
+
+fn stroke_style_palette(
+    ui: &mut egui::Ui,
+    style: crate::ui::PathStyleData,
+    actions: &mut UiActions,
+) {
+    ui.label(egui::RichText::new("Line cap").strong());
+    ui.horizontal(|ui| {
+        for (value, icon, label) in [
+            (0, ph::LINE_SEGMENT, "Butt"),
+            (1, ph::CIRCLE, "Round"),
+            (2, ph::SQUARE, "Square"),
+        ] {
+            if ui
+                .selectable_label(style.cap == value, format!("{icon} {label}"))
+                .clicked()
+            {
+                actions.tool.set_path_cap = Some(value);
+            }
+        }
+    });
+    ui.separator();
+    ui.label(egui::RichText::new("Line join").strong());
+    ui.horizontal(|ui| {
+        for (value, icon, label) in [
+            (0, ph::TRIANGLE, "Miter"),
+            (1, ph::CIRCLE, "Round"),
+            (2, ph::CORNERS_IN, "Bevel"),
+        ] {
+            if ui
+                .selectable_label(style.join == value, format!("{icon} {label}"))
+                .clicked()
+            {
+                actions.tool.set_path_join = Some(value);
+            }
+        }
+    });
+}
+
+fn arrow_controls(
+    ui: &mut egui::Ui,
+    style: crate::ui::PathStyleData,
+    actions: &mut UiActions,
+    id: &str,
+) {
+    let meta = |kind| match kind {
+        1 => (ph::TRIANGLE, "Triangle"),
+        2 => (ph::FLOW_ARROW, "Stealth"),
+        3 => (ph::CIRCLE, "Circle"),
+        4 => (ph::DIAMOND, "Diamond"),
+        _ => (ph::MINUS, "None"),
+    };
+    for (title, current, action) in [
+        (
+            "Start arrow",
+            style.arrow_start,
+            &mut actions.tool.set_path_arrow_start,
+        ),
+        (
+            "End arrow",
+            style.arrow_end,
+            &mut actions.tool.set_path_arrow_end,
+        ),
+    ] {
+        ui.label(egui::RichText::new(title).strong());
+        ui.horizontal(|ui| {
+            for value in 0..=4 {
+                let (icon, label) = meta(value);
+                if ui
+                    .selectable_label(current == value, icon)
+                    .on_hover_text(label)
+                    .clicked()
+                {
+                    *action = Some(value);
+                }
+            }
+        });
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(top_options_icon(ph::RULER))
+            .on_hover_text("Arrow size");
+        let mut size = style.arrow_size;
+        let response = ui.add(egui::DragValue::new(&mut size).range(0.0..=20.0).speed(0.1));
+        if response.changed() {
+            actions.tool.set_path_arrow_size = Some(size);
+        }
+        if response.drag_stopped() || response.lost_focus() {
+            actions.tool.commit_path_style = true;
+        }
+    });
+    let _ = id;
+}
+
+fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    use crate::core::vector::ops::{AlignRef, Axis};
+    ui.label(egui::RichText::new("Node").strong());
+    ui.separator();
+    if data.tool.path_style.is_some() {
+        path_style_options(ui, data, actions);
+        ui.separator();
+    }
+
+    // Align the multi-selected nodes (Shift+click to pick several). Snaps X for
+    // left/centre/right, Y for top/middle/bottom; a no-op below 2 selected nodes.
+    ui.label("Align:");
+    if ui
+        .button(top_options_icon(ph::ALIGN_LEFT))
+        .on_hover_text("Align left (selected points, ≥2)")
+        .clicked()
+    {
+        actions.tool.node_align = Some((Axis::Vertical, AlignRef::Min));
+    }
+    if ui
+        .button(top_options_icon(ph::ALIGN_CENTER_HORIZONTAL))
+        .on_hover_text("Align horizontal centres")
+        .clicked()
+    {
+        actions.tool.node_align = Some((Axis::Vertical, AlignRef::Average));
+    }
+    if ui
+        .button(top_options_icon(ph::ALIGN_RIGHT))
+        .on_hover_text("Align right")
+        .clicked()
+    {
+        actions.tool.node_align = Some((Axis::Vertical, AlignRef::Max));
+    }
+    ui.separator();
+    if ui
+        .button(top_options_icon(ph::ALIGN_TOP))
+        .on_hover_text("Align top")
+        .clicked()
+    {
+        actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Min));
+    }
+    if ui
+        .button(top_options_icon(ph::ALIGN_CENTER_VERTICAL))
+        .on_hover_text("Align vertical centres")
+        .clicked()
+    {
+        actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Average));
+    }
+    if ui
+        .button(top_options_icon(ph::ALIGN_BOTTOM))
+        .on_hover_text("Align bottom")
+        .clicked()
+    {
+        actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Max));
+    }
+    ui.separator();
+
+    // Break the path at the selected node / join two selected endpoints.
+    if ui
+        .button(format!("{}  Break", ph::LINK_SIMPLE_HORIZONTAL_BREAK))
+        .on_hover_text("Break the path at the selected point")
+        .clicked()
+    {
+        actions.tool.node_break = true;
+    }
+    if ui
+        .button(format!("{}  Join", ph::LINK_SIMPLE_HORIZONTAL))
+        .on_hover_text("Join the two selected endpoints (close or weld the path)")
+        .clicked()
+    {
+        actions.tool.node_join = true;
+    }
+    ui.separator();
+
+    ui.label(
+        egui::RichText::new(
+            "Drag point/handle · click edge = insert · Alt+edge = line/curve · \
+             double-click point = corner/smooth · Shift+click or box = multi-select · \
+             click another path = select · Delete = remove",
+        )
+        .size(11.0)
+        .color(egui::Color32::from_gray(150)),
+    );
+}
+
+/// Fill/Outline toggles + outline parameters for the active Path layer. Shared by
+/// the Move and Node options bars. Solid colours come from the right-edge palette
+/// (the redundant swatches were removed); the width scrub previews live and
+/// commits one undo on release.
+fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    let Some(style) = data.tool.path_style else {
+        return;
+    };
+    // Fill. Solid colour comes from the right-edge palette; only the enable
+    // toggle and gradient controls stay here.
+    let mut fill = style.fill_enabled;
+    if ui.checkbox(&mut fill, "Fill").changed() {
+        actions.tool.set_path_fill_enabled = Some(fill);
+    }
+    let mut fill_overprint = style.fill_overprint;
+    if ui
+        .add_enabled(
+            style.fill_enabled,
+            egui::Checkbox::new(&mut fill_overprint, "OP Fill"),
+        )
+        .on_hover_text("Overprint Fill — preserve underlying inks on output")
+        .changed()
+    {
+        actions.tool.set_path_fill_overprint = Some(fill_overprint);
+    }
+    let mut fill_kind = style.fill_kind;
+    egui::ComboBox::from_id_salt("path_fill_kind")
+        .selected_text(match fill_kind {
+            1 => format!("{}  Linear", ph::GRADIENT),
+            2 => format!("{}  Radial", ph::CIRCLE),
+            _ => format!("{}  Solid", ph::SQUARE),
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut fill_kind, 0, format!("{}  Solid", ph::SQUARE));
+            ui.selectable_value(&mut fill_kind, 1, format!("{}  Linear", ph::GRADIENT));
+            ui.selectable_value(&mut fill_kind, 2, format!("{}  Radial", ph::CIRCLE));
+        });
+    if fill_kind != style.fill_kind {
+        actions.tool.set_path_fill_kind = Some(fill_kind);
+    }
+    if style.fill_kind != 0 && shape_color_chip(ui, style.fill_end_color, "Gradient end colour") {
+        actions.dialogs.open_paint_color_dialog = Some(7);
+    }
+    if style.fill_kind != 0 {
+        ui.menu_button(format!("Stops: {}", style.gradient_stop_count), |ui| {
+            ui.set_min_width(285.0);
+            ui.label("Gradient stops");
+            ui.separator();
+            let count = style.gradient_stop_count as usize;
+            for index in 0..count {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}.", index + 1));
+                    if shape_color_chip(ui, style.gradient_stop_colors[index], "Edit stop colour") {
+                        actions.dialogs.open_paint_color_dialog = Some(8 + index as u8);
+                    }
+                    let lo = if index == 0 {
+                        0.0
+                    } else {
+                        style.gradient_stop_offsets[index - 1]
+                    };
+                    let hi = if index + 1 == count {
+                        1.0
+                    } else {
+                        style.gradient_stop_offsets[index + 1]
+                    };
+                    let mut percent = style.gradient_stop_offsets[index] * 100.0;
+                    let response = ui.add(
+                        egui::DragValue::new(&mut percent)
+                            .range((lo * 100.0)..=(hi * 100.0))
+                            .suffix("%")
+                            .speed(0.25)
+                            .max_decimals(1),
+                    );
+                    if response.changed() {
+                        actions.tool.set_path_gradient_stop_offset =
+                            Some((index as u8, percent / 100.0));
+                    }
+                    if response.drag_stopped() || response.lost_focus() {
+                        actions.tool.commit_path_style = true;
+                    }
+                    if ui
+                        .add_enabled(count > 2, egui::Button::new("Delete"))
+                        .clicked()
+                    {
+                        actions.tool.remove_path_gradient_stop = Some(index as u8);
+                    }
+                });
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    count < crate::core::vector::style::MAX_GRADIENT_STOPS,
+                    egui::Button::new("Add stop"),
+                )
+                .clicked()
+            {
+                actions.tool.add_path_gradient_stop = true;
+            }
+            ui.label(
+                egui::RichText::new("Stops stay sorted; minimum 2, maximum 8")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(140)),
+            );
+        });
+    }
+    ui.separator();
+    // Outline. Colour comes from the right-edge palette; the width and
+    // cap/join/dash parameters stay here.
+    let mut stroke = style.stroke_enabled;
+    if ui.checkbox(&mut stroke, "Outline").changed() {
+        actions.tool.set_path_stroke_enabled = Some(stroke);
+    }
+    let mut stroke_overprint = style.stroke_overprint;
+    if ui
+        .add_enabled(
+            style.stroke_enabled,
+            egui::Checkbox::new(&mut stroke_overprint, "OP Line"),
+        )
+        .on_hover_text("Overprint Outline — preserve underlying inks on output")
+        .changed()
+    {
+        actions.tool.set_path_stroke_overprint = Some(stroke_overprint);
+    }
+    ui.label("Width:");
+    let mut w = style.stroke_width;
+    let resp = ui.add(
+        egui::DragValue::new(&mut w)
+            .range(0.0..=500.0)
+            .suffix(" px")
+            .speed(0.2),
+    );
+    if resp.changed() {
+        actions.tool.set_path_stroke_width = Some(w);
+    }
+    // One undo step per scrub: commit when the drag stops or the field loses focus.
+    if resp.drag_stopped() || resp.lost_focus() {
+        actions.tool.commit_path_style = true;
+    }
+    let mut dash_kind = style.dash_kind;
+    egui::ComboBox::from_id_salt("path_dash_kind")
+        .selected_text(match dash_kind {
+            1 => "Dashed",
+            2 => "Dotted",
+            _ => "Solid",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut dash_kind, 0, "Solid");
+            ui.selectable_value(&mut dash_kind, 1, "Dashed");
+            ui.selectable_value(&mut dash_kind, 2, "Dotted");
+        });
+    if dash_kind != style.dash_kind {
+        actions.tool.set_path_dash_kind = Some(dash_kind);
+    }
+    let mut cap = style.cap;
+    egui::ComboBox::from_id_salt("path_line_cap")
+        .selected_text(match cap {
+            1 => format!("{}  Round cap", ph::CIRCLE),
+            2 => format!("{}  Square cap", ph::SQUARE),
+            _ => format!("{}  Butt cap", ph::LINE_SEGMENT),
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut cap, 0, format!("{}  Butt cap", ph::LINE_SEGMENT));
+            ui.selectable_value(&mut cap, 1, format!("{}  Round cap", ph::CIRCLE));
+            ui.selectable_value(&mut cap, 2, format!("{}  Square cap", ph::SQUARE));
+        });
+    if cap != style.cap {
+        actions.tool.set_path_cap = Some(cap);
+    }
+    let mut join = style.join;
+    egui::ComboBox::from_id_salt("path_line_join")
+        .selected_text(match join {
+            1 => format!("{}  Round join", ph::CIRCLE),
+            2 => format!("{}  Bevel join", ph::CORNERS_IN),
+            _ => format!("{}  Miter join", ph::TRIANGLE),
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut join, 0, format!("{}  Miter join", ph::TRIANGLE));
+            ui.selectable_value(&mut join, 1, format!("{}  Round join", ph::CIRCLE));
+            ui.selectable_value(&mut join, 2, format!("{}  Bevel join", ph::CORNERS_IN));
+        });
+    if join != style.join {
+        actions.tool.set_path_join = Some(join);
+    }
+    ui.add_enabled_ui(style.dash_len > 0, |ui| {
+        ui.menu_button("Dash\u{2026}", |ui| {
+            ui.set_min_width(330.0);
+
+            let mut values = style.dash_values;
+            let mut len = style.dash_len.clamp(1, 8);
+            ui.horizontal(|ui| {
+                ui.label("Segments:");
+                let response = ui.add(egui::DragValue::new(&mut len).range(1..=8));
+                if response.changed() {
+                    let old_len = style.dash_len.max(1) as usize;
+                    for index in old_len..len as usize {
+                        values[index] = values[index % old_len].max(0.01);
+                    }
+                    actions.tool.set_path_dash_values = Some((values, len));
+                }
+                if response.drag_stopped() || response.lost_focus() {
+                    actions.tool.commit_path_style = true;
+                }
+            });
+
+            ui.label("Dash / gap lengths:");
+            let mut values_changed = false;
+            let mut values_finished = false;
+            ui.horizontal_wrapped(|ui| {
+                for (index, value) in values[..len as usize].iter_mut().enumerate() {
+                    ui.label(format!("{}:", index + 1));
+                    let response = ui.add(
+                        egui::DragValue::new(value)
+                            .range(0.01..=10_000.0)
+                            .speed(0.1)
+                            .max_decimals(2),
+                    );
+                    values_changed |= response.changed();
+                    values_finished |= response.drag_stopped() || response.lost_focus();
+                }
+            });
+            if values_changed {
+                actions.tool.set_path_dash_values = Some((values, len));
+            }
+            if values_finished {
+                actions.tool.commit_path_style = true;
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Offset:");
+                let mut offset = style.dash_offset;
+                let response = ui.add(
+                    egui::DragValue::new(&mut offset)
+                        .range(-10_000.0..=10_000.0)
+                        .speed(0.1)
+                        .max_decimals(2),
+                );
+                if response.changed() {
+                    actions.tool.set_path_dash_offset = Some(offset);
+                }
+                if response.drag_stopped() || response.lost_focus() {
+                    actions.tool.commit_path_style = true;
+                }
+            });
+        });
+    });
 }
 
 fn align_button(ui: &mut egui::Ui, actions: &mut UiActions, align: LayerAlign, tooltip: &str) {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), egui::Sense::click());
-    let resp = resp.on_hover_text(tooltip);
-    let fill = if resp.hovered() {
-        ui.visuals().widgets.hovered.bg_fill
-    } else {
-        ui.visuals().widgets.inactive.bg_fill
+    let icon = match align {
+        LayerAlign::Left => ph::ALIGN_LEFT,
+        // Phosphor names these by the bars' orientation: `align-center-horizontal`
+        // draws horizontal bars on a VERTICAL centre line → aligns X centres
+        // (HorizontalCenter). These two were previously swapped.
+        LayerAlign::HorizontalCenter => ph::ALIGN_CENTER_HORIZONTAL,
+        LayerAlign::Right => ph::ALIGN_RIGHT,
+        LayerAlign::Top => ph::ALIGN_TOP,
+        LayerAlign::VerticalCenter => ph::ALIGN_CENTER_VERTICAL,
+        LayerAlign::Bottom => ph::ALIGN_BOTTOM,
     };
-    let icon_col = ui.visuals().text_color();
-    ui.painter().rect_filled(rect, 2.0, fill);
-    paint_align_icon(ui.painter(), rect, align, icon_col);
+    let resp = ui
+        .add(
+            egui::Button::new(
+                egui::RichText::new(icon)
+                    .size(TOP_OPTIONS_ICON_SIZE)
+                    .color(ui.visuals().text_color()),
+            )
+            .min_size(egui::vec2(24.0, 22.0)),
+        )
+        .on_hover_text(tooltip);
     if resp.clicked() {
         actions.layers.align_layers = Some(align);
     }
@@ -1446,7 +2344,7 @@ fn move_transform_button(
         .add(
             egui::Button::new(
                 egui::RichText::new(icon)
-                    .size(14.0)
+                    .size(TOP_OPTIONS_ICON_SIZE)
                     .color(ui.visuals().text_color()),
             )
             .min_size(egui::vec2(24.0, 22.0)),
@@ -1455,78 +2353,6 @@ fn move_transform_button(
         .clicked()
     {
         actions.tool.move_transform = Some(action);
-    }
-}
-
-fn paint_align_icon(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    align: LayerAlign,
-    color: egui::Color32,
-) {
-    let stroke = egui::Stroke::new(1.4_f32, color);
-    let pad = 5.0;
-    let r = rect.shrink(4.0);
-
-    match align {
-        LayerAlign::Left | LayerAlign::HorizontalCenter | LayerAlign::Right => {
-            let guide_x = match align {
-                LayerAlign::Left => r.left(),
-                LayerAlign::HorizontalCenter => r.center().x,
-                LayerAlign::Right => r.right(),
-                _ => r.left(),
-            };
-            painter.line_segment(
-                [
-                    egui::pos2(guide_x, r.top()),
-                    egui::pos2(guide_x, r.bottom()),
-                ],
-                stroke,
-            );
-            let bar_h = 4.0;
-            for (y, w) in [(r.top() + 2.0, 10.0), (r.bottom() - 6.0, 14.0)] {
-                let x = match align {
-                    LayerAlign::Left => guide_x + pad,
-                    LayerAlign::HorizontalCenter => guide_x - w * 0.5,
-                    LayerAlign::Right => guide_x - pad - w,
-                    _ => guide_x,
-                };
-                painter.rect_filled(
-                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, bar_h)),
-                    0.8,
-                    color,
-                );
-            }
-        }
-        LayerAlign::Top | LayerAlign::VerticalCenter | LayerAlign::Bottom => {
-            let guide_y = match align {
-                LayerAlign::Top => r.top(),
-                LayerAlign::VerticalCenter => r.center().y,
-                LayerAlign::Bottom => r.bottom(),
-                _ => r.top(),
-            };
-            painter.line_segment(
-                [
-                    egui::pos2(r.left(), guide_y),
-                    egui::pos2(r.right(), guide_y),
-                ],
-                stroke,
-            );
-            let bar_w = 4.0;
-            for (x, h) in [(r.left() + 3.0, 10.0), (r.right() - 7.0, 14.0)] {
-                let y = match align {
-                    LayerAlign::Top => guide_y + pad,
-                    LayerAlign::VerticalCenter => guide_y - h * 0.5,
-                    LayerAlign::Bottom => guide_y - pad - h,
-                    _ => guide_y,
-                };
-                painter.rect_filled(
-                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(bar_w, h)),
-                    0.8,
-                    color,
-                );
-            }
-        }
     }
 }
 
@@ -1574,13 +2400,17 @@ fn smart_select_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
     ];
     for (mode, label, tooltip) in &modes {
         let selected = data.sel.selection_mode == *mode;
-        let btn = egui::Button::new(*label)
-            .fill(if selected {
-                ui.visuals().selection.bg_fill
-            } else {
-                ui.visuals().widgets.inactive.bg_fill
-            })
-            .min_size(egui::vec2(24.0, 22.0));
+        let btn = if *mode == SelectionMode::New {
+            egui::Button::new(*label)
+        } else {
+            egui::Button::new(top_options_icon(label))
+        }
+        .fill(if selected {
+            ui.visuals().selection.bg_fill
+        } else {
+            ui.visuals().widgets.inactive.bg_fill
+        })
+        .min_size(egui::vec2(24.0, 22.0));
         if ui.add(btn).on_hover_text(*tooltip).clicked() {
             actions.sel.set_selection_mode = Some(*mode);
         }
@@ -1706,13 +2536,17 @@ fn selection_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
 
     for (mode, label, tooltip) in &modes {
         let selected = data.sel.selection_mode == *mode;
-        let btn = egui::Button::new(*label)
-            .fill(if selected {
-                ui.visuals().selection.bg_fill
-            } else {
-                ui.visuals().widgets.inactive.bg_fill
-            })
-            .min_size(egui::vec2(24.0, 22.0));
+        let btn = if *mode == SelectionMode::New {
+            egui::Button::new(*label)
+        } else {
+            egui::Button::new(top_options_icon(label))
+        }
+        .fill(if selected {
+            ui.visuals().selection.bg_fill
+        } else {
+            ui.visuals().widgets.inactive.bg_fill
+        })
+        .min_size(egui::vec2(24.0, 22.0));
         if ui.add(btn).on_hover_text(*tooltip).clicked() {
             actions.sel.set_selection_mode = Some(*mode);
         }
@@ -1755,7 +2589,7 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         return;
     }
 
-    let panel_btn = egui::Button::new(egui::RichText::new(ph::TEXT_T).size(14.0).color(pal.icon))
+    let panel_btn = egui::Button::new(top_options_icon(ph::TEXT_T).color(pal.icon))
         .min_size(egui::vec2(26.0, 22.0));
     if ui.add(panel_btn).on_hover_text("Show Text panel").clicked() {
         actions.chrome.show_text_panel = Some(true);
@@ -1782,7 +2616,7 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         (data.tool.text_italic, ph::TEXT_ITALIC, "Italic", 1),
         (data.tool.text_underline, ph::TEXT_UNDERLINE, "Underline", 2),
     ] {
-        let btn = egui::Button::new(egui::RichText::new(icon).size(14.0))
+        let btn = egui::Button::new(top_options_icon(icon))
             .fill(if selected {
                 pal.accent_selected_bg
             } else {
@@ -1805,7 +2639,7 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         (TextAlign::Right, ph::TEXT_ALIGN_RIGHT, "Right align"),
     ] {
         let selected = data.tool.text_align == align;
-        let btn = egui::Button::new(egui::RichText::new(icon).size(14.0))
+        let btn = egui::Button::new(top_options_icon(icon))
             .fill(if selected {
                 pal.accent_selected_bg
             } else {
@@ -1955,23 +2789,22 @@ fn transform_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
     }
 
     ui.separator();
-    let cancel_btn = egui::Button::new(egui::RichText::new(ph::X).size(13.0).color(pal.danger))
+    let cancel_btn = egui::Button::new(top_options_icon(ph::X).color(pal.danger))
         .min_size(egui::vec2(26.0, 22.0));
     let cancel_btn = modal_flash_btn(cancel_btn, ui, data);
     if ui
         .add(cancel_btn)
-        .on_hover_text("Hủy transform (Esc)")
+        .on_hover_text("Cancel transform (Esc)")
         .clicked()
     {
         actions.tool.transform_cancel = true;
     }
-    let commit_btn =
-        egui::Button::new(egui::RichText::new(ph::CHECK).size(13.0).color(pal.success))
-            .min_size(egui::vec2(26.0, 22.0));
+    let commit_btn = egui::Button::new(top_options_icon(ph::CHECK).color(pal.success))
+        .min_size(egui::vec2(26.0, 22.0));
     let commit_btn = modal_flash_btn(commit_btn, ui, data);
     if ui
         .add(commit_btn)
-        .on_hover_text("Xác nhận transform (Enter)")
+        .on_hover_text("Apply transform (Enter)")
         .clicked()
     {
         actions.tool.transform_commit = true;

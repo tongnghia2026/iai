@@ -166,6 +166,127 @@ fn resync_glyph_styles(
 }
 
 impl App {
+    /// Convert the Text layer at `idx` into editable vector Path layers ("Convert
+    /// Text to Curves"). Each distinct fill colour becomes one Path layer: the
+    /// first reuses the text layer's slot IN PLACE (keeping its id / stacking order
+    /// / opacity / blend / group / page — mirroring `convert_shape_to_path`), any
+    /// extra colours are inserted just above, inheriting the text layer's
+    /// compositing. Every glyph outline lands exactly where the rasterized text
+    /// sat. One structural undo restores the Text layer. Returns true when it
+    /// converted.
+    ///
+    /// The existing layer mask is preserved on the in-place Path layer, just like
+    /// Shape-to-Curves; the vector opacity carries the layer's own
+    /// `Layer::opacity`, while `TextData::opacity` is folded into each object's
+    /// `VectorStyle::opacity` by [`crate::core::text::text_to_curves`].
+    pub fn text_to_curves(&mut self, idx: usize) -> bool {
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::style::VectorStyle;
+
+        // Snapshot the text layer's data + the properties extra colour layers
+        // inherit.
+        let (td, layer_offset, blend, layer_opacity, visible, parent_id, page_id) = {
+            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+            let Some(layer) = canvas.layer_stack.layers.get(idx) else {
+                return false;
+            };
+            let LayerType::Text(td) = &layer.layer_type else {
+                return false;
+            };
+            (
+                td.clone(),
+                layer.offset,
+                layer.blend_mode,
+                layer.opacity,
+                layer.visible,
+                layer.parent_id,
+                layer.page_id,
+            )
+        };
+        let td_opacity = td.opacity.clamp(0.0, 1.0);
+
+        // Build one validated vector object per colour group (skip any the parser
+        // limits would reject, so a pathological glyph count can't poison a file).
+        let mut objects: Vec<VectorObjectData> = Vec::new();
+        for grp in crate::core::text::text_to_curves(&td, layer_offset) {
+            let style = VectorStyle {
+                opacity: td_opacity,
+                ..VectorStyle::filled(ColorValue::from_rgba8(grp.color))
+            };
+            let obj = VectorObjectData::new(grp.path, style, AffineTransform::IDENTITY);
+            if obj.validate().is_ok() {
+                objects.push(obj);
+            }
+        }
+        if objects.is_empty() {
+            self.shell.status_msg = "No text to convert to curves".to_string();
+            return false;
+        }
+
+        let (cw, ch) = {
+            let d = &self.docs.documents[self.docs.active_doc_idx];
+            (d.canvas.width, d.canvas.height)
+        };
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let before =
+            LayerStructureCommand::capture_before("Text to Curves", &canvas.layer_stack, cw, ch);
+
+        // First colour reuses the text layer slot in place.
+        {
+            let Some(layer) = canvas.layer_stack.layers.get_mut(idx) else {
+                return false;
+            };
+            apply_object_to_layer(layer, objects[0].clone());
+        }
+        canvas.layer_stack.active_idx = idx;
+
+        // Extra colours: fresh Path layers just above, inheriting the text layer's
+        // compositing so the stack looks identical.
+        for obj in objects.iter().skip(1) {
+            let new_idx = canvas.layer_stack.add_layer(cw, ch);
+            let layer = &mut canvas.layer_stack.layers[new_idx];
+            apply_object_to_layer(layer, obj.clone());
+            layer.blend_mode = blend;
+            layer.opacity = layer_opacity;
+            layer.visible = visible;
+            layer.parent_id = parent_id;
+            layer.page_id = page_id;
+            layer.name = layer_name_from(&td.content);
+        }
+
+        // CMYK: re-derive ink planes for the new Path rasters from their RGB mirror.
+        canvas.reconcile_path_ink();
+        canvas.layer_revision += 1;
+
+        // Select the converted layer so the Move box shows without an extra click.
+        // Do this before capturing the after-state so redo restores the exact
+        // selection produced by the original conversion.
+        for l in &mut canvas.layer_stack.layers {
+            l.selected = false;
+        }
+        let active = canvas
+            .layer_stack
+            .active_idx
+            .min(canvas.layer_stack.layers.len().saturating_sub(1));
+        if let Some(l) = canvas.layer_stack.layers.get_mut(active) {
+            l.selected = true;
+        }
+
+        let mut cmd = before;
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
+
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = "Converted text to curves (Path)".to_string();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     /// Build a `TextData` from the current app-level text style + the given
     /// content and per-glyph overrides (compacted when uniform).
     fn text_data_from_state(
@@ -341,21 +462,37 @@ impl App {
         canvas.layer_stack.active_idx = idx;
         canvas.layer_revision += 1;
 
+        // Seed the edit buffer as canonical NFC so the on-screen caret lines up
+        // with the fused glyphs and a later commit stays precomposed (see
+        // `update_text_buffer`). Legacy text saved as decomposed diacritics is
+        // repaired the moment it is re-opened.
+        let (nfc_chars, style_src) = crate::core::text::normalize_nfc_with_style_src(&td.content);
+        let buffer: String = nfc_chars.iter().collect();
+        let glyph_styles = if td.glyph_styles.is_empty() {
+            Vec::new()
+        } else {
+            style_src
+                .iter()
+                .map(|&i| td.glyph_style(i))
+                .collect::<Vec<_>>()
+        };
+        let caret = Some(nfc_chars.len());
+
         self.edit.tools.select(ToolId::Text);
         self.shell.ui.show_text_panel = true;
         self.edit.text_edit = Some(TextEditState {
             doc_id,
             layer_id,
-            buffer: td.content.clone(),
+            buffer,
             origin,
             rotation_deg: td.rotation_deg,
             stretch_x: td.stretch_x,
             flip_x: td.flip_x,
             flip_y: td.flip_y,
             is_new: false,
-            glyph_styles: td.glyph_styles.clone(),
+            glyph_styles,
             selection: None,
-            caret: Some(td.content.chars().count()),
+            caret,
             pending_style: None,
             orig: Some(td),
             before_cmd: Some(before),
@@ -372,6 +509,11 @@ impl App {
     /// overlay shows the text until commit). Keeps per-character styles aligned
     /// with the edited string.
     pub fn update_text_buffer(&mut self, new: String) {
+        // Store canonical (precomposed) text: decomposed diacritics would render
+        // with detached accents (ab_glyph has no mark positioning) and the caret
+        // would count the invisible combining marks. NFC also matches how most
+        // Vietnamese IMEs deliver text.
+        let new = crate::core::text::normalize_nfc(&new);
         let base = crate::core::text::GlyphStyle {
             color: self.edit.text_color,
             font_px: self.edit.text_font_px,
@@ -730,6 +872,61 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app_with_text(content: &str) -> (App, usize) {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let canvas = &mut app.docs.documents[0].canvas;
+        let idx = canvas.layer_stack.add_layer(200, 200);
+        let td = TextData {
+            content: content.to_string(),
+            font_family: crate::core::text::TextFontFamily::DejaVuSans,
+            font_px: 48.0,
+            ..TextData::default()
+        };
+        rasterize_into_layer(canvas, idx, (20, 30), td);
+        canvas.layer_stack.active_idx = idx;
+        (app, idx)
+    }
+
+    #[test]
+    fn text_to_curves_preserves_mask_and_undo_redo_selection() {
+        let (mut app, idx) = app_with_text("Aa");
+        {
+            let layer = &mut app.docs.documents[0].canvas.layer_stack.layers[idx];
+            layer.add_mask(false);
+            layer.selected = false;
+        }
+
+        assert!(app.text_to_curves(idx));
+        let canvas = &mut app.docs.documents[0].canvas;
+        assert!(
+            canvas.layer_stack.layers[idx].mask.is_some(),
+            "conversion must preserve the text layer mask"
+        );
+        assert!(canvas.layer_stack.layers[idx].selected);
+        assert!(matches!(
+            canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(_))
+        ));
+
+        canvas.undo().expect("undo text-to-curves");
+        assert!(matches!(
+            canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Text(_)
+        ));
+        assert!(
+            !canvas.layer_stack.layers[idx].selected,
+            "undo restores the original selection"
+        );
+
+        canvas.redo().expect("redo text-to-curves");
+        assert!(canvas.layer_stack.layers[idx].mask.is_some());
+        assert!(
+            canvas.layer_stack.layers[idx].selected,
+            "redo restores the conversion's selection"
+        );
+    }
 
     #[test]
     fn click_outside_is_refused_while_editing() {

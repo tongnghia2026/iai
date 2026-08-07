@@ -35,6 +35,9 @@ pub struct DocumentIntent {
     pub save_project: bool,
     pub export: Option<ExportFormat>,
     pub exit: bool,
+    pub exit_save_current: bool,
+    pub exit_discard_current: bool,
+    pub exit_cancel: bool,
     pub undo: bool,
     pub redo: bool,
     pub jump_history: Option<usize>,
@@ -58,7 +61,9 @@ pub struct DocumentIntent {
     pub pdf_nav_goto: Option<usize>,
     /// PDF navigator strip: export the active PDF group as a multi-page PDF.
     pub pdf_nav_export: bool,
-    pub new_canvas_confirmed: Option<(String, u32, u32, f32, u8, Unit)>,
+    /// New canvas: `(name, w, h, dpi, background, unit, cmyk)`. `cmyk` starts the
+    /// document in CMYK (Generic naive) instead of RGB.
+    pub new_canvas_confirmed: Option<(String, u32, u32, f32, u8, Unit, bool)>,
     pub rename_confirmed: Option<(usize, String)>,
     pub export_confirmed: Option<(ExportFormat, String)>,
     /// Request the Save dialog (rfd) to pick an export path. MUST be handled in
@@ -102,11 +107,29 @@ pub struct DocumentIntent {
 #[derive(Default)]
 pub struct LayerIntent {
     pub align_layers: Option<LayerAlign>,
+    pub distribute_layers: Option<LayerDistribute>,
+    pub duplicate_selected_step: bool,
+    pub repeat_duplicate_step: bool,
     pub add_layer: bool,
     pub add_adjustment_layer: Option<AdjustmentType>,
     pub duplicate_layer: Option<usize>,
     pub layer_via_copy: bool,
     pub remove_layer: Option<usize>,
+    /// Bake a vector Path layer (this index) down to a plain raster layer.
+    pub rasterize_layer: Option<usize>,
+    /// Convert the Shape layer (this index) into an editable vector Path layer.
+    pub convert_to_curves: Option<usize>,
+    /// Convert the Text layer (this index) into editable vector Path layer(s).
+    pub text_to_curves: Option<usize>,
+    /// Weld/Trim/Intersect/Simplify the selected vector layers.
+    pub boolean_op: Option<crate::core::vector::boolean::BooleanOp>,
+    /// PowerClip: place the selected content inside the selected vector frame.
+    pub powerclip_place: bool,
+    /// PowerClip: extract the selected content from its frame.
+    pub powerclip_release: bool,
+    /// Clipping mask (Ctrl+Alt+G): clip the active layer to the one below, or
+    /// release it. Photoshop-style; shares the PowerClip clip engine.
+    pub toggle_clipping_mask: bool,
     pub select_layer: Option<(usize, bool, bool)>,
     /// Ctrl+click a layer's thumbnail → load that layer's alpha as a selection.
     pub load_layer_selection: Option<usize>,
@@ -149,6 +172,16 @@ pub struct LayerIntent {
 #[derive(Default)]
 pub struct ToolIntent {
     pub select_tool: Option<ToolId>,
+    /// Align the multi-selected Path nodes (Node options bar): the axis to snap on
+    /// and which reference coordinate to snap to.
+    pub node_align: Option<(
+        crate::core::vector::ops::Axis,
+        crate::core::vector::ops::AlignRef,
+    )>,
+    /// Break the active Path at the primary selected node (Node options bar).
+    pub node_break: bool,
+    /// Join the two selected endpoints — close or weld (Node options bar).
+    pub node_join: bool,
     /// New buffer contents from the editing overlay.
     pub text_buffer: Option<String>,
     pub text_cursor: Option<(Option<std::ops::Range<usize>>, Option<usize>)>,
@@ -261,10 +294,62 @@ pub struct ToolIntent {
     pub set_patch_mode: Option<u8>,
     pub set_pen_mode: Option<u8>,
     pub set_pen_stroke_width: Option<f32>,
+    /// Vector Brush (Phase 6B) options.
+    pub set_vector_brush_width: Option<f32>,
+    pub set_vector_brush_smoothing: Option<f32>,
+    pub set_vector_brush_pressure: Option<bool>,
+    pub set_vector_brush_velocity: Option<bool>,
+    pub set_arrow_width: Option<f32>,
+    pub set_arrow_end: Option<u8>,
+    pub set_arrow_route: Option<u8>,
+    /// Bake the active Vector Brush stroke into a closed outline.
+    pub expand_vector_brush: bool,
     pub set_shape_kind: Option<u8>,
     pub set_shape_fill: Option<bool>,
     pub set_shape_stroke_width: Option<f32>,
     pub set_shape_corner_radius: Option<f32>,
+    pub set_shape_corner_type: Option<u8>,
+    /// Polygon edge count / Star point count.
+    pub set_shape_sides: Option<u32>,
+    /// Star inner-radius fraction.
+    pub set_shape_star_inner: Option<f32>,
+    /// Path layer Fill/Outline (options bar under Move / Node).
+    pub set_path_fill_enabled: Option<bool>,
+    pub set_path_stroke_enabled: Option<bool>,
+    pub set_path_fill_overprint: Option<bool>,
+    pub set_path_stroke_overprint: Option<bool>,
+    /// Corel-like palette gesture: primary click applies Fill, secondary click
+    /// applies Outline while preserving an exact RGB/CMYK process value.
+    pub apply_palette_fill: Option<crate::core::vector::color::ColorValue>,
+    pub apply_palette_outline: Option<crate::core::vector::color::ColorValue>,
+    pub clear_palette_fill: bool,
+    pub clear_palette_outline: bool,
+    pub add_document_swatch: Option<crate::core::vector::color::ColorValue>,
+    /// Create a spot-ink swatch: `(plate name, base colour used as the process
+    /// alternate)`.
+    pub add_spot_swatch: Option<(String, crate::core::vector::color::ColorValue)>,
+    pub rename_document_swatch: Option<(usize, String)>,
+    pub remove_document_swatch: Option<usize>,
+    /// Live preview of the outline width; `commit_path_style` finalises the scrub.
+    pub set_path_stroke_width: Option<f32>,
+    pub set_path_fill_kind: Option<u8>,
+    pub set_path_gradient_stop_offset: Option<(u8, f32)>,
+    pub add_path_gradient_stop: bool,
+    pub remove_path_gradient_stop: Option<u8>,
+    pub set_path_dash_kind: Option<u8>,
+    /// Outline end cap (0 Butt, 1 Round, 2 Square) and corner join (0 Miter, 1
+    /// Round, 2 Bevel). Each is a discrete selection recorded as one undo step.
+    pub set_path_cap: Option<u8>,
+    pub set_path_join: Option<u8>,
+    pub set_path_arrow_start: Option<u8>,
+    pub set_path_arrow_end: Option<u8>,
+    pub set_path_arrow_size: Option<f32>,
+    /// Live preview of the custom dash array and phase.
+    pub set_path_dash_values: Option<([f32; crate::core::vector::style::MAX_DASHES], u8)>,
+    pub set_path_dash_offset: Option<f32>,
+    /// End of an interactive Path style edit (width scrub / colour dialog) — record
+    /// the single undo step.
+    pub commit_path_style: bool,
     pub transform_commit: bool,
     pub transform_cancel: bool,
     pub set_transform_scale_x: Option<f32>,
@@ -393,6 +478,8 @@ pub struct PrintIntent {
     pub export_cmyk_separations: bool,
     /// File ▸ Export ▸ PDF (multi-page)… — write all open tabs as one PDF.
     pub export_multipage_pdf: bool,
+    /// File ▸ Export ▸ SVG (Vector)… — write the document as an SVG.
+    pub export_svg: bool,
     /// Print dialog: send the current page to the default printer.
     pub print_send: bool,
     /// Print dialog: save the print-ready PDF (deferred rfd save).
@@ -402,6 +489,10 @@ pub struct PrintIntent {
 #[derive(Default)]
 pub struct DialogIntent {
     pub open_paint_color_dialog: Option<u8>,
+    /// Open the paint-colour dialog for `target` pre-seeded with a specific
+    /// colour (the palette right-click "Adjust colour…" gesture). `original`
+    /// stays the target's current colour so Cancel restores it.
+    pub open_paint_color_dialog_with: Option<(u8, [u8; 4])>,
     pub set_paint_color_dialog_color: Option<[u8; 4]>,
     pub set_paint_color_dialog_live_preview: Option<bool>,
     pub paint_color_dialog_default: bool,
@@ -473,9 +564,6 @@ pub struct ChromeIntent {
     /// A click landed on UI that is disabled by the strict modal lock (tab
     /// bar, menus, …) — the app rings the bell and flashes Commit/Cancel.
     pub modal_denied: bool,
-    pub set_toolbox_open: Option<bool>,
-    pub set_toolbox_pos: Option<(f32, f32)>,
-    pub set_toolbox_single_column: Option<bool>,
     pub set_theme_mode: Option<theme::ThemeMode>,
     pub show_welcome: Option<bool>,
     /// Toggle the Library grid browser (Track B). `true` also leaves the welcome

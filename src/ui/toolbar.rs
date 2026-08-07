@@ -33,9 +33,25 @@ const CROP_GROUP: &[(ToolId, &str, &str)] = &[
 
 const TEXT_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Text, ph::TEXT_T, "Type (T)")];
 
-const SHAPE_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Shape, ph::SHAPES, "Shape (U)")];
+const SHAPE_GROUP: &[(ToolId, &str, &str)] = &[
+    (ToolId::Shape, ph::RECTANGLE, "Rectangle (U)"),
+    (ToolId::Shape, ph::CIRCLE, "Ellipse (U)"),
+    (ToolId::Shape, ph::LINE_SEGMENT, "Line (U)"),
+    (ToolId::Shape, ph::POLYGON, "Polygon (U)"),
+    (ToolId::Shape, ph::STAR, "Star (U)"),
+    (ToolId::Arrow, ph::ARROW_UP_RIGHT, "Arrow / Connector"),
+];
 
 const PEN_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Pen, ph::PEN_NIB, "Pen (P)")];
+
+const NODE_GROUP: &[(ToolId, &str, &str)] =
+    &[(ToolId::Node, ph::BEZIER_CURVE, "Node — edit points (A)")];
+
+const VECTOR_BRUSH_GROUP: &[(ToolId, &str, &str)] = &[(
+    ToolId::VectorBrush,
+    ph::SCRIBBLE_LOOP,
+    "Vector Brush — freehand editable stroke",
+)];
 
 const BRUSH_GROUP: &[(ToolId, &str, &str)] = &[
     (ToolId::Brush, ph::PAINT_BRUSH, "Brush (B)"),
@@ -44,10 +60,9 @@ const BRUSH_GROUP: &[(ToolId, &str, &str)] = &[
 
 const ERASER_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Eraser, ph::ERASER, "Eraser (E)")];
 
-const FILL_GROUP: &[(ToolId, &str, &str)] = &[
-    (ToolId::Fill, ph::PAINT_BUCKET, "Fill (G)"),
-    (ToolId::Gradient, ph::GRADIENT, "Gradient (G)"),
-];
+const PIXEL_FILL_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Fill, ph::PAINT_BUCKET, "Fill (G)")];
+
+const GRADIENT_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Gradient, ph::GRADIENT, "Gradient (G)")];
 
 const EYEDROPPER_GROUP: &[(ToolId, &str, &str)] =
     &[(ToolId::Eyedropper, ph::EYEDROPPER, "Eyedropper (I)")];
@@ -69,44 +84,65 @@ const ZOOM_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Zoom, ph::MAGNIFYING_GLAS
 
 const HAND_GROUP: &[(ToolId, &str, &str)] = &[(ToolId::Hand, ph::HAND, "Hand (H)")];
 
-const TOOL_GROUPS: &[&[(ToolId, &str, &str)]] = &[
-    MOVE_GROUP,
+// Move is emitted first on its own (see `visible_groups`) so the Node tool can sit
+// directly beneath it in the vector context; these are the remaining shared top
+// tools that follow.
+const COMMON_TOP_GROUPS: &[&[(ToolId, &str, &str)]] = &[
     SEL_GROUP,
     LASSO_GROUP,
     WAND_GROUP,
     CROP_GROUP,
     EYEDROPPER_GROUP,
+];
+
+const PIXEL_GROUPS: &[&[(ToolId, &str, &str)]] = &[
     HEAL_GROUP,
     PATCH_GROUP,
     BRUSH_GROUP,
     CLONE_GROUP,
     ERASER_GROUP,
-    FILL_GROUP,
+    PIXEL_FILL_GROUP,
     SMUDGE_GROUP,
     DODGE_GROUP,
+];
+
+const VECTOR_GROUPS: &[&[(ToolId, &str, &str)]] = &[NODE_GROUP];
+const NO_CONTEXT_GROUPS: &[&[(ToolId, &str, &str)]] = &[];
+
+const COMMON_BOTTOM_GROUPS: &[&[(ToolId, &str, &str)]] = &[
+    GRADIENT_GROUP,
     PEN_GROUP,
+    VECTOR_BRUSH_GROUP,
     TEXT_GROUP,
     SHAPE_GROUP,
     HAND_GROUP,
     ZOOM_GROUP,
 ];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolbarContext {
+    Pixel,
+    Vector,
+    Neutral,
+}
+
 const TOOLBOX_TOOL_W: f32 = 36.0;
 const TOOLBOX_TOOL_H: f32 = 30.0;
-const TOOLBOX_GRID_COLS: usize = 3;
-const TOOLBOX_ROW_SPACING_Y: f32 = 3.0;
-const TOOLBOX_HEADER_BTN_H: f32 = 28.0;
-const TOOLBOX_HEADER_SPACING_Y: f32 = 4.0;
-const TOOLBOX_SECTION_H: f32 = 20.0;
-const TOOLBOX_SWATCH_H: f32 = 38.0;
-const TOOLBOX_FRAME_EXTRA_H: f32 = 6.0;
-const TOOLBOX_THREE_COLUMN_EXTRA_H: f32 = 38.0;
-const TOOLBAR_TOP_H: f32 = 86.0;
-const RULER_SIZE: f32 = 20.0;
-const STATUSBAR_H: f32 = 22.0;
+const TOOLBAR_ICON_SIZE: f32 = 19.0;
 
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
+    let context = toolbar_context(data);
+    let background_locked = active_background_locked(data);
+    let active_visible = tool_visible_in_context(context, data.tool.active_tool);
+
+    // A layer-context change must never leave a hidden destructive tool active.
+    // Modal sessions own their tool until commit/cancel, so defer the fallback.
+    let active_blocked_by_background =
+        background_locked && tool_writes_layer(data.tool.active_tool);
+    if (!active_visible || active_blocked_by_background) && !data.chrome.is_tool_modal {
+        actions.tool.select_tool = Some(ToolId::Move);
+    }
 
     #[allow(deprecated)]
     egui::SidePanel::left("toolbar")
@@ -115,399 +151,509 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         .frame(egui::Frame::new().fill(pal.toolbar_bg))
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(6.0);
-
-                toolbox_toggle_btn(ui, data, actions);
-                ui.add_space(8.0);
-                active_tool_btn(ui, data, actions);
-
+                ui.add_space(4.0);
+                let swatch_h = 48.0;
+                let tools_h = (ui.available_height() - swatch_h).max(80.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("fixed_context_toolbar")
+                    .max_height(tools_h)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            for group in visible_groups(context) {
+                                let locked = background_locked && tool_writes_active_layer(group);
+                                contextual_group_btn(ui, data, actions, group, locked);
+                                ui.add_space(2.0);
+                            }
+                        });
+                    });
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    ui.add_space(8.0);
+                    ui.add_space(4.0);
                     color_swatches(ui, data, actions);
                 });
             });
         });
+}
 
-    if data.chrome.toolbox_open {
-        toolbox_popup(ctx, data, actions);
+fn toolbar_context(data: &UiData) -> ToolbarContext {
+    context_for_layer_type(
+        data.layers
+            .layer_types
+            .get(data.layers.active_layer_idx)
+            .map(String::as_str),
+    )
+}
+
+fn context_for_layer_type(layer_type: Option<&str>) -> ToolbarContext {
+    match layer_type {
+        Some("Raster") => ToolbarContext::Pixel,
+        Some("Shape" | "Path") => ToolbarContext::Vector,
+        _ => ToolbarContext::Neutral,
     }
 }
 
-fn toolbox_toggle_btn(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    let pal = data.chrome.theme_mode.palette();
-    let mut btn = egui::Button::new(egui::RichText::new(ph::TOOLBOX).size(18.0).color(pal.icon))
-        .min_size(egui::vec2(36.0, 34.0));
-    if data.chrome.toolbox_open {
-        btn = btn.fill(pal.accent_selected_bg);
-    }
-
-    let resp = ui.add(btn).on_hover_text(if data.chrome.toolbox_open {
-        "Close Toolbox"
-    } else {
-        "Open Toolbox"
-    });
-    if resp.clicked() {
-        actions.chrome.set_toolbox_open = Some(!data.chrome.toolbox_open);
-    }
-}
-
-fn active_tool_btn(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    if let Some(group) = TOOL_GROUPS
-        .iter()
+fn active_background_locked(data: &UiData) -> bool {
+    let idx = data.layers.active_layer_idx;
+    data.layers
+        .layer_is_background
+        .get(idx)
         .copied()
-        .find(|group| group.iter().any(|&(id, _, _)| id == data.tool.active_tool))
-    {
-        group_btn(ui, data, actions, group);
+        .unwrap_or(false)
+        && data.layers.layer_locked.get(idx).copied().unwrap_or(false)
+}
+
+fn visible_groups(
+    context: ToolbarContext,
+) -> impl Iterator<Item = &'static [(ToolId, &'static str, &'static str)]> {
+    // Node edits a vector object's points; keep it directly beneath Move in the
+    // vector context so the "select/move object → edit its points" relationship
+    // reads straight from the toolbar layout (no Corel-style renaming needed).
+    let node_under_move: &[&[(ToolId, &str, &str)]] = match context {
+        ToolbarContext::Vector => VECTOR_GROUPS,
+        _ => NO_CONTEXT_GROUPS,
+    };
+    // Pixel-only retouch tools sit in the middle band on raster layers.
+    let mid: &[&[(ToolId, &str, &str)]] = match context {
+        ToolbarContext::Pixel => PIXEL_GROUPS,
+        _ => NO_CONTEXT_GROUPS,
+    };
+    std::iter::once(MOVE_GROUP)
+        .chain(node_under_move.iter().copied())
+        .chain(COMMON_TOP_GROUPS.iter().copied())
+        .chain(mid.iter().copied())
+        .chain(COMMON_BOTTOM_GROUPS.iter().copied())
+}
+
+fn tool_writes_active_layer(entries: &[(ToolId, &str, &str)]) -> bool {
+    entries.iter().any(|&(id, _, _)| tool_writes_layer(id))
+}
+
+fn tool_writes_layer(id: ToolId) -> bool {
+    matches!(
+        id,
+        ToolId::Move
+            | ToolId::Brush
+            | ToolId::Pencil
+            | ToolId::Eraser
+            | ToolId::Fill
+            | ToolId::Gradient
+            | ToolId::Clone
+            | ToolId::Repair
+            | ToolId::Patch
+            | ToolId::Smudge
+            | ToolId::Dodge
+            | ToolId::Burn
+    )
+}
+
+fn tool_visible_in_context(context: ToolbarContext, tool: ToolId) -> bool {
+    visible_groups(context).any(|group| group.iter().any(|&(id, _, _)| id == tool))
+}
+
+fn contextual_group_btn(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    actions: &mut UiActions,
+    entries: &[(ToolId, &str, &str)],
+    background_locked: bool,
+) {
+    if background_locked {
+        ui.add_enabled_ui(false, |ui| group_btn(ui, data, actions, entries))
+            .response
+            .on_disabled_hover_text("Background is locked — unlock it to edit");
+    } else {
+        group_btn(ui, data, actions, entries);
     }
 }
 
-fn toolbox_popup(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
-    let pal = data.chrome.theme_mode.palette();
-    let screen = ctx.content_rect();
-    let default_pos = egui::pos2(data.chrome.toolbar_w + 8.0, 92.0);
-    let rest_pos = data
-        .chrome
-        .toolbox_pos
-        .map(|(x, y)| egui::pos2(x, y))
-        .unwrap_or(default_pos);
-    let pos = clamp_toolbox_pos(rest_pos, data, screen);
-    let docked = toolbox_is_docked(data, pos);
-    let margin = toolbox_margin(docked);
-    let fixed_h = toolbox_fixed_h(data, docked, margin);
-    let max_h = (screen.max.y - STATUSBAR_H - pos.y - fixed_h).max(120.0);
-    let content_w = toolbox_content_w(data, docked);
-    let mut scroll_area = egui::ScrollArea::vertical().max_height(max_h);
-    if !docked && !data.chrome.toolbox_single_column {
-        scroll_area = scroll_area
-            .min_scrolled_height(toolbox_scroll_content_h(data))
-            .auto_shrink([false, false]);
-    } else {
-        scroll_area = scroll_area.auto_shrink([false, true]);
+#[cfg(any())]
+mod legacy_toolbox {
+    use super::*;
+
+    fn toolbox_toggle_btn(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+        let pal = data.chrome.theme_mode.palette();
+        let mut btn =
+            egui::Button::new(egui::RichText::new(ph::TOOLBOX).size(21.0).color(pal.icon))
+                .min_size(egui::vec2(36.0, 34.0));
+        if data.chrome.toolbox_open {
+            btn = btn.fill(pal.accent_selected_bg);
+        }
+
+        let resp = ui.add(btn).on_hover_text(if data.chrome.toolbox_open {
+            "Close Toolbox"
+        } else {
+            "Open Toolbox"
+        });
+        if resp.clicked() {
+            actions.chrome.set_toolbox_open = Some(!data.chrome.toolbox_open);
+        }
     }
 
-    egui::Area::new(egui::Id::new("toolbox_popup"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(pos)
-        .show(ctx, |ui| {
-            egui::Frame::popup(ui.style())
-                .fill(pal.window_bg)
-                .stroke(egui::Stroke::new(1.0_f32, pal.separator))
-                .inner_margin(egui::Margin::same(margin))
-                .show(ui, |ui| {
-                    ui.set_min_width(content_w);
-                    ui.set_max_width(content_w);
-                    if docked {
-                        let docked_h = toolbox_docked_content_h(screen, pos, margin);
-                        ui.set_min_size(egui::vec2(content_w, docked_h));
-                        ui.set_max_height(docked_h);
-                    }
+    fn active_tool_btn(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+        if let Some(group) = ALL_TOOL_GROUPS
+            .iter()
+            .copied()
+            .find(|group| group.iter().any(|&(id, _, _)| id == data.tool.active_tool))
+        {
+            group_btn(ui, data, actions, group);
+        }
+    }
 
-                    toolbox_header(ui, data, actions, pos, screen, docked);
+    fn toolbox_popup(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+        let pal = data.chrome.theme_mode.palette();
+        let screen = ctx.content_rect();
+        let default_pos = egui::pos2(data.chrome.toolbar_w + 8.0, 92.0);
+        let rest_pos = data
+            .chrome
+            .toolbox_pos
+            .map(|(x, y)| egui::pos2(x, y))
+            .unwrap_or(default_pos);
+        let pos = clamp_toolbox_pos(rest_pos, data, screen);
+        let docked = toolbox_is_docked(data, pos);
+        let margin = toolbox_margin(docked);
+        let fixed_h = toolbox_fixed_h(data, docked, margin);
+        let max_h = (screen.max.y - STATUSBAR_H - pos.y - fixed_h).max(120.0);
+        let content_w = toolbox_content_w(data, docked);
+        let mut scroll_area = egui::ScrollArea::vertical().max_height(max_h);
+        if !docked && !data.chrome.toolbox_single_column {
+            scroll_area = scroll_area
+                .min_scrolled_height(toolbox_scroll_content_h(data))
+                .auto_shrink([false, false]);
+        } else {
+            scroll_area = scroll_area.auto_shrink([false, true]);
+        }
 
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(6.0);
+        egui::Area::new(egui::Id::new("toolbox_popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .fill(pal.window_bg)
+                    .stroke(egui::Stroke::new(1.0_f32, pal.separator))
+                    .inner_margin(egui::Margin::same(margin))
+                    .show(ui, |ui| {
+                        ui.set_min_width(content_w);
+                        ui.set_max_width(content_w);
+                        if docked {
+                            let docked_h = toolbox_docked_content_h(screen, pos, margin);
+                            ui.set_min_size(egui::vec2(content_w, docked_h));
+                            ui.set_max_height(docked_h);
+                        }
 
-                    // Strict modal lock: tool switching is disabled while a
-                    // modal operation is open (the header stays live so the
-                    // toolbox can still be moved or closed).
-                    let tools_ui = ui.add_enabled_ui(!data.chrome.is_tool_modal, |ui| {
-                        scroll_area.show(ui, |ui| {
-                            let columns = toolbox_columns(data);
-                            egui::Grid::new("toolbox_grid")
-                                .num_columns(columns)
-                                .spacing(egui::vec2(4.0, TOOLBOX_ROW_SPACING_Y))
-                                .show(ui, |ui| {
-                                    for (i, group) in TOOL_GROUPS.iter().copied().enumerate() {
-                                        group_btn(ui, data, actions, group);
-                                        if (i + 1) % columns == 0 {
+                        toolbox_header(ui, data, actions, pos, screen, docked);
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+
+                        // Strict modal lock: tool switching is disabled while a
+                        // modal operation is open (the header stays live so the
+                        // toolbox can still be moved or closed).
+                        let tools_ui = ui.add_enabled_ui(!data.chrome.is_tool_modal, |ui| {
+                            scroll_area.show(ui, |ui| {
+                                let columns = toolbox_columns(data);
+                                egui::Grid::new("toolbox_grid")
+                                    .num_columns(columns)
+                                    .spacing(egui::vec2(4.0, TOOLBOX_ROW_SPACING_Y))
+                                    .show(ui, |ui| {
+                                        for (i, group) in
+                                            ALL_TOOL_GROUPS.iter().copied().enumerate()
+                                        {
+                                            group_btn(ui, data, actions, group);
+                                            if (i + 1) % columns == 0 {
+                                                ui.end_row();
+                                            }
+                                        }
+                                        if !ALL_TOOL_GROUPS.len().is_multiple_of(columns) {
                                             ui.end_row();
                                         }
-                                    }
-                                    if !TOOL_GROUPS.len().is_multiple_of(columns) {
-                                        ui.end_row();
-                                    }
-                                });
+                                    });
 
-                            ui.add_space(6.0);
-                            ui.separator();
-                            ui.add_space(6.0);
-                            ui.vertical_centered(|ui| color_swatches(ui, data, actions));
-                            if !data.chrome.toolbox_single_column {
-                                ui.add_space(TOOLBOX_THREE_COLUMN_EXTRA_H);
-                            }
+                                ui.add_space(6.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+                                ui.vertical_centered(|ui| color_swatches(ui, data, actions));
+                                if !data.chrome.toolbox_single_column {
+                                    ui.add_space(TOOLBOX_THREE_COLUMN_EXTRA_H);
+                                }
+                            });
                         });
+                        if data.chrome.is_tool_modal
+                            && ui.input(|i| i.pointer.primary_clicked())
+                            && ui
+                                .input(|i| i.pointer.interact_pos())
+                                .is_some_and(|pos| tools_ui.response.rect.contains(pos))
+                        {
+                            actions.chrome.modal_denied = true;
+                        }
                     });
-                    if data.chrome.is_tool_modal
-                        && ui.input(|i| i.pointer.primary_clicked())
-                        && ui
-                            .input(|i| i.pointer.interact_pos())
-                            .is_some_and(|pos| tools_ui.response.rect.contains(pos))
-                    {
-                        actions.chrome.modal_denied = true;
-                    }
-                });
-        });
-}
-
-fn toolbox_header(
-    ui: &mut egui::Ui,
-    data: &UiData,
-    actions: &mut UiActions,
-    pos: egui::Pos2,
-    screen: egui::Rect,
-    docked: bool,
-) {
-    if docked {
-        ui.vertical_centered(|ui| {
-            toolbox_drag_grip(ui, data, actions, pos, screen);
-            toolbox_mode_button(ui, data, actions, screen);
-        });
-        return;
+            });
     }
 
-    if data.chrome.toolbox_single_column {
-        ui.vertical_centered(|ui| {
-            toolbox_drag_grip(ui, data, actions, pos, screen);
-            toolbox_drag_button(ui, data, actions, pos, screen);
-            toolbox_mode_button(ui, data, actions, screen);
-            toolbox_close_button(ui, actions);
-        });
-    } else {
-        ui.horizontal(|ui| {
-            toolbox_drag_button(ui, data, actions, pos, screen);
-            toolbox_drag_grip(ui, data, actions, pos, screen);
-            toolbox_mode_button(ui, data, actions, screen);
-            toolbox_close_button(ui, actions);
-        });
-    }
-}
-
-fn toolbox_drag_button(
-    ui: &mut egui::Ui,
-    data: &UiData,
-    actions: &mut UiActions,
-    pos: egui::Pos2,
-    screen: egui::Rect,
-) {
-    let resp = ui
-        .add(
-            egui::Button::new(
-                egui::RichText::new(ph::TOOLBOX)
-                    .size(16.0)
-                    .color(data.chrome.theme_mode.palette().icon),
-            )
-            .min_size(egui::vec2(28.0, 28.0)),
-        )
-        .on_hover_text("Drag Toolbox");
-    if resp.dragged() {
-        move_toolbox(actions, data, screen, pos + resp.drag_delta(), false);
-    }
-    if resp.drag_stopped() {
-        move_toolbox(actions, data, screen, pos + resp.drag_delta(), true);
-    }
-}
-
-fn toolbox_drag_grip(
-    ui: &mut egui::Ui,
-    data: &UiData,
-    actions: &mut UiActions,
-    pos: egui::Pos2,
-    screen: egui::Rect,
-) {
-    let pal = data.chrome.theme_mode.palette();
-    let grip_w = if data.chrome.toolbox_single_column {
-        ui.available_width().max(28.0)
-    } else {
-        24.0
-    };
-    let (drag_rect, drag_resp) =
-        ui.allocate_exact_size(egui::vec2(grip_w, 28.0), egui::Sense::drag());
-    ui.painter().text(
-        drag_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        ph::DOTS_SIX_VERTICAL,
-        egui::FontId::proportional(15.0),
-        pal.icon,
-    );
-    if drag_resp.dragged() {
-        move_toolbox(actions, data, screen, pos + drag_resp.drag_delta(), false);
-    }
-    if drag_resp.drag_stopped() {
-        move_toolbox(actions, data, screen, pos + drag_resp.drag_delta(), true);
-    }
-}
-
-fn toolbox_mode_button(
-    ui: &mut egui::Ui,
-    data: &UiData,
-    actions: &mut UiActions,
-    screen: egui::Rect,
-) {
-    let icon = if data.chrome.toolbox_single_column {
-        ph::GRID_NINE
-    } else {
-        ph::LIST
-    };
-    let tip = if data.chrome.toolbox_single_column {
-        "Switch to 3 Columns"
-    } else {
-        "Switch to 1 Column"
-    };
-    let resp = ui
-        .add(
-            egui::Button::new(
-                egui::RichText::new(icon)
-                    .size(15.0)
-                    .color(data.chrome.theme_mode.palette().icon),
-            )
-            .min_size(egui::vec2(28.0, 28.0)),
-        )
-        .on_hover_text(tip);
-    if resp.clicked() {
-        let next_single_column = !data.chrome.toolbox_single_column;
-        actions.chrome.set_toolbox_single_column = Some(next_single_column);
-        if next_single_column {
-            actions.chrome.set_toolbox_pos = Some((0.0, toolbar_top_y(data, screen)));
+    fn toolbox_header(
+        ui: &mut egui::Ui,
+        data: &UiData,
+        actions: &mut UiActions,
+        pos: egui::Pos2,
+        screen: egui::Rect,
+        docked: bool,
+    ) {
+        if docked {
+            ui.vertical_centered(|ui| {
+                toolbox_drag_grip(ui, data, actions, pos, screen);
+                toolbox_mode_button(ui, data, actions, screen);
+            });
+            return;
         }
-    }
-}
 
-fn toolbox_close_button(ui: &mut egui::Ui, actions: &mut UiActions) {
-    let icon_color = ui.visuals().text_color();
-    let close = egui::Button::new(egui::RichText::new(ph::X).size(14.0).color(icon_color))
-        .min_size(egui::vec2(28.0, 28.0));
-    if ui.add(close).on_hover_text("Close").clicked() {
-        actions.chrome.set_toolbox_open = Some(false);
-    }
-}
-
-fn move_toolbox(
-    actions: &mut UiActions,
-    data: &UiData,
-    screen: egui::Rect,
-    desired_pos: egui::Pos2,
-    snap: bool,
-) {
-    let next = if snap {
-        snap_toolbox_pos(desired_pos, data, screen)
-    } else {
-        clamp_toolbox_pos(desired_pos, data, screen)
-    };
-    actions.chrome.set_toolbox_pos = Some((next.x, next.y));
-}
-
-fn toolbox_columns(data: &UiData) -> usize {
-    if data.chrome.toolbox_single_column {
-        1
-    } else {
-        TOOLBOX_GRID_COLS
-    }
-}
-
-fn toolbox_content_w(data: &UiData, docked: bool) -> f32 {
-    if docked {
-        return (data.chrome.toolbar_w - f32::from(toolbox_margin(true)) * 2.0).max(TOOLBOX_TOOL_W);
-    }
-    if data.chrome.toolbox_single_column {
-        return 38.0;
-    }
-    let columns = toolbox_columns(data) as f32;
-    columns * TOOLBOX_TOOL_W + (columns - 1.0).max(0.0) * 4.0
-}
-
-fn toolbox_est_w(data: &UiData) -> f32 {
-    toolbox_content_w(data, false) + f32::from(toolbox_margin(false)) * 2.0
-}
-
-fn toolbox_est_h(data: &UiData) -> f32 {
-    let margin = toolbox_margin(false);
-    toolbox_fixed_h(data, false, margin) + toolbox_scroll_content_h(data)
-}
-
-fn toolbox_fixed_h(data: &UiData, docked: bool, margin: i8) -> f32 {
-    f32::from(margin) * 2.0
-        + toolbox_header_h(data, docked)
-        + TOOLBOX_SECTION_H
-        + TOOLBOX_FRAME_EXTRA_H
-}
-
-fn toolbox_scroll_content_h(data: &UiData) -> f32 {
-    let rows = toolbox_row_count(data);
-    let tool_h =
-        rows as f32 * TOOLBOX_TOOL_H + rows.saturating_sub(1) as f32 * TOOLBOX_ROW_SPACING_Y;
-    let extra_h = if data.chrome.toolbox_single_column {
-        0.0
-    } else {
-        TOOLBOX_THREE_COLUMN_EXTRA_H
-    };
-    tool_h + TOOLBOX_SECTION_H + TOOLBOX_SWATCH_H + extra_h
-}
-
-fn toolbox_header_h(data: &UiData, docked: bool) -> f32 {
-    let buttons: usize = if docked {
-        2
-    } else if data.chrome.toolbox_single_column {
-        4
-    } else {
-        1
-    };
-    buttons as f32 * TOOLBOX_HEADER_BTN_H
-        + buttons.saturating_sub(1) as f32 * TOOLBOX_HEADER_SPACING_Y
-}
-
-fn toolbox_row_count(data: &UiData) -> usize {
-    let columns = toolbox_columns(data).max(1);
-    TOOL_GROUPS.len().div_ceil(columns)
-}
-
-fn snap_toolbox_pos(pos: egui::Pos2, data: &UiData, screen: egui::Rect) -> egui::Pos2 {
-    let mut pos = clamp_toolbox_pos(pos, data, screen);
-    if data.chrome.toolbox_single_column && pos.x <= data.chrome.toolbar_w + 18.0 {
-        pos.x = 0.0;
-        pos.y = toolbar_top_y(data, screen);
-    }
-    pos
-}
-
-fn clamp_toolbox_pos(pos: egui::Pos2, data: &UiData, screen: egui::Rect) -> egui::Pos2 {
-    if data.chrome.toolbox_single_column && pos.x <= 0.5 {
-        return egui::pos2(0.0, toolbar_top_y(data, screen));
-    }
-
-    let min_x = if data.chrome.toolbox_single_column {
-        0.0
-    } else {
-        data.chrome.toolbar_w + 4.0
-    };
-    let max_x = (screen.max.x - toolbox_est_w(data)).max(min_x);
-    let max_y = (screen.max.y - STATUSBAR_H - toolbox_est_h(data)).max(34.0);
-    egui::pos2(pos.x.clamp(min_x, max_x), pos.y.clamp(34.0, max_y))
-}
-
-fn toolbox_is_docked(data: &UiData, pos: egui::Pos2) -> bool {
-    data.chrome.toolbox_single_column && pos.x <= 0.5
-}
-
-fn toolbar_top_y(data: &UiData, screen: egui::Rect) -> f32 {
-    screen.min.y
-        + TOOLBAR_TOP_H
-        + if data.chrome.show_rulers {
-            RULER_SIZE
+        if data.chrome.toolbox_single_column {
+            ui.vertical_centered(|ui| {
+                toolbox_drag_grip(ui, data, actions, pos, screen);
+                toolbox_drag_button(ui, data, actions, pos, screen);
+                toolbox_mode_button(ui, data, actions, screen);
+                toolbox_close_button(ui, actions);
+            });
         } else {
-            0.0
+            ui.horizontal(|ui| {
+                toolbox_drag_button(ui, data, actions, pos, screen);
+                toolbox_drag_grip(ui, data, actions, pos, screen);
+                toolbox_mode_button(ui, data, actions, screen);
+                toolbox_close_button(ui, actions);
+            });
         }
-}
+    }
 
-fn toolbox_docked_content_h(screen: egui::Rect, pos: egui::Pos2, margin: i8) -> f32 {
-    (screen.max.y - STATUSBAR_H - pos.y - f32::from(margin) * 2.0).max(160.0)
-}
+    fn toolbox_drag_button(
+        ui: &mut egui::Ui,
+        data: &UiData,
+        actions: &mut UiActions,
+        pos: egui::Pos2,
+        screen: egui::Rect,
+    ) {
+        let resp = ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new(ph::TOOLBOX)
+                        .size(TOOLBAR_HEADER_ICON_SIZE)
+                        .color(data.chrome.theme_mode.palette().icon),
+                )
+                .min_size(egui::vec2(28.0, 28.0)),
+            )
+            .on_hover_text("Drag Toolbox");
+        if resp.dragged() {
+            move_toolbox(actions, data, screen, pos + resp.drag_delta(), false);
+        }
+        if resp.drag_stopped() {
+            move_toolbox(actions, data, screen, pos + resp.drag_delta(), true);
+        }
+    }
 
-fn toolbox_margin(docked: bool) -> i8 {
-    if docked {
-        5
-    } else {
-        8
+    fn toolbox_drag_grip(
+        ui: &mut egui::Ui,
+        data: &UiData,
+        actions: &mut UiActions,
+        pos: egui::Pos2,
+        screen: egui::Rect,
+    ) {
+        let pal = data.chrome.theme_mode.palette();
+        let grip_w = if data.chrome.toolbox_single_column {
+            ui.available_width().max(28.0)
+        } else {
+            24.0
+        };
+        let (drag_rect, drag_resp) =
+            ui.allocate_exact_size(egui::vec2(grip_w, 28.0), egui::Sense::drag());
+        ui.painter().text(
+            drag_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            ph::DOTS_SIX_VERTICAL,
+            egui::FontId::proportional(TOOLBAR_HEADER_ICON_SIZE),
+            pal.icon,
+        );
+        if drag_resp.dragged() {
+            move_toolbox(actions, data, screen, pos + drag_resp.drag_delta(), false);
+        }
+        if drag_resp.drag_stopped() {
+            move_toolbox(actions, data, screen, pos + drag_resp.drag_delta(), true);
+        }
+    }
+
+    fn toolbox_mode_button(
+        ui: &mut egui::Ui,
+        data: &UiData,
+        actions: &mut UiActions,
+        screen: egui::Rect,
+    ) {
+        let icon = if data.chrome.toolbox_single_column {
+            ph::GRID_NINE
+        } else {
+            ph::LIST
+        };
+        let tip = if data.chrome.toolbox_single_column {
+            "Switch to 3 Columns"
+        } else {
+            "Switch to 1 Column"
+        };
+        let resp = ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new(icon)
+                        .size(TOOLBAR_HEADER_ICON_SIZE)
+                        .color(data.chrome.theme_mode.palette().icon),
+                )
+                .min_size(egui::vec2(28.0, 28.0)),
+            )
+            .on_hover_text(tip);
+        if resp.clicked() {
+            let next_single_column = !data.chrome.toolbox_single_column;
+            actions.chrome.set_toolbox_single_column = Some(next_single_column);
+            if next_single_column {
+                actions.chrome.set_toolbox_pos = Some((0.0, toolbar_top_y(data, screen)));
+            }
+        }
+    }
+
+    fn toolbox_close_button(ui: &mut egui::Ui, actions: &mut UiActions) {
+        let icon_color = ui.visuals().text_color();
+        let close = egui::Button::new(
+            egui::RichText::new(ph::X)
+                .size(TOOLBAR_HEADER_ICON_SIZE)
+                .color(icon_color),
+        )
+        .min_size(egui::vec2(28.0, 28.0));
+        if ui.add(close).on_hover_text("Close").clicked() {
+            actions.chrome.set_toolbox_open = Some(false);
+        }
+    }
+
+    fn move_toolbox(
+        actions: &mut UiActions,
+        data: &UiData,
+        screen: egui::Rect,
+        desired_pos: egui::Pos2,
+        snap: bool,
+    ) {
+        let next = if snap {
+            snap_toolbox_pos(desired_pos, data, screen)
+        } else {
+            clamp_toolbox_pos(desired_pos, data, screen)
+        };
+        actions.chrome.set_toolbox_pos = Some((next.x, next.y));
+    }
+
+    fn toolbox_columns(data: &UiData) -> usize {
+        if data.chrome.toolbox_single_column {
+            1
+        } else {
+            TOOLBOX_GRID_COLS
+        }
+    }
+
+    fn toolbox_content_w(data: &UiData, docked: bool) -> f32 {
+        if docked {
+            return (data.chrome.toolbar_w - f32::from(toolbox_margin(true)) * 2.0)
+                .max(TOOLBOX_TOOL_W);
+        }
+        if data.chrome.toolbox_single_column {
+            return 38.0;
+        }
+        let columns = toolbox_columns(data) as f32;
+        columns * TOOLBOX_TOOL_W + (columns - 1.0).max(0.0) * 4.0
+    }
+
+    fn toolbox_est_w(data: &UiData) -> f32 {
+        toolbox_content_w(data, false) + f32::from(toolbox_margin(false)) * 2.0
+    }
+
+    fn toolbox_est_h(data: &UiData) -> f32 {
+        let margin = toolbox_margin(false);
+        toolbox_fixed_h(data, false, margin) + toolbox_scroll_content_h(data)
+    }
+
+    fn toolbox_fixed_h(data: &UiData, docked: bool, margin: i8) -> f32 {
+        f32::from(margin) * 2.0
+            + toolbox_header_h(data, docked)
+            + TOOLBOX_SECTION_H
+            + TOOLBOX_FRAME_EXTRA_H
+    }
+
+    fn toolbox_scroll_content_h(data: &UiData) -> f32 {
+        let rows = toolbox_row_count(data);
+        let tool_h =
+            rows as f32 * TOOLBOX_TOOL_H + rows.saturating_sub(1) as f32 * TOOLBOX_ROW_SPACING_Y;
+        let extra_h = if data.chrome.toolbox_single_column {
+            0.0
+        } else {
+            TOOLBOX_THREE_COLUMN_EXTRA_H
+        };
+        tool_h + TOOLBOX_SECTION_H + TOOLBOX_SWATCH_H + extra_h
+    }
+
+    fn toolbox_header_h(data: &UiData, docked: bool) -> f32 {
+        let buttons: usize = if docked {
+            2
+        } else if data.chrome.toolbox_single_column {
+            4
+        } else {
+            1
+        };
+        buttons as f32 * TOOLBOX_HEADER_BTN_H
+            + buttons.saturating_sub(1) as f32 * TOOLBOX_HEADER_SPACING_Y
+    }
+
+    fn toolbox_row_count(data: &UiData) -> usize {
+        let columns = toolbox_columns(data).max(1);
+        ALL_TOOL_GROUPS.len().div_ceil(columns)
+    }
+
+    fn snap_toolbox_pos(pos: egui::Pos2, data: &UiData, screen: egui::Rect) -> egui::Pos2 {
+        let mut pos = clamp_toolbox_pos(pos, data, screen);
+        if data.chrome.toolbox_single_column && pos.x <= data.chrome.toolbar_w + 18.0 {
+            pos.x = 0.0;
+            pos.y = toolbar_top_y(data, screen);
+        }
+        pos
+    }
+
+    fn clamp_toolbox_pos(pos: egui::Pos2, data: &UiData, screen: egui::Rect) -> egui::Pos2 {
+        if data.chrome.toolbox_single_column && pos.x <= 0.5 {
+            return egui::pos2(0.0, toolbar_top_y(data, screen));
+        }
+
+        let min_x = if data.chrome.toolbox_single_column {
+            0.0
+        } else {
+            data.chrome.toolbar_w + 4.0
+        };
+        let max_x = (screen.max.x - toolbox_est_w(data)).max(min_x);
+        let max_y = (screen.max.y - STATUSBAR_H - toolbox_est_h(data)).max(34.0);
+        egui::pos2(pos.x.clamp(min_x, max_x), pos.y.clamp(34.0, max_y))
+    }
+
+    fn toolbox_is_docked(data: &UiData, pos: egui::Pos2) -> bool {
+        data.chrome.toolbox_single_column && pos.x <= 0.5
+    }
+
+    fn toolbar_top_y(data: &UiData, screen: egui::Rect) -> f32 {
+        screen.min.y
+            + TOOLBAR_TOP_H
+            + if data.chrome.show_rulers {
+                RULER_SIZE
+            } else {
+                0.0
+            }
+    }
+
+    fn toolbox_docked_content_h(screen: egui::Rect, pos: egui::Pos2, margin: i8) -> f32 {
+        (screen.max.y - STATUSBAR_H - pos.y - f32::from(margin) * 2.0).max(160.0)
+    }
+
+    fn toolbox_margin(docked: bool) -> i8 {
+        if docked {
+            5
+        } else {
+            8
+        }
     }
 }
 
@@ -522,14 +668,26 @@ fn group_btn(
     entries: &[(ToolId, &str, &str)],
 ) {
     let pal = data.chrome.theme_mode.palette();
-    let active_entry = entries
-        .iter()
-        .find(|&&(id, _, _)| id == data.tool.active_tool);
+    let is_shape_group = entries.iter().any(|&(id, _, _)| id == ToolId::Shape)
+        && entries.iter().any(|&(id, _, _)| id == ToolId::Arrow);
+    let active_entry = if is_shape_group && data.tool.active_tool == ToolId::Shape {
+        entries.get(data.tool.shape_kind.min(4) as usize)
+    } else {
+        entries
+            .iter()
+            .find(|&&(id, _, _)| id == data.tool.active_tool)
+    };
     let preferred_entry = data
         .tool
         .tool_group_preferences
         .iter()
         .find_map(|pref| entries.iter().find(|&&(id, _, _)| id == *pref));
+    let preferred_entry =
+        if is_shape_group && preferred_entry.is_some_and(|&(id, _, _)| id == ToolId::Shape) {
+            entries.get(data.tool.shape_kind.min(4) as usize)
+        } else {
+            preferred_entry
+        };
     let (shown_id, shown_icon, shown_tip) = active_entry.or(preferred_entry).unwrap_or(&entries[0]);
     let is_active = active_entry.is_some();
     let has_multi = entries.len() > 1;
@@ -539,7 +697,7 @@ fn group_btn(
     let icon_color = pal.icon;
     let mut btn = egui::Button::new(
         egui::RichText::new(*shown_icon)
-            .size(15.0)
+            .size(TOOLBAR_ICON_SIZE)
             .color(icon_color),
     )
     .min_size(egui::vec2(TOOLBOX_TOOL_W, TOOLBOX_TOOL_H));
@@ -573,10 +731,35 @@ fn group_btn(
 
         resp.context_menu(|ui| {
             ui.set_min_width(160.0);
-            for &(entry_id, entry_icon, entry_name) in entries {
-                let checked = entry_id == data.tool.active_tool;
-                let label = format!("{} {}", entry_icon, entry_name);
+            for (entry_index, &(entry_id, entry_icon, entry_name)) in entries.iter().enumerate() {
+                let checked = entry_id == data.tool.active_tool
+                    && (!is_shape_group
+                        || entry_id == ToolId::Arrow
+                        || data.tool.shape_kind as usize == entry_index);
+                let mut label = egui::text::LayoutJob::default();
+                label.append(
+                    entry_icon,
+                    0.0,
+                    egui::TextFormat {
+                        font_id: egui::FontId::proportional(TOOLBAR_ICON_SIZE),
+                        color: ui.visuals().text_color(),
+                        ..Default::default()
+                    },
+                );
+                label.append(
+                    &format!("  {entry_name}"),
+                    0.0,
+                    egui::TextFormat {
+                        font_id: egui::TextStyle::Button.resolve(ui.style()),
+                        color: ui.visuals().text_color(),
+                        valign: egui::Align::Center,
+                        ..Default::default()
+                    },
+                );
                 if ui.add(egui::Button::selectable(checked, label)).clicked() {
+                    if is_shape_group && entry_id == ToolId::Shape {
+                        actions.tool.set_shape_kind = Some(entry_index.min(4) as u8);
+                    }
                     actions.tool.select_tool = Some(entry_id);
                     ui.close();
                 }
@@ -681,7 +864,7 @@ fn paint_swap_button(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         ph::SWAP,
-        egui::FontId::proportional(9.0),
+        egui::FontId::proportional(11.0),
         pal.icon,
     );
 }
@@ -721,4 +904,80 @@ fn paint_reset_button(
         egui::Stroke::new(0.5_f32, pal.separator),
         egui::StrokeKind::Outside,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layer_types_map_to_expected_toolbar_context() {
+        assert_eq!(
+            context_for_layer_type(Some("Raster")),
+            ToolbarContext::Pixel
+        );
+        assert_eq!(
+            context_for_layer_type(Some("Shape")),
+            ToolbarContext::Vector
+        );
+        assert_eq!(context_for_layer_type(Some("Path")), ToolbarContext::Vector);
+        assert_eq!(
+            context_for_layer_type(Some("Text")),
+            ToolbarContext::Neutral
+        );
+        assert_eq!(context_for_layer_type(None), ToolbarContext::Neutral);
+    }
+
+    #[test]
+    fn shared_tools_stay_visible_across_contexts() {
+        for context in [
+            ToolbarContext::Pixel,
+            ToolbarContext::Vector,
+            ToolbarContext::Neutral,
+        ] {
+            assert!(tool_visible_in_context(context, ToolId::Move));
+            assert!(tool_visible_in_context(context, ToolId::Eyedropper));
+            assert!(tool_visible_in_context(context, ToolId::Hand));
+            assert!(tool_visible_in_context(context, ToolId::Zoom));
+        }
+    }
+
+    #[test]
+    fn pixel_and_vector_specific_tools_do_not_leak() {
+        assert!(tool_visible_in_context(
+            ToolbarContext::Pixel,
+            ToolId::Brush
+        ));
+        assert!(!tool_visible_in_context(
+            ToolbarContext::Pixel,
+            ToolId::Node
+        ));
+        assert!(tool_visible_in_context(
+            ToolbarContext::Vector,
+            ToolId::Node
+        ));
+        assert!(!tool_visible_in_context(
+            ToolbarContext::Vector,
+            ToolId::Brush
+        ));
+        assert!(!tool_visible_in_context(
+            ToolbarContext::Neutral,
+            ToolId::Node
+        ));
+    }
+
+    #[test]
+    fn creation_tools_are_available_on_a_new_raster_document() {
+        for tool in [
+            ToolId::Pen,
+            ToolId::Shape,
+            ToolId::VectorBrush,
+            ToolId::Arrow,
+            ToolId::Text,
+            ToolId::Gradient,
+        ] {
+            assert!(tool_visible_in_context(ToolbarContext::Pixel, tool));
+            assert!(tool_visible_in_context(ToolbarContext::Neutral, tool));
+        }
+    }
 }

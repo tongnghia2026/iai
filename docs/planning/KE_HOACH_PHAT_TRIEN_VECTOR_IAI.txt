@@ -1,0 +1,1491 @@
+KẾ HOẠCH PHÁT TRIỂN NỀN TẢNG VECTOR TÍCH HỢP CHO iAi
+Phiên bản 2 — điều chỉnh theo kiến trúc repository và AUDIT CODE thực tế
+
+THAY ĐỔI CHÍNH SAU AUDIT (đọc kèm các mục được trỏ):
+- Đã kiểm chứng toàn bộ tuyên bố kiến trúc với code thật; các tuyên bố ở Mục 1
+  đều ĐÚNG (LayerType 6 variant, Document->Canvas->LayerStack flat-vec,
+  PenAnchor, CommandHistory saved-checkpoint/RAM budget, .iai v3=CMYK reject
+  version cao hơn, ink planes ở TileMap, PDF chỉ raster).
+- BỔ SUNG tích hợp hạ tầng thật mà bản cũ bỏ sót: gateway/HistoryGate,
+  layer_revision + GPU atlas, history nửa-migrate -> Mục 3.9.
+- ĐỊNH SẴN bố cục file/module vector để KHÔNG phải tách file về sau (code hiện
+  đã rất lớn) -> Mục 3.10.
+- TÁCH RÕ lớp NỀN TẢNG (đóng băng contract) khỏi lớp TÍNH NĂNG (mở rộng, không
+  sửa nền) + cổng Foundation Freeze -> Mục 3.11.
+- NÂNG rủi ro co giãn "một object/một layer" thành rủi ro kiến trúc -> Mục 3.12.
+- SỬA Phase 4: ShapeKind hiện chỉ Rectangle/Ellipse/Line; Polygon/Star là
+  PRIMITIVE MỚI phải thêm (không phải "giữ primitive có sẵn") -> Mục 6/Phase 4.
+- THÊM cột mốc dùng-được-sớm "Lát dọc mỏng M1" -> Mục 14.
+- CHIA NHỎ công việc nền tảng thành task T0-T6 có DoD -> Mục 15.
+- BỔ SUNG nợ kỹ thuật phải tránh (audit) -> Mục 8.
+- TÍNH TRƯỚC đa trang/Artboard: khóa invariant page-relative + envelope pages-
+  list để sau này thêm Artboard (Designer) / Publisher-pages KHÔNG phải sửa nền
+  -> Mục 3.13. Vector core đã viết KHÔNG phải sửa (tọa độ trừu tượng).
+
+
+1. MỤC ĐÍCH VÀ PHẠM VI
+======================
+
+Tài liệu này định hướng việc bổ sung khả năng thiết kế vector vào iAi mà không
+tách thành ứng dụng, document model hoặc layer stack riêng. Kế hoạch đã được
+điều chỉnh theo code hiện tại của repository:
+
+- Document chứa một Canvas.
+- Canvas chứa một LayerStack dùng chung.
+- LayerType hiện có Raster, Adjustment, Group, Text, Shape và SmartObject.
+- Shape và Text giữ model editable trong LayerType nhưng rasterize vào TileMap.
+- Compositor, mask, blend, thumbnail và phần lớn export hiện tiêu thụ TileMap.
+- Pen giữ Bézier trong trạng thái tool và hiện commit thành selection hoặc pixel.
+- CommandHistory đã có grouping, merge, saved checkpoint và giới hạn RAM.
+- File .iai là ZIP gồm manifest JSON và PNG của từng layer.
+- CMYK hiện lấy ink planes trong TileMap làm dữ liệu màu gốc.
+- PDF hiện hỗ trợ raster export và hybrid giữ trang PDF nguồn + raster overlay;
+  chưa có backend xuất Shape/Path thành PDF path thật.
+
+Mục tiêu là tiến hóa kiến trúc này theo các lát cắt nhỏ, giữ raster workflow ổn
+định. Không xây một vector engine độc lập rồi ghép lại sau.
+
+
+2. TẦM NHÌN SẢN PHẨM
+====================
+
+iAi hướng tới một ứng dụng thiết kế thống nhất:
+
+- Retouch raster và thiết kế vector trong cùng document.
+- Cùng canvas, layer panel, mask, group, opacity và blend stack.
+- Path, Shape và Text giữ dữ liệu editable, không lấy bitmap cache làm nguồn thật.
+- File .iai lưu được model vector và một bản raster fallback phù hợp.
+- Có thể chuyển ngữ cảnh công cụ ảnh/vector mà không chuyển file.
+- Xuất raster ổn định trước; PDF vector/hybrid thật được phát triển sau khi model,
+  style, transform và màu đã ổn định.
+
+Thước đo thành công là tính nhất quán của model, command, cache, serialization và
+export; không phải số lượng tool được thêm trong thời gian ngắn.
+
+
+2.1. THAM KHẢO AFFINITY VÀ KẾT LUẬN ÁP DỤNG
+-------------------------------------------
+
+Tài liệu chính thức Affinity xác nhận các workflow đáng tham khảo:
+
+- Designer Persona dành cho công cụ vector; Pixel Persona dành cho pixel brush
+  và raster texture trên thiết kế vector. Persona là ngữ cảnh UI, không phải hai
+  document model.
+- Khi dùng Erase Brush trên vector, Affinity tạo pixel mask và áp lên vector vì
+  bản thân vector không có pixel để xóa. Vector và mask vẫn sửa độc lập.
+- Affinity Assistant cho phép chọn policy khi erasing trên vector: tự tạo mask,
+  rasterize object hoặc không cho thao tác.
+- Clipping tạo quan hệ parent-child: path/alpha của parent giới hạn phần nhìn thấy
+  của child; phần child nằm ngoài parent bị ẩn.
+- Có insertion target "Inside"; brush stroke tạo mới có thể tự động clip vào
+  object đang chọn.
+- Clipped child vẫn chọn, sửa opacity/blend và transform độc lập được. Khi scale
+  parent, Affinity mặc định có thể scale child cùng; tùy chọn Lock Children cho
+  phép resize parent mà không scale nội dung child.
+- Vector Brush là công cụ khác Pixel Brush: nó tạo curve/stroke editable, hỗ trợ
+  pressure profile và texture line style.
+
+Nguồn tham khảo chính thức:
+
+- https://affinity.help/photo2ipad/en-US.lproj/pages/Painting/erasing.html
+- https://affinity.help/photo2ipad/en-US.lproj/pages/Layers/LayerMasks.html
+- https://affinity.help/photo2ipad/en-US.lproj/pages/LayerOperations/clipping.html
+- https://affinity.help/designer2ipad/English.lproj/pages/Introduction/about_Personas.html
+- https://affinity.help/designer2ipad/English.lproj/pages/CurvesShapes/pressure.html
+- https://affinity.help/designer2ipad/en-US.lproj/pages/CurvesShapes/texture_line_style.html
+
+Kết luận áp dụng cho iAi:
+
+- Không biến Brush/Eraser raster hiện tại thành tool vector lai.
+- Pixel Brush trên Shape/Text/Path mặc định tạo hoặc tái sử dụng một Pixel Paint
+  child được clip inside object.
+- Eraser trên Shape/Text/Path mặc định tạo hoặc tái sử dụng một editable Raster
+  Mask; không sửa geometry và không rasterize object.
+- Vector Brush là tool riêng, tạo open Path với stroke editable.
+- Vector Eraser/Knife là tool geometry riêng ở giai đoạn sau; không dùng thay cho
+  non-destructive pixel erasing.
+- UX Assistant/policy phải cho phép Auto Create Attachment, Ask, Rasterize hoặc
+  Block; mặc định an toàn là Auto Create Attachment.
+
+
+2.2. CORELDRAW LÀ CHUẨN WORKFLOW VECTOR CHÍNH
+---------------------------------------------
+
+iAi dùng CorelDRAW làm chuẩn tham chiếu chính cho tên khái niệm, mental model và
+thứ tự tool vector vì người dùng mục tiêu làm quảng cáo, bảng hiệu và in ấn đã
+quen workflow Corel. Không sao chép giao diện hoặc toàn bộ feature; chỉ ánh xạ
+workflow quen thuộc lên kiến trúc iAi.
+
+Các kết luận từ tài liệu chính thức CorelDRAW:
+
+- Pick Tool là công cụ trung tâm để chọn, move, size, rotate và skew object.
+- Shape Tool là công cụ chuẩn để chọn/sửa một hoặc nhiều node và control handle.
+- Curve object có open/closed path, segment thẳng/cong và nhiều subpath.
+- Node có ba loại hành vi chính: Cusp, Smooth và Symmetrical.
+- Freehand, Bézier, Pen và Polyline là các UX khác nhau trên cùng nền curve/path;
+  không cần bốn geometry engine.
+- Rectangle/Ellipse/Polygon/Star phải giữ primitive editable; Convert to Curves
+  mới chuyển thành curve object.
+- Fill và Outline là hai thuộc tính độc lập. Palette workflow phải đổi nhanh fill
+  hoặc outline của object đang chọn.
+- PowerClip đặt bitmap hoặc vector content vào một frame; content vẫn chọn, sửa,
+  reposition, fit/fill, lock/unlock và extract được; PowerClip có thể nested.
+- Shaping cơ bản gồm Weld, Trim và Intersect; kết quả và style phụ thuộc target
+  object nên selection order/target phải rõ.
+- Artistic Text và Paragraph Text là hai workflow khác nhau; cả hai có thể Convert
+  to Curves, nhưng thao tác này là một chiều và làm mất khả năng sửa text.
+- Align/Distribute áp dụng cho object và node, có reference target rõ ràng.
+- Contour, Blend, Envelope, Transparency và Artistic Media quan trọng nhưng nằm
+  sau nền chọn/curve/shape/style/PowerClip/shaping.
+- Workflow in cần process color, spot color, document palette, separations,
+  overprint fill/outline và chính sách giữ pure black/grayscale K.
+
+Nguồn tham khảo chính thức CorelDRAW:
+
+- https://product.corel.com/help/CorelDRAW/Documentation-Windows/CorelDRAW-en/CorelDRAW-Toolbox.html
+- https://product.corel.com/help/CorelDRAW/Documentation-Windows/CorelDRAW-en/CorelDRAW-Curve-objects.html
+- https://product.corel.com/help/CorelDRAW/Documentation-Windows/CorelDRAW-en/CorelDRAW-PowerClip-objects.html
+- https://product.corel.com/help/CorelDRAW/540111147/CorelDRAW-en/CorelDRAW-Weld-and-intersect-objects.html
+- https://product.corel.com/help/CorelDRAW/Documentation-Windows/CorelDRAW-en/CorelDRAW-Fills.html
+- https://product.corel.com/help/CorelDRAW/Documentation-Windows/CorelDRAW-en/CorelDRAW-Find-edit-and-convert-text.html
+- https://product.corel.com/help/CorelDRAW/Documentation-Windows/CorelDRAW-en/CorelDRAW-Choose-colors.html
+- https://product.corel.com/help/CorelDRAW/540111186/Documentation-Windows/CorelDRAW-en/CorelDRAW-Color-separations.html
+- https://product.corel.com/help/CorelDRAW/Documentation-Windows/CorelDRAW-en/CorelDRAW-Color-trapping-and-overprinting.html
+
+Nguyên tắc sản phẩm:
+
+- Dùng thuật ngữ Corel quen thuộc khi không xung đột với iAi: Pick, Shape/Node,
+  Convert to Curves, PowerClip, Weld, Trim, Intersect, Fill và Outline.
+- Có thể ghi tên thân thiện kèm thuật ngữ kỹ thuật, ví dụ “Outline (Stroke)”.
+- Shortcut Corel chỉ áp dụng sau khi kiểm tra xung đột với raster tools hiện tại.
+- Affinity tiếp tục là tham khảo cho mask/clipping tự động; không quyết định
+  toolbox, terminology hoặc thứ tự ưu tiên vector của iAi.
+
+
+2.3. MA TRẬN ƯU TIÊN TOOL CHO QUẢNG CÁO VÀ IN ẤN
+------------------------------------------------
+
+Nền bắt buộc (P0):
+
+- Pick: select, multi-select, move, scale, rotate, skew, duplicate.
+- Shape/Node: node/handle, Cusp/Smooth/Symmetrical, join/break, open/close,
+  reverse direction, insert/delete và align nodes.
+- Curve: Pen/Bézier trước; Freehand/Polyline là input mode dùng chung PathData.
+- Primitive: Rectangle, rounded rectangle, Ellipse, Polygon và Star.
+- Fill/Outline: none/solid, width, cap, join, miter và palette interaction.
+- PowerClip: add/edit/select/extract/lock content; raster + vector content.
+- Shaping: Weld, Trim, Intersect; target/selection order rõ ràng.
+- Align/Distribute và snapping.
+- Artistic Text, Paragraph Text cơ bản và Convert to Curves.
+- CMYK/process color, document palette, spot color identity và overprint flags.
+- Save/load và PDF output không làm mất các thuộc tính sản xuất đã công bố.
+
+Năng lực quảng cáo thường dùng sau nền (P1):
+
+- Contour/offset path, đặc biệt cho viền chữ, tem và đường bế.
+- Duplicate/step-and-repeat và transform chính xác.
+- Text on Path.
+- Gradient và Transparency.
+- Blend.
+- Knife/Virtual Segment Delete và vector geometry erasing.
+- Artistic Media/Vector Brush và pressure-width profile.
+
+Năng lực làm sau theo workflow thật (P2):
+
+- Envelope/distort vector.
+- Extrude, complex artistic brushes, pattern/mesh fill.
+- Advanced compound shaping/Shape Builder.
+- Trace.
+
+Không để feature P1/P2 trì hoãn tính đúng của P0.
+
+
+3. CÁC QUYẾT ĐỊNH KIẾN TRÚC PHÙ HỢP CODE HIỆN TẠI
+=================================================
+
+3.1. Một Document, Canvas và LayerStack
+
+- Giữ nguyên Document -> Canvas -> LayerStack.
+- Thêm Path như một LayerType mới; không tạo VectorDocument hay VectorLayerStack.
+- Giai đoạn đầu áp dụng quy tắc một editable vector object trên một Layer.
+- Group tiếp tục dùng LayerType::Group và Layer::parent_id.
+- Chưa xây một vector layer chứa nhiều object. Chỉ xem xét sau khi workflow thật
+  chứng minh lợi ích và đã xác định selection/ordering nội bộ.
+
+3.2. Model là nguồn thật, TileMap là cache và fallback
+
+- PathData/ShapeData/TextData là nguồn dữ liệu editable.
+- Layer.tiles của Path/Shape/Text là raster cache dùng cho compositor hiện tại,
+  thumbnail, raster export và backward-display fallback.
+- Chỉnh model phải làm cache stale; không chỉnh model bằng cách sửa cache.
+- Công cụ raster không được âm thầm vẽ trực tiếp lên Path/Shape/Text.
+- Khi người dùng muốn Brush/Eraser/Filter trên vector layer, UI phải yêu cầu một
+  thao tác Rasterize rõ ràng hoặc tạo raster layer mới theo policy được duyệt.
+- Chưa thay compositor bằng một scene renderer vector trong các giai đoạn đầu.
+
+3.2.1. Pixel Paint inside vector
+
+- Pixel Paint là một Raster layer thật, không phải Layer.tiles cache của vector.
+- Pixel Paint là clipped child của Shape/Text/Path và chỉ hiển thị trong alpha/path
+  của parent, tương tự PowerClip/Insert Inside.
+- Một parent có thể có nhiều clipped child; thứ tự child phải xác định rõ.
+- Child vẫn có opacity, blend mode, mask và transform/offset riêng.
+- Layer panel phải hiển thị nesting, cho chọn child và có Release/Move Outside.
+- Brush stroke đầu tiên trên vector tạo child + paint delta trong một atomic undo.
+- Các stroke sau tái sử dụng child đang chọn/phù hợp; không tự tạo layer mỗi dab.
+- Clip kết hợp alpha của vector parent với mask của parent theo thứ tự compositing
+  được ADR xác định.
+
+3.2.2. Eraser trên vector
+
+- Mặc định Eraser tạo hoặc chọn Raster Mask gắn với object vector.
+- Eraser ghi giá trị ẩn vào mask; Paint Brush trắng có thể khôi phục.
+- Vector geometry, fill/stroke và baked cache không bị sửa.
+- Tạo mask + nét erase đầu tiên là một atomic undo.
+- Có lệnh Disable, Invert, Delete và Apply/Rasterize rõ ràng.
+- Nếu object đã có mask, policy phải xác định tái sử dụng mask đó hay tạo mask mới;
+  MVP khuyến nghị mỗi layer có một Raster Mask như model hiện tại.
+
+3.2.3. Không dùng chung một field quan hệ mơ hồ
+
+Layer::parent_id hiện biểu diễn membership của Group và group_range dựa vào flat
+stack. Không được âm thầm dùng cùng field này cho cả Group và Clipping nếu không
+có discriminator, vì reorder, serialization và compositor sẽ không biết quan hệ
+nào đang được áp dụng.
+
+Trước khi hỗ trợ Pixel Paint inside cần ADR chọn một trong hai hướng:
+
+- Thêm LayerRelation/ParentRelation có kiểu GroupMember hoặc ClippedInside; hoặc
+- Thêm clip_parent_id riêng và định nghĩa invariant với parent_id hiện tại.
+
+Mọi lựa chọn phải xác định cycle prevention, reorder, duplicate, delete, group,
+mask, selection, transform, save/load và unknown relation fallback.
+
+3.3. Một object trên một layer ở MVP
+
+- Path layer chứa một PathData có thể gồm nhiều contour/subpath.
+- Compound path và lỗ nằm trong PathData, không phải nhiều layer ẩn.
+- Boolean nhiều layer tạo một Path layer kết quả hoặc thay thế nguồn theo một
+  command rõ ràng.
+- Không đưa selection node, hover, active handle hoặc trạng thái tool vào model.
+- Clipped Pixel Paint và Raster Mask là attachment của object, không làm PathData
+  trở thành multi-object vector layer.
+- Quy tắc một object/layer là giới hạn triển khai MVP của iAi, không phải hành vi
+  UI người dùng phải hiểu; Pick/Shape/PowerClip vẫn phải cho cảm giác object-based
+  giống workflow Corel.
+
+3.4. Hệ tọa độ và transform
+
+Code hiện có Layer::offset, geometry local của Shape, các field transform riêng
+của Text và Free Transform dựa trên quad/resampling. Vector cần contract mới:
+
+- Path node nằm trong object-local space.
+- PathData có affine transform riêng hoặc VectorObjectTransform dùng chung.
+- Layer::offset tiếp tục là vị trí layer trên canvas trong giai đoạn chuyển tiếp.
+- API phải ghi rõ local, layer, document/canvas và screen space.
+- Bổ sung PAGE/ARTBOARD space (Mục 3.13): object là page-relative; document-space
+  chứa nhiều page có origin/size. MVP = một page ngầm nên page-space TRÙNG canvas-
+  space; Layer::offset là offset TRONG page. Không hard-code tọa độ theo một
+  canvas size duy nhất.
+- Zoom/pan chỉ ảnh hưởng chuyển đổi canvas <-> screen, không sửa model.
+- Không dùng Homography của Perspective Crop làm affine transform chung.
+- Projective/distort/perspective trên vector chưa được coi là editable transform
+  ở MVP; phải rasterize explicit hoặc bị từ chối rõ ràng.
+
+Trước khi code Path layer phải có ADR xác định quan hệ giữa local transform và
+Layer::offset, bao gồm migration tương lai của Shape/Text.
+
+ADR cũng phải chốt transform của attachment:
+
+- Move parent: attachment đi cùng parent.
+- Scale/rotate parent: mặc định scale/rotate attachment cùng hay giữ pixel ở
+  document space phải là policy hiển thị rõ.
+- Cần tùy chọn Lock Children tương đương để đổi geometry parent mà không làm méo
+  Pixel Paint.
+- Sửa node/đổi Shape primitive chỉ đổi clipping boundary; không tự warp pixels.
+
+3.5. Màu ở cấp vector object
+
+Shape/Text hiện lưu RGBA, trong khi CMYK document giữ CMYK ink ở TileMap. Không
+được tạo PathStyle chỉ chứa RGBA rồi coi như đã hỗ trợ CMYK đầy đủ.
+
+Cần định nghĩa ColorValue dùng chung trước khi khóa schema Path:
+
+- RGB kèm color space/ý nghĩa chuyển đổi phù hợp pipeline hiện có.
+- CMYK kèm bốn kênh và profile association của document.
+- Alpha/opacity có semantics rõ ràng.
+- Quy tắc đổi document RGB <-> CMYK.
+- Spot color để ngoài MVP nhưng representation không nên ngăn mở rộng hợp lý.
+
+Điều chỉnh theo nhu cầu in ấn Corel-like:
+
+- Spot color identity không được suy ra chỉ từ giá trị CMYK gần giống; phải có
+  loại process/spot, tên swatch và alternate/process preview rõ ràng.
+- Fill và Outline có overprint flag độc lập.
+- Document palette lưu swatch dùng trong tài liệu và tham chiếu ổn định nếu cần.
+- Chính sách preserve pure black và map grayscale to K phải được xác định trước
+  PDF/separation output.
+- UI có thể trì hoãn spot palette đầy đủ, nhưng schema ColorValue không được khóa
+  theo cách bắt buộc migration toàn bộ object khi bổ sung spot/overprint.
+
+Raster cache của vector trong CMYK document phải tạo đồng thời RGB mirror và ink
+planes đúng theo pipeline hiện tại. Worker không hỗ trợ ink không được âm thầm
+làm mất CMYK; có thể dùng synchronous fallback như Shape hiện nay trong lát cắt
+đầu, sau đó tối ưu có benchmark.
+
+3.6. Tool framework
+
+Giữ Tool trait và ToolManager concrete-field hiện tại. Compile-time exhaustive
+match là ưu điểm, nhưng phải thừa nhận wiring đang nằm ở nhiều nơi:
+
+- ToolId.
+- Module và field/constructor của ToolManager.
+- tool_dyn/tool_dyn_mut và accessor.
+- Toolbar/group.
+- Top options.
+- Shortcut và input routing.
+- Cursor/overlay/UI data.
+- App action handling.
+
+Giai đoạn đầu chỉ lập checklist wiring và test/compile guard. Chưa tạo registry,
+macro hoặc plugin runtime. Chỉ tập trung hóa khi có ít nhất hai tool vector mới và
+chi phí wiring thực tế chứng minh cần thiết.
+
+Phân biệt tool ngay trong UX/spec:
+
+- Pixel Brush: ghi TileMap của raster target hoặc clipped Pixel Paint.
+- Eraser: xóa pixel target; nếu target là vector thì ghi Raster Mask.
+- Vector Brush: tạo Path + VectorStroke, không ghi pixel attachment.
+- Vector Eraser/Knife: sửa geometry bằng split/trim/boolean, làm sau.
+
+Tool naming/role theo Corel-like UX:
+
+- Pick là tool chọn và transform object mặc định.
+- Shape là tool sửa node; “Node Tool” có thể dùng như chú thích nhưng không tạo
+  hai tool trùng chức năng.
+- Pen, Bézier, Freehand và Polyline là input modes/tools dùng chung PathData,
+  snapping, preview và command infrastructure.
+- Fill/Outline là thuộc tính object; không nhập nhằng với raster Fill Tool.
+
+3.7. Command và undo/redo
+
+Tái sử dụng Command, EditContext và CommandHistory. Không xây undo engine riêng.
+
+- Mọi thay đổi bền vững của Path phải qua command.
+- Pointer drag dùng preview session và chỉ commit một command.
+- Cancel không ghi history.
+- Model command không chụp TileMap lớn nếu có thể lưu model trước/sau nhỏ.
+- Cache là derived state: undo/redo khôi phục model và đánh dấu/rebuild cache.
+- Không dùng LayerStructureCommand chụp toàn LayerStack cho các thao tác node/style
+  thường xuyên.
+- Create/delete/replace layer có thể tái sử dụng hoặc mở rộng command cấu trúc,
+  nhưng phải đo footprint thật của tiles/cache.
+
+Các command tối thiểu:
+
+- CreatePathLayer / DeletePathLayer.
+- ReplacePathGeometry.
+- ChangeVectorStyle.
+- ChangeVectorTransform.
+- RasterizeVectorLayer.
+- CreateClippedPixelChild / ReleaseClippedChild.
+- CreateOrAttachRasterMask.
+- BooleanPaths và ConvertToCurves ở giai đoạn sau.
+- WeldPaths / TrimPaths / IntersectPaths với source-target policy rõ.
+- ConvertPrimitiveToCurves / ConvertTextToCurves.
+- ChangeFill / ChangeOutline / ChangeOverprint.
+
+3.8. Renderer và cache chuyển tiếp
+
+MVP dùng CPU rasterizer tạo TileMap giống mô hình Shape/Text hiện tại. Cache cần:
+
+- model_generation.
+- cache_generation.
+- Render scale/DPI/tolerance nếu kết quả phụ thuộc chúng.
+- Bounds cũ và bounds mới để invalidation.
+- Worker job mang document id, layer id và generation.
+- Kết quả worker cũ phải bị loại nếu model đã thay đổi.
+- Cache thiếu hoặc lỗi phải rebuild được từ model.
+
+Không đưa cache, generation runtime hoặc worker state vào document schema. PNG
+baked trong .iai là fallback/preview có chủ đích, không phải model cache đáng tin
+tuyệt đối.
+
+
+3.9. Tích hợp hạ tầng hiện có (BẮT BUỘC — bổ sung sau audit)
+
+Bản cũ nói "tái sử dụng Command/EditContext/CommandHistory" nhưng bỏ sót ba cơ
+chế thật đang chi phối mọi thay đổi. Vector phải tuân theo, không được đi vòng:
+
+- Gateway/HistoryGate: Canvas.cmd_history bị niêm phong sau HistoryGate
+  (core/canvas/history_gate.rs) + core/gateway.rs. MỌI thay đổi bền vững phải qua
+  record/record_as/execute; không tự push vào history. Vì vậy history, saved
+  checkpoint và invalidation không thể lệch — do compiler ép, không do quy ước.
+  Mọi command vector PHẢI đi qua đường này; EditContext là điểm truy cập.
+- layer_revision + GPU atlas: Canvas có layer_revision (u64) và một compositor
+  GPU atlas cập nhật ĐỘC LẬP với Canvas.pixels (pixels chỉ dùng cho CPU tool và
+  export). Các field dirty / stroke_dirty / plane_dirty là kênh invalidation.
+  Khi rasterize vector vào TileMap phải bump layer_revision và mark dirty đúng
+  vùng để atlas upload lại; "generation" của cache vector KHÔNG thay thế
+  layer_revision mà phải hợp tác với nó.
+- History nửa-migrate: canvas/mod.rs ghi rõ còn đường pending_stroke /
+  DeltaSnapshot (Phase 1 snapshot) song song CommandHistory (Phase 2). Command
+  vector đi HẲN CommandHistory; không bám vào pending_stroke.
+- Homography (đã cảnh báo ở 3.4) tồn tại thật trong core/geometry.rs (perspective
+  crop). KHÔNG dùng làm affine vector; vector dùng AffineTransform riêng.
+
+3.10. Bố cục file/module định sẵn (để KHÔNG phải tách file về sau)
+
+Code hiện đã rất lớn: layer.rs ~3.76k dòng, tile.rs ~2.28k, command.rs ~2.13k,
+iai.rs ~1.91k, canvas/mod.rs ~1.81k, text.rs ~1.69k. Nhồi vector vào các file này
+sẽ buộc phải tách khẩn cấp sau — điều phải TRÁNH. Vì vậy định sẵn cây module mới
+ngay từ đầu; mỗi file một trách nhiệm, ngưỡng mềm ~800-1000 dòng, vượt thì tách
+theo ranh giới đã định trước (không refactor khẩn cấp giữa chừng).
+
+Cây module vector (tạo dần theo phase, nhưng đặt tên/ranh giới ngay bây giờ):
+
+  src/core/vector/
+    mod.rs        - re-export; KHÔNG chứa logic nặng.
+    affine.rs     - AffineTransform (compose/inverse/apply point/vector/bounds).
+    path.rs       - PathData, Contour, Node, FillRule.
+    ops.rs        - validate, open/close/reverse, insert/split/delete node,
+                    join/break, convert segment line/curve, align nodes.
+    flatten.rs    - adaptive flatten theo tolerance.
+    hittest.rs    - fill/stroke hit-test, nearest node/segment.
+    style.rs      - VectorStyle, StrokeStyle.
+    color.rs      - ColorValue (RGB/CMYK/opacity). Có thể mở rộng core/color.rs
+                    nếu vừa; nếu không thì file riêng.
+    raster.rs     - rasterize PathData -> TileMap (CPU) + sinh RGB mirror và ink
+                    planes; nối layer_revision/atlas.
+    bool.rs       - Boolean/Weld/Trim/Intersect (Phase 7; để trống trước).
+    contour.rs    - offset/contour path (Phase 7B; để trống trước).
+    brush.rs      - Vector Brush appearance/pressure (Phase 6B; để trống trước).
+
+  core/mod.rs: chỉ THÊM một dòng "pub mod vector;".
+
+Command vector — FILE RIÊNG, không nhồi vào command.rs:
+
+  src/core/command_vector.rs - CreatePathLayer/DeletePathLayer,
+    ReplacePathGeometry, ChangeVectorStyle, ChangeVectorTransform,
+    RasterizeVectorLayer, CreateClippedPixelChild/ReleaseClippedChild,
+    CreateOrAttachRasterMask, WeldPaths/TrimPaths/IntersectPaths,
+    ConvertPrimitiveToCurves/ConvertTextToCurves,
+    ChangeFill/ChangeOutline/ChangeOverprint.
+  Nếu vượt ngưỡng: tách command_vector/{layer.rs, geometry.rs, style.rs,
+  clip.rs} — ranh giới đã biết trước, không phải nghĩ lại.
+
+Serialization — FILE RIÊNG, không nhồi vào iai.rs:
+
+  src/formats/iai_vector.rs - serde payload Path (contour/node/handle/closed/
+    fillrule/style/color/affine), giới hạn parser, migration. iai.rs chỉ thêm
+    ĐÚNG một nhánh dispatch: layer_type == "Path" => iai_vector::read/write.
+
+Clipping relation — sửa layer.rs TỐI THIỂU:
+
+  - layer.rs chỉ thêm: LayerType::Path (1 variant) + đúng một discriminator quan
+    hệ (LayerRelation kiểu GroupMember|ClippedInside, hoặc clip_parent_id) +
+    invariant.
+  - Logic clip nặng (thứ tự compositing, release/extract, fit/fill) đặt ở file
+    mới src/core/canvas/clip_ops.rs, KHÔNG phình layer.rs.
+  - Payload PathData nằm ở core/vector/path.rs, không nằm trong layer.rs.
+
+Tool & UI — file mới:
+
+  - src/tools/pick.rs (Pick), src/tools/node_tool.rs (Shape/Node). Pen giữ
+    pen.rs. Wiring ToolId theo checklist ở Mục 3.6/T0.3.
+  - src/ui/vector_options.rs cho option bar; ghép vào chỗ dựng option bar bằng
+    ≤ vài dòng.
+
+KỶ LUẬT SỬA FILE LỚN: mỗi phase chỉ THÊM file/hàm. Sửa file lớn hiện có giới hạn ở
+(a) một variant enum, (b) một nhánh dispatch, (c) một dòng đăng ký module. Nếu một
+thay đổi buộc viết >~50 dòng logic vào file lớn hiện có -> DỪNG, đưa logic sang
+file mới trong cây trên. Đây là điều kiện để "không cần tách file về sau".
+
+3.11. Ranh giới NỀN TẢNG (đóng băng) vs TÍNH NĂNG (mở rộng)
+
+Chia dứt khoát hai lớp để "làm nền cho chắc rồi mở rộng mà không sửa nền":
+
+Lớp NỀN TẢNG — làm chắc TRƯỚC, rồi ĐÓNG BĂNG contract (10 mục):
+  1) AffineTransform + PathData/Contour/Node/FillRule.
+  2) ColorValue RGB/CMYK/opacity.
+  3) VectorStyle/StrokeStyle.
+  4) Coordinate space contract (local/layer/PAGE/document/screen); Layer::offset
+     là page-relative (Mục 3.4/3.13); object KHÔNG phụ thuộc canvas size duy nhất.
+  5) LayerType::Path + discriminator quan hệ clipping + tham chiếu owning page.
+  6) Command contract vector qua gateway.
+  7) Cache/generation + layer_revision/atlas invalidation.
+  8) .iai schema Path + version policy (v4) + envelope pages-list (Mục 3.13).
+  9) Rasterize policy.
+ 10) Page/Artboard identity + page-relative coords (MVP: MỘT page ngầm; object lưu
+     page_id, page có origin/size/bleed/margin — CHƯA xây UI, chỉ khóa contract để
+     thêm Artboard/Publisher về sau là additive, không migrate diện rộng).
+
+Contract của lớp này = các struct công khai + serde schema + chữ ký command. Sau
+cổng "Foundation Freeze", KHÔNG đổi các contract này khi thêm tính năng; đổi phải
+có ADR + migration + lý do đo được.
+
+Lớp TÍNH NĂNG — xây TRÊN nền đã đóng băng, KHÔNG sửa nền:
+  Pick/Node tool, primitives (kể cả Polygon/Star mới), PowerClip/clip UX,
+  Boolean, Contour/offset, gradient/dash, Vector Brush, Text->Curves, PDF vector,
+  Trace, Persona. Mỗi tính năng chỉ được: thêm variant vào enum ĐÃ chừa chỗ, thêm
+  command mới, thêm file tool/ui. Nếu một tính năng ĐÒI đổi PathData/ColorValue/
+  schema -> đó là dấu hiệu nền thiết kế thiếu; quay lại ADR, KHÔNG vá lên nền.
+
+CỔNG "FOUNDATION FREEZE" — chỉ tuyên bố đóng băng khi ĐỦ cả ba:
+  - 10 contract trên có test round-trip + property test.
+  - Lát dọc mỏng M1 (Mục 14) chạy được end-to-end cho cả RGB và CMYK.
+  - Đã "giả lập trên giấy" 4 tính năng tương lai (Polygon/Star, Boolean,
+    Text->Curves, VÀ đa trang/Artboard theo Mục 3.13) và xác nhận chúng KHÔNG đòi
+    đổi contract. Nếu đòi -> sửa nền TRƯỚC khi freeze.
+
+3.12. Rủi ro co giãn multi-object (NÂNG thành rủi ro kiến trúc)
+
+Mô hình hiện tại = một TileMap đầy khung + một PNG baked mỗi layer trong .iai.
+File Corel thật (bảng hiệu, bao bì, tem nhãn) thường có HÀNG TRĂM object; nếu mỗi
+object là một layer thì RAM và kích thước .iai phình phi tuyến. "Một object/một
+layer" ở MVP chấp nhận được, nhưng NỀN TẢNG phải chừa chỗ để sau này gộp nhiều
+object trên một layer mà KHÔNG phải migrate:
+
+  - PathData đã hỗ trợ nhiều contour (compound): tận dụng để nhiều hình cùng
+    style nằm chung một Path layer trước khi cần multi-object thật.
+  - Schema .iai Path KHÔNG khóa "một payload = một object": biểu diễn dạng danh
+    sách object (dù MVP chỉ ghi một) để bản sau đọc nhiều object không cần bump
+    version phá tương thích.
+  - Raster cache PHẢI có đường "nhiều object -> một TileMap layer" trong thiết kế
+    (dù chưa bật), để không viết lại compositor sau.
+
+Đây là rủi ro kiến trúc cần chốt trong ADR T0.2, không phải feature hoãn.
+
+
+3.13. Đa trang / Artboard — invariant TÍNH TRƯỚC (xây SAU vector nền tảng)
+
+Trạng thái code thật (audit `document.rs`): `Document` giữ ĐÚNG MỘT `canvas:
+Canvas` (một trang). Đa trang hiện CHỈ tồn tại như chế độ PDF import
+(`pdf_document: Option<PdfDocumentState>` + `edited_pages: HashMap<usize,
+PdfCachedPage>`): trang active nằm trên `Document::canvas`, trang sạch render lại
+từ source, trang đã sửa cache riêng. Đây KHÔNG phải model artboard/page tổng
+quát — chỉ là bolt-on cho một luồng import. (`DocumentId` đã thread khắp
+ToolCtx/EventBus nên MULTI-DOCUMENT an toàn; nhưng MULTI-PAGE-trong-một-document
+thì CHƯA có.)
+
+Vậy lo ngại là ĐÚNG: nếu vector hard-code mọi object vào một canvas duy nhất,
+thêm artboard/page về sau sẽ phải sửa model + tọa độ + export + serialization rất
+lớn. Chốt invariant TRƯỚC Foundation Freeze là đúng thời điểm.
+
+Invariant KHÓA NGAY (chưa xây — chỉ để không phải sửa nền sau):
+- `Document` tương lai chứa được nhiều Page/Artboard.
+- Mỗi Layer/object thuộc MỘT page/artboard rõ ràng (tham chiếu tường minh).
+- Tọa độ object là PAGE-RELATIVE (theo gốc page nó thuộc về), KHÔNG phụ thuộc
+  trực tiếp kích thước một canvas duy nhất.
+- Mỗi Page/Artboard có size, orientation, bleed, margin, background riêng, đặt
+  trong một document-space chung (page có origin + transform).
+- Palette, style, asset dùng CHUNG cấp document, không nhân bản theo trang.
+- `.iai` có đường nâng cấp ADDITIVE single-canvas -> multi-page.
+- Export PDF duyệt từng page/artboard.
+
+Mô hình hợp nhất khuyến nghị (giữ mở CẢ hai kiểu Affinity):
+- Page/Artboard = { id, origin+size trong document-space, bleed, margin,
+  background }. Object lưu tọa độ page-relative + `page_id`.
+- MVP = ĐÚNG MỘT page ngầm: id mặc định, origin (0,0), size = canvas hiện tại,
+  transform identity. Khi đó page-space == canvas-space == hành vi hôm nay → MVP
+  KHÔNG đổi gì, nhưng đã future-proof.
+- Kiểu này bao được CẢ Affinity Designer Artboards (page = vùng của document lớn,
+  transform tịnh tiến) LẪN Publisher pages (page = canvas render độc lập). ADR
+  sau chọn hiện thực; PDF multi-page hiện tại (mỗi page một Canvas) là tiền lệ
+  cho envelope pages-array trong `.iai`.
+
+QUAN TRỌNG — vector core ĐÃ viết KHÔNG phải sửa: `affine.rs`/`path.rs` lưu tọa độ
+trừu tượng (f32), không dính canvas size. Chỉ các contract CHƯA đóng băng cần
+thêm chữ "page-relative": Coordinate space (3.4 / contract #4), object ownership
+(#5), `.iai` schema (#8). Đây chính là lợi ích của việc chốt bây giờ.
+
+Thứ tự triển khai (Artboard TRƯỚC pagination kiểu Publisher):
+  1) Vector core, Pick/Shape, Path, style.               (đang làm — Bước 1+)
+  2) PowerClip, shaping, text cơ bản.
+  3) Artboards / multi-page document foundation.  <-- chèn năng lực đa trang
+  4) Paragraph Text và linked text frames.
+  5) Master Pages, facing pages, numbering, preflight (Publisher-style).
+Quảng cáo–in ấn: Artboards hữu ích sớm (nhiều kích thước thiết kế); dàn
+catalogue/sách là hệ lớn, làm sau.
+
+Ghi chú Master Pages (khóa mức KHÁI NIỆM cho ADR page-model ở bước 5 — CHƯA xây):
+Master Page là QUAN HỆ KẾ THỪA giữa các trang, KHÔNG phải UI. Trang con tham chiếu
+một master (mang layout/guide/element nền dùng chung) và có thể OVERRIDE cục bộ
+từng element. Yêu cầu để không phá contract page (#10):
+- Master là một loại page riêng nằm trong pages-list envelope.
+- Trang thường mang `master_ref` optional; MVP để None.
+- Override lưu Ở TRANG CON, không sửa master; đổi master cập nhật mọi trang con
+  trừ phần đã override.
+- Facing pages / numbering / preflight nằm cùng bước 5, sau khi master + page-
+  model chạy ổn.
+Đây là backend thật (không phải "chỉ UX"); nhưng vẫn là THÊM VÀO nền đã khóa,
+không đập lại vector/layer/tọa độ.
+
+
+4. VECTOR CORE TỐI THIỂU
+========================
+
+Tạo khu vực core/vector không phụ thuộc UI, app event loop, GPU hay file dialog.
+Tên module có thể thích nghi với repository.
+
+4.1. Kiểu dữ liệu
+
+- Dùng lại core::geometry::Point và Rect nếu đáp ứng được validation/chính xác.
+- Thêm AffineTransform 2D riêng, có compose, inverse và apply point/vector/bounds.
+- PathData gồm danh sách Contour.
+- Contour gồm danh sách Node và cờ closed.
+- Node gồm anchor, optional in/out handles và node kind nếu thực sự cần.
+- Node kind P0 gồm Cusp, Smooth và Symmetrical để khớp Shape workflow quen thuộc.
+- MVP dùng cubic Bézier; quadratic chỉ thêm khi có consumer thật.
+- FillRule: NonZero và EvenOdd.
+- VectorStyle: fill, stroke và object opacity theo ADR màu.
+- StrokeStyle: width, cap, join, miter; dash để lát cắt sau.
+- Dùng tên UI Outline nhưng giữ tên code StrokeStyle nếu phù hợp chuẩn renderer;
+  mapping phải duy nhất và được ghi trong UI/model contract.
+
+4.2. Phép toán nền
+
+- Validate và sanitize finite values.
+- Giới hạn node/contour.
+- Open/close/reverse contour.
+- Insert/split/delete node.
+- Join/break curve và convert segment line/curve.
+- Align/distribute selected nodes theo reference được định nghĩa.
+- Bounds hình học và bounds tính stroke.
+- Affine transform.
+- Adaptive flatten theo tolerance; không dùng cố định 24 đoạn cho mọi cubic.
+- Fill hit-test và stroke hit-test.
+- Nearest node/segment.
+
+Không đưa Boolean, gradient, PDF hoặc trace vào vector core tối thiểu.
+
+4.3. Adapter Pen
+
+PenAnchor hiện tại không phải PathData chính thức. Cần adapter theo hai bước:
+
+1) Chuyển PenAnchor/closed thành PathData mà không đổi hành vi Pen hiện tại.
+2) Sau khi test tương đương ổn định, cho Pen preview dùng chung thuật toán Path.
+
+Trong giai đoạn adapter, Pen vẫn được phép commit thành selection/fill/stroke như
+hiện tại. Chỉ thêm commit thành Path layer sau khi persistence và command đã có.
+
+
+5. CHIẾN LƯỢC FILE .iai
+=======================
+
+5.1. Thực trạng cần tôn trọng
+
+- Mỗi layer hiện có PNG baked.
+- Manifest ghi layer_type và payload JSON riêng cho Text/Shape.
+- Type lạ hiện có thể rơi về Raster nếu PNG tồn tại, nhưng payload lạ không được
+  bảo toàn khi save lại.
+- Version mới hơn mức hỗ trợ bị từ chối.
+- CMYK dùng version 3 và các PNG ink/profile entry riêng.
+
+Vì vậy không được mô tả code hiện tại là đã có unknown-layer preservation.
+
+5.2. Schema Path
+
+Path layer cần:
+
+- layer_type = "Path".
+- path payload version riêng hoặc schema version rõ ràng.
+- Contour, node, handle, closed, fill rule.
+- Vector style và color representation.
+- Affine transform.
+- PNG baked fallback theo convention layer hiện tại.
+- Không serialize selected node, hover, overlay, cache generation hoặc flatten.
+
+Schema layer/document đồng thời phải có quan hệ clipping rõ ràng:
+
+- Group membership và clipped-inside không được nhập nhằng.
+- Pixel child vẫn serialize như Raster layer bình thường.
+- Raster Mask tiếp tục dùng payload mask hiện tại nếu contract đủ.
+- Save/load phải giữ nesting, order, transform policy và attachment identity.
+- Baked PNG của parent không được chứa gộp Pixel Paint theo cách làm mất khả năng
+  sửa child sau khi load.
+
+5.3. Chính sách tương thích
+
+Phải chọn và ghi ADR trước khi merge Path persistence:
+
+- Bản cũ hiển thị PNG fallback nhưng nếu save sẽ mất vector; hoặc
+- Tăng format version để bản cũ từ chối mở; hoặc
+- Xây unknown payload preservation trước.
+
+Không tuyên bố “file mới không làm file cũ hỏng” nếu chưa xác định hành vi mở rồi
+save bằng bản cũ. Phương án MVP an toàn được khuyến nghị:
+
+- Tăng version khi Path xuất hiện.
+- Bản không hiểu version phải từ chối rõ ràng.
+- Bản mới luôn mở file cũ.
+- PNG baked vẫn được lưu để phục vụ recovery/preview và tương lai, nhưng không dùng
+  nó để biện minh cho backward editing khi payload không được bảo toàn.
+
+Unknown-layer preservation có thể là một lát cắt riêng nếu muốn cho bản mới mở,
+hiển thị và save-through payload của plugin/type tương lai.
+
+5.4. An toàn parser
+
+Thêm giới hạn cho:
+
+- Kích thước manifest.
+- Tổng số layer.
+- Tổng node/contour/path.
+- Độ sâu/chu kỳ group.
+- Kích thước payload Path và ICC.
+- Tổng dung lượng giải nén và compression ratio hợp lý.
+- NaN/Infinity, transform singular và kích thước vượt giới hạn.
+- Dash/gradient stop khi các feature đó được thêm.
+
+Test bắt buộc:
+
+- File cũ.
+- Path round-trip.
+- Save -> load -> save giữ dữ liệu có nghĩa.
+- File malformed/truncated.
+- Payload vượt giới hạn.
+- Version mới hơn bị từ chối rõ ràng.
+
+
+6. LỘ TRÌNH TRIỂN KHAI ĐÃ ĐIỀU CHỈNH
+====================================
+
+GIAI ĐOẠN UX-0 — Workflow prototype và interaction contract
+-----------------------------------------------------------
+
+Thực hiện trước khi khóa vector core/schema. Đây là wireframe/spec, không phải
+viết hoàn chỉnh toàn bộ UI.
+
+Prototype các luồng dọc:
+
+1) Chọn Shape/Text/Path -> Pixel Brush -> tự tạo Pixel Paint inside -> undo.
+2) Chọn Shape/Text/Path -> Eraser -> tự tạo Raster Mask -> erase/restore -> undo.
+3) Chọn Pixel Paint hoặc mask trong Layers panel -> tiếp tục vẽ đúng target.
+4) Move/scale/rotate parent với child; bật/tắt Lock Children.
+5) Release clipped child, disable/delete mask và Rasterize explicit.
+6) Vector Brush -> Path stroke -> Node edit -> undo.
+7) Pick -> multi-select -> move/scale/rotate/skew -> duplicate -> undo.
+8) Pen/Bézier -> Shape Tool -> Cusp/Smooth/Symmetrical -> join/break.
+9) Primitive -> chỉnh tham số -> Convert to Curves -> sửa node.
+10) Chọn source/target -> Weld/Trim/Intersect -> kiểm tra style kết quả.
+11) PowerClip -> edit/select/reposition/lock/extract content.
+12) Palette -> đổi Fill/Outline -> CMYK/spot/overprint preflight.
+
+Interaction contract phải chốt:
+
+- Target nào được ưu tiên khi click canvas/layer panel.
+- Khi nào tái sử dụng attachment, khi nào tạo mới.
+- Tên layer mặc định và cách hiển thị nesting/thumbnail.
+- Assistant policy: Auto, Ask, Rasterize, Block.
+- Cursor/status message trước khi stroke đầu tiên.
+- Một gesture tương ứng một undo; auto-create + stroke là một transaction.
+- Hành vi khi parent locked/hidden/grouped/masked/CMYK.
+- Hành vi khi đổi Persona/ngữ cảnh tool giữa stroke.
+- Selection order, active/target object và status bar feedback cho shaping.
+- Quy tắc click palette cho Fill so với Outline, có tooltip dễ học cho người quen
+  Corel nhưng không phá shortcut/hành vi raster hiện tại.
+
+Đầu ra là state table và wireframe đủ để quyết định model/command; không tạo hai
+document model và không trì hoãn core vì polish UI.
+
+GIAI ĐOẠN 0 — Baseline và ADR bắt buộc
+--------------------------------------
+
+Mục tiêu:
+
+- Ghi baseline cargo check/test hiện tại khi được giao code.
+- Lập module/data-flow map cho Document, Canvas, LayerStack, TileMap, compositor,
+  Shape, Text, Pen, CommandHistory, .iai, CMYK và PDF.
+- Ghi đầy đủ các điểm wiring của ToolId.
+- Xác định các raster action có thể sửa nhầm vector layer.
+- Khảo sát chính xác Layer::parent_id/group_range và compositor để thiết kế clipping
+  relation mà không phá group hiện tại.
+
+ADR phải hoàn thành:
+
+1) Path/Contour/Node representation.
+2) Coordinate spaces, AffineTransform và quan hệ với Layer::offset.
+3) ColorValue RGB/CMYK và opacity semantics.
+4) Một object trên một layer ở MVP.
+5) Cache/fallback và generation.
+6) .iai version/backward compatibility.
+7) Rasterize policy.
+8) Group membership so với clipped-inside relation.
+9) Attachment transform và Lock Children policy.
+10) Corel-like selection order/target semantics cho Weld/Trim/Intersect.
+11) Process/spot color identity, document palette và overprint flags.
+
+Tiêu chí hoàn thành:
+
+- Không thay đổi hành vi sản phẩm.
+- Mọi giả định quan trọng được xác minh hoặc đánh dấu chưa xác minh.
+- Có kế hoạch file/module cụ thể cho Giai đoạn 1A.
+
+
+GIAI ĐOẠN 1A — Geometry và transform core
+-----------------------------------------
+
+Phạm vi:
+
+- AffineTransform.
+- PathData, Contour, Node, FillRule.
+- Validation, bounds, transform, open/close/reverse.
+- Adaptive flatten.
+- Hit-test nền tảng.
+- Unit/property tests thích hợp.
+
+Không nối LayerType, UI, serialization hoặc renderer.
+
+Tiêu chí hoàn thành:
+
+- Core không phụ thuộc UI/App/GPU.
+- Test path mở/đóng, nhiều contour, cubic, transform lồng nhau, bounds và dữ liệu
+  không hữu hạn.
+
+
+GIAI ĐOẠN 1B — Adapter Pen không regression
+-------------------------------------------
+
+Phạm vi:
+
+- Convert PenAnchor hiện tại sang PathData.
+- Dùng flatten/hit-test chung ở nơi phù hợp.
+- Giữ nguyên selection/fill/stroke commit hiện tại.
+- Chưa lưu Path layer.
+
+Tiêu chí hoàn thành:
+
+- Pen hiện tại không đổi UX ngoài các sửa lỗi có test.
+- Curve split bằng De Casteljau giữ hình.
+- Open/closed path và Ctrl+Enter vẫn hoạt động.
+- Có test so sánh hành vi adapter.
+
+
+GIAI ĐOẠN 1C — Style và color contract tối thiểu
+------------------------------------------------
+
+Phạm vi:
+
+- ColorValue theo ADR.
+- Fill none/solid.
+- Stroke none/solid, width, cap, join, miter.
+- Object opacity.
+- Validation và conversion tới raster pipeline RGB/CMYK hiện tại.
+
+Chưa migration toàn bộ Shape/Text. Có adapter từ style cũ để tránh big-bang
+refactor.
+
+
+GIAI ĐOẠN 2A — Path Layer persistence và command
+------------------------------------------------
+
+Phạm vi:
+
+- Thêm LayerType::Path(PathData/VectorObjectData).
+- Tạo/delete/duplicate/reorder/group/mask bằng LayerStack hiện tại.
+- Dedicated model commands.
+- Schema .iai, version policy và PNG baked fallback.
+- Pen có lựa chọn commit thành Path layer.
+
+Tiêu chí hoàn thành:
+
+- Vẽ Path -> save .iai -> reopen -> geometry/style/transform còn nguyên.
+- Undo/redo tạo và xóa Path đúng.
+- File cũ mở như trước.
+- Bản không hỗ trợ version mới từ chối đúng policy.
+- Không dùng whole-document clone cho node/style command.
+
+
+GIAI ĐOẠN 2B — Raster cache và compositor integration
+----------------------------------------------------
+
+Phạm vi:
+
+- Rasterize Path vào TileMap cho pipeline hiện tại.
+- Generation và stale-worker rejection.
+- Dirty bounds cũ/mới.
+- Thumbnail, raster export, opacity, blend, group và mask.
+- CMYK RGB mirror + ink planes theo color contract.
+- Rasterize explicit action/policy.
+
+Tiêu chí hoàn thành:
+
+- Cache có thể xóa và rebuild từ model.
+- Undo/redo không để cache sai model.
+- Worker trả muộn không ghi đè model/cache mới.
+- Không redraw toàn document khi dirty rect hiện tại cho phép cập nhật cục bộ.
+- Raster tools không âm thầm phá model vector.
+
+
+GIAI ĐOẠN 2C — PowerClip, pixel attachment và non-destructive erase
+-------------------------------------------------------------------
+
+Phạm vi:
+
+- Typed clipping relation theo ADR, không làm đổi nghĩa group một cách ngầm định.
+- PowerClip frame nhận raster hoặc vector content, hỗ trợ nested theo giới hạn an
+  toàn; Pixel Paint child là trường hợp Brush tự tạo bên trong frame vector.
+- Pixel Brush auto-create/reuse child theo UX contract.
+- Eraser auto-create/reuse Raster Mask trên vector.
+- Layers panel nesting, targeting, Select/Edit Contents, Release/Extract và Lock
+  Contents; content có transform/opacity/blend riêng.
+- Center, Fit Proportionally, Fill Proportionally và Stretch to Fill có command
+  rõ, không âm thầm sửa content khi load.
+- Atomic command cho attachment creation + stroke đầu tiên.
+- Save/load, duplicate, reorder, delete, group/mask và CMYK.
+
+Tiêu chí hoàn thành:
+
+- Brush không sửa Layer.tiles cache của vector.
+- Eraser không sửa vector geometry và có thể restore bằng mask.
+- Đổi vector geometry cập nhật clipping boundary nhưng không làm mất pixel child.
+- Move/transform/Lock Children đúng contract.
+- Edit/Finish Editing cô lập content target nhưng không tạo document/canvas khác.
+- Undo nét đầu tiên xóa cả stroke lẫn attachment vừa tự tạo; redo khôi phục cả hai.
+- File reopen giữ đầy đủ parent-child/mask và vẫn editable.
+
+
+GIAI ĐOẠN 3 — Pick Tool và Shape/Node Tool
+------------------------------------------
+
+Phạm vi:
+
+- Pick Tool: chọn Path/Shape/Text bằng bounds/fill/outline hit-test.
+- Shift multi-select, marquee select, active/target object và selection order.
+- Move/scale/rotate/skew object bằng handles quen thuộc.
+- Chọn một/nhiều node.
+- Move node/handle.
+- Insert/delete/convert node.
+- Open/close/reverse contour.
+- Cusp/Smooth/Symmetrical.
+- Join/break curve, convert line/curve segment và align selected nodes.
+- Snapping/guides dùng lại helper hiện có.
+- Overlay/handles là UI state, không serialize.
+
+Yêu cầu:
+
+- Preview drag không ghi history và không serialize.
+- Một drag = một undo command.
+- Escape khôi phục hoàn toàn.
+- Hit threshold theo screen pixel, không làm đổi model theo zoom.
+- Cache preview được throttle/generation-safe.
+
+Selection phải phân biệt rõ parent vector, clipped Pixel Paint và Raster Mask;
+không để click canvas ngẫu nhiên đổi paint target giữa ba loại này.
+
+Tên UX khuyến nghị: Pick cho object mode và Shape cho node mode. Code có thể giữ
+tên internal khác nếu cần, nhưng toolbar/status/help phải nhất quán.
+
+
+GIAI ĐOẠN 4 — Hợp nhất Shape với vector style/core
+--------------------------------------------------
+
+Chỉ bắt đầu sau khi Path chứng minh API ổn định.
+
+Phạm vi:
+
+- Shape dùng VectorStyle/ColorValue chung qua adapter/migration nhỏ.
+- Trạng thái code (audit): ShapeKind hiện CHỈ có Rectangle, Ellipse, Line
+  (core/shape.rs); rounded-rectangle là tham số corner_radius trên Rectangle,
+  không phải kind riêng. Do đó Polygon và Star là PRIMITIVE MỚI phải thêm, KHÔNG
+  phải "giữ primitive có sẵn". Phải tính công sức này, đừng coi Phase 4 chỉ là
+  "hợp nhất".
+- Rectangle, rounded rectangle, ellipse giữ primitive parameters editable;
+  Polygon và Star thêm mới với tham số riêng; line dùng curve/open-path
+  foundation. Convert to Curves của MỌI primitive (kể cả cái mới) tạo PathData
+  qua vector core.
+- Convert Shape to Curves tạo PathData.
+- Giữ file Shape cũ mở không đổi hình ngoài ý muốn.
+
+Không buộc Shape trở thành Path khi người dùng chưa Convert to Curves.
+
+
+GIAI ĐOẠN 5 — Transform vector và thao tác object
+------------------------------------------------
+
+Phạm vi:
+
+- Translate/scale/rotate affine không bake node.
+- Align/distribute.
+- Duplicate chính xác.
+- Step-and-repeat cơ bản sau duplicate/transform chính xác.
+- Group/reorder.
+- Quy tắc rõ cho skew/projective và raster fallback.
+
+Không tái sử dụng máy móc Free Transform raster nếu nó resample tiles và làm mất
+model. Có thể tái sử dụng UI handles/snapping nhưng commit phải là vector command.
+
+
+GIAI ĐOẠN 6 — Dash, gradient và style nâng cao
+------------------------------------------------
+
+Sau khi solid style ổn định:
+
+- Dash array/offset.
+- Linear/radial gradient.
+- Gradient stops và transform.
+- Validation, schema, hit-test, bounds và CMYK policy tương ứng.
+- Palette interaction, document swatch và overprint fill/outline.
+
+Không thêm pattern khi chưa có workflow thật.
+
+
+GIAI ĐOẠN 6B — Artistic Media / Vector Brush
+--------------------------------------------
+
+Chỉ triển khai sau Path stroke, Node Tool và pressure input contract:
+
+- Vector Brush tạo open Path với VectorStroke.
+- Lưu pressure/width profile theo normalized arc length hoặc representation có
+  ADR; không chỉ bake width thành bitmap.
+- Stabilizer/smoothing dùng preview, commit geometry một lần.
+- Solid stroke trước; textured/nozzle vector brush làm sau.
+- Có Expand Stroke để chuyển appearance thành closed outline khi cần Boolean.
+- Pixel Brush và Vector Brush có tool identity/option bar rõ, dù có thể chia sẻ
+  brush size, pressure sampling hoặc preset UI ở mức hợp lý.
+- UI dùng “Artistic Media / Vector Brush” theo mức quen thuộc của người dùng; nền
+  dữ liệu vẫn là editable curve + appearance, không phải pixel stroke.
+
+
+GIAI ĐOẠN 7 — Boolean/Shaping
+-----------------------------
+
+Điều kiện đầu vào:
+
+- FillRule, compound contour và affine transform đã ổn định.
+- Có dependency/algorithm ADR.
+- Tolerance và self-intersection policy rõ.
+
+P0 theo thuật ngữ Corel:
+
+- Union/Weld.
+- Trim/Difference với source và target rõ ràng.
+- Intersect.
+- Chỉ path kín; path mở báo không hỗ trợ rõ ràng.
+
+Kết quả style phải theo policy target object đã công bố; selection order và active
+target phải nhìn thấy trong UI, không suy đoán âm thầm.
+
+Test rectangle, cubic, hole, nhiều contour, touching edge/point, transform, gần
+suy biến, NaN và undo nguồn. Thêm fuzz/property test nếu dependency cho phép.
+
+
+GIAI ĐOẠN 7B — Contour/Offset Path và công cụ cắt
+-------------------------------------------------
+
+Ưu tiên cao cho bảng hiệu, decal và đường bế:
+
+- Contour outside/inside/center với distance, step và corner/join policy.
+- Convert/Break Contour Group Apart khi workflow cần object thật.
+- Offset path engine dùng chung cho outline expansion và đường bế.
+- Knife/Virtual Segment Delete hoặc vector eraser chỉ triển khai sau split,
+  intersection và topology đã ổn định.
+- Không dùng Raster Eraser/mask thay cho geometry cutting; hai workflow tồn tại
+  song song và có tên/cursor khác nhau.
+
+
+GIAI ĐOẠN 8 — Artistic/Paragraph Text và Convert to Curves
+----------------------------------------------------------
+
+Mục tiêu P0:
+
+- Artistic Text cho tiêu đề, logo và chữ trang trí.
+- Paragraph Text trong frame với wrap, alignment và overflow indicator tối thiểu.
+- Pick/transform và text editing không phá model.
+- Convert Artistic/Paragraph Text to Curves.
+
+Trước khi triển khai outline conversion phải khảo sát và ADR:
+
+- Font resolver và font face thực tế.
+- Shaping, glyph id, ligature, combining mark, RTL.
+- Font fallback và font fingerprint/version.
+- Variable font nếu có.
+- Quyền nhúng/font licensing cho PDF.
+
+Convert Text to Curves là vector -> vector, một chiều nhưng undo được. Kết quả là
+Path editable, giữ holes/fill rule và không rasterize.
+
+UX theo Corel:
+
+- Artistic Text cho tiêu đề/logo/chữ trang trí và transform trực tiếp.
+- Paragraph Text cho khung nội dung; có overflow policy rõ.
+- Text on Path là lát cắt P1 sau Artistic Text ổn định.
+- Convert to Curves phải giữ appearance, character position/rotation/spacing trong
+  phạm vi shaping được hỗ trợ và cảnh báo phần text overflow có nguy cơ mất.
+
+
+GIAI ĐOẠN 9 — PDF vector/hybrid thật
+------------------------------------
+
+Đây là một workstream riêng, không coi exporter hiện tại là backend vector.
+
+Chia lát cắt:
+
+1) Export scene/capability analysis.
+2) Path/Shape solid fill và stroke cơ bản thành PDF path.
+3) Clip/mask và transparency đơn giản.
+4) Raster fallback cục bộ cho effect/blend không biểu diễn tương đương.
+5) Text giữ text hay outline theo policy.
+6) CMYK, ICC/output intent và preflight.
+7) Spot colors, separations và overprint fill/outline theo capability công bố.
+
+Không rasterize toàn trang nếu chỉ một vùng cần fallback. Phải có report cho người
+dùng về object/vùng bị rasterize khi khả thi.
+
+
+GIAI ĐOẠN 10 — Persona Vector (tùy nhu cầu UX)
+----------------------------------------------
+
+Persona không nằm trên critical path kỹ thuật. Chỉ triển khai khi số tool/panel
+vector đủ lớn để toolbar hiện tại trở nên khó dùng.
+
+- Persona chỉ đổi toolbar, option bar, panel và shortcut context.
+- Không đổi document data và không tạo undo.
+- Không tạo cửa sổ, canvas hoặc engine thứ hai.
+- Dù dùng Persona, tên và nhóm tool vector phải theo mental model Corel; Pixel
+  Persona/Affinity chỉ là tham khảo cách giảm clutter.
+
+
+GIAI ĐOẠN 11 — Pixel-to-Vector Trace (tùy chọn, làm sau)
+-------------------------------------------------------
+
+Chỉ bắt đầu khi Path/Node/Boolean ổn định. Kết quả là Path layer bình thường.
+MVP ưu tiên logo ít màu, line art và scan tương phản cao; không hứa phục hồi ảnh
+chụp chính xác.
+
+
+7. KIỂM THỬ VÀ BENCHMARK BẮT BUỘC
+=================================
+
+7.1. Unit/model tests
+
+- Cubic, contour, fill rule, bounds và affine transform.
+- Adaptive flatten theo tolerance.
+- Fill/stroke hit-test.
+- Style/color validation.
+- Serialization round-trip.
+- Invalid/singular/non-finite data.
+
+7.2. Command tests
+
+- Commit/undo/redo.
+- Một drag/một undo.
+- Cancel không đổi model/history.
+- Group transaction nhiều object.
+- Undo/redo đánh stale và rebuild cache đúng.
+- Memory footprint không tính/giữ bitmap cache không cần thiết.
+
+7.3. Integration tests
+
+- Pen -> Path layer -> save/load -> node edit.
+- Path + raster + group + mask + opacity + blend.
+- Shape -> curves -> edit -> undo.
+- Text -> curves -> save/load.
+- RGB và CMYK vector raster cache.
+- Worker result cũ không thắng generation mới.
+- Rasterize explicit giữ visual và bỏ model theo đúng command.
+- Pixel Brush -> auto clipped child -> save/load -> tiếp tục paint.
+- Eraser -> auto Raster Mask -> restore -> disable/delete -> undo/redo.
+- Group member và clipped child không bị nhầm sau reorder/duplicate.
+- Parent transform với Lock Children bật/tắt.
+- Vector Brush tạo editable Path stroke, không tạo Pixel Paint.
+- Pick/Shape selection order và source-target của Weld/Trim/Intersect.
+- Primitive -> Convert to Curves -> node edit.
+- PowerClip nested, edit, lock/unlock và extract.
+- Process/spot swatch và overprint flags qua save/load/export capability.
+
+7.4. Visual tests
+
+- Golden image với tolerance được ghi rõ.
+- Nhiều zoom/DPI/render scale.
+- Anti-alias, premultiplied/straight alpha.
+- Stroke mảnh và biên tile.
+- Mask/group/blend.
+- Canvas và raster export nhất quán.
+
+7.5. Compatibility/security tests
+
+- Golden fixture file .iai cũ.
+- Path fixture và migration/version.
+- Unknown/newer version policy.
+- ZIP/manifest/path payload vượt giới hạn.
+- File truncated/malformed không panic hoặc cấp phát vô hạn.
+
+7.6. Benchmark
+
+- Một path 10, 100, 1.000 và 10.000 node.
+- Nhiều path nhỏ trên nhiều layer.
+- Một path nhiều contour/hole.
+- Zoom/pan và kéo node.
+- Object ngoài viewport.
+- Cache churn và stale worker.
+- Save/load tài liệu lớn.
+- Boolean geometry vừa/lớn khi đến giai đoạn tương ứng.
+
+Không tối ưu theo cảm tính. Lưu baseline và so sánh theo cùng tài liệu/thiết bị.
+
+
+8. NỢ KỸ THUẬT PHẢI TRÁNH
+=========================
+
+- Không sao chép PenAnchor thành một Path model thứ hai không tương thích.
+- Không giữ flatten cố định 24 bước làm thuật toán chung.
+- Không tạo RGBA-only vector style rồi gọi là hỗ trợ CMYK.
+- Không để mỗi Shape/Path/Text có raster worker và generation protocol riêng.
+- Không snapshot toàn LayerStack/TileMap cho mọi node drag.
+- Không coi baked PNG là nguồn dữ liệu vector.
+- Không âm thầm mở unknown layer thành Raster rồi save mất payload mà không cảnh báo.
+- Không dùng Layer::offset, Text rotation và Path transform mà không có contract.
+- Không tạo registry/macro/tool plugin trước khi có nhu cầu được đo.
+- Không làm Persona trước nền model/command/cache.
+- Không đưa Boolean/PDF/trace vào vector core tối thiểu.
+- Không refactor raster pipeline diện rộng chỉ để làm code “đẹp hơn”.
+- Không nhét Pixel Paint vào Layer.tiles cache của vector.
+- Không dùng parent_id cho cả group và clipping mà thiếu relation discriminator.
+- Không để auto-create layer/mask và stroke đầu tiên thành hai undo rời nhau.
+- Không gọi Pixel Brush là Vector Brush chỉ vì nó được clip trong vector.
+- Không tạo geometry engine riêng cho Pen, Bézier, Freehand và Polyline.
+- Không dùng cùng từ “Fill” cho raster bucket và vector object fill mà UI không
+  thể hiện context rõ ràng.
+- Không làm spot color chỉ bằng một giá trị CMYK không có identity/name/type.
+- Không triển khai Contour bằng cách chỉ tăng stroke width; contour là geometry/
+  offset workflow có output và corner semantics riêng.
+- (Audit) Không tự push command vào history; mọi command vector phải qua gateway/
+  HistoryGate (record/execute), nếu không saved-checkpoint và invalidation lệch.
+- (Audit) Không rasterize vector vào TileMap mà quên bump layer_revision và mark
+  dirty đúng vùng; nếu không GPU atlas hiển thị sai hoặc không cập nhật.
+- (Audit) Không bám vào pending_stroke/DeltaSnapshot (đường snapshot Phase 1) cho
+  command vector; đi hẳn CommandHistory.
+- (Audit) Không nhồi code vector vào các file đã lớn (layer/command/iai/canvas/
+  text). Thêm file mới theo Mục 3.10; sửa file lớn giới hạn ở một variant + một
+  nhánh dispatch + một dòng đăng ký module.
+- (Audit) Không khóa schema Path theo kiểu "một payload = một object" khiến sau
+  này phải migrate để hỗ trợ nhiều object trên một layer (Mục 3.12).
+- (Audit) Không coi Phase 4 là "chỉ hợp nhất": Polygon/Star là primitive mới.
+- (Audit) Không đổi contract lớp nền tảng sau Foundation Freeze mà không có ADR +
+  migration (Mục 3.11).
+- (Audit/đa trang) Không hard-code object vào một canvas duy nhất; object phải
+  page-relative + tham chiếu owning page id (dù MVP chỉ một page ngầm). Nếu không,
+  thêm Artboard/page sau sẽ phải migrate tọa độ + serialization + export (Mục 3.13).
+
+
+9. DEFINITION OF DONE CHO MỖI TÍNH NĂNG VECTOR
+=============================================
+
+Một tính năng chỉ hoàn thành khi:
+
+- Model nằm đúng core/layer contract.
+- Coordinate space và transform rõ ràng.
+- Có validation và giới hạn dữ liệu.
+- Cache/render/invalidation đúng.
+- Worker result cũ không thể ghi đè state mới.
+- Có selection/hit-test khi object tương tác được.
+- Có undo/redo; cancel không để state rác.
+- Save/load round-trip không mất model.
+- Hành vi file cũ/version mới đúng ADR.
+- RGB/CMYK, opacity, blend, group và mask đúng phạm vi công bố.
+- Rasterize là explicit nếu feature không giữ được vector.
+- Có test tương xứng rủi ro.
+- Không regression raster tools.
+- Có benchmark khi thay đổi đường nóng.
+- Hạn chế và lỗi unsupported được báo rõ.
+
+
+10. QUY TRÌNH LÀM VIỆC
+======================
+
+Mỗi lát cắt phải theo vòng lặp:
+
+1) Đọc code liên quan và kiểm tra git status.
+2) Ghi file/module dự kiến thay đổi.
+3) Nêu invariant, compatibility và memory/cache risk.
+4) Triển khai lát cắt nhỏ nhất chạy được.
+5) Thêm test cùng thay đổi.
+6) Chạy formatter, check, test hẹp rồi mở rộng theo rủi ro.
+7) Tự review ownership, command, cache generation, serialization, CMYK và regression.
+8) Báo cáo file chính, test, giới hạn và bước kế tiếp.
+
+Không gộp nhiều giai đoạn lớn vào một đợt. Thay schema, dependency geometry/PDF,
+color contract hoặc public layer model phải được trình bày tác động trước.
+
+
+11. THÔNG TIN CẦN TỪ NGƯỜI DÙNG
+===============================
+
+Để ưu tiên Giai đoạn 4 trở đi, cần danh sách workflow thực tế:
+
+- Tool/hành động dùng hàng ngày, thường xuyên hoặc thỉnh thoảng.
+- Loại sản phẩm được làm.
+- Chuỗi bước trước/sau tool đó.
+- Có in CMYK, spot color, cắt bế hay không.
+- File trao đổi bắt buộc: PDF, SVG, EPS hoặc định dạng khác.
+- Mức tương thích mong muốn với bản iAi cũ.
+- Có chấp nhận bản cũ từ chối file Path mới hay bắt buộc hiển thị fallback.
+- Khi scale/rotate parent, Pixel Paint mặc định đi theo transform hay giữ nguyên
+  trong document space; có cần Lock Children mặc định không.
+- Pixel Brush nên tái sử dụng child gần nhất hay luôn tạo child mới theo lựa chọn.
+- Assistant policy mặc định khi Brush/Eraser gặp vector.
+- Nhóm sản phẩm chính: bảng hiệu, decal, tem nhãn, bao bì, áo, khắc/cắt hay in
+  kỹ thuật số để ưu tiên Contour, spot/overprint và PDF preset.
+- Các shortcut/thói quen Corel bắt buộc phải giữ.
+- Workflow PowerClip thường dùng và cách mong muốn scale/lock content.
+- Quy tắc đường bế: spot color name, hairline/outline width và overprint mong muốn.
+
+Không thay đổi thứ tự Giai đoạn 0–3 chỉ vì muốn thêm nhiều tool. Chỉ đổi khi code
+hoặc workflow thật chứng minh có phụ thuộc mạnh.
+
+
+12. YÊU CẦU ĐẦU TIÊN KHI ĐƯỢC GIAO CODE
+======================================
+
+Không bắt đầu bằng việc thêm ngay LayerType::Path.
+
+Thứ tự đầu tiên:
+
+1) Hoàn thành Giai đoạn UX-0 và interaction contract cốt lõi.
+2) Hoàn thành Giai đoạn 0 và các ADR bắt buộc dựa trên UX đã chốt.
+3) Chốt Corel-like Pick/Shape/PowerClip/shaping workflow và terminology.
+4) Chốt ColorValue, spot/overprint, transform ownership và attachment relation.
+5) Chốt version/backward compatibility của .iai.
+6) Triển khai Giai đoạn 1A độc lập UI.
+7) Nối adapter Pen ở Giai đoạn 1B và chứng minh không regression.
+8) Chỉ sau đó mới duyệt schema và Path layer persistence.
+
+Nếu các contract màu, transform hoặc file chưa được duyệt, dừng ở core/tests;
+không tự khóa schema tạm thời rồi tạo migration debt ngay từ bản đầu.
+
+
+13. KẾT QUẢ CUỐI CÙNG MONG MUỐN
+===============================
+
+Sau toàn bộ lộ trình, iAi cho phép:
+
+- Raster và vector trong cùng document/layer stack.
+- Vẽ, chọn và sửa Path/Node không phá hủy.
+- Shape giữ primitive editable và convert to curves khi người dùng yêu cầu.
+- Text convert thành outline vector đúng shaping trong phạm vi hỗ trợ.
+- Style/color nhất quán giữa Path/Shape và phù hợp pipeline RGB/CMYK.
+- Mask, group, opacity và blend hoạt động qua raster cache hiện tại, sau đó có thể
+  được tối ưu mà không đổi model.
+- Pixel Brush có thể vẽ non-destructive inside vector bằng clipped Pixel Paint;
+  Eraser có thể ẩn/khôi phục bằng Raster Mask mà không rasterize vector.
+- Vector Brush tạo stroke/path editable riêng, không trộn với raster Brush.
+- Pick, Shape, PowerClip, Weld/Trim/Intersect, Contour, Artistic/Paragraph Text và
+  palette workflow đủ quen thuộc để người dùng Corel chuyển sang không phải học
+  lại mental model cơ bản.
+- Process/spot color, overprint và PDF capability được bảo toàn rõ ràng cho công
+  việc quảng cáo và in ấn.
+- .iai giữ model vector, có version/fallback policy rõ và không âm thầm mất dữ liệu.
+- PDF vector/hybrid xuất path thật khi capability cho phép, rasterize cục bộ khi
+  cần và báo rõ fallback.
+- Trace về sau tạo Path layer bình thường, không làm phức tạp core bắt buộc.
+
+Nền tảng được coi là thành công khi một tính năng vector mới có thể dùng lại
+model, style, command, cache, serialization và test contract mà không cần thêm
+một đường xử lý song song xuyên toàn bộ ứng dụng.
+
+
+14. LÁT DỌC MỎNG ĐẦU TIÊN (M1) — CỘT MỐC DÙNG ĐƯỢC SỚM
+======================================================
+
+Mục tiêu: có thứ CHẠY end-to-end sớm để chứng minh nền tảng đúng TRƯỚC khi
+freeze, thay vì đi hết core rồi mới ráp và phát hiện sai contract quá muộn. M1 là
+một điều kiện của cổng Foundation Freeze (Mục 3.11), không phải tính năng thương
+mại đầy đủ.
+
+Luồng M1 (tối thiểu, đã đủ dùng cho việc in cơ bản):
+
+  Pen/Bézier -> commit thành Path layer -> sửa node bằng Node tool -> đặt Fill/
+  Outline solid -> gán màu (thử cả RGB và CMYK) -> Ctrl+S ra .iai -> mở lại còn
+  nguyên geometry/style/transform -> xuất PDF không mất thiết kế.
+
+M1 CỐ TÌNH BỎ (để lớp tính năng làm sau, không đụng nền): Boolean, gradient, dash,
+PowerClip, Text->Curves, Polygon/Star, PDF vector thật (M1 cho phép PDF raster
+fallback, miễn KHÔNG mất object khi round-trip .iai).
+
+Tiêu chí M1 đạt:
+
+  - Round-trip .iai giữ geometry/style/transform cho cả RGB và CMYK.
+  - Undo/redo tạo/xóa/sửa node đúng, đi qua gateway.
+  - layer_revision/atlas cập nhật đúng vùng, không redraw toàn document.
+  - Không regression: full test cũ (712 test) xanh + test mới của M1.
+
+
+15. CHIA NHỎ CÔNG VIỆC — DANH SÁCH TASK NỀN TẢNG
+================================================
+
+Mỗi task nhỏ, tự chứa, có test và Definition of Done (DoD) riêng, mergeable trong
+một đợt. Thứ tự phản ánh nguyên tắc "nền tảng chắc trước". Không bắt đầu task sau
+khi task phụ thuộc chưa đạt DoD. Ánh xạ tới các Giai đoạn ở Mục 6 ghi trong [].
+
+BƯỚC 0 — Chuẩn bị & ADR (KHÔNG đổi hành vi sản phẩm) [Giai đoạn 0 / UX-0]
+  T0.1  Ghi baseline cargo check/test/fmt hiện tại (712 test). Không sửa code.
+  T0.2  Đóng ADR bắt buộc (Mục 3 + 3.9-3.12): Path/Contour/Node; AffineTransform
+        vs Layer::offset; ColorValue RGB/CMYK; clipping discriminator; .iai v4/
+        backward; rasterize policy; gateway wiring; layer_revision/atlas
+        contract; multi-object không-migrate (3.12).
+  T0.3  Lập checklist wiring ToolId (mọi điểm phải sửa khi thêm Pick/Node).
+  T0.4  UX-0: state table + wireframe cho các luồng dọc ở Mục 6/UX-0.
+  DoD:  ADR duyệt; giả định quan trọng được xác minh hoặc đánh dấu chưa xác minh.
+
+BƯỚC 1 — Vector core độc lập UI [Giai đoạn 1A]
+  T1.1  core/vector/affine.rs: AffineTransform + test compose/inverse/apply.
+  T1.2  core/vector/path.rs: PathData/Contour/Node/FillRule + validate finite +
+        giới hạn node/contour + test.
+  T1.3  core/vector/ops.rs: open/close/reverse, insert/split(De Casteljau)/delete
+        node, join/break, convert line<->curve segment, align nodes + test.
+  T1.4  core/vector/flatten.rs: adaptive flatten theo tolerance (KHÔNG cố định 24
+        đoạn) + test.
+  T1.5  core/vector/hittest.rs: fill/stroke hit-test, nearest node/segment + test.
+  DoD:  core::vector KHÔNG phụ thuộc UI/App/GPU; property test path lồng nhau,
+        nhiều contour, cubic, bounds, dữ liệu không hữu hạn.
+
+BƯỚC 2 — Style & color contract [Giai đoạn 1C]
+  T2.1  core/vector/color.rs (hoặc mở rộng core/color.rs): ColorValue RGB/CMYK/
+        opacity + conversion tới pipeline raster hiện tại + test.
+  T2.2  core/vector/style.rs: VectorStyle/StrokeStyle (fill none/solid; stroke
+        width/cap/join/miter) + adapter từ ShapeData RGBA cũ + test.
+  DoD:  chưa migration toàn bộ Shape/Text; có adapter tránh big-bang.
+
+BƯỚC 3 — Adapter Pen không regression [Giai đoạn 1B]
+  T3.1  PenAnchor -> PathData adapter, GIỮ nguyên UX Pen (selection/fill/stroke) +
+        test tương đương hành vi.
+  T3.2  Pen preview dùng chung flatten/hit-test sau khi test tương đương pass.
+  DoD:  Pen không đổi UX ngoài lỗi có test; Ctrl+Enter/Esc/Ctrl+Z vẫn đúng.
+
+BƯỚC 4 — Path layer + persistence + command [Giai đoạn 2A]
+  T4.1  layer.rs: thêm LayerType::Path(VectorObjectData) (1 variant) + Default/
+        clone/dispatch tối thiểu.
+  T4.2  core/command_vector.rs: CreatePathLayer/DeletePathLayer/
+        ReplacePathGeometry/ChangeVectorStyle/ChangeVectorTransform QUA gateway +
+        test undo/redo (KHÔNG clone whole-document cho node/style).
+  T4.3  formats/iai_vector.rs + đúng 1 nhánh dispatch trong iai.rs; bump .iai v4;
+        giới hạn parser; PNG baked fallback; schema dạng danh-sách-object (3.12).
+        Test: round-trip RGB & CMYK, file cũ mở được, version cao bị từ chối.
+  T4.4  Pen thêm lựa chọn commit thành Path layer.
+  DoD:  vẽ Path -> save -> reopen giữ nguyên; undo/redo đúng; file cũ mở như cũ.
+
+BƯỚC 5 — Raster cache + compositor/atlas [Giai đoạn 2B]
+  T5.1  core/vector/raster.rs: PathData -> TileMap; sinh RGB mirror + ink planes
+        (CMYK) theo color contract.
+  T5.2  generation + stale-worker rejection; nối layer_revision + dirty/atlas;
+        rebuild-from-model khi cache thiếu/lỗi.
+  T5.3  Rasterize explicit command/policy.
+  DoD:  worker trả muộn không đè cache mới; undo không để cache lệch model;
+        không redraw toàn document khi dirty-rect cho phép cục bộ.
+
+BƯỚC 6 — Clipping/attachment nền [Giai đoạn 2C — phần NỀN]
+  T6.1  layer.rs: discriminator quan hệ (LayerRelation/clip_parent_id) + invariant
+        cycle/reorder/duplicate/delete; logic đặt ở canvas/clip_ops.rs.
+  T6.2  CreateClippedPixelChild/ReleaseClippedChild + CreateOrAttachRasterMask
+        (atomic create + nét đầu tiên) qua gateway + test.
+  T6.3  Save/load giữ nesting/relation/mask; test reorder/duplicate KHÔNG nhầm
+        group vs clip.
+  DoD:  Brush không sửa Layer.tiles cache vector; Eraser không sửa geometry, khôi
+        phục bằng mask; đổi geometry cập nhật clip boundary, không mất pixel child.
+
+>>> CỔNG FOUNDATION FREEZE <<<
+  Chạy M1 (Mục 14) end-to-end + full test xanh + giả lập-trên-giấy 3 tính năng
+  tương lai không đòi đổi contract. Đạt -> tuyên bố ĐÓNG BĂNG 9 contract nền tảng.
+  Từ đây, lớp tính năng (Giai đoạn 3 trở đi) CHỈ THÊM, không sửa nền.

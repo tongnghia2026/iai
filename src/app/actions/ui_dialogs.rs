@@ -387,13 +387,14 @@ impl App {
     }
 
     pub(super) fn handle_misc_dialog_actions(&mut self, actions: &mut UiActions) {
-        let created_new_canvas =
-            if let Some((name, w, h, dpi, bg, unit)) = actions.doc.new_canvas_confirmed.take() {
-                self.do_new_tab(name, w, h, dpi, bg, unit);
-                true
-            } else {
-                false
-            };
+        let created_new_canvas = if let Some((name, w, h, dpi, bg, unit, cmyk)) =
+            actions.doc.new_canvas_confirmed.take()
+        {
+            self.do_new_tab(name, w, h, dpi, bg, unit, cmyk);
+            true
+        } else {
+            false
+        };
 
         if let Some(v) = actions.dialogs.show_new_dialog.take() {
             if v {
@@ -419,6 +420,25 @@ impl App {
         }
         if let Some(v) = actions.dialogs.show_adjustment_dialog.take() {
             self.shell.ui.show_adjustment_dialog = v;
+        }
+        if actions.doc.exit_cancel {
+            self.cancel_app_exit();
+        }
+        if actions.doc.exit_discard_current {
+            self.discard_current_exit_document();
+        }
+        if actions.doc.exit_save_current {
+            self.shell.ui.show_exit_dialog = false;
+            self.do_save_project();
+            if self.jobs.pending_file_dialog.is_some() {
+                self.shell.exit_save_pending = true;
+            } else if !self.docs.documents[self.docs.active_doc_idx].is_modified() {
+                self.docs.pending_exit_docs.pop_front();
+                self.present_next_exit_document();
+            } else {
+                // A synchronous write failed; keep this tab in the sweep.
+                self.shell.ui.show_exit_dialog = true;
+            }
         }
         if let Some(v) = actions.dialogs.show_exit_dialog.take() {
             if !v || !self.block_exit_if_active_operation() {

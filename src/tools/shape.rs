@@ -25,6 +25,12 @@ pub struct ShapeTool {
     pub stroke_color: [u8; 4],
     /// Rounded-rectangle corner radius in canvas pixels. 0 = sharp corners.
     pub corner_radius: f32,
+    /// Rectangle corner style (Round/Scallop/Chamfer).
+    pub corner_type: crate::core::vector::from_shape::RectCorner,
+    /// Polygon edge count / Star point count (3–100).
+    pub sides: u32,
+    /// Star inner-radius fraction of the outer radius (0–1).
+    pub star_inner: f32,
     start_x: f32,
     start_y: f32,
     cur_x: f32,
@@ -38,11 +44,16 @@ impl Default for ShapeTool {
     fn default() -> Self {
         Self {
             kind: ShapeKind::Rectangle,
-            fill: true,
+            // Outline-only by default, like CorelDRAW: a new shape draws its outline
+            // and the user fills it afterwards via the selected object's Fill control.
+            fill: false,
             fill_color: [0, 0, 0, 255],
             stroke_width: 2.0,
             stroke_color: [0, 0, 0, 255],
             corner_radius: 0.0,
+            corner_type: crate::core::vector::from_shape::RectCorner::Round,
+            sides: 5,
+            star_inner: 0.5,
             start_x: 0.0,
             start_y: 0.0,
             cur_x: 0.0,
@@ -62,19 +73,12 @@ impl ShapeTool {
     /// End point after applying Shift constrain (square/circle/45°-line),
     /// relative to the drag start (before any Alt centring).
     fn effective_end(&self) -> (f32, f32) {
-        if !self.shift {
+        if !self.shift && !self.alt {
             return (self.cur_x, self.cur_y);
         }
         let dx = self.cur_x - self.start_x;
         let dy = self.cur_y - self.start_y;
         match self.kind {
-            ShapeKind::Rectangle | ShapeKind::Ellipse => {
-                let m = dx.abs().max(dy.abs());
-                (
-                    self.start_x + m * dx.signum(),
-                    self.start_y + m * dy.signum(),
-                )
-            }
             ShapeKind::Line => {
                 let len = (dx * dx + dy * dy).sqrt();
                 if len < 0.001 {
@@ -86,6 +90,14 @@ impl ShapeTool {
                 (
                     self.start_x + len * snapped.cos(),
                     self.start_y + len * snapped.sin(),
+                )
+            }
+            // Rectangle / Ellipse / Polygon / Star: Shift → square bounds.
+            _ => {
+                let m = dx.abs().max(dy.abs());
+                (
+                    self.start_x + m * dx.signum(),
+                    self.start_y + m * dy.signum(),
                 )
             }
         }
@@ -130,7 +142,7 @@ impl ShapeTool {
     ) -> Option<(f32, f32, f32, f32)> {
         self.cur_x = cx;
         self.cur_y = cy;
-        self.shift = shift;
+        self.shift = shift || alt;
         self.alt = alt;
         self.is_dragging = false;
         let (x0, y0, x1, y1) = self.resolved_span();
@@ -163,7 +175,7 @@ impl Tool for ShapeTool {
         self.start_y = event.canvas_y;
         self.cur_x = event.canvas_x;
         self.cur_y = event.canvas_y;
-        self.shift = event.shift;
+        self.shift = event.shift || event.alt;
         self.alt = event.alt;
         self.is_dragging = true;
         ToolResponse::redraw()
@@ -177,7 +189,7 @@ impl Tool for ShapeTool {
     ) -> ToolResponse {
         self.cur_x = event.canvas_x;
         self.cur_y = event.canvas_y;
-        self.shift = event.shift;
+        self.shift = event.shift || event.alt;
         self.alt = event.alt;
         ToolResponse::redraw()
     }
@@ -214,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn alt_draws_from_center() {
+    fn alt_draws_from_center_and_constrains() {
         let mut t = ShapeTool::new();
         t.start_x = 50.0;
         t.start_y = 50.0;
@@ -222,8 +234,8 @@ mod tests {
         t.cur_y = 60.0;
         t.alt = true;
         let (x0, y0, x1, y1) = t.resolved_span();
-        assert_eq!((x0, y0), (30.0, 40.0));
-        assert_eq!((x1, y1), (70.0, 60.0));
+        assert_eq!((x0, y0), (30.0, 30.0));
+        assert_eq!((x1, y1), (70.0, 70.0));
         assert_eq!((x0 + x1) * 0.5, 50.0);
         assert_eq!((y0 + y1) * 0.5, 50.0);
     }

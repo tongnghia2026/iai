@@ -409,7 +409,12 @@ pub struct CompositorUniformsData {
     pub mask_inverted: u32,
     pub adj_kind: u32,
     pub _adj_pad_a: u32,
-    pub _adj_pad_b: u32,
+    /// Live PowerClip / clipping-mask pin. Two i16 packed `(dx << 16) | dy`
+    /// (masking off sign bits) = owning layer's `offset − mask.bake_offset`.
+    /// The main compositor adds it to the mask sample coord so a clipped child
+    /// stays pinned to its frame while dragged, with no per-frame mask re-bake.
+    /// Zero for every non-clip layer (default, byte-identical to before).
+    pub clip_shift_packed: u32,
     pub _adj_pad_c: u32,
     /// Three vec4 values = 12 floats. Mapping depends on `adjustment_to_gpu`.
     pub adj_p: [f32; 12],
@@ -423,6 +428,23 @@ pub struct CompositorUniformsData {
 
 const _: () = assert!(std::mem::size_of::<CompositorUniformsData>() == 3248);
 const _: () = assert!(std::mem::offset_of!(CompositorUniformsData, adj_lut) == 176);
+
+/// Pack a clipping-mask / PowerClip child's live pin into the single spare
+/// uniform slot. The compositor samples the (unmoved) clip mask at a canvas-fixed
+/// coordinate `layer_local + (dx, dy)`, so a clipped image stays pinned to its
+/// frame while it is moved OR free-transformed, with no per-frame re-bake.
+///
+/// The same 32 bits also carry the "this layer IS a clip child" flag: each i16
+/// delta is stored biased by `0x8000`, so both halves are always ≥ 1 and the word
+/// is never zero for a clip child. A value of exactly 0 therefore means "not a
+/// clip child → no pin", which the shader fast-paths. Deltas clamp to ±32767 px
+/// (in the current composite's pixel scale — full-res, or downscaled by the LOD
+/// proxy level).
+fn pack_clip_shift(dx: i32, dy: i32) -> u32 {
+    let dx = (dx.clamp(-32767, 32767) + 0x8000) as u32;
+    let dy = (dy.clamp(-32767, 32767) + 0x8000) as u32;
+    (dx << 16) | (dy & 0xFFFF)
+}
 
 /// Converts `AdjustmentType` into shader kind, parameters, and LUT data.
 /// kind=0 means the adjustment is CPU-only for flattening. Kind 13 uses the LUT
@@ -935,9 +957,72 @@ pub struct CompositorState {
     /// requests a repaint while any build is pending so the proxy engages even if
     /// the zoom gesture already stopped.
     proxy_builds: std::collections::HashMap<(u32, u32), ProxyBuild>,
+    /// Hybrid-canvas GPU vector stage. `Some` only when `IAI_GPU_VECTOR_CANVAS` is
+    /// on; `None` leaves the raster pipeline unchanged. See `gpu::vector::composite`.
+    vector_stage: Option<crate::gpu::vector::composite::VectorCompositeStage>,
+    /// Layer ids the last composite drew natively on the GPU (empty when the GPU
+    /// vector path is inactive). Kept as frame telemetry/debug state; callers that
+    /// plan the current frame must use `will_draw_vector_layer_on_gpu` instead.
+    pub gpu_drawn_layer_ids: Vec<u32>,
 }
 
 impl CompositorState {
+    pub fn can_gpu_isolate_opacity_groups(&self, stack: &LayerStack, allow_active: bool) -> bool {
+        crate::gpu::vector::eligibility::stack_supports_gpu_opacity_groups(stack)
+            && stack.layers.iter().enumerate().all(|(index, layer)| {
+                let in_effected_group = layer.parent_id.is_some_and(|parent_id| {
+                    stack.layers.iter().any(|group| {
+                        group.id == parent_id
+                            && group.is_group()
+                            && (group.opacity < 0.999
+                                || group.blend_mode != crate::core::blend::BlendMode::Normal
+                                || group.mask.as_ref().is_some_and(|mask| mask.enabled))
+                    })
+                });
+                !in_effected_group
+                    || !stack.is_effectively_visible(index)
+                    || self.will_draw_vector_layer_on_gpu(
+                        layer,
+                        stack,
+                        index,
+                        stack.active_idx,
+                        allow_active,
+                    )
+            })
+    }
+
+    /// Whether `layer` will use the native GPU-vector path in the current
+    /// compositor state. Keep this as the single policy entry point for both
+    /// scene planning and `path_display`: consulting the ids drawn by the
+    /// previous frame creates a feedback loop because the crisp overlay itself
+    /// temporarily hides raster twins from the next composite.
+    pub fn will_draw_vector_layer_on_gpu(
+        &self,
+        layer: &Layer,
+        layer_stack: &LayerStack,
+        stack_idx: usize,
+        active_idx: usize,
+        allow_active: bool,
+    ) -> bool {
+        self.vector_stage.is_some()
+            && !self.canvas_space
+            && self.render_scale == 1
+            && self.crop_preview.is_none()
+            && (stack_idx != active_idx || allow_active)
+            && !self
+                .transform_previews
+                .iter()
+                .any(|preview| preview.layer_id == layer.id)
+            && matches!(
+                crate::gpu::vector::eligibility::layer_eligibility_in_stack(
+                    layer,
+                    layer_stack,
+                    true,
+                ),
+                crate::gpu::vector::eligibility::Eligibility::GpuVector
+            )
+    }
+
     pub fn new(
         device: &wgpu::Device,
         viewport_w: u32,
@@ -1419,6 +1504,16 @@ struct VsOut {
             proxy_frame: 0,
             proxy_build_suspend: None,
             proxy_builds: std::collections::HashMap::new(),
+            // Built only when the hybrid-canvas flag is on; None keeps the raster
+            // pipeline byte-for-byte unchanged. Rebuilt with the whole GpuState on
+            // device loss.
+            vector_stage: crate::gpu::vector::runtime_enabled().then(|| {
+                crate::gpu::vector::composite::VectorCompositeStage::new(
+                    device,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                )
+            }),
+            gpu_drawn_layer_ids: Vec::new(),
         }
     }
 
@@ -2287,8 +2382,15 @@ struct VsOut {
             crate::core::layer::LayerType::Raster => 1u8.hash(&mut h),
             crate::core::layer::LayerType::Group => 2u8.hash(&mut h),
             crate::core::layer::LayerType::Text(_) => 3u8.hash(&mut h),
-            crate::core::layer::LayerType::Shape(_) => 4u8.hash(&mut h),
+            crate::core::layer::LayerType::Vector(
+                crate::core::vector::object::VectorGeometry::Primitive(_),
+            ) => 4u8.hash(&mut h),
             crate::core::layer::LayerType::SmartObject => 5u8.hash(&mut h),
+            // Path renders through its tiles cache (hashed above via the tile
+            // revision fingerprint), like Shape/Text — the discriminant is enough.
+            crate::core::layer::LayerType::Vector(
+                crate::core::vector::object::VectorGeometry::Path(_),
+            ) => 6u8.hash(&mut h),
         }
         h.finish()
     }
@@ -2603,9 +2705,8 @@ struct VsOut {
         zoom: f32,
         dirty_rect: Option<(u32, u32, u32, u32)>,
         allow_backdrop_cache: bool,
+        allow_active_gpu_vector: bool,
     ) -> bool {
-        let use_partial = dirty_rect.is_some() && self.ping_initialized && self.render_scale == 1;
-
         let mut command_buffers: Vec<wgpu::CommandBuffer> = Vec::new();
 
         // Each entry keeps its original stack index; `boundary` is the backdrop
@@ -2615,6 +2716,57 @@ struct VsOut {
         let (visible_layers, boundary) = Self::visible_layers_and_boundary(layer_stack);
         let n_layers = visible_layers.len();
         let active_idx = layer_stack.active_idx;
+
+        // Hybrid canvas (Phase 2): per visible layer, is it an eligible GPU vector
+        // layer this frame? Only in the full viewport path (not canvas_space / not
+        // low-res preview); a present vector run forces a full composite (no partial
+        // dirty-rect, no backdrop cache) so the ping/pong parity stays trivial.
+        // Crop transforms the whole stack per-layer (not by id), so a crop preview
+        // disables the GPU vector path entirely for the frame.
+        let gpu_eligible: Vec<bool> = visible_layers
+            .iter()
+            .map(|&(stack_idx, layer)| {
+                // The ACTIVE layer is the one being edited: node/style/shape
+                // drags update a pending raster preview (its tiles), not the
+                // committed model the GPU reads, so keep it on the existing
+                // raster + crisp-overlay path. Free-transform previews (which
+                // can target several layers) are excluded by id. Non-active
+                // static vector layers render natively on the GPU. A live
+                // multi-Move of other selected layers is followed via the
+                // offset drift correction in `composite_run`.
+                self.will_draw_vector_layer_on_gpu(
+                    layer,
+                    layer_stack,
+                    stack_idx,
+                    active_idx,
+                    allow_active_gpu_vector,
+                )
+            })
+            .collect();
+        let gpu_vector_active = gpu_eligible.iter().any(|&e| e);
+
+        // Record exactly the layers this composite draws on the GPU, so
+        // `path_display` can drop their redundant CPU crisp-overlay bake (Phase 8).
+        // Cleared when the GPU path is inactive so a stale set never suppresses a
+        // layer that is back on the raster path.
+        self.gpu_drawn_layer_ids.clear();
+        if gpu_vector_active {
+            for (slot, &(_, layer)) in visible_layers.iter().enumerate() {
+                if gpu_eligible[slot] {
+                    self.gpu_drawn_layer_ids.push(layer.id);
+                }
+            }
+        }
+
+        let use_partial = dirty_rect.is_some()
+            && self.ping_initialized
+            && self.render_scale == 1
+            && !gpu_vector_active;
+        if let Some(stage) = self.vector_stage.as_mut() {
+            if gpu_vector_active {
+                stage.begin_frame();
+            }
+        }
         // A live preview (Develop / Ctrl+L·M / filter) targeting a layer inside
         // the frozen prefix would make the snapshot stale — its parameters live
         // in compositor state, not in the layer fingerprint. In practice previews
@@ -2685,6 +2837,7 @@ struct VsOut {
             && boundary > 0
             && boundary < n_layers
             && !preview_conflict
+            && !gpu_vector_active
             && (!use_partial || clamped_scissor.is_some());
         let cur_sig: Vec<u64> = if cache_enabled {
             visible_layers[..boundary]
@@ -2924,6 +3077,193 @@ struct VsOut {
             if layer_slot < start_slot {
                 continue;
             }
+            // Hybrid canvas: an eligible GPU vector layer is drawn natively by the
+            // vector run, not by the raster tile pass (its one representation — no
+            // halo). Handle the whole contiguous run at its first layer, then skip
+            // the members here. A run participates in the ping/pong as one step.
+            if gpu_eligible[layer_slot] {
+                let layer_has_mask = layer.mask.as_ref().is_some_and(|mask| mask.enabled);
+                let previous_joins = layer_slot > 0
+                    && gpu_eligible[layer_slot - 1]
+                    && visible_layers[layer_slot - 1].1.parent_id == layer.parent_id
+                    && !layer_has_mask
+                    && !visible_layers[layer_slot - 1]
+                        .1
+                        .mask
+                        .as_ref()
+                        .is_some_and(|mask| mask.enabled);
+                let is_run_start = !previous_joins;
+                if is_run_start {
+                    use crate::core::layer::LayerType;
+                    use crate::core::vector::object::VectorGeometry;
+                    let mut run_end = layer_slot;
+                    if layer_has_mask {
+                        run_end += 1;
+                    } else {
+                        while run_end < n_layers
+                            && gpu_eligible[run_end]
+                            && visible_layers[run_end].1.parent_id == layer.parent_id
+                            && !visible_layers[run_end]
+                                .1
+                                .mask
+                                .as_ref()
+                                .is_some_and(|mask| mask.enabled)
+                        {
+                            run_end += 1;
+                        }
+                    }
+                    // Phase 6: a Primitive is drawn by converting it to the same
+                    // `PathData` its raster twin uses (`ShapeData::to_vector_object`).
+                    // The converted objects are owned temporaries, so they are built
+                    // into `converted` *first* (capacity reserved so references never
+                    // dangle), then borrowed alongside the Path objects in z-order.
+                    let prim_count = (layer_slot..run_end)
+                        .filter(|&j| {
+                            matches!(
+                                &visible_layers[j].1.layer_type,
+                                LayerType::Vector(VectorGeometry::Primitive(_))
+                            )
+                        })
+                        .count();
+                    let mut converted: Vec<crate::core::vector::object::VectorObjectData> =
+                        Vec::with_capacity(prim_count);
+                    for j in layer_slot..run_end {
+                        if let LayerType::Vector(VectorGeometry::Primitive(shape)) =
+                            &visible_layers[j].1.layer_type
+                        {
+                            converted.push(shape.to_vector_object(visible_layers[j].1.offset));
+                        }
+                    }
+                    let mut objects: Vec<(
+                        &crate::core::vector::object::VectorObjectData,
+                        (i32, i32),
+                        f32,
+                    )> = Vec::with_capacity(run_end - layer_slot);
+                    let mut ci = 0usize;
+                    for j in layer_slot..run_end {
+                        let run_layer = visible_layers[j].1;
+                        match &run_layer.layer_type {
+                            LayerType::Vector(VectorGeometry::Path(obj)) => {
+                                objects.push((obj, run_layer.offset, run_layer.opacity));
+                            }
+                            LayerType::Vector(VectorGeometry::Primitive(_)) => {
+                                // The position is already baked into the converted
+                                // object's transform, so pass its own raster origin:
+                                // the drag-drift correction becomes a no-op and the
+                                // shape draws exactly where its raster twin sat.
+                                let obj = &converted[ci];
+                                let origin = crate::core::vector::raster::raster_geometry(obj)
+                                    .map(|(o, _, _)| o)
+                                    .unwrap_or(run_layer.offset);
+                                objects.push((obj, origin, run_layer.opacity));
+                                ci += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !objects.is_empty() {
+                        let run_group = layer.parent_id.and_then(|parent_id| {
+                            layer_stack
+                                .layers
+                                .iter()
+                                .find(|candidate| candidate.id == parent_id)
+                        });
+                        let run_opacity = run_group.map_or(1.0, |group| group.opacity);
+                        let run_blend_mode =
+                            run_group.map_or(layer.blend_mode, |group| group.blend_mode);
+                        let run_mask_owner = run_group.unwrap_or(layer);
+                        let vw = self.viewport_w;
+                        let vh = self.viewport_h;
+                        let ping_v = self.ping_view.clone();
+                        let pong_v = self.pong_view.clone();
+                        let (dst_read, dst_write) = if current_dst_is_ping {
+                            (&ping_v, &pong_v)
+                        } else {
+                            (&pong_v, &ping_v)
+                        };
+                        let mut enc =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("vector_run_enc"),
+                            });
+                        // First drawn content: seed its background (dst_read)
+                        // transparent, mirroring the raster first-layer clear.
+                        if first_layer && !use_partial {
+                            let rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("vector_run_clear"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: dst_read,
+                                    resolve_target: None,
+                                    depth_slice: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                ..Default::default()
+                            });
+                            drop(rp);
+                            self.ping_initialized = true;
+                        }
+                        first_layer = false;
+                        if let Some(stage) = self.vector_stage.as_mut() {
+                            stage.composite_run(
+                                device,
+                                queue,
+                                &mut enc,
+                                dst_read,
+                                dst_write,
+                                vw,
+                                vh,
+                                view_offset_x,
+                                view_offset_y,
+                                zoom,
+                                &objects,
+                                run_mask_owner
+                                    .mask
+                                    .as_ref()
+                                    .filter(|mask| mask.enabled)
+                                    .map(|mask| {
+                                        crate::gpu::vector::composite::VectorMask {
+                                            layer_id: run_mask_owner.id,
+                                            // Group masks use canvas coordinates in
+                                            // the CPU synthetic-layer reference.
+                                            layer_offset: run_group
+                                                .map_or(layer.offset, |_| (0, 0)),
+                                            sample_shift: if run_group.is_some() {
+                                                (0, 0)
+                                            } else {
+                                                layer.clip_parent_id.map_or((0, 0), |frame_id| {
+                                                    let frame_now = layer_stack
+                                                        .layers
+                                                        .iter()
+                                                        .find(|candidate| candidate.id == frame_id)
+                                                        .map(|frame| frame.offset)
+                                                        .unwrap_or(mask.bake_frame_offset);
+                                                    (
+                                                        (layer.offset.0 - mask.bake_offset.0)
+                                                            - (frame_now.0
+                                                                - mask.bake_frame_offset.0),
+                                                        (layer.offset.1 - mask.bake_offset.1)
+                                                            - (frame_now.1
+                                                                - mask.bake_frame_offset.1),
+                                                    )
+                                                })
+                                            },
+                                            mask,
+                                        }
+                                    }),
+                                run_opacity,
+                                run_blend_mode,
+                            );
+                        }
+                        command_buffers.push(enc.finish());
+                        // The run is one ping/pong step: flip parity exactly once.
+                        current_dst_is_ping = !current_dst_is_ping;
+                    }
+                }
+                continue;
+            }
             // Snapshot: capture the accumulated prefix [0..boundary) the moment
             // before the active layer is blended over it, so a later interactive
             // frame can resume from here.
@@ -3159,6 +3499,55 @@ struct VsOut {
                 }
             }
 
+            // Live clip pin: a clipping-mask / PowerClip child skips its clip
+            // re-bake while dragged/transformed (the per-frame re-bake was the Move
+            // lag), so its mask still sits at the bake position. Feed the shader the
+            // pin delta (Δcontent − Δframe) so it samples the mask at the
+            // canvas-fixed spot instead — the image stays clipped inside the frame
+            // live, through Move AND Free Transform. Naturally zero shift when the
+            // mask is fresh; the bias encoding still flags it as a clip child so the
+            // transform branches pin too.
+            let clip_shift_eff: Option<(i32, i32)> =
+                match (layer.clip_parent_id, layer.mask.as_ref()) {
+                    (Some(frame_id), Some(m)) if m.enabled => {
+                        // Frame's CURRENT offset (live during a frame drag). If the
+                        // frame isn't in this composited stack (rare region composite),
+                        // fall back to its bake offset → Δframe = 0 → content-only pin.
+                        let frame_now = layer_stack
+                            .layers
+                            .iter()
+                            .find(|l| l.id == frame_id)
+                            .map(|f| f.offset)
+                            .unwrap_or(m.bake_frame_offset);
+                        let dx = (layer.offset.0 - m.bake_offset.0)
+                            - (frame_now.0 - m.bake_frame_offset.0);
+                        let dy = (layer.offset.1 - m.bake_offset.1)
+                            - (frame_now.1 - m.bake_frame_offset.1);
+                        // The normal (non-transform) path composites through a LOD proxy
+                        // when one is engaged, so its layer_x is downscaled — scale the
+                        // pin to match. The transform branches sample at full-res canvas
+                        // coordinates, so they keep the full-res shift.
+                        let scale = if xform_active == 0 {
+                            proxy.map_or(1, |p| 1i32 << p.level)
+                        } else {
+                            1
+                        };
+                        Some((dx / scale, dy / scale))
+                    }
+                    _ => None,
+                };
+            let clip_shift_packed = clip_shift_eff.map_or(0, |(dx, dy)| pack_clip_shift(dx, dy));
+            // The shader samples the clip mask at `layer_local + shift`, so the mask
+            // tiles it reads are those the layer would show if it sat at
+            // `offset − shift`. Gather the mask against THAT offset, or the shifted
+            // sample lands on a tile that was never uploaded (slot -1 = hidden) and
+            // the base bleeds through the moving image. (Transform passes gather the
+            // whole tileset, so they are unaffected.)
+            let eff_off_mask = match clip_shift_eff {
+                Some((sx, sy)) => (eff_off.0 - sx as f32, eff_off.1 - sy as f32),
+                None => eff_off,
+            };
+
             let uniform = CompositorUniformsData {
                 opacity: layer.opacity,
                 blend_mode: Self::blend_mode_to_u32(&layer.blend_mode),
@@ -3190,7 +3579,7 @@ struct VsOut {
                 mask_inverted: u32::from(layer.mask.as_ref().map(|m| m.inverted).unwrap_or(false)),
                 adj_kind,
                 _adj_pad_a: dev_tone_active,
-                _adj_pad_b: 0,
+                clip_shift_packed,
                 _adj_pad_c: dev_scene_flag,
                 adj_p,
                 adj_lut,
@@ -3253,7 +3642,7 @@ struct VsOut {
                         band,
                         eff_zoom,
                         eff_view_off,
-                        eff_off,
+                        eff_off_mask,
                         eff_w,
                         eff_h,
                         eff_tiles_w,
@@ -3333,7 +3722,7 @@ struct VsOut {
                         band_src,
                         eff_zoom,
                         eff_view_off,
-                        eff_off,
+                        eff_off_mask,
                         eff_w,
                         eff_h,
                     );
@@ -3507,6 +3896,48 @@ mod shader_tests {
     fn shaders_are_valid_wgsl() {
         validate("compositor", super::COMPOSITOR_SHADER);
         validate("adjustment", super::ADJUSTMENT_SHADER);
+    }
+
+    /// Mirror of the shader's `clip_is_child()` + `clip_shift()`: 0 means "not a
+    /// clip child"; otherwise each half is the i16 delta biased by 0x8000. Keep in
+    /// lockstep — a clip mask drifting off its frame would be this encoding
+    /// breaking, not the shader.
+    fn unpack_clip_shift(packed: u32) -> Option<(i32, i32)> {
+        if packed == 0 {
+            return None;
+        }
+        let dx = (packed >> 16) as i32 - 0x8000;
+        let dy = (packed & 0xFFFF) as i32 - 0x8000;
+        Some((dx, dy))
+    }
+
+    #[test]
+    fn clip_shift_packs_and_unpacks_signed_deltas() {
+        for (dx, dy) in [
+            (0, 0),
+            (1, -1),
+            (37, 512),
+            (-250, -3000),
+            (32767, -32767),
+            (-32767, 32767),
+        ] {
+            let packed = super::pack_clip_shift(dx, dy);
+            // A clip child is ALWAYS flagged non-zero, even at zero shift, so the
+            // transform branches know to pin (a zero word means "not a clip child").
+            assert_ne!(packed, 0, "clip child must stay flagged for ({dx}, {dy})");
+            assert_eq!(
+                unpack_clip_shift(packed),
+                Some((dx, dy)),
+                "round-trip failed for ({dx}, {dy})"
+            );
+        }
+        // Exactly 0 is the reserved "not a clip child" value.
+        assert_eq!(unpack_clip_shift(0), None);
+        // Out-of-range deltas clamp instead of wrapping to a bogus small shift.
+        assert_eq!(
+            unpack_clip_shift(super::pack_clip_shift(90_000, -90_000)),
+            Some((32767, -32767))
+        );
     }
 
     #[test]

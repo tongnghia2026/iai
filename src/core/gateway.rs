@@ -112,6 +112,9 @@ pub enum ChangeKind {
     LayerStructure,
     /// Selection mask or offset.
     Selection,
+    /// Serialized document metadata that does not alter the canvas pixels
+    /// (document palette, author/title fields, future print metadata).
+    DocumentMetadata,
 }
 
 impl ChangeKind {
@@ -133,6 +136,9 @@ impl ChangeKind {
                 // do enter history (so undo reaches them) and therefore move the
                 // saved checkpoint. Kept as PersistentDocument to preserve the
                 // behaviour the app has always had.
+                out.composite = CompositeInvalidation::None;
+            }
+            ChangeKind::DocumentMetadata => {
                 out.composite = CompositeInvalidation::None;
             }
         }
@@ -250,6 +256,7 @@ mod tests {
             (ChangeKind::LayerPixels, CompositeInvalidation::Region),
             (ChangeKind::LayerStructure, CompositeInvalidation::Full),
             (ChangeKind::Selection, CompositeInvalidation::None),
+            (ChangeKind::DocumentMetadata, CompositeInvalidation::None),
         ] {
             let out = kind.outcome(7, true);
             assert_eq!(out.composite, composite);

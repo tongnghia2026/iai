@@ -1,5 +1,6 @@
 use super::{UiActions, UiData};
 use egui;
+use egui_phosphor::regular as ph;
 
 pub(super) const HEIGHT: f32 = 22.0;
 
@@ -18,7 +19,11 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
 
-                if ui.small_button("-").on_hover_text("Zoom Out").clicked() {
+                if ui
+                    .small_button(ph::MINUS)
+                    .on_hover_text("Zoom Out")
+                    .clicked()
+                {
                     actions.doc.zoom_out = true;
                 }
 
@@ -31,11 +36,51 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     actions.doc.zoom_100 = true;
                 }
 
-                if ui.small_button("+").on_hover_text("Zoom In").clicked() {
+                if ui.small_button(ph::PLUS).on_hover_text("Zoom In").clicked() {
                     actions.doc.zoom_in = true;
                 }
 
                 ui.separator();
+
+                if !data.tool.eyedropper_picked_colors.is_empty() {
+                    let has_vector = data.tool.path_style.is_some();
+                    let tip = if has_vector {
+                        "Sampled color — Left click: Fill · Right click: Outline"
+                    } else {
+                        "Sampled color — Left click: Foreground · Right click: Background"
+                    };
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for (index, &rgba) in data.tool.eyedropper_picked_colors.iter().enumerate() {
+                        ui.push_id(("picked_color", index), |ui| {
+                            // Paint an exact square instead of using Button padding;
+                            // 14 px fits safely inside the 20 px status-bar content.
+                            let (rect, response) = ui
+                                .allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+                            let response = response.on_hover_text(tip);
+                            ui.painter().rect_filled(
+                                rect,
+                                0.0,
+                                egui::Color32::from_rgba_unmultiplied(
+                                    rgba[0], rgba[1], rgba[2], rgba[3],
+                                ),
+                            );
+                            ui.painter().rect_stroke(
+                                rect,
+                                0.0,
+                                egui::Stroke::new(1.0_f32, pal.separator),
+                                egui::StrokeKind::Inside,
+                            );
+                            let color = crate::core::vector::color::ColorValue::from_rgba8(rgba);
+                            if response.clicked_by(egui::PointerButton::Primary) {
+                                actions.tool.apply_palette_fill = Some(color);
+                            }
+                            if response.clicked_by(egui::PointerButton::Secondary) {
+                                actions.tool.apply_palette_outline = Some(color);
+                            }
+                        });
+                    }
+                    ui.separator();
+                }
 
                 use crate::core::units::{format_value, from_pixels, Unit};
                 let size_text = if data.doc.canvas_unit == Unit::Pixels {
@@ -108,6 +153,22 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         crate::tools::ToolId::Fill => "G=Fill | Click to flood fill",
                         crate::tools::ToolId::Zoom => "Z=Zoom | Drag right/down=In | left/up=Out",
                         crate::tools::ToolId::Hand => "H=Hand | Click+Drag to pan",
+                        crate::tools::ToolId::Pen => {
+                            "P=Pen | Click=add point · Enter=finish · Esc=cancel"
+                        }
+                        crate::tools::ToolId::Node => {
+                            "A=Node | Drag point · Click edge=add · Delete=remove"
+                        }
+                        crate::tools::ToolId::Shape => {
+                            "U=Shape | Drag=draw · Shift=constrain · Alt=from center"
+                        }
+                        crate::tools::ToolId::VectorBrush => {
+                            "Vector Brush | Drag=draw stroke · edit its points afterwards"
+                        }
+                        crate::tools::ToolId::Arrow => {
+                            "Arrow / Connector | Drag from point to point"
+                        }
+                        crate::tools::ToolId::Text => "T=Type | Click on canvas to add text",
                         _ => "Space+Drag=Pan | Alt+Scroll=Zoom",
                     };
 

@@ -673,7 +673,11 @@ pub enum LayerType {
     /// payload-free avoids stale child indices.
     Group,
     Text(crate::core::text::TextData),
-    Shape(crate::core::shape::ShapeData),
+    /// An editable vector Path object (Bước 4). Holds the source-of-truth model
+    /// (geometry + fill/outline + object transform, Mục 3.2); `Layer::tiles` is
+    /// a raster cache derived from it, and `Layer::offset` places that raster on
+    /// the canvas/page. One object per layer at MVP (Mục 3.3).
+    Vector(crate::core::vector::object::VectorGeometry),
     SmartObject,
 }
 
@@ -702,6 +706,17 @@ pub struct LayerMask {
     pub height: u32,
     pub enabled: bool,
     pub inverted: bool,
+    /// Canvas offset of the owning (content) layer when this mask was baked, and
+    /// (`bake_frame_offset`) the clip frame's offset at that same moment. Only
+    /// meaningful for a PowerClip / clipping-mask content layer: while either the
+    /// content or its frame is dragged, the clip re-bake is skipped (too slow per
+    /// frame), so the GPU pins the clip by sampling this unmoved mask at
+    /// `layer_local + shift`, where `shift = (content.offset − bake_offset) −
+    /// (frame.offset − bake_frame_offset)`. That keeps the image clipped inside
+    /// the frame live, with no per-frame re-bake. Both `(0, 0)` for every ordinary
+    /// mask (which simply move with their layer, delta 0).
+    pub bake_offset: (i32, i32),
+    pub bake_frame_offset: (i32, i32),
 }
 
 #[allow(dead_code)]
@@ -713,6 +728,8 @@ impl LayerMask {
             height,
             enabled: true,
             inverted: false,
+            bake_offset: (0, 0),
+            bake_frame_offset: (0, 0),
         }
     }
 
@@ -723,6 +740,8 @@ impl LayerMask {
             height,
             enabled: true,
             inverted: false,
+            bake_offset: (0, 0),
+            bake_frame_offset: (0, 0),
         }
     }
 
@@ -889,6 +908,14 @@ pub struct Layer {
     /// Membership is stored here (not in `LayerType::Group`) so reorders never
     /// invalidate stale child indices.
     pub parent_id: Option<u32>,
+    /// Independent PowerClip relation: this layer's pixels are content clipped
+    /// by the referenced frame layer. Deliberately separate from `parent_id`,
+    /// which means group membership only.
+    pub clip_parent_id: Option<u32>,
+    /// Which page / artboard this layer belongs to (foundation contract #10). At
+    /// MVP every layer is on [`crate::core::page::PageId::IMPLICIT`], so behaviour
+    /// is unchanged; the field is here so multi-page support is purely additive.
+    pub page_id: crate::core::page::PageId,
     /// Group-only: whether the folder is expanded in the panel. Ignored for
     /// non-group layers. Defaults to `true`.
     pub expanded: bool,
@@ -917,6 +944,8 @@ impl Layer {
             offset: (0, 0),
             selected: false,
             parent_id: None,
+            clip_parent_id: None,
+            page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
         }
     }
@@ -949,6 +978,8 @@ impl Layer {
             offset: (0, 0),
             selected: false,
             parent_id: None,
+            clip_parent_id: None,
+            page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
         }
     }
@@ -975,6 +1006,8 @@ impl Layer {
             offset: (0, 0),
             selected: false,
             parent_id: None,
+            clip_parent_id: None,
+            page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
         }
     }
@@ -1029,6 +1062,10 @@ impl Layer {
             offset: self.offset,
             selected: self.selected,
             parent_id: self.parent_id,
+            clip_parent_id: self.clip_parent_id,
+            // A duplicate stays on the same page as its source (page membership is
+            // copied verbatim, unlike the clip relation which is remapped).
+            page_id: self.page_id,
             expanded: self.expanded,
         }
     }
@@ -1848,7 +1885,14 @@ impl LayerStack {
         if idx >= self.layers.len() {
             return false;
         }
+        let removed_id = self.layers[idx].id;
         self.layers.remove(idx);
+        for layer in &mut self.layers {
+            if layer.clip_parent_id == Some(removed_id) {
+                layer.clip_parent_id = None;
+            }
+        }
+        self.repair_clip_relations();
         if idx < self.active_idx {
             self.active_idx -= 1;
         } else if self.active_idx >= self.layers.len() {
@@ -1883,6 +1927,11 @@ impl LayerStack {
             return false;
         }
         let mut top = self.layers[idx].clone();
+        // Visibility priority: a hidden layer contributes nothing to the merge,
+        // and the result is visible when either input was — so merging a visible
+        // top onto a hidden bottom keeps the top, not the hidden bottom.
+        let top_visible = top.visible;
+        let bottom_visible = self.layers[idx - 1].visible;
         let bottom = &mut self.layers[idx - 1];
         // Bake the bottom mask into its alpha first: the merged pixels are a
         // new image, so keeping the old mask would cut the freshly blended
@@ -1906,9 +1955,17 @@ impl LayerStack {
                 let ch = chunk_size.min((h - cy) as usize) as u32;
                 let needed = (cw * ch * 4) as usize;
 
-                bottom
-                    .tiles
-                    .flatten_tiles_region_into(cx, cy, cw, ch, &mut patch[..needed]);
+                if bottom_visible {
+                    bottom
+                        .tiles
+                        .flatten_tiles_region_into(cx, cy, cw, ch, &mut patch[..needed]);
+                } else {
+                    // Hidden bottom: start from transparent so only the visible
+                    // top contributes (blend_onto_region no-ops a hidden top).
+                    for b in patch[..needed].iter_mut() {
+                        *b = 0;
+                    }
+                }
                 let saved = top.offset;
                 top.offset = (saved.0 - cx as i32, saved.1 - cy as i32);
                 top.blend_onto_region(&mut patch[..needed], cw, 0, 0, cw, ch);
@@ -1920,6 +1977,7 @@ impl LayerStack {
         bottom.blend_mode = BlendMode::Normal;
         bottom.opacity = 1.0;
         bottom.layer_type = LayerType::Raster;
+        bottom.visible = top_visible || bottom_visible;
         self.layers.remove(idx);
         if self.active_idx >= self.layers.len() {
             self.active_idx = self.layers.len() - 1;
@@ -1937,21 +1995,25 @@ impl LayerStack {
         let start = self.group_member_range(header_idx).start;
         let old_gid = self.layers[header_idx].id;
         let new_gid = self.reserve_id();
+        let mut id_map = std::collections::HashMap::new();
+        id_map.insert(old_gid, new_gid);
+        for i in start..header_idx {
+            id_map.insert(self.layers[i].id, self.reserve_id());
+        }
 
         let mut block: Vec<Layer> = Vec::with_capacity(header_idx - start + 1);
         let mut generated_names = Vec::with_capacity(header_idx - start + 1);
         for i in start..=header_idx {
-            let nid = if self.layers[i].id == old_gid {
-                new_gid
-            } else {
-                self.reserve_id()
-            };
+            let nid = id_map[&self.layers[i].id];
             let source_name = self.layers[i].name.clone();
             let mut d = self.layers[i].duplicate(nid);
             d.name = self.copy_name_with_reserved(&source_name, &mut generated_names);
-            if self.layers[i].parent_id == Some(old_gid) {
-                d.parent_id = Some(new_gid);
-            }
+            d.parent_id = self.layers[i]
+                .parent_id
+                .map(|parent| id_map.get(&parent).copied().unwrap_or(parent));
+            d.clip_parent_id = self.layers[i]
+                .clip_parent_id
+                .map(|parent| id_map.get(&parent).copied().unwrap_or(parent));
             d.selected = false;
             block.push(d);
         }
@@ -1988,6 +2050,10 @@ impl LayerStack {
             // Keep membership only for a parent that was copied too; an outer folder
             // left behind becomes a top-level paste.
             l.parent_id = src.parent_id.and_then(|p| id_map.get(&p).copied());
+            // A copied clip relation survives only when its frame was copied in
+            // the same block. Never leave a pasted child pointing into the
+            // source document/block.
+            l.clip_parent_id = src.clip_parent_id.and_then(|p| id_map.get(&p).copied());
             l.is_background = false;
             l.locked = false;
             l.selected = true;
@@ -2447,6 +2513,11 @@ impl LayerStack {
             return self.merge_down(self.active_idx);
         }
 
+        // Visibility priority: hidden selected layers are skipped by
+        // blend_onto_region, so the composite already excludes them; the result
+        // must stay visible when any input was (not inherit a hidden bottom).
+        let any_visible = selected_idxs.iter().any(|&i| self.layers[i].visible);
+
         let min_ox = selected_idxs
             .iter()
             .map(|&i| self.layers[i].offset.0)
@@ -2533,6 +2604,7 @@ impl LayerStack {
         self.layers[bottom_idx].name = "Merged".to_string();
         self.layers[bottom_idx].layer_type = LayerType::Raster;
         self.layers[bottom_idx].mask = None;
+        self.layers[bottom_idx].visible = any_visible;
 
         for &idx in selected_idxs[1..].iter().rev() {
             self.layers.remove(idx);
@@ -3160,6 +3232,82 @@ mod tests {
         assert_eq!(merged.tiles.get_pixel(0, 0).3, 0);
         // Top pixel had no mask -> survives the merge.
         assert_eq!(merged.tiles.get_pixel(1, 1), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn merge_down_drops_a_hidden_bottom_and_stays_visible() {
+        let mut stack = LayerStack::new(2, 2);
+        let bottom = stack.add_layer(2, 2);
+        stack.layers[bottom].tiles.set_pixel(0, 0, 255, 0, 0, 255); // red
+        stack.layers[bottom].visible = false; // eye off on the lower layer
+        let top = stack.add_layer(2, 2);
+        stack.layers[top].tiles.set_pixel(1, 1, 0, 0, 255, 255); // blue
+
+        assert!(stack.merge_down(top));
+
+        let merged = &stack.layers[bottom];
+        assert!(
+            merged.visible,
+            "a visible top makes the merged layer visible"
+        );
+        // The hidden bottom contributes nothing.
+        assert_eq!(
+            merged.tiles.get_pixel(0, 0).3,
+            0,
+            "hidden bottom pixel dropped"
+        );
+        // The visible top survives.
+        assert_eq!(merged.tiles.get_pixel(1, 1), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn merge_selected_keeps_visible_top_over_hidden_lower() {
+        let mut stack = LayerStack::new(2, 2);
+        let lower = stack.add_layer(2, 2);
+        stack.layers[lower].tiles.set_pixel(0, 0, 255, 0, 0, 255); // red
+        stack.layers[lower].visible = false;
+        stack.layers[lower].selected = true;
+        let upper = stack.add_layer(2, 2);
+        stack.layers[upper].tiles.set_pixel(1, 1, 0, 0, 255, 255); // blue
+        stack.layers[upper].selected = true;
+
+        assert!(stack.merge_selected(2, 2));
+
+        // Result lands on the lower slot; it must be visible and hold only the
+        // visible top's pixel, not the hidden lower's.
+        let merged = &stack.layers[lower];
+        assert!(merged.visible, "merged result must be visible");
+        assert_eq!(
+            merged.tiles.get_pixel(0, 0).3,
+            0,
+            "hidden lower pixel dropped"
+        );
+        assert_eq!(merged.tiles.get_pixel(1, 1), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn merge_selected_bakes_a_layer_mask() {
+        let mut stack = LayerStack::new(2, 2);
+        let lower = stack.add_layer(2, 2);
+        for (x, y) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)] {
+            stack.layers[lower].tiles.set_pixel(x, y, 0, 255, 0, 255); // green
+        }
+        stack.layers[lower].selected = true;
+        let upper = stack.add_layer(2, 2);
+        stack.layers[upper].tiles.set_pixel(0, 0, 0, 0, 255, 255); // blue
+        stack.layers[upper].mask = Some(LayerMask::new_black(2, 2)); // hides the top
+        stack.layers[upper].selected = true;
+
+        assert!(stack.merge_selected(2, 2));
+
+        let merged = &stack.layers[lower];
+        assert!(merged.mask.is_none(), "mask is baked in, not kept");
+        // The top was fully masked out, so its blue must not paint over the green.
+        assert_eq!(
+            merged.tiles.get_pixel(0, 0),
+            (0, 255, 0, 255),
+            "masked-out top did not paint"
+        );
     }
 
     #[test]

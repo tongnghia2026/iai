@@ -4,7 +4,44 @@
 use crate::app::state::App;
 
 impl App {
+    /// Mark every PowerClip / clipping-mask content layer's canvas region dirty,
+    /// so a re-fit is recomposited even when the base only changed coverage
+    /// (nothing moved to mark it). Called after a clip re-bake changed something.
+    fn mark_clip_content_dirty(&mut self) {
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let bounds: Vec<(i32, i32, u32, u32)> = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .filter(|l| l.clip_parent_id.is_some())
+            .map(|l| (l.offset.0, l.offset.1, l.width, l.height))
+            .collect();
+        for (x, y, w, h) in bounds {
+            canvas.mark_dirty_layer_bounds(x, y, w, h);
+        }
+    }
+
     pub fn flush_canvas(&mut self) {
+        // Re-pin clipping-mask / PowerClip content to its base — but NOT while a
+        // Move drag is in flight. Re-baking the clip is O(content area) on the CPU
+        // plus a GPU re-upload; doing that every frame made dragging a large
+        // clipped image unusably slow. While dragging, the content moves with its
+        // existing mask (as cheap as any layer move); on release — and on any
+        // other recomposite — we re-bake once so the clip snaps back onto the base.
+        // Fingerprint-gated (Canvas::clip_fp): no clip, or unchanged geometry, is a
+        // cheap hash.
+        let interactive_move =
+            self.edit.input.painting && self.edit.tools.active_id() == crate::tools::ToolId::Move;
+        if !interactive_move
+            && self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .refresh_clip_masks()
+        {
+            // The clip moved: mark its content's region dirty so this flush
+            // actually recomposites it (a move already marks dirty, but a base
+            // edit that only changed coverage might not).
+            self.mark_clip_content_dirty();
+        }
         if self.docs.documents[self.docs.active_doc_idx]
             .canvas
             .plane_dirty
@@ -263,6 +300,19 @@ impl App {
     /// The compositor guards correctness via `ping_initialized` — callers can freely
     /// pass `Some` and the compositor will fall back to full clear if needed.
     pub fn recomposite_with_dirty(&mut self, dirty_rect: Option<(u32, u32, u32, u32)>) {
+        // Live clip move: the backdrop cache freezes the layers below the active
+        // one, but a dragged clip child is pinned to a FIXED frame that its moving
+        // dirty rect doesn't track, so the frozen base could show through stale —
+        // the "bóng ma" that doubled the layer below. Disable the backdrop for this
+        // case so the base is recomposited fresh inside the (cheap) partial scissor,
+        // which the moved content bounds already cover (the frame sits inside them).
+        // NB: keep the partial scissor — a FULL viewport recompose every frame gets
+        // throttled, which left newly-revealed frame regions showing the base until
+        // release (base "covers" the image mid-drag).
+        let clip_live_move = self.is_interactive_edit()
+            && self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .has_clip_content();
         // Pick Mode A/B (Mode B while interactively moving/transforming) and size
         // the compositor before computing the composite.
         self.sync_compositor_viewport();
@@ -281,6 +331,7 @@ impl App {
             None
         };
         let dev_preview = self.build_develop_gpu_preview();
+        let allow_active_gpu_vector = self.active_vector_gpu_idle();
         if let Some(gpu) = &mut self.win.gpu {
             // Mode A composites in canvas-space (identity view); the dirty rect is
             // already in canvas pixels. Mode B bakes the view transform, so the
@@ -328,7 +379,12 @@ impl App {
                 });
             let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
             gpu.compositor.develop_preview = dev_preview;
-            let has_groups = canvas.layer_stack.has_effected_groups();
+            let has_effected_groups = canvas.layer_stack.has_effected_groups();
+            let gpu_isolates_groups = has_effected_groups
+                && gpu
+                    .compositor
+                    .can_gpu_isolate_opacity_groups(&canvas.layer_stack, allow_active_gpu_vector);
+            let has_groups = has_effected_groups && !gpu_isolates_groups;
             let effective_dirty = if has_groups {
                 dirty_rect.filter(|_| gpu.compositor.ping_initialized)
             } else {
@@ -365,6 +421,27 @@ impl App {
                 &canvas.layer_stack
             };
 
+            // The top visible vector run is drawn separately from one
+            // zoom-bucketed supersampled raster. Remove every corresponding
+            // document-resolution cache so coarse edge pixels cannot show
+            // through underneath the smoother overlay.
+            let display_stack_owned = self
+                .shell
+                .ui_data_cache
+                .path_display_suppressed_layers
+                .as_ref()
+                .filter(|(doc_id, _)| *doc_id == self.docs.documents[self.docs.active_doc_idx].id.0)
+                .map(|(_, layer_ids)| {
+                    let mut stack = render_stack_ref.clone();
+                    for layer in &mut stack.layers {
+                        if layer_ids.contains(&layer.id) {
+                            layer.visible = false;
+                        }
+                    }
+                    stack
+                });
+            let render_stack_ref = display_stack_owned.as_ref().unwrap_or(render_stack_ref);
+
             gpu.composite_layers(
                 render_stack_ref,
                 comp_off_x,
@@ -375,9 +452,11 @@ impl App {
                 // view-independently, and Mode B (viewport-streaming) bakes the
                 // view in but the view transform is part of the snapshot key
                 // (`vp_sig`), so a zoom/pan simply misses and recomposites. Only
-                // disabled for the synthetic group-isolation stack, whose indices
-                // don't match the real stack the cut is computed from.
-                !has_groups,
+                // disabled for the synthetic group-isolation stack (whose indices
+                // don't match the real stack the cut is computed from) and for a
+                // live clip move (the frozen base would ghost — see above).
+                !has_effected_groups && !clip_live_move,
+                allow_active_gpu_vector,
             );
             // Remember which Develop-window view this Mode B composite baked, so
             // the Develop window recomposites only when its view actually moves.
@@ -430,12 +509,37 @@ impl App {
         // each per-frame recomposite only fills the VIEWPORT (~1-2M px), not the
         // full canvas resolution (e.g. 17.5M px) Mode A would composite. Zoom/pan
         // (non-interactive) keeps Mode A's cached, recomposite-free re-blit.
-        let interactive = self.is_interactive_edit();
+        //
+        // Exception: an on-canvas Path scale/rotate previews entirely through the
+        // GPU transform slots, whose math is canvas-space (mode-agnostic — see the
+        // `xform_active` branch in compositor.wgsl) and which Mode A composites
+        // fine through its scissored partial path. Forcing Mode B for it would flip
+        // the ping/pong textures (canvas-size ↔ window-size) on gesture start,
+        // reallocating them and clearing `ping_initialized` — so the FIRST frame of
+        // the first such gesture pays a full-viewport recomposite plus a cold
+        // texture allocation, the visible one-beat hitch users hit when they first
+        // grab a rotate/scale handle. Staying in Mode A keeps `ping_initialized`
+        // and the textures, so the first frame is a cheap partial composite. A
+        // genuinely large / streaming canvas still switches to Mode B below via
+        // `is_large_canvas` / `viewport_streaming`.
+        let interactive = self.is_interactive_edit() && self.edit.path_transform.is_none();
         let mut mode_changed = false;
         if let Some(gpu) = &mut self.win.gpu {
             let canvas_pixels = (cw as u64).saturating_mul(ch as u64);
             let viewport_streaming = canvas_pixels > 12_000_000;
-            let canvas_space = !gpu.is_large_canvas && !viewport_streaming && !interactive;
+            // Native vectors must render into a viewport-sized target using the
+            // live view transform. Mode A composites at document resolution with
+            // (off=0, zoom=1) and only magnifies that texture during the final
+            // blit, so its `!canvas_space` eligibility guard would otherwise keep
+            // every ordinary small-canvas Path on the sequential CPU display
+            // bake forever. The flag defaults off, preserving the old Mode A/B
+            // decision byte-for-byte outside the experimental hybrid canvas.
+            let canvas_space = choose_canvas_space(
+                gpu.is_large_canvas,
+                viewport_streaming,
+                interactive,
+                crate::gpu::vector::runtime_enabled(),
+            );
             if gpu.compositor.canvas_space != canvas_space {
                 mode_changed = true;
             }
@@ -468,6 +572,23 @@ impl App {
             || (self.edit.input.painting
                 && self.edit.tools.active_id() == crate::tools::ToolId::Move)
             || self.edit.shape_drag.is_some()
+    }
+
+    /// The committed active vector may use the native GPU path whenever no live
+    /// editing session owns a pending preview. During any such session the raster
+    /// twin remains authoritative until its existing commit/cancel path finishes.
+    pub(in crate::app) fn active_vector_gpu_idle(&self) -> bool {
+        let live_move =
+            self.edit.input.painting && self.edit.tools.active_id() == crate::tools::ToolId::Move;
+        !live_move
+            && self.edit.transform_state.is_none()
+            && self.edit.path_transform.is_none()
+            && self.edit.path_gradient_drag.is_none()
+            && self.edit.node_drag.is_none()
+            && self.edit.pending_path_style.is_none()
+            && self.edit.shape_drag.is_none()
+            && !self.shape_style_scrub_active()
+            && self.jobs.shape_bake.is_none()
     }
 
     pub fn on_view_changed(&mut self) {
@@ -588,5 +709,54 @@ impl App {
             self.win.view_recompose_last = Some(end);
         }
         true
+    }
+}
+
+fn choose_canvas_space(
+    is_large_canvas: bool,
+    viewport_streaming: bool,
+    interactive: bool,
+    gpu_vector_canvas: bool,
+) -> bool {
+    !is_large_canvas && !viewport_streaming && !interactive && !gpu_vector_canvas
+}
+
+#[cfg(test)]
+mod hybrid_canvas_mode_tests {
+    use super::{choose_canvas_space, App};
+
+    #[test]
+    fn gpu_vector_flag_forces_viewport_space_for_small_static_canvas() {
+        assert!(choose_canvas_space(false, false, false, false));
+        assert!(!choose_canvas_space(false, false, false, true));
+    }
+
+    #[test]
+    fn legacy_mode_selection_is_unchanged_when_gpu_vector_flag_is_off() {
+        for is_large in [false, true] {
+            for streaming in [false, true] {
+                for interactive in [false, true] {
+                    assert_eq!(
+                        choose_canvas_space(is_large, streaming, interactive, false),
+                        !is_large && !streaming && !interactive
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn active_vector_is_gpu_eligible_only_outside_live_style_session() {
+        let mut app = App::new();
+        assert!(app.active_vector_gpu_idle());
+
+        app.edit.pending_path_style = Some((
+            app.docs.documents[0].canvas.layer_stack.layers[0].id,
+            crate::core::vector::style::VectorStyle::default(),
+        ));
+        assert!(!app.active_vector_gpu_idle());
+
+        app.edit.pending_path_style = None;
+        assert!(app.active_vector_gpu_idle());
     }
 }

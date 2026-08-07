@@ -487,7 +487,7 @@ pub(crate) fn filter_proxy_preview_ps_ui(ui: &mut egui::Ui, data: &UiData) {
             [74.0, 18.0],
             egui::Label::new(format!("{:.0}%", zoom * 100.0)),
         );
-        if ui.small_button("+").clicked() {
+        if ui.small_button(ph::PLUS).clicked() {
             zoom = next_filter_zoom(zoom, 1);
         }
         ui.ctx().data_mut(|d| d.insert_temp(zoom_id, zoom));

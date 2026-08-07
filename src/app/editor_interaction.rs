@@ -28,6 +28,11 @@ pub struct EditorInteraction {
     pub(in crate::app) transform_snap_guides: Vec<crate::core::snapping::SnapLine>,
     pub(in crate::app) pending_transform_commit:
         Option<std::sync::mpsc::Receiver<Result<TransformCommitResult, String>>>,
+    /// Non-destructive source retained between consecutive raster Free
+    /// Transforms. A fingerprint mismatch means another pixel operation touched
+    /// the layer and causes the entry to be discarded on the next Ctrl+T.
+    pub(in crate::app) raster_transform_lineage:
+        std::collections::HashMap<(crate::core::document::DocumentId, u32), RasterTransformLineage>,
     /// Continue into mesh Warp after an asynchronous transform bake.
     pub(in crate::app) warp_after_transform_commit: bool,
     /// Internal layer clipboard: whole cloned `Layer`s (preserving offset, opacity,
@@ -58,6 +63,53 @@ pub struct EditorInteraction {
     pub(in crate::app) text_edit: Option<TextEditState>,
     /// Active Shape-handle drag (Shape tool). See [`ShapeDragState`].
     pub(in crate::app) shape_drag: Option<ShapeDragState>,
+    /// Active on-canvas Path transform (scale/rotate) under the Move tool. See
+    /// [`PathTransformDrag`]. None unless a handle is being dragged.
+    pub(in crate::app) path_transform: Option<PathTransformDrag>,
+    /// User-moved rotation pivot for the active single Path: `(layer_id, pivot in
+    /// object-LOCAL coords)`. `None` — or an id that isn't the active layer —
+    /// means the default (the box centre). CorelDRAW-style: dragging the centre
+    /// marker relocates the point every rotation turns about. Kept per-layer so a
+    /// different object resets to centre; a material (local) point so it stays
+    /// glued to the object as it moves/scales/rotates.
+    pub(in crate::app) path_pivot: Option<(u32, crate::core::geometry::Point)>,
+    /// True while the rotation-pivot marker itself is being dragged (Move tool),
+    /// as opposed to a scale/rotate handle.
+    pub(in crate::app) path_pivot_dragging: bool,
+    /// While dragging the pivot, the label of the box anchor it has snapped to
+    /// ("Center" / "Corner" / "Middle"), shown next to the marker; `None` when it
+    /// sits free between anchors.
+    pub(in crate::app) path_pivot_snap: Option<&'static str>,
+    /// Path id currently showing CorelDRAW-style rotate/skew handles.
+    pub(in crate::app) path_rotate_mode: Option<u32>,
+    /// The last repeatable "duplicate + transform" step, as a CANVAS-space affine
+    /// `M`: Repeat (Ctrl+D / the button) duplicates the selection and applies `M`
+    /// to each copy, so a single sample fans out into a row / ring / spiral.
+    /// Captured from Alt+move (translate), Alt+rotate (rotate about the pivot) and
+    /// Ctrl+scale (scale about the anchor). `None` = nothing to repeat yet.
+    pub(in crate::app) last_repeat_transform: Option<crate::core::vector::affine::AffineTransform>,
+    /// Layer-stack snapshot captured at the START of an Alt/Ctrl duplicate-transform
+    /// gesture, so the duplicate + its transform commit as ONE undo step on release.
+    pub(in crate::app) path_dup_before: Option<crate::core::command::LayerStructureCommand>,
+    /// Active on-canvas vector-gradient transform handle drag.
+    pub(in crate::app) path_gradient_drag: Option<PathGradientDrag>,
+    /// Active node-edit drag under the Node tool. See [`NodeDrag`]. None unless a
+    /// node is being dragged.
+    pub(in crate::app) node_drag: Option<NodeDrag>,
+    /// The currently-selected Path node `(layer_id, contour, node)` for the Node
+    /// tool — highlighted in the overlay and the target of the Delete key.
+    pub(in crate::app) node_selected: Option<(u32, usize, usize)>,
+    /// Additional selected Path nodes `(contour, node)` on the SAME layer as
+    /// `node_selected`, for multi-node move / delete / align. Excludes the primary
+    /// (which lives in `node_selected`). Empty for a single-node selection.
+    pub(in crate::app) node_multi: Vec<(usize, usize)>,
+    /// Active Node-tool rubber-band selection rect in SCREEN space
+    /// `(start_x, start_y, cur_x, cur_y)`. `None` unless dragging on empty canvas.
+    pub(in crate::app) node_marquee: Option<(f32, f32, f32, f32)>,
+    /// Baseline `(layer_id, style)` captured when an interactive Path style edit
+    /// (colour dialog / outline-width scrub) begins, so the whole interaction
+    /// commits as ONE `ChangeVectorStyle` on release. None when idle.
+    pub(in crate::app) pending_path_style: Option<(u32, crate::core::vector::style::VectorStyle)>,
     /// Deferred options-bar style edit (Radius/Stroke/colour scrub) for a
     /// Shape layer. See [`ShapeStylePending`].
     pub(in crate::app) shape_style_pending: Option<ShapeStylePending>,

@@ -22,6 +22,18 @@ mod ui_layers;
 mod ui_selection;
 mod ui_tools;
 
+fn should_ring_modal_denial(denied: bool, text_input_frame: bool) -> bool {
+    denied && !text_input_frame
+}
+
+/// True while a keyboard/IME edit is recent enough that any incidental modal
+/// denial this frame belongs to that edit and must stay silent. A time window
+/// (rather than a one-shot per-frame flag) because the denial can surface a
+/// frame or two after the input event.
+fn within_text_input_window(until: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    until.is_some_and(|until| now < until)
+}
+
 impl App {
     fn set_refine_overlay_tint(&mut self, color: [u8; 4]) {
         self.edit.refine_overlay_color = color;
@@ -50,12 +62,16 @@ impl App {
             }
             3 => {
                 self.edit.tools.shape_mut().fill_color = color;
-                self.update_selected_shape_style();
+                self.update_selected_shape_style(true, false, false);
             }
             4 => {
                 self.edit.tools.shape_mut().stroke_color = color;
-                self.update_selected_shape_style();
+                self.update_selected_shape_style(false, true, false);
             }
+            5 => self.path_set_fill_color(color),
+            6 => self.path_set_stroke_color(color),
+            7 => self.path_set_fill_end_color(color),
+            8..=15 => self.path_set_gradient_stop_color(target - 8, color),
             _ => {
                 self.edit.tools.brush_mut().settings.color = color;
                 self.edit.tools.fill_mut().color = color;
@@ -90,6 +106,7 @@ impl App {
                 self.set_paint_color(self.shell.ui.paint_color_dialog_target, color);
             }
         } else {
+            self.edit.tools.eyedropper_mut().remember_color(color);
             self.set_paint_color(0, color);
         }
         self.shell.status_msg = format!("Picked #{:02X}{:02X}{:02X}", color[0], color[1], color[2]);
@@ -104,10 +121,16 @@ impl App {
         // even after the pointer goes idle.
         self.poll_shape_bake();
         self.flush_pending_shape_style();
+        // Off-thread Path bakes (live scale/rotate & node drags).
+        self.poll_path_bake();
+        // Off-thread crisp-Path display overlay bakes (zoom-bucket changes).
+        self.poll_display_bake();
 
         // Strict modal lock (standard design-app behavior): while a modal
         // operation or dialog is open, features outside its scope are refused
         // with the system bell until the user commits or cancels.
+        let text_input_frame =
+            within_text_input_window(self.win.text_input_quiet_until, std::time::Instant::now());
         if self.modal_lock_active() {
             let mut denied = actions.chrome.modal_denied;
             denied |= actions.doc.switch_doc.take().is_some();
@@ -132,7 +155,12 @@ impl App {
                 actions.chrome.show_library = None;
                 denied = true;
             }
-            if denied {
+            // Keyboard/IME events owned by the live TextEdit can make egui emit
+            // incidental UI bookkeeping in the same frame. They are not an
+            // attempted action outside the modal and must never ring Windows'
+            // attention bell. Pointer/menu/tab denials arrive in other frames;
+            // Ctrl+N is intercepted before egui and keeps its explicit denial.
+            if should_ring_modal_denial(denied, text_input_frame) {
                 self.deny_modal_action();
             }
         }
@@ -146,7 +174,7 @@ impl App {
         self.handle_direct_adjustment_actions(&mut actions);
         self.handle_tool_options_actions(&mut actions, event_loop);
 
-        if actions.doc.exit && !self.block_exit_if_active_operation() {
+        if actions.doc.exit && self.request_app_exit() {
             self.shell.exit_requested = true;
         }
 
@@ -187,5 +215,37 @@ impl App {
         if !self.docs.documents.is_empty() {
             self.docs.documents[self.docs.active_doc_idx].reconcile_pdf_page_modified();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_ring_modal_denial, within_text_input_window};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn text_input_frames_never_ring_the_modal_bell() {
+        assert!(!should_ring_modal_denial(true, true));
+        assert!(should_ring_modal_denial(true, false));
+        assert!(!should_ring_modal_denial(false, false));
+    }
+
+    #[test]
+    fn text_input_window_covers_frames_just_after_a_keystroke() {
+        let now = Instant::now();
+        // No recent text input: denials ring.
+        assert!(!within_text_input_window(None, now));
+        // A keystroke set the window 250ms ahead; a denial one frame later
+        // (still inside the window) stays silent, unlike the old one-shot flag.
+        let until = now + Duration::from_millis(250);
+        assert!(within_text_input_window(
+            Some(until),
+            now + Duration::from_millis(30)
+        ));
+        // Well past the window (a deliberate click after typing stopped): rings.
+        assert!(!within_text_input_window(
+            Some(until),
+            now + Duration::from_millis(400)
+        ));
     }
 }

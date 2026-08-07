@@ -195,6 +195,10 @@ pub struct CropTool {
     pub fixed_h: f32,
     pub unit: Unit,
     pub dpi: f32,
+    /// True once the user has typed a resolution into the Crop options. A
+    /// hand-entered DPI must survive tool/tab switches — only automatic
+    /// defaults may be replaced by the document's metadata DPI.
+    pub dpi_user_set: bool,
     pub presets: Vec<CropPreset>,
 
     pub is_dragging: bool,
@@ -233,6 +237,7 @@ impl CropTool {
             fixed_h: 600.0,
             unit: Unit::Pixels,
             dpi: 72.0,
+            dpi_user_set: false,
             presets: CropPreset::defaults(),
             is_dragging: false,
             crop_x0: 0.0,
@@ -265,15 +270,25 @@ impl CropTool {
         self.fixed_h = preset.height;
         self.unit = preset.unit;
         self.dpi = preset.dpi;
+        self.dpi_user_set = false;
         self.mode = CropMode::FixedSize;
     }
 
+    /// A resolution typed by the user in the Crop options. Sticky: it is never
+    /// replaced by the document's metadata DPI on re-activation.
+    pub fn set_user_dpi(&mut self, dpi: f32) {
+        self.dpi = dpi.clamp(1.0, 10000.0);
+        self.dpi_user_set = true;
+    }
+
     /// Refresh resolution from the active image only when Crop has no fixed
-    /// output preset. A fixed-size preset owns its DPI (for example an ID-photo
-    /// preset at 600 ppi), so leaving and returning to Crop must not replace it
-    /// with the document's commonly-defaulted 72 ppi metadata.
+    /// output preset AND the user has not typed a resolution themselves. A
+    /// fixed-size preset owns its DPI (for example an ID-photo preset at
+    /// 600 ppi) and a hand-entered value is a deliberate choice, so leaving and
+    /// returning to Crop (switching tools or document tabs) must not replace
+    /// either with the document's commonly-defaulted 72 ppi metadata.
     pub fn sync_dpi_on_activate(&mut self, canvas_dpi: f32) {
-        if self.mode != CropMode::FixedSize {
+        if self.mode != CropMode::FixedSize && !self.dpi_user_set {
             self.dpi = canvas_dpi.max(1.0);
         }
     }
@@ -425,6 +440,31 @@ impl CropTool {
             self.rotation = 0.0;
             self.image_tx = 0.0;
             self.image_ty = 0.0;
+        }
+    }
+
+    /// Switch the W/H display unit.
+    ///
+    /// In `FixedSize` mode `fixed_w`/`fixed_h` store a *physical* size in the
+    /// current unit, so the numbers are converted through pixels to keep the real
+    /// size unchanged (e.g. 2480 px at 300 dpi → 21.00 cm) rather than keeping the
+    /// raw number and merely relabelling the unit. The pixel selection is
+    /// unchanged, so it is only re-synced to the new numbers. In Free/Ratio mode
+    /// the crop is defined by the pixel selection and W/H is recomputed from it
+    /// each frame, so only the unit label changes — never the selection.
+    pub fn change_display_unit(&mut self, new_unit: Unit, cw: f32, ch: f32) {
+        use crate::core::units::{from_pixels, to_pixels};
+        if self.mode == CropMode::FixedSize {
+            let w_px = to_pixels(self.fixed_w, self.unit, self.dpi, cw);
+            let h_px = to_pixels(self.fixed_h, self.unit, self.dpi, ch);
+            self.unit = new_unit;
+            self.fixed_w = from_pixels(w_px, new_unit, self.dpi, cw);
+            self.fixed_h = from_pixels(h_px, new_unit, self.dpi, ch);
+            if self.has_selection() {
+                self.init_bounds(cw as u32, ch as u32);
+            }
+        } else {
+            self.unit = new_unit;
         }
     }
 
@@ -1045,6 +1085,28 @@ mod tests {
     }
 
     #[test]
+    fn switching_display_unit_converts_fixed_size_to_new_unit() {
+        // A4 at 300 ppi as a pixel-unit preset: 2480 × 3508 px.
+        let mut crop = CropTool::new();
+        crop.mode = CropMode::FixedSize;
+        crop.unit = Unit::Pixels;
+        crop.dpi = 300.0;
+        crop.fixed_w = 2480.0;
+        crop.fixed_h = 3508.0;
+
+        // Switching to cm must convert the real size, not keep the raw number.
+        crop.change_display_unit(Unit::Centimeters, 4000.0, 4000.0);
+        assert_eq!(crop.unit, Unit::Centimeters);
+        assert!((crop.fixed_w - 21.0).abs() < 0.05, "w = {}", crop.fixed_w);
+        assert!((crop.fixed_h - 29.7).abs() < 0.1, "h = {}", crop.fixed_h);
+
+        // Physical size is preserved on the round-trip back to pixels.
+        crop.change_display_unit(Unit::Pixels, 4000.0, 4000.0);
+        assert!((crop.fixed_w - 2480.0).abs() < 1.0, "w = {}", crop.fixed_w);
+        assert!((crop.fixed_h - 3508.0).abs() < 1.0, "h = {}", crop.fixed_h);
+    }
+
+    #[test]
     fn fixed_size_preset_keeps_dpi_when_crop_tool_is_reselected() {
         let mut crop = CropTool::new();
         let preset = CropPreset {
@@ -1066,6 +1128,36 @@ mod tests {
     fn free_crop_adopts_active_document_dpi() {
         let mut crop = CropTool::new();
         crop.dpi = 600.0;
+
+        crop.sync_dpi_on_activate(300.0);
+
+        assert_eq!(crop.dpi, 300.0);
+    }
+
+    #[test]
+    fn user_typed_dpi_survives_reactivation() {
+        let mut crop = CropTool::new();
+        crop.set_user_dpi(300.0);
+
+        // Switching tools or document tabs re-syncs from the document's
+        // metadata (commonly 72 ppi); a hand-typed resolution must hold.
+        crop.sync_dpi_on_activate(72.0);
+
+        assert_eq!(crop.dpi, 300.0);
+    }
+
+    #[test]
+    fn preset_dpi_then_free_mode_readopts_document_dpi() {
+        let mut crop = CropTool::new();
+        let preset = CropPreset {
+            name: "ID".to_string(),
+            width: 3.0,
+            height: 4.0,
+            unit: Unit::Centimeters,
+            dpi: 600.0,
+        };
+        crop.apply_preset(&preset);
+        crop.mode = CropMode::Free;
 
         crop.sync_dpi_on_activate(300.0);
 

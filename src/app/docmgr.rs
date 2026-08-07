@@ -21,6 +21,10 @@ impl App {
         if self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
+        // Interactive vector-style previews are pinned to the current canvas.
+        // Commit while that document is still active so layer-id reuse in the
+        // destination document can never redirect or discard the edit.
+        self.path_style_commit();
         self.docs.documents[self.docs.active_doc_idx].saved_zoom = self.edit.view.zoom;
         self.docs.documents[self.docs.active_doc_idx].saved_offset_x = self.edit.view.offset_x;
         self.docs.documents[self.docs.active_doc_idx].saved_offset_y = self.edit.view.offset_y;
@@ -125,6 +129,9 @@ impl App {
         {
             self.commit_text_edit();
         }
+        if idx == self.docs.active_doc_idx {
+            self.path_style_commit();
+        }
 
         if self.docs.documents[idx].is_modified() {
             self.docs.pending_close_doc_idx = Some(idx);
@@ -190,6 +197,7 @@ impl App {
         if self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
+        self.path_style_commit();
         let doc_idx = self.docs.active_doc_idx;
         let Some(pdf) = self.docs.documents[doc_idx].pdf_document.as_ref() else {
             return;
@@ -397,6 +405,50 @@ mod tests {
             app.docs.documents[app.docs.active_doc_idx].id,
             DocumentId(3)
         );
+    }
+
+    #[test]
+    fn app_exit_prompts_each_dirty_tab_and_skips_clean_tabs() {
+        let mut app = App::new();
+        let first_id = app.docs.documents[0].id;
+        app.docs.documents[0].canvas.deselect();
+
+        app.open_new_doc_tab();
+        let second_id = app.docs.documents[1].id;
+        app.docs.documents[1].canvas.deselect();
+
+        app.open_new_doc_tab(); // clean tab, active when exit is requested
+        assert!(!app.request_app_exit());
+        assert_eq!(app.docs.pending_exit_docs.len(), 2);
+        assert_eq!(app.docs.pending_exit_docs.front(), Some(&first_id));
+        assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, first_id);
+
+        app.discard_current_exit_document();
+        assert_eq!(app.docs.pending_exit_docs.front(), Some(&second_id));
+        assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, second_id);
+        assert!(app.shell.ui.show_exit_dialog);
+
+        app.discard_current_exit_document();
+        assert!(app.docs.pending_exit_docs.is_empty());
+        assert!(app.shell.exit_requested);
+        assert!(!app.shell.ui.show_exit_dialog);
+    }
+
+    #[test]
+    fn cancelling_a_per_tab_exit_prompt_keeps_all_documents_open() {
+        let mut app = App::new();
+        app.docs.documents[0].canvas.deselect();
+        app.open_new_doc_tab();
+        app.docs.documents[1].canvas.deselect();
+
+        assert!(!app.request_app_exit());
+        app.cancel_app_exit();
+
+        assert_eq!(app.docs.documents.len(), 2);
+        assert!(app.docs.documents.iter().all(Document::is_modified));
+        assert!(app.docs.pending_exit_docs.is_empty());
+        assert!(!app.shell.exit_requested);
+        assert!(!app.shell.ui.show_exit_dialog);
     }
 
     #[test]

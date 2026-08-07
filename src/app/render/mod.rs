@@ -30,6 +30,9 @@ impl App {
     pub fn apply_canvas_event(&mut self, event: CanvasEvent) {
         match event {
             CanvasEvent::LayerPixelsChanged => {
+                // flush_canvas re-pins any PowerClip / clipping-mask content to its
+                // base (fingerprint-gated), so a live Move — which recomposites
+                // through here every frame — follows the clip in real time.
                 self.flush_canvas();
             }
             CanvasEvent::SelectionChanged => {
@@ -41,6 +44,13 @@ impl App {
                 self.push_selection_uniforms();
             }
             CanvasEvent::LayerStructureChanged => {
+                // Re-pin PowerClip content masks to their frames before the full
+                // recomposite so any structural change (place, reorder, undo/redo,
+                // frame edit committed as structure) shows the correct clip. Cheap
+                // no-op when nothing is clipped or unchanged (fingerprint-gated).
+                self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .refresh_clip_masks();
                 self.docs.documents[self.docs.active_doc_idx]
                     .canvas
                     .layer_revision += 1;
@@ -185,7 +195,12 @@ impl App {
             &*window,
             None,
             None,
-            None,
+            // The recovered adapter's real texture ceiling — the egui default
+            // (2048) would panic on big textures and shrink the font atlas.
+            self.win
+                .gpu
+                .as_ref()
+                .map(|g| g.max_texture_dimension as usize),
         ));
         self.win.cached_egui_primitives = Vec::new();
         self.edit.refine_overlay_tex = None;
@@ -233,7 +248,10 @@ impl App {
                     &*dev_window,
                     None,
                     None,
-                    None,
+                    self.win
+                        .gpu
+                        .as_ref()
+                        .map(|g| g.max_texture_dimension as usize),
                 ));
                 self.win.develop_egui_ctx = Some(ctx);
                 dev_window.request_redraw();

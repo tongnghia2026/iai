@@ -45,6 +45,19 @@ pub const CLONE_SOURCE_PREVIEW_MAX_SIZE: usize = 512;
 // have no reliable stacking relationship with window layers.
 const CANVAS_TOOL_OVERLAY_ORDER: egui::Order = egui::Order::Background;
 
+/// Shared layer for the editable Path raster and its editing chrome.
+///
+/// Keeping these in one layer makes call order authoritative: the display
+/// raster is emitted first, then outlines, handles and anchors. Separate layer
+/// ids at the same egui order can retain an older stacking order and let the
+/// curve cover the nodes that must remain visible and draggable.
+fn canvas_path_overlay_layer() -> egui::LayerId {
+    egui::LayerId::new(
+        CANVAS_TOOL_OVERLAY_ORDER,
+        egui::Id::new("canvas_path_overlay"),
+    )
+}
+
 pub(crate) fn document_side_dialog_pos(
     ctx: &egui::Context,
     data: &UiData,
@@ -136,6 +149,97 @@ pub struct ShapeOverlay {
     /// (bakes are throttled on big shapes), so the overlay also draws the
     /// live shape outline.
     pub dragging: bool,
+}
+
+/// Current fill/outline style of the active Path layer, for the options-bar
+/// Fill/Outline controls (Move / Node tools). `*_enabled` mirrors whether the
+/// paint is present (`Paint::Solid`); the colour is the last solid colour (or
+/// black) so a chip always shows something.
+#[derive(Clone, Copy)]
+pub struct PathStyleData {
+    pub fill_enabled: bool,
+    pub fill_color: [u8; 4],
+    /// Exact process colour behind the preview chip (preserves CMYK identity).
+    pub fill_value: Option<crate::core::vector::color::ColorValue>,
+    pub fill_overprint: bool,
+    pub fill_end_color: [u8; 4],
+    pub gradient_stop_colors: [[u8; 4]; crate::core::vector::style::MAX_GRADIENT_STOPS],
+    pub gradient_stop_offsets: [f32; crate::core::vector::style::MAX_GRADIENT_STOPS],
+    pub gradient_stop_count: u8,
+    pub stroke_enabled: bool,
+    pub stroke_color: [u8; 4],
+    pub stroke_value: Option<crate::core::vector::color::ColorValue>,
+    pub stroke_overprint: bool,
+    pub stroke_width: f32,
+    /// 0 solid, 1 linear gradient, 2 radial gradient.
+    pub fill_kind: u8,
+    /// 0 solid, 1 dashed, 2 dotted.
+    pub dash_kind: u8,
+    /// Editable dash/gap lengths in canvas units. Only the first `dash_len`
+    /// entries are active.
+    pub dash_values: [f32; crate::core::vector::style::MAX_DASHES],
+    pub dash_len: u8,
+    pub dash_offset: f32,
+    /// Outline end cap: 0 Butt, 1 Round, 2 Square.
+    pub cap: u8,
+    /// Outline corner join: 0 Miter, 1 Round, 2 Bevel.
+    pub join: u8,
+    pub arrow_start: u8,
+    pub arrow_end: u8,
+    pub arrow_size: f32,
+}
+
+/// On-canvas editing overlay for the Node tool: the active Path's outline,
+/// its anchor points, and the handle arms of the selected node. All positions
+/// are in canvas space; the UI maps them to screen.
+#[derive(Clone)]
+pub struct NodeOverlay {
+    /// Flattened contours (each a polyline) to draw as the path outline.
+    pub outlines: Vec<Vec<(f32, f32)>>,
+    /// Segment currently inside the enlarged insertion hit area.
+    pub hovered_segment: Option<Vec<(f32, f32)>>,
+    /// Exact canvas-space point where a click will insert a node.
+    pub insertion_marker: Option<(f32, f32)>,
+    /// True when the insertion point has snapped to the segment's exact midpoint.
+    pub insertion_at_mid: bool,
+    /// Anchor points: `(canvas_x, canvas_y, selected)`.
+    pub nodes: Vec<(f32, f32, bool)>,
+    /// Bézier handle arms of the selected node: `[anchor_x, anchor_y, ctrl_x, ctrl_y]`.
+    pub handles: Vec<[f32; 4]>,
+    /// Active rubber-band selection rect in SCREEN space `[x0, y0, x1, y1]`, or
+    /// `None` when not marquee-dragging.
+    pub marquee: Option<[f32; 4]>,
+}
+
+#[derive(Clone)]
+pub struct PathGradientOverlay {
+    /// 0 linear, 1 radial.
+    pub kind: u8,
+    pub center: (f32, f32),
+    pub axis_x: (f32, f32),
+    pub axis_y: (f32, f32),
+    pub stops: Vec<(f32, f32)>,
+}
+
+#[derive(Clone)]
+pub struct PathDisplayRaster {
+    pub cache_key: u64,
+    pub tiles: std::sync::Arc<Vec<PathDisplayTile>>,
+    pub canvas_x: f32,
+    pub canvas_y: f32,
+    pub canvas_w: f32,
+    pub canvas_h: f32,
+    pub raster_w: u32,
+    pub raster_h: u32,
+}
+
+#[derive(Clone)]
+pub struct PathDisplayTile {
+    pub rgba: std::sync::Arc<Vec<u8>>,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Warp freeze-mask snapshot for the red canvas overlay. `alpha` is the mesh
@@ -281,6 +385,16 @@ pub struct TransformOverlayData {
     pub handles: [(f32, f32); 8],
     /// Center handle in canvas space
     pub center: (f32, f32),
+    /// Rotation-pivot marker in canvas space. Equals `center` for Free Transform
+    /// and for a Path whose pivot has not been moved; otherwise the relocated
+    /// centre of rotation (CorelDRAW style).
+    pub pivot: (f32, f32),
+    /// While the pivot is being dragged and snapped to a box anchor, the label to
+    /// show beside it ("Center" / "Corner" / "Middle"); `None` when it sits free.
+    /// The overlay highlights the marker + guides when this is `Some`.
+    pub pivot_snap_label: Option<&'static str>,
+    /// Whether this is the Path's second-click rotate/skew handle set.
+    pub alternate_handles: bool,
 }
 
 fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
@@ -586,6 +700,12 @@ pub enum LayerAlign {
     Top,
     VerticalCenter,
     Bottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerDistribute {
+    HorizontalCenters,
+    VerticalCenters,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1027,6 +1147,70 @@ pub fn build(
             }
         }
 
+        // Vector Brush: preview the in-progress stroke at its true screen width so
+        // the drawn thickness is visible while dragging (committed on release).
+        if data.tool.vector_brush_path.len() >= 2 {
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("vector_brush_overlay"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            let pts: Vec<egui::Pos2> = data
+                .tool
+                .vector_brush_path
+                .iter()
+                .map(|&(x, y)| to_screen_pos(x, y))
+                .collect();
+            let fg = data.tool.vector_brush_color;
+            let width = (data.tool.vector_brush_width * zoom).max(1.0);
+            painter.add(egui::Shape::line(
+                pts,
+                egui::Stroke::new(
+                    width,
+                    egui::Color32::from_rgba_unmultiplied(fg[0], fg[1], fg[2], 150),
+                ),
+            ));
+        }
+
+        if data.tool.arrow_path.len() >= 2 {
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("arrow_tool_overlay"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            let points: Vec<_> = data
+                .tool
+                .arrow_path
+                .iter()
+                .map(|&(x, y)| to_screen_pos(x, y))
+                .collect();
+            let color = data.tool.vector_brush_color;
+            painter.add(egui::Shape::line(
+                points.clone(),
+                egui::Stroke::new(
+                    (data.tool.arrow_width * zoom).max(1.0),
+                    egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 190),
+                ),
+            ));
+            if let (Some(tip), Some(previous)) = (points.last(), points.iter().rev().nth(1)) {
+                let direction = (*tip - *previous).normalized();
+                let normal = egui::vec2(-direction.y, direction.x);
+                let length = (data.tool.arrow_width * zoom * 6.0).max(8.0);
+                let base = *tip - direction * length;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        *tip,
+                        base + normal * length * 0.42,
+                        base - normal * length * 0.42,
+                    ],
+                    egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 190),
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+
         if let Some([x0, y0, x1, y1]) = data.sel.rect_sel_preview {
             let painter = ctx
                 .layer_painter(egui::LayerId::new(
@@ -1099,6 +1283,35 @@ pub fn build(
                             })
                             .collect();
                         pts.push(pts[0]);
+                        painter.add(egui::Shape::line(pts, stroke));
+                    }
+                    format!("{:.0} × {:.0}", (x1 - x0).abs(), (y1 - y0).abs())
+                }
+                3 | 4 => {
+                    let cx = (x0 + x1) * 0.5;
+                    let cy = (y0 + y1) * 0.5;
+                    let rx = (x1 - x0).abs() * 0.5;
+                    let ry = (y1 - y0).abs() * 0.5;
+                    let n = data.tool.shape_sides.clamp(3, 100) as usize;
+                    if rx > 0.5 && ry > 0.5 {
+                        let start = -std::f32::consts::FRAC_PI_2;
+                        let star = data.tool.shape_kind == 4;
+                        let inner = data.tool.shape_star_inner.clamp(0.05, 0.95);
+                        let count = if star { 2 * n } else { n };
+                        let mut pts: Vec<egui::Pos2> = (0..count)
+                            .map(|i| {
+                                let (a, f) = if star {
+                                    let a = start + std::f32::consts::PI * i as f32 / n as f32;
+                                    (a, if i % 2 == 0 { 1.0 } else { inner })
+                                } else {
+                                    (start + std::f32::consts::TAU * i as f32 / n as f32, 1.0)
+                                };
+                                to_screen_pos(cx + rx * f * a.cos(), cy + ry * f * a.sin())
+                            })
+                            .collect();
+                        if let Some(&first) = pts.first() {
+                            pts.push(first);
+                        }
                         painter.add(egui::Shape::line(pts, stroke));
                     }
                     format!("{:.0} × {:.0}", (x1 - x0).abs(), (y1 - y0).abs())
@@ -1214,7 +1427,19 @@ pub fn build(
             }
             for &(hid, hx, hy) in &overlay.handles {
                 let c = to_screen_pos(hx, hy);
-                if hid == 8 {
+                if hid == 11 {
+                    // Corel-style centre move node: small circle + crosshair.
+                    painter.circle_filled(c, 5.0, egui::Color32::WHITE);
+                    painter.circle_stroke(c, 5.0, egui::Stroke::new(1.0_f32, accent));
+                    painter.line_segment(
+                        [c - egui::vec2(3.0, 0.0), c + egui::vec2(3.0, 0.0)],
+                        egui::Stroke::new(1.0_f32, accent),
+                    );
+                    painter.line_segment(
+                        [c - egui::vec2(0.0, 3.0), c + egui::vec2(0.0, 3.0)],
+                        egui::Stroke::new(1.0_f32, accent),
+                    );
+                } else if hid == 8 {
                     // Corner-radius node: a small diamond.
                     let r = 4.5;
                     let pts = vec![
@@ -1238,6 +1463,242 @@ pub fn build(
                         egui::StrokeKind::Inside,
                     );
                 }
+            }
+        }
+
+        // A zoom-bucketed display raster keeps the active Path crisp without
+        // changing the document-resolution atlas (and therefore without
+        // softening raster/photo layers). It sits in the canvas-tool layer so
+        // dialogs and panels always remain above it.
+        if let Some(display) = &data.tool.path_display {
+            let texture_cache_id = egui::Id::new("active_path_display_texture");
+            let textures = ctx
+                .data(|d| {
+                    d.get_temp::<(u64, Vec<egui::TextureHandle>)>(texture_cache_id)
+                        .filter(|(key, _)| *key == display.cache_key)
+                        .map(|(_, textures)| textures)
+                })
+                .unwrap_or_else(|| {
+                    let textures: Vec<_> = display
+                        .tiles
+                        .iter()
+                        .enumerate()
+                        .map(|(index, tile)| {
+                            let image = egui::ColorImage::from_rgba_unmultiplied(
+                                [tile.width as usize, tile.height as usize],
+                                tile.rgba.as_slice(),
+                            );
+                            ctx.load_texture(
+                                format!("active_path_display_{index}"),
+                                image,
+                                // Display rasters are baked at the next zoom
+                                // bucket (2x/4x/8x/16x). Most actual zooms sit
+                                // between buckets, so the texture is reduced
+                                // slightly on screen. Linear filtering preserves
+                                // the supersampled edge coverage; nearest sampling
+                                // reintroduced visible stair-steps at e.g. 257%.
+                                egui::TextureOptions::LINEAR,
+                            )
+                        })
+                        .collect();
+                    ctx.data_mut(|d| {
+                        d.insert_temp(texture_cache_id, (display.cache_key, textures.clone()));
+                    });
+                    textures
+                });
+            let painter = ctx
+                .layer_painter(canvas_path_overlay_layer())
+                .with_clip_rect(canvas_viewport);
+            let px_canvas_x = display.canvas_w / display.raster_w as f32;
+            let px_canvas_y = display.canvas_h / display.raster_h as f32;
+            for (tile, texture) in display.tiles.iter().zip(&textures) {
+                let tile_x = display.canvas_x + tile.x as f32 * px_canvas_x;
+                let tile_y = display.canvas_y + tile.y as f32 * px_canvas_y;
+                let rect = egui::Rect::from_min_size(
+                    to_screen_pos(tile_x, tile_y),
+                    egui::vec2(
+                        tile.width as f32 * px_canvas_x * zoom,
+                        tile.height as f32 * px_canvas_y * zoom,
+                    ),
+                );
+                painter.image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+        }
+
+        // Node tool overlay: the active Path's outline, its anchor points, and
+        // the selected node's Bézier handle arms.
+        if let Some(overlay) = &data.tool.node_overlay {
+            let painter = ctx
+                .layer_painter(canvas_path_overlay_layer())
+                .with_clip_rect(canvas_viewport);
+            let accent = egui::Color32::from_rgb(64, 140, 240);
+            // Path outline (steady blue line, like the Pen preview).
+            for line in &overlay.outlines {
+                if line.len() >= 2 {
+                    let pts: Vec<egui::Pos2> =
+                        line.iter().map(|&(x, y)| to_screen_pos(x, y)).collect();
+                    painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0_f32, accent)));
+                }
+            }
+            // Make the insertion target unambiguous without thickening every
+            // contour: only the segment under the pointer is emphasized.
+            if let Some(line) = &overlay.hovered_segment {
+                if line.len() >= 2 {
+                    let pts: Vec<egui::Pos2> =
+                        line.iter().map(|&(x, y)| to_screen_pos(x, y)).collect();
+                    painter.add(egui::Shape::line(
+                        pts,
+                        egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(70, 190, 255)),
+                    ));
+                }
+            }
+            if let Some((x, y)) = overlay.insertion_marker {
+                let p = to_screen_pos(x, y);
+                let mid = overlay.insertion_at_mid;
+                // Snapped to the edge midpoint → bright amber; otherwise blue.
+                let ring = if mid {
+                    egui::Color32::from_rgb(255, 190, 40)
+                } else {
+                    egui::Color32::from_rgb(30, 110, 230)
+                };
+                let r = if mid { 6.0 } else { 5.0 };
+                painter.circle_filled(p, r, egui::Color32::WHITE);
+                painter.circle_stroke(p, r, egui::Stroke::new(1.5_f32, ring));
+                // A "+" inside the marker so it clearly reads "add a node here".
+                let arm = r - 2.0;
+                let plus = egui::Stroke::new(1.5_f32, ring);
+                painter.line_segment(
+                    [egui::pos2(p.x - arm, p.y), egui::pos2(p.x + arm, p.y)],
+                    plus,
+                );
+                painter.line_segment(
+                    [egui::pos2(p.x, p.y - arm), egui::pos2(p.x, p.y + arm)],
+                    plus,
+                );
+                // Text label so the affordance is unmistakable.
+                let label = if mid { "Middle" } else { "Add node" };
+                let lp = egui::pos2(p.x + 10.0, p.y - 10.0);
+                let font = egui::FontId::proportional(12.0);
+                for (dx, dy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0_f32), (0.0, 1.0)] {
+                    painter.text(
+                        egui::pos2(lp.x + dx, lp.y + dy),
+                        egui::Align2::LEFT_BOTTOM,
+                        label,
+                        font.clone(),
+                        egui::Color32::from_black_alpha(200),
+                    );
+                }
+                painter.text(
+                    lp,
+                    egui::Align2::LEFT_BOTTOM,
+                    label,
+                    font,
+                    egui::Color32::WHITE,
+                );
+            }
+            // Handle arms of the selected node (thin line + round control point).
+            for &[ax, ay, hx, hy] in &overlay.handles {
+                let a = to_screen_pos(ax, ay);
+                let h = to_screen_pos(hx, hy);
+                painter.add(egui::Shape::line_segment(
+                    [a, h],
+                    egui::Stroke::new(1.0_f32, accent),
+                ));
+                painter.circle(
+                    h,
+                    3.0,
+                    egui::Color32::WHITE,
+                    egui::Stroke::new(1.0_f32, accent),
+                );
+            }
+            // Anchor squares: hollow for normal, filled for the selected node.
+            for &(x, y, selected) in &overlay.nodes {
+                let c = to_screen_pos(x, y);
+                let rect = egui::Rect::from_center_size(c, egui::vec2(7.0, 7.0));
+                if selected {
+                    painter.rect_filled(rect, 0.0, accent);
+                    painter.rect_stroke(
+                        rect,
+                        0.0,
+                        egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
+                        egui::StrokeKind::Outside,
+                    );
+                } else {
+                    painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
+                    painter.rect_stroke(
+                        rect,
+                        0.0,
+                        egui::Stroke::new(1.0_f32, accent),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+            // Rubber-band selection rect (screen space — drawn directly).
+            if let Some([x0, y0, x1, y1]) = overlay.marquee {
+                let rect = egui::Rect::from_two_pos(egui::pos2(x0, y0), egui::pos2(x1, y1));
+                painter.rect_filled(
+                    rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(64, 140, 240, 40),
+                );
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(1.0_f32, accent),
+                    egui::StrokeKind::Middle,
+                );
+            }
+        }
+
+        // Editable Path gradient transform: origin and basis handles. Linear
+        // gradients expose direction; radial gradients also expose the second
+        // radius and an ellipse preview.
+        if let Some(overlay) = &data.tool.path_gradient_overlay {
+            let painter = ctx
+                .layer_painter(canvas_path_overlay_layer())
+                .with_clip_rect(canvas_viewport);
+            let center = to_screen_pos(overlay.center.0, overlay.center.1);
+            let axis_x = to_screen_pos(overlay.axis_x.0, overlay.axis_x.1);
+            let axis_y = to_screen_pos(overlay.axis_y.0, overlay.axis_y.1);
+            let shadow = egui::Stroke::new(3.0_f32, egui::Color32::from_black_alpha(150));
+            let accent = egui::Stroke::new(1.25_f32, egui::Color32::from_rgb(255, 210, 70));
+            for stroke in [shadow, accent] {
+                painter.line_segment([center, axis_x], stroke);
+                if overlay.kind == 1 {
+                    painter.line_segment([center, axis_y], stroke);
+                }
+            }
+            if overlay.kind == 1 {
+                let vx = axis_x - center;
+                let vy = axis_y - center;
+                let ellipse: Vec<egui::Pos2> = (0..=64)
+                    .map(|index| {
+                        let angle = std::f32::consts::TAU * index as f32 / 64.0;
+                        center + vx * angle.cos() + vy * angle.sin()
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(ellipse, accent));
+            }
+            for &(x, y) in &overlay.stops {
+                let point = to_screen_pos(x, y);
+                painter.circle(
+                    point,
+                    3.0,
+                    egui::Color32::WHITE,
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40)),
+                );
+            }
+            let center_rect = egui::Rect::from_center_size(center, egui::vec2(8.0, 8.0));
+            painter.rect_filled(center_rect, 1.0, egui::Color32::WHITE);
+            painter.rect_stroke(center_rect, 1.0, accent, egui::StrokeKind::Outside);
+            painter.circle(axis_x, 5.0, egui::Color32::WHITE, accent);
+            if overlay.kind == 1 {
+                painter.circle(axis_y, 5.0, egui::Color32::WHITE, accent);
             }
         }
 
@@ -1364,7 +1825,7 @@ pub fn build(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 let del_btn = egui::Button::new(
-                                                    egui::RichText::new("\u{00D7}").color(
+                                                    egui::RichText::new(ph::X).color(
                                                         egui::Color32::from_rgb(220, 80, 80),
                                                     ),
                                                 )
@@ -1621,10 +2082,19 @@ pub fn build(
         }
 
         if let Some(ref ov) = data.tool.transform_overlay {
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::new("transform_overlay"),
-            ));
+            // Canvas tool chrome must stay above the image but below floating
+            // windows/dialogs, and must not escape into the side/top panels. Clip
+            // to the drawing viewport — NOT the paper rect — so a box larger than
+            // the page (e.g. an image bigger than the canvas, or one rotated so its
+            // corners fall outside the page) still shows its handles in the empty
+            // canvas margin where they can be grabbed.
+            let clip_rect = canvas_viewport;
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    CANVAS_TOOL_OVERLAY_ORDER,
+                    egui::Id::new("transform_overlay"),
+                ))
+                .with_clip_rect(clip_rect);
 
             let bbox_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220);
             let handle_fill = egui::Color32::from_rgba_unmultiplied(240, 240, 255, 240);
@@ -1635,6 +2105,8 @@ pub fn build(
 
             let cs = |cx: f32, cy: f32| egui::pos2(cx * zoom + ox, cy * zoom + oy);
 
+            // `corners` is TL, TR, BL, BR. Walk the outside perimeter only;
+            // never connect opposite corners (the Move box must not show an X).
             let c = ov.corners;
             painter.line_segment([cs(c[0].0, c[0].1), cs(c[1].0, c[1].1)], bbox_stroke);
             painter.line_segment([cs(c[1].0, c[1].1), cs(c[3].0, c[3].1)], bbox_stroke);
@@ -1642,24 +2114,112 @@ pub fn build(
             painter.line_segment([cs(c[2].0, c[2].1), cs(c[0].0, c[0].1)], bbox_stroke);
 
             let hs = 4.5;
-            for &(hx, hy) in &ov.handles {
+            for (i, &(hx, hy)) in ov.handles.iter().enumerate() {
                 let sp = cs(hx, hy);
-                let rect = egui::Rect::from_center_size(sp, egui::vec2(hs * 2.0, hs * 2.0));
-                painter.rect_filled(rect, 1.0, handle_fill);
-                painter.rect_stroke(rect, 1.0, border_stroke, egui::StrokeKind::Outside);
+                if ov.alternate_handles {
+                    // Phosphor supplies close matches for Corel's curved rotate
+                    // and two-headed skew marks. Put them just outside the box,
+                    // along the centre-to-handle ray, like the reference chrome.
+                    let center = cs(ov.center.0, ov.center.1);
+                    let ray = sp - center;
+                    let len = ray.length().max(1.0);
+                    let icon_pos = sp + ray / len * 11.0;
+                    let glyph = match i {
+                        0 | 2 | 5 | 7 => ph::ARROW_COUNTER_CLOCKWISE,
+                        1 | 6 => ph::ARROWS_LEFT_RIGHT,
+                        3 | 4 => ph::ARROWS_DOWN_UP,
+                        _ => "",
+                    };
+                    let font = egui::FontId::proportional(if matches!(i, 0 | 2 | 5 | 7) {
+                        20.0
+                    } else {
+                        18.0
+                    });
+                    // Four-way dark halo keeps the white glyph readable over
+                    // both the canvas margin and bright artwork.
+                    for (dx, dy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                        painter.text(
+                            icon_pos + egui::vec2(dx, dy),
+                            egui::Align2::CENTER_CENTER,
+                            glyph,
+                            font.clone(),
+                            egui::Color32::from_black_alpha(230),
+                        );
+                    }
+                    painter.text(
+                        icon_pos,
+                        egui::Align2::CENTER_CENTER,
+                        glyph,
+                        font,
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    let rect = egui::Rect::from_center_size(sp, egui::vec2(hs * 2.0, hs * 2.0));
+                    painter.rect_filled(rect, 1.0, handle_fill);
+                    painter.rect_stroke(rect, 1.0, border_stroke, egui::StrokeKind::Outside);
+                }
             }
 
-            let cp = cs(ov.center.0, ov.center.1);
-            painter.circle_filled(cp, 5.0, center_fill);
-            painter.circle_stroke(cp, 5.0, border_stroke);
-            painter.line_segment(
-                [egui::pos2(cp.x - 4.0, cp.y), egui::pos2(cp.x + 4.0, cp.y)],
-                egui::Stroke::new(1.0_f32, handle_border),
-            );
-            painter.line_segment(
-                [egui::pos2(cp.x, cp.y - 4.0), egui::pos2(cp.x, cp.y + 4.0)],
-                egui::Stroke::new(1.0_f32, handle_border),
-            );
+            // Rotation-pivot marker (⊕). Drawn at the pivot — the box centre by
+            // default, or wherever the user dragged the centre of rotation.
+            if ov.alternate_handles {
+                let cp = cs(ov.pivot.0, ov.pivot.1);
+                if let Some(label) = ov.pivot_snap_label {
+                    // Snapped to a box anchor while dragging: bright guides through the
+                    // point + an amber marker + a label ("Center"/"Corner"/"Middle"), so
+                    // the user knows exactly where a release lands the pivot.
+                    let amber = egui::Color32::from_rgb(255, 190, 40);
+                    let guide = egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgba_unmultiplied(255, 190, 40, 180),
+                    );
+                    painter.line_segment(
+                        [
+                            egui::pos2(clip_rect.left(), cp.y),
+                            egui::pos2(clip_rect.right(), cp.y),
+                        ],
+                        guide,
+                    );
+                    painter.line_segment(
+                        [
+                            egui::pos2(cp.x, clip_rect.top()),
+                            egui::pos2(cp.x, clip_rect.bottom()),
+                        ],
+                        guide,
+                    );
+                    painter.circle_filled(cp, 6.0, amber);
+                    painter.circle_stroke(cp, 6.0, border_stroke);
+                    let lp = egui::pos2(cp.x + 10.0, cp.y - 10.0);
+                    let font = egui::FontId::proportional(12.0);
+                    for (dx, dy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0_f32), (0.0, 1.0)] {
+                        painter.text(
+                            egui::pos2(lp.x + dx, lp.y + dy),
+                            egui::Align2::LEFT_BOTTOM,
+                            label,
+                            font.clone(),
+                            egui::Color32::from_black_alpha(200),
+                        );
+                    }
+                    painter.text(
+                        lp,
+                        egui::Align2::LEFT_BOTTOM,
+                        label,
+                        font,
+                        egui::Color32::WHITE,
+                    );
+                } else {
+                    painter.circle_filled(cp, 5.0, center_fill);
+                    painter.circle_stroke(cp, 5.0, border_stroke);
+                    painter.line_segment(
+                        [egui::pos2(cp.x - 4.0, cp.y), egui::pos2(cp.x + 4.0, cp.y)],
+                        egui::Stroke::new(1.0_f32, handle_border),
+                    );
+                    painter.line_segment(
+                        [egui::pos2(cp.x, cp.y - 4.0), egui::pos2(cp.x, cp.y + 4.0)],
+                        egui::Stroke::new(1.0_f32, handle_border),
+                    );
+                }
+            }
 
             if data.tool.transform_cursor_hint == 1 {
                 if let Some(mouse_pos) = ctx.pointer_hover_pos() {
@@ -1758,6 +2318,10 @@ pub fn build(
                         .inner_margin(egui::Margin::same(4))
                         .show(ui, |ui| {
                             ui.set_min_width(menu_w - 8.0);
+                            if let Some(corner) = data.tool.selected_rect_corner_type {
+                                topoptions::corner_palette(ui, corner, &mut actions);
+                                ui.separator();
+                            }
                             ui.label(egui::RichText::new("Free Transform").strong());
                             ui.separator();
                             if ui.selectable_label(false, "Reset Transform").clicked() {
@@ -2487,7 +3051,13 @@ pub fn build(
                 Some(range) if !range.is_empty() => Some(range),
                 Some(range) if resp.has_focus() => Some(range),
                 Some(range) => cached_text_range.or(Some(range)),
-                None => cached_text_range,
+                None => cached_text_range.or_else(|| {
+                    data.tool.text_caret.map(|caret| {
+                        egui::text::CCursorRange::one(egui::text::CCursor::new(
+                            caret.min(buf.chars().count()),
+                        ))
+                    })
+                }),
             };
 
             // Pointer→caret mapping in raster space. egui's built-in hit-test
@@ -2607,7 +3177,12 @@ pub fn build(
                     .with_clip_rect(canvas_viewport);
                 let origin = egui::pos2(mx, my);
                 if range.is_empty() {
-                    if resp.has_focus() {
+                    // The Text session owns keyboard input even when egui's
+                    // invisible TextEdit reports a transient focus loss between
+                    // KeyboardInput/IME and the following UI frame. Keep the
+                    // visible raster-space caret alive from the cached session
+                    // cursor; the colour dialog deliberately owns focus/canvas.
+                    if !data.dialogs.show_paint_color_dialog {
                         ctx.request_repaint_after(std::time::Duration::from_millis(250));
                         if let Some(rect) =
                             crate::core::text::caret_rect(&caret_td, range.primary.index)
@@ -3113,6 +3688,13 @@ fn paint_v_ticks(painter: &egui::Painter, rect: egui::Rect, data: &UiData) {
     }
 }
 
+/// Edge length of the 2-D saturation/value square in the paint colour dialog.
+/// The dialog auto-sizes to hug it, so the square fills the width for a balanced
+/// layout (no empty gutter on the right).
+const PAINT_DIALOG_SQUARE: f32 = 300.0;
+/// Dialog outer width used for side-docking placement (square + window margins).
+const PAINT_DIALOG_WIDTH: f32 = PAINT_DIALOG_SQUARE + 16.0;
+
 fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     if !data.dialogs.show_paint_color_dialog {
         return;
@@ -3132,10 +3714,14 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
         2 => "Text Color",
         3 => "Shape Fill Color",
         4 => "Shape Stroke Color",
+        5 => "Path Fill Color",
+        6 => "Path Outline Color",
+        7 => "Gradient End Color",
+        8..=15 => "Gradient Stop Color",
         _ => "Foreground Color",
     };
 
-    let side_pos = document_side_dialog_pos(ctx, data, 340.0, 96.0);
+    let side_pos = document_side_dialog_pos(ctx, data, PAINT_DIALOG_WIDTH, 96.0);
     let mut open = data.dialogs.show_paint_color_dialog;
     let mut window = egui::Window::new(title)
         .id(egui::Id::new("paint_color_dialog"))
@@ -3144,7 +3730,7 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
         .movable(true)
         .order(egui::Order::Foreground)
         .default_pos(side_pos)
-        .default_width(340.0)
+        .default_width(PAINT_DIALOG_WIDTH)
         .open(&mut open);
 
     if data.dialogs.paint_color_dialog_center_next {
@@ -3153,7 +3739,10 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
     }
 
     let dialog_resp = window.show(ctx, |ui| {
-        ui.spacing_mut().slider_width = 270.0;
+        // Wide square that fills the dialog width (balanced, no right gutter).
+        // The RGB row inside the picker now also carries an editable #hex field
+        // so a colour code can be copied out or pasted in.
+        ui.spacing_mut().slider_width = PAINT_DIALOG_SQUARE;
 
         let mut color = egui::Color32::from_rgba_unmultiplied(
             data.dialogs.paint_color_dialog_color[0],
@@ -3166,80 +3755,26 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
                 Some([color.r(), color.g(), color.b(), 255]);
         }
 
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            paint_color_preview(ui, "Current", data.dialogs.paint_color_dialog_original);
-            ui.add_space(8.0);
-            paint_color_preview(ui, "New", data.dialogs.paint_color_dialog_color);
-        });
-
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new("Swatches")
+        // Ink read-out only for CMYK (print) documents; hidden for RGB work so
+        // the dialog stays uncluttered.
+        if let Some(ink) = data.dialogs.paint_dialog_ink {
+            let pct = |v: u8| (v as f32 / 255.0 * 100.0).round() as u32;
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "C {} M {} Y {} K {} %",
+                    pct(ink[0]),
+                    pct(ink[1]),
+                    pct(ink[2]),
+                    pct(ink[3])
+                ))
+                .monospace()
                 .small()
                 .color(egui::Color32::GRAY),
-        );
-        ui.horizontal_wrapped(|ui| {
-            let sw = [
-                [0u8, 0, 0, 255],
-                [255, 255, 255, 255],
-                [192, 0, 0, 255],
-                [255, 0, 0, 255],
-                [255, 102, 0, 255],
-                [255, 192, 0, 255],
-                [255, 255, 0, 255],
-                [146, 208, 80, 255],
-                [0, 176, 80, 255],
-                [0, 176, 240, 255],
-                [0, 70, 127, 255],
-                [112, 48, 160, 255],
-            ];
-            for swatch in sw {
-                if ui
-                    .add(
-                        egui::Button::new("")
-                            .fill(egui::Color32::from_rgb(swatch[0], swatch[1], swatch[2]))
-                            .min_size(egui::vec2(22.0, 22.0)),
-                    )
-                    .clicked()
-                {
-                    actions.dialogs.set_paint_color_dialog_color = Some(swatch);
-                }
-            }
-        });
+            );
+        }
 
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let mut live = data.dialogs.paint_color_dialog_live_preview;
-            if ui.checkbox(&mut live, "Preview").changed() {
-                actions.dialogs.set_paint_color_dialog_live_preview = Some(live);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let [r, g, b, _] = data.dialogs.paint_color_dialog_color;
-                ui.label(
-                    egui::RichText::new(format!("#{r:02X}{g:02X}{b:02X}"))
-                        .monospace()
-                        .small()
-                        .color(egui::Color32::GRAY),
-                );
-                if let Some(ink) = data.dialogs.paint_dialog_ink {
-                    let pct = |v: u8| (v as f32 / 255.0 * 100.0).round() as u32;
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "C{} M{} Y{} K{} %",
-                            pct(ink[0]),
-                            pct(ink[1]),
-                            pct(ink[2]),
-                            pct(ink[3])
-                        ))
-                        .monospace()
-                        .small()
-                        .color(egui::Color32::GRAY),
-                    );
-                }
-            });
-        });
-
         ui.separator();
         ui.horizontal(|ui| {
             if ui.button("Default").clicked() {
@@ -3275,26 +3810,4 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
     if !open {
         actions.dialogs.paint_color_dialog_cancel = true;
     }
-}
-
-fn paint_color_preview(ui: &mut egui::Ui, label: &str, color: [u8; 4]) {
-    ui.vertical(|ui| {
-        ui.label(
-            egui::RichText::new(label)
-                .small()
-                .color(egui::Color32::GRAY),
-        );
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(86.0, 30.0), egui::Sense::hover());
-        ui.painter().rect_filled(
-            rect,
-            2.0,
-            egui::Color32::from_rgb(color[0], color[1], color[2]),
-        );
-        ui.painter().rect_stroke(
-            rect,
-            2.0,
-            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(90)),
-            egui::StrokeKind::Outside,
-        );
-    });
 }

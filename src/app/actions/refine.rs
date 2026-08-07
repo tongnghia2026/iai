@@ -321,6 +321,8 @@ impl App {
             height: canvas_h,
             enabled: true,
             inverted: false,
+            bake_offset: (0, 0),
+            bake_frame_offset: (0, 0),
         };
 
         if idx
@@ -399,6 +401,8 @@ impl App {
                     height: canvas_h,
                     enabled: true,
                     inverted: false,
+                    bake_offset: (0, 0),
+                    bake_frame_offset: (0, 0),
                 };
                 if let Some(layer) = self.docs.documents[self.docs.active_doc_idx]
                     .canvas

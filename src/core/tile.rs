@@ -5,6 +5,11 @@ use std::sync::Arc;
 
 static NEXT_TILE_REV: AtomicU64 = AtomicU64::new(100);
 
+#[inline]
+pub(crate) fn next_tile_revision() -> u64 {
+    NEXT_TILE_REV.fetch_add(1, Ordering::Relaxed)
+}
+
 pub const TILE_SIZE: u32 = 256;
 pub const TILE_PIXELS: usize = (TILE_SIZE * TILE_SIZE) as usize;
 pub const TILE_BYTES: usize = TILE_PIXELS * 4;
@@ -599,7 +604,7 @@ impl TileMap {
             .entry(pos)
             .or_insert_with(|| Arc::new(Tile::new_empty()));
         let t = Arc::make_mut(arc_tile);
-        t.revision += 1;
+        t.revision = next_tile_revision();
         // An 8-bit mutation invalidates the 16-bit master (precision lost).
         t.pixels16 = None;
         // …and the CMYK ink plane: dropping it fails loudly (the plate reads as
@@ -620,7 +625,7 @@ impl TileMap {
             .entry(pos)
             .or_insert_with(|| Arc::new(Tile::new_empty()));
         let t = Arc::make_mut(arc_tile);
-        t.revision += 1;
+        t.revision = next_tile_revision();
         if t.ink.is_none() {
             t.ink = Some(vec![0u8; TILE_BYTES]);
         }
@@ -634,8 +639,25 @@ impl TileMap {
     /// atlas serves the stale cached tile and child edits never appear.
     pub fn bump_all_revisions(&mut self) {
         for tile in self.tiles.values_mut() {
-            let rev = NEXT_TILE_REV.fetch_add(1, Ordering::Relaxed);
+            let rev = next_tile_revision();
             Arc::make_mut(tile).revision = rev;
+        }
+    }
+
+    /// Give restored/replayed tiles fresh globally unique revisions wherever
+    /// `other` contains different tile storage. Undo must not put an old local
+    /// revision back into the GPU atlas: a later edit can otherwise reach the
+    /// same revision number as stale cached pixels and skip the required upload.
+    pub fn bump_changed_revisions(&mut self, other: &Self) {
+        for (pos, tile) in &mut self.tiles {
+            let changed = other
+                .tiles
+                .get(pos)
+                .is_none_or(|other_tile| !Arc::ptr_eq(tile, other_tile));
+            if changed {
+                let rev = next_tile_revision();
+                Arc::make_mut(tile).revision = rev;
+            }
         }
     }
 
@@ -757,6 +779,16 @@ impl TileMap {
     /// CMYK-mode document and has ink content worth carrying through rebuilds).
     pub fn has_any_ink(&self) -> bool {
         self.tiles.values().any(|t| t.ink.is_some())
+    }
+
+    /// True when at least one tile is missing its CMYK ink plane. A Path/vector
+    /// layer's raster is rebuilt wholesale by `from_rgba` (which produces ink-less
+    /// tiles), so this flags a layer whose mirror was just re-rasterized and whose
+    /// ink planes must be re-derived. A layer already fully inked returns `false`,
+    /// letting [`Canvas::reconcile_path_ink`] skip layers nothing touched instead
+    /// of re-encoding every vector layer on every edit.
+    pub fn needs_ink_encode(&self) -> bool {
+        self.tiles.values().any(|t| t.ink.is_none())
     }
 
     /// RGB→CMYK convert of this whole map (document mode conversion): every

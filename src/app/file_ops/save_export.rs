@@ -348,6 +348,46 @@ impl App {
         }
     }
 
+    /// File ▸ Export ▸ SVG (Vector) — write the active document as an SVG: its
+    /// qualifying vector objects as native `<path>` elements over an embedded PNG
+    /// of the raster beneath them (a pure-vector document embeds no image). Meant
+    /// for the web and cut plotters. Blocking rfd is fine here.
+    pub fn export_svg(&mut self) {
+        self.sync_brush_gpu_to_cpu();
+        let idx = self.docs.active_doc_idx;
+        let svg = match crate::core::svg::build_svg(&self.docs.documents[idx].canvas) {
+            Ok(svg) => svg,
+            Err(e) => {
+                self.shell.status_msg = format!("SVG export error: {e}");
+                return;
+            }
+        };
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let parent = file_io::dialog_parent(window);
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("SVG", &["svg"])
+            .set_file_name("artwork.svg");
+        if let Some(p) = &parent {
+            dialog = dialog.set_parent(p);
+        }
+        let Some(mut path) = dialog.save_file() else {
+            return;
+        };
+        path.set_extension("svg");
+        match std::fs::write(&path, svg.as_bytes()) {
+            Ok(_) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("artwork.svg");
+                self.shell.status_msg = format!("Exported SVG: {name}");
+            }
+            Err(e) => self.shell.status_msg = format!("Error writing SVG: {e}"),
+        }
+    }
+
     /// File ▸ Export ▸ CMYK Separations… — write four grayscale ink plates
     /// (`<base>_C/_M/_Y/_K.png`, print convention: full ink = black). On a CMYK
     /// document the plates come straight from the ink planes (`flatten_ink`,
@@ -599,13 +639,18 @@ impl App {
                         let overlay = (doc.is_modified()
                             && allow_overlay
                             && compatibility.get(source_index).copied().unwrap_or(false))
-                        .then(|| doc.pdf_safe_overlay_rgba())
+                        .then(|| {
+                            doc.pdf_page
+                                .as_ref()
+                                .and_then(|page| page.safe_overlay_pdf_parts(&doc.canvas))
+                        })
                         .flatten();
                         let content = if !doc.is_modified() {
                             crate::formats::pdf::HybridPageContent::Original
-                        } else if let Some(rgba) = overlay {
+                        } else if let Some((rgba, vectors)) = overlay {
                             crate::formats::pdf::HybridPageContent::Overlay {
                                 rgba,
+                                vectors,
                                 width: doc.canvas.width,
                                 height: doc.canvas.height,
                                 dpi: doc.canvas.metadata.resolution_ppi,
@@ -661,11 +706,16 @@ impl App {
         }
 
         let mut encoded = Vec::with_capacity(doc_indices.len());
+        // Crisp vector overlay per page (empty for CMYK ink / re-rendered PDF
+        // pages, which stay pure raster).
+        let mut vectors: Vec<Vec<crate::core::print::PdfVectorObject>> =
+            Vec::with_capacity(doc_indices.len());
         let mut ink_pages = 0usize;
         for &idx in &doc_indices {
             let Some(doc) = self.docs.documents.get(idx) else {
                 continue;
             };
+            let mut page_vectors: Vec<crate::core::print::PdfVectorObject> = Vec::new();
             let lazy_page = doc.pdf_page.as_ref().filter(|page| !page.loaded).cloned();
             let encoded_page = if let Some(page) = lazy_page {
                 let canvas = match crate::formats::pdf::PdfImporter::render_selected(
@@ -698,31 +748,41 @@ impl App {
                     doc.canvas.height,
                     doc.canvas.metadata.resolution_ppi,
                 );
-                // CMYK documents embed their ink planes as a DeviceCMYK page
-                // (same press-ready path as Ctrl+P Save-as-PDF); anything that
-                // isn't ink-exact falls back to the RGB mirror.
-                let ink_page = if doc.canvas.is_cmyk()
-                    && crate::core::canvas::Canvas::pixel_count(w, h)
-                        .is_some_and(|p| p <= PDF_EXPORT_MAX_PIXELS)
-                {
-                    doc.canvas.flatten_ink()
+                let too_large = crate::core::canvas::Canvas::pixel_count(w, h)
+                    .is_none_or(|p| p > PDF_EXPORT_MAX_PIXELS);
+                if too_large {
+                    self.shell.status_msg =
+                        format!("Document {} is too large to export safely", idx + 1);
+                    return;
+                }
+                if doc.canvas.is_cmyk() {
+                    // CMYK page: promote qualifying vectors to native DeviceCMYK
+                    // paths over an ink raster base (press-ready + resolution
+                    // independent). When the stack isn't ink-exact, flatten the
+                    // RGB mirror instead (no native vectors) — same as before.
+                    let selection = crate::core::print::collect_pdf_vectors(&doc.canvas);
+                    if let Some(ink) = crate::core::print::pdf_ink_base(&doc.canvas, &selection) {
+                        ink_pages += 1;
+                        page_vectors = selection.objects;
+                        crate::core::print::encode_pdf_page_cmyk(&ink, w, h, dpi)
+                    } else {
+                        let rgba = doc.canvas.export_flat();
+                        crate::core::print::encode_pdf_page(&rgba, w, h, dpi)
+                    }
                 } else {
-                    None
-                };
-                if let Some(ink) = ink_page {
-                    ink_pages += 1;
-                    crate::core::print::encode_pdf_page_cmyk(&ink, w, h, dpi)
-                } else {
-                    let Some(rgba) = doc.canvas.export_flat_up_to(PDF_EXPORT_MAX_PIXELS) else {
-                        self.shell.status_msg =
-                            format!("Document {} is too large to export safely", idx + 1);
-                        return;
-                    };
+                    // RGB page: split native PDF paths out of the raster base so
+                    // their anti-aliased cache cannot leave a jagged halo.
+                    let selection = crate::core::print::collect_pdf_vectors(&doc.canvas);
+                    let rgba = crate::core::print::pdf_raster_base(&doc.canvas, &selection);
+                    page_vectors = selection.objects;
                     crate::core::print::encode_pdf_page(&rgba, w, h, dpi)
                 }
             };
             match encoded_page {
-                Ok(page) => encoded.push(page),
+                Ok(page) => {
+                    encoded.push(page);
+                    vectors.push(page_vectors);
+                }
                 Err(error) => {
                     self.shell.status_msg = format!("Error encoding PDF page: {error}");
                     return;
@@ -740,7 +800,7 @@ impl App {
             .export_embed_icc
             .then(crate::core::cms::srgb_icc_bytes);
         let n = encoded.len();
-        match crate::core::print::build_pdf_multipage_encoded(&encoded, icc.as_deref()) {
+        match crate::core::print::build_pdf_multipage_encoded(&encoded, &vectors, icc.as_deref()) {
             Ok(bytes) => match std::fs::write(&path, &bytes) {
                 Ok(_) => {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -826,11 +886,12 @@ impl App {
                     let content = if let Some((canvas, reference)) = edited {
                         let overlay = (allow_overlay
                             && compatibility.get(page_index).copied().unwrap_or(false))
-                        .then(|| reference.safe_overlay_rgba(canvas))
+                        .then(|| reference.safe_overlay_pdf_parts(canvas))
                         .flatten();
-                        if let Some(rgba) = overlay {
+                        if let Some((rgba, vectors)) = overlay {
                             crate::formats::pdf::HybridPageContent::Overlay {
                                 rgba,
+                                vectors,
                                 width: canvas.width,
                                 height: canvas.height,
                                 dpi: canvas.metadata.resolution_ppi,

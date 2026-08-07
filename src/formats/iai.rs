@@ -11,12 +11,18 @@ use std::path::{Path, PathBuf};
 /// stamped when ink is present, which older builds MUST reject (their loader
 /// errors on version > 2) rather than silently strip the ink.
 ///
+/// v4 adds editable vector Path layers (per-layer `"path"` model payload, Bước 4).
+/// Only stamped when a Path layer is present, so RGB/CMYK files without vector
+/// content keep writing v2/v3 and older builds still open them; a v4 file makes
+/// older builds reject (version > their max) rather than silently dropping the
+/// vector model on resave.
+///
 /// 16-bit precision does NOT bump the version: a layer that still holds a 16-bit
 /// master is written as a 16-bit RGBA PNG at `layer_{i}.png`. Older builds decode
 /// it as 8-bit (graceful precision loss they couldn't use anyway); this build
 /// detects the 16-bit payload on load and rebuilds the master. See
 /// `docs/bit-depth-and-color-capability.md`.
-const IAI_FORMAT_VERSION: u64 = 3;
+const IAI_FORMAT_VERSION: u64 = 4;
 
 pub struct IaiImporter;
 pub struct IaiExporter;
@@ -127,6 +133,7 @@ fn build_canvas_from_meta<R: Read + Seek>(
     canvas.color_space = color_space;
     canvas.metadata.author = meta["author"].as_str().unwrap_or("").to_string();
     canvas.metadata.description = meta["description"].as_str().unwrap_or("").to_string();
+    canvas.metadata.swatches = super::iai_palette::json_to_palette(meta.get("document_swatches"));
     // 16-bit mode (post-B2 key; absent on older files = 8-bit). Keeps a reopened
     // 16-bit document in 16-bit mode so its first edit preserves precision
     // instead of quantizing the masters the 16-bit layer PNGs just restored.
@@ -202,6 +209,9 @@ fn build_canvas_from_meta<R: Read + Seek>(
         layer.blend_mode = blend_mode;
         layer.offset = (offset_x, offset_y);
         layer.parent_id = layer_info["parent"].as_u64().map(|p| p as u32);
+        layer.clip_parent_id = layer_info["clip_parent"].as_u64().map(|p| p as u32);
+        layer.page_id =
+            crate::core::page::PageId(layer_info["page"].as_u64().map(|p| p as u32).unwrap_or(0));
         layer.expanded = layer_info["expanded"].as_bool().unwrap_or(true);
         if let Some(adj) = json_to_adjustment(&layer_info["adjustment"]) {
             layer.layer_type = crate::core::layer::LayerType::Adjustment(adj);
@@ -211,7 +221,18 @@ fn build_canvas_from_meta<R: Read + Seek>(
             }
         } else if layer_info["layer_type"].as_str() == Some("Shape") {
             if let Some(shape) = json_to_shape_data(&layer_info["shape"]) {
-                layer.layer_type = crate::core::layer::LayerType::Shape(shape);
+                layer.layer_type = crate::core::layer::LayerType::Vector(
+                    crate::core::vector::object::VectorGeometry::Primitive(shape),
+                );
+            }
+        } else if layer_info["layer_type"].as_str() == Some("Path") {
+            // Model is the source of truth; the baked PNG already loaded above is
+            // the display fallback. A malformed/oversized payload decodes to None,
+            // leaving the layer as the raster it loaded (Mục 5.3).
+            if let Some(obj) = super::iai_vector::json_to_layer_path(&layer_info["path"]) {
+                layer.layer_type = crate::core::layer::LayerType::Vector(
+                    crate::core::vector::object::VectorGeometry::Path(obj),
+                );
             }
         } else if layer_info["layer_type"].as_str() == Some("Group") {
             layer.layer_type = crate::core::layer::LayerType::Group;
@@ -237,6 +258,9 @@ fn build_canvas_from_meta<R: Read + Seek>(
                 // Key added post-v1; older files default to enabled.
                 enabled: layer_info["mask_enabled"].as_bool().unwrap_or(true),
                 inverted: false,
+                // Derived on next clip re-bake for PowerClip content; harmless 0 here.
+                bake_offset: (0, 0),
+                bake_frame_offset: (0, 0),
             });
         }
 
@@ -250,6 +274,7 @@ fn build_canvas_from_meta<R: Read + Seek>(
             .push(Layer::new(0, "Layer 1", w, h));
     }
     canvas.layer_stack.repair_next_id();
+    canvas.layer_stack.repair_clip_relations();
 
     let active_idx = meta["active_layer"].as_u64().unwrap_or(0) as usize;
     canvas.layer_stack.active_idx =
@@ -322,6 +347,14 @@ fn build_canvas_from_meta<R: Read + Seek>(
                 .add_alpha(name, gray.into_raw(), cw.max(1), ch.max(1));
         }
     }
+
+    // Path layers: re-derive the raster cache from the restored model so the
+    // model — not the baked PNG fallback — is authoritative on reopen (Muc 3.8,
+    // Buoc 5). No-op when there are no Path layers.
+    canvas.rebuild_path_caches();
+    // PowerClip: the clip relation persists but its mask is derived — re-bake each
+    // content layer's clip from its frame (frames now have their tiles restored).
+    canvas.refresh_clip_masks();
 
     canvas.flatten_full();
     Ok(canvas)
@@ -431,10 +464,21 @@ impl Exporter for IaiExporter {
         write_iai_archive(path, |zip| {
             let options = deflated_options();
             let mut manifest = canvas_meta_json(canvas);
-            // RGB single-canvas files stay v2 (readable by older builds — the
-            // historical hard-coded `1` was needlessly conservative); CMYK
-            // documents stamp v3 so older builds reject instead of losing ink.
-            manifest["version"] = serde_json::json!(if canvas.is_cmyk() { 3u64 } else { 2u64 });
+            // Graduated version so files stay openable by older builds when they
+            // can be: a Path or clipping relation forces v4 (editable model
+            // would be lost on an older resave), else CMYK stamps v3 (ink),
+            // else RGB stays v2.
+            let has_v4_model = canvas.layer_stack.layers.iter().any(|l| {
+                matches!(l.layer_type, crate::core::layer::LayerType::Vector(_))
+                    || l.clip_parent_id.is_some()
+            }) || !canvas.metadata.swatches.is_empty();
+            manifest["version"] = serde_json::json!(if has_v4_model {
+                4u64
+            } else if canvas.is_cmyk() {
+                3u64
+            } else {
+                2u64
+            });
 
             zip.start_file("manifest.json", options)
                 .map_err(|e| e.to_string())?;
@@ -494,6 +538,19 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             .and_then(|pid| canvas.layer_stack.layers.iter().position(|l| l.id == pid))
             .map(|p| serde_json::json!(p as u64))
             .unwrap_or(serde_json::Value::Null);
+        let clip_parent_index: serde_json::Value = layer
+            .clip_parent_id
+            .and_then(|pid| canvas.layer_stack.layers.iter().position(|l| l.id == pid))
+            .map(|p| serde_json::json!(p as u64))
+            .unwrap_or(serde_json::Value::Null);
+        // Page ownership (contract #10). A page id, not a layer index. Written only
+        // when off the implicit page, so default single-page docs are unchanged.
+        let page_value: serde_json::Value = if layer.page_id != crate::core::page::PageId::IMPLICIT
+        {
+            serde_json::json!(layer.page_id.0)
+        } else {
+            serde_json::Value::Null
+        };
         let adj_json = if let crate::core::layer::LayerType::Adjustment(ref adj) = layer.layer_type
         {
             adjustment_to_json(adj)
@@ -505,8 +562,19 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
         } else {
             serde_json::Value::Null
         };
-        let shape_json = if let crate::core::layer::LayerType::Shape(ref shape) = layer.layer_type {
+        let shape_json = if let crate::core::layer::LayerType::Vector(
+            crate::core::vector::object::VectorGeometry::Primitive(ref shape),
+        ) = layer.layer_type
+        {
             shape_to_json(shape)
+        } else {
+            serde_json::Value::Null
+        };
+        let path_json = if let crate::core::layer::LayerType::Vector(
+            crate::core::vector::object::VectorGeometry::Path(ref obj),
+        ) = layer.layer_type
+        {
+            super::iai_vector::layer_path_to_json(obj)
         } else {
             serde_json::Value::Null
         };
@@ -524,10 +592,13 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             "offset_x": layer.offset.0,
             "offset_y": layer.offset.1,
             "parent": parent_index,
+            "clip_parent": clip_parent_index,
+            "page": page_value,
             "expanded": layer.expanded,
             "adjustment": adj_json,
             "text": text_json,
             "shape": shape_json,
+            "path": path_json,
         }));
     }
 
@@ -563,6 +634,7 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
         "bit_depth": bit_depth,
         "author": canvas.metadata.author,
         "description": canvas.metadata.description,
+        "document_swatches": super::iai_palette::palette_to_json(&canvas.metadata.swatches),
         "layer_count": canvas.layer_stack.layers.len(),
         "active_layer": canvas.layer_stack.active_idx,
         "layers": layers_json,
@@ -701,10 +773,19 @@ pub fn save_pdf_project(
             })
             .collect();
 
-        // Projects only need v3 when a page actually carries CMYK ink;
-        // otherwise stay at v2 so older builds keep opening them.
-        let version = if pages.iter().any(|p| p.canvas.is_cmyk()) {
-            IAI_FORMAT_VERSION
+        // Graduated version (mirrors the single-canvas path): a Path or clipping
+        // relation on any page forces v4, else CMYK ink needs v3, else stay v2.
+        let has_v4_model = pages.iter().any(|p| {
+            !p.canvas.metadata.swatches.is_empty()
+                || p.canvas.layer_stack.layers.iter().any(|l| {
+                    matches!(l.layer_type, crate::core::layer::LayerType::Vector(_))
+                        || l.clip_parent_id.is_some()
+                })
+        });
+        let version = if has_v4_model {
+            4u64
+        } else if pages.iter().any(|p| p.canvas.is_cmyk()) {
+            3u64
         } else {
             2u64
         };
@@ -873,7 +954,8 @@ fn layer_type_to_str(lt: &LayerType) -> &'static str {
         LayerType::Adjustment(_) => "Adjustment",
         LayerType::Group => "Group",
         LayerType::Text(_) => "Text",
-        LayerType::Shape(_) => "Shape",
+        LayerType::Vector(crate::core::vector::object::VectorGeometry::Primitive(_)) => "Shape",
+        LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(_)) => "Path",
         LayerType::SmartObject => "SmartObject",
     }
 }
@@ -942,10 +1024,16 @@ fn shape_to_json(sd: &crate::core::shape::ShapeData) -> serde_json::Value {
         "x1": sd.x1,
         "y1": sd.y1,
         "corner_radius": sd.corner_radius,
-        "fill": sd.fill,
-        "fill_color": sd.fill_color,
-        "stroke_width": sd.stroke_width,
-        "stroke_color": sd.stroke_color,
+        "corner_type": sd.corner_type.to_u8(),
+        "sides": sd.sides,
+        "star_inner": sd.star_inner,
+        "style": super::iai_vector::style_to_json(&sd.style),
+        // Legacy mirrors keep old readers useful for solid shapes. New readers
+        // use `style`, which preserves gradient/dash/CMYK/overprint exactly.
+        "fill": sd.fill_enabled(),
+        "fill_color": sd.fill_color(),
+        "stroke_width": sd.stroke_width(),
+        "stroke_color": sd.stroke_color(),
     })
 }
 
@@ -967,6 +1055,21 @@ fn json_to_shape_data(v: &serde_json::Value) -> Option<crate::core::shape::Shape
             a[3].as_u64()? as u8,
         ])
     };
+    let legacy_fill = v["fill"].as_bool().unwrap_or(true);
+    let legacy_fill_color = color("fill_color").unwrap_or([0, 0, 0, 255]);
+    let legacy_stroke_width = f("stroke_width").unwrap_or(0.0);
+    let legacy_stroke_color = color("stroke_color").unwrap_or([0, 0, 0, 255]);
+    let style = v
+        .get("style")
+        .and_then(super::iai_vector::json_to_style)
+        .unwrap_or_else(|| {
+            crate::core::vector::style::VectorStyle::from_shape_fields(
+                legacy_fill,
+                legacy_fill_color,
+                legacy_stroke_width,
+                legacy_stroke_color,
+            )
+        });
     Some(ShapeData {
         kind: ShapeKind::from_u8(v["kind"].as_u64().unwrap_or(0) as u8),
         x0: f("x0")?,
@@ -974,10 +1077,12 @@ fn json_to_shape_data(v: &serde_json::Value) -> Option<crate::core::shape::Shape
         x1: f("x1")?,
         y1: f("y1")?,
         corner_radius: f("corner_radius").unwrap_or(0.0),
-        fill: v["fill"].as_bool().unwrap_or(true),
-        fill_color: color("fill_color").unwrap_or([0, 0, 0, 255]),
-        stroke_width: f("stroke_width").unwrap_or(0.0),
-        stroke_color: color("stroke_color").unwrap_or([0, 0, 0, 255]),
+        corner_type: crate::core::vector::from_shape::RectCorner::from_u8(
+            v["corner_type"].as_u64().unwrap_or(0) as u8,
+        ),
+        sides: v["sides"].as_u64().unwrap_or(5) as u32,
+        star_inner: f("star_inner").unwrap_or(0.5),
+        style,
     })
 }
 
@@ -1547,6 +1652,486 @@ mod tests {
     }
 
     #[test]
+    fn document_palette_round_trips_rgb_and_cmyk_and_stamps_v4() {
+        use crate::core::palette::DocumentSwatch;
+        use crate::core::vector::color::ColorValue;
+
+        let dir = tmp_dir("palette-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 8, 8);
+        canvas.metadata.swatches = vec![
+            DocumentSwatch::new("Brand Red", ColorValue::rgb(1.0, 0.1, 0.2)),
+            DocumentSwatch::new("Pure K", ColorValue::cmyk(0.0, 0.0, 0.0, 1.0)),
+        ];
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(4),
+            "palette is persistent production data and must not be silently stripped by old builds"
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(loaded.metadata.swatches, canvas.metadata.swatches);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Path layer persistence (Bước 4 / T4.3) ──
+    use crate::core::vector::affine::AffineTransform;
+    use crate::core::vector::color::ColorValue;
+    use crate::core::vector::object::VectorObjectData;
+    use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+    use crate::core::vector::style::{Paint, StrokeStyle, VectorStyle};
+
+    fn sample_path_object() -> VectorObjectData {
+        use crate::core::geometry::Point;
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::with_handles(
+                        Point::new(40.0, 0.0),
+                        Point::new(30.0, -6.0),
+                        Point::new(50.0, 6.0),
+                        crate::core::vector::path::NodeKind::Smooth,
+                    ),
+                    Node::sharp(Point::new(40.0, 40.0)),
+                    Node::sharp(Point::new(0.0, 40.0)),
+                ],
+                true,
+            )],
+            FillRule::EvenOdd,
+        );
+        let mut style = VectorStyle::filled(ColorValue::cmyk(0.0, 0.0, 0.0, 1.0));
+        style.stroke = Paint::Solid(ColorValue::rgb(0.0, 0.4, 1.0));
+        style.stroke_style = StrokeStyle {
+            width: 2.5,
+            ..StrokeStyle::default()
+        };
+        style.opacity = 0.9;
+        VectorObjectData::new(path, style, AffineTransform::translate(20.0, 15.0))
+    }
+
+    fn loaded_path_model(canvas: &Canvas) -> VectorObjectData {
+        canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find_map(|l| match &l.layer_type {
+                LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(o)) => {
+                    Some(o.clone())
+                }
+                _ => None,
+            })
+            .expect("a Path layer survived the round-trip")
+    }
+
+    #[test]
+    fn path_layer_round_trips_and_stamps_v4() {
+        let dir = tmp_dir("path-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        let obj = sample_path_object();
+        canvas
+            .execute(
+                Box::new(crate::core::command_vector::CreatePathLayer::new(
+                    obj.clone(),
+                    "Path 1",
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        // Manifest is stamped v4 because a Path layer is present.
+        let f = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(4)
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(
+            loaded_path_model(&loaded),
+            obj,
+            "geometry/style/transform must round-trip"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn path_layer_round_trips_on_cmyk() {
+        let dir = tmp_dir("path-cmyk");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        canvas
+            .convert_to_cmyk(crate::core::canvas::CmykProfile::Naive)
+            .expect("to CMYK");
+        let obj = sample_path_object();
+        canvas
+            .execute(
+                Box::new(crate::core::command_vector::CreatePathLayer::new(
+                    obj.clone(),
+                    "Path 1",
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.is_cmyk(), "CMYK mode lost");
+        // The model (incl. the CMYK fill colour) is the source of truth and must
+        // survive verbatim even though the baked fallback is a mirror.
+        assert_eq!(loaded_path_model(&loaded), obj);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── M1 end-to-end (Mục 14 / cổng Foundation Freeze) ──
+    // Drive the whole thin slice through the gateway — Pen→Path commit, Node
+    // edit, Fill/Outline, then Transform — and prove the FINAL model survives a
+    // .iai round-trip AND that PDF export represents it correctly (native vector
+    // on RGB; raster fallback on CMYK, which M1 explicitly allows).
+
+    fn path_layer_id(canvas: &Canvas) -> u32 {
+        canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| {
+                matches!(
+                    l.layer_type,
+                    LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(_))
+                )
+            })
+            .map(|l| l.id)
+            .expect("a Path layer exists")
+    }
+
+    #[test]
+    fn m1_end_to_end_rgb_edit_chain_roundtrips_and_emits_pdf_vector() {
+        use crate::core::command_vector::{
+            ChangeVectorStyle, ChangeVectorTransform, CreatePathLayer, ReplacePathGeometry,
+        };
+        use crate::core::gateway::ChangeKind;
+        use crate::core::geometry::Point;
+
+        let dir = tmp_dir("m1-rgb");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+
+        // 1) Pen → Path commit.
+        canvas
+            .execute(
+                Box::new(CreatePathLayer::new(sample_path_object(), "Path 1")),
+                ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+        let id = path_layer_id(&canvas);
+
+        // 2) Node edit: replace geometry (equivalent to move + insert a node).
+        let edited_geom = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(60.0, 0.0)),
+                    Node::sharp(Point::new(60.0, 60.0)),
+                    Node::sharp(Point::new(30.0, 45.0)), // inserted node
+                    Node::sharp(Point::new(0.0, 60.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        canvas
+            .execute(
+                Box::new(ReplacePathGeometry::new(id, edited_geom.clone())),
+                ChangeKind::LayerPixels,
+            )
+            .expect("edit geometry");
+
+        // 3) Fill/Outline: opaque red fill, thin blue outline.
+        let mut final_style = VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0));
+        final_style.stroke = Paint::Solid(ColorValue::rgb(0.0, 0.0, 1.0));
+        final_style.stroke_style = StrokeStyle {
+            width: 1.5,
+            ..StrokeStyle::default()
+        };
+        canvas
+            .execute(
+                Box::new(ChangeVectorStyle::new(id, final_style)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("style");
+
+        // 4) Transform: move (no node baking).
+        let final_xf = AffineTransform::translate(8.0, 4.0);
+        canvas
+            .execute(
+                Box::new(ChangeVectorTransform::new(id, final_xf)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("transform");
+
+        let expected = VectorObjectData::new(edited_geom.clone(), final_style, final_xf);
+        assert_eq!(
+            loaded_path_model(&canvas),
+            expected,
+            "live model after the M1 edit chain"
+        );
+
+        // Undo/redo integrity through the gateway: last step is the transform.
+        assert!(canvas.can_undo());
+        canvas.undo().expect("undo transform");
+        assert_eq!(
+            loaded_path_model(&canvas).transform,
+            AffineTransform::translate(20.0, 15.0),
+            "undo reverts only the transform to the pre-step value"
+        );
+        canvas.redo().expect("redo transform");
+        assert_eq!(loaded_path_model(&canvas).transform, final_xf);
+
+        // Round-trip the FINAL model through .iai.
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(
+            loaded_path_model(&loaded),
+            expected,
+            "final geometry/style/transform round-trips"
+        );
+
+        // PDF: an eligible top RGB Path becomes a native vector over the raster.
+        let sel = crate::core::print::collect_pdf_vectors(&loaded);
+        assert_eq!(sel.objects.len(), 1, "RGB Path promoted to a PDF vector");
+        match sel.objects[0].fill.expect("red fill present") {
+            crate::core::print::PdfPaintColor::Rgb([r, g, b]) => assert!(
+                (r - 1.0).abs() < 1e-3 && g.abs() < 1e-3 && b.abs() < 1e-3,
+                "promoted fill colour is red"
+            ),
+            other => panic!("expected an sRGB fill, got {other:?}"),
+        }
+        assert!(!sel.promoted_layer_ids.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn m1_end_to_end_cmyk_roundtrips_and_pdf_uses_native_vectors() {
+        use crate::core::command_vector::{
+            ChangeVectorStyle, ChangeVectorTransform, CreatePathLayer, ReplacePathGeometry,
+        };
+        use crate::core::gateway::ChangeKind;
+        use crate::core::geometry::Point;
+
+        let dir = tmp_dir("m1-cmyk");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        canvas
+            .convert_to_cmyk(crate::core::canvas::CmykProfile::Naive)
+            .expect("to CMYK");
+
+        canvas
+            .execute(
+                Box::new(CreatePathLayer::new(sample_path_object(), "Path 1")),
+                ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+        let id = path_layer_id(&canvas);
+
+        let edited_geom = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(50.0, 0.0)),
+                    Node::sharp(Point::new(50.0, 50.0)),
+                    Node::sharp(Point::new(0.0, 50.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        canvas
+            .execute(
+                Box::new(ReplacePathGeometry::new(id, edited_geom.clone())),
+                ChangeKind::LayerPixels,
+            )
+            .expect("edit geometry");
+
+        // Pure-K fill: proves CMYK ink survives verbatim (no RGB round-trip).
+        let final_style = VectorStyle::filled(ColorValue::cmyk(0.0, 0.0, 0.0, 1.0));
+        canvas
+            .execute(
+                Box::new(ChangeVectorStyle::new(id, final_style)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("style");
+        let final_xf = AffineTransform::translate(6.0, 3.0);
+        canvas
+            .execute(
+                Box::new(ChangeVectorTransform::new(id, final_xf)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("transform");
+
+        let expected = VectorObjectData::new(edited_geom, final_style, final_xf);
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.is_cmyk(), "CMYK mode lost on round-trip");
+        assert_eq!(
+            loaded_path_model(&loaded),
+            expected,
+            "CMYK model (incl. pure-K fill) round-trips verbatim"
+        );
+
+        // The top CMYK Path is promoted to a native DeviceCMYK vector; the pure-K
+        // fill survives verbatim (no RGB round-trip) all the way to the PDF colour.
+        let sel = crate::core::print::collect_pdf_vectors(&loaded);
+        assert_eq!(
+            sel.objects.len(),
+            1,
+            "CMYK Path promoted to a native vector"
+        );
+        match sel.objects[0].fill {
+            Some(crate::core::print::PdfPaintColor::Cmyk([c, m, y, k])) => assert!(
+                c == 0.0 && m == 0.0 && y == 0.0 && k >= 0.999,
+                "pure K stays pure K, got {c},{m},{y},{k}"
+            ),
+            other => panic!("expected a DeviceCMYK fill, got {other:?}"),
+        }
+        assert!(!sel.promoted_layer_ids.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn layer_page_id_round_trips_through_iai() {
+        // Contract #10: a layer's page ownership persists. MVP keeps everything on
+        // the implicit page; this drives a non-implicit id to prove the schema slot
+        // carries it, so multi-page later is additive.
+        let dir = tmp_dir("page-id");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([10, 20, 30, 255], 8, 8);
+        let idx = canvas.layer_stack.add_layer(8, 8);
+        canvas.layer_stack.layers[idx].page_id = crate::core::page::PageId(2);
+        assert_eq!(
+            canvas.layer_stack.layers[0].page_id,
+            crate::core::page::PageId::IMPLICIT
+        );
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(loaded.layer_stack.layers.len(), 2);
+        assert_eq!(
+            loaded.layer_stack.layers[0].page_id,
+            crate::core::page::PageId::IMPLICIT,
+            "implicit-page layer stays implicit"
+        );
+        assert_eq!(
+            loaded.layer_stack.layers[idx].page_id,
+            crate::core::page::PageId(2),
+            "non-implicit page id must round-trip"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn powerclip_relation_round_trips_separately_from_group_parent() {
+        let dir = tmp_dir("powerclip-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 48, 48);
+        let frame_idx = canvas.layer_stack.add_layer(48, 48);
+        let frame_id = canvas.layer_stack.layers[frame_idx].id;
+        let child_id = canvas
+            .layer_stack
+            .create_clipped_pixel_child(frame_id, 48, 48)
+            .expect("create clipped child");
+        assert_eq!(
+            canvas
+                .layer_stack
+                .layers
+                .iter()
+                .find(|layer| layer.id == child_id)
+                .unwrap()
+                .parent_id,
+            None
+        );
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let f = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(4)
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        let child = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .find(|layer| layer.name == "Pixel Paint inside")
+            .expect("clipped child");
+        let loaded_frame = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .find(|layer| Some(layer.id) == child.clip_parent_id)
+            .expect("clip frame");
+        assert_ne!(child.id, loaded_frame.id);
+        assert_eq!(child.parent_id, None, "clip is not group membership");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn newer_version_is_rejected() {
+        let dir = tmp_dir("newer-ver");
+        let path = dir.join("doc.iai");
+        // Hand-write a minimal archive claiming a version beyond this build.
+        write_iai_archive(&path, |zip| {
+            zip.start_file("manifest.json", stored_options())
+                .map_err(|e| e.to_string())?;
+            let m =
+                serde_json::json!({ "version": IAI_FORMAT_VERSION + 1, "width": 4, "height": 4 });
+            zip.write_all(m.to_string().as_bytes())
+                .map_err(|e| e.to_string())
+        })
+        .expect("write");
+        assert!(load(&path).is_err(), "a newer-version file must be refused");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn text_rotation_round_trips_json() {
         let mut td = crate::core::text::TextData {
             content: "Turn".to_string(),
@@ -1586,7 +2171,7 @@ mod tests {
 
     #[test]
     fn shape_data_round_trips_json() {
-        let (sd, _) = crate::core::shape::ShapeData::from_canvas_span(
+        let (mut sd, _) = crate::core::shape::ShapeData::from_canvas_span(
             crate::core::shape::ShapeKind::Rectangle,
             10.0,
             20.0,
@@ -1597,6 +2182,20 @@ mod tests {
             [200, 30, 40, 255],
             4.0,
             [0, 0, 0, 255],
+        );
+        sd.style.fill = crate::core::vector::style::Paint::Gradient(
+            crate::core::vector::style::Gradient::two_color(
+                crate::core::vector::style::GradientKind::Radial,
+                crate::core::vector::color::ColorValue::cmyk(0.1, 0.2, 0.3, 0.4),
+                crate::core::vector::color::ColorValue::rgba(0.8, 0.2, 0.1, 0.6),
+                crate::core::vector::affine::AffineTransform {
+                    a: 80.0,
+                    d: 60.0,
+                    e: 10.0,
+                    f: 5.0,
+                    ..crate::core::vector::affine::AffineTransform::IDENTITY
+                },
+            ),
         );
         let json = shape_to_json(&sd);
         let restored = json_to_shape_data(&json).expect("shape json restores");

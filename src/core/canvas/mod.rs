@@ -1,6 +1,8 @@
 // Main document model — Canvas, History, metadata.
 //
 
+mod clip_ops;
+mod clip_render;
 mod color_mode;
 mod geometry_ops;
 mod history_gate;
@@ -72,6 +74,9 @@ pub struct CanvasMetadata {
     /// sRGB working space (empty when the source was untagged or already sRGB).
     /// Display-only — shown in the Info panel.
     pub source_profile: String,
+    /// Named process colours owned by this document. Kept out of global UI
+    /// preferences so each `.iai` project carries its production palette.
+    pub swatches: Vec<crate::core::palette::DocumentSwatch>,
 }
 
 impl Default for CanvasMetadata {
@@ -83,6 +88,7 @@ impl Default for CanvasMetadata {
             tags: Vec::new(),
             resolution_ppi: 72.0,
             source_profile: String::new(),
+            swatches: Vec::new(),
         }
     }
 }
@@ -292,6 +298,11 @@ pub struct Canvas {
     pub pending_alpha_stroke: Option<super::channels::PendingAlphaStroke>,
     /// Region of the viewed alpha plane painted since the last GPU upload.
     pub plane_dirty: DirtyRegion,
+    /// Combined fingerprint of PowerClip geometry (content offsets/sizes + frame
+    /// shapes) at the last [`refresh_clip_masks`](Self::refresh_clip_masks) bake.
+    /// Lets the per-event refit skip when nothing clip-relevant changed. Derived
+    /// state; never serialized.
+    pub clip_fp: u64,
 }
 
 /// Shortest distance from point `(px,py)` to segment `a–b`. Used by
@@ -373,6 +384,7 @@ impl Canvas {
             channels: super::channels::ChannelsState::default(),
             pending_alpha_stroke: None,
             plane_dirty: DirtyRegion::default(),
+            clip_fp: 0,
         }
     }
 
@@ -426,6 +438,7 @@ impl Canvas {
             channels: super::channels::ChannelsState::default(),
             pending_alpha_stroke: None,
             plane_dirty: DirtyRegion::default(),
+            clip_fp: 0,
         }
     }
 
@@ -474,6 +487,7 @@ impl Canvas {
             channels: super::channels::ChannelsState::default(),
             pending_alpha_stroke: None,
             plane_dirty: DirtyRegion::default(),
+            clip_fp: 0,
         }
     }
 
@@ -642,7 +656,8 @@ impl Canvas {
                 &mut self.height,
                 Some(&mut self.selection),
             )
-            .with_channels(&mut self.channels);
+            .with_channels(&mut self.channels)
+            .with_metadata(&mut self.metadata);
             self.cmd_history.undo(&mut ctx)
         };
         if !undone {
@@ -650,6 +665,7 @@ impl Canvas {
         }
         self.layer_revision += 1;
         self.reconcile_selection_dims();
+        self.reconcile_path_ink();
         self.flatten_full();
         Some(self.history_nav_outcome())
     }
@@ -663,7 +679,8 @@ impl Canvas {
                 &mut self.height,
                 Some(&mut self.selection),
             )
-            .with_channels(&mut self.channels);
+            .with_channels(&mut self.channels)
+            .with_metadata(&mut self.metadata);
             self.cmd_history.redo(&mut ctx)
         };
         if !redone {
@@ -671,6 +688,7 @@ impl Canvas {
         }
         self.layer_revision += 1;
         self.reconcile_selection_dims();
+        self.reconcile_path_ink();
         self.flatten_full();
         Some(self.history_nav_outcome())
     }
@@ -750,12 +768,95 @@ impl Canvas {
                 &mut self.height,
                 Some(&mut self.selection),
             )
-            .with_channels(&mut self.channels);
+            .with_channels(&mut self.channels)
+            .with_metadata(&mut self.metadata);
             cmd.execute(&mut ctx)
         };
         match result {
-            Ok(()) => Ok(self.record_as(cmd, kind)),
+            Ok(()) => {
+                self.reconcile_path_ink();
+                Ok(self.record_as(cmd, kind))
+            }
             Err(message) => Err(ChangeError { message }),
+        }
+    }
+
+    /// Re-derive CMYK ink planes for Path layers from their (freshly rasterised)
+    /// RGB mirror. A vector command rebuilds the mirror deterministically from
+    /// its model (`command_vector`); on a CMYK document the ink planes must
+    /// follow so separations/export and the baked `.iai` fallback stay correct.
+    /// The ICC converter lives here on the canvas, not in an `EditContext`, so
+    /// this runs after the gateway rather than inside the command. No-op on RGB
+    /// documents (one bool check) and on CMYK documents with no Path layers.
+    ///
+    /// Only layers whose raster was actually re-rasterized are re-encoded: a
+    /// wholesale `apply_object_to_layer` replaces a layer's tiles with ink-less
+    /// ones ([`TileMap::needs_ink_encode`]), while every *other* vector layer
+    /// still carries valid ink and is skipped. This keeps a single-layer edit
+    /// (node drag, style scrub, transform commit) from re-running the O(area) ICC
+    /// transform over every vector layer in the document — the reconcile used to
+    /// rebuild the ink of the whole stack on each edit, which was a major part of
+    /// the CMYK drag lag.
+    pub(crate) fn reconcile_path_ink(&mut self) {
+        use crate::core::layer::LayerType;
+        if !self.is_cmyk() {
+            return;
+        }
+        let any_stale =
+            self.layer_stack.layers.iter().any(|l| {
+                matches!(l.layer_type, LayerType::Vector(_)) && l.tiles.needs_ink_encode()
+            });
+        if !any_stale {
+            return;
+        }
+        let Some(conv) = self.cmyk_converter() else {
+            return;
+        };
+        for layer in &mut self.layer_stack.layers {
+            if matches!(layer.layer_type, LayerType::Vector(_)) && layer.tiles.needs_ink_encode() {
+                layer.tiles.encode_ink_from_mirror(&conv);
+            }
+        }
+    }
+
+    /// Re-derive every Path layer's raster cache from its model (Bước 5 / T5.2).
+    /// The model is the source of truth; the cache must be rebuildable from it
+    /// (Mục 3.8). Called after loading an `.iai` so a reopened document renders
+    /// from the model rather than trusting the baked PNG fallback, and as a
+    /// recovery path when a cache is missing/corrupt. No-op when there are no
+    /// Path layers.
+    pub fn rebuild_path_caches(&mut self) {
+        use crate::core::layer::LayerType;
+        let mut any = false;
+        for layer in &mut self.layer_stack.layers {
+            if matches!(
+                layer.layer_type,
+                LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(_))
+            ) {
+                // Folds a saved Move-tool drag (offset ≠ model) back into the
+                // model AND re-derives the raster from the model.
+                crate::core::command_vector::rebuild_path_cache_from_model(layer);
+                any = true;
+            } else if let LayerType::Vector(
+                crate::core::vector::object::VectorGeometry::Primitive(shape),
+            ) = &layer.layer_type
+            {
+                let shape = shape.clone();
+                if let Some(raster) = shape.render() {
+                    layer.tiles = crate::core::tile::TileMap::from_rgba(
+                        &raster.rgba,
+                        raster.width,
+                        raster.height,
+                    );
+                    layer.width = raster.width;
+                    layer.height = raster.height;
+                    any = true;
+                }
+            }
+        }
+        if any {
+            self.reconcile_path_ink();
+            self.layer_revision += 1;
         }
     }
 
@@ -1387,6 +1488,137 @@ mod hdr_adjust_tests {
             canvas.layer_stack.layers[0].tiles.get_pixel(0, 0),
             before.get_pixel(0, 0),
             "pixels untouched after the refusal"
+        );
+    }
+
+    /// `reconcile_path_ink` must re-derive ink ONLY for layers whose raster was
+    /// just rebuilt (ink-less tiles), leaving every other vector layer — and its
+    /// tile revisions — untouched. This is the anti-regression for the old
+    /// blanket reconcile that re-ran the O(area) ICC transform over every vector
+    /// layer on each edit (a large part of the CMYK drag lag).
+    #[test]
+    fn reconcile_path_ink_only_reencodes_rebuilt_layers() {
+        use crate::core::command_vector::{apply_object_to_layer, CreatePathLayer};
+        use crate::core::gateway::ChangeKind;
+        use crate::core::geometry::Point;
+        use crate::core::layer::LayerType;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::{VectorGeometry, VectorObjectData};
+        use crate::core::vector::path::{Contour, FillRule, Node};
+        use crate::core::vector::style::VectorStyle;
+
+        fn square_obj(side: f32, at: (f32, f32)) -> VectorObjectData {
+            let path = crate::core::vector::path::PathData::new(
+                vec![Contour::new(
+                    vec![
+                        Node::sharp(Point::new(0.0, 0.0)),
+                        Node::sharp(Point::new(side, 0.0)),
+                        Node::sharp(Point::new(side, side)),
+                        Node::sharp(Point::new(0.0, side)),
+                    ],
+                    true,
+                )],
+                FillRule::NonZero,
+            );
+            VectorObjectData::new(
+                path,
+                VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0)),
+                AffineTransform::translate(at.0, at.1),
+            )
+        }
+
+        let mut canvas = Canvas::new(300, 300);
+        canvas
+            .convert_to_cmyk(CmykProfile::Naive)
+            .expect("convert to CMYK");
+        // Two Path layers, both created through the gateway → both fully inked.
+        canvas
+            .execute(
+                Box::new(CreatePathLayer::new(square_obj(50.0, (20.0, 20.0)), "A")),
+                ChangeKind::LayerStructure,
+            )
+            .expect("create A");
+        canvas
+            .execute(
+                Box::new(CreatePathLayer::new(square_obj(50.0, (150.0, 150.0)), "B")),
+                ChangeKind::LayerStructure,
+            )
+            .expect("create B");
+        let path_ids: Vec<u32> = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .filter(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(path_ids.len(), 2, "two path layers");
+        let (id_a, id_b) = (path_ids[0], path_ids[1]);
+        let fp = |c: &Canvas, id: u32| {
+            c.layer_stack
+                .layers
+                .iter()
+                .find(|l| l.id == id)
+                .unwrap()
+                .tiles
+                .revision_fingerprint()
+        };
+        let has_ink = |c: &Canvas, id: u32| {
+            c.layer_stack
+                .layers
+                .iter()
+                .find(|l| l.id == id)
+                .unwrap()
+                .tiles
+                .has_any_ink()
+        };
+        assert!(has_ink(&canvas, id_a) && has_ink(&canvas, id_b));
+        let b_before = fp(&canvas, id_b);
+
+        // Rebuild ONLY layer A's raster (like a live preview / node commit does).
+        // This strips A's ink; B is untouched and still inked.
+        {
+            let idx = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .position(|l| l.id == id_a)
+                .unwrap();
+            apply_object_to_layer(
+                &mut canvas.layer_stack.layers[idx],
+                square_obj(80.0, (20.0, 20.0)),
+            );
+        }
+        assert!(
+            canvas
+                .layer_stack
+                .layers
+                .iter()
+                .find(|l| l.id == id_a)
+                .unwrap()
+                .tiles
+                .needs_ink_encode(),
+            "A was rebuilt ink-less"
+        );
+
+        canvas.reconcile_path_ink();
+
+        assert!(has_ink(&canvas, id_a), "A re-inked");
+        assert!(
+            !canvas
+                .layer_stack
+                .layers
+                .iter()
+                .find(|l| l.id == id_a)
+                .unwrap()
+                .tiles
+                .needs_ink_encode(),
+            "A fully inked after reconcile"
+        );
+        assert_eq!(
+            fp(&canvas, id_b),
+            b_before,
+            "layer B was not re-encoded (its tile revisions are untouched)"
         );
     }
 

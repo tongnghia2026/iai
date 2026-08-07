@@ -112,6 +112,20 @@ impl App {
 
         self.update_refine_overlay_tex();
 
+        // Background jobs above must still make progress while minimized, but
+        // never build egui or acquire/present a hidden surface. A 0x0 egui frame
+        // also persists collapsed dock dimensions into egui memory.
+        let zero_sized = self
+            .win
+            .window
+            .as_ref()
+            .map(|window| window.inner_size())
+            .is_some_and(|size| size.width == 0 || size.height == 0);
+        if self.win.window_occluded || zero_sized {
+            self.win.rendering = false;
+            return;
+        }
+
         if let Some(window) = self.win.window.as_ref().cloned() {
             let mut main_frame_presented = self.win.gpu.is_none();
             // "Ants-only" frame: this redraw was scheduled purely by the
@@ -183,6 +197,12 @@ impl App {
                 if !self.win.window_visible {
                     window.set_visible(true);
                     self.win.window_visible = true;
+                    self.win.startup_focus_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
+                    // Activate on first reveal so Windows gives the hidden-created
+                    // borderless window a real WM_SETFOCUS (IME association),
+                    // otherwise it dings on every keystroke until minimise+restore.
+                    window.focus_window();
                 }
             } else {
                 // Push the theme into egui's global Visuals only when it
@@ -269,6 +289,12 @@ impl App {
                 if !self.win.window_visible {
                     window.set_visible(true);
                     self.win.window_visible = true;
+                    self.win.startup_focus_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
+                    // Activate on first reveal so Windows gives the hidden-created
+                    // borderless window a real WM_SETFOCUS (IME association),
+                    // otherwise it dings on every keystroke until minimise+restore.
+                    window.focus_window();
                 }
             }
             if main_frame_presented {

@@ -7,11 +7,20 @@
 // raster on the canvas, so the Move tool can shift the layer without touching the
 // geometry, and editing handles work in canvas space via `canvas_span`.
 
+use crate::core::geometry::Point;
+use crate::core::vector::from_shape::RectCorner;
+use crate::core::vector::style::{Paint, VectorStyle};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ShapeKind {
     Rectangle,
     Ellipse,
     Line,
+    /// Regular N-gon inscribed in the bounding box (`sides` = number of edges).
+    Polygon,
+    /// N-pointed star inscribed in the box (`sides` = points, `star_inner` = inner
+    /// radius as a fraction of the outer).
+    Star,
 }
 
 impl ShapeKind {
@@ -19,6 +28,8 @@ impl ShapeKind {
         match v {
             1 => ShapeKind::Ellipse,
             2 => ShapeKind::Line,
+            3 => ShapeKind::Polygon,
+            4 => ShapeKind::Star,
             _ => ShapeKind::Rectangle,
         }
     }
@@ -27,6 +38,8 @@ impl ShapeKind {
             ShapeKind::Rectangle => 0,
             ShapeKind::Ellipse => 1,
             ShapeKind::Line => 2,
+            ShapeKind::Polygon => 3,
+            ShapeKind::Star => 4,
         }
     }
     pub fn label(self) -> &'static str {
@@ -34,7 +47,14 @@ impl ShapeKind {
             ShapeKind::Rectangle => "Rectangle",
             ShapeKind::Ellipse => "Ellipse",
             ShapeKind::Line => "Line",
+            ShapeKind::Polygon => "Polygon",
+            ShapeKind::Star => "Star",
         }
+    }
+    /// A box-bounded, fillable shape (Rectangle / Ellipse / Polygon / Star) — as
+    /// opposed to the open Line. Used to share box handling across kinds.
+    pub fn is_box_shape(self) -> bool {
+        !matches!(self, ShapeKind::Line)
     }
 }
 
@@ -54,6 +74,8 @@ pub enum ShapeHandle {
     Radius,
     LineStart,
     LineEnd,
+    /// Centre node: drag the whole primitive without switching to Move.
+    Center,
 }
 
 impl ShapeHandle {
@@ -70,6 +92,7 @@ impl ShapeHandle {
             ShapeHandle::Radius => 8,
             ShapeHandle::LineStart => 9,
             ShapeHandle::LineEnd => 10,
+            ShapeHandle::Center => 11,
         }
     }
     pub fn from_u8(v: u8) -> ShapeHandle {
@@ -84,6 +107,7 @@ impl ShapeHandle {
             8 => ShapeHandle::Radius,
             9 => ShapeHandle::LineStart,
             10 => ShapeHandle::LineEnd,
+            11 => ShapeHandle::Center,
             _ => ShapeHandle::TopLeft,
         }
     }
@@ -100,11 +124,16 @@ pub struct ShapeData {
     pub y1: f32,
     /// Rounded-rectangle corner radius (canvas px). 0 = sharp.
     pub corner_radius: f32,
-    pub fill: bool,
-    pub fill_color: [u8; 4],
-    /// Outline / line thickness (canvas px). 0 = no outline.
-    pub stroke_width: f32,
-    pub stroke_color: [u8; 4],
+    /// Rectangle corner style (Round/Scallop/Chamfer). Only meaningful for a
+    /// Rectangle with `corner_radius > 0`; ignored for other kinds.
+    pub corner_type: RectCorner,
+    /// Polygon edge count / Star point count (ignored for other kinds).
+    pub sides: u32,
+    /// Star inner-radius fraction of the outer radius, in `(0,1)` (Star only).
+    pub star_inner: f32,
+    /// Shared vector appearance. Primitive and Bézier geometry now use exactly
+    /// the same fill, gradient, outline, dash, overprint and opacity model.
+    pub style: VectorStyle,
 }
 
 /// A rendered shape: tight RGBA buffer sized to the shape's own extent.
@@ -127,18 +156,35 @@ impl ShapeData {
     #[allow(clippy::too_many_arguments)]
     pub fn from_canvas_span(
         kind: ShapeKind,
-        mut cx0: f32,
-        mut cy0: f32,
-        mut cx1: f32,
-        mut cy1: f32,
+        cx0: f32,
+        cy0: f32,
+        cx1: f32,
+        cy1: f32,
         corner_radius: f32,
         fill: bool,
         fill_color: [u8; 4],
         stroke_width: f32,
         stroke_color: [u8; 4],
     ) -> (ShapeData, (i32, i32)) {
+        let style = VectorStyle::from_shape_fields(fill, fill_color, stroke_width, stroke_color);
+        Self::from_canvas_span_with_style(kind, cx0, cy0, cx1, cy1, corner_radius, style)
+    }
+
+    /// Build a parametric primitive with a shared vector style.
+    pub fn from_canvas_span_with_style(
+        kind: ShapeKind,
+        mut cx0: f32,
+        mut cy0: f32,
+        mut cx1: f32,
+        mut cy1: f32,
+        corner_radius: f32,
+        style: VectorStyle,
+    ) -> (ShapeData, (i32, i32)) {
+        let fill = style.fill.is_visible();
+        let stroke_width = style.effective_stroke_width();
+        let stroke_visible = style.stroke.is_visible();
         (cx0, cy0, cx1, cy1) =
-            pixel_snapped_span(kind, cx0, cy0, cx1, cy1, fill, stroke_width, stroke_color);
+            pixel_snapped_span(kind, cx0, cy0, cx1, cy1, fill, stroke_width, stroke_visible);
         let pad = Self::pad(stroke_width);
         let minx = cx0.min(cx1);
         let miny = cy0.min(cy1);
@@ -151,12 +197,101 @@ impl ShapeData {
             x1: cx1 - off_x,
             y1: cy1 - off_y,
             corner_radius: corner_radius.max(0.0),
-            fill,
-            fill_color,
-            stroke_width: stroke_width.max(0.0),
-            stroke_color,
+            // Defaults; Polygon/Star and Rectangle-corner callers overwrite these
+            // (kept out of the signature so existing call sites are unchanged).
+            // `rebuilt` copies them from `self`, so a resize never resets them.
+            corner_type: RectCorner::Round,
+            sides: 5,
+            star_inner: 0.5,
+            style,
         };
         (data, (off_x as i32, off_y as i32))
+    }
+
+    pub fn fill_enabled(&self) -> bool {
+        self.style.fill.is_visible()
+    }
+
+    pub fn fill_color(&self) -> [u8; 4] {
+        match self.style.fill {
+            Paint::Solid(color) => color.to_rgba8(),
+            Paint::Gradient(gradient) => gradient
+                .active_stops()
+                .first()
+                .map_or([0, 0, 0, 0], |stop| stop.color.to_rgba8()),
+            Paint::None => [0, 0, 0, 0],
+        }
+    }
+
+    pub fn stroke_width(&self) -> f32 {
+        self.style.stroke_style.width.max(0.0)
+    }
+
+    pub fn stroke_color(&self) -> [u8; 4] {
+        match self.style.stroke {
+            Paint::Solid(color) => color.to_rgba8(),
+            Paint::Gradient(gradient) => gradient
+                .active_stops()
+                .first()
+                .map_or([0, 0, 0, 0], |stop| stop.color.to_rgba8()),
+            Paint::None => [0, 0, 0, 0],
+        }
+    }
+
+    pub fn set_solid_style(
+        &mut self,
+        fill: bool,
+        fill_color: [u8; 4],
+        stroke_width: f32,
+        stroke_color: [u8; 4],
+    ) {
+        self.style = VectorStyle::from_shape_fields(fill, fill_color, stroke_width, stroke_color);
+    }
+
+    /// Canonical adapter for display and PDF backends. Geometry remains local
+    /// and layer placement becomes the object transform, preserving the local
+    /// coordinate system of gradients and other vector paints.
+    pub fn to_vector_object(
+        &self,
+        layer_offset: (i32, i32),
+    ) -> crate::core::vector::object::VectorObjectData {
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::from_shape;
+        let path = match self.kind {
+            ShapeKind::Rectangle => {
+                let r = self.effective_radius();
+                if self.corner_type == RectCorner::Round || r <= 0.0 {
+                    from_shape::rect_path(self.x0, self.y0, self.x1, self.y1, r)
+                } else {
+                    from_shape::rect_path_corners(
+                        self.x0,
+                        self.y0,
+                        self.x1,
+                        self.y1,
+                        [r; 4],
+                        [self.corner_type; 4],
+                    )
+                }
+            }
+            ShapeKind::Ellipse => from_shape::ellipse_path(self.x0, self.y0, self.x1, self.y1),
+            ShapeKind::Line => from_shape::line_path(self.x0, self.y0, self.x1, self.y1),
+            ShapeKind::Polygon => {
+                from_shape::polygon_path(self.x0, self.y0, self.x1, self.y1, self.sides)
+            }
+            ShapeKind::Star => from_shape::star_path(
+                self.x0,
+                self.y0,
+                self.x1,
+                self.y1,
+                self.sides,
+                self.star_inner,
+            ),
+        };
+        crate::core::vector::object::VectorObjectData::new(
+            path,
+            self.style,
+            AffineTransform::translate(layer_offset.0 as f32, layer_offset.1 as f32),
+        )
     }
 
     /// The shape's geometry in canvas space, given its layer offset.
@@ -178,6 +313,7 @@ impl ShapeData {
             return vec![
                 (ShapeHandle::LineStart, x0, y0),
                 (ShapeHandle::LineEnd, x1, y1),
+                (ShapeHandle::Center, (x0 + x1) * 0.5, (y0 + y1) * 0.5),
             ];
         }
         let minx = x0.min(x1);
@@ -195,6 +331,7 @@ impl ShapeData {
             (ShapeHandle::Bottom, midx, maxy),
             (ShapeHandle::BottomLeft, minx, maxy),
             (ShapeHandle::Left, minx, midy),
+            (ShapeHandle::Center, midx, midy),
         ]
     }
 
@@ -205,9 +342,41 @@ impl ShapeData {
         self.corner_radius.min(w * 0.5).min(h * 0.5).max(0.0)
     }
 
+    /// Local-space vertices of a Polygon (N sharp corners) or Star (2N alternating
+    /// corners) inscribed in the bounding box — first vertex points up. Empty for
+    /// non-polygonal kinds. The box's half-extents are the radii, so the shape
+    /// stretches with a non-square box.
+    pub fn polygon_vertices(&self) -> Vec<(f32, f32)> {
+        let cx = (self.x0 + self.x1) * 0.5;
+        let cy = (self.y0 + self.y1) * 0.5;
+        let rx = (self.x1 - self.x0).abs() * 0.5;
+        let ry = (self.y1 - self.y0).abs() * 0.5;
+        let n = self.sides.clamp(3, 200) as usize;
+        let start = -std::f32::consts::FRAC_PI_2;
+        match self.kind {
+            ShapeKind::Polygon => (0..n)
+                .map(|i| {
+                    let a = start + std::f32::consts::TAU * i as f32 / n as f32;
+                    (cx + rx * a.cos(), cy + ry * a.sin())
+                })
+                .collect(),
+            ShapeKind::Star => {
+                let inner = self.star_inner.clamp(0.05, 0.95);
+                (0..2 * n)
+                    .map(|i| {
+                        let a = start + std::f32::consts::PI * i as f32 / n as f32;
+                        let f = if i % 2 == 0 { 1.0 } else { inner };
+                        (cx + rx * f * a.cos(), cy + ry * f * a.sin())
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Size of the tight raster that holds this shape.
     pub fn raster_size(&self) -> (u32, u32) {
-        let pad = Self::pad(self.stroke_width);
+        let pad = Self::pad(self.style.effective_stroke_width());
         let maxx = self.x0.max(self.x1);
         let maxy = self.y0.max(self.y1);
         let w = (maxx + pad).ceil().max(1.0);
@@ -217,22 +386,24 @@ impl ShapeData {
 
     /// Re-derive the shape from an edited canvas-space span, keeping style.
     fn rebuilt(&self, cx0: f32, cy0: f32, cx1: f32, cy1: f32) -> (ShapeData, (i32, i32)) {
-        let (mut data, off) = Self::from_canvas_span(
+        let (mut data, off) = Self::from_canvas_span_with_style(
             self.kind,
             cx0,
             cy0,
             cx1,
             cy1,
             self.corner_radius,
-            self.fill,
-            self.fill_color,
-            self.stroke_width,
-            self.stroke_color,
+            self.style,
         );
         // Corner radius can't exceed half the shorter side.
         let w = (cx1 - cx0).abs();
         let h = (cy1 - cy0).abs();
         data.corner_radius = data.corner_radius.min(w * 0.5).min(h * 0.5).max(0.0);
+        // Corner style / Polygon-Star parameters are not derived from the span —
+        // carry them over.
+        data.corner_type = self.corner_type;
+        data.sides = self.sides;
+        data.star_inner = self.star_inner;
         (data, off)
     }
 
@@ -246,10 +417,57 @@ impl ShapeData {
         cx: f32,
         cy: f32,
     ) -> (ShapeData, (i32, i32)) {
+        self.resize_by_handle_with_modifiers(offset, handle, cx, cy, false, false)
+    }
+
+    /// Resize with Free-Transform modifiers: Shift preserves the original
+    /// aspect ratio on corner/line endpoint drags; Alt scales around the
+    /// original centre instead of keeping the opposite handle fixed.
+    pub fn resize_by_handle_with_modifiers(
+        &self,
+        offset: (i32, i32),
+        handle: ShapeHandle,
+        cx: f32,
+        cy: f32,
+        shift: bool,
+        alt: bool,
+    ) -> (ShapeData, (i32, i32)) {
         let (sx0, sy0, sx1, sy1) = self.canvas_span(offset);
         match handle {
-            ShapeHandle::LineStart => self.rebuilt(cx, cy, sx1, sy1),
-            ShapeHandle::LineEnd => self.rebuilt(sx0, sy0, cx, cy),
+            ShapeHandle::Center => {
+                let center = ((sx0 + sx1) * 0.5, (sy0 + sy1) * 0.5);
+                let dx = cx - center.0;
+                let dy = cy - center.1;
+                self.rebuilt(sx0 + dx, sy0 + dy, sx1 + dx, sy1 + dy)
+            }
+            ShapeHandle::LineStart | ShapeHandle::LineEnd => {
+                let moving_start = handle == ShapeHandle::LineStart;
+                let fixed = if moving_start { (sx1, sy1) } else { (sx0, sy0) };
+                let center = ((sx0 + sx1) * 0.5, (sy0 + sy1) * 0.5);
+                let anchor = if alt { center } else { fixed };
+                let (mut tx, mut ty) = (cx, cy);
+                if shift {
+                    let dx = tx - anchor.0;
+                    let dy = ty - anchor.1;
+                    let len = (dx * dx + dy * dy).sqrt();
+                    if len > 0.001 {
+                        let step = std::f32::consts::FRAC_PI_4;
+                        let angle = (dy.atan2(dx) / step).round() * step;
+                        tx = anchor.0 + len * angle.cos();
+                        ty = anchor.1 + len * angle.sin();
+                    }
+                }
+                let opposite = if alt {
+                    (2.0 * center.0 - tx, 2.0 * center.1 - ty)
+                } else {
+                    fixed
+                };
+                if moving_start {
+                    self.rebuilt(tx, ty, opposite.0, opposite.1)
+                } else {
+                    self.rebuilt(opposite.0, opposite.1, tx, ty)
+                }
+            }
             ShapeHandle::Radius => {
                 // Node rides the top edge inset from the top-left corner; its
                 // horizontal distance from that corner is the radius.
@@ -281,17 +499,79 @@ impl ShapeData {
                     ShapeHandle::Left => (true, false, false, false),
                     _ => (false, false, false, false),
                 };
+                let center = ((minx + maxx) * 0.5, (miny + maxy) * 0.5);
+                let orig_w = (maxx - minx).max(0.001);
+                let orig_h = (maxy - miny).max(0.001);
                 if left {
                     minx = cx;
+                    if alt {
+                        maxx = 2.0 * center.0 - cx;
+                    }
                 }
                 if right {
                     maxx = cx;
+                    if alt {
+                        minx = 2.0 * center.0 - cx;
+                    }
                 }
                 if top {
                     miny = cy;
+                    if alt {
+                        maxy = 2.0 * center.1 - cy;
+                    }
                 }
                 if bottom {
                     maxy = cy;
+                    if alt {
+                        miny = 2.0 * center.1 - cy;
+                    }
+                }
+                let is_corner = (left || right) && (top || bottom);
+                if shift && is_corner {
+                    let anchor = if alt {
+                        center
+                    } else {
+                        (
+                            if left { sx0.max(sx1) } else { sx0.min(sx1) },
+                            if top { sy0.max(sy1) } else { sy0.min(sy1) },
+                        )
+                    };
+                    let base_w = if alt { orig_w * 0.5 } else { orig_w };
+                    let base_h = if alt { orig_h * 0.5 } else { orig_h };
+                    let dx = cx - anchor.0;
+                    let dy = cy - anchor.1;
+                    let scale = (dx.abs() / base_w).max(dy.abs() / base_h);
+                    let fallback_x = if left { -1.0 } else { 1.0 };
+                    let fallback_y = if top { -1.0 } else { 1.0 };
+                    let tx = anchor.0
+                        + base_w * scale * if dx == 0.0 { fallback_x } else { dx.signum() };
+                    let ty = anchor.1
+                        + base_h * scale * if dy == 0.0 { fallback_y } else { dy.signum() };
+                    if alt {
+                        minx = 2.0 * center.0 - tx;
+                        maxx = tx;
+                        miny = 2.0 * center.1 - ty;
+                        maxy = ty;
+                    } else {
+                        if left {
+                            minx = tx
+                        } else {
+                            maxx = tx
+                        }
+                        if top {
+                            miny = ty
+                        } else {
+                            maxy = ty
+                        }
+                    }
+                } else if shift && (left || right) {
+                    let new_h = (maxx - minx).abs() * orig_h / orig_w;
+                    miny = center.1 - new_h * 0.5;
+                    maxy = center.1 + new_h * 0.5;
+                } else if shift && (top || bottom) {
+                    let new_w = (maxy - miny).abs() * orig_w / orig_h;
+                    minx = center.0 - new_w * 0.5;
+                    maxx = center.0 + new_w * 0.5;
                 }
                 self.rebuilt(minx, miny, maxx, maxy)
             }
@@ -313,19 +593,27 @@ impl ShapeData {
             return None;
         }
         let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
-        let fill_rgb = [
-            self.fill_color[0] as f32 / 255.0,
-            self.fill_color[1] as f32 / 255.0,
-            self.fill_color[2] as f32 / 255.0,
-        ];
-        let fill_a = self.fill_color[3] as f32 / 255.0;
-        let stroke_rgb = [
-            self.stroke_color[0] as f32 / 255.0,
-            self.stroke_color[1] as f32 / 255.0,
-            self.stroke_color[2] as f32 / 255.0,
-        ];
-        let stroke_a = self.stroke_color[3] as f32 / 255.0;
-        let half = self.stroke_width.max(0.0) * 0.5;
+        let fill_paint = self.style.fill;
+        let stroke_paint = self.style.stroke;
+        let opacity = self.style.opacity.clamp(0.0, 1.0);
+        let sample = |paint: Paint, px: f32, py: f32| {
+            let color = crate::core::vector::raster::sample_paint_in_object_space(
+                paint,
+                Point::new(px, py),
+            );
+            (
+                [
+                    color[0] as f32 / 255.0,
+                    color[1] as f32 / 255.0,
+                    color[2] as f32 / 255.0,
+                ],
+                color[3] as f32 / 255.0 * opacity,
+            )
+        };
+        let half = self.style.effective_stroke_width() * 0.5;
+        // This geometry is constant for the whole raster; do not allocate it
+        // again for every Polygon/Star pixel sample.
+        let polygon_vertices = self.polygon_vertices();
 
         // Boundary-referenced signed distance per kind. A line is treated as a
         // "filled" band of half-width `half.max(0.5)` (matching coverage_parts,
@@ -340,16 +628,16 @@ impl ShapeData {
                     let rx1 = self.x0.max(self.x1);
                     let ry0 = self.y0.min(self.y1);
                     let ry1 = self.y0.max(self.y1);
-                    if self.corner_radius > 0.0 {
-                        let r = self
-                            .corner_radius
-                            .min((rx1 - rx0) * 0.5)
-                            .min((ry1 - ry0) * 0.5)
-                            .max(0.0);
-                        sdf_round_box(px, py, rx0, ry0, rx1, ry1, r)
-                    } else {
-                        sdf_box(px, py, rx0, ry0, rx1, ry1)
-                    }
+                    sdf_rect_corners(
+                        px,
+                        py,
+                        rx0,
+                        ry0,
+                        rx1,
+                        ry1,
+                        self.corner_radius,
+                        self.corner_type,
+                    )
                 }
                 ShapeKind::Ellipse => {
                     let cx = (self.x0 + self.x1) * 0.5;
@@ -358,6 +646,7 @@ impl ShapeData {
                     let b = (self.y1 - self.y0).abs() * 0.5;
                     sdf_ellipse(px, py, cx, cy, a, b)
                 }
+                ShapeKind::Polygon | ShapeKind::Star => sdf_polygon(px, py, &polygon_vertices),
             }
         };
         // |sd| beyond this is provably coverage 0 (outside) or exactly the
@@ -370,14 +659,16 @@ impl ShapeData {
         // Exact interior pixel, computed through the same blend as the
         // per-pixel path (fill_cov = 1, stroke_cov = 0; a line's interior is
         // its stroke at full coverage) so runs are byte-identical to it.
+        let interior_paint = if self.kind == ShapeKind::Line {
+            stroke_paint
+        } else {
+            fill_paint
+        };
+        let interior_is_gradient = matches!(interior_paint, Paint::Gradient(_));
         let mut interior_px = [0u8; 4];
-        match self.kind {
-            ShapeKind::Line => blend_straight(&mut interior_px, stroke_rgb, stroke_a),
-            _ => {
-                if self.fill {
-                    blend_straight(&mut interior_px, fill_rgb, fill_a);
-                }
-            }
+        if !interior_is_gradient {
+            let (rgb, alpha) = sample(interior_paint, self.x0, self.y0);
+            blend_straight(&mut interior_px, rgb, alpha);
         }
 
         for y in 0..h {
@@ -392,8 +683,19 @@ impl ShapeData {
                 } else if sd <= -(band + 1.0) {
                     // Pure interior: slice-fill the guaranteed run.
                     let run = (((-sd) - band) as u32).max(1).min(w - x);
-                    if interior_px[3] > 0 {
-                        let start = ((y * w + x) * 4) as usize;
+                    let start = ((y * w + x) * 4) as usize;
+                    if interior_is_gradient {
+                        for (index, p) in rgba[start..start + run as usize * 4]
+                            .chunks_exact_mut(4)
+                            .enumerate()
+                        {
+                            let (rgb, alpha) =
+                                sample(interior_paint, (x as usize + index) as f32 + 0.5, py);
+                            let mut out = [p[0], p[1], p[2], p[3]];
+                            blend_straight(&mut out, rgb, alpha);
+                            p.copy_from_slice(&out);
+                        }
+                    } else if interior_px[3] > 0 {
                         for p in rgba[start..start + run as usize * 4].chunks_exact_mut(4) {
                             p.copy_from_slice(&interior_px);
                         }
@@ -401,10 +703,18 @@ impl ShapeData {
                     x += run;
                 } else {
                     // AA ramp / stroke ring: exact coverage.
-                    let (fill_cov, stroke_cov) = self.coverage_parts(px, py);
+                    // Reuse the signed distance already computed above. This
+                    // avoids walking every polygon edge twice at boundary
+                    // pixels (and keeps the Line band semantics unchanged).
+                    let (fill_cov, stroke_cov) = match self.kind {
+                        ShapeKind::Line => (0.0, (0.5 - sd).clamp(0.0, 1.0)),
+                        _ => self.fill_stroke_parts(sd, half),
+                    };
                     if fill_cov >= 0.0015 || stroke_cov >= 0.0015 {
                         let i = ((y * w + x) * 4) as usize;
                         let mut p = [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]];
+                        let (fill_rgb, fill_a) = sample(fill_paint, px, py);
+                        let (stroke_rgb, stroke_a) = sample(stroke_paint, px, py);
                         blend_straight(&mut p, fill_rgb, fill_cov * fill_a);
                         blend_straight(&mut p, stroke_rgb, stroke_cov * stroke_a);
                         rgba[i..i + 4].copy_from_slice(&p);
@@ -421,8 +731,9 @@ impl ShapeData {
     }
 
     /// Anti-aliased `(fill, stroke)` coverage of local pixel centre `(px,py)`.
+    #[cfg(test)]
     fn coverage_parts(&self, px: f32, py: f32) -> (f32, f32) {
-        let half = self.stroke_width.max(0.0) * 0.5;
+        let half = self.style.effective_stroke_width() * 0.5;
         match self.kind {
             ShapeKind::Line => {
                 let d = dist_to_segment(px, py, self.x0, self.y0, self.x1, self.y1);
@@ -434,16 +745,16 @@ impl ShapeData {
                 let rx1 = self.x0.max(self.x1);
                 let ry0 = self.y0.min(self.y1);
                 let ry1 = self.y0.max(self.y1);
-                let sd = if self.corner_radius > 0.0 {
-                    let r = self
-                        .corner_radius
-                        .min((rx1 - rx0) * 0.5)
-                        .min((ry1 - ry0) * 0.5)
-                        .max(0.0);
-                    sdf_round_box(px, py, rx0, ry0, rx1, ry1, r)
-                } else {
-                    sdf_box(px, py, rx0, ry0, rx1, ry1)
-                };
+                let sd = sdf_rect_corners(
+                    px,
+                    py,
+                    rx0,
+                    ry0,
+                    rx1,
+                    ry1,
+                    self.corner_radius,
+                    self.corner_type,
+                );
                 self.fill_stroke_parts(sd, half)
             }
             ShapeKind::Ellipse => {
@@ -454,11 +765,15 @@ impl ShapeData {
                 let sd = sdf_ellipse(px, py, cx, cy, a, b);
                 self.fill_stroke_parts(sd, half)
             }
+            ShapeKind::Polygon | ShapeKind::Star => {
+                let sd = sdf_polygon(px, py, &self.polygon_vertices());
+                self.fill_stroke_parts(sd, half)
+            }
         }
     }
 
     fn fill_stroke_parts(&self, sd: f32, half: f32) -> (f32, f32) {
-        let fill_cov = if self.fill {
+        let fill_cov = if self.style.fill.is_visible() {
             (0.5 - sd).clamp(0.0, 1.0)
         } else {
             0.0
@@ -484,12 +799,12 @@ fn pixel_snapped_span(
     cy1: f32,
     fill: bool,
     stroke_width: f32,
-    stroke_color: [u8; 4],
+    stroke_visible: bool,
 ) -> (f32, f32, f32, f32) {
-    let visible_stroke = stroke_color[3] > 0
+    let visible_stroke = stroke_visible
         && match kind {
             ShapeKind::Line => true,
-            ShapeKind::Rectangle | ShapeKind::Ellipse => stroke_width > 0.05,
+            _ => stroke_width > 0.05,
         };
     let phase = if visible_stroke {
         stroke_pixel_phase(stroke_width)
@@ -500,11 +815,6 @@ fn pixel_snapped_span(
     };
 
     match kind {
-        ShapeKind::Rectangle | ShapeKind::Ellipse => {
-            let (x0, x1) = snap_pair_to_phase(cx0, cx1, phase);
-            let (y0, y1) = snap_pair_to_phase(cy0, cy1, phase);
-            (x0, y0, x1, y1)
-        }
         ShapeKind::Line => {
             let dx = (cx1 - cx0).abs();
             let dy = (cy1 - cy0).abs();
@@ -521,7 +831,48 @@ fn pixel_snapped_span(
                 (cx0, cy0, cx1, cy1)
             }
         }
+        // Rectangle / Ellipse / Polygon / Star: pixel-snap the bounding box.
+        _ => {
+            let (x0, x1) = snap_pair_to_phase(cx0, cx1, phase);
+            let (y0, y1) = snap_pair_to_phase(cy0, cy1, phase);
+            (x0, y0, x1, y1)
+        }
     }
+}
+
+/// Signed distance to a closed polygon (negative inside), after Inigo Quilez's
+/// `sdPoly`. `v` are the polygon vertices in order; fewer than 3 → +∞.
+fn sdf_polygon(px: f32, py: f32, v: &[(f32, f32)]) -> f32 {
+    let n = v.len();
+    if n < 3 {
+        return f32::INFINITY;
+    }
+    let mut d = {
+        let dx = px - v[0].0;
+        let dy = py - v[0].1;
+        dx * dx + dy * dy
+    };
+    let mut s = 1.0f32;
+    let mut j = n - 1;
+    for i in 0..n {
+        let e = (v[j].0 - v[i].0, v[j].1 - v[i].1);
+        let w = (px - v[i].0, py - v[i].1);
+        let denom = e.0 * e.0 + e.1 * e.1;
+        let t = if denom > 0.0 {
+            ((w.0 * e.0 + w.1 * e.1) / denom).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let bx = w.0 - e.0 * t;
+        let by = w.1 - e.1 * t;
+        d = d.min(bx * bx + by * by);
+        let c = [py >= v[i].1, py < v[j].1, e.0 * w.1 > e.1 * w.0];
+        if c[0] == c[1] && c[1] == c[2] {
+            s = -s;
+        }
+        j = i;
+    }
+    s * d.sqrt()
 }
 
 fn stroke_pixel_phase(stroke_width: f32) -> f32 {
@@ -578,6 +929,56 @@ fn sdf_box(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {
     let ox = dx.max(0.0);
     let oy = dy.max(0.0);
     (ox * ox + oy * oy).sqrt() + dx.max(dy).min(0.0)
+}
+
+/// Signed distance to a rectangle with a uniform corner radius and [`RectCorner`]
+/// style (negative inside). Round = rounded box; Chamfer = the 8-vertex cut
+/// octagon; Scallop = the box minus a quarter-disk at each vertex (concave bites).
+/// All three are 1-Lipschitz, so `render`'s run-skipping stays valid. Matches the
+/// `from_shape::rect_path_corners` geometry that the GPU/PDF backends draw.
+fn sdf_rect_corners(
+    px: f32,
+    py: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    corner_radius: f32,
+    corner_type: RectCorner,
+) -> f32 {
+    let r = corner_radius
+        .min((x1 - x0) * 0.5)
+        .min((y1 - y0) * 0.5)
+        .max(0.0);
+    if r <= 0.0 {
+        return sdf_box(px, py, x0, y0, x1, y1);
+    }
+    match corner_type {
+        RectCorner::Round => sdf_round_box(px, py, x0, y0, x1, y1, r),
+        RectCorner::Chamfer => {
+            let v = [
+                (x0 + r, y0),
+                (x1 - r, y0),
+                (x1, y0 + r),
+                (x1, y1 - r),
+                (x1 - r, y1),
+                (x0 + r, y1),
+                (x0, y1 - r),
+                (x0, y0 + r),
+            ];
+            sdf_polygon(px, py, &v)
+        }
+        RectCorner::Scallop => {
+            // box ∩ complement(4 corner disks) → max of the box sd and each
+            // disk-complement sd `r − dist(p, vertex)`.
+            let d = |vx: f32, vy: f32| r - ((px - vx).hypot(py - vy));
+            sdf_box(px, py, x0, y0, x1, y1)
+                .max(d(x0, y0))
+                .max(d(x1, y0))
+                .max(d(x1, y1))
+                .max(d(x0, y1))
+        }
+    }
 }
 
 /// Signed distance to a rounded box with corner radius `r` (negative inside).
@@ -667,18 +1068,20 @@ mod tests {
     fn render_reference(d: &ShapeData) -> Vec<u8> {
         let (w, h) = d.raster_size();
         let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+        let fill_color = d.fill_color();
+        let stroke_color = d.stroke_color();
         let fill_rgb = [
-            d.fill_color[0] as f32 / 255.0,
-            d.fill_color[1] as f32 / 255.0,
-            d.fill_color[2] as f32 / 255.0,
+            fill_color[0] as f32 / 255.0,
+            fill_color[1] as f32 / 255.0,
+            fill_color[2] as f32 / 255.0,
         ];
-        let fill_a = d.fill_color[3] as f32 / 255.0;
+        let fill_a = fill_color[3] as f32 / 255.0;
         let stroke_rgb = [
-            d.stroke_color[0] as f32 / 255.0,
-            d.stroke_color[1] as f32 / 255.0,
-            d.stroke_color[2] as f32 / 255.0,
+            stroke_color[0] as f32 / 255.0,
+            stroke_color[1] as f32 / 255.0,
+            stroke_color[2] as f32 / 255.0,
         ];
-        let stroke_a = d.stroke_color[3] as f32 / 255.0;
+        let stroke_a = stroke_color[3] as f32 / 255.0;
         for y in 0..h {
             for x in 0..w {
                 let (fill_cov, stroke_cov) = d.coverage_parts(x as f32 + 0.5, y as f32 + 0.5);
@@ -738,6 +1141,22 @@ mod tests {
                 [1, 2, 3, 255],
                 0.0,
                 [0, 0, 0, 0],
+            ),
+            (
+                ShapeKind::Polygon,
+                0.0,
+                true,
+                [40, 180, 90, 220],
+                3.0,
+                [20, 30, 40, 255],
+            ),
+            (
+                ShapeKind::Star,
+                0.0,
+                true,
+                [220, 160, 20, 180],
+                4.0,
+                [60, 20, 100, 255],
             ),
             (
                 ShapeKind::Line,
@@ -922,5 +1341,75 @@ mod tests {
         // Clamped to half the shorter side (40).
         let (d3, _) = d.resize_by_handle(off, ShapeHandle::Radius, 999.0, 0.0);
         assert!((d3.corner_radius - 40.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn shift_corner_resize_preserves_original_aspect_ratio() {
+        let (d, off) = ShapeData::from_canvas_span(
+            ShapeKind::Rectangle,
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 255],
+        );
+        let (next, next_off) = d.resize_by_handle_with_modifiers(
+            off,
+            ShapeHandle::BottomRight,
+            160.0,
+            60.0,
+            true,
+            false,
+        );
+        let (x0, y0, x1, y1) = next.canvas_span(next_off);
+        assert!((((x1 - x0) / (y1 - y0)) - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn alt_edge_resize_keeps_original_center() {
+        let (d, off) = ShapeData::from_canvas_span(
+            ShapeKind::Rectangle,
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 255],
+        );
+        let (next, next_off) =
+            d.resize_by_handle_with_modifiers(off, ShapeHandle::Right, 130.0, 25.0, true, true);
+        let (x0, y0, x1, y1) = next.canvas_span(next_off);
+        assert!(((x0 + x1) * 0.5 - 50.0).abs() < 0.001);
+        assert!(((y0 + y1) * 0.5 - 25.0).abs() < 0.001);
+        assert!((((x1 - x0) / (y1 - y0)) - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn center_handle_moves_shape_without_resizing() {
+        let (d, off) = ShapeData::from_canvas_span(
+            ShapeKind::Ellipse,
+            10.0,
+            20.0,
+            110.0,
+            70.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 255],
+        );
+        let (next, next_off) = d.resize_by_handle(off, ShapeHandle::Center, 90.0, 65.0);
+        let (x0, y0, x1, y1) = next.canvas_span(next_off);
+        assert!(((x0 + x1) * 0.5 - 90.0).abs() < 0.001);
+        assert!(((y0 + y1) * 0.5 - 65.0).abs() < 0.001);
+        assert!(((x1 - x0) - 100.0).abs() < 0.001);
+        assert!(((y1 - y0) - 50.0).abs() < 0.001);
     }
 }

@@ -22,6 +22,8 @@ pub struct DocumentSession {
     pub(in crate::app) next_doc_id: u32,
     /// When non-None, the user confirmed "close without saving" for this doc index.
     pub(in crate::app) pending_close_doc_idx: Option<usize>,
+    /// Dirty documents still requiring a per-tab decision during app shutdown.
+    pub(in crate::app) pending_exit_docs: std::collections::VecDeque<DocumentId>,
     /// Monotonic id assigned to each PDF import so its pages share a navigator group.
     pub(in crate::app) next_pdf_group_id: u32,
     /// Persistent per-document PDF render workers. Each parses its source once.
