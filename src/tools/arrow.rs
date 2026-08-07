@@ -132,6 +132,7 @@ impl ArrowTool {
             end.y,
             self.tree_count.max(1) as usize,
             stub,
+            self.width.max(0.1) * 0.5,
         )
     }
 

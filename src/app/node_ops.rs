@@ -77,6 +77,55 @@ fn shifted_node(
     }
 }
 
+/// Constrain a node-drag delta `(dx, dy)` so the dragged anchor keeps a straight
+/// segment straight when Shift is held (so an arrow can't be knocked askew).
+///
+/// For an endpoint (one neighbour) the segment to that neighbour is locked to the
+/// horizontal or vertical axis — whichever the cursor leans toward — while the
+/// anchor still slides freely along that axis. Interior / closed / lone nodes have
+/// no single segment to preserve, so the move is just locked to its dominant axis.
+fn constrain_node_delta(
+    contour: &crate::core::vector::path::Contour,
+    node: usize,
+    base: Point,
+    dx: f32,
+    dy: f32,
+) -> (f32, f32) {
+    let n = contour.nodes.len();
+    let neighbours: Vec<Point> = if n < 2 {
+        Vec::new()
+    } else if contour.closed {
+        vec![
+            contour.nodes[(node + n - 1) % n].anchor,
+            contour.nodes[(node + 1) % n].anchor,
+        ]
+    } else {
+        let mut v = Vec::new();
+        if node > 0 {
+            v.push(contour.nodes[node - 1].anchor);
+        }
+        if node + 1 < n {
+            v.push(contour.nodes[node + 1].anchor);
+        }
+        v
+    };
+
+    if let [nb] = neighbours.as_slice() {
+        let target = Point::new(base.x + dx, base.y + dy);
+        if (target.x - nb.x).abs() >= (target.y - nb.y).abs() {
+            // Horizontal segment: lock the anchor's Y to the neighbour, X follows.
+            (dx, nb.y - base.y)
+        } else {
+            // Vertical segment: lock X to the neighbour, Y follows.
+            (nb.x - base.x, dy)
+        }
+    } else if dx.abs() >= dy.abs() {
+        (dx, 0.0)
+    } else {
+        (0.0, dy)
+    }
+}
+
 /// The parameter `t ∈ (0,1)` on segment `seg` of `contour` closest to the local
 /// point `p`, by uniform sampling. Clamped away from the endpoints so
 /// `split_segment` accepts it.
@@ -703,14 +752,26 @@ impl App {
             return;
         };
         let local = inv.apply_point(Point::new(cx, cy));
+        let shift = self.edit.input.shift_held;
 
         let (layer_id, pending) = match self.edit.node_drag.as_mut() {
             Some(d) => {
-                let dx = local.x - d.grab_local.x;
-                let dy = local.y - d.grab_local.y;
+                let mut dx = local.x - d.grab_local.x;
+                let mut dy = local.y - d.grab_local.y;
                 match d.target {
                     NodeDragTarget::Anchor => {
-                        // Primary node follows the cursor rigidly.
+                        // Shift keeps the dragged segment axis-aligned so a straight
+                        // arrow can't be tilted; the whole selection then rides the
+                        // same constrained delta.
+                        if shift {
+                            if let Some(c) = d.pending.contours.get(d.contour) {
+                                let (cdx, cdy) =
+                                    constrain_node_delta(c, d.node, d.base_node.anchor, dx, dy);
+                                dx = cdx;
+                                dy = cdy;
+                            }
+                        }
+                        // Primary node follows the (possibly constrained) cursor.
                         let Some(slot) = d
                             .pending
                             .contours
@@ -1138,6 +1199,86 @@ mod tests {
                 .anchor
                 .distance_to(Point::new(0.0, 0.0))
                 < 0.5
+        );
+    }
+
+    /// App with one active, selected OPEN horizontal line (0,0)→(100,0) at the
+    /// identity transform, Node tool live at 1:1 (screen == canvas == local).
+    fn app_with_open_line() -> (App, u32) {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(300, 300);
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(100.0, 0.0)),
+                ],
+                false,
+            )],
+            FillRule::NonZero,
+        );
+        let id = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            canvas
+                .execute(
+                    Box::new(CreatePathLayer::new(
+                        VectorObjectData::new(
+                            path,
+                            VectorStyle::default(),
+                            AffineTransform::IDENTITY,
+                        ),
+                        "Line",
+                    )),
+                    ChangeKind::LayerStructure,
+                )
+                .unwrap();
+            let idx = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .position(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
+                .unwrap();
+            canvas.layer_stack.active_idx = idx;
+            canvas.layer_stack.layers[idx].id
+        };
+        app.edit.tools.select(crate::tools::ToolId::Node);
+        app.edit.view.zoom = 1.0;
+        app.edit.view.offset_x = 0.0;
+        app.edit.view.offset_y = 0.0;
+        (app, id)
+    }
+
+    #[test]
+    fn shift_drag_keeps_the_line_axis_aligned() {
+        let (mut app, id) = app_with_open_line();
+        let hit = app.node_hit_at_screen(100.0, 0.0).expect("endpoint hit");
+        assert_eq!(hit, NodeHit::Node(0, 1));
+        app.node_press(hit, 100.0, 0.0);
+        // Drag the endpoint diagonally with Shift held: X follows, Y locks to the
+        // neighbour (0,0) so the line stays horizontal.
+        app.edit.input.shift_held = true;
+        app.node_drag_update(140.0, 20.0);
+        app.node_drag_finish();
+        let a = model_path(&app, id).contours[0].nodes[1].anchor;
+        assert!((a.x - 140.0).abs() < 0.5, "x follows the cursor, got {a:?}");
+        assert!(
+            a.y.abs() < 0.5,
+            "y stays aligned with the neighbour, got {a:?}"
+        );
+    }
+
+    #[test]
+    fn free_drag_tilts_the_line_without_shift() {
+        let (mut app, id) = app_with_open_line();
+        let hit = app.node_hit_at_screen(100.0, 0.0).expect("endpoint hit");
+        app.node_press(hit, 100.0, 0.0);
+        app.edit.input.shift_held = false;
+        app.node_drag_update(140.0, 20.0);
+        app.node_drag_finish();
+        let a = model_path(&app, id).contours[0].nodes[1].anchor;
+        assert!(
+            (a.x - 140.0).abs() < 0.5 && (a.y - 20.0).abs() < 0.5,
+            "free drag follows the cursor exactly, got {a:?}"
         );
     }
 

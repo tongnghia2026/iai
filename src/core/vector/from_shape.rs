@@ -65,6 +65,10 @@ pub fn elbow_connector_path(sx: f32, sy: f32, ex: f32, ey: f32, route: Connector
 /// style never puts an arrowhead on; each drop is an OPEN contour, so it gets the
 /// object's end arrowhead pointing down. No per-contour style is needed — the
 /// arrowhead kind is whatever the Arrow tool has selected.
+///
+/// `overhang` (half the stroke width) extends the bar past the outer drops so its
+/// butt-capped end fully covers the outer corner square left uncovered where a
+/// horizontal bar meets a vertical drop — otherwise those corners read as gaps.
 pub fn tree_connector_path(
     left: f32,
     right: f32,
@@ -72,19 +76,22 @@ pub fn tree_connector_path(
     bottom: f32,
     count: usize,
     stub: f32,
+    overhang: f32,
 ) -> PathData {
     let count = count.max(1);
     let (x0, x1) = (left.min(right), left.max(right));
     let (y_top, y_bottom) = (top.min(bottom), top.max(bottom));
     let xc = (x0 + x1) * 0.5;
+    let over = overhang.max(0.0);
 
     let mut contours = Vec::with_capacity(count + 2);
 
-    // Horizontal bar (closed → no arrowhead).
+    // Horizontal bar (closed → no arrowhead), extended past the outer drops so the
+    // corners it forms with them are filled rather than notched.
     contours.push(Contour::new(
         vec![
-            Node::sharp(Point::new(x0, y_top)),
-            Node::sharp(Point::new(x1, y_top)),
+            Node::sharp(Point::new(x0 - over, y_top)),
+            Node::sharp(Point::new(x1 + over, y_top)),
         ],
         true,
     ));
@@ -411,14 +418,15 @@ mod tests {
 
     #[test]
     fn tree_connector_bar_and_stub_closed_drops_open() {
-        // Box (0..100) × (0..50), 5 children, stub 20.
-        let p = tree_connector_path(0.0, 100.0, 0.0, 50.0, 5, 20.0);
+        // Box (0..100) × (0..50), 5 children, stub 20, bar overhang 3.
+        let p = tree_connector_path(0.0, 100.0, 0.0, 50.0, 5, 20.0, 3.0);
         // bar + stub + 5 drops.
         assert_eq!(p.contours.len(), 7);
-        // Bar spans the full width at the top, closed (no arrowhead).
+        // Bar spans the full width at the top (extended by the overhang so its
+        // corners with the outer drops are filled), closed (no arrowhead).
         assert!(p.contours[0].closed);
-        assert_eq!(p.contours[0].nodes[0].anchor, Point::new(0.0, 0.0));
-        assert_eq!(p.contours[0].nodes[1].anchor, Point::new(100.0, 0.0));
+        assert_eq!(p.contours[0].nodes[0].anchor, Point::new(-3.0, 0.0));
+        assert_eq!(p.contours[0].nodes[1].anchor, Point::new(103.0, 0.0));
         // Stub rises from the centre, closed.
         assert!(p.contours[1].closed);
         assert_eq!(p.contours[1].nodes[0].anchor, Point::new(50.0, 0.0));
@@ -438,7 +446,7 @@ mod tests {
 
     #[test]
     fn tree_connector_single_child_is_centred_no_stub() {
-        let p = tree_connector_path(10.0, 90.0, 0.0, 40.0, 1, 0.0);
+        let p = tree_connector_path(10.0, 90.0, 0.0, 40.0, 1, 0.0, 0.0);
         // bar + 1 drop (stub 0 → omitted).
         assert_eq!(p.contours.len(), 2);
         assert!(p.contours[0].closed); // bar
