@@ -150,6 +150,14 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                         ui.close();
                                     }
                                 }
+                                ui.separator();
+                                if ui
+                                    .add(menu_item_enabled("SVG (Vector)...", "", data.doc.has_doc))
+                                    .clicked()
+                                {
+                                    actions.print.export_svg = true;
+                                    ui.close();
+                                }
                             });
                             ui.separator();
                             if ui
@@ -179,13 +187,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 .clicked()
                             {
                                 actions.print.export_cmyk_separations = true;
-                                ui.close();
-                            }
-                            if ui
-                                .add(menu_item_enabled("SVG (Vector)...", "", data.doc.has_doc))
-                                .clicked()
-                            {
-                                actions.print.export_svg = true;
                                 ui.close();
                             }
                             ui.separator();
