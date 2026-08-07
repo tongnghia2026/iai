@@ -543,11 +543,14 @@ impl App {
             self.set_active_arrow_route(route);
             self.edit.tools.arrow_mut().route = route;
         }
-        if let Some(on) = actions.tool.set_arrow_multi.take() {
-            self.edit.tools.arrow_mut().multi = on;
+        if let Some(mode) = actions.tool.set_arrow_mode.take() {
+            self.edit.tools.arrow_mut().mode = mode.min(2);
             // Switching mode ends any trunk in progress; the next drag starts fresh.
             self.edit.arrow_multi_layer = None;
             self.edit.tools.arrow_mut().clear();
+        }
+        if let Some(count) = actions.tool.set_tree_count.take() {
+            self.edit.tools.arrow_mut().tree_count = count.clamp(1, 20);
         }
         if std::mem::take(&mut actions.tool.expand_vector_brush) {
             self.expand_active_brush_stroke();

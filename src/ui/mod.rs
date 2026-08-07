@@ -1211,6 +1211,45 @@ pub fn build(
             }
         }
 
+        // Tree (org-chart) preview: the bar, parent stub and each down-arrow, with a
+        // small triangle hint at every drop so the layout reads before release.
+        if !data.tool.arrow_preview_contours.is_empty() {
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("arrow_tree_overlay"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            let color = data.tool.vector_brush_color;
+            let stroke = egui::Stroke::new(
+                (data.tool.arrow_width * zoom).max(1.0),
+                egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 190),
+            );
+            let head = egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 190);
+            for contour in &data.tool.arrow_preview_contours {
+                let pts: Vec<_> = contour.iter().map(|&(x, y)| to_screen_pos(x, y)).collect();
+                if pts.len() < 2 {
+                    continue;
+                }
+                painter.add(egui::Shape::line(pts.clone(), stroke));
+                // A downward drop (vertical, second point lower) gets an arrowhead.
+                let (a, b) = (pts[0], pts[pts.len() - 1]);
+                if (b.y - a.y).abs() > (b.x - a.x).abs() && b.y > a.y {
+                    let len = (data.tool.arrow_width * zoom * 6.0).max(8.0);
+                    let base = b - egui::vec2(0.0, len);
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            b,
+                            base + egui::vec2(len * 0.42, 0.0),
+                            base - egui::vec2(len * 0.42, 0.0),
+                        ],
+                        head,
+                        egui::Stroke::NONE,
+                    ));
+                }
+            }
+        }
+
         // Snap feedback: a small diamond at the corner/edge the Arrow endpoint is
         // snapped to, so it's clear the line will connect there.
         if let Some((mx, my)) = data.tool.arrow_snap_marker {

@@ -55,6 +55,68 @@ pub fn elbow_connector_path(sx: f32, sy: f32, ex: f32, ey: f32, route: Connector
     )
 }
 
+/// Build an org-chart / tree connector inside the box `[left,right] × [top,bottom]`:
+/// a horizontal distribution bar at `top`, `count` evenly-spaced vertical drops to
+/// `bottom`, and a centred stub of length `stub` rising above the bar (the line
+/// that attaches up to the parent/root box).
+///
+/// The trick that lets one object carry both plain lines and arrows: the bar and
+/// the stub are CLOSED (degenerate, retraced) contours, which the shared stroke
+/// style never puts an arrowhead on; each drop is an OPEN contour, so it gets the
+/// object's end arrowhead pointing down. No per-contour style is needed — the
+/// arrowhead kind is whatever the Arrow tool has selected.
+pub fn tree_connector_path(
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+    count: usize,
+    stub: f32,
+) -> PathData {
+    let count = count.max(1);
+    let (x0, x1) = (left.min(right), left.max(right));
+    let (y_top, y_bottom) = (top.min(bottom), top.max(bottom));
+    let xc = (x0 + x1) * 0.5;
+
+    let mut contours = Vec::with_capacity(count + 2);
+
+    // Horizontal bar (closed → no arrowhead).
+    contours.push(Contour::new(
+        vec![
+            Node::sharp(Point::new(x0, y_top)),
+            Node::sharp(Point::new(x1, y_top)),
+        ],
+        true,
+    ));
+    // Stub rising to the parent box (closed → no arrowhead).
+    if stub > 0.0 {
+        contours.push(Contour::new(
+            vec![
+                Node::sharp(Point::new(xc, y_top)),
+                Node::sharp(Point::new(xc, y_top - stub)),
+            ],
+            true,
+        ));
+    }
+    // One down-arrow per child (open → gets the end arrowhead at the bottom).
+    for i in 0..count {
+        let x = if count == 1 {
+            xc
+        } else {
+            x0 + (x1 - x0) * (i as f32) / ((count - 1) as f32)
+        };
+        contours.push(Contour::new(
+            vec![
+                Node::sharp(Point::new(x, y_top)),
+                Node::sharp(Point::new(x, y_bottom)),
+            ],
+            false,
+        ));
+    }
+
+    PathData::new(contours, FillRule::NonZero)
+}
+
 fn corner_node(anchor: Point, in_handle: Option<Point>, out_handle: Option<Point>) -> Node {
     Node {
         anchor,
@@ -346,6 +408,43 @@ pub fn star_path(x0: f32, y0: f32, x1: f32, y1: f32, points: u32, inner: f32) ->
 mod tests {
     use super::*;
     use crate::core::geometry::cubic_bezier;
+
+    #[test]
+    fn tree_connector_bar_and_stub_closed_drops_open() {
+        // Box (0..100) × (0..50), 5 children, stub 20.
+        let p = tree_connector_path(0.0, 100.0, 0.0, 50.0, 5, 20.0);
+        // bar + stub + 5 drops.
+        assert_eq!(p.contours.len(), 7);
+        // Bar spans the full width at the top, closed (no arrowhead).
+        assert!(p.contours[0].closed);
+        assert_eq!(p.contours[0].nodes[0].anchor, Point::new(0.0, 0.0));
+        assert_eq!(p.contours[0].nodes[1].anchor, Point::new(100.0, 0.0));
+        // Stub rises from the centre, closed.
+        assert!(p.contours[1].closed);
+        assert_eq!(p.contours[1].nodes[0].anchor, Point::new(50.0, 0.0));
+        assert_eq!(p.contours[1].nodes[1].anchor, Point::new(50.0, -20.0));
+        // Five evenly spaced OPEN drops (these get the arrowhead).
+        let drops: Vec<f32> = p.contours[2..]
+            .iter()
+            .map(|c| {
+                assert!(!c.closed);
+                assert_eq!(c.nodes[0].anchor.y, 0.0);
+                assert_eq!(c.nodes[1].anchor.y, 50.0);
+                c.nodes[0].anchor.x
+            })
+            .collect();
+        assert_eq!(drops, vec![0.0, 25.0, 50.0, 75.0, 100.0]);
+    }
+
+    #[test]
+    fn tree_connector_single_child_is_centred_no_stub() {
+        let p = tree_connector_path(10.0, 90.0, 0.0, 40.0, 1, 0.0);
+        // bar + 1 drop (stub 0 → omitted).
+        assert_eq!(p.contours.len(), 2);
+        assert!(p.contours[0].closed); // bar
+        assert!(!p.contours[1].closed); // drop
+        assert_eq!(p.contours[1].nodes[0].anchor.x, 50.0); // centred
+    }
 
     #[test]
     fn sharp_rect_is_four_corners() {

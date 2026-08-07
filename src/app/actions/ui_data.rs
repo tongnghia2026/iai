@@ -936,8 +936,13 @@ impl App {
                     .map_or(self.edit.tools.arrow().end_arrow, |settings| settings.1),
                 arrow_route: selected_arrow_settings
                     .map_or(self.edit.tools.arrow().route, |settings| settings.2),
-                arrow_multi: self.edit.tools.arrow().multi,
-                arrow_path: if self.edit.tools.active_id() == crate::tools::ToolId::Arrow {
+                arrow_mode: self.edit.tools.arrow().mode,
+                arrow_tree_count: self.edit.tools.arrow().tree_count,
+                // Single / branch preview: one polyline (the UI adds the arrowhead).
+                // Tree preview lives in arrow_preview_contours instead.
+                arrow_path: if self.edit.tools.active_id() == crate::tools::ToolId::Arrow
+                    && !self.edit.tools.arrow().is_tree()
+                {
                     self.edit
                         .tools
                         .arrow()
@@ -948,6 +953,29 @@ impl App {
                                 .nodes
                                 .into_iter()
                                 .map(|node| (node.anchor.x, node.anchor.y))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                arrow_preview_contours: if self.edit.tools.active_id()
+                    == crate::tools::ToolId::Arrow
+                    && self.edit.tools.arrow().is_tree()
+                {
+                    self.edit
+                        .tools
+                        .arrow()
+                        .preview_path()
+                        .map(|path| {
+                            path.contours
+                                .into_iter()
+                                .map(|c| {
+                                    c.nodes
+                                        .into_iter()
+                                        .map(|n| (n.anchor.x, n.anchor.y))
+                                        .collect()
+                                })
                                 .collect()
                         })
                         .unwrap_or_default()

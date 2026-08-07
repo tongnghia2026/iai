@@ -230,10 +230,15 @@ pub struct ToolViewModel {
     pub arrow_width: f32,
     pub arrow_end: u8,
     pub arrow_route: u8,
-    /// Arrow "branch" (multi-arrow) mode: draw a trunk, then keep dragging to add
-    /// sub-arrows onto the same object.
-    pub arrow_multi: bool,
+    /// Arrow tool mode: 0 single, 1 branch (drag a trunk then add sub-arrows),
+    /// 2 tree (org-chart connector).
+    pub arrow_mode: u8,
+    /// Down-arrow count for tree mode.
+    pub arrow_tree_count: u8,
     pub arrow_path: Vec<(f32, f32)>,
+    /// Preview polylines for the org-chart connector while dragging in tree mode
+    /// (canvas space); empty in the other modes.
+    pub arrow_preview_contours: Vec<Vec<(f32, f32)>>,
     /// Canvas-space point the Arrow endpoint is snapped to (a nearby vector
     /// object's corner/edge), for the on-canvas snap marker. `None` when unsnapped.
     pub arrow_snap_marker: Option<(f32, f32)>,
@@ -732,8 +737,10 @@ impl Default for UiData {
                 arrow_width: 3.0,
                 arrow_end: 1,
                 arrow_route: 0,
-                arrow_multi: false,
+                arrow_mode: 0,
+                arrow_tree_count: 5,
                 arrow_path: Vec::new(),
+                arrow_preview_contours: Vec::new(),
                 arrow_snap_marker: None,
                 gradient_preview: None,
                 wand_brush_size: 30.0,

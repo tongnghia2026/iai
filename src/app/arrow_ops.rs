@@ -98,11 +98,39 @@ impl App {
     }
 
     pub fn commit_arrow(&mut self) {
-        if self.edit.tools.arrow().multi {
-            self.commit_arrow_branch();
-        } else {
-            self.commit_arrow_single();
+        use crate::tools::arrow::{MODE_BRANCH, MODE_TREE};
+        match self.edit.tools.arrow().mode {
+            MODE_BRANCH => self.commit_arrow_branch(),
+            MODE_TREE => self.commit_arrow_tree(),
+            _ => self.commit_arrow_single(),
         }
+    }
+
+    /// Add `object` as a new, selected Path layer and repaint. Returns its id.
+    fn add_arrow_layer(&mut self, object: VectorObjectData, name: &'static str) -> Option<u32> {
+        let doc_idx = self.docs.active_doc_idx;
+        let canvas = &mut self.docs.documents[doc_idx].canvas;
+        if canvas
+            .execute(
+                Box::new(CreatePathLayer::new(object, name)),
+                ChangeKind::LayerStructure,
+            )
+            .is_err()
+        {
+            return None;
+        }
+        let new_idx = canvas.layer_stack.active_idx;
+        for layer in &mut canvas.layer_stack.layers {
+            layer.selected = false;
+        }
+        let new_id = canvas.layer_stack.layers.get_mut(new_idx).map(|layer| {
+            layer.selected = true;
+            layer.id
+        });
+        canvas.reconcile_path_ink();
+        canvas.layer_revision += 1;
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        new_id
     }
 
     /// One drag → one standalone arrow / connector layer (the classic behaviour).
@@ -111,28 +139,21 @@ impl App {
         let Some(object) = self.edit.tools.arrow_mut().take_arrow_object(fg) else {
             return;
         };
-        let doc_idx = self.docs.active_doc_idx;
-        let canvas = &mut self.docs.documents[doc_idx].canvas;
-        if canvas
-            .execute(
-                Box::new(CreatePathLayer::new(object, "Arrow")),
-                ChangeKind::LayerStructure,
-            )
-            .is_err()
-        {
+        if self.add_arrow_layer(object, "Arrow").is_some() {
+            self.shell.status_msg = "Arrow / connector created".to_string();
+        }
+    }
+
+    /// One drag → a whole org-chart connector (bar + N down-arrows + parent stub)
+    /// as a single editable layer.
+    fn commit_arrow_tree(&mut self) {
+        let fg = self.edit.fg_color;
+        let Some(object) = self.edit.tools.arrow_mut().take_tree_object(fg) else {
             return;
+        };
+        if self.add_arrow_layer(object, "Tree connector").is_some() {
+            self.shell.status_msg = "Tree connector created".to_string();
         }
-        let new_idx = canvas.layer_stack.active_idx;
-        for layer in &mut canvas.layer_stack.layers {
-            layer.selected = false;
-        }
-        if let Some(layer) = canvas.layer_stack.layers.get_mut(new_idx) {
-            layer.selected = true;
-        }
-        canvas.reconcile_path_ink();
-        canvas.layer_revision += 1;
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Arrow / connector created".to_string();
     }
 
     /// Branch (multi-arrow) mode: the first drag lays a straight trunk line; each
@@ -147,10 +168,10 @@ impl App {
             return;
         };
         let doc_idx = self.docs.active_doc_idx;
-        let canvas = &mut self.docs.documents[doc_idx].canvas;
 
         // Append to the current trunk if it still exists as a Path layer.
         if let Some(layer_id) = self.edit.arrow_multi_layer {
+            let canvas = &mut self.docs.documents[doc_idx].canvas;
             let existing = canvas
                 .layer_stack
                 .layers
@@ -200,27 +221,7 @@ impl App {
             style,
             AffineTransform::IDENTITY,
         );
-        if canvas
-            .execute(
-                Box::new(CreatePathLayer::new(object, "Arrow")),
-                ChangeKind::LayerStructure,
-            )
-            .is_err()
-        {
-            return;
-        }
-        let new_idx = canvas.layer_stack.active_idx;
-        for layer in &mut canvas.layer_stack.layers {
-            layer.selected = false;
-        }
-        let new_id = canvas.layer_stack.layers.get_mut(new_idx).map(|layer| {
-            layer.selected = true;
-            layer.id
-        });
-        canvas.reconcile_path_ink();
-        canvas.layer_revision += 1;
-        self.edit.arrow_multi_layer = new_id;
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.edit.arrow_multi_layer = self.add_arrow_layer(object, "Arrow");
         self.shell.status_msg = "Trunk drawn — drag again from it to add sub-arrows".to_string();
     }
 }
@@ -293,7 +294,7 @@ mod tests {
     #[test]
     fn branch_mode_keeps_sub_arrows_on_one_layer() {
         let mut app = arrow_app();
-        app.edit.tools.arrow_mut().multi = true;
+        app.edit.tools.arrow_mut().mode = crate::tools::arrow::MODE_BRANCH;
 
         // Trunk.
         arrow_drag(&mut app, 100.0, 100.0, 100.0, 300.0);
@@ -310,7 +311,7 @@ mod tests {
     #[test]
     fn single_mode_makes_a_layer_per_drag() {
         let mut app = arrow_app();
-        assert!(!app.edit.tools.arrow().multi);
+        assert!(!app.edit.tools.arrow().is_branch());
         arrow_drag(&mut app, 10.0, 10.0, 60.0, 10.0);
         arrow_drag(&mut app, 10.0, 40.0, 60.0, 40.0);
         assert_eq!(vector_layer_count(&app), 2, "each drag is its own arrow");
@@ -320,7 +321,7 @@ mod tests {
     #[test]
     fn finishing_the_group_starts_a_new_trunk() {
         let mut app = arrow_app();
-        app.edit.tools.arrow_mut().multi = true;
+        app.edit.tools.arrow_mut().mode = crate::tools::arrow::MODE_BRANCH;
         arrow_drag(&mut app, 100.0, 100.0, 100.0, 300.0);
         let first = app.edit.arrow_multi_layer;
         // Esc / Enter / re-selecting the tool ends the group.
@@ -328,5 +329,29 @@ mod tests {
         arrow_drag(&mut app, 200.0, 100.0, 200.0, 300.0);
         assert_ne!(app.edit.arrow_multi_layer, first, "a fresh trunk layer");
         assert_eq!(vector_layer_count(&app), 2, "two independent trunks");
+    }
+
+    #[test]
+    fn tree_mode_generates_one_connector_layer() {
+        let mut app = arrow_app();
+        app.edit.tools.arrow_mut().mode = crate::tools::arrow::MODE_TREE;
+        app.edit.tools.arrow_mut().tree_count = 4;
+        // One drag of the layout box.
+        arrow_drag(&mut app, 40.0, 40.0, 360.0, 160.0);
+        assert_eq!(vector_layer_count(&app), 1, "one connector layer");
+        // bar + stub + 4 drops = 6 contours.
+        let canvas = &app.docs.documents[0].canvas;
+        let obj = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find_map(|l| match &l.layer_type {
+                LayerType::Vector(VectorGeometry::Path(o)) => Some(o),
+                _ => None,
+            })
+            .expect("a path layer");
+        assert_eq!(obj.path.contours.len(), 6);
+        // Tree mode doesn't accumulate like branch mode.
+        assert!(app.edit.arrow_multi_layer.is_none());
     }
 }

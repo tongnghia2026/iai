@@ -448,9 +448,9 @@ fn arrow_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         _ => (ph::ARROW_RIGHT, "Straight"),
     };
     let (route_icon, route_name) = route_meta(data.tool.arrow_route);
-    // The connector route only applies to a single arrow; branch mode is always
-    // straight, so hide the route picker there to keep the bar honest.
-    if !data.tool.arrow_multi {
+    // The connector route only applies to a single arrow; branch / tree modes are
+    // always straight, so hide the route picker there to keep the bar honest.
+    if data.tool.arrow_mode == 0 {
         ui.menu_button(format!("{route_icon} {route_name}"), |ui| {
             ui.label(egui::RichText::new("Connector route").strong());
             ui.horizontal(|ui| {
@@ -469,16 +469,44 @@ fn arrow_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         });
     }
     ui.separator();
-    // Branch mode: draw a straight trunk, then keep dragging from it to add
-    // sub-arrows onto the same object.
-    let mut multi = data.tool.arrow_multi;
-    if ui
-        .selectable_label(multi, format!("{} Branch", ph::TREE_STRUCTURE))
-        .on_hover_text("Branch arrow: draw a line, then drag again to add sub-arrows onto it")
-        .clicked()
-    {
-        multi = !multi;
-        actions.tool.set_arrow_multi = Some(multi);
+    // Arrow style: a single arrow, a free-hand branch group, or an org-chart tree.
+    let mode_meta = |mode: u8| match mode {
+        1 => (ph::SHARE_NETWORK, "Branch"),
+        2 => (ph::TREE_STRUCTURE, "Tree"),
+        _ => (ph::ARROW_RIGHT, "Single"),
+    };
+    let (mode_icon, mode_name) = mode_meta(data.tool.arrow_mode);
+    ui.menu_button(format!("{mode_icon} {mode_name}"), |ui| {
+        ui.label(egui::RichText::new("Arrow style").strong());
+        for value in 0..=2u8 {
+            let (icon, name) = mode_meta(value);
+            let hint = match value {
+                1 => "Draw a line, then drag again to add sub-arrows onto it",
+                2 => "Org-chart: drag a box for a bar with N down-arrows + a top line",
+                _ => "One arrow / connector per drag",
+            };
+            if ui
+                .selectable_label(data.tool.arrow_mode == value, format!("{icon} {name}"))
+                .on_hover_text(hint)
+                .clicked()
+            {
+                actions.tool.set_arrow_mode = Some(value);
+                ui.close();
+            }
+        }
+    });
+    // Tree mode: how many down-arrows to fan out.
+    if data.tool.arrow_mode == 2 {
+        ui.label(top_options_icon(ph::ARROW_LINE_DOWN))
+            .on_hover_text("Number of down-arrows");
+        let mut count = data.tool.arrow_tree_count as i32;
+        if ui
+            .add(egui::DragValue::new(&mut count).range(1..=20))
+            .on_hover_text("Number of down-arrows")
+            .changed()
+        {
+            actions.tool.set_tree_count = Some(count.clamp(1, 20) as u8);
+        }
     }
 }
 

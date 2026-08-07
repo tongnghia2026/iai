@@ -12,6 +12,13 @@ use crate::core::vector::style::{ArrowHead, ArrowStyle, Paint, VectorStyle};
 /// geometry (a corner/endpoint, or an outline). Divided by zoom at snap time.
 const SNAP_PX: f32 = 9.0;
 
+/// Arrow tool drawing mode (`ArrowTool::mode`).
+pub const MODE_SINGLE: u8 = 0;
+/// One trunk line, then each further drag adds a free-hand sub-arrow onto it.
+pub const MODE_BRANCH: u8 = 1;
+/// One drag lays out an org-chart connector: a bar, N down-arrows, a parent stub.
+pub const MODE_TREE: u8 = 2;
+
 pub struct ArrowTool {
     pub width: f32,
     pub end_arrow: u8,
@@ -20,11 +27,10 @@ pub struct ArrowTool {
     /// the Move tool). When on, both endpoints snap to nearby vector objects so
     /// arrows / connectors join at their corners and edges.
     pub snap_enabled: bool,
-    /// "Branch" (multi-arrow) mode: the first drag lays a straight trunk line,
-    /// each later drag adds a sub-arrow onto the SAME object (see
-    /// `App::commit_arrow`). Every drag is a straight segment here; the trunk and
-    /// each branch get the chosen arrowhead at their far end.
-    pub multi: bool,
+    /// Drawing mode: [`MODE_SINGLE`] / [`MODE_BRANCH`] / [`MODE_TREE`].
+    pub mode: u8,
+    /// Number of down-arrows generated in [`MODE_TREE`].
+    pub tree_count: u8,
     start: Option<Point>,
     end: Option<Point>,
     drawing: bool,
@@ -40,7 +46,8 @@ impl ArrowTool {
             end_arrow: ArrowHead::Triangle.to_u8(),
             route: 0,
             snap_enabled: true,
-            multi: false,
+            mode: MODE_SINGLE,
+            tree_count: 5,
             start: None,
             end: None,
             drawing: false,
@@ -52,6 +59,14 @@ impl ArrowTool {
         self.drawing
     }
 
+    pub fn is_branch(&self) -> bool {
+        self.mode == MODE_BRANCH
+    }
+
+    pub fn is_tree(&self) -> bool {
+        self.mode == MODE_TREE
+    }
+
     /// Where the pointer is currently snapped (canvas space), for the UI marker.
     pub fn snap_marker(&self) -> Option<Point> {
         self.snap_marker
@@ -61,6 +76,13 @@ impl ArrowTool {
     /// marker and wins over Shift, matching the "object snap overrides ortho"
     /// convention of CAD tools), else the Shift-constrained cursor point.
     fn resolve_endpoint(&mut self, raw: Point, shift: bool, ctx: &ToolCtx) -> Point {
+        // Tree mode drags out an abstract layout box, not a connectable endpoint:
+        // object snapping would pull its corners onto stray geometry and Shift-ortho
+        // would flatten the box, so neither applies.
+        if self.is_tree() {
+            self.snap_marker = None;
+            return raw;
+        }
         if self.snap_enabled {
             if let Some(hit) = ctx.snap_vector_point(raw, None, SNAP_PX) {
                 self.snap_marker = Some(hit.point);
@@ -89,18 +111,35 @@ impl ArrowTool {
         }
     }
 
-    /// The connector route in force: branch mode is always a straight segment
-    /// (trunk + each sub-arrow), otherwise the user's chosen route.
+    /// The connector route in force: branch / tree modes are always straight
+    /// segments, otherwise the user's chosen route.
     fn effective_route(&self) -> ConnectorRoute {
-        if self.multi {
+        if self.is_branch() || self.is_tree() {
             ConnectorRoute::from_u8(0)
         } else {
             ConnectorRoute::from_u8(self.route)
         }
     }
 
+    /// Org-chart connector geometry for the current drag box `(start..end)`, in
+    /// canvas space. Shared by the preview and the commit so they match.
+    pub fn tree_path(&self, start: Point, end: Point) -> crate::core::vector::path::PathData {
+        let stub = ((start.y - end.y).abs() * 0.5).max(24.0);
+        crate::core::vector::from_shape::tree_connector_path(
+            start.x,
+            end.x,
+            start.y,
+            end.y,
+            self.tree_count.max(1) as usize,
+            stub,
+        )
+    }
+
     pub fn preview_path(&self) -> Option<crate::core::vector::path::PathData> {
         let (start, end) = (self.start?, self.end?);
+        if self.is_tree() {
+            return Some(self.tree_path(start, end));
+        }
         Some(elbow_connector_path(
             start.x,
             start.y,
@@ -150,6 +189,27 @@ impl ArrowTool {
             return None;
         }
         Some((start, end))
+    }
+
+    /// Consume the drag box and build the org-chart connector object (tree mode),
+    /// resetting the tool. `None` when the box is too small to lay one out.
+    pub fn take_tree_object(&mut self, fg: [u8; 4]) -> Option<VectorObjectData> {
+        let start = self.start?;
+        let end = self.end?;
+        let object = if (start.x - end.x).abs() >= 4.0 && (start.y - end.y).abs() >= 4.0 {
+            Some(VectorObjectData::new(
+                self.tree_path(start, end),
+                self.make_style(fg),
+                AffineTransform::IDENTITY,
+            ))
+        } else {
+            None
+        };
+        self.start = None;
+        self.end = None;
+        self.drawing = false;
+        self.snap_marker = None;
+        object
     }
 
     pub fn clear(&mut self) {
