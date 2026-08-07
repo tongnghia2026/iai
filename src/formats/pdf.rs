@@ -984,24 +984,42 @@ impl Exporter for PdfExporter {
             return Err("PDF canvas is too large to export safely".to_string());
         }
         if canvas.is_cmyk() {
-            if let Some(ink) = canvas.flatten_ink() {
+            // Promote qualifying Path/Shape/Text layers to native DeviceCMYK vector
+            // paths over an ink raster base — crisp at any size (no "răng cưa"),
+            // colour-managed via the embedded CMYK profile so the PDF matches the
+            // app's preview. Mirrors the RGB path below.
+            let selection = crate::core::print::collect_pdf_vectors(canvas);
+            if let Some(ink) = crate::core::print::pdf_ink_base(canvas, &selection) {
                 let page = crate::core::print::encode_pdf_page_cmyk(
                     &ink,
                     canvas.width,
                     canvas.height,
                     canvas.metadata.resolution_ppi,
                 )?;
-                // Embed the document's CMYK profile so the DeviceCMYK ink renders
-                // the same colours the app previews, instead of the viewer's own
-                // default CMYK interpretation.
                 let profile = canvas.cmyk_pdf_profile();
-                let pdf = crate::core::print::build_pdf_encoded(
+                let pdf = crate::core::print::build_pdf_encoded_with_vectors(
                     &page,
+                    &selection.objects,
                     &PrintLayout::default(),
                     profile.as_deref(),
                 )?;
                 return std::fs::write(path, &pdf).map_err(|e| e.to_string());
             }
+            // Not ink-exact (group / adjustment / mask / ink-less pixel): fall back
+            // to a colour-managed RGB raster of the on-screen mirror (no vectors, so
+            // no CMYK operators leak onto an RGB page). Still matches the preview.
+            let rgba = canvas.export_flat();
+            let icc = super::export_icc_bytes(canvas);
+            let pdf = crate::core::print::build_pdf_with_vectors(
+                &rgba,
+                canvas.width,
+                canvas.height,
+                canvas.metadata.resolution_ppi,
+                &[],
+                &PrintLayout::default(),
+                Some(&icc),
+            )?;
+            return std::fs::write(path, &pdf).map_err(|e| e.to_string());
         }
         let selection = crate::core::print::collect_pdf_vectors(canvas);
         let rgba = crate::core::print::pdf_raster_base(canvas, &selection);
@@ -1071,6 +1089,71 @@ mod tests {
         let bytes = std::fs::read(&output).expect("read pdf");
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains(" m\n") && text.contains("f\nQ"));
+        let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    fn cmyk_pdf_exporter_writes_native_vectors_not_flat_raster() {
+        // File ▸ Export ▸ PDF on a CMYK document must keep vectors crisp (native
+        // DeviceCMYK paths over an ink base), colour-managed via the embedded
+        // profile — not flatten the whole page to a raster (which looked jagged).
+        use crate::core::canvas::CmykProfile;
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        // Convert to CMYK first, then add the vector (conversion merges prior
+        // layers), matching how a CMYK design is authored.
+        let mut canvas = Canvas::from_rgba(vec![255; 16 * 16 * 4], 16, 16);
+        canvas
+            .convert_to_cmyk(CmykProfile::Naive)
+            .expect("convert to CMYK");
+        let index = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(2.0, 2.0)),
+                            Node::sharp(Point::new(14.0, 2.0)),
+                            Node::sharp(Point::new(8.0, 14.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                VectorStyle::filled(ColorValue::cmyk(0.0, 1.0, 1.0, 0.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+
+        let output = temp_pdf_path("cmyk-native-vector");
+        PdfExporter
+            .export(&canvas, &output, &ExportOptions::default())
+            .expect("export");
+        let bytes = std::fs::read(&output).expect("read pdf");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains(" m\n"),
+            "crisp native vector path present (not a flattened raster)"
+        );
+        assert!(
+            text.contains(" k\n"),
+            "DeviceCMYK fill operator present for the vector"
+        );
+        assert!(
+            text.contains("[/ICCBased"),
+            "ink base is tagged with the embedded CMYK profile"
+        );
+        assert!(
+            text.contains("/OutputIntents"),
+            "page declares the CMYK output intent"
+        );
         let _ = std::fs::remove_file(output);
     }
 
