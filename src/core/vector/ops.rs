@@ -255,9 +255,20 @@ fn make_node_collinear(contour: &mut Contour, ni: usize, symmetric: bool) -> OpR
     let node = &mut contour.nodes[ni];
     let a = node.anchor;
     let (ux, uy) = smooth_tangent(a, prev, next);
-    // Default handle length: a third of the chord to each neighbour — a gentle curve.
-    let def_in = prev.map_or(0.0, |p| a.distance_to(p) / 3.0);
-    let def_out = next.map_or(0.0, |q| a.distance_to(q) / 3.0);
+    // Keep synthesised handles within the shorter adjacent edge. Giving each
+    // side one third of its own edge lets the long-side handle cross the short
+    // neighbouring segment at uneven corners, creating tiny self-intersections
+    // that show up as white slits in a filled path after smoothing.
+    let prev_len = prev.map(|p| a.distance_to(p));
+    let next_len = next.map(|q| a.distance_to(q));
+    let shared_len = match (prev_len, next_len) {
+        (Some(p), Some(q)) => p.min(q) / 3.0,
+        (Some(p), None) => p / 3.0,
+        (None, Some(q)) => q / 3.0,
+        (None, None) => 0.0,
+    };
+    let def_in = prev_len.map_or(0.0, |_| shared_len);
+    let def_out = next_len.map_or(0.0, |_| shared_len);
     let cur_in = node.in_handle.map(|h| a.distance_to(h));
     let cur_out = node.out_handle.map(|h| a.distance_to(h));
     let (len_in, len_out) = if symmetric {
@@ -733,6 +744,23 @@ mod tests {
         let dot = v1.0 * v2.0 + v1.1 * v2.1;
         assert!(cross.abs() < 1e-3, "handles not collinear: {v1:?} {v2:?}");
         assert!(dot < 0.0, "handles must point opposite ways");
+    }
+
+    #[test]
+    fn smooth_corner_limits_both_new_handles_to_the_shorter_edge() {
+        let mut contour = Contour::new(
+            vec![
+                Node::sharp(Point::new(0.0, 0.0)),
+                Node::sharp(Point::new(1000.0, 0.0)),
+                Node::sharp(Point::new(1000.0, 30.0)),
+            ],
+            false,
+        );
+        set_node_smooth(&mut contour, 1).unwrap();
+        let node = contour.nodes[1];
+        let expected = 10.0; // one third of the 30-unit short edge
+        assert!((node.anchor.distance_to(node.in_handle.unwrap()) - expected).abs() < 1e-4);
+        assert!((node.anchor.distance_to(node.out_handle.unwrap()) - expected).abs() < 1e-4);
     }
 
     #[test]

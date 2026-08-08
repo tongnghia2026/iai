@@ -26,9 +26,6 @@ use crate::core::vector::path::PathData;
 const NODE_HIT_PX: f32 = 8.0;
 /// Screen-space grab radius for a segment (insert an anchor).
 const SEG_HIT_PX: f32 = 9.0;
-/// Screen-space radius within which a segment insertion snaps to the exact
-/// midpoint (t=0.5) — makes "add a node at the middle of an edge" easy.
-const MID_SNAP_PX: f32 = 6.0;
 /// Samples per segment when locating the nearest split parameter.
 const SEG_SAMPLES: usize = 40;
 /// Maximum flattening error in screen pixels for the editable outline.
@@ -127,8 +124,10 @@ fn constrain_node_delta(
 }
 
 /// The parameter `t ∈ (0,1)` on segment `seg` of `contour` closest to the local
-/// point `p`, by uniform sampling. Clamped away from the endpoints so
-/// `split_segment` accepts it.
+/// point `p`. A coarse scan finds the right basin, then a bounded ternary search
+/// refines it. Using the actual pointer point here matters: re-projecting the
+/// nearest coarse sample makes insertions visibly jump by as much as 1/40 of a
+/// long segment.
 fn nearest_segment_t(contour: &crate::core::vector::path::Contour, seg: usize, p: Point) -> f32 {
     let Some((p0, p1, p2, p3)) = contour.segment(seg) else {
         return 0.5;
@@ -143,7 +142,29 @@ fn nearest_segment_t(contour: &crate::core::vector::path::Contour, seg: usize, p
             best_t = t;
         }
     }
-    best_t.clamp(0.02, 0.98)
+    let step = 1.0 / SEG_SAMPLES as f32;
+    let mut lo = (best_t - step).max(0.0);
+    let mut hi = (best_t + step).min(1.0);
+    let distance2 = |t: f32| {
+        let q = cubic_bezier(p0, p1, p2, p3, t);
+        (q.x - p.x).powi(2) + (q.y - p.y).powi(2)
+    };
+    // Squared distance to a cubic is smooth inside the coarse basin. This fixed
+    // iteration count is cheap and gives sub-pixel placement even at high zoom.
+    for _ in 0..14 {
+        let third = (hi - lo) / 3.0;
+        let a = lo + third;
+        let b = hi - third;
+        if distance2(a) <= distance2(b) {
+            hi = b;
+        } else {
+            lo = a;
+        }
+    }
+    // `split_segment` only excludes the exact endpoints. Keep the smallest
+    // practical margin instead of 2% of the whole segment: that old clamp moved
+    // clicks near an endpoint by tens of pixels on long straight lines.
+    ((lo + hi) * 0.5).clamp(1e-5, 1.0 - 1e-5)
 }
 
 impl App {
@@ -497,8 +518,8 @@ impl App {
                             .map(map)
                             .collect();
                             let marker = map(cubic_bezier(p0, p1, p2, p3, tparam));
-                            // node_hit_at_screen snaps tparam to exactly 0.5 at the
-                            // midpoint, so this flags the "Middle" insertion.
+                            // An exact midpoint projection gets the "Middle"
+                            // label without moving nearby clicks onto it.
                             let at_mid = (tparam - 0.5).abs() < 1e-4;
                             (Some(line), Some(marker), at_mid)
                         }
@@ -567,6 +588,9 @@ impl App {
             (q.x * zoom + vox, q.y * zoom + voy)
         };
         let dist2 = |(ax, ay): (f32, f32)| (ax - sx).powi(2) + (ay - sy).powi(2);
+        let pointer_local = t
+            .inverse()
+            .map(|inv| inv.apply_point(Point::new((sx - vox) / zoom, (sy - voy) / zoom)));
 
         // Handles of the SELECTED node win first — they sit on top of the path
         // and are only drawn (hence grabbable) while their node is selected.
@@ -601,34 +625,26 @@ impl App {
             return Some(NodeHit::Node(ci, ni));
         }
 
-        // Then segments: sample each and take the nearest within the pick radius.
-        let mut best_seg: Option<(f32, usize, usize, Point)> = None;
+        // Then segments: project the real pointer onto every curve and take the
+        // nearest projection. The coarse samples belong inside
+        // `nearest_segment_t`; using them as the hit points leaves blind spots
+        // and visible quantisation on long straight segments.
+        let pointer_local = pointer_local?;
+        let mut best_seg: Option<(f32, usize, usize, f32)> = None;
         for (ci, c) in path.contours.iter().enumerate() {
             for seg in 0..c.segment_count() {
                 let Some((p0, p1, p2, p3)) = c.segment(seg) else {
                     continue;
                 };
-                for k in 1..SEG_SAMPLES {
-                    let t = k as f32 / SEG_SAMPLES as f32;
-                    let lp = cubic_bezier(p0, p1, p2, p3, t);
-                    let d = dist2(to_screen(lp));
-                    if d <= SEG_HIT_PX * SEG_HIT_PX && best_seg.map_or(true, |(bd, _, _, _)| d < bd)
-                    {
-                        best_seg = Some((d, ci, seg, lp));
-                    }
+                let tparam = nearest_segment_t(c, seg, pointer_local);
+                let projected = cubic_bezier(p0, p1, p2, p3, tparam);
+                let d = dist2(to_screen(projected));
+                if d <= SEG_HIT_PX * SEG_HIT_PX && best_seg.map_or(true, |(bd, _, _, _)| d < bd) {
+                    best_seg = Some((d, ci, seg, tparam));
                 }
             }
         }
-        if let Some((_, ci, seg, lp)) = best_seg {
-            let mut tparam = nearest_segment_t(&path.contours[ci], seg, lp);
-            // Snap to the segment's exact midpoint when the cursor is near it, so a
-            // node lands dead-centre on an edge (mirrors the pivot's snap-to-centre).
-            if let Some((p0, p1, p2, p3)) = path.contours[ci].segment(seg) {
-                let mid = cubic_bezier(p0, p1, p2, p3, 0.5);
-                if dist2(to_screen(mid)) <= MID_SNAP_PX * MID_SNAP_PX {
-                    tparam = 0.5;
-                }
-            }
+        if let Some((_, ci, seg, tparam)) = best_seg {
             return Some(NodeHit::Segment(ci, seg, tparam));
         }
         None
@@ -1082,6 +1098,49 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearest_segment_t_projects_the_actual_pointer_between_coarse_samples() {
+        let contour = crate::core::vector::path::Contour::new(
+            vec![
+                crate::core::vector::path::Node::sharp(Point::new(0.0, 0.0)),
+                crate::core::vector::path::Node::sharp(Point::new(1000.0, 0.0)),
+            ],
+            false,
+        );
+        // t=0.413 is deliberately not one of the old 1/40 sample positions.
+        let wanted = 0.413;
+        let p = cubic_bezier(
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 0.0),
+            Point::new(1000.0, 0.0),
+            Point::new(1000.0, 0.0),
+            wanted,
+        );
+        let got = nearest_segment_t(&contour, 0, p);
+        assert!((got - wanted).abs() < 1e-3, "got {got}, wanted {wanted}");
+    }
+
+    #[test]
+    fn straight_segment_projection_does_not_snap_or_clamp_away_from_click() {
+        let contour = crate::core::vector::path::Contour::new(
+            vec![
+                crate::core::vector::path::Node::sharp(Point::new(0.0, 0.0)),
+                crate::core::vector::path::Node::sharp(Point::new(1000.0, 0.0)),
+            ],
+            false,
+        );
+        for clicked_x in [10.0, 494.0, 990.0] {
+            let t = nearest_segment_t(&contour, 0, Point::new(clicked_x, 0.0));
+            let (p0, p1, p2, p3) = contour.segment(0).unwrap();
+            let inserted = cubic_bezier(p0, p1, p2, p3, t);
+            assert!(
+                (inserted.x - clicked_x).abs() < 0.1,
+                "click {clicked_x} inserted at {}",
+                inserted.x
+            );
+        }
+    }
 
     #[test]
     fn node_outline_tolerance_tracks_zoom_and_object_scale() {
