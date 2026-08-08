@@ -456,6 +456,9 @@ pub struct SceneToneData {
     /// Tone-equalizer EV offsets over the same axis (all zero when inactive).
     pub tone_eq: [f32; 256],
     pub tone_eq_active: bool,
+    /// Raw-look perceptual shadow-chroma compensation. Identity sources bypass
+    /// it so tone-neutral non-RAW pixels remain bit-stable.
+    pub shadow_chroma_active: bool,
     /// Display-domain (gamma) luma curve: parametric curve_* sliders + the
     /// luminance point curve. `None` when identity.
     pub display: Option<Box<[f32; 256]>>,
@@ -528,6 +531,7 @@ pub fn build_scene_tone_for(settings: &DevelopSettings, look: BaseLook) -> Scene
         lut,
         tone_eq,
         tone_eq_active,
+        shadow_chroma_active: look == BaseLook::Raw,
         display: build_display_lut_for(settings, look),
         rgb: rgb_curve_luts(settings),
         sigmoid,
@@ -650,6 +654,19 @@ fn compress_highlight_chroma(c: [f32; 3], mapped_n: f32, scene_n: f32) -> [f32; 
     ]
 }
 
+/// Perceptual tone curves lose colour in the toe. Restore at most 20% chroma
+/// through the coloured-shadow band, leaving black, midtones and neutrals alone.
+#[inline]
+fn restore_shadow_chroma(c: [f32; 3]) -> [f32; 3] {
+    let y = luma_lin(c[0], c[1], c[2]).clamp(0.0, 1.0);
+    let d = [c[0] - y, c[1] - y, c[2] - y];
+    let chroma = d[0].max(d[1]).max(d[2]) - d[0].min(d[1]).min(d[2]);
+    let tonal = smootherstep(0.08, 0.18, y) * (1.0 - smootherstep(0.38, 0.55, y));
+    let colored = smootherstep(0.015, 0.10, chroma);
+    let scale = 1.0 + 0.20 * tonal * colored;
+    [y + d[0] * scale, y + d[1] * scale, y + d[2] * scale]
+}
+
 impl SceneToneData {
     /// Absolute exposure (EV) of a scene value after WB+EV — the signal the
     /// tone-equalizer zones read, and what the regional-E proxy stores.
@@ -707,6 +724,11 @@ impl SceneToneData {
             compress_highlight_chroma(mixed, mapped_n, n)
         } else {
             pc
+        };
+        let out = if self.shadow_chroma_active {
+            restore_shadow_chroma(out)
+        } else {
+            out
         };
         let clipped = gamut_clip_chroma(filmlike_clip(out));
         let mut r = linear_to_srgb(clipped[0]);
@@ -1230,6 +1252,35 @@ mod tests {
     }
 
     #[test]
+    fn shadow_chroma_restore_preserves_luma_and_neutrals() {
+        let color = [0.30, 0.16, 0.10];
+        let out = restore_shadow_chroma(color);
+        let chroma = |c: [f32; 3]| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
+        assert!(chroma(out) > chroma(color));
+        assert!(chroma(out) <= chroma(color) * 1.201);
+        assert!(
+            (luma_lin(out[0], out[1], out[2]) - luma_lin(color[0], color[1], color[2])).abs()
+                < 1e-6
+        );
+        assert_eq!(restore_shadow_chroma([0.20; 3]), [0.20; 3]);
+    }
+
+    #[test]
+    fn identity_look_does_not_restore_shadow_chroma() {
+        let tone = build_scene_tone_for(&settings(), BaseLook::Identity);
+        let srgb = [0.42f32, 0.24, 0.15];
+        let input = [
+            srgb_to_linear(srgb[0]),
+            srgb_to_linear(srgb[1]),
+            srgb_to_linear(srgb[2]),
+        ];
+        let out = tone.scene_to_display(input, None);
+        for i in 0..3 {
+            assert!((out[i] - srgb[i]).abs() < 2e-3, "channel {i}: {}", out[i]);
+        }
+    }
+
+    #[test]
     fn identity_look_reproduces_the_source_exactly_at_tone_neutral() {
         // A linearized display source must come back byte-stable through the
         // identity chain whenever the Light half is untouched (colour-only
@@ -1733,12 +1784,14 @@ mod tests {
             "fn dev_gamut_clip_chroma(",
             "fn dev_filmlike_clip(",
             "fn dev_compress_highlight_chroma(",
+            "fn dev_restore_shadow_chroma(",
             "dev_smootherstep(0.02, 0.80, 1.0 - ratio)",
             "dev_smootherstep(0.55, 1.0, mapped_n)",
             "(ev + 14.0) / 20.0",
             "(e + 14.0) / 20.0",
             "6.1035156e-5",
             "dev_effects[16]",
+            "dev_effects[25]",
             "dev_smootherstep(0.5, 1.0, mapped_n)",
             "let blend = 0.90 + (0.20 - 0.90) * hw",
             "dev_effects[26]",

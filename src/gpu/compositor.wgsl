@@ -810,6 +810,17 @@ fn dev_compress_highlight_chroma(c: vec3<f32>, mapped_n: f32, scene_n: f32) -> v
     return mix(c, vec3<f32>(mapped_n), amount);
 }
 
+// CPU twin: restore_shadow_chroma.
+fn dev_restore_shadow_chroma(c: vec3<f32>) -> vec3<f32> {
+    let y = clamp(dev_luma_lin(c), 0.0, 1.0);
+    let d = c - vec3<f32>(y);
+    let chroma = max(max(d.r, d.g), d.b) - min(min(d.r, d.g), d.b);
+    let tonal = dev_smootherstep(0.08, 0.18, y) * (1.0 - dev_smootherstep(0.38, 0.55, y));
+    let colored = dev_smootherstep(0.015, 0.10, chroma);
+    let scale = 1.0 + 0.20 * tonal * colored;
+    return vec3<f32>(y) + d * scale;
+}
+
 // Interpolated display-domain luma curve (curve_* sliders + point curve).
 fn dev_display_lum_at(v: f32) -> f32 {
     let x = clamp(v, 0.0, 1.0) * 255.0;
@@ -840,6 +851,9 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
         let blend = 0.90 + (0.20 - 0.90) * hw;
         outc = mix(pc, v * (mapped_n / n), blend);
         outc = dev_compress_highlight_chroma(outc, mapped_n, n);
+    }
+    if (dev_effects[25] > 0.5) {
+        outc = dev_restore_shadow_chroma(outc);
     }
     outc = dev_gamut_clip_chroma(dev_filmlike_clip(outc));
     var g = dev_linear_to_srgb(clamp(outc, vec3(0.0), vec3(1.0)));

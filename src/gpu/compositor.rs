@@ -1921,6 +1921,7 @@ struct VsOut {
                     effects[16 + i * 3 + 1] = row[1];
                     effects[16 + i * 3 + 2] = row[2];
                 }
+                effects[25] = f32::from(tone.shadow_chroma_active);
                 if let Some(display) = &tone.display {
                     effects[26] = 1.0;
                     rgb[769..1025].copy_from_slice(display.as_ref());
