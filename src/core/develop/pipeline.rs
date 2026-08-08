@@ -873,9 +873,11 @@ impl<'a> DevelopPlan<'a> {
         // Mixer-band edits: gate by the REGION's band membership (smooth hue
         // selection), so the edit tapers across a colour boundary and cannot
         // recolour a neighbouring hue.
+        let mut mixer_affinity = 1.0;
         if self.mixer_gated {
             if let Some(curves) = &self.mixer_curves {
-                gate *= mixer_edit_affinity(curves, region);
+                mixer_affinity = mixer_edit_affinity(curves, region);
+                gate *= mixer_affinity;
             }
         }
         // Attenuating chroma detail de-blocks JPEG chroma noise (a SMALL
@@ -886,6 +888,17 @@ impl<'a> DevelopPlan<'a> {
         let dev_mag = ((dr - dl).powi(2) + (dg - dl).powi(2) + (db - dl).powi(2)).sqrt();
         let keep =
             CHROMA_DETAIL_KEEP + (1.0 - CHROMA_DETAIL_KEEP) * smootherstep(0.08, 0.22, dev_mag);
+        // A strong negative Saturation edit intentionally removes colour. Do
+        // not reconstruct that same chroma from the full-resolution detail or
+        // blue/aqua fringes survive around otherwise neutralised regions.
+        let global_desat = (-self.settings.saturation / CONTROL_LIMIT).clamp(0.0, 1.0);
+        let mixer_desat = self
+            .settings
+            .mixer_saturation
+            .iter()
+            .map(|v| (-*v / CONTROL_LIMIT).clamp(0.0, 1.0))
+            .fold(0.0f32, f32::max);
+        let keep = keep * (1.0 - global_desat.max(mixer_desat * mixer_affinity));
         // Reconstruct the FULL adjusted region + re-added detail, then blend toward
         // the untouched pixel by the gate a SINGLE time. The old form pre-gated the
         // region→adjusted step as well, so a partial gate (dark or muted colours,

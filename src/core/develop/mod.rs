@@ -80,7 +80,7 @@ const MIXER_HUE_SHIFT_MAX_DEG: f32 = 45.0;
 // transform to retain the same perceptual slider travel without shifting Y.
 const SAT_POSITIVE_SCALE: f32 = 1.50;
 const MIXER_SAT_POSITIVE_SCALE: f32 = 2.20;
-const SAT_NEGATIVE_SCALE: f32 = 0.95;
+const SAT_NEGATIVE_SCALE: f32 = 1.0;
 
 // ── Colour-Mixer selection model (hue-curve colour equalizer) ───────────────
 // A pixel is selected by its UCS-22 hue (core/ucs.rs) through a

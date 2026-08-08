@@ -958,8 +958,10 @@ fn dev_finish_colored(toned: vec3<f32>, region: vec3<f32>, adjusted: vec3<f32>) 
     let lt = clamp(dev_luma(toned), 0.0, 1.0);
     let ct = dev_chroma(toned);
     var gate = dev_smootherstep(0.0, 0.32, lt + ct * 0.60);
+    var mixer_affinity = 1.0;
     if (dev_effects[4] > 0.5) {
-        gate = gate * dev_mixer_edit_affinity(region);
+        mixer_affinity = dev_mixer_edit_affinity(region);
+        gate = gate * mixer_affinity;
     }
     let dlv = vec3<f32>(dl, dl, dl);
     // Adaptive chroma-detail keep: small deviations (JPEG chroma blocks) stay
@@ -967,7 +969,9 @@ fn dev_finish_colored(toned: vec3<f32>, region: vec3<f32>, adjusted: vec3<f32>) 
     // Reconstruct the FULL adjusted region + detail, then blend toward the pixel
     // by the gate ONCE. Gate → 0 returns the exact toned pixel (bit-faithful).
     let cd = d - dlv;
-    let keep = 0.5 + 0.5 * dev_smootherstep(0.08, 0.22, length(cd));
+    let detail_keep = 0.5 + 0.5 * dev_smootherstep(0.08, 0.22, length(cd));
+    let desat = max(dev_effects[5], dev_effects[6] * mixer_affinity);
+    let keep = detail_keep * (1.0 - desat);
     let full = clamp(adjusted + dlv + cd * keep, vec3(0.0), vec3(1.0));
     let toned_c = clamp(toned, vec3(0.0), vec3(1.0));
     return clamp(toned_c + (full - toned_c) * gate, vec3(0.0), vec3(1.0));

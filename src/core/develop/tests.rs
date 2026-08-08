@@ -3092,6 +3092,34 @@ fn every_band_saturation_has_clear_plus100_and_plus200_strength() {
 }
 
 #[test]
+fn aqua_and_blue_minus200_can_remove_color_completely() {
+    let mut settings = DevelopSettings::default();
+    settings.mixer_saturation[A] = -CONTROL_LIMIT;
+    settings.mixer_saturation[BL] = -CONTROL_LIMIT;
+    let saturation = |rgb: [u8; 3]| {
+        let max = rgb[0].max(rgb[1]).max(rgb[2]) as f32;
+        let min = rgb[0].min(rgb[1]).min(rgb[2]) as f32;
+        if max > 0.0 {
+            (max - min) / max
+        } else {
+            0.0
+        }
+    };
+    for rgb in [[40, 140, 140], [45, 90, 180], [110, 175, 210]] {
+        let direct = direct_apply(&settings, rgb);
+        let proxy = proxy_apply(&settings, rgb);
+        assert!(
+            saturation(direct) < 0.025,
+            "direct aqua/blue retained color: {rgb:?} -> {direct:?}"
+        );
+        assert!(
+            saturation(proxy) < 0.035,
+            "proxy aqua/blue retained color: {rgb:?} -> {proxy:?}"
+        );
+    }
+}
+
+#[test]
 fn proxy_and_direct_saturation_strength_remain_comparable_at_plus200() {
     let settings = all_band_saturation_settings(CONTROL_LIMIT);
     for rgb in [

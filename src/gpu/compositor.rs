@@ -1897,6 +1897,12 @@ struct VsOut {
             if mixer_gated {
                 effects[4] = 1.0;
             }
+            effects[5] = (-s.saturation / crate::core::develop::CONTROL_LIMIT).clamp(0.0, 1.0);
+            effects[6] = s
+                .mixer_saturation
+                .iter()
+                .map(|v| (-*v / crate::core::develop::CONTROL_LIMIT).clamp(0.0, 1.0))
+                .fold(0.0f32, f32::max);
 
             // R/G/B point curves: [flag, 3×256] — the exact tables the CPU
             // ToneData::apply_rgb_curves reads, so preview and bake match.
