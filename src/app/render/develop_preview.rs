@@ -84,7 +84,7 @@ impl App {
             .and_then(|p| p.scene.clone());
         let scene_tone = scene
             .as_ref()
-            .map(|sc| crate::core::develop_scene::build_scene_tone_for(&settings, sc.look));
+            .map(|sc| crate::core::develop_scene::build_scene_tone_for_scene(&settings, sc));
         // Detail (Sharpening / Noise Reduction) is independent of the colour proxy: it
         // is full-resolution and previewed on commit only (see the note below). It must
         // NOT suppress the colour preview — the old `&& !need_detail` here made every

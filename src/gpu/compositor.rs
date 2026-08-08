@@ -691,11 +691,11 @@ fn develop_to_gpu(
 /// legacy path so `dev_color_proxy_at` / `dev_finish_colored` are shared.
 fn develop_scene_to_gpu(
     settings: &crate::core::develop::DevelopSettings,
-    look: crate::core::develop_scene::BaseLook,
+    scene: &crate::core::develop_scene::SceneSource,
     region: Option<&RegionLumaProxy>,
     color: Option<&ColorProxies>,
 ) -> ([f32; 12], [f32; 256]) {
-    let tone = crate::core::develop_scene::build_scene_tone_for(settings, look);
+    let tone = crate::core::develop_scene::build_scene_tone_for_scene(settings, scene);
     let mut adj_p = [0.0f32; 12];
     if let Some(c) = color {
         if !c.region.is_empty() {
@@ -1787,7 +1787,7 @@ struct VsOut {
                         return None;
                     }
                     let tone =
-                        crate::core::develop_scene::build_scene_tone_for(&p.settings, scene.look);
+                        crate::core::develop_scene::build_scene_tone_for_scene(&p.settings, scene);
                     return Some((r.data.clone(), tone.tone_eq));
                 }
                 let tone = crate::core::develop::build_tone_data(&p.settings);
@@ -1921,7 +1921,7 @@ struct VsOut {
                 }
             }
             if let Some(scene) = &p.scene {
-                let tone = crate::core::develop_scene::build_scene_tone_for(s, scene.look);
+                let tone = crate::core::develop_scene::build_scene_tone_for_scene(s, scene);
                 for (i, row) in tone.wb_ev.iter().enumerate() {
                     effects[16 + i * 3] = row[0];
                     effects[16 + i * 3 + 1] = row[1];
@@ -3469,7 +3469,7 @@ struct VsOut {
                         if let (Some(scene), true) = (&preview.scene, self.dev_scene_key != 0) {
                             let (p, lut) = develop_scene_to_gpu(
                                 &preview.settings,
-                                scene.look,
+                                scene,
                                 preview.region_luma.as_ref(),
                                 preview.color.as_ref(),
                             );

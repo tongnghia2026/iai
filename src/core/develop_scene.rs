@@ -37,6 +37,7 @@ use crate::core::develop::{
 };
 use crate::core::tile::TileMap;
 use rayon::prelude::*;
+use std::sync::OnceLock;
 
 // ── LUT domain ───────────────────────────────────────────────────────────────
 
@@ -180,6 +181,16 @@ pub struct SceneSource {
     /// `None` means fully opaque (the normal RAW and opaque-image case).
     pub alpha: Option<Vec<u16>>,
     pub look: BaseLook,
+    /// Robust black/grey/white anchors of the immutable RAW master. Computed
+    /// lazily from a small grid and then reused by every preview/commit build.
+    pub auto_tone: OnceLock<AutoToneRange>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AutoToneRange {
+    pub black_ev: f32,
+    pub grey_ev: f32,
+    pub white_ev: f32,
 }
 
 #[allow(dead_code)] // constructors exercised by unit tests; production fills `half` directly
@@ -191,6 +202,7 @@ impl SceneSource {
             half: vec![0u16; width as usize * height as usize * 4],
             alpha: None,
             look: BaseLook::Raw,
+            auto_tone: OnceLock::new(),
         }
     }
 
@@ -305,6 +317,7 @@ impl SceneSource {
             half,
             alpha,
             look: BaseLook::Identity,
+            auto_tone: OnceLock::new(),
         }
     }
 
@@ -426,6 +439,71 @@ pub fn baseline_exposure_gain(scene_rgb: &[[f32; 3]], target_display_mean: f32) 
     (lo * hi).sqrt()
 }
 
+/// Estimate image-specific scene anchors on a bounded grid. Transparent and
+/// non-positive samples are ignored; small percentile trims keep letterbox
+/// black and isolated sensor highlights from defining the whole curve.
+fn estimate_auto_tone(scene: &SceneSource) -> AutoToneRange {
+    const BUDGET: u64 = 60_000;
+    let total = scene.width as u64 * scene.height as u64;
+    let step = (((total / BUDGET).max(1) as f64).sqrt().ceil() as u32).max(1);
+    let mut evs = Vec::with_capacity((total / (step as u64 * step as u64) + 1) as usize);
+    let mut y = 0;
+    while y < scene.height {
+        let mut x = 0;
+        while x < scene.width {
+            let i = y as usize * scene.width as usize + x as usize;
+            if scene.alpha16_at_index(i) > 0 {
+                let p = scene.get_rgb(x, y);
+                let l = luma_lin(p[0], p[1], p[2]);
+                if l.is_finite() && l > 1e-7 {
+                    evs.push(l.log2());
+                }
+            }
+            x += step;
+        }
+        y += step;
+    }
+    if evs.len() < 32 {
+        return AutoToneRange {
+            black_ev: SCENE_EV_MIN,
+            grey_ev: SCENE_MID_GRAY.log2(),
+            white_ev: SCENE_EV_MAX,
+        };
+    }
+    evs.sort_unstable_by(f32::total_cmp);
+    let at = |q: f32| evs[((evs.len() - 1) as f32 * q).round() as usize];
+    // ART's vmin*0.5 / vmax*1.5 expressed in EV, with robust 0.2/99.8%
+    // endpoints so a dead pixel or specular pinprick cannot collapse the DR.
+    let black_ev = (at(0.002) - 1.0).clamp(SCENE_EV_MIN, SCENE_EV_MAX - 3.0);
+    let white_ev = (at(0.998) + 1.5f32.log2()).clamp(black_ev + 3.0, SCENE_EV_MAX + 4.0);
+    // Mean only through the adaptive central window, excluding the outer 10%
+    // of the measured DR. Averaging in linear light matches sourceGray.
+    let lo = black_ev + (white_ev - black_ev) * 0.10;
+    let hi = white_ev - (white_ev - black_ev) * 0.10;
+    let (sum, count) = evs
+        .iter()
+        .filter(|&&e| e >= lo && e <= hi)
+        .fold((0.0f64, 0usize), |(sum, n), &e| {
+            (sum + 2.0f64.powf(e as f64), n + 1)
+        });
+    let grey_ev = if count == 0 {
+        (black_ev + white_ev) * 0.5
+    } else {
+        (sum / count as f64).log2() as f32
+    }
+    .clamp(black_ev + 1.0, white_ev - 1.0);
+    AutoToneRange {
+        black_ev,
+        grey_ev,
+        white_ev,
+    }
+}
+
+pub fn scene_auto_tone(scene: &SceneSource) -> Option<AutoToneRange> {
+    (scene.look == BaseLook::Raw)
+        .then(|| *scene.auto_tone.get_or_init(|| estimate_auto_tone(scene)))
+}
+
 /// Signed tone-equalizer offset (EV) for a regional exposure `e` (EV, absolute)
 /// under the four Light sliders. Direct evaluation — the LUT bakes this.
 pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
@@ -477,12 +555,28 @@ pub fn build_scene_tone(settings: &DevelopSettings) -> SceneToneData {
     build_scene_tone_for(settings, BaseLook::Raw)
 }
 
+/// Per-image variant used by every real scene preview and bake.
+pub fn build_scene_tone_for_scene(
+    settings: &DevelopSettings,
+    scene: &SceneSource,
+) -> SceneToneData {
+    build_scene_tone_impl(settings, scene.look, scene_auto_tone(scene))
+}
+
 /// Build the scene tone stage for a given base look. Both looks share the
 /// whole chain structure (CAT16·2^EV matrix, EV-domain tone equalizer, the
 /// log2-indexed tone LUT the CPU and GPU consume, display curves) — only the
 /// LUT CONTENT and where Contrast lives differ, so the WGSL chain needs no
 /// flag: it renders whatever tables it is given.
 pub fn build_scene_tone_for(settings: &DevelopSettings, look: BaseLook) -> SceneToneData {
+    build_scene_tone_impl(settings, look, None)
+}
+
+fn build_scene_tone_impl(
+    settings: &DevelopSettings,
+    look: BaseLook,
+    auto: Option<AutoToneRange>,
+) -> SceneToneData {
     let wb = cat16::wb_matrix(settings.temperature, settings.tint);
     let ev = exposure_multiplier(settings.exposure);
     let mut wb_ev = wb;
@@ -498,7 +592,18 @@ pub fn build_scene_tone_for(settings: &DevelopSettings, look: BaseLook) -> Scene
             sigmoid = sigmoid_params(settings.contrast);
             for (i, slot) in lut.iter_mut().enumerate() {
                 let e = SCENE_EV_MIN + (SCENE_EV_MAX - SCENE_EV_MIN) * i as f32 / 255.0;
-                *slot = sigmoid_eval(&sigmoid, e.exp2());
+                let mapped_e = auto.map_or(e, |a| {
+                    let mid = SCENE_MID_GRAY.log2();
+                    if e <= a.grey_ev {
+                        SCENE_EV_MIN
+                            + (e - a.black_ev) / (a.grey_ev - a.black_ev).max(1e-3)
+                                * (mid - SCENE_EV_MIN)
+                    } else {
+                        mid + (e - a.grey_ev) / (a.white_ev - a.grey_ev).max(1e-3)
+                            * (SCENE_EV_MAX - mid)
+                    }
+                });
+                *slot = sigmoid_eval(&sigmoid, mapped_e.exp2());
             }
         }
         BaseLook::Identity => {
@@ -1061,7 +1166,10 @@ fn render_scene_display(scene: &SceneSource, tone: &SceneToneData) -> Vec<u16> {
 /// pixels already on screen (zero-work preview, no pop) and the "Open Image"
 /// neutral shortcut is exact.
 pub fn render_default_look(scene: &SceneSource) -> Vec<u16> {
-    render_scene_display(scene, &build_scene_tone(&DevelopSettings::default()))
+    render_scene_display(
+        scene,
+        &build_scene_tone_for_scene(&DevelopSettings::default(), scene),
+    )
 }
 
 /// Strip every slider the scene chain already applied, leaving the stages the
@@ -1099,7 +1207,7 @@ pub fn apply_scene_to_tilemap(
     settings: &DevelopSettings,
     selection: Option<crate::core::develop::DevelopSelection>,
 ) -> TileMap {
-    let tone = build_scene_tone_for(settings, scene.look);
+    let tone = build_scene_tone_for_scene(settings, scene);
     let px16 = render_scene_display(scene, &tone);
     let display = TileMap::from_rgba16(&px16, scene.width, scene.height);
     drop(px16);
@@ -1253,6 +1361,39 @@ mod tests {
             assert!(fit_err < 0.02, "target {target}: fit_err {fit_err}");
             assert!(fit_err <= unit_err + 1e-4);
         }
+    }
+
+    #[test]
+    fn auto_tone_anchors_raw_black_grey_and_white_monotonically() {
+        let mut scene = SceneSource::new(256, 1);
+        for x in 0..256 {
+            let ev = -9.0 + 11.0 * x as f32 / 255.0;
+            let v = ev.exp2();
+            scene.set_rgb(x, 0, [v, v, v]);
+        }
+        let anchors = scene_auto_tone(&scene).expect("RAW has automatic anchors");
+        assert!(anchors.black_ev < anchors.grey_ev);
+        assert!(anchors.grey_ev < anchors.white_ev);
+
+        let tone = build_scene_tone_for_scene(&settings(), &scene);
+        assert!(tone.tone_map(anchors.black_ev.exp2()) < 0.002);
+        assert!(tone.tone_map(anchors.white_ev.exp2()) > 0.995);
+        let mapped_grey = tone.tone_map(anchors.grey_ev.exp2());
+        assert!(
+            (mapped_grey - SCENE_MID_GRAY).abs() < 0.01,
+            "grey anchor mapped to {mapped_grey}"
+        );
+        assert!(tone.lut.windows(2).all(|w| w[1] >= w[0]));
+    }
+
+    #[test]
+    fn auto_tone_is_disabled_for_identity_sources() {
+        let tiles = TileMap::new(2, 2);
+        let scene = SceneSource::from_display_tiles(&tiles);
+        assert!(scene_auto_tone(&scene).is_none());
+        let adaptive = build_scene_tone_for_scene(&settings(), &scene);
+        let fixed = build_scene_tone_for(&settings(), BaseLook::Identity);
+        assert_eq!(adaptive.lut, fixed.lut);
     }
 
     #[test]

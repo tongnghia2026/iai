@@ -438,6 +438,7 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
         half: out,
         alpha: None,
         look: crate::core::develop_scene::BaseLook::Raw,
+        auto_tone: std::sync::OnceLock::new(),
     };
     let px16 = render_default_look(&scene);
 
