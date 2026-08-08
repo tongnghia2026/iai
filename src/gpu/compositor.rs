@@ -1930,6 +1930,7 @@ struct VsOut {
                 effects[25] = f32::from(tone.shadow_chroma_active);
                 effects[27..30].copy_from_slice(&tone.grade_shadow);
                 effects[30..33].copy_from_slice(&tone.grade_highlight);
+                effects[33] = tone.scene_contrast_gamma;
                 if let Some(display) = &tone.display {
                     effects[26] = 1.0;
                     rgb[769..1025].copy_from_slice(display.as_ref());

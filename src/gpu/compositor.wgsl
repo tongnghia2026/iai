@@ -871,6 +871,18 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
         outc = mix(pc, v * (mapped_n / n), blend);
         outc = dev_compress_highlight_chroma(outc, mapped_n, n);
     }
+    // Contrast is independent of the sigmoid shoulder: a two-sided power
+    // curve fixed at black, 18.45% grey and white. CPU twin: apply_scene_contrast.
+    let cg = dev_effects[33];
+    if (abs(cg - 1.0) > 1e-5) {
+        let y = clamp(dev_luma_lin(outc), 0.0, 1.0);
+        let pivot = 0.1845;
+        var target_l = pivot * pow(y / pivot, cg);
+        if (y > pivot) {
+            target_l = 1.0 - (1.0 - pivot) * pow((1.0 - y) / (1.0 - pivot), cg);
+        }
+        outc = dev_apply_luma_target(outc, target_l);
+    }
     if (dev_effects[25] > 0.5) {
         outc = dev_restore_shadow_chroma(outc);
     }

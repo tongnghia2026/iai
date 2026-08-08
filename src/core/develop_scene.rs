@@ -53,7 +53,6 @@ pub const SCENE_MID_GRAY: f32 = 0.1845;
 /// Sigmoid steepness at neutral Contrast, and how far one full slider unit
 /// scales it (C = BASE · 2^(RANGE·u)). Taste knobs for the default look.
 const SIGMOID_BASE_C: f32 = 1.7;
-const SIGMOID_C_RANGE: f32 = 0.7;
 /// Blend from the per-channel sigmoid toward the max-RGB ratio path. Preserve
 /// hue strongly through shadows/midtones, then let clipped highlights converge
 /// naturally toward white. These taste knobs are mirrored in compositor.wgsl.
@@ -365,9 +364,10 @@ pub struct SigmoidParams {
 }
 
 /// Solve the anchor/normalisation pair for a Contrast slider value (±200).
-pub fn sigmoid_params(contrast: f32) -> SigmoidParams {
-    let u = control_to_unit(contrast);
-    let c = SIGMOID_BASE_C * (SIGMOID_C_RANGE * u).exp2();
+pub fn sigmoid_params(_contrast: f32) -> SigmoidParams {
+    // The shoulder is part of the base rendering transform, not the Contrast
+    // control. Contrast is a separate pivoted luma curve after tone mapping.
+    let c = SIGMOID_BASE_C;
     let top = SCENE_EV_MAX.exp2();
     let mut n = 1.0f32;
     let mut a = SCENE_MID_GRAY;
@@ -540,6 +540,8 @@ pub struct SceneToneData {
     /// Zero-luminance RGB offsets for scene-linear split grading.
     pub grade_shadow: [f32; 3],
     pub grade_highlight: [f32; 3],
+    /// Power of the post-tone, pivoted RAW contrast curve (1 = identity).
+    pub scene_contrast_gamma: f32,
     /// Display-domain (gamma) luma curve: parametric curve_* sliders + the
     /// luminance point curve. `None` when identity.
     pub display: Option<Box<[f32; 256]>>,
@@ -645,6 +647,11 @@ fn build_scene_tone_impl(
             settings.grade_highlight_hue,
             settings.grade_highlight_strength,
         ),
+        scene_contrast_gamma: if look == BaseLook::Raw {
+            (0.75 * control_to_unit(settings.contrast)).exp2()
+        } else {
+            1.0
+        },
         display: build_display_lut_for(settings, look),
         rgb: rgb_curve_luts(settings),
         sigmoid,
@@ -806,6 +813,23 @@ fn restore_shadow_chroma(c: [f32; 3]) -> [f32; 3] {
 
 impl SceneToneData {
     #[inline]
+    fn apply_scene_contrast(&self, c: [f32; 3]) -> [f32; 3] {
+        if (self.scene_contrast_gamma - 1.0).abs() < 1e-5 {
+            return c;
+        }
+        let y = luma_lin(c[0], c[1], c[2]).clamp(0.0, 1.0);
+        let p = SCENE_MID_GRAY;
+        let target = if y <= p {
+            p * (y / p).powf(self.scene_contrast_gamma)
+        } else {
+            1.0 - (1.0 - p) * ((1.0 - y) / (1.0 - p)).powf(self.scene_contrast_gamma)
+        };
+        let (mut r, mut g, mut b) = (c[0], c[1], c[2]);
+        apply_luma_target(&mut r, &mut g, &mut b, target);
+        [r, g, b]
+    }
+
+    #[inline]
     fn apply_scene_grade(&self, mut v: [f32; 3]) -> [f32; 3] {
         if self.grade_shadow == [0.0; 3] && self.grade_highlight == [0.0; 3] {
             return v;
@@ -883,6 +907,7 @@ impl SceneToneData {
         } else {
             pc
         };
+        let out = self.apply_scene_contrast(out);
         let out = if self.shadow_chroma_active {
             restore_shadow_chroma(out)
         } else {
@@ -1694,6 +1719,31 @@ mod tests {
                 last = s;
             }
         }
+    }
+
+    #[test]
+    fn contrast_is_pivoted_after_a_fixed_sigmoid_shoulder() {
+        let low = build_scene_tone(&DevelopSettings {
+            contrast: -200.0,
+            ..settings()
+        });
+        let neutral = build_scene_tone(&settings());
+        let high = build_scene_tone(&DevelopSettings {
+            contrast: 200.0,
+            ..settings()
+        });
+        assert!((low.sigmoid.c - neutral.sigmoid.c).abs() < 1e-7);
+        assert!((high.sigmoid.c - neutral.sigmoid.c).abs() < 1e-7);
+
+        let pivot = [SCENE_MID_GRAY; 3];
+        let fixed = high.apply_scene_contrast(pivot);
+        assert!((fixed[0] - SCENE_MID_GRAY).abs() < 1e-6);
+        assert!(high.apply_scene_contrast([0.08; 3])[0] < 0.08);
+        assert!(high.apply_scene_contrast([0.70; 3])[0] > 0.70);
+        let h0 = high.apply_scene_contrast([0.85; 3])[0];
+        let h1 = high.apply_scene_contrast([0.90; 3])[0];
+        assert!(h1 > h0, "highlight gradation flattened: {h0} -> {h1}");
+        assert_eq!(neutral.apply_scene_contrast([0.37; 3]), [0.37; 3]);
     }
 
     #[test]
