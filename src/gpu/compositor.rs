@@ -1921,7 +1921,6 @@ struct VsOut {
                     effects[16 + i * 3 + 1] = row[1];
                     effects[16 + i * 3 + 2] = row[2];
                 }
-                effects[25] = crate::core::develop_scene::SIGMOID_HUE_PRESERVE;
                 if let Some(display) = &tone.display {
                     effects[26] = 1.0;
                     rgb[769..1025].copy_from_slice(display.as_ref());

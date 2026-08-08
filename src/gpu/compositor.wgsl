@@ -815,7 +815,10 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     var outc = pc;
     let n = max(max(v.r, v.g), v.b);
     if (n > 1e-8) {
-        outc = mix(pc, v * (dev_scene_lut(n) / n), dev_effects[25]);
+        let mapped_n = dev_scene_lut(n);
+        let hw = dev_smootherstep(0.5, 1.0, mapped_n);
+        let blend = 0.90 + (0.20 - 0.90) * hw;
+        outc = mix(pc, v * (mapped_n / n), blend);
     }
     outc = dev_gamut_clip_chroma(outc);
     var g = dev_linear_to_srgb(clamp(outc, vec3(0.0), vec3(1.0)));

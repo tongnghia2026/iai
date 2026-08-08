@@ -53,11 +53,17 @@ pub const SCENE_MID_GRAY: f32 = 0.1845;
 /// scales it (C = BASE · 2^(RANGE·u)). Taste knobs for the default look.
 const SIGMOID_BASE_C: f32 = 1.7;
 const SIGMOID_C_RANGE: f32 = 0.7;
-/// Blend from the per-channel sigmoid (film-like hue skew: warm sunsets,
-/// gentle skin) toward the max-RGB ratio path (spectral hue preserved).
-/// 0 = pure per-channel, 1 = pure ratio. Taste knob vs PTS. Public because the
-/// GPU preview receives it through the effects buffer and must blend identically.
-pub const SIGMOID_HUE_PRESERVE: f32 = 0.35;
+/// Blend from the per-channel sigmoid toward the max-RGB ratio path. Preserve
+/// hue strongly through shadows/midtones, then let clipped highlights converge
+/// naturally toward white. These taste knobs are mirrored in compositor.wgsl.
+const HUE_PRESERVE_LOW: f32 = 0.90;
+const HUE_PRESERVE_HIGH: f32 = 0.20;
+
+#[inline]
+fn hue_preserve_blend(mapped_n: f32) -> f32 {
+    let hw = smootherstep(0.5, 1.0, mapped_n);
+    HUE_PRESERVE_LOW + (HUE_PRESERVE_HIGH - HUE_PRESERVE_LOW) * hw
+}
 
 // ── Tone-equalizer zones (H/S/W/B as EV offsets) ────────────────────────────
 // Each Light slider owns a gaussian zone on the EV axis relative to middle
@@ -649,11 +655,13 @@ impl SceneToneData {
         // …blended toward the max-RGB ratio path (spectral hue preserved).
         let n = v[0].max(v[1]).max(v[2]);
         let out = if n > 1e-8 {
-            let s = self.tone_map(n) / n;
+            let mapped_n = self.tone_map(n);
+            let s = mapped_n / n;
+            let blend = hue_preserve_blend(mapped_n);
             [
-                pc[0] + (v[0] * s - pc[0]) * SIGMOID_HUE_PRESERVE,
-                pc[1] + (v[1] * s - pc[1]) * SIGMOID_HUE_PRESERVE,
-                pc[2] + (v[2] * s - pc[2]) * SIGMOID_HUE_PRESERVE,
+                pc[0] + (v[0] * s - pc[0]) * blend,
+                pc[1] + (v[1] * s - pc[1]) * blend,
+                pc[2] + (v[2] * s - pc[2]) * blend,
             ]
         } else {
             pc
@@ -1140,6 +1148,20 @@ mod tests {
             assert!((back - v).abs() <= tol, "f16 roundtrip {v} -> {back}");
         }
         assert_eq!(f16_bits_to_f32(0x3c00), 1.0);
+    }
+
+    #[test]
+    fn sigmoid_hue_preservation_releases_only_near_white() {
+        assert!((hue_preserve_blend(0.25) - 0.90).abs() < 1e-7);
+        assert!((hue_preserve_blend(0.50) - 0.90).abs() < 1e-7);
+        assert!((hue_preserve_blend(1.00) - 0.20).abs() < 1e-7);
+
+        let mid_highlight = hue_preserve_blend(0.75);
+        assert!(
+            (0.20..0.90).contains(&mid_highlight),
+            "highlight transition must be smooth: {mid_highlight}"
+        );
+        assert!(hue_preserve_blend(0.65) > hue_preserve_blend(0.85));
     }
 
     #[test]
@@ -1648,7 +1670,8 @@ mod tests {
             "(e + 14.0) / 20.0",
             "6.1035156e-5",
             "dev_effects[16]",
-            "dev_effects[25]",
+            "dev_smootherstep(0.5, 1.0, mapped_n)",
+            "let blend = 0.90 + (0.20 - 0.90) * hw",
             "dev_effects[26]",
             "dev_rgb_curve[769u + i0]",
             "u.adj_pad_c == 1u",
