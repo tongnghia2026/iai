@@ -504,6 +504,23 @@ pub fn scene_auto_tone(scene: &SceneSource) -> Option<AutoToneRange> {
         .then(|| *scene.auto_tone.get_or_init(|| estimate_auto_tone(scene)))
 }
 
+/// Conservative image-range warp. The camera-preview baseline has already set
+/// overall brightness, so source grey must remain fixed. Black/white statistics
+/// may only adjust the two slopes gently; unconstrained endpoint fitting can
+/// turn a normal 5-stop portrait into a 20-stop curve with crushed blacks and
+/// neon skin.
+#[inline]
+fn adaptive_map_ev(e: f32, a: AutoToneRange) -> f32 {
+    let desired = if e <= a.grey_ev {
+        (a.grey_ev - SCENE_EV_MIN) / (a.grey_ev - a.black_ev).max(1.0)
+    } else {
+        (SCENE_EV_MAX - a.grey_ev) / (a.white_ev - a.grey_ev).max(1.0)
+    };
+    // Half-blend a bounded 0.8..1.2 fit -> effective slope 0.9..1.1.
+    let slope = 1.0 + (desired.clamp(0.8, 1.2) - 1.0) * 0.5;
+    a.grey_ev + (e - a.grey_ev) * slope
+}
+
 /// Signed tone-equalizer offset (EV) for a regional exposure `e` (EV, absolute)
 /// under the four Light sliders. Direct evaluation — the LUT bakes this.
 pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
@@ -594,17 +611,7 @@ fn build_scene_tone_impl(
             sigmoid = sigmoid_params(settings.contrast);
             for (i, slot) in lut.iter_mut().enumerate() {
                 let e = SCENE_EV_MIN + (SCENE_EV_MAX - SCENE_EV_MIN) * i as f32 / 255.0;
-                let mapped_e = auto.map_or(e, |a| {
-                    let mid = SCENE_MID_GRAY.log2();
-                    if e <= a.grey_ev {
-                        SCENE_EV_MIN
-                            + (e - a.black_ev) / (a.grey_ev - a.black_ev).max(1e-3)
-                                * (mid - SCENE_EV_MIN)
-                    } else {
-                        mid + (e - a.grey_ev) / (a.white_ev - a.grey_ev).max(1e-3)
-                            * (SCENE_EV_MAX - mid)
-                    }
-                });
+                let mapped_e = auto.map_or(e, |a| adaptive_map_ev(e, a));
                 *slot = sigmoid_eval(&sigmoid, mapped_e.exp2());
             }
         }
@@ -1389,7 +1396,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_tone_anchors_raw_black_grey_and_white_monotonically() {
+    fn auto_tone_gently_shapes_range_without_reexposing_grey() {
         let mut scene = SceneSource::new(256, 1);
         for x in 0..256 {
             let ev = -9.0 + 11.0 * x as f32 / 255.0;
@@ -1400,13 +1407,28 @@ mod tests {
         assert!(anchors.black_ev < anchors.grey_ev);
         assert!(anchors.grey_ev < anchors.white_ev);
 
+        assert_eq!(adaptive_map_ev(anchors.grey_ev, anchors), anchors.grey_ev);
+        for e in [
+            anchors.black_ev,
+            anchors.grey_ev - 2.0,
+            anchors.grey_ev + 2.0,
+            anchors.white_ev,
+        ] {
+            let mapped = adaptive_map_ev(e, anchors);
+            let distance = (e - anchors.grey_ev).abs();
+            assert!(
+                (mapped - e).abs() <= distance * 0.101 + 1e-5,
+                "adaptive warp moved {e} too far: {mapped}"
+            );
+        }
+
         let tone = build_scene_tone_for_scene(&settings(), &scene);
-        assert!(tone.tone_map(anchors.black_ev.exp2()) < 0.002);
-        assert!(tone.tone_map(anchors.white_ev.exp2()) > 0.995);
-        let mapped_grey = tone.tone_map(anchors.grey_ev.exp2());
+        let fixed = build_scene_tone(&settings());
+        let grey = anchors.grey_ev.exp2();
+        let grey_error = (tone.tone_map(grey) - fixed.tone_map(grey)).abs();
         assert!(
-            (mapped_grey - SCENE_MID_GRAY).abs() < 0.01,
-            "grey anchor mapped to {mapped_grey}"
+            grey_error < 0.005,
+            "grey LUT interpolation drifted by {grey_error}"
         );
         assert!(tone.lut.windows(2).all(|w| w[1] >= w[0]));
     }
@@ -1419,6 +1441,22 @@ mod tests {
         let adaptive = build_scene_tone_for_scene(&settings(), &scene);
         let fixed = build_scene_tone_for(&settings(), BaseLook::Identity);
         assert_eq!(adaptive.lut, fixed.lut);
+    }
+
+    #[test]
+    fn auto_tone_preserves_raw_baseline_exposure() {
+        let mut normal = SceneSource::new(128, 1);
+        let mut lifted = SceneSource::new(128, 1);
+        for x in 0..128 {
+            let v = (-7.0 + 7.0 * x as f32 / 127.0).exp2();
+            normal.set_rgb(x, 0, [v; 3]);
+            lifted.set_rgb(x, 0, [v * 2.0; 3]);
+        }
+        let tn = build_scene_tone_for_scene(&settings(), &normal);
+        let tl = build_scene_tone_for_scene(&settings(), &lifted);
+        let a = tn.scene_to_display(normal.get_rgb(64, 0), None)[0];
+        let b = tl.scene_to_display(lifted.get_rgb(64, 0), None)[0];
+        assert!(b > a + 0.08, "baseline exposure was cancelled: {a} -> {b}");
     }
 
     #[test]
