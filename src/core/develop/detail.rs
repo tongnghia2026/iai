@@ -140,10 +140,27 @@ fn atrous_decompose(
 ///     (strong edges always sharpen), Masking gates on the residual's gradient
 ///     (smooth areas drop out), the total lift is tanh-limited, and the chroma
 ///     de-fringe pull is kept from the old engine (demosaic fringing guard).
-fn process_detail_plane(rgb: &[[f32; 3]], w: usize, h: usize, p: &DetailParams) -> Vec<[f32; 3]> {
+fn process_detail_plane(
+    rgb: &[[f32; 3]],
+    w: usize,
+    h: usize,
+    p: &DetailParams,
+    linear: bool,
+) -> Vec<[f32; 3]> {
     let mut luma: Vec<f32> = rgb
         .iter()
-        .map(|c| luminance_f32(c[0], c[1], c[2]).clamp(0.0, 1.0))
+        .map(|c| {
+            let y = if linear {
+                luma_lin(c[0], c[1], c[2])
+            } else {
+                luminance_f32(c[0], c[1], c[2])
+            };
+            if linear {
+                y.max(0.0)
+            } else {
+                y.clamp(0.0, 1.0)
+            }
+        })
         .collect();
     let mut chroma: Vec<[f32; 3]> = rgb
         .iter()
@@ -222,7 +239,11 @@ fn process_detail_plane(rgb: &[[f32; 3]], w: usize, h: usize, p: &DetailParams) 
                     };
                     let delta = SHARPEN_LIMIT * (delta * mask / SHARPEN_LIMIT).tanh();
                     let base = res[i] + details.iter().map(|d| d[i]).sum::<f32>();
-                    luma[i] = (base + delta).clamp(0.0, 1.0);
+                    luma[i] = if linear {
+                        (base + delta).max(0.0)
+                    } else {
+                        (base + delta).clamp(0.0, 1.0)
+                    };
 
                     let edge_gate = smootherstep(0.006, 0.055, edge_mag);
                     let fr = (p.amount * edge_gate * 0.4).min(0.6) * mask;
@@ -237,7 +258,11 @@ fn process_detail_plane(rgb: &[[f32; 3]], w: usize, h: usize, p: &DetailParams) 
             // NR only: lossless reconstruction of the shrunk coefficients.
             for (i, l) in luma.iter_mut().enumerate() {
                 let d_sum = details.iter().map(|d| d[i]).sum::<f32>();
-                *l = (res[i] + d_sum).clamp(0.0, 1.0);
+                *l = if linear {
+                    (res[i] + d_sum).max(0.0)
+                } else {
+                    (res[i] + d_sum).clamp(0.0, 1.0)
+                };
             }
         }
     }
@@ -245,13 +270,35 @@ fn process_detail_plane(rgb: &[[f32; 3]], w: usize, h: usize, p: &DetailParams) 
     (0..w * h)
         .map(|i| {
             let l = luma[i];
-            [
-                (l + chroma[i][0]).clamp(0.0, 1.0),
-                (l + chroma[i][1]).clamp(0.0, 1.0),
-                (l + chroma[i][2]).clamp(0.0, 1.0),
-            ]
+            let out = [l + chroma[i][0], l + chroma[i][1], l + chroma[i][2]];
+            if linear {
+                out
+            } else {
+                [
+                    out[0].clamp(0.0, 1.0),
+                    out[1].clamp(0.0, 1.0),
+                    out[2].clamp(0.0, 1.0),
+                ]
+            }
         })
         .collect()
+}
+
+/// Full-resolution RAW Detail pass over the unclamped linear master. Unlike
+/// the legacy tiled entry point this receives the complete plane, so the
+/// wavelet neighbourhood is naturally seam-free and output encoding remains
+/// the single final boundary owned by `develop_scene`.
+pub(crate) fn apply_detail_to_working_buffer(
+    working: &mut Vec<[f32; 3]>,
+    width: usize,
+    height: usize,
+    settings: &DevelopSettings,
+) {
+    if width == 0 || height == 0 || working.len() != width * height || !has_detail(settings) {
+        return;
+    }
+    let params = DetailParams::new(settings);
+    *working = process_detail_plane(working, width, height, &params, true);
 }
 
 /// Gather a `DETAIL_HALO`-apron'd f32 RGB plane around one tile (edge-clamped,
@@ -325,7 +372,7 @@ pub(crate) fn apply_detail_to_tilemap(source: &TileMap, settings: &DevelopSettin
             }
 
             let (plane, hw, _hh) = gather_detail_plane(source, base_x, base_y, valid_w, valid_h);
-            let out = process_detail_plane(&plane, hw, _hh, &p);
+            let out = process_detail_plane(&plane, hw, _hh, &p, false);
             let r = DETAIL_HALO;
 
             for ty in 0..valid_h as usize {

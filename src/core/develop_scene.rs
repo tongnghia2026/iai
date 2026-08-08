@@ -30,11 +30,11 @@
 use crate::core::cat16;
 use crate::core::color::luminance_f32;
 use crate::core::develop::{
-    apply_color, apply_color_linear, apply_effects_linear, apply_luma_target,
-    apply_point_curve_outer, bell, contrast_curve, control_to_unit, curve_is_identity,
-    curve_shadows_mask, darks_mask, eased_control, guided_lowpass_plane, linear_to_srgb, luma_lin,
-    lut_lerp, rgb_curve_luts, sample_plane_bilinear, smootherstep, srgb_to_linear, DevelopSettings,
-    EXPOSURE_LIMIT, TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
+    apply_color, apply_color_linear, apply_detail_to_working_buffer, apply_effects_linear,
+    apply_luma_target, apply_point_curve_outer, bell, contrast_curve, control_to_unit,
+    curve_is_identity, curve_shadows_mask, darks_mask, eased_control, guided_lowpass_plane,
+    linear_to_srgb, luma_lin, lut_lerp, rgb_curve_luts, sample_plane_bilinear, smootherstep,
+    srgb_to_linear, DevelopSettings, EXPOSURE_LIMIT, TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
 };
 use crate::core::tile::TileMap;
 use rayon::prelude::*;
@@ -1343,6 +1343,10 @@ fn render_scene_display_inner(
         });
     }
 
+    if let Some((settings, _)) = develop.filter(|(settings, _)| settings.has_detail()) {
+        apply_detail_to_working_buffer(&mut working, w, h, settings);
+    }
+
     let mut out = vec![0u16; w * h * 4];
     out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
         for x in 0..w {
@@ -1411,6 +1415,7 @@ pub fn apply_scene_to_tilemap(
     let linear_develop = scene.look == BaseLook::Raw
         && (settings.has_color()
             || settings.has_spatial_effects()
+            || settings.has_detail()
             || settings.vignette.abs() > 0.001);
     let curves = crate::core::develop::build_mixer_curves_opt(settings);
     let px16 = render_scene_display_inner(
@@ -1431,6 +1436,9 @@ pub fn apply_scene_to_tilemap(
         rest.clarity = 0.0;
         rest.dehaze = 0.0;
         rest.vignette = 0.0;
+        rest.sharpening = 0.0;
+        rest.noise_reduction = 0.0;
+        rest.color_noise_reduction = 0.0;
     }
     if rest.is_neutral() {
         let mut display = display;
@@ -2311,6 +2319,39 @@ mod tests {
         assert!(
             centre.0.saturating_sub(centre.1) > centre.1.saturating_sub(centre.2),
             "linear saturation must remain present under Effects"
+        );
+    }
+
+    #[test]
+    fn raw_sharpening_amplifies_linear_detail_before_encoding() {
+        let mut scene = SceneSource::new(24, 24);
+        for y in 0..24 {
+            for x in 0..24 {
+                let ripple = if (x + y) % 2 == 0 { -0.012 } else { 0.012 };
+                let v = 0.18 + ripple;
+                scene.set_rgb(x, y, [v, v * 0.72, v * 0.48]);
+            }
+        }
+        let plain = apply_scene_to_tilemap(&scene, &settings(), None);
+        let sharp = apply_scene_to_tilemap(
+            &scene,
+            &DevelopSettings {
+                sharpening: 100.0,
+                sharpen_detail: 100.0,
+                ..settings()
+            },
+            None,
+        );
+        let spread = |tm: &TileMap| {
+            let a = tm.get_pixel16(10, 10).0 as i32;
+            let b = tm.get_pixel16(11, 10).0 as i32;
+            (a - b).abs()
+        };
+        assert!(
+            spread(&sharp) > spread(&plain),
+            "linear sharpening must widen fine RAW detail: {} -> {}",
+            spread(&plain),
+            spread(&sharp)
         );
     }
 
