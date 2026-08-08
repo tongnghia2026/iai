@@ -609,6 +609,47 @@ pub fn gamut_clip_chroma(c: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Film-like RGB ceiling: keep the darkest channel fixed, put the brightest
+/// at white, and interpolate the middle channel by its original rank. Unlike
+/// independent channel clipping this retains the highlight's hue trajectory.
+#[inline]
+fn filmlike_clip(c: [f32; 3]) -> [f32; 3] {
+    let lo = c[0].min(c[1]).min(c[2]);
+    let hi = c[0].max(c[1]).max(c[2]);
+    if hi <= 1.0 {
+        return c;
+    }
+    if lo >= 1.0 || hi - lo <= 1e-8 {
+        return [1.0; 3];
+    }
+    let lo = lo.max(0.0);
+    let scale = (1.0 - lo) / (hi - lo).max(1e-8);
+    [
+        lo + (c[0] - lo) * scale,
+        lo + (c[1] - lo) * scale,
+        lo + (c[2] - lo) * scale,
+    ]
+}
+
+/// Bleach only highlights whose scene value is being compressed by the tone
+/// map. More compression and greater displayed brightness both increase the
+/// pull toward white; uncompressed pixels are exact no-ops.
+#[inline]
+fn compress_highlight_chroma(c: [f32; 3], mapped_n: f32, scene_n: f32) -> [f32; 3] {
+    let ratio = mapped_n / scene_n.max(1e-8);
+    if ratio >= 1.0 {
+        return c;
+    }
+    let compression = smootherstep(0.02, 0.80, 1.0 - ratio);
+    let highlight = smootherstep(0.55, 1.0, mapped_n);
+    let amount = compression * highlight * 0.65;
+    [
+        c[0] + (mapped_n - c[0]) * amount,
+        c[1] + (mapped_n - c[1]) * amount,
+        c[2] + (mapped_n - c[2]) * amount,
+    ]
+}
+
 impl SceneToneData {
     /// Absolute exposure (EV) of a scene value after WB+EV — the signal the
     /// tone-equalizer zones read, and what the regional-E proxy stores.
@@ -658,15 +699,16 @@ impl SceneToneData {
             let mapped_n = self.tone_map(n);
             let s = mapped_n / n;
             let blend = hue_preserve_blend(mapped_n);
-            [
+            let mixed = [
                 pc[0] + (v[0] * s - pc[0]) * blend,
                 pc[1] + (v[1] * s - pc[1]) * blend,
                 pc[2] + (v[2] * s - pc[2]) * blend,
-            ]
+            ];
+            compress_highlight_chroma(mixed, mapped_n, n)
         } else {
             pc
         };
-        let clipped = gamut_clip_chroma(out);
+        let clipped = gamut_clip_chroma(filmlike_clip(out));
         let mut r = linear_to_srgb(clipped[0]);
         let mut g = linear_to_srgb(clipped[1]);
         let mut b = linear_to_srgb(clipped[2]);
@@ -1162,6 +1204,29 @@ mod tests {
             "highlight transition must be smooth: {mid_highlight}"
         );
         assert!(hue_preserve_blend(0.65) > hue_preserve_blend(0.85));
+    }
+
+    #[test]
+    fn compressed_highlights_fade_smoothly_toward_white() {
+        let color = [0.80, 0.32, 0.12];
+        let uncompressed = compress_highlight_chroma(color, 0.80, 0.80);
+        assert_eq!(uncompressed, color);
+
+        let mild = compress_highlight_chroma(color, 0.80, 1.0);
+        let strong = compress_highlight_chroma(color, 0.80, 4.0);
+        let chroma = |c: [f32; 3]| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
+        assert!(chroma(strong) < chroma(mild));
+        assert!(chroma(mild) < chroma(color));
+        assert!((strong[0] - 0.80).abs() < 1e-7);
+    }
+
+    #[test]
+    fn filmlike_clip_interpolates_the_middle_channel() {
+        let out = filmlike_clip([1.40, 0.80, 0.20]);
+        assert!((out[0] - 1.0).abs() < 1e-6, "max={}", out[0]);
+        assert!((out[2] - 0.20).abs() < 1e-6);
+        assert!((out[1] - 0.60).abs() < 1e-6, "middle={}", out[1]);
+        assert_eq!(filmlike_clip([0.20, 0.40, 0.60]), [0.20, 0.40, 0.60]);
     }
 
     #[test]
@@ -1666,6 +1731,10 @@ mod tests {
             "fn dev_scene_lut(",
             "fn dev_tone_eq_at(",
             "fn dev_gamut_clip_chroma(",
+            "fn dev_filmlike_clip(",
+            "fn dev_compress_highlight_chroma(",
+            "dev_smootherstep(0.02, 0.80, 1.0 - ratio)",
+            "dev_smootherstep(0.55, 1.0, mapped_n)",
             "(ev + 14.0) / 20.0",
             "(e + 14.0) / 20.0",
             "6.1035156e-5",
