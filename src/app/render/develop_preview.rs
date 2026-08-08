@@ -482,30 +482,39 @@ impl App {
                 }
             } else {
                 let fast = cache.fast_region.as_ref().unwrap();
-                // Scene sessions: the cached base is LINEAR scene; run the scene
-                // chain to display, then re-apply only the leftover (stripped)
-                // stages — tone is already inside the chain.
-                let (region, effective_settings) = match &scene_tone {
-                    Some(st) => (
-                        std::sync::Arc::new(crate::core::develop_scene::scene_fast_region_display(
-                            &fast.region,
-                            st,
-                        )),
-                        crate::core::develop_scene::strip_scene_handled(&settings),
-                    ),
-                    None => (fast.region.clone(), settings.clone()),
+                let (region, adjusted) = match &scene_tone {
+                    Some(st) => {
+                        let (region, adjusted) =
+                            crate::core::develop_scene::scene_fast_region_develop(
+                                &fast.region,
+                                st,
+                                &settings,
+                                fast.w,
+                                fast.h,
+                                fast.origin_x,
+                                fast.origin_y,
+                                fast.source_w,
+                                fast.source_h,
+                                fast.downsample,
+                            );
+                        (std::sync::Arc::new(region), adjusted)
+                    }
+                    None => {
+                        let region = fast.region.clone();
+                        let adjusted = develop::apply_fast_preview_to_region(
+                            &region,
+                            &settings,
+                            fast.w,
+                            fast.h,
+                            fast.origin_x,
+                            fast.origin_y,
+                            fast.source_w,
+                            fast.source_h,
+                            fast.downsample,
+                        );
+                        (region, adjusted)
+                    }
                 };
-                let adjusted = develop::apply_fast_preview_to_region(
-                    &region,
-                    &effective_settings,
-                    fast.w,
-                    fast.h,
-                    fast.origin_x,
-                    fast.origin_y,
-                    fast.source_w,
-                    fast.source_h,
-                    fast.downsample,
-                );
                 crate::gpu::compositor::ColorProxies {
                     region,
                     adjusted: std::sync::Arc::new(adjusted),

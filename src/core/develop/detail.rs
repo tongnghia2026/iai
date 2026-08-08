@@ -462,3 +462,78 @@ pub(crate) fn apply_effects(
         apply_tone_delta(r, g, b, delta);
     }
 }
+
+/// RAW twin of [`apply_effects`]: identical slider response, but luminance and
+/// all channel arithmetic stay in the unclamped linear working buffer. The
+/// caller supplies an edge-aware linear-luminance base and performs the single
+/// output transform only after this stage.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_effects_linear(
+    settings: &DevelopSettings,
+    r: &mut f32,
+    g: &mut f32,
+    b: &mut f32,
+    x: u32,
+    y: u32,
+    inv_w: f32,
+    inv_h: f32,
+    base_luma: f32,
+) {
+    let set_luma = |r: &mut f32, g: &mut f32, b: &mut f32, target: f32| {
+        let old = luma_lin(*r, *g, *b);
+        if old.abs() > 1e-6 {
+            let scale = target / old;
+            *r *= scale;
+            *g *= scale;
+            *b *= scale;
+        } else {
+            *r = target;
+            *g = target;
+            *b = target;
+        }
+    };
+
+    if settings.texture.abs() > 0.001 {
+        let luma = luma_lin(*r, *g, *b).max(0.0);
+        let base = base_luma.max(0.0);
+        let k = eased_control(settings.texture) * TEXTURE_GAIN;
+        let boost = k * bell(base.clamp(0.0, 1.0), 0.5, 0.62) * (luma - base);
+        let delta = TEXTURE_LIMIT * (boost / TEXTURE_LIMIT).tanh();
+        set_luma(r, g, b, (luma + delta).max(0.0));
+    }
+    if settings.clarity.abs() > 0.001 {
+        let luma = luma_lin(*r, *g, *b).max(0.0);
+        let base = base_luma.max(0.0);
+        let k = eased_control(settings.clarity) * (CONTROL_LIMIT / 180.0) * CLARITY_GAIN;
+        let boost = k * bell(base.clamp(0.0, 1.0), 0.5, 0.56) * (luma - base);
+        let delta = CLARITY_LIMIT * (boost / CLARITY_LIMIT).tanh();
+        set_luma(r, g, b, (luma + delta).max(0.0));
+    }
+    if settings.dehaze.abs() > 0.001 {
+        let base = base_luma.clamp(0.0, 1.0);
+        let d = (eased_control(settings.dehaze) * (CONTROL_LIMIT / 160.0)).clamp(-1.0, 1.0);
+        if d > 0.0 {
+            let veil = smootherstep(0.25, 0.95, base);
+            let t = (1.0 - d * veil * DEHAZE_MAX_VEIL).max(DEHAZE_MIN_TRANSMISSION);
+            let a = 1.0 - t;
+            *r = (*r - a) / t;
+            *g = (*g - a) / t;
+            *b = (*b - a) / t;
+        } else {
+            let m = -d * 0.45 * smootherstep(0.10, 0.90, base);
+            *r = *r * (1.0 - m) + m;
+            *g = *g * (1.0 - m) + m;
+            *b = *b * (1.0 - m) + m;
+        }
+    }
+    let vignette = eased_control(settings.vignette);
+    if vignette.abs() > 0.001 {
+        let nx = x as f32 * inv_w - 0.5;
+        let ny = y as f32 * inv_h - 0.5;
+        let edge = ((nx * nx + ny * ny).sqrt() / 0.707).clamp(0.0, 1.0);
+        let amount = smootherstep(0.18, 1.0, edge) * vignette.abs() * 0.42;
+        let delta = if vignette > 0.0 { -amount } else { amount };
+        let luma = luma_lin(*r, *g, *b).max(0.0);
+        set_luma(r, g, b, (luma + delta).max(0.0));
+    }
+}
