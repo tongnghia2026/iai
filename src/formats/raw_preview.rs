@@ -18,8 +18,15 @@
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-fn preview_luma_cache() -> &'static Mutex<std::collections::HashMap<std::path::PathBuf, f32>> {
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, f32>>> =
+#[derive(Clone, Copy, Debug)]
+pub struct RawPreviewStats {
+    pub mean_rgb: [f32; 3],
+    pub mean_luma: f32,
+}
+
+fn preview_luma_cache(
+) -> &'static Mutex<std::collections::HashMap<std::path::PathBuf, RawPreviewStats>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, RawPreviewStats>>> =
         OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
@@ -46,9 +53,9 @@ pub fn extract(path: &Path) -> Option<RawPreview> {
     let data = std::fs::read(path).ok()?;
     let mut preview = extract_from_bytes(&data)?;
     preview.exif = crate::formats::raw_exif::exif_summary(&data);
-    if let Some(mean) = preview_mean_luma(&preview) {
+    if let Some(stats) = preview_stats(&preview) {
         if let Ok(mut cache) = preview_luma_cache().lock() {
-            cache.insert(path.to_path_buf(), mean);
+            cache.insert(path.to_path_buf(), stats);
         }
     }
     Some(preview)
@@ -58,6 +65,14 @@ pub fn extract(path: &Path) -> Option<RawPreview> {
 /// normal open path this saves another full file read plus another JPEG decode
 /// at the end of the expensive RAW demosaic.
 pub fn take_cached_mean_luma(path: &Path) -> Option<f32> {
+    preview_luma_cache()
+        .lock()
+        .ok()?
+        .remove(path)
+        .map(|s| s.mean_luma)
+}
+
+pub fn take_cached_stats(path: &Path) -> Option<RawPreviewStats> {
     preview_luma_cache().lock().ok()?.remove(path)
 }
 
@@ -101,17 +116,34 @@ pub fn preview_mean_luma_from_bytes(data: &[u8]) -> Option<f32> {
     preview_mean_luma(&p)
 }
 
+pub fn preview_stats_from_bytes(data: &[u8]) -> Option<RawPreviewStats> {
+    preview_stats(&extract_from_bytes(data)?)
+}
+
 fn preview_mean_luma(p: &RawPreview) -> Option<f32> {
+    preview_stats(p).map(|s| s.mean_luma)
+}
+
+fn preview_stats(p: &RawPreview) -> Option<RawPreviewStats> {
     if p.rgba.is_empty() {
         return None;
     }
     let n = (p.rgba.len() / 4) as f64;
-    let sum: f64 = p
-        .rgba
-        .chunks_exact(4)
-        .map(|px| 0.2126 * px[0] as f64 + 0.7152 * px[1] as f64 + 0.0722 * px[2] as f64)
-        .sum();
-    Some((sum / n / 255.0) as f32)
+    let sum = p.rgba.chunks_exact(4).fold([0.0f64; 3], |mut s, px| {
+        for c in 0..3 {
+            s[c] += px[c] as f64;
+        }
+        s
+    });
+    let mean_rgb = [
+        (sum[0] / n / 255.0) as f32,
+        (sum[1] / n / 255.0) as f32,
+        (sum[2] / n / 255.0) as f32,
+    ];
+    Some(RawPreviewStats {
+        mean_rgb,
+        mean_luma: 0.2126 * mean_rgb[0] + 0.7152 * mean_rgb[1] + 0.0722 * mean_rgb[2],
+    })
 }
 
 /// One scanned embedded-JPEG candidate: byte offset of its SOI and the frame

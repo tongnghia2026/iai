@@ -418,16 +418,16 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
     // darker than that preview (the camera bakes its picture-style tone into the
     // JPEG), which reads as the image "jumping dark" once the full decode replaces
     // the instant preview. Best-effort: files without a preview are left as-is.
-    let preview_luma = crate::formats::raw_preview::take_cached_mean_luma(path).or_else(|| {
+    let preview_stats = crate::formats::raw_preview::take_cached_stats(path).or_else(|| {
         std::fs::read(path)
             .ok()
-            .and_then(|bytes| crate::formats::raw_preview::preview_mean_luma_from_bytes(&bytes))
+            .and_then(|bytes| crate::formats::raw_preview::preview_stats_from_bytes(&bytes))
     });
-    if let Some(target) = preview_luma {
+    if let Some(target) = preview_stats {
         let samples = subsample_scene_rgb(&out);
-        let k = crate::core::develop_scene::baseline_exposure_gain(&samples, target);
-        if (k - 1.0).abs() > 0.01 {
-            scale_scene(&mut out, k);
+        let gain = crate::core::develop_scene::baseline_rgb_gains(&samples, target.mean_rgb);
+        if gain.iter().any(|g| (g - 1.0).abs() > 0.01) {
+            scale_scene_rgb(&mut out, gain);
         }
     }
 
@@ -1198,10 +1198,14 @@ fn subsample_scene_rgb(scene: &[u16]) -> Vec<[f32; 3]> {
 /// scene space). Alpha (index 3) is untouched. Headroom above 1.0 is preserved —
 /// the display sigmoid's shoulder rolls the highlights off later.
 fn scale_scene(scene: &mut [u16], k: f32) {
+    scale_scene_rgb(scene, [k; 3]);
+}
+
+fn scale_scene_rgb(scene: &mut [u16], gain: [f32; 3]) {
     scene.par_chunks_mut(4).for_each(|px| {
-        px[0] = f32_to_f16_bits(f16_bits_to_f32(px[0]) * k);
-        px[1] = f32_to_f16_bits(f16_bits_to_f32(px[1]) * k);
-        px[2] = f32_to_f16_bits(f16_bits_to_f32(px[2]) * k);
+        px[0] = f32_to_f16_bits(f16_bits_to_f32(px[0]) * gain[0]);
+        px[1] = f32_to_f16_bits(f16_bits_to_f32(px[1]) * gain[1]);
+        px[2] = f32_to_f16_bits(f16_bits_to_f32(px[2]) * gain[2]);
     });
 }
 

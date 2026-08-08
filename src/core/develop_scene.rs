@@ -439,6 +439,37 @@ pub fn baseline_exposure_gain(scene_rgb: &[[f32; 3]], target_display_mean: f32) 
     (lo * hi).sqrt()
 }
 
+/// Camera-preview baseline fit with chromaticity as well as brightness. The
+/// embedded JPEG is the only available as-shot colour reference when no DCP is
+/// installed. Fit three bounded linear gains through the real default tone
+/// transform; damping prevents a camera picture style from becoming an extreme
+/// correction. Returns at most +/-1 EV per channel.
+pub fn baseline_rgb_gains(scene_rgb: &[[f32; 3]], target: [f32; 3]) -> [f32; 3] {
+    if scene_rgb.is_empty() || target.iter().any(|v| !v.is_finite()) {
+        return [1.0; 3];
+    }
+    let target = target.map(|v| v.clamp(0.01, 0.99));
+    let tone = build_scene_tone(&DevelopSettings::default());
+    let mut gain = [1.0f32; 3];
+    for _ in 0..10 {
+        let mut sum = [0.0f64; 3];
+        for p in scene_rgb {
+            let d = tone.scene_to_display([p[0] * gain[0], p[1] * gain[1], p[2] * gain[2]], None);
+            for c in 0..3 {
+                sum[c] += d[c] as f64;
+            }
+        }
+        for c in 0..3 {
+            let mean = (sum[c] / scene_rgb.len() as f64) as f32;
+            // Encoded output responds sub-linearly to a linear gain. A damped
+            // 1.4 exponent converges quickly without oscillating through gamut.
+            let correction = (target[c] / mean.max(0.005)).powf(1.4);
+            gain[c] = (gain[c] * correction).clamp(0.5, 2.0);
+        }
+    }
+    gain
+}
+
 /// Estimate image-specific scene anchors on a bounded grid. Transparent and
 /// non-positive samples are ignored; small percentile trims keep letterbox
 /// black and isolated sensor highlights from defining the whole curve.
@@ -1393,6 +1424,31 @@ mod tests {
             assert!(fit_err < 0.02, "target {target}: fit_err {fit_err}");
             assert!(fit_err <= unit_err + 1e-4);
         }
+    }
+
+    #[test]
+    fn baseline_rgb_fit_matches_preview_colour_without_extreme_gains() {
+        let samples = vec![[0.12f32, 0.09, 0.07]; 256];
+        let target = [0.52, 0.48, 0.46];
+        let gain = baseline_rgb_gains(&samples, target);
+        assert!(gain.iter().all(|g| (0.5..=2.0).contains(g)));
+        let tone = build_scene_tone(&settings());
+        let before = tone.scene_to_display(samples[0], None);
+        let out = tone.scene_to_display(
+            [
+                samples[0][0] * gain[0],
+                samples[0][1] * gain[1],
+                samples[0][2] * gain[2],
+            ],
+            None,
+        );
+        let error = |rgb: [f32; 3]| {
+            (rgb[0] - target[0]).abs() + (rgb[1] - target[1]).abs() + (rgb[2] - target[2]).abs()
+        };
+        assert!(
+            error(out) < error(before) * 0.35,
+            "preview colour fit did not improve enough: {before:?} -> {out:?}"
+        );
     }
 
     #[test]
