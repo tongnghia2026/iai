@@ -1274,6 +1274,64 @@ pub fn scene_fast_region_develop(
 /// Render the scene at the current settings into a display-referred RGBA16
 /// (gamma sRGB) buffer — the Light half only (Colour/Effects/Detail/Locals run
 /// on top via the legacy stages in [`apply_scene_to_tilemap`]).
+fn apply_scene_locals_linear(
+    working: &mut [[f32; 3]],
+    width: usize,
+    height: usize,
+    settings: &DevelopSettings,
+) {
+    let locals: Vec<_> = settings
+        .locals
+        .iter()
+        .filter(|local| !local.settings.is_neutral())
+        .map(|local| {
+            let s = local.settings.to_develop_settings();
+            let tone = build_scene_tone_for(&s, BaseLook::Identity);
+            (local.shape, s, tone)
+        })
+        .collect();
+    if locals.is_empty() {
+        return;
+    }
+    let inv_w = if width > 1 {
+        1.0 / (width - 1) as f32
+    } else {
+        0.0
+    };
+    let inv_h = if height > 1 {
+        1.0 / (height - 1) as f32
+    } else {
+        0.0
+    };
+    working.par_iter_mut().enumerate().for_each(|(i, pixel)| {
+        let nx = (i % width) as f32 * inv_w;
+        let ny = (i / width) as f32 * inv_h;
+        for (shape, local, tone) in &locals {
+            let weight = shape.weight(nx, ny);
+            if weight <= 0.003 {
+                continue;
+            }
+            let mut adjusted = tone.scene_to_working(*pixel, None);
+            if local.contrast.abs() > 0.001 {
+                let gamma = (0.75 * control_to_unit(local.contrast)).exp2();
+                let y = luma_lin(adjusted[0], adjusted[1], adjusted[2]).clamp(0.0, 1.0);
+                let target = if y <= SCENE_MID_GRAY {
+                    SCENE_MID_GRAY * (y / SCENE_MID_GRAY).powf(gamma)
+                } else {
+                    1.0 - (1.0 - SCENE_MID_GRAY) * ((1.0 - y) / (1.0 - SCENE_MID_GRAY)).powf(gamma)
+                };
+                let [r, g, b] = &mut adjusted;
+                apply_luma_target(r, g, b, target);
+            }
+            let [r, g, b] = &mut adjusted;
+            apply_color_linear(local, None, r, g, b);
+            for channel in 0..3 {
+                pixel[channel] += (adjusted[channel] - pixel[channel]) * weight;
+            }
+        }
+    });
+}
+
 fn render_scene_display_inner(
     scene: &SceneSource,
     tone: &SceneToneData,
@@ -1347,6 +1405,10 @@ fn render_scene_display_inner(
         apply_detail_to_working_buffer(&mut working, w, h, settings);
     }
 
+    if let Some((settings, _)) = develop.filter(|(settings, _)| settings.has_locals()) {
+        apply_scene_locals_linear(&mut working, w, h, settings);
+    }
+
     let mut out = vec![0u16; w * h * 4];
     out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
         for x in 0..w {
@@ -1416,6 +1478,7 @@ pub fn apply_scene_to_tilemap(
         && (settings.has_color()
             || settings.has_spatial_effects()
             || settings.has_detail()
+            || settings.has_locals()
             || settings.vignette.abs() > 0.001);
     let curves = crate::core::develop::build_mixer_curves_opt(settings);
     let px16 = render_scene_display_inner(
@@ -1439,6 +1502,7 @@ pub fn apply_scene_to_tilemap(
         rest.sharpening = 0.0;
         rest.noise_reduction = 0.0;
         rest.color_noise_reduction = 0.0;
+        rest.locals.clear();
     }
     if rest.is_neutral() {
         let mut display = display;
@@ -2352,6 +2416,47 @@ mod tests {
             "linear sharpening must widen fine RAW detail: {} -> {}",
             spread(&plain),
             spread(&sharp)
+        );
+    }
+
+    #[test]
+    fn raw_local_mask_blends_linear_adjustment_before_encoding() {
+        let mut scene = SceneSource::new(20, 20);
+        for y in 0..20 {
+            for x in 0..20 {
+                scene.set_rgb(x, y, [0.12, 0.07, 0.04]);
+            }
+        }
+        let mut local = settings();
+        local.locals.push(crate::core::develop::LocalAdjustment {
+            shape: crate::core::develop::LocalMaskShape::Radial {
+                cx: 0.5,
+                cy: 0.5,
+                rx: 0.28,
+                ry: 0.28,
+                feather: 0.35,
+                invert: false,
+            },
+            settings: crate::core::develop::LocalSettings {
+                exposure: 20.0,
+                saturation: 80.0,
+                ..Default::default()
+            },
+        });
+        let plain = apply_scene_to_tilemap(&scene, &settings(), None);
+        let masked = apply_scene_to_tilemap(&scene, &local, None);
+        let p_center = plain.get_pixel16(10, 10);
+        let m_center = masked.get_pixel16(10, 10);
+        let p_corner = plain.get_pixel16(0, 0);
+        let m_corner = masked.get_pixel16(0, 0);
+        assert!(
+            m_center.0 > p_center.0,
+            "local exposure must lift its centre"
+        );
+        assert_eq!(m_corner, p_corner, "outside a local mask must remain exact");
+        assert!(
+            m_center.0.saturating_sub(m_center.1) > p_center.0.saturating_sub(p_center.1),
+            "local saturation must compose in the same linear adjustment"
         );
     }
 
