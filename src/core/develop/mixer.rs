@@ -205,6 +205,14 @@ pub(crate) fn mixer_weight(r: f32, g: f32, b: f32, shift: f32) -> f32 {
         * smootherstep(MIXER_DELTA_LO, MIXER_DELTA_HI, delta)
 }
 
+/// Lower confidence floor for negative Saturation. A pale colour cast still
+/// has a meaningful hue and must be removable, while exact/near greys remain
+/// protected by the absolute-delta gate.
+pub(crate) fn mixer_desat_weight(r: f32, g: f32, b: f32) -> f32 {
+    let delta = r.max(g).max(b) - r.min(g).min(b);
+    mixer_satweight(hsv_saturation(r, g, b) - 0.01) * smootherstep(0.002, 0.025, delta)
+}
+
 /// Per-pixel selective-colour mixer contribution: the periodic hue curves
 /// sampled at the pixel's UCS hue, weighted by its saturation (Luminance
 /// additionally keeps the shadow/highlight guard against black speckles and
@@ -224,9 +232,15 @@ pub(crate) fn mixer_adjustments_for_color(
     let lum_guard = smootherstep(LUM_BLACK_LO, LUM_BLACK_HI, luma)
         * (1.0 - smootherstep(LUM_WHITE_LO, LUM_WHITE_HI, luma));
     let wl = mixer_weight(r, g, b, MIXER_BRIGHT_SHIFT) * lum_guard;
+    let sat = curve_sample(&curves.sat, h);
+    let sat_w = if sat < 0.0 {
+        mixer_desat_weight(r, g, b)
+    } else {
+        w
+    };
     (
         (curve_sample(&curves.hue, h) * w).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
-        (curve_sample(&curves.sat, h) * w).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
+        (sat * sat_w).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
         (curve_sample(&curves.lum, h) * wl).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
     )
 }

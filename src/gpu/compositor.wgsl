@@ -790,6 +790,13 @@ fn dev_gamut_clip_chroma(c: vec3<f32>) -> vec3<f32> {
     return clamp(vec3<f32>(y) + d * f, vec3(0.0), vec3(1.0));
 }
 
+fn dev_mixer_desat_weight(c: vec3<f32>) -> f32 {
+    let mx = max(max(c.r, c.g), c.b);
+    let delta = mx - min(min(c.r, c.g), c.b);
+    let sat = select(0.0, delta / max(mx, 1e-8), mx > 1e-4 && delta > 1e-6);
+    return 1.0 / (1.0 + exp(-24.0 * (sat - 0.01))) * dev_smootherstep(0.002, 0.025, delta);
+}
+
 // CPU twins: filmlike_clip / compress_highlight_chroma.
 fn dev_filmlike_clip(c: vec3<f32>) -> vec3<f32> {
     let lo0 = min(min(c.r, c.g), c.b);
@@ -921,7 +928,7 @@ fn dev_band_affinity(c: vec3<f32>) -> f32 {
     let a = dev_rgb_curve[1025u + i];
     let b = dev_rgb_curve[1025u + ((i + 1u) % 360u)];
     let gate = a + (b - a) * f;
-    let w = dev_mixer_weight(c, 0.06);
+    let w = select(dev_mixer_weight(c, 0.06), dev_mixer_desat_weight(c), dev_effects[6] > 0.0);
     return clamp(gate * w, 0.0, 1.0);
 }
 

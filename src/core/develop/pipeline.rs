@@ -611,6 +611,18 @@ pub(crate) fn mixer_edit_affinity(curves: &MixerCurves, region: [f32; 3]) -> f32
     )
 }
 
+fn mixer_desat_affinity(curves: &MixerCurves, region: [f32; 3]) -> f32 {
+    let gate = curve_sample(
+        &curves.gate,
+        crate::core::ucs::ucs_hue_rad(region[0], region[1], region[2]),
+    );
+    smootherstep(
+        REGATE_LO,
+        REGATE_HI,
+        (gate * mixer_desat_weight(region[0], region[1], region[2])).clamp(0.0, 1.0),
+    )
+}
+
 /// True when any White Balance / Exposure / Light / Curve setting is engaged, i.e.
 /// the tone stage (incl. the highlight roll-off) runs. The GPU preview needs this
 /// to skip tone exactly like the CPU bake (which holds `tone = None` otherwise), so
@@ -873,10 +885,20 @@ impl<'a> DevelopPlan<'a> {
         // Mixer-band edits: gate by the REGION's band membership (smooth hue
         // selection), so the edit tapers across a colour boundary and cannot
         // recolour a neighbouring hue.
+        let mixer_desat = self
+            .settings
+            .mixer_saturation
+            .iter()
+            .map(|v| (-*v / CONTROL_LIMIT).clamp(0.0, 1.0))
+            .fold(0.0f32, f32::max);
         let mut mixer_affinity = 1.0;
         if self.mixer_gated {
             if let Some(curves) = &self.mixer_curves {
-                mixer_affinity = mixer_edit_affinity(curves, region);
+                mixer_affinity = if mixer_desat > 0.0 {
+                    mixer_desat_affinity(curves, region)
+                } else {
+                    mixer_edit_affinity(curves, region)
+                };
                 gate *= mixer_affinity;
             }
         }
@@ -892,12 +914,6 @@ impl<'a> DevelopPlan<'a> {
         // not reconstruct that same chroma from the full-resolution detail or
         // blue/aqua fringes survive around otherwise neutralised regions.
         let global_desat = (-self.settings.saturation / CONTROL_LIMIT).clamp(0.0, 1.0);
-        let mixer_desat = self
-            .settings
-            .mixer_saturation
-            .iter()
-            .map(|v| (-*v / CONTROL_LIMIT).clamp(0.0, 1.0))
-            .fold(0.0f32, f32::max);
         let keep = keep * (1.0 - global_desat.max(mixer_desat * mixer_affinity));
         // Reconstruct the FULL adjusted region + re-added detail, then blend toward
         // the untouched pixel by the gate a SINGLE time. The old form pre-gated the

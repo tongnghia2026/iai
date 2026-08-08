@@ -3105,7 +3105,13 @@ fn aqua_and_blue_minus200_can_remove_color_completely() {
             0.0
         }
     };
-    for rgb in [[40, 140, 140], [45, 90, 180], [110, 175, 210]] {
+    for rgb in [
+        [40, 140, 140],
+        [45, 90, 180],
+        [110, 175, 210],
+        [190, 196, 204], // pale blue cast on white fabric
+        [215, 220, 226],
+    ] {
         let direct = direct_apply(&settings, rgb);
         let proxy = proxy_apply(&settings, rgb);
         assert!(
