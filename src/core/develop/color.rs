@@ -40,6 +40,11 @@ pub(crate) fn apply_color(
         *b = nb;
     }
 
+    // Oklab helpers above accept display-encoded sRGB. From here onward the
+    // colour transform runs in linear light: chroma is anchored to real
+    // Rec.709 luminance, then the result is encoded and clamped once at exit.
+    let (mut rl, mut gl, mut bl) = (srgb_to_linear(*r), srgb_to_linear(*g), srgb_to_linear(*b));
+
     let global_sat_delta = eased_control(settings.saturation);
     let mixer_sat_delta = eased_control(mixer_sat);
     let vibrance = eased_control(settings.vibrance);
@@ -47,17 +52,21 @@ pub(crate) fn apply_color(
     // muted colours and leaves already-vivid ones (chroma ≥ 0.35) untouched —
     // the old HSL-saturation shaping still fed vivid colours a residual boost,
     // which is Saturation's job, not Vividness's.
-    let vib_w = 1.0 - smootherstep(0.10, 0.35, rgb_chroma(*r, *g, *b));
+    let vib_w = 1.0 - smootherstep(0.10, 0.35, rgb_chroma(rl, gl, bl));
     let vib_delta = vibrance * vib_w * 0.88;
     let factor = saturation_factor(global_sat_delta, mixer_sat_delta, vib_delta);
     if (factor - 1.0).abs() > 0.001 {
-        scale_chroma_around_luma(r, g, b, factor);
+        scale_linear_chroma_around_luma(&mut rl, &mut gl, &mut bl, factor);
     }
 
     let lum_delta = eased_control(mixer_lum);
     if lum_delta.abs() > 0.001 {
-        apply_mixer_brightness(r, g, b, lum_delta);
+        apply_mixer_brightness(&mut rl, &mut gl, &mut bl, lum_delta);
     }
+
+    *r = linear_to_srgb(rl).clamp(0.0, 1.0);
+    *g = linear_to_srgb(gl).clamp(0.0, 1.0);
+    *b = linear_to_srgb(bl).clamp(0.0, 1.0);
 }
 
 /// Mixer Luminance = a RATIO-PRESERVING brightness gain (an HSB-style
@@ -68,7 +77,7 @@ pub(crate) fn apply_color(
 /// before it must compress; it never falls back to an additive lift toward
 /// white (the old `apply_luma_target` desaturated once the target passed ~0.88).
 fn apply_mixer_brightness(r: &mut f32, g: &mut f32, b: &mut f32, lum_delta: f32) {
-    let luma = luminance_f32(*r, *g, *b).clamp(0.0, 1.0);
+    let luma = luma_lin(*r, *g, *b).clamp(0.0, 1.0);
     // Leave less headroom the closer a pixel already is to the ceiling (bright
     // pixels move less) / the floor (dark pixels darken less), matching the old
     // response envelope so the slider feel is unchanged.
@@ -101,16 +110,41 @@ fn apply_mixer_brightness(r: &mut f32, g: &mut f32, b: &mut f32, lum_delta: f32)
         (BRIGHT_KNEE + (1.0 - BRIGHT_KNEE) * t / (1.0 + t)).max(mx)
     };
     let s = new_mx / mx;
-    *r = (*r * s).clamp(0.0, 1.0);
-    *g = (*g * s).clamp(0.0, 1.0);
-    *b = (*b * s).clamp(0.0, 1.0);
+    *r *= s;
+    *g *= s;
+    *b *= s;
 }
 
-fn scale_chroma_around_luma(r: &mut f32, g: &mut f32, b: &mut f32, factor: f32) {
-    let (nr, ng, nb) = crate::core::color::saturate_around_luma(*r, *g, *b, factor);
-    *r = nr;
-    *g = ng;
-    *b = nb;
+/// ART-style saturation in working linear RGB: `Y + sat * (RGB - Y)`.
+/// The positive branch keeps the existing smooth gamut knee, but its anchor is
+/// true linear Rec.709 luminance. Protection thresholds are the linear-light
+/// equivalents of the old display-domain masks, preserving slider feel.
+fn scale_linear_chroma_around_luma(r: &mut f32, g: &mut f32, b: &mut f32, factor: f32) {
+    let y = luma_lin(*r, *g, *b).clamp(0.0, 1.0);
+    let protect = smootherstep(0.0027, 0.0174, y) * (1.0 - smootherstep(0.7874, 0.9774, y));
+    let req = (factor.clamp(0.0, 3.20) - 1.0) * protect;
+    let d = [*r - y, *g - y, *b - y];
+    let mut room = f32::INFINITY;
+    for dc in d {
+        if dc > 1e-6 {
+            room = room.min((1.0 - y) / dc - 1.0);
+        } else if dc < -1e-6 {
+            room = room.min(y / -dc - 1.0);
+        }
+    }
+    let scale = if req > 0.0 {
+        let room = if room.is_finite() { room.max(0.0) } else { 0.0 };
+        if room > 1e-4 {
+            1.0 + room * (req / room).tanh()
+        } else {
+            1.0
+        }
+    } else {
+        1.0 + req
+    };
+    *r = y + d[0] * scale;
+    *g = y + d[1] * scale;
+    *b = y + d[2] * scale;
 }
 
 fn saturation_factor(global_sat_delta: f32, mixer_sat_delta: f32, vib_delta: f32) -> f32 {

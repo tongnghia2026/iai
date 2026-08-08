@@ -76,8 +76,10 @@ const CHROMA_DETAIL_KEEP: f32 = 0.5;
 /// Max Oklab-hue rotation (degrees) the Color Mixer's Hue slider applies at full
 /// strength on a pure-band pixel. Tunable "feel" knob vs PTS.
 const MIXER_HUE_SHIFT_MAX_DEG: f32 = 45.0;
-const SAT_POSITIVE_SCALE: f32 = 1.20;
-const MIXER_SAT_POSITIVE_SCALE: f32 = 1.65;
+// Linear-light chroma needs a longer positive range than the former gamma-space
+// transform to retain the same perceptual slider travel without shifting Y.
+const SAT_POSITIVE_SCALE: f32 = 1.50;
+const MIXER_SAT_POSITIVE_SCALE: f32 = 2.20;
 const SAT_NEGATIVE_SCALE: f32 = 0.95;
 
 // ── Colour-Mixer selection model (hue-curve colour equalizer) ───────────────
