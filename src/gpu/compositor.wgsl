@@ -620,18 +620,6 @@ fn dev_apply_whites(c: vec3<f32>, amount: f32, luma: f32) -> vec3<f32> {
     return dev_apply_luma_target(c, luma - recover);
 }
 
-fn dev_soft_contrast(c: vec3<f32>, amount_in: f32, strength: f32) -> vec3<f32> {
-    let amount = clamp(amount_in * strength, -0.88, 0.96);
-    if (abs(amount) <= 0.0001) {
-        return c;
-    }
-    let l = clamp(dev_luma(c), 0.0, 1.0);
-    let target_l = dev_contrast_curve(l, amount);
-    let chroma_factor = clamp(1.0 + amount * 0.34, 0.66, 1.34);
-    let cc = clamp(vec3(l) + (c - vec3(l)) * chroma_factor, vec3(0.0), vec3(1.0));
-    return dev_apply_luma_target(cc, target_l);
-}
-
 // UCS-22 hue (radians in (-π, π]) of an sRGB colour. Mirrors the CPU
 // core::ucs::ucs_hue_rad (whose chromaticity warp runs in f64 — the difference
 // is orders of magnitude below the 1° gate-LUT resolution).
@@ -1021,9 +1009,12 @@ fn dev_effects_stage(c_in: vec3<f32>, local: vec2<f32>, base_l: f32) -> vec3<f32
     let vignette_raw = dev_effects[3];
     if (dev_active(texture_raw)) {
         let l = clamp(dev_luma(c), 0.0, 1.0);
-        let mid = dev_bell(l, 0.5, 0.56);
-        let texture = dev_eased(texture_raw) * (200.0 / 300.0);
-        c = dev_soft_contrast(c, clamp(texture * mid * 0.55, -0.62, 0.78), 0.85);
+        let base = clamp(base_l, 0.0, 1.0);
+        let k = dev_eased(texture_raw) * 1.35;
+        let tonal = dev_bell(base, 0.5, 0.62);
+        let boost = k * tonal * (l - base);
+        let delta = 0.14 * tanh(boost / 0.14);
+        c = dev_apply_luma_target(c, clamp(l + delta, 0.0, 1.0));
     }
     if (dev_active(clarity_raw)) {
         let l = clamp(dev_luma(c), 0.0, 1.0);

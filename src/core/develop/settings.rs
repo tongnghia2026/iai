@@ -495,9 +495,8 @@ impl DevelopSettings {
     }
 
     /// True when an Effects slider with a spatial component is engaged —
-    /// Clarity/Defog compare each pixel against its regional base luminance, so
-    /// the bake must build that base (Texture/Vignette are per-pixel).
+    /// Texture/Clarity/Defog compare each pixel against a regional base.
     pub fn has_spatial_effects(&self) -> bool {
-        self.clarity.abs() > 0.001 || self.dehaze.abs() > 0.001
+        self.texture.abs() > 0.001 || self.clarity.abs() > 0.001 || self.dehaze.abs() > 0.001
     }
 }

@@ -203,24 +203,3 @@ pub(crate) fn contrast_curve(x: f32, amount: f32) -> f32 {
     };
     out.clamp(0.0, 1.0)
 }
-
-pub(crate) fn apply_soft_contrast(
-    r: &mut f32,
-    g: &mut f32,
-    b: &mut f32,
-    amount: f32,
-    strength: f32,
-) {
-    let amount = (amount * strength).clamp(-0.88, 0.96);
-    if amount.abs() <= 0.0001 {
-        return;
-    }
-    let luma = luminance_f32(*r, *g, *b).clamp(0.0, 1.0);
-    let target_luma = contrast_curve(luma, amount);
-    let chroma_factor = (1.0 + amount * 0.34).clamp(0.66, 1.34);
-
-    *r = (luma + (*r - luma) * chroma_factor).clamp(0.0, 1.0);
-    *g = (luma + (*g - luma) * chroma_factor).clamp(0.0, 1.0);
-    *b = (luma + (*b - luma) * chroma_factor).clamp(0.0, 1.0);
-    apply_luma_target(r, g, b, target_luma);
-}

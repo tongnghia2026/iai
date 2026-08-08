@@ -3739,6 +3739,40 @@ fn clarity_amplifies_local_contrast() {
 }
 
 #[test]
+fn texture_amplifies_spatial_detail_without_shifting_the_mean() {
+    let src = ripple_tilemap(0.5, 0.045);
+    let before_spread = luma_spread(&src);
+    let before_mean = mean_luma(&src);
+    let mut settings = DevelopSettings::default();
+    settings.texture = 100.0;
+    assert!(settings.has_spatial_effects());
+    let out = apply_to_tilemap_direct(&src, &settings, None);
+    let after_spread = luma_spread(&out);
+    let after_mean = mean_luma(&out);
+    assert!(
+        after_spread > before_spread + 4.0,
+        "texture should widen fine detail: {before_spread} -> {after_spread}"
+    );
+    assert!(
+        (after_mean - before_mean).abs() < 3.0,
+        "texture shifted overall tone: {before_mean} -> {after_mean}"
+    );
+}
+
+#[test]
+fn texture_leaves_a_flat_region_untouched() {
+    let src = ripple_tilemap(0.5, 0.0);
+    let mut settings = DevelopSettings::default();
+    settings.texture = 200.0;
+    let out = apply_to_tilemap_direct(&src, &settings, None);
+    assert!(
+        (mean_luma(&out) - mean_luma(&src)).abs() < 1.0,
+        "flat field must be a texture no-op"
+    );
+    assert!(luma_spread(&out) < 1.0);
+}
+
+#[test]
 fn clarity_leaves_flat_region_untouched() {
     let src = ripple_tilemap(0.5, 0.0);
     let mut settings = DevelopSettings::default();

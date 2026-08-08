@@ -384,6 +384,8 @@ pub(crate) fn apply_detail_to_pixels(
 /// exploding in dense haze. Mirrored in the WGSL `dev_effects_stage`.
 const CLARITY_GAIN: f32 = 2.2;
 const CLARITY_LIMIT: f32 = 0.28;
+const TEXTURE_GAIN: f32 = 1.35;
+const TEXTURE_LIMIT: f32 = 0.14;
 const DEHAZE_MAX_VEIL: f32 = 0.7;
 const DEHAZE_MIN_TRANSMISSION: f32 = 0.25;
 
@@ -403,13 +405,16 @@ pub(crate) fn apply_effects(
     inv_h: f32,
     base_luma: f32,
 ) {
-    // Texture: fine-detail soft contrast. Still a point-op — a dedicated
-    // fine-scale base is a follow-up; Clarity/Defog below are spatial.
+    // Texture: real luminance high-pass against the edge-aware spatial base.
+    // Only target luma moves; the chroma reconstruction stays independent.
     if settings.texture.abs() > 0.001 {
         let luma = luminance_f32(*r, *g, *b).clamp(0.0, 1.0);
-        let mid = bell(luma, 0.5, 0.56);
-        let texture = eased_control(settings.texture) * (CONTROL_LIMIT / 300.0);
-        apply_soft_contrast(r, g, b, (texture * mid * 0.55).clamp(-0.62, 0.78), 0.85);
+        let base = base_luma.clamp(0.0, 1.0);
+        let k = eased_control(settings.texture) * TEXTURE_GAIN;
+        let tonal = bell(base, 0.5, 0.62);
+        let boost = k * tonal * (luma - base);
+        let delta = TEXTURE_LIMIT * (boost / TEXTURE_LIMIT).tanh();
+        apply_luma_target(r, g, b, (luma + delta).clamp(0.0, 1.0));
     }
 
     // Clarity (Definition): true local contrast — amplify the pixel's deviation
