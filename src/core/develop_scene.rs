@@ -459,6 +459,9 @@ pub struct SceneToneData {
     /// Raw-look perceptual shadow-chroma compensation. Identity sources bypass
     /// it so tone-neutral non-RAW pixels remain bit-stable.
     pub shadow_chroma_active: bool,
+    /// Zero-luminance RGB offsets for scene-linear split grading.
+    pub grade_shadow: [f32; 3],
+    pub grade_highlight: [f32; 3],
     /// Display-domain (gamma) luma curve: parametric curve_* sliders + the
     /// luminance point curve. `None` when identity.
     pub display: Option<Box<[f32; 256]>>,
@@ -532,10 +535,39 @@ pub fn build_scene_tone_for(settings: &DevelopSettings, look: BaseLook) -> Scene
         tone_eq,
         tone_eq_active,
         shadow_chroma_active: look == BaseLook::Raw,
+        grade_shadow: grade_vector(settings.grade_shadow_hue, settings.grade_shadow_strength),
+        grade_highlight: grade_vector(
+            settings.grade_highlight_hue,
+            settings.grade_highlight_strength,
+        ),
         display: build_display_lut_for(settings, look),
         rgb: rgb_curve_luts(settings),
         sigmoid,
     }
+}
+
+/// Hue/strength control to a small, zero-luminance linear-RGB offset. Removing
+/// the direction's Rec.709 luminance makes grading change colour contrast
+/// without lifting or lowering the zone as a side effect.
+fn grade_vector(hue_deg: f32, strength: f32) -> [f32; 3] {
+    let h = hue_deg.rem_euclid(360.0) / 60.0;
+    let x = 1.0 - ((h % 2.0) - 1.0).abs();
+    let rgb = match h as i32 {
+        0 => [1.0, x, 0.0],
+        1 => [x, 1.0, 0.0],
+        2 => [0.0, 1.0, x],
+        3 => [0.0, x, 1.0],
+        4 => [x, 0.0, 1.0],
+        _ => [1.0, 0.0, x],
+    };
+    let y = luma_lin(rgb[0], rgb[1], rgb[2]);
+    let mut d = [rgb[0] - y, rgb[1] - y, rgb[2] - y];
+    let norm = d[0].abs().max(d[1].abs()).max(d[2].abs()).max(1e-6);
+    let scale = control_to_unit(strength).max(0.0) * 0.12 / norm;
+    for v in &mut d {
+        *v *= scale;
+    }
+    d
 }
 
 /// Exposure slider (±`EXPOSURE_LIMIT`) → linear multiplier, exactly linear in
@@ -668,6 +700,26 @@ fn restore_shadow_chroma(c: [f32; 3]) -> [f32; 3] {
 }
 
 impl SceneToneData {
+    #[inline]
+    fn apply_scene_grade(&self, mut v: [f32; 3]) -> [f32; 3] {
+        if self.grade_shadow == [0.0; 3] && self.grade_highlight == [0.0; 3] {
+            return v;
+        }
+        let y = luma_lin(v[0], v[1], v[2]).max(0.0);
+        let er = y.max(SCENE_EV_MIN.exp2()).log2() - SCENE_MID_GRAY.log2();
+        let gaussian = |center: f32, width: f32| {
+            let d = (er - center) / width;
+            (-0.5 * d * d).exp()
+        };
+        let sw = gaussian(-2.0, 1.8);
+        let hw = gaussian(2.0, 1.8);
+        let amplitude = y.sqrt();
+        for i in 0..3 {
+            v[i] += amplitude * (self.grade_shadow[i] * sw + self.grade_highlight[i] * hw);
+        }
+        v
+    }
+
     /// Absolute exposure (EV) of a scene value after WB+EV — the signal the
     /// tone-equalizer zones read, and what the regional-E proxy stores.
     #[inline]
@@ -704,6 +756,7 @@ impl SceneToneData {
             let gain = self.tone_eq_at(e).exp2();
             v = [v[0] * gain, v[1] * gain, v[2] * gain];
         }
+        v = self.apply_scene_grade(v);
         // Per-channel sigmoid (film-like hue skew)…
         let pc = [
             self.tone_map(v[0]),
@@ -1266,6 +1319,30 @@ mod tests {
     }
 
     #[test]
+    fn split_grade_targets_opposite_ev_zones_without_moving_luma() {
+        let s = DevelopSettings {
+            grade_shadow_hue: 240.0,
+            grade_shadow_strength: 200.0,
+            grade_highlight_hue: 30.0,
+            grade_highlight_strength: 200.0,
+            ..settings()
+        };
+        let tone = build_scene_tone(&s);
+        let shadow_y = SCENE_MID_GRAY / 4.0;
+        let highlight_y = SCENE_MID_GRAY * 4.0;
+        let shadow = tone.apply_scene_grade([shadow_y; 3]);
+        let highlight = tone.apply_scene_grade([highlight_y; 3]);
+        assert!(shadow[2] > shadow[0], "shadow not cooled: {shadow:?}");
+        assert!(
+            highlight[0] > highlight[2],
+            "highlight not warmed: {highlight:?}"
+        );
+        for (before, after) in [(shadow_y, shadow), (highlight_y, highlight)] {
+            assert!((luma_lin(after[0], after[1], after[2]) - before).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn identity_look_does_not_restore_shadow_chroma() {
         let tone = build_scene_tone_for(&settings(), BaseLook::Identity);
         let srgb = [0.42f32, 0.24, 0.15];
@@ -1795,6 +1872,9 @@ mod tests {
             "dev_smootherstep(0.5, 1.0, mapped_n)",
             "let blend = 0.90 + (0.20 - 0.90) * hw",
             "dev_effects[26]",
+            "dev_effects[27]",
+            "dev_effects[32]",
+            "let sw = exp(-0.5 * sd * sd)",
             "dev_rgb_curve[769u + i0]",
             "u.adj_pad_c == 1u",
             "@group(0) @binding(2) var dev_scene_tex",

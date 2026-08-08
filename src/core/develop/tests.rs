@@ -1297,6 +1297,24 @@ fn mixer_mode_alone_is_not_an_image_adjustment() {
 }
 
 #[test]
+fn old_develop_settings_default_split_grade_to_neutral() {
+    let settings: DevelopSettings = serde_json::from_str("{}").expect("old settings load");
+    assert_eq!(settings.grade_shadow_hue, 220.0);
+    assert_eq!(settings.grade_highlight_hue, 35.0);
+    assert_eq!(settings.grade_shadow_strength, 0.0);
+    assert_eq!(settings.grade_highlight_strength, 0.0);
+    assert!(settings.is_neutral());
+
+    let hue_only = DevelopSettings {
+        grade_shadow_hue: 90.0,
+        grade_highlight_hue: 280.0,
+        ..DevelopSettings::default()
+    };
+    assert!(hue_only.is_neutral(), "inert hue choices changed the image");
+    assert!(hue_only.same_image_effect(&DevelopSettings::default()));
+}
+
+#[test]
 fn mixer_hue_and_luminance_affect_pixels() {
     let source = vec![210, 40, 40, 255];
 

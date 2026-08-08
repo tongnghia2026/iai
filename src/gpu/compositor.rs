@@ -1388,9 +1388,9 @@ struct VsOut {
             label: Some("dev_effects_buf"),
             // [texture, clarity, dehaze, vignette, mixer_gate_active,
             //  5..16 free (the mixer re-gate table lives in dev_rgb_curve),
-            //  scene: CAT16·2^EV matrix 16..25, hue-preserve 25,
-            //  display-curve flag 26, pad 27]
-            size: 28 * 4,
+            //  scene: CAT16·2^EV matrix 16..25, shadow-chroma flag 25,
+            //  display-curve flag 26, split-grade RGB vectors 27..33]
+            size: 34 * 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1888,7 +1888,7 @@ struct VsOut {
         // the display-curve flag ([16..27]).
         if let Some(p) = self.develop_preview.as_ref() {
             let s = &p.settings;
-            let mut effects = [0.0f32; 28];
+            let mut effects = [0.0f32; 34];
             effects[0] = s.texture;
             effects[1] = s.clarity;
             effects[2] = s.dehaze;
@@ -1928,6 +1928,8 @@ struct VsOut {
                     effects[16 + i * 3 + 2] = row[2];
                 }
                 effects[25] = f32::from(tone.shadow_chroma_active);
+                effects[27..30].copy_from_slice(&tone.grade_shadow);
+                effects[30..33].copy_from_slice(&tone.grade_highlight);
                 if let Some(display) = &tone.display {
                     effects[26] = 1.0;
                     rgb[769..1025].copy_from_slice(display.as_ref());

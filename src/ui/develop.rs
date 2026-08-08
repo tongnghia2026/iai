@@ -299,6 +299,19 @@ pub(crate) fn develop_panel_contents(
                     &mut settings.saturation,
                     -CONTROL_LIMIT..=CONTROL_LIMIT,
                 );
+                ui.separator();
+                changed |= grade_row(
+                    ui,
+                    "Shadow grade",
+                    &mut settings.grade_shadow_hue,
+                    &mut settings.grade_shadow_strength,
+                );
+                changed |= grade_row(
+                    ui,
+                    "Highlight grade",
+                    &mut settings.grade_highlight_hue,
+                    &mut settings.grade_highlight_strength,
+                );
             });
             note_section(out, SEC_COLOR, actions);
 
@@ -612,6 +625,29 @@ fn slider_row(
     range: std::ops::RangeInclusive<f32>,
 ) -> bool {
     gradient_slider_row(ui, label, value, range, &tone_gradient(label))
+}
+
+fn grade_row(ui: &mut egui::Ui, label: &str, hue: &mut f32, strength: &mut f32) -> bool {
+    let (r, g, b) = hsl_to_rgb(hue.rem_euclid(360.0) / 360.0, 0.78, 0.52);
+    let mut rgb = [
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    ];
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui.color_edit_button_srgb(&mut rgb).changed() {
+            let (h, _, _) = rgb_to_hsl(
+                rgb[0] as f32 / 255.0,
+                rgb[1] as f32 / 255.0,
+                rgb[2] as f32 / 255.0,
+            );
+            *hue = h * 360.0;
+            changed = true;
+        }
+    });
+    changed | slider_row(ui, "Strength", strength, 0.0..=CONTROL_LIMIT)
 }
 
 /// The Local Masks section: arm a linear/radial placement (the next canvas

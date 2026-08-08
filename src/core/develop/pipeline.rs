@@ -630,6 +630,8 @@ fn mixer_desat_affinity(curves: &MixerCurves, region: [f32; 3]) -> f32 {
 pub(crate) fn tone_is_active(settings: &DevelopSettings) -> bool {
     has_white_balance(settings)
         || settings.exposure.abs() > 0.001
+        || settings.grade_shadow_strength.abs() > 0.001
+        || settings.grade_highlight_strength.abs() > 0.001
         || has_light(settings)
         || has_curve(settings)
 }

@@ -178,6 +178,11 @@ pub struct DevelopSettings {
     pub tint: f32,
     pub vibrance: f32,
     pub saturation: f32,
+    /// Split-grade hue in degrees. Hue is inert while its strength is zero.
+    pub grade_shadow_hue: f32,
+    pub grade_shadow_strength: f32,
+    pub grade_highlight_hue: f32,
+    pub grade_highlight_strength: f32,
     pub texture: f32,
     pub clarity: f32,
     pub sharpening: f32,
@@ -229,6 +234,10 @@ impl Default for DevelopSettings {
             tint: 0.0,
             vibrance: 0.0,
             saturation: 0.0,
+            grade_shadow_hue: 220.0,
+            grade_shadow_strength: 0.0,
+            grade_highlight_hue: 35.0,
+            grade_highlight_strength: 0.0,
             texture: 0.0,
             clarity: 0.0,
             sharpening: 0.0,
@@ -256,6 +265,11 @@ impl Default for DevelopSettings {
     }
 }
 
+#[inline]
+fn same_grade(hue: f32, strength: f32, other_hue: f32, other_strength: f32) -> bool {
+    strength == other_strength && (strength.abs() <= 0.001 || hue == other_hue)
+}
+
 impl DevelopSettings {
     pub fn is_neutral(&self) -> bool {
         self.exposure.abs() <= 0.001
@@ -268,6 +282,8 @@ impl DevelopSettings {
             && self.tint.abs() <= 0.001
             && self.vibrance.abs() <= 0.001
             && self.saturation.abs() <= 0.001
+            && self.grade_shadow_strength.abs() <= 0.001
+            && self.grade_highlight_strength.abs() <= 0.001
             && self.texture.abs() <= 0.001
             && self.clarity.abs() <= 0.001
             && self.sharpening.abs() <= 0.001
@@ -300,6 +316,18 @@ impl DevelopSettings {
             && self.tint == other.tint
             && self.vibrance == other.vibrance
             && self.saturation == other.saturation
+            && same_grade(
+                self.grade_shadow_hue,
+                self.grade_shadow_strength,
+                other.grade_shadow_hue,
+                other.grade_shadow_strength,
+            )
+            && same_grade(
+                self.grade_highlight_hue,
+                self.grade_highlight_strength,
+                other.grade_highlight_hue,
+                other.grade_highlight_strength,
+            )
             && self.texture == other.texture
             && self.clarity == other.clarity
             && self.sharpening == other.sharpening
@@ -335,6 +363,18 @@ impl DevelopSettings {
             && self.tint == other.tint
             && self.vibrance == other.vibrance
             && self.saturation == other.saturation
+            && same_grade(
+                self.grade_shadow_hue,
+                self.grade_shadow_strength,
+                other.grade_shadow_hue,
+                other.grade_shadow_strength,
+            )
+            && same_grade(
+                self.grade_highlight_hue,
+                self.grade_highlight_strength,
+                other.grade_highlight_hue,
+                other.grade_highlight_strength,
+            )
             && self.texture == other.texture
             && self.clarity == other.clarity
             && self.sharpening == other.sharpening
@@ -377,6 +417,18 @@ impl DevelopSettings {
             && self.blacks == other.blacks
             && self.vibrance == other.vibrance
             && self.saturation == other.saturation
+            && same_grade(
+                self.grade_shadow_hue,
+                self.grade_shadow_strength,
+                other.grade_shadow_hue,
+                other.grade_shadow_strength,
+            )
+            && same_grade(
+                self.grade_highlight_hue,
+                self.grade_highlight_strength,
+                other.grade_highlight_hue,
+                other.grade_highlight_strength,
+            )
             && self.texture == other.texture
             && self.clarity == other.clarity
             && self.sharpening == other.sharpening

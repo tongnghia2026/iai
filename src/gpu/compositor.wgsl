@@ -848,6 +848,18 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
         let e = dev_region_luma_at(local.x * u.layer_w, local.y * u.layer_h);
         v = v * exp2(dev_tone_eq_at(e));
     }
+    // Scene-linear split grade. CPU twin: apply_scene_grade.
+    let grade_shadow = vec3<f32>(dev_effects[27], dev_effects[28], dev_effects[29]);
+    let grade_highlight = vec3<f32>(dev_effects[30], dev_effects[31], dev_effects[32]);
+    if (any(abs(grade_shadow) > vec3<f32>(1e-8)) || any(abs(grade_highlight) > vec3<f32>(1e-8))) {
+        let y = max(dev_luma_lin(v), 0.0);
+        let er = log2(max(y, 6.1035156e-5)) - log2(0.1845);
+        let sd = (er + 2.0) / 1.8;
+        let hd = (er - 2.0) / 1.8;
+        let sw = exp(-0.5 * sd * sd);
+        let hw = exp(-0.5 * hd * hd);
+        v = v + sqrt(y) * (grade_shadow * sw + grade_highlight * hw);
+    }
     // Per-channel sigmoid blended toward the max-RGB ratio path.
     let pc = vec3<f32>(dev_scene_lut(v.r), dev_scene_lut(v.g), dev_scene_lut(v.b));
     var outc = pc;
