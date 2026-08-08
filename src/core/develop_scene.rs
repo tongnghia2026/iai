@@ -16,9 +16,9 @@
 //! Everything monotone collapses into 256-entry LUTs indexed in **log2 (EV)**
 //! space over [`SCENE_EV_MIN`, `SCENE_EV_MAX`] — the same LUT-plumbing budget the
 //! old gamma-domain engine used, so the GPU preview mirrors the chain exactly.
-//! The Colour/Effects/Detail/Locals stages are unchanged: they run on the
-//! display-referred output of this chain (see [`apply_scene_to_tilemap`]), which
-//! is what they always consumed.
+//! For RAW, Colour, Mixer, Effects, Detail and Local Masks now share this
+//! unclamped working master; gamut mapping and sRGB encoding happen once after
+//! the last stage. Identity/PTS keeps its compatibility path bit-stable.
 //!
 //! Non-RAW sessions run the SAME chain through [`BaseLook::Identity`]: the
 //! layer is linearized into a `SceneSource` on session open, the tone map is
@@ -1271,9 +1271,9 @@ pub fn scene_fast_region_develop(
 
 // ── Full renders ─────────────────────────────────────────────────────────────
 
-/// Render the scene at the current settings into a display-referred RGBA16
-/// (gamma sRGB) buffer — the Light half only (Colour/Effects/Detail/Locals run
-/// on top via the legacy stages in [`apply_scene_to_tilemap`]).
+/// Render the scene at the current settings into display-referred RGBA16. RAW
+/// Develop stages supplied through `develop` run together on the intermediate
+/// working buffer before its single output transform.
 fn apply_scene_locals_linear(
     working: &mut [[f32; 3]],
     width: usize,
@@ -1463,11 +1463,10 @@ pub fn strip_scene_handled(settings: &DevelopSettings) -> DevelopSettings {
     }
 }
 
-/// Commit bake for a scene-referred (RAW) Develop session: the scene chain
-/// renders the Light half at f32 → 16-bit display tiles, then the untouched
-/// legacy stages (Colour / Effects / Detail / Locals) run on that exactly as
-/// they always ran on a toned document. Selections never occur in the RAW
-/// pre-editor, so the scene half applies unconditionally.
+/// Commit bake for a scene-referred Develop session. RAW runs Light, Colour,
+/// Effects, Detail and Local Masks on one f32 working master and performs the
+/// output transform once. Identity sources retain the legacy tail so neutral
+/// and PTS behaviour remain bit-stable.
 pub fn apply_scene_to_tilemap(
     scene: &SceneSource,
     settings: &DevelopSettings,
