@@ -1398,8 +1398,8 @@ struct VsOut {
         let dev_rgb_curve_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dev_rgb_curve_buf"),
             // [active flag, R 256, G 256, B 256, scene display luma 256,
-            //  mixer re-gate LUT 360 (1025..1385)]
-            size: 1385 * 4,
+            // mixer gate + H/S/L working-space curves (4 x 360 entries).
+            size: 2465 * 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1908,7 +1908,7 @@ struct VsOut {
             // ToneData::apply_rgb_curves reads, so preview and bake match.
             // [769..1025] is the scene display luma curve; [1025..1385] the
             // mixer re-gate LUT.
-            let mut rgb = vec![0.0f32; 1385];
+            let mut rgb = vec![0.0f32; 2465];
             if let Some(luts) = crate::core::develop::rgb_curve_luts(s) {
                 rgb[0] = 1.0;
                 for (ch, lut) in luts.iter().enumerate() {
@@ -1918,6 +1918,9 @@ struct VsOut {
             if mixer_gated {
                 if let Some(curves) = crate::core::develop::build_mixer_curves_opt(s) {
                     rgb[1025..1385].copy_from_slice(&curves.gate);
+                    rgb[1385..1745].copy_from_slice(&curves.hue);
+                    rgb[1745..2105].copy_from_slice(&curves.sat);
+                    rgb[2105..2465].copy_from_slice(&curves.lum);
                 }
             }
             if let Some(scene) = &p.scene {
@@ -1931,7 +1934,7 @@ struct VsOut {
                 effects[27..30].copy_from_slice(&tone.grade_shadow);
                 effects[30..33].copy_from_slice(&tone.grade_highlight);
                 effects[33] = tone.scene_contrast_gamma;
-                if scene.look == crate::core::develop_scene::BaseLook::Raw && !s.has_mixer_edits() {
+                if scene.look == crate::core::develop_scene::BaseLook::Raw {
                     effects[34] = s.saturation;
                     effects[35] = s.vibrance;
                 }

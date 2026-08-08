@@ -971,14 +971,15 @@ impl SceneToneData {
         self.working_to_display(self.scene_to_working(rgb, region_e))
     }
 
-    fn scene_to_display_with_global_color(
+    fn scene_to_display_with_color(
         &self,
         rgb: [f32; 3],
         region_e: Option<f32>,
         settings: &DevelopSettings,
+        curves: Option<&crate::core::develop::MixerCurves>,
     ) -> [f32; 3] {
         let [mut r, mut g, mut b] = self.scene_to_working(rgb, region_e);
-        apply_color_linear(settings, None, &mut r, &mut g, &mut b);
+        apply_color_linear(settings, curves, &mut r, &mut g, &mut b);
         self.working_to_display([r, g, b])
     }
 
@@ -1212,7 +1213,7 @@ pub fn scene_fast_region_display(base: &[[f32; 3]], tone: &SceneToneData) -> Vec
 fn render_scene_display_inner(
     scene: &SceneSource,
     tone: &SceneToneData,
-    global_color: Option<&DevelopSettings>,
+    color: Option<(&DevelopSettings, Option<&crate::core::develop::MixerCurves>)>,
 ) -> Vec<u16> {
     let w = scene.width as usize;
     let h = scene.height as usize;
@@ -1240,8 +1241,10 @@ fn render_scene_display_inner(
             let e = region.as_ref().map(|(plane, pw, ph)| {
                 sample_plane_bilinear(plane, *pw, *ph, (x as f32 + 0.5) / s - 0.5, fy)
             });
-            let d = match global_color {
-                Some(settings) => tone.scene_to_display_with_global_color(rgb, e, settings),
+            let d = match color {
+                Some((settings, curves)) => {
+                    tone.scene_to_display_with_color(rgb, e, settings, curves)
+                }
                 None => tone.scene_to_display(rgb, e),
             };
             let o = x * 4;
@@ -1305,16 +1308,22 @@ pub fn apply_scene_to_tilemap(
     selection: Option<crate::core::develop::DevelopSelection>,
 ) -> TileMap {
     let tone = build_scene_tone_for_scene(settings, scene);
-    let linear_global_color = scene.look == BaseLook::Raw
-        && !settings.has_mixer_edits()
-        && (settings.saturation.abs() > 0.001 || settings.vibrance.abs() > 0.001);
-    let px16 = render_scene_display_inner(scene, &tone, linear_global_color.then_some(settings));
+    let linear_color = scene.look == BaseLook::Raw && settings.has_color();
+    let curves = crate::core::develop::build_mixer_curves_opt(settings);
+    let px16 = render_scene_display_inner(
+        scene,
+        &tone,
+        linear_color.then_some((settings, curves.as_ref())),
+    );
     let display = TileMap::from_rgba16(&px16, scene.width, scene.height);
     drop(px16);
     let mut rest = strip_scene_handled(settings);
-    if linear_global_color {
+    if linear_color {
         rest.saturation = 0.0;
         rest.vibrance = 0.0;
+        rest.mixer_hue = [0.0; crate::core::develop::MIXER_BANDS];
+        rest.mixer_saturation = [0.0; crate::core::develop::MIXER_BANDS];
+        rest.mixer_luminance = [0.0; crate::core::develop::MIXER_BANDS];
     }
     if rest.is_neutral() {
         let mut display = display;

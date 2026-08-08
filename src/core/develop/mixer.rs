@@ -90,9 +90,9 @@ fn mixer_basis() -> &'static MixerBasis {
 
 /// The three interpolated slider curves over UCS hue, plus the re-gate LUT.
 pub(crate) struct MixerCurves {
-    hue: Vec<f32>,
-    sat: Vec<f32>,
-    lum: Vec<f32>,
+    pub(crate) hue: Vec<f32>,
+    pub(crate) sat: Vec<f32>,
+    pub(crate) lum: Vec<f32>,
     /// 0..1 membership of the EDITED bands' hues for the full-res anti-bleed
     /// re-gate — the WGSL twin samples this exact table (uploaded per frame).
     pub(crate) gate: Vec<f32>,

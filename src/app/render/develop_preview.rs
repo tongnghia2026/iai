@@ -90,12 +90,10 @@ impl App {
         // NOT suppress the colour preview — the old `&& !need_detail` here made every
         // Colour/Mixer edit vanish (preview snapped back to the untouched image) the
         // moment a Detail slider was touched.
-        let linear_global_color = scene.as_ref().is_some_and(|sc| {
-            sc.look == crate::core::develop_scene::BaseLook::Raw
-                && !settings.has_mixer_edits()
-                && (settings.saturation.abs() > 0.001 || settings.vibrance.abs() > 0.001)
+        let linear_scene_color = scene.as_ref().is_some_and(|sc| {
+            sc.look == crate::core::develop_scene::BaseLook::Raw && settings.has_color()
         });
-        let need_color = settings.has_color() && !linear_global_color;
+        let need_color = settings.has_color() && !linear_scene_color;
         // The fast (point-sampled, low-res) proxy carries tone+effects on a downsampled
         // buffer; only the spatial Effects/Detail stages actually need it. Tone is
         // applied EXACTLY per-pixel by the shader — global via the tone LUT, and

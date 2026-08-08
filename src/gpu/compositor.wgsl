@@ -816,21 +816,43 @@ fn dev_restore_shadow_chroma(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(y) + d * scale;
 }
 
-// Global Saturation/Vibrance directly on the unclamped scene working pixel.
-// CPU twin: apply_color_linear with no mixer curves.
-fn dev_scene_global_color(c: vec3<f32>) -> vec3<f32> {
-    let sat = dev_eased(dev_effects[34]);
-    let vibrance = dev_eased(dev_effects[35]);
-    if (abs(sat) <= 1e-4 && abs(vibrance) <= 1e-4) {
-        return c;
-    }
+fn dev_mixer_curve_at(base: u32, h: f32) -> f32 {
+    let t = fract((h + 3.14159265) / 6.28318531) * 360.0;
+    let i = min(u32(t), 359u);
+    let f = t - f32(i);
+    return mix(dev_rgb_curve[base + i], dev_rgb_curve[base + ((i + 1u) % 360u)], f);
+}
+
+fn dev_signed_cbrt(x: f32) -> f32 {
+    return sign(x) * pow(abs(x), 0.3333333333);
+}
+
+// Oklab hue rotation on unclamped linear RGB. CPU twin: rotate_oklab_hue_linear.
+fn dev_rotate_oklab_hue_linear(c: vec3<f32>, deg: f32) -> vec3<f32> {
+    let ll = dev_signed_cbrt(dot(vec3<f32>(0.4122214708, 0.5363325363, 0.0514459929), c));
+    let mm = dev_signed_cbrt(dot(vec3<f32>(0.2119034982, 0.6806995451, 0.1073969566), c));
+    let ss = dev_signed_cbrt(dot(vec3<f32>(0.0883024619, 0.2817188376, 0.6299787005), c));
+    let big_l = 0.2104542553 * ll + 0.7936177850 * mm - 0.0040720468 * ss;
+    let aa = 1.9779984951 * ll - 2.4285922050 * mm + 0.4505937099 * ss;
+    let bb = 0.0259040371 * ll + 0.7827717662 * mm - 0.8086757660 * ss;
+    let rad = deg * 0.01745329252;
+    let na = aa * cos(rad) - bb * sin(rad);
+    let nb = aa * sin(rad) + bb * cos(rad);
+    let l2_ = big_l + 0.3963377774 * na + 0.2158037573 * nb;
+    let m2_ = big_l - 0.1055613458 * na - 0.0638541728 * nb;
+    let s2_ = big_l - 0.0894841775 * na - 1.2914855480 * nb;
+    let l2 = l2_ * l2_ * l2_;
+    let m2 = m2_ * m2_ * m2_;
+    let s2 = s2_ * s2_ * s2_;
+    return vec3<f32>(
+        4.0767416621 * l2 - 3.3077115913 * m2 + 0.2309699292 * s2,
+        -1.2684380046 * l2 + 2.6097574011 * m2 - 0.3413193965 * s2,
+        -0.0041960863 * l2 - 0.7034186147 * m2 + 1.7076147010 * s2,
+    );
+}
+
+fn dev_scale_linear_chroma(c: vec3<f32>, factor: f32) -> vec3<f32> {
     let y = clamp(dev_luma_lin(c), 0.0, 1.0);
-    let vib_w = 1.0 - dev_smootherstep(0.10, 0.35, dev_chroma(c));
-    let delta = clamp(sat + vibrance * vib_w * 0.88, -1.0, 1.0);
-    var factor = 1.0 + delta;
-    if (delta > 0.0) {
-        factor = 1.0 + delta * 1.50;
-    }
     let protect = dev_smootherstep(0.0027, 0.0174, y)
         * (1.0 - dev_smootherstep(0.7874, 0.9774, y));
     let req = (clamp(factor, 0.0, 3.20) - 1.0) * protect;
@@ -848,6 +870,63 @@ fn dev_scene_global_color(c: vec3<f32>) -> vec3<f32> {
         scale = select(1.0, 1.0 + room * tanh(req / room), room > 1e-4);
     }
     return vec3<f32>(y) + d * scale;
+}
+
+// Full RAW colour stage on the unclamped linear working pixel. Classification
+// stays display-referred so slider band semantics remain compatible.
+fn dev_scene_color(input: vec3<f32>) -> vec3<f32> {
+    var c = input;
+    let display = dev_linear_to_srgb(clamp(input, vec3(0.0), vec3(1.0)));
+    let h = dev_ucs_hue(display);
+    let luma = clamp(dev_luma(display), 0.0, 1.0);
+    let w = dev_mixer_weight(display, 0.06);
+    let hue_ctl = clamp(dev_mixer_curve_at(1385u, h) * w, -200.0, 200.0);
+    var sat_ctl = dev_mixer_curve_at(1745u, h);
+    let sat_w = select(w, dev_mixer_desat_weight(display), sat_ctl < 0.0);
+    sat_ctl = clamp(sat_ctl * sat_w, -200.0, 200.0);
+    let lum_guard = dev_smootherstep(0.02, 0.14, luma)
+        * (1.0 - dev_smootherstep(0.82, 0.98, luma));
+    let lum_ctl = clamp(dev_mixer_curve_at(2105u, h)
+        * dev_mixer_weight(display, 0.10) * lum_guard, -200.0, 200.0);
+
+    if (abs(hue_ctl) > 0.001) {
+        c = dev_rotate_oklab_hue_linear(c, dev_eased(hue_ctl) * 45.0);
+    }
+    let global_sat = dev_eased(dev_effects[34]);
+    let mixer_sat = dev_eased(sat_ctl);
+    let vibrance = dev_eased(dev_effects[35]);
+    let vib_delta = vibrance * (1.0 - dev_smootherstep(0.10, 0.35, dev_chroma(c))) * 0.88;
+    let delta = clamp(global_sat + mixer_sat + vib_delta, -1.0, 1.0);
+    var factor = 1.0 + delta;
+    if (delta > 0.0) {
+        let positive_total = max(global_sat, 0.0) + max(mixer_sat, 0.0) + max(vib_delta, 0.0);
+        var mixer_share = 0.0;
+        if (positive_total > 1e-6) {
+            mixer_share = clamp(max(mixer_sat, 0.0) / positive_total, 0.0, 1.0);
+        }
+        factor = 1.0 + delta * (1.50 + mixer_share * 0.70);
+    }
+    if (abs(factor - 1.0) > 0.001) {
+        c = dev_scale_linear_chroma(c, factor);
+    }
+
+    let lum_delta = dev_eased(lum_ctl);
+    if (abs(lum_delta) > 0.001) {
+        let y = clamp(dev_luma_lin(c), 0.0, 1.0);
+        let tonal_room = select(pow(y, 0.42), pow(1.0 - y, 0.42), lum_delta >= 0.0);
+        let gain = max(1.0 + lum_delta * 0.62 * tonal_room, 0.0);
+        let mx = max(c.r, max(c.g, c.b));
+        if (mx >= 1e-6 && abs(gain - 1.0) >= 1e-4) {
+            let want = mx * gain;
+            var new_mx = want;
+            if (gain > 1.0 && want > 0.90) {
+                let t = (want - 0.90) / 0.10;
+                new_mx = max(0.90 + 0.10 * t / (1.0 + t), mx);
+            }
+            c = c * (new_mx / mx);
+        }
+    }
+    return c;
 }
 
 // Interpolated display-domain luma curve (curve_* sliders + point curve).
@@ -908,7 +987,7 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     if (dev_effects[25] > 0.5) {
         outc = dev_restore_shadow_chroma(outc);
     }
-    outc = dev_scene_global_color(outc);
+    outc = dev_scene_color(outc);
     outc = dev_gamut_clip_chroma(dev_filmlike_clip(outc));
     var g = dev_linear_to_srgb(clamp(outc, vec3(0.0), vec3(1.0)));
     if (dev_effects[26] > 0.5) {
