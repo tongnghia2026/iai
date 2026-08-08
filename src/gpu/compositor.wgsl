@@ -816,6 +816,40 @@ fn dev_restore_shadow_chroma(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(y) + d * scale;
 }
 
+// Global Saturation/Vibrance directly on the unclamped scene working pixel.
+// CPU twin: apply_color_linear with no mixer curves.
+fn dev_scene_global_color(c: vec3<f32>) -> vec3<f32> {
+    let sat = dev_eased(dev_effects[34]);
+    let vibrance = dev_eased(dev_effects[35]);
+    if (abs(sat) <= 1e-4 && abs(vibrance) <= 1e-4) {
+        return c;
+    }
+    let y = clamp(dev_luma_lin(c), 0.0, 1.0);
+    let vib_w = 1.0 - dev_smootherstep(0.10, 0.35, dev_chroma(c));
+    let delta = clamp(sat + vibrance * vib_w * 0.88, -1.0, 1.0);
+    var factor = 1.0 + delta;
+    if (delta > 0.0) {
+        factor = 1.0 + delta * 1.50;
+    }
+    let protect = dev_smootherstep(0.0027, 0.0174, y)
+        * (1.0 - dev_smootherstep(0.7874, 0.9774, y));
+    let req = (clamp(factor, 0.0, 3.20) - 1.0) * protect;
+    let d = c - vec3<f32>(y);
+    var room = 1e20;
+    if (d.r > 1e-6) { room = min(room, (1.0 - y) / d.r - 1.0); }
+    if (d.r < -1e-6) { room = min(room, y / -d.r - 1.0); }
+    if (d.g > 1e-6) { room = min(room, (1.0 - y) / d.g - 1.0); }
+    if (d.g < -1e-6) { room = min(room, y / -d.g - 1.0); }
+    if (d.b > 1e-6) { room = min(room, (1.0 - y) / d.b - 1.0); }
+    if (d.b < -1e-6) { room = min(room, y / -d.b - 1.0); }
+    var scale = 1.0 + req;
+    if (req > 0.0) {
+        room = max(room, 0.0);
+        scale = select(1.0, 1.0 + room * tanh(req / room), room > 1e-4);
+    }
+    return vec3<f32>(y) + d * scale;
+}
+
 // Interpolated display-domain luma curve (curve_* sliders + point curve).
 fn dev_display_lum_at(v: f32) -> f32 {
     let x = clamp(v, 0.0, 1.0) * 255.0;
@@ -874,6 +908,7 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     if (dev_effects[25] > 0.5) {
         outc = dev_restore_shadow_chroma(outc);
     }
+    outc = dev_scene_global_color(outc);
     outc = dev_gamut_clip_chroma(dev_filmlike_clip(outc));
     var g = dev_linear_to_srgb(clamp(outc, vec3(0.0), vec3(1.0)));
     if (dev_effects[26] > 0.5) {

@@ -30,10 +30,11 @@
 use crate::core::cat16;
 use crate::core::color::luminance_f32;
 use crate::core::develop::{
-    apply_color, apply_luma_target, apply_point_curve_outer, bell, contrast_curve, control_to_unit,
-    curve_is_identity, curve_shadows_mask, darks_mask, eased_control, guided_lowpass_plane,
-    linear_to_srgb, luma_lin, lut_lerp, rgb_curve_luts, sample_plane_bilinear, smootherstep,
-    srgb_to_linear, DevelopSettings, EXPOSURE_LIMIT, TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
+    apply_color, apply_color_linear, apply_luma_target, apply_point_curve_outer, bell,
+    contrast_curve, control_to_unit, curve_is_identity, curve_shadows_mask, darks_mask,
+    eased_control, guided_lowpass_plane, linear_to_srgb, luma_lin, lut_lerp, rgb_curve_luts,
+    sample_plane_bilinear, smootherstep, srgb_to_linear, DevelopSettings, EXPOSURE_LIMIT,
+    TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
 };
 use crate::core::tile::TileMap;
 use rayon::prelude::*;
@@ -916,7 +917,7 @@ impl SceneToneData {
     /// gamma sRGB in [0,1]. `region_e` is the regional exposure from the
     /// guided proxy; None falls back to the pixel's own exposure (histogram /
     /// proxy-free paths — identical for smooth areas by construction).
-    pub fn scene_to_display(&self, rgb: [f32; 3], region_e: Option<f32>) -> [f32; 3] {
+    pub(crate) fn scene_to_working(&self, rgb: [f32; 3], region_e: Option<f32>) -> [f32; 3] {
         let mut v = cat16::mat_apply(&self.wb_ev, rgb);
         if self.tone_eq_active {
             let e = region_e.unwrap_or_else(|| self.own_e(v));
@@ -951,12 +952,34 @@ impl SceneToneData {
         } else {
             out
         };
-        let clipped = gamut_clip_chroma(filmlike_clip(out));
+        out
+    }
+
+    /// Final output boundary: gamut-map and encode a linear working pixel once.
+    pub(crate) fn working_to_display(&self, working: [f32; 3]) -> [f32; 3] {
+        let clipped = gamut_clip_chroma(filmlike_clip(working));
         let mut r = linear_to_srgb(clipped[0]);
         let mut g = linear_to_srgb(clipped[1]);
         let mut b = linear_to_srgb(clipped[2]);
         self.apply_display_curves(&mut r, &mut g, &mut b);
         [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)]
+    }
+
+    /// Compatibility composition while downstream stages migrate to the
+    /// unclamped working-space boundary above.
+    pub fn scene_to_display(&self, rgb: [f32; 3], region_e: Option<f32>) -> [f32; 3] {
+        self.working_to_display(self.scene_to_working(rgb, region_e))
+    }
+
+    fn scene_to_display_with_global_color(
+        &self,
+        rgb: [f32; 3],
+        region_e: Option<f32>,
+        settings: &DevelopSettings,
+    ) -> [f32; 3] {
+        let [mut r, mut g, mut b] = self.scene_to_working(rgb, region_e);
+        apply_color_linear(settings, None, &mut r, &mut g, &mut b);
+        self.working_to_display([r, g, b])
     }
 
     /// Display-domain curves (gamma space): luminance curve then R/G/B point
@@ -1186,7 +1209,11 @@ pub fn scene_fast_region_display(base: &[[f32; 3]], tone: &SceneToneData) -> Vec
 /// Render the scene at the current settings into a display-referred RGBA16
 /// (gamma sRGB) buffer — the Light half only (Colour/Effects/Detail/Locals run
 /// on top via the legacy stages in [`apply_scene_to_tilemap`]).
-fn render_scene_display(scene: &SceneSource, tone: &SceneToneData) -> Vec<u16> {
+fn render_scene_display_inner(
+    scene: &SceneSource,
+    tone: &SceneToneData,
+    global_color: Option<&DevelopSettings>,
+) -> Vec<u16> {
     let w = scene.width as usize;
     let h = scene.height as usize;
     let region = if tone.tone_eq_active {
@@ -1213,7 +1240,10 @@ fn render_scene_display(scene: &SceneSource, tone: &SceneToneData) -> Vec<u16> {
             let e = region.as_ref().map(|(plane, pw, ph)| {
                 sample_plane_bilinear(plane, *pw, *ph, (x as f32 + 0.5) / s - 0.5, fy)
             });
-            let d = tone.scene_to_display(rgb, e);
+            let d = match global_color {
+                Some(settings) => tone.scene_to_display_with_global_color(rgb, e, settings),
+                None => tone.scene_to_display(rgb, e),
+            };
             let o = x * 4;
             row[o] = (d[0] * 65535.0 + 0.5) as u16;
             row[o + 1] = (d[1] * 65535.0 + 0.5) as u16;
@@ -1222,6 +1252,10 @@ fn render_scene_display(scene: &SceneSource, tone: &SceneToneData) -> Vec<u16> {
         }
     });
     out
+}
+
+fn render_scene_display(scene: &SceneSource, tone: &SceneToneData) -> Vec<u16> {
+    render_scene_display_inner(scene, tone, None)
 }
 
 /// The default (neutral-settings) render — what the RAW decode bakes into the
@@ -1271,10 +1305,17 @@ pub fn apply_scene_to_tilemap(
     selection: Option<crate::core::develop::DevelopSelection>,
 ) -> TileMap {
     let tone = build_scene_tone_for_scene(settings, scene);
-    let px16 = render_scene_display(scene, &tone);
+    let linear_global_color = scene.look == BaseLook::Raw
+        && !settings.has_mixer_edits()
+        && (settings.saturation.abs() > 0.001 || settings.vibrance.abs() > 0.001);
+    let px16 = render_scene_display_inner(scene, &tone, linear_global_color.then_some(settings));
     let display = TileMap::from_rgba16(&px16, scene.width, scene.height);
     drop(px16);
-    let rest = strip_scene_handled(settings);
+    let mut rest = strip_scene_handled(settings);
+    if linear_global_color {
+        rest.saturation = 0.0;
+        rest.vibrance = 0.0;
+    }
     if rest.is_neutral() {
         let mut display = display;
         display.bump_all_revisions();

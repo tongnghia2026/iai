@@ -471,6 +471,12 @@ impl DevelopSettings {
         has_color(self)
     }
 
+    pub fn has_mixer_edits(&self) -> bool {
+        self.mixer_hue.iter().any(|v| v.abs() > 0.001)
+            || self.mixer_saturation.iter().any(|v| v.abs() > 0.001)
+            || self.mixer_luminance.iter().any(|v| v.abs() > 0.001)
+    }
+
     /// True when a Detail slider (Sharpening / Noise Reduction) is engaged. The
     /// live shader cannot run these (full-res neighbourhood passes), so the GPU
     /// preview schedules a debounced commit-quality CPU bake instead.
