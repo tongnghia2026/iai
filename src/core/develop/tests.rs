@@ -3680,6 +3680,26 @@ fn luma_u8(px: &[u8]) -> f32 {
     px[0] as f32 * 0.2126 + px[1] as f32 * 0.7152 + px[2] as f32 * 0.0722
 }
 
+#[test]
+fn linear_color_stage_preserves_headroom_and_neutral_is_exact() {
+    let neutral = DevelopSettings::default();
+    let (mut er, mut eg, mut eb) = (1.25f32, 0.42, 0.18);
+    apply_color_linear(&neutral, None, &mut er, &mut eg, &mut eb);
+    let exact = [er, eg, eb];
+    assert_eq!(exact, [1.25, 0.42, 0.18]);
+
+    let mut settings = DevelopSettings::default();
+    settings.saturation = 100.0;
+    let (mut wr, mut wg, mut wb) = (1.25f32, 0.42, 0.18);
+    apply_color_linear(&settings, None, &mut wr, &mut wg, &mut wb);
+    let wide = [wr, wg, wb];
+    assert!(wide.iter().all(|v| v.is_finite()));
+    assert!(
+        wide[0] > 1.0,
+        "linear colour clipped highlight headroom: {wide:?}"
+    );
+}
+
 /// 64×64 grey tilemap with a horizontal sine ripple of ±`amp` around `mean`
 /// (period 32 px) — smooth mid-scale structure the guided base averages out,
 /// which is exactly what Clarity/Defog act on.

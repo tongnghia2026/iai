@@ -362,9 +362,26 @@ pub fn rotate_oklab_hue(r: f32, g: f32, b: f32, deg: f32) -> (f32, f32, f32) {
     if deg.abs() < 1e-4 {
         return (r, g, b);
     }
-    let lr = srgb_to_linear_scalar(r);
-    let lg = srgb_to_linear_scalar(g);
-    let lb = srgb_to_linear_scalar(b);
+    let (lr, lg, lb) = (
+        srgb_to_linear_scalar(r),
+        srgb_to_linear_scalar(g),
+        srgb_to_linear_scalar(b),
+    );
+    let (lr2, lg2, lb2) = rotate_oklab_hue_linear(lr, lg, lb, deg);
+    (
+        linear_to_srgb_scalar(lr2),
+        linear_to_srgb_scalar(lg2),
+        linear_to_srgb_scalar(lb2),
+    )
+}
+
+/// Linear-light twin of [`rotate_oklab_hue`]. It deliberately does not clamp:
+/// scene highlights and wide-gamut colours keep their headroom until the final
+/// output transform.
+pub fn rotate_oklab_hue_linear(lr: f32, lg: f32, lb: f32, deg: f32) -> (f32, f32, f32) {
+    if deg.abs() < 1e-4 {
+        return (lr, lg, lb);
+    }
     let l = 0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb;
     let m = 0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb;
     let s = 0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb;
@@ -389,11 +406,7 @@ pub fn rotate_oklab_hue(r: f32, g: f32, b: f32, deg: f32) -> (f32, f32, f32) {
     let lr2 = 4.0767416621 * l2 - 3.3077115913 * m2 + 0.2309699292 * s2;
     let lg2 = -1.2684380046 * l2 + 2.6097574011 * m2 - 0.3413193965 * s2;
     let lb2 = -0.0041960863 * l2 - 0.7034186147 * m2 + 1.7076147010 * s2;
-    (
-        linear_to_srgb_scalar(lr2),
-        linear_to_srgb_scalar(lg2),
-        linear_to_srgb_scalar(lb2),
-    )
+    (lr2, lg2, lb2)
 }
 
 /// Oklab/Oklch hue of an sRGB colour (channels in [0,1]) as degrees in [0,360).

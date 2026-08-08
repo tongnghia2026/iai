@@ -15,15 +15,41 @@ pub(crate) fn apply_color(
     g: &mut f32,
     b: &mut f32,
 ) {
+    if settings.saturation.abs() <= 0.001 && settings.vibrance.abs() <= 0.001 && curves.is_none() {
+        return;
+    }
+    let (mut rl, mut gl, mut bl) = (srgb_to_linear(*r), srgb_to_linear(*g), srgb_to_linear(*b));
+    apply_color_linear(settings, curves, &mut rl, &mut gl, &mut bl);
+    *r = linear_to_srgb(rl).clamp(0.0, 1.0);
+    *g = linear_to_srgb(gl).clamp(0.0, 1.0);
+    *b = linear_to_srgb(bl).clamp(0.0, 1.0);
+}
+
+/// Linear working-space colour stage. Classification still samples a bounded
+/// display encoding (the existing UCS/HSV slider semantics), while every actual
+/// correction stays linear and unclamped. This is the RAW path's #10 building
+/// block; [`apply_color`] remains the bit-compatible Identity/PTS wrapper.
+pub(crate) fn apply_color_linear(
+    settings: &DevelopSettings,
+    curves: Option<&MixerCurves>,
+    r: &mut f32,
+    g: &mut f32,
+    b: &mut f32,
+) {
     let has_global_saturation =
         settings.saturation.abs() > 0.001 || settings.vibrance.abs() > 0.001;
     if !has_global_saturation && curves.is_none() {
         return;
     }
 
-    let luma = luminance_f32(*r, *g, *b).clamp(0.0, 1.0);
+    let (sr, sg, sb) = (
+        linear_to_srgb(*r).clamp(0.0, 1.0),
+        linear_to_srgb(*g).clamp(0.0, 1.0),
+        linear_to_srgb(*b).clamp(0.0, 1.0),
+    );
+    let luma = luminance_f32(sr, sg, sb).clamp(0.0, 1.0);
     let (mixer_hue, mixer_sat, mixer_lum) = match curves {
-        Some(c) => mixer_adjustments_for_color(c, *r, *g, *b, luma),
+        Some(c) => mixer_adjustments_for_color(c, sr, sg, sb, luma),
         None => (0.0, 0.0, 0.0),
     };
 
@@ -34,16 +60,11 @@ pub(crate) fn apply_color(
         // already carries the single chroma/luma gate, and the rotation is a
         // no-op on near-neutral pixels, so no extra guard/blend is needed.
         let shift_deg = eased_control(mixer_hue) * MIXER_HUE_SHIFT_MAX_DEG;
-        let (nr, ng, nb) = crate::core::color::rotate_oklab_hue(*r, *g, *b, shift_deg);
+        let (nr, ng, nb) = crate::core::color::rotate_oklab_hue_linear(*r, *g, *b, shift_deg);
         *r = nr;
         *g = ng;
         *b = nb;
     }
-
-    // Oklab helpers above accept display-encoded sRGB. From here onward the
-    // colour transform runs in linear light: chroma is anchored to real
-    // Rec.709 luminance, then the result is encoded and clamped once at exit.
-    let (mut rl, mut gl, mut bl) = (srgb_to_linear(*r), srgb_to_linear(*g), srgb_to_linear(*b));
 
     let global_sat_delta = eased_control(settings.saturation);
     let mixer_sat_delta = eased_control(mixer_sat);
@@ -52,21 +73,17 @@ pub(crate) fn apply_color(
     // muted colours and leaves already-vivid ones (chroma ≥ 0.35) untouched —
     // the old HSL-saturation shaping still fed vivid colours a residual boost,
     // which is Saturation's job, not Vividness's.
-    let vib_w = 1.0 - smootherstep(0.10, 0.35, rgb_chroma(rl, gl, bl));
+    let vib_w = 1.0 - smootherstep(0.10, 0.35, rgb_chroma(*r, *g, *b));
     let vib_delta = vibrance * vib_w * 0.88;
     let factor = saturation_factor(global_sat_delta, mixer_sat_delta, vib_delta);
     if (factor - 1.0).abs() > 0.001 {
-        scale_linear_chroma_around_luma(&mut rl, &mut gl, &mut bl, factor);
+        scale_linear_chroma_around_luma(r, g, b, factor);
     }
 
     let lum_delta = eased_control(mixer_lum);
     if lum_delta.abs() > 0.001 {
-        apply_mixer_brightness(&mut rl, &mut gl, &mut bl, lum_delta);
+        apply_mixer_brightness(r, g, b, lum_delta);
     }
-
-    *r = linear_to_srgb(rl).clamp(0.0, 1.0);
-    *g = linear_to_srgb(gl).clamp(0.0, 1.0);
-    *b = linear_to_srgb(bl).clamp(0.0, 1.0);
 }
 
 /// Mixer Luminance = a RATIO-PRESERVING brightness gain (an HSB-style
