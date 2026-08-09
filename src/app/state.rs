@@ -559,11 +559,12 @@ pub struct DevelopPreviewState {
     pub pending_settings: Option<crate::core::develop::DevelopSettings>,
     pub last_preview_settings: crate::core::develop::DevelopSettings,
     pub rx: Option<std::sync::mpsc::Receiver<DevelopPreviewResult>>,
-    /// Debounced commit-quality CPU bake for the Detail group: the shader
-    /// cannot run Sharpening/NR (full-res neighbourhood passes), so a
-    /// Detail-engaged edit schedules this bake to land over the GPU preview
-    /// once the sliders go quiet. Any newer edit re-schedules it.
+    /// Debounced commit-quality full-resolution settled frame. The live GPU
+    /// path may use proxies while dragging; after a short quiet period this
+    /// exact bake replaces it, so the frame visible before Apply is the frame
+    /// that will be committed. Any newer edit re-schedules it.
     pub detail_refine_at: Option<std::time::Instant>,
+    pub detail_refine_waiting_for_release: bool,
     pub detail_refine_settings: Option<crate::core::develop::DevelopSettings>,
 }
 
@@ -1307,6 +1308,7 @@ impl App {
                 develop_local_drag: None,
                 develop_session: Vec::new(),
                 develop_bake_all: None,
+                develop_commit_after_refine: false,
                 develop_thumbs: std::collections::HashMap::new(),
                 pending_develop: Vec::new(),
                 develop_gpu_preview_dirty: false,

@@ -209,6 +209,7 @@ impl App {
     /// another modal takes over while the fallback in-canvas dialog is up (the
     /// documents stay open; only the session bookkeeping is abandoned).
     pub(crate) fn abandon_develop_session(&mut self) {
+        self.dev.develop_commit_after_refine = false;
         self.shell.ui.show_develop_dialog = false;
         self.cancel_develop_preview();
         self.dev.develop_session.clear();
@@ -491,6 +492,7 @@ impl App {
                 last_preview_settings: crate::core::develop::DevelopSettings::default(),
                 rx: None,
                 detail_refine_at: None,
+                detail_refine_waiting_for_release: false,
                 detail_refine_settings: None,
             }
         };
@@ -619,8 +621,10 @@ impl App {
         &mut self,
         settings: crate::core::develop::DevelopSettings,
     ) -> bool {
-        // Quiet period after the last edit before the Detail bake fires — long
-        // enough to not stack bakes mid-drag, short enough to feel live.
+        // Detail has no realtime GPU implementation, so it alone receives a
+        // quiet-period CPU refine. Tone/WB/Colour must never launch a full RAW
+        // bake after every mouse release: that worker saturates Rayon and makes
+        // the next slider wait. Open Image separately requests one exact bake.
         const DETAIL_REFINE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
         let (layer_id, original_tiles, needs_restore, immediate_eligible) = {
             let Some(preview) = &mut self.dev.develop_preview else {
@@ -642,18 +646,20 @@ impl App {
                 || settings.differs_only_white_balance(&preview.last_preview_settings)
                 || settings.preview_proxy_free();
             preview.job_id = preview.job_id.wrapping_add(1);
-            preview.processing = false;
             preview.pending_settings = None;
-            preview.rx = None;
+            // Keep an already-running receiver alive. Rayon work cannot be
+            // cancelled, so dropping it here used to make `processing` look
+            // false and allowed another full-image refine to start while the
+            // stale one was still consuming CPU. The bumped job id makes its
+            // result harmless; polling it is what releases the single-flight
+            // gate before the newest settled settings are baked.
 
-            // The shader cannot preview Detail (Sharpening/NR are full-res
-            // neighbourhood passes), so while Detail is engaged every edit
-            // schedules a debounced commit-quality CPU bake that lands over
-            // this GPU preview once the sliders go quiet (fired from
-            // `poll_develop_preview`; the job_id bump above already
-            // invalidates any in-flight result).
             if settings.has_detail() {
-                preview.detail_refine_at = Some(std::time::Instant::now() + DETAIL_REFINE_DEBOUNCE);
+                preview.detail_refine_at = if preview.detail_refine_waiting_for_release {
+                    None
+                } else {
+                    Some(std::time::Instant::now() + DETAIL_REFINE_DEBOUNCE)
+                };
                 preview.detail_refine_settings = Some(settings.clone());
             } else {
                 preview.detail_refine_at = None;
@@ -697,6 +703,37 @@ impl App {
         }
 
         true
+    }
+
+    /// Keep expensive settled rendering out of an active slider drag. On
+    /// release, arm a short debounce so the last interactive GPU frame paints
+    /// first and only the final settings receive a full-resolution bake.
+    pub(crate) fn set_develop_controls_pointer_down(&mut self, down: bool) {
+        let Some(preview) = &mut self.dev.develop_preview else {
+            return;
+        };
+        let was_down = preview.detail_refine_waiting_for_release;
+        preview.detail_refine_waiting_for_release = down;
+        if down {
+            preview.detail_refine_at = None;
+        } else if was_down && preview.detail_refine_settings.is_some() {
+            preview.detail_refine_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(120));
+        }
+        if was_down != down {
+            // Pointer state switches RAW colour between the old fast chroma
+            // reconstruction path (down) and exact per-pixel scene colour
+            // (released). Recompose even when the slider value itself did not
+            // change on this event.
+            self.dev.develop_gpu_preview_dirty = true;
+            self.dev.develop_gpu_preview_immediate = true;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            if let Some(w) = &self.win.develop_window {
+                w.request_redraw();
+            }
+        }
     }
 
     pub(super) fn spawn_develop_preview_job(
@@ -784,8 +821,8 @@ impl App {
         true
     }
 
-    /// Fire the debounced Detail bake scheduled by `apply_develop_preview_gpu`
-    /// once its quiet period has passed. Waits out an in-flight job instead of
+    /// Fire the debounced commit-quality settled bake scheduled by
+    /// `apply_develop_preview_gpu`. Waits out an in-flight job instead of
     /// stacking a second full-image bake on top of it.
     pub(super) fn fire_due_detail_refine(&mut self) {
         let settings = {

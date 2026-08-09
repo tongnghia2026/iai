@@ -36,22 +36,70 @@ pub(crate) fn apply_color_linear(
     g: &mut f32,
     b: &mut f32,
 ) {
+    apply_color_linear_classified(settings, curves, None, r, g, b);
+}
+
+/// Apply linear-light colour corrections while optionally classifying mixer
+/// bands from the camera-look display colour the user actually sees.
+pub(crate) fn apply_color_linear_classified(
+    settings: &DevelopSettings,
+    curves: Option<&MixerCurves>,
+    classification: Option<[f32; 3]>,
+    r: &mut f32,
+    g: &mut f32,
+    b: &mut f32,
+) {
     let has_global_saturation =
         settings.saturation.abs() > 0.001 || settings.vibrance.abs() > 0.001;
     if !has_global_saturation && curves.is_none() {
         return;
     }
 
-    let (sr, sg, sb) = (
-        linear_to_srgb(*r).clamp(0.0, 1.0),
-        linear_to_srgb(*g).clamp(0.0, 1.0),
-        linear_to_srgb(*b).clamp(0.0, 1.0),
-    );
+    let [sr, sg, sb] = classification.unwrap_or_else(|| {
+        [
+            linear_to_srgb(*r).clamp(0.0, 1.0),
+            linear_to_srgb(*g).clamp(0.0, 1.0),
+            linear_to_srgb(*b).clamp(0.0, 1.0),
+        ]
+    });
     let luma = luminance_f32(sr, sg, sb).clamp(0.0, 1.0);
-    let (mixer_hue, mixer_sat, mixer_lum) = match curves {
+    let (mut mixer_hue, mut mixer_sat, mut mixer_lum) = match curves {
         Some(c) => mixer_adjustments_for_color(c, sr, sg, sb, luma),
         None => (0.0, 0.0, 0.0),
     };
+
+    if curves.is_some_and(|c| c.algorithm == ColorMixerAlgorithm::V2) {
+        let mut color = crate::core::perceptual_color::working_rgb_to_perceptual(
+            [*r, *g, *b],
+            crate::core::working_color::WorkingColorSpace::LinearSrgb,
+        );
+        color.hue = (color.hue + (eased_control(mixer_hue) * MIXER_HUE_SHIFT_MAX_DEG).to_radians())
+            .rem_euclid(std::f32::consts::TAU);
+        let sat_delta = eased_control(mixer_sat);
+        let chroma_scale = if sat_delta >= 0.0 {
+            1.0 + 1.15 * sat_delta
+        } else {
+            1.0 + 0.95 * sat_delta
+        };
+        color.chroma *= chroma_scale.max(0.0);
+        let light_delta = eased_control(mixer_lum);
+        let room = if light_delta >= 0.0 {
+            (1.0 - color.lightness).max(0.0)
+        } else {
+            color.lightness.max(0.0)
+        };
+        color.lightness += light_delta * 0.32 * room;
+        let converted = crate::core::perceptual_color::perceptual_to_working_rgb(
+            color,
+            crate::core::working_color::WorkingColorSpace::LinearSrgb,
+        );
+        *r = converted[0];
+        *g = converted[1];
+        *b = converted[2];
+        mixer_hue = 0.0;
+        mixer_sat = 0.0;
+        mixer_lum = 0.0;
+    }
 
     if mixer_hue.abs() > 0.001 {
         // Rotate hue in Oklab — the SAME perceptual space band membership is

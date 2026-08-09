@@ -93,6 +93,7 @@ impl App {
         if actions.develop.open_develop_dialog {
             self.open_develop_window(event_loop);
         }
+        self.set_develop_controls_pointer_down(actions.develop.develop_controls_pointer_down);
         if let Some(settings) = actions.develop.set_develop_settings.take() {
             self.shell.ui.develop_settings = settings.clone();
             if self.shell.ui.show_develop_dialog && self.dev.develop_preview.is_some() {

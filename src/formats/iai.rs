@@ -122,6 +122,7 @@ fn build_canvas_from_meta<R: Read + Seek>(
     let dpi = meta["dpi"].as_f64().unwrap_or(72.0) as f32;
     let color_space = match meta["color_space"].as_str().unwrap_or("sRGB") {
         "AdobeRGB" => ColorSpace::AdobeRGB,
+        "DisplayP3" => ColorSpace::DisplayP3,
         "ProPhoto" => ColorSpace::ProPhoto,
         _ => ColorSpace::SRGB,
     };
@@ -133,6 +134,13 @@ fn build_canvas_from_meta<R: Read + Seek>(
     canvas.color_space = color_space;
     canvas.metadata.author = meta["author"].as_str().unwrap_or("").to_string();
     canvas.metadata.description = meta["description"].as_str().unwrap_or("").to_string();
+    canvas.metadata.develop_working_space = match meta["develop_working_space"].as_str() {
+        Some("LinearProPhoto") => crate::core::working_color::WorkingColorSpace::LinearProPhoto,
+        Some("ACEScg") => crate::core::working_color::WorkingColorSpace::AcesCg,
+        _ => crate::core::working_color::WorkingColorSpace::LinearSrgb,
+    };
+    canvas.metadata.color_pipeline_version =
+        meta["color_pipeline_version"].as_u64().unwrap_or(1) as u16;
     canvas.metadata.swatches = super::iai_palette::json_to_palette(meta.get("document_swatches"));
     // 16-bit mode (post-B2 key; absent on older files = 8-bit). Keeps a reopened
     // 16-bit document in 16-bit mode so its first edit preserves precision
@@ -634,6 +642,12 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
         "bit_depth": bit_depth,
         "author": canvas.metadata.author,
         "description": canvas.metadata.description,
+        "develop_working_space": match canvas.metadata.develop_working_space {
+            crate::core::working_color::WorkingColorSpace::LinearSrgb => "LinearSrgb",
+            crate::core::working_color::WorkingColorSpace::AcesCg => "ACEScg",
+            crate::core::working_color::WorkingColorSpace::LinearProPhoto => "LinearProPhoto",
+        },
+        "color_pipeline_version": canvas.metadata.color_pipeline_version,
         "document_swatches": super::iai_palette::palette_to_json(&canvas.metadata.swatches),
         "layer_count": canvas.layer_stack.layers.len(),
         "active_layer": canvas.layer_stack.active_idx,
@@ -964,6 +978,7 @@ fn color_space_to_str(cs: crate::core::canvas::ColorSpace) -> &'static str {
     match cs {
         crate::core::canvas::ColorSpace::SRGB => "sRGB",
         crate::core::canvas::ColorSpace::AdobeRGB => "AdobeRGB",
+        crate::core::canvas::ColorSpace::DisplayP3 => "DisplayP3",
         crate::core::canvas::ColorSpace::ProPhoto => "ProPhoto",
         crate::core::canvas::ColorSpace::LinearRGB => "LinearRGB",
     }

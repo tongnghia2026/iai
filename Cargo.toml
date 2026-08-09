@@ -13,6 +13,10 @@ readme = "README.md"
 name = "iai"
 path = "src/lib.rs"
 
+[features]
+default = []
+jzazbz-prototype = []
+
 [[bin]]
 name = "iai"
 path = "src/main.rs"

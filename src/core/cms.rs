@@ -21,6 +21,8 @@ pub const DEFAULT_INTENT: Intent = Intent::RelativeColorimetric;
 pub enum WorkingProfile {
     Srgb,
     AdobeRgb,
+    DisplayP3,
+    ProPhoto,
 }
 
 impl WorkingProfile {
@@ -28,6 +30,8 @@ impl WorkingProfile {
         match self {
             WorkingProfile::Srgb => "sRGB IEC61966-2.1",
             WorkingProfile::AdobeRgb => "Adobe RGB (1998)",
+            WorkingProfile::DisplayP3 => "Display P3",
+            WorkingProfile::ProPhoto => "ProPhoto RGB",
         }
     }
 
@@ -35,11 +39,18 @@ impl WorkingProfile {
         match self {
             WorkingProfile::Srgb => srgb_profile(),
             WorkingProfile::AdobeRgb => adobe_rgb_profile(),
+            WorkingProfile::DisplayP3 => display_p3_profile(),
+            WorkingProfile::ProPhoto => prophoto_profile(),
         }
     }
 
     pub fn all() -> &'static [WorkingProfile] {
-        &[WorkingProfile::Srgb, WorkingProfile::AdobeRgb]
+        &[
+            WorkingProfile::Srgb,
+            WorkingProfile::AdobeRgb,
+            WorkingProfile::DisplayP3,
+            WorkingProfile::ProPhoto,
+        ]
     }
 }
 
@@ -75,6 +86,46 @@ pub fn adobe_rgb_profile() -> Profile {
     };
     let gamma = ToneCurve::new(2.19921875);
     Profile::new_rgb(&white, &primaries, &[&gamma, &gamma, &gamma])
+        .unwrap_or_else(|_| srgb_profile())
+}
+
+/// Display P3 (D65, P3 primaries). The synthesized profile uses a 2.2 curve;
+/// image import/export still delegates the exact profile transform to lcms.
+pub fn display_p3_profile() -> Profile {
+    rgb_profile(
+        (0.3127, 0.3290),
+        [(0.680, 0.320), (0.265, 0.690), (0.150, 0.060)],
+        2.2,
+    )
+}
+
+/// ProPhoto RGB (D50 primaries, 1.8 transfer curve).
+pub fn prophoto_profile() -> Profile {
+    rgb_profile(
+        (0.3457, 0.3585),
+        [(0.7347, 0.2653), (0.1596, 0.8404), (0.0366, 0.0001)],
+        1.8,
+    )
+}
+
+fn rgb_profile(white_xy: (f64, f64), xy: [(f64, f64); 3], gamma: f64) -> Profile {
+    let white = CIExyY {
+        x: white_xy.0,
+        y: white_xy.1,
+        Y: 1.0,
+    };
+    let primary = |p: (f64, f64)| CIExyY {
+        x: p.0,
+        y: p.1,
+        Y: 1.0,
+    };
+    let primaries = CIExyYTRIPLE {
+        Red: primary(xy[0]),
+        Green: primary(xy[1]),
+        Blue: primary(xy[2]),
+    };
+    let curve = ToneCurve::new(gamma);
+    Profile::new_rgb(&white, &primaries, &[&curve, &curve, &curve])
         .unwrap_or_else(|_| srgb_profile())
 }
 
@@ -446,6 +497,22 @@ pub fn convert_rgba8(buf: &mut [u8], src: &Profile, dst: &Profile, intent: Inten
     true
 }
 
+/// 16-bit RGB-profile conversion with alpha passed through by lcms. This is the
+/// precision-preserving path for tagged TIFF/PNG and profile roundtrip tests.
+pub fn convert_rgba16(buf: &mut [u16], src: &Profile, dst: &Profile, intent: Intent) -> bool {
+    if buf.len() % 4 != 0 {
+        return false;
+    }
+    let transform: Transform<[u16; 4], [u16; 4]> =
+        match Transform::new(src, PixelFormat::RGBA_16, dst, PixelFormat::RGBA_16, intent) {
+            Ok(transform) => transform,
+            Err(_) => return false,
+        };
+    let pixels: &mut [[u16; 4]] = bytemuck::cast_slice_mut(buf);
+    transform.transform_in_place(pixels);
+    true
+}
+
 // ── Soft proofing (Phase B) ──────────────────────────────────────────────────
 //
 // A soft-proof simulates, on the sRGB display, how the image will look once
@@ -523,7 +590,37 @@ pub fn build_display_lut(
     monitor_icc: Option<&[u8]>,
     size: usize,
 ) -> Option<Vec<u8>> {
+    build_document_display_lut(None, proof_icc, gamut_warn, monitor_icc, size)
+}
+
+/// Build the display LUT when the canvas pixels are encoded in an explicitly
+/// assigned RGB document profile. The first transform converts document RGB to
+/// the sRGB display/soft-proof connection space; proof and monitor transforms
+/// are then composed exactly as in [`build_display_lut`].
+pub fn build_document_display_lut(
+    document_icc: Option<&[u8]>,
+    proof_icc: Option<&[u8]>,
+    gamut_warn: bool,
+    monitor_icc: Option<&[u8]>,
+    size: usize,
+) -> Option<Vec<u8>> {
     let mut grid = identity_grid(size);
+
+    if let Some(document_icc) = document_icc {
+        let document = profile_from_bytes(document_icc)?;
+        if !name_is_srgb(&profile_name(&document)) {
+            let srgb = srgb_profile();
+            let transform: Transform<[u8; 3], [u8; 3]> = Transform::new(
+                &document,
+                PixelFormat::RGB_8,
+                &srgb,
+                PixelFormat::RGB_8,
+                DEFAULT_INTENT,
+            )
+            .ok()?;
+            transform.transform_in_place(&mut grid);
+        }
+    }
 
     if let Some(proof_icc) = proof_icc {
         let mut ctx = ThreadContext::new();

@@ -18,10 +18,17 @@
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RawPreviewStats {
     pub mean_rgb: [f32; 3],
     pub mean_luma: f32,
+    pub histogram: Box<[[u32; 256]; 3]>,
+    /// Small upright, normalized-position colour reference. Unlike channel
+    /// histograms this preserves which RAW colour corresponds to which camera
+    /// JPEG colour, allowing a conservative cross-channel camera-look fit.
+    pub thumbnail_rgb: Vec<[u8; 3]>,
+    pub thumbnail_width: u32,
+    pub thumbnail_height: u32,
 }
 
 fn preview_luma_cache(
@@ -129,9 +136,11 @@ fn preview_stats(p: &RawPreview) -> Option<RawPreviewStats> {
         return None;
     }
     let n = (p.rgba.len() / 4) as f64;
+    let mut histogram = Box::new([[0u32; 256]; 3]);
     let sum = p.rgba.chunks_exact(4).fold([0.0f64; 3], |mut s, px| {
         for c in 0..3 {
             s[c] += px[c] as f64;
+            histogram[c][px[c] as usize] += 1;
         }
         s
     });
@@ -140,9 +149,27 @@ fn preview_stats(p: &RawPreview) -> Option<RawPreviewStats> {
         (sum[1] / n / 255.0) as f32,
         (sum[2] / n / 255.0) as f32,
     ];
+    const THUMB_EDGE: u32 = 24;
+    let thumbnail_width = THUMB_EDGE.min(p.width.max(1));
+    let thumbnail_height = THUMB_EDGE.min(p.height.max(1));
+    let mut thumbnail_rgb = Vec::with_capacity((thumbnail_width * thumbnail_height) as usize);
+    for ty in 0..thumbnail_height {
+        let sy = (((ty as u64 * 2 + 1) * p.height as u64) / (thumbnail_height as u64 * 2))
+            .min(p.height.saturating_sub(1) as u64) as usize;
+        for tx in 0..thumbnail_width {
+            let sx = (((tx as u64 * 2 + 1) * p.width as u64) / (thumbnail_width as u64 * 2))
+                .min(p.width.saturating_sub(1) as u64) as usize;
+            let i = (sy * p.width as usize + sx) * 4;
+            thumbnail_rgb.push([p.rgba[i], p.rgba[i + 1], p.rgba[i + 2]]);
+        }
+    }
     Some(RawPreviewStats {
         mean_rgb,
         mean_luma: 0.2126 * mean_rgb[0] + 0.7152 * mean_rgb[1] + 0.0722 * mean_rgb[2],
+        histogram,
+        thumbnail_rgb,
+        thumbnail_width,
+        thumbnail_height,
     })
 }
 
@@ -312,6 +339,10 @@ mod tests {
         // Largest wins; orientation Unknown (no RAW metadata) so dims are as-is.
         assert_eq!((p.width, p.height), (128, 96));
         assert_eq!(p.rgba.len(), 128 * 96 * 4);
+        let stats = preview_stats(&p).expect("preview stats");
+        for channel in stats.histogram.iter() {
+            assert_eq!(channel.iter().sum::<u32>(), 128 * 96);
+        }
     }
 
     #[test]

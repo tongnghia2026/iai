@@ -121,11 +121,24 @@ pub(crate) fn develop_panel_contents(
     actions: &mut UiActions,
     max_scroll_h: f32,
 ) -> (bool, bool) {
+    actions.develop.develop_controls_pointer_down = ui.input(|input| input.pointer.primary_down());
     let mut settings = data.develop.develop_settings.clone();
     let mut changed = false;
     let mut apply = false;
     let mut cancel = false;
     ui.spacing_mut().slider_width = 142.0;
+
+    ui.horizontal(|ui| {
+        ui.label("Preview");
+        let (text, color) = if data.develop.develop_preview_settled {
+            ("Full quality", egui::Color32::from_rgb(74, 180, 110))
+        } else if data.develop.develop_preview_refining {
+            ("Refining…", egui::Color32::from_rgb(220, 165, 65))
+        } else {
+            ("Interactive", egui::Color32::from_rgb(95, 155, 220))
+        };
+        ui.colored_label(color, text);
+    });
 
     // ── D4 header: RGB histogram + cursor readout + EXIF + Auto/B&W ─────────
     let header_top = ui.cursor().top();
@@ -235,6 +248,38 @@ pub(crate) fn develop_panel_contents(
             note_section(out, SEC_PRESETS, actions);
 
             let out = section(ui, data, SEC_LIGHT, "Light", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Tone Mapping");
+                    egui::ComboBox::from_id_salt("develop_tone_map_mode")
+                        .selected_text(match settings.tone_map_mode {
+                            crate::core::develop::ToneMapMode::Perceptual => "Perceptual",
+                            crate::core::develop::ToneMapMode::FilmLike => "Film-like",
+                            crate::core::develop::ToneMapMode::Neutral => "Neutral",
+                        })
+                        .show_ui(ui, |ui| {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut settings.tone_map_mode,
+                                    crate::core::develop::ToneMapMode::Perceptual,
+                                    "Perceptual — balanced skin and colour",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut settings.tone_map_mode,
+                                    crate::core::develop::ToneMapMode::FilmLike,
+                                    "Film-like — soft colour shoulder",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut settings.tone_map_mode,
+                                    crate::core::develop::ToneMapMode::Neutral,
+                                    "Neutral — minimum hue/chroma drift",
+                                )
+                                .changed();
+                        });
+                });
                 changed |= slider_row(
                     ui,
                     "Exposure",
@@ -298,6 +343,12 @@ pub(crate) fn develop_panel_contents(
                     "Saturation",
                     &mut settings.saturation,
                     -CONTROL_LIMIT..=CONTROL_LIMIT,
+                );
+                changed |= slider_row(
+                    ui,
+                    "Color Smoothing",
+                    &mut settings.color_smoothing,
+                    0.0..=100.0,
                 );
                 ui.separator();
                 changed |= grade_row(
@@ -379,6 +430,24 @@ pub(crate) fn develop_panel_contents(
             note_section(out, SEC_EFFECTS, actions);
 
             let out = section(ui, data, SEC_CURVE, "Curve", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Master Curve");
+                    changed |= ui
+                        .selectable_value(
+                            &mut settings.point_curve_mode,
+                            crate::core::develop::PointCurveMode::Perceptual,
+                            "Perceptual",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut settings.point_curve_mode,
+                            crate::core::develop::PointCurveMode::Luminance,
+                            "Luminance",
+                        )
+                        .changed();
+                    ui.label("RGB tabs remain per-channel");
+                });
                 changed |=
                     curve_editor_ui(ui, &mut settings, data.develop.develop_histogram.as_deref());
                 changed |= slider_row(
@@ -503,25 +572,39 @@ pub(crate) fn develop_panel_contents(
         });
 
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        if ui.button("Reset").clicked() {
-            settings = DevelopSettings::default();
-            changed = true;
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Cancel").clicked() {
-                cancel = true;
+    let footer_w = (ui.clip_rect().right() - ui.cursor().left()).max(1.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(footer_w, 24.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            if ui
+                .add_sized([52.0, 22.0], egui::Button::new("Reset"))
+                .clicked()
+            {
+                settings = DevelopSettings::default();
+                changed = true;
             }
-            let commit_label = if data.develop.develop_mode {
-                "Open Image"
-            } else {
-                "OK"
-            };
-            if ui.button(commit_label).clicked() {
-                apply = true;
-            }
-        });
-    });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_sized([58.0, 22.0], egui::Button::new("Cancel"))
+                    .clicked()
+                {
+                    cancel = true;
+                }
+                let commit_label = if data.develop.develop_mode {
+                    "Open Image"
+                } else {
+                    "OK"
+                };
+                if ui
+                    .add_sized([82.0, 22.0], egui::Button::new(commit_label))
+                    .clicked()
+                {
+                    apply = true;
+                }
+            });
+        },
+    );
     if changed {
         actions.develop.set_develop_settings = Some(settings);
     }

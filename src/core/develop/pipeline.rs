@@ -146,7 +146,11 @@ pub fn apply_to_tilemap_direct(
                 } else {
                     None
                 };
-                let color_bufs = if plan.use_color && valid_w > 0 && valid_h > 0 {
+                let color_bufs = if plan.use_color
+                    && plan.settings.color_smoothing > 0.001
+                    && valid_w > 0
+                    && valid_h > 0
+                {
                     Some(build_color_lowpass(
                         source_tiles,
                         &plan.tone,
@@ -277,7 +281,11 @@ pub fn apply_to_tilemap_direct(
             // re-add (attenuated) detail so a steep per-band saturation/luminance
             // push does not magnify the source JPEG's chroma blocks into patches.
             // Built once per tile, reading a halo from the source for seam-free blur.
-            let color_bufs = if plan.use_color && valid_w > 0 && valid_h > 0 {
+            let color_bufs = if plan.use_color
+                && plan.settings.color_smoothing > 0.001
+                && valid_w > 0
+                && valid_h > 0
+            {
                 Some(build_color_lowpass(
                     source_tiles,
                     &plan.tone,
@@ -591,6 +599,16 @@ pub(crate) fn mixer_edit_mask(settings: &DevelopSettings) -> Option<[bool; MIXER
 /// takes none of the edit. Mirrored in the WGSL `dev_mixer_edit_affinity`
 /// (which samples the SAME uploaded gate LUT).
 pub(crate) fn band_affinity(curves: &MixerCurves, r: f32, g: f32, b: f32) -> f32 {
+    if curves.algorithm == ColorMixerAlgorithm::V2 {
+        let lab = crate::core::perceptual_color::linear_srgb_to_oklab([
+            srgb_to_linear(r),
+            srgb_to_linear(g),
+            srgb_to_linear(b),
+        ]);
+        let p = crate::core::perceptual_color::PerceptualColor::from_oklab(lab);
+        let gate = curve_sample(&curves.gate, p.hue);
+        return (gate * smootherstep(0.008, 0.055, p.chroma)).clamp(0.0, 1.0);
+    }
     let gate = curve_sample(&curves.gate, crate::core::ucs::ucs_hue_rad(r, g, b));
     let w = mixer_weight(r, g, b, MIXER_SAT_SHIFT);
     (gate * w).clamp(0.0, 1.0)
@@ -612,6 +630,16 @@ pub(crate) fn mixer_edit_affinity(curves: &MixerCurves, region: [f32; 3]) -> f32
 }
 
 fn mixer_desat_affinity(curves: &MixerCurves, region: [f32; 3]) -> f32 {
+    if curves.algorithm == ColorMixerAlgorithm::V2 {
+        let lab = crate::core::perceptual_color::linear_srgb_to_oklab([
+            srgb_to_linear(region[0]),
+            srgb_to_linear(region[1]),
+            srgb_to_linear(region[2]),
+        ]);
+        let p = crate::core::perceptual_color::PerceptualColor::from_oklab(lab);
+        return (curve_sample(&curves.gate, p.hue) * smootherstep(0.002, 0.025, p.chroma))
+            .clamp(0.0, 1.0);
+    }
     let gate = curve_sample(
         &curves.gate,
         crate::core::ucs::ucs_hue_rad(region[0], region[1], region[2]),
@@ -931,6 +959,25 @@ impl<'a> DevelopPlan<'a> {
         let mut rf = recon(adjusted[0], dr, toned[0].clamp(0.0, 1.0));
         let mut gf = recon(adjusted[1], dg, toned[1].clamp(0.0, 1.0));
         let mut bf = recon(adjusted[2], db, toned[2].clamp(0.0, 1.0));
+
+        // Quality mode is the full-resolution direct colour transform. The
+        // guided/proxy reconstruction is now an explicit optional smoothing
+        // control instead of silently discarding half the chroma detail.
+        let smoothing = (self.settings.color_smoothing / 100.0).clamp(0.0, 1.0);
+        if smoothing < 1.0 {
+            let (mut direct_r, mut direct_g, mut direct_b) = (toned[0], toned[1], toned[2]);
+            apply_color(
+                self.settings,
+                self.mixer_curves.as_ref(),
+                &mut direct_r,
+                &mut direct_g,
+                &mut direct_b,
+            );
+            rf = direct_r + (rf - direct_r) * smoothing;
+            gf = direct_g + (gf - direct_g) * smoothing;
+            bf = direct_b + (bf - direct_b) * smoothing;
+            clamp_unit(&mut rf, &mut gf, &mut bf);
+        }
 
         if self.use_effects {
             // The colour region IS a post-tone edge-aware low-pass, so its

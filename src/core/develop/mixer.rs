@@ -14,6 +14,10 @@ struct MixerBasis {
     lagrange: Vec<[f32; MIXER_BANDS]>,
 }
 
+struct MixerBasisV2 {
+    weights: Vec<[f32; MIXER_BANDS]>,
+}
+
 /// Periodic RBF kernel (positive-definite on the circle): a truncated cosine
 /// series in the exponent, matching the reference module's interpolation.
 fn rbf_kernel(d: f32) -> f32 {
@@ -28,6 +32,22 @@ fn rbf_kernel(d: f32) -> f32 {
 /// Hue of LUT entry `i`, radians in [−π, π) — the layout `curve_sample` indexes.
 fn curve_entry_hue(i: usize) -> f32 {
     (i as f32) * std::f32::consts::TAU / (MIXER_CURVE_RES as f32) - std::f32::consts::PI
+}
+
+/// Narrow only the warm edge of Reds. The generic periodic RBF is deliberately
+/// soft, but after moving the mixer to linear light its Red/Orange overlap
+/// became visually too strong. Keep the Magenta->Red edge untouched and fade
+/// Red earlier on the shortest Red->Orange arc.
+fn red_to_orange_falloff(hue: f32, red: f32, orange: f32) -> f32 {
+    let signed_delta = |from: f32, to: f32| {
+        (to - from + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+    };
+    let arc = signed_delta(red, orange);
+    let t = signed_delta(red, hue) / arc;
+    if !(0.0..=1.0).contains(&t) {
+        return 1.0;
+    }
+    1.0 - smootherstep(0.20, 0.68, t)
 }
 
 fn mixer_basis() -> &'static MixerBasis {
@@ -70,6 +90,8 @@ fn mixer_basis() -> &'static MixerBasis {
                 }
             }
         }
+        let red_hue = node_hues[0];
+        let orange_hue = node_hues[1];
         let lagrange = (0..MIXER_CURVE_RES)
             .map(|i| {
                 let hue = curve_entry_hue(i);
@@ -81,10 +103,81 @@ fn mixer_basis() -> &'static MixerBasis {
                     }
                     *slot = v as f32;
                 }
+                row[0] *= red_to_orange_falloff(hue, red_hue, orange_hue);
                 row
             })
             .collect();
         MixerBasis { lagrange }
+    })
+}
+
+/// Periodic raised-cosine crossfade between adjacent OKLCh band centres. Each
+/// band owns an inner plateau and transitions with zero slope at both ends.
+/// Only two adjacent bands overlap and their weights sum to one, eliminating
+/// RBF overshoot, sign clamps and the old Red→Orange exception.
+fn mixer_basis_v2() -> &'static MixerBasisV2 {
+    static BASIS: std::sync::OnceLock<MixerBasisV2> = std::sync::OnceLock::new();
+    BASIS.get_or_init(|| {
+        let mut centers = [0.0f32; MIXER_BANDS];
+        for (i, c) in MIXER_COLORS.iter().enumerate() {
+            let lin = [
+                srgb_to_linear(c[0] as f32 / 255.0),
+                srgb_to_linear(c[1] as f32 / 255.0),
+                srgb_to_linear(c[2] as f32 / 255.0),
+            ];
+            centers[i] = crate::core::perceptual_color::PerceptualColor::from_oklab(
+                crate::core::perceptual_color::linear_srgb_to_oklab(lin),
+            )
+            .hue;
+        }
+        // Preserve UI band order while unwrapping once around the hue circle.
+        for i in 1..MIXER_BANDS {
+            while centers[i] <= centers[i - 1] {
+                centers[i] += std::f32::consts::TAU;
+            }
+        }
+        const INNER: f32 = 0.18;
+        let weights = (0..MIXER_CURVE_RES)
+            .map(|sample| {
+                let mut hue = curve_entry_hue(sample).rem_euclid(std::f32::consts::TAU);
+                while hue < centers[0] {
+                    hue += std::f32::consts::TAU;
+                }
+                while hue >= centers[0] + std::f32::consts::TAU {
+                    hue -= std::f32::consts::TAU;
+                }
+                let mut row = [0.0; MIXER_BANDS];
+                for i in 0..MIXER_BANDS {
+                    let j = (i + 1) % MIXER_BANDS;
+                    let left = centers[i];
+                    let right = if j == 0 {
+                        centers[0] + std::f32::consts::TAU
+                    } else {
+                        centers[j]
+                    };
+                    let mut h = hue;
+                    if i == MIXER_BANDS - 1 && h < left {
+                        h += std::f32::consts::TAU;
+                    }
+                    if h >= left && h <= right {
+                        let t = ((h - left) / (right - left)).clamp(0.0, 1.0);
+                        let blend = if t <= INNER {
+                            0.0
+                        } else if t >= 1.0 - INNER {
+                            1.0
+                        } else {
+                            let u = (t - INNER) / (1.0 - 2.0 * INNER);
+                            0.5 - 0.5 * (std::f32::consts::PI * u).cos()
+                        };
+                        row[i] = 1.0 - blend;
+                        row[j] = blend;
+                        break;
+                    }
+                }
+                row
+            })
+            .collect();
+        MixerBasisV2 { weights }
     })
 }
 
@@ -96,6 +189,7 @@ pub(crate) struct MixerCurves {
     /// 0..1 membership of the EDITED bands' hues for the full-res anti-bleed
     /// re-gate — the WGSL twin samples this exact table (uploaded per frame).
     pub(crate) gate: Vec<f32>,
+    pub(crate) algorithm: ColorMixerAlgorithm,
 }
 
 /// Interpolate the band sliders into smooth periodic curves; `None` when no
@@ -107,14 +201,19 @@ pub(crate) fn build_mixer_curves_opt(settings: &DevelopSettings) -> Option<Mixer
     if !any {
         return None;
     }
-    let basis = mixer_basis();
+    let legacy_basis = (settings.mixer_algorithm == ColorMixerAlgorithm::Legacy).then(mixer_basis);
+    let v2_basis = (settings.mixer_algorithm == ColorMixerAlgorithm::V2).then(mixer_basis_v2);
     let edited = mixer_edit_mask(settings);
     let mut hue = vec![0.0f32; MIXER_CURVE_RES];
     let mut sat = vec![0.0f32; MIXER_CURVE_RES];
     let mut lum = vec![0.0f32; MIXER_CURVE_RES];
     let mut gate = vec![0.0f32; MIXER_CURVE_RES];
     for i in 0..MIXER_CURVE_RES {
-        let l = &basis.lagrange[i];
+        let l = if let Some(basis) = legacy_basis {
+            &basis.lagrange[i]
+        } else {
+            &v2_basis.expect("V2 basis").weights[i]
+        };
         let mut h = 0.0f32;
         let mut s = 0.0f32;
         let mut b = 0.0f32;
@@ -140,13 +239,16 @@ pub(crate) fn build_mixer_curves_opt(settings: &DevelopSettings) -> Option<Mixer
     // highlights under a red edit went grey). Clamping to [min_node, max_node]
     // kills the sign-flip while leaving the intended in-span shape. Hue is left
     // free (an offset, not a gain — it is left unclipped).
-    clamp_curve_to_node_span(&mut sat, &settings.mixer_saturation);
-    clamp_curve_to_node_span(&mut lum, &settings.mixer_luminance);
+    if settings.mixer_algorithm == ColorMixerAlgorithm::Legacy {
+        clamp_curve_to_node_span(&mut sat, &settings.mixer_saturation);
+        clamp_curve_to_node_span(&mut lum, &settings.mixer_luminance);
+    }
     Some(MixerCurves {
         hue,
         sat,
         lum,
         gate,
+        algorithm: settings.mixer_algorithm,
     })
 }
 
@@ -227,6 +329,29 @@ pub(crate) fn mixer_adjustments_for_color(
     b: f32,
     luma: f32,
 ) -> (f32, f32, f32) {
+    if curves.algorithm == ColorMixerAlgorithm::V2 {
+        let lab = crate::core::perceptual_color::linear_srgb_to_oklab([
+            srgb_to_linear(r),
+            srgb_to_linear(g),
+            srgb_to_linear(b),
+        ]);
+        let perceptual = crate::core::perceptual_color::PerceptualColor::from_oklab(lab);
+        // Continuous chroma confidence protects the neutral axis without a hard
+        // hue gate. Negative saturation gets a lower floor so weak casts remain
+        // removable while exact neutrals stay fixed.
+        let normal_w = smootherstep(0.008, 0.055, perceptual.chroma);
+        let desat_w = smootherstep(0.002, 0.025, perceptual.chroma);
+        let hue = perceptual.hue;
+        let sat = curve_sample(&curves.sat, hue);
+        let lum_guard = smootherstep(0.015, 0.09, perceptual.lightness)
+            * (1.0 - smootherstep(0.90, 1.02, perceptual.lightness));
+        return (
+            (curve_sample(&curves.hue, hue) * normal_w).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
+            (sat * if sat < 0.0 { desat_w } else { normal_w }).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
+            (curve_sample(&curves.lum, hue) * normal_w * lum_guard)
+                .clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
+        );
+    }
     let h = crate::core::ucs::ucs_hue_rad(r, g, b);
     let w = mixer_weight(r, g, b, MIXER_SAT_SHIFT);
     let lum_guard = smootherstep(LUM_BLACK_LO, LUM_BLACK_HI, luma)
@@ -278,4 +403,183 @@ pub(crate) fn mixer_edit_weights(r: f32, g: f32, b: f32, luma: f32) -> (f32, f32
 
 pub(crate) fn rgb_chroma(r: f32, g: f32, b: f32) -> f32 {
     r.max(g).max(b) - r.min(g).min(b)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MixerTarget {
+    pub band: usize,
+    pub hue_radians: f32,
+    pub confidence: f32,
+}
+
+/// Engine API for a future targeted-adjustment eyedropper. Keeping this out of
+/// the main UI preserves the existing Photoshop-style panel until Phase 7.
+pub fn mixer_target_from_srgb(rgb: [f32; 3]) -> MixerTarget {
+    let lab = crate::core::perceptual_color::linear_srgb_to_oklab([
+        srgb_to_linear(rgb[0]),
+        srgb_to_linear(rgb[1]),
+        srgb_to_linear(rgb[2]),
+    ]);
+    let p = crate::core::perceptual_color::PerceptualColor::from_oklab(lab);
+    let basis = mixer_basis_v2();
+    let sample = (((p.hue + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+        / std::f32::consts::TAU)
+        * MIXER_CURVE_RES as f32) as usize
+        % MIXER_CURVE_RES;
+    let (band, _) = basis.weights[sample]
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap();
+    MixerTarget {
+        band,
+        hue_radians: p.hue,
+        confidence: smootherstep(0.008, 0.055, p.chroma),
+    }
+}
+
+/// Per-pixel grayscale mask value for debug/targeted preview.
+pub fn mixer_mask_preview(settings: &DevelopSettings, rgb: [f32; 3]) -> f32 {
+    build_mixer_curves_opt(settings)
+        .map(|curves| band_affinity(&curves, rgb[0], rgb[1], rgb[2]))
+        .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+    use crate::core::perceptual_color::{linear_srgb_to_oklab, PerceptualColor};
+
+    fn circular_error(a: f32, b: f32) -> f32 {
+        let d = (a - b).abs().rem_euclid(std::f32::consts::TAU);
+        d.min(std::f32::consts::TAU - d)
+    }
+
+    /// Periodic Catmull-Rom candidate evaluated for kernel selection. It is not
+    /// used in production because its outer lobes become negative.
+    fn cubic_candidate_weights(t: f32) -> [f32; 4] {
+        let t2 = t * t;
+        let t3 = t2 * t;
+        [
+            -0.5 * t + t2 - 0.5 * t3,
+            1.0 - 2.5 * t2 + 1.5 * t3,
+            0.5 * t + 2.0 * t2 - 1.5 * t3,
+            -0.5 * t2 + 0.5 * t3,
+        ]
+    }
+
+    #[test]
+    fn raised_cosine_wins_kernel_measurement_over_periodic_cubic() {
+        let mut cubic_negative = 0;
+        let mut cubic_sum_error = 0.0f32;
+        for i in 0..=256 {
+            let w = cubic_candidate_weights(i as f32 / 256.0);
+            cubic_negative += w.iter().filter(|&&v| v < -1.0e-7).count();
+            cubic_sum_error = cubic_sum_error.max((w.iter().sum::<f32>() - 1.0).abs());
+        }
+        assert!(
+            cubic_negative > 0,
+            "cubic candidate unexpectedly has no negative lobes"
+        );
+        assert!(cubic_sum_error < 2.0e-6);
+        assert!(mixer_basis_v2().weights.iter().flatten().all(|&v| v >= 0.0));
+    }
+
+    #[test]
+    fn raised_cosine_is_normalized_nonnegative_and_periodic() {
+        let basis = mixer_basis_v2();
+        for row in &basis.weights {
+            assert!(row.iter().all(|&w| (0.0..=1.0).contains(&w)));
+            assert!((row.iter().sum::<f32>() - 1.0).abs() < 2.0e-6);
+            assert!(row.iter().filter(|&&w| w > 1.0e-6).count() <= 2);
+        }
+        for band in 0..MIXER_BANDS {
+            for opposite in 0..MIXER_BANDS {
+                if (band + 4) % MIXER_BANDS == opposite {
+                    let max_joint = basis
+                        .weights
+                        .iter()
+                        .map(|w| w[band].min(w[opposite]))
+                        .fold(0.0, f32::max);
+                    assert!(max_joint <= 1.0e-6);
+                }
+            }
+        }
+        let seam_delta: f32 = basis.weights[0]
+            .iter()
+            .zip(&basis.weights[MIXER_CURVE_RES - 1])
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(seam_delta < 0.08, "0/360 seam delta {seam_delta}");
+    }
+
+    #[test]
+    fn v2_axes_preserve_the_other_oklch_components() {
+        let input = [0.42, 0.13, 0.07];
+        let encoded = [
+            linear_to_srgb(input[0]),
+            linear_to_srgb(input[1]),
+            linear_to_srgb(input[2]),
+        ];
+        let before = PerceptualColor::from_oklab(linear_srgb_to_oklab(input));
+        for axis in 0..3 {
+            let mut settings = DevelopSettings::default();
+            let band = 1; // orange
+            match axis {
+                0 => settings.mixer_hue[band] = 80.0,
+                1 => settings.mixer_saturation[band] = 80.0,
+                _ => settings.mixer_luminance[band] = 80.0,
+            }
+            let curves = build_mixer_curves_opt(&settings).unwrap();
+            let [mut r, mut g, mut b] = input;
+            super::super::apply_color_linear_classified(
+                &settings,
+                Some(&curves),
+                Some(encoded),
+                &mut r,
+                &mut g,
+                &mut b,
+            );
+            let after = PerceptualColor::from_oklab(linear_srgb_to_oklab([r, g, b]));
+            match axis {
+                0 => {
+                    assert!((after.lightness - before.lightness).abs() < 2.0e-5);
+                    assert!((after.chroma - before.chroma).abs() < 2.0e-5);
+                }
+                1 => {
+                    assert!((after.lightness - before.lightness).abs() < 2.0e-5);
+                    assert!(circular_error(after.hue, before.hue) < 2.0e-5);
+                }
+                _ => {
+                    assert!((after.chroma - before.chroma).abs() < 2.0e-5);
+                    assert!(circular_error(after.hue, before.hue) < 2.0e-5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_algorithm_deserializes_legacy_while_new_defaults_use_v2() {
+        let old = serde_json::from_str::<DevelopSettings>("{}").unwrap();
+        assert_eq!(old.mixer_algorithm, ColorMixerAlgorithm::Legacy);
+        assert_eq!(
+            DevelopSettings::default().mixer_algorithm,
+            ColorMixerAlgorithm::V2
+        );
+    }
+
+    #[test]
+    fn targeted_api_returns_band_and_continuous_mask() {
+        let target = mixer_target_from_srgb([0.82, 0.46, 0.22]);
+        assert!(target.band < MIXER_BANDS && target.confidence > 0.9);
+        let mut settings = DevelopSettings::default();
+        settings.mixer_saturation[target.band] = 100.0;
+        let selected = mixer_mask_preview(&settings, [0.82, 0.46, 0.22]);
+        let neutral = mixer_mask_preview(&settings, [0.5, 0.5, 0.5]);
+        assert!(
+            selected > neutral + 0.5,
+            "selected={selected}, neutral={neutral}"
+        );
+    }
 }

@@ -422,6 +422,8 @@ impl Canvas {
         self.color_space = match target {
             cms::WorkingProfile::Srgb => ColorSpace::SRGB,
             cms::WorkingProfile::AdobeRgb => ColorSpace::AdobeRGB,
+            cms::WorkingProfile::DisplayP3 => ColorSpace::DisplayP3,
+            cms::WorkingProfile::ProPhoto => ColorSpace::ProPhoto,
         };
         self.metadata.source_profile = target.name().to_string();
         self.flatten_full();

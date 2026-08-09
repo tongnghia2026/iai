@@ -44,6 +44,7 @@ impl App {
                 .canvas
                 .flip_horizontal();
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            self.apply_proof_settings();
             self.apply_canvas_event(CanvasEvent::SelectionChanged);
         }
         if actions.doc.flip_vertical {
@@ -51,6 +52,7 @@ impl App {
                 .canvas
                 .flip_vertical();
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            self.apply_proof_settings();
             self.apply_canvas_event(CanvasEvent::SelectionChanged);
         }
         if actions.doc.rotate_cw {
@@ -242,6 +244,10 @@ impl App {
                 .canvas
                 .assign_profile(profile);
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            // Assign changes the document tag/encoding. Rebuild the display LUT
+            // immediately; otherwise the next frame can interpret the new pixel
+            // values through the previous document profile.
+            self.apply_proof_settings();
             self.shell.status_msg = format!("Assigned profile: {}", profile.name());
         }
         if let Some(profile) = actions.doc.convert_profile.take() {
@@ -249,6 +255,9 @@ impl App {
                 .canvas
                 .convert_to_profile(profile);
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            // Conversion stores pixels encoded in the destination profile, so
+            // the document-to-display LUT must change in the same UI action.
+            self.apply_proof_settings();
             self.shell.status_msg = format!("Converted to profile: {}", profile.name());
         }
         if actions.doc.convert_grayscale {

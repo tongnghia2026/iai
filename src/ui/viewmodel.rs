@@ -341,6 +341,9 @@ pub struct DevelopViewModel {
     pub develop_readout: Option<[u8; 3]>,
     /// Auto (exposure fit) works on scene-referred sessions only.
     pub develop_auto_available: bool,
+    /// Preview quality state exposed as a small debug/quality badge.
+    pub develop_preview_settled: bool,
+    pub develop_preview_refining: bool,
     pub develop_presets: std::sync::Arc<Vec<crate::core::presets::DevelopPreset>>,
     /// Develop local masks: which row is selected, which placement is armed,
     /// and the selected mask's screen-space outline.
@@ -815,6 +818,8 @@ impl Default for UiData {
                 develop_exif: None,
                 develop_readout: None,
                 develop_auto_available: false,
+                develop_preview_settled: false,
+                develop_preview_refining: false,
                 develop_presets: std::sync::Arc::new(Vec::new()),
                 develop_local_selected: None,
                 develop_local_arm: None,

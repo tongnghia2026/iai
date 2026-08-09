@@ -1264,6 +1264,17 @@ impl App {
                     .develop_preview
                     .as_ref()
                     .is_some_and(|p| p.scene.is_some() && !p.histogram_proxy.is_empty()),
+                develop_preview_settled: self.dev.develop_preview.as_ref().is_some_and(|p| {
+                    !p.gpu_preview_active
+                        && !p.processing
+                        && p.pending_settings.is_none()
+                        && p.detail_refine_at.is_none()
+                }),
+                develop_preview_refining: self
+                    .dev
+                    .develop_preview
+                    .as_ref()
+                    .is_some_and(|p| p.processing || p.detail_refine_at.is_some()),
                 develop_local_selected: self.shell.ui.develop_local_selected,
                 develop_local_arm: self.shell.ui.develop_local_arm.map(|(k, _)| k),
                 develop_local_overlay: self.build_develop_local_overlay(),

@@ -63,7 +63,13 @@ impl App {
                 zoom: self.edit.view.zoom,
                 vp_mode,
                 screen_size: [sz.width as f32, sz.height as f32],
-                proof_enabled: if self.shell.proof_enabled || self.shell.display_cms_enabled {
+                proof_enabled: if self.shell.proof_enabled
+                    || self.shell.display_cms_enabled
+                    || self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .color_space
+                        != crate::core::canvas::ColorSpace::SRGB
+                {
                     1.0
                 } else {
                     0.0
@@ -78,7 +84,14 @@ impl App {
     /// few thousand lcms2 samples); called whenever a View ▸ Proof or Display
     /// Profile setting changes. Display-only — never alters document pixels.
     pub fn apply_proof_settings(&mut self) {
-        if self.shell.proof_enabled || self.shell.display_cms_enabled {
+        let document_profile = {
+            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+            (canvas.color_space != crate::core::canvas::ColorSpace::SRGB
+                && !canvas.icc_profile.data.is_empty())
+            .then(|| canvas.icc_profile.data.clone())
+        };
+        if self.shell.proof_enabled || self.shell.display_cms_enabled || document_profile.is_some()
+        {
             let proof = if self.shell.proof_enabled {
                 Some(self.shell.proof_target.icc_bytes())
             } else {
@@ -89,7 +102,8 @@ impl App {
             } else {
                 None
             };
-            let lut = crate::core::cms::build_display_lut(
+            let lut = crate::core::cms::build_document_display_lut(
+                document_profile.as_deref(),
                 proof.as_deref(),
                 self.shell.proof_gamut_warn,
                 monitor.as_deref(),
@@ -99,6 +113,10 @@ impl App {
             if let Some(gpu) = &self.win.gpu {
                 gpu.upload_proof_lut(&lut);
             }
+        } else if let Some(gpu) = &self.win.gpu {
+            gpu.upload_proof_lut(&crate::core::cms::identity_lut(
+                crate::core::cms::PROOF_LUT_SIZE,
+            ));
         }
         self.push_canvas_uniforms();
         if let Some(w) = &self.win.window {

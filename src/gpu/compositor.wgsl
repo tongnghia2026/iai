@@ -765,17 +765,30 @@ fn dev_tone_eq_at(e: f32) -> f32 {
     return dev_local_lut_at(clamp((e + 14.0) / 20.0, 0.0, 1.0));
 }
 
-// Display-linear gamut resolution: pull chroma toward the clamped luminance
-// just enough that every channel fits [0,1]. CPU twin: gamut_clip_chroma.
+// Display-linear, hue-preserving sRGB gamut mapping in OKLCh. In-gamut input
+// is bit-identical; out-of-gamut input keeps perceptual L/h and searches C.
+// CPU twin: gamut_map::map_to_output_gamut (18 iterations; sRGB target).
 fn dev_gamut_clip_chroma(c: vec3<f32>) -> vec3<f32> {
-    let y = clamp(dev_luma_lin(c), 0.0, 1.0);
-    let d = c - vec3<f32>(y);
-    var f = 1.0;
-    if (d.r > 1e-6) { f = min(f, (1.0 - y) / d.r); } else if (d.r < -1e-6) { f = min(f, y / -d.r); }
-    if (d.g > 1e-6) { f = min(f, (1.0 - y) / d.g); } else if (d.g < -1e-6) { f = min(f, y / -d.g); }
-    if (d.b > 1e-6) { f = min(f, (1.0 - y) / d.b); } else if (d.b < -1e-6) { f = min(f, y / -d.b); }
-    f = clamp(f, 0.0, 1.0);
-    return clamp(vec3<f32>(y) + d * f, vec3(0.0), vec3(1.0));
+    if (all(c >= vec3(0.0)) && all(c <= vec3(1.0))) { return c; }
+    let lab0 = dev_linear_srgb_to_oklab(c);
+    let chroma0 = length(lab0.yz);
+    let lightness = clamp(lab0.x, 0.0, 1.0);
+    if (chroma0 <= 1e-7) {
+        return clamp(dev_oklab_to_linear_srgb(vec3(lightness, 0.0, 0.0)), vec3(0.0), vec3(1.0));
+    }
+    let direction = lab0.yz / chroma0;
+    var low = 0.0;
+    var high = chroma0;
+    for (var i = 0u; i < 18u; i = i + 1u) {
+        let mid = 0.5 * (low + high);
+        let candidate = dev_oklab_to_linear_srgb(vec3(lightness, direction * mid));
+        if (all(candidate >= vec3(-1e-6)) && all(candidate <= vec3(1.000001))) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    return clamp(dev_oklab_to_linear_srgb(vec3(lightness, direction * low)), vec3(0.0), vec3(1.0));
 }
 
 fn dev_mixer_desat_weight(c: vec3<f32>) -> f32 {
@@ -796,12 +809,15 @@ fn dev_filmlike_clip(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(lo) + (c - vec3<f32>(lo)) * scale;
 }
 
-fn dev_compress_highlight_chroma(c: vec3<f32>, mapped_n: f32, scene_n: f32) -> vec3<f32> {
+fn dev_compress_highlight_chroma(c: vec3<f32>, mapped_n: f32, scene_n: f32, mode: f32) -> vec3<f32> {
+    if (mode > 1.5) { return c; }
     let ratio = mapped_n / max(scene_n, 1e-8);
     if (ratio >= 1.0) { return c; }
     let compression = dev_smootherstep(0.02, 0.80, 1.0 - ratio);
     let highlight = dev_smootherstep(0.55, 1.0, mapped_n);
-    let amount = compression * highlight * 0.65;
+    let excursion = max(max(max(-c.r, c.r - 1.0), max(-c.g, c.g - 1.0)), max(-c.b, c.b - 1.0));
+    let strength = select(0.12 + 0.38 * dev_smootherstep(0.0, 0.25, max(excursion, 0.0)), 0.65, mode > 0.5);
+    let amount = compression * highlight * strength;
     return mix(c, vec3<f32>(mapped_n), amount);
 }
 
@@ -812,7 +828,7 @@ fn dev_restore_shadow_chroma(c: vec3<f32>) -> vec3<f32> {
     let chroma = max(max(d.r, d.g), d.b) - min(min(d.r, d.g), d.b);
     let tonal = dev_smootherstep(0.08, 0.18, y) * (1.0 - dev_smootherstep(0.38, 0.55, y));
     let colored = dev_smootherstep(0.015, 0.10, chroma);
-    let scale = 1.0 + 0.20 * tonal * colored;
+    let scale = 1.0 + 0.05 * tonal * colored;
     return vec3<f32>(y) + d * scale;
 }
 
@@ -827,20 +843,23 @@ fn dev_signed_cbrt(x: f32) -> f32 {
     return sign(x) * pow(abs(x), 0.3333333333);
 }
 
-// Oklab hue rotation on unclamped linear RGB. CPU twin: rotate_oklab_hue_linear.
-fn dev_rotate_oklab_hue_linear(c: vec3<f32>, deg: f32) -> vec3<f32> {
+// Shared OKLab core. CPU twins live in core::perceptual_color. Keep signed
+// cube roots and do not clamp: scene-linear negative/HDR values are valid.
+fn dev_linear_srgb_to_oklab(c: vec3<f32>) -> vec3<f32> {
     let ll = dev_signed_cbrt(dot(vec3<f32>(0.4122214708, 0.5363325363, 0.0514459929), c));
     let mm = dev_signed_cbrt(dot(vec3<f32>(0.2119034982, 0.6806995451, 0.1073969566), c));
     let ss = dev_signed_cbrt(dot(vec3<f32>(0.0883024619, 0.2817188376, 0.6299787005), c));
-    let big_l = 0.2104542553 * ll + 0.7936177850 * mm - 0.0040720468 * ss;
-    let aa = 1.9779984951 * ll - 2.4285922050 * mm + 0.4505937099 * ss;
-    let bb = 0.0259040371 * ll + 0.7827717662 * mm - 0.8086757660 * ss;
-    let rad = deg * 0.01745329252;
-    let na = aa * cos(rad) - bb * sin(rad);
-    let nb = aa * sin(rad) + bb * cos(rad);
-    let l2_ = big_l + 0.3963377774 * na + 0.2158037573 * nb;
-    let m2_ = big_l - 0.1055613458 * na - 0.0638541728 * nb;
-    let s2_ = big_l - 0.0894841775 * na - 1.2914855480 * nb;
+    return vec3<f32>(
+        0.2104542553 * ll + 0.7936177850 * mm - 0.0040720468 * ss,
+        1.9779984951 * ll - 2.4285922050 * mm + 0.4505937099 * ss,
+        0.0259040371 * ll + 0.7827717662 * mm - 0.8086757660 * ss,
+    );
+}
+
+fn dev_oklab_to_linear_srgb(lab: vec3<f32>) -> vec3<f32> {
+    let l2_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+    let m2_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+    let s2_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
     let l2 = l2_ * l2_ * l2_;
     let m2 = m2_ * m2_ * m2_;
     let s2 = s2_ * s2_ * s2_;
@@ -849,6 +868,15 @@ fn dev_rotate_oklab_hue_linear(c: vec3<f32>, deg: f32) -> vec3<f32> {
         -1.2684380046 * l2 + 2.6097574011 * m2 - 0.3413193965 * s2,
         -0.0041960863 * l2 - 0.7034186147 * m2 + 1.7076147010 * s2,
     );
+}
+
+// Oklab hue rotation on unclamped linear RGB. CPU twin: rotate_oklab_hue_linear.
+fn dev_rotate_oklab_hue_linear(c: vec3<f32>, deg: f32) -> vec3<f32> {
+    let lab = dev_linear_srgb_to_oklab(c);
+    let rad = deg * 0.01745329252;
+    let na = lab.y * cos(rad) - lab.z * sin(rad);
+    let nb = lab.y * sin(rad) + lab.z * cos(rad);
+    return dev_oklab_to_linear_srgb(vec3<f32>(lab.x, na, nb));
 }
 
 fn dev_scale_linear_chroma(c: vec3<f32>, factor: f32) -> vec3<f32> {
@@ -874,20 +902,55 @@ fn dev_scale_linear_chroma(c: vec3<f32>, factor: f32) -> vec3<f32> {
 
 // Full RAW colour stage on the unclamped linear working pixel. Classification
 // stays display-referred so slider band semantics remain compatible.
-fn dev_scene_color(input: vec3<f32>) -> vec3<f32> {
+fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>) -> vec3<f32> {
     var c = input;
-    let display = dev_linear_to_srgb(clamp(input, vec3(0.0), vec3(1.0)));
-    let h = dev_ucs_hue(display);
+    let display = classification;
+    let display_linear = vec3<f32>(
+        dev_srgb_to_linear_channel(display.r),
+        dev_srgb_to_linear_channel(display.g),
+        dev_srgb_to_linear_channel(display.b),
+    );
+    let display_lab = dev_linear_srgb_to_oklab(display_linear);
+    let display_chroma = length(display_lab.yz);
+    let oklch_hue = select(0.0, atan2(display_lab.z, display_lab.y), display_chroma > 0.0000001);
+    let h = select(dev_ucs_hue(display), oklch_hue, dev_effects[7] > 0.5);
     let luma = clamp(dev_luma(display), 0.0, 1.0);
-    let w = dev_mixer_weight(display, 0.06);
-    let hue_ctl = clamp(dev_mixer_curve_at(1385u, h) * w, -200.0, 200.0);
+    let legacy_w = dev_mixer_weight(display, 0.06);
+    let v2_w = dev_smootherstep(0.008, 0.055, display_chroma);
+    let w = select(legacy_w, v2_w, dev_effects[7] > 0.5);
+    var hue_ctl = clamp(dev_mixer_curve_at(1385u, h) * w, -200.0, 200.0);
     var sat_ctl = dev_mixer_curve_at(1745u, h);
-    let sat_w = select(w, dev_mixer_desat_weight(display), sat_ctl < 0.0);
+    let legacy_desat_w = dev_mixer_desat_weight(display);
+    let v2_desat_w = dev_smootherstep(0.002, 0.025, display_chroma);
+    let desat_w = select(legacy_desat_w, v2_desat_w, dev_effects[7] > 0.5);
+    let sat_w = select(w, desat_w, sat_ctl < 0.0);
     sat_ctl = clamp(sat_ctl * sat_w, -200.0, 200.0);
-    let lum_guard = dev_smootherstep(0.02, 0.14, luma)
+    let legacy_lum_guard = dev_smootherstep(0.02, 0.14, luma)
         * (1.0 - dev_smootherstep(0.82, 0.98, luma));
-    let lum_ctl = clamp(dev_mixer_curve_at(2105u, h)
-        * dev_mixer_weight(display, 0.10) * lum_guard, -200.0, 200.0);
+    let v2_lum_guard = dev_smootherstep(0.015, 0.09, display_lab.x)
+        * (1.0 - dev_smootherstep(0.90, 1.02, display_lab.x));
+    var lum_ctl = clamp(dev_mixer_curve_at(2105u, h)
+        * select(dev_mixer_weight(display, 0.10) * legacy_lum_guard,
+                 v2_w * v2_lum_guard, dev_effects[7] > 0.5), -200.0, 200.0);
+
+    if (dev_effects[7] > 0.5) {
+        var lab = dev_linear_srgb_to_oklab(c);
+        let rad = dev_eased(hue_ctl) * 45.0 * 0.01745329252;
+        let chroma = length(lab.yz);
+        var hue = select(0.0, atan2(lab.z, lab.y), chroma > 0.0000001) + rad;
+        let sat_delta = dev_eased(sat_ctl);
+        let chroma_scale = max(0.0, select(1.0 + 0.95 * sat_delta,
+                                           1.0 + 1.15 * sat_delta, sat_delta >= 0.0));
+        let light_delta = dev_eased(lum_ctl);
+        let room = select(max(lab.x, 0.0), max(1.0 - lab.x, 0.0), light_delta >= 0.0);
+        lab.x = lab.x + light_delta * 0.32 * room;
+        lab.y = chroma * chroma_scale * cos(hue);
+        lab.z = chroma * chroma_scale * sin(hue);
+        c = dev_oklab_to_linear_srgb(lab);
+        hue_ctl = 0.0;
+        sat_ctl = 0.0;
+        lum_ctl = 0.0;
+    }
 
     if (abs(hue_ctl) > 0.001) {
         c = dev_rotate_oklab_hue_linear(c, dev_eased(hue_ctl) * 45.0);
@@ -968,9 +1031,13 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     if (n > 1e-8) {
         let mapped_n = dev_scene_lut(n);
         let hw = dev_smootherstep(0.5, 1.0, mapped_n);
-        let blend = 0.90 + (0.20 - 0.90) * hw;
+        var blend = 1.0;
+        if (dev_effects[8] < 1.5) {
+            blend = 0.90 + (0.20 - 0.90) * hw;
+            if (dev_effects[8] < 0.5) { blend = min(blend + 0.10, 1.0); }
+        }
         outc = mix(pc, v * (mapped_n / n), blend);
-        outc = dev_compress_highlight_chroma(outc, mapped_n, n);
+        outc = dev_compress_highlight_chroma(outc, mapped_n, n, dev_effects[8]);
     }
     // Contrast is independent of the sigmoid shoulder: a two-sided power
     // curve fixed at black, 18.45% grey and white. CPU twin: apply_scene_contrast.
@@ -987,12 +1054,42 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     if (dev_effects[25] > 0.5) {
         outc = dev_restore_shadow_chroma(outc);
     }
-    outc = dev_scene_color(outc);
+    var classification = dev_linear_to_srgb(
+        clamp(dev_gamut_clip_chroma(dev_filmlike_clip(outc)), vec3(0.0), vec3(1.0))
+    );
+    // Classification reads the same displayed stage as the CPU
+    // `working_to_display`, including the master curve before RGB tabs.
+    if (dev_effects[26] > 0.5) {
+        if (dev_effects[9] > 0.5) {
+            var class_lab = dev_linear_srgb_to_oklab(dev_srgb_to_linear(classification));
+            class_lab.x = dev_display_lum_at(clamp(class_lab.x, 0.0, 1.0));
+            let class_curved = dev_gamut_clip_chroma(dev_oklab_to_linear_srgb(class_lab));
+            classification = dev_linear_to_srgb(clamp(class_curved, vec3(0.0), vec3(1.0)));
+        } else {
+            let class_l = clamp(dev_luma(classification), 0.0, 1.0);
+            classification = dev_apply_luma_target(classification, dev_display_lum_at(class_l));
+        }
+    }
+    if (dev_rgb_curve[0] > 0.5) {
+        classification = vec3<f32>(
+            dev_rgb_curve_at(0u, classification.r),
+            dev_rgb_curve_at(1u, classification.g),
+            dev_rgb_curve_at(2u, classification.b),
+        );
+    }
+    outc = dev_scene_color(outc, classification);
     outc = dev_gamut_clip_chroma(dev_filmlike_clip(outc));
     var g = dev_linear_to_srgb(clamp(outc, vec3(0.0), vec3(1.0)));
     if (dev_effects[26] > 0.5) {
-        let l = clamp(dev_luma(g), 0.0, 1.0);
-        g = dev_apply_luma_target(g, dev_display_lum_at(l));
+        if (dev_effects[9] > 0.5) {
+            var lab = dev_linear_srgb_to_oklab(dev_srgb_to_linear(g));
+            lab.x = dev_display_lum_at(clamp(lab.x, 0.0, 1.0));
+            let curved = dev_gamut_clip_chroma(dev_oklab_to_linear_srgb(lab));
+            g = dev_linear_to_srgb(clamp(curved, vec3(0.0), vec3(1.0)));
+        } else {
+            let l = clamp(dev_luma(g), 0.0, 1.0);
+            g = dev_apply_luma_target(g, dev_display_lum_at(l));
+        }
     }
     return clamp(g, vec3(0.0), vec3(1.0));
 }
@@ -1047,14 +1144,25 @@ fn dev_color_proxy_at(lx: f32, ly: f32) -> CrColorProxy {
 // hue, times the logistic saturation weight (midpoint 0.06 — mirrors CPU
 // MIXER_SAT_SHIFT). Exact mirror of CPU `band_affinity`, down to the LUT wrap.
 fn dev_band_affinity(c: vec3<f32>) -> f32 {
-    let h = dev_ucs_hue(c);
+    let linear = vec3<f32>(
+        dev_srgb_to_linear_channel(c.r),
+        dev_srgb_to_linear_channel(c.g),
+        dev_srgb_to_linear_channel(c.b),
+    );
+    let lab = dev_linear_srgb_to_oklab(linear);
+    let chroma = length(lab.yz);
+    let oklch_hue = select(0.0, atan2(lab.z, lab.y), chroma > 0.0000001);
+    let h = select(dev_ucs_hue(c), oklch_hue, dev_effects[7] > 0.5);
     let t = fract((h + 3.14159265) / 6.28318531) * 360.0;
     let i = min(u32(t), 359u);
     let f = t - f32(i);
     let a = dev_rgb_curve[1025u + i];
     let b = dev_rgb_curve[1025u + ((i + 1u) % 360u)];
     let gate = a + (b - a) * f;
-    let w = select(dev_mixer_weight(c, 0.06), dev_mixer_desat_weight(c), dev_effects[6] > 0.0);
+    let legacy_w = select(dev_mixer_weight(c, 0.06), dev_mixer_desat_weight(c), dev_effects[6] > 0.0);
+    let v2_w = select(dev_smootherstep(0.008, 0.055, chroma),
+                      dev_smootherstep(0.002, 0.025, chroma), dev_effects[6] > 0.0);
+    let w = select(legacy_w, v2_w, dev_effects[7] > 0.5);
     return clamp(gate * w, 0.0, 1.0);
 }
 
@@ -1257,11 +1365,9 @@ fn develop_apply(srgb_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
         toned = dev_apply_luma_target(rgb, target_l);
     }
     }
-    // Per-channel point curves, after the luma tone stage — mirrors the CPU
-    // ToneData::apply* order exactly. Scene sessions apply them inside
-    // dev_scene_display's display stage instead (dev_rgb_curve[0] is 0 there
-    // only when the curves are identity; when set, applying here matches the
-    // CPU scene chain's apply_display_curves order: luma curve, then R/G/B).
+    // Final per-channel curve pass. A scene may also use these tables earlier
+    // only to classify colour-band membership; CPU does the same classification
+    // read before applying the composed camera + user curves to final output.
     if (dev_rgb_curve[0] > 0.5) {
         toned = vec3<f32>(
             dev_rgb_curve_at(0u, toned.r),

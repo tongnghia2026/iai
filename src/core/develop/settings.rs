@@ -13,6 +13,57 @@ pub enum DevelopMixerMode {
     All,
 }
 
+#[cfg(test)]
+mod tone_v2_settings_tests {
+    use super::*;
+
+    #[test]
+    fn old_documents_keep_legacy_tone_and_curve_semantics() {
+        let mut value = serde_json::to_value(DevelopSettings::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("tone_map_mode");
+        object.remove("point_curve_mode");
+        let reopened: DevelopSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(reopened.tone_map_mode, ToneMapMode::FilmLike);
+        assert_eq!(reopened.point_curve_mode, PointCurveMode::Luminance);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ColorMixerAlgorithm {
+    Legacy,
+    V2,
+}
+
+/// Scene-to-display rendering intent. Existing documents deserialize to
+/// FilmLike, which preserves the pre-v2 response; new sessions use Perceptual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ToneMapMode {
+    Perceptual,
+    FilmLike,
+    Neutral,
+}
+
+fn legacy_tone_map_mode() -> ToneMapMode {
+    ToneMapMode::FilmLike
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PointCurveMode {
+    /// Change encoded Rec.709 luminance while retaining RGB ratios.
+    Luminance,
+    /// Change OKLab lightness while retaining perceptual chroma and hue.
+    Perceptual,
+}
+
+fn legacy_point_curve_mode() -> PointCurveMode {
+    PointCurveMode::Luminance
+}
+
+fn legacy_mixer_algorithm() -> ColorMixerAlgorithm {
+    ColorMixerAlgorithm::Legacy
+}
+
 /// Which local-mask tool the panel arms for canvas placement (view state,
 /// not serialized).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +219,8 @@ pub struct LocalAdjustment {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct DevelopSettings {
+    #[serde(default = "legacy_tone_map_mode")]
+    pub tone_map_mode: ToneMapMode,
     pub exposure: f32,
     pub contrast: f32,
     pub highlights: f32,
@@ -178,6 +231,9 @@ pub struct DevelopSettings {
     pub tint: f32,
     pub vibrance: f32,
     pub saturation: f32,
+    /// Optional region-guided colour smoothing (0 = full-resolution colour,
+    /// 100 = legacy proxy smoothing/deblocking).
+    pub color_smoothing: f32,
     /// Split-grade hue in degrees. Hue is inert while its strength is zero.
     pub grade_shadow_hue: f32,
     pub grade_shadow_strength: f32,
@@ -207,11 +263,15 @@ pub struct DevelopSettings {
     /// of the parametric curve. `[[0,0],[1,1]]` (or any points on the
     /// diagonal) = identity.
     pub curve_points: Vec<[f32; 2]>,
+    #[serde(default = "legacy_point_curve_mode")]
+    pub point_curve_mode: PointCurveMode,
     /// Per-channel point curves, applied to R/G/B after the tone stage.
     pub curve_points_r: Vec<[f32; 2]>,
     pub curve_points_g: Vec<[f32; 2]>,
     pub curve_points_b: Vec<[f32; 2]>,
     pub mixer_mode: DevelopMixerMode,
+    #[serde(default = "legacy_mixer_algorithm")]
+    pub mixer_algorithm: ColorMixerAlgorithm,
     pub mixer_hue: [f32; MIXER_BANDS],
     pub mixer_saturation: [f32; MIXER_BANDS],
     pub mixer_luminance: [f32; MIXER_BANDS],
@@ -224,6 +284,7 @@ pub struct DevelopSettings {
 impl Default for DevelopSettings {
     fn default() -> Self {
         Self {
+            tone_map_mode: ToneMapMode::Perceptual,
             exposure: 0.0,
             contrast: 0.0,
             highlights: 0.0,
@@ -234,6 +295,7 @@ impl Default for DevelopSettings {
             tint: 0.0,
             vibrance: 0.0,
             saturation: 0.0,
+            color_smoothing: 0.0,
             grade_shadow_hue: 220.0,
             grade_shadow_strength: 0.0,
             grade_highlight_hue: 35.0,
@@ -253,10 +315,12 @@ impl Default for DevelopSettings {
             curve_darks: 0.0,
             curve_shadows: 0.0,
             curve_points: identity_curve(),
+            point_curve_mode: PointCurveMode::Perceptual,
             curve_points_r: identity_curve(),
             curve_points_g: identity_curve(),
             curve_points_b: identity_curve(),
             mixer_mode: DevelopMixerMode::Saturation,
+            mixer_algorithm: ColorMixerAlgorithm::V2,
             mixer_hue: [0.0; MIXER_BANDS],
             mixer_saturation: [0.0; MIXER_BANDS],
             mixer_luminance: [0.0; MIXER_BANDS],
@@ -306,7 +370,9 @@ impl DevelopSettings {
     }
 
     pub fn same_image_effect(&self, other: &Self) -> bool {
-        self.exposure == other.exposure
+        self.tone_map_mode == other.tone_map_mode
+            && self.point_curve_mode == other.point_curve_mode
+            && self.exposure == other.exposure
             && self.contrast == other.contrast
             && self.highlights == other.highlights
             && self.shadows == other.shadows
@@ -316,6 +382,7 @@ impl DevelopSettings {
             && self.tint == other.tint
             && self.vibrance == other.vibrance
             && self.saturation == other.saturation
+            && self.color_smoothing == other.color_smoothing
             && same_grade(
                 self.grade_shadow_hue,
                 self.grade_shadow_strength,
@@ -346,6 +413,7 @@ impl DevelopSettings {
             && self.curve_points_r == other.curve_points_r
             && self.curve_points_g == other.curve_points_g
             && self.curve_points_b == other.curve_points_b
+            && self.mixer_algorithm == other.mixer_algorithm
             && self.mixer_hue == other.mixer_hue
             && self.mixer_saturation == other.mixer_saturation
             && self.mixer_luminance == other.mixer_luminance
@@ -353,7 +421,9 @@ impl DevelopSettings {
     }
 
     pub fn differs_only_color_mixer(&self, other: &Self) -> bool {
-        self.exposure == other.exposure
+        self.tone_map_mode == other.tone_map_mode
+            && self.point_curve_mode == other.point_curve_mode
+            && self.exposure == other.exposure
             && self.contrast == other.contrast
             && self.highlights == other.highlights
             && self.shadows == other.shadows
@@ -363,6 +433,7 @@ impl DevelopSettings {
             && self.tint == other.tint
             && self.vibrance == other.vibrance
             && self.saturation == other.saturation
+            && self.color_smoothing == other.color_smoothing
             && same_grade(
                 self.grade_shadow_hue,
                 self.grade_shadow_strength,
@@ -394,7 +465,8 @@ impl DevelopSettings {
             && self.curve_points_g == other.curve_points_g
             && self.curve_points_b == other.curve_points_b
             && self.locals == other.locals
-            && (self.mixer_hue != other.mixer_hue
+            && (self.mixer_algorithm != other.mixer_algorithm
+                || self.mixer_hue != other.mixer_hue
                 || self.mixer_saturation != other.mixer_saturation
                 || self.mixer_luminance != other.mixer_luminance)
     }
@@ -409,7 +481,9 @@ impl DevelopSettings {
     /// throttled; that is what keeps a Temperature/Tint drag smooth instead of
     /// stepping at the throttle rate when Colour/local-tone/Effects are engaged.
     pub fn differs_only_white_balance(&self, other: &Self) -> bool {
-        self.exposure == other.exposure
+        self.tone_map_mode == other.tone_map_mode
+            && self.point_curve_mode == other.point_curve_mode
+            && self.exposure == other.exposure
             && self.contrast == other.contrast
             && self.highlights == other.highlights
             && self.shadows == other.shadows
@@ -417,6 +491,8 @@ impl DevelopSettings {
             && self.blacks == other.blacks
             && self.vibrance == other.vibrance
             && self.saturation == other.saturation
+            && self.color_smoothing == other.color_smoothing
+            && self.mixer_algorithm == other.mixer_algorithm
             && same_grade(
                 self.grade_shadow_hue,
                 self.grade_shadow_strength,

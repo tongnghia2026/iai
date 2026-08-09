@@ -9,6 +9,22 @@ use crate::file_io;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Embedded camera JPEGs are colour references/thumbnails only. Presenting one
+/// as the main document guarantees a visible replacement when the RAW lands.
+fn present_embedded_raw_as_canvas() -> bool {
+    false
+}
+
+#[cfg(test)]
+mod raw_transition_tests {
+    use super::present_embedded_raw_as_canvas;
+
+    #[test]
+    fn embedded_raw_preview_is_never_the_main_canvas() {
+        assert!(!present_embedded_raw_as_canvas());
+    }
+}
+
 /// Run one import, converting a decoder panic into a normal error. A panic
 /// used to kill the worker thread silently and leave the app stuck on
 /// "Loading…" with no message (e.g. the old PSD ZIP-compression path).
@@ -188,14 +204,26 @@ impl App {
         }
         if !paths_to_load.is_empty() {
             let n = paths_to_load.len();
-            // RAW subset gets a second, faster worker that extracts the embedded
-            // JPEG preview so the image shows near-instantly (poll_raw_previews)
-            // while the full demosaic below runs. Collected before the move.
-            let raw_paths: Vec<PathBuf> = paths_to_load
+            // Do not install the embedded camera JPEG as the document canvas.
+            // Its picture style cannot be pixel-identical to our scene-linear
+            // RAW render, so replacing it after demosaic creates an unavoidable
+            // visible colour jump. The RAW importer still decodes that JPEG
+            // privately for default-look statistics; only the finished RAW
+            // pipeline is ever presented as the main image.
+            let raw_stat_paths: Vec<PathBuf> = paths_to_load
                 .iter()
                 .filter(|p| crate::formats::raw::is_raw_path(p))
                 .cloned()
                 .collect();
+            if !raw_stat_paths.is_empty() {
+                std::thread::spawn(move || {
+                    for path in raw_stat_paths {
+                        // `extract` populates the shared stats cache. Discard
+                        // the bitmap here: it must never become the main canvas.
+                        let _ = crate::formats::raw_preview::extract(&path);
+                    }
+                });
+            }
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 // The registry holds only built-in importers (no runtime plugins), so a
@@ -210,21 +238,6 @@ impl App {
                 }
             });
             self.jobs.pending_loads.push(rx);
-            if !raw_paths.is_empty() {
-                let (ptx, prx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    for path in raw_paths {
-                        // Best-effort: a RAW without a usable preview simply shows
-                        // when its full decode lands, same as before.
-                        if let Some(preview) = crate::formats::raw_preview::extract(&path) {
-                            if ptx.send((path, preview)).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                });
-                self.jobs.pending_raw_previews.push(prx);
-            }
             self.jobs.load_activate_pending = true;
             self.shell.status_msg = if n == 1 {
                 "Loading…".to_string()
@@ -446,6 +459,9 @@ impl App {
         path: std::path::PathBuf,
         preview: crate::formats::raw_preview::RawPreview,
     ) {
+        if !present_embedded_raw_as_canvas() {
+            return;
+        }
         let key = normalized_path_key(&path);
         if self.jobs.cancelled_raw_loads.contains(&key) {
             return;

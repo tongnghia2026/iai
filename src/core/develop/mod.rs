@@ -31,7 +31,8 @@ pub(crate) use self::tone::*;
 // entry points that integration tests (tests/perf_develop.rs) drive are
 // exported, so the crate's public surface stays small.
 pub use self::curves::build_histogram_proxy;
-pub use self::settings::DevelopSettings;
+pub use self::mixer::{mixer_mask_preview, mixer_target_from_srgb, MixerTarget};
+pub use self::settings::{ColorMixerAlgorithm, DevelopSettings, PointCurveMode, ToneMapMode};
 pub use self::spatial::{apply_color_to_region, fast_preview_downsample};
 
 pub const MIXER_BANDS: usize = 8;

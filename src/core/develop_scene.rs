@@ -30,11 +30,12 @@
 use crate::core::cat16;
 use crate::core::color::luminance_f32;
 use crate::core::develop::{
-    apply_color, apply_color_linear, apply_detail_to_working_buffer, apply_effects_linear,
-    apply_luma_target, apply_point_curve_outer, bell, contrast_curve, control_to_unit,
-    curve_is_identity, curve_shadows_mask, darks_mask, eased_control, guided_lowpass_plane,
-    linear_to_srgb, luma_lin, lut_lerp, rgb_curve_luts, sample_plane_bilinear, smootherstep,
-    srgb_to_linear, DevelopSettings, EXPOSURE_LIMIT, TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
+    apply_color, apply_color_linear, apply_color_linear_classified, apply_detail_to_working_buffer,
+    apply_effects_linear, apply_luma_target, apply_point_curve_outer, bell, contrast_curve,
+    control_to_unit, curve_is_identity, curve_shadows_mask, darks_mask, eased_control,
+    guided_lowpass_plane, linear_to_srgb, luma_lin, lut_lerp, rgb_curve_luts,
+    sample_plane_bilinear, smootherstep, srgb_to_linear, DevelopSettings, EXPOSURE_LIMIT,
+    TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
 };
 use crate::core::tile::TileMap;
 use rayon::prelude::*;
@@ -181,6 +182,10 @@ pub struct SceneSource {
     /// `None` means fully opaque (the normal RAW and opaque-image case).
     pub alpha: Option<Vec<u16>>,
     pub look: BaseLook,
+    /// Primaries of the unclamped scene-linear RGB values in `half`.
+    pub color_pipeline: crate::core::working_color::ColorPipelineMetadata,
+    /// Camera picture-style curves fitted from the embedded JPEG.
+    pub camera_rgb_curve: Option<Box<[[f32; 256]; 3]>>,
     /// Robust black/grey/white anchors of the immutable RAW master. Computed
     /// lazily from a small grid and then reused by every preview/commit build.
     pub auto_tone: OnceLock<AutoToneRange>,
@@ -202,6 +207,8 @@ impl SceneSource {
             half: vec![0u16; width as usize * height as usize * 4],
             alpha: None,
             look: BaseLook::Raw,
+            color_pipeline: crate::core::working_color::ColorPipelineMetadata::default(),
+            camera_rgb_curve: None,
             auto_tone: OnceLock::new(),
         }
     }
@@ -317,6 +324,11 @@ impl SceneSource {
             half,
             alpha,
             look: BaseLook::Identity,
+            color_pipeline: crate::core::working_color::ColorPipelineMetadata {
+                working: crate::core::working_color::WorkingColorSpace::LinearSrgb,
+                ..Default::default()
+            },
+            camera_rgb_curve: None,
             auto_tone: OnceLock::new(),
         }
     }
@@ -446,11 +458,174 @@ pub fn baseline_exposure_gain(scene_rgb: &[[f32; 3]], target_display_mean: f32) 
 /// transform; damping prevents a camera picture style from becoming an extreme
 /// correction. Returns at most +/-1 EV per channel.
 pub fn baseline_rgb_gains(scene_rgb: &[[f32; 3]], target: [f32; 3]) -> [f32; 3] {
+    let tone = build_scene_tone(&DevelopSettings::default());
+    baseline_rgb_gains_with_tone(scene_rgb, target, &tone)
+}
+
+/// Scene-aware camera-preview fit using the exact per-image tone transform
+/// consumed by [`render_default_look`].
+pub fn baseline_rgb_gains_for_scene(scene: &SceneSource, target: [f32; 3]) -> [f32; 3] {
+    const BUDGET: u64 = 60_000;
+    let total = scene.width as u64 * scene.height as u64;
+    let step = (((total / BUDGET).max(1) as f64).sqrt().ceil() as u32).max(1);
+    let mut samples = Vec::with_capacity((total / (step as u64 * step as u64) + 1) as usize);
+    for y in (0..scene.height).step_by(step as usize) {
+        for x in (0..scene.width).step_by(step as usize) {
+            if scene.alpha16_at_index(y as usize * scene.width as usize + x as usize) > 0 {
+                samples.push(scene.get_rgb(x, y));
+            }
+        }
+    }
+    let tone = build_scene_tone_for_scene(&DevelopSettings::default(), scene);
+    baseline_rgb_gains_with_tone(&samples, target, &tone)
+}
+
+/// Fit monotone display curves that transfer the embedded camera JPEG's
+/// per-channel tone distribution onto the full-resolution RAW rendering.
+pub fn fit_camera_rgb_curve(scene: &SceneSource, target: &[[u32; 256]; 3]) -> Box<[[f32; 256]; 3]> {
+    let tone = build_scene_tone_for_scene(&DevelopSettings::default(), scene);
+    let mut source = [[0u32; 256]; 3];
+    const BUDGET: u64 = 100_000;
+    let total = scene.width as u64 * scene.height as u64;
+    let step = (((total / BUDGET).max(1) as f64).sqrt().ceil() as u32).max(1);
+    for y in (0..scene.height).step_by(step as usize) {
+        for x in (0..scene.width).step_by(step as usize) {
+            let d = tone.scene_to_display(scene.get_rgb(x, y), None);
+            for c in 0..3 {
+                source[c][(d[c].clamp(0.0, 1.0) * 255.0).round() as usize] += 1;
+            }
+        }
+    }
+    let mut curves = Box::new([[0.0f32; 256]; 3]);
+    for c in 0..3 {
+        let source_total = source[c].iter().map(|&v| v as u64).sum::<u64>().max(1);
+        let target_total = target[c].iter().map(|&v| v as u64).sum::<u64>().max(1);
+        let mut source_cdf = 0u64;
+        let mut target_bin = 0usize;
+        let mut target_cdf = target[c][0] as u64;
+        for i in 0..256 {
+            source_cdf += source[c][i] as u64;
+            while target_bin < 255 && target_cdf * source_total < source_cdf * target_total {
+                target_bin += 1;
+                target_cdf += target[c][target_bin] as u64;
+            }
+            curves[c][i] = target_bin as f32 / 255.0;
+        }
+        curves[c][0] = 0.0;
+        curves[c][255] = 1.0;
+    }
+    curves
+}
+
+/// Fit a conservative linear cross-channel correction from normalized spatial
+/// correspondences in the embedded camera JPEG. Histograms cannot distinguish
+/// (for example) foliage green from a global green cast; paired samples can.
+/// Ridge-to-identity and hard coefficient bounds keep this a camera calibration
+/// hint rather than an attempt to reproduce an opaque JPEG picture style.
+pub fn fit_camera_color_matrix(
+    scene: &SceneSource,
+    target: &[[u8; 3]],
+    target_w: u32,
+    target_h: u32,
+) -> [[f32; 3]; 3] {
+    let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    if target_w == 0 || target_h == 0 || target.len() != (target_w as usize * target_h as usize) {
+        return identity;
+    }
+    let tone = build_scene_tone_for_scene(&DevelopSettings::default(), scene);
+    let mut xtx = [[0.0f64; 3]; 3];
+    let mut xty = [[0.0f64; 3]; 3];
+    let mut used = 0usize;
+    for ty in 0..target_h {
+        let sy = (((ty as u64 * 2 + 1) * scene.height as u64) / (target_h as u64 * 2))
+            .min(scene.height.saturating_sub(1) as u64) as u32;
+        for tx in 0..target_w {
+            let sx = (((tx as u64 * 2 + 1) * scene.width as u64) / (target_w as u64 * 2))
+                .min(scene.width.saturating_sub(1) as u64) as u32;
+            if scene.alpha16_at_index(sy as usize * scene.width as usize + sx as usize) == 0 {
+                continue;
+            }
+            let src_display = tone.scene_to_display(scene.get_rgb(sx, sy), None);
+            let src = src_display.map(crate::core::develop::srgb_to_linear);
+            let t = target[(ty * target_w + tx) as usize];
+            let dst = t.map(|v| crate::core::develop::srgb_to_linear(v as f32 / 255.0));
+            let luma = 0.2126 * src_display[0] + 0.7152 * src_display[1] + 0.0722 * src_display[2];
+            if !(0.03..=0.97).contains(&luma) {
+                continue;
+            }
+            for i in 0..3 {
+                for j in 0..3 {
+                    xtx[i][j] += (src[i] * src[j]) as f64;
+                    xty[i][j] += (src[i] * dst[j]) as f64;
+                }
+            }
+            used += 1;
+        }
+    }
+    if used < 24 {
+        return identity;
+    }
+    let ridge = used as f64 * 0.08;
+    for i in 0..3 {
+        xtx[i][i] += ridge;
+        xty[i][i] += ridge;
+    }
+    let mut out = identity;
+    for channel in 0..3 {
+        let rhs = [xty[0][channel], xty[1][channel], xty[2][channel]];
+        let Some(solution) = solve_3x3(xtx, rhs) else {
+            return identity;
+        };
+        for input in 0..3 {
+            let raw = solution[input] as f32;
+            let bounded = if input == channel {
+                raw.clamp(0.80, 1.20)
+            } else {
+                raw.clamp(-0.15, 0.15)
+            };
+            out[channel][input] =
+                identity[channel][input] + (bounded - identity[channel][input]) * 0.65;
+        }
+    }
+    out
+}
+
+fn solve_3x3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<[f64; 3]> {
+    for col in 0..3 {
+        let pivot = (col..3).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs()))?;
+        if a[pivot][col].abs() < 1e-10 {
+            return None;
+        }
+        a.swap(col, pivot);
+        b.swap(col, pivot);
+        let d = a[col][col];
+        for j in col..3 {
+            a[col][j] /= d;
+        }
+        b[col] /= d;
+        for row in 0..3 {
+            if row == col {
+                continue;
+            }
+            let f = a[row][col];
+            for j in col..3 {
+                a[row][j] -= f * a[col][j];
+            }
+            b[row] -= f * b[col];
+        }
+    }
+    Some(b)
+}
+
+fn baseline_rgb_gains_with_tone(
+    scene_rgb: &[[f32; 3]],
+    target: [f32; 3],
+    tone: &SceneToneData,
+) -> [f32; 3] {
     if scene_rgb.is_empty() || target.iter().any(|v| !v.is_finite()) {
         return [1.0; 3];
     }
     let target = target.map(|v| v.clamp(0.01, 0.99));
-    let tone = build_scene_tone(&DevelopSettings::default());
     let mut gain = [1.0f32; 3];
     for _ in 0..10 {
         let mut sum = [0.0f64; 3];
@@ -543,14 +718,12 @@ pub fn scene_auto_tone(scene: &SceneSource) -> Option<AutoToneRange> {
 /// neon skin.
 #[inline]
 fn adaptive_map_ev(e: f32, a: AutoToneRange) -> f32 {
-    let desired = if e <= a.grey_ev {
-        (a.grey_ev - SCENE_EV_MIN) / (a.grey_ev - a.black_ev).max(1.0)
-    } else {
-        (SCENE_EV_MAX - a.grey_ev) / (a.white_ev - a.grey_ev).max(1.0)
-    };
-    // Half-blend a bounded 0.8..1.2 fit -> effective slope 0.9..1.1.
-    let slope = 1.0 + (desired.clamp(0.8, 1.2) - 1.0) * 0.5;
-    a.grey_ev + (e - a.grey_ev) * slope
+    // Retain the measured anchors for a future genuinely adaptive operator.
+    // Fitting them to the fixed LUT endpoints made the shadow-side desired
+    // slope almost always hit its upper clamp because SCENE_EV_MIN lies far
+    // below a photographic black point. That added contrast to every RAW.
+    let _ = a;
+    e
 }
 
 /// Signed tone-equalizer offset (EV) for a regional exposure `e` (EV, absolute)
@@ -561,9 +734,26 @@ pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
         let d = (er - zone.0) / zone.1;
         zone.2 * u * (-0.5 * d * d).exp()
     };
-    let off = g(TONE_EQ_SHADOWS, control_to_unit(settings.shadows))
-        + g(TONE_EQ_BLACKS, control_to_unit(settings.blacks))
-        + g(TONE_EQ_HIGHLIGHTS, control_to_unit(settings.highlights))
+    // A continuous signal-confidence floor prevents positive shadow lifts
+    // from amplifying sensor-floor noise. Negative controls remain unguarded
+    // so users can still deepen blacks. The guard is below both zone centres,
+    // therefore it has no discontinuous mask edge and does not weaken normal
+    // photographic shadows.
+    let noise_confidence = smootherstep(-9.0, -7.0, er);
+    let shadow_u = control_to_unit(settings.shadows);
+    let black_u = control_to_unit(settings.blacks);
+    let off = g(
+        TONE_EQ_SHADOWS,
+        shadow_u
+            * if shadow_u > 0.0 {
+                noise_confidence
+            } else {
+                1.0
+            },
+    ) + g(
+        TONE_EQ_BLACKS,
+        black_u * if black_u > 0.0 { noise_confidence } else { 1.0 },
+    ) + g(TONE_EQ_HIGHLIGHTS, control_to_unit(settings.highlights))
         + g(TONE_EQ_WHITES, control_to_unit(settings.whites));
     off.clamp(-TONE_EQ_CLAMP_EV, TONE_EQ_CLAMP_EV)
 }
@@ -575,6 +765,8 @@ pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
 /// same matrix + LUTs). Built once per slider change, never per pixel.
 #[derive(Clone)]
 pub struct SceneToneData {
+    pub tone_map_mode: crate::core::develop::ToneMapMode,
+    pub point_curve_mode: crate::core::develop::PointCurveMode,
     /// CAT16 white balance composed with the exposure multiplier: one matrix
     /// applied to the linear scene value. Identity·1 at neutral.
     pub wb_ev: [[f32; 3]; 3],
@@ -611,7 +803,29 @@ pub fn build_scene_tone_for_scene(
     settings: &DevelopSettings,
     scene: &SceneSource,
 ) -> SceneToneData {
-    build_scene_tone_impl(settings, scene.look, scene_auto_tone(scene))
+    let mut tone = build_scene_tone_impl(settings, scene.look, scene_auto_tone(scene));
+    let to_srgb = scene.color_pipeline.working.to_linear_srgb_matrix();
+    let mut wb_from_working = [[0.0f32; 3]; 3];
+    for (row, output) in wb_from_working.iter_mut().enumerate() {
+        for (column, value) in output.iter_mut().enumerate() {
+            *value = tone.wb_ev[row][0] * to_srgb[0][column]
+                + tone.wb_ev[row][1] * to_srgb[1][column]
+                + tone.wb_ev[row][2] * to_srgb[2][column];
+        }
+    }
+    tone.wb_ev = wb_from_working;
+    if let Some(camera) = &scene.camera_rgb_curve {
+        let user = tone.rgb.take();
+        let mut composed = Box::new([[0.0f32; 256]; 3]);
+        for c in 0..3 {
+            for i in 0..256 {
+                let v = camera[c][i];
+                composed[c][i] = user.as_ref().map_or(v, |u| lut_lerp(&u[c], v));
+            }
+        }
+        tone.rgb = Some(composed);
+    }
+    tone
 }
 
 /// Build the scene tone stage for a given base look. Both looks share the
@@ -676,11 +890,14 @@ fn build_scene_tone_impl(
         }
     }
     SceneToneData {
+        tone_map_mode: settings.tone_map_mode,
+        point_curve_mode: settings.point_curve_mode,
         wb_ev,
         lut,
         tone_eq,
         tone_eq_active,
-        shadow_chroma_active: look == BaseLook::Raw,
+        shadow_chroma_active: look == BaseLook::Raw
+            && settings.tone_map_mode == crate::core::develop::ToneMapMode::Perceptual,
         grade_shadow: grade_vector(settings.grade_shadow_hue, settings.grade_shadow_strength),
         grade_highlight: grade_vector(
             settings.grade_highlight_hue,
@@ -778,22 +995,10 @@ fn build_display_lut_for(settings: &DevelopSettings, look: BaseLook) -> Option<B
 /// colours outside the cube move at all.
 #[inline]
 pub fn gamut_clip_chroma(c: [f32; 3]) -> [f32; 3] {
-    let y = luma_lin(c[0], c[1], c[2]).clamp(0.0, 1.0);
-    let d = [c[0] - y, c[1] - y, c[2] - y];
-    let mut f = 1.0f32;
-    for &dc in &d {
-        if dc > 1e-6 {
-            f = f.min((1.0 - y) / dc);
-        } else if dc < -1e-6 {
-            f = f.min(y / -dc);
-        }
-    }
-    let f = f.clamp(0.0, 1.0);
-    [
-        (y + d[0] * f).clamp(0.0, 1.0),
-        (y + d[1] * f).clamp(0.0, 1.0),
-        (y + d[2] * f).clamp(0.0, 1.0),
-    ]
+    crate::core::gamut_map::map_to_output_gamut(
+        c,
+        crate::core::working_color::OutputColorSpace::Srgb,
+    )
 }
 
 /// Film-like RGB ceiling: keep the darkest channel fixed, put the brightest
@@ -822,14 +1027,33 @@ fn filmlike_clip(c: [f32; 3]) -> [f32; 3] {
 /// map. More compression and greater displayed brightness both increase the
 /// pull toward white; uncompressed pixels are exact no-ops.
 #[inline]
-fn compress_highlight_chroma(c: [f32; 3], mapped_n: f32, scene_n: f32) -> [f32; 3] {
+fn compress_highlight_chroma(
+    c: [f32; 3],
+    mapped_n: f32,
+    scene_n: f32,
+    mode: crate::core::develop::ToneMapMode,
+) -> [f32; 3] {
+    if mode == crate::core::develop::ToneMapMode::Neutral {
+        return c;
+    }
     let ratio = mapped_n / scene_n.max(1e-8);
     if ratio >= 1.0 {
         return c;
     }
     let compression = smootherstep(0.02, 0.80, 1.0 - ratio);
     let highlight = smootherstep(0.55, 1.0, mapped_n);
-    let amount = compression * highlight * 0.65;
+    let excursion = c
+        .into_iter()
+        .map(|v| (-v).max(v - 1.0).max(0.0))
+        .fold(0.0f32, f32::max);
+    let strength = match mode {
+        crate::core::develop::ToneMapMode::FilmLike => 0.65,
+        crate::core::develop::ToneMapMode::Perceptual => {
+            0.12 + 0.38 * smootherstep(0.0, 0.25, excursion)
+        }
+        crate::core::develop::ToneMapMode::Neutral => 0.0,
+    };
+    let amount = compression * highlight * strength;
     [
         c[0] + (mapped_n - c[0]) * amount,
         c[1] + (mapped_n - c[1]) * amount,
@@ -837,7 +1061,7 @@ fn compress_highlight_chroma(c: [f32; 3], mapped_n: f32, scene_n: f32) -> [f32; 
     ]
 }
 
-/// Perceptual tone curves lose colour in the toe. Restore at most 20% chroma
+/// Perceptual tone curves lose colour in the toe. Restore at most 5% chroma
 /// through the coloured-shadow band, leaving black, midtones and neutrals alone.
 #[inline]
 fn restore_shadow_chroma(c: [f32; 3]) -> [f32; 3] {
@@ -846,7 +1070,7 @@ fn restore_shadow_chroma(c: [f32; 3]) -> [f32; 3] {
     let chroma = d[0].max(d[1]).max(d[2]) - d[0].min(d[1]).min(d[2]);
     let tonal = smootherstep(0.08, 0.18, y) * (1.0 - smootherstep(0.38, 0.55, y));
     let colored = smootherstep(0.015, 0.10, chroma);
-    let scale = 1.0 + 0.20 * tonal * colored;
+    let scale = 1.0 + 0.05 * tonal * colored;
     [y + d[0] * scale, y + d[1] * scale, y + d[2] * scale]
 }
 
@@ -936,13 +1160,19 @@ impl SceneToneData {
         let out = if n > 1e-8 {
             let mapped_n = self.tone_map(n);
             let s = mapped_n / n;
-            let blend = hue_preserve_blend(mapped_n);
+            let blend = match self.tone_map_mode {
+                crate::core::develop::ToneMapMode::Neutral => 1.0,
+                crate::core::develop::ToneMapMode::FilmLike => hue_preserve_blend(mapped_n),
+                crate::core::develop::ToneMapMode::Perceptual => {
+                    (hue_preserve_blend(mapped_n) + 0.10).min(1.0)
+                }
+            };
             let mixed = [
                 pc[0] + (v[0] * s - pc[0]) * blend,
                 pc[1] + (v[1] * s - pc[1]) * blend,
                 pc[2] + (v[2] * s - pc[2]) * blend,
             ];
-            compress_highlight_chroma(mixed, mapped_n, n)
+            compress_highlight_chroma(mixed, mapped_n, n, self.tone_map_mode)
         } else {
             pc
         };
@@ -976,9 +1206,27 @@ impl SceneToneData {
     #[inline]
     pub fn apply_display_curves(&self, r: &mut f32, g: &mut f32, b: &mut f32) {
         if let Some(lut) = &self.display {
-            let l = luminance_f32(*r, *g, *b).clamp(0.0, 1.0);
-            let target = lut_lerp(lut, l);
-            apply_luma_target(r, g, b, target);
+            match self.point_curve_mode {
+                crate::core::develop::PointCurveMode::Luminance => {
+                    let l = luminance_f32(*r, *g, *b).clamp(0.0, 1.0);
+                    let target = lut_lerp(lut, l);
+                    apply_luma_target(r, g, b, target);
+                }
+                crate::core::develop::PointCurveMode::Perceptual => {
+                    let linear = [srgb_to_linear(*r), srgb_to_linear(*g), srgb_to_linear(*b)];
+                    let mut p = crate::core::perceptual_color::PerceptualColor::from_oklab(
+                        crate::core::perceptual_color::linear_srgb_to_oklab(linear),
+                    );
+                    p.lightness = lut_lerp(lut, p.lightness.clamp(0.0, 1.0));
+                    let mapped = crate::core::gamut_map::map_to_output_gamut(
+                        crate::core::perceptual_color::oklab_to_linear_srgb(p.to_oklab()),
+                        crate::core::working_color::OutputColorSpace::Srgb,
+                    );
+                    *r = linear_to_srgb(mapped[0]);
+                    *g = linear_to_srgb(mapped[1]);
+                    *b = linear_to_srgb(mapped[2]);
+                }
+            }
         }
         if let Some(luts) = &self.rgb {
             *r = lut_lerp(&luts[0], r.clamp(0.0, 1.0));
@@ -1211,7 +1459,15 @@ pub fn scene_fast_region_develop(
         .par_iter()
         .map(|p| {
             let [mut r, mut g, mut b] = tone.scene_to_working(*p, None);
-            apply_color_linear(settings, curves.as_ref(), &mut r, &mut g, &mut b);
+            let classification = tone.working_to_display([r, g, b]);
+            apply_color_linear_classified(
+                settings,
+                curves.as_ref(),
+                Some(classification),
+                &mut r,
+                &mut g,
+                &mut b,
+            );
             [r, g, b]
         })
         .collect();
@@ -1365,7 +1621,15 @@ fn render_scene_display_inner(
             });
             let [mut r, mut g, mut b] = tone.scene_to_working(rgb, e);
             if let Some((settings, curves)) = develop {
-                apply_color_linear(settings, curves, &mut r, &mut g, &mut b);
+                let classification = tone.working_to_display([r, g, b]);
+                apply_color_linear_classified(
+                    settings,
+                    curves,
+                    Some(classification),
+                    &mut r,
+                    &mut g,
+                    &mut b,
+                );
             }
             *slot = [r, g, b];
         }
@@ -1680,6 +1944,45 @@ mod tests {
     }
 
     #[test]
+    fn spatial_camera_color_fit_is_identity_for_matching_preview() {
+        let (w, h) = (24, 24);
+        let mut scene = SceneSource::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let fx = x as f32 / (w - 1) as f32;
+                let fy = y as f32 / (h - 1) as f32;
+                scene.set_rgb(
+                    x,
+                    y,
+                    [0.03 + 0.55 * fx, 0.04 + 0.45 * fy, 0.05 + 0.35 * (1.0 - fx)],
+                );
+            }
+        }
+        let tone = build_scene_tone_for_scene(&DevelopSettings::default(), &scene);
+        let target: Vec<[u8; 3]> = (0..h)
+            .flat_map(|y| {
+                let scene_ref = &scene;
+                let tone_ref = &tone;
+                (0..w).map(move |x| {
+                    tone_ref
+                        .scene_to_display(scene_ref.get_rgb(x, y), None)
+                        .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+                })
+            })
+            .collect();
+        let matrix = fit_camera_color_matrix(&scene, &target, w, h);
+        for row in 0..3 {
+            for col in 0..3 {
+                let expected = f32::from(row == col);
+                assert!(
+                    (matrix[row][col] - expected).abs() < 0.025,
+                    "matching preview produced {matrix:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn auto_tone_gently_shapes_range_without_reexposing_grey() {
         let mut scene = SceneSource::new(256, 1);
         for x in 0..256 {
@@ -1699,11 +2002,7 @@ mod tests {
             anchors.white_ev,
         ] {
             let mapped = adaptive_map_ev(e, anchors);
-            let distance = (e - anchors.grey_ev).abs();
-            assert!(
-                (mapped - e).abs() <= distance * 0.101 + 1e-5,
-                "adaptive warp moved {e} too far: {mapped}"
-            );
+            assert_eq!(mapped, e, "default auto-tone must not add contrast");
         }
 
         let tone = build_scene_tone_for_scene(&settings(), &scene);
@@ -1725,6 +2024,56 @@ mod tests {
         let adaptive = build_scene_tone_for_scene(&settings(), &scene);
         let fixed = build_scene_tone_for(&settings(), BaseLook::Identity);
         assert_eq!(adaptive.lut, fixed.lut);
+    }
+
+    #[test]
+    fn camera_curve_is_monotone_and_moves_toward_preview_distribution() {
+        let mut scene = SceneSource::new(256, 1);
+        for x in 0..256 {
+            let v = (x as f32 / 255.0).powf(2.0);
+            scene.set_rgb(x, 0, [v; 3]);
+        }
+        let mut target = [[0u32; 256]; 3];
+        for c in 0..3 {
+            for i in 128..256 {
+                target[c][i] = 1;
+            }
+        }
+        let curve = fit_camera_rgb_curve(&scene, &target);
+        for channel in curve.iter() {
+            assert!(channel.windows(2).all(|w| w[1] >= w[0]));
+            assert!(channel[96] > 96.0 / 255.0);
+            assert_eq!(channel[0], 0.0);
+            assert_eq!(channel[255], 1.0);
+        }
+    }
+
+    #[test]
+    fn mixer_classifies_the_camera_look_colour_visible_to_the_user() {
+        let mut settings = DevelopSettings::default();
+        settings.mixer_saturation[0] = 100.0;
+        let curves = crate::core::develop::build_mixer_curves_opt(&settings).unwrap();
+        let original = [0.62, 0.08, 0.04];
+        let mut hidden = original;
+        let [hr, hg, hb] = &mut hidden;
+        apply_color_linear(&settings, Some(&curves), hr, hg, hb);
+        let mut visible = original;
+        let [vr, vg, vb] = &mut visible;
+        apply_color_linear_classified(
+            &settings,
+            Some(&curves),
+            Some([0.84, 0.55, 0.24]),
+            vr,
+            vg,
+            vb,
+        );
+        let movement = |v: [f32; 3]| {
+            (v[0] - original[0]).abs() + (v[1] - original[1]).abs() + (v[2] - original[2]).abs()
+        };
+        assert!(
+            movement(visible) < movement(hidden) * 0.45,
+            "Reds followed hidden RAW hue instead of visible orange: {hidden:?} vs {visible:?}"
+        );
     }
 
     #[test]
@@ -1772,15 +2121,149 @@ mod tests {
     #[test]
     fn compressed_highlights_fade_smoothly_toward_white() {
         let color = [0.80, 0.32, 0.12];
-        let uncompressed = compress_highlight_chroma(color, 0.80, 0.80);
+        let uncompressed = compress_highlight_chroma(
+            color,
+            0.80,
+            0.80,
+            crate::core::develop::ToneMapMode::Perceptual,
+        );
         assert_eq!(uncompressed, color);
 
-        let mild = compress_highlight_chroma(color, 0.80, 1.0);
-        let strong = compress_highlight_chroma(color, 0.80, 4.0);
+        let mild = compress_highlight_chroma(
+            color,
+            0.80,
+            1.0,
+            crate::core::develop::ToneMapMode::FilmLike,
+        );
+        let strong = compress_highlight_chroma(
+            color,
+            0.80,
+            4.0,
+            crate::core::develop::ToneMapMode::FilmLike,
+        );
         let chroma = |c: [f32; 3]| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
         assert!(chroma(strong) < chroma(mild));
         assert!(chroma(mild) < chroma(color));
         assert!((strong[0] - 0.80).abs() < 1e-7);
+    }
+
+    #[test]
+    fn tone_modes_are_distinct_and_neutral_minimises_highlight_hue_drift() {
+        use crate::core::develop::ToneMapMode;
+        let input = [3.2, 0.55, 0.18];
+        let render = |mode| {
+            build_scene_tone(&DevelopSettings {
+                tone_map_mode: mode,
+                ..settings()
+            })
+            .scene_to_working(input, None)
+        };
+        let perceptual = render(ToneMapMode::Perceptual);
+        let film = render(ToneMapMode::FilmLike);
+        let neutral = render(ToneMapMode::Neutral);
+        assert_ne!(perceptual, film);
+        assert_ne!(film, neutral);
+        let hue = |rgb| {
+            crate::core::perceptual_color::PerceptualColor::from_oklab(
+                crate::core::perceptual_color::linear_srgb_to_oklab(rgb),
+            )
+            .hue
+        };
+        let error = |a: f32, b: f32| {
+            let d = (a - b).abs().rem_euclid(std::f32::consts::TAU);
+            d.min(std::f32::consts::TAU - d)
+        };
+        assert!(error(hue(input), hue(neutral)) <= error(hue(input), hue(film)) + 1e-5);
+    }
+
+    #[test]
+    fn light_controls_remain_monotone_on_neutral_ramp() {
+        for field in ["highlights", "whites", "shadows", "blacks"] {
+            let mut previous = [f32::NEG_INFINITY; 65];
+            for amount in [-200.0, -100.0, 0.0, 100.0, 200.0] {
+                let mut s = settings();
+                match field {
+                    "highlights" => s.highlights = amount,
+                    "whites" => s.whites = amount,
+                    "shadows" => s.shadows = amount,
+                    _ => s.blacks = amount,
+                }
+                let tone = build_scene_tone(&s);
+                for (i, last) in previous.iter_mut().enumerate() {
+                    let v = (-10.0 + i as f32 * 14.0 / 64.0).exp2();
+                    let out = tone.scene_to_display([v; 3], None)[1];
+                    assert!(
+                        out + 2e-4 >= *last,
+                        "{field} non-monotone at {i}: {last} -> {out}"
+                    );
+                    *last = out;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deep_shadow_positive_lift_has_continuous_noise_guard() {
+        let s = DevelopSettings {
+            shadows: 200.0,
+            blacks: 200.0,
+            ..settings()
+        };
+        let mut last = f32::NEG_INFINITY;
+        for i in 0..=200 {
+            let er = -10.0 + i as f32 * 4.0 / 200.0;
+            let offset = tone_eq_offset_ev(&s, SCENE_MID_GRAY.log2() + er);
+            assert!(
+                offset + 1e-5 >= last,
+                "guard discontinuity at {er}: {last} -> {offset}"
+            );
+            last = offset;
+        }
+    }
+
+    #[test]
+    fn negative_highlights_recovers_coloured_highlight_chroma() {
+        let neutral = build_scene_tone(&settings());
+        let recovered = build_scene_tone(&DevelopSettings {
+            highlights: -160.0,
+            ..settings()
+        });
+        let input = [4.0, 1.1, 0.3];
+        let chroma = |rgb| {
+            crate::core::perceptual_color::PerceptualColor::from_oklab(
+                crate::core::perceptual_color::linear_srgb_to_oklab(rgb),
+            )
+            .chroma
+        };
+        let a = chroma(neutral.scene_to_working(input, None));
+        let b = chroma(recovered.scene_to_working(input, None));
+        assert!(
+            b > a + 0.01,
+            "negative Highlights did not recover colour: {a} -> {b}"
+        );
+    }
+
+    #[test]
+    fn tone_modes_do_not_invert_rgb_channel_order_on_highlight_ramp() {
+        use crate::core::develop::ToneMapMode;
+        for mode in [
+            ToneMapMode::Perceptual,
+            ToneMapMode::FilmLike,
+            ToneMapMode::Neutral,
+        ] {
+            let tone = build_scene_tone(&DevelopSettings {
+                tone_map_mode: mode,
+                ..settings()
+            });
+            for i in 1..=128 {
+                let k = i as f32 * 6.0 / 128.0;
+                let out = tone.scene_to_working([k, k * 0.45, k * 0.12], None);
+                assert!(
+                    out[0] + 1e-6 >= out[1] && out[1] + 1e-6 >= out[2],
+                    "{mode:?}: {out:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1798,7 +2281,7 @@ mod tests {
         let out = restore_shadow_chroma(color);
         let chroma = |c: [f32; 3]| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
         assert!(chroma(out) > chroma(color));
-        assert!(chroma(out) <= chroma(color) * 1.201);
+        assert!(chroma(out) <= chroma(color) * 1.051);
         assert!(
             (luma_lin(out[0], out[1], out[2]) - luma_lin(color[0], color[1], color[2])).abs()
                 < 1e-6
@@ -2226,7 +2709,7 @@ mod tests {
     }
 
     #[test]
-    fn gamut_clip_preserves_luma_and_contains_channels() {
+    fn gamut_clip_preserves_perceptual_lightness_hue_and_contains_channels() {
         for c in [
             [1.4f32, 0.2, 0.1],
             [-0.2, 0.5, 0.3],
@@ -2237,9 +2720,13 @@ mod tests {
             for v in out {
                 assert!((0.0..=1.0).contains(&v), "channel {v} escaped");
             }
-            let y_in = luma_lin(c[0], c[1], c[2]).clamp(0.0, 1.0);
-            let y_out = luma_lin(out[0], out[1], out[2]);
-            assert!((y_in - y_out).abs() < 1e-3, "luma drift {y_in} -> {y_out}");
+            let input = crate::core::perceptual_color::PerceptualColor::from_oklab(
+                crate::core::perceptual_color::linear_srgb_to_oklab(c),
+            );
+            let output = crate::core::perceptual_color::PerceptualColor::from_oklab(
+                crate::core::perceptual_color::linear_srgb_to_oklab(out),
+            );
+            assert!((input.lightness.clamp(0.0, 1.0) - output.lightness).abs() < 1e-4);
         }
         // In-gamut input is untouched.
         let same = gamut_clip_chroma([0.2, 0.4, 0.6]);
@@ -2507,7 +2994,9 @@ mod tests {
             "dev_effects[16]",
             "dev_effects[25]",
             "dev_smootherstep(0.5, 1.0, mapped_n)",
-            "let blend = 0.90 + (0.20 - 0.90) * hw",
+            "blend = 0.90 + (0.20 - 0.90) * hw",
+            "dev_effects[8]",
+            "dev_effects[9]",
             "dev_effects[26]",
             "dev_effects[27]",
             "dev_effects[32]",

@@ -70,6 +70,10 @@ pub struct DevelopShell {
     pub(in crate::app) develop_session: Vec<DevelopSessionEntry>,
     /// In-progress "Open Image" bake over the session (see [`DevelopBakeAll`]).
     pub(in crate::app) develop_bake_all: Option<DevelopBakeAll>,
+    /// Open Image was requested while the interactive GPU frame was still
+    /// active. Wait for the exact CPU settled frame before starting the commit
+    /// queue so teardown can never expose a different set of pixels.
+    pub(in crate::app) develop_commit_after_refine: bool,
     /// Filmstrip thumbnails for this Develop session (textures on the Develop
     /// window's egui context; dropped on teardown).
     pub(in crate::app) develop_thumbs: std::collections::HashMap<DocumentId, egui::TextureHandle>,

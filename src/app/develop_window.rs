@@ -21,6 +21,14 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
+fn develop_commit_needs_settled_frame(
+    gpu_preview_active: bool,
+    processing: bool,
+    receiver_active: bool,
+) -> bool {
+    gpu_preview_active || processing || receiver_active
+}
+
 #[derive(Clone, Copy)]
 struct DevelopWorkArea {
     origin: winit::dpi::PhysicalPosition<i32>,
@@ -305,6 +313,28 @@ impl App {
             }
             return;
         }
+        // Never tear down a live GPU approximation directly into CPU-committed
+        // tiles. Arm (or wait for) the exact settled bake first; the render loop
+        // resumes this commit automatically as soon as those tiles land.
+        if let Some(preview) = &mut self.dev.develop_preview {
+            if develop_commit_needs_settled_frame(
+                preview.gpu_preview_active,
+                preview.processing,
+                preview.rx.is_some(),
+            ) {
+                self.dev.develop_commit_after_refine = true;
+                if preview.gpu_preview_active && !preview.processing {
+                    preview.detail_refine_settings = Some(self.shell.ui.develop_settings.clone());
+                    preview.detail_refine_at = Some(std::time::Instant::now());
+                }
+                self.shell.status_msg = "Finalizing full-quality RAW preview…".to_string();
+                if let Some(w) = &self.win.develop_window {
+                    w.request_redraw();
+                }
+                return;
+            }
+        }
+        self.dev.develop_commit_after_refine = false;
         self.develop_session_save_active_settings();
         // The live preview stays UP through the whole bake: cancelling it here
         // restored the pristine tiles, so the window (and the main canvas
@@ -365,6 +395,7 @@ impl App {
     /// Drop the Develop window's OS window, egui context and GPU surface. The
     /// session (commit/cancel) is handled by the caller.
     fn teardown_develop_window(&mut self) {
+        self.dev.develop_commit_after_refine = false;
         self.win.develop_egui_state = None;
         self.win.develop_egui_ctx = None;
         // Stop treating it as the active Develop host immediately, but keep the
@@ -671,6 +702,16 @@ impl App {
         // until Windows generates another paint event (for example after a
         // minimize/restore cycle).
         self.poll_develop_preview();
+        if self.dev.develop_commit_after_refine
+            && self.dev.develop_preview.as_ref().is_some_and(|p| {
+                !p.gpu_preview_active
+                    && !p.processing
+                    && p.rx.is_none()
+                    && p.detail_refine_at.is_none()
+            })
+        {
+            self.commit_develop_window();
+        }
         let (Some(ctx), Some(window)) = (
             self.win.develop_egui_ctx.clone(),
             self.win.develop_window.clone(),
@@ -975,6 +1016,7 @@ impl App {
         } else if reset_100 {
             self.develop_set_zoom_100(&window, pixels_per_point);
         }
+        self.set_develop_controls_pointer_down(actions.develop.develop_controls_pointer_down);
         if let Some(s) = actions.develop.set_develop_settings.take() {
             self.shell.ui.develop_settings = s.clone();
             self.update_develop_preview(s);
@@ -1431,5 +1473,18 @@ impl App {
         self.dev.develop_view_zoom = 1.0;
         self.dev.develop_view_off = (rail_px + (vw - cw) / 2.0, (vh - ch) / 2.0);
         self.dev.develop_view_fit = false;
+    }
+}
+
+#[cfg(test)]
+mod phase6_transition_tests {
+    use super::develop_commit_needs_settled_frame;
+
+    #[test]
+    fn open_image_waits_for_every_unsettled_preview_state() {
+        assert!(develop_commit_needs_settled_frame(true, false, false));
+        assert!(develop_commit_needs_settled_frame(false, true, false));
+        assert!(develop_commit_needs_settled_frame(false, false, true));
+        assert!(!develop_commit_needs_settled_frame(false, false, false));
     }
 }

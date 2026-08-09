@@ -1903,6 +1903,15 @@ struct VsOut {
                 .iter()
                 .map(|v| (-*v / crate::core::develop::CONTROL_LIMIT).clamp(0.0, 1.0))
                 .fold(0.0f32, f32::max);
+            effects[7] =
+                f32::from(s.mixer_algorithm == crate::core::develop::ColorMixerAlgorithm::V2);
+            effects[8] = match s.tone_map_mode {
+                crate::core::develop::ToneMapMode::Perceptual => 0.0,
+                crate::core::develop::ToneMapMode::FilmLike => 1.0,
+                crate::core::develop::ToneMapMode::Neutral => 2.0,
+            };
+            effects[9] =
+                f32::from(s.point_curve_mode == crate::core::develop::PointCurveMode::Perceptual);
 
             // R/G/B point curves: [flag, 3×256] — the exact tables the CPU
             // ToneData::apply_rgb_curves reads, so preview and bake match.
@@ -1941,6 +1950,17 @@ struct VsOut {
                 if let Some(display) = &tone.display {
                     effects[26] = 1.0;
                     rgb[769..1025].copy_from_slice(display.as_ref());
+                }
+                // Scene-specific RGB curves include the camera-picture-style
+                // fit (and compose user RGB curves over it). Upload the
+                // composed tables, not only `rgb_curve_luts(settings)`: the
+                // latter made a RAW drop its camera look as soon as any live
+                // GPU adjustment activated, then regain it on CPU refine.
+                if let Some(luts) = &tone.rgb {
+                    rgb[0] = 1.0;
+                    for (ch, lut) in luts.iter().enumerate() {
+                        rgb[1 + ch * 256..1 + (ch + 1) * 256].copy_from_slice(lut);
+                    }
                 }
             }
             queue.write_buffer(&self.dev_effects_buf, 0, bytemuck::cast_slice(&effects));
@@ -2324,6 +2344,70 @@ struct VsOut {
     /// finishes after the zoom gesture stops still gets swapped in.
     pub fn has_pending_proxy_builds(&self) -> bool {
         !self.proxy_builds.is_empty()
+    }
+
+    /// Read the latest compositor target into tightly packed RGBA8 pixels.
+    /// Intended for headless parity tests and diagnostics, not the frame loop.
+    pub fn readback_rgba8(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        result_is_ping: bool,
+    ) -> Vec<u8> {
+        let width = self.viewport_w.div_ceil(self.render_scale.max(1));
+        let height = self.viewport_h.div_ceil(self.render_scale.max(1));
+        let unpadded = width * 4;
+        let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("compositor_readback"),
+            size: (padded * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("compositor_readback_encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: if result_is_ping {
+                    &self.ping_texture
+                } else {
+                    &self.pong_texture
+                },
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        let mapped = slice.get_mapped_range();
+        let mut output = vec![0; (unpadded * height) as usize];
+        for row in 0..height as usize {
+            let src = row * padded as usize;
+            let dst = row * unpadded as usize;
+            output[dst..dst + unpadded as usize]
+                .copy_from_slice(&mapped[src..src + unpadded as usize]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        output
     }
 
     /// The visible-composited layers (group folders and fully-transparent /
@@ -3912,6 +3996,54 @@ mod shader_tests {
     fn shaders_are_valid_wgsl() {
         validate("compositor", super::COMPOSITOR_SHADER);
         validate("adjustment", super::ADJUSTMENT_SHADER);
+    }
+
+    #[test]
+    fn oklab_cpu_wgsl_twins_meet_f32_tolerance() {
+        use crate::core::perceptual_color::{
+            linear_srgb_to_oklab, oklab_to_linear_srgb, OKLAB_GPU_PARITY_TOLERANCE,
+        };
+
+        // Literal f32 transcription of dev_linear_srgb_to_oklab and its inverse.
+        let shader_roundtrip = |c: [f32; 3]| {
+            let signed_cbrt = |x: f32| x.signum() * x.abs().powf(1.0 / 3.0);
+            let ll = signed_cbrt(0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2]);
+            let mm = signed_cbrt(0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2]);
+            let ss = signed_cbrt(0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2]);
+            let lab = crate::core::perceptual_color::Oklab {
+                l: 0.2104542553 * ll + 0.7936177850 * mm - 0.0040720468 * ss,
+                a: 1.9779984951 * ll - 2.4285922050 * mm + 0.4505937099 * ss,
+                b: 0.0259040371 * ll + 0.7827717662 * mm - 0.8086757660 * ss,
+            };
+            (lab, oklab_to_linear_srgb(lab))
+        };
+
+        for rgb in [
+            [0.0; 3],
+            [0.18; 3],
+            [1.0, 0.0, 0.0],
+            [-0.2, 0.7, 4.0],
+            [16.0, -2.0, 0.5],
+        ] {
+            let cpu = linear_srgb_to_oklab(rgb);
+            let (gpu, gpu_back) = shader_roundtrip(rgb);
+            for (a, b) in [cpu.l, cpu.a, cpu.b].into_iter().zip([gpu.l, gpu.a, gpu.b]) {
+                assert!(
+                    (a - b).abs() <= OKLAB_GPU_PARITY_TOLERANCE,
+                    "CPU {cpu:?}, WGSL {gpu:?}"
+                );
+            }
+            let cpu_back = oklab_to_linear_srgb(cpu);
+            for (a, b) in cpu_back.into_iter().zip(gpu_back) {
+                assert!(
+                    (a - b).abs()
+                        <= OKLAB_GPU_PARITY_TOLERANCE
+                            * rgb.into_iter().map(f32::abs).fold(1.0, f32::max)
+                );
+            }
+        }
+        assert!(super::COMPOSITOR_SHADER.contains("fn dev_linear_srgb_to_oklab"));
+        assert!(super::COMPOSITOR_SHADER.contains("fn dev_oklab_to_linear_srgb"));
     }
 
     /// Mirror of the shader's `clip_is_child()` + `clip_shift()`: 0 means "not a

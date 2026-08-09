@@ -2,6 +2,10 @@
 
 use crate::app::state::App;
 
+fn raw_color_runs_per_pixel(has_color: bool, pointer_down: bool) -> bool {
+    has_color && !pointer_down
+}
+
 impl App {
     pub fn flush_develop_gpu_preview(&mut self) {
         if !self.dev.develop_gpu_preview_dirty {
@@ -90,8 +94,20 @@ impl App {
         // NOT suppress the colour preview — the old `&& !need_detail` here made every
         // Colour/Mixer edit vanish (preview snapped back to the untouched image) the
         // moment a Detail slider was touched.
+        let pointer_down = self
+            .dev
+            .develop_preview
+            .as_ref()
+            .is_some_and(|p| p.detail_refine_waiting_for_release);
+        // The pre-ART realtime architecture kept selective colour on a small
+        // chroma proxy and reconstructed it over the native-resolution toned
+        // pixel, so edges stayed sharp without evaluating OKLCh/gamut mapping
+        // for every viewport fragment. Use that path only while the pointer is
+        // held. Release immediately returns RAW to the exact per-pixel shader,
+        // and settled/commit remain the full CPU pipeline.
         let linear_scene_color = scene.as_ref().is_some_and(|sc| {
-            sc.look == crate::core::develop_scene::BaseLook::Raw && settings.has_color()
+            sc.look == crate::core::develop_scene::BaseLook::Raw
+                && raw_color_runs_per_pixel(settings.has_color(), pointer_down)
         });
         let need_color = settings.has_color() && !linear_scene_color;
         // The fast (point-sampled, low-res) proxy carries tone+effects on a downsampled
@@ -549,5 +565,18 @@ impl App {
             color,
             scene,
         })
+    }
+}
+
+#[cfg(test)]
+mod phase6_native_interaction_tests {
+    use super::raw_color_runs_per_pixel;
+
+    #[test]
+    fn raw_drag_uses_chroma_proxy_but_release_is_exact() {
+        assert!(!raw_color_runs_per_pixel(true, true));
+        assert!(raw_color_runs_per_pixel(true, false));
+        assert!(!raw_color_runs_per_pixel(false, true));
+        assert!(!raw_color_runs_per_pixel(false, false));
     }
 }

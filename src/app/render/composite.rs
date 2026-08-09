@@ -549,13 +549,10 @@ impl App {
             } else {
                 (win_sz.width.max(1), win_sz.height.max(1))
             };
-            // Interactive move/transform still uses Mode B (viewport-sized) to
-            // avoid full-canvas compositing, but keep it at native viewport
-            // resolution. The lower-res proxy was fast but visibly destroyed image
-            // detail during drag.
-            let scale = 1;
-            gpu.compositor
-                .configure_viewport(&gpu.device, vw, vh, scale);
+            // Keep the canvas native-resolution during Develop interaction.
+            // Downscaling this target made every edge visibly soft while a
+            // slider was held, which is not an acceptable editing preview.
+            gpu.compositor.configure_viewport(&gpu.device, vw, vh, 1);
         }
         // The blit's `vp_mode` must track the mode (Mode A positions a canvas-sized
         // texture by offset+zoom; Mode B is a fullscreen blit). Re-push when it flips.

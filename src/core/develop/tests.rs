@@ -1357,6 +1357,7 @@ fn red_mixer_ignores_near_neutral_white_and_black() {
 #[test]
 fn red_saturation_preserves_lip_luma_without_black_speckles() {
     let mut settings = DevelopSettings::default();
+    settings.mixer_algorithm = ColorMixerAlgorithm::Legacy;
     settings.mixer_saturation[0] = CONTROL_LIMIT;
 
     let before = vec![
@@ -1599,6 +1600,7 @@ fn color_mixer_softens_small_chroma_blocks_vs_per_pixel() {
     }
 
     let mut settings = DevelopSettings::default();
+    settings.color_smoothing = 100.0;
     settings.mixer_saturation[0] = CONTROL_LIMIT;
 
     let mut naive = px.clone();
@@ -1654,6 +1656,7 @@ fn color_mixer_pulls_offhue_speck_toward_its_region() {
 
     // Boost the Oranges band.
     let mut settings = DevelopSettings::default();
+    settings.color_smoothing = 100.0;
     settings.mixer_saturation[1] = CONTROL_LIMIT;
     settings.mixer_luminance[1] = CONTROL_LIMIT;
 
@@ -1680,6 +1683,38 @@ fn color_mixer_pulls_offhue_speck_toward_its_region() {
         dp_gap < naive_gap,
         "region-aware speck gap {dp_gap} should be < naive {naive_gap}"
     );
+}
+
+#[test]
+fn default_color_quality_is_full_resolution_direct() {
+    let w = 19u32;
+    let h = 13u32;
+    let mut source = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            source.extend_from_slice(&[
+                (x * 255 / (w - 1)) as u8,
+                (y * 255 / (h - 1)) as u8,
+                ((x * 17 + y * 29) % 256) as u8,
+                255,
+            ]);
+        }
+    }
+    let mut settings = DevelopSettings::default();
+    settings.saturation = 65.0;
+    settings.mixer_hue[5] = -35.0;
+    assert_eq!(settings.color_smoothing, 0.0);
+    let mut direct = source.clone();
+    apply_to_pixels(&settings, &mut direct, w, h);
+    let quality =
+        apply_to_tilemap_direct(&TileMap::from_rgba(&source, w, h), &settings, None).flatten();
+    let max_error = quality
+        .iter()
+        .zip(&direct)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    assert!(max_error <= 1, "quality/direct max error {max_error}/255");
 }
 
 #[test]
@@ -1711,6 +1746,7 @@ fn yellow_band_grips_orange_yellow_skin() {
     // The Orange↔Yellow split is biased toward yellow, so a light orange-yellow
     // skin tone now responds meaningfully to the Yellow slider.
     let mut settings = DevelopSettings::default();
+    settings.mixer_algorithm = ColorMixerAlgorithm::Legacy;
     settings.mixer_saturation[2] = CONTROL_LIMIT;
     let skin = vec![220, 170, 120, 255];
     let mut out = skin.clone();
@@ -2459,6 +2495,7 @@ fn proxy_apply(settings: &DevelopSettings, rgb: [u8; 3]) -> [u8; 3] {
 
 fn proxy_de(band: usize, field: u8, value: f32, rgb: [u8; 3]) -> f32 {
     let mut s = DevelopSettings::default();
+    s.mixer_algorithm = ColorMixerAlgorithm::Legacy;
     match field {
         0 => s.mixer_hue[band] = value,
         1 => s.mixer_saturation[band] = value,
@@ -3112,6 +3149,7 @@ fn every_band_saturation_has_clear_plus100_and_plus200_strength() {
 #[test]
 fn aqua_and_blue_minus200_can_remove_color_completely() {
     let mut settings = DevelopSettings::default();
+    settings.mixer_algorithm = ColorMixerAlgorithm::Legacy;
     settings.mixer_saturation[A] = -CONTROL_LIMIT;
     settings.mixer_saturation[BL] = -CONTROL_LIMIT;
     let saturation = |rgb: [u8; 3]| {
@@ -3299,6 +3337,7 @@ fn red_luminance_keeps_colour_and_does_not_wash_to_white() {
         }
     };
     let mut settings = DevelopSettings::default();
+    settings.mixer_algorithm = ColorMixerAlgorithm::Legacy;
     settings.mixer_luminance[0] = CONTROL_LIMIT;
     for rgb in [[170, 55, 55], [150, 20, 34], [120, 40, 44]] {
         let out = direct_apply(&settings, rgb);
@@ -3506,6 +3545,28 @@ fn proxy_skin_prefers_orange_over_yellow_and_red() {
 }
 
 #[test]
+fn reds_release_saturated_orange_but_keep_brick_and_lip_red() {
+    for orange in [[225, 120, 30], [205, 150, 120]] {
+        let memberships = base_aff_u8(orange);
+        assert!(
+            memberships[O] > memberships[R] * 3.0,
+            "orange {orange:?} still overlaps Reds too widely: R={} O={}",
+            memberships[R],
+            memberships[O]
+        );
+    }
+    for red in [[210, 45, 45], [170, 72, 48], [150, 20, 34]] {
+        let memberships = base_aff_u8(red);
+        assert!(
+            memberships[R] > memberships[O] * 1.5 && memberships[R] > 0.55,
+            "real red {red:?} lost Reds membership: R={} O={}",
+            memberships[R],
+            memberships[O]
+        );
+    }
+}
+
+#[test]
 fn proxy_matches_direct_path_strength() {
     // The regression was the proxy (live) path being far weaker than the
     // per-pixel maths. They must now agree closely for flat colour — no hidden
@@ -3601,6 +3662,7 @@ fn cpu_regate_matches_gpu_mirror() {
         // Settings whose edited-band set is exactly `m` (what the upload
         // path feeds `build_mixer_curves_opt` before slicing out `gate`).
         let mut s = DevelopSettings::default();
+        s.mixer_algorithm = ColorMixerAlgorithm::Legacy;
         for (band, &on) in m.iter().enumerate() {
             if on {
                 s.mixer_saturation[band] = 100.0;

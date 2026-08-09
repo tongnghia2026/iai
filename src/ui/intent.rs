@@ -435,6 +435,9 @@ pub struct SelectionIntent {
 pub struct DevelopIntent {
     pub open_develop_dialog: bool,
     pub set_develop_settings: Option<DevelopSettings>,
+    /// True while the primary pointer is held over an interactive Develop
+    /// control. Full-resolution refinement waits for release.
+    pub develop_controls_pointer_down: bool,
     pub apply_develop_dialog: bool,
     pub cancel_develop_dialog: bool,
     /// Save the current Develop settings under this name (same name overwrites).

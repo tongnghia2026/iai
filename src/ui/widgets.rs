@@ -142,7 +142,12 @@ pub fn dev_slider_stacked_resp(
 ) -> egui::Response {
     let min = *range.start();
     let max = *range.end();
-    let row_w = ui.available_width().max(190.0);
+    // A vertical ScrollArea may retain a wider virtual content width after a
+    // child (curve editor, combo, etc.) requested it. Limit rows to the part
+    // that is actually visible, otherwise the numeric box and the right end
+    // of the track are laid out beyond the Develop side panel and clipped.
+    let visible_w = (ui.clip_rect().right() - ui.cursor().left()).max(1.0);
+    let row_w = ui.available_width().min(visible_w).max(1.0);
     let (rect, mut response) =
         ui.allocate_exact_size(egui::vec2(row_w, 33.0), egui::Sense::click_and_drag());
 

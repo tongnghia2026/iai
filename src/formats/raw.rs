@@ -308,6 +308,12 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
                     .map(|i| normalize(v[i], cfa.color_at(i / w, i % w)))
                     .collect(),
             };
+            // Camera pipelines such as ART/ACR suppress isolated dead/hot
+            // sensels before interpolation. Without this, one defective Bayer
+            // sample expands into a small black/coloured dot after demosaic.
+            if !mono {
+                correct_isolated_bayer_defects(&mut plane, w, h, cfa);
+            }
             // Reconstruct clipped highlights on the mosaic, before demosaic.
             if !mono {
                 inpaint_opposed_bayer(&mut plane, w, h, cfa, gain);
@@ -407,11 +413,13 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
     // Capture sharpening on the linear scene, after demosaic and before the
     // master is frozen (before orientation too, but the pass is isotropic so
     // the order is irrelevant).
-    capture_sharpen(&mut out, cw, ch);
+    if CAPTURE_SHARPEN {
+        capture_sharpen(&mut out, cw, ch);
+    }
 
     // Apply EXIF orientation so portraits aren't sideways. The buffer holds f16
     // bits at this point; orientation only moves 4-u16 pixels, so it is agnostic.
-    let (mut out, fw, fh) = apply_orientation(out, cw, ch, raw.orientation);
+    let (out, fw, fh) = apply_orientation(out, cw, ch, raw.orientation);
 
     // Baseline exposure: lift the scene so the default render matches the camera's
     // embedded-JPEG brightness. A scene-referred RAW otherwise opens flatter and
@@ -423,23 +431,40 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
             .ok()
             .and_then(|bytes| crate::formats::raw_preview::preview_stats_from_bytes(&bytes))
     });
-    if let Some(target) = preview_stats {
-        let samples = subsample_scene_rgb(&out);
-        let gain = crate::core::develop_scene::baseline_rgb_gains(&samples, target.mean_rgb);
-        if gain.iter().any(|g| (g - 1.0).abs() > 0.01) {
-            scale_scene_rgb(&mut out, gain);
-        }
-    }
-
-    // The unclamped linear master + its neutral default-look render.
-    let scene = SceneSource {
+    let mut scene = SceneSource {
         width: fw as u32,
         height: fh as u32,
         half: out,
         alpha: None,
         look: crate::core::develop_scene::BaseLook::Raw,
+        color_pipeline: crate::core::working_color::ColorPipelineMetadata::default(),
+        camera_rgb_curve: None,
         auto_tone: std::sync::OnceLock::new(),
     };
+    if let Some(target) = preview_stats {
+        let gain =
+            crate::core::develop_scene::baseline_rgb_gains_for_scene(&scene, target.mean_rgb);
+        if gain.iter().any(|g| (g - 1.0).abs() > 0.01) {
+            scale_scene_rgb(&mut scene.half, gain);
+            scene.auto_tone = std::sync::OnceLock::new();
+        }
+        let matrix = crate::core::develop_scene::fit_camera_color_matrix(
+            &scene,
+            &target.thumbnail_rgb,
+            target.thumbnail_width,
+            target.thumbnail_height,
+        );
+        if camera_color_matrix_is_material(matrix) {
+            transform_scene_rgb(&mut scene.half, matrix);
+            scene.auto_tone = std::sync::OnceLock::new();
+        }
+        scene.camera_rgb_curve = Some(crate::core::develop_scene::fit_camera_rgb_curve(
+            &scene,
+            &target.histogram,
+        ));
+    }
+
+    // The unclamped linear master + its neutral default-look render.
     let px16 = render_default_look(&scene);
 
     let mut canvas = Canvas::from_rgba16(px16, fw as u32, fh as u32);
@@ -451,6 +476,9 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
     };
     let cam = format!("{} {}", raw.clean_make.trim(), raw.clean_model.trim());
     canvas.metadata.source_profile = cam.trim().to_string();
+    canvas.metadata.develop_working_space =
+        crate::core::working_color::WorkingColorSpace::LinearProPhoto;
+    canvas.metadata.color_pipeline_version = 2;
     Ok(canvas)
 }
 
@@ -858,6 +886,81 @@ fn opposed_refavg_bayer(
     0.5 * (m((k + 1) % 3) + m((k + 2) % 3))
 }
 
+/// Replace only extreme, isolated Bayer sensels using nearby samples of the
+/// same CFA colour. The fast four-neighbour precheck keeps normal texture and
+/// real dark lines untouched; the wider median confirmation rejects edges.
+fn correct_isolated_bayer_defects(plane: &mut [f32], w: usize, h: usize, cfa: &rawloader::CFA) {
+    if w < 9 || h < 9 {
+        return;
+    }
+    let src: &[f32] = plane;
+    let updates: Vec<(usize, f32)> = (4..h - 4)
+        .into_par_iter()
+        .flat_map_iter(|row| {
+            (4..w - 4).filter_map(move |col| {
+                let i = row * w + col;
+                let channel = cfa.color_at(row, col);
+                let center = src[i];
+                let mut nearest = [0.0f32; 4];
+                let mut count = 0usize;
+                for (dr, dc) in [(-2i32, 0i32), (2, 0), (0, -2), (0, 2)] {
+                    let rr = (row as i32 + dr) as usize;
+                    let cc = (col as i32 + dc) as usize;
+                    if cfa.color_at(rr, cc) == channel {
+                        nearest[count] = src[rr * w + cc];
+                        count += 1;
+                    }
+                }
+                if count < 2 {
+                    return None;
+                }
+                let lo = nearest[..count]
+                    .iter()
+                    .copied()
+                    .fold(f32::INFINITY, f32::min);
+                let hi = nearest[..count]
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let obvious_dead = lo > 0.005 && center < lo * 0.20;
+                let obvious_hot = center > hi * 4.0 + 0.02;
+                if !obvious_dead && !obvious_hot {
+                    return None;
+                }
+
+                let mut neighbours = Vec::with_capacity(24);
+                for dr in -4i32..=4 {
+                    for dc in -4i32..=4 {
+                        if dr == 0 && dc == 0 {
+                            continue;
+                        }
+                        let rr = (row as i32 + dr) as usize;
+                        let cc = (col as i32 + dc) as usize;
+                        if cfa.color_at(rr, cc) == channel {
+                            neighbours.push(src[rr * w + cc]);
+                        }
+                    }
+                }
+                neighbours.sort_unstable_by(f32::total_cmp);
+                let median = neighbours[neighbours.len() / 2];
+                let q1 = neighbours[neighbours.len() / 4];
+                let q3 = neighbours[neighbours.len() * 3 / 4];
+                // A real edge has a broad same-colour neighbourhood and must
+                // not be mistaken for a defective sensor site.
+                if q3 - q1 > median.abs() * 0.35 + 0.01 {
+                    return None;
+                }
+                let confirmed =
+                    (median > 0.005 && center < median * 0.20) || center > median * 4.0 + 0.02;
+                confirmed.then_some((i, median))
+            })
+        })
+        .collect();
+    for (i, value) in updates {
+        plane[i] = value;
+    }
+}
+
 /// Opposed highlight reconstruction on the white-balanced Bayer plane, BEFORE
 /// demosaic — the interpolators then see smooth reconstructed values instead of
 /// a flat cap. No-op when nothing is clipped.
@@ -1065,7 +1168,10 @@ fn opposed_rgb(
 // hue/chroma stay put and no per-channel fringing appears. The guard gates on
 // RELATIVE local contrast, leaving flat/noisy areas alone instead of amplifying
 // their noise. All constants are taste knobs.
-const CAPTURE_SHARPEN: bool = true;
+// Disabled by default: two strong unsharp iterations create dark undershoot
+// beads along hair/skin boundaries. Sharpening belongs to the explicit Detail
+// stage, where the user can control it and preview the result.
+const CAPTURE_SHARPEN: bool = false;
 const CS_ITERATIONS: usize = 2;
 /// Gaussian radius of the unsharp blur, sensor px.
 const CS_SIGMA: f32 = 0.7;
@@ -1107,7 +1213,7 @@ fn blur_plane_5(src: &[f32], w: usize, h: usize, k: &[f32; 5]) -> Vec<f32> {
 
 /// Capture-sharpen an RGBA f16 scene buffer in place (see the constants above).
 fn capture_sharpen(half: &mut [u16], w: usize, h: usize) {
-    if !CAPTURE_SHARPEN || w < 4 || h < 4 {
+    if w < 4 || h < 4 {
         return;
     }
     let mut k = [0.0f32; 5];
@@ -1164,10 +1270,12 @@ fn capture_sharpen(half: &mut [u16], w: usize, h: usize) {
 /// `develop_scene`.
 #[inline]
 fn write_scene(dst: &mut [u16], m: &[[f32; 3]; 3], cam: [f32; 3]) {
-    let lin = camera_to_linear_srgb(m, cam);
-    dst[0] = f32_to_f16_bits(lin[0]);
-    dst[1] = f32_to_f16_bits(lin[1]);
-    dst[2] = f32_to_f16_bits(lin[2]);
+    let srgb = camera_to_linear_srgb(m, cam);
+    let working =
+        crate::core::working_color::WorkingColorSpace::LinearProPhoto.from_linear_srgb(srgb);
+    dst[0] = f32_to_f16_bits(working[0]);
+    dst[1] = f32_to_f16_bits(working[1]);
+    dst[2] = f32_to_f16_bits(working[2]);
     dst[3] = 0x3c00; // 1.0
 }
 
@@ -1206,6 +1314,30 @@ fn scale_scene_rgb(scene: &mut [u16], gain: [f32; 3]) {
         px[0] = f32_to_f16_bits(f16_bits_to_f32(px[0]) * gain[0]);
         px[1] = f32_to_f16_bits(f16_bits_to_f32(px[1]) * gain[1]);
         px[2] = f32_to_f16_bits(f16_bits_to_f32(px[2]) * gain[2]);
+    });
+}
+
+fn camera_color_matrix_is_material(matrix: [[f32; 3]; 3]) -> bool {
+    matrix.iter().enumerate().any(|(row, values)| {
+        values
+            .iter()
+            .enumerate()
+            .any(|(col, &v)| (v - f32::from(row == col)).abs() > 0.002)
+    })
+}
+
+fn transform_scene_rgb(scene: &mut [u16], matrix: [[f32; 3]; 3]) {
+    scene.par_chunks_mut(4).for_each(|px| {
+        let src = [
+            f16_bits_to_f32(px[0]),
+            f16_bits_to_f32(px[1]),
+            f16_bits_to_f32(px[2]),
+        ];
+        for row in 0..3 {
+            px[row] = f32_to_f16_bits(
+                matrix[row][0] * src[0] + matrix[row][1] * src[1] + matrix[row][2] * src[2],
+            );
+        }
     });
 }
 
@@ -1360,9 +1492,18 @@ mod tests {
         let mut dst = [0u16; 4];
         let identity = [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         write_scene(&mut dst, &identity, [2.5, 0.1845, -0.05]);
-        let back = crate::core::develop_scene::f16_bits_to_f32(dst[0]);
-        assert!((back - 2.5).abs() < 0.01, "headroom clipped: {back}");
-        let neg = crate::core::develop_scene::f16_bits_to_f32(dst[2]);
+        let stored = [
+            crate::core::develop_scene::f16_bits_to_f32(dst[0]),
+            crate::core::develop_scene::f16_bits_to_f32(dst[1]),
+            crate::core::develop_scene::f16_bits_to_f32(dst[2]),
+        ];
+        let recovered =
+            crate::core::working_color::WorkingColorSpace::LinearProPhoto.to_linear_srgb(stored);
+        assert!(
+            (recovered[0] - 2.5).abs() < 0.01,
+            "headroom clipped: {recovered:?}"
+        );
+        let neg = recovered[2];
         assert!(neg < 0.0, "out-of-gamut value clipped: {neg}");
         assert_eq!(dst[3], 0x3c00, "alpha must be f16 1.0");
     }
@@ -1937,6 +2078,31 @@ mod tests {
         let original = buf.clone();
         capture_sharpen(&mut buf, w, h);
         assert_eq!(buf, original, "flat noise must not be sharpened");
+    }
+
+    #[test]
+    fn bayer_defect_filter_removes_isolated_dead_and_hot_sites_but_keeps_lines() {
+        let (w, h) = (20usize, 20usize);
+        let cfa = rawloader::CFA::new("RGGB");
+        let mut plane = vec![0.4f32; w * h];
+        plane[8 * w + 8] = 0.0;
+        plane[12 * w + 12] = 4.0;
+        // A real two-pixel-wide dark feature has dark same-colour neighbours
+        // and must survive the isolated-site precheck.
+        for y in 4..16 {
+            plane[y * w + 5] = 0.03;
+            plane[y * w + 6] = 0.03;
+        }
+        correct_isolated_bayer_defects(&mut plane, w, h, &cfa);
+        assert!((plane[8 * w + 8] - 0.4).abs() < 1e-6);
+        assert!((plane[12 * w + 12] - 0.4).abs() < 1e-6);
+        assert_eq!(plane[10 * w + 5], 0.03);
+        assert_eq!(plane[10 * w + 6], 0.03);
+    }
+
+    #[test]
+    fn automatic_capture_sharpen_stays_disabled() {
+        assert!(!CAPTURE_SHARPEN);
     }
 
     #[test]

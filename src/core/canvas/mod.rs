@@ -74,6 +74,11 @@ pub struct CanvasMetadata {
     /// sRGB working space (empty when the source was untagged or already sRGB).
     /// Display-only — shown in the Info panel.
     pub source_profile: String,
+    /// Scene-linear Develop storage primaries. Older documents default to the
+    /// legacy linear-sRGB compatibility path.
+    pub develop_working_space: crate::core::working_color::WorkingColorSpace,
+    /// Version of the scene color-pipeline contract stored by `.iai`.
+    pub color_pipeline_version: u16,
     /// Named process colours owned by this document. Kept out of global UI
     /// preferences so each `.iai` project carries its production palette.
     pub swatches: Vec<crate::core::palette::DocumentSwatch>,
@@ -88,6 +93,8 @@ impl Default for CanvasMetadata {
             tags: Vec::new(),
             resolution_ppi: 72.0,
             source_profile: String::new(),
+            develop_working_space: crate::core::working_color::WorkingColorSpace::LinearSrgb,
+            color_pipeline_version: 1,
             swatches: Vec::new(),
         }
     }
@@ -102,6 +109,7 @@ pub enum ColorSpace {
     SRGB,
     LinearRGB,
     AdobeRGB,
+    DisplayP3,
     ProPhoto,
 }
 

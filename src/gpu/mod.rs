@@ -1883,6 +1883,18 @@ struct CanvasUniforms {
 @group(0) @binding(3) var proof_lut: texture_3d<f32>;
 @group(0) @binding(4) var proof_samp: sampler;
 
+fn linear_to_srgb(v: vec3<f32>) -> vec3<f32> {
+    let lo = v * 12.92;
+    let hi = 1.055 * pow(max(v, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, v <= vec3<f32>(0.0031308));
+}
+
+fn srgb_to_linear(v: vec3<f32>) -> vec3<f32> {
+    let lo = v / 12.92;
+    let hi = pow((max(v, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, v <= vec3<f32>(0.04045));
+}
+
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -1916,10 +1928,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // bit-exact pass-through and there is no non-uniform control flow.
     // N must match core::cms::PROOF_LUT_SIZE.
     let n = 17.0;
-    let rgb = clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-    let coord = rgb * ((n - 1.0) / n) + (0.5 / n);
-    let proofed = textureSample(proof_lut, proof_samp, coord).rgb;
-    var out_rgb = mix(c.rgb, proofed, u.proof_enabled);
+    // canvas_tex is Rgba8UnormSrgb, therefore textureSample returns linear
+    // light. ICC/LittleCMS LUTs, however, consume and produce encoded RGB
+    // channel values. Encode before lookup, then decode its result because the
+    // sRGB swapchain will perform the final output encoding.
+    let encoded_rgb = linear_to_srgb(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    let coord = encoded_rgb * ((n - 1.0) / n) + (0.5 / n);
+    let proofed_encoded = textureSample(proof_lut, proof_samp, coord).rgb;
+    let proofed_linear = srgb_to_linear(proofed_encoded);
+    var out_rgb = mix(c.rgb, proofed_linear, u.proof_enabled);
     // Single-channel plate (Channels panel): show one channel as grayscale.
     // Plates are document data, not display simulation; proof is bypassed.
     if u.channel_view > 0.5 {
