@@ -290,23 +290,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             ui.close();
                         }
                         ui.separator();
-                        // Batch-change the font of every text layer in the document
-                        // (all pages) at once — a client changing their mind about
-                        // the typeface shouldn't mean re-editing thousands of layers.
-                        // Lives in Edit (a document-wide find/replace-style action),
-                        // not Layer, which acts on the single active layer.
-                        if ui
-                            .add(menu_item_enabled(
-                                "Change Font of All Text…",
-                                "",
-                                data.layers.layer_types.iter().any(|t| t == "Text"),
-                            ))
-                            .clicked()
-                        {
-                            actions.dialogs.show_font_change_dialog = Some(true);
-                            ui.close();
-                        }
-                        ui.separator();
                         if ui.add(menu_item("Preferences", "Ctrl+,")).clicked() {
                             actions.dialogs.show_preferences = Some(true);
                             ui.close();
@@ -648,20 +631,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.layers.convert_to_curves = Some(data.layers.active_layer_idx);
                             ui.close();
                         }
-                        if ui
-                            .add(menu_item_enabled(
-                                "Convert Text to Curves",
-                                "Ctrl+Q",
-                                data.layers
-                                    .layer_types
-                                    .get(data.layers.active_layer_idx)
-                                    .is_some_and(|t| t == "Text"),
-                            ))
-                            .clicked()
-                        {
-                            actions.layers.text_to_curves = Some(data.layers.active_layer_idx);
-                            ui.close();
-                        }
                         {
                             use crate::core::vector::boolean::BooleanOp;
                             // Enabled once at least two selected vector objects
@@ -931,6 +900,36 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 ui.close();
                             }
                         });
+                    });
+
+                    // Everything that acts on type, gathered in one place.
+                    ui.menu_button("Text", |ui| {
+                        if ui
+                            .add(menu_item_enabled(
+                                "Format All Text…",
+                                "",
+                                data.layers.layer_types.iter().any(|t| t == "Text"),
+                            ))
+                            .clicked()
+                        {
+                            actions.dialogs.show_font_change_dialog = Some(true);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .add(menu_item_enabled(
+                                "Convert Text to Curves",
+                                "Ctrl+Q",
+                                data.layers
+                                    .layer_types
+                                    .get(data.layers.active_layer_idx)
+                                    .is_some_and(|t| t == "Text"),
+                            ))
+                            .clicked()
+                        {
+                            actions.layers.text_to_curves = Some(data.layers.active_layer_idx);
+                            ui.close();
+                        }
                     });
 
                     ui.menu_button("Select", |ui| {

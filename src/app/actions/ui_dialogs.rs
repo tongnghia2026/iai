@@ -410,14 +410,13 @@ impl App {
         if let Some(v) = actions.dialogs.show_font_change_dialog.take() {
             self.shell.ui.show_font_change_dialog = v;
         }
-        if let Some(req) = actions.dialogs.apply_font_change.take() {
-            let to = crate::core::text::TextFontFamily::from_storage_name(&req.to);
-            let n = self.change_document_text_font(req.from, to);
+        if let Some(fmt) = actions.dialogs.apply_text_format.take() {
+            let n = self.change_document_text_format(fmt);
             self.shell.ui.show_font_change_dialog = false;
             self.shell.status_msg = if n == 0 {
-                "Không có layer chữ nào cần đổi font".to_string()
+                "Không có layer chữ nào thay đổi".to_string()
             } else {
-                format!("Đã đổi font cho {n} layer chữ")
+                format!("Đã định dạng {n} layer chữ")
             };
         }
         if let Some(v) = actions.dialogs.show_resize_dialog.take() {

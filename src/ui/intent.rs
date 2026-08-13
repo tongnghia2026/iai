@@ -495,13 +495,34 @@ pub struct PrintIntent {
     /// Print dialog: save the print-ready PDF (deferred rfd save).
     pub print_save_pdf: bool,
 }
-/// A batch "Change font" request from the font dialog. `from == None` re-fonts
-/// every text layer; `from == Some(storage_name)` replaces only that font.
-/// `to` is the target family's `storage_name`.
+/// A batch text-formatting request from the "Định dạng chữ hàng loạt" dialog.
+/// Every field is optional — `None` means "leave this attribute unchanged".
+/// Applied across every text layer in the active document as one undo step.
 #[derive(Clone, Default)]
-pub struct FontChangeRequest {
-    pub from: Option<String>,
-    pub to: String,
+pub struct TextBatchFormat {
+    /// Scope of the font swap: `None` = all fonts, `Some(storage_name)` = only
+    /// text currently using that font. Relevant only when `set_font` is set.
+    pub from_font: Option<String>,
+    pub set_font: Option<crate::core::text::TextFontFamily>,
+    pub set_color: Option<[u8; 4]>,
+    pub set_size: Option<f32>,
+    pub set_bold: Option<bool>,
+    pub set_italic: Option<bool>,
+    pub set_underline: Option<bool>,
+    pub set_case: Option<crate::core::text::TextCase>,
+}
+
+impl TextBatchFormat {
+    /// True when nothing was chosen to change (Apply is then a no-op).
+    pub fn is_noop(&self) -> bool {
+        self.set_font.is_none()
+            && self.set_color.is_none()
+            && self.set_size.is_none()
+            && self.set_bold.is_none()
+            && self.set_italic.is_none()
+            && self.set_underline.is_none()
+            && self.set_case.is_none()
+    }
 }
 
 /// Open/confirm/cancel for the modal dialogs and their scratch edits.
@@ -555,10 +576,10 @@ pub struct DialogIntent {
     /// Smart Fill dialog → download the AI inpainting model.
     pub download_lama_model: bool,
     pub show_new_dialog: Option<bool>,
-    /// Open/close the batch "Change font" dialog.
+    /// Open/close the batch "Định dạng chữ hàng loạt" dialog.
     pub show_font_change_dialog: Option<bool>,
-    /// Apply a batch font change to the active document's text layers.
-    pub apply_font_change: Option<FontChangeRequest>,
+    /// Apply a batch text-formatting change to the active document's text layers.
+    pub apply_text_format: Option<TextBatchFormat>,
     pub show_resize_dialog: Option<bool>,
     pub show_image_size_dialog: Option<bool>,
     pub show_rename_dialog: Option<(bool, usize)>,

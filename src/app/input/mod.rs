@@ -805,6 +805,16 @@ impl ApplicationHandler for App {
                 if self.edit.input.alt_right_dragging {
                     return;
                 }
+                // Don't let the wheel punch through a panel onto the canvas: over
+                // the dock/toolbars (ui_chrome_hit) or the floating Text panel, the
+                // panel's own scroll consumes it instead of zooming/panning.
+                if self
+                    .ui_chrome_hit(self.edit.input.mouse_x, self.edit.input.mouse_y)
+                    .0
+                    || self.edit.text_panel_hovered
+                {
+                    return;
+                }
                 let (sx, sy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
                     MouseScrollDelta::PixelDelta(p) => (p.x * 0.1, p.y * 0.1),

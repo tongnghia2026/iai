@@ -113,15 +113,24 @@ impl App {
         self.update_refine_overlay_tex();
 
         // Background jobs above must still make progress while minimized, but
-        // never build egui or acquire/present a hidden surface. A 0x0 egui frame
-        // also persists collapsed dock dimensions into egui memory.
-        let zero_sized = self
+        // never build egui or acquire/present a hidden surface. A degenerate egui
+        // frame persists collapsed dock dimensions AND clamps floating panels to a
+        // tiny screen rect (they reappear stuck at the left edge on restore) — so
+        // skip the frame whenever the window is minimized or near-zero-sized. The
+        // real min inner size is 640x400, so a <200px dimension only ever occurs
+        // in the transient minimize/restore state, never for a real window.
+        let degenerate_size = self
             .win
             .window
             .as_ref()
             .map(|window| window.inner_size())
-            .is_some_and(|size| size.width == 0 || size.height == 0);
-        if self.win.window_occluded || zero_sized {
+            .is_some_and(|size| size.width < 200 || size.height < 200);
+        let minimized = self
+            .win
+            .window
+            .as_ref()
+            .is_some_and(|window| window.is_minimized() == Some(true));
+        if self.win.window_occluded || degenerate_size || minimized {
             self.win.rendering = false;
             return;
         }

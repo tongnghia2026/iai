@@ -146,7 +146,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         new_canvas_dialog(ctx, data, actions);
     }
     if data.dialogs.show_font_change_dialog {
-        font_change_dialog(ctx, data, actions);
+        text_format_dialog(ctx, data, actions);
     }
     if data.dialogs.show_resize_dialog {
         resize_dialog(ctx, data, actions);

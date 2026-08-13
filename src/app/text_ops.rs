@@ -421,29 +421,47 @@ impl App {
         out
     }
 
-    /// Batch-change the font of every editable Text layer in the active document
-    /// (all pages). `from == None` switches every text layer to `to`;
-    /// `from == Some(storage)` switches only the glyphs whose family
-    /// `storage_name()` equals `storage` — base font and per-character overrides
-    /// alike — leaving text set to other fonts untouched. Locked (non-background)
-    /// layers are skipped.
-    ///
-    /// Each changed layer is re-rasterized in place, keeping its on-canvas
-    /// position exactly as a manual open→pick font→commit would (origin recovered
-    /// from the *original* text via [`text_edit_origin_for_layer`]). The whole
-    /// batch is a single undo step. Returns how many layers changed.
+    /// Convenience: batch-change only the font. `from == None` re-fonts every
+    /// text layer to `to`; `from == Some(storage)` replaces only that font.
+    /// Thin wrapper over [`Self::change_document_text_format`].
     pub fn change_document_text_font(
         &mut self,
         from: Option<String>,
         to: crate::core::text::TextFontFamily,
     ) -> usize {
-        self.ensure_text_font_registered(&to);
+        self.change_document_text_format(crate::ui::intent::TextBatchFormat {
+            from_font: from,
+            set_font: Some(to),
+            ..Default::default()
+        })
+    }
+
+    /// Batch-apply a text-formatting change across every editable Text layer in
+    /// the active document (all pages). Each `TextBatchFormat` field is optional
+    /// — `None` leaves that attribute alone. Font swaps honour `from_font`
+    /// (all fonts, or one specific font); colour/size/bold/italic/underline are
+    /// set on the base style and every per-character override; case rewrites the
+    /// content (UPPER / lower / Title). Locked (non-background) layers are
+    /// skipped.
+    ///
+    /// Each changed layer is re-rasterized in place, keeping its ink centred on
+    /// its old position (frame-safe) via [`compute_refont_origin`]. The whole
+    /// batch is a single undo step. Returns how many layers changed.
+    pub fn change_document_text_format(
+        &mut self,
+        fmt: crate::ui::intent::TextBatchFormat,
+    ) -> usize {
+        if fmt.is_noop() {
+            return 0;
+        }
+        if let Some(to) = &fmt.set_font {
+            self.ensure_text_font_registered(to);
+        }
         let (cw, ch) = {
             let d = &self.docs.documents[self.docs.active_doc_idx];
             (d.canvas.width, d.canvas.height)
         };
-        let to_storage = to.storage_name();
-        let matches = |fam: &crate::core::text::TextFontFamily| match &from {
+        let font_matches = |fam: &crate::core::text::TextFontFamily| match &fmt.from_font {
             None => true,
             Some(want) => &fam.storage_name() == want,
         };
@@ -462,21 +480,111 @@ impl App {
                 };
                 let mut new_td = td.clone();
                 let mut changed = false;
-                if matches(&new_td.font_family) && new_td.font_family.storage_name() != to_storage {
-                    new_td.font_family = to.clone();
-                    changed = true;
-                }
-                for g in &mut new_td.glyph_styles {
-                    if matches(&g.font_family) && g.font_family.storage_name() != to_storage {
-                        g.font_family = to.clone();
-                        changed = true;
+
+                // Case first: it rewrites content (and may change its length), so
+                // per-glyph styles must be re-spread before any per-glyph setter.
+                if let Some(target) = fmt.set_case {
+                    let chars: Vec<char> = new_td.content.chars().collect();
+                    let n = chars.len();
+                    if n > 0 {
+                        let (new_chars, style_src) =
+                            crate::core::text::transform_text_case(&chars, 0..n, target);
+                        if new_chars != chars {
+                            if new_td.glyph_styles.len() == n {
+                                new_td.glyph_styles = style_src
+                                    .iter()
+                                    .map(|&i| new_td.glyph_styles[i].clone())
+                                    .collect();
+                            }
+                            new_td.content = new_chars.into_iter().collect();
+                            changed = true;
+                        }
                     }
                 }
+
+                if let Some(to) = &fmt.set_font {
+                    let to_storage = to.storage_name();
+                    if font_matches(&new_td.font_family)
+                        && new_td.font_family.storage_name() != to_storage
+                    {
+                        new_td.font_family = to.clone();
+                        changed = true;
+                    }
+                    for g in &mut new_td.glyph_styles {
+                        if font_matches(&g.font_family)
+                            && g.font_family.storage_name() != to_storage
+                        {
+                            g.font_family = to.clone();
+                            changed = true;
+                        }
+                    }
+                }
+                if let Some(c) = fmt.set_color {
+                    if new_td.color != c {
+                        new_td.color = c;
+                        changed = true;
+                    }
+                    for g in &mut new_td.glyph_styles {
+                        if g.color != c {
+                            g.color = c;
+                            changed = true;
+                        }
+                    }
+                }
+                if let Some(px) = fmt.set_size {
+                    let px = px.clamp(4.0, 1600.0);
+                    if new_td.font_px != px {
+                        new_td.font_px = px;
+                        changed = true;
+                    }
+                    for g in &mut new_td.glyph_styles {
+                        if g.font_px != px {
+                            g.font_px = px;
+                            changed = true;
+                        }
+                    }
+                }
+                if let Some(v) = fmt.set_bold {
+                    if new_td.bold != v {
+                        new_td.bold = v;
+                        changed = true;
+                    }
+                    for g in &mut new_td.glyph_styles {
+                        if g.bold != v {
+                            g.bold = v;
+                            changed = true;
+                        }
+                    }
+                }
+                if let Some(v) = fmt.set_italic {
+                    if new_td.italic != v {
+                        new_td.italic = v;
+                        changed = true;
+                    }
+                    for g in &mut new_td.glyph_styles {
+                        if g.italic != v {
+                            g.italic = v;
+                            changed = true;
+                        }
+                    }
+                }
+                if let Some(v) = fmt.set_underline {
+                    if new_td.underline != v {
+                        new_td.underline = v;
+                        changed = true;
+                    }
+                    for g in &mut new_td.glyph_styles {
+                        if g.underline != v {
+                            g.underline = v;
+                            changed = true;
+                        }
+                    }
+                }
+
                 if changed {
-                    // Keep each block centred on its old position (frame-safe)
-                    // instead of pinning a corner, which visibly drifts when the
-                    // new font's metrics differ. Fall back to the plain anchor
-                    // only when there is no ink to measure.
+                    // Drop per-glyph overrides that now equal the base style.
+                    new_td.compact_glyph_styles();
+                    // Centre-anchor keeps blocks (e.g. text in a frame) in place.
                     let origin = compute_refont_origin(layer, &new_td)
                         .unwrap_or_else(|| text_edit_origin_for_layer(td, layer));
                     edits.push((idx, origin, new_td));
@@ -490,7 +598,7 @@ impl App {
 
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
         let before =
-            LayerStructureCommand::capture_before("Change Font", &canvas.layer_stack, cw, ch);
+            LayerStructureCommand::capture_before("Format Text", &canvas.layer_stack, cw, ch);
         let count = edits.len();
         for (idx, origin, new_td) in edits {
             rasterize_into_layer(canvas, idx, origin, new_td);
@@ -1506,6 +1614,85 @@ mod tests {
             .collect();
         assert!(storages.contains(&TextFontFamily::DejaVuSans.storage_name()));
         assert!(storages.contains(&TextFontFamily::Arial.storage_name()));
+    }
+
+    #[test]
+    fn batch_format_applies_bold_and_uppercase_in_one_undo() {
+        use crate::core::text::{TextCase, TextFontFamily};
+        use crate::ui::intent::TextBatchFormat;
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let idx = add_text_layer(&mut app, "hello", TextFontFamily::DejaVuSans);
+
+        let n = app.change_document_text_format(TextBatchFormat {
+            set_bold: Some(true),
+            set_case: Some(TextCase::Upper),
+            ..Default::default()
+        });
+        assert_eq!(n, 1);
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Text(td) => {
+                assert!(td.bold);
+                assert_eq!(td.content, "HELLO");
+            }
+            _ => panic!("text layer"),
+        }
+        // The colour/size/bold/case batch is a single undo.
+        app.docs.documents[0]
+            .canvas
+            .undo()
+            .expect("undo batch format");
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Text(td) => {
+                assert!(!td.bold);
+                assert_eq!(td.content, "hello");
+            }
+            _ => panic!("text layer"),
+        }
+    }
+
+    #[test]
+    fn batch_format_noop_changes_nothing() {
+        use crate::core::text::TextFontFamily;
+        use crate::ui::intent::TextBatchFormat;
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        add_text_layer(&mut app, "hi", TextFontFamily::DejaVuSans);
+        assert_eq!(
+            app.change_document_text_format(TextBatchFormat::default()),
+            0
+        );
+    }
+
+    #[test]
+    fn batch_format_color_and_size_override_per_glyph() {
+        use crate::core::text::TextFontFamily;
+        use crate::ui::intent::TextBatchFormat;
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let idx = add_text_layer(&mut app, "Hi", TextFontFamily::DejaVuSans);
+        // Seed a distinct per-glyph colour to prove the batch overrides it.
+        {
+            let layer = &mut app.docs.documents[0].canvas.layer_stack.layers[idx];
+            if let LayerType::Text(td) = &mut layer.layer_type {
+                td.glyph_styles = vec![td.glyph_style(0), td.glyph_style(1)];
+                td.glyph_styles[0].color = [10, 20, 30, 255];
+            }
+        }
+        let n = app.change_document_text_format(TextBatchFormat {
+            set_color: Some([200, 0, 0, 255]),
+            set_size: Some(72.0),
+            ..Default::default()
+        });
+        assert_eq!(n, 1);
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Text(td) => {
+                assert_eq!(td.color, [200, 0, 0, 255]);
+                assert_eq!(td.font_px, 72.0);
+                assert!(td.glyph_styles.iter().all(|g| g.color == [200, 0, 0, 255]));
+            }
+            _ => panic!("text layer"),
+        }
     }
 
     #[test]
