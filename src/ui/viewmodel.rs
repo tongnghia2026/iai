@@ -286,6 +286,7 @@ pub struct ToolViewModel {
     pub transform_ty: f32,
     pub transform_cursor_hint: u8,
     pub transform_ctx_menu_pos: Option<(f32, f32)>,
+    pub object_ctx_menu_pos: Option<(f32, f32)>,
     pub selected_rect_corner_type: Option<u8>,
 }
 /// Selection: mode, previews, Select Subject and the Refine panel.
@@ -381,6 +382,7 @@ pub struct DialogViewModel {
     pub show_font_change_dialog: bool,
     /// Batch vector fill/outline dialog is open.
     pub show_vector_style_dialog: bool,
+    pub vector_style_target: crate::ui::intent::VectorStyleTarget,
     /// Distinct fonts used by the active document's text layers, as
     /// `(storage_name, display_label)`. Only filled while the font dialog is
     /// open (the "from" list); empty otherwise.
@@ -783,6 +785,7 @@ impl Default for UiData {
                 transform_ty: 0.0,
                 transform_cursor_hint: 0,
                 transform_ctx_menu_pos: None,
+                object_ctx_menu_pos: None,
                 selected_rect_corner_type: None,
             },
             sel: SelectionViewModel {
@@ -853,6 +856,7 @@ impl Default for UiData {
                 show_new_dialog: false,
                 show_font_change_dialog: false,
                 show_vector_style_dialog: false,
+                vector_style_target: crate::ui::intent::VectorStyleTarget::Document,
                 text_fonts_in_use: Vec::new(),
                 show_resize_dialog: false,
                 show_image_size_dialog: false,

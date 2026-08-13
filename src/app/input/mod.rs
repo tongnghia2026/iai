@@ -138,6 +138,18 @@ impl App {
         }
     }
 
+    fn has_selected_vector_layers(&self) -> bool {
+        self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .any(|layer| {
+                layer.selected
+                    && matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
+            })
+    }
+
     /// Index of the guide under the current cursor (within a few screen px), or
     /// None. Returns None when guides are hidden or locked.
     pub(crate) fn guide_at_screen(&self) -> Option<usize> {

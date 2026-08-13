@@ -361,6 +361,7 @@ pub struct UiState {
     pub show_font_change_dialog: bool,
     /// Batch vector fill/outline dialog (Object ▸ Format All Vectors…).
     pub show_vector_style_dialog: bool,
+    pub vector_style_target: crate::ui::intent::VectorStyleTarget,
     pub show_resize_dialog: bool,
     pub show_image_size_dialog: bool,
     pub show_rename_dialog: bool,
@@ -1240,6 +1241,7 @@ impl App {
                 text_fonts_failed: std::collections::HashSet::new(),
                 text_font_preview: None,
                 transform_ctx_menu_pos: None,
+                object_ctx_menu_pos: None,
                 brush_popup_pos: None,
                 selection_ctx_menu_pos: None,
                 text_drag_hovered: false,
@@ -1331,6 +1333,7 @@ impl App {
                     show_new_dialog: false,
                     show_font_change_dialog: false,
                     show_vector_style_dialog: false,
+                    vector_style_target: crate::ui::intent::VectorStyleTarget::Document,
                     show_resize_dialog: false,
                     show_image_size_dialog: false,
                     show_rename_dialog: false,

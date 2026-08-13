@@ -3,9 +3,9 @@
 //! is opt-in, and the whole application is one undo step.
 
 use super::*;
-use crate::ui::intent::VectorBatchStyle;
+use crate::ui::intent::{VectorBatchStyle, VectorStyleTarget};
 
-pub(crate) fn vector_style_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut UiActions) {
+pub(crate) fn vector_style_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let arrows_id = egui::Id::new("vecfmt_arrows");
     let shapes_id = egui::Id::new("vecfmt_shapes");
     let curves_id = egui::Id::new("vecfmt_curves");
@@ -37,7 +37,13 @@ pub(crate) fn vector_style_dialog(ctx: &egui::Context, _data: &UiData, actions: 
     let mut do_cancel = esc_pressed;
 
     modal_overlay(ctx, "vector_style_overlay");
-    egui::Window::new("Đổi màu và độ dày viền hàng loạt")
+    let selected_only = data.dialogs.vector_style_target == VectorStyleTarget::Selected;
+    let title = if selected_only {
+        "Đổi màu và viền các layer vector đã chọn"
+    } else {
+        "Đổi màu và độ dày viền hàng loạt"
+    };
+    egui::Window::new(title)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -45,7 +51,11 @@ pub(crate) fn vector_style_dialog(ctx: &egui::Context, _data: &UiData, actions: 
         .min_width(390.0)
         .show(ctx, |ui| {
             ui.add_space(6.0);
-            ui.label("Chọn loại đối tượng và chỉ bật những thuộc tính cần thay đổi.");
+            ui.label(if selected_only {
+                "Chỉ áp dụng cho các layer đang chọn. Chọn loại đối tượng và thuộc tính cần đổi."
+            } else {
+                "Chọn loại đối tượng và chỉ bật những thuộc tính cần thay đổi."
+            });
             ui.add_space(10.0);
 
             ui.strong("Phạm vi");
@@ -113,6 +123,7 @@ pub(crate) fn vector_style_dialog(ctx: &egui::Context, _data: &UiData, actions: 
 
     if do_apply {
         let spec = VectorBatchStyle {
+            target: data.dialogs.vector_style_target,
             include_arrows: arrows,
             include_shapes: shapes,
             include_curves: curves,

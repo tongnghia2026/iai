@@ -186,6 +186,7 @@ impl App {
             || actions.tool.set_transform_mode.is_some()
             || actions.tool.transform_warp
             || actions.tool.transform_ctx_menu_close
+            || actions.dialogs.open_vector_style_dialog.is_some()
             || actions.tool.transform_commit
             || actions.tool.transform_cancel;
         if actions.tool.transform_flip_h {
@@ -214,6 +215,10 @@ impl App {
         }
         if ctx_menu_consumed {
             self.edit.transform_ctx_menu_pos = None;
+        }
+        if actions.tool.object_ctx_menu_close || actions.dialogs.open_vector_style_dialog.is_some()
+        {
+            self.edit.object_ctx_menu_pos = None;
         }
 
         let sel_menu_consumed = actions.sel.selection_ctx_menu_close

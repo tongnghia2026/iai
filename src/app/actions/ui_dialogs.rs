@@ -422,11 +422,22 @@ impl App {
         if let Some(v) = actions.dialogs.show_vector_style_dialog.take() {
             self.shell.ui.show_vector_style_dialog = v;
         }
+        if let Some(target) = actions.dialogs.open_vector_style_dialog.take() {
+            self.shell.ui.vector_style_target = target;
+            self.shell.ui.show_vector_style_dialog = true;
+        }
         if let Some(spec) = actions.dialogs.apply_vector_style.take() {
+            let selected_only = spec.target == crate::ui::intent::VectorStyleTarget::Selected;
             let n = self.change_document_vector_style(spec);
             self.shell.ui.show_vector_style_dialog = false;
             self.shell.status_msg = if n == 0 {
-                "Không có layer vector nào thay đổi".to_string()
+                if selected_only {
+                    "Không có layer vector đã chọn nào thay đổi".to_string()
+                } else {
+                    "Không có layer vector nào thay đổi".to_string()
+                }
+            } else if selected_only {
+                format!("Đã đổi kiểu cho {n} layer vector đã chọn")
             } else {
                 format!("Đã đổi kiểu cho {n} layer vector")
             };

@@ -2845,6 +2845,12 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
     }
 
     if row_resp.secondary_clicked() {
+        // Preserve an existing multi-selection when right-clicking one of its
+        // rows. Right-clicking an unselected row makes that row the sole target,
+        // matching standard Layers-panel context-menu behaviour.
+        if !is_selected {
+            actions.layers.select_layer = Some((idx, false, false));
+        }
         ui.ctx().request_repaint();
     }
     row_resp.context_menu(|ui| {
@@ -2858,6 +2864,24 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
         }
         if ui.button("Rename...").clicked() {
             actions.dialogs.show_rename_dialog = Some((true, idx));
+            ui.close();
+        }
+        let has_selected_vector = data
+            .layers
+            .layer_selected
+            .iter()
+            .zip(data.layers.layer_types.iter())
+            .any(|(selected, kind)| *selected && (kind == "Shape" || kind == "Path"));
+        let clicked_vector = layer_type == "Shape" || layer_type == "Path";
+        if ui
+            .add_enabled(
+                has_selected_vector || clicked_vector,
+                egui::Button::new("Format Selected Vectors…"),
+            )
+            .clicked()
+        {
+            actions.dialogs.open_vector_style_dialog =
+                Some(crate::ui::intent::VectorStyleTarget::Selected);
             ui.close();
         }
         ui.separator();

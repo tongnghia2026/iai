@@ -374,6 +374,8 @@ pub struct ToolIntent {
     pub set_transform_mode: Option<crate::app::state::TransformMode>,
     pub transform_warp: bool,
     pub transform_ctx_menu_close: bool,
+    /// Close the Move-tool selected-object context menu.
+    pub object_ctx_menu_close: bool,
     /// Begin Free Transform (Ctrl+T) — fired from the selection context menu.
     pub start_transform: bool,
 }
@@ -525,10 +527,19 @@ impl TextBatchFormat {
     }
 }
 
+/// Which layers a vector batch-style operation may change.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorStyleTarget {
+    #[default]
+    Document,
+    Selected,
+}
+
 /// Batch style change for vector layers. Scope flags classify each vector
 /// layer independently; optional style fields leave the existing value alone.
 #[derive(Clone, Copy, Default)]
 pub struct VectorBatchStyle {
+    pub target: VectorStyleTarget,
     pub include_arrows: bool,
     pub include_shapes: bool,
     pub include_curves: bool,
@@ -603,6 +614,8 @@ pub struct DialogIntent {
     pub apply_text_format: Option<TextBatchFormat>,
     /// Open/close Object ▸ Format All Vectors….
     pub show_vector_style_dialog: Option<bool>,
+    /// Open the vector-style dialog for the whole document or selected layers.
+    pub open_vector_style_dialog: Option<VectorStyleTarget>,
     /// Apply one batch style change to the selected vector-layer classes.
     pub apply_vector_style: Option<VectorBatchStyle>,
     pub show_resize_dialog: Option<bool>,

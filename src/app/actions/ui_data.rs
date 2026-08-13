@@ -1189,6 +1189,7 @@ impl App {
                     .unwrap_or(0.0),
                 transform_cursor_hint: self.transform_cursor_hint(),
                 transform_ctx_menu_pos: self.edit.transform_ctx_menu_pos,
+                object_ctx_menu_pos: self.edit.object_ctx_menu_pos,
                 selected_rect_corner_type: self.active_rectangle_corner_type(),
             },
             sel: SelectionViewModel {
@@ -1304,6 +1305,7 @@ impl App {
                 show_new_dialog: self.shell.ui.show_new_dialog,
                 show_font_change_dialog: self.shell.ui.show_font_change_dialog,
                 show_vector_style_dialog: self.shell.ui.show_vector_style_dialog,
+                vector_style_target: self.shell.ui.vector_style_target,
                 // Only scan the layer stack for fonts-in-use while the dialog is
                 // open, so the common (closed) frame stays cheap.
                 text_fonts_in_use: if self.shell.ui.show_font_change_dialog {

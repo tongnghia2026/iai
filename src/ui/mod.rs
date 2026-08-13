@@ -2381,6 +2381,26 @@ pub fn build(
                         .inner_margin(egui::Margin::same(4))
                         .show(ui, |ui| {
                             ui.set_min_width(menu_w - 8.0);
+                            let has_selected_vector = data
+                                .layers
+                                .layer_selected
+                                .iter()
+                                .zip(data.layers.layer_types.iter())
+                                .any(|(selected, kind)| {
+                                    *selected && (kind == "Shape" || kind == "Path")
+                                });
+                            if ui
+                                .add_enabled(
+                                    has_selected_vector,
+                                    egui::Button::new("Format Selected Vectors…"),
+                                )
+                                .clicked()
+                            {
+                                actions.dialogs.open_vector_style_dialog =
+                                    Some(intent::VectorStyleTarget::Selected);
+                                actions.tool.transform_ctx_menu_close = true;
+                            }
+                            ui.separator();
                             if let Some(corner) = data.tool.selected_rect_corner_type {
                                 topoptions::corner_palette(ui, corner, &mut actions);
                                 ui.separator();
@@ -2444,6 +2464,63 @@ pub fn build(
             let clicked_outside = ctx.input(|i| i.pointer.any_click()) && !resp.response.hovered();
             if clicked_outside {
                 actions.tool.transform_ctx_menu_close = true;
+            }
+        }
+
+        if let Some((mx, my)) = data.tool.object_ctx_menu_pos {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                actions.tool.object_ctx_menu_close = true;
+            }
+            let screen = ctx.content_rect();
+            let menu_w = 230.0;
+            let px = mx.min(screen.max.x - menu_w).max(screen.min.x);
+            let py = my.min(screen.max.y - 90.0).max(screen.min.y + 28.0);
+            let pal = data.chrome.theme_mode.palette();
+            let selected_vectors = data
+                .layers
+                .layer_selected
+                .iter()
+                .zip(data.layers.layer_types.iter())
+                .filter(|(selected, kind)| {
+                    **selected && (kind.as_str() == "Shape" || kind.as_str() == "Path")
+                })
+                .count();
+
+            let resp = egui::Area::new(egui::Id::new("object_ctx_menu"))
+                .fixed_pos(egui::pos2(px, py))
+                .order(egui::Order::Tooltip)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(pal.panel_bg)
+                        .stroke(egui::Stroke::new(1.0_f32, pal.border_subtle))
+                        .inner_margin(egui::Margin::symmetric(0, 4))
+                        .corner_radius(0.0)
+                        .show(ui, |ui| {
+                            ui.set_min_width(menu_w);
+                            ui.set_max_width(menu_w);
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            if flat_context_menu_item(
+                                ui,
+                                menu_w,
+                                selected_vectors > 0,
+                                "Format Selected Vectors…",
+                                None,
+                            ) {
+                                actions.dialogs.open_vector_style_dialog =
+                                    Some(intent::VectorStyleTarget::Selected);
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .inner
+                });
+            if resp.inner {
+                actions.tool.object_ctx_menu_close = true;
+            }
+            let clicked_outside = ctx.input(|i| i.pointer.any_click()) && !resp.response.hovered();
+            if clicked_outside {
+                actions.tool.object_ctx_menu_close = true;
             }
         }
 

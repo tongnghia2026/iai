@@ -149,6 +149,8 @@ pub struct EditorInteraction {
     /// Screen-space position where right-click happened inside the transform bbox.
     /// Set in input.rs, consumed by the UI to show a context menu popup.
     pub(in crate::app) transform_ctx_menu_pos: Option<(f32, f32)>,
+    /// Screen-space position of the Move-tool context menu for selected objects.
+    pub(in crate::app) object_ctx_menu_pos: Option<(f32, f32)>,
     /// Screen-space position of the right-click brush settings popup (Brush /
     /// Pencil / Eraser). Set in input.rs, consumed by the UI. None when closed.
     pub(in crate::app) brush_popup_pos: Option<(f32, f32)>,

@@ -7,7 +7,7 @@ use crate::core::layer::LayerType;
 use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorGeometry;
 use crate::core::vector::style::{ArrowStyle, Paint, VectorStyle};
-use crate::ui::intent::VectorBatchStyle;
+use crate::ui::intent::{VectorBatchStyle, VectorStyleTarget};
 
 fn style_for_scope(geometry: &VectorGeometry, spec: VectorBatchStyle) -> Option<VectorStyle> {
     match geometry {
@@ -38,6 +38,9 @@ impl App {
         let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
         let mut replacements = Vec::new();
         for (index, layer) in canvas.layer_stack.layers.iter().enumerate() {
+            if spec.target == VectorStyleTarget::Selected && !layer.selected {
+                continue;
+            }
             let LayerType::Vector(geometry) = &layer.layer_type else {
                 continue;
             };
@@ -258,8 +261,46 @@ mod tests {
     }
 
     #[test]
+    fn batch_vector_style_selected_target_skips_unselected_layers() {
+        let (mut app, shape, curve, arrow) = app_with_vector_classes();
+        for layer in &mut app.docs.documents[0].canvas.layer_stack.layers {
+            layer.selected = false;
+        }
+        app.docs.documents[0].canvas.layer_stack.layers[shape].selected = true;
+        app.docs.documents[0].canvas.layer_stack.layers[arrow].selected = true;
+        let before_curve = vector_style(&app, curve);
+        let color = [80, 90, 100, 255];
+
+        assert_eq!(
+            app.change_document_vector_style(VectorBatchStyle {
+                target: VectorStyleTarget::Selected,
+                include_arrows: true,
+                include_shapes: true,
+                include_curves: true,
+                set_fill: Some(color),
+                ..Default::default()
+            }),
+            2
+        );
+        assert_eq!(
+            vector_style(&app, shape).fill,
+            Paint::Solid(ColorValue::from_rgba8(color))
+        );
+        assert_eq!(
+            vector_style(&app, arrow).fill,
+            Paint::Solid(ColorValue::from_rgba8(color))
+        );
+        assert_eq!(vector_style(&app, curve), before_curve);
+    }
+
+    #[test]
     fn batch_vector_style_is_one_undo() {
         let (mut app, shape, curve, arrow) = app_with_vector_classes();
+        for layer in &mut app.docs.documents[0].canvas.layer_stack.layers {
+            layer.selected = false;
+        }
+        app.docs.documents[0].canvas.layer_stack.layers[shape].selected = true;
+        app.docs.documents[0].canvas.layer_stack.layers[arrow].selected = true;
         let before = [
             vector_style(&app, shape),
             vector_style(&app, curve),
@@ -269,6 +310,7 @@ mod tests {
 
         assert_eq!(
             app.change_document_vector_style(VectorBatchStyle {
+                target: VectorStyleTarget::Selected,
                 include_arrows: true,
                 include_shapes: true,
                 include_curves: true,
@@ -276,9 +318,10 @@ mod tests {
                 set_stroke: Some([10, 20, 30, 255]),
                 set_stroke_width: Some(7.0),
             }),
-            3
+            2
         );
         assert_eq!(app.docs.documents[0].canvas.undo_count(), undo_before + 1);
+        assert_eq!(vector_style(&app, curve), before[1]);
 
         app.docs.documents[0]
             .canvas
