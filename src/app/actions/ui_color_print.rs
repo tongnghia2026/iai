@@ -316,6 +316,7 @@ impl App {
                     crate::core::print::PdfVectorSelection {
                         objects: Vec::new(),
                         promoted_layer_ids: Vec::new(),
+                        above_layer_ids: Vec::new(),
                     }
                 };
                 let ink_page = if cmyk_pdf {
@@ -342,6 +343,7 @@ impl App {
                     crate::core::print::PdfVectorSelection {
                         objects: Vec::new(),
                         promoted_layer_ids: Vec::new(),
+                        above_layer_ids: Vec::new(),
                     }
                 } else {
                     crate::core::print::collect_pdf_vectors(

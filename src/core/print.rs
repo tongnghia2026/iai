@@ -289,6 +289,25 @@ pub fn build_pdf_with_vectors(
     layout: &PrintLayout,
     icc: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
+    build_pdf_with_vectors_overlay(rgba, w, h, dpi, vectors, None, layout, icc)
+}
+
+/// Like [`build_pdf_with_vectors`], but also draws `overlay` (a canvas-sized RGBA
+/// buffer of the opaque pixel layers stacked above the vectors) ON TOP of the
+/// native vectors as a transparent SMask image — so a Path/Text layer stays
+/// crisp even with a few images over it. `None` behaves exactly like
+/// [`build_pdf_with_vectors`]. RGB pages only (ignored on a CMYK ink page).
+#[allow(clippy::too_many_arguments)]
+pub fn build_pdf_with_vectors_overlay(
+    rgba: &[u8],
+    w: u32,
+    h: u32,
+    dpi: f32,
+    vectors: &[PdfVectorObject],
+    overlay: Option<Vec<u8>>,
+    layout: &PrintLayout,
+    icc: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
     if w == 0 || h == 0 {
         return Err("Empty image, cannot print".into());
     }
@@ -302,7 +321,9 @@ pub fn build_pdf_with_vectors(
         h,
         dpi,
         components: 3,
-    };
+        overlay: None,
+    }
+    .with_overlay(overlay);
     build_pdf_encoded_with_vectors(&page, vectors, layout, icc)
 }
 
@@ -346,6 +367,7 @@ pub fn encode_pdf_page_streamed(
         h,
         dpi,
         components: 3,
+        overlay: None,
     })
 }
 
@@ -443,10 +465,36 @@ pub fn build_pdf_encoded_with_vectors(
     } else {
         String::new()
     };
+    // Transparent overlay (opaque pixel layers stacked ABOVE the native vectors
+    // on an RGB page): split the canvas-sized RGBA into an RGB image + a
+    // DeviceGray SMask so it composites on top of the crisp vectors instead of
+    // flattening them. Objects land after the base image (5) and optional ICC
+    // (6): SMask then image, so the image can reference its mask.
+    let overlay_streams = match page.overlay.as_deref().filter(|_| page.components == 3) {
+        Some(rgba) if rgba.len() >= (w as usize) * (h as usize) * 4 => {
+            let px = (w as usize) * (h as usize);
+            let mut rgb = Vec::with_capacity(px * 3);
+            let mut alpha = Vec::with_capacity(px);
+            for i in 0..px {
+                let o = i * 4;
+                rgb.extend_from_slice(&rgba[o..o + 3]);
+                alpha.push(rgba[o + 3]);
+            }
+            Some((zlib_bytes(&rgb)?, zlib_bytes(&alpha)?))
+        }
+        _ => None,
+    };
+    let overlay_smask_obj = if icc.is_some() { 7 } else { 6 };
+    let overlay_image_obj = overlay_smask_obj + 1;
+    let overlay_xobject = if overlay_streams.is_some() {
+        format!(" /Im1 {overlay_image_obj} 0 R")
+    } else {
+        String::new()
+    };
     pdf.extend_from_slice(
         format!(
             "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}]{box_entries} \
-             /Resources << /XObject << /Im0 5 0 R >> {shading_resources} {extgstate_resources} {colorspace_resources} >> /Contents 4 0 R >>\nendobj\n"
+             /Resources << /XObject << /Im0 5 0 R{overlay_xobject} >> {shading_resources} {extgstate_resources} {colorspace_resources} >> /Contents 4 0 R >>\nendobj\n"
         )
         .as_bytes(),
     );
@@ -458,6 +506,13 @@ pub fn build_pdf_encoded_with_vectors(
     // paints CMYK through the embedded profile (/IaiCmyk cs … scn); an untagged
     // ink page falls back to raw k/K.
     append_vector_content(&mut content, vectors, w, h, dw, dh, tx, ty, cmyk_cs);
+    // Draw the above-vectors pixel layers back ON TOP of the crisp vectors (same
+    // placement/clip as the base image), so their z-order is preserved.
+    if overlay_streams.is_some() {
+        content.push_str(&format!(
+            "q\n{clip_x:.2} {clip_y:.2} {clip_w:.2} {clip_h:.2} re W n\n{dw:.2} 0 0 {dh:.2} {tx:.2} {ty:.2} cm\n/Im1 Do\nQ\n"
+        ));
+    }
     // Crop / registration marks sit in the page margin around the artwork.
     append_print_marks(
         &mut content,
@@ -514,6 +569,34 @@ pub fn build_pdf_encoded_with_vectors(
         pdf.extend_from_slice(b"\nendstream\nendobj\n");
     }
 
+    // The above-vectors overlay: DeviceGray SMask (alpha) followed by the RGB
+    // image that references it. Same colour space as the base RGB image so it
+    // matches the page's profile.
+    if let Some((rgb_c, alpha_c)) = &overlay_streams {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!(
+                "{overlay_smask_obj} 0 obj\n<< /Type /XObject /Subtype /Image /Width {w} /Height {h} \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n",
+                alpha_c.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(alpha_c);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!(
+                "{overlay_image_obj} 0 obj\n<< /Type /XObject /Subtype /Image /Width {w} /Height {h} \
+                 /ColorSpace {colorspace} /SMask {overlay_smask_obj} 0 R /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n",
+                rgb_c.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(rgb_c);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+
     // Cross-reference table + trailer.
     let xref_off = pdf.len();
     let count = offsets.len() + 1;
@@ -548,6 +631,23 @@ pub struct EncodedPdfPage {
     /// Colour components per pixel in the compressed stream: 3 = RGB,
     /// 4 = DeviceCMYK (ink planes, 255 = full ink).
     components: u8,
+    /// Optional transparent overlay (raw RGBA, canvas-sized) drawn ON TOP of the
+    /// native vectors: the opaque pixel layers stacked above the vector run on an
+    /// RGB page (see [`pdf_overlay_raster`]). `None` on the common vectors-on-top
+    /// path and on every CMYK page.
+    overlay: Option<Vec<u8>>,
+}
+
+impl EncodedPdfPage {
+    /// Attach the transparent above-vectors overlay (raw RGBA, must be
+    /// `w*h*4` bytes) to draw on top of the native vectors. Ignored on CMYK
+    /// pages, which keep their conservative single-image z-order.
+    pub fn with_overlay(mut self, overlay: Option<Vec<u8>>) -> Self {
+        if self.components == 3 {
+            self.overlay = overlay;
+        }
+        self
+    }
 }
 
 /// Encode one page independently so a caller can render a large source PDF
@@ -569,6 +669,7 @@ pub fn encode_pdf_page(rgba: &[u8], w: u32, h: u32, dpi: f32) -> Result<EncodedP
         h,
         dpi,
         components: 3,
+        overlay: None,
     })
 }
 
@@ -604,6 +705,7 @@ pub fn encode_pdf_page_cmyk(
         h,
         dpi,
         components: 4,
+        overlay: None,
     })
 }
 
@@ -701,6 +803,12 @@ pub struct PdfVectorObject {
 pub struct PdfVectorSelection {
     pub objects: Vec<PdfVectorObject>,
     pub promoted_layer_ids: Vec<u32>,
+    /// Opaque raster layers that sit ABOVE the promoted vector run. They are
+    /// kept out of the raster base and re-drawn as a single transparent overlay
+    /// image ON TOP of the native vectors, so a Path/Text layer stays crisp even
+    /// when a few pixel layers are stacked over it (instead of being flattened
+    /// into the raster and going jagged). Empty in the common vectors-on-top case.
+    pub above_layer_ids: Vec<u32>,
 }
 
 fn shape_as_vector(
@@ -737,6 +845,25 @@ fn arrowheads_as_pdf_path(
 }
 
 pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSelection {
+    collect_pdf_vectors_impl(canvas, false)
+}
+
+/// Like [`collect_pdf_vectors`], but also promotes a vector run that has opaque
+/// pixel layers stacked above it (RGB pages only). Those layers come back in
+/// [`PdfVectorSelection::above_layer_ids`] for the caller to re-draw as a single
+/// transparent overlay ON TOP of the native vectors (see [`pdf_overlay_raster`]),
+/// so a Path/Text layer stays crisp instead of being flattened just because a
+/// few images sit over it. Use this only on the single-page RGB export/print
+/// paths that emit the overlay; every other writer must keep
+/// [`collect_pdf_vectors`], whose base draws all non-vector layers.
+pub fn collect_pdf_vectors_layered(canvas: &crate::core::canvas::Canvas) -> PdfVectorSelection {
+    collect_pdf_vectors_impl(canvas, true)
+}
+
+fn collect_pdf_vectors_impl(
+    canvas: &crate::core::canvas::Canvas,
+    allow_overlay: bool,
+) -> PdfVectorSelection {
     use crate::core::layer::{BlendMode, LayerType};
     use crate::core::vector::path::FillRule;
     use crate::core::vector::style::Paint;
@@ -752,6 +879,7 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
                 return PdfVectorSelection {
                     objects: Vec::new(),
                     promoted_layer_ids: Vec::new(),
+                    above_layer_ids: Vec::new(),
                 };
             }
         }
@@ -818,9 +946,13 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
 
     let mut objects = Vec::new();
     let mut promoted_layer_ids = Vec::new();
+    let mut above_layer_ids = Vec::new();
     // Walk from the top down and stop at the first painted layer that cannot be
-    // represented natively. This guarantees the later vector overlay never
-    // jumps above unsupported content that originally covered it.
+    // represented natively. Opaque pixel layers stacked ABOVE the vector run are
+    // the exception: they are recorded (`above_layer_ids`) and re-drawn as a
+    // transparent overlay ON TOP of the vectors, so the vectors stay crisp
+    // instead of being flattened into the raster just because a few images sit
+    // over them. Once the run has started, everything below stays in the base.
     for (i, layer) in layers.iter().enumerate().rev() {
         if !canvas.layer_stack.is_effectively_visible(i) || layer.is_group() {
             continue;
@@ -898,6 +1030,17 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
             LayerType::Vector(crate::core::vector::object::VectorGeometry::Primitive(shape)) => {
                 shape_object = shape_as_vector(shape, layer.offset);
                 &shape_object
+            }
+            // An opaque pixel layer ABOVE the vector run (nothing promoted yet):
+            // hold it aside as a transparent overlay drawn on top of the vectors,
+            // rather than ending promotion and forcing the vectors to raster.
+            // RGB pages only — a CMYK ink page draws its overlay through the ink
+            // base, so keep its conservative z-order (raster ends promotion).
+            LayerType::Raster
+                if allow_overlay && cmyk_conv.is_none() && promoted_layer_ids.is_empty() =>
+            {
+                above_layer_ids.push(layer.id);
+                continue;
             }
             _ => break,
         };
@@ -1024,26 +1167,62 @@ pub fn collect_pdf_vectors(canvas: &crate::core::canvas::Canvas) -> PdfVectorSel
     }
     objects.reverse();
     promoted_layer_ids.reverse();
+    // A promotion that never actually started (the very top layer was a pixel
+    // layer with nothing but more pixels below) leaves stray "above" ids and no
+    // vectors — drop them so callers see a plain raster page, not a pointless
+    // overlay split.
+    if promoted_layer_ids.is_empty() {
+        above_layer_ids.clear();
+    }
     PdfVectorSelection {
         objects,
         promoted_layer_ids,
+        above_layer_ids,
     }
+}
+
+/// The transparent overlay drawn ON TOP of the native vectors: the opaque pixel
+/// layers that sit above the promoted vector run (`above_layer_ids`), flattened
+/// alone over transparency so the vectors (and the base below) show through
+/// everywhere those layers have no coverage. `None` when nothing sits above the
+/// vectors — the common vectors-on-top case, where the page needs no overlay.
+pub fn pdf_overlay_raster(
+    canvas: &crate::core::canvas::Canvas,
+    selection: &PdfVectorSelection,
+) -> Option<Vec<u8>> {
+    if selection.above_layer_ids.is_empty() {
+        return None;
+    }
+    let keep: std::collections::HashSet<u32> = selection.above_layer_ids.iter().copied().collect();
+    let mut stack = canvas.layer_stack.clone();
+    for layer in &mut stack.layers {
+        if !keep.contains(&layer.id) {
+            layer.visible = false;
+        }
+    }
+    Some(stack.flatten(canvas.width, canvas.height))
 }
 
 /// Flatten the PDF raster base without native vector paths. Operates on a clone
 /// so export cannot perturb visibility, selection, undo, or document dirtiness.
+/// Both the promoted vectors AND the pixel layers held aside for the overlay are
+/// hidden, so the base is exactly the content BELOW the vector run.
 pub fn pdf_raster_base(
     canvas: &crate::core::canvas::Canvas,
     selection: &PdfVectorSelection,
 ) -> Vec<u8> {
-    if selection.promoted_layer_ids.is_empty() {
+    if selection.promoted_layer_ids.is_empty() && selection.above_layer_ids.is_empty() {
         return canvas.export_flat();
     }
-    let promoted: std::collections::HashSet<u32> =
-        selection.promoted_layer_ids.iter().copied().collect();
+    let hidden: std::collections::HashSet<u32> = selection
+        .promoted_layer_ids
+        .iter()
+        .chain(&selection.above_layer_ids)
+        .copied()
+        .collect();
     let mut stack = canvas.layer_stack.clone();
     for layer in &mut stack.layers {
-        if promoted.contains(&layer.id) {
+        if hidden.contains(&layer.id) {
             layer.visible = false;
         }
     }
@@ -3044,6 +3223,7 @@ mod tests {
         let none = PdfVectorSelection {
             objects: Vec::new(),
             promoted_layer_ids: Vec::new(),
+            above_layer_ids: Vec::new(),
         };
         assert_eq!(
             pdf_ink_base(&canvas, &none).expect("ink base")[..4],
@@ -3054,6 +3234,7 @@ mod tests {
         let promoted = PdfVectorSelection {
             objects: Vec::new(),
             promoted_layer_ids: vec![layer_id],
+            above_layer_ids: Vec::new(),
         };
         assert_eq!(
             pdf_ink_base(&canvas, &promoted).expect("ink base")[..4],

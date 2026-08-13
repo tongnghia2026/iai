@@ -1022,15 +1022,21 @@ impl Exporter for PdfExporter {
             )?;
             return std::fs::write(path, &pdf).map_err(|e| e.to_string());
         }
-        let selection = crate::core::print::collect_pdf_vectors(canvas);
+        // `_layered` keeps a Path/Text run crisp even when opaque image layers
+        // sit above it: those come back in `above_layer_ids` and are re-drawn as
+        // a transparent overlay ON TOP of the native vectors (correct z-order),
+        // instead of flattening the vectors into the raster (which went jagged).
+        let selection = crate::core::print::collect_pdf_vectors_layered(canvas);
         let rgba = crate::core::print::pdf_raster_base(canvas, &selection);
+        let overlay = crate::core::print::pdf_overlay_raster(canvas, &selection);
         let icc = super::export_icc_bytes(canvas);
-        let pdf = crate::core::print::build_pdf_with_vectors(
+        let pdf = crate::core::print::build_pdf_with_vectors_overlay(
             &rgba,
             canvas.width,
             canvas.height,
             canvas.metadata.resolution_ppi,
             &selection.objects,
+            overlay,
             &PrintLayout::default(),
             Some(&icc),
         )?;
@@ -1090,6 +1096,77 @@ mod tests {
         let bytes = std::fs::read(&output).expect("read pdf");
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains(" m\n") && text.contains("f\nQ"));
+        let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    fn export_keeps_vectors_crisp_under_pixel_layers() {
+        // A vector layer with opaque pixel (image) layers stacked ABOVE it must
+        // still export as crisp native paths, with the images redrawn as a
+        // transparent overlay ON TOP — not flattened into the raster (which is
+        // what made the vectors go jagged when a couple of image layers sat over
+        // them). File ▸ Export ▸ PDF path.
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::print::{
+            collect_pdf_vectors, collect_pdf_vectors_layered, pdf_overlay_raster,
+        };
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        let mut canvas = Canvas::from_rgba(vec![255; 16 * 16 * 4], 16, 16); // raster "photo"
+        let vec_idx = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[vec_idx],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(2.0, 2.0)),
+                            Node::sharp(Point::new(14.0, 2.0)),
+                            Node::sharp(Point::new(8.0, 14.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                VectorStyle::filled(ColorValue::rgb(0.0, 0.0, 1.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+        let img_idx = canvas.add_layer(); // an opaque pixel layer ON TOP of the vector
+        let above_id = canvas.layer_stack.layers[img_idx].id;
+
+        // The conservative collector stops at the image on top and promotes
+        // nothing; the layered one promotes the vector and holds the image aside.
+        assert!(
+            collect_pdf_vectors(&canvas).objects.is_empty(),
+            "plain collector should not promote a vector buried under a pixel layer"
+        );
+        let layered = collect_pdf_vectors_layered(&canvas);
+        assert!(
+            !layered.objects.is_empty(),
+            "layered collector must keep the vector native despite the image above it"
+        );
+        assert_eq!(layered.above_layer_ids, vec![above_id]);
+        assert!(pdf_overlay_raster(&canvas, &layered).is_some());
+
+        let output = temp_pdf_path("crisp-under-pixels");
+        PdfExporter
+            .export(&canvas, &output, &ExportOptions::default())
+            .expect("export");
+        let bytes = std::fs::read(&output).expect("read pdf");
+        let text = String::from_utf8_lossy(&bytes);
+        // Native vector path ops AND the transparent overlay image both present.
+        assert!(
+            text.contains(" m\n") && text.contains("f\nQ"),
+            "no native vector path"
+        );
+        assert!(text.contains("/Im1"), "overlay image XObject not emitted");
+        assert!(text.contains("/SMask"), "overlay alpha (SMask) not emitted");
         let _ = std::fs::remove_file(output);
     }
 
