@@ -290,6 +290,23 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             ui.close();
                         }
                         ui.separator();
+                        // Batch-change the font of every text layer in the document
+                        // (all pages) at once — a client changing their mind about
+                        // the typeface shouldn't mean re-editing thousands of layers.
+                        // Lives in Edit (a document-wide find/replace-style action),
+                        // not Layer, which acts on the single active layer.
+                        if ui
+                            .add(menu_item_enabled(
+                                "Change Font of All Text…",
+                                "",
+                                data.layers.layer_types.iter().any(|t| t == "Text"),
+                            ))
+                            .clicked()
+                        {
+                            actions.dialogs.show_font_change_dialog = Some(true);
+                            ui.close();
+                        }
+                        ui.separator();
                         if ui.add(menu_item("Preferences", "Ctrl+,")).clicked() {
                             actions.dialogs.show_preferences = Some(true);
                             ui.close();
@@ -643,20 +660,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             .clicked()
                         {
                             actions.layers.text_to_curves = Some(data.layers.active_layer_idx);
-                            ui.close();
-                        }
-                        // Batch-change the font of every text layer in the document
-                        // (all pages) at once — a customer changing their mind about
-                        // the typeface shouldn't mean re-editing hundreds of layers.
-                        if ui
-                            .add(menu_item_enabled(
-                                "Change Font of All Text…",
-                                "",
-                                data.layers.layer_types.iter().any(|t| t == "Text"),
-                            ))
-                            .clicked()
-                        {
-                            actions.dialogs.show_font_change_dialog = Some(true);
                             ui.close();
                         }
                         {

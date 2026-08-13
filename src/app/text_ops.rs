@@ -71,6 +71,46 @@ fn text_edit_origin_for_layer(td: &TextData, layer: &Layer) -> (i32, i32) {
     )
 }
 
+/// Origin for re-fonting into `layer` that keeps the block's ink centre fixed
+/// on the canvas, so text centred inside a frame stays centred when the new
+/// font changes its width/height. Works for rotated/stretched text too: both
+/// centres are measured on the *placed* raster and `delta` maps back to the
+/// layer offset. Returns `None` when either side has no ink (blank), so the
+/// caller can fall back to the plain corner anchor.
+fn compute_refont_origin(layer: &Layer, new_td: &TextData) -> Option<(i32, i32)> {
+    let old_bounds = layer.tiles.content_bounds()?;
+    let (raster, delta) = rasterize_placed(new_td)?;
+    let new_tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+    let new_bounds = new_tiles.content_bounds()?;
+    Some(refont_origin_from_bounds(
+        layer.offset,
+        old_bounds,
+        new_bounds,
+        delta,
+    ))
+}
+
+/// Pure centre-anchor arithmetic: the origin at which a new placed raster whose
+/// ink spans `new_bounds` must be drawn so its ink centre coincides with the
+/// ink centre of the current tiles (`old_bounds` at `offset`). `delta` is the
+/// placed raster's bbox offset, which `rasterize_into_layer` re-adds to the
+/// origin.
+fn refont_origin_from_bounds(
+    offset: (i32, i32),
+    old_bounds: (i32, i32, i32, i32),
+    new_bounds: (i32, i32, i32, i32),
+    delta: (i32, i32),
+) -> (i32, i32) {
+    let old_cx = offset.0 as f32 + (old_bounds.0 + old_bounds.2) as f32 * 0.5;
+    let old_cy = offset.1 as f32 + (old_bounds.1 + old_bounds.3) as f32 * 0.5;
+    let new_cx = (new_bounds.0 + new_bounds.2) as f32 * 0.5;
+    let new_cy = (new_bounds.1 + new_bounds.3) as f32 * 0.5;
+    (
+        (old_cx - new_cx).round() as i32 - delta.0,
+        (old_cy - new_cy).round() as i32 - delta.1,
+    )
+}
+
 /// Default font size that reads well on a canvas of the given dimensions
 /// (~4% of the smaller side): 12pt-style constants are invisible on print-res
 /// documents and huge on thumbnails.
@@ -433,7 +473,12 @@ impl App {
                     }
                 }
                 if changed {
-                    let origin = text_edit_origin_for_layer(td, layer);
+                    // Keep each block centred on its old position (frame-safe)
+                    // instead of pinning a corner, which visibly drifts when the
+                    // new font's metrics differ. Fall back to the plain anchor
+                    // only when there is no ink to measure.
+                    let origin = compute_refont_origin(layer, &new_td)
+                        .unwrap_or_else(|| text_edit_origin_for_layer(td, layer));
                     edits.push((idx, origin, new_td));
                 }
             }
@@ -1346,6 +1391,27 @@ mod tests {
             LayerType::Text(td) => td.font_family.clone(),
             _ => panic!("expected a text layer"),
         }
+    }
+
+    #[test]
+    fn refont_origin_centres_new_block_on_old_centre() {
+        // Old ink centre (canvas) = (100+25, 100+10) = (125, 110).
+        let origin = refont_origin_from_bounds((100, 100), (0, 0, 50, 20), (0, 0, 80, 30), (0, 0));
+        assert_eq!(origin, (85, 95));
+        // Placing the new block (ink centre local (40, 15)) at that origin lands
+        // its centre exactly on the old centre.
+        assert_eq!((origin.0 + 40, origin.1 + 15), (125, 110));
+    }
+
+    #[test]
+    fn refont_origin_accounts_for_placed_delta() {
+        // Non-zero placed delta (rotated/stretched): origin subtracts it so
+        // layer.offset (= origin + delta) still centres the block. Same bounds →
+        // centres equal → final offset 0 → origin = -delta.
+        let delta = (7, -3);
+        let origin = refont_origin_from_bounds((0, 0), (0, 0, 40, 40), (0, 0, 40, 40), delta);
+        assert_eq!(origin, (-7, 3));
+        assert_eq!((origin.0 + delta.0, origin.1 + delta.1), (0, 0));
     }
 
     #[test]
