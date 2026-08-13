@@ -359,6 +359,8 @@ pub struct UiState {
     pub show_new_dialog: bool,
     /// Batch "Change font" dialog (Layer ▸ Change Font of All Text…).
     pub show_font_change_dialog: bool,
+    /// Batch vector fill/outline dialog (Object ▸ Format All Vectors…).
+    pub show_vector_style_dialog: bool,
     pub show_resize_dialog: bool,
     pub show_image_size_dialog: bool,
     pub show_rename_dialog: bool,
@@ -1328,6 +1330,7 @@ impl App {
                     show_library: false,
                     show_new_dialog: false,
                     show_font_change_dialog: false,
+                    show_vector_style_dialog: false,
                     show_resize_dialog: false,
                     show_image_size_dialog: false,
                     show_rename_dialog: false,
@@ -2141,6 +2144,7 @@ impl App {
         self.shell.ui.show_welcome
             || self.shell.ui.show_new_dialog
             || self.shell.ui.show_font_change_dialog
+            || self.shell.ui.show_vector_style_dialog
             || self.shell.ui.show_resize_dialog
             || self.shell.ui.show_image_size_dialog
             || self.shell.ui.show_rename_dialog

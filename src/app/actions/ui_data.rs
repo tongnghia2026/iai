@@ -1303,6 +1303,7 @@ impl App {
                 },
                 show_new_dialog: self.shell.ui.show_new_dialog,
                 show_font_change_dialog: self.shell.ui.show_font_change_dialog,
+                show_vector_style_dialog: self.shell.ui.show_vector_style_dialog,
                 // Only scan the layer stack for fonts-in-use while the dialog is
                 // open, so the common (closed) frame stays cheap.
                 text_fonts_in_use: if self.shell.ui.show_font_change_dialog {

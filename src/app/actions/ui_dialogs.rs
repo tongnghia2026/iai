@@ -419,6 +419,18 @@ impl App {
                 format!("Đã định dạng {n} layer chữ")
             };
         }
+        if let Some(v) = actions.dialogs.show_vector_style_dialog.take() {
+            self.shell.ui.show_vector_style_dialog = v;
+        }
+        if let Some(spec) = actions.dialogs.apply_vector_style.take() {
+            let n = self.change_document_vector_style(spec);
+            self.shell.ui.show_vector_style_dialog = false;
+            self.shell.status_msg = if n == 0 {
+                "Không có layer vector nào thay đổi".to_string()
+            } else {
+                format!("Đã đổi kiểu cho {n} layer vector")
+            };
+        }
         if let Some(v) = actions.dialogs.show_resize_dialog.take() {
             self.shell.ui.show_resize_dialog = v;
         }

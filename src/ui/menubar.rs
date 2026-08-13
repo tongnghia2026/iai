@@ -902,6 +902,23 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         });
                     });
 
+                    ui.menu_button("Object", |ui| {
+                        if ui
+                            .add(menu_item_enabled(
+                                "Format All Vectors…",
+                                "",
+                                data.layers
+                                    .layer_types
+                                    .iter()
+                                    .any(|t| t == "Shape" || t == "Path"),
+                            ))
+                            .clicked()
+                        {
+                            actions.dialogs.show_vector_style_dialog = Some(true);
+                            ui.close();
+                        }
+                    });
+
                     // Everything that acts on type, gathered in one place.
                     ui.menu_button("Text", |ui| {
                         if ui

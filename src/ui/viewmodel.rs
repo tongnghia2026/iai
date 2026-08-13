@@ -379,6 +379,8 @@ pub struct DialogViewModel {
     pub show_new_dialog: bool,
     /// Batch "Change font" dialog is open.
     pub show_font_change_dialog: bool,
+    /// Batch vector fill/outline dialog is open.
+    pub show_vector_style_dialog: bool,
     /// Distinct fonts used by the active document's text layers, as
     /// `(storage_name, display_label)`. Only filled while the font dialog is
     /// open (the "from" list); empty otherwise.
@@ -850,6 +852,7 @@ impl Default for UiData {
                 paint_dialog_ink: None,
                 show_new_dialog: false,
                 show_font_change_dialog: false,
+                show_vector_style_dialog: false,
                 text_fonts_in_use: Vec::new(),
                 show_resize_dialog: false,
                 show_image_size_dialog: false,

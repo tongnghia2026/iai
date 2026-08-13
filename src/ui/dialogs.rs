@@ -5,6 +5,7 @@ mod print;
 mod select_ops;
 mod session;
 mod text_font;
+mod vector_style;
 pub(crate) use adjustment::*;
 pub(crate) use document::*;
 pub(crate) use filter::*;
@@ -12,6 +13,7 @@ pub(crate) use print::*;
 pub(crate) use select_ops::*;
 pub(crate) use session::*;
 pub(crate) use text_font::*;
+pub(crate) use vector_style::*;
 
 pub(crate) use super::{
     AdjEyedropperKind, AdjustmentOptions, AutoLevelsAlgorithm, UiActions, UiData,
@@ -147,6 +149,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     }
     if data.dialogs.show_font_change_dialog {
         text_format_dialog(ctx, data, actions);
+    }
+    if data.dialogs.show_vector_style_dialog {
+        vector_style_dialog(ctx, data, actions);
     }
     if data.dialogs.show_resize_dialog {
         resize_dialog(ctx, data, actions);

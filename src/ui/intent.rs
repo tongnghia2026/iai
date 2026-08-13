@@ -525,6 +525,27 @@ impl TextBatchFormat {
     }
 }
 
+/// Batch style change for vector layers. Scope flags classify each vector
+/// layer independently; optional style fields leave the existing value alone.
+#[derive(Clone, Copy, Default)]
+pub struct VectorBatchStyle {
+    pub include_arrows: bool,
+    pub include_shapes: bool,
+    pub include_curves: bool,
+    pub set_fill: Option<[u8; 4]>,
+    pub set_stroke: Option<[u8; 4]>,
+    pub set_stroke_width: Option<f32>,
+}
+
+impl VectorBatchStyle {
+    pub fn is_noop(&self) -> bool {
+        (!self.include_arrows && !self.include_shapes && !self.include_curves)
+            || (self.set_fill.is_none()
+                && self.set_stroke.is_none()
+                && self.set_stroke_width.is_none())
+    }
+}
+
 /// Open/confirm/cancel for the modal dialogs and their scratch edits.
 #[derive(Default)]
 pub struct DialogIntent {
@@ -580,6 +601,10 @@ pub struct DialogIntent {
     pub show_font_change_dialog: Option<bool>,
     /// Apply a batch text-formatting change to the active document's text layers.
     pub apply_text_format: Option<TextBatchFormat>,
+    /// Open/close Object ▸ Format All Vectors….
+    pub show_vector_style_dialog: Option<bool>,
+    /// Apply one batch style change to the selected vector-layer classes.
+    pub apply_vector_style: Option<VectorBatchStyle>,
     pub show_resize_dialog: Option<bool>,
     pub show_image_size_dialog: Option<bool>,
     pub show_rename_dialog: Option<(bool, usize)>,
