@@ -1302,6 +1302,14 @@ impl App {
                     None
                 },
                 show_new_dialog: self.shell.ui.show_new_dialog,
+                show_font_change_dialog: self.shell.ui.show_font_change_dialog,
+                // Only scan the layer stack for fonts-in-use while the dialog is
+                // open, so the common (closed) frame stays cheap.
+                text_fonts_in_use: if self.shell.ui.show_font_change_dialog {
+                    self.document_text_fonts_in_use()
+                } else {
+                    Vec::new()
+                },
                 show_resize_dialog: self.shell.ui.show_resize_dialog,
                 show_image_size_dialog: self.shell.ui.show_image_size_dialog,
                 show_rename_dialog: self.shell.ui.show_rename_dialog,

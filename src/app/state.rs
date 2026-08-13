@@ -357,6 +357,8 @@ pub struct UiState {
     /// The Library grid browser (Track B) is showing instead of the editor.
     pub show_library: bool,
     pub show_new_dialog: bool,
+    /// Batch "Change font" dialog (Layer ▸ Change Font of All Text…).
+    pub show_font_change_dialog: bool,
     pub show_resize_dialog: bool,
     pub show_image_size_dialog: bool,
     pub show_rename_dialog: bool,
@@ -1325,6 +1327,7 @@ impl App {
                     show_welcome: true,
                     show_library: false,
                     show_new_dialog: false,
+                    show_font_change_dialog: false,
                     show_resize_dialog: false,
                     show_image_size_dialog: false,
                     show_rename_dialog: false,
@@ -2137,6 +2140,7 @@ impl App {
     pub fn is_blocking_modal(&self) -> bool {
         self.shell.ui.show_welcome
             || self.shell.ui.show_new_dialog
+            || self.shell.ui.show_font_change_dialog
             || self.shell.ui.show_resize_dialog
             || self.shell.ui.show_image_size_dialog
             || self.shell.ui.show_rename_dialog

@@ -495,6 +495,15 @@ pub struct PrintIntent {
     /// Print dialog: save the print-ready PDF (deferred rfd save).
     pub print_save_pdf: bool,
 }
+/// A batch "Change font" request from the font dialog. `from == None` re-fonts
+/// every text layer; `from == Some(storage_name)` replaces only that font.
+/// `to` is the target family's `storage_name`.
+#[derive(Clone, Default)]
+pub struct FontChangeRequest {
+    pub from: Option<String>,
+    pub to: String,
+}
+
 /// Open/confirm/cancel for the modal dialogs and their scratch edits.
 #[derive(Default)]
 pub struct DialogIntent {
@@ -546,6 +555,10 @@ pub struct DialogIntent {
     /// Smart Fill dialog → download the AI inpainting model.
     pub download_lama_model: bool,
     pub show_new_dialog: Option<bool>,
+    /// Open/close the batch "Change font" dialog.
+    pub show_font_change_dialog: Option<bool>,
+    /// Apply a batch font change to the active document's text layers.
+    pub apply_font_change: Option<FontChangeRequest>,
     pub show_resize_dialog: Option<bool>,
     pub show_image_size_dialog: Option<bool>,
     pub show_rename_dialog: Option<(bool, usize)>,

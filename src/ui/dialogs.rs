@@ -4,12 +4,14 @@ mod filter;
 mod print;
 mod select_ops;
 mod session;
+mod text_font;
 pub(crate) use adjustment::*;
 pub(crate) use document::*;
 pub(crate) use filter::*;
 pub(crate) use print::*;
 pub(crate) use select_ops::*;
 pub(crate) use session::*;
+pub(crate) use text_font::*;
 
 pub(crate) use super::{
     AdjEyedropperKind, AdjustmentOptions, AutoLevelsAlgorithm, UiActions, UiData,
@@ -142,6 +144,9 @@ pub(crate) fn document_side_dialog_pos(
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     if data.dialogs.show_new_dialog {
         new_canvas_dialog(ctx, data, actions);
+    }
+    if data.dialogs.show_font_change_dialog {
+        font_change_dialog(ctx, data, actions);
     }
     if data.dialogs.show_resize_dialog {
         resize_dialog(ctx, data, actions);

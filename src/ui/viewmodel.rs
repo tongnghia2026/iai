@@ -377,6 +377,12 @@ pub struct DialogViewModel {
     /// Ink split of the paint dialog's live colour (picker readout).
     pub paint_dialog_ink: Option<[u8; 4]>,
     pub show_new_dialog: bool,
+    /// Batch "Change font" dialog is open.
+    pub show_font_change_dialog: bool,
+    /// Distinct fonts used by the active document's text layers, as
+    /// `(storage_name, display_label)`. Only filled while the font dialog is
+    /// open (the "from" list); empty otherwise.
+    pub text_fonts_in_use: Vec<(String, String)>,
     pub show_resize_dialog: bool,
     pub show_image_size_dialog: bool,
     pub show_rename_dialog: bool,
@@ -843,6 +849,8 @@ impl Default for UiData {
             dialogs: DialogViewModel {
                 paint_dialog_ink: None,
                 show_new_dialog: false,
+                show_font_change_dialog: false,
+                text_fonts_in_use: Vec::new(),
                 show_resize_dialog: false,
                 show_image_size_dialog: false,
                 show_rename_dialog: false,

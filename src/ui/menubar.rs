@@ -645,6 +645,20 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.layers.text_to_curves = Some(data.layers.active_layer_idx);
                             ui.close();
                         }
+                        // Batch-change the font of every text layer in the document
+                        // (all pages) at once — a customer changing their mind about
+                        // the typeface shouldn't mean re-editing hundreds of layers.
+                        if ui
+                            .add(menu_item_enabled(
+                                "Change Font of All Text…",
+                                "",
+                                data.layers.layer_types.iter().any(|t| t == "Text"),
+                            ))
+                            .clicked()
+                        {
+                            actions.dialogs.show_font_change_dialog = Some(true);
+                            ui.close();
+                        }
                         {
                             use crate::core::vector::boolean::BooleanOp;
                             // Enabled once at least two selected vector objects

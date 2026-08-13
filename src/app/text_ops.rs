@@ -78,6 +78,18 @@ fn auto_font_px(cw: u32, ch: u32) -> f32 {
     ((cw.min(ch) as f32) * 0.04).round().clamp(10.0, 256.0)
 }
 
+/// Human-readable label for a font family in a list (family name, plus the
+/// style when it isn't the plain Regular face).
+fn font_display_label(fam: &crate::core::text::TextFontFamily) -> String {
+    let name = fam.name();
+    let style = fam.style_name();
+    if style.eq_ignore_ascii_case("Regular") {
+        name.to_string()
+    } else {
+        format!("{name} {style}")
+    }
+}
+
 /// First line of the text, trimmed and truncated, for the layer panel name.
 fn layer_name_from(content: &str) -> String {
     let first = content.lines().next().unwrap_or("").trim();
@@ -343,6 +355,111 @@ impl App {
             w.request_redraw();
         }
         true
+    }
+
+    /// Distinct fonts currently used across the active document's Text layers
+    /// (each layer's base font plus any per-glyph overrides), returned as
+    /// `(storage_name, display_label)` sorted by display label. Feeds the batch
+    /// "Change font" dialog's *from* list so the user picks among fonts that are
+    /// actually present.
+    pub fn document_text_fonts_in_use(&self) -> Vec<(String, String)> {
+        use std::collections::BTreeMap;
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let mut map: BTreeMap<String, String> = BTreeMap::new();
+        for layer in &canvas.layer_stack.layers {
+            if let LayerType::Text(td) = &layer.layer_type {
+                map.entry(td.font_family.storage_name())
+                    .or_insert_with(|| font_display_label(&td.font_family));
+                for g in &td.glyph_styles {
+                    map.entry(g.font_family.storage_name())
+                        .or_insert_with(|| font_display_label(&g.font_family));
+                }
+            }
+        }
+        let mut out: Vec<(String, String)> = map.into_iter().collect();
+        out.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        out
+    }
+
+    /// Batch-change the font of every editable Text layer in the active document
+    /// (all pages). `from == None` switches every text layer to `to`;
+    /// `from == Some(storage)` switches only the glyphs whose family
+    /// `storage_name()` equals `storage` — base font and per-character overrides
+    /// alike — leaving text set to other fonts untouched. Locked (non-background)
+    /// layers are skipped.
+    ///
+    /// Each changed layer is re-rasterized in place, keeping its on-canvas
+    /// position exactly as a manual open→pick font→commit would (origin recovered
+    /// from the *original* text via [`text_edit_origin_for_layer`]). The whole
+    /// batch is a single undo step. Returns how many layers changed.
+    pub fn change_document_text_font(
+        &mut self,
+        from: Option<String>,
+        to: crate::core::text::TextFontFamily,
+    ) -> usize {
+        self.ensure_text_font_registered(&to);
+        let (cw, ch) = {
+            let d = &self.docs.documents[self.docs.active_doc_idx];
+            (d.canvas.width, d.canvas.height)
+        };
+        let to_storage = to.storage_name();
+        let matches = |fam: &crate::core::text::TextFontFamily| match &from {
+            None => true,
+            Some(want) => &fam.storage_name() == want,
+        };
+
+        // Collect the layers that actually change (index, anchor origin, new
+        // text) before mutating, so one structural command spans the batch.
+        let mut edits: Vec<(usize, (i32, i32), TextData)> = Vec::new();
+        {
+            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+            for (idx, layer) in canvas.layer_stack.layers.iter().enumerate() {
+                if layer.locked && !layer.is_background {
+                    continue;
+                }
+                let LayerType::Text(td) = &layer.layer_type else {
+                    continue;
+                };
+                let mut new_td = td.clone();
+                let mut changed = false;
+                if matches(&new_td.font_family) && new_td.font_family.storage_name() != to_storage {
+                    new_td.font_family = to.clone();
+                    changed = true;
+                }
+                for g in &mut new_td.glyph_styles {
+                    if matches(&g.font_family) && g.font_family.storage_name() != to_storage {
+                        g.font_family = to.clone();
+                        changed = true;
+                    }
+                }
+                if changed {
+                    let origin = text_edit_origin_for_layer(td, layer);
+                    edits.push((idx, origin, new_td));
+                }
+            }
+        }
+
+        if edits.is_empty() {
+            return 0;
+        }
+
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let before =
+            LayerStructureCommand::capture_before("Change Font", &canvas.layer_stack, cw, ch);
+        let count = edits.len();
+        for (idx, origin, new_td) in edits {
+            rasterize_into_layer(canvas, idx, origin, new_td);
+        }
+        canvas.layer_revision += 1;
+        let mut cmd = before;
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
+
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        count
     }
 
     /// Build a `TextData` from the current app-level text style + the given
@@ -1203,6 +1320,126 @@ mod tests {
             LayerType::Text(td) => assert_eq!(td.color, orig, "undo restores the original colour"),
             _ => panic!("undo keeps it a text layer"),
         }
+    }
+
+    /// Add a Text layer with the given font to doc 0, returning its index.
+    fn add_text_layer(
+        app: &mut App,
+        content: &str,
+        font: crate::core::text::TextFontFamily,
+    ) -> usize {
+        let canvas = &mut app.docs.documents[0].canvas;
+        let (cw, ch) = (canvas.width, canvas.height);
+        let idx = canvas.layer_stack.add_layer(cw, ch);
+        let td = TextData {
+            content: content.to_string(),
+            font_family: font,
+            font_px: 48.0,
+            ..TextData::default()
+        };
+        rasterize_into_layer(canvas, idx, (10, 10), td);
+        idx
+    }
+
+    fn layer_font(app: &App, idx: usize) -> crate::core::text::TextFontFamily {
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Text(td) => td.font_family.clone(),
+            _ => panic!("expected a text layer"),
+        }
+    }
+
+    #[test]
+    fn change_all_text_font_switches_every_layer_and_is_one_undo() {
+        use crate::core::text::TextFontFamily;
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let a = add_text_layer(&mut app, "Alpha", TextFontFamily::DejaVuSans);
+        let b = add_text_layer(&mut app, "Beta", TextFontFamily::Arial);
+
+        // from = None → every text layer becomes LiberationSans.
+        let n = app.change_document_text_font(None, TextFontFamily::LiberationSans);
+        assert_eq!(n, 2, "both text layers change");
+        assert_eq!(layer_font(&app, a), TextFontFamily::LiberationSans);
+        assert_eq!(layer_font(&app, b), TextFontFamily::LiberationSans);
+
+        // A single undo restores BOTH original fonts.
+        app.docs.documents[0]
+            .canvas
+            .undo()
+            .expect("undo batch font");
+        assert_eq!(layer_font(&app, a), TextFontFamily::DejaVuSans);
+        assert_eq!(layer_font(&app, b), TextFontFamily::Arial);
+    }
+
+    #[test]
+    fn replace_specific_font_leaves_other_fonts_untouched() {
+        use crate::core::text::TextFontFamily;
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let a = add_text_layer(&mut app, "Alpha", TextFontFamily::DejaVuSans);
+        let b = add_text_layer(&mut app, "Beta", TextFontFamily::Arial);
+
+        // Replace only DejaVuSans → Tahoma; Arial layer must stay Arial.
+        let n = app.change_document_text_font(
+            Some(TextFontFamily::DejaVuSans.storage_name()),
+            TextFontFamily::Tahoma,
+        );
+        assert_eq!(n, 1, "only the DejaVuSans layer changes");
+        assert_eq!(layer_font(&app, a), TextFontFamily::Tahoma);
+        assert_eq!(layer_font(&app, b), TextFontFamily::Arial);
+    }
+
+    #[test]
+    fn change_font_covers_per_glyph_overrides() {
+        use crate::core::text::{GlyphStyle, TextFontFamily};
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let idx = add_text_layer(&mut app, "Hi", TextFontFamily::DejaVuSans);
+        // Give the second character a distinct per-glyph font.
+        {
+            let layer = &mut app.docs.documents[0].canvas.layer_stack.layers[idx];
+            if let LayerType::Text(td) = &mut layer.layer_type {
+                td.glyph_styles = vec![td.glyph_style(0), td.glyph_style(1)];
+                td.glyph_styles[1].font_family = TextFontFamily::Arial;
+            }
+        }
+
+        let n = app.change_document_text_font(None, TextFontFamily::Calibri);
+        assert_eq!(n, 1);
+        match &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type {
+            LayerType::Text(td) => {
+                assert_eq!(td.font_family, TextFontFamily::Calibri);
+                assert!(
+                    td.glyph_styles
+                        .iter()
+                        .all(|g| g.font_family == TextFontFamily::Calibri),
+                    "per-glyph fonts switch too"
+                );
+            }
+            _ => panic!("still a text layer"),
+        }
+    }
+
+    #[test]
+    fn fonts_in_use_lists_base_and_glyph_fonts() {
+        use crate::core::text::TextFontFamily;
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 200);
+        let idx = add_text_layer(&mut app, "Hi", TextFontFamily::DejaVuSans);
+        {
+            let layer = &mut app.docs.documents[0].canvas.layer_stack.layers[idx];
+            if let LayerType::Text(td) = &mut layer.layer_type {
+                td.glyph_styles = vec![td.glyph_style(0), td.glyph_style(1)];
+                td.glyph_styles[1].font_family = TextFontFamily::Arial;
+            }
+        }
+        let storages: Vec<String> = app
+            .document_text_fonts_in_use()
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
+        assert!(storages.contains(&TextFontFamily::DejaVuSans.storage_name()));
+        assert!(storages.contains(&TextFontFamily::Arial.storage_name()));
     }
 
     #[test]
