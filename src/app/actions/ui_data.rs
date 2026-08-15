@@ -1305,6 +1305,25 @@ impl App {
                 show_new_dialog: self.shell.ui.show_new_dialog,
                 show_font_change_dialog: self.shell.ui.show_font_change_dialog,
                 show_vector_style_dialog: self.shell.ui.show_vector_style_dialog,
+                show_scan_cleanup_dialog: self.shell.ui.show_scan_cleanup_dialog,
+                scan_is_pdf: self
+                    .docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .and_then(|d| d.pdf_document.as_ref())
+                    .is_some(),
+                scan_page_count: self
+                    .docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .and_then(|d| d.pdf_document.as_ref())
+                    .map_or(1, |p| p.page_count),
+                scan_active_page: self
+                    .docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .and_then(|d| d.pdf_document.as_ref())
+                    .map_or(0, |p| p.active_page),
                 vector_style_target: self.shell.ui.vector_style_target,
                 // Only scan the layer stack for fonts-in-use while the dialog is
                 // open, so the common (closed) frame stays cheap.

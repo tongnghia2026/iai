@@ -361,6 +361,8 @@ pub struct UiState {
     pub show_font_change_dialog: bool,
     /// Batch vector fill/outline dialog (Object ▸ Format All Vectors…).
     pub show_vector_style_dialog: bool,
+    /// "Làm sạch bản scan" dialog (Image ▸ Làm sạch bản scan…).
+    pub show_scan_cleanup_dialog: bool,
     pub vector_style_target: crate::ui::intent::VectorStyleTarget,
     pub show_resize_dialog: bool,
     pub show_image_size_dialog: bool,
@@ -1333,6 +1335,7 @@ impl App {
                     show_new_dialog: false,
                     show_font_change_dialog: false,
                     show_vector_style_dialog: false,
+                    show_scan_cleanup_dialog: false,
                     vector_style_target: crate::ui::intent::VectorStyleTarget::Document,
                     show_resize_dialog: false,
                     show_image_size_dialog: false,
@@ -2148,6 +2151,7 @@ impl App {
             || self.shell.ui.show_new_dialog
             || self.shell.ui.show_font_change_dialog
             || self.shell.ui.show_vector_style_dialog
+            || self.shell.ui.show_scan_cleanup_dialog
             || self.shell.ui.show_resize_dialog
             || self.shell.ui.show_image_size_dialog
             || self.shell.ui.show_rename_dialog

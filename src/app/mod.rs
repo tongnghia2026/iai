@@ -21,6 +21,7 @@ pub mod path_style;
 pub mod pen_ops;
 pub mod powerclip_ops;
 pub mod render;
+pub mod scan_cleanup_ops;
 pub mod shape_ops;
 pub mod state;
 pub mod text_ops;

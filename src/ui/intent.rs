@@ -618,6 +618,10 @@ pub struct DialogIntent {
     pub open_vector_style_dialog: Option<VectorStyleTarget>,
     /// Apply one batch style change to the selected vector-layer classes.
     pub apply_vector_style: Option<VectorBatchStyle>,
+    /// Open/close the "Làm sạch bản scan" dialog.
+    pub show_scan_cleanup_dialog: Option<bool>,
+    /// Apply a scan-cleanup pass to the current page/image or a page range.
+    pub apply_scan_cleanup: Option<crate::core::scan_cleanup::ScanCleanupRequest>,
     pub show_resize_dialog: Option<bool>,
     pub show_image_size_dialog: Option<bool>,
     pub show_rename_dialog: Option<(bool, usize)>,

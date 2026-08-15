@@ -426,6 +426,17 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.develop.open_develop_dialog = true;
                             ui.close();
                         }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Làm sạch bản scan…",
+                                "",
+                                data.doc.has_doc,
+                            ))
+                            .clicked()
+                        {
+                            actions.dialogs.show_scan_cleanup_dialog = Some(true);
+                            ui.close();
+                        }
                         ui.separator();
                         ui.menu_button("Adjustments", |ui| {
                             use crate::core::layer::AdjustmentType;

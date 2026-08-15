@@ -382,6 +382,14 @@ pub struct DialogViewModel {
     pub show_font_change_dialog: bool,
     /// Batch vector fill/outline dialog is open.
     pub show_vector_style_dialog: bool,
+    /// "Làm sạch bản scan" dialog is open.
+    pub show_scan_cleanup_dialog: bool,
+    /// Active document is a multi-page PDF session (enables page-scope options).
+    pub scan_is_pdf: bool,
+    /// PDF page count (1 for a plain image), for the scan-cleanup scope UI.
+    pub scan_page_count: usize,
+    /// Active PDF page (0-based), for the scan-cleanup "current page" label.
+    pub scan_active_page: usize,
     pub vector_style_target: crate::ui::intent::VectorStyleTarget,
     /// Distinct fonts used by the active document's text layers, as
     /// `(storage_name, display_label)`. Only filled while the font dialog is
@@ -856,6 +864,10 @@ impl Default for UiData {
                 show_new_dialog: false,
                 show_font_change_dialog: false,
                 show_vector_style_dialog: false,
+                show_scan_cleanup_dialog: false,
+                scan_is_pdf: false,
+                scan_page_count: 1,
+                scan_active_page: 0,
                 vector_style_target: crate::ui::intent::VectorStyleTarget::Document,
                 text_fonts_in_use: Vec::new(),
                 show_resize_dialog: false,

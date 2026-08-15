@@ -2,6 +2,7 @@ mod adjustment;
 mod document;
 mod filter;
 mod print;
+mod scan_cleanup;
 mod select_ops;
 mod session;
 mod text_font;
@@ -10,6 +11,7 @@ pub(crate) use adjustment::*;
 pub(crate) use document::*;
 pub(crate) use filter::*;
 pub(crate) use print::*;
+pub(crate) use scan_cleanup::*;
 pub(crate) use select_ops::*;
 pub(crate) use session::*;
 pub(crate) use text_font::*;
@@ -152,6 +154,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     }
     if data.dialogs.show_vector_style_dialog {
         vector_style_dialog(ctx, data, actions);
+    }
+    if data.dialogs.show_scan_cleanup_dialog {
+        scan_cleanup_dialog(ctx, data, actions);
     }
     if data.dialogs.show_resize_dialog {
         resize_dialog(ctx, data, actions);
