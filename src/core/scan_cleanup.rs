@@ -2,18 +2,24 @@
 //! deepen the text, for cleaning up book/scanner captures whose paper reads grey
 //! and whose gutter is shadowed.
 //!
-//! The maths is illumination normalisation: estimate the local paper level
-//! (background) on a coarse grid, divide each pixel by it so uneven shading
-//! flattens to a uniform white, then clamp with a white/black point so faint
-//! grey snaps to paper-white and text darkens. `Grayscale` mode keeps tone and
-//! colour (scaling each channel by the same factor); `Bilevel` produces a hard
-//! black-on-white result for the cleanest print. Everything runs on an 8-bit
-//! RGBA buffer in linear index order; alpha is preserved.
+//! Method — divide by a **morphological-closing** background estimate
+//! (rolling-ball style), which beats a plain blur (or a high-pass/subtract):
+//!  1. Estimate the local paper level by grayscale *closing* (dilate then erode)
+//!     of a downscaled luma image. Closing erases the thin dark strokes of text
+//!     and leaves only the smooth paper illumination — and, unlike a blur, it
+//!     tracks the sharp gutter shadow without bleeding brightness across it.
+//!  2. Divide each pixel's luma by that background (illumination is multiplicative,
+//!     so a divide — not a subtract — flattens uneven shading to a uniform white).
+//!  3. Clamp with a white/black point so faint grey snaps to paper and text darkens.
+//!
+//! Output is neutral grey (paper→white, text→black), which removes any uneven
+//! colour cast from the scan; `Bilevel` thresholds that to pure black-on-white
+//! for the cleanest print. Runs on an 8-bit RGBA buffer; alpha is preserved.
 
 /// Output character of a cleanup pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanCleanupMode {
-    /// Keep tone/colour — just flatten the background to white and deepen text.
+    /// Flatten to a clean neutral grayscale (paper white, text black).
     Grayscale,
     /// Hard two-level output (black text on white) for the cleanest print.
     Bilevel,
@@ -55,19 +61,15 @@ pub struct ScanCleanupRequest {
     pub scope: ScanCleanScope,
 }
 
-/// Pixels at or above this normalised level (paper ≈ 1.0) become pure white.
-const WHITE_POINT: f32 = 0.85;
-/// Pixels at or below this normalised level become pure black.
-const BLACK_POINT: f32 = 0.20;
-/// Bilevel split on the normalised level.
-const BILEVEL_THRESHOLD: f32 = 0.60;
-/// Roughly how many background samples span the long edge. Larger cells are
-/// more likely to contain paper (not just ink) and smooth the gutter shadow;
-/// the estimate is upsampled bilinearly so cell size doesn't band the output.
-const BG_CELLS: usize = 24;
-/// Never let a background cell shrink below this many pixels, so a cell always
-/// straddles some paper even on small inputs.
-const BG_CELL_MIN: usize = 16;
+/// After dividing by the background, paper ≈ 1.0. Pixels at/above this become
+/// pure white; at/below `BLACK_POINT` become pure black; linear between.
+const WHITE_POINT: f32 = 0.90;
+const BLACK_POINT: f32 = 0.15;
+/// Bilevel split on the cleaned (post-clamp) level.
+const BILEVEL_LEVEL: f32 = 0.5;
+/// Long edge of the working image the background is estimated on. Downscaling
+/// keeps the (radius-heavy) morphology cheap and doubles as a first smoothing.
+const BG_WORK: usize = 1000;
 
 /// Clean an 8-bit RGBA image. Returns a new buffer of the same length; the
 /// input is returned unchanged for a degenerate size or zero strength.
@@ -84,98 +86,92 @@ pub fn clean_scan_rgba(src: &[u8], w: u32, h: u32, params: ScanCleanupParams) ->
         *l = (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32) / 255.0;
     }
 
-    // Local paper level, full-resolution.
+    // Local paper level (rolling-ball background), full-resolution.
     let bg = estimate_background(&luma, w, h);
 
     let inv_span = 1.0 / (WHITE_POINT - BLACK_POINT);
     let mut out = src.to_vec();
     for (i, chunk) in out.chunks_exact_mut(4).enumerate() {
         let bg_level = bg[i].max(1e-3);
-        // paper → ≈1.0, ink → <1. Cap so a slightly-brighter-than-estimate paper
-        // pixel doesn't explode the per-channel scale.
-        let norm = (luma[i] / bg_level).min(1.5);
-        match params.mode {
-            ScanCleanupMode::Grayscale => {
-                let cleaned_l = ((norm - BLACK_POINT) * inv_span).clamp(0.0, 1.0);
-                // Scale every channel by the same factor so colour is preserved
-                // (a near-neutral scan simply whitens; text goes to black).
-                let cur = luma[i].max(1e-3);
-                let scale = cleaned_l / cur;
-                for c in chunk.iter_mut().take(3) {
-                    let orig = *c as f32;
-                    let v = orig * scale;
-                    *c = (orig * (1.0 - strength) + v * strength)
-                        .clamp(0.0, 255.0)
-                        .round() as u8;
-                }
-            }
+        // paper → ≈1.0, ink → <1.
+        let norm = (luma[i] / bg_level).min(1.3);
+        let cleaned = ((norm - BLACK_POINT) * inv_span).clamp(0.0, 1.0);
+        // Neutral grey (grayscale) or a hard threshold (bilevel). Either way the
+        // target is achromatic, which erases any uneven colour cast from the scan.
+        let target = match params.mode {
+            ScanCleanupMode::Grayscale => cleaned * 255.0,
             ScanCleanupMode::Bilevel => {
-                let v = if norm >= BILEVEL_THRESHOLD {
+                if cleaned >= BILEVEL_LEVEL {
                     255.0
                 } else {
                     0.0
-                };
-                for c in chunk.iter_mut().take(3) {
-                    let orig = *c as f32;
-                    *c = (orig * (1.0 - strength) + v * strength)
-                        .clamp(0.0, 255.0)
-                        .round() as u8;
                 }
             }
+        };
+        for c in chunk.iter_mut().take(3) {
+            let orig = *c as f32;
+            *c = (orig * (1.0 - strength) + target * strength)
+                .clamp(0.0, 255.0)
+                .round() as u8;
         }
     }
     out
 }
 
-/// Estimate the local background (paper) luma for every pixel: take the
-/// brightest sample per coarse cell (paper is the brightest thing locally, ink
-/// is darker), smooth the coarse grid, then bilinearly upsample to full size.
+/// Estimate the local background (paper) luma for every pixel by grayscale
+/// morphological closing of a downscaled copy: dilate (local max) then erode
+/// (local min) erases the thin dark strokes of text, leaving smooth paper that
+/// tracks the shading — including a sharp gutter shadow — far better than a blur.
+/// A light box blur removes residual texture; the result is bilinearly upsampled.
 fn estimate_background(luma: &[f32], w: usize, h: usize) -> Vec<f32> {
-    let cell = (w.max(h) / BG_CELLS).max(BG_CELL_MIN);
-    let gw = w.div_ceil(cell);
-    let gh = h.div_ceil(cell);
-
-    let mut grid = vec![0f32; gw * gh];
-    for gy in 0..gh {
-        let y0 = gy * cell;
-        let y1 = (y0 + cell).min(h);
-        for gx in 0..gw {
-            let x0 = gx * cell;
-            let x1 = (x0 + cell).min(w);
-            let mut m = 0f32;
+    // Downscale so the long edge is ~BG_WORK (cheap morphology + first smoothing).
+    let ds = w.max(h).div_ceil(BG_WORK).max(1);
+    let sw = w.div_ceil(ds);
+    let sh = h.div_ceil(ds);
+    let mut small = vec![0f32; sw * sh];
+    for sy in 0..sh {
+        let y0 = sy * ds;
+        let y1 = (y0 + ds).min(h);
+        for sx in 0..sw {
+            let x0 = sx * ds;
+            let x1 = (x0 + ds).min(w);
+            let mut sum = 0f32;
+            let mut n = 0f32;
             for y in y0..y1 {
                 let row = y * w;
                 for x in x0..x1 {
-                    let v = luma[row + x];
-                    if v > m {
-                        m = v;
-                    }
+                    sum += luma[row + x];
+                    n += 1.0;
                 }
             }
-            grid[gy * gw + gx] = m;
+            small[sy * sw + sx] = if n > 0.0 { sum / n } else { 0.0 };
         }
     }
 
-    // Smooth cell seams (two light box passes).
-    let grid = box_blur_grid(&grid, gw, gh, 1);
-    let grid = box_blur_grid(&grid, gw, gh, 1);
+    // Closing radius (in working pixels): big enough to swallow text strokes,
+    // small enough to follow the illumination. Then a light blur to de-texture.
+    let radius = (sw.max(sh) / 80).max(4);
+    let dilated = morph(&small, sw, sh, radius, true);
+    let closed = morph(&dilated, sw, sh, radius, false);
+    let bg_small = box_blur_grid(&closed, sw, sh, (radius / 2).max(1));
 
+    // Bilinear upsample to full resolution.
     let mut bg = vec![1f32; w * h];
-    let cell_f = cell as f32;
+    let ds_f = ds as f32;
     for (y, bg_row) in bg.chunks_exact_mut(w).enumerate() {
-        let fy = ((y as f32 + 0.5) / cell_f - 0.5).clamp(0.0, (gh - 1) as f32);
+        let fy = ((y as f32 + 0.5) / ds_f - 0.5).clamp(0.0, (sh - 1) as f32);
         let gy0 = fy.floor() as usize;
-        let gy1 = (gy0 + 1).min(gh - 1);
+        let gy1 = (gy0 + 1).min(sh - 1);
         let ty = fy - gy0 as f32;
         for (x, dst) in bg_row.iter_mut().enumerate() {
-            let fx = ((x as f32 + 0.5) / cell_f - 0.5).clamp(0.0, (gw - 1) as f32);
+            let fx = ((x as f32 + 0.5) / ds_f - 0.5).clamp(0.0, (sw - 1) as f32);
             let gx0 = fx.floor() as usize;
-            let gx1 = (gx0 + 1).min(gw - 1);
+            let gx1 = (gx0 + 1).min(sw - 1);
             let tx = fx - gx0 as f32;
-            let a = grid[gy0 * gw + gx0];
-            let b = grid[gy0 * gw + gx1];
-            let c = grid[gy1 * gw + gx0];
-            let d = grid[gy1 * gw + gx1];
+            let a = bg_small[gy0 * sw + gx0];
+            let b = bg_small[gy0 * sw + gx1];
+            let c = bg_small[gy1 * sw + gx0];
+            let d = bg_small[gy1 * sw + gx1];
             let top = a + (b - a) * tx;
             let bot = c + (d - c) * tx;
             *dst = top + (bot - top) * ty;
@@ -184,8 +180,43 @@ fn estimate_background(luma: &[f32], w: usize, h: usize) -> Vec<f32> {
     bg
 }
 
-/// Separable box blur over a small grid (radius in cells). Edges shrink the
-/// window rather than wrapping or clamping to a constant.
+/// Separable grayscale morphology (dilation when `take_max`, erosion otherwise)
+/// with a square structuring element of the given radius. Windows shrink at the
+/// edges rather than wrapping.
+fn morph(src: &[f32], w: usize, h: usize, radius: usize, take_max: bool) -> Vec<f32> {
+    let pick = |a: f32, b: f32| if take_max { a.max(b) } else { a.min(b) };
+    // Horizontal pass.
+    let mut tmp = vec![0f32; w * h];
+    for y in 0..h {
+        let row = y * w;
+        for x in 0..w {
+            let x0 = x.saturating_sub(radius);
+            let x1 = (x + radius).min(w - 1);
+            let mut v = src[row + x0];
+            for xx in (x0 + 1)..=x1 {
+                v = pick(v, src[row + xx]);
+            }
+            tmp[row + x] = v;
+        }
+    }
+    // Vertical pass.
+    let mut out = vec![0f32; w * h];
+    for x in 0..w {
+        for y in 0..h {
+            let y0 = y.saturating_sub(radius);
+            let y1 = (y + radius).min(h - 1);
+            let mut v = tmp[y0 * w + x];
+            for yy in (y0 + 1)..=y1 {
+                v = pick(v, tmp[yy * w + x]);
+            }
+            out[y * w + x] = v;
+        }
+    }
+    out
+}
+
+/// Separable box blur over a small grid. Edges shrink the window rather than
+/// wrapping or clamping to a constant.
 fn box_blur_grid(src: &[f32], gw: usize, gh: usize, radius: usize) -> Vec<f32> {
     if radius == 0 || gw == 0 || gh == 0 {
         return src.to_vec();
@@ -246,8 +277,9 @@ pub fn resolve_pages(scope: ScanCleanScope, page_count: usize, active_page: usiz
 mod tests {
     use super::*;
 
-    /// Build a white page darkened toward the right edge (a gutter shadow) with
-    /// a dark text block, so we can check the shadow flattens and text stays.
+    /// A white page darkened toward the right edge (a gutter shadow) with thin
+    /// dark text strokes (as real glyphs are — not a solid block), so we can
+    /// check the shadow flattens while the strokes stay dark.
     fn shaded_page(w: u32, h: u32) -> Vec<u8> {
         let mut px = vec![0u8; (w * h * 4) as usize];
         for y in 0..h {
@@ -255,8 +287,10 @@ mod tests {
                 let i = ((y * w + x) * 4) as usize;
                 // ~235 on the left fading to ~155 on the right.
                 let shade = 235u32.saturating_sub(x as u32 * 80 / w as u32) as u8;
-                let text = (18..30).contains(&x) && (18..46).contains(&y);
-                let v = if text { 20 } else { shade };
+                // 2px-wide vertical strokes with 2px paper gaps (thin text).
+                let stroke =
+                    (18..46).contains(&y) && matches!(x % 4, 0 | 1) && (18..32).contains(&x);
+                let v = if stroke { 20 } else { shade };
                 px[i] = v;
                 px[i + 1] = v;
                 px[i + 2] = v;
@@ -268,7 +302,7 @@ mod tests {
 
     #[test]
     fn flattens_uneven_background_to_white_keeps_text_dark() {
-        let (w, h) = (64u32, 64u32);
+        let (w, h) = (128u32, 128u32);
         let px = shaded_page(w, h);
         let out = clean_scan_rgba(
             &px,
@@ -286,17 +320,17 @@ mod tests {
             "shadowed background should whiten, got {}",
             out[bg]
         );
-        // A text pixel stays dark.
-        let t = ((30 * w + 22) * 4) as usize;
+        // A stroke pixel (x=20, y=30) stays dark.
+        let t = ((30 * w + 20) * 4) as usize;
         assert!(out[t] < 90, "text should stay dark, got {}", out[t]);
-        // Alpha untouched.
-        assert_eq!(out[bg + 1], out[bg]); // grey stays neutral
+        // Output is neutral grey.
+        assert_eq!(out[bg + 1], out[bg]);
         assert_eq!(out[bg + 3], 255);
     }
 
     #[test]
     fn bilevel_is_pure_black_and_white() {
-        let (w, h) = (64u32, 64u32);
+        let (w, h) = (128u32, 128u32);
         let px = shaded_page(w, h);
         let out = clean_scan_rgba(
             &px,
@@ -318,7 +352,7 @@ mod tests {
 
     #[test]
     fn zero_strength_is_identity() {
-        let (w, h) = (16u32, 16u32);
+        let (w, h) = (32u32, 32u32);
         let px = shaded_page(w, h);
         let out = clean_scan_rgba(
             &px,
