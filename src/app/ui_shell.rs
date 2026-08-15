@@ -52,6 +52,8 @@ pub struct UiShell {
     pub(in crate::app) adjustment_preview_last: Option<std::time::Instant>,
     pub(in crate::app) adjustment_preview_cost: std::time::Duration,
     pub(in crate::app) filter_preview: Option<FilterPreviewSession>,
+    /// Live-preview session for the "Làm sạch bản scan" dialog.
+    pub(in crate::app) scan_preview: Option<ScanPreviewSession>,
     pub(in crate::app) user_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
     /// Named Develop slider sets saved by the user (develop_presets.json).
     pub(in crate::app) develop_presets: std::sync::Arc<Vec<crate::core::presets::DevelopPreset>>,

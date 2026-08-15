@@ -420,10 +420,25 @@ impl App {
             };
         }
         if let Some(v) = actions.dialogs.show_scan_cleanup_dialog.take() {
-            self.shell.ui.show_scan_cleanup_dialog = v;
+            if v {
+                self.shell.ui.show_scan_cleanup_dialog = true;
+                self.begin_scan_preview();
+            } else {
+                self.shell.ui.show_scan_cleanup_dialog = false;
+                self.cancel_scan_preview();
+            }
+        }
+        if let Some(params) = actions.dialogs.set_scan_cleanup_preview.take() {
+            self.update_scan_preview(params);
+        }
+        if std::mem::take(&mut actions.dialogs.cancel_scan_cleanup_dialog) {
+            self.shell.ui.show_scan_cleanup_dialog = false;
+            self.cancel_scan_preview();
         }
         if let Some(req) = actions.dialogs.apply_scan_cleanup.take() {
             self.shell.ui.show_scan_cleanup_dialog = false;
+            // Restore the pristine layer, then commit undoably from it.
+            self.cancel_scan_preview();
             self.apply_scan_cleanup(req);
         }
         if let Some(v) = actions.dialogs.show_vector_style_dialog.take() {

@@ -5,7 +5,7 @@
 //! [`crate::core::scan_cleanup`]; this drives it against the app's documents.
 
 use super::render::CanvasEvent;
-use super::state::App;
+use super::state::{App, ScanPreviewSession};
 use crate::core::canvas::Canvas;
 use crate::core::scan_cleanup::{
     clean_scan_rgba, resolve_pages, ScanCleanScope, ScanCleanupParams, ScanCleanupRequest,
@@ -15,6 +15,100 @@ use crate::core::tile::TileMap;
 const CLEAN_LABEL: &str = "Làm sạch bản scan";
 
 impl App {
+    /// Open the live preview: snapshot the active raster layer and pre-compute the
+    /// rolling-ball background + luma once (the params-independent, expensive part),
+    /// then show the default-params result on the canvas. No-op when the active
+    /// layer can't be cleaned (CMYK / locked / non-raster) — the dialog then just
+    /// applies without a live preview.
+    pub(crate) fn begin_scan_preview(&mut self) {
+        self.cancel_scan_preview();
+        let idx = self.docs.active_doc_idx;
+        let canvas = &self.docs.documents[idx].canvas;
+        if canvas.is_cmyk() {
+            return;
+        }
+        let Some(layer) = canvas.layer_stack.layers.get(canvas.layer_stack.active_idx) else {
+            return;
+        };
+        if (!layer.is_background && layer.locked) || !layer.is_raster() {
+            return;
+        }
+        let session = ScanPreviewSession {
+            doc_id: self.docs.documents[idx].id,
+            layer_id: layer.id,
+            w: layer.width,
+            h: layer.height,
+            original_tiles: layer.tiles.clone(),
+            src_rgba: layer.flatten_tiles(),
+            luma: Vec::new(),
+            bg: Vec::new(),
+            last: None,
+        };
+        let luma = crate::core::scan_cleanup::luma_of(&session.src_rgba);
+        let bg = crate::core::scan_cleanup::estimate_background(
+            &luma,
+            session.w as usize,
+            session.h as usize,
+        );
+        self.shell.scan_preview = Some(ScanPreviewSession {
+            luma,
+            bg,
+            ..session
+        });
+        self.update_scan_preview(ScanCleanupParams::default());
+    }
+
+    /// Re-run the cheap final pass for `params` and show it on the canvas. Cheap
+    /// enough to call every frame while a slider drags; deduplicated so an
+    /// unchanged frame does no work.
+    pub(crate) fn update_scan_preview(&mut self, params: ScanCleanupParams) {
+        let idx = self.docs.active_doc_idx;
+        let doc_id = self.docs.documents[idx].id;
+        let Some(session) = self.shell.scan_preview.as_ref() else {
+            return;
+        };
+        if session.doc_id != doc_id || session.last == Some(params) {
+            return;
+        }
+        let cleaned = crate::core::scan_cleanup::apply_with_background(
+            &session.src_rgba,
+            &session.bg,
+            &session.luma,
+            params,
+        );
+        let (layer_id, w, h) = (session.layer_id, session.w, session.h);
+        let tiles = TileMap::from_rgba(&cleaned, w, h);
+        self.docs.documents[idx]
+            .canvas
+            .preview_layer_tiles(layer_id, tiles);
+        if let Some(s) = self.shell.scan_preview.as_mut() {
+            s.last = Some(params);
+        }
+        if let Some(win) = &self.win.window {
+            win.request_redraw();
+        }
+    }
+
+    /// Drop the preview session, restoring the layer's original tiles (Cancel, or
+    /// before an OK commit so it starts from the pristine baseline).
+    pub(crate) fn cancel_scan_preview(&mut self) {
+        let Some(session) = self.shell.scan_preview.take() else {
+            return;
+        };
+        if let Some(doc) = self
+            .docs
+            .documents
+            .iter_mut()
+            .find(|d| d.id == session.doc_id)
+        {
+            doc.canvas
+                .restore_layer_tiles(session.layer_id, session.original_tiles);
+        }
+        if let Some(win) = &self.win.window {
+            win.request_redraw();
+        }
+    }
+
     /// Dialog entry point. Routes to the single-canvas path (a plain image or the
     /// current PDF page) or the multi-page PDF batch.
     pub(crate) fn apply_scan_cleanup(&mut self, req: ScanCleanupRequest) {

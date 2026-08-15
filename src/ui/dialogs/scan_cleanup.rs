@@ -1,7 +1,12 @@
 //! "Làm sạch bản scan" dialog (Image ▸ Làm sạch bản scan…): flatten an uneven,
 //! greyed scan background to white and deepen text. One preset (grayscale /
 //! bilevel) plus a strength slider, and — for a multi-page PDF — a page scope
-//! (current / range / all). Handed to the app as a single request.
+//! (current / range / all).
+//!
+//! Non-blocking with a live canvas preview (like the Filter/Levels dialogs): the
+//! window is movable and leaves the canvas navigable so the page shows behind it;
+//! every frame it streams the current params so the result updates in real time.
+//! OK commits undoably; Cancel restores the layer.
 
 use super::*;
 use crate::core::scan_cleanup::{
@@ -29,18 +34,25 @@ pub(crate) fn scan_cleanup_dialog(ctx: &egui::Context, data: &UiData, actions: &
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut do_apply = enter_pressed;
     let mut do_cancel = esc_pressed;
+    let mut open = true;
 
-    modal_overlay(ctx, "scan_cleanup_overlay");
-
+    let default_pos = document_side_dialog_pos(ctx, data, 360.0, 96.0);
     egui::Window::new("Làm sạch bản scan")
         .collapsible(false)
         .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .movable(true)
+        .open(&mut open)
+        .default_pos(default_pos)
         .order(DIALOG_ORDER)
         .min_width(360.0)
         .show(ctx, |ui| {
             ui.add_space(6.0);
             ui.label("Làm phẳng nền xám/tối không đều của bản scan về trắng, chữ đậm rõ hơn.");
+            ui.label(
+                egui::RichText::new("Xem trực tiếp trên trang; OK để áp dụng, Hủy để bỏ.")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(140)),
+            );
             ui.add_space(10.0);
 
             ui.label("Kiểu:");
@@ -75,6 +87,7 @@ pub(crate) fn scan_cleanup_dialog(ctx: &egui::Context, data: &UiData, actions: &
                     });
                 });
                 ui.radio_value(&mut scope, 2, format!("Tất cả trang ({page_count} trang)"));
+                ui.weak("(Xem trực tiếp áp cho trang hiện tại; OK mới xử lý cả phạm vi.)");
                 if scope == 2 && page_count > 60 {
                     ui.colored_label(
                         egui::Color32::from_rgb(200, 150, 60),
@@ -100,6 +113,10 @@ pub(crate) fn scan_cleanup_dialog(ctx: &egui::Context, data: &UiData, actions: &
             ui.add_space(4.0);
         });
 
+    if !open {
+        do_cancel = true;
+    }
+
     // Keep the typed range ascending.
     if from > to {
         std::mem::swap(&mut from, &mut to);
@@ -113,15 +130,16 @@ pub(crate) fn scan_cleanup_dialog(ctx: &egui::Context, data: &UiData, actions: &
         d.insert_temp(to_id, to);
     });
 
+    let params = ScanCleanupParams {
+        mode: if mode == 1 {
+            ScanCleanupMode::Bilevel
+        } else {
+            ScanCleanupMode::Grayscale
+        },
+        strength,
+    };
+
     if do_apply {
-        let params = ScanCleanupParams {
-            mode: if mode == 1 {
-                ScanCleanupMode::Bilevel
-            } else {
-                ScanCleanupMode::Grayscale
-            },
-            strength,
-        };
         let scope = if is_pdf {
             match scope {
                 2 => ScanCleanScope::AllPages,
@@ -136,6 +154,9 @@ pub(crate) fn scan_cleanup_dialog(ctx: &egui::Context, data: &UiData, actions: &
         };
         actions.dialogs.apply_scan_cleanup = Some(ScanCleanupRequest { params, scope });
     } else if do_cancel {
-        actions.dialogs.show_scan_cleanup_dialog = Some(false);
+        actions.dialogs.cancel_scan_cleanup_dialog = true;
+    } else {
+        // Stream the current params so the canvas preview tracks the sliders.
+        actions.dialogs.set_scan_cleanup_preview = Some(params);
     }
 }

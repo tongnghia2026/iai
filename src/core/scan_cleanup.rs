@@ -71,24 +71,46 @@ const BILEVEL_LEVEL: f32 = 0.5;
 /// keeps the (radius-heavy) morphology cheap and doubles as a first smoothing.
 const BG_WORK: usize = 1000;
 
+/// Per-pixel luma (0..1) of an 8-bit RGBA buffer.
+pub fn luma_of(src: &[u8]) -> Vec<f32> {
+    src.chunks_exact(4)
+        .map(|px| (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32) / 255.0)
+        .collect()
+}
+
 /// Clean an 8-bit RGBA image. Returns a new buffer of the same length; the
 /// input is returned unchanged for a degenerate size or zero strength.
+///
+/// This computes `luma` + the rolling-ball `background` from scratch. A live
+/// preview should instead cache those once (they don't depend on the params)
+/// and call [`apply_with_background`] on every slider change — see the
+/// scan-cleanup preview session.
 pub fn clean_scan_rgba(src: &[u8], w: u32, h: u32, params: ScanCleanupParams) -> Vec<u8> {
-    let (w, h) = (w as usize, h as usize);
+    let (wu, hu) = (w as usize, h as usize);
     let strength = params.strength.clamp(0.0, 1.0);
-    if w == 0 || h == 0 || src.len() < w * h * 4 || strength <= 0.0 {
+    if wu == 0 || hu == 0 || src.len() < wu * hu * 4 || strength <= 0.0 {
         return src.to_vec();
     }
+    let luma = luma_of(src);
+    let bg = estimate_background(&luma, wu, hu);
+    apply_with_background(src, &bg, &luma, params)
+}
 
-    // Per-pixel luma (0..1).
-    let mut luma = vec![0f32; w * h];
-    for (l, px) in luma.iter_mut().zip(src.chunks_exact(4)) {
-        *l = (0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32) / 255.0;
+/// The cheap final pass: divide each pixel's luma by the pre-computed background,
+/// clamp with the white/black point, and blend the neutral result over the input
+/// by `strength`. `bg` and `luma` are per-pixel (as from [`estimate_background`]
+/// and [`luma_of`] of the same image). Fast enough to rerun every frame.
+pub fn apply_with_background(
+    src: &[u8],
+    bg: &[f32],
+    luma: &[f32],
+    params: ScanCleanupParams,
+) -> Vec<u8> {
+    let n = src.len() / 4;
+    let strength = params.strength.clamp(0.0, 1.0);
+    if strength <= 0.0 || bg.len() < n || luma.len() < n {
+        return src.to_vec();
     }
-
-    // Local paper level (rolling-ball background), full-resolution.
-    let bg = estimate_background(&luma, w, h);
-
     let inv_span = 1.0 / (WHITE_POINT - BLACK_POINT);
     let mut out = src.to_vec();
     for (i, chunk) in out.chunks_exact_mut(4).enumerate() {
@@ -123,7 +145,7 @@ pub fn clean_scan_rgba(src: &[u8], w: u32, h: u32, params: ScanCleanupParams) ->
 /// (local min) erases the thin dark strokes of text, leaving smooth paper that
 /// tracks the shading — including a sharp gutter shadow — far better than a blur.
 /// A light box blur removes residual texture; the result is bilinearly upsampled.
-fn estimate_background(luma: &[f32], w: usize, h: usize) -> Vec<f32> {
+pub fn estimate_background(luma: &[f32], w: usize, h: usize) -> Vec<f32> {
     // Downscale so the long edge is ~BG_WORK (cheap morphology + first smoothing).
     let ds = w.max(h).div_ceil(BG_WORK).max(1);
     let sw = w.div_ceil(ds);

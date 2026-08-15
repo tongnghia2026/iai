@@ -620,6 +620,10 @@ pub struct DialogIntent {
     pub apply_vector_style: Option<VectorBatchStyle>,
     /// Open/close the "Làm sạch bản scan" dialog.
     pub show_scan_cleanup_dialog: Option<bool>,
+    /// Live-preview params for the open scan-cleanup dialog (current page only).
+    pub set_scan_cleanup_preview: Option<crate::core::scan_cleanup::ScanCleanupParams>,
+    /// Cancel/close the scan-cleanup dialog (restore the previewed layer).
+    pub cancel_scan_cleanup_dialog: bool,
     /// Apply a scan-cleanup pass to the current page/image or a page range.
     pub apply_scan_cleanup: Option<crate::core::scan_cleanup::ScanCleanupRequest>,
     pub show_resize_dialog: Option<bool>,

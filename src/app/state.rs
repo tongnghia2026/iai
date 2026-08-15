@@ -547,6 +547,22 @@ pub struct FilterPreviewResult {
     pub tiles: crate::core::tile::TileMap,
 }
 
+/// Live-preview session for "Làm sạch bản scan". The rolling-ball background and
+/// luma are computed once on open (they don't depend on the params); each slider
+/// change reruns only the cheap final pass and shows it via `preview_layer_tiles`.
+/// OK commits undoably from `original_tiles`; Cancel restores them.
+pub struct ScanPreviewSession {
+    pub doc_id: crate::core::document::DocumentId,
+    pub layer_id: u32,
+    pub w: u32,
+    pub h: u32,
+    pub original_tiles: crate::core::tile::TileMap,
+    pub src_rgba: Vec<u8>,
+    pub luma: Vec<f32>,
+    pub bg: Vec<f32>,
+    pub last: Option<crate::core::scan_cleanup::ScanCleanupParams>,
+}
+
 pub struct DevelopPreviewState {
     pub doc_id: crate::core::document::DocumentId,
     pub layer_id: u32,
@@ -1442,6 +1458,7 @@ impl App {
                 adjustment_preview_last: None,
                 adjustment_preview_cost: std::time::Duration::ZERO,
                 filter_preview: None,
+                scan_preview: None,
                 user_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all()),
                 develop_presets: std::sync::Arc::new(
                     crate::core::presets::DevelopPreset::load_all(),
@@ -2151,7 +2168,6 @@ impl App {
             || self.shell.ui.show_new_dialog
             || self.shell.ui.show_font_change_dialog
             || self.shell.ui.show_vector_style_dialog
-            || self.shell.ui.show_scan_cleanup_dialog
             || self.shell.ui.show_resize_dialog
             || self.shell.ui.show_image_size_dialog
             || self.shell.ui.show_rename_dialog
@@ -2172,6 +2188,7 @@ impl App {
         self.shell.ui.show_adjustment_dialog
             || self.shell.ui.show_filter_dialog
             || self.shell.ui.show_develop_dialog
+            || self.shell.ui.show_scan_cleanup_dialog
     }
 
     /// Bug 7: True when Crop (with an active selection) or Free Transform is active.
