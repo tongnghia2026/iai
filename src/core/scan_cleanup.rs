@@ -62,11 +62,15 @@ pub struct ScanCleanupRequest {
 }
 
 /// After dividing by the background, paper ≈ 1.0. Pixels at/above this become
-/// pure white; at/below `BLACK_POINT` become pure black; linear between.
-const WHITE_POINT: f32 = 0.90;
-const BLACK_POINT: f32 = 0.15;
-/// Bilevel split on the cleaned (post-clamp) level.
-const BILEVEL_LEVEL: f32 = 0.5;
+/// pure white; at/below `BLACK_POINT` become pure black; linear between. The
+/// window is deliberately narrow so the flattened grey gains contrast (text
+/// deepens, paper whitens) rather than reading flat.
+const WHITE_POINT: f32 = 0.86;
+const BLACK_POINT: f32 = 0.26;
+/// Bilevel split on the raw background-normalised level (paper ≈ 1.0): pixels
+/// darker than this fraction of the local paper become black. Higher keeps more
+/// (and thinner) strokes intact; lower is cleaner but drops faint text.
+const BILEVEL_NORM_THRESHOLD: f32 = 0.72;
 /// Long edge of the working image the background is estimated on. Downscaling
 /// keeps the (radius-heavy) morphology cheap and doubles as a first smoothing.
 const BG_WORK: usize = 1000;
@@ -117,13 +121,15 @@ pub fn apply_with_background(
         let bg_level = bg[i].max(1e-3);
         // paper → ≈1.0, ink → <1.
         let norm = (luma[i] / bg_level).min(1.3);
-        let cleaned = ((norm - BLACK_POINT) * inv_span).clamp(0.0, 1.0);
         // Neutral grey (grayscale) or a hard threshold (bilevel). Either way the
         // target is achromatic, which erases any uneven colour cast from the scan.
         let target = match params.mode {
-            ScanCleanupMode::Grayscale => cleaned * 255.0,
+            ScanCleanupMode::Grayscale => {
+                (((norm - BLACK_POINT) * inv_span).clamp(0.0, 1.0)) * 255.0
+            }
+            // Threshold on the paper-relative level so faint strokes survive.
             ScanCleanupMode::Bilevel => {
-                if cleaned >= BILEVEL_LEVEL {
+                if norm >= BILEVEL_NORM_THRESHOLD {
                     255.0
                 } else {
                     0.0
