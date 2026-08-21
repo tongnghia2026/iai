@@ -20,7 +20,9 @@ use tungstenite::Message;
 /// Localhost-only. The extension connects to ws://127.0.0.1:PORT.
 pub const PORT: u16 = 47821;
 /// Longest edge uploaded to the browser (it forwards to Gemini/ChatGPT, which cap
-/// around 1MP anyway). The result is resized back to the exact canvas size.
+/// around 1MP anyway). The result is kept at whatever resolution the model
+/// returns — it is NOT upscaled back to the source canvas, which used to soften
+/// (blur) results whenever the model returned an image smaller than the canvas.
 const MAX_UPLOAD_EDGE: u32 = 1536;
 const FIRST_PROGRESS_TIMEOUT: Duration = Duration::from_secs(18);
 
@@ -594,15 +596,18 @@ fn downscale(img: image::DynamicImage, max_edge: u32) -> image::DynamicImage {
 
 /// Decode a base64 PNG result into RGBA at exactly `w×h` (so it lines up as a
 /// layer over the Background). Used by the app when a `Result` arrives.
-pub fn decode_result(image_b64: &str, w: u32, h: u32) -> Result<Vec<u8>, String> {
+/// Decode an extension result image at its NATIVE resolution — returns the RGBA
+/// bytes plus the real pixel dimensions. Earlier this force-resized to the source
+/// canvas size, which upscaled (and softened) any model output smaller than the
+/// canvas; the result now keeps exactly the resolution the browser showed.
+pub fn decode_result(image_b64: &str) -> Result<(Vec<u8>, u32, u32), String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(image_b64.as_bytes())
         .map_err(|e| format!("decode base64: {e}"))?;
     let out = image::load_from_memory(&bytes).map_err(|e| format!("load result: {e}"))?;
-    Ok(out
-        .resize_exact(w, h, image::imageops::FilterType::Lanczos3)
-        .to_rgba8()
-        .into_raw())
+    let rgba = out.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    Ok((rgba.into_raw(), w, h))
 }
 
 /// Non-cryptographic per-session token: enough to stop a casual web page from
@@ -677,6 +682,21 @@ mod tests {
             in_tx,
             out_rx,
         )
+    }
+
+    #[test]
+    fn decode_result_keeps_native_resolution() {
+        // A 7x3 image must decode back as 7x3 — NOT resized to any canvas size.
+        let img = image::RgbaImage::from_pixel(7, 3, image::Rgba([10, 20, 30, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode png");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let (rgba, w, h) = decode_result(&b64).expect("decode");
+        assert_eq!((w, h), (7, 3), "native dimensions preserved");
+        assert_eq!(rgba.len(), 7 * 3 * 4);
+        assert_eq!(&rgba[0..4], &[10, 20, 30, 255]);
     }
 
     fn enqueue(bridge: &mut ExtBridge, doc_id: u32, site: &str) -> EnqueueOutcome {

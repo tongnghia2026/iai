@@ -292,17 +292,16 @@ impl App {
                     origin: Some(origin),
                     ..
                 } => {
-                    let success = match crate::app::ext_bridge::decode_result(
-                        &image_b64,
-                        origin.width,
-                        origin.height,
-                    ) {
-                        Ok(rgba) => {
+                    let success = match crate::app::ext_bridge::decode_result(&image_b64) {
+                        Ok((rgba, rw, rh)) => {
+                            // Keep the model's native resolution (rw×rh) — placing it
+                            // instead of upscaling to the source canvas is what stops
+                            // web results coming in blurrier than the browser showed.
                             let s = self.place_gemini_result(
                                 Some(origin.doc_id),
                                 rgba,
-                                origin.width,
-                                origin.height,
+                                rw,
+                                rh,
                                 origin.output_new_file,
                             );
                             let success = ai_placement_succeeded(&s);
@@ -393,17 +392,20 @@ impl App {
             None => self.docs.active_doc_idx,
         };
 
-        if w != self.docs.documents[idx].canvas.width || h != self.docs.documents[idx].canvas.height
-        {
-            return "Document gốc đã đổi kích thước — bỏ ảnh".to_string();
-        }
+        // The result keeps the model's native resolution, which may be smaller
+        // than the canvas (the source is downscaled for upload and models cap
+        // their output). Place it as a layer CENTRED on the canvas rather than
+        // upscaling it to fill — that upscale is what made web results blurrier
+        // than the browser. The undo snapshot still records the CANVAS size.
+        let cw = self.docs.documents[idx].canvas.width;
+        let ch = self.docs.documents[idx].canvas.height;
 
         let tiles = crate::core::tile::TileMap::from_rgba(&rgba, w, h);
         let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
             "AI Gemini",
             &self.docs.documents[idx].canvas.layer_stack,
-            w,
-            h,
+            cw,
+            ch,
         );
         for l in &mut self.docs.documents[idx].canvas.layer_stack.layers {
             l.selected = false;
@@ -415,11 +417,14 @@ impl App {
             layer.tiles = tiles;
             layer.width = w;
             layer.height = h;
-            layer.offset = (0, 0);
+            layer.offset = (
+                ((cw as i64 - w as i64) / 2) as i32,
+                ((ch as i64 - h as i64) / 2) as i32,
+            );
             layer.selected = true;
         }
         self.docs.documents[idx].canvas.layer_stack.active_idx = new_idx;
-        cmd.capture_after(&self.docs.documents[idx].canvas.layer_stack, w, h);
+        cmd.capture_after(&self.docs.documents[idx].canvas.layer_stack, cw, ch);
         self.docs.documents[idx].canvas.record(Box::new(cmd));
         self.docs.documents[idx].canvas.layer_revision += 1;
 
