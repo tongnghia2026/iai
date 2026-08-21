@@ -1062,6 +1062,27 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
             ui.separator();
 
+            // Crop to the exact size the Gemini / ChatGPT image models return.
+            // Sending an image already at the AI's output size keeps the whole
+            // round-trip (send → edit → bring back) at native resolution: the
+            // result matches the canvas 1:1, so it fills the frame sharply instead
+            // of being upscaled (which softened it). Portrait 1024×1536 is the
+            // orientation the owner works in.
+            ui.label(
+                egui::RichText::new("AI (Gemini / ChatGPT)")
+                    .color(egui::Color32::GRAY)
+                    .size(10.5),
+            );
+            if ui
+                .selectable_label(false, "1024 × 1536 px  ·  dọc")
+                .clicked()
+            {
+                apply_preset = Some(PresetAction::Size(1024.0, 1536.0, 72.0));
+                ui.close();
+            }
+
+            ui.separator();
+
             ui.label(
                 egui::RichText::new("Size")
                     .color(egui::Color32::GRAY)
@@ -1335,7 +1356,8 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 /// Separators/headings are included in the base; each saved preset contributes
 /// one normal menu row, and a non-empty saved section also shows Delete Preset.
 fn crop_preset_popup_height(saved_preset_count: usize) -> f32 {
-    const FIXED_CONTENT_HEIGHT: f32 = 560.0;
+    // Raised for the "AI (Gemini / ChatGPT)" section (label + separator + 1 row).
+    const FIXED_CONTENT_HEIGHT: f32 = 620.0;
     const MENU_ROW_HEIGHT: f32 = 26.0;
     FIXED_CONTENT_HEIGHT
         + saved_preset_count as f32 * MENU_ROW_HEIGHT
