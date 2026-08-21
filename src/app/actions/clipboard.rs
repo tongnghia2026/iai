@@ -139,7 +139,36 @@ fn os_clipboard_block_image(
     stack.set_next_id(next_id);
 
     let out = stack.flatten(bw, bh);
-    crop_to_alpha(bw, bh, out)
+    let (cw, ch, mut rgba) = crop_to_alpha(bw, bh, out)?;
+    flatten_onto_white(&mut rgba);
+    Some((cw, ch, rgba))
+}
+
+/// Composite a straight-alpha RGBA buffer onto opaque white, in place, forcing
+/// every pixel fully opaque.
+///
+/// The OS clipboard's DIB / bitmap formats are read by applications that ignore
+/// the alpha channel (Windows Paint, many chat clients, Office "paste as
+/// picture"). Those render a copied object's transparent surround — and its
+/// see-through parts — as solid BLACK, so an in-app copy pasted into another
+/// program came out as a black box (the reported "can't copy out to other apps"
+/// bug). Flattening onto white first makes the copy paste correctly everywhere.
+///
+/// This only touches the flattened mirror sent to the *system* clipboard. iAi's
+/// own paste keeps using the internal layer clipboard, so on-canvas transparency,
+/// blend modes and layer structure are unaffected.
+fn flatten_onto_white(rgba: &mut [u8]) {
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 255 {
+            continue;
+        }
+        for c in px.iter_mut().take(3) {
+            // straight-alpha over white: c·a/255 + 255·(255−a)/255, rounded.
+            *c = ((*c as u32 * a + 255 * (255 - a) + 127) / 255) as u8;
+        }
+        px[3] = 255;
+    }
 }
 
 /// Crop an RGBA buffer to the bounding box of its non-transparent pixels.
@@ -679,6 +708,51 @@ mod tests {
         assert!((rgba[0] as i32 - 127).abs() <= 2, "r={}", rgba[0]);
         assert!((rgba[1] as i32 - 127).abs() <= 2, "g={}", rgba[1]);
         assert_eq!(rgba[3], 255);
+    }
+
+    #[test]
+    fn flatten_onto_white_fills_transparent_and_blends_edges() {
+        // Three pixels: opaque red (kept), fully transparent (→ white), and a
+        // half-opaque blue (→ blended halfway to white).
+        let mut rgba = vec![
+            255, 0, 0, 255, // opaque red
+            0, 0, 0, 0, // fully transparent (rgb must not leak through as black)
+            0, 0, 255, 128, // 50% blue
+        ];
+        flatten_onto_white(&mut rgba);
+        assert_eq!(&rgba[0..4], &[255, 0, 0, 255], "opaque pixel untouched");
+        assert_eq!(
+            &rgba[4..8],
+            &[255, 255, 255, 255],
+            "transparent surround becomes opaque white, not black"
+        );
+        assert_eq!(rgba[11], 255, "blended pixel is now opaque");
+        assert!((rgba[8] as i32 - 128).abs() <= 1, "r≈128: {}", rgba[8]);
+        assert!((rgba[9] as i32 - 128).abs() <= 1, "g≈128: {}", rgba[9]);
+        assert_eq!(rgba[10], 255, "blue channel stays saturated over white");
+    }
+
+    #[test]
+    fn os_clipboard_mirror_is_opaque_over_white() {
+        // A red disc-ish blob with a transparent surround: the OS-clipboard
+        // mirror must come out fully opaque (no alpha, no black surround).
+        let mut layer = Layer::from_rgba(1, "blob", vec![0u8; 16 * 16 * 4], 16, 16);
+        // Paint a small opaque red square in the middle, leave the rest clear.
+        for tile in layer.tiles.tiles.values_mut() {
+            let tile = std::sync::Arc::make_mut(tile);
+            for y in 4..12 {
+                for x in 4..12 {
+                    let i = ((y * TILE_SIZE + x) * 4) as usize;
+                    tile.pixels[i] = 255;
+                    tile.pixels[i + 3] = 255;
+                }
+            }
+        }
+        let (_, _, rgba) = os_clipboard_block_image(&[layer], 16, 16).expect("has content");
+        assert!(
+            rgba.chunks_exact(4).all(|px| px[3] == 255),
+            "every mirrored pixel must be opaque"
+        );
     }
 
     #[test]
