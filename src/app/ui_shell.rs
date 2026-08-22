@@ -36,6 +36,9 @@ pub struct UiShell {
     pub(in crate::app) print_printers: Vec<crate::core::print::PrinterInfo>,
     pub(in crate::app) print_selected_printer: String,
     pub(in crate::app) print_copies: u32,
+    /// Driver DEVMODE scoped to this IAI print session. It is passed directly
+    /// to CreateDC and never saved as the Windows printer default.
+    pub(in crate::app) print_driver_settings: Option<crate::core::print_gdi::PrinterSettings>,
     /// Optional printer ICC profile for app-managed colour conversion (RGB
     /// profiles only for now). None = printer/OS manages colour (PDF is tagged
     /// with the document sRGB profile + rendering intent).

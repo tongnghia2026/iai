@@ -1469,6 +1469,7 @@ impl App {
                 print_printers: Vec::new(),
                 print_selected_printer: String::new(),
                 print_copies: 1,
+                print_driver_settings: None,
                 print_printer_profile: None,
                 print_printer_profile_name: String::new(),
                 adjustment_preview: None,

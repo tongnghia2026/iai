@@ -89,6 +89,13 @@ pub struct DialogParent {
     hinstance: isize,
 }
 
+impl DialogParent {
+    /// Native owner handle for Win32 dialogs that are not routed through rfd.
+    pub fn hwnd(self) -> isize {
+        self.hwnd
+    }
+}
+
 impl winit::raw_window_handle::HasWindowHandle for DialogParent {
     fn window_handle(
         &self,

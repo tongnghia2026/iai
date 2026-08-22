@@ -999,18 +999,25 @@ fn collect_pdf_vectors_impl(
             // layer.  After move/transform/edit round-trips, their ink bounds
             // can differ from the origin reconstructed from TextData (notably
             // for older .iai files).  Screen compositing uses those tiles, so
-            // register the transient PDF outlines to the same ink top-left.
-            // This prevents exported text drifting right/down or being clipped
-            // even though it still looks correctly positioned in the editor.
-            if let (Some((tile_x, tile_y, _, _)), Some(vector_bounds)) = (
+            // register the transient PDF outlines to the same visible ink
+            // centre. The editor's alignment commands use the alpha bounds'
+            // centre; registering only the top-left makes a large one-line
+            // heading drift when the Bézier bounds and antialiased pixel bounds
+            // differ slightly. Tight curve bounds also avoid control handles
+            // biasing the correction.
+            if let (Some((tile_x0, tile_y0, tile_x1, tile_y1)), Some(vector_bounds)) = (
                 layer.tiles.content_bounds(),
                 text_objects
                     .iter()
-                    .filter_map(|object| object.path_in_layer_space().control_bounds())
+                    .filter_map(|object| object.layer_bounds(0.05))
                     .reduce(|a, b| a.union(b)),
             ) {
-                let dx = layer.offset.0 as f32 + tile_x as f32 - vector_bounds.x;
-                let dy = layer.offset.1 as f32 + tile_y as f32 - vector_bounds.y;
+                let tile_cx = layer.offset.0 as f32 + (tile_x0 + tile_x1) as f32 * 0.5;
+                let tile_cy = layer.offset.1 as f32 + (tile_y0 + tile_y1) as f32 * 0.5;
+                let vector_cx = vector_bounds.x + vector_bounds.w * 0.5;
+                let vector_cy = vector_bounds.y + vector_bounds.h * 0.5;
+                let dx = tile_cx - vector_cx;
+                let dy = tile_cy - vector_cy;
                 if dx.abs() > 0.01 || dy.abs() > 0.01 {
                     let correction =
                         crate::core::vector::affine::AffineTransform::translate(dx, dy);
@@ -2131,7 +2138,15 @@ fn default_printer_name() -> Option<String> {
 /// flag they already have.
 #[cfg(target_os = "windows")]
 pub fn query_printer(name: &str) -> Result<PrinterInfo, String> {
-    let metrics = crate::core::print_gdi::printer_page_metrics(name)?;
+    query_printer_with_settings(name, None)
+}
+
+#[cfg(target_os = "windows")]
+pub fn query_printer_with_settings(
+    name: &str,
+    settings: Option<&crate::core::print_gdi::PrinterSettings>,
+) -> Result<PrinterInfo, String> {
+    let metrics = crate::core::print_gdi::printer_page_metrics_with_settings(name, settings)?;
     Ok(PrinterInfo {
         name: name.to_string(),
         is_default: false,
@@ -2199,28 +2214,20 @@ pub fn available_printers() -> Result<Vec<PrinterInfo>, String> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn open_printer_settings(printer: &str) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-
-    if printer.trim().is_empty() {
-        return Err("No printer selected".to_string());
-    }
-
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let status = std::process::Command::new("rundll32.exe")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["printui.dll,PrintUIEntry", "/e", "/n", printer])
-        .status()
-        .map_err(|e| format!("Cannot open printer driver settings: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("Printer driver settings exited with {status}"))
-    }
+pub fn open_printer_settings(
+    printer: &str,
+    current: Option<&crate::core::print_gdi::PrinterSettings>,
+    owner_hwnd: isize,
+) -> Result<Option<crate::core::print_gdi::PrinterSettings>, String> {
+    crate::core::print_gdi::prompt_printer_settings(printer, current, owner_hwnd)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn open_printer_settings(_printer: &str) -> Result<(), String> {
+pub fn open_printer_settings(
+    _printer: &str,
+    _current: Option<&crate::core::print_gdi::PrinterSettings>,
+    _owner_hwnd: isize,
+) -> Result<Option<crate::core::print_gdi::PrinterSettings>, String> {
     Err("Printer driver settings are only wired on Windows right now".to_string())
 }
 
@@ -2653,19 +2660,72 @@ mod tests {
         layer.width = w;
         layer.height = h;
         layer.tiles = TileMap::from_rgba(&rgba, w, h);
-        let (ink_x, ink_y, _, _) = layer.tiles.content_bounds().expect("tile ink bounds");
-        let expected_x = (layer.offset.0 + ink_x) as f32;
-        let expected_y = (layer.offset.1 + ink_y) as f32;
+        let (ink_x0, ink_y0, ink_x1, ink_y1) =
+            layer.tiles.content_bounds().expect("tile ink bounds");
+        let expected_cx = layer.offset.0 as f32 + (ink_x0 + ink_x1) as f32 * 0.5;
+        let expected_cy = layer.offset.1 as f32 + (ink_y0 + ink_y1) as f32 * 0.5;
 
         let selection = collect_pdf_vectors(&canvas);
         let bounds = selection
             .objects
             .iter()
-            .filter_map(|object| object.path.control_bounds())
+            .filter_map(|object| crate::core::vector::flatten::tight_bounds(&object.path, 0.05))
             .reduce(|a, b| a.union(b))
             .expect("text vector bounds");
-        assert!((bounds.x - expected_x).abs() < 0.01);
-        assert!((bounds.y - expected_y).abs() < 0.01);
+        assert!((bounds.x + bounds.w * 0.5 - expected_cx).abs() < 0.01);
+        assert!((bounds.y + bounds.h * 0.5 - expected_cy).abs() < 0.01);
+    }
+
+    #[test]
+    fn large_centered_text_keeps_its_visible_center_in_pdf_curves() {
+        use crate::core::layer::LayerType;
+        use crate::core::text::{rasterize, TextData};
+        use crate::core::tile::TileMap;
+
+        let text = TextData {
+            content: "IAI DESIGN STUDIO".to_string(),
+            font_px: 180.0,
+            ..TextData::default()
+        };
+        let Some(raster) = rasterize(&text) else {
+            return;
+        };
+        let tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+        let (x0, y0, x1, y1) = tiles.content_bounds().expect("visible text ink");
+
+        let mut canvas = crate::core::canvas::Canvas::new_blank(1800, 600);
+        let layer = &mut canvas.layer_stack.layers[canvas.layer_stack.active_idx];
+        layer.layer_type = LayerType::Text(text);
+        layer.width = raster.width;
+        layer.height = raster.height;
+        layer.tiles = tiles;
+        // Mirror the editor's horizontal/vertical center commands: they align
+        // the visible alpha bounds, not the padded text raster rectangle.
+        layer.offset = (
+            (canvas.width as f32 * 0.5 - (x0 + x1) as f32 * 0.5).round() as i32,
+            (canvas.height as f32 * 0.5 - (y0 + y1) as f32 * 0.5).round() as i32,
+        );
+
+        let visible_cx = layer.offset.0 as f32 + (x0 + x1) as f32 * 0.5;
+        let visible_cy = layer.offset.1 as f32 + (y0 + y1) as f32 * 0.5;
+        let selection = collect_pdf_vectors(&canvas);
+        let pdf_bounds = selection
+            .objects
+            .iter()
+            .filter_map(|object| crate::core::vector::flatten::tight_bounds(&object.path, 0.05))
+            .reduce(|a, b| a.union(b))
+            .expect("PDF text curves");
+        let pdf_cx = pdf_bounds.x + pdf_bounds.w * 0.5;
+        let pdf_cy = pdf_bounds.y + pdf_bounds.h * 0.5;
+
+        assert!(
+            (pdf_cx - visible_cx).abs() < 0.01,
+            "large centered text drifted horizontally: visible={visible_cx}, pdf={pdf_cx}"
+        );
+        assert!(
+            (pdf_cy - visible_cy).abs() < 0.01,
+            "large centered text drifted vertically: visible={visible_cy}, pdf={pdf_cy}"
+        );
     }
 
     #[test]

@@ -3,7 +3,10 @@
 use crate::app::state::App;
 
 impl App {
-    pub(super) fn apply_printer_list(&mut self, printers: Vec<crate::core::print::PrinterInfo>) {
+    pub(super) fn apply_printer_list(
+        &mut self,
+        mut printers: Vec<crate::core::print::PrinterInfo>,
+    ) {
         if self.shell.print_selected_printer.is_empty()
             || !printers
                 .iter()
@@ -15,6 +18,20 @@ impl App {
                 .or_else(|| printers.first())
                 .map(|p| p.name.clone())
                 .unwrap_or_default();
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(settings) = self.shell.print_driver_settings.as_ref() {
+            let name = &self.shell.print_selected_printer;
+            if settings.matches_printer(name) {
+                if let Ok(updated) =
+                    crate::core::print::query_printer_with_settings(name, Some(settings))
+                {
+                    if let Some(slot) = printers.iter_mut().find(|p| p.name == *name) {
+                        slot.paper_points = updated.paper_points;
+                        slot.printable_rect_points = updated.printable_rect_points;
+                    }
+                }
+            }
         }
         self.shell.print_printers = printers;
         if self.shell.print_printers.is_empty() {
@@ -87,11 +104,14 @@ impl App {
                 return;
             }
             let name = self.shell.print_selected_printer.clone();
+            let settings = self.shell.print_driver_settings.clone();
             let mut printers = self.shell.print_printers.clone();
             let (tx, rx) = std::sync::mpsc::channel();
             self.jobs.pending_printer_refresh = Some(rx);
             std::thread::spawn(move || {
-                if let Ok(updated) = crate::core::print::query_printer(&name) {
+                if let Ok(updated) =
+                    crate::core::print::query_printer_with_settings(&name, settings.as_ref())
+                {
                     match printers.iter_mut().find(|p| p.name == name) {
                         Some(slot) => {
                             slot.paper_points = updated.paper_points;

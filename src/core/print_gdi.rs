@@ -11,6 +11,47 @@
 
 use super::print::{placement, printable_area_points, PrintLayout};
 
+/// Driver settings selected for one IAI print session.
+///
+/// Windows printer drivers expose a variable-sized `DEVMODE` block.  Keeping
+/// it here (instead of asking PrintUI to edit "Printing Preferences") lets us
+/// pass the choices to this app's printer DC without changing the printer's
+/// defaults for every other application.
+#[derive(Debug, Clone)]
+pub struct PrinterSettings {
+    printer: String,
+    // `DocumentPropertiesW` requires DEVMODE-aligned storage. A byte Vec is
+    // only aligned to 1 by contract, whereas usize storage is sufficiently
+    // aligned for the structure and its driver-private tail.
+    storage: Vec<usize>,
+    byte_len: usize,
+}
+
+impl PrinterSettings {
+    fn new(printer: &str, byte_len: usize) -> Self {
+        let words = byte_len.div_ceil(std::mem::size_of::<usize>());
+        Self {
+            printer: printer.to_string(),
+            storage: vec![0; words],
+            byte_len,
+        }
+    }
+
+    pub fn matches_printer(&self, printer: &str) -> bool {
+        self.printer == printer
+    }
+
+    #[cfg(target_os = "windows")]
+    fn as_ptr(&self) -> *const core::ffi::c_void {
+        self.storage.as_ptr().cast()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn as_mut_ptr(&mut self) -> *mut core::ffi::c_void {
+        self.storage.as_mut_ptr().cast()
+    }
+}
+
 /// Physical metrics of one printer device context. Lengths are device pixels;
 /// `(printable_x, printable_y)` is the printable area's top-left offset from
 /// the paper corner (GDI `PHYSICALOFFSETX/Y`).
@@ -146,6 +187,8 @@ pub fn rgba_band_to_dib_bgr(band: &[u8], w: u32, rows: u32) -> Vec<u8> {
 #[cfg(target_os = "windows")]
 mod ffi {
     pub type Hdc = *mut core::ffi::c_void;
+    pub type Handle = *mut core::ffi::c_void;
+    pub type Hwnd = *mut core::ffi::c_void;
 
     #[repr(C)]
     pub struct DocInfoW {
@@ -206,6 +249,24 @@ mod ffi {
         ) -> i32;
     }
 
+    #[link(name = "winspool")]
+    extern "system" {
+        pub fn OpenPrinterW(
+            printer_name: *mut u16,
+            printer: *mut Handle,
+            defaults: *const core::ffi::c_void,
+        ) -> i32;
+        pub fn ClosePrinter(printer: Handle) -> i32;
+        pub fn DocumentPropertiesW(
+            hwnd: Hwnd,
+            printer: Handle,
+            device_name: *mut u16,
+            output: *mut core::ffi::c_void,
+            input: *const core::ffi::c_void,
+            mode: u32,
+        ) -> i32;
+    }
+
     pub const HORZRES: i32 = 8;
     pub const VERTRES: i32 = 10;
     pub const LOGPIXELSX: i32 = 88;
@@ -219,6 +280,11 @@ mod ffi {
     pub const SRCCOPY: u32 = 0x00CC_0020;
     pub const HALFTONE: i32 = 4;
     pub const GDI_ERROR: i32 = -1;
+    pub const DM_OUT_BUFFER: u32 = 0x0000_0002;
+    pub const DM_IN_PROMPT: u32 = 0x0000_0004;
+    pub const DM_IN_BUFFER: u32 = 0x0000_0008;
+    pub const IDOK: i32 = 1;
+    pub const IDCANCEL: i32 = 2;
 }
 
 #[cfg(target_os = "windows")]
@@ -236,18 +302,112 @@ impl Drop for Dc {
 }
 
 #[cfg(target_os = "windows")]
-fn open_printer_dc(printer: &str) -> Result<Dc, String> {
+struct PrinterHandle(ffi::Handle);
+#[cfg(target_os = "windows")]
+impl Drop for PrinterHandle {
+    fn drop(&mut self) {
+        unsafe { ffi::ClosePrinter(self.0) };
+    }
+}
+
+/// Show the selected driver's property sheet and return an app-local DEVMODE.
+/// No `DM_UPDATE` flag is ever supplied, so the driver's system/user defaults
+/// are not written. `Ok(None)` means the user cancelled the dialog.
+#[cfg(target_os = "windows")]
+pub fn prompt_printer_settings(
+    printer: &str,
+    current: Option<&PrinterSettings>,
+    owner_hwnd: isize,
+) -> Result<Option<PrinterSettings>, String> {
+    if printer.trim().is_empty() {
+        return Err("No printer selected".to_string());
+    }
+
+    let mut device = wide(printer);
+    let mut raw_handle = std::ptr::null_mut();
+    if unsafe { ffi::OpenPrinterW(device.as_mut_ptr(), &mut raw_handle, std::ptr::null()) } == 0 {
+        return Err(format!(
+            "Cannot open printer '{printer}': {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let handle = PrinterHandle(raw_handle);
+    let hwnd = owner_hwnd as ffi::Hwnd;
+
+    let required = unsafe {
+        ffi::DocumentPropertiesW(
+            hwnd,
+            handle.0,
+            device.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            0,
+        )
+    };
+    if required <= 0 {
+        return Err("Printer driver did not provide a DEVMODE".to_string());
+    }
+    let required = required as usize;
+
+    let input = match current
+        .filter(|s| s.matches_printer(printer) && s.byte_len == required && !s.storage.is_empty())
+    {
+        Some(settings) => settings.clone(),
+        None => {
+            let mut defaults = PrinterSettings::new(printer, required);
+            let result = unsafe {
+                ffi::DocumentPropertiesW(
+                    hwnd,
+                    handle.0,
+                    device.as_mut_ptr(),
+                    defaults.as_mut_ptr(),
+                    std::ptr::null(),
+                    ffi::DM_OUT_BUFFER,
+                )
+            };
+            if result != ffi::IDOK {
+                return Err("Cannot read the printer's current settings".to_string());
+            }
+            defaults
+        }
+    };
+
+    // Keep input and output separate: a few older vendor drivers do not
+    // tolerate an in-place DEVMODE during their property sheet callback.
+    let mut output = PrinterSettings::new(printer, required);
+    let result = unsafe {
+        ffi::DocumentPropertiesW(
+            hwnd,
+            handle.0,
+            device.as_mut_ptr(),
+            output.as_mut_ptr(),
+            input.as_ptr(),
+            ffi::DM_IN_BUFFER | ffi::DM_OUT_BUFFER | ffi::DM_IN_PROMPT,
+        )
+    };
+    match result {
+        ffi::IDOK => Ok(Some(output)),
+        ffi::IDCANCEL => Ok(None),
+        code => Err(format!("Printer settings failed with code {code}")),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_printer_dc(printer: &str, settings: Option<&PrinterSettings>) -> Result<Dc, String> {
     if printer.trim().is_empty() {
         return Err("No printer selected".to_string());
     }
     let driver = wide("WINSPOOL");
     let device = wide(printer);
+    let init_data = settings
+        .filter(|s| s.matches_printer(printer))
+        .map_or(std::ptr::null(), PrinterSettings::as_ptr);
     let dc = Dc(unsafe {
         ffi::CreateDCW(
             driver.as_ptr(),
             device.as_ptr(),
             std::ptr::null(),
-            std::ptr::null(),
+            init_data,
         )
     });
     if dc.0.is_null() {
@@ -261,7 +421,18 @@ fn open_printer_dc(printer: &str) -> Result<Dc, String> {
 /// unlike the seconds-long PowerShell enumeration this replaced.
 #[cfg(target_os = "windows")]
 pub fn printer_page_metrics(printer: &str) -> Result<DeviceMetrics, String> {
-    let dc = open_printer_dc(printer)?;
+    printer_page_metrics_with_settings(printer, None)
+}
+
+/// Query metrics using the app-local DEVMODE returned by
+/// [`prompt_printer_settings`], keeping preview and the eventual print DC in
+/// agreement without touching the driver's saved defaults.
+#[cfg(target_os = "windows")]
+pub fn printer_page_metrics_with_settings(
+    printer: &str,
+    settings: Option<&PrinterSettings>,
+) -> Result<DeviceMetrics, String> {
+    let dc = open_printer_dc(printer, settings)?;
     metrics_from_dc(dc.0)
 }
 
@@ -309,6 +480,7 @@ fn metrics_from_dc(hdc: ffi::Hdc) -> Result<DeviceMetrics, String> {
 #[cfg(target_os = "windows")]
 pub fn print_bands(
     printer: &str,
+    settings: Option<&PrinterSettings>,
     doc_name: &str,
     img_w: u32,
     img_h: u32,
@@ -321,7 +493,7 @@ pub fn print_bands(
         return Err("Empty image, cannot print".to_string());
     }
 
-    let dc = open_printer_dc(printer)?;
+    let dc = open_printer_dc(printer, settings)?;
     let metrics = metrics_from_dc(dc.0)?;
     let (dest_x, dest_y, dest_w, dest_h) = image_dest_rect(&metrics, layout, img_w, img_h, dpi);
     let (clip_l, clip_t, clip_r, clip_b) = clip_dest_rect(&metrics, layout, img_w, img_h, dpi);

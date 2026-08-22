@@ -143,20 +143,36 @@ impl App {
             self.refresh_printer_list();
         }
         if let Some(printer) = actions.print.set_print_printer.take() {
+            if printer != self.shell.print_selected_printer {
+                self.shell.print_driver_settings = None;
+            }
             self.shell.print_selected_printer = printer;
         }
         if let Some(copies) = actions.print.set_print_copies.take() {
             self.shell.print_copies = copies.clamp(1, 999);
         }
         if actions.print.open_printer_settings {
-            match crate::core::print::open_printer_settings(&self.shell.print_selected_printer) {
-                Ok(_) => {
+            let owner_hwnd = self
+                .win
+                .window
+                .as_ref()
+                .and_then(|window| crate::file_io::dialog_parent(window.as_ref()))
+                .map(crate::file_io::DialogParent::hwnd)
+                .unwrap_or(0);
+            match crate::core::print::open_printer_settings(
+                &self.shell.print_selected_printer,
+                self.shell.print_driver_settings.as_ref(),
+                owner_hwnd,
+            ) {
+                Ok(Some(settings)) => {
+                    self.shell.print_driver_settings = Some(settings);
                     self.shell.status_msg = format!(
-                        "Updated printer settings: {}",
+                        "Printer settings applied to this IAI print only: {}",
                         self.shell.print_selected_printer
                     );
                     self.refresh_selected_printer();
                 }
+                Ok(None) => {}
                 Err(e) => self.shell.status_msg = e,
             }
         }
@@ -256,6 +272,7 @@ impl App {
                     let intent = layout.intent.to_lcms();
                     Some(crate::core::print_gdi::print_bands(
                         &self.shell.print_selected_printer,
+                        self.shell.print_driver_settings.as_ref(),
                         &doc_name,
                         cw,
                         ch,
