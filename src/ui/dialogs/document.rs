@@ -1021,6 +1021,53 @@ pub(crate) fn export_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                 );
             }
 
+            // Press marks — PDF export only. The document is the bleed area; the
+            // exported page is enlarged so the crop/registration marks have room.
+            if matches!(data.dialogs.export_format, ExportFormat::Pdf { .. }) {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                let mut marks = data.doc.export_pdf_marks;
+                let mut changed = false;
+                if ui.checkbox(&mut marks.crop_marks, "Crop marks").changed() {
+                    changed = true;
+                }
+                if ui
+                    .checkbox(&mut marks.registration_marks, "Registration marks")
+                    .changed()
+                {
+                    changed = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Bleed:");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut marks.bleed_mm)
+                                .range(0.0..=20.0)
+                                .speed(0.1)
+                                .suffix(" mm"),
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+                if changed {
+                    marks.bleed_mm = marks.bleed_mm.clamp(0.0, 20.0);
+                    actions.doc.set_export_pdf_marks = Some(marks);
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Adds crop/registration marks and a trim/bleed box for the printer. The \
+                         page is enlarged to give the marks room; the artwork is the bleed area \
+                         and the trim (cut) line is inset by the bleed.",
+                    )
+                    .color(egui::Color32::GRAY)
+                    .size(10.0),
+                );
+            }
+
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 if ui.button("  Export...  ").clicked() {

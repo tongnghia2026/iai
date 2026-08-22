@@ -638,6 +638,7 @@ impl App {
                 export_resize_enabled: self.shell.ui.export_resize_enabled,
                 export_resize_long_edge: self.shell.ui.export_resize_long_edge,
                 export_output_sharpen: self.shell.ui.export_output_sharpen,
+                export_pdf_marks: self.shell.ui.export_pdf_marks,
                 swatches: std::sync::Arc::new(
                     self.docs.documents[self.docs.active_doc_idx]
                         .canvas

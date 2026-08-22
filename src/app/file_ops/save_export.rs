@@ -338,6 +338,7 @@ impl App {
                 .export_resize_enabled
                 .then_some(self.shell.ui.export_resize_long_edge),
             output_sharpen: self.shell.ui.export_output_sharpen,
+            pdf_marks: self.shell.ui.export_pdf_marks,
             ..ExportOptions::default()
         };
         match self.jobs.format_registry.export(

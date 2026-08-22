@@ -1,6 +1,5 @@
 use super::{ExportOptions, Exporter, Importer};
 use crate::core::canvas::Canvas;
-use crate::core::print::PrintLayout;
 use lopdf::dictionary;
 use std::io::Write;
 use std::path::Path;
@@ -979,11 +978,19 @@ impl Exporter for PdfExporter {
         &["pdf"]
     }
 
-    fn export(&self, canvas: &Canvas, path: &Path, _opts: &ExportOptions) -> Result<(), String> {
+    fn export(&self, canvas: &Canvas, path: &Path, opts: &ExportOptions) -> Result<(), String> {
         if Canvas::pixel_count(canvas.width, canvas.height).is_none_or(|p| p > MAX_PDF_PAGE_PIXELS)
         {
             return Err("PDF canvas is too large to export safely".to_string());
         }
+        // Press-ready marks (bleed + crop/registration) when requested in the
+        // Export dialog; a plain export keeps `PrintLayout::default()`.
+        let layout = crate::core::print::export_pdf_layout(
+            opts.pdf_marks,
+            canvas.width,
+            canvas.height,
+            canvas.metadata.resolution_ppi,
+        );
         if canvas.is_cmyk() {
             // Promote qualifying Path/Shape/Text layers to native DeviceCMYK vector
             // paths over an ink raster base — crisp at any size (no "răng cưa"),
@@ -1001,7 +1008,7 @@ impl Exporter for PdfExporter {
                 let pdf = crate::core::print::build_pdf_encoded_with_vectors(
                     &page,
                     &selection.objects,
-                    &PrintLayout::default(),
+                    &layout,
                     profile.as_deref(),
                 )?;
                 return std::fs::write(path, &pdf).map_err(|e| e.to_string());
@@ -1017,7 +1024,7 @@ impl Exporter for PdfExporter {
                 canvas.height,
                 canvas.metadata.resolution_ppi,
                 &[],
-                &PrintLayout::default(),
+                &layout,
                 Some(&icc),
             )?;
             return std::fs::write(path, &pdf).map_err(|e| e.to_string());
@@ -1037,7 +1044,7 @@ impl Exporter for PdfExporter {
             canvas.metadata.resolution_ppi,
             &selection.objects,
             overlay,
-            &PrintLayout::default(),
+            &layout,
             Some(&icc),
         )?;
         std::fs::write(path, &pdf).map_err(|e| e.to_string())
@@ -1369,8 +1376,15 @@ mod tests {
     fn imports_a_generated_pdf_page_at_auto_dpi() {
         let path = temp_pdf_path("pdf-import");
         let rgba = vec![255u8; 8 * 6 * 4];
-        let pdf = crate::core::print::build_pdf(&rgba, 8, 6, 72.0, &PrintLayout::default(), None)
-            .unwrap();
+        let pdf = crate::core::print::build_pdf(
+            &rgba,
+            8,
+            6,
+            72.0,
+            &crate::core::print::PrintLayout::default(),
+            None,
+        )
+        .unwrap();
         std::fs::write(&path, pdf).unwrap();
 
         let imported = PdfImporter.import_many(&path).unwrap();

@@ -248,6 +248,10 @@ impl App {
         if let Some(v) = actions.doc.set_export_output_sharpen.take() {
             self.shell.ui.export_output_sharpen = v.min(100);
         }
+        if let Some(mut v) = actions.doc.set_export_pdf_marks.take() {
+            v.bleed_mm = v.bleed_mm.clamp(0.0, 20.0);
+            self.shell.ui.export_pdf_marks = v;
+        }
         if let Some(profile) = actions.doc.assign_profile.take() {
             self.docs.documents[self.docs.active_doc_idx]
                 .canvas

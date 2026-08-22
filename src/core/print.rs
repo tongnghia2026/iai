@@ -182,6 +182,33 @@ pub fn page_points(layout: &PrintLayout, img_w: u32, img_h: u32, dpi: f32) -> (f
         .unwrap_or_else(|| document_page_points(img_w, img_h, dpi))
 }
 
+/// Extra page margin (PDF points) added around the artwork on export when press
+/// marks are on. Crop / registration marks sit ~17 pt outside the artwork, so
+/// without this the page (which on export equals the document size) would clip
+/// them. On Print the printer paper is already larger than the artwork, so no
+/// enlargement happens there.
+pub const MARKS_PAGE_MARGIN_PT: f32 = 20.0;
+
+/// Build the [`PrintLayout`] for a File ▸ Export PDF. With marks off this equals
+/// `PrintLayout::default()` (page == document) so the export is byte-identical to
+/// one produced before this option existed. With marks on, the page is enlarged
+/// by [`MARKS_PAGE_MARGIN_PT`] on every side and the artwork is centred, giving
+/// the crop/registration marks room; `marks.bleed_mm` still places the
+/// TrimBox/BleedBox and the crop lines.
+pub fn export_pdf_layout(marks: PrintMarks, img_w: u32, img_h: u32, dpi: f32) -> PrintLayout {
+    let mut layout = PrintLayout {
+        marks,
+        ..PrintLayout::default()
+    };
+    if marks.is_active() {
+        let (aw, ah) = document_page_points(img_w, img_h, dpi);
+        let m = MARKS_PAGE_MARGIN_PT;
+        layout.page_points = Some((aw + 2.0 * m, ah + 2.0 * m));
+        layout.center = true;
+    }
+    layout
+}
+
 pub fn printable_area_points(
     layout: &PrintLayout,
     img_w: u32,
@@ -3431,6 +3458,36 @@ mod tests {
             text.contains("/IaiOPf gs\n"),
             "overprint state applied to the object"
         );
+    }
+
+    #[test]
+    fn export_pdf_layout_enlarges_page_only_when_marks_are_active() {
+        // Marks off => byte-identical to a plain export (page == document).
+        let plain = export_pdf_layout(PrintMarks::none(), 600, 400, 72.0);
+        assert_eq!(plain, PrintLayout::default());
+        assert!(plain.page_points.is_none());
+
+        // Marks on => page enlarged by the marks margin on every side, artwork
+        // centred, marks carried through.
+        let marks = PrintMarks {
+            bleed_mm: 3.0,
+            crop_marks: true,
+            registration_marks: true,
+        };
+        let l = export_pdf_layout(marks, 600, 400, 72.0);
+        let (aw, ah) = document_page_points(600, 400, 72.0);
+        let (pw, ph) = l.page_points.expect("enlarged page");
+        assert!((pw - (aw + 2.0 * MARKS_PAGE_MARGIN_PT)).abs() < 1e-3);
+        assert!((ph - (ah + 2.0 * MARKS_PAGE_MARGIN_PT)).abs() < 1e-3);
+        assert!(l.center);
+        assert_eq!(l.marks, marks);
+        // The artwork is inset by the margin, so crop/registration marks (which
+        // reach ~17 pt outside the artwork) stay on the page.
+        let (dw, dh, tx, ty) = placement(&l, 600, 400, 72.0);
+        assert!((tx - MARKS_PAGE_MARGIN_PT).abs() < 0.5);
+        assert!((ty - MARKS_PAGE_MARGIN_PT).abs() < 0.5);
+        assert!(tx + dw <= pw - MARKS_PAGE_MARGIN_PT + 0.5);
+        assert!(ty + dh <= ph - MARKS_PAGE_MARGIN_PT + 0.5);
     }
 
     #[test]

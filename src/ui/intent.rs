@@ -75,6 +75,8 @@ pub struct DocumentIntent {
     pub set_export_resize_enabled: Option<bool>,
     pub set_export_resize_long_edge: Option<u32>,
     pub set_export_output_sharpen: Option<u8>,
+    /// PDF export press marks (crop / registration / bleed).
+    pub set_export_pdf_marks: Option<crate::core::print::PrintMarks>,
     /// Image ▸ Assign Profile: re-interpret the document as this profile and bake
     /// into the sRGB working space.
     pub assign_profile: Option<crate::core::cms::WorkingProfile>,

@@ -197,6 +197,9 @@ pub struct ExportOptions {
     /// Output sharpening strength (0..=100, 0 = off), applied AFTER the resize so
     /// it re-crisps detail at the final delivery size.
     pub output_sharpen: u8,
+    /// Press marks (crop / registration / bleed) for PDF export. `none()` (the
+    /// default) produces a plain PDF byte-identical to before this option existed.
+    pub pdf_marks: crate::core::print::PrintMarks,
 }
 
 impl Default for ExportOptions {
@@ -207,6 +210,7 @@ impl Default for ExportOptions {
             embed_icc: true,
             resize_long_edge: None,
             output_sharpen: 0,
+            pdf_marks: crate::core::print::PrintMarks::none(),
         }
     }
 }

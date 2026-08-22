@@ -28,6 +28,8 @@ pub struct DocumentViewModel {
     pub export_resize_long_edge: u32,
     /// Output sharpening strength for export (0..=100, 0 = off).
     pub export_output_sharpen: u8,
+    /// Press marks (crop / registration / bleed) for PDF export (default off).
+    pub export_pdf_marks: crate::core::print::PrintMarks,
     /// Named RGB/CMYK process colours stored in this document.
     pub swatches: std::sync::Arc<Vec<crate::core::palette::DocumentSwatch>>,
     pub zoom: f32,
@@ -619,6 +621,7 @@ impl Default for UiData {
                 export_resize_enabled: false,
                 export_resize_long_edge: 2048,
                 export_output_sharpen: 0,
+                export_pdf_marks: crate::core::print::PrintMarks::none(),
                 swatches: std::sync::Arc::new(Vec::new()),
                 zoom: 1.0,
                 offset_x: 0.0,

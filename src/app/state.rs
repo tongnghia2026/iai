@@ -419,6 +419,8 @@ pub struct UiState {
     pub export_resize_long_edge: u32,
     /// Output sharpening strength for export (0..=100, 0 = off).
     pub export_output_sharpen: u8,
+    /// Press marks (crop / registration / bleed) for PDF export (default off).
+    pub export_pdf_marks: crate::core::print::PrintMarks,
     pub transform_interpolation: InterpolationMode,
     pub show_color_panel: bool,
     pub show_text_panel: bool,
@@ -1409,6 +1411,7 @@ impl App {
                     export_resize_enabled: false,
                     export_resize_long_edge: 2048,
                     export_output_sharpen: 0,
+                    export_pdf_marks: crate::core::print::PrintMarks::none(),
                     transform_interpolation: InterpolationMode::Bilinear,
                     // Color & Brush is now a floating panel opened on demand
                     // (Window ▸ Color Panel), like the Levels dialog. Quick
