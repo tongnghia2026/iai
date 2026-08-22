@@ -689,6 +689,30 @@ impl TileMap {
                     continue;
                 }
 
+                // Keep a sparse destination sparse. Crop/resample writes in
+                // tile-sized chunks, including chunks that are completely
+                // transparent when a layer has no content in that part of the
+                // canvas. Creating a 256x256 allocation for every such chunk
+                // turns an otherwise sparse document into O(layers * canvas)
+                // memory. An existing tile still has to be written so zeroes can
+                // clear it; only a missing destination tile may be skipped.
+                if !self.tiles.contains_key(&pos) {
+                    let mut all_zero = true;
+                    'zero_scan: for py in copy_y0..copy_y1 {
+                        let src_row = py - y0;
+                        let src_col = copy_x0 - x0;
+                        let src_idx = ((src_row * w + src_col) * 4) as usize;
+                        let len = ((copy_x1 - copy_x0) * 4) as usize;
+                        if pixels[src_idx..src_idx + len].iter().any(|&v| v != 0) {
+                            all_zero = false;
+                            break 'zero_scan;
+                        }
+                    }
+                    if all_zero {
+                        continue;
+                    }
+                }
+
                 let tile = self.get_tile_mut(pos);
                 for py in copy_y0..copy_y1 {
                     let tile_row = py - tile_start_y;
@@ -734,6 +758,25 @@ impl TileMap {
                 let copy_y1 = y1.min(tile_start_y + TILE_SIZE);
                 if copy_x1 <= copy_x0 || copy_y1 <= copy_y0 {
                     continue;
+                }
+
+                // See write_region: do not materialize an absent destination
+                // tile when this 16-bit write contains only transparent zeroes.
+                if !self.tiles.contains_key(&pos) {
+                    let mut all_zero = true;
+                    'zero_scan: for py in copy_y0..copy_y1 {
+                        let src_row = py - y0;
+                        let src_col = copy_x0 - x0;
+                        let src_idx = ((src_row * w + src_col) * 4) as usize;
+                        let len = ((copy_x1 - copy_x0) * 4) as usize;
+                        if px16[src_idx..src_idx + len].iter().any(|&v| v != 0) {
+                            all_zero = false;
+                            break 'zero_scan;
+                        }
+                    }
+                    if all_zero {
+                        continue;
+                    }
                 }
 
                 // Mutable tile that KEEPS its 16-bit master (get_tile_mut drops it).

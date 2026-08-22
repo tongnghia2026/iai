@@ -7,6 +7,470 @@
 
 use super::*;
 use crate::core::gateway::ChangeKind;
+use crate::core::layer::{Layer, LayerType};
+use crate::core::tile::TileMap;
+use crate::core::vector::affine::AffineTransform;
+use crate::core::vector::object::VectorGeometry;
+
+/// Translate editable geometry after an axis-aligned crop without baking it into
+/// a canvas-sized raster. Text and primitive shapes store placement in the layer
+/// offset; Path objects store it in their source-of-truth object transform.
+fn translate_editable_layer(layer: &mut Layer, dx: i32, dy: i32) -> bool {
+    match layer.layer_type.clone() {
+        LayerType::Text(_) | LayerType::Vector(VectorGeometry::Primitive(_)) => {
+            layer.offset.0 = layer.offset.0.saturating_add(dx);
+            layer.offset.1 = layer.offset.1.saturating_add(dy);
+            true
+        }
+        LayerType::Vector(VectorGeometry::Path(mut object)) => {
+            object.transform =
+                AffineTransform::translate(dx as f32, dy as f32).then(&object.transform);
+            crate::core::command_vector::apply_object_to_layer(layer, object);
+            true
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod crop_regression_tests {
+    use super::*;
+    use crate::core::geometry::Point;
+    use crate::core::shape::{ShapeData, ShapeKind};
+    use crate::core::text::{rasterize_placed, TextData};
+    use crate::core::vector::color::ColorValue;
+    use crate::core::vector::object::VectorObjectData;
+    use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+    use crate::core::vector::raster::raster_geometry;
+    use crate::core::vector::style::VectorStyle;
+
+    fn square_object(at: (f32, f32)) -> VectorObjectData {
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(30.0, 0.0)),
+                    Node::sharp(Point::new(30.0, 30.0)),
+                    Node::sharp(Point::new(0.0, 30.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        VectorObjectData::new(
+            path,
+            VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0)),
+            AffineTransform::translate(at.0, at.1),
+        )
+    }
+
+    fn set_text_layer(layer: &mut Layer, origin: (i32, i32)) {
+        let td = TextData {
+            content: "Crop regression".to_string(),
+            font_px: 24.0,
+            ..TextData::default()
+        };
+        let (raster, delta) = rasterize_placed(&td).expect("text raster");
+        layer.tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+        layer.width = raster.width;
+        layer.height = raster.height;
+        layer.offset = (origin.0 + delta.0, origin.1 + delta.1);
+        layer.layer_type = LayerType::Text(td);
+    }
+
+    #[test]
+    fn straight_crop_keeps_empty_layers_sparse() {
+        let mut canvas = Canvas::new(257, 257);
+        for _ in 1..1000 {
+            canvas.layer_stack.add_layer(257, 257);
+        }
+        assert_eq!(
+            canvas
+                .layer_stack
+                .layers
+                .iter()
+                .map(|layer| layer.tiles.tiles.len())
+                .sum::<usize>(),
+            4
+        );
+
+        assert!(canvas.crop(0, 0, 257, 257, true));
+        assert_eq!(canvas.layer_stack.layers.len(), 1000);
+        assert_eq!(
+            canvas
+                .layer_stack
+                .layers
+                .iter()
+                .map(|layer| layer.tiles.tiles.len())
+                .sum::<usize>(),
+            4,
+            "transparent layers must not become full-canvas tile maps"
+        );
+    }
+
+    #[test]
+    fn transformed_crop_skips_empty_layer_resampling() {
+        let mut canvas = Canvas::new(257, 257);
+        for _ in 1..1000 {
+            canvas.layer_stack.add_layer(257, 257);
+        }
+        assert!(canvas.crop_transformed(128.5, 128.5, 257.0, 257.0, 257, 257, 0.0, 0.0, 0.0, true,));
+        assert_eq!(canvas.layer_stack.layers.len(), 1000);
+        assert_eq!(
+            canvas
+                .layer_stack
+                .layers
+                .iter()
+                .skip(1)
+                .map(|layer| layer.tiles.tiles.len())
+                .sum::<usize>(),
+            0
+        );
+    }
+
+    #[test]
+    fn straight_crop_translates_path_model_and_cache_together() {
+        let mut canvas = Canvas::new(256, 256);
+        crate::core::command_vector::apply_object_to_layer(
+            &mut canvas.layer_stack.layers[0],
+            square_object((100.0, 80.0)),
+        );
+
+        assert!(canvas.crop(64, 32, 128, 128, true));
+        let layer = &canvas.layer_stack.layers[0];
+        let LayerType::Vector(VectorGeometry::Path(object)) = &layer.layer_type else {
+            panic!("path stopped being editable");
+        };
+        let (origin, width, height) = raster_geometry(object).expect("path geometry");
+        assert_eq!(layer.offset, origin);
+        assert_eq!((layer.width, layer.height), (width, height));
+        let bounds = layer.tiles.content_bounds().expect("path pixels");
+        assert!((layer.offset.0 + bounds.0 - 36).abs() <= 1);
+        assert!((layer.offset.1 + bounds.1 - 48).abs() <= 1);
+
+        let mut rebuilt = layer.clone();
+        crate::core::command_vector::fold_offset_into_model(&mut rebuilt);
+        assert_eq!(rebuilt.offset, layer.offset);
+        assert_eq!(rebuilt.tiles.content_bounds(), layer.tiles.content_bounds());
+        assert_eq!(rebuilt.layer_type, layer.layer_type);
+
+        canvas.undo().expect("undo crop");
+        let LayerType::Vector(VectorGeometry::Path(object)) =
+            &canvas.layer_stack.layers[0].layer_type
+        else {
+            panic!("undo lost path model");
+        };
+        assert_eq!(raster_geometry(object).unwrap().0, (99, 79));
+        canvas.redo().expect("redo crop");
+        let layer = &canvas.layer_stack.layers[0];
+        let LayerType::Vector(VectorGeometry::Path(object)) = &layer.layer_type else {
+            panic!("redo lost path model");
+        };
+        assert_eq!(layer.offset, raster_geometry(object).unwrap().0);
+    }
+
+    #[test]
+    fn straight_crop_keeps_text_and_primitive_editable_and_compact() {
+        let mut canvas = Canvas::new(256, 256);
+        set_text_layer(&mut canvas.layer_stack.layers[0], (100, 80));
+        let text_before = canvas.layer_stack.layers[0].clone();
+
+        let idx = canvas.layer_stack.add_layer(256, 256);
+        let (shape, offset) = ShapeData::from_canvas_span(
+            ShapeKind::Rectangle,
+            120.0,
+            90.0,
+            160.0,
+            130.0,
+            0.0,
+            true,
+            [0, 0, 255, 255],
+            0.0,
+            [0, 0, 0, 0],
+        );
+        let raster = shape.render().expect("shape raster");
+        let shape_layer = &mut canvas.layer_stack.layers[idx];
+        shape_layer.tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+        shape_layer.width = raster.width;
+        shape_layer.height = raster.height;
+        shape_layer.offset = offset;
+        shape_layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(shape));
+        let shape_before = shape_layer.clone();
+
+        assert!(canvas.crop(64, 32, 128, 128, true));
+        let text = &canvas.layer_stack.layers[0];
+        assert!(matches!(text.layer_type, LayerType::Text(_)));
+        assert_eq!(
+            text.offset,
+            (text_before.offset.0 - 64, text_before.offset.1 - 32)
+        );
+        assert_eq!(
+            (text.width, text.height),
+            (text_before.width, text_before.height)
+        );
+
+        let shape = &canvas.layer_stack.layers[idx];
+        assert!(matches!(
+            shape.layer_type,
+            LayerType::Vector(VectorGeometry::Primitive(_))
+        ));
+        assert_eq!(
+            shape.offset,
+            (shape_before.offset.0 - 64, shape_before.offset.1 - 32)
+        );
+        assert_eq!(
+            (shape.width, shape.height),
+            (shape_before.width, shape_before.height)
+        );
+    }
+
+    #[test]
+    fn affine_crop_reconciles_path_and_text_models() {
+        let mut canvas = Canvas::new(256, 256);
+        crate::core::command_vector::apply_object_to_layer(
+            &mut canvas.layer_stack.layers[0],
+            square_object((100.0, 80.0)),
+        );
+        let text_idx = canvas.layer_stack.add_layer(256, 256);
+        set_text_layer(&mut canvas.layer_stack.layers[text_idx], (110, 100));
+
+        assert!(canvas.crop_transformed(128.0, 128.0, 128.0, 128.0, 128, 128, 0.0, 0.0, 0.0, true,));
+        let path = &canvas.layer_stack.layers[0];
+        let LayerType::Vector(VectorGeometry::Path(object)) = &path.layer_type else {
+            panic!("affine crop rasterized a path");
+        };
+        assert_eq!(path.offset, raster_geometry(object).unwrap().0);
+        let path_bounds = path.tiles.content_bounds().expect("affine path pixels");
+        assert!((path.offset.0 + path_bounds.0 - 36).abs() <= 1);
+        assert!((path.offset.1 + path_bounds.1 - 16).abs() <= 1);
+        let text = &canvas.layer_stack.layers[text_idx];
+        let LayerType::Text(td) = &text.layer_type else {
+            panic!("axis-aligned affine crop rasterized text");
+        };
+        let text_origin = text_origin_for_layer(td, text);
+        assert!((text_origin.0 - 46).abs() <= 1);
+        assert!((text_origin.1 - 36).abs() <= 1);
+    }
+
+    #[test]
+    fn rotated_crop_updates_path_model_in_output_coordinates() {
+        let mut canvas = Canvas::new(256, 256);
+        crate::core::command_vector::apply_object_to_layer(
+            &mut canvas.layer_stack.layers[0],
+            square_object((100.0, 80.0)),
+        );
+        assert!(canvas.crop_rotated(
+            128.0,
+            128.0,
+            128.0,
+            128.0,
+            128,
+            128,
+            std::f32::consts::FRAC_PI_2,
+            true,
+        ));
+        let layer = &canvas.layer_stack.layers[0];
+        let LayerType::Vector(VectorGeometry::Path(object)) = &layer.layer_type else {
+            panic!("rotated crop rasterized a path");
+        };
+        assert_eq!(layer.offset, raster_geometry(object).unwrap().0);
+        let bounds = layer.tiles.content_bounds().expect("rotated path pixels");
+        let canvas_bounds = (
+            layer.offset.0 + bounds.0,
+            layer.offset.1 + bounds.1,
+            layer.offset.0 + bounds.2,
+            layer.offset.1 + bounds.3,
+        );
+        assert!((canvas_bounds.0 - 16).abs() <= 1, "{canvas_bounds:?}");
+        assert!((canvas_bounds.1 - 62).abs() <= 1, "{canvas_bounds:?}");
+    }
+
+    #[test]
+    fn perspective_crop_explicitly_rasterizes_unrepresentable_models() {
+        let mut canvas = Canvas::new(128, 128);
+        crate::core::command_vector::apply_object_to_layer(
+            &mut canvas.layer_stack.layers[0],
+            square_object((30.0, 30.0)),
+        );
+        canvas
+            .convert_to_cmyk(CmykProfile::Naive)
+            .expect("CMYK conversion");
+        assert!(canvas.crop_perspective(
+            [(0.0, 0.0), (127.0, 4.0), (124.0, 127.0), (3.0, 124.0)],
+            128,
+            128,
+            true,
+        ));
+        assert!(matches!(
+            canvas.layer_stack.layers[0].layer_type,
+            LayerType::Raster
+        ));
+        assert!(canvas.layer_stack.layers[0]
+            .tiles
+            .content_bounds()
+            .is_some());
+        assert!(
+            canvas.layer_stack.layers[0].tiles.has_any_ink(),
+            "projective rasterization must retain CMYK separations"
+        );
+    }
+}
+
+/// Recover the upright text anchor from the current derived raster. This is the
+/// core equivalent of the Type tool's edit-origin recovery and lets a crop
+/// transform the editable text model rather than only its cached pixels.
+fn text_origin_for_layer(td: &crate::core::text::TextData, layer: &Layer) -> (i32, i32) {
+    let Some((placed, delta)) = crate::core::text::rasterize_placed(td) else {
+        return layer.offset;
+    };
+    let placed_tiles = TileMap::from_rgba(&placed.rgba, placed.width, placed.height);
+    let Some((placed_min_x, placed_min_y, _, _)) = placed_tiles.content_bounds() else {
+        return layer.offset;
+    };
+    let Some((layer_min_x, layer_min_y, _, _)) = layer.tiles.content_bounds() else {
+        return layer.offset;
+    };
+    (
+        layer
+            .offset
+            .0
+            .saturating_add(layer_min_x)
+            .saturating_sub(delta.0)
+            .saturating_sub(placed_min_x),
+        layer
+            .offset
+            .1
+            .saturating_add(layer_min_y)
+            .saturating_sub(delta.1)
+            .saturating_sub(placed_min_y),
+    )
+}
+
+/// Apply an affine canvas transform to editable text when its resulting basis is
+/// still representable by TextData (rotation + horizontal stretch + font scale).
+/// Anisotropic scale around already-rotated text can introduce shear; that case
+/// returns false so the caller explicitly keeps the exact resampled raster.
+fn apply_affine_to_text_layer(
+    layer: &mut Layer,
+    source: &Layer,
+    td: &crate::core::text::TextData,
+    transform: AffineTransform,
+) -> bool {
+    let angle = td.rotation_deg.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let fx = if td.flip_x { -1.0 } else { 1.0 };
+    let fy = if td.flip_y { -1.0 } else { 1.0 };
+    let stretch = td.stretch_x.max(0.001);
+
+    // Columns of R(rotation) * Flip * Scale(stretch_x, 1), transformed by the
+    // crop's linear part.
+    let x0 = cos * fx * stretch;
+    let y0 = sin * fx * stretch;
+    let x1 = -sin * fy;
+    let y1 = cos * fy;
+    let nx0 = transform.a * x0 + transform.c * y0;
+    let ny0 = transform.b * x0 + transform.d * y0;
+    let nx1 = transform.a * x1 + transform.c * y1;
+    let ny1 = transform.b * x1 + transform.d * y1;
+    let sx = nx0.hypot(ny0);
+    let sy = nx1.hypot(ny1);
+    if !sx.is_finite() || !sy.is_finite() || sx <= 1e-5 || sy <= 1e-5 {
+        return false;
+    }
+    let orthogonality = (nx0 * nx1 + ny0 * ny1).abs() / (sx * sy);
+    if orthogonality > 0.002 {
+        return false;
+    }
+
+    let mut next = td.clone();
+    next.rotation_deg = ((ny0 * fx).atan2(nx0 * fx).to_degrees()).rem_euclid(360.0);
+    next.font_px = (next.font_px * sy).clamp(4.0, 1600.0);
+    next.tracking_px = (next.tracking_px * sy).clamp(-200.0, 500.0);
+    next.stretch_x = (sx / sy).clamp(0.01, 100.0);
+    for glyph in &mut next.glyph_styles {
+        glyph.font_px = (glyph.font_px * sy).clamp(4.0, 1600.0);
+    }
+
+    let origin = text_origin_for_layer(td, source);
+    let mapped = transform.apply_point(crate::core::geometry::Point::new(
+        origin.0 as f32,
+        origin.1 as f32,
+    ));
+    let mapped_origin = (mapped.x.round() as i32, mapped.y.round() as i32);
+    let Some((raster, delta)) = crate::core::text::rasterize_placed(&next) else {
+        return false;
+    };
+    layer.tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+    layer.width = raster.width;
+    layer.height = raster.height;
+    layer.offset = (
+        mapped_origin.0.saturating_add(delta.0),
+        mapped_origin.1.saturating_add(delta.1),
+    );
+    layer.layer_type = LayerType::Text(next);
+    true
+}
+
+/// Reconcile an affine crop's resampled cache with the editable layer model.
+/// A mask is tied to the old raster's local coordinate system, so masked editable
+/// layers intentionally keep the exact rasterized result; unmasked layers can be
+/// rebuilt compactly and remain editable.
+fn reconcile_affine_layer_model(layer: &mut Layer, source: &Layer, transform: AffineTransform) {
+    if source.mask.is_some() {
+        if matches!(source.layer_type, LayerType::Text(_) | LayerType::Vector(_)) {
+            layer.layer_type = LayerType::Raster;
+        }
+        return;
+    }
+
+    match source.layer_type.clone() {
+        LayerType::Vector(VectorGeometry::Path(mut object)) => {
+            object.transform = transform.then(&object.transform);
+            let scale = transform.determinant().abs().sqrt();
+            object.style.stroke_style.width = (object.style.stroke_style.width * scale).max(0.0);
+            crate::core::command_vector::apply_object_to_layer(layer, object);
+        }
+        LayerType::Vector(VectorGeometry::Primitive(shape)) => {
+            let mut object = shape.to_vector_object(source.offset);
+            object.transform = transform.then(&object.transform);
+            let scale = transform.determinant().abs().sqrt();
+            object.style.stroke_style.width = (object.style.stroke_style.width * scale).max(0.0);
+            crate::core::command_vector::apply_object_to_layer(layer, object);
+        }
+        LayerType::Text(td) => {
+            if !apply_affine_to_text_layer(layer, source, &td, transform) {
+                layer.layer_type = LayerType::Raster;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Perspective geometry cannot be represented by the affine-only vector/text
+/// models. Keep the exact resampled result and make that conversion explicit so
+/// no later model edit can silently replace it with stale pre-crop geometry.
+fn rasterize_projective_layer_model(layer: &mut Layer) {
+    if matches!(layer.layer_type, LayerType::Text(_) | LayerType::Vector(_)) {
+        layer.layer_type = LayerType::Raster;
+    }
+}
+
+/// Crop resampling rebuilds RGB mirrors for every layer kind, not only Paths.
+/// Restore CMYK ink planes before the history snapshot so crop/undo/export keep
+/// separations valid for raster, text and explicitly rasterized vector layers.
+fn reconcile_crop_ink(canvas: &mut Canvas) {
+    if !canvas.is_cmyk() {
+        return;
+    }
+    let Some(converter) = canvas.cmyk_converter() else {
+        return;
+    };
+    for layer in &mut canvas.layer_stack.layers {
+        if layer.tiles.needs_ink_encode() {
+            layer.tiles.encode_ink_from_mirror(&converter);
+        }
+    }
+}
 
 impl Canvas {
     pub(crate) fn add_crop_background_if_missing(
@@ -81,6 +545,12 @@ impl Canvas {
         );
 
         for layer in &mut self.layer_stack.layers {
+            // Editable geometry stays compact and is translated in its own
+            // source model. Cropping its raster to a canvas-sized cache would
+            // both destroy sparsity and leave the model at the old coordinates.
+            if translate_editable_layer(layer, -x, -y) {
+                continue;
+            }
             let ox = layer.offset.0;
             let oy = layer.offset.1;
 
@@ -134,6 +604,7 @@ impl Canvas {
         self.width = w;
         self.height = h;
         self.selection.resize(w, h);
+        reconcile_crop_ink(self);
         cmd.capture_after(&self.layer_stack, self.width, self.height);
         self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
         self.flatten_full();
@@ -183,8 +654,16 @@ impl Canvas {
 
         let cos_rot = angle_rad.cos();
         let sin_rot = angle_rad.sin();
+        let forward = AffineTransform::translate(hw, hh)
+            .then(&AffineTransform::scale(
+                1.0 / scale_x.max(f32::EPSILON),
+                1.0 / scale_y.max(f32::EPSILON),
+            ))
+            .then(&AffineTransform::rotate(-angle_rad))
+            .then(&AffineTransform::translate(-cx, -cy));
 
         for layer in &mut self.layer_stack.layers {
+            let source = layer.clone();
             let ox = layer.offset.0 as f32;
             let oy = layer.offset.1 as f32;
             // Back-project each output-pixel centre through a CW rotation by
@@ -207,11 +686,13 @@ impl Canvas {
                 mask.width = out_w;
                 mask.height = out_h;
             }
+            reconcile_affine_layer_model(layer, &source, forward);
         }
 
         self.width = out_w;
         self.height = out_h;
         self.selection.resize(out_w, out_h);
+        reconcile_crop_ink(self);
         cmd.capture_after(&self.layer_stack, self.width, self.height);
         self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
         self.flatten_full();
@@ -326,8 +807,17 @@ impl Canvas {
         let sin_inv = angle_rad.sin();
         let pivot_tx = cx + image_tx;
         let pivot_ty = cy + image_ty;
+        let forward = AffineTransform::translate(hw, hh)
+            .then(&AffineTransform::scale(
+                1.0 / scale_x.max(f32::EPSILON),
+                1.0 / scale_y.max(f32::EPSILON),
+            ))
+            .then(&AffineTransform::translate(image_tx, image_ty))
+            .then(&AffineTransform::rotate(angle_rad))
+            .then(&AffineTransform::translate(-cx, -cy));
 
         for layer in &mut self.layer_stack.layers {
+            let source = layer.clone();
             let ox = layer.offset.0 as f32;
             let oy = layer.offset.1 as f32;
             let map = |u: f32, v: f32| -> (f32, f32) {
@@ -356,6 +846,7 @@ impl Canvas {
                 mask.width = out_w;
                 mask.height = out_h;
             }
+            reconcile_affine_layer_model(layer, &source, forward);
         }
 
         if extends_canvas {
@@ -367,6 +858,7 @@ impl Canvas {
         self.width = out_w;
         self.height = out_h;
         self.selection.resize(out_w, out_h);
+        reconcile_crop_ink(self);
         cmd.capture_after(&self.layer_stack, self.width, self.height);
         self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
         self.flatten_full();
@@ -435,11 +927,13 @@ impl Canvas {
                 mask.width = out_w;
                 mask.height = out_h;
             }
+            rasterize_projective_layer_model(layer);
         }
 
         self.width = out_w;
         self.height = out_h;
         self.selection.resize(out_w, out_h);
+        reconcile_crop_ink(self);
         cmd.capture_after(&self.layer_stack, self.width, self.height);
         self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
         self.flatten_full();
@@ -462,6 +956,9 @@ impl Canvas {
         offset_y: i32,
         fill: Option<[u8; 4]>,
     ) -> (crate::core::tile::TileMap, u32, u32) {
+        if src_tiles.tiles.is_empty() && fill.is_none() {
+            return (crate::core::tile::TileMap::new(out_w, out_h), out_w, out_h);
+        }
         let local_x = crop_x - offset_x;
         let local_y = crop_y - offset_y;
 
@@ -507,6 +1004,12 @@ impl Canvas {
     ) -> crate::core::tile::TileMap {
         use rayon::prelude::*;
         let mut new_tiles = crate::core::tile::TileMap::new(out_w, out_h);
+        // The common large-document case contains many empty/group/adjustment
+        // layers. Sampling every output pixel for each empty sparse map makes a
+        // transformed crop O(empty_layers * output_pixels) for no result.
+        if src.tiles.is_empty() && background.is_none() {
+            return new_tiles;
+        }
         let chunk = 256u32;
         // Resample at 16 bits when the source carries a full master, so resize /
         // rotate-by-angle / perspective keep precision instead of quantizing.
