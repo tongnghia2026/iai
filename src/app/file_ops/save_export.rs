@@ -813,7 +813,12 @@ impl App {
             .export_embed_icc
             .then(crate::core::cms::srgb_icc_bytes);
         let n = encoded.len();
-        match crate::core::print::build_pdf_multipage_encoded(&encoded, &vectors, icc.as_deref()) {
+        match crate::core::print::build_pdf_multipage_encoded(
+            &encoded,
+            &vectors,
+            self.shell.ui.export_pdf_marks,
+            icc.as_deref(),
+        ) {
             Ok(bytes) => match std::fs::write(&path, &bytes) {
                 Ok(_) => {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();

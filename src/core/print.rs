@@ -1821,7 +1821,7 @@ pub fn build_pdf_multipage(
         .iter()
         .map(|page| encode_pdf_page(page.rgba, page.w, page.h, page.dpi))
         .collect::<Result<Vec<_>, _>>()?;
-    build_pdf_multipage_encoded(&encoded, &[], icc)
+    build_pdf_multipage_encoded(&encoded, &[], PrintMarks::none(), icc)
 }
 
 /// `vectors[i]` (when present) are drawn as crisp vector paths over page `i`'s
@@ -1829,12 +1829,15 @@ pub fn build_pdf_multipage(
 pub fn build_pdf_multipage_encoded(
     pages: &[EncodedPdfPage],
     vectors: &[Vec<PdfVectorObject>],
+    marks: PrintMarks,
     icc: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
     if pages.is_empty() {
         return Err("No pages to export as PDF".into());
     }
-    let layout = PrintLayout::default();
+    // Multipage pages carry the default rendering intent (Perceptual); the
+    // per-page layout only varies the marks/page geometry, not the intent.
+    let intent = PrintLayout::default().intent;
     let base = 3usize; // objects 1=Catalog, 2=Pages; per-page objects start at 3
     let n = pages.len();
     // The shared (RGB) ICC object only exists when an RGB page would reference
@@ -1865,6 +1868,10 @@ pub fn build_pdf_multipage_encoded(
     }
     let mut encoded: Vec<Encoded<'_>> = Vec::with_capacity(n);
     for page in pages {
+        // Per-page layout so each page carries its own press marks: with marks off
+        // this is PrintLayout::default() (page == document), byte-identical to
+        // before; with marks on the page is enlarged and the artwork centred.
+        let layout = export_pdf_layout(marks, page.w, page.h, page.dpi);
         let (pw, ph) = page_points(&layout, page.w, page.h, page.dpi);
         let (dw, dh, tx, ty) = placement(&layout, page.w, page.h, page.dpi);
         encoded.push(Encoded {
@@ -1918,10 +1925,24 @@ pub fn build_pdf_multipage_encoded(
             .map(|objects| pdf_colorspace_resources(objects))
             .unwrap_or_default();
 
+        // TrimBox / BleedBox tag the cut size when press marks are on: the
+        // artwork is the bleed box, the trim box is that inset by the bleed.
+        let box_entries = if marks.is_active() {
+            let (trx0, try0, trx1, try1) = marks_trim_box(e.tx, e.ty, e.dw, e.dh, marks.bleed_mm);
+            format!(
+                " /BleedBox [{:.2} {:.2} {:.2} {:.2}] /TrimBox [{trx0:.2} {try0:.2} {trx1:.2} {try1:.2}]",
+                e.tx,
+                e.ty,
+                e.tx + e.dw,
+                e.ty + e.dh
+            )
+        } else {
+            String::new()
+        };
         offsets.push(pdf.len());
         pdf.extend_from_slice(
             format!(
-                "{page_obj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] \
+                "{page_obj} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}]{box_entries} \
                  /Resources << /XObject << /Im0 {image_obj} 0 R >> {shading_resources} {extgstate_resources} {colorspace_resources} >> /Contents {content_obj} 0 R >>\nendobj\n",
                 e.pw, e.ph
             )
@@ -1937,6 +1958,17 @@ pub fn build_pdf_multipage_encoded(
         if let Some(objs) = vectors.get(i) {
             append_vector_content(&mut content, objs, e.w, e.h, e.dw, e.dh, e.tx, e.ty, None);
         }
+        // Crop / registration marks around the artwork (multipage pages carry no
+        // embedded CMYK profile, so ink pages mark in raw all-ink K).
+        append_print_marks(
+            &mut content,
+            e.tx,
+            e.ty,
+            e.dw,
+            e.dh,
+            &marks,
+            e.components == 4,
+        );
         offsets.push(pdf.len());
         pdf.extend_from_slice(
             format!(
@@ -1960,7 +1992,7 @@ pub fn build_pdf_multipage_encoded(
                  /ColorSpace {colorspace} /Intent /{} /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n",
                 e.w,
                 e.h,
-                layout.intent.pdf_name(),
+                intent.pdf_name(),
                 e.compressed_rgb.len()
             )
             .as_bytes(),
@@ -2976,7 +3008,8 @@ mod tests {
             fill_overprint: false,
             stroke_overprint: false,
         };
-        let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], None).expect("pdf");
+        let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], PrintMarks::none(), None)
+            .expect("pdf");
         let text = String::from_utf8_lossy(&pdf);
         // The content stream is uncompressed, so the path operators are visible.
         assert!(text.contains(" m\n"), "vector moveto present");
@@ -3026,7 +3059,8 @@ mod tests {
             fill_overprint: false,
             stroke_overprint: false,
         };
-        let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], None).expect("pdf");
+        let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], PrintMarks::none(), None)
+            .expect("pdf");
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/DeviceCMYK"), "ink page is DeviceCMYK");
         assert!(
@@ -3134,7 +3168,9 @@ mod tests {
         let rgb_page = encode_pdf_page(&[10u8; 8 * 8 * 4], 8, 8, 72.0).expect("rgb");
         let ink_page = encode_pdf_page_cmyk(&[20u8; 8 * 8 * 4], 8, 8, 72.0).expect("ink");
         let icc = crate::core::cms::srgb_icc_bytes();
-        let pdf = build_pdf_multipage_encoded(&[rgb_page, ink_page], &[], Some(&icc)).expect("pdf");
+        let pdf =
+            build_pdf_multipage_encoded(&[rgb_page, ink_page], &[], PrintMarks::none(), Some(&icc))
+                .expect("pdf");
         let text = String::from_utf8_lossy(&pdf);
         assert!(
             text.contains("/ColorSpace [/ICCBased"),
@@ -3151,7 +3187,8 @@ mod tests {
     fn multipage_all_ink_pages_skip_unused_icc_object() {
         let ink_page = encode_pdf_page_cmyk(&[20u8; 8 * 8 * 4], 8, 8, 72.0).expect("ink");
         let icc = crate::core::cms::srgb_icc_bytes();
-        let pdf = build_pdf_multipage_encoded(&[ink_page], &[], Some(&icc)).expect("pdf");
+        let pdf = build_pdf_multipage_encoded(&[ink_page], &[], PrintMarks::none(), Some(&icc))
+            .expect("pdf");
         assert!(
             !pdf.windows(8).any(|w| w == b"ICCBased"),
             "no RGB page references the ICC object, so it must not be embedded"
@@ -3488,6 +3525,30 @@ mod tests {
         assert!((ty - MARKS_PAGE_MARGIN_PT).abs() < 0.5);
         assert!(tx + dw <= pw - MARKS_PAGE_MARGIN_PT + 0.5);
         assert!(ty + dh <= ph - MARKS_PAGE_MARGIN_PT + 0.5);
+    }
+
+    #[test]
+    fn multipage_export_adds_trim_box_and_marks_only_when_requested() {
+        let rgba = vec![200u8; 8 * 8 * 4];
+        let marks = PrintMarks {
+            bleed_mm: 2.0,
+            crop_marks: true,
+            registration_marks: true,
+        };
+        let page = encode_pdf_page(&rgba, 8, 8, 72.0).expect("encode");
+        let pdf = build_pdf_multipage_encoded(&[page], &[], marks, None).expect("pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/TrimBox"), "press page must carry a TrimBox");
+        assert!(
+            text.contains("/BleedBox"),
+            "press page must carry a BleedBox"
+        );
+
+        // Marks off => no boxes, matching the pre-marks output.
+        let plain_page = encode_pdf_page(&rgba, 8, 8, 72.0).expect("encode");
+        let plain =
+            build_pdf_multipage_encoded(&[plain_page], &[], PrintMarks::none(), None).expect("pdf");
+        assert!(!String::from_utf8_lossy(&plain).contains("/TrimBox"));
     }
 
     #[test]
