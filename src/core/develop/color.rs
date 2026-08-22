@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::core::color::luminance_f32;
+use crate::core::working_color::WorkingColorSpace;
 
 /// Colour stage for one pixel. `curves` are the interpolated mixer curves for
 /// THESE settings (`build_mixer_curves_opt`) — callers build them once per
@@ -19,32 +20,95 @@ pub(crate) fn apply_color(
         return;
     }
     let (mut rl, mut gl, mut bl) = (srgb_to_linear(*r), srgb_to_linear(*g), srgb_to_linear(*b));
-    apply_color_linear(settings, curves, &mut rl, &mut gl, &mut bl);
+    // Raster/PTS wrapper: the result is hard-clamped to [0,1] just below, so
+    // there is no downstream OKLCh output boundary to compress an over-gamut
+    // push — keep the bit-exact sRGB-hull saturation knee.
+    apply_color_linear(settings, curves, false, &mut rl, &mut gl, &mut bl);
     *r = linear_to_srgb(rl).clamp(0.0, 1.0);
     *g = linear_to_srgb(gl).clamp(0.0, 1.0);
     *b = linear_to_srgb(bl).clamp(0.0, 1.0);
 }
 
-/// Linear working-space colour stage. Classification still samples a bounded
-/// display encoding (the existing UCS/HSV slider semantics), while every actual
-/// correction stays linear and unclamped. This is the RAW path's #10 building
-/// block; [`apply_color`] remains the bit-compatible Identity/PTS wrapper.
+/// Linear working-space colour stage. Mixer V2 classifies and edits one
+/// unclamped working-space OKLCh value; Legacy keeps its bounded display-domain
+/// UCS/HSV semantics. This is the RAW path's #10 building block;
+/// [`apply_color`] remains the bit-compatible Identity/PTS wrapper.
 pub(crate) fn apply_color_linear(
     settings: &DevelopSettings,
     curves: Option<&MixerCurves>,
+    boundary_managed: bool,
     r: &mut f32,
     g: &mut f32,
     b: &mut f32,
 ) {
-    apply_color_linear_classified(settings, curves, None, r, g, b);
+    apply_color_linear_in_space(
+        settings,
+        curves,
+        boundary_managed,
+        WorkingColorSpace::LinearSrgb,
+        r,
+        g,
+        b,
+    );
 }
 
-/// Apply linear-light colour corrections while optionally classifying mixer
-/// bands from the camera-look display colour the user actually sees.
+pub(crate) fn apply_color_linear_in_space(
+    settings: &DevelopSettings,
+    curves: Option<&MixerCurves>,
+    boundary_managed: bool,
+    working_space: WorkingColorSpace,
+    r: &mut f32,
+    g: &mut f32,
+    b: &mut f32,
+) {
+    apply_color_linear_classified_in_space(
+        settings,
+        curves,
+        None,
+        boundary_managed,
+        working_space,
+        r,
+        g,
+        b,
+    );
+}
+
+/// Apply linear-light colour corrections while optionally supplying the
+/// camera-look display colour used by the Legacy mixer. Mixer V2 deliberately
+/// ignores that bounded proxy and classifies in the working space.
+///
+/// `boundary_managed` marks callers whose output passes through the single
+/// hue-preserving OKLCh gamut compression at the scene boundary
+/// (`working_to_display`). Those may push chroma past the sRGB hull and let the
+/// boundary map it back once; the clamped raster wrapper passes `false`.
+#[allow(dead_code)]
 pub(crate) fn apply_color_linear_classified(
     settings: &DevelopSettings,
     curves: Option<&MixerCurves>,
     classification: Option<[f32; 3]>,
+    boundary_managed: bool,
+    r: &mut f32,
+    g: &mut f32,
+    b: &mut f32,
+) {
+    apply_color_linear_classified_in_space(
+        settings,
+        curves,
+        classification,
+        boundary_managed,
+        WorkingColorSpace::LinearSrgb,
+        r,
+        g,
+        b,
+    );
+}
+
+pub(crate) fn apply_color_linear_classified_in_space(
+    settings: &DevelopSettings,
+    curves: Option<&MixerCurves>,
+    classification: Option<[f32; 3]>,
+    boundary_managed: bool,
+    working_space: WorkingColorSpace,
     r: &mut f32,
     g: &mut f32,
     b: &mut f32,
@@ -55,24 +119,29 @@ pub(crate) fn apply_color_linear_classified(
         return;
     }
 
-    let [sr, sg, sb] = classification.unwrap_or_else(|| {
-        [
-            linear_to_srgb(*r).clamp(0.0, 1.0),
-            linear_to_srgb(*g).clamp(0.0, 1.0),
-            linear_to_srgb(*b).clamp(0.0, 1.0),
-        ]
-    });
-    let luma = luminance_f32(sr, sg, sb).clamp(0.0, 1.0);
-    let (mut mixer_hue, mut mixer_sat, mut mixer_lum) = match curves {
-        Some(c) => mixer_adjustments_for_color(c, sr, sg, sb, luma),
-        None => (0.0, 0.0, 0.0),
+    let mut v2_color = curves
+        .filter(|c| c.algorithm == ColorMixerAlgorithm::V2)
+        .map(|_| {
+            crate::core::perceptual_color::working_rgb_to_perceptual([*r, *g, *b], working_space)
+        });
+    let (mut mixer_hue, mut mixer_sat, mut mixer_lum) = match (curves, v2_color) {
+        (Some(c), Some(color)) => mixer_adjustments_for_perceptual(c, color),
+        (Some(c), None) => {
+            let [sr, sg, sb] = classification.unwrap_or_else(|| {
+                let output = working_space.to_linear_srgb([*r, *g, *b]);
+                [
+                    linear_to_srgb(output[0]).clamp(0.0, 1.0),
+                    linear_to_srgb(output[1]).clamp(0.0, 1.0),
+                    linear_to_srgb(output[2]).clamp(0.0, 1.0),
+                ]
+            });
+            let luma = luminance_f32(sr, sg, sb).clamp(0.0, 1.0);
+            mixer_adjustments_for_color(c, sr, sg, sb, luma)
+        }
+        (None, _) => (0.0, 0.0, 0.0),
     };
 
-    if curves.is_some_and(|c| c.algorithm == ColorMixerAlgorithm::V2) {
-        let mut color = crate::core::perceptual_color::working_rgb_to_perceptual(
-            [*r, *g, *b],
-            crate::core::working_color::WorkingColorSpace::LinearSrgb,
-        );
+    if let Some(mut color) = v2_color.take() {
         color.hue = (color.hue + (eased_control(mixer_hue) * MIXER_HUE_SHIFT_MAX_DEG).to_radians())
             .rem_euclid(std::f32::consts::TAU);
         let sat_delta = eased_control(mixer_sat);
@@ -89,10 +158,8 @@ pub(crate) fn apply_color_linear_classified(
             color.lightness.max(0.0)
         };
         color.lightness += light_delta * 0.32 * room;
-        let converted = crate::core::perceptual_color::perceptual_to_working_rgb(
-            color,
-            crate::core::working_color::WorkingColorSpace::LinearSrgb,
-        );
+        let converted =
+            crate::core::perceptual_color::perceptual_to_working_rgb(color, working_space);
         *r = converted[0];
         *g = converted[1];
         *b = converted[2];
@@ -107,11 +174,12 @@ pub(crate) fn apply_color_linear_classified(
         // rotation shifted in a different space than the selection). `mixer_hue`
         // already carries the single chroma/luma gate, and the rotation is a
         // no-op on near-neutral pixels, so no extra guard/blend is needed.
-        let shift_deg = eased_control(mixer_hue) * MIXER_HUE_SHIFT_MAX_DEG;
-        let (nr, ng, nb) = crate::core::color::rotate_oklab_hue_linear(*r, *g, *b, shift_deg);
-        *r = nr;
-        *g = ng;
-        *b = nb;
+        let mut color =
+            crate::core::perceptual_color::working_rgb_to_perceptual([*r, *g, *b], working_space);
+        color.hue = (color.hue + (eased_control(mixer_hue) * MIXER_HUE_SHIFT_MAX_DEG).to_radians())
+            .rem_euclid(std::f32::consts::TAU);
+        [*r, *g, *b] =
+            crate::core::perceptual_color::perceptual_to_working_rgb(color, working_space);
     }
 
     let global_sat_delta = eased_control(settings.saturation);
@@ -125,12 +193,12 @@ pub(crate) fn apply_color_linear_classified(
     let vib_delta = vibrance * vib_w * 0.88;
     let factor = saturation_factor(global_sat_delta, mixer_sat_delta, vib_delta);
     if (factor - 1.0).abs() > 0.001 {
-        scale_linear_chroma_around_luma(r, g, b, factor);
+        scale_linear_chroma_around_luma(r, g, b, factor, boundary_managed, working_space);
     }
 
     let lum_delta = eased_control(mixer_lum);
     if lum_delta.abs() > 0.001 {
-        apply_mixer_brightness(r, g, b, lum_delta);
+        apply_mixer_brightness(r, g, b, lum_delta, working_space);
     }
 }
 
@@ -141,8 +209,14 @@ pub(crate) fn apply_color_linear_classified(
 /// (a filmic shoulder), so the colour survives as far as the gamut allows
 /// before it must compress; it never falls back to an additive lift toward
 /// white (the old `apply_luma_target` desaturated once the target passed ~0.88).
-fn apply_mixer_brightness(r: &mut f32, g: &mut f32, b: &mut f32, lum_delta: f32) {
-    let luma = luma_lin(*r, *g, *b).clamp(0.0, 1.0);
+fn apply_mixer_brightness(
+    r: &mut f32,
+    g: &mut f32,
+    b: &mut f32,
+    lum_delta: f32,
+    working_space: WorkingColorSpace,
+) {
+    let luma = working_luma(working_space, [*r, *g, *b]).clamp(0.0, 1.0);
     // Leave less headroom the closer a pixel already is to the ceiling (bright
     // pixels move less) / the floor (dark pixels darken less), matching the old
     // response envelope so the slider feel is unchanged.
@@ -180,36 +254,64 @@ fn apply_mixer_brightness(r: &mut f32, g: &mut f32, b: &mut f32, lum_delta: f32)
     *b *= s;
 }
 
-/// ART-style saturation in working linear RGB: `Y + sat * (RGB - Y)`.
-/// The positive branch keeps the existing smooth gamut knee, but its anchor is
-/// true linear Rec.709 luminance. Protection thresholds are the linear-light
+/// ART-style saturation in working linear RGB: `Y + sat * (RGB - Y)`, anchored
+/// on true linear Rec.709 luminance. Protection thresholds are the linear-light
 /// equivalents of the old display-domain masks, preserving slider feel.
-fn scale_linear_chroma_around_luma(r: &mut f32, g: &mut f32, b: &mut f32, factor: f32) {
-    let y = luma_lin(*r, *g, *b).clamp(0.0, 1.0);
+///
+/// `boundary_managed` selects how a POSITIVE push resolves gamut:
+/// - `true` (RAW scene path): keep the hue direction and scale chroma freely
+///   (`1 + req`). The scene has one hue-preserving OKLCh gamut compression at
+///   its output boundary, which maps any excursion back in gamut a single time,
+///   so strong Saturation/Mixer pushes stay vivid instead of greying against
+///   the sRGB hull mid-chain.
+/// - `false` (raster/PTS wrapper, hard-clamped right after): cap chroma at the
+///   sRGB gamut hull with the smooth knee — bit-identical to before.
+///
+/// Desaturation (`req <= 0`) only shrinks chroma toward luma and is always in
+/// gamut, so both paths share the exact `1 + req` scale there.
+fn scale_linear_chroma_around_luma(
+    r: &mut f32,
+    g: &mut f32,
+    b: &mut f32,
+    factor: f32,
+    boundary_managed: bool,
+    working_space: WorkingColorSpace,
+) {
+    let y = working_luma(working_space, [*r, *g, *b]).clamp(0.0, 1.0);
     let protect = smootherstep(0.0027, 0.0174, y) * (1.0 - smootherstep(0.7874, 0.9774, y));
     let req = (factor.clamp(0.0, 3.20) - 1.0) * protect;
     let d = [*r - y, *g - y, *b - y];
-    let mut room = f32::INFINITY;
-    for dc in d {
-        if dc > 1e-6 {
-            room = room.min((1.0 - y) / dc - 1.0);
-        } else if dc < -1e-6 {
-            room = room.min(y / -dc - 1.0);
+    let scale = if boundary_managed || req <= 0.0 {
+        1.0 + req
+    } else {
+        let mut room = f32::INFINITY;
+        for dc in d {
+            if dc > 1e-6 {
+                room = room.min((1.0 - y) / dc - 1.0);
+            } else if dc < -1e-6 {
+                room = room.min(y / -dc - 1.0);
+            }
         }
-    }
-    let scale = if req > 0.0 {
         let room = if room.is_finite() { room.max(0.0) } else { 0.0 };
         if room > 1e-4 {
             1.0 + room * (req / room).tanh()
         } else {
             1.0
         }
-    } else {
-        1.0 + req
     };
     *r = y + d[0] * scale;
     *g = y + d[1] * scale;
     *b = y + d[2] * scale;
+}
+
+#[inline]
+fn working_luma(space: WorkingColorSpace, rgb: [f32; 3]) -> f32 {
+    if space == WorkingColorSpace::LinearSrgb {
+        luma_lin(rgb[0], rgb[1], rgb[2])
+    } else {
+        let c = space.render_luminance_coefficients();
+        c[0] * rgb[0] + c[1] * rgb[1] + c[2] * rgb[2]
+    }
 }
 
 fn saturation_factor(global_sat_delta: f32, mixer_sat_delta: f32, vib_delta: f32) -> f32 {

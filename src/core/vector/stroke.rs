@@ -164,6 +164,31 @@ fn stroke_one(
         return;
     }
 
+    if is_closed && n == 2 {
+        // A closed two-node contour is the connector representation for a
+        // non-arrowheaded line (Tree bar/stub). Treating it as an ordinary
+        // closed ring emits the same quad twice in opposite travel directions;
+        // although winding is normalised later, overlapping duplicate rings can
+        // leave a rectangular bite when the GPU fill tessellator resolves their
+        // coincident edges. Emit one unambiguous rectangle with square endpoint
+        // coverage instead. The source remains closed, so arrowheads stay off.
+        let a = pts[0];
+        let b = pts[1];
+        if let Some(dir) = norm(sub(b, a)) {
+            let nm = perp(dir);
+            push_ring(
+                out,
+                vec![
+                    along(along(a, dir, -half), nm, half),
+                    along(along(b, dir, half), nm, half),
+                    along(along(b, dir, half), nm, -half),
+                    along(along(a, dir, -half), nm, -half),
+                ],
+            );
+        }
+        return;
+    }
+
     // Body: one offset quad per segment.
     let seg_count = if is_closed { n } else { n - 1 };
     for i in 0..seg_count {
@@ -609,6 +634,27 @@ mod tests {
         assert!(inside(&rings, Point::new(20.0, 40.0)), "left edge painted");
         assert!(!inside(&rings, Point::new(40.0, 40.0)), "interior hollow");
         assert!(inside(&rings, Point::new(60.0, 40.0)), "right edge painted");
+    }
+
+    #[test]
+    fn closed_two_node_connector_is_one_solid_square_capped_ring() {
+        let lines = vec![vec![Point::new(10.0, 20.0), Point::new(50.0, 20.0)]];
+        let rings = stroke_outline_contours(
+            &lines,
+            &[true],
+            5.0,
+            LineCap::Butt,
+            LineJoin::Miter,
+            4.0,
+            0.25,
+        );
+        assert_eq!(rings.len(), 1, "no duplicate coincident outline rings");
+        let ring = &rings[0];
+        let min_x = ring.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        let max_x = ring.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = ring.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let max_y = ring.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+        assert_eq!((min_x, max_x, min_y, max_y), (5.0, 55.0, 15.0, 25.0));
     }
 
     #[test]

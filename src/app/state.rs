@@ -413,6 +413,12 @@ pub struct UiState {
     pub export_format: crate::formats::ExportFormat,
     /// "Embed Color Profile (ICC)" toggle for export (default on).
     pub export_embed_icc: bool,
+    /// "Resize on export" toggle and the longest-side target in pixels (used
+    /// only when enabled). Raster image formats only; downscale only.
+    pub export_resize_enabled: bool,
+    pub export_resize_long_edge: u32,
+    /// Output sharpening strength for export (0..=100, 0 = off).
+    pub export_output_sharpen: u8,
     pub transform_interpolation: InterpolationMode,
     pub show_color_panel: bool,
     pub show_text_panel: bool,
@@ -576,6 +582,9 @@ pub struct DevelopPreviewState {
     /// follows the adjustments (see `develop::histogram_rgbl`). LINEAR scene
     /// samples when `scene` is present (`develop_scene::histogram_rgbl_scene`).
     pub histogram_proxy: std::sync::Arc<Vec<[f32; 3]>>,
+    /// Rectangular source samples for waveform/parade/vectorscope. Kept
+    /// separately from the histogram proxy because scopes must preserve x.
+    pub scope_proxy: std::sync::Arc<crate::core::develop2::scopes::ScopeSourceProxy>,
     pub job_id: u64,
     pub processing: bool,
     pub gpu_preview_active: bool,
@@ -1327,6 +1336,9 @@ impl App {
                 develop_histogram: None,
                 develop_histogram_at: None,
                 develop_histogram_stale: false,
+                develop_scopes: None,
+                develop_scopes_revision: 0,
+                develop_scope_visibility: crate::ui::develop::DEFAULT_SCOPE_VISIBILITY,
                 develop_readout: None,
                 develop_sections_open: crate::ui::develop::load_sections_open(),
                 develop_local_drag: None,
@@ -1394,6 +1406,9 @@ impl App {
                     rename_text: String::new(),
                     export_format: crate::formats::ExportFormat::Png { compression: 6 },
                     export_embed_icc: true,
+                    export_resize_enabled: false,
+                    export_resize_long_edge: 2048,
+                    export_output_sharpen: 0,
                     transform_interpolation: InterpolationMode::Bilinear,
                     // Color & Brush is now a floating panel opened on demand
                     // (Window ▸ Color Panel), like the Levels dialog. Quick

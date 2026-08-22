@@ -215,6 +215,12 @@ impl App {
             if crate::formats::ExportFormat::from_extension(&ext).is_some() {
                 let opts = ExportOptions {
                     embed_icc: self.shell.ui.export_embed_icc,
+                    resize_long_edge: self
+                        .shell
+                        .ui
+                        .export_resize_enabled
+                        .then_some(self.shell.ui.export_resize_long_edge),
+                    output_sharpen: self.shell.ui.export_output_sharpen,
                     ..ExportOptions::default()
                 };
                 self.jobs
@@ -326,6 +332,12 @@ impl App {
 
         let opts = ExportOptions {
             embed_icc: self.shell.ui.export_embed_icc,
+            resize_long_edge: self
+                .shell
+                .ui
+                .export_resize_enabled
+                .then_some(self.shell.ui.export_resize_long_edge),
+            output_sharpen: self.shell.ui.export_output_sharpen,
             ..ExportOptions::default()
         };
         match self.jobs.format_registry.export(

@@ -12,6 +12,15 @@
 //! Develop session at neutral settings, non-destructively.
 
 use super::Importer;
+use crate::core::camera_profile::dcp_transform::PreparedHueSatMap;
+use crate::core::camera_profile::resolver::{
+    self, CameraIdentityRef, DecoderFallback, EmbeddedDcpCandidate, ProfileBlob, ResolveRequest,
+    ResolvedCameraCharacterization,
+};
+use crate::core::camera_profile::{
+    discovery, embedded_dng, resolve_decoder_matrix, JpegMatchMode, RawDecoderBackend,
+    RawSceneCharacterization,
+};
 use crate::core::canvas::Canvas;
 use crate::core::develop_scene::{
     f16_bits_to_f32, f32_to_f16_bits, render_default_look, SceneSource,
@@ -23,7 +32,7 @@ use std::path::Path;
 /// File extensions handled by rawloader's bundled decoders. Anything outside this
 /// set falls through to the generic image importers.
 const RAW_EXTS: &[&str] = &[
-    "cr2", "crw", // Canon
+    "cr2", "crw", "cr3", // Canon (cr3 via the rawler fallback)
     "nef", "nrw", // Nikon
     "arw", "sr2", "srf", // Sony
     "raf", // Fuji
@@ -64,13 +73,6 @@ impl Importer for RawImporter {
         decode_raw(path)
     }
 }
-
-/// XYZ (D65) → linear sRGB (D65), the standard primaries matrix.
-const XYZ_TO_SRGB: [[f32; 3]; 3] = [
-    [3.2404542, -1.5371385, -0.4985314],
-    [-0.9692660, 1.8760108, 0.0415560],
-    [0.0556434, -0.2040259, 1.0572252],
-];
 
 // The old display baseline (luma S-curve + gamut fit baked at decode) is gone:
 // the default look now comes from the scene-referred sigmoid render in
@@ -123,6 +125,30 @@ fn white_balance_gains(wbc: [f32; 4], mono: bool) -> [f32; 4] {
         gain[c] = if wbc[c] > 0.0 { wbc[c] / gref } else { 1.0 };
     }
     gain
+}
+
+/// Recover an absolute as-shot source white from the camera neutral implied by
+/// decoder WB multipliers and the decoder camera→XYZ matrix. This is metadata
+/// only: the gains are already baked into the scene master exactly as before.
+fn as_shot_white_balance(
+    cam2xyz: &[[f32; 4]; 3],
+    gains: [f32; 4],
+    mono: bool,
+) -> Option<crate::core::cat16::WhiteBalance> {
+    if mono
+        || gains[..3]
+            .iter()
+            .any(|gain| !gain.is_finite() || *gain <= 0.0)
+    {
+        return None;
+    }
+    let neutral = [1.0 / gains[0], 1.0 / gains[1], 1.0 / gains[2]];
+    let xyz = [
+        cam2xyz[0][0] * neutral[0] + cam2xyz[0][1] * neutral[1] + cam2xyz[0][2] * neutral[2],
+        cam2xyz[1][0] * neutral[0] + cam2xyz[1][1] * neutral[1] + cam2xyz[1][2] * neutral[2],
+        cam2xyz[2][0] * neutral[0] + cam2xyz[2][1] * neutral[1] + cam2xyz[2][2] * neutral[2],
+    ];
+    crate::core::cat16::white_balance_from_xyz(xyz)
 }
 
 #[inline]
@@ -218,20 +244,6 @@ fn raw_levels(raw: &RawImage, area: ActiveArea) -> RawLevels {
     }
 }
 
-fn camera_to_srgb_matrix(cam2xyz: &[[f32; 4]; 3]) -> [[f32; 3]; 3] {
-    let mut cam2srgb = [[0.0f32; 3]; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            let mut s = 0.0;
-            for k in 0..3 {
-                s += XYZ_TO_SRGB[i][k] * cam2xyz[k][j];
-            }
-            cam2srgb[i][j] = s;
-        }
-    }
-    cam2srgb
-}
-
 #[inline]
 fn luma_lin(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
@@ -246,9 +258,187 @@ fn camera_to_linear_srgb(m: &[[f32; 3]; 3], cam: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn decode_raw(path: &Path) -> Result<Canvas, String> {
-    let raw = rawloader::decode_file(path).map_err(|e| e.to_string())?;
+/// Decoded sensor data plus the front-end that supplied its compatibility
+/// matrix. The old adapter erased this distinction before profile resolution.
+struct DecodedRaw {
+    image: RawImage,
+    backend: RawDecoderBackend,
+}
 
+fn decode_raw(path: &Path) -> Result<Canvas, String> {
+    // Primary decoder: rawloader. Fallback: rawler, which adds Canon CR3 and a
+    // much larger camera database. Files rawloader already decodes never reach
+    // the fallback, so their output is byte-for-byte unchanged.
+    let decoded = match rawloader::decode_file(path) {
+        Ok(image) => DecodedRaw {
+            image,
+            backend: RawDecoderBackend::Rawloader,
+        },
+        Err(primary) => decode_via_rawler(path)
+            .map_err(|fallback| format!("rawloader: {primary}; {fallback}"))?,
+    };
+    decode_raw_from(decoded, path)
+}
+
+/// Decode a RAW with rawler and adapt it into a `rawloader::RawImage`, so the
+/// single shared decode body below handles both front-ends. rawler's public
+/// data model maps onto rawloader's one-to-one: same mosaic enum shape, a
+/// `[[f32; 3]; 4]` `xyz_to_cam`, an EXIF-numbered orientation, and a CFA whose
+/// `name` is the pattern string rawloader's `CFA::new` expects.
+fn decode_via_rawler(path: &Path) -> Result<DecodedRaw, String> {
+    let img = rawler::decode_file(path).map_err(|e| format!("rawler: {e:?}"))?;
+
+    // rawler's camera database stores characterization in `color_matrix`;
+    // `xyz_to_cam` is deprecated and is commonly left as an all-zero default.
+    // Select a matrix deterministically before adapting into rawloader's data
+    // model, otherwise supported rawler-only cameras can render black.
+    let mono = matches!(
+        img.photometric,
+        rawler::rawimage::RawPhotometricInterpretation::BlackIsZero
+    );
+    let xyz_to_cam = select_rawler_xyz_to_cam(&img.color_matrix, img.xyz_to_cam, mono)?;
+
+    let to_u16_4 = |a: [f32; 4]| a.map(|v| v.round().clamp(0.0, u16::MAX as f32) as u16);
+    let whitelevels = to_u16_4(img.whitelevel.as_bayer_array());
+    let blacklevels = to_u16_4(img.blacklevel.as_bayer_array());
+
+    // rawloader crops are margins [top, right, bottom, left]. Prefer the default
+    // crop, then the active area, else the whole frame.
+    let crops = img
+        .crop_area
+        .or(img.active_area)
+        .map(|r| {
+            let [top, left, bottom, right] = r.as_tlbr_offsets(img.width, img.height);
+            [top, right, bottom, left]
+        })
+        .unwrap_or([0, 0, 0, 0]);
+
+    let cfa = rawloader::CFA::new(&img.camera.cfa.name);
+    let orientation = rawloader::Orientation::from_u16(img.orientation.to_u16());
+    let data = match img.data {
+        rawler::rawimage::RawImageData::Integer(v) => RawImageData::Integer(v),
+        rawler::rawimage::RawImageData::Float(v) => RawImageData::Float(v),
+    };
+
+    let image = RawImage {
+        make: img.make,
+        model: img.model,
+        clean_make: img.clean_make,
+        clean_model: img.clean_model,
+        width: img.width,
+        height: img.height,
+        cpp: img.cpp,
+        wb_coeffs: img.wb_coeffs,
+        whitelevels,
+        blacklevels,
+        xyz_to_cam,
+        cfa,
+        crops,
+        orientation,
+        data,
+        blackareas: Vec::new(),
+    };
+    Ok(DecodedRaw {
+        image,
+        backend: RawDecoderBackend::Rawler,
+    })
+}
+
+fn select_rawler_xyz_to_cam(
+    color_matrices: &std::collections::HashMap<
+        rawler::imgop::xyz::Illuminant,
+        rawler::imgop::xyz::FlatColorMatrix,
+    >,
+    legacy: [[f32; 3]; 4],
+    mono: bool,
+) -> Result<[[f32; 3]; 4], String> {
+    use rawler::imgop::xyz::Illuminant;
+
+    fn usable_flat(matrix: &[f32]) -> bool {
+        matches!(matrix.len(), 9 | 12)
+            && matrix.iter().all(|value| value.is_finite())
+            && matrix
+                .chunks_exact(3)
+                .all(|row| row.iter().map(|value| value.abs()).sum::<f32>() > 1.0e-8)
+    }
+
+    fn usable_legacy(matrix: &[[f32; 3]; 4]) -> bool {
+        matrix.iter().flatten().all(|value| value.is_finite())
+            && matrix[..3]
+                .iter()
+                .all(|row| row.iter().map(|value| value.abs()).sum::<f32>() > 1.0e-8)
+    }
+
+    fn rank(illuminant: Illuminant) -> (u8, u16) {
+        let priority = match illuminant {
+            Illuminant::D65 => 0,
+            Illuminant::D55 => 1,
+            Illuminant::D50 => 2,
+            Illuminant::Daylight => 3,
+            Illuminant::D75 => 4,
+            Illuminant::A => 5,
+            _ => 6,
+        };
+        (priority, u16::from(illuminant))
+    }
+
+    if let Some((_, matrix)) = color_matrices
+        .iter()
+        .filter(|(_, matrix)| usable_flat(matrix))
+        .min_by_key(|(illuminant, _)| rank(**illuminant))
+    {
+        let mut selected = [[0.0f32; 3]; 4];
+        for (row, values) in matrix.chunks_exact(3).enumerate() {
+            selected[row].copy_from_slice(values);
+        }
+        return Ok(selected);
+    }
+
+    if usable_legacy(&legacy) {
+        return Ok(legacy);
+    }
+
+    if mono {
+        let mut identity = [[0.0f32; 3]; 4];
+        for channel in 0..3 {
+            identity[channel][channel] = 1.0;
+        }
+        return Ok(identity);
+    }
+
+    Err("rawler: camera has no usable deterministic XYZ-to-camera matrix".into())
+}
+
+/// Which parts of the embedded-JPEG default-look matching to apply at decode,
+/// returned as `(apply_baseline_gain, apply_color_matrix_and_curve)`.
+///
+/// A profile-backed DCP render is already colour-accurate, so it defaults to no
+/// embedded-JPEG fit (`none`). The decoder-matrix fallback keeps the shipping
+/// brightness+colour match. The `IAI_RAW_JPEG_MATCH` override still wins:
+/// `on`/`full` force both, `off` keeps only the brightness baseline, `none`
+/// drops all embedded-JPEG matching. Camera characterization work continues to
+/// replace this heuristic (master plan §14/§33).
+fn jpeg_match_mode(dcp_selected: bool) -> (bool, bool) {
+    match std::env::var("IAI_RAW_JPEG_MATCH").as_deref() {
+        Ok("on") | Ok("full") => (true, true),
+        Ok("off") => (true, false),
+        Ok("none") => (false, false),
+        // A resolved DCP supplies the colour characterization, so drop the
+        // embedded-JPEG COLOUR fit — but keep the brightness baseline so the
+        // render opens at the camera's exposure instead of a dark scene-linear
+        // level (the owner-validated "gain-only" DCP look).
+        _ if dcp_selected => (true, false),
+        _ => (true, true),
+    }
+}
+
+/// Build the iAi scene + canvas from a decoded rawloader mosaic. Shared by both
+/// the rawloader and rawler front-ends.
+fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
+    let DecodedRaw {
+        image: raw,
+        backend,
+    } = decoded;
     let (w, h) = (raw.width, raw.height);
     let area = active_area(&raw)?;
     if w == 0 || h == 0 {
@@ -287,7 +477,101 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
     // Camera RGB → linear sRGB. cam_to_xyz_normalized is [XYZ][RGBE]; the E column
     // is zero for ordinary 3-colour sensors, so a 3×3 (RGB) compose is exact.
     let cam2xyz = raw.cam_to_xyz_normalized();
-    let cam2srgb = camera_to_srgb_matrix(&cam2xyz);
+    let mut as_shot_white = as_shot_white_balance(&cam2xyz, gain, mono);
+    // Bit-exact decoder compatibility matrix, kept for the legacy sRGB writer
+    // and used as the resolver's guaranteed final tier.
+    let decoder_srgb = resolve_decoder_matrix(backend, &raw.clean_make, &raw.clean_model, &cam2xyz)
+        .camera_to_linear_srgb;
+
+    // DCP characterization is only meaningful for ordinary three-colour RGB
+    // sensors. Monochrome and four-colour (RGBE/CMY) sensors keep the legacy
+    // sRGB path, so no DCP candidates are offered for them.
+    let dcp_eligible = !mono && camera_matrix_is_three_colour(&cam2xyz);
+    // Explicit env override wins; otherwise fall back to a per-camera DCP in the
+    // default profile directory beside the executable. Both flow through the
+    // resolver's explicit tier (required camera-match), so a wrong file is
+    // rejected, not applied.
+    let explicit_profile = if dcp_eligible {
+        load_explicit_dcp_override()
+            .or_else(|| load_default_camera_dcp(raw.clean_make.as_str(), raw.clean_model.as_str()))
+    } else {
+        None
+    };
+    let explicit_blob: Option<ProfileBlob> = explicit_profile.as_ref().map(|p| p.blob());
+    // Owned profile bytes (embedded + manifest) must outlive the borrowed
+    // candidates and the resolution below.
+    let embedded_profiles = if dcp_eligible {
+        load_embedded_dng_dcps(path)
+    } else {
+        Vec::new()
+    };
+    let embedded_dcps: Vec<_> = embedded_profiles
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| EmbeddedDcpCandidate {
+            blob: ProfileBlob {
+                bytes,
+                locator: "<embedded DNG profile>",
+            },
+            profile_index: index as u16,
+        })
+        .collect();
+    let manifest_profiles = if dcp_eligible {
+        load_manifest_dcp_profiles(raw.clean_make.as_str(), raw.clean_model.as_str())
+    } else {
+        Vec::new()
+    };
+    let manifest_dcps: Vec<_> = manifest_profiles
+        .iter()
+        .filter_map(|profile| profile.as_dcp_candidate())
+        .collect();
+
+    let resolution = resolver::resolve(ResolveRequest {
+        camera: CameraIdentityRef {
+            make: raw.clean_make.as_str(),
+            model: raw.clean_model.as_str(),
+        },
+        wb_gains: [gain[0] as f64, gain[1] as f64, gain[2] as f64],
+        explicit_dcp: explicit_blob,
+        embedded_dcps: &embedded_dcps,
+        manifest_dcps: &manifest_dcps,
+        // Scene ICC stays gated: RAW retains signed/HDR values the bounded ICC
+        // adapter cannot accept, and it must never be silently clamped.
+        trusted_scene_iccs: &[],
+        decoder_fallback: DecoderFallback {
+            backend,
+            camera_to_xyz: &cam2xyz,
+        },
+    });
+    // Clone the provenance now so it can be moved onto the scene after the pixel
+    // loops, while the writer keeps borrowing the resolved transform.
+    let resolver_provenance = resolution.provenance.clone();
+    if let ResolvedCameraCharacterization::Dcp { transform, .. } = &resolution.characterization {
+        if let Some(white) = &mut as_shot_white {
+            // The profile-aware neutral iteration is a better CCT estimate than
+            // the compatibility decoder matrix; retain the independently
+            // measured Duv coordinate from the camera neutral.
+            white.cct_kelvin = transform.selection.cct_kelvin as f32;
+        }
+    }
+
+    let writer = match &resolution.characterization {
+        ResolvedCameraCharacterization::Dcp { transform, .. } if dcp_eligible => {
+            // Quantize the post-WB camera→linear-ProPhoto matrix to f32 once and
+            // apply it directly to camera RGB; never route DCP through sRGB.
+            let matrix = quantize_matrix_f32(&transform.post_wb_camera_to_linear_prophoto);
+            let hue_sat = transform
+                .hue_sat_map
+                .as_ref()
+                .and_then(|table| PreparedHueSatMap::new(table).ok());
+            SceneWriter::Dcp { matrix, hue_sat }
+        }
+        _ => SceneWriter::LegacySrgb {
+            cam2srgb: decoder_srgb,
+        },
+    };
+    let dcp_selected = matches!(writer, SceneWriter::Dcp { .. });
+    let writer = &writer;
 
     let crop_top = area.top;
     let crop_left = area.left;
@@ -323,14 +607,16 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
             // Whole-sensor AHD demosaic, computed once (skipped for mono and past
             // the pixel cap). The per-pixel loop below just reads it back; a None
             // here means the loop falls to Malvar/bilinear per pixel instead.
-            let ahd_rgb: Option<Vec<[f32; 3]>> = if DEMOSAIC == DemosaicMethod::Ahd
-                && !mono
-                && w.saturating_mul(h) <= AHD_MAX_PIXELS
-            {
-                Some(demosaic_ahd(&plane, w, h, cfa, &cam2xyz))
-            } else {
-                None
-            };
+            // The cap is overridable (`IAI_AHD_MAX_PIXELS`) so AHD's cleaner
+            // diagonal-edge handling can be used on full-frame RAW that would
+            // otherwise fall back to Malvar (which zippers at high-contrast edges).
+            let ahd_cap = env_usize("IAI_AHD_MAX_PIXELS", AHD_MAX_PIXELS);
+            let ahd_rgb: Option<Vec<[f32; 3]>> =
+                if DEMOSAIC == DemosaicMethod::Ahd && !mono && w.saturating_mul(h) <= ahd_cap {
+                    Some(demosaic_ahd(&plane, w, h, cfa, &cam2xyz))
+                } else {
+                    None
+                };
 
             out.par_chunks_mut(cw * 4)
                 .enumerate()
@@ -374,7 +660,7 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
                             // Malvar, or AHD that fell back past the pixel cap.
                             demosaic_malvar(&plane, w, h, cfa, fr, fc)
                         };
-                        write_scene(&mut row[dst..dst + 4], &cam2srgb, cam);
+                        writer.write(&mut row[dst..dst + 4], cam);
                     }
                 });
         }
@@ -403,18 +689,43 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
                         if let Some(op) = &opposed {
                             op.reconstruct(fr * w + fc, &mut cam);
                         }
-                        write_scene(&mut row[ox * 4..ox * 4 + 4], &cam2srgb, cam);
+                        writer.write(&mut row[ox * 4..ox * 4 + 4], cam);
                     }
                 });
         }
         other => return Err(format!("RAW {other} kênh/điểm ảnh chưa hỗ trợ")),
     }
 
+    // Default false-colour suppression on the linear scene: a chroma median that
+    // drops the Malvar demosaic's isolated edge colour specks (the reddish-brown
+    // dotted rim on high-contrast skin↔dark edges) while keeping green — and thus
+    // luminance detail — exact. Runs FIRST, before the colour NR and sharpen.
+    // Skipped for monochrome (no chroma).
+    let fc_iters = env_usize("IAI_SCENE_FALSE_COLOR", SCENE_FALSE_COLOR_ITERS);
+    if !mono && fc_iters > 0 {
+        suppress_false_color(&mut out, cw, ch, fc_iters);
+    }
+
+    // Default colour-noise reduction on the linear scene, before capture sharpen
+    // (so the sharpener never re-amplifies chroma speckle) and before any chroma
+    // enrichment. Skipped for monochrome (no chroma to clean).
+    let scene_color_nr = env_f32("IAI_SCENE_COLOR_NR", SCENE_COLOR_NR);
+    if !mono && scene_color_nr > 1e-4 {
+        denoise_scene_chroma(&mut out, cw, ch, scene_color_nr);
+    }
+
     // Capture sharpening on the linear scene, after demosaic and before the
     // master is frozen (before orientation too, but the pass is isotropic so
     // the order is irrelevant).
     if CAPTURE_SHARPEN {
-        capture_sharpen(&mut out, cw, ch);
+        capture_sharpen(
+            &mut out,
+            cw,
+            ch,
+            env_f32("IAI_CS_GAIN", CS_GAIN),
+            env_f32("IAI_CS_DARK_RATIO", CS_DARK_RATIO),
+            env_f32("IAI_CS_FLOOR", CS_FLOOR),
+        );
     }
 
     // Apply EXIF orientation so portraits aren't sideways. The buffer holds f16
@@ -426,11 +737,25 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
     // darker than that preview (the camera bakes its picture-style tone into the
     // JPEG), which reads as the image "jumping dark" once the full decode replaces
     // the instant preview. Best-effort: files without a preview are left as-is.
-    let preview_stats = crate::formats::raw_preview::take_cached_stats(path).or_else(|| {
-        std::fs::read(path)
-            .ok()
-            .and_then(|bytes| crate::formats::raw_preview::preview_stats_from_bytes(&bytes))
-    });
+    // Decide the embedded-JPEG match policy first: a profile-backed DCP render
+    // is already colour-accurate, so it defaults to no JPEG fit, while the
+    // decoder-matrix fallback keeps the shipping brightness+colour match. An
+    // explicit IAI_RAW_JPEG_MATCH override still wins.
+    let (apply_gain, apply_color) = jpeg_match_mode(dcp_selected);
+
+    // Always consume any cached preview stats so stale preview data cannot leak
+    // into a later decode, but only read/compute them when a mode needs them.
+    let cached_preview = crate::formats::raw_preview::take_cached_stats(path);
+    let preview_stats = if apply_gain || apply_color {
+        cached_preview.or_else(|| {
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| crate::formats::raw_preview::preview_stats_from_bytes(&bytes))
+        })
+    } else {
+        None
+    };
+
     let mut scene = SceneSource {
         width: fw as u32,
         height: fh as u32,
@@ -438,30 +763,62 @@ fn decode_raw(path: &Path) -> Result<Canvas, String> {
         alpha: None,
         look: crate::core::develop_scene::BaseLook::Raw,
         color_pipeline: crate::core::working_color::ColorPipelineMetadata::default(),
+        camera_profile: Some(RawSceneCharacterization {
+            resolution: resolver_provenance,
+            jpeg_match: JpegMatchMode::from_flags(apply_gain, apply_color),
+        }),
+        as_shot_white_balance: as_shot_white,
         camera_rgb_curve: None,
-        auto_tone: std::sync::OnceLock::new(),
     };
     if let Some(target) = preview_stats {
-        let gain =
-            crate::core::develop_scene::baseline_rgb_gains_for_scene(&scene, target.mean_rgb);
-        if gain.iter().any(|g| (g - 1.0).abs() > 0.01) {
-            scale_scene_rgb(&mut scene.half, gain);
-            scene.auto_tone = std::sync::OnceLock::new();
+        if apply_gain {
+            let gain =
+                crate::core::develop_scene::baseline_rgb_gains_for_scene(&scene, target.mean_rgb);
+            if gain.iter().any(|g| (g - 1.0).abs() > 0.01) {
+                scale_scene_rgb(&mut scene.half, gain);
+            }
         }
-        let matrix = crate::core::develop_scene::fit_camera_color_matrix(
-            &scene,
-            &target.thumbnail_rgb,
-            target.thumbnail_width,
-            target.thumbnail_height,
+        if apply_color {
+            let matrix = crate::core::develop_scene::fit_camera_color_matrix(
+                &scene,
+                &target.thumbnail_rgb,
+                target.thumbnail_width,
+                target.thumbnail_height,
+            );
+            if camera_color_matrix_is_material(matrix) {
+                transform_scene_rgb(&mut scene.half, matrix);
+            }
+            // Restore the camera-preview midtone saturation the linear render
+            // otherwise lands short of; done before the tone-curve fit so the
+            // per-channel match below re-normalises brightness on top of it.
+            enrich_scene_chroma(&mut scene.half, CHROMA_ENRICH);
+            scene.camera_rgb_curve = Some(crate::core::develop_scene::fit_camera_rgb_curve(
+                &scene,
+                &target.histogram,
+            ));
+        }
+    }
+
+    // Clean warm default look for the paths WITHOUT the full embedded-JPEG colour
+    // fit — the DCP "gain-only" path (the owner's profiled cameras) and the
+    // no-match path. The full-fit path already reaches the camera-JPEG colour
+    // numerically, so it is left alone. Everything here runs on the already-
+    // denoised master, AFTER the baseline brightness match, and bakes into the one
+    // scene master so the GPU preview and the CPU commit inherit it identically.
+    // Hue-preserving and saturation-protected; neutrals stay neutral.
+    if !apply_color {
+        let brightness = env_f32("IAI_SCENE_BRIGHTNESS", SCENE_BRIGHTNESS);
+        if (brightness - 1.0).abs() > 1e-4 {
+            scale_scene(&mut scene.half, brightness);
+        }
+        enrich_scene_chroma_shadow(
+            &mut scene.half,
+            env_f32("IAI_SCENE_CHROMA_BASE", SCENE_CHROMA_BASE),
+            env_f32("IAI_SCENE_CHROMA_SHADOW", SCENE_CHROMA_SHADOW),
+            env_f32("IAI_SCENE_SHADOW_LOW_EV", CHROMA_SHADOW_LOW_EV),
+            env_f32("IAI_SCENE_SHADOW_HIGH_EV", CHROMA_SHADOW_HIGH_EV),
         );
-        if camera_color_matrix_is_material(matrix) {
-            transform_scene_rgb(&mut scene.half, matrix);
-            scene.auto_tone = std::sync::OnceLock::new();
-        }
-        scene.camera_rgb_curve = Some(crate::core::develop_scene::fit_camera_rgb_curve(
-            &scene,
-            &target.histogram,
-        ));
+        warm_scene(&mut scene.half, env_f32("IAI_SCENE_WARM", SCENE_WARM));
     }
 
     // The unclamped linear master + its neutral default-look render.
@@ -501,14 +858,20 @@ enum DemosaicMethod {
 }
 const DEMOSAIC: DemosaicMethod = DemosaicMethod::Ahd;
 
-/// Above this sensor pixel count AHD's whole-frame transient buffers and Lab
-/// pass are too costly for an interactive open, so use the sharp O(1)-memory
-/// Malvar path. Debug builds need a lower cap because the unoptimised AHD math
-/// can otherwise hold Develop on its loading screen for several minutes.
+/// Above this sensor pixel count the whole-sensor AHD demosaic falls back to the
+/// sharp O(1)-memory Malvar path. AHD is worth it well past the old 12 MP cap:
+/// measured on a 36 MP frame in release it adds only ~0.2 s to a ~7.7 s decode,
+/// and it avoids the diagonal-edge zipper / reddish false-colour Malvar leaves at
+/// high-contrast edges (the camera JPEG and Photoshop are clean because they
+/// demosaic this well). So full-frame and most high-res RAW now take the AHD
+/// path; only very large sensors (past ~64 MP, where the ~50 B/px transient gets
+/// heavy) fall back. Debug builds keep a low cap because the unoptimised AHD math
+/// can otherwise hold Develop on its loading screen for minutes. Overridable via
+/// `IAI_AHD_MAX_PIXELS`.
 const AHD_MAX_PIXELS: usize = if cfg!(debug_assertions) {
     4_000_000
 } else {
-    12_000_000
+    64_000_000
 };
 
 /// Demosaic one Bayer pixel with the Malvar-He-Cutler 5×5 gradient-corrected
@@ -1168,20 +1531,45 @@ fn opposed_rgb(
 // hue/chroma stay put and no per-channel fringing appears. The guard gates on
 // RELATIVE local contrast, leaving flat/noisy areas alone instead of amplifying
 // their noise. All constants are taste knobs.
-// Disabled by default: two strong unsharp iterations create dark undershoot
-// beads along hair/skin boundaries. Sharpening belongs to the explicit Detail
-// stage, where the user can control it and preview the result.
-const CAPTURE_SHARPEN: bool = false;
-const CS_ITERATIONS: usize = 2;
+// Enabled at a GENTLE setting: one unsharp iteration at a modest gain, so a RAW
+// opens with the crisp pore/hair micro-detail every RAW converter applies as a
+// capture-sharpen baseline (AHD demosaic + no sharpening renders ~1.2x softer
+// than the camera JPEG, which reads as "bệt/mờ"). The earlier default — TWO
+// iterations at gain 0.55 — compounded overshoot into dark beads along hair/skin
+// edges; halving the iterations and dropping the gain keeps the acutance without
+// the beads. Luma-only + the relative-contrast guard leave flat skin/noise
+// untouched. The explicit Detail▸Sharpening slider still stacks on top.
+const CAPTURE_SHARPEN: bool = true;
+const CS_ITERATIONS: usize = 1;
 /// Gaussian radius of the unsharp blur, sensor px.
 const CS_SIGMA: f32 = 0.7;
-/// Per-iteration unsharp gain.
-const CS_GAIN: f32 = 0.55;
+/// Per-iteration unsharp gain. Restores acutance toward the camera JPEG (a
+/// scene-referred demosaic opens ~25% softer natively). Runs AFTER the default
+/// colour NR and is luma-only with a relative-contrast guard, so it lifts real
+/// edges without re-amplifying the chroma speckle NR removed. Override:
+/// `IAI_CS_GAIN`. The Detail ▸ Sharpening slider still adds more on top.
+const CS_GAIN: f32 = 0.60;
 /// Relative-contrast guard: fully closed below LO, fully open above HI.
 const CS_GUARD_LO: f32 = 0.04;
 const CS_GUARD_HI: f32 = 0.15;
 /// Level floor in the relative-contrast denominator (damps deep-shadow blowup).
 const CS_GUARD_FLOOR: f32 = 0.02;
+/// Dark-side (undershoot) gain multiplier, and a floor on the per-pixel factor.
+/// Unsharp undershoot dims the dark side of a high-contrast edge; at a strong
+/// gain it pushes already-dark edge pixels toward black — the dotted rim a
+/// photographer sees along a soft skin↔dark-bokeh edge. Damping the dark-side
+/// gain and flooring the factor removes those specks while the bright side keeps
+/// the full gain, so real acutance is preserved. Overrides: `IAI_CS_DARK_RATIO`
+/// / `IAI_CS_FLOOR`.
+///
+/// `dark_ratio = 0` = NO dark-side undershoot at all (pure bright-side / overshoot
+/// sharpen): the dark side of every edge is left exactly as decoded, so the
+/// sharpener can never dim an edge pixel toward black/brown. Measured to bring
+/// edge dark-spikes back to the raw-decode baseline while the native acutance is
+/// unchanged (the undershoot contributed almost nothing to real sharpness). The
+/// floor still bounds the dark side under any nonzero override.
+const CS_DARK_RATIO: f32 = 0.0;
+const CS_FLOOR: f32 = 0.85;
 
 /// Separable 5-tap blur over an f32 plane, edge-clamped.
 fn blur_plane_5(src: &[f32], w: usize, h: usize, k: &[f32; 5]) -> Vec<f32> {
@@ -1212,7 +1600,10 @@ fn blur_plane_5(src: &[f32], w: usize, h: usize, k: &[f32; 5]) -> Vec<f32> {
 }
 
 /// Capture-sharpen an RGBA f16 scene buffer in place (see the constants above).
-fn capture_sharpen(half: &mut [u16], w: usize, h: usize) {
+/// `gain` is the per-iteration unsharp gain (default [`CS_GAIN`]); `dark_ratio`
+/// damps the dark-side undershoot and `floor` bounds how far a pixel may be
+/// dimmed, so no edge pixel is crushed toward black.
+fn capture_sharpen(half: &mut [u16], w: usize, h: usize, gain: f32, dark_ratio: f32, floor: f32) {
     if w < 4 || h < 4 {
         return;
     }
@@ -1254,7 +1645,11 @@ fn capture_sharpen(half: &mut [u16], w: usize, h: usize) {
                 if guard <= 0.0 {
                     continue;
                 }
-                let factor = ((l + CS_GAIN * guard * d) / l).clamp(0.5, 2.0);
+                // Bright side (d>0, overshoot) keeps the full gain for acutance;
+                // the dark side (d<0, undershoot) is damped and floored so an edge
+                // pixel is never dimmed toward black (the dotted-rim artifact).
+                let eff_gain = if d < 0.0 { gain * dark_ratio } else { gain };
+                let factor = ((l + eff_gain * guard * d) / l).clamp(floor, 2.0);
                 for ch in 0..3 {
                     let v = f16_bits_to_f32(row[x * 4 + ch]);
                     row[x * 4 + ch] = f32_to_f16_bits(v * factor);
@@ -1269,6 +1664,109 @@ fn capture_sharpen(half: &mut [u16], w: usize, h: usize) {
 /// out-of-gamut values below 0.0 survive; display rendering happens later in
 /// `develop_scene`.
 #[inline]
+/// True when the decoder camera→XYZ matrix has a zero fourth (E) column, i.e. an
+/// ordinary three-colour RGB sensor rather than an RGBE/CMY four-colour sensor.
+/// The DCP camera transform is a 3×3 RGB map, so it is only offered for these.
+fn camera_matrix_is_three_colour(cam2xyz: &[[f32; 4]; 3]) -> bool {
+    cam2xyz.iter().all(|row| row[3] == 0.0)
+}
+
+/// Quantize a f64 3×3 matrix to f32 once, before the per-pixel loop.
+fn quantize_matrix_f32(matrix: &[[f64; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut out = [[0.0f32; 3]; 3];
+    for row in 0..3 {
+        for column in 0..3 {
+            out[row][column] = matrix[row][column] as f32;
+        }
+    }
+    out
+}
+
+/// Load the explicit `IAI_CAMERA_PROFILE` override DCP, if one is configured and
+/// readable. A missing or unreadable override silently yields `None` so the
+/// resolver falls through to its next tier.
+fn load_explicit_dcp_override() -> Option<discovery::ExplicitProfile> {
+    let path = discovery::explicit_profile_override_path()?;
+    discovery::load_explicit_dcp(&path).ok()
+}
+
+/// Load the per-camera DCP from the default profile directory beside the
+/// executable (`camera_profiles/<make>__<model>.dcp`), if present and readable.
+/// The resolver's explicit tier re-verifies the camera match before applying it.
+fn load_default_camera_dcp(make: &str, model: &str) -> Option<discovery::ExplicitProfile> {
+    let path = discovery::default_camera_dcp_path(make, model)?;
+    discovery::load_explicit_dcp(&path).ok()
+}
+
+/// Extract the technical camera profile embedded in a DNG's IFD0, re-serialized
+/// as a standalone DCP. Only `.dng` inputs are probed; a non-DNG, a DNG without a
+/// technical profile, or any structural error yields an empty list.
+fn load_embedded_dng_dcps(path: &Path) -> Vec<Vec<u8>> {
+    let is_dng = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("dng"));
+    if !is_dng {
+        return Vec::new();
+    }
+    match embedded_dng::extract_technical_dcp_from_file(path) {
+        Ok(Some(blob)) => vec![blob],
+        _ => Vec::new(),
+    }
+}
+
+/// Load the DCP-kind profiles from the `IAI_CAMERA_PROFILE_MANIFEST` manifest
+/// that exactly match this camera. Scene ICC records stay gated for generic RAW,
+/// so they are skipped here. A missing/unreadable manifest yields an empty list;
+/// the resolver then falls through to the decoder matrix.
+fn load_manifest_dcp_profiles(make: &str, model: &str) -> Vec<discovery::LoadedManifestProfile> {
+    let Some(manifest_path) = discovery::manifest_override_path() else {
+        return Vec::new();
+    };
+    let Ok(manifest) = discovery::load_manifest_file(&manifest_path) else {
+        return Vec::new();
+    };
+    let root = manifest_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let camera = CameraIdentityRef { make, model };
+    let mut loaded = Vec::new();
+    for matched in manifest.matching_profiles(camera) {
+        if matched.kind() != discovery::ProfileKind::Dcp {
+            continue;
+        }
+        if let Ok(profile) = discovery::load_matched_profile(root, &matched) {
+            loaded.push(profile);
+        }
+    }
+    loaded
+}
+
+/// Per-pixel writer for the RAW scene master. Both variants write UNCLAMPED f16
+/// so highlight headroom above 1.0 and out-of-gamut values below 0.0 survive.
+enum SceneWriter<'a> {
+    /// Bit-exact legacy path: camera RGB → linear sRGB (decoder matrix) → linear
+    /// ProPhoto → f16. Unchanged from the pre-resolver decode.
+    LegacySrgb { cam2srgb: [[f32; 3]; 3] },
+    /// DCP path: camera RGB → linear ProPhoto (quantized post-WB matrix) →
+    /// scene-safe technical HueSatMap → f16. Never routed through linear sRGB.
+    Dcp {
+        matrix: [[f32; 3]; 3],
+        hue_sat: Option<PreparedHueSatMap<'a>>,
+    },
+}
+
+impl SceneWriter<'_> {
+    #[inline]
+    fn write(&self, dst: &mut [u16], cam: [f32; 3]) {
+        match self {
+            SceneWriter::LegacySrgb { cam2srgb } => write_scene(dst, cam2srgb, cam),
+            SceneWriter::Dcp { matrix, hue_sat } => write_scene_dcp(dst, matrix, *hue_sat, cam),
+        }
+    }
+}
+
 fn write_scene(dst: &mut [u16], m: &[[f32; 3]; 3], cam: [f32; 3]) {
     let srgb = camera_to_linear_srgb(m, cam);
     let working =
@@ -1276,6 +1774,36 @@ fn write_scene(dst: &mut [u16], m: &[[f32; 3]; 3], cam: [f32; 3]) {
     dst[0] = f32_to_f16_bits(working[0]);
     dst[1] = f32_to_f16_bits(working[1]);
     dst[2] = f32_to_f16_bits(working[2]);
+    dst[3] = 0x3c00; // 1.0
+}
+
+/// DCP scene writer. `cam` is camera-native RGB with the mosaic white balance
+/// already applied, so the post-WB matrix maps it straight to linear ProPhoto.
+fn write_scene_dcp(
+    dst: &mut [u16],
+    matrix: &[[f32; 3]; 3],
+    hue_sat: Option<PreparedHueSatMap<'_>>,
+    cam: [f32; 3],
+) {
+    let mut rgb = [
+        matrix[0][0] * cam[0] + matrix[0][1] * cam[1] + matrix[0][2] * cam[2],
+        matrix[1][0] * cam[0] + matrix[1][1] * cam[1] + matrix[1][2] * cam[2],
+        matrix[2][0] * cam[0] + matrix[2][1] * cam[1] + matrix[2][2] * cam[2],
+    ];
+    if let Some(map) = hue_sat {
+        // Signed values bypass (HSV undefined); HDR values keep their magnitude;
+        // the LUT is never allowed to clamp the scene.
+        if let Ok(result) = map.apply_scene_safe([rgb[0] as f64, rgb[1] as f64, rgb[2] as f64]) {
+            rgb = [
+                result.rgb[0] as f32,
+                result.rgb[1] as f32,
+                result.rgb[2] as f32,
+            ];
+        }
+    }
+    dst[0] = f32_to_f16_bits(rgb[0]);
+    dst[1] = f32_to_f16_bits(rgb[1]);
+    dst[2] = f32_to_f16_bits(rgb[2]);
     dst[3] = 0x3c00; // 1.0
 }
 
@@ -1341,6 +1869,351 @@ fn transform_scene_rgb(scene: &mut [u16], matrix: [[f32; 3]; 3]) {
     });
 }
 
+/// Peak strength of the default-look midtone vibrance. Measured against the
+/// embedded camera JPEG (the target look): a neutral scene-referred render
+/// reproduces the JPEG's mean, white point and per-channel tone, but its
+/// midtones land ~15% less saturated because the camera bakes a saturation
+/// step the per-channel tone-curve match cannot recreate (that match only
+/// reshapes each channel's marginal, never the cross-channel spread chroma is
+/// made of). This reads as the "nhợt nhạt / mờ đục" (pale, muddy) cast a
+/// photographer sees against the camera preview. 0 = off.
+const CHROMA_ENRICH: f32 = 0.85;
+
+/// Luminance-anchored vibrance on the LINEAR scene master, applied once at
+/// import so the default look, the GPU preview (scene master upload) and the
+/// CPU commit inherit one identical enrichment — no per-stage mirroring, and
+/// neutrals stay bit-exact (a grey pixel has zero chroma, so it is untouched;
+/// the neutral/parity goldens are unaffected). Midtone-weighted and
+/// saturation-protected so it lifts the muddy midtones toward the camera look
+/// WITHOUT pushing the already-saturated deep shadows further (they measured
+/// slightly over the JPEG), and hue-preserving because every channel scales
+/// around the same held luma.
+fn enrich_scene_chroma(scene: &mut [u16], strength: f32) {
+    if strength.abs() < 1e-4 {
+        return;
+    }
+    // Rec.709-ish luma; the exact weights only set which luminance is held
+    // constant, so an approximation in the wide working space is fine — neutral
+    // preservation holds for any weights that sum to one.
+    const LW: [f32; 3] = [0.22, 0.69, 0.09];
+    // Midtone window in EV around 18% grey (log2 domain), ~1.4-stop sigma.
+    const CENTER: f32 = -2.47; // log2(0.18)
+    const SIGMA: f32 = 1.4;
+    scene.par_chunks_mut(4).for_each(|px| {
+        let rgb = [
+            f16_bits_to_f32(px[0]),
+            f16_bits_to_f32(px[1]),
+            f16_bits_to_f32(px[2]),
+        ];
+        let luma = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
+        if luma <= 1e-5 {
+            return;
+        }
+        let mx = rgb[0].max(rgb[1]).max(rgb[2]);
+        let mn = rgb[0].min(rgb[1]).min(rgb[2]);
+        // Saturation proxy in [0,1]; protect pixels that are already vivid.
+        let sat = if mx > 1e-6 { (mx - mn) / mx } else { 0.0 };
+        let protect = (1.0 - sat).clamp(0.0, 1.0);
+        // Midtone weight: Gaussian on exposure so deep shadows/near-clip stay put.
+        let e = luma.max(1e-5).log2();
+        let d = (e - CENTER) / SIGMA;
+        let mid = (-0.5 * d * d).exp();
+        let factor = 1.0 + strength * mid * protect;
+        for c in 0..3 {
+            px[c] = f32_to_f16_bits((luma + (rgb[c] - luma) * factor).max(0.0));
+        }
+    });
+}
+
+/// Default false-colour-suppression iterations applied to every RAW scene master
+/// at import (0 = off). The Malvar demosaic (the fallback for images past the AHD
+/// pixel cap — i.e. most full-frame RAW) fringes at high-contrast edges: it emits
+/// isolated colour specks (e.g. a reddish-brown dotted rim along a skin↔dark
+/// edge) that the camera JPEG / Photoshop do not, because they run a chroma
+/// median. This is a Freeman-style median on the R−G / B−G colour-difference
+/// planes: green (the densest Bayer channel, so the cleanest) is kept exactly, so
+/// luminance detail is preserved, while the colour differences are median-filtered
+/// to drop the isolated edge specks. Runs FIRST, before the à-trous colour NR and
+/// capture sharpen. With AHD now demosaicing full-frame RAW (which removes most
+/// of the edge zipper at the source), this is a light residual clean-up for any
+/// isolated specks left behind. Override: `IAI_SCENE_FALSE_COLOR`.
+const SCENE_FALSE_COLOR_ITERS: usize = 2;
+
+/// Read an integer tuning knob from the environment, falling back to `default`.
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+/// 3×3 median of an f32 plane, edge-clamped, parallel over rows.
+fn median3x3_plane(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, slot) in row.iter_mut().enumerate() {
+            let mut v = [0.0f32; 9];
+            let mut k = 0;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                    let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                    v[k] = src[ny * w + nx];
+                    k += 1;
+                }
+            }
+            v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            *slot = v[4];
+        }
+    });
+    out
+}
+
+/// False-colour suppression on the linear RGBA-f16 scene master. Keeps green
+/// exactly and median-filters the R−G / B−G colour-difference planes, so isolated
+/// demosaic colour specks at edges are removed while luminance detail is untouched
+/// (green carries most of it, and a median preserves real colour edges — only the
+/// outliers are replaced). `iterations` widens the effective support for denser
+/// speckle. Neutral pixels have R−G = B−G = 0, so they are unaffected.
+fn suppress_false_color(scene: &mut [u16], w: usize, h: usize, iterations: usize) {
+    if iterations == 0 || w < 3 || h < 3 {
+        return;
+    }
+    let n = w * h;
+    let g: Vec<f32> = (0..n).map(|i| f16_bits_to_f32(scene[i * 4 + 1])).collect();
+    let mut cr: Vec<f32> = (0..n)
+        .map(|i| f16_bits_to_f32(scene[i * 4]) - g[i])
+        .collect();
+    let mut cb: Vec<f32> = (0..n)
+        .map(|i| f16_bits_to_f32(scene[i * 4 + 2]) - g[i])
+        .collect();
+    for _ in 0..iterations {
+        cr = median3x3_plane(&cr, w, h);
+        cb = median3x3_plane(&cb, w, h);
+    }
+    scene.par_chunks_mut(4).enumerate().for_each(|(i, px)| {
+        px[0] = f32_to_f16_bits((g[i] + cr[i]).max(0.0));
+        px[2] = f32_to_f16_bits((g[i] + cb[i]).max(0.0));
+        // Green (px[1]) and alpha (px[3]) are left exactly as decoded.
+    });
+}
+
+/// Default colour-noise reduction strength applied to every RAW scene master at
+/// import (0 = off). A scene-referred demosaic leaves ~1.8× the embedded JPEG's
+/// hi-frequency chroma noise (the camera JPEG runs its own colour NR), which the
+/// photographer sees as "lấm tấm" speckle and, once colour is pushed toward the
+/// camera look, as "loang màu" chroma blotch. This bakes a clean-up into the
+/// master BEFORE capture sharpen and before any chroma enrichment, so speckle is
+/// never re-amplified and the later warmth/chroma steps stay clean. Mirrors the
+/// Detail-stage colour NR semantics; the user's Detail ▸ Colour NR slider still
+/// adds more on top.
+const SCENE_COLOR_NR: f32 = 0.85;
+/// Per-à-trous-level chroma attenuation at full strength: kill the finest colour
+/// speckle outright, keep progressively more of the coarser (real-colour) scales
+/// so saturated regions are not desaturated. Same shape as the Detail stage's
+/// `CHROMA_NR_ATTEN`.
+const SCENE_CHROMA_NR_ATTEN: [f32; 3] = [1.0, 0.85, 0.55];
+
+/// One separable à-trous B3-spline smoothing pass at hole spacing `1 << level`,
+/// edge-clamped, parallel over rows. Plain (not edge-aware) taps: a single-pixel
+/// colour speck must be smoothed, not "protected" as an edge.
+fn atrous_smooth_plane(src: &[f32], w: usize, h: usize, level: usize) -> Vec<f32> {
+    const B3: [f32; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
+    let step = 1i64 << level;
+    let mut tmp = vec![0.0f32; w * h];
+    tmp.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+        let base = y * w;
+        for (x, slot) in out.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for (t, &kv) in B3.iter().enumerate() {
+                let o = (t as i64 - 2) * step;
+                let sx = (x as i64 + o).clamp(0, w as i64 - 1) as usize;
+                acc += src[base + sx] * kv;
+            }
+            *slot = acc;
+        }
+    });
+    let mut dst = vec![0.0f32; w * h];
+    dst.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+        for (x, slot) in out.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for (t, &kv) in B3.iter().enumerate() {
+                let o = (t as i64 - 2) * step;
+                let sy = (y as i64 + o).clamp(0, h as i64 - 1) as usize;
+                acc += tmp[sy * w + x] * kv;
+            }
+            *slot = acc;
+        }
+    });
+    dst
+}
+
+/// Whole-frame colour-noise reduction on the linear RGBA-f16 scene master. Splits
+/// each pixel into luminance + chroma offsets (the chroma part carries zero luma
+/// by construction, so this cannot shift brightness or luma detail), à-trous
+/// shrinks the finest chroma detail levels, and recomposes. Neutral pixels have
+/// zero chroma so they are untouched.
+fn denoise_scene_chroma(scene: &mut [u16], w: usize, h: usize, strength: f32) {
+    if strength.abs() < 1e-4 || w < 8 || h < 8 {
+        return;
+    }
+    const LW: [f32; 3] = [0.22, 0.69, 0.09];
+    let n = w * h;
+    // Decode once into luma + three chroma planes.
+    let mut luma = vec![0.0f32; n];
+    let mut chroma = [vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]];
+    scene
+        .par_chunks(4)
+        .zip(luma.par_iter_mut())
+        .enumerate()
+        .for_each(|(_, (px, l))| {
+            let rgb = [
+                f16_bits_to_f32(px[0]),
+                f16_bits_to_f32(px[1]),
+                f16_bits_to_f32(px[2]),
+            ];
+            *l = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
+        });
+    for (ch, plane) in chroma.iter_mut().enumerate() {
+        plane
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, slot)| *slot = f16_bits_to_f32(scene[i * 4 + ch]) - luma[i]);
+    }
+    // À-trous shrink each chroma plane in place: subtract the attenuated fine
+    // detail of each level (memory-light: only prev/next/accumulator live).
+    for plane in chroma.iter_mut() {
+        let mut prev = plane.clone();
+        for (level, &atten) in SCENE_CHROMA_NR_ATTEN.iter().enumerate() {
+            let next = atrous_smooth_plane(&prev, w, h, level);
+            let k = strength * atten;
+            plane
+                .par_iter_mut()
+                .zip(prev.par_iter())
+                .zip(next.par_iter())
+                .for_each(|((v, &p), &nx)| *v -= k * (p - nx));
+            prev = next;
+        }
+    }
+    // Recompose luma + denoised chroma back into the scene master.
+    scene.par_chunks_mut(4).enumerate().for_each(|(i, px)| {
+        let l = luma[i];
+        for ch in 0..3 {
+            px[ch] = f32_to_f16_bits((l + chroma[ch][i]).max(0.0));
+        }
+    });
+}
+
+// ── Clean warm default-look shaping (non-full-fit RAW paths) ──────────────────
+//
+// These shape the DCP "gain-only" and no-match paths toward the embedded-JPEG
+// look on the already-denoised master. All are env-overridable so the headless
+// look probe can fit them to the measured target (see tests/raw_look_probe.rs)
+// without a rebuild; the const is the shipped default.
+
+/// Small pre-tone brightness lift toward the embedded-JPEG tone: the gain-only
+/// render lands a few % darker (measured Oklab L 0.636 vs the JPEG's 0.659).
+/// 1.0 = off. Override: `IAI_SCENE_BRIGHTNESS`.
+const SCENE_BRIGHTNESS: f32 = 1.10;
+/// Flat overall vibrance restored on the clean master (measured overall/midtone
+/// chroma ~5% low vs the JPEG). Override: `IAI_SCENE_CHROMA_BASE`.
+const SCENE_CHROMA_BASE: f32 = 0.10;
+/// Extra vibrance in the deep shadows, where the camera matrix + tone curve
+/// desaturate the most (measured −40% shadow chroma vs the JPEG). Ramps in below
+/// `CHROMA_SHADOW_HIGH_EV` to full strength by `CHROMA_SHADOW_LOW_EV`. The window
+/// is kept in the true shadows so it restores the muddy darks without inflating
+/// midtone saturation. Override: `IAI_SCENE_CHROMA_SHADOW`.
+const SCENE_CHROMA_SHADOW: f32 = 1.10;
+/// Shadow window (EV of scene luma) for the shadow vibrance ramp: fitted to the
+/// display shadow zone (Oklab L < 0.25) so the boost lands where the render lost
+/// colour, without spilling into the midtones. Overrides:
+/// `IAI_SCENE_SHADOW_LOW_EV` / `IAI_SCENE_SHADOW_HIGH_EV`.
+const CHROMA_SHADOW_LOW_EV: f32 = -6.0;
+const CHROMA_SHADOW_HIGH_EV: f32 = -3.3;
+/// Luma-preserving warm tilt (R up / B down). Small by default: the measured skin
+/// hue already matches the JPEG, so this only nudges neutrals off the profile
+/// matrix's cool-olive cast. 0 = off. Override: `IAI_SCENE_WARM`.
+const SCENE_WARM: f32 = 0.0;
+
+/// Read a float tuning knob from the environment, falling back to `default`.
+fn env_f32(name: &str, default: f32) -> f32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .unwrap_or(default)
+}
+
+/// Shadow-weighted vibrance on the linear scene master: a flat `base` everywhere
+/// plus extra `shadow` where the tone/matrix chain desaturated the darks. Luma is
+/// held constant (hue-preserving), and already-vivid pixels are protected, so
+/// neutrals and saturated colour are left alone while muddy shadows regain chroma.
+fn enrich_scene_chroma_shadow(
+    scene: &mut [u16],
+    base: f32,
+    shadow: f32,
+    low_ev: f32,
+    high_ev: f32,
+) {
+    if base.abs() < 1e-4 && shadow.abs() < 1e-4 {
+        return;
+    }
+    const LW: [f32; 3] = [0.22, 0.69, 0.09];
+    scene.par_chunks_mut(4).for_each(|px| {
+        let rgb = [
+            f16_bits_to_f32(px[0]),
+            f16_bits_to_f32(px[1]),
+            f16_bits_to_f32(px[2]),
+        ];
+        let luma = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
+        if luma <= 1e-5 {
+            return;
+        }
+        let mx = rgb[0].max(rgb[1]).max(rgb[2]);
+        let mn = rgb[0].min(rgb[1]).min(rgb[2]);
+        let sat = if mx > 1e-6 { (mx - mn) / mx } else { 0.0 };
+        let protect = (1.0 - sat).clamp(0.0, 1.0);
+        // Shadow weight: 1 in the deep shadows, ramping to 0 by the high EV.
+        let e = luma.max(1e-5).log2();
+        let sw = 1.0 - crate::core::develop::smootherstep(low_ev, high_ev, e);
+        let strength = base + shadow * sw;
+        let factor = 1.0 + strength * protect;
+        for c in 0..3 {
+            px[c] = f32_to_f16_bits((luma + (rgb[c] - luma) * factor).max(0.0));
+        }
+    });
+}
+
+/// Luma-preserving warm tilt: scale R up and B down by `w`, then rescale to hold
+/// the original luminance so only the colour balance shifts, not brightness.
+fn warm_scene(scene: &mut [u16], w: f32) {
+    if w.abs() < 1e-4 {
+        return;
+    }
+    const LW: [f32; 3] = [0.22, 0.69, 0.09];
+    scene.par_chunks_mut(4).for_each(|px| {
+        let rgb = [
+            f16_bits_to_f32(px[0]),
+            f16_bits_to_f32(px[1]),
+            f16_bits_to_f32(px[2]),
+        ];
+        let l0 = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
+        if l0 <= 1e-6 {
+            return;
+        }
+        let mut out = [rgb[0] * (1.0 + w), rgb[1], rgb[2] * (1.0 - w)];
+        let l1 = LW[0] * out[0] + LW[1] * out[1] + LW[2] * out[2];
+        if l1 > 1e-6 {
+            let k = l0 / l1;
+            for c in &mut out {
+                *c *= k;
+            }
+        }
+        for c in 0..3 {
+            px[c] = f32_to_f16_bits(out[c].max(0.0));
+        }
+    });
+}
+
 /// Standard sRGB opto-electronic transfer function (linear → encoded). Kept for
 /// the decode diagnosis tests.
 #[cfg(test)]
@@ -1395,6 +2268,59 @@ fn apply_orientation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rawler_fallback_prefers_a_valid_d65_matrix_deterministically() {
+        use rawler::imgop::xyz::Illuminant;
+
+        let tungsten = vec![0.9, 0.1, 0.0, 0.2, 0.7, 0.1, 0.0, 0.1, 0.9];
+        let d65 = vec![0.6, 0.3, 0.1, 0.1, 0.8, 0.1, 0.0, 0.2, 0.8];
+        let mut matrices = std::collections::HashMap::new();
+        matrices.insert(Illuminant::A, tungsten);
+        matrices.insert(Illuminant::D65, d65.clone());
+
+        let selected = select_rawler_xyz_to_cam(&matrices, [[0.0; 3]; 4], false).unwrap();
+        assert_eq!(selected[0], d65[0..3]);
+        assert_eq!(selected[1], d65[3..6]);
+        assert_eq!(selected[2], d65[6..9]);
+
+        // HashMap insertion/iteration order is not part of the decision.
+        let mut reversed = std::collections::HashMap::new();
+        reversed.insert(Illuminant::D65, d65);
+        reversed.insert(
+            Illuminant::A,
+            vec![0.9, 0.1, 0.0, 0.2, 0.7, 0.1, 0.0, 0.1, 0.9],
+        );
+        assert_eq!(
+            select_rawler_xyz_to_cam(&reversed, [[0.0; 3]; 4], false).unwrap(),
+            selected
+        );
+    }
+
+    #[test]
+    fn rawler_fallback_uses_legacy_or_mono_identity_but_never_a_zero_rgb_matrix() {
+        let matrices = std::collections::HashMap::new();
+        let legacy = [
+            [0.7, 0.2, 0.1],
+            [0.1, 0.8, 0.1],
+            [0.0, 0.1, 0.9],
+            [0.0, 0.0, 0.0],
+        ];
+        assert_eq!(
+            select_rawler_xyz_to_cam(&matrices, legacy, false).unwrap(),
+            legacy
+        );
+        assert!(select_rawler_xyz_to_cam(&matrices, [[0.0; 3]; 4], false).is_err());
+        assert_eq!(
+            select_rawler_xyz_to_cam(&matrices, [[0.0; 3]; 4], true).unwrap(),
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0],
+            ]
+        );
+    }
 
     fn srgb_to_linear_for_test(c: f32) -> f32 {
         if c <= 0.04045 {
@@ -1467,17 +2393,49 @@ mod tests {
     }
 
     #[test]
+    fn camera_neutral_recovers_absolute_as_shot_kelvin() {
+        let identity_cam2xyz = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        // CIE illuminant A chromaticity, normalized to Y=1. Camera WB gains
+        // are the reciprocal neutral normalized to green.
+        let (x, y) = (0.447_57f32, 0.407_45f32);
+        let xyz = [x / y, 1.0, (1.0 - x - y) / y];
+        let gains = [1.0 / xyz[0], 1.0, 1.0 / xyz[2], 1.0];
+        let white = as_shot_white_balance(&identity_cam2xyz, gains, false).unwrap();
+        assert!(
+            (white.cct_kelvin - 2856.0).abs() < 80.0,
+            "as-shot {white:?}"
+        );
+        assert!(white.duv.abs() < 0.003, "as-shot {white:?}");
+        assert!(as_shot_white_balance(&identity_cam2xyz, gains, true).is_none());
+    }
+
+    #[test]
     fn camera_to_srgb_matrix_composes_xyz_rows() {
         let identity_cam2xyz = [
             [1.0, 0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0, 0.0],
             [0.0, 0.0, 1.0, 0.0],
         ];
-        let m = camera_to_srgb_matrix(&identity_cam2xyz);
+        let m = resolve_decoder_matrix(
+            RawDecoderBackend::Rawloader,
+            "test",
+            "identity",
+            &identity_cam2xyz,
+        )
+        .camera_to_linear_srgb;
+        let xyz_to_srgb = [
+            [3.2404542f32, -1.5371385, -0.4985314],
+            [-0.9692660, 1.8760108, 0.0415560],
+            [0.0556434, -0.2040259, 1.0572252],
+        ];
         for y in 0..3 {
             for x in 0..3 {
                 assert!(
-                    (m[y][x] - XYZ_TO_SRGB[y][x]).abs() < 1e-6,
+                    (m[y][x] - xyz_to_srgb[y][x]).abs() < 1e-6,
                     "matrix[{y}][{x}]"
                 );
             }
@@ -1698,7 +2656,13 @@ mod tests {
         let gain = white_balance_gains(wbc, mono);
         let levels = raw_levels(&raw, area);
         let cam2xyz = raw.cam_to_xyz_normalized();
-        let cam2srgb = camera_to_srgb_matrix(&cam2xyz);
+        let cam2srgb = resolve_decoder_matrix(
+            RawDecoderBackend::Rawloader,
+            &raw.clean_make,
+            &raw.clean_model,
+            &cam2xyz,
+        )
+        .camera_to_linear_srgb;
         let (fw, fh) = orientation_dims(area, raw.orientation);
 
         let mut picks = [
@@ -2042,7 +3006,7 @@ mod tests {
             .map(|i| if i % w < w / 2 { 0.15 } else { 0.55 })
             .collect();
         let mut buf = scene_buf_from(&vals);
-        capture_sharpen(&mut buf, w, h);
+        capture_sharpen(&mut buf, w, h, CS_GAIN, CS_DARK_RATIO, CS_FLOOR);
         let at =
             |x: usize, y: usize| crate::core::develop_scene::f16_bits_to_f32(buf[(y * w + x) * 4]);
 
@@ -2063,6 +3027,32 @@ mod tests {
     }
 
     #[test]
+    fn capture_sharpen_does_not_crush_dark_edge_toward_black() {
+        // Bright block beside a dark block. The unsharp undershoot must NOT dim
+        // the dark-side edge pixel toward black (the dotted-rim artifact a strong
+        // gain produced on soft skin↔dark edges); the floor bounds the darkening.
+        let (w, h) = (64usize, 16usize);
+        let dark = 0.06f32;
+        let vals: Vec<f32> = (0..w * h)
+            .map(|i| if i % w < w / 2 { 0.55 } else { dark })
+            .collect();
+        let mut buf = scene_buf_from(&vals);
+        capture_sharpen(&mut buf, w, h, CS_GAIN, CS_DARK_RATIO, CS_FLOOR);
+        let at =
+            |x: usize, y: usize| crate::core::develop_scene::f16_bits_to_f32(buf[(y * w + x) * 4]);
+        // First dark pixel (the edge's dark side) keeps at least `floor` of its
+        // value — no near-black speck.
+        let dark_edge = at(w / 2, 8);
+        assert!(
+            dark_edge >= dark * CS_FLOOR - 1e-3,
+            "dark edge floored, not crushed: {dark_edge} (>= {})",
+            dark * CS_FLOOR
+        );
+        // The bright side still overshoots (acutance preserved).
+        assert!(at(w / 2 - 1, 8) > 0.55, "bright side still sharpened");
+    }
+
+    #[test]
     fn capture_sharpen_guard_spares_flat_noise() {
         // Flat midtone with sub-percent deterministic noise: relative contrast sits
         // far below the guard threshold, so the pass must leave it bit-identical
@@ -2076,7 +3066,7 @@ mod tests {
         let vals: Vec<f32> = (0..w * h).map(|_| 0.3 + 0.008 * rand()).collect();
         let mut buf = scene_buf_from(&vals);
         let original = buf.clone();
-        capture_sharpen(&mut buf, w, h);
+        capture_sharpen(&mut buf, w, h, CS_GAIN, CS_DARK_RATIO, CS_FLOOR);
         assert_eq!(buf, original, "flat noise must not be sharpened");
     }
 
@@ -2101,8 +3091,171 @@ mod tests {
     }
 
     #[test]
-    fn automatic_capture_sharpen_stays_disabled() {
-        assert!(!CAPTURE_SHARPEN);
+    fn automatic_capture_sharpen_is_enabled_and_gentle() {
+        // A RAW must open with a crisp baseline, but gently enough to avoid the
+        // dark hair/skin beads the old two-iteration/high-gain setting produced.
+        assert!(
+            CAPTURE_SHARPEN,
+            "RAW should open with a capture-sharpen baseline"
+        );
+        assert_eq!(
+            CS_ITERATIONS, 1,
+            "one iteration keeps overshoot from compounding"
+        );
+        // One iteration + the relative-contrast guard + colour NR running first
+        // keep this from beading even though the gain restores real acutance.
+        assert!(
+            CS_GAIN <= 0.7,
+            "gain must stay moderate to avoid edge beads"
+        );
+    }
+
+    /// Build an f16 RGBA scene buffer from per-pixel linear RGB triples.
+    fn scene_buf_rgb(vals: &[[f32; 3]]) -> Vec<u16> {
+        let mut out = Vec::with_capacity(vals.len() * 4);
+        for v in vals {
+            out.extend_from_slice(&[
+                f32_to_f16_bits(v[0]),
+                f32_to_f16_bits(v[1]),
+                f32_to_f16_bits(v[2]),
+                0x3c00,
+            ]);
+        }
+        out
+    }
+
+    const LW_TEST: [f32; 3] = [0.22, 0.69, 0.09];
+    fn luma_of(px: &[u16]) -> f32 {
+        LW_TEST[0] * f16_bits_to_f32(px[0])
+            + LW_TEST[1] * f16_bits_to_f32(px[1])
+            + LW_TEST[2] * f16_bits_to_f32(px[2])
+    }
+    fn chroma_of(px: &[u16]) -> f32 {
+        let r = f16_bits_to_f32(px[0]);
+        let g = f16_bits_to_f32(px[1]);
+        let b = f16_bits_to_f32(px[2]);
+        r.max(g).max(b) - r.min(g).min(b)
+    }
+
+    #[test]
+    fn denoise_scene_chroma_smooths_chroma_and_holds_luma() {
+        // Flat luminance with a checkerboard chroma speck (offset chosen to carry
+        // ~zero luma) → colour NR must attenuate the speckle but leave luma intact.
+        let (w, h) = (16usize, 16usize);
+        let base = 0.4f32;
+        let off = [1.0f32, 0.0, -LW_TEST[0] / LW_TEST[2]]; // LW·off ≈ 0
+        let s = 0.05f32;
+        let mut vals = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let sgn = if (x + y) % 2 == 0 { 1.0 } else { -1.0 };
+                vals.push([
+                    base + sgn * s * off[0],
+                    base + sgn * s * off[1],
+                    base + sgn * s * off[2],
+                ]);
+            }
+        }
+        let mut buf = scene_buf_rgb(&vals);
+        let luma_before: Vec<f32> = buf.chunks_exact(4).map(luma_of).collect();
+        let chroma_before: f32 = buf.chunks_exact(4).map(chroma_of).sum::<f32>() / (w * h) as f32;
+        denoise_scene_chroma(&mut buf, w, h, 0.85);
+        let chroma_after: f32 = buf.chunks_exact(4).map(chroma_of).sum::<f32>() / (w * h) as f32;
+        assert!(
+            chroma_after < chroma_before * 0.5,
+            "colour speckle attenuated: before={chroma_before} after={chroma_after}"
+        );
+        for (px, &l0) in buf.chunks_exact(4).zip(&luma_before) {
+            assert!(
+                (luma_of(px) - l0).abs() < 3e-3,
+                "luma preserved: {l0} -> {}",
+                luma_of(px)
+            );
+        }
+    }
+
+    #[test]
+    fn suppress_false_color_fixes_speck_keeps_green_and_neutral() {
+        // A uniform warm field (surround R−G=+0.1, B−G=−0.1) with one isolated
+        // false-colour speck. The median must pull the speck's colour differences
+        // back to the surround while leaving green (luma) exact, and must not tint
+        // a neutral field.
+        let (w, h) = (9usize, 9usize);
+        let base = [0.5f32, 0.4, 0.3];
+        let mut vals = vec![base; w * h];
+        vals[4 * w + 4] = [0.3, 0.7, 0.3]; // green false-colour speck
+        let mut buf = scene_buf_rgb(&vals);
+        let g_before: Vec<f32> = buf.chunks_exact(4).map(|p| f16_bits_to_f32(p[1])).collect();
+        suppress_false_color(&mut buf, w, h, 2);
+        let sp = &buf[(4 * w + 4) * 4..(4 * w + 4) * 4 + 4];
+        let (r, g, b) = (
+            f16_bits_to_f32(sp[0]),
+            f16_bits_to_f32(sp[1]),
+            f16_bits_to_f32(sp[2]),
+        );
+        assert!(
+            ((r - g) - 0.1).abs() < 0.03,
+            "R−G pulled to surround: {}",
+            r - g
+        );
+        assert!(
+            ((b - g) + 0.1).abs() < 0.03,
+            "B−G pulled to surround: {}",
+            b - g
+        );
+        for (px, &g0) in buf.chunks_exact(4).zip(&g_before) {
+            assert!(
+                (f16_bits_to_f32(px[1]) - g0).abs() < 1e-3,
+                "green (luma) left exact"
+            );
+        }
+        // Neutral field is untouched.
+        let mut neutral = scene_buf_rgb(&vec![[0.3f32, 0.3, 0.3]; w * h]);
+        let before = neutral.clone();
+        suppress_false_color(&mut neutral, w, h, 2);
+        assert_eq!(neutral, before, "neutral stays neutral");
+    }
+
+    #[test]
+    fn enrich_scene_chroma_shadow_holds_neutral_and_favours_shadows() {
+        // p0 neutral, p1 a low-sat coloured DEEP shadow, p2 the same colour scaled
+        // into the midtones. Neutral stays neutral; both gain chroma; the deep
+        // shadow gains proportionally more (higher shadow weight).
+        let p1 = [0.0072f32, 0.006, 0.0048];
+        let scale = 33.0f32;
+        let p2 = [p1[0] * scale, p1[1] * scale, p1[2] * scale];
+        let neutral = [0.05f32, 0.05, 0.05];
+        let mut buf = scene_buf_rgb(&[neutral, p1, p2]);
+        let c1_before = chroma_of(&buf[4..8]);
+        let c2_before = chroma_of(&buf[8..12]);
+        enrich_scene_chroma_shadow(
+            &mut buf,
+            SCENE_CHROMA_BASE,
+            SCENE_CHROMA_SHADOW,
+            CHROMA_SHADOW_LOW_EV,
+            CHROMA_SHADOW_HIGH_EV,
+        );
+        assert!(chroma_of(&buf[0..4]) < 1e-4, "neutral stays neutral");
+        let g1 = chroma_of(&buf[4..8]) / c1_before;
+        let g2 = chroma_of(&buf[8..12]) / c2_before;
+        assert!(g1 > 1.02 && g2 > 1.0, "both lifted: shadow={g1} mid={g2}");
+        assert!(g1 > g2 + 0.05, "shadow lifted more than mid: {g1} vs {g2}");
+    }
+
+    #[test]
+    fn warm_scene_warms_and_holds_luma() {
+        let gray = [0.3f32, 0.3, 0.3];
+        let mut buf = scene_buf_rgb(&[gray]);
+        let l0 = luma_of(&buf[0..4]);
+        warm_scene(&mut buf, 0.05);
+        let (r, g, b) = (
+            f16_bits_to_f32(buf[0]),
+            f16_bits_to_f32(buf[1]),
+            f16_bits_to_f32(buf[2]),
+        );
+        assert!(r > 0.3 && b < 0.3, "warmer: r={r} b={b}");
+        let _ = g;
+        assert!((luma_of(&buf[0..4]) - l0).abs() < 3e-3, "luma held: {l0}");
     }
 
     #[test]

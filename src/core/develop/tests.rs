@@ -1098,7 +1098,7 @@ fn color_region_box_deblocks_like_commit() {
     let s = 4usize;
     let (commit, pw, ph) = build_color_region(&tm, &None, s);
     let (boxed, pwb, phb) = build_color_region_box(&tm, &None, 0, 0, w, h, s);
-    let (fast, pwf, phf) = build_fast_preview_region(&tm, &None, 0, 0, w, h, s);
+    let (fast, pwf, phf) = build_fast_preview_region(&tm, &None, 0, 0, w, h, s, false);
     assert_eq!((pw, ph), (pwb, phb));
     assert_eq!((pw, ph), (pwf, phf));
 
@@ -3746,19 +3746,65 @@ fn luma_u8(px: &[u8]) -> f32 {
 fn linear_color_stage_preserves_headroom_and_neutral_is_exact() {
     let neutral = DevelopSettings::default();
     let (mut er, mut eg, mut eb) = (1.25f32, 0.42, 0.18);
-    apply_color_linear(&neutral, None, &mut er, &mut eg, &mut eb);
+    apply_color_linear(&neutral, None, true, &mut er, &mut eg, &mut eb);
     let exact = [er, eg, eb];
     assert_eq!(exact, [1.25, 0.42, 0.18]);
 
     let mut settings = DevelopSettings::default();
     settings.saturation = 100.0;
     let (mut wr, mut wg, mut wb) = (1.25f32, 0.42, 0.18);
-    apply_color_linear(&settings, None, &mut wr, &mut wg, &mut wb);
+    apply_color_linear(&settings, None, true, &mut wr, &mut wg, &mut wb);
     let wide = [wr, wg, wb];
     assert!(wide.iter().all(|v| v.is_finite()));
     assert!(
         wide[0] > 1.0,
         "linear colour clipped highlight headroom: {wide:?}"
+    );
+}
+
+#[test]
+fn boundary_managed_saturation_beats_the_srgb_hull_knee() {
+    // A mid-chroma warm RAW working pixel pushed hard on Saturation. The
+    // boundary-managed (RAW scene) path keeps scaling chroma past the point the
+    // clamped sRGB-hull knee stops; the single OKLCh output boundary then maps
+    // it back in gamut with the hue preserved. This is what keeps strong
+    // Saturation/Mixer pushes "trong"/vivid instead of greying (bạc).
+    use crate::core::gamut_map::{is_in_gamut, map_to_output_gamut};
+    use crate::core::perceptual_color::{linear_srgb_to_oklab, PerceptualColor};
+    use crate::core::working_color::OutputColorSpace;
+
+    let mut settings = DevelopSettings::default();
+    settings.saturation = 100.0;
+    let input = [0.36f32, 0.10, 0.06];
+    let oklch = |c: [f32; 3]| PerceptualColor::from_oklab(linear_srgb_to_oklab(c));
+
+    let (mut wr, mut wg, mut wb) = (input[0], input[1], input[2]);
+    apply_color_linear(&settings, None, true, &mut wr, &mut wg, &mut wb);
+    let wide = [wr, wg, wb];
+
+    let (mut kr, mut kg, mut kb) = (input[0], input[1], input[2]);
+    apply_color_linear(&settings, None, false, &mut kr, &mut kg, &mut kb);
+    let knee = [kr, kg, kb];
+
+    assert!(wide.iter().all(|v| v.is_finite()));
+    // The wide push overshoots the sRGB gamut; the hull knee never does.
+    assert!(!is_in_gamut(wide, OutputColorSpace::Srgb));
+    assert!(is_in_gamut(knee, OutputColorSpace::Srgb));
+    // It carries meaningfully more chroma than the greyed knee result.
+    assert!(
+        oklch(wide).chroma > oklch(knee).chroma + 1.0e-3,
+        "wide {wide:?} did not out-saturate knee {knee:?}"
+    );
+    // The single output boundary lands it back in gamut, hue preserved.
+    let mapped = map_to_output_gamut(wide, OutputColorSpace::Srgb);
+    assert!(is_in_gamut(mapped, OutputColorSpace::Srgb));
+    let dh = (oklch(mapped).hue - oklch(wide).hue).abs();
+    let dh = dh.min(std::f32::consts::TAU - dh);
+    assert!(
+        dh < 0.02,
+        "boundary map drifted hue: {} -> {}",
+        oklch(wide).hue,
+        oklch(mapped).hue
     );
 }
 
@@ -3943,10 +3989,10 @@ fn fast_preview_effects_track_spatial_bake() {
     // The live preview proxy (downsample 1 here) must move the same
     // direction as the bake: clarity widens the ripple's range.
     let src = ripple_tilemap(0.5, 0.08);
-    let (region, pw, ph) = build_fast_preview_region(&src, &None, 0, 0, 64, 64, 1);
+    let (region, pw, ph) = build_fast_preview_region(&src, &None, 0, 0, 64, 64, 1, false);
     let mut settings = DevelopSettings::default();
     settings.clarity = 100.0;
-    let out = apply_fast_preview_to_region(&region, &settings, pw, ph, 0, 0, 64, 64, 1);
+    let out = apply_fast_preview_to_region(&region, &settings, None, pw, ph, 0, 0, 64, 64, 1);
     let lum = |p: &[f32; 3]| p[0] * 0.299 + p[1] * 0.587 + p[2] * 0.114;
     let spread = |buf: &[[f32; 3]]| {
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
@@ -3963,6 +4009,143 @@ fn fast_preview_effects_track_spatial_bake() {
         after > before + 0.03,
         "fast preview clarity should widen the ripple: {before} -> {after}"
     );
+}
+
+#[test]
+fn fast_preview_detail_and_local_track_commit_at_full_sample_density() {
+    let src = ripple_tilemap(0.46, 0.12);
+    let mut settings = DevelopSettings {
+        shadows: 24.0,
+        sharpening: 62.0,
+        sharpen_radius: 1.2,
+        sharpen_detail: 45.0,
+        sharpen_masking: 20.0,
+        noise_reduction: 18.0,
+        color_noise_reduction: 12.0,
+        ..Default::default()
+    };
+    settings.locals.push(LocalAdjustment {
+        shape: LocalMaskShape::Radial {
+            cx: 0.38,
+            cy: 0.52,
+            rx: 0.32,
+            ry: 0.40,
+            feather: 0.65,
+            invert: false,
+        },
+        settings: LocalSettings {
+            exposure: 24.0,
+            contrast: 18.0,
+            saturation: 10.0,
+            ..Default::default()
+        },
+    });
+
+    let (region, pw, ph) = build_fast_preview_region(&src, &None, 0, 0, 64, 64, 1, true);
+    let tone = build_tone_data(&settings);
+    let (regional, regional_w, regional_h) = build_region_luma_proxy(&src, &tone, 1);
+    let preview = apply_fast_preview_to_region(
+        &region,
+        &settings,
+        Some((&regional, regional_w, regional_h, 1)),
+        pw,
+        ph,
+        0,
+        0,
+        64,
+        64,
+        1,
+    );
+    let committed = apply_to_tilemap_direct(&src, &settings, None).flatten();
+    let mut errors = Vec::with_capacity(preview.len() * 3);
+    for (i, p) in preview.iter().enumerate() {
+        for channel in 0..3 {
+            errors.push((p[channel] - committed[i * 4 + channel] as f32 / 255.0).abs());
+        }
+    }
+    errors.sort_by(f32::total_cmp);
+    let p95 = errors[((errors.len() as f32 * 0.95).ceil() as usize).min(errors.len() - 1)];
+    let max = *errors.last().unwrap();
+    assert!(p95 <= 2.0 / 255.0, "preview/commit p95 drift {p95}");
+    assert!(max <= 4.0 / 255.0, "preview/commit max drift {max}");
+}
+
+#[test]
+fn detail_preview_base_prefilters_single_pixel_aliasing() {
+    let (w, h) = (64u32, 64u32);
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+            pixels[i] = v;
+            pixels[i + 1] = v;
+            pixels[i + 2] = v;
+            pixels[i + 3] = 255;
+        }
+    }
+    let src = TileMap::from_rgba(&pixels, w, h);
+    let (proxy, _, _) = build_fast_preview_region(&src, &None, 0, 0, w, h, 4, true);
+    let mean = proxy.iter().map(|p| p[0]).sum::<f32>() / proxy.len() as f32;
+    assert!(
+        (mean - 0.5).abs() < 0.12,
+        "anti-aliased Detail base should retain checker mean, got {mean}"
+    );
+}
+
+#[test]
+#[ignore = "manual spatial-preview p95 probe; hardware dependent"]
+fn fast_preview_detail_local_p95_probe() {
+    // High-tier production budget for Detail is two thirds of 240k = 160k.
+    let (w, h) = (490usize, 326usize);
+    let region: Vec<[f32; 3]> = (0..w * h)
+        .map(|i| {
+            let x = (i % w) as f32;
+            let y = (i / w) as f32;
+            let v = 0.45 + 0.12 * (x * 0.071).sin() + 0.05 * (y * 0.113).cos();
+            [
+                v + 0.015 * (x * 0.31).sin(),
+                v,
+                v - 0.012 * (y * 0.29).sin(),
+            ]
+        })
+        .collect();
+    let mut settings = DevelopSettings {
+        sharpening: 55.0,
+        sharpen_radius: 1.1,
+        sharpen_detail: 40.0,
+        sharpen_masking: 25.0,
+        noise_reduction: 15.0,
+        color_noise_reduction: 10.0,
+        ..Default::default()
+    };
+    settings.locals.push(LocalAdjustment {
+        shape: LocalMaskShape::Linear {
+            x0: 0.15,
+            y0: 0.1,
+            x1: 0.85,
+            y1: 0.9,
+        },
+        settings: LocalSettings {
+            exposure: 20.0,
+            contrast: 15.0,
+            saturation: 8.0,
+            ..Default::default()
+        },
+    });
+
+    let run = || apply_fast_preview_to_region(&region, &settings, None, w, h, 0, 0, 6370, 4238, 13);
+    std::hint::black_box(run());
+    let mut samples = Vec::with_capacity(12);
+    for _ in 0..12 {
+        let start = std::time::Instant::now();
+        std::hint::black_box(run());
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    let p95 = samples[((samples.len() as f64 * 0.95).ceil() as usize).min(samples.len() - 1)];
+    eprintln!("Detail+Local 160k proxy tail p95 {p95:.2} ms");
+    assert!(p95 < 50.0, "Detail+Local proxy tail p95 {p95:.2} ms");
 }
 
 #[test]

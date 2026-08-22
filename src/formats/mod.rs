@@ -189,6 +189,14 @@ pub struct ExportOptions {
     pub flatten: bool,
     pub embed_metadata: bool,
     pub embed_icc: bool,
+    /// Fit the longest side to this many pixels on export (downscale only);
+    /// `None` keeps the native size. Raster image formats only. Because output
+    /// sizing/sharpening is a display-referred final step, a reprocessed export
+    /// is written as 8-bit.
+    pub resize_long_edge: Option<u32>,
+    /// Output sharpening strength (0..=100, 0 = off), applied AFTER the resize so
+    /// it re-crisps detail at the final delivery size.
+    pub output_sharpen: u8,
 }
 
 impl Default for ExportOptions {
@@ -197,6 +205,8 @@ impl Default for ExportOptions {
             flatten: true,
             embed_metadata: true,
             embed_icc: true,
+            resize_long_edge: None,
+            output_sharpen: 0,
         }
     }
 }
@@ -371,9 +381,14 @@ impl FormatRegistry {
     }
 
     pub fn export(&self, canvas: &Canvas, path: &Path, opts: &ExportOptions) -> Result<(), String> {
+        // Optional output sizing/sharpening produces a derived 8-bit canvas; when
+        // it doesn't apply, `prepared` is None and the export is byte-identical to
+        // before this feature existed.
+        let prepared = prepare_output_canvas(canvas, path, opts);
+        let target = prepared.as_ref().unwrap_or(canvas);
         for exporter in &self.exporters {
             if exporter.can_export(path) {
-                return exporter.export(canvas, path, opts);
+                return exporter.export(target, path, opts);
             }
         }
         Err(format!("No exporter found for: {}", path.display()))
@@ -398,6 +413,76 @@ impl FormatRegistry {
         exts.dedup();
         exts
     }
+}
+
+/// Raster image extensions that support output sizing/sharpening on export.
+fn is_raster_image_ext(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "tiff" | "tif" | "bmp"
+    )
+}
+
+/// Build a derived, single-layer 8-bit canvas for output sizing/sharpening:
+/// flatten → high-quality Lanczos downscale (longest-side fit, downscale only) →
+/// output sharpen at the final grid. Returns `None` when the request does not
+/// apply — no resize and no sharpen, a non-raster target, an empty or oversized
+/// canvas, or a resize that would upscale — so those exports stay byte-identical.
+fn prepare_output_canvas(canvas: &Canvas, path: &Path, opts: &ExportOptions) -> Option<Canvas> {
+    if !opts.flatten || !is_raster_image_ext(path) {
+        return None;
+    }
+    if opts.resize_long_edge.is_none() && opts.output_sharpen == 0 {
+        return None;
+    }
+    let (w, h) = (canvas.width, canvas.height);
+    if w == 0 || h == 0 || !Canvas::fits_flat_buffer(w, h) {
+        return None;
+    }
+    let mut rgba = canvas.export_flat();
+    if rgba.len() != (w as usize) * (h as usize) * 4 {
+        return None;
+    }
+    let (mut cw, mut ch) = (w, h);
+
+    if let Some(le) = opts.resize_long_edge {
+        let longest = w.max(h);
+        if le > 0 && (le as u64) < longest as u64 {
+            let scale = le as f64 / longest as f64;
+            let nw = ((w as f64 * scale).round() as u32).max(1);
+            let nh = ((h as f64 * scale).round() as u32).max(1);
+            let src = image::RgbaImage::from_raw(w, h, rgba)?;
+            let dst = image::imageops::resize(&src, nw, nh, image::imageops::FilterType::Lanczos3);
+            cw = nw;
+            ch = nh;
+            rgba = dst.into_raw();
+        }
+    }
+
+    // Nothing to do (the resize was an up-scale we declined and no sharpening) —
+    // keep the original export path.
+    if cw == w && ch == h && opts.output_sharpen == 0 {
+        return None;
+    }
+
+    if opts.output_sharpen > 0 {
+        crate::core::output_sharpen::apply_output_sharpen(
+            &mut rgba,
+            cw as usize,
+            ch as usize,
+            opts.output_sharpen,
+        );
+    }
+
+    let mut derived = Canvas::from_rgba(rgba, cw, ch);
+    derived.icc_profile = canvas.icc_profile.clone();
+    derived.metadata = canvas.metadata.clone();
+    Some(derived)
 }
 
 #[cfg(test)]
@@ -538,5 +623,55 @@ mod icc_roundtrip_tests {
     #[test]
     fn tiff_16bit_roundtrip_is_lossless() {
         assert_16bit_roundtrip("tiff");
+    }
+}
+
+#[cfg(test)]
+mod output_prep_tests {
+    use super::*;
+    use crate::core::canvas::Canvas;
+    use std::path::Path;
+
+    fn solid_canvas(w: u32, h: u32) -> Canvas {
+        Canvas::from_rgba(vec![128u8; (w as usize) * (h as usize) * 4], w, h)
+    }
+
+    #[test]
+    fn default_export_is_left_untouched() {
+        let c = solid_canvas(64, 40);
+        assert!(
+            prepare_output_canvas(&c, Path::new("out.png"), &ExportOptions::default()).is_none()
+        );
+    }
+
+    #[test]
+    fn resize_fits_longest_side_and_downscales_only() {
+        let c = solid_canvas(400, 200);
+        let opts = ExportOptions {
+            resize_long_edge: Some(100),
+            ..ExportOptions::default()
+        };
+        let out =
+            prepare_output_canvas(&c, Path::new("out.jpg"), &opts).expect("derived export canvas");
+        assert_eq!((out.width, out.height), (100, 50));
+
+        // An up-scale request is declined (output sizing only downscales).
+        let up = ExportOptions {
+            resize_long_edge: Some(800),
+            ..ExportOptions::default()
+        };
+        assert!(prepare_output_canvas(&c, Path::new("out.jpg"), &up).is_none());
+    }
+
+    #[test]
+    fn non_raster_targets_are_skipped() {
+        let c = solid_canvas(400, 200);
+        let opts = ExportOptions {
+            resize_long_edge: Some(100),
+            output_sharpen: 60,
+            ..ExportOptions::default()
+        };
+        assert!(prepare_output_canvas(&c, Path::new("out.pdf"), &opts).is_none());
+        assert!(prepare_output_canvas(&c, Path::new("out.iai"), &opts).is_none());
     }
 }

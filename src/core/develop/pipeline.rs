@@ -710,12 +710,12 @@ impl<'a> DevelopPlan<'a> {
     }
 
     /// Local adjustments: each mask's tone/colour stage runs on the globally
-    /// developed pixel and blends back by the mask weight. Runs LAST (after
-    /// effects, before quantization) on every bake path; the live preview
-    /// takes the CPU path while masks are active, so preview = commit by
-    /// construction. Highlights/Shadows here use the per-pixel (global) tone
-    /// form — no regional base — which is the classic local-brush behaviour.
-    fn apply_locals(&self, rf: &mut f32, gf: &mut f32, bf: &mut f32, x: u32, y: u32) {
+    /// developed pixel and blends back by the mask weight. This is the last
+    /// point-op before the legacy path's separate Detail pass; the reduced-res
+    /// preview calls this same plan in the same order. Highlights/Shadows here
+    /// use the per-pixel (global) tone form — no regional base — which is the
+    /// classic local-brush behaviour.
+    pub(crate) fn apply_locals(&self, rf: &mut f32, gf: &mut f32, bf: &mut f32, x: u32, y: u32) {
         if self.locals.is_empty() {
             return;
         }
@@ -1254,4 +1254,5 @@ pub(crate) fn has_detail(settings: &DevelopSettings) -> bool {
     settings.sharpening.abs() > 0.001
         || settings.noise_reduction.abs() > 0.001
         || settings.color_noise_reduction.abs() > 0.001
+        || settings.defringe.abs() > 0.001
 }

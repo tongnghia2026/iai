@@ -635,6 +635,9 @@ impl App {
                     crate::core::canvas::ColorMode::Rgb => String::new(),
                 },
                 export_embed_icc: self.shell.ui.export_embed_icc,
+                export_resize_enabled: self.shell.ui.export_resize_enabled,
+                export_resize_long_edge: self.shell.ui.export_resize_long_edge,
+                export_output_sharpen: self.shell.ui.export_output_sharpen,
                 swatches: std::sync::Arc::new(
                     self.docs.documents[self.docs.active_doc_idx]
                         .canvas
@@ -1248,6 +1251,9 @@ impl App {
                 develop_in_window: self.win.develop_window.is_some(),
                 develop_settings: self.shell.ui.develop_settings.clone(),
                 develop_histogram: self.dev.develop_histogram.clone(),
+                develop_scopes: self.dev.develop_scopes.clone(),
+                develop_scopes_revision: self.dev.develop_scopes_revision,
+                develop_scope_visibility: self.dev.develop_scope_visibility,
                 develop_mode: {
                     let active_id = self.docs.documents[self.docs.active_doc_idx].id;
                     self.dev

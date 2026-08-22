@@ -2,6 +2,10 @@ use crate::core::layer::{BlendMode, Layer, LayerStack};
 use crate::core::tile::{TileMap, TilePos};
 use crate::gpu::tile_atlas::TileAtlas;
 use bytemuck::{Pod, Zeroable};
+use wgpu::util::DeviceExt;
+
+const DEV_EFFECTS_LEN: usize = 84;
+const DEV_RGB_CURVE_BASE_LEN: usize = 2465;
 
 /// Deepest LOD proxy level built for a zoomed-out layer (`S = 2^level`). Level 8
 /// reduces by 256×, enough to render a ~12k-px layer at zoom ≈ 0.004.
@@ -1389,19 +1393,26 @@ struct VsOut {
             // [texture, clarity, dehaze, vignette, mixer_gate_active,
             //  5..16 free (the mixer re-gate table lives in dev_rgb_curve),
             //  scene: CAT16·2^EV matrix 16..25, shadow-chroma flag 25,
-            //  display-curve flag 26, split-grade RGB vectors 27..33]
-            size: 36 * 4,
+            //  display-curve flag 26, split-grade RGB vectors 27..33,
+            //  working<->sRGB matrices 36..54, working-luma coefficients 54..57,
+            //  cusp-LUT schema 58..62, direct working<->OKLab-LMS 64..82]
+            size: (DEV_EFFECTS_LEN * 4) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let dev_rgb_curve_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        let mut dev_rgb_curve_initial =
+            vec![0.0f32; DEV_RGB_CURVE_BASE_LEN + crate::core::gamut_map::CUSP_LUT_LEN];
+        dev_rgb_curve_initial[DEV_RGB_CURVE_BASE_LEN..].copy_from_slice(
+            crate::core::gamut_map::cusp_lut(crate::core::working_color::OutputColorSpace::Srgb),
+        );
+        let dev_rgb_curve_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("dev_rgb_curve_buf"),
             // [active flag, R 256, G 256, B 256, scene display luma 256,
-            // mixer gate + H/S/L working-space curves (4 x 360 entries).
-            size: 2465 * 4,
+            // mixer gate + H/S/L working-space curves (4 x 360 entries),
+            // then the shared sRGB OKLCh cusp table.
+            contents: bytemuck::cast_slice(&dev_rgb_curve_initial),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         let uniform_bg = Self::build_uniform_bg(
@@ -1888,11 +1899,12 @@ struct VsOut {
         // the display-curve flag ([16..27]).
         if let Some(p) = self.develop_preview.as_ref() {
             let s = &p.settings;
-            let mut effects = [0.0f32; 36];
+            let mut effects = [0.0f32; DEV_EFFECTS_LEN];
             effects[0] = s.texture;
             effects[1] = s.clarity;
             effects[2] = s.dehaze;
             effects[3] = s.vignette;
+            let mixer_curves = crate::core::develop::build_mixer_curves_opt(s);
             let mixer_gated = crate::core::develop::mixer_edit_mask(s).is_some();
             if mixer_gated {
                 effects[4] = 1.0;
@@ -1917,20 +1929,22 @@ struct VsOut {
             // ToneData::apply_rgb_curves reads, so preview and bake match.
             // [769..1025] is the scene display luma curve; [1025..1385] the
             // mixer re-gate LUT.
-            let mut rgb = vec![0.0f32; 2465];
+            let mut rgb = vec![0.0f32; DEV_RGB_CURVE_BASE_LEN];
             if let Some(luts) = crate::core::develop::rgb_curve_luts(s) {
                 rgb[0] = 1.0;
                 for (ch, lut) in luts.iter().enumerate() {
                     rgb[1 + ch * 256..1 + (ch + 1) * 256].copy_from_slice(lut);
                 }
             }
-            if mixer_gated {
-                if let Some(curves) = crate::core::develop::build_mixer_curves_opt(s) {
-                    rgb[1025..1385].copy_from_slice(&curves.gate);
-                    rgb[1385..1745].copy_from_slice(&curves.hue);
-                    rgb[1745..2105].copy_from_slice(&curves.sat);
-                    rgb[2105..2465].copy_from_slice(&curves.lum);
-                }
+            // Mixer activity and the spatial anti-bleed re-gate are separate
+            // states. Global Saturation/Vibrance deliberately opens the gate,
+            // but the band curves must still reach the shader and combine with
+            // those global controls exactly as they do in the CPU plan.
+            if let Some(curves) = mixer_curves {
+                rgb[1025..1385].copy_from_slice(&curves.gate);
+                rgb[1385..1745].copy_from_slice(&curves.hue);
+                rgb[1745..2105].copy_from_slice(&curves.sat);
+                rgb[2105..2465].copy_from_slice(&curves.lum);
             }
             if let Some(scene) = &p.scene {
                 let tone = crate::core::develop_scene::build_scene_tone_for_scene(s, scene);
@@ -1946,6 +1960,45 @@ struct VsOut {
                 if scene.look == crate::core::develop_scene::BaseLook::Raw {
                     effects[34] = s.saturation;
                     effects[35] = s.vibrance;
+                }
+                for (i, row) in tone
+                    .working_space
+                    .to_linear_srgb_matrix()
+                    .iter()
+                    .enumerate()
+                {
+                    effects[36 + i * 3..39 + i * 3].copy_from_slice(row);
+                }
+                for (i, row) in tone
+                    .working_space
+                    .from_linear_srgb_matrix()
+                    .iter()
+                    .enumerate()
+                {
+                    effects[45 + i * 3..48 + i * 3].copy_from_slice(row);
+                }
+                effects[54..57]
+                    .copy_from_slice(&tone.working_space.render_luminance_coefficients());
+                effects[57] = f32::from(
+                    tone.working_space != crate::core::working_color::WorkingColorSpace::LinearSrgb,
+                );
+                effects[58] = DEV_RGB_CURVE_BASE_LEN as f32;
+                effects[59] = crate::core::gamut_map::CUSP_HUE_SAMPLES as f32;
+                effects[60] = crate::core::gamut_map::CUSP_LIGHTNESS_SAMPLES as f32;
+                effects[61] = crate::core::gamut_map::CUSP_FALLBACK_STEPS as f32;
+                for (i, row) in
+                    crate::core::perceptual_color::oklab_lms_from_working_matrix(tone.working_space)
+                        .iter()
+                        .enumerate()
+                {
+                    effects[64 + i * 3..67 + i * 3].copy_from_slice(row);
+                }
+                for (i, row) in
+                    crate::core::perceptual_color::working_from_oklab_lms_matrix(tone.working_space)
+                        .iter()
+                        .enumerate()
+                {
+                    effects[73 + i * 3..76 + i * 3].copy_from_slice(row);
                 }
                 if let Some(display) = &tone.display {
                     effects[26] = 1.0;

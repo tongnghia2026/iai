@@ -954,6 +954,73 @@ pub(crate) fn export_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                 );
             }
 
+            // Output sizing & sharpening — raster image formats only.
+            let is_raster_output = matches!(
+                data.dialogs.export_format,
+                ExportFormat::Png { .. }
+                    | ExportFormat::Jpeg { .. }
+                    | ExportFormat::Webp { .. }
+                    | ExportFormat::Tiff
+                    | ExportFormat::Bmp
+            );
+            if is_raster_output {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                let mut resize_on = data.doc.export_resize_enabled;
+                if ui
+                    .checkbox(&mut resize_on, "Resize (longest side)")
+                    .changed()
+                {
+                    actions.doc.set_export_resize_enabled = Some(resize_on);
+                }
+                if resize_on {
+                    let mut le = data.doc.export_resize_long_edge;
+                    ui.horizontal(|ui| {
+                        ui.label("Longest side:");
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut le)
+                                    .range(16..=60000)
+                                    .suffix(" px"),
+                            )
+                            .changed()
+                        {
+                            actions.doc.set_export_resize_long_edge = Some(le);
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new("Only downscales; larger sizes are kept.")
+                            .color(egui::Color32::GRAY)
+                            .size(10.0),
+                    );
+                }
+
+                ui.add_space(6.0);
+                ui.label("Output sharpening:");
+                // Map the stored strength back to the nearest preset for display.
+                let cur = data.doc.export_output_sharpen;
+                let cur_name = match cur {
+                    0 => "Off",
+                    1..=45 => "Low",
+                    46..=72 => "Standard",
+                    _ => "High",
+                };
+                ui.horizontal(|ui| {
+                    for (name, val) in [("Off", 0u8), ("Low", 35), ("Standard", 60), ("High", 85)] {
+                        if ui.selectable_label(cur_name == name, name).clicked() {
+                            actions.doc.set_export_output_sharpen = Some(val);
+                        }
+                    }
+                });
+                ui.label(
+                    egui::RichText::new("Re-crisps detail at the export size.")
+                        .color(egui::Color32::GRAY)
+                        .size(10.0),
+                );
+            }
+
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 if ui.button("  Export...  ").clicked() {

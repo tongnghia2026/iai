@@ -348,6 +348,14 @@ impl App {
                 crate::ui::develop::save_sections_open(&self.dev.develop_sections_open);
             }
         }
+        if let Some(visible) = actions.develop.set_develop_scope_visibility.take() {
+            let visible = visible & 0b111;
+            if self.dev.develop_scope_visibility != visible {
+                self.dev.develop_scope_visibility = visible;
+                let settings = self.shell.ui.develop_settings.clone();
+                self.rebin_develop_histogram(&settings);
+            }
+        }
         if actions.develop.develop_auto {
             actions.develop.develop_auto = false;
             self.apply_develop_auto();

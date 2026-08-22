@@ -71,6 +71,10 @@ pub struct DocumentIntent {
     pub request_export_path: Option<ExportFormat>,
     /// Toggle "Embed Color Profile (ICC)" for export.
     pub set_export_embed_icc: Option<bool>,
+    /// Export output-sizing/sharpening controls.
+    pub set_export_resize_enabled: Option<bool>,
+    pub set_export_resize_long_edge: Option<u32>,
+    pub set_export_output_sharpen: Option<u8>,
     /// Image ▸ Assign Profile: re-interpret the document as this profile and bake
     /// into the sRGB working space.
     pub assign_profile: Option<crate::core::cms::WorkingProfile>,
@@ -454,6 +458,8 @@ pub struct DevelopIntent {
     pub select_develop_local: Option<Option<usize>>,
     /// A section header was expanded/collapsed — persist to prefs.json.
     pub set_develop_section_open: Option<(usize, bool)>,
+    /// View-only scope visibility bitmask (waveform/parade/vectorscope).
+    pub set_develop_scope_visibility: Option<u8>,
     /// "Auto" clicked: fit Exposure to the fixed target brightness (D4 v1).
     pub develop_auto: bool,
 }

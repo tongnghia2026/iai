@@ -132,7 +132,10 @@ impl ArrowTool {
             end.y,
             self.tree_count.max(1) as usize,
             stub,
-            self.width.max(0.1) * 0.5,
+            // Closed two-node connector strokes already receive square endpoint
+            // coverage in the shared CPU/GPU stroke geometry. Adding the old
+            // half-width overhang here would extend the bar past the outer drop.
+            0.0,
         )
     }
 

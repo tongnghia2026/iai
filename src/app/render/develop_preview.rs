@@ -2,8 +2,8 @@
 
 use crate::app::state::App;
 
-fn raw_color_runs_per_pixel(has_color: bool, pointer_down: bool) -> bool {
-    has_color && !pointer_down
+fn raw_color_runs_per_pixel(has_color: bool) -> bool {
+    has_color
 }
 
 impl App {
@@ -89,50 +89,37 @@ impl App {
         let scene_tone = scene
             .as_ref()
             .map(|sc| crate::core::develop_scene::build_scene_tone_for_scene(&settings, sc));
-        // Detail (Sharpening / Noise Reduction) is independent of the colour proxy: it
-        // is full-resolution and previewed on commit only (see the note below). It must
-        // NOT suppress the colour preview — the old `&& !need_detail` here made every
-        // Colour/Mixer edit vanish (preview snapped back to the untouched image) the
-        // moment a Detail slider was touched.
-        let pointer_down = self
-            .dev
-            .develop_preview
-            .as_ref()
-            .is_some_and(|p| p.detail_refine_waiting_for_release);
-        // The pre-ART realtime architecture kept selective colour on a small
-        // chroma proxy and reconstructed it over the native-resolution toned
-        // pixel, so edges stayed sharp without evaluating OKLCh/gamut mapping
-        // for every viewport fragment. Use that path only while the pointer is
-        // held. Release immediately returns RAW to the exact per-pixel shader,
-        // and settled/commit remain the full CPU pipeline.
+        // Detail and Local reuse the same CPU kernels on a reduced-resolution
+        // viewport proxy. They must not suppress the colour preview — the old
+        // `&& !need_detail` gate made every Colour/Mixer edit vanish as soon as
+        // a Detail slider was touched.
+        // RAW colour always runs through the scene shader. Interaction may
+        // reduce the sampled scene texture's resolution, but must never swap
+        // to the old chroma-reconstruction model while the pointer is held:
+        // changing models on release was the visible brightness/chroma jump.
         let linear_scene_color = scene.as_ref().is_some_and(|sc| {
             sc.look == crate::core::develop_scene::BaseLook::Raw
-                && raw_color_runs_per_pixel(settings.has_color(), pointer_down)
+                && raw_color_runs_per_pixel(settings.has_color())
         });
-        let need_color = settings.has_color() && !linear_scene_color;
-        // The fast (point-sampled, low-res) proxy carries tone+effects on a downsampled
-        // buffer; only the spatial Effects/Detail stages actually need it. Tone is
-        // applied EXACTLY per-pixel by the shader — global via the tone LUT, and
-        // local-adaptation (Shadows/Highlights/Whites/Blacks) via the `region_luma`
-        // proxy + local LUT below — matching the per-pixel CPU commit. Routing tone
-        // through the fast proxy (the old `tone_is_active` term here) made the light
-        // preview coarse and dropped local adaptation, so it diverged from the commit
-        // (the "sáng/tối" preview↔commit jump). Keep tone out of the fast path.
-        // Detail (Sharpening / Noise Reduction) is NOT previewed via the proxy — it is
-        // full-resolution and the proxy version beaded thin edges (see
-        // apply_fast_preview_to_region); it applies on commit. So only the Effects
-        // group drives the fast proxy here.
-        let need_fast = !need_color
-            && (settings.texture.abs() > 0.001
-                || settings.clarity.abs() > 0.001
-                || settings.dehaze.abs() > 0.001
-                || settings.vignette.abs() > 0.001);
-        // Region-luma (regional Shadows/Highlights/Whites/Blacks adaptation) is now
-        // built under the Colour Mixer too, not only for tone-only edits — the shader
-        // composes local tone THEN colour, so H/S/W/B stay regional when the Mixer
-        // engages (no jump). Still skipped on the fast-effects path (it bakes tone
-        // into its own proxy and returns before the local stage).
-        let need_local = !need_fast && settings.has_local_tone();
+        let needs_spatial_proxy = settings.texture.abs() > 0.001
+            || settings.clarity.abs() > 0.001
+            || settings.dehaze.abs() > 0.001
+            || settings.vignette.abs() > 0.001
+            || settings.has_detail()
+            || settings.has_locals();
+        let need_fast = needs_spatial_proxy;
+        let need_color = settings.has_color() && !linear_scene_color && !need_fast;
+        // The fast low-res proxy carries the complete chain whenever a spatial
+        // stage needs neighbourhood pixels. Its tail samples the same regional
+        // luma/E proxy as the shader-only path, so stacking Shadows/Highlights
+        // with Detail does not silently switch local adaptation to global tone.
+        // Spatial Effects, Detail, and Local all run through this viewport proxy.
+        // Detail requests a five-tap anti-aliased base below, avoiding the thin-edge
+        // aliasing that made the earlier point-sampled attempt bead magenta/cyan.
+        // Region-luma (regional Shadows/Highlights/Whites/Blacks adaptation) is
+        // built under both Colour and fast spatial paths; each composes local
+        // tone before the remaining stages.
+        let need_local = settings.has_local_tone();
         let tone = (scene.is_none() && develop::tone_is_active(&settings))
             .then(|| develop::build_tone_data(&settings));
         let viewport_key = if need_fast || need_color {
@@ -176,7 +163,11 @@ impl App {
                 .clamp(0.0, src_h as f32) as u32;
             let mut rw = lx1.saturating_sub(lx0).max(1);
             let mut rh = ly1.saturating_sub(ly0).max(1);
-            let downsample = develop::fast_preview_downsample(rw, rh) as u32;
+            let downsample = if settings.has_detail() {
+                develop::detail_preview_downsample(rw, rh)
+            } else {
+                develop::fast_preview_downsample(rw, rh)
+            } as u32;
             let pad = downsample.saturating_mul(4).max(64);
             let ox = lx0.saturating_sub(pad).min(src_w.saturating_sub(1));
             let oy = ly0.saturating_sub(pad).min(src_h.saturating_sub(1));
@@ -329,6 +320,7 @@ impl App {
                             rw,
                             rh,
                             downsample as usize,
+                            settings.has_detail(),
                         ),
                         None => develop::build_fast_preview_region(
                             src,
@@ -338,6 +330,7 @@ impl App {
                             rw,
                             rh,
                             downsample as usize,
+                            settings.has_detail(),
                         ),
                     };
                     Some(crate::app::state::DevelopRegionCache {
@@ -498,6 +491,10 @@ impl App {
                 }
             } else {
                 let fast = cache.fast_region.as_ref().unwrap();
+                let regional = cache
+                    .region_luma
+                    .as_ref()
+                    .map(|r| (r.data.as_slice(), r.w, r.h, r.downsample));
                 let (region, adjusted) = match &scene_tone {
                     Some(st) => {
                         let (region, adjusted) =
@@ -505,6 +502,7 @@ impl App {
                                 &fast.region,
                                 st,
                                 &settings,
+                                regional,
                                 fast.w,
                                 fast.h,
                                 fast.origin_x,
@@ -520,6 +518,7 @@ impl App {
                         let adjusted = develop::apply_fast_preview_to_region(
                             &region,
                             &settings,
+                            regional,
                             fast.w,
                             fast.h,
                             fast.origin_x,
@@ -573,10 +572,8 @@ mod phase6_native_interaction_tests {
     use super::raw_color_runs_per_pixel;
 
     #[test]
-    fn raw_drag_uses_chroma_proxy_but_release_is_exact() {
-        assert!(!raw_color_runs_per_pixel(true, true));
-        assert!(raw_color_runs_per_pixel(true, false));
-        assert!(!raw_color_runs_per_pixel(false, true));
-        assert!(!raw_color_runs_per_pixel(false, false));
+    fn raw_color_uses_one_per_pixel_model_for_drag_and_release() {
+        assert!(raw_color_runs_per_pixel(true));
+        assert!(!raw_color_runs_per_pixel(false));
     }
 }

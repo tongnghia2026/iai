@@ -158,6 +158,53 @@ pub(crate) fn apply_luma_target(r: &mut f32, g: &mut f32, b: &mut f32, target_lu
     set_rgb_preserving_luma(r, g, b, nr, ng, nb, target);
 }
 
+/// Unclamped twin of [`apply_luma_target`] for a scene working space. The same
+/// chroma-preservation weights are retained, but no RGB-cube fit happens here:
+/// wide-gamut values remain signed/unbounded until the output boundary.
+pub(crate) fn apply_luma_target_in_space(
+    r: &mut f32,
+    g: &mut f32,
+    b: &mut f32,
+    target_luma: f32,
+    space: crate::core::working_color::WorkingColorSpace,
+) {
+    if space == crate::core::working_color::WorkingColorSpace::LinearSrgb {
+        apply_luma_target(r, g, b, target_luma);
+        return;
+    }
+    let luma = space.luminance([*r, *g, *b]).clamp(0.0, 1.0);
+    let target = target_luma.clamp(0.0, 1.0);
+    let lift = target - luma;
+    let chroma = rgb_chroma(*r, *g, *b);
+    let chroma_gate = smootherstep(0.04, 0.22, chroma);
+    let tone_gate = smootherstep(0.025, 0.16, luma) * (1.0 - smootherstep(0.86, 0.98, target));
+    let chroma_factor = if lift > 0.0 {
+        1.0 + lift * 1.20 * chroma_gate * tone_gate
+    } else {
+        1.0
+    };
+    let additive = [
+        target + (*r - luma) * chroma_factor,
+        target + (*g - luma) * chroma_factor,
+        target + (*b - luma) * chroma_factor,
+    ];
+    let preserve = luma_target_chroma_preserve_weight(luma, chroma, target);
+    let scale = if luma > 1e-5 { target / luma } else { 0.0 };
+    let scaled = [*r * scale, *g * scale, *b * scale];
+    let mut out = [
+        additive[0] + (scaled[0] - additive[0]) * preserve,
+        additive[1] + (scaled[1] - additive[1]) * preserve,
+        additive[2] + (scaled[2] - additive[2]) * preserve,
+    ];
+    // The coefficients sum to one, so a neutral correction reaches the exact
+    // requested luminance without clipping the wide-gamut chroma residual.
+    let correction = target - space.luminance(out);
+    for value in &mut out {
+        *value += correction;
+    }
+    [*r, *g, *b] = out;
+}
+
 pub(crate) fn apply_tone_delta(r: &mut f32, g: &mut f32, b: &mut f32, delta: f32) {
     let luma = luminance_f32(*r, *g, *b).clamp(0.0, 1.0);
     let delta = delta.clamp(-0.85, 0.85);

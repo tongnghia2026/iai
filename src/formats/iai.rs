@@ -1589,6 +1589,102 @@ mod tests {
     }
 
     #[test]
+    fn develop2_commit_save_reopen_and_png_export_are_settled_identical() {
+        use crate::core::canvas::BitDepth;
+        use crate::core::develop::{
+            DevelopSettings, LocalAdjustment, LocalMaskShape, LocalSettings,
+        };
+        use crate::core::develop_scene::{apply_scene_to_tilemap, SceneSource};
+        use crate::formats::png::PngExporter;
+
+        let dir = tmp_dir("develop2-end-to-end");
+        let project_path = dir.join("developed.iai");
+        let png_path = dir.join("developed.png");
+        let (w, h) = (40u32, 28u32);
+        let mut scene = SceneSource::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let xf = x as f32 / (w - 1) as f32;
+                let yf = y as f32 / (h - 1) as f32;
+                let grain = 0.008 * ((x * 17 + y * 11) as f32).sin();
+                scene.set_rgb(
+                    x,
+                    y,
+                    [
+                        0.025 + 0.46 * xf + grain,
+                        0.018 + 0.27 * yf,
+                        0.035 + 0.16 * xf * yf,
+                    ],
+                );
+            }
+        }
+        let mut settings = DevelopSettings {
+            exposure: 7.0,
+            contrast: 14.0,
+            shadows: 18.0,
+            temperature: 8.0,
+            tint: -4.0,
+            vibrance: 16.0,
+            sharpening: 42.0,
+            sharpen_detail: 38.0,
+            noise_reduction: 9.0,
+            vignette: 11.0,
+            ..Default::default()
+        };
+        settings.locals.push(LocalAdjustment {
+            shape: LocalMaskShape::Radial {
+                cx: 0.42,
+                cy: 0.55,
+                rx: 0.28,
+                ry: 0.36,
+                feather: 0.6,
+                invert: false,
+            },
+            settings: LocalSettings {
+                exposure: 12.0,
+                saturation: 9.0,
+                ..Default::default()
+            },
+        });
+
+        // This is the exact settled/commit path used after the interactive
+        // preview refines. It remains the reference through save and export.
+        let settled = apply_scene_to_tilemap(&scene, &settings, None);
+        let expected = settled.flatten16();
+        let mut canvas = solid([0, 0, 0, 255], w, h);
+        canvas.bit_depth = BitDepth::Sixteen;
+        canvas.metadata.develop_working_space = scene.color_pipeline.working;
+        canvas.metadata.color_pipeline_version = 2;
+        canvas.layer_stack.layers[0].tiles = settled;
+
+        IaiExporter
+            .export(&canvas, &project_path, &ExportOptions::default())
+            .expect("save Develop2 project");
+        let IaiLoad::Canvas(reopened) = load(&project_path).expect("reopen Develop2 project")
+        else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(reopened.bit_depth, BitDepth::Sixteen);
+        assert_eq!(reopened.layer_stack.layers[0].tiles.flatten16(), expected);
+
+        PngExporter
+            .export(&reopened, &png_path, &ExportOptions::default())
+            .expect("export settled PNG");
+        let exported = image::open(&png_path)
+            .expect("decode exported PNG")
+            .to_rgba16()
+            .into_raw();
+        assert_eq!(
+            exported,
+            reopened
+                .export_flat16_samples()
+                .expect("16-bit flattened export"),
+            "settled preview/commit must survive save, reopen, and export exactly"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn eight_bit_layer_stays_eight_bit() {
         // A layer without a master must NOT be promoted on save; the payload
         // stays an 8-bit PNG and reopens master-less.

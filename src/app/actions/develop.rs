@@ -16,18 +16,51 @@ const SCENE_IDENTITY_MAX_PIXELS: u64 = 16384 * 16384;
 
 impl App {
     /// Re-bin the live histogram from the cached source proxy through `settings`.
-    fn rebin_develop_histogram(&mut self, settings: &crate::core::develop::DevelopSettings) {
+    pub(super) fn rebin_develop_histogram(
+        &mut self,
+        settings: &crate::core::develop::DevelopSettings,
+    ) {
+        let scopes_visible = self.dev.develop_scope_visibility != 0;
         let Some(preview) = &self.dev.develop_preview else {
             return;
         };
-        self.dev.develop_histogram = Some(std::sync::Arc::new(match &preview.scene {
+        let histogram = std::sync::Arc::new(match &preview.scene {
             Some(scene) => crate::core::develop_scene::histogram_rgbl_scene(
                 &preview.histogram_proxy,
                 settings,
                 scene.look,
             ),
             None => crate::core::develop::histogram_rgbl(&preview.histogram_proxy, settings),
-        }));
+        });
+        let scopes = scopes_visible.then(|| {
+            let rendered = match &preview.scene {
+                Some(scene) => crate::core::develop_scene::render_scene_scope_source_proxy(
+                    scene,
+                    &preview.scope_proxy,
+                    settings,
+                ),
+                None => {
+                    crate::core::develop::render_scope_source_proxy(&preview.scope_proxy, settings)
+                }
+            };
+            let resolution = crate::core::develop2::scopes::ScopeResolution {
+                horizontal_bins: 192,
+                value_bins: 128,
+                vectorscope_bins: 128,
+            };
+            crate::core::develop2::scopes::analyze_display_scopes_masked(
+                &rendered,
+                Some(&preview.scope_proxy.included),
+                preview.scope_proxy.width,
+                preview.scope_proxy.height,
+                crate::core::develop2::BufferContract::DISPLAY_SINK,
+                resolution,
+            )
+            .ok()
+        });
+        self.dev.develop_histogram = Some(histogram);
+        self.dev.develop_scopes = scopes.flatten().map(std::sync::Arc::new);
+        self.dev.develop_scopes_revision = self.dev.develop_scopes_revision.wrapping_add(1);
         self.dev.develop_histogram_at = Some(std::time::Instant::now());
         self.dev.develop_histogram_stale = false;
     }
@@ -164,6 +197,9 @@ impl App {
         self.develop_session_save_active_settings();
         self.cancel_develop_preview();
         self.switch_to_doc(idx);
+        // The shared proof LUT is document-profile aware; a filmstrip switch
+        // must rebuild it before the Develop window presents the new image.
+        self.apply_proof_settings();
         self.begin_develop_preview(settings);
         self.dev.develop_view_fit = true;
         self.dev.develop_composited_view = None;
@@ -479,12 +515,17 @@ impl App {
                     &original_tiles,
                 )),
             };
+            let scope_proxy = std::sync::Arc::new(match &scene {
+                Some(sc) => crate::core::develop_scene::build_scene_scope_source_proxy(sc),
+                None => crate::core::develop::build_scope_source_proxy(&original_tiles),
+            });
             crate::app::state::DevelopPreviewState {
                 doc_id,
                 layer_id: layer.id,
                 original_tiles,
                 scene,
                 histogram_proxy,
+                scope_proxy,
                 job_id: 0,
                 processing: false,
                 gpu_preview_active: false,
@@ -558,11 +599,10 @@ impl App {
         }
 
         // The whole Develop panel previews on the GPU when there is no selection.
-        // Local-tone and Colour feed the shader region proxies (built in recomposite)
-        // and Effects run per-pixel in the shader, so the live preview matches the
-        // CPU bake. Selection-active edits and local-adjustment masks take the CPU
-        // path (the shader neither blends the selection mask nor evaluates local
-        // masks — the CPU path IS the commit bake, so preview = commit).
+        // Local-tone and Colour feed shader region proxies; spatial Effects,
+        // Detail, and Local adjustments share a reduced-resolution viewport
+        // proxy. Selection-active edits still take the exact CPU path because
+        // the shader does not blend the selection mask.
         // A scene (RAW) session additionally requires the f16 master to fit a
         // device texture; oversized masters fall back to the CPU bake.
         let scene_for_gpu = self
@@ -595,7 +635,6 @@ impl App {
                 .canvas
                 .selection
                 .active
-            && !settings.has_locals()
             && !in_isolated_group
         {
             return self.apply_develop_preview_gpu(settings);
@@ -621,8 +660,8 @@ impl App {
         &mut self,
         settings: crate::core::develop::DevelopSettings,
     ) -> bool {
-        // Detail has no realtime GPU implementation, so it alone receives a
-        // quiet-period CPU refine. Tone/WB/Colour must never launch a full RAW
+        // Reduced-resolution spatial stages receive a quiet-period exact CPU
+        // refine. Tone/WB/Colour alone must never launch a full RAW
         // bake after every mouse release: that worker saturates Rayon and makes
         // the next slider wait. Open Image separately requests one exact bake.
         const DETAIL_REFINE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -654,7 +693,7 @@ impl App {
             // result harmless; polling it is what releases the single-flight
             // gate before the newest settled settings are baked.
 
-            if settings.has_detail() {
+            if settings.has_detail() || settings.has_locals() {
                 preview.detail_refine_at = if preview.detail_refine_waiting_for_release {
                     None
                 } else {
@@ -1215,6 +1254,7 @@ impl App {
         self.dev.develop_histogram = None;
         self.dev.develop_histogram_at = None;
         self.dev.develop_histogram_stale = false;
+        self.dev.develop_scopes = None;
         self.dev.develop_local_drag = None;
         self.shell.ui.develop_local_arm = None;
         self.shell.ui.develop_local_selected = None;

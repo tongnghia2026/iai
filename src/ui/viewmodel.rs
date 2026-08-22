@@ -23,6 +23,11 @@ pub struct DocumentViewModel {
     pub cmyk_profile_name: String,
     /// Whether "Embed Color Profile (ICC)" is enabled for export.
     pub export_embed_icc: bool,
+    /// "Resize on export" (longest side, downscale only) toggle + target px.
+    pub export_resize_enabled: bool,
+    pub export_resize_long_edge: u32,
+    /// Output sharpening strength for export (0..=100, 0 = off).
+    pub export_output_sharpen: u8,
     /// Named RGB/CMYK process colours stored in this document.
     pub swatches: std::sync::Arc<Vec<crate::core::palette::DocumentSwatch>>,
     pub zoom: f32,
@@ -331,6 +336,10 @@ pub struct DevelopViewModel {
     pub develop_settings: DevelopSettings,
     /// R/G/B/Luma histogram of the develop source — curve editor backdrop.
     pub develop_histogram: Option<std::sync::Arc<[[f32; 256]; 4]>>,
+    /// Display-post-render, pre-monitor scopes produced by Develop2 core.
+    pub develop_scopes: Option<std::sync::Arc<crate::core::develop2::scopes::DevelopScopes>>,
+    pub develop_scopes_revision: u64,
+    pub develop_scope_visibility: u8,
     /// True while the Develop panel is acting as the RAW Develop stage (slice
     /// R2): the panel is titled "Develop" and commit/cancel mean open/discard.
     pub develop_mode: bool,
@@ -607,6 +616,9 @@ impl Default for UiData {
                 is_cmyk: false,
                 cmyk_profile_name: String::new(),
                 export_embed_icc: true,
+                export_resize_enabled: false,
+                export_resize_long_edge: 2048,
+                export_output_sharpen: 0,
                 swatches: std::sync::Arc::new(Vec::new()),
                 zoom: 1.0,
                 offset_x: 0.0,
@@ -832,6 +844,9 @@ impl Default for UiData {
                 develop_in_window: false,
                 develop_settings: DevelopSettings::default(),
                 develop_histogram: None,
+                develop_scopes: None,
+                develop_scopes_revision: 0,
+                develop_scope_visibility: develop::DEFAULT_SCOPE_VISIBILITY,
                 develop_mode: false,
                 develop_sections_open: develop::DEFAULT_SECTIONS_OPEN,
                 develop_exif: None,

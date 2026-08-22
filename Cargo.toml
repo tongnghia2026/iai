@@ -43,6 +43,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 flate2 = "1"
 rawloader = "0.37"
+# Fallback RAW decoder: CR3 support and a much larger camera database than
+# rawloader. Same LGPL-2.1 license as rawloader, so no new license obligation.
+rawler = "0.7"
 ort = "2.0.0-rc.12"
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json", "multipart"], default-features = false }
 ab_glyph = "0.2"
@@ -55,6 +58,7 @@ i_overlay = "7.0.2"
 lyon_path = "1"
 lyon_tessellation = "1"
 unicode-normalization = "0.1"
+hmac-sha256 = "1.1.14"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_UI_Shell"] }

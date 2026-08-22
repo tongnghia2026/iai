@@ -4,6 +4,22 @@
 
 use super::*;
 
+/// Renderer recipe used to interpret a Develop settings snapshot.
+///
+/// Missing fields deserialize as `Scene1`, preserving the renderer that created
+/// projects and presets before Develop Engine 2 existed. New snapshots opt into
+/// Develop2 through `Default`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum DevelopEngineVersion {
+    Legacy1,
+    Scene1,
+    Develop2,
+}
+
+fn legacy_engine_version() -> DevelopEngineVersion {
+    DevelopEngineVersion::Scene1
+}
+
 /// Which channel the Colour Mixer panel is editing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DevelopMixerMode {
@@ -21,11 +37,24 @@ mod tone_v2_settings_tests {
     fn old_documents_keep_legacy_tone_and_curve_semantics() {
         let mut value = serde_json::to_value(DevelopSettings::default()).unwrap();
         let object = value.as_object_mut().unwrap();
+        object.remove("develop_engine_version");
         object.remove("tone_map_mode");
         object.remove("point_curve_mode");
         let reopened: DevelopSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            reopened.develop_engine_version,
+            DevelopEngineVersion::Scene1
+        );
         assert_eq!(reopened.tone_map_mode, ToneMapMode::FilmLike);
         assert_eq!(reopened.point_curve_mode, PointCurveMode::Luminance);
+    }
+
+    #[test]
+    fn new_documents_default_to_develop2() {
+        assert_eq!(
+            DevelopSettings::default().develop_engine_version,
+            DevelopEngineVersion::Develop2
+        );
     }
 }
 
@@ -219,6 +248,8 @@ pub struct LocalAdjustment {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct DevelopSettings {
+    #[serde(default = "legacy_engine_version")]
+    pub develop_engine_version: DevelopEngineVersion,
     #[serde(default = "legacy_tone_map_mode")]
     pub tone_map_mode: ToneMapMode,
     pub exposure: f32,
@@ -252,6 +283,11 @@ pub struct DevelopSettings {
     pub sharpen_masking: f32,
     pub noise_reduction: f32,
     pub color_noise_reduction: f32,
+    /// 0–100: strength of edge chroma cleanup (lateral CA / purple fringing).
+    /// Neutralises the thin green/magenta rim along high-contrast edges without
+    /// touching uniform colour. A modifier of the Detail stage — inert at 0, so
+    /// old projects/presets (which lack the field) load unaffected.
+    pub defringe: f32,
     pub dehaze: f32,
     pub vignette: f32,
     pub curve_highlights: f32,
@@ -284,6 +320,7 @@ pub struct DevelopSettings {
 impl Default for DevelopSettings {
     fn default() -> Self {
         Self {
+            develop_engine_version: DevelopEngineVersion::Develop2,
             tone_map_mode: ToneMapMode::Perceptual,
             exposure: 0.0,
             contrast: 0.0,
@@ -308,6 +345,7 @@ impl Default for DevelopSettings {
             sharpen_masking: 0.0,
             noise_reduction: 0.0,
             color_noise_reduction: 0.0,
+            defringe: 0.0,
             dehaze: 0.0,
             vignette: 0.0,
             curve_highlights: 0.0,
@@ -353,6 +391,7 @@ impl DevelopSettings {
             && self.sharpening.abs() <= 0.001
             && self.noise_reduction.abs() <= 0.001
             && self.color_noise_reduction.abs() <= 0.001
+            && self.defringe.abs() <= 0.001
             && self.dehaze.abs() <= 0.001
             && self.vignette.abs() <= 0.001
             && self.curve_highlights.abs() <= 0.001
@@ -370,7 +409,8 @@ impl DevelopSettings {
     }
 
     pub fn same_image_effect(&self, other: &Self) -> bool {
-        self.tone_map_mode == other.tone_map_mode
+        self.develop_engine_version == other.develop_engine_version
+            && self.tone_map_mode == other.tone_map_mode
             && self.point_curve_mode == other.point_curve_mode
             && self.exposure == other.exposure
             && self.contrast == other.contrast
@@ -403,6 +443,7 @@ impl DevelopSettings {
             && self.sharpen_masking == other.sharpen_masking
             && self.noise_reduction == other.noise_reduction
             && self.color_noise_reduction == other.color_noise_reduction
+            && self.defringe == other.defringe
             && self.dehaze == other.dehaze
             && self.vignette == other.vignette
             && self.curve_highlights == other.curve_highlights
@@ -454,6 +495,7 @@ impl DevelopSettings {
             && self.sharpen_masking == other.sharpen_masking
             && self.noise_reduction == other.noise_reduction
             && self.color_noise_reduction == other.color_noise_reduction
+            && self.defringe == other.defringe
             && self.dehaze == other.dehaze
             && self.vignette == other.vignette
             && self.curve_highlights == other.curve_highlights
@@ -513,6 +555,7 @@ impl DevelopSettings {
             && self.sharpen_masking == other.sharpen_masking
             && self.noise_reduction == other.noise_reduction
             && self.color_noise_reduction == other.color_noise_reduction
+            && self.defringe == other.defringe
             && self.dehaze == other.dehaze
             && self.vignette == other.vignette
             && self.curve_highlights == other.curve_highlights

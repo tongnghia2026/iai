@@ -49,6 +49,12 @@ pub struct DevelopShell {
     /// re-bins are throttled and the resting value lands via a trailing flush.
     pub(in crate::app) develop_histogram_at: Option<std::time::Instant>,
     pub(in crate::app) develop_histogram_stale: bool,
+    /// Display-post-render, pre-monitor scopes, refreshed on the same throttle
+    /// as the live histogram and shared with both Develop UI hosts.
+    pub(in crate::app) develop_scopes:
+        Option<std::sync::Arc<crate::core::develop2::scopes::DevelopScopes>>,
+    pub(in crate::app) develop_scopes_revision: u64,
+    pub(in crate::app) develop_scope_visibility: u8,
     /// Display R/G/B (0–255) under the Develop-window cursor, evaluated from
     /// the scene master through the current settings each frame the cursor
     /// sits over the viewport. `None` off-viewport or without a scene.

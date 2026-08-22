@@ -610,9 +610,20 @@ pub(crate) fn suppress_edge_correction(
 }
 
 pub fn fast_preview_downsample(width: u32, height: u32) -> usize {
+    fast_preview_downsample_for_target(width, height, crate::core::hw::fast_preview_target_pixels())
+}
+
+/// Detail's wavelet/NR tail is heavier than Effects/Local point operations.
+/// Keep its live proxy within two thirds of the normal tier budget so the same
+/// model stays under the slider-to-frame latency gate without weakening the
+/// commit kernel.
+pub(crate) fn detail_preview_downsample(width: u32, height: u32) -> usize {
+    let target = (crate::core::hw::fast_preview_target_pixels() * 2 / 3).max(1);
+    fast_preview_downsample_for_target(width, height, target)
+}
+
+fn fast_preview_downsample_for_target(width: u32, height: u32, target: usize) -> usize {
     let pixels = (width as usize).saturating_mul(height as usize).max(1);
-    // Machine-tier pixel budget (weak machines drag a coarser live proxy).
-    let target = crate::core::hw::fast_preview_target_pixels();
     let s = ((pixels as f32 / target as f32).sqrt().ceil() as usize)
         .clamp(FAST_PREVIEW_MIN_DOWNSAMPLE, FAST_PREVIEW_MAX_DOWNSAMPLE);
     s.max(1)
@@ -735,9 +746,10 @@ pub(crate) fn tone_lowpass_color_region(
     guided_lowpass(&toned, pw, ph, r, COLOR_GUIDED_EPS)
 }
 
-/// Ultra-cheap live-preview base for Light/Curve/Detail/Effects. Unlike the Color
-/// Mixer region, this samples one source pixel per block instead of averaging every
-/// source pixel, so building the proxy is O(proxy pixels), not O(full image).
+/// Ultra-cheap live-preview base for the spatial chain. Effects/Local use one
+/// centre sample per block; Detail requests a five-tap corners+centre average
+/// to prefilter single-pixel colour aliases without turning this into an
+/// O(full-image) box average.
 pub(crate) fn build_fast_preview_region(
     source: &TileMap,
     tone: &Option<ToneData>,
@@ -746,6 +758,7 @@ pub(crate) fn build_fast_preview_region(
     region_w: u32,
     region_h: u32,
     s: usize,
+    antialias: bool,
 ) -> (Vec<[f32; 3]>, usize, usize) {
     let w = source.width as usize;
     let h = source.height as usize;
@@ -762,25 +775,71 @@ pub(crate) fn build_fast_preview_region(
     let tsize = TILE_SIZE as usize;
     let mut out = vec![[0.0f32; 3]; pw * ph];
     out.par_chunks_mut(pw).enumerate().for_each(|(py, row)| {
-        let sy = (oy + (py * s) + s / 2).min(oy + rh - 1).min(h - 1);
-        let ty_tile = (sy / tsize) as i32;
-        let ly = (sy % tsize) as u32;
+        let block_y0 = oy + py * s;
+        let block_y1 = (block_y0 + s).min(oy + rh).min(h);
+        let span_y = block_y1.saturating_sub(block_y0).max(1);
+        let ys = if antialias {
+            [block_y0, block_y0 + span_y - 1]
+        } else {
+            [block_y0 + span_y / 2, block_y0 + span_y / 2]
+        };
         for (px, slot) in row.iter_mut().enumerate() {
-            let sx = (ox + (px * s) + s / 2).min(ox + rw - 1).min(w - 1);
-            let tx_tile = (sx / tsize) as i32;
-            if let Some(t) = source.tiles.get(&crate::core::tile::TilePos {
-                x: tx_tile,
-                y: ty_tile,
-            }) {
-                let (r, g, b, _a) = t.get_pixel((sx % tsize) as u32, ly);
-                let (mut rf, mut gf, mut bf) =
-                    (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-                if let Some(tone) = tone {
-                    tone.apply(&mut rf, &mut gf, &mut bf);
-                    clamp_unit(&mut rf, &mut gf, &mut bf);
+            let block_x0 = ox + px * s;
+            let block_x1 = (block_x0 + s).min(ox + rw).min(w);
+            let span_x = block_x1.saturating_sub(block_x0).max(1);
+            let xs = if antialias {
+                [block_x0, block_x0 + span_x - 1]
+            } else {
+                [block_x0 + span_x / 2, block_x0 + span_x / 2]
+            };
+            let taps = if antialias { 5.0 } else { 1.0 };
+            let mut acc = [0.0f32; 3];
+            for (yi, &sy) in ys.iter().enumerate() {
+                for (xi, &sx) in xs.iter().enumerate() {
+                    if !antialias && (yi != 0 || xi != 0) {
+                        continue;
+                    }
+                    let ty_tile = (sy / tsize) as i32;
+                    let tx_tile = (sx / tsize) as i32;
+                    if let Some(t) = source.tiles.get(&crate::core::tile::TilePos {
+                        x: tx_tile,
+                        y: ty_tile,
+                    }) {
+                        let (r, g, b, _a) = t.get_pixel((sx % tsize) as u32, (sy % tsize) as u32);
+                        let (mut rf, mut gf, mut bf) =
+                            (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+                        if let Some(tone) = tone {
+                            tone.apply(&mut rf, &mut gf, &mut bf);
+                            clamp_unit(&mut rf, &mut gf, &mut bf);
+                        }
+                        acc[0] += rf;
+                        acc[1] += gf;
+                        acc[2] += bf;
+                    }
                 }
-                *slot = [rf, gf, bf];
             }
+            if antialias {
+                let sx = block_x0 + (span_x - 1) / 2;
+                let sy = block_y0 + (span_y - 1) / 2;
+                let ty_tile = (sy / tsize) as i32;
+                let tx_tile = (sx / tsize) as i32;
+                if let Some(t) = source.tiles.get(&crate::core::tile::TilePos {
+                    x: tx_tile,
+                    y: ty_tile,
+                }) {
+                    let (r, g, b, _a) = t.get_pixel((sx % tsize) as u32, (sy % tsize) as u32);
+                    let (mut rf, mut gf, mut bf) =
+                        (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+                    if let Some(tone) = tone {
+                        tone.apply(&mut rf, &mut gf, &mut bf);
+                        clamp_unit(&mut rf, &mut gf, &mut bf);
+                    }
+                    acc[0] += rf;
+                    acc[1] += gf;
+                    acc[2] += bf;
+                }
+            }
+            *slot = [acc[0] / taps, acc[1] / taps, acc[2] / taps];
         }
     });
     (out, pw, ph)
@@ -793,8 +852,9 @@ pub(crate) fn build_fast_preview_region(
 pub(crate) fn apply_fast_preview_to_region(
     region: &[[f32; 3]],
     settings: &DevelopSettings,
+    regional_luma: Option<(&[f32], usize, usize, u32)>,
     w: usize,
-    _h: usize,
+    h: usize,
     origin_x: u32,
     origin_y: u32,
     source_w: u32,
@@ -804,7 +864,6 @@ pub(crate) fn apply_fast_preview_to_region(
     let tone = tone_is_active(settings).then(|| build_tone_data(settings));
     let use_color = has_color(settings);
     let curves = build_mixer_curves_opt(settings);
-    let use_effects = has_effects(settings);
     let inv_w = if source_w > 1 {
         1.0 / (source_w - 1) as f32
     } else {
@@ -822,12 +881,39 @@ pub(crate) fn apply_fast_preview_to_region(
     // "base after tone" definition the bake and the colour path use.
     let toned: Vec<[f32; 3]> = region
         .par_iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(idx, p)| {
             let mut r = p[0];
             let mut g = p[1];
             let mut b = p[2];
             if let Some(tone) = &tone {
-                tone.apply(&mut r, &mut g, &mut b);
+                if tone.is_local {
+                    if let Some((plane, pw, ph, plane_step)) = regional_luma {
+                        let px = (idx % w) as u32;
+                        let py = (idx / w) as u32;
+                        let x = origin_x
+                            .saturating_add(px.saturating_mul(sample_step))
+                            .saturating_add(sample_step / 2)
+                            .min(source_w.saturating_sub(1));
+                        let y = origin_y
+                            .saturating_add(py.saturating_mul(sample_step))
+                            .saturating_add(sample_step / 2)
+                            .min(source_h.saturating_sub(1));
+                        let s = plane_step.max(1) as f32;
+                        let base = sample_plane_bilinear(
+                            plane,
+                            pw,
+                            ph,
+                            (x as f32 + 0.5) / s - 0.5,
+                            (y as f32 + 0.5) / s - 0.5,
+                        );
+                        tone.apply_local(&mut r, &mut g, &mut b, base);
+                    } else {
+                        tone.apply(&mut r, &mut g, &mut b);
+                    }
+                } else {
+                    tone.apply(&mut r, &mut g, &mut b);
+                }
                 clamp_unit(&mut r, &mut g, &mut b);
             }
             if use_color {
@@ -837,7 +923,7 @@ pub(crate) fn apply_fast_preview_to_region(
             [r, g, b]
         })
         .collect();
-    if !use_effects || w == 0 || toned.is_empty() {
+    if w == 0 || h == 0 || toned.is_empty() {
         return toned;
     }
 
@@ -856,7 +942,7 @@ pub(crate) fn apply_fast_preview_to_region(
         None
     };
 
-    let out: Vec<[f32; 3]> = toned
+    let mut out: Vec<[f32; 3]> = toned
         .par_iter()
         .enumerate()
         .map(|(idx, p)| {
@@ -884,11 +970,28 @@ pub(crate) fn apply_fast_preview_to_region(
             [r, g, b]
         })
         .collect();
-    // NOTE: detail (Sharpening / Noise Reduction) is deliberately NOT applied here.
-    // It is a full-resolution operation; running it on this downsampled proxy and
-    // upsampling produced the beaded magenta/cyan artefacts on thin wires in the
-    // live preview (the full-res commit was always clean). Detail is applied on
-    // commit; the preview shows the un-sharpened image rather than a wrong one.
+
+    // Legacy commit applies Local before its separate Detail pass. Reuse the
+    // exact precomputed Local plans and evaluate masks in source-image space so
+    // viewport origin/downsample cannot move a gradient or radial mask.
+    if settings.has_locals() {
+        let plan = DevelopPlan::new(settings, source_w, source_h);
+        out.par_iter_mut().enumerate().for_each(|(idx, p)| {
+            let px = (idx % w) as u32;
+            let py = (idx / w) as u32;
+            let x = origin_x
+                .saturating_add(px.saturating_mul(sample_step))
+                .saturating_add(sample_step / 2)
+                .min(source_w.saturating_sub(1));
+            let y = origin_y
+                .saturating_add(py.saturating_mul(sample_step))
+                .saturating_add(sample_step / 2)
+                .min(source_h.saturating_sub(1));
+            let [r, g, b] = p;
+            plan.apply_locals(r, g, b, x, y);
+        });
+    }
+    apply_detail_to_display_buffer(&mut out, w, h, settings);
     out
 }
 

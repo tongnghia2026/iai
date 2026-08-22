@@ -5,7 +5,7 @@ use crate::app::state::App;
 use crate::ui::UiActions;
 
 impl App {
-    pub(super) fn handle_color_print_actions(&mut self, actions: &mut UiActions) {
+    pub(crate) fn handle_color_print_actions(&mut self, actions: &mut UiActions) {
         if let Some(target) = actions.print.set_proof_target.take() {
             self.shell.proof_target = target;
             self.shell.proof_enabled = true;

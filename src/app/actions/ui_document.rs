@@ -239,6 +239,15 @@ impl App {
         if let Some(v) = actions.doc.set_export_embed_icc.take() {
             self.shell.ui.export_embed_icc = v;
         }
+        if let Some(v) = actions.doc.set_export_resize_enabled.take() {
+            self.shell.ui.export_resize_enabled = v;
+        }
+        if let Some(v) = actions.doc.set_export_resize_long_edge.take() {
+            self.shell.ui.export_resize_long_edge = v.clamp(16, 60000);
+        }
+        if let Some(v) = actions.doc.set_export_output_sharpen.take() {
+            self.shell.ui.export_output_sharpen = v.min(100);
+        }
         if let Some(profile) = actions.doc.assign_profile.take() {
             self.docs.documents[self.docs.active_doc_idx]
                 .canvas

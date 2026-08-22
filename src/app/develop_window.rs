@@ -29,6 +29,18 @@ fn develop_commit_needs_settled_frame(
     gpu_preview_active || processing || receiver_active
 }
 
+fn develop_display_lut_active(
+    proof_enabled: bool,
+    display_cms_enabled: bool,
+    document_is_wide_gamut: bool,
+) -> f32 {
+    if proof_enabled || display_cms_enabled || document_is_wide_gamut {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 #[derive(Clone, Copy)]
 struct DevelopWorkArea {
     origin: winit::dpi::PhysicalPosition<i32>,
@@ -1029,6 +1041,9 @@ impl App {
         }
         // Presets and local-mask arm/select — shared with the fallback dialog.
         self.apply_develop_panel_actions(&mut actions);
+        // The Develop window owns its own UiActions frame, so proof controls
+        // must be consumed here instead of waiting for the covered main UI.
+        self.handle_color_print_actions(&mut actions);
         // Filmstrip switch (after the settings above — they belong to the image
         // the panel was showing this frame).
         if let Some(doc) = filmstrip_clicked {
@@ -1191,7 +1206,14 @@ impl App {
             zoom: self.dev.develop_view_zoom,
             vp_mode: if canvas_space { 0.0 } else { 1.0 },
             screen_size: [dw, dh],
-            proof_enabled: 0.0,
+            proof_enabled: develop_display_lut_active(
+                self.shell.proof_enabled,
+                self.shell.display_cms_enabled,
+                self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .color_space
+                    != crate::core::canvas::ColorSpace::SRGB,
+            ),
             channel_view: 0.0,
         })
     }
@@ -1478,7 +1500,7 @@ impl App {
 
 #[cfg(test)]
 mod phase6_transition_tests {
-    use super::develop_commit_needs_settled_frame;
+    use super::{develop_commit_needs_settled_frame, develop_display_lut_active};
 
     #[test]
     fn open_image_waits_for_every_unsettled_preview_state() {
@@ -1486,5 +1508,13 @@ mod phase6_transition_tests {
         assert!(develop_commit_needs_settled_frame(false, true, false));
         assert!(develop_commit_needs_settled_frame(false, false, true));
         assert!(!develop_commit_needs_settled_frame(false, false, false));
+    }
+
+    #[test]
+    fn develop_window_enables_the_shared_display_lut_for_every_view_transform() {
+        assert_eq!(develop_display_lut_active(true, false, false), 1.0);
+        assert_eq!(develop_display_lut_active(false, true, false), 1.0);
+        assert_eq!(develop_display_lut_active(false, false, true), 1.0);
+        assert_eq!(develop_display_lut_active(false, false, false), 0.0);
     }
 }

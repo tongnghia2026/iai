@@ -20,11 +20,12 @@ const SEC_EFFECTS: usize = 4;
 const SEC_CURVE: usize = 5;
 const SEC_MIXER: usize = 6;
 const SEC_LOCALS: usize = 7;
-pub const DEV_PANEL_SECTIONS: usize = 8;
+const SEC_SCOPES: usize = 8;
+pub const DEV_PANEL_SECTIONS: usize = 9;
 
 /// The pre-D4 `default_open` flags, used until the user first toggles a header.
 pub const DEFAULT_SECTIONS_OPEN: [bool; DEV_PANEL_SECTIONS] =
-    [false, true, false, false, false, false, true, false];
+    [false, true, false, false, false, false, true, false, true];
 
 /// Saved open/closed state of the panel sections (prefs.json
 /// `develop_sections_open`); missing/short entries fall back to the defaults.
@@ -121,7 +122,16 @@ pub(crate) fn develop_panel_contents(
     actions: &mut UiActions,
     max_scroll_h: f32,
 ) -> (bool, bool) {
-    actions.develop.develop_controls_pointer_down = ui.input(|input| input.pointer.primary_down());
+    // True only while the primary button is actively driving an egui control
+    // (e.g. a slider drag). `is_using_pointer()` is false for clicks on the
+    // canvas image — it renders on its own GPU surface, not as an egui widget —
+    // so a plain click there no longer counts. Previously this was the GLOBAL
+    // `primary_down()`, so ANY mouse press anywhere flipped the RAW colour
+    // preview between the fast chroma proxy (down) and the exact per-pixel
+    // shader (up), flashing the image brighter on every click once the Colour
+    // Mixer was engaged.
+    actions.develop.develop_controls_pointer_down =
+        ui.input(|input| input.pointer.primary_down()) && ui.ctx().egui_is_using_pointer();
     let mut settings = data.develop.develop_settings.clone();
     let mut changed = false;
     let mut apply = false;
@@ -188,6 +198,19 @@ pub(crate) fn develop_panel_contents(
     egui::ScrollArea::vertical()
         .max_height(max_scroll_h)
         .show(ui, |ui| {
+            let out = section(ui, data, SEC_SCOPES, "Scopes", |ui| {
+                scopes_ui(
+                    ui,
+                    data.develop.develop_scopes.as_ref(),
+                    data.develop.develop_scopes_revision,
+                    data.develop.develop_scope_visibility,
+                    actions,
+                );
+                ui.separator();
+                proof_controls_ui(ui, data, actions);
+            });
+            note_section(out, SEC_SCOPES, actions);
+
             let out = section(ui, data, SEC_PRESETS, "Presets", |ui| {
                 ui.horizontal(|ui| {
                     let mut apply_idx: Option<usize> = None;
@@ -398,6 +421,10 @@ pub(crate) fn develop_panel_contents(
                     &mut settings.color_noise_reduction,
                     0.0..=100.0,
                 );
+                // Defringe slider hidden pending a native fringe sample to tune
+                // against (GUI acceptance failed). The `defringe` field, its
+                // apply_defringe pass and its regression test remain in place so
+                // it can be re-exposed once validated on a real crop.
                 changed |= slider_row(
                     ui,
                     "Texture",
@@ -660,6 +687,278 @@ fn histogram_overlay(ui: &mut egui::Ui, hist: &[[f32; 256]; 4]) {
         3.0,
         egui::Stroke::new(1.0_f32, egui::Color32::from_gray(52)),
         egui::StrokeKind::Inside,
+    );
+}
+
+const SCOPE_WAVEFORM: u8 = 1 << 0;
+const SCOPE_PARADE: u8 = 1 << 1;
+const SCOPE_VECTOR: u8 = 1 << 2;
+pub const DEFAULT_SCOPE_VISIBILITY: u8 = SCOPE_WAVEFORM;
+
+fn scopes_ui(
+    ui: &mut egui::Ui,
+    scopes: Option<&std::sync::Arc<crate::core::develop2::scopes::DevelopScopes>>,
+    revision: u64,
+    mut visible: u8,
+    actions: &mut UiActions,
+) {
+    let before = visible;
+    ui.horizontal_wrapped(|ui| {
+        scope_toggle(ui, &mut visible, SCOPE_WAVEFORM, "Waveform");
+        scope_toggle(ui, &mut visible, SCOPE_PARADE, "RGB Parade");
+        scope_toggle(ui, &mut visible, SCOPE_VECTOR, "Vectorscope");
+    });
+    if visible != before {
+        actions.develop.set_develop_scope_visibility = Some(visible);
+    }
+    ui.label(
+        egui::RichText::new("Display encoded sRGB · pre-monitor")
+            .size(10.0)
+            .color(egui::Color32::GRAY),
+    );
+
+    let Some(scopes) = scopes else {
+        ui.label("Scopes are waiting for a Develop preview.");
+        return;
+    };
+    if visible == 0 {
+        return;
+    }
+    let textures = scope_textures(ui, scopes, revision);
+    if visible & SCOPE_WAVEFORM != 0 {
+        if let Some(texture) = textures.first() {
+            draw_scope_texture(ui, "Waveform (luma)", texture, 92.0);
+        }
+    }
+    if visible & SCOPE_PARADE != 0 {
+        if let Some(texture) = textures.get(1) {
+            draw_scope_texture(ui, "RGB Parade", texture, 92.0);
+        }
+    }
+    if visible & SCOPE_VECTOR != 0 {
+        if let Some(texture) = textures.get(2) {
+            draw_scope_texture(ui, "Vectorscope (Rec.709)", texture, 150.0);
+        }
+    }
+    ui.label(
+        egui::RichText::new(format!("{} sampled pixels", scopes.sample_count))
+            .size(10.0)
+            .color(egui::Color32::GRAY),
+    );
+}
+
+fn scope_toggle(ui: &mut egui::Ui, visible: &mut u8, bit: u8, label: &str) {
+    let mut enabled = *visible & bit != 0;
+    if ui.toggle_value(&mut enabled, label).changed() {
+        if enabled {
+            *visible |= bit;
+        } else {
+            *visible &= !bit;
+        }
+    }
+}
+
+fn scope_textures(
+    ui: &mut egui::Ui,
+    scopes: &std::sync::Arc<crate::core::develop2::scopes::DevelopScopes>,
+    revision: u64,
+) -> Vec<egui::TextureHandle> {
+    let cache_id = ui.make_persistent_id("develop_scope_textures");
+    let images = || {
+        vec![
+            waveform_scope_image(scopes),
+            parade_scope_image(scopes),
+            vectorscope_image(scopes),
+        ]
+    };
+    ui.ctx()
+        .data(|data| data.get_temp::<(u64, Vec<egui::TextureHandle>)>(cache_id))
+        .map(|(cached_key, mut textures)| {
+            if cached_key != revision || textures.len() != 3 {
+                let images = images();
+                if textures.len() == images.len() {
+                    for (texture, image) in textures.iter_mut().zip(images) {
+                        texture.set(image, egui::TextureOptions::NEAREST);
+                    }
+                } else {
+                    textures = load_scope_textures(ui.ctx(), images);
+                }
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(cache_id, (revision, textures.clone())));
+            }
+            textures
+        })
+        .unwrap_or_else(|| {
+            let textures = load_scope_textures(ui.ctx(), images());
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(cache_id, (revision, textures.clone())));
+            textures
+        })
+}
+
+fn load_scope_textures(
+    ctx: &egui::Context,
+    images: Vec<egui::ColorImage>,
+) -> Vec<egui::TextureHandle> {
+    images
+        .into_iter()
+        .enumerate()
+        .map(|(index, image)| {
+            ctx.load_texture(
+                format!("develop_scope_{index}"),
+                image,
+                egui::TextureOptions::NEAREST,
+            )
+        })
+        .collect()
+}
+
+fn draw_scope_texture(ui: &mut egui::Ui, label: &str, texture: &egui::TextureHandle, height: f32) {
+    ui.label(egui::RichText::new(label).size(10.0));
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, egui::Color32::from_gray(18));
+    let texture_size = texture.size_vec2();
+    let scale = (rect.width() / texture_size.x)
+        .min(rect.height() / texture_size.y)
+        .max(0.0);
+    let image_rect = egui::Rect::from_center_size(rect.center(), texture_size * scale);
+    painter.image(
+        texture.id(),
+        image_rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(52)),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn waveform_scope_image(scopes: &crate::core::develop2::scopes::DevelopScopes) -> egui::ColorImage {
+    let width = scopes.horizontal_bins.max(1);
+    let height = scopes.value_bins.max(1);
+    let mut pixels = vec![egui::Color32::from_gray(18); width * height];
+    let peak = scopes.waveform.iter().copied().max().unwrap_or(0);
+    for x in 0..width {
+        for value in 0..height {
+            let level = scope_density(scopes.waveform_at(x, value), peak);
+            if level > 0 {
+                let row = height - 1 - value;
+                pixels[row * width + x] = egui::Color32::from_rgb(level, level, level);
+            }
+        }
+    }
+    egui::ColorImage::new([width, height], pixels)
+}
+
+fn parade_scope_image(scopes: &crate::core::develop2::scopes::DevelopScopes) -> egui::ColorImage {
+    let plane_width = scopes.horizontal_bins.max(1);
+    let height = scopes.value_bins.max(1);
+    let width = plane_width * 3;
+    let mut pixels = vec![egui::Color32::from_gray(18); width * height];
+    for channel in 0..3 {
+        let peak = scopes.parade[channel].iter().copied().max().unwrap_or(0);
+        for x in 0..plane_width {
+            for value in 0..height {
+                let level = scope_density(scopes.parade_at(channel, x, value), peak);
+                if level == 0 {
+                    continue;
+                }
+                let row = height - 1 - value;
+                let index = row * width + channel * plane_width + x;
+                let mut rgb = [38, 38, 38];
+                rgb[channel] = level;
+                pixels[index] = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+            }
+        }
+    }
+    egui::ColorImage::new([width, height], pixels)
+}
+
+fn vectorscope_image(scopes: &crate::core::develop2::scopes::DevelopScopes) -> egui::ColorImage {
+    let size = scopes.vectorscope_bins.max(1);
+    let mut pixels = vec![egui::Color32::from_gray(18); size * size];
+    let centre = size / 2;
+    for i in 0..size {
+        pixels[centre * size + i] = egui::Color32::from_gray(38);
+        pixels[i * size + centre] = egui::Color32::from_gray(38);
+    }
+    let peak = scopes.vectorscope.iter().copied().max().unwrap_or(0);
+    for cr in 0..size {
+        for cb in 0..size {
+            let level = scope_density(scopes.vectorscope_at(cb, cr), peak);
+            if level > 0 {
+                let base = pixels[cr * size + cb];
+                pixels[cr * size + cb] = egui::Color32::from_rgb(
+                    base.r().max(level / 3),
+                    base.g().max(level),
+                    base.b().max(level / 2),
+                );
+            }
+        }
+    }
+    egui::ColorImage::new([size, size], pixels)
+}
+
+fn scope_density(count: u32, peak: u32) -> u8 {
+    if count == 0 || peak == 0 {
+        return 0;
+    }
+    let normalized = (count as f32).ln_1p() / (peak as f32).ln_1p();
+    (64.0 + 191.0 * normalized.sqrt()).round().clamp(0.0, 255.0) as u8
+}
+
+fn proof_controls_ui(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    ui.label(egui::RichText::new("Soft Proof").strong());
+    ui.horizontal(|ui| {
+        let mut enabled = data.print.proof_enabled;
+        if ui.checkbox(&mut enabled, "Proof colors").changed() {
+            actions.print.toggle_proof_colors = true;
+        }
+        let mut warning = data.print.proof_gamut_warn;
+        if ui.checkbox(&mut warning, "Gamut warning").changed() {
+            actions.print.toggle_gamut_warning = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Target");
+        egui::ComboBox::from_id_salt("develop_proof_target")
+            .selected_text(&data.print.proof_target_label)
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(data.print.proof_target_label == "sRGB", "sRGB")
+                    .clicked()
+                {
+                    actions.print.set_proof_target = Some(crate::core::cms::ProofTarget::Srgb);
+                }
+                if ui
+                    .selectable_label(
+                        data.print.proof_target_label == "Adobe RGB (1998)",
+                        "Adobe RGB (1998)",
+                    )
+                    .clicked()
+                {
+                    actions.print.set_proof_target = Some(crate::core::cms::ProofTarget::AdobeRgb);
+                }
+            });
+        if ui.small_button("Load ICC…").clicked() {
+            actions.print.load_proof_profile = true;
+        }
+    });
+    let monitor = if data.print.display_cms_enabled {
+        data.print.display_profile_name.as_str()
+    } else {
+        "system display transform off"
+    };
+    ui.label(
+        egui::RichText::new(format!("View only · monitor: {monitor}"))
+            .size(10.0)
+            .color(egui::Color32::GRAY),
     );
 }
 
@@ -1159,6 +1458,12 @@ fn tone_gradient(label: &str) -> Vec<egui::Color32> {
             egui::Color32::from_rgb(46, 46, 46),
             egui::Color32::from_rgb(96, 126, 144),
             egui::Color32::from_rgb(184, 210, 218),
+        ],
+        // The green↔magenta axis the cleanup neutralises.
+        "Defringe" => vec![
+            egui::Color32::from_rgb(150, 70, 168),
+            egui::Color32::from_rgb(120, 120, 120),
+            egui::Color32::from_rgb(78, 168, 96),
         ],
         "Temperature" => vec![
             egui::Color32::from_rgb(73, 124, 218),

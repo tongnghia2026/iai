@@ -111,6 +111,53 @@ pub(crate) fn apply_point_curve_outer(lut: &mut [f32; 256], settings: &DevelopSe
 /// tone+colour stages on every slider tick stays negligible.
 const HISTOGRAM_PROXY_PIXELS: u64 = 60_000;
 
+/// Coordinate-preserving twin of the histogram proxy for waveform/parade.
+/// Transparent samples remain in the raster but are excluded by the scope
+/// analyzer, so their neighbours never slide into the wrong x column.
+pub(crate) fn build_scope_source_proxy(
+    tiles: &TileMap,
+) -> crate::core::develop2::scopes::ScopeSourceProxy {
+    crate::core::develop2::scopes::ScopeSourceProxy::sample(
+        tiles.width,
+        tiles.height,
+        HISTOGRAM_PROXY_PIXELS,
+        |x, y| {
+            let (r, g, b, a) = tiles.get_pixel(x, y);
+            (
+                [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
+                a > 0,
+            )
+        },
+    )
+}
+
+/// Render cached display-domain source samples through the current legacy
+/// settings. The returned pixels are encoded sRGB (`DISPLAY_SINK`).
+pub(crate) fn render_scope_source_proxy(
+    proxy: &crate::core::develop2::scopes::ScopeSourceProxy,
+    settings: &DevelopSettings,
+) -> Vec<[f32; 3]> {
+    let tone = tone_is_active(settings).then(|| build_tone_data(settings));
+    let use_color = has_color(settings);
+    let curves = build_mixer_curves_opt(settings);
+    proxy
+        .pixels
+        .iter()
+        .map(|p| {
+            let (mut r, mut g, mut b) = (p[0], p[1], p[2]);
+            if let Some(tone) = &tone {
+                tone.apply(&mut r, &mut g, &mut b);
+                clamp_unit(&mut r, &mut g, &mut b);
+            }
+            if use_color {
+                apply_color(settings, curves.as_ref(), &mut r, &mut g, &mut b);
+                clamp_unit(&mut r, &mut g, &mut b);
+            }
+            [r, g, b]
+        })
+        .collect()
+}
+
 /// Grid-sampled source pixels (transparent skipped), cached for the Develop
 /// session. The curve-editor histogram must show the image AFTER the current
 /// settings, so it is re-binned from this proxy through the tone+colour

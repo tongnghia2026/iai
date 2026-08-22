@@ -13,24 +13,37 @@
 
 use iai::core::develop::{self, fast_preview_downsample, DevelopSettings, TONE_DOWNSAMPLE};
 use iai::core::develop_scene::{self, SceneSource};
+use iai::core::layer::{Layer, LayerStack};
 use iai::formats::{raw::RawImporter, Importer};
+use iai::gpu::compositor::{CompositorState, DevelopGpuPreview};
+use std::sync::Arc;
 use std::time::Instant;
 
-/// Median-ish timing: 1 warmup + `iters` runs, report best and mean.
+const EXPENSIVE_SAMPLES: usize = 15;
+const FRAME_SAMPLES: usize = 30;
+
+/// One warmup plus `iters` measured runs; report best, mean, and p95.
 fn time<T>(label: &str, iters: usize, mut f: impl FnMut() -> T) -> T {
     let mut out = f(); // warmup (page-in, rayon pool spin-up)
     let mut best = f64::INFINITY;
     let mut total = 0.0;
+    let mut samples = Vec::with_capacity(iters);
     for _ in 0..iters {
         let t = Instant::now();
         out = f();
         let ms = t.elapsed().as_secs_f64() * 1e3;
         best = best.min(ms);
         total += ms;
+        samples.push(ms);
     }
+    samples.sort_by(f64::total_cmp);
+    let p95_index = ((samples.len() as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples.len() - 1);
     eprintln!(
-        "{label:<44} best {best:8.2} ms   mean {:8.2} ms",
-        total / iters as f64
+        "{label:<44} best {best:8.2} ms   mean {:8.2} ms   p95 {:8.2} ms",
+        total / iters as f64,
+        samples[p95_index],
     );
     out
 }
@@ -60,6 +73,67 @@ fn multi_group_settings() -> DevelopSettings {
     s
 }
 
+/// Hardware-local Phase-6 frame probe. A 640×360 scene is magnified 3× into a
+/// 1920×1080 target, so every measured frame executes the full Develop scene
+/// shader over 2.07 M fragments without requiring a large RAW fixture merely
+/// to generate the same fit-view fragment load.
+#[test]
+#[ignore = "manual GPU p95 probe; hardware dependent"]
+fn perf_headless_develop_slider_frames() {
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("perf_headless_develop_slider_frames: no GPU adapter - skipping");
+        return;
+    };
+    let (source_w, source_h) = (640, 360);
+    let (viewport_w, viewport_h) = (1920, 1080);
+    let mut scene = SceneSource::new(source_w, source_h);
+    for y in 0..source_h {
+        for x in 0..source_w {
+            let fx = x as f32 / (source_w - 1) as f32;
+            let fy = y as f32 / (source_h - 1) as f32;
+            let input = [fx * 1.35, fy * 0.95, (1.0 - fx) * (0.45 + fy)];
+            scene.set_rgb(x, y, scene.color_pipeline.working.from_linear_srgb(input));
+        }
+    }
+    let neutral = develop_scene::render_default_look(&scene);
+    let neutral8 = neutral.iter().map(|v| (v >> 8) as u8).collect();
+    let mut stack = LayerStack::new(source_w, source_h);
+    stack.layers[0] = Layer::from_rgba(0, "Background", neutral8, source_w, source_h);
+    let scene = Arc::new(scene);
+    let max_texture = device.limits().max_texture_dimension_2d;
+    let mut compositor = CompositorState::new(&device, viewport_w, viewport_h, max_texture);
+
+    let mut samples = Vec::with_capacity(FRAME_SAMPLES);
+    for frame in 0..=FRAME_SAMPLES {
+        let mut settings = multi_group_settings();
+        settings.saturation = 18.0 + (frame % 11) as f32;
+        settings.mixer_saturation[0] = 12.0 + (frame % 7) as f32;
+        compositor.develop_preview = Some(DevelopGpuPreview {
+            layer_id: 0,
+            settings,
+            region_luma: None,
+            color: None,
+            scene: Some(scene.clone()),
+        });
+        let started = Instant::now();
+        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 3.0, None, false, false);
+        device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        if frame > 0 {
+            samples.push(started.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+    samples.sort_by(f64::total_cmp);
+    let p95 = samples[((samples.len() as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples.len() - 1)];
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    eprintln!(
+        "headless Develop 1920x1080: best {:.2} ms mean {mean:.2} ms p95 {p95:.2} ms",
+        samples[0]
+    );
+    assert!(p95 < 50.0, "Develop slider-to-frame p95 {p95:.2} ms");
+}
+
 fn probe_viewport(
     scene: &SceneSource,
     settings: &DevelopSettings,
@@ -72,16 +146,22 @@ fn probe_viewport(
     let s = fast_preview_downsample(rw, rh);
     eprintln!("\n-- {label}: region {rw}x{rh} @({ox},{oy}), downsample {s} --");
     let tone = develop_scene::build_scene_tone(settings);
-    let (base, pw, ph) = time("  build_scene_color_base_box  (viewport chg)", 3, || {
-        develop_scene::build_scene_color_base_box(scene, ox, oy, rw, rh, s)
-    });
+    let (base, pw, ph) = time(
+        "  build_scene_color_base_box  (viewport chg)",
+        EXPENSIVE_SAMPLES,
+        || develop_scene::build_scene_color_base_box(scene, ox, oy, rw, rh, s),
+    );
     eprintln!("     proxy {pw}x{ph} = {} texels", pw * ph);
-    let region = time("  tone_lowpass_scene_region   (per frame)", 5, || {
-        develop_scene::tone_lowpass_scene_region(&base, pw, ph, &tone, s)
-    });
-    time("  apply_color_to_region       (per frame)", 5, || {
-        develop::apply_color_to_region(&region, settings, pw, ph)
-    });
+    let region = time(
+        "  tone_lowpass_scene_region   (per frame)",
+        FRAME_SAMPLES,
+        || develop_scene::tone_lowpass_scene_region(&base, pw, ph, &tone, s),
+    );
+    time(
+        "  apply_color_to_region       (per frame)",
+        FRAME_SAMPLES,
+        || develop::apply_color_to_region(&region, settings, pw, ph),
+    );
 }
 
 /// Times every stage `begin_develop_preview` runs on the MAIN thread when a
@@ -156,24 +236,34 @@ fn perf_develop_stages() {
     let settings = multi_group_settings();
 
     eprintln!("\n-- per-session (once per Develop open) --");
-    let hist_proxy = time("  build_scene_histogram_proxy", 3, || {
+    let hist_proxy = time("  build_scene_histogram_proxy", EXPENSIVE_SAMPLES, || {
         develop_scene::build_scene_histogram_proxy(&scene)
     });
-    let (rbase, rpw, rph) = time("  build_scene_region_base", 3, || {
+    let (rbase, rpw, rph) = time("  build_scene_region_base", EXPENSIVE_SAMPLES, || {
         develop_scene::build_scene_region_base(&scene, TONE_DOWNSAMPLE)
     });
     eprintln!("     E-plane {rpw}x{rph} = {} texels", rpw * rph);
 
     eprintln!("\n-- per-frame (every slider tick) --");
-    let tone = time("  build_scene_tone            (x2: hist+prev)", 20, || {
+    let tone = time("  build_scene_tone            (x2: hist+prev)", 100, || {
         develop_scene::build_scene_tone(&settings)
     });
-    time("  histogram_rgbl_scene        (per tick)", 5, || {
-        develop_scene::histogram_rgbl_scene(&hist_proxy, &settings, develop_scene::BaseLook::Raw)
-    });
-    time("  finish_region_e             (EV/WB drag)", 5, || {
-        develop_scene::finish_region_e(&rbase, rpw, rph, &tone, TONE_DOWNSAMPLE)
-    });
+    time(
+        "  histogram_rgbl_scene        (per tick)",
+        FRAME_SAMPLES,
+        || {
+            develop_scene::histogram_rgbl_scene(
+                &hist_proxy,
+                &settings,
+                develop_scene::BaseLook::Raw,
+            )
+        },
+    );
+    time(
+        "  finish_region_e             (EV/WB drag)",
+        FRAME_SAMPLES,
+        || develop_scene::finish_region_e(&rbase, rpw, rph, &tone, TONE_DOWNSAMPLE),
+    );
 
     // Fit view: the viewport shows the whole image -> the colour proxy box IS
     // the full source. 100% zoom: a screen-sized crop in the middle.

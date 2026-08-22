@@ -7,6 +7,58 @@
 
 use super::working_color::WorkingColorSpace;
 
+const OKLAB_LMS_FROM_SRGB: [[f32; 3]; 3] = [
+    [0.412_221_46, 0.536_332_55, 0.051_445_995],
+    [0.211_903_5, 0.680_699_5, 0.107_396_96],
+    [0.088_302_46, 0.281_718_85, 0.629_978_7],
+];
+const SRGB_FROM_OKLAB_LMS: [[f32; 3]; 3] = [
+    [4.076_741_7, -3.307_711_6, 0.230_969_94],
+    [-1.268_438, 2.609_757_4, -0.341_319_4],
+    [-0.004_196_086_3, -0.703_418_6, 1.707_614_7],
+];
+
+// OKLab's linear LMS input composed directly with each working-space-to-sRGB
+// transform. The transforms already include their adopted-white adaptation, so
+// this is the same colorimetry as `working -> linear sRGB -> OKLab` without an
+// intermediate RGB representation or an opportunity for a gamut clamp.
+const OKLAB_LMS_FROM_PROPHOTO: [[f32; 3]; 3] = [
+    [0.715_330_96, 0.352_908_94, -0.068_239_8],
+    [0.274_355_92, 0.667_852_34, 0.057_791_825],
+    [0.109_757_565, 0.186_217_46, 0.704_025_6],
+];
+const PROPHOTO_FROM_OKLAB_LMS: [[f32; 3]; 3] = [
+    [1.738_739_8, -0.988_400_76, 0.249_660_88],
+    [-0.707_003_9, 1.934_316_8, -0.227_312_77],
+    [-0.084_064_75, -0.357_515_5, 1.441_580_3],
+];
+const OKLAB_LMS_FROM_ACESCG: [[f32; 3]; 3] = [
+    [0.631_782_05, 0.348_893_73, 0.019_316_588],
+    [0.270_148_63, 0.630_902_8, 0.098_990_716],
+    [0.098_801_255, 0.185_215_88, 0.716_043_83],
+];
+const ACESCG_FROM_OKLAB_LMS: [[f32; 3]; 3] = [
+    [2.068_700_6, -1.175_307_2, 0.106_693_7],
+    [-0.876_566_35, 2.150_152_7, -0.273_616_43],
+    [-0.058_707_546, -0.393_958_27, 1.452_613_6],
+];
+
+pub fn oklab_lms_from_working_matrix(space: WorkingColorSpace) -> &'static [[f32; 3]; 3] {
+    match space {
+        WorkingColorSpace::LinearSrgb => &OKLAB_LMS_FROM_SRGB,
+        WorkingColorSpace::AcesCg => &OKLAB_LMS_FROM_ACESCG,
+        WorkingColorSpace::LinearProPhoto => &OKLAB_LMS_FROM_PROPHOTO,
+    }
+}
+
+pub fn working_from_oklab_lms_matrix(space: WorkingColorSpace) -> &'static [[f32; 3]; 3] {
+    match space {
+        WorkingColorSpace::LinearSrgb => &SRGB_FROM_OKLAB_LMS,
+        WorkingColorSpace::AcesCg => &ACESCG_FROM_OKLAB_LMS,
+        WorkingColorSpace::LinearProPhoto => &PROPHOTO_FROM_OKLAB_LMS,
+    }
+}
+
 // Wide-gamut adaptation matrices are rounded to f32, leaving neutral-axis
 // opponent noise around 1e-5. Keep that numerical noise hue-less.
 pub const ACHROMATIC_EPSILON: f32 = 2.0e-5;
@@ -83,13 +135,47 @@ pub fn oklab_to_linear_srgb(lab: Oklab) -> [f32; 3] {
 }
 
 #[inline]
+fn working_rgb_to_oklab_direct(rgb: [f32; 3], lms_from_working: &[[f32; 3]; 3]) -> Oklab {
+    let signed_cbrt = |x: f32| x.signum() * x.abs().powf(1.0 / 3.0);
+    let lms = super::working_color::apply_matrix(lms_from_working, rgb);
+    let l = signed_cbrt(lms[0]);
+    let m = signed_cbrt(lms[1]);
+    let s = signed_cbrt(lms[2]);
+    Oklab {
+        l: 0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        a: 1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        b: 0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    }
+}
+
+#[inline]
+fn oklab_to_working_rgb_direct(lab: Oklab, working_from_lms: &[[f32; 3]; 3]) -> [f32; 3] {
+    let l = lab.l + 0.396_337_78 * lab.a + 0.215_803_76 * lab.b;
+    let m = lab.l - 0.105_561_346 * lab.a - 0.063_854_17 * lab.b;
+    let s = lab.l - 0.089_484_18 * lab.a - 1.291_485_5 * lab.b;
+    super::working_color::apply_matrix(working_from_lms, [l * l * l, m * m * m, s * s * s])
+}
+
+#[inline]
 pub fn working_rgb_to_oklab(rgb: [f32; 3], space: WorkingColorSpace) -> Oklab {
-    linear_srgb_to_oklab(space.to_linear_srgb(rgb))
+    match space {
+        WorkingColorSpace::LinearSrgb => linear_srgb_to_oklab(rgb),
+        WorkingColorSpace::AcesCg => working_rgb_to_oklab_direct(rgb, &OKLAB_LMS_FROM_ACESCG),
+        WorkingColorSpace::LinearProPhoto => {
+            working_rgb_to_oklab_direct(rgb, &OKLAB_LMS_FROM_PROPHOTO)
+        }
+    }
 }
 
 #[inline]
 pub fn oklab_to_working_rgb(lab: Oklab, space: WorkingColorSpace) -> [f32; 3] {
-    space.from_linear_srgb(oklab_to_linear_srgb(lab))
+    match space {
+        WorkingColorSpace::LinearSrgb => oklab_to_linear_srgb(lab),
+        WorkingColorSpace::AcesCg => oklab_to_working_rgb_direct(lab, &ACESCG_FROM_OKLAB_LMS),
+        WorkingColorSpace::LinearProPhoto => {
+            oklab_to_working_rgb_direct(lab, &PROPHOTO_FROM_OKLAB_LMS)
+        }
+    }
 }
 
 #[inline]
@@ -217,6 +303,22 @@ mod tests {
             let p = working_rgb_to_perceptual(rgb, WorkingColorSpace::LinearProPhoto);
             assert!(p.chroma < 2.0e-5, "neutral {v} -> {p:?}");
             assert_eq!(p.hue, 0.0);
+        }
+    }
+
+    #[test]
+    fn direct_working_oklab_matches_unclamped_composed_reference() {
+        for space in [WorkingColorSpace::AcesCg, WorkingColorSpace::LinearProPhoto] {
+            for rgb in VECTORS {
+                let direct = working_rgb_to_oklab(rgb, space);
+                let composed = linear_srgb_to_oklab(space.to_linear_srgb(rgb));
+                for (a, b) in [direct.l, direct.a, direct.b]
+                    .into_iter()
+                    .zip([composed.l, composed.a, composed.b])
+                {
+                    assert!((a - b).abs() < 3.0e-6, "{space:?}: {rgb:?}");
+                }
+            }
         }
     }
 

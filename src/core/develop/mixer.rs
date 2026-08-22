@@ -1,7 +1,8 @@
 //! Colour-mixer selection model: the periodic-RBF Lagrange basis that maps the
 //! 8 band sliders to a smooth per-hue curve, the saturation-confidence weighting,
-//! and the per-pixel band adjustments. A pixel is selected by its UCS-22 hue
-//! through the curve, then weighted by HSV saturation so neutrals take no edit.
+//! and the per-pixel band adjustments. Legacy selects by display UCS/HSV; V2
+//! selects and edits one working-space OKLCh value with continuous neutral
+//! protection.
 
 use super::*;
 
@@ -315,13 +316,10 @@ pub(crate) fn mixer_desat_weight(r: f32, g: f32, b: f32) -> f32 {
     mixer_satweight(hsv_saturation(r, g, b) - 0.01) * smootherstep(0.002, 0.025, delta)
 }
 
-/// Per-pixel selective-colour mixer contribution: the periodic hue curves
-/// sampled at the pixel's UCS hue, weighted by its saturation (Luminance
-/// additionally keeps the shadow/highlight guard against black speckles and
-/// highlight wash). Returns hue/sat/luminance control deltas. Runs on the CPU
-/// for every path (the GPU preview consumes the CPU-baked `adjusted` proxy),
-/// so the model is GPU-parity-exact by construction; only the spatial re-gate
-/// is mirrored, via the shared gate LUT.
+/// Per-pixel selective-colour mixer contribution for a bounded display RGB.
+/// Legacy samples UCS/HSV directly. This remains a compatibility wrapper for
+/// V2 display-domain callers; the RAW working path calls
+/// [`mixer_adjustments_for_perceptual`] with its unclamped working OKLCh.
 pub(crate) fn mixer_adjustments_for_color(
     curves: &MixerCurves,
     r: f32,
@@ -336,21 +334,7 @@ pub(crate) fn mixer_adjustments_for_color(
             srgb_to_linear(b),
         ]);
         let perceptual = crate::core::perceptual_color::PerceptualColor::from_oklab(lab);
-        // Continuous chroma confidence protects the neutral axis without a hard
-        // hue gate. Negative saturation gets a lower floor so weak casts remain
-        // removable while exact neutrals stay fixed.
-        let normal_w = smootherstep(0.008, 0.055, perceptual.chroma);
-        let desat_w = smootherstep(0.002, 0.025, perceptual.chroma);
-        let hue = perceptual.hue;
-        let sat = curve_sample(&curves.sat, hue);
-        let lum_guard = smootherstep(0.015, 0.09, perceptual.lightness)
-            * (1.0 - smootherstep(0.90, 1.02, perceptual.lightness));
-        return (
-            (curve_sample(&curves.hue, hue) * normal_w).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
-            (sat * if sat < 0.0 { desat_w } else { normal_w }).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
-            (curve_sample(&curves.lum, hue) * normal_w * lum_guard)
-                .clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
-        );
+        return mixer_adjustments_for_perceptual(curves, perceptual);
     }
     let h = crate::core::ucs::ucs_hue_rad(r, g, b);
     let w = mixer_weight(r, g, b, MIXER_SAT_SHIFT);
@@ -367,6 +351,31 @@ pub(crate) fn mixer_adjustments_for_color(
         (curve_sample(&curves.hue, h) * w).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
         (sat * sat_w).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
         (curve_sample(&curves.lum, h) * wl).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
+    )
+}
+
+/// V2 mixer controls from the same working-space OKLCh value the edit mutates.
+/// Keeping classification and correction on one value prevents an out-of-sRGB
+/// scene colour from being assigned to a different band by the output preview.
+pub(crate) fn mixer_adjustments_for_perceptual(
+    curves: &MixerCurves,
+    perceptual: crate::core::perceptual_color::PerceptualColor,
+) -> (f32, f32, f32) {
+    debug_assert_eq!(curves.algorithm, ColorMixerAlgorithm::V2);
+    // Continuous chroma confidence protects the neutral axis without a hard
+    // hue gate. Negative saturation gets a lower floor so weak casts remain
+    // removable while exact neutrals stay fixed.
+    let normal_w = smootherstep(0.008, 0.055, perceptual.chroma);
+    let desat_w = smootherstep(0.002, 0.025, perceptual.chroma);
+    let hue = perceptual.hue;
+    let sat = curve_sample(&curves.sat, hue);
+    let lum_guard = smootherstep(0.015, 0.09, perceptual.lightness)
+        * (1.0 - smootherstep(0.90, 1.02, perceptual.lightness));
+    (
+        (curve_sample(&curves.hue, hue) * normal_w).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
+        (sat * if sat < 0.0 { desat_w } else { normal_w }).clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
+        (curve_sample(&curves.lum, hue) * normal_w * lum_guard)
+            .clamp(-CONTROL_LIMIT, CONTROL_LIMIT),
     )
 }
 
@@ -449,7 +458,10 @@ pub fn mixer_mask_preview(settings: &DevelopSettings, rgb: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod v2_tests {
     use super::*;
-    use crate::core::perceptual_color::{linear_srgb_to_oklab, PerceptualColor};
+    use crate::core::perceptual_color::{
+        linear_srgb_to_oklab, perceptual_to_working_rgb, working_rgb_to_perceptual, PerceptualColor,
+    };
+    use crate::core::working_color::WorkingColorSpace;
 
     fn circular_error(a: f32, b: f32) -> f32 {
         let d = (a - b).abs().rem_euclid(std::f32::consts::TAU);
@@ -537,6 +549,7 @@ mod v2_tests {
                 &settings,
                 Some(&curves),
                 Some(encoded),
+                true,
                 &mut r,
                 &mut g,
                 &mut b,
@@ -557,6 +570,170 @@ mod v2_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn v2_classifies_and_rotates_one_wide_working_oklch_value() {
+        let band = 3; // green
+        let swatch = MIXER_COLORS[band];
+        let swatch_lab = linear_srgb_to_oklab([
+            srgb_to_linear(swatch[0] as f32 / 255.0),
+            srgb_to_linear(swatch[1] as f32 / 255.0),
+            srgb_to_linear(swatch[2] as f32 / 255.0),
+        ]);
+        let input_color = PerceptualColor {
+            lightness: 0.62,
+            chroma: 0.24,
+            hue: PerceptualColor::from_oklab(swatch_lab).hue,
+        };
+        let space = WorkingColorSpace::LinearProPhoto;
+        let input = perceptual_to_working_rgb(input_color, space);
+
+        let mut settings = DevelopSettings::default();
+        settings.mixer_hue[band] = 120.0;
+        let curves = build_mixer_curves_opt(&settings).unwrap();
+        let apply = |classification: [f32; 3]| {
+            let [mut r, mut g, mut b] = input;
+            super::super::apply_color_linear_classified_in_space(
+                &settings,
+                Some(&curves),
+                Some(classification),
+                true,
+                space,
+                &mut r,
+                &mut g,
+                &mut b,
+            );
+            working_rgb_to_perceptual([r, g, b], space)
+        };
+        // Deliberately conflicting bounded display proxies must not change V2.
+        let green_proxy = apply([0.0, 1.0, 0.0]);
+        let magenta_proxy = apply([1.0, 0.0, 1.0]);
+        assert!(circular_error(green_proxy.hue, input_color.hue) > 0.05);
+        assert!(circular_error(green_proxy.hue, magenta_proxy.hue) < 2.0e-5);
+        assert!((green_proxy.lightness - input_color.lightness).abs() < 2.0e-5);
+        assert!((green_proxy.chroma - input_color.chroma).abs() < 2.0e-5);
+    }
+
+    #[test]
+    fn v2_controls_are_periodic_and_neutral_axis_is_fixed() {
+        let mut settings = DevelopSettings::default();
+        settings.mixer_hue = [120.0, -80.0, 35.0, 90.0, -45.0, 65.0, -110.0, 20.0];
+        settings.mixer_saturation = [-200.0; MIXER_BANDS];
+        settings.mixer_luminance = [40.0, -35.0, 25.0, -15.0, 10.0, -5.0, 30.0, -20.0];
+        let curves = build_mixer_curves_opt(&settings).unwrap();
+        let at = |hue| {
+            mixer_adjustments_for_perceptual(
+                &curves,
+                PerceptualColor {
+                    lightness: 0.58,
+                    chroma: 0.16,
+                    hue,
+                },
+            )
+        };
+        let zero = at(0.0);
+        let turn = at(std::f32::consts::TAU);
+        for (a, b) in [zero.0, zero.1, zero.2]
+            .into_iter()
+            .zip([turn.0, turn.1, turn.2])
+        {
+            assert!((a - b).abs() < 1.0e-4, "periodic seam {a} vs {b}");
+        }
+
+        let neutral = mixer_adjustments_for_perceptual(
+            &curves,
+            PerceptualColor {
+                lightness: 0.58,
+                chroma: 0.0,
+                hue: 5.1,
+            },
+        );
+        assert_eq!(neutral, (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn v2_zero_chroma_endpoint_is_even_across_hue() {
+        let mut settings = DevelopSettings::default();
+        settings.mixer_saturation = [-CONTROL_LIMIT; MIXER_BANDS];
+        let curves = build_mixer_curves_opt(&settings).unwrap();
+        let space = WorkingColorSpace::LinearProPhoto;
+        let mut ratios = Vec::new();
+        for step in 0..24 {
+            let before = PerceptualColor {
+                lightness: 0.62,
+                chroma: 0.16,
+                hue: step as f32 * std::f32::consts::TAU / 24.0,
+            };
+            let [mut r, mut g, mut b] = perceptual_to_working_rgb(before, space);
+            super::super::apply_color_linear_classified_in_space(
+                &settings,
+                Some(&curves),
+                None,
+                true,
+                space,
+                &mut r,
+                &mut g,
+                &mut b,
+            );
+            let after = working_rgb_to_perceptual([r, g, b], space);
+            assert!((after.lightness - before.lightness).abs() < 2.0e-5);
+            let hue_error = circular_error(after.hue, before.hue);
+            assert!(
+                hue_error < 2.0e-4,
+                "hue {step} drifted {hue_error}: {before:?} -> {after:?}"
+            );
+            ratios.push(after.chroma / before.chroma);
+        }
+        let lo = ratios.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = ratios.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(hi - lo < 2.0e-5, "desaturation varies by hue: {lo}..{hi}");
+        assert!(hi < 0.051, "maximum desaturation is too weak: {hi}");
+    }
+
+    #[test]
+    fn v2_skin_hue_response_is_stable_across_tone_levels() {
+        let band = 1; // orange / skin neighbourhood
+        let swatch = MIXER_COLORS[band];
+        let hue = PerceptualColor::from_oklab(linear_srgb_to_oklab([
+            srgb_to_linear(swatch[0] as f32 / 255.0),
+            srgb_to_linear(swatch[1] as f32 / 255.0),
+            srgb_to_linear(swatch[2] as f32 / 255.0),
+        ]))
+        .hue;
+        let mut settings = DevelopSettings::default();
+        settings.mixer_hue[band] = 90.0;
+        let curves = build_mixer_curves_opt(&settings).unwrap();
+        let space = WorkingColorSpace::LinearProPhoto;
+        let hue_shift = |lightness: f32, chroma: f32| {
+            let before = PerceptualColor {
+                lightness,
+                chroma,
+                hue,
+            };
+            let [mut r, mut g, mut b] = perceptual_to_working_rgb(before, space);
+            super::super::apply_color_linear_classified_in_space(
+                &settings,
+                Some(&curves),
+                None,
+                true,
+                space,
+                &mut r,
+                &mut g,
+                &mut b,
+            );
+            let after = working_rgb_to_perceptual([r, g, b], space);
+            (after.hue - before.hue).rem_euclid(std::f32::consts::TAU)
+        };
+        // Two proportional OKLCh levels model the same skin chromaticity after
+        // different exposure/contrast placements. Both are above the smooth
+        // chroma-confidence knee, so their selective hue response must agree.
+        let shadow = hue_shift(0.43, 0.09);
+        let highlight = hue_shift(0.76, 0.16);
+        assert!(
+            (shadow - highlight).abs() < 2.0e-5,
+            "{shadow} vs {highlight}"
+        );
     }
 
     #[test]

@@ -73,6 +73,17 @@ pub fn apply_matrix(matrix: &[[f32; 3]; 3], rgb: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+#[inline]
+pub fn multiply_matrices(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    for (row, values) in out.iter_mut().enumerate() {
+        for (column, value) in values.iter_mut().enumerate() {
+            *value = a[row][0] * b[0][column] + a[row][1] * b[1][column] + a[row][2] * b[2][column];
+        }
+    }
+    out
+}
+
 impl WorkingColorSpace {
     pub fn name(self) -> &'static str {
         match self {
@@ -112,6 +123,16 @@ impl WorkingColorSpace {
             Self::LinearSrgb => [0.212_672_9, 0.715_152_2, 0.072_175],
             Self::AcesCg => [0.272_228_7, 0.674_081_8, 0.053_689_5],
             Self::LinearProPhoto => [0.288_04, 0.711_874, 0.000_086],
+        }
+    }
+
+    /// Coefficients used by the versioned render kernels. Linear-sRGB keeps
+    /// the historical rounded Rec.709 values bit-for-bit; wide spaces use
+    /// their native Y row.
+    pub fn render_luminance_coefficients(self) -> [f32; 3] {
+        match self {
+            Self::LinearSrgb => [0.2126, 0.7152, 0.0722],
+            _ => self.luminance_coefficients(),
         }
     }
 

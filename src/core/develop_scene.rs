@@ -30,16 +30,18 @@
 use crate::core::cat16;
 use crate::core::color::luminance_f32;
 use crate::core::develop::{
-    apply_color, apply_color_linear, apply_color_linear_classified, apply_detail_to_working_buffer,
-    apply_effects_linear, apply_luma_target, apply_point_curve_outer, bell, contrast_curve,
-    control_to_unit, curve_is_identity, curve_shadows_mask, darks_mask, eased_control,
-    guided_lowpass_plane, linear_to_srgb, luma_lin, lut_lerp, rgb_curve_luts,
-    sample_plane_bilinear, smootherstep, srgb_to_linear, DevelopSettings, EXPOSURE_LIMIT,
-    TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
+    apply_color, apply_color_linear_classified_in_space, apply_color_linear_in_space,
+    apply_detail_to_working_buffer_in_space, apply_effects_linear_in_space, apply_luma_target,
+    apply_luma_target_in_space, apply_point_curve_outer, bell, contrast_curve, control_to_unit,
+    curve_is_identity, curve_shadows_mask, darks_mask, eased_control, guided_lowpass_plane,
+    linear_to_srgb, luma_lin, lut_lerp, rgb_curve_luts, sample_plane_bilinear, smootherstep,
+    srgb_to_linear, DevelopSettings, EXPOSURE_LIMIT, TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
 };
+#[cfg(test)]
+use crate::core::develop::{apply_color_linear, apply_color_linear_classified};
 use crate::core::tile::TileMap;
+use crate::core::working_color::{OutputColorSpace, WorkingColorSpace};
 use rayon::prelude::*;
-use std::sync::OnceLock;
 
 // ── LUT domain ───────────────────────────────────────────────────────────────
 
@@ -52,9 +54,10 @@ pub const SCENE_EV_MAX: f32 = 6.0;
 /// filmic convention — 18% grey stays 18% grey at neutral).
 pub const SCENE_MID_GRAY: f32 = 0.1845;
 
-/// Sigmoid steepness at neutral Contrast, and how far one full slider unit
-/// scales it (C = BASE · 2^(RANGE·u)). Taste knobs for the default look.
-const SIGMOID_BASE_C: f32 = 1.7;
+/// Steepness of the RAW render sigmoid before the versioned looks existed.
+/// Scene1/Legacy1 projects keep this exact value, so re-opening an old edit is
+/// byte-stable. New (Develop2) projects render through [`LookRecipe`] instead.
+const LEGACY_SIGMOID_C: f32 = 1.7;
 /// Blend from the per-channel sigmoid toward the max-RGB ratio path. Preserve
 /// hue strongly through shadows/midtones, then let clipped highlights converge
 /// naturally toward white. These taste knobs are mirrored in compositor.wgsl.
@@ -65,6 +68,84 @@ const HUE_PRESERVE_HIGH: f32 = 0.20;
 fn hue_preserve_blend(mapped_n: f32) -> f32 {
     let hw = smootherstep(0.5, 1.0, mapped_n);
     HUE_PRESERVE_LOW + (HUE_PRESERVE_HIGH - HUE_PRESERVE_LOW) * hw
+}
+
+// ── Look recipe: the versioned RAW render transform ("iAi Natural v1") ───────
+
+/// A named, versioned RAW render *look*: the taste parameters of the
+/// scene → display transform. Only the RAW ([`BaseLook::Raw`]) path consults
+/// it; display-referred (Identity) sources render through the identity map and
+/// ignore it.
+///
+/// Centralising the look here is what lets a new look version ship — or an old
+/// project stay pinned to the look it was edited under — without touching the
+/// per-pixel loop or its hand-written GPU twin. The one knob that varies today,
+/// the sigmoid steepness, rides entirely inside the uploaded tone LUT, so the
+/// WGSL preview reproduces every look for free (it samples whatever LUT it is
+/// given). 18% grey maps to itself for ANY steepness (`S(mid) == mid`), so a
+/// punchier look adds midtone contrast without shifting exposure or clipping
+/// the black/white endpoints.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LookRecipe {
+    /// Stable human label, e.g. `"iAi Natural v1"`.
+    pub name: &'static str,
+    /// Log-logistic sigmoid steepness at neutral Contrast. Higher = more
+    /// midtone contrast ("pop").
+    pub sigmoid_c: f32,
+}
+
+impl LookRecipe {
+    /// The look a RAW render should use for these settings. Projects saved
+    /// under the older scene engine (`Scene1`) or the legacy gamma engine
+    /// (`Legacy1`) keep the exact shipped transform, so re-opening them never
+    /// shifts their appearance. New projects (`Develop2`, the default for a
+    /// fresh RAW open) get the versioned per-mode looks, mapped from the
+    /// existing Tone rendering-intent control so no new UI is introduced.
+    pub fn resolve(
+        mode: crate::core::develop::ToneMapMode,
+        engine: crate::core::develop::DevelopEngineVersion,
+    ) -> Self {
+        use crate::core::develop::{DevelopEngineVersion, ToneMapMode};
+        if engine != DevelopEngineVersion::Develop2 {
+            return Self {
+                name: "iAi legacy sigmoid",
+                sigmoid_c: LEGACY_SIGMOID_C,
+            };
+        }
+        match mode {
+            ToneMapMode::Perceptual => Self::natural_v1(),
+            ToneMapMode::FilmLike => Self::filmic_v1(),
+            ToneMapMode::Neutral => Self::neutral_v1(),
+        }
+    }
+
+    /// The default look: a balanced render with a gentle midtone lift over the
+    /// legacy curve, so a RAW opens with natural "pop" instead of flat/muddy
+    /// midtones, while grey stays grey and highlights keep their rolloff.
+    pub const fn natural_v1() -> Self {
+        Self {
+            name: "iAi Natural v1",
+            sigmoid_c: 1.85,
+        }
+    }
+
+    /// The punchiest look: a steeper film-style shoulder. Pairs with the
+    /// FilmLike rendering intent's stronger highlight desaturation.
+    pub const fn filmic_v1() -> Self {
+        Self {
+            name: "iAi Filmic v1",
+            sigmoid_c: 2.0,
+        }
+    }
+
+    /// The flattest, most colorimetric look: a gentle curve close to the
+    /// legacy response, for accurate/low-contrast starting points.
+    pub const fn neutral_v1() -> Self {
+        Self {
+            name: "iAi Neutral v1",
+            sigmoid_c: 1.55,
+        }
+    }
 }
 
 // ── Tone-equalizer zones (H/S/W/B as EV offsets) ────────────────────────────
@@ -184,18 +265,17 @@ pub struct SceneSource {
     pub look: BaseLook,
     /// Primaries of the unclamped scene-linear RGB values in `half`.
     pub color_pipeline: crate::core::working_color::ColorPipelineMetadata,
+    /// Transient trace of the technical camera characterization used to build
+    /// a RAW master. `None` for display-referred and synthetic scenes. This is
+    /// diagnostic state only and is never serialized into `.iai`.
+    pub camera_profile: Option<crate::core::camera_profile::RawSceneCharacterization>,
+    /// Absolute as-shot source white recovered from RAW camera neutral/matrix
+    /// metadata. The existing ±200 controls remain a transport around D65;
+    /// clients can expose this value as Kelvin/Duv without changing render
+    /// settings or the legacy project schema.
+    pub as_shot_white_balance: Option<crate::core::cat16::WhiteBalance>,
     /// Camera picture-style curves fitted from the embedded JPEG.
     pub camera_rgb_curve: Option<Box<[[f32; 256]; 3]>>,
-    /// Robust black/grey/white anchors of the immutable RAW master. Computed
-    /// lazily from a small grid and then reused by every preview/commit build.
-    pub auto_tone: OnceLock<AutoToneRange>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct AutoToneRange {
-    pub black_ev: f32,
-    pub grey_ev: f32,
-    pub white_ev: f32,
 }
 
 #[allow(dead_code)] // constructors exercised by unit tests; production fills `half` directly
@@ -208,9 +288,30 @@ impl SceneSource {
             alpha: None,
             look: BaseLook::Raw,
             color_pipeline: crate::core::working_color::ColorPipelineMetadata::default(),
+            camera_profile: None,
+            as_shot_white_balance: None,
             camera_rgb_curve: None,
-            auto_tone: OnceLock::new(),
         }
+    }
+
+    /// Absolute Kelvin/Duv represented by the current Develop2 controls. RAW
+    /// scenes are relative to their as-shot white; synthetic/Identity scenes
+    /// use D65 as the neutral base.
+    pub fn absolute_white_balance(
+        &self,
+        settings: &DevelopSettings,
+    ) -> crate::core::cat16::WhiteBalance {
+        let base = self
+            .as_shot_white_balance
+            .unwrap_or(crate::core::cat16::WhiteBalance {
+                cct_kelvin: crate::core::cat16::D65_CCT_KELVIN,
+                duv: 0.0,
+            });
+        crate::core::cat16::sliders_to_white_balance_from_base(
+            base,
+            settings.temperature,
+            settings.tint,
+        )
     }
 
     /// Linearize a display-referred layer (gamma sRGB, 8- or 16-bit tiles)
@@ -328,8 +429,9 @@ impl SceneSource {
                 working: crate::core::working_color::WorkingColorSpace::LinearSrgb,
                 ..Default::default()
             },
+            camera_profile: None,
+            as_shot_white_balance: None,
             camera_rgb_curve: None,
-            auto_tone: OnceLock::new(),
         }
     }
 
@@ -376,11 +478,11 @@ pub struct SigmoidParams {
     pub n: f32,
 }
 
-/// Solve the anchor/normalisation pair for a Contrast slider value (±200).
-pub fn sigmoid_params(_contrast: f32) -> SigmoidParams {
-    // The shoulder is part of the base rendering transform, not the Contrast
-    // control. Contrast is a separate pivoted luma curve after tone mapping.
-    let c = SIGMOID_BASE_C;
+/// Solve the anchor/normalisation pair for a look's sigmoid steepness `c`
+/// (see [`LookRecipe`]). The shoulder is part of the base rendering transform,
+/// NOT the Contrast control — Contrast is a separate pivoted luma curve after
+/// tone mapping. 18% grey maps to itself for any `c`.
+pub fn sigmoid_params(c: f32) -> SigmoidParams {
     let top = SCENE_EV_MAX.exp2();
     let mut n = 1.0f32;
     let mut a = SCENE_MID_GRAY;
@@ -646,86 +748,6 @@ fn baseline_rgb_gains_with_tone(
     gain
 }
 
-/// Estimate image-specific scene anchors on a bounded grid. Transparent and
-/// non-positive samples are ignored; small percentile trims keep letterbox
-/// black and isolated sensor highlights from defining the whole curve.
-fn estimate_auto_tone(scene: &SceneSource) -> AutoToneRange {
-    const BUDGET: u64 = 60_000;
-    let total = scene.width as u64 * scene.height as u64;
-    let step = (((total / BUDGET).max(1) as f64).sqrt().ceil() as u32).max(1);
-    let mut evs = Vec::with_capacity((total / (step as u64 * step as u64) + 1) as usize);
-    let mut y = 0;
-    while y < scene.height {
-        let mut x = 0;
-        while x < scene.width {
-            let i = y as usize * scene.width as usize + x as usize;
-            if scene.alpha16_at_index(i) > 0 {
-                let p = scene.get_rgb(x, y);
-                let l = luma_lin(p[0], p[1], p[2]);
-                if l.is_finite() && l > 1e-7 {
-                    evs.push(l.log2());
-                }
-            }
-            x += step;
-        }
-        y += step;
-    }
-    if evs.len() < 32 {
-        return AutoToneRange {
-            black_ev: SCENE_EV_MIN,
-            grey_ev: SCENE_MID_GRAY.log2(),
-            white_ev: SCENE_EV_MAX,
-        };
-    }
-    evs.sort_unstable_by(f32::total_cmp);
-    let at = |q: f32| evs[((evs.len() - 1) as f32 * q).round() as usize];
-    // ART's vmin*0.5 / vmax*1.5 expressed in EV, with robust 0.2/99.8%
-    // endpoints so a dead pixel or specular pinprick cannot collapse the DR.
-    let black_ev = (at(0.002) - 1.0).clamp(SCENE_EV_MIN, SCENE_EV_MAX - 3.0);
-    let white_ev = (at(0.998) + 1.5f32.log2()).clamp(black_ev + 3.0, SCENE_EV_MAX + 4.0);
-    // Mean only through the adaptive central window, excluding the outer 10%
-    // of the measured DR. Averaging in linear light matches sourceGray.
-    let lo = black_ev + (white_ev - black_ev) * 0.10;
-    let hi = white_ev - (white_ev - black_ev) * 0.10;
-    let (sum, count) = evs
-        .iter()
-        .filter(|&&e| e >= lo && e <= hi)
-        .fold((0.0f64, 0usize), |(sum, n), &e| {
-            (sum + 2.0f64.powf(e as f64), n + 1)
-        });
-    let grey_ev = if count == 0 {
-        (black_ev + white_ev) * 0.5
-    } else {
-        (sum / count as f64).log2() as f32
-    }
-    .clamp(black_ev + 1.0, white_ev - 1.0);
-    AutoToneRange {
-        black_ev,
-        grey_ev,
-        white_ev,
-    }
-}
-
-pub fn scene_auto_tone(scene: &SceneSource) -> Option<AutoToneRange> {
-    (scene.look == BaseLook::Raw)
-        .then(|| *scene.auto_tone.get_or_init(|| estimate_auto_tone(scene)))
-}
-
-/// Conservative image-range warp. The camera-preview baseline has already set
-/// overall brightness, so source grey must remain fixed. Black/white statistics
-/// may only adjust the two slopes gently; unconstrained endpoint fitting can
-/// turn a normal 5-stop portrait into a 20-stop curve with crushed blacks and
-/// neon skin.
-#[inline]
-fn adaptive_map_ev(e: f32, a: AutoToneRange) -> f32 {
-    // Retain the measured anchors for a future genuinely adaptive operator.
-    // Fitting them to the fixed LUT endpoints made the shadow-side desired
-    // slope almost always hit its upper clamp because SCENE_EV_MIN lies far
-    // below a photographic black point. That added contrast to every RAW.
-    let _ = a;
-    e
-}
-
 /// Signed tone-equalizer offset (EV) for a regional exposure `e` (EV, absolute)
 /// under the four Light sliders. Direct evaluation — the LUT bakes this.
 pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
@@ -767,6 +789,11 @@ pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
 pub struct SceneToneData {
     pub tone_map_mode: crate::core::develop::ToneMapMode,
     pub point_curve_mode: crate::core::develop::PointCurveMode,
+    /// RGB primaries carried between the technical scene stage and the single
+    /// output boundary. Develop2 keeps the scene master's wide working space;
+    /// Scene1/Legacy1 retain their historical linear-sRGB processing contract.
+    pub working_space: WorkingColorSpace,
+    pub output_space: OutputColorSpace,
     /// CAT16 white balance composed with the exposure multiplier: one matrix
     /// applied to the linear scene value. Identity·1 at neutral.
     pub wb_ev: [[f32; 3]; 3],
@@ -803,17 +830,28 @@ pub fn build_scene_tone_for_scene(
     settings: &DevelopSettings,
     scene: &SceneSource,
 ) -> SceneToneData {
-    let mut tone = build_scene_tone_impl(settings, scene.look, scene_auto_tone(scene));
-    let to_srgb = scene.color_pipeline.working.to_linear_srgb_matrix();
-    let mut wb_from_working = [[0.0f32; 3]; 3];
-    for (row, output) in wb_from_working.iter_mut().enumerate() {
-        for (column, value) in output.iter_mut().enumerate() {
-            *value = tone.wb_ev[row][0] * to_srgb[0][column]
-                + tone.wb_ev[row][1] * to_srgb[1][column]
-                + tone.wb_ev[row][2] * to_srgb[2][column];
-        }
+    validate_develop2_recipe(settings);
+    let working_space = if settings.develop_engine_version
+        == crate::core::develop::DevelopEngineVersion::Develop2
+    {
+        scene.color_pipeline.working
+    } else {
+        WorkingColorSpace::LinearSrgb
+    };
+    let mut tone = build_scene_tone_impl(
+        settings,
+        scene.look,
+        working_space,
+        scene.color_pipeline.output,
+        scene.as_shot_white_balance,
+    );
+    if scene.color_pipeline.working != working_space {
+        let input_to_working = crate::core::working_color::multiply_matrices(
+            working_space.from_linear_srgb_matrix(),
+            scene.color_pipeline.working.to_linear_srgb_matrix(),
+        );
+        tone.wb_ev = crate::core::working_color::multiply_matrices(&tone.wb_ev, &input_to_working);
     }
-    tone.wb_ev = wb_from_working;
     if let Some(camera) = &scene.camera_rgb_curve {
         let user = tone.rgb.take();
         let mut composed = Box::new([[0.0f32; 256]; 3]);
@@ -834,17 +872,57 @@ pub fn build_scene_tone_for_scene(
 /// LUT CONTENT and where Contrast lives differ, so the WGSL chain needs no
 /// flag: it renders whatever tables it is given.
 pub fn build_scene_tone_for(settings: &DevelopSettings, look: BaseLook) -> SceneToneData {
-    build_scene_tone_impl(settings, look, None)
+    validate_develop2_recipe(settings);
+    build_scene_tone_impl(
+        settings,
+        look,
+        WorkingColorSpace::LinearSrgb,
+        OutputColorSpace::Srgb,
+        None,
+    )
+}
+
+#[inline]
+fn validate_develop2_recipe(settings: &DevelopSettings) {
+    if settings.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop2 {
+        crate::core::develop2::compile(settings)
+            .expect("Develop2 settings must compile to a valid canonical graph");
+    }
 }
 
 fn build_scene_tone_impl(
     settings: &DevelopSettings,
     look: BaseLook,
-    auto: Option<AutoToneRange>,
+    working_space: WorkingColorSpace,
+    output_space: OutputColorSpace,
+    as_shot_white: Option<crate::core::cat16::WhiteBalance>,
 ) -> SceneToneData {
-    let wb = cat16::wb_matrix(settings.temperature, settings.tint);
+    let wb_srgb = if settings.develop_engine_version
+        == crate::core::develop::DevelopEngineVersion::Develop2
+        && look == BaseLook::Raw
+    {
+        as_shot_white.map_or_else(
+            || cat16::wb_matrix(settings.temperature, settings.tint),
+            |base| cat16::wb_matrix_from_base(base, settings.temperature, settings.tint),
+        )
+    } else {
+        cat16::wb_matrix_legacy(settings.temperature, settings.tint)
+    };
     let ev = exposure_multiplier(settings.exposure);
-    let mut wb_ev = wb;
+    let mut wb_ev = if working_space == WorkingColorSpace::LinearSrgb {
+        wb_srgb
+    } else if settings.temperature.abs() <= 0.001 && settings.tint.abs() <= 0.001 {
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    } else {
+        let wb_then_to_srgb = crate::core::working_color::multiply_matrices(
+            &wb_srgb,
+            working_space.to_linear_srgb_matrix(),
+        );
+        crate::core::working_color::multiply_matrices(
+            working_space.from_linear_srgb_matrix(),
+            &wb_then_to_srgb,
+        )
+    };
     for row in &mut wb_ev {
         for v in row {
             *v *= ev;
@@ -854,11 +932,12 @@ fn build_scene_tone_impl(
     let mut lut = [0.0f32; 256];
     match look {
         BaseLook::Raw => {
-            sigmoid = sigmoid_params(settings.contrast);
+            let recipe =
+                LookRecipe::resolve(settings.tone_map_mode, settings.develop_engine_version);
+            sigmoid = sigmoid_params(recipe.sigmoid_c);
             for (i, slot) in lut.iter_mut().enumerate() {
                 let e = SCENE_EV_MIN + (SCENE_EV_MAX - SCENE_EV_MIN) * i as f32 / 255.0;
-                let mapped_e = auto.map_or(e, |a| adaptive_map_ev(e, a));
-                *slot = sigmoid_eval(&sigmoid, mapped_e.exp2());
+                *slot = sigmoid_eval(&sigmoid, e.exp2());
             }
         }
         BaseLook::Identity => {
@@ -878,7 +957,7 @@ fn build_scene_tone_impl(
             }
             // Unused by the identity chain (the LUT above drives tone_map);
             // kept neutral so any consumer sees a sane anchored curve.
-            sigmoid = sigmoid_params(0.0);
+            sigmoid = sigmoid_params(LEGACY_SIGMOID_C);
         }
     }
     let tone_eq_active = settings.has_local_tone();
@@ -892,16 +971,23 @@ fn build_scene_tone_impl(
     SceneToneData {
         tone_map_mode: settings.tone_map_mode,
         point_curve_mode: settings.point_curve_mode,
+        working_space,
+        output_space,
         wb_ev,
         lut,
         tone_eq,
         tone_eq_active,
         shadow_chroma_active: look == BaseLook::Raw
             && settings.tone_map_mode == crate::core::develop::ToneMapMode::Perceptual,
-        grade_shadow: grade_vector(settings.grade_shadow_hue, settings.grade_shadow_strength),
+        grade_shadow: grade_vector(
+            settings.grade_shadow_hue,
+            settings.grade_shadow_strength,
+            working_space,
+        ),
         grade_highlight: grade_vector(
             settings.grade_highlight_hue,
             settings.grade_highlight_strength,
+            working_space,
         ),
         scene_contrast_gamma: if look == BaseLook::Raw {
             (0.75 * control_to_unit(settings.contrast)).exp2()
@@ -917,7 +1003,7 @@ fn build_scene_tone_impl(
 /// Hue/strength control to a small, zero-luminance linear-RGB offset. Removing
 /// the direction's Rec.709 luminance makes grading change colour contrast
 /// without lifting or lowering the zone as a side effect.
-fn grade_vector(hue_deg: f32, strength: f32) -> [f32; 3] {
+fn grade_vector(hue_deg: f32, strength: f32, working_space: WorkingColorSpace) -> [f32; 3] {
     let h = hue_deg.rem_euclid(360.0) / 60.0;
     let x = 1.0 - ((h % 2.0) - 1.0).abs();
     let rgb = match h as i32 {
@@ -928,7 +1014,12 @@ fn grade_vector(hue_deg: f32, strength: f32) -> [f32; 3] {
         4 => [x, 0.0, 1.0],
         _ => [1.0, 0.0, x],
     };
-    let y = luma_lin(rgb[0], rgb[1], rgb[2]);
+    let rgb = if working_space == WorkingColorSpace::LinearSrgb {
+        rgb
+    } else {
+        working_space.from_linear_srgb(rgb)
+    };
+    let y = working_luma(working_space, rgb);
     let mut d = [rgb[0] - y, rgb[1] - y, rgb[2] - y];
     let norm = d[0].abs().max(d[1].abs()).max(d[2].abs()).max(1e-6);
     let scale = control_to_unit(strength).max(0.0) * 0.12 / norm;
@@ -1064,8 +1155,8 @@ fn compress_highlight_chroma(
 /// Perceptual tone curves lose colour in the toe. Restore at most 5% chroma
 /// through the coloured-shadow band, leaving black, midtones and neutrals alone.
 #[inline]
-fn restore_shadow_chroma(c: [f32; 3]) -> [f32; 3] {
-    let y = luma_lin(c[0], c[1], c[2]).clamp(0.0, 1.0);
+fn restore_shadow_chroma(c: [f32; 3], working_space: WorkingColorSpace) -> [f32; 3] {
+    let y = working_luma(working_space, c).clamp(0.0, 1.0);
     let d = [c[0] - y, c[1] - y, c[2] - y];
     let chroma = d[0].max(d[1]).max(d[2]) - d[0].min(d[1]).min(d[2]);
     let tonal = smootherstep(0.08, 0.18, y) * (1.0 - smootherstep(0.38, 0.55, y));
@@ -1080,7 +1171,7 @@ impl SceneToneData {
         if (self.scene_contrast_gamma - 1.0).abs() < 1e-5 {
             return c;
         }
-        let y = luma_lin(c[0], c[1], c[2]).clamp(0.0, 1.0);
+        let y = working_luma(self.working_space, c).clamp(0.0, 1.0);
         let p = SCENE_MID_GRAY;
         let target = if y <= p {
             p * (y / p).powf(self.scene_contrast_gamma)
@@ -1088,7 +1179,7 @@ impl SceneToneData {
             1.0 - (1.0 - p) * ((1.0 - y) / (1.0 - p)).powf(self.scene_contrast_gamma)
         };
         let (mut r, mut g, mut b) = (c[0], c[1], c[2]);
-        apply_luma_target(&mut r, &mut g, &mut b, target);
+        apply_luma_target_in_space(&mut r, &mut g, &mut b, target, self.working_space);
         [r, g, b]
     }
 
@@ -1097,7 +1188,7 @@ impl SceneToneData {
         if self.grade_shadow == [0.0; 3] && self.grade_highlight == [0.0; 3] {
             return v;
         }
-        let y = luma_lin(v[0], v[1], v[2]).max(0.0);
+        let y = working_luma(self.working_space, v).max(0.0);
         let er = y.max(SCENE_EV_MIN.exp2()).log2() - SCENE_MID_GRAY.log2();
         let gaussian = |center: f32, width: f32| {
             let d = (er - center) / width;
@@ -1116,7 +1207,7 @@ impl SceneToneData {
     /// tone-equalizer zones read, and what the regional-E proxy stores.
     #[inline]
     pub fn own_e(&self, rgb_after_wb_ev: [f32; 3]) -> f32 {
-        luma_lin(rgb_after_wb_ev[0], rgb_after_wb_ev[1], rgb_after_wb_ev[2])
+        working_luma(self.working_space, rgb_after_wb_ev)
             .max(SCENE_EV_MIN.exp2())
             .log2()
     }
@@ -1178,7 +1269,7 @@ impl SceneToneData {
         };
         let out = self.apply_scene_contrast(out);
         let out = if self.shadow_chroma_active {
-            restore_shadow_chroma(out)
+            restore_shadow_chroma(out, self.working_space)
         } else {
             out
         };
@@ -1187,7 +1278,11 @@ impl SceneToneData {
 
     /// Final output boundary: gamut-map and encode a linear working pixel once.
     pub(crate) fn working_to_display(&self, working: [f32; 3]) -> [f32; 3] {
-        let clipped = gamut_clip_chroma(filmlike_clip(working));
+        let output_linear = self.working_space.to_linear_srgb(working);
+        let clipped = crate::core::gamut_map::map_to_output_gamut(
+            filmlike_clip(output_linear),
+            self.output_space,
+        );
         let mut r = linear_to_srgb(clipped[0]);
         let mut g = linear_to_srgb(clipped[1]);
         let mut b = linear_to_srgb(clipped[2]);
@@ -1254,6 +1349,16 @@ impl SceneToneData {
     }
 }
 
+#[inline]
+fn working_luma(space: WorkingColorSpace, rgb: [f32; 3]) -> f32 {
+    if space == WorkingColorSpace::LinearSrgb {
+        luma_lin(rgb[0], rgb[1], rgb[2])
+    } else {
+        let c = space.render_luminance_coefficients();
+        c[0] * rgb[0] + c[1] * rgb[1] + c[2] * rgb[2]
+    }
+}
+
 // ── Regional-E proxy (tone equalizer's guided mask) ─────────────────────────
 
 /// Tone-independent base for the regional exposure plane: box-average the
@@ -1313,7 +1418,7 @@ pub fn finish_region_e(
         .par_iter()
         .map(|p| {
             let v = cat16::mat_apply(&tone.wb_ev, *p);
-            luma_lin(v[0], v[1], v[2]).max(floor).log2()
+            working_luma(tone.working_space, v).max(floor).log2()
         })
         .collect();
     let r = (TONE_REGION_RADIUS / s.max(1)).max(1);
@@ -1393,9 +1498,8 @@ pub fn tone_lowpass_scene_region(
     crate::core::develop::guided_lowpass(&toned, pw, ph, r, crate::core::develop::COLOR_GUIDED_EPS)
 }
 
-/// Point-sampled scene base for the fast (Effects) preview proxy — linear
-/// scene RGB, one sample per s×s block. Cacheable; the per-frame tail applies
-/// the scene chain + the leftover (stripped) stages.
+/// Cacheable linear scene base for the fast spatial preview. Effects/Local use
+/// one centre sample per block; Detail requests the five-tap anti-aliased form.
 pub fn build_scene_fast_base(
     scene: &SceneSource,
     origin_x: u32,
@@ -1403,6 +1507,7 @@ pub fn build_scene_fast_base(
     region_w: u32,
     region_h: u32,
     s: usize,
+    antialias: bool,
 ) -> (Vec<[f32; 3]>, usize, usize) {
     let w = scene.width as usize;
     let h = scene.height as usize;
@@ -1418,23 +1523,51 @@ pub fn build_scene_fast_base(
     let ph = rh.div_ceil(s);
     let mut out = vec![[0.0f32; 3]; pw * ph];
     out.par_chunks_mut(pw).enumerate().for_each(|(py, row)| {
-        let sy = (oy + (py * s) + s / 2).min(oy + rh - 1).min(h - 1);
+        let block_y0 = oy + py * s;
+        let block_y1 = (block_y0 + s).min(oy + rh).min(h);
+        let span_y = block_y1.saturating_sub(block_y0).max(1);
+        let ys = if antialias {
+            [block_y0, block_y0 + span_y - 1]
+        } else {
+            [block_y0 + span_y / 2, block_y0 + span_y / 2]
+        };
         for (px, slot) in row.iter_mut().enumerate() {
-            let sx = (ox + (px * s) + s / 2).min(ox + rw - 1).min(w - 1);
-            let i = (sy * w + sx) * 4;
-            *slot = [
-                f16_bits_to_f32(scene.half[i]),
-                f16_bits_to_f32(scene.half[i + 1]),
-                f16_bits_to_f32(scene.half[i + 2]),
-            ];
+            let block_x0 = ox + px * s;
+            let block_x1 = (block_x0 + s).min(ox + rw).min(w);
+            let span_x = block_x1.saturating_sub(block_x0).max(1);
+            let xs = if antialias {
+                [block_x0, block_x0 + span_x - 1]
+            } else {
+                [block_x0 + span_x / 2, block_x0 + span_x / 2]
+            };
+            let taps = if antialias { 5.0 } else { 1.0 };
+            let mut acc = [0.0f32; 3];
+            for (yi, &sy) in ys.iter().enumerate() {
+                for (xi, &sx) in xs.iter().enumerate() {
+                    if !antialias && (yi != 0 || xi != 0) {
+                        continue;
+                    }
+                    let i = (sy * w + sx) * 4;
+                    acc[0] += f16_bits_to_f32(scene.half[i]);
+                    acc[1] += f16_bits_to_f32(scene.half[i + 1]);
+                    acc[2] += f16_bits_to_f32(scene.half[i + 2]);
+                }
+            }
+            if antialias {
+                let sx = block_x0 + (span_x - 1) / 2;
+                let sy = block_y0 + (span_y - 1) / 2;
+                let i = (sy * w + sx) * 4;
+                acc[0] += f16_bits_to_f32(scene.half[i]);
+                acc[1] += f16_bits_to_f32(scene.half[i + 1]);
+                acc[2] += f16_bits_to_f32(scene.half[i + 2]);
+            }
+            *slot = [acc[0] / taps, acc[1] / taps, acc[2] / taps];
         }
     });
     (out, pw, ph)
 }
 
 /// Per-frame fast-preview tail: scene chain per texel → display domain.
-/// The caller then runs `apply_fast_preview_to_region` with the STRIPPED
-/// settings so only the leftover stages (Colour/Effects) re-apply.
 pub fn scene_fast_region_display(base: &[[f32; 3]], tone: &SceneToneData) -> Vec<[f32; 3]> {
     base.par_iter()
         .map(|p| tone.scene_to_display(*p, None))
@@ -1446,6 +1579,7 @@ pub fn scene_fast_region_develop(
     base: &[[f32; 3]],
     tone: &SceneToneData,
     settings: &DevelopSettings,
+    regional_e: Option<(&[f32], usize, usize, u32)>,
     w: usize,
     h: usize,
     origin_x: u32,
@@ -1457,13 +1591,36 @@ pub fn scene_fast_region_develop(
     let curves = crate::core::develop::build_mixer_curves_opt(settings);
     let mut working: Vec<[f32; 3]> = base
         .par_iter()
-        .map(|p| {
-            let [mut r, mut g, mut b] = tone.scene_to_working(*p, None);
+        .enumerate()
+        .map(|(idx, p)| {
+            let px = (idx % w) as u32;
+            let py = (idx / w) as u32;
+            let x = origin_x
+                .saturating_add(px.saturating_mul(downsample.max(1)))
+                .saturating_add(downsample.max(1) / 2)
+                .min(source_w.saturating_sub(1));
+            let y = origin_y
+                .saturating_add(py.saturating_mul(downsample.max(1)))
+                .saturating_add(downsample.max(1) / 2)
+                .min(source_h.saturating_sub(1));
+            let e = regional_e.map(|(plane, pw, ph, plane_step)| {
+                let s = plane_step.max(1) as f32;
+                sample_plane_bilinear(
+                    plane,
+                    pw,
+                    ph,
+                    (x as f32 + 0.5) / s - 0.5,
+                    (y as f32 + 0.5) / s - 0.5,
+                )
+            });
+            let [mut r, mut g, mut b] = tone.scene_to_working(*p, e);
             let classification = tone.working_to_display([r, g, b]);
-            apply_color_linear_classified(
+            apply_color_linear_classified_in_space(
                 settings,
                 curves.as_ref(),
                 Some(classification),
+                true,
+                tone.working_space,
                 &mut r,
                 &mut g,
                 &mut b,
@@ -1475,12 +1632,12 @@ pub fn scene_fast_region_develop(
         .par_iter()
         .map(|p| tone.working_to_display(*p))
         .collect();
-    if !(settings.has_spatial_effects() || settings.vignette.abs() > 0.001) || working.is_empty() {
+    if working.is_empty() {
         return (region.clone(), region);
     }
     let luma: Vec<f32> = working
         .par_iter()
-        .map(|p| luma_lin(p[0], p[1], p[2]).max(0.0))
+        .map(|p| working_luma(tone.working_space, *p).max(0.0))
         .collect();
     let step = downsample.max(1);
     let spatial_base = if settings.has_spatial_effects() {
@@ -1516,8 +1673,35 @@ pub fn scene_fast_region_develop(
             .saturating_add(step / 2)
             .min(source_h.saturating_sub(1));
         let [r, g, b] = p;
-        apply_effects_linear(settings, r, g, b, x, y, inv_w, inv_h, spatial_base[i]);
+        apply_effects_linear_in_space(
+            settings,
+            r,
+            g,
+            b,
+            x,
+            y,
+            inv_w,
+            inv_h,
+            spatial_base[i],
+            tone.working_space,
+        );
     });
+    if settings.has_detail() {
+        apply_detail_to_working_buffer_in_space(&mut working, w, h, settings, tone.working_space);
+    }
+    if settings.has_locals() {
+        apply_scene_locals_linear_region(
+            &mut working,
+            w,
+            settings,
+            tone,
+            origin_x,
+            origin_y,
+            source_w,
+            source_h,
+            step,
+        );
+    }
     let adjusted = working
         .par_iter()
         .map(|p| tone.working_to_display(*p))
@@ -1530,11 +1714,17 @@ pub fn scene_fast_region_develop(
 /// Render the scene at the current settings into display-referred RGBA16. RAW
 /// Develop stages supplied through `develop` run together on the intermediate
 /// working buffer before its single output transform.
-fn apply_scene_locals_linear(
+#[allow(clippy::too_many_arguments)]
+fn apply_scene_locals_linear_region(
     working: &mut [[f32; 3]],
     width: usize,
-    height: usize,
     settings: &DevelopSettings,
+    parent_tone: &SceneToneData,
+    origin_x: u32,
+    origin_y: u32,
+    source_w: u32,
+    source_h: u32,
+    sample_step: u32,
 ) {
     let locals: Vec<_> = settings
         .locals
@@ -1542,26 +1732,42 @@ fn apply_scene_locals_linear(
         .filter(|local| !local.settings.is_neutral())
         .map(|local| {
             let s = local.settings.to_develop_settings();
-            let tone = build_scene_tone_for(&s, BaseLook::Identity);
+            let tone = build_scene_tone_impl(
+                &s,
+                BaseLook::Identity,
+                parent_tone.working_space,
+                parent_tone.output_space,
+                None,
+            );
             (local.shape, s, tone)
         })
         .collect();
     if locals.is_empty() {
         return;
     }
-    let inv_w = if width > 1 {
-        1.0 / (width - 1) as f32
+    let inv_w = if source_w > 1 {
+        1.0 / (source_w - 1) as f32
     } else {
         0.0
     };
-    let inv_h = if height > 1 {
-        1.0 / (height - 1) as f32
+    let inv_h = if source_h > 1 {
+        1.0 / (source_h - 1) as f32
     } else {
         0.0
     };
     working.par_iter_mut().enumerate().for_each(|(i, pixel)| {
-        let nx = (i % width) as f32 * inv_w;
-        let ny = (i / width) as f32 * inv_h;
+        let px = (i % width) as u32;
+        let py = (i / width) as u32;
+        let x = origin_x
+            .saturating_add(px.saturating_mul(sample_step))
+            .saturating_add(sample_step / 2)
+            .min(source_w.saturating_sub(1));
+        let y = origin_y
+            .saturating_add(py.saturating_mul(sample_step))
+            .saturating_add(sample_step / 2)
+            .min(source_h.saturating_sub(1));
+        let nx = x as f32 * inv_w;
+        let ny = y as f32 * inv_h;
         for (shape, local, tone) in &locals {
             let weight = shape.weight(nx, ny);
             if weight <= 0.003 {
@@ -1570,17 +1776,17 @@ fn apply_scene_locals_linear(
             let mut adjusted = tone.scene_to_working(*pixel, None);
             if local.contrast.abs() > 0.001 {
                 let gamma = (0.75 * control_to_unit(local.contrast)).exp2();
-                let y = luma_lin(adjusted[0], adjusted[1], adjusted[2]).clamp(0.0, 1.0);
+                let y = working_luma(tone.working_space, adjusted).clamp(0.0, 1.0);
                 let target = if y <= SCENE_MID_GRAY {
                     SCENE_MID_GRAY * (y / SCENE_MID_GRAY).powf(gamma)
                 } else {
                     1.0 - (1.0 - SCENE_MID_GRAY) * ((1.0 - y) / (1.0 - SCENE_MID_GRAY)).powf(gamma)
                 };
                 let [r, g, b] = &mut adjusted;
-                apply_luma_target(r, g, b, target);
+                apply_luma_target_in_space(r, g, b, target, tone.working_space);
             }
             let [r, g, b] = &mut adjusted;
-            apply_color_linear(local, None, r, g, b);
+            apply_color_linear_in_space(local, None, true, tone.working_space, r, g, b);
             for channel in 0..3 {
                 pixel[channel] += (adjusted[channel] - pixel[channel]) * weight;
             }
@@ -1622,10 +1828,12 @@ fn render_scene_display_inner(
             let [mut r, mut g, mut b] = tone.scene_to_working(rgb, e);
             if let Some((settings, curves)) = develop {
                 let classification = tone.working_to_display([r, g, b]);
-                apply_color_linear_classified(
+                apply_color_linear_classified_in_space(
                     settings,
                     curves,
                     Some(classification),
+                    true,
+                    tone.working_space,
                     &mut r,
                     &mut g,
                     &mut b,
@@ -1640,7 +1848,7 @@ fn render_scene_display_inner(
     {
         let luma: Vec<f32> = working
             .par_iter()
-            .map(|p| luma_lin(p[0], p[1], p[2]).max(0.0))
+            .map(|p| working_luma(tone.working_space, *p).max(0.0))
             .collect();
         let base = if settings.has_spatial_effects() {
             guided_lowpass_plane(&luma, w, h, TONE_REGION_RADIUS, 0.05)
@@ -1651,7 +1859,7 @@ fn render_scene_display_inner(
         let inv_h = if h > 1 { 1.0 / (h - 1) as f32 } else { 0.0 };
         working.par_iter_mut().enumerate().for_each(|(i, p)| {
             let [r, g, b] = p;
-            apply_effects_linear(
+            apply_effects_linear_in_space(
                 settings,
                 r,
                 g,
@@ -1661,16 +1869,27 @@ fn render_scene_display_inner(
                 inv_w,
                 inv_h,
                 base[i],
+                tone.working_space,
             );
         });
     }
 
     if let Some((settings, _)) = develop.filter(|(settings, _)| settings.has_detail()) {
-        apply_detail_to_working_buffer(&mut working, w, h, settings);
+        apply_detail_to_working_buffer_in_space(&mut working, w, h, settings, tone.working_space);
     }
 
     if let Some((settings, _)) = develop.filter(|(settings, _)| settings.has_locals()) {
-        apply_scene_locals_linear(&mut working, w, h, settings);
+        apply_scene_locals_linear_region(
+            &mut working,
+            w,
+            settings,
+            tone,
+            0,
+            0,
+            w as u32,
+            h as u32,
+            1,
+        );
     }
 
     let mut out = vec![0u16; w * h * 4];
@@ -1731,7 +1950,7 @@ pub fn strip_scene_handled(settings: &DevelopSettings) -> DevelopSettings {
 /// Effects, Detail and Local Masks on one f32 working master and performs the
 /// output transform once. Identity sources retain the legacy tail so neutral
 /// and PTS behaviour remain bit-stable.
-pub fn apply_scene_to_tilemap(
+pub(crate) fn apply_scene1_to_tilemap(
     scene: &SceneSource,
     settings: &DevelopSettings,
     selection: Option<crate::core::develop::DevelopSelection>,
@@ -1775,10 +1994,82 @@ pub fn apply_scene_to_tilemap(
     crate::core::develop::apply_to_tilemap_direct(&display, &rest, selection)
 }
 
+/// Versioned scene renderer boundary. Existing projects retain Scene1 exactly;
+/// Develop2 goes through its validated typed graph before adopting the same
+/// proven kernels node-by-node. Legacy1 remains a compatibility choice and is
+/// intentionally routed to the pre-Develop2 scene implementation here.
+pub fn apply_scene_to_tilemap(
+    scene: &SceneSource,
+    settings: &DevelopSettings,
+    selection: Option<crate::core::develop::DevelopSelection>,
+) -> TileMap {
+    match settings.develop_engine_version {
+        crate::core::develop::DevelopEngineVersion::Develop2 => {
+            crate::core::develop2::execute_scene(scene, settings, selection)
+                .expect("the canonical Develop2 recipe must validate")
+        }
+        crate::core::develop::DevelopEngineVersion::Legacy1
+        | crate::core::develop::DevelopEngineVersion::Scene1 => {
+            apply_scene1_to_tilemap(scene, settings, selection)
+        }
+    }
+}
+
 // ── Histogram ────────────────────────────────────────────────────────────────
 
 /// Pixel budget mirrors the legacy histogram proxy.
 const HISTOGRAM_PROXY_PIXELS: u64 = 60_000;
+
+/// Coordinate-preserving scene samples for waveform/parade/vectorscope.
+/// Unlike the histogram proxy, transparent locations stay represented and are
+/// masked only during analysis so the spatial x axis remains truthful.
+pub(crate) fn build_scene_scope_source_proxy(
+    scene: &SceneSource,
+) -> crate::core::develop2::scopes::ScopeSourceProxy {
+    crate::core::develop2::scopes::ScopeSourceProxy::sample(
+        scene.width,
+        scene.height,
+        HISTOGRAM_PROXY_PIXELS,
+        |x, y| {
+            let index = y as usize * scene.width as usize + x as usize;
+            (scene.get_rgb(x, y), scene.alpha16_at_index(index) > 0)
+        },
+    )
+}
+
+/// Render the cached scene samples through the same pointwise Develop2 chain
+/// used by the settled CPU path. Spatial stages are intentionally absent from
+/// this low-resolution measurement tap, matching the live histogram contract.
+pub(crate) fn render_scene_scope_source_proxy(
+    scene: &SceneSource,
+    proxy: &crate::core::develop2::scopes::ScopeSourceProxy,
+    settings: &DevelopSettings,
+) -> Vec<[f32; 3]> {
+    let tone = build_scene_tone_for_scene(settings, scene);
+    let use_color = settings.has_color();
+    let curves = crate::core::develop::build_mixer_curves_opt(settings);
+    proxy
+        .pixels
+        .iter()
+        .map(|&pixel| {
+            let [mut r, mut g, mut b] = tone.scene_to_working(pixel, None);
+            if use_color {
+                let classification = tone.working_to_display([r, g, b]);
+                apply_color_linear_classified_in_space(
+                    settings,
+                    curves.as_ref(),
+                    Some(classification),
+                    true,
+                    tone.working_space,
+                    &mut r,
+                    &mut g,
+                    &mut b,
+                );
+            }
+            tone.working_to_display([r, g, b])
+        })
+        .collect()
+}
 
 /// Grid-sampled LINEAR scene pixels, cached for the session; the histogram is
 /// re-binned from this through the live scene chain on every slider tick.
@@ -1878,12 +2169,184 @@ pub fn eval_scene_pixel(rgb: [f32; 3], settings: &DevelopSettings, look: BaseLoo
     [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)]
 }
 
+/// Display-referred RGB of one pixel from a concrete scene master. Unlike the
+/// compatibility evaluator above, this follows the same unclamped colour-stage
+/// placement as a settled scene commit and honours the master's working-space
+/// metadata. It is the CPU conformance entry point for preview/commit parity.
+pub fn eval_scene_pixel_for_scene(
+    scene: &SceneSource,
+    rgb: [f32; 3],
+    settings: &DevelopSettings,
+) -> [f32; 3] {
+    let tone = build_scene_tone_for_scene(settings, scene);
+    let [mut r, mut g, mut b] = tone.scene_to_working(rgb, None);
+    if settings.has_color() {
+        let curves = crate::core::develop::build_mixer_curves_opt(settings);
+        let classification = tone.working_to_display([r, g, b]);
+        apply_color_linear_classified_in_space(
+            settings,
+            curves.as_ref(),
+            Some(classification),
+            true,
+            tone.working_space,
+            &mut r,
+            &mut g,
+            &mut b,
+        );
+    }
+    tone.working_to_display([r, g, b])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn settings() -> DevelopSettings {
         DevelopSettings::default()
+    }
+
+    #[test]
+    fn develop2_raw_look_is_punchier_than_scene1() {
+        // Phase 3 versions the RAW render transform. A fresh RAW opens on
+        // Develop2 (the default) and gets the punchier "iAi Natural v1" look;
+        // a project saved under the older Scene1 engine keeps the exact legacy
+        // curve, so re-opening it never shifts. The two must therefore DIFFER,
+        // Scene1 must stay on the legacy steepness, and Develop2 must carry a
+        // steeper (more contrasty) tone curve — pivoted so 18% grey holds.
+        let develop2 = DevelopSettings::default();
+        let mut scene1 = develop2.clone();
+        scene1.develop_engine_version = crate::core::develop::DevelopEngineVersion::Scene1;
+
+        let d2 = build_scene_tone(&develop2);
+        let s1 = build_scene_tone(&scene1);
+        assert_eq!(
+            s1.sigmoid.c, LEGACY_SIGMOID_C,
+            "Scene1 must keep the legacy look"
+        );
+        assert_eq!(d2.sigmoid.c, LookRecipe::natural_v1().sigmoid_c);
+        assert!(d2.sigmoid.c > s1.sigmoid.c, "Natural v1 must be punchier");
+
+        // Both pin 18% grey to itself…
+        assert!((d2.tone_map(SCENE_MID_GRAY) - SCENE_MID_GRAY).abs() < 5e-3);
+        assert!((s1.tone_map(SCENE_MID_GRAY) - SCENE_MID_GRAY).abs() < 5e-3);
+        // …but the Develop2 tone curve reaches a steeper peak slope (its LUT is
+        // uniform in EV, so the largest adjacent step measures peak contrast).
+        let peak_step =
+            |lut: &[f32; 256]| lut.windows(2).map(|w| w[1] - w[0]).fold(0.0f32, f32::max);
+        assert!(
+            peak_step(&d2.lut) > peak_step(&s1.lut),
+            "Natural v1 was not steeper than the legacy look"
+        );
+    }
+
+    #[test]
+    fn look_recipes_are_ordered_and_version_gated() {
+        use crate::core::develop::{DevelopEngineVersion, ToneMapMode};
+        // Distinct, ordered steepness: Neutral (flattest) < Natural < Filmic,
+        // straddling the legacy look so Neutral is gentler and Filmic punchier.
+        let neutral = LookRecipe::neutral_v1().sigmoid_c;
+        let natural = LookRecipe::natural_v1().sigmoid_c;
+        let filmic = LookRecipe::filmic_v1().sigmoid_c;
+        assert!(neutral < natural && natural < filmic);
+        assert!(neutral < LEGACY_SIGMOID_C && LEGACY_SIGMOID_C < filmic);
+
+        // Develop2 maps the existing Tone rendering-intent control onto the
+        // three looks (no new UI).
+        let d2 = DevelopEngineVersion::Develop2;
+        assert_eq!(
+            LookRecipe::resolve(ToneMapMode::Neutral, d2),
+            LookRecipe::neutral_v1()
+        );
+        assert_eq!(
+            LookRecipe::resolve(ToneMapMode::Perceptual, d2),
+            LookRecipe::natural_v1()
+        );
+        assert_eq!(
+            LookRecipe::resolve(ToneMapMode::FilmLike, d2),
+            LookRecipe::filmic_v1()
+        );
+
+        // Older engines keep the legacy look regardless of the Tone control, so
+        // a saved project's appearance is pinned to what it was edited under.
+        for engine in [DevelopEngineVersion::Scene1, DevelopEngineVersion::Legacy1] {
+            for mode in [
+                ToneMapMode::Neutral,
+                ToneMapMode::Perceptual,
+                ToneMapMode::FilmLike,
+            ] {
+                assert_eq!(
+                    LookRecipe::resolve(mode, engine).sigmoid_c,
+                    LEGACY_SIGMOID_C
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contrast_steepens_the_midtone_slope() {
+        // The pivoted Contrast node must genuinely change the tone slope through
+        // the 18% pivot (Phase 3: "Contrast thực sự đổi độ dốc"), holding grey
+        // fixed. Measured as the display response across a band straddling grey.
+        let slope = |c: f32| {
+            let tone = build_scene_tone(&DevelopSettings {
+                contrast: c,
+                ..settings()
+            });
+            let ya = tone.scene_to_display([0.09; 3], None)[1];
+            let yb = tone.scene_to_display([0.30; 3], None)[1];
+            (yb - ya) / (0.30 - 0.09)
+        };
+        assert!(
+            slope(120.0) > slope(0.0),
+            "positive Contrast did not steepen"
+        );
+        assert!(
+            slope(0.0) > slope(-120.0),
+            "negative Contrast did not flatten"
+        );
+
+        // Grey stays anchored under Contrast (the node pivots at 18% grey).
+        let g = build_scene_tone(&DevelopSettings {
+            contrast: 120.0,
+            ..settings()
+        })
+        .apply_scene_contrast([SCENE_MID_GRAY; 3]);
+        assert!((g[0] - SCENE_MID_GRAY).abs() < 1e-4);
+    }
+
+    #[test]
+    fn develop2_full_global_slice_is_bit_exact_with_scene1() {
+        // The look versioning touches ONLY the RAW render transform. A
+        // display-referred (raster) scene renders through the identity tone map,
+        // which ignores the look recipe, so Develop2 and Scene1 must stay
+        // bit-identical on the raster path even with the whole global chain on —
+        // proving the versioning did not leak into the shared kernels.
+        let mut scene = SceneSource::new(16, 8);
+        scene.look = BaseLook::Identity;
+        scene.color_pipeline.working = crate::core::working_color::WorkingColorSpace::LinearSrgb;
+        for y in 0..scene.height {
+            for x in 0..scene.width {
+                let t = (y * scene.width + x) as f32 / 127.0;
+                scene.set_rgb(x, y, [0.05 + t * 0.9, 0.02 + t * 0.6, 0.4 - t * 0.3]);
+            }
+        }
+        let mut develop2 = DevelopSettings::default();
+        develop2.exposure = 12.0;
+        develop2.contrast = 18.0;
+        develop2.highlights = -24.0;
+        develop2.shadows = 15.0;
+        develop2.temperature = 9.0;
+        develop2.saturation = 17.0;
+        develop2.vibrance = 11.0;
+        develop2.clarity = 8.0;
+        develop2.sharpening = 13.0;
+        develop2.curve_lights = 7.0;
+        let mut scene1 = develop2.clone();
+        scene1.develop_engine_version = crate::core::develop::DevelopEngineVersion::Scene1;
+        assert_eq!(
+            apply_scene_to_tilemap(&scene, &develop2, None).flatten16(),
+            apply_scene_to_tilemap(&scene, &scene1, None).flatten16()
+        );
     }
 
     #[test]
@@ -1983,47 +2446,40 @@ mod tests {
     }
 
     #[test]
-    fn auto_tone_gently_shapes_range_without_reexposing_grey() {
-        let mut scene = SceneSource::new(256, 1);
+    fn raw_render_is_not_per_image_adaptive() {
+        // The guessed per-image auto-tone operator was removed: a RAW's render
+        // transform depends only on its settings/look, never on the image's own
+        // brightness histogram. Two scenes with very different ranges must build
+        // the identical tone LUT, matching the image-independent builder — and
+        // 18% grey still renders to itself under the default look.
+        let mut dark = SceneSource::new(256, 1);
+        let mut bright = SceneSource::new(256, 1);
         for x in 0..256 {
-            let ev = -9.0 + 11.0 * x as f32 / 255.0;
-            let v = ev.exp2();
-            scene.set_rgb(x, 0, [v, v, v]);
+            let t = x as f32 / 255.0;
+            dark.set_rgb(x, 0, [(-11.0 + 6.0 * t).exp2(); 3]);
+            bright.set_rgb(x, 0, [(-3.0 + 8.0 * t).exp2(); 3]);
         }
-        let anchors = scene_auto_tone(&scene).expect("RAW has automatic anchors");
-        assert!(anchors.black_ev < anchors.grey_ev);
-        assert!(anchors.grey_ev < anchors.white_ev);
-
-        assert_eq!(adaptive_map_ev(anchors.grey_ev, anchors), anchors.grey_ev);
-        for e in [
-            anchors.black_ev,
-            anchors.grey_ev - 2.0,
-            anchors.grey_ev + 2.0,
-            anchors.white_ev,
-        ] {
-            let mapped = adaptive_map_ev(e, anchors);
-            assert_eq!(mapped, e, "default auto-tone must not add contrast");
-        }
-
-        let tone = build_scene_tone_for_scene(&settings(), &scene);
-        let fixed = build_scene_tone(&settings());
-        let grey = anchors.grey_ev.exp2();
-        let grey_error = (tone.tone_map(grey) - fixed.tone_map(grey)).abs();
+        let fixed = build_scene_tone(&settings()).lut;
+        assert_eq!(build_scene_tone_for_scene(&settings(), &dark).lut, fixed);
+        assert_eq!(build_scene_tone_for_scene(&settings(), &bright).lut, fixed);
         assert!(
-            grey_error < 0.005,
-            "grey LUT interpolation drifted by {grey_error}"
+            fixed.windows(2).all(|w| w[1] >= w[0]),
+            "tone LUT non-monotone"
         );
-        assert!(tone.lut.windows(2).all(|w| w[1] >= w[0]));
+        let grey = build_scene_tone(&settings()).tone_map(SCENE_MID_GRAY);
+        assert!(
+            (grey - SCENE_MID_GRAY).abs() < 5e-3,
+            "18% grey drifted to {grey}"
+        );
     }
 
     #[test]
-    fn auto_tone_is_disabled_for_identity_sources() {
+    fn identity_source_uses_the_identity_tone_map() {
         let tiles = TileMap::new(2, 2);
         let scene = SceneSource::from_display_tiles(&tiles);
-        assert!(scene_auto_tone(&scene).is_none());
-        let adaptive = build_scene_tone_for_scene(&settings(), &scene);
+        let via_scene = build_scene_tone_for_scene(&settings(), &scene);
         let fixed = build_scene_tone_for(&settings(), BaseLook::Identity);
-        assert_eq!(adaptive.lut, fixed.lut);
+        assert_eq!(via_scene.lut, fixed.lut);
     }
 
     #[test]
@@ -2049,20 +2505,49 @@ mod tests {
     }
 
     #[test]
-    fn mixer_classifies_the_camera_look_colour_visible_to_the_user() {
+    fn mixer_v2_classifies_the_wide_working_colour_not_the_bounded_preview() {
         let mut settings = DevelopSettings::default();
         settings.mixer_saturation[0] = 100.0;
         let curves = crate::core::develop::build_mixer_curves_opt(&settings).unwrap();
         let original = [0.62, 0.08, 0.04];
         let mut hidden = original;
         let [hr, hg, hb] = &mut hidden;
-        apply_color_linear(&settings, Some(&curves), hr, hg, hb);
+        apply_color_linear(&settings, Some(&curves), true, hr, hg, hb);
         let mut visible = original;
         let [vr, vg, vb] = &mut visible;
         apply_color_linear_classified(
             &settings,
             Some(&curves),
             Some([0.84, 0.55, 0.24]),
+            true,
+            vr,
+            vg,
+            vb,
+        );
+        for (a, b) in hidden.into_iter().zip(visible) {
+            assert!((a - b).abs() < 2.0e-6, "{hidden:?} vs {visible:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_mixer_keeps_camera_look_classification() {
+        let mut settings = DevelopSettings {
+            mixer_algorithm: crate::core::develop::ColorMixerAlgorithm::Legacy,
+            ..DevelopSettings::default()
+        };
+        settings.mixer_saturation[0] = 100.0;
+        let curves = crate::core::develop::build_mixer_curves_opt(&settings).unwrap();
+        let original = [0.62, 0.08, 0.04];
+        let mut hidden = original;
+        let [hr, hg, hb] = &mut hidden;
+        apply_color_linear(&settings, Some(&curves), true, hr, hg, hb);
+        let mut visible = original;
+        let [vr, vg, vb] = &mut visible;
+        apply_color_linear_classified(
+            &settings,
+            Some(&curves),
+            Some([0.84, 0.55, 0.24]),
+            true,
             vr,
             vg,
             vb,
@@ -2072,12 +2557,12 @@ mod tests {
         };
         assert!(
             movement(visible) < movement(hidden) * 0.45,
-            "Reds followed hidden RAW hue instead of visible orange: {hidden:?} vs {visible:?}"
+            "Legacy stopped following camera-look bands: {hidden:?} vs {visible:?}"
         );
     }
 
     #[test]
-    fn auto_tone_preserves_raw_baseline_exposure() {
+    fn raw_render_preserves_input_brightness_ordering() {
         let mut normal = SceneSource::new(128, 1);
         let mut lifted = SceneSource::new(128, 1);
         for x in 0..128 {
@@ -2278,7 +2763,7 @@ mod tests {
     #[test]
     fn shadow_chroma_restore_preserves_luma_and_neutrals() {
         let color = [0.30, 0.16, 0.10];
-        let out = restore_shadow_chroma(color);
+        let out = restore_shadow_chroma(color, WorkingColorSpace::LinearSrgb);
         let chroma = |c: [f32; 3]| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
         assert!(chroma(out) > chroma(color));
         assert!(chroma(out) <= chroma(color) * 1.051);
@@ -2286,7 +2771,10 @@ mod tests {
             (luma_lin(out[0], out[1], out[2]) - luma_lin(color[0], color[1], color[2])).abs()
                 < 1e-6
         );
-        assert_eq!(restore_shadow_chroma([0.20; 3]), [0.20; 3]);
+        assert_eq!(
+            restore_shadow_chroma([0.20; 3], WorkingColorSpace::LinearSrgb),
+            [0.20; 3]
+        );
     }
 
     #[test]
@@ -2506,15 +2994,24 @@ mod tests {
 
     #[test]
     fn sigmoid_hits_anchor_endpoints_and_stays_monotone() {
-        for contrast in [-200.0f32, -80.0, 0.0, 90.0, 200.0] {
-            let p = sigmoid_params(contrast);
+        // Sweep the look steepnesses (legacy + Neutral/Natural/Filmic): every
+        // one must anchor 18% grey to itself and white to white, and stay
+        // monotone — that is what lets a punchier look add contrast without
+        // shifting exposure or clipping.
+        for c in [
+            LEGACY_SIGMOID_C,
+            LookRecipe::neutral_v1().sigmoid_c,
+            LookRecipe::natural_v1().sigmoid_c,
+            LookRecipe::filmic_v1().sigmoid_c,
+        ] {
+            let p = sigmoid_params(c);
             let mid = sigmoid_eval(&p, SCENE_MID_GRAY);
             assert!(
                 (mid - SCENE_MID_GRAY).abs() < 1e-3,
-                "mid-grey anchor broken at contrast {contrast}: {mid}"
+                "mid-grey anchor broken at c {c}: {mid}"
             );
             let top = sigmoid_eval(&p, SCENE_EV_MAX.exp2());
-            assert!((top - 1.0).abs() < 1e-3, "top {top} at contrast {contrast}");
+            assert!((top - 1.0).abs() < 1e-3, "top {top} at c {c}");
             assert!(sigmoid_eval(&p, 0.0) == 0.0);
             let mut last = -1.0f32;
             for i in 0..400 {
@@ -2799,6 +3296,121 @@ mod tests {
     }
 
     #[test]
+    fn develop2_keeps_the_scene_master_working_space_until_output() {
+        use crate::core::develop::DevelopEngineVersion;
+        use crate::core::working_color::WorkingColorSpace;
+
+        let scene = SceneSource::new(1, 1);
+        assert_eq!(
+            scene.color_pipeline.working,
+            WorkingColorSpace::LinearProPhoto
+        );
+        let develop2 = build_scene_tone_for_scene(&settings(), &scene);
+        assert_eq!(develop2.working_space, WorkingColorSpace::LinearProPhoto);
+        assert_eq!(
+            develop2.wb_ev,
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "neutral Develop2 must not round-trip the scene master through sRGB"
+        );
+
+        let mut scene1_settings = settings();
+        scene1_settings.develop_engine_version = DevelopEngineVersion::Scene1;
+        let scene1 = build_scene_tone_for_scene(&scene1_settings, &scene);
+        assert_eq!(scene1.working_space, WorkingColorSpace::LinearSrgb);
+        assert_ne!(scene1.wb_ev, develop2.wb_ev);
+    }
+
+    #[test]
+    fn wide_neutral_ramp_matches_the_develop2_srgb_reference_within_one_code() {
+        use crate::core::working_color::WorkingColorSpace;
+
+        const SAMPLES: u32 = 256;
+        let mut wide = SceneSource::new(SAMPLES, 1);
+        let mut srgb = SceneSource::new(SAMPLES, 1);
+        srgb.color_pipeline.working = WorkingColorSpace::LinearSrgb;
+        for x in 0..SAMPLES {
+            let value = x as f32 / (SAMPLES - 1) as f32;
+            wide.set_rgb(
+                x,
+                0,
+                WorkingColorSpace::LinearProPhoto.from_linear_srgb([value; 3]),
+            );
+            srgb.set_rgb(x, 0, [value; 3]);
+        }
+        let wide_rendered = render_default_look(&wide);
+        let srgb_rendered = render_default_look(&srgb);
+        for (index, (actual, reference)) in
+            wide_rendered.iter().zip(srgb_rendered.iter()).enumerate()
+        {
+            assert!(
+                actual.abs_diff(*reference) <= 1,
+                "wide neutral ramp moved at sample {index}: {actual} vs {reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_working_neutrals_stay_neutral_through_color_edits() {
+        use crate::core::working_color::WorkingColorSpace;
+
+        let color_settings = DevelopSettings {
+            saturation: 80.0,
+            vibrance: 45.0,
+            ..settings()
+        };
+        for space in [WorkingColorSpace::LinearProPhoto, WorkingColorSpace::AcesCg] {
+            let mut scene = SceneSource::new(1, 1);
+            scene.color_pipeline.working = space;
+            scene.set_rgb(0, 0, space.from_linear_srgb([0.18; 3]));
+            let out = eval_scene_pixel_for_scene(&scene, scene.get_rgb(0, 0), &color_settings);
+            let spread =
+                out.into_iter().fold(f32::MIN, f32::max) - out.into_iter().fold(f32::MAX, f32::min);
+            assert!(
+                spread <= 0.5 / 255.0,
+                "{space:?} neutral acquired chroma after Develop2 edits: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_chroma_is_only_contained_at_the_output_boundary() {
+        let mut scene = SceneSource::new(1, 1);
+        let input = scene
+            .color_pipeline
+            .working
+            .from_linear_srgb([0.75, 0.025, 0.005]);
+        scene.set_rgb(0, 0, input);
+        let color_settings = DevelopSettings {
+            saturation: 180.0,
+            vibrance: 60.0,
+            ..settings()
+        };
+        let tone = build_scene_tone_for_scene(&color_settings, &scene);
+        let [mut r, mut g, mut b] = tone.scene_to_working(scene.get_rgb(0, 0), None);
+        apply_color_linear_in_space(
+            &color_settings,
+            None,
+            true,
+            tone.working_space,
+            &mut r,
+            &mut g,
+            &mut b,
+        );
+        let pre_boundary = tone.working_space.to_linear_srgb([r, g, b]);
+        assert!(
+            pre_boundary
+                .iter()
+                .any(|value| *value < 0.0 || *value > 1.0),
+            "wide chroma was compressed before output: {pre_boundary:?}"
+        );
+        let output = tone.working_to_display([r, g, b]);
+        assert!(
+            output.iter().all(|value| (0.0..=1.0).contains(value)),
+            "output boundary did not contain gamut: {output:?}"
+        );
+    }
+
+    #[test]
     fn scene_commit_runs_legacy_color_stage_on_top() {
         let mut scene = SceneSource::new(4, 4);
         for y in 0..4 {
@@ -2947,6 +3559,79 @@ mod tests {
     }
 
     #[test]
+    fn raw_fast_proxy_detail_local_matches_commit_at_full_sample_density() {
+        let (w, h) = (32usize, 24usize);
+        let mut scene = SceneSource::new(w as u32, h as u32);
+        for y in 0..h {
+            for x in 0..w {
+                let texture = 0.018 * (x as f32 * 0.73).sin() + 0.012 * (y as f32 * 0.91).cos();
+                let v = 0.16 + texture;
+                scene.set_rgb(x as u32, y as u32, [v, v * 0.76, v * 0.51]);
+            }
+        }
+        let mut settings = DevelopSettings {
+            shadows: 22.0,
+            sharpening: 58.0,
+            sharpen_radius: 1.1,
+            sharpen_detail: 50.0,
+            noise_reduction: 12.0,
+            color_noise_reduction: 8.0,
+            ..settings()
+        };
+        settings.locals.push(crate::core::develop::LocalAdjustment {
+            shape: crate::core::develop::LocalMaskShape::Linear {
+                x0: 0.1,
+                y0: 0.15,
+                x1: 0.9,
+                y1: 0.8,
+            },
+            settings: crate::core::develop::LocalSettings {
+                exposure: 18.0,
+                contrast: 14.0,
+                saturation: 12.0,
+                ..Default::default()
+            },
+        });
+
+        let tone = build_scene_tone_for_scene(&settings, &scene);
+        let (regional_base, regional_w, regional_h) =
+            build_scene_region_base(&scene, TONE_DOWNSAMPLE);
+        let regional_e = finish_region_e(
+            &regional_base,
+            regional_w,
+            regional_h,
+            &tone,
+            TONE_DOWNSAMPLE,
+        );
+        let (base, pw, ph) = build_scene_fast_base(&scene, 0, 0, w as u32, h as u32, 1, true);
+        let (_region, preview) = scene_fast_region_develop(
+            &base,
+            &tone,
+            &settings,
+            Some((&regional_e, regional_w, regional_h, TONE_DOWNSAMPLE as u32)),
+            pw,
+            ph,
+            0,
+            0,
+            w as u32,
+            h as u32,
+            1,
+        );
+        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten16();
+        let mut errors = Vec::with_capacity(preview.len() * 3);
+        for (i, p) in preview.iter().enumerate() {
+            for channel in 0..3 {
+                errors.push((p[channel] - committed[i * 4 + channel] as f32 / 65535.0).abs());
+            }
+        }
+        errors.sort_by(f32::total_cmp);
+        let p95 = errors[((errors.len() as f32 * 0.95).ceil() as usize).min(errors.len() - 1)];
+        let max = *errors.last().unwrap();
+        assert!(p95 <= 2.0 / 65535.0, "RAW proxy/commit p95 drift {p95}");
+        assert!(max <= 4.0 / 65535.0, "RAW proxy/commit max drift {max}");
+    }
+
+    #[test]
     fn region_e_proxy_tracks_exposure_shift_exactly() {
         let mut scene = SceneSource::new(16, 16);
         for y in 0..16 {
@@ -2983,6 +3668,12 @@ mod tests {
             "fn dev_scene_lut(",
             "fn dev_tone_eq_at(",
             "fn dev_gamut_clip_chroma(",
+            "fn dev_cusp_chroma(",
+            "fn dev_working_to_linear_srgb(",
+            "fn dev_linear_srgb_to_working(",
+            "fn dev_working_to_oklab(",
+            "fn dev_oklab_to_working(",
+            "fn dev_apply_working_luma_target(",
             "fn dev_filmlike_clip(",
             "fn dev_compress_highlight_chroma(",
             "fn dev_restore_shadow_chroma(",
@@ -3000,6 +3691,16 @@ mod tests {
             "dev_effects[26]",
             "dev_effects[27]",
             "dev_effects[32]",
+            "dev_effects[36]",
+            "dev_effects[45]",
+            "dev_effects[54]",
+            "dev_effects[57]",
+            "dev_effects[58]",
+            "dev_effects[59]",
+            "dev_effects[60]",
+            "dev_effects[61]",
+            "dev_effects[64]",
+            "dev_effects[73]",
             "let sw = exp(-0.5 * sd * sd)",
             "dev_rgb_curve[769u + i0]",
             "u.adj_pad_c == 1u",

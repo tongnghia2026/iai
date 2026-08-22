@@ -748,7 +748,9 @@ fn dev_region_luma_at(lx: f32, ly: f32) -> f32 {
 //   dev_local_lut    = tone-equalizer EV offsets over the same axis;
 //   dev_region_luma  = regional exposure E plane (EV values, not [0,1]);
 //   dev_effects[16..25] = CAT16·2^EV matrix (row-major),
-//              [25] = hue-preserve blend, [26] = display-curve flag;
+//              [25] = hue-preserve blend, [26] = display-curve flag,
+//              [36..54] = working<->linear-sRGB matrices,
+//              [54..57] = working-space luminance coefficients;
 //   dev_rgb_curve[769..1025] = display-domain luma curve.
 
 // Sigmoid via the log2-indexed LUT. CPU twin: SceneToneData::tone_map.
@@ -765,9 +767,38 @@ fn dev_tone_eq_at(e: f32) -> f32 {
     return dev_local_lut_at(clamp((e + 14.0) / 20.0, 0.0, 1.0));
 }
 
+fn dev_in_srgb_gamut(c: vec3<f32>) -> bool {
+    return all(c >= vec3(-1e-6)) && all(c <= vec3(1.000001));
+}
+
+// Bilinear sample of the CPU-generated OKLCh cusp table. dev_effects carries
+// the buffer offset and dimensions, so the shader has no independent schema
+// constants to drift from core::gamut_map.
+fn dev_cusp_chroma(lightness: f32, hue: f32) -> f32 {
+    let base = u32(dev_effects[58]);
+    let hue_samples = u32(dev_effects[59]);
+    let lightness_samples = u32(dev_effects[60]);
+    var normalized_hue = hue / 6.28318530718;
+    if (normalized_hue < 0.0) { normalized_hue = normalized_hue + 1.0; }
+    let hp = normalized_hue * f32(hue_samples);
+    let h0 = u32(floor(hp)) % hue_samples;
+    let h1 = (h0 + 1u) % hue_samples;
+    let hw = hp - floor(hp);
+    let lp = clamp(lightness, 0.0, 1.0) * f32(lightness_samples - 1u);
+    let l0 = u32(floor(lp));
+    let l1 = min(l0 + 1u, lightness_samples - 1u);
+    let lw = lp - floor(lp);
+    let c00 = dev_rgb_curve[base + l0 * hue_samples + h0];
+    let c01 = dev_rgb_curve[base + l0 * hue_samples + h1];
+    let c10 = dev_rgb_curve[base + l1 * hue_samples + h0];
+    let c11 = dev_rgb_curve[base + l1 * hue_samples + h1];
+    return mix(mix(c00, c01, hw), mix(c10, c11, hw), lw);
+}
+
 // Display-linear, hue-preserving sRGB gamut mapping in OKLCh. In-gamut input
-// is bit-identical; out-of-gamut input keeps perceptual L/h and searches C.
-// CPU twin: gamut_map::map_to_output_gamut (18 iterations; sRGB target).
+// is bit-identical; out-of-gamut input keeps perceptual L/h and reads the same
+// cusp table as the CPU. The short search only guards interpolation overshoot.
+// CPU twin: gamut_map::map_to_output_gamut.
 fn dev_gamut_clip_chroma(c: vec3<f32>) -> vec3<f32> {
     if (all(c >= vec3(0.0)) && all(c <= vec3(1.0))) { return c; }
     let lab0 = dev_linear_srgb_to_oklab(c);
@@ -777,12 +808,20 @@ fn dev_gamut_clip_chroma(c: vec3<f32>) -> vec3<f32> {
         return clamp(dev_oklab_to_linear_srgb(vec3(lightness, 0.0, 0.0)), vec3(0.0), vec3(1.0));
     }
     let direction = lab0.yz / chroma0;
-    var low = 0.0;
-    var high = chroma0;
-    for (var i = 0u; i < 18u; i = i + 1u) {
+    let mapped_chroma = min(chroma0, dev_cusp_chroma(lightness, atan2(lab0.z, lab0.y)));
+    var candidate = dev_oklab_to_linear_srgb(vec3(lightness, direction * mapped_chroma));
+    if (dev_in_srgb_gamut(candidate)) {
+        return clamp(candidate, vec3(0.0), vec3(1.0));
+    }
+    var high = mapped_chroma;
+    var low = high * 0.95;
+    candidate = dev_oklab_to_linear_srgb(vec3(lightness, direction * low));
+    if (!dev_in_srgb_gamut(candidate)) { low = 0.0; }
+    let fallback_steps = u32(dev_effects[61]);
+    for (var i = 0u; i < fallback_steps; i = i + 1u) {
         let mid = 0.5 * (low + high);
-        let candidate = dev_oklab_to_linear_srgb(vec3(lightness, direction * mid));
-        if (all(candidate >= vec3(-1e-6)) && all(candidate <= vec3(1.000001))) {
+        candidate = dev_oklab_to_linear_srgb(vec3(lightness, direction * mid));
+        if (dev_in_srgb_gamut(candidate)) {
             low = mid;
         } else {
             high = mid;
@@ -823,7 +862,7 @@ fn dev_compress_highlight_chroma(c: vec3<f32>, mapped_n: f32, scene_n: f32, mode
 
 // CPU twin: restore_shadow_chroma.
 fn dev_restore_shadow_chroma(c: vec3<f32>) -> vec3<f32> {
-    let y = clamp(dev_luma_lin(c), 0.0, 1.0);
+    let y = clamp(dev_working_luma(c), 0.0, 1.0);
     let d = c - vec3<f32>(y);
     let chroma = max(max(d.r, d.g), d.b) - min(min(d.r, d.g), d.b);
     let tonal = dev_smootherstep(0.08, 0.18, y) * (1.0 - dev_smootherstep(0.38, 0.55, y));
@@ -870,71 +909,126 @@ fn dev_oklab_to_linear_srgb(lab: vec3<f32>) -> vec3<f32> {
     );
 }
 
+fn dev_working_to_linear_srgb(c: vec3<f32>) -> vec3<f32> {
+    let m0 = vec3<f32>(dev_effects[36], dev_effects[37], dev_effects[38]);
+    let m1 = vec3<f32>(dev_effects[39], dev_effects[40], dev_effects[41]);
+    let m2 = vec3<f32>(dev_effects[42], dev_effects[43], dev_effects[44]);
+    return vec3<f32>(dot(m0, c), dot(m1, c), dot(m2, c));
+}
+
+fn dev_linear_srgb_to_working(c: vec3<f32>) -> vec3<f32> {
+    let m0 = vec3<f32>(dev_effects[45], dev_effects[46], dev_effects[47]);
+    let m1 = vec3<f32>(dev_effects[48], dev_effects[49], dev_effects[50]);
+    let m2 = vec3<f32>(dev_effects[51], dev_effects[52], dev_effects[53]);
+    return vec3<f32>(dot(m0, c), dot(m1, c), dot(m2, c));
+}
+
+fn dev_working_luma(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(dev_effects[54], dev_effects[55], dev_effects[56]));
+}
+
+fn dev_working_to_oklab(c: vec3<f32>) -> vec3<f32> {
+    let m0 = vec3<f32>(dev_effects[64], dev_effects[65], dev_effects[66]);
+    let m1 = vec3<f32>(dev_effects[67], dev_effects[68], dev_effects[69]);
+    let m2 = vec3<f32>(dev_effects[70], dev_effects[71], dev_effects[72]);
+    let linear_lms = vec3<f32>(dot(m0, c), dot(m1, c), dot(m2, c));
+    let ll = sign(linear_lms.x) * pow(abs(linear_lms.x), 1.0 / 3.0);
+    let mm = sign(linear_lms.y) * pow(abs(linear_lms.y), 1.0 / 3.0);
+    let ss = sign(linear_lms.z) * pow(abs(linear_lms.z), 1.0 / 3.0);
+    return vec3<f32>(
+        0.2104542553 * ll + 0.7936177850 * mm - 0.0040720468 * ss,
+        1.9779984951 * ll - 2.4285922050 * mm + 0.4505937099 * ss,
+        0.0259040371 * ll + 0.7827717662 * mm - 0.8086757660 * ss,
+    );
+}
+
+fn dev_oklab_to_working(lab: vec3<f32>) -> vec3<f32> {
+    let ll = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+    let mm = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+    let ss = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+    let lms = vec3<f32>(ll * ll * ll, mm * mm * mm, ss * ss * ss);
+    let m0 = vec3<f32>(dev_effects[73], dev_effects[74], dev_effects[75]);
+    let m1 = vec3<f32>(dev_effects[76], dev_effects[77], dev_effects[78]);
+    let m2 = vec3<f32>(dev_effects[79], dev_effects[80], dev_effects[81]);
+    return vec3<f32>(dot(m0, lms), dot(m1, lms), dot(m2, lms));
+}
+
+fn dev_apply_working_luma_target(c: vec3<f32>, target_luma: f32) -> vec3<f32> {
+    let luma = clamp(dev_working_luma(c), 0.0, 1.0);
+    let target_l = clamp(target_luma, 0.0, 1.0);
+    let lift = target_l - luma;
+    let chroma = dev_chroma(c);
+    let chroma_gate = dev_smootherstep(0.04, 0.22, chroma);
+    let tone_gate = dev_smootherstep(0.025, 0.16, luma)
+        * (1.0 - dev_smootherstep(0.86, 0.98, target_l));
+    var chroma_factor = 1.0;
+    if (lift > 0.0) {
+        chroma_factor = 1.0 + lift * 1.20 * chroma_gate * tone_gate;
+    }
+    let additive = vec3<f32>(target_l) + (c - vec3<f32>(luma)) * chroma_factor;
+    let scaled = c * (target_l / max(luma, 0.00001));
+    let preserve = dev_luma_target_chroma_preserve_weight(luma, chroma, target_l);
+    var outc = mix(additive, scaled, preserve);
+    outc = outc + vec3<f32>(target_l - dev_working_luma(outc));
+    return outc;
+}
+
 // Oklab hue rotation on unclamped linear RGB. CPU twin: rotate_oklab_hue_linear.
-fn dev_rotate_oklab_hue_linear(c: vec3<f32>, deg: f32) -> vec3<f32> {
-    let lab = dev_linear_srgb_to_oklab(c);
+fn dev_rotate_oklab_hue_working(c: vec3<f32>, deg: f32) -> vec3<f32> {
+    let lab = dev_working_to_oklab(c);
     let rad = deg * 0.01745329252;
     let na = lab.y * cos(rad) - lab.z * sin(rad);
     let nb = lab.y * sin(rad) + lab.z * cos(rad);
-    return dev_oklab_to_linear_srgb(vec3<f32>(lab.x, na, nb));
+    return dev_oklab_to_working(vec3<f32>(lab.x, na, nb));
 }
 
+// Hue-preserving linear chroma scale for the RAW scene colour stage. The scene
+// path runs one OKLCh output-boundary gamut compression (dev_gamut_clip_chroma
+// in dev_scene_display), so a positive push scales chroma freely and lets the
+// boundary map any excursion back in gamut a single time — strong
+// Saturation/Mixer pushes stay vivid instead of greying against the sRGB hull.
+// CPU twin: scale_linear_chroma_around_luma with boundary_managed = true.
 fn dev_scale_linear_chroma(c: vec3<f32>, factor: f32) -> vec3<f32> {
-    let y = clamp(dev_luma_lin(c), 0.0, 1.0);
+    let y = clamp(dev_working_luma(c), 0.0, 1.0);
     let protect = dev_smootherstep(0.0027, 0.0174, y)
         * (1.0 - dev_smootherstep(0.7874, 0.9774, y));
     let req = (clamp(factor, 0.0, 3.20) - 1.0) * protect;
     let d = c - vec3<f32>(y);
-    var room = 1e20;
-    if (d.r > 1e-6) { room = min(room, (1.0 - y) / d.r - 1.0); }
-    if (d.r < -1e-6) { room = min(room, y / -d.r - 1.0); }
-    if (d.g > 1e-6) { room = min(room, (1.0 - y) / d.g - 1.0); }
-    if (d.g < -1e-6) { room = min(room, y / -d.g - 1.0); }
-    if (d.b > 1e-6) { room = min(room, (1.0 - y) / d.b - 1.0); }
-    if (d.b < -1e-6) { room = min(room, y / -d.b - 1.0); }
-    var scale = 1.0 + req;
-    if (req > 0.0) {
-        room = max(room, 0.0);
-        scale = select(1.0, 1.0 + room * tanh(req / room), room > 1e-4);
-    }
+    let scale = 1.0 + req;
     return vec3<f32>(y) + d * scale;
 }
 
-// Full RAW colour stage on the unclamped linear working pixel. Classification
-// stays display-referred so slider band semantics remain compatible.
+// Full RAW colour stage on the unclamped linear working pixel. V2 classifies
+// and edits the same working-space OKLab value; Legacy keeps display-referred
+// UCS/HSV band semantics.
 fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>) -> vec3<f32> {
     var c = input;
     let display = classification;
-    let display_linear = vec3<f32>(
-        dev_srgb_to_linear_channel(display.r),
-        dev_srgb_to_linear_channel(display.g),
-        dev_srgb_to_linear_channel(display.b),
-    );
-    let display_lab = dev_linear_srgb_to_oklab(display_linear);
-    let display_chroma = length(display_lab.yz);
-    let oklch_hue = select(0.0, atan2(display_lab.z, display_lab.y), display_chroma > 0.0000001);
-    let h = select(dev_ucs_hue(display), oklch_hue, dev_effects[7] > 0.5);
+    let working_lab = dev_working_to_oklab(c);
+    let working_chroma = length(working_lab.yz);
+    let working_hue = select(0.0, atan2(working_lab.z, working_lab.y), working_chroma > 0.0000001);
+    let h = select(dev_ucs_hue(display), working_hue, dev_effects[7] > 0.5);
     let luma = clamp(dev_luma(display), 0.0, 1.0);
     let legacy_w = dev_mixer_weight(display, 0.06);
-    let v2_w = dev_smootherstep(0.008, 0.055, display_chroma);
+    let v2_w = dev_smootherstep(0.008, 0.055, working_chroma);
     let w = select(legacy_w, v2_w, dev_effects[7] > 0.5);
     var hue_ctl = clamp(dev_mixer_curve_at(1385u, h) * w, -200.0, 200.0);
     var sat_ctl = dev_mixer_curve_at(1745u, h);
     let legacy_desat_w = dev_mixer_desat_weight(display);
-    let v2_desat_w = dev_smootherstep(0.002, 0.025, display_chroma);
+    let v2_desat_w = dev_smootherstep(0.002, 0.025, working_chroma);
     let desat_w = select(legacy_desat_w, v2_desat_w, dev_effects[7] > 0.5);
     let sat_w = select(w, desat_w, sat_ctl < 0.0);
     sat_ctl = clamp(sat_ctl * sat_w, -200.0, 200.0);
     let legacy_lum_guard = dev_smootherstep(0.02, 0.14, luma)
         * (1.0 - dev_smootherstep(0.82, 0.98, luma));
-    let v2_lum_guard = dev_smootherstep(0.015, 0.09, display_lab.x)
-        * (1.0 - dev_smootherstep(0.90, 1.02, display_lab.x));
+    let v2_lum_guard = dev_smootherstep(0.015, 0.09, working_lab.x)
+        * (1.0 - dev_smootherstep(0.90, 1.02, working_lab.x));
     var lum_ctl = clamp(dev_mixer_curve_at(2105u, h)
         * select(dev_mixer_weight(display, 0.10) * legacy_lum_guard,
                  v2_w * v2_lum_guard, dev_effects[7] > 0.5), -200.0, 200.0);
 
     if (dev_effects[7] > 0.5) {
-        var lab = dev_linear_srgb_to_oklab(c);
+        var lab = working_lab;
         let rad = dev_eased(hue_ctl) * 45.0 * 0.01745329252;
         let chroma = length(lab.yz);
         var hue = select(0.0, atan2(lab.z, lab.y), chroma > 0.0000001) + rad;
@@ -946,14 +1040,14 @@ fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>) -> vec3<f32> {
         lab.x = lab.x + light_delta * 0.32 * room;
         lab.y = chroma * chroma_scale * cos(hue);
         lab.z = chroma * chroma_scale * sin(hue);
-        c = dev_oklab_to_linear_srgb(lab);
+        c = dev_oklab_to_working(lab);
         hue_ctl = 0.0;
         sat_ctl = 0.0;
         lum_ctl = 0.0;
     }
 
     if (abs(hue_ctl) > 0.001) {
-        c = dev_rotate_oklab_hue_linear(c, dev_eased(hue_ctl) * 45.0);
+        c = dev_rotate_oklab_hue_working(c, dev_eased(hue_ctl) * 45.0);
     }
     let global_sat = dev_eased(dev_effects[34]);
     let mixer_sat = dev_eased(sat_ctl);
@@ -975,7 +1069,7 @@ fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>) -> vec3<f32> {
 
     let lum_delta = dev_eased(lum_ctl);
     if (abs(lum_delta) > 0.001) {
-        let y = clamp(dev_luma_lin(c), 0.0, 1.0);
+        let y = clamp(dev_working_luma(c), 0.0, 1.0);
         let tonal_room = select(pow(y, 0.42), pow(1.0 - y, 0.42), lum_delta >= 0.0);
         let gain = max(1.0 + lum_delta * 0.62 * tonal_room, 0.0);
         let mx = max(c.r, max(c.g, c.b));
@@ -1016,7 +1110,7 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     let grade_shadow = vec3<f32>(dev_effects[27], dev_effects[28], dev_effects[29]);
     let grade_highlight = vec3<f32>(dev_effects[30], dev_effects[31], dev_effects[32]);
     if (any(abs(grade_shadow) > vec3<f32>(1e-8)) || any(abs(grade_highlight) > vec3<f32>(1e-8))) {
-        let y = max(dev_luma_lin(v), 0.0);
+        let y = max(dev_working_luma(v), 0.0);
         let er = log2(max(y, 6.1035156e-5)) - log2(0.1845);
         let sd = (er + 2.0) / 1.8;
         let hd = (er - 2.0) / 1.8;
@@ -1043,20 +1137,25 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     // curve fixed at black, 18.45% grey and white. CPU twin: apply_scene_contrast.
     let cg = dev_effects[33];
     if (abs(cg - 1.0) > 1e-5) {
-        let y = clamp(dev_luma_lin(outc), 0.0, 1.0);
+        let y = clamp(dev_working_luma(outc), 0.0, 1.0);
         let pivot = 0.1845;
         var target_l = pivot * pow(y / pivot, cg);
         if (y > pivot) {
             target_l = 1.0 - (1.0 - pivot) * pow((1.0 - y) / (1.0 - pivot), cg);
         }
-        outc = dev_apply_luma_target(outc, target_l);
+        outc = select(
+            dev_apply_luma_target(outc, target_l),
+            dev_apply_working_luma_target(outc, target_l),
+            dev_effects[57] > 0.5,
+        );
     }
     if (dev_effects[25] > 0.5) {
         outc = dev_restore_shadow_chroma(outc);
     }
-    var classification = dev_linear_to_srgb(
-        clamp(dev_gamut_clip_chroma(dev_filmlike_clip(outc)), vec3(0.0), vec3(1.0))
+    let classification_linear = dev_gamut_clip_chroma(
+        dev_filmlike_clip(dev_working_to_linear_srgb(outc))
     );
+    var classification = dev_linear_to_srgb(clamp(classification_linear, vec3(0.0), vec3(1.0)));
     // Classification reads the same displayed stage as the CPU
     // `working_to_display`, including the master curve before RGB tabs.
     if (dev_effects[26] > 0.5) {
@@ -1078,8 +1177,10 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
         );
     }
     outc = dev_scene_color(outc, classification);
-    outc = dev_gamut_clip_chroma(dev_filmlike_clip(outc));
-    var g = dev_linear_to_srgb(clamp(outc, vec3(0.0), vec3(1.0)));
+    let output_linear = dev_gamut_clip_chroma(
+        dev_filmlike_clip(dev_working_to_linear_srgb(outc))
+    );
+    var g = dev_linear_to_srgb(clamp(output_linear, vec3(0.0), vec3(1.0)));
     if (dev_effects[26] > 0.5) {
         if (dev_effects[9] > 0.5) {
             var lab = dev_linear_srgb_to_oklab(dev_srgb_to_linear(g));

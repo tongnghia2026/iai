@@ -7,20 +7,24 @@
 pub mod ai;
 
 pub mod blend;
+pub mod camera_profile;
 pub mod canvas;
 pub mod cat16;
 pub mod channels;
 pub mod cms;
 pub mod color;
+pub mod color_reference;
 pub mod command;
 pub mod command_clip;
 pub mod command_vector;
 pub mod develop;
+pub mod develop2;
 pub mod develop_scene;
 pub mod gateway;
 pub mod geometry;
 pub mod hw;
 pub mod layer;
+pub mod output_sharpen;
 pub mod page;
 pub mod palette;
 pub mod perceptual_color;

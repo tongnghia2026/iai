@@ -13,7 +13,11 @@ The command evaluates the public `eval_scene_pixel` path for a neutral setup and
 - Exposure is monotone for shadow, middle-grey, and highlight probes.
 - Settled CPU pixel evaluation and committed scene output differ by at most one 16-bit code value for the non-spatial test matrix.
 - `compositor.wgsl` parses successfully through Naga.
-- Headless WGPU Develop preview versus committed output: maximum error `1/255`, P99 `1/255` on the procedural signed/HDR grid.
+- Historical headless WGPU result was maximum error `1/255`, P99 `1/255` on the
+  procedural signed/HDR grid. Re-verification on 2026-08-11 now fails at maximum
+  `19/255`, P99 `6/255`; see
+  `COLOR_ENGINE_RECONSTRUCTION_BASELINE_2026-08-11.md`. The ignored test must not
+  be described as an active passing gate until Phase 6 fixes it.
 
 Headless parity command: `cargo test --test develop_cpu_gpu_parity headless_gpu_preview_matches_committed_scene -- --ignored --nocapture --test-threads=1`
 
@@ -48,5 +52,7 @@ These are initial wall-clock measurements, not a cross-machine performance budge
 ## Known gaps
 
 - CPU model/RAM and GPU/VRAM metadata are not currently exposed by the benchmark; only OS and architecture are recorded.
-- Licensed ColorChecker, skin, neon, camera RAW, and embedded-profile images are not yet available in the repository.
+- External Middlebury ColorChecker RGB and Cube++ sensor-RAW/known-illuminant
+  fixtures are now measured from the ignored target cache; neither asset is
+  committed. A sensor RAW ColorChecker/spectral reference is still missing.
 - Existing uncommitted mixer and RAW-look tuning predates this baseline and is captured as part of `iai-scene-v1`; the regression matrix validates its currently intended behavior but does not establish provenance for those edits.

@@ -1,10 +1,9 @@
-//! Parity gates that can run without a display adapter. The CPU settled/commit
-//! gate is active in CI; the remaining GPU readback gap is documented in the
-//! Phase 0 baseline until the compositor exposes a headless Develop entry point.
+//! CPU/commit and headless GPU/commit parity gates. The GPU gate skips cleanly
+//! when the test host exposes no compatible adapter.
 
 use iai::core::develop::DevelopSettings;
 use iai::core::develop_scene::{
-    apply_scene_to_tilemap, eval_scene_pixel, render_default_look, BaseLook, SceneSource,
+    apply_scene_to_tilemap, eval_scene_pixel_for_scene, render_default_look, SceneSource,
 };
 use iai::core::layer::{Layer, LayerStack};
 use iai::gpu::compositor::{CompositorState, DevelopGpuPreview};
@@ -49,8 +48,7 @@ fn settled_pixel_evaluator_matches_committed_scene_for_non_spatial_edits() {
             // Commit reads the f16 scene master, so parity must evaluate the
             // same representable input rather than the original f32 literal.
             let stored = scene.get_rgb(x as u32, 0);
-            let compatibility_input = scene.color_pipeline.working.to_linear_srgb(stored);
-            let settled = eval_scene_pixel(compatibility_input, &settings, BaseLook::Raw);
+            let settled = eval_scene_pixel_for_scene(&scene, stored, &settings);
             for channel in 0..3 {
                 let expected = (settled[channel].clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
                 let actual = committed[x * 4 + channel];
@@ -70,7 +68,6 @@ fn compositor_shader_remains_valid_wgsl() {
 }
 
 #[test]
-#[ignore = "requires a local headless GPU adapter"]
 fn headless_gpu_preview_matches_committed_scene() {
     let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
         eprintln!("no headless GPU adapter; skipped");
@@ -78,6 +75,10 @@ fn headless_gpu_preview_matches_committed_scene() {
     };
     let (width, height) = (16, 8);
     let mut scene = SceneSource::new(width, height);
+    scene.as_shot_white_balance = Some(iai::core::cat16::WhiteBalance {
+        cct_kelvin: 2856.0,
+        duv: 0.006,
+    });
     for y in 0..height {
         for x in 0..width {
             let fx = x as f32 / (width - 1) as f32;
@@ -98,6 +99,8 @@ fn headless_gpu_preview_matches_committed_scene() {
     }
     scene.camera_rgb_curve = Some(camera_curve);
     let settings = DevelopSettings {
+        temperature: -120.0,
+        tint: 37.0,
         exposure: 25.0,
         contrast: -15.0,
         saturation: 31.0,
@@ -128,16 +131,34 @@ fn headless_gpu_preview_matches_committed_scene() {
     assert_eq!(gpu.len(), committed.len());
     let mut max_error = 0u8;
     let mut errors = Vec::with_capacity(width as usize * height as usize * 3);
-    for (a, b) in gpu.chunks_exact(4).zip(committed.chunks_exact(4)) {
+    let mut worst = Vec::with_capacity(width as usize * height as usize);
+    for (pixel_index, (a, b)) in gpu
+        .chunks_exact(4)
+        .zip(committed.chunks_exact(4))
+        .enumerate()
+    {
+        let mut pixel_error = 0u8;
         for channel in 0..3 {
             let error = a[channel].abs_diff(b[channel]);
             max_error = max_error.max(error);
+            pixel_error = pixel_error.max(error);
             errors.push(error);
         }
+        worst.push((
+            pixel_error,
+            pixel_index % width as usize,
+            pixel_index / width as usize,
+            [a[0], a[1], a[2]],
+            [b[0], b[1], b[2]],
+        ));
     }
     errors.sort_unstable();
+    worst.sort_unstable_by(|a, b| b.0.cmp(&a.0));
     let p99 = errors[(errors.len() * 99 / 100).min(errors.len() - 1)];
     eprintln!("GPU/commit max={max_error}/255 p99={p99}/255");
+    for sample in worst.iter().take(8) {
+        eprintln!("GPU/commit worst={sample:?}");
+    }
     assert!(max_error <= 2, "GPU/commit max error {max_error}/255");
     assert!(p99 <= 1, "GPU/commit p99 error {p99}/255");
 }

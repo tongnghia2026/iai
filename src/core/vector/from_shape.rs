@@ -417,6 +417,40 @@ mod tests {
     use crate::core::geometry::cubic_bezier;
 
     #[test]
+    fn tree_outer_t_junction_has_no_transparent_notch() {
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::raster::rasterize;
+        use crate::core::vector::style::VectorStyle;
+
+        let width = 40.0;
+        let object = VectorObjectData::new(
+            tree_connector_path(20.0, 100.0, 60.0, 160.0, 3, 30.0, 0.0),
+            VectorStyle::stroked(ColorValue::BLACK, width),
+            AffineTransform::IDENTITY,
+        );
+        let raster = rasterize(&object).expect("tree raster");
+        // The outer drop meets the distribution bar at (100,60). The whole
+        // stroke-width square around that junction must be solid; the reported
+        // regression was a white rectangular bite in its upper-right quadrant.
+        for y in 42..79 {
+            for x in 82..119 {
+                let rx = (x - raster.offset.0) as u32;
+                let ry = (y - raster.offset.1) as u32;
+                let alpha = raster.rgba[((ry * raster.width + rx) * 4 + 3) as usize];
+                assert!(alpha > 250, "notch at layer pixel ({x},{y}), alpha={alpha}");
+            }
+        }
+        // Square endpoint coverage ends at x=120, exactly flush with the outer
+        // edge of the 40px drop centred at x=100; it must not protrude farther.
+        let outside_x = (121 - raster.offset.0) as u32;
+        let bar_y = (45 - raster.offset.1) as u32;
+        let outside_alpha = raster.rgba[((bar_y * raster.width + outside_x) * 4 + 3) as usize];
+        assert_eq!(outside_alpha, 0, "horizontal bar protrudes past outer drop");
+    }
+
+    #[test]
     fn tree_connector_bar_and_stub_closed_drops_open() {
         // Box (0..100) × (0..50), 5 children, stub 20, bar overhang 3.
         let p = tree_connector_path(0.0, 100.0, 0.0, 50.0, 5, 20.0, 3.0);
