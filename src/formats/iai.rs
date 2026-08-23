@@ -142,6 +142,9 @@ fn build_canvas_from_meta<R: Read + Seek>(
     canvas.metadata.color_pipeline_version =
         meta["color_pipeline_version"].as_u64().unwrap_or(1) as u16;
     canvas.metadata.swatches = super::iai_palette::json_to_palette(meta.get("document_swatches"));
+    // Artboards / multi-page container (contract #10). Absent on one-page docs and
+    // older files → empty → the canvas falls back to its single implicit page.
+    canvas.metadata.artboards = json_to_artboards(meta.get("artboards"));
     // 16-bit mode (post-B2 key; absent on older files = 8-bit). Keeps a reopened
     // 16-bit document in 16-bit mode so its first edit preserves precision
     // instead of quantizing the masters the 16-bit layer PNGs just restored.
@@ -479,7 +482,8 @@ impl Exporter for IaiExporter {
             let has_v4_model = canvas.layer_stack.layers.iter().any(|l| {
                 matches!(l.layer_type, crate::core::layer::LayerType::Vector(_))
                     || l.clip_parent_id.is_some()
-            }) || !canvas.metadata.swatches.is_empty();
+            }) || !canvas.metadata.swatches.is_empty()
+                || !canvas.metadata.artboards.is_empty();
             manifest["version"] = serde_json::json!(if has_v4_model {
                 4u64
             } else if canvas.is_cmyk() {
@@ -666,7 +670,83 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             }
         };
     }
+
+    // Artboards / multi-page (contract #10 container). Written ONLY when the
+    // document has explicit artboards, so a single-page document adds no key and
+    // round-trips byte-for-byte; an absent key loads back as the implicit page.
+    if !canvas.metadata.artboards.is_empty() {
+        meta["artboards"] = artboards_to_json(&canvas.metadata.artboards);
+    }
     meta
+}
+
+/// Serialise the document's artboards (contract #10 container) to a JSON array.
+/// Fields mirror [`crate::core::page::Page`]; `bg` is null for a transparent /
+/// paper page.
+fn artboards_to_json(artboards: &[crate::core::page::Page]) -> serde_json::Value {
+    serde_json::Value::Array(
+        artboards
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id.0,
+                    "x": p.origin.x,
+                    "y": p.origin.y,
+                    "w": p.size.0,
+                    "h": p.size.1,
+                    "bleed": p.bleed,
+                    "margin": p.margin,
+                    "bg": p
+                        .background
+                        .map(|c| serde_json::json!(c))
+                        .unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Parse artboards written by [`artboards_to_json`]. Absent / non-array → empty
+/// (the canvas falls back to its single implicit page). A page with non-finite or
+/// negative geometry is dropped ([`Page::validate`]) so an untrusted file cannot
+/// poison layout maths.
+fn json_to_artboards(value: Option<&serde_json::Value>) -> Vec<crate::core::page::Page> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let background = item
+            .get("bg")
+            .and_then(|v| v.as_array())
+            .filter(|a| a.len() == 4)
+            .map(|a| {
+                [
+                    a[0].as_u64().unwrap_or(0) as u8,
+                    a[1].as_u64().unwrap_or(0) as u8,
+                    a[2].as_u64().unwrap_or(0) as u8,
+                    a[3].as_u64().unwrap_or(255) as u8,
+                ]
+            });
+        let page = crate::core::page::Page {
+            id: crate::core::page::PageId(item["id"].as_u64().unwrap_or(0) as u32),
+            origin: crate::core::geometry::Point::new(
+                item["x"].as_f64().unwrap_or(0.0) as f32,
+                item["y"].as_f64().unwrap_or(0.0) as f32,
+            ),
+            size: (
+                item["w"].as_f64().unwrap_or(0.0) as f32,
+                item["h"].as_f64().unwrap_or(0.0) as f32,
+            ),
+            bleed: item["bleed"].as_f64().unwrap_or(0.0) as f32,
+            margin: item["margin"].as_f64().unwrap_or(0.0) as f32,
+            background,
+        };
+        if page.validate().is_ok() {
+            out.push(page);
+        }
+    }
+    out
 }
 
 fn write_thumbnail(zip: &mut zip::ZipWriter<std::fs::File>, canvas: &Canvas) -> Result<(), String> {
@@ -1790,6 +1870,87 @@ mod tests {
             panic!("expected a plain canvas");
         };
         assert_eq!(loaded.metadata.swatches, canvas.metadata.swatches);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn artboards_round_trip_and_stamp_v4() {
+        use crate::core::geometry::Point;
+        use crate::core::page::{Page, PageId};
+        // GUI can't build a second artboard until a later slice, so the multi-page
+        // .iai round-trip is proven here at code level (Artboard plan, trap #7).
+        let dir = tmp_dir("artboards-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 32, 24);
+        canvas.metadata.artboards = vec![
+            Page::implicit(32, 24),
+            Page {
+                id: PageId(1),
+                origin: Point::new(40.0, 0.0),
+                size: (32.0, 24.0),
+                bleed: 3.0,
+                margin: 5.0,
+                background: Some([250, 248, 240, 255]),
+            },
+        ];
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let manifest = read_manifest(&mut zip).unwrap();
+        assert_eq!(
+            manifest["version"].as_u64(),
+            Some(4),
+            "artboards are production data old builds must not silently strip"
+        );
+        assert!(
+            manifest.get("artboards").is_some_and(|v| v.is_array()),
+            "artboards envelope written"
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(loaded.metadata.artboards, canvas.metadata.artboards);
+        assert!(loaded.has_explicit_artboards());
+        assert_eq!(loaded.artboard_count(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_page_document_writes_no_artboards_envelope() {
+        let dir = tmp_dir("artboards-implicit");
+        let path = dir.join("doc.iai");
+        let canvas = solid([10, 20, 30, 255], 8, 8);
+        assert!(!canvas.has_explicit_artboards());
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let manifest = read_manifest(&mut zip).unwrap();
+        assert!(
+            manifest.get("artboards").is_none(),
+            "a one-page doc adds no artboards key (stays byte-identical)"
+        );
+        assert_eq!(
+            manifest["version"].as_u64(),
+            Some(2),
+            "no artboards must not bump the version"
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(!loaded.has_explicit_artboards());
+        assert_eq!(loaded.artboard_count(), 1);
+        assert_eq!(
+            loaded.effective_artboards()[0].rect(),
+            crate::core::geometry::Rect::new(0.0, 0.0, 8.0, 8.0)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

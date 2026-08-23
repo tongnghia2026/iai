@@ -203,16 +203,6 @@ pub struct Document {
     /// Formatted EXIF line ("ISO … · f/… · …") for a RAW import, shown in the
     /// Develop window. Session-only — parsed by the RAW preview worker.
     pub raw_exif: Option<String>,
-    /// Explicit artboards (print pages) placed in document space. EMPTY means a
-    /// single implicit artboard equal to the canvas — the one-page / MVP case —
-    /// so a plain document stores nothing here and keeps page-space ==
-    /// canvas-space. This materialises the reserved container from
-    /// `docs/ADR_PAGE_OWNERSHIP.md` (called `Document.pages` there); named
-    /// `artboards` to avoid confusion with the pages of an imported PDF
-    /// (`pdf_document`). Once it holds real artboards, mutating it must go through
-    /// an undoable page command — the history gate lives inside `Canvas`, so a
-    /// bare write here would not undo (Artboard plan, trap #1).
-    pub artboards: Vec<Page>,
 }
 
 impl Document {
@@ -230,7 +220,6 @@ impl Document {
             pdf_page: None,
             pdf_document: None,
             raw_exif: None,
-            artboards: Vec::new(),
         }
     }
 
@@ -254,33 +243,27 @@ impl Document {
             pdf_page: None,
             pdf_document: None,
             raw_exif: None,
-            artboards: Vec::new(),
         }
     }
 
-    /// The artboards this document renders, never empty: the explicit
-    /// [`Self::artboards`] when set, otherwise the single implicit artboard equal
-    /// to the canvas (origin `(0,0)`, canvas size, no bleed / margin). Derived
-    /// fresh from the canvas, so the implicit artboard can never desync from a
-    /// canvas resize.
+    /// The artboards this document renders, never empty — see
+    /// [`Canvas::effective_artboards`]. The container lives on the canvas metadata
+    /// (so it persists and, later, undoes with the rest of the canvas); these are
+    /// thin conveniences for app code that holds a `Document`.
     pub fn effective_artboards(&self) -> Vec<Page> {
-        if self.artboards.is_empty() {
-            vec![Page::implicit(self.canvas.width, self.canvas.height)]
-        } else {
-            self.artboards.clone()
-        }
+        self.canvas.effective_artboards()
     }
 
     /// How many artboards the document has — always at least one (the implicit
-    /// page). O(1); prefer over `effective_artboards().len()`.
+    /// page).
     pub fn artboard_count(&self) -> usize {
-        self.artboards.len().max(1)
+        self.canvas.artboard_count()
     }
 
     /// Whether the document carries explicit artboards (a real multi-page job)
     /// rather than the single implicit page derived from the canvas.
     pub fn has_explicit_artboards(&self) -> bool {
-        !self.artboards.is_empty()
+        self.canvas.has_explicit_artboards()
     }
 
     /// Short display name shown in the tab bar.
@@ -523,7 +506,7 @@ mod tests {
         use crate::core::geometry::Point;
         use crate::core::page::{Page, PageId};
         let mut doc = Document::new(DocumentId(1), 400, 400);
-        doc.artboards = vec![
+        doc.canvas.metadata.artboards = vec![
             Page::implicit(400, 400),
             Page {
                 id: PageId(1),

@@ -82,6 +82,13 @@ pub struct CanvasMetadata {
     /// Named process colours owned by this document. Kept out of global UI
     /// preferences so each `.iai` project carries its production palette.
     pub swatches: Vec<crate::core::palette::DocumentSwatch>,
+    /// Artboards (print pages) placed in document space — the multi-page
+    /// container reserved by `docs/ADR_PAGE_OWNERSHIP.md`. EMPTY means a single
+    /// implicit artboard equal to the canvas (page-space == canvas-space), so a
+    /// one-page document stores nothing and round-trips byte-identically. Homed on
+    /// the canvas metadata (not `Document`) so it rides the existing `.iai` canvas
+    /// serialisation and, later, the canvas undo / dirty gate.
+    pub artboards: Vec<crate::core::page::Page>,
 }
 
 impl Default for CanvasMetadata {
@@ -96,7 +103,35 @@ impl Default for CanvasMetadata {
             develop_working_space: crate::core::working_color::WorkingColorSpace::LinearSrgb,
             color_pipeline_version: 1,
             swatches: Vec::new(),
+            artboards: Vec::new(),
         }
+    }
+}
+
+impl Canvas {
+    /// The artboards this canvas renders, never empty: the explicit
+    /// [`CanvasMetadata::artboards`] when set, otherwise the single implicit
+    /// artboard equal to the canvas (origin `(0,0)`, canvas size, no bleed /
+    /// margin). Derived fresh, so the implicit artboard can never desync from a
+    /// canvas resize.
+    pub fn effective_artboards(&self) -> Vec<crate::core::page::Page> {
+        if self.metadata.artboards.is_empty() {
+            vec![crate::core::page::Page::implicit(self.width, self.height)]
+        } else {
+            self.metadata.artboards.clone()
+        }
+    }
+
+    /// How many artboards the canvas has — always at least one (the implicit
+    /// page). O(1); prefer over `effective_artboards().len()`.
+    pub fn artboard_count(&self) -> usize {
+        self.metadata.artboards.len().max(1)
+    }
+
+    /// Whether the canvas carries explicit artboards (a real multi-page job)
+    /// rather than the single implicit page derived from its size.
+    pub fn has_explicit_artboards(&self) -> bool {
+        !self.metadata.artboards.is_empty()
     }
 }
 
