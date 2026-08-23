@@ -89,6 +89,13 @@ pub struct CanvasMetadata {
     /// the canvas metadata (not `Document`) so it rides the existing `.iai` canvas
     /// serialisation and, later, the canvas undo / dirty gate.
     pub artboards: Vec<crate::core::page::Page>,
+    /// Default page bleed, in document units (canvas pixels), applied to the single
+    /// implicit page. `0` = none. Kept on the canvas so it follows a resize and
+    /// persists; explicit artboards carry their own bleed instead.
+    pub page_bleed_px: f32,
+    /// Default page safe-margin, in document units (canvas pixels), applied to the
+    /// implicit page. `0` = none.
+    pub page_margin_px: f32,
 }
 
 impl Default for CanvasMetadata {
@@ -104,6 +111,8 @@ impl Default for CanvasMetadata {
             color_pipeline_version: 1,
             swatches: Vec::new(),
             artboards: Vec::new(),
+            page_bleed_px: 0.0,
+            page_margin_px: 0.0,
         }
     }
 }
@@ -116,7 +125,10 @@ impl Canvas {
     /// canvas resize.
     pub fn effective_artboards(&self) -> Vec<crate::core::page::Page> {
         if self.metadata.artboards.is_empty() {
-            vec![crate::core::page::Page::implicit(self.width, self.height)]
+            let mut page = crate::core::page::Page::implicit(self.width, self.height);
+            page.bleed = self.metadata.page_bleed_px.max(0.0);
+            page.margin = self.metadata.page_margin_px.max(0.0);
+            vec![page]
         } else {
             self.metadata.artboards.clone()
         }

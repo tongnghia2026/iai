@@ -524,4 +524,40 @@ mod tests {
         assert_eq!(boards[1].id, PageId(1));
         assert_eq!(boards[1].origin, Point::new(420.0, 0.0));
     }
+
+    #[test]
+    fn page_setup_command_sets_bleed_and_margin_then_undoes() {
+        // The undoable page-setup path: bleed/margin land on the implicit page,
+        // survive undo/redo, and route through the canvas history gate.
+        let mut doc = Document::new(DocumentId(1), 100, 100);
+        assert_eq!(doc.effective_artboards()[0].bleed, 0.0);
+        doc.mark_saved();
+
+        doc.canvas
+            .execute(
+                Box::new(crate::core::command::PageSetupCommand::new(
+                    "Page setup",
+                    8.0,
+                    5.0,
+                    Vec::new(),
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("page setup applies");
+        assert_eq!(doc.canvas.metadata.page_bleed_px, 8.0);
+        assert_eq!(doc.effective_artboards()[0].bleed, 8.0);
+        assert_eq!(doc.effective_artboards()[0].margin, 5.0);
+        assert!(
+            doc.is_modified(),
+            "a page-setup edit marks the document dirty"
+        );
+
+        doc.canvas.undo();
+        assert_eq!(doc.canvas.metadata.page_bleed_px, 0.0);
+        assert_eq!(doc.effective_artboards()[0].bleed, 0.0);
+
+        doc.canvas.redo();
+        assert_eq!(doc.canvas.metadata.page_bleed_px, 8.0);
+        assert_eq!(doc.effective_artboards()[0].bleed, 8.0);
+    }
 }

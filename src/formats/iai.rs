@@ -145,6 +145,8 @@ fn build_canvas_from_meta<R: Read + Seek>(
     // Artboards / multi-page container (contract #10). Absent on one-page docs and
     // older files → empty → the canvas falls back to its single implicit page.
     canvas.metadata.artboards = json_to_artboards(meta.get("artboards"));
+    canvas.metadata.page_bleed_px = meta["page_bleed"].as_f64().unwrap_or(0.0).max(0.0) as f32;
+    canvas.metadata.page_margin_px = meta["page_margin"].as_f64().unwrap_or(0.0).max(0.0) as f32;
     // 16-bit mode (post-B2 key; absent on older files = 8-bit). Keeps a reopened
     // 16-bit document in 16-bit mode so its first edit preserves precision
     // instead of quantizing the masters the 16-bit layer PNGs just restored.
@@ -676,6 +678,15 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
     // round-trips byte-for-byte; an absent key loads back as the implicit page.
     if !canvas.metadata.artboards.is_empty() {
         meta["artboards"] = artboards_to_json(&canvas.metadata.artboards);
+    }
+    // Default page bleed / safe-margin (document units) for the implicit page.
+    // Display-only print guides — written when set, no version bump (an older
+    // build that ignores them just doesn't draw the guides, like alpha channels).
+    if canvas.metadata.page_bleed_px != 0.0 {
+        meta["page_bleed"] = serde_json::json!(canvas.metadata.page_bleed_px);
+    }
+    if canvas.metadata.page_margin_px != 0.0 {
+        meta["page_margin"] = serde_json::json!(canvas.metadata.page_margin_px);
     }
     meta
 }
@@ -1936,6 +1947,10 @@ mod tests {
             manifest.get("artboards").is_none(),
             "a one-page doc adds no artboards key (stays byte-identical)"
         );
+        assert!(
+            manifest.get("page_bleed").is_none() && manifest.get("page_margin").is_none(),
+            "no page bleed/margin set → no keys written"
+        );
         assert_eq!(
             manifest["version"].as_u64(),
             Some(2),
@@ -1951,6 +1966,28 @@ mod tests {
             loaded.effective_artboards()[0].rect(),
             crate::core::geometry::Rect::new(0.0, 0.0, 8.0, 8.0)
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn page_bleed_and_margin_round_trip() {
+        let dir = tmp_dir("page-setup");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 16, 16);
+        canvas.metadata.page_bleed_px = 8.5;
+        canvas.metadata.page_margin_px = 12.0;
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!((loaded.metadata.page_bleed_px - 8.5).abs() < 1e-4);
+        assert!((loaded.metadata.page_margin_px - 12.0).abs() < 1e-4);
+        // The implicit page picks the defaults up, so the sheet draws them.
+        assert!((loaded.effective_artboards()[0].bleed - 8.5).abs() < 1e-4);
+        assert!((loaded.effective_artboards()[0].margin - 12.0).abs() < 1e-4);
         std::fs::remove_dir_all(&dir).ok();
     }
 

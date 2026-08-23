@@ -51,6 +51,11 @@ pub struct DocumentIntent {
         u32,
     )>,
     pub set_canvas_unit: Option<Unit>,
+    /// Page ▸ Bleed: set the default page bleed of the active document, in mm
+    /// (one undoable step). Drawn by the artboard sheet overlay.
+    pub set_page_bleed_mm: Option<f32>,
+    /// Page ▸ Safe margin: set the default page safe-margin, in mm.
+    pub set_page_margin_mm: Option<f32>,
     pub reload_open_file_confirm: bool,
     pub reload_open_file_cancel: bool,
     /// PDF page-selection dialog: confirm with the 0-based page indices to open

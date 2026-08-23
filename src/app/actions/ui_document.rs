@@ -103,6 +103,12 @@ impl App {
             self.apply_canvas_event(CanvasEvent::SelectionChanged);
             self.fit_canvas_to_screen();
         }
+        if let Some(mm) = actions.doc.set_page_bleed_mm.take() {
+            self.set_page_setup(Some(mm), None);
+        }
+        if let Some(mm) = actions.doc.set_page_margin_mm.take() {
+            self.set_page_setup(None, Some(mm));
+        }
         if let Some((w, h, dpi)) = actions.doc.image_resize.take() {
             let w = w.max(1);
             let h = h.max(1);
@@ -293,6 +299,45 @@ impl App {
         }
 
         // Soft proof (View > Proof) is handled in a separate pass.
+    }
+
+    /// Set the page bleed / safe-margin for the active document as one undoable
+    /// step. Each argument is millimetres (`None` leaves that one unchanged);
+    /// values convert to document units through the canvas DPI. Recorded as a
+    /// [`crate::core::command::PageSetupCommand`] on the canvas history gate, so it
+    /// undoes and marks the document dirty. No-op when nothing actually changes.
+    pub fn set_page_setup(&mut self, bleed_mm: Option<f32>, margin_mm: Option<f32>) {
+        let idx = self.docs.active_doc_idx;
+        let dpi = self.docs.documents[idx]
+            .canvas
+            .metadata
+            .resolution_ppi
+            .max(1.0);
+        let mm_to_px = |mm: f32| mm.max(0.0) / 25.4 * dpi;
+        let (cur_bleed, cur_margin, artboards) = {
+            let m = &self.docs.documents[idx].canvas.metadata;
+            (m.page_bleed_px, m.page_margin_px, m.artboards.clone())
+        };
+        let bleed_px = bleed_mm.map_or(cur_bleed, mm_to_px);
+        let margin_px = margin_mm.map_or(cur_margin, mm_to_px);
+        if (bleed_px - cur_bleed).abs() < 1e-3 && (margin_px - cur_margin).abs() < 1e-3 {
+            return;
+        }
+        let _ = self.docs.documents[idx].canvas.execute(
+            Box::new(crate::core::command::PageSetupCommand::new(
+                "Page setup",
+                bleed_px,
+                margin_px,
+                artboards,
+            )),
+            crate::core::gateway::ChangeKind::LayerStructure,
+        );
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = format!(
+            "Trang: bleed {:.0}mm · lề an toàn {:.0}mm",
+            bleed_px / dpi * 25.4,
+            margin_px / dpi * 25.4
+        );
     }
 
     /// Image ▸ Mode CMYK actions: open/close the convert dialog (pre-loading the

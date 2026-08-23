@@ -421,6 +421,28 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 ui.close();
                             }
                         });
+                        ui.menu_button("Trang · Artboard", |ui| {
+                            let en = data.doc.has_doc;
+                            // Bleed / safe-margin are drawn as guides on the page
+                            // sheet. Presets cover the print-standard 3 mm bleed;
+                            // 0 turns the guide off.
+                            ui.menu_button("Bleed", |ui| {
+                                for (label, mm) in [("Không", 0.0), ("3 mm", 3.0), ("5 mm", 5.0)] {
+                                    if ui.add_enabled(en, egui::Button::new(label)).clicked() {
+                                        actions.doc.set_page_bleed_mm = Some(mm);
+                                        ui.close();
+                                    }
+                                }
+                            });
+                            ui.menu_button("Lề an toàn", |ui| {
+                                for (label, mm) in [("Không", 0.0), ("3 mm", 3.0), ("5 mm", 5.0)] {
+                                    if ui.add_enabled(en, egui::Button::new(label)).clicked() {
+                                        actions.doc.set_page_margin_mm = Some(mm);
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        });
                         ui.separator();
                         if ui.add(menu_item("Develop...", "Ctrl+Shift+A")).clicked() {
                             actions.develop.open_develop_dialog = true;

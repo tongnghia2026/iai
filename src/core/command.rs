@@ -1586,6 +1586,76 @@ impl Command for ResizeCanvasCommand {
     }
 }
 
+/// Undoable change to a document's page setup — the default page bleed / margin
+/// and the explicit artboard list, all held in [`crate::core::canvas::CanvasMetadata`].
+/// Routing every artboard edit through one swap command keeps it on the canvas
+/// history gate (Artboard plan, trap #1): it undoes and marks the document dirty
+/// like any pixel edit. The prior snapshot is captured on the first `execute` and
+/// restored on `undo`; a redo re-applies the new state.
+pub struct PageSetupCommand {
+    label: String,
+    bleed_px: f32,
+    margin_px: f32,
+    artboards: Vec<crate::core::page::Page>,
+    prev: Option<(f32, f32, Vec<crate::core::page::Page>)>,
+}
+
+impl PageSetupCommand {
+    pub fn new(
+        label: &str,
+        bleed_px: f32,
+        margin_px: f32,
+        artboards: Vec<crate::core::page::Page>,
+    ) -> Self {
+        Self {
+            label: label.to_string(),
+            bleed_px,
+            margin_px,
+            artboards,
+            prev: None,
+        }
+    }
+}
+
+impl Command for PageSetupCommand {
+    fn execute(&mut self, ctx: &mut EditContext) -> Result<(), String> {
+        let meta = ctx
+            .metadata
+            .as_mut()
+            .ok_or_else(|| "Page-setup command needs a metadata context".to_string())?;
+        if self.prev.is_none() {
+            self.prev = Some((
+                meta.page_bleed_px,
+                meta.page_margin_px,
+                meta.artboards.clone(),
+            ));
+        }
+        meta.page_bleed_px = self.bleed_px;
+        meta.page_margin_px = self.margin_px;
+        meta.artboards = self.artboards.clone();
+        Ok(())
+    }
+
+    fn undo(&mut self, ctx: &mut EditContext) -> Result<(), String> {
+        let meta = ctx
+            .metadata
+            .as_mut()
+            .ok_or_else(|| "Page-setup command needs a metadata context".to_string())?;
+        let (bleed, margin, artboards) = self
+            .prev
+            .clone()
+            .ok_or_else(|| "Page-setup command has no prior state to undo".to_string())?;
+        meta.page_bleed_px = bleed;
+        meta.page_margin_px = margin;
+        meta.artboards = artboards;
+        Ok(())
+    }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
