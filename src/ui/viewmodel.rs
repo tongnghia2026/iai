@@ -507,6 +507,10 @@ pub struct ChromeViewModel {
     pub hovered_guide: Option<usize>,
     /// Smart-guide lines from the Move tool's snapping (magenta = align, red = page edge).
     pub snap_guides: Vec<crate::core::snapping::SnapLine>,
+    /// Artboards (print pages) of the active document, in document space. Drawn as
+    /// paper sheets — a soft shadow + edge — with bleed and safe-margin guides when
+    /// those are set. One implicit page (= the canvas) for a plain document.
+    pub artboards: Vec<crate::core::page::Page>,
     pub toolbar_w: f32,
     pub panel_r_w: f32,
     /// Strict modal lock is active (Crop/Free Transform/Text editing/dialog):
@@ -973,6 +977,7 @@ impl Default for UiData {
                 guide_preview: None,
                 hovered_guide: None,
                 snap_guides: Vec::new(),
+                artboards: Vec::new(),
                 toolbar_w: 48.0,
                 panel_r_w: 300.0,
                 is_tool_modal: false,

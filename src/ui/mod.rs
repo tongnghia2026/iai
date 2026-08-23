@@ -866,6 +866,77 @@ pub fn build(
         let oy = data.doc.offset_y;
         let to_screen_pos = |cx: f32, cy: f32| egui::pos2(cx * zoom + ox, cy * zoom + oy);
 
+        // Artboard sheets: draw each page as paper floating on the workspace — a
+        // soft shadow + a thin edge — plus a bleed rectangle (outside the trim) and
+        // a safe-margin rectangle (inside) when those are set. A plain document has
+        // one implicit page equal to the canvas, so this just frames the canvas as a
+        // sheet; bleed / margin appear once a page carries them. Drawn UNDER the
+        // editing overlays (guides, selection) so it reads as the substrate.
+        if !data.chrome.artboards.is_empty() {
+            let pal = data.chrome.theme_mode.palette();
+            let painter = ctx
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Background,
+                    egui::Id::new("artboard_overlay"),
+                ))
+                .with_clip_rect(canvas_viewport);
+            let edge = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(140));
+            for page in &data.chrome.artboards {
+                let r = page.rect();
+                let sheet = egui::Rect::from_min_max(
+                    to_screen_pos(r.x, r.y),
+                    to_screen_pos(r.right(), r.bottom()),
+                );
+                // Drop shadow, drawn ONLY in the strips OUTSIDE the sheet (right +
+                // bottom) so it never darkens the canvas underneath — egui overlays
+                // paint OVER the GPU canvas, so a full shadow rect would tint the
+                // whole page. Two fading steps read as soft. (The page background
+                // colour is stored but not painted here: compositing it behind
+                // content needs the GPU pass, a later slice.)
+                for (spread, alpha) in [(6.0_f32, 18u8), (3.0_f32, 34u8)] {
+                    let col = egui::Color32::from_black_alpha(alpha);
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(sheet.right(), sheet.top() + spread),
+                            egui::pos2(sheet.right() + spread, sheet.bottom() + spread),
+                        ),
+                        0.0,
+                        col,
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(sheet.left() + spread, sheet.bottom()),
+                            egui::pos2(sheet.right(), sheet.bottom() + spread),
+                        ),
+                        0.0,
+                        col,
+                    );
+                }
+                painter.rect_stroke(sheet, 0.0, edge, egui::StrokeKind::Outside);
+                // Bleed: the printed area that runs off the trim (danger accent).
+                if page.bleed > 0.0 {
+                    painter.rect_stroke(
+                        sheet.expand(page.bleed * zoom),
+                        0.0,
+                        egui::Stroke::new(1.0_f32, pal.danger),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                // Safe margin: keep-important-content-inside guide (guide accent).
+                if page.margin > 0.0 {
+                    let safe = sheet.shrink(page.margin * zoom);
+                    if safe.is_positive() {
+                        painter.rect_stroke(
+                            safe,
+                            0.0,
+                            egui::Stroke::new(1.0_f32, pal.accent_guide),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+            }
+        }
+
         // Ruler guides (theme guide accent) + the in-progress one being dragged (brighter).
         if data.chrome.show_guides
             && (!data.chrome.guides.is_empty() || data.chrome.guide_preview.is_some())

@@ -1515,6 +1515,7 @@ impl App {
                 } else {
                     Vec::new()
                 },
+                artboards: self.docs.documents[self.docs.active_doc_idx].effective_artboards(),
                 toolbar_w: self.shell.toolbar_w,
                 panel_r_w: self.shell.panel_r_w,
                 is_tool_modal: self.modal_lock_active(),
