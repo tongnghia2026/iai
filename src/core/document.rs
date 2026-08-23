@@ -5,6 +5,7 @@
 // plugin API never assumes a single document — avoiding a future breaking change.
 
 use crate::core::canvas::Canvas;
+use crate::core::page::Page;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -202,6 +203,16 @@ pub struct Document {
     /// Formatted EXIF line ("ISO … · f/… · …") for a RAW import, shown in the
     /// Develop window. Session-only — parsed by the RAW preview worker.
     pub raw_exif: Option<String>,
+    /// Explicit artboards (print pages) placed in document space. EMPTY means a
+    /// single implicit artboard equal to the canvas — the one-page / MVP case —
+    /// so a plain document stores nothing here and keeps page-space ==
+    /// canvas-space. This materialises the reserved container from
+    /// `docs/ADR_PAGE_OWNERSHIP.md` (called `Document.pages` there); named
+    /// `artboards` to avoid confusion with the pages of an imported PDF
+    /// (`pdf_document`). Once it holds real artboards, mutating it must go through
+    /// an undoable page command — the history gate lives inside `Canvas`, so a
+    /// bare write here would not undo (Artboard plan, trap #1).
+    pub artboards: Vec<Page>,
 }
 
 impl Document {
@@ -219,6 +230,7 @@ impl Document {
             pdf_page: None,
             pdf_document: None,
             raw_exif: None,
+            artboards: Vec::new(),
         }
     }
 
@@ -242,7 +254,33 @@ impl Document {
             pdf_page: None,
             pdf_document: None,
             raw_exif: None,
+            artboards: Vec::new(),
         }
+    }
+
+    /// The artboards this document renders, never empty: the explicit
+    /// [`Self::artboards`] when set, otherwise the single implicit artboard equal
+    /// to the canvas (origin `(0,0)`, canvas size, no bleed / margin). Derived
+    /// fresh from the canvas, so the implicit artboard can never desync from a
+    /// canvas resize.
+    pub fn effective_artboards(&self) -> Vec<Page> {
+        if self.artboards.is_empty() {
+            vec![Page::implicit(self.canvas.width, self.canvas.height)]
+        } else {
+            self.artboards.clone()
+        }
+    }
+
+    /// How many artboards the document has — always at least one (the implicit
+    /// page). O(1); prefer over `effective_artboards().len()`.
+    pub fn artboard_count(&self) -> usize {
+        self.artboards.len().max(1)
+    }
+
+    /// Whether the document carries explicit artboards (a real multi-page job)
+    /// rather than the single implicit page derived from the canvas.
+    pub fn has_explicit_artboards(&self) -> bool {
+        !self.artboards.is_empty()
     }
 
     /// Short display name shown in the tab bar.
@@ -446,5 +484,61 @@ mod tests {
             !doc.is_modified(),
             "redoing back onto the saved state must report clean"
         );
+    }
+
+    #[test]
+    fn new_document_has_one_implicit_artboard() {
+        use crate::core::geometry::Rect;
+        use crate::core::page::PageId;
+        let doc = Document::new(DocumentId(1), 800, 600);
+        assert!(!doc.has_explicit_artboards());
+        assert_eq!(doc.artboard_count(), 1);
+        let boards = doc.effective_artboards();
+        assert_eq!(boards.len(), 1);
+        assert_eq!(boards[0].id, PageId::IMPLICIT);
+        assert_eq!(boards[0].rect(), Rect::new(0.0, 0.0, 800.0, 600.0));
+        assert_eq!((boards[0].bleed, boards[0].margin), (0.0, 0.0));
+        assert!(boards[0].background.is_none());
+    }
+
+    #[test]
+    fn implicit_artboard_follows_the_canvas_size() {
+        use crate::core::geometry::Rect;
+        // Derived, not stored: two differently sized documents each report their
+        // own canvas as the single implicit artboard — no copy to desync.
+        let small = Document::new(DocumentId(1), 100, 100);
+        let big = Document::new(DocumentId(2), 1920, 1080);
+        assert_eq!(
+            small.effective_artboards()[0].rect(),
+            Rect::new(0.0, 0.0, 100.0, 100.0)
+        );
+        assert_eq!(
+            big.effective_artboards()[0].rect(),
+            Rect::new(0.0, 0.0, 1920.0, 1080.0)
+        );
+    }
+
+    #[test]
+    fn explicit_artboards_override_the_implicit_page() {
+        use crate::core::geometry::Point;
+        use crate::core::page::{Page, PageId};
+        let mut doc = Document::new(DocumentId(1), 400, 400);
+        doc.artboards = vec![
+            Page::implicit(400, 400),
+            Page {
+                id: PageId(1),
+                origin: Point::new(420.0, 0.0),
+                size: (400.0, 400.0),
+                bleed: 0.0,
+                margin: 0.0,
+                background: None,
+            },
+        ];
+        assert!(doc.has_explicit_artboards());
+        assert_eq!(doc.artboard_count(), 2);
+        let boards = doc.effective_artboards();
+        assert_eq!(boards.len(), 2);
+        assert_eq!(boards[1].id, PageId(1));
+        assert_eq!(boards[1].origin, Point::new(420.0, 0.0));
     }
 }
