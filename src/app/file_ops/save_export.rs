@@ -464,7 +464,7 @@ impl App {
 
         let n = (cw as usize) * (ch as usize);
         let mut ink_exact = false;
-        let cmyk: Vec<u8> = if doc_is_cmyk {
+        let mut cmyk: Vec<u8> = if doc_is_cmyk {
             if let Some(ink) = self.docs.documents[self.docs.active_doc_idx]
                 .canvas
                 .flatten_ink()
@@ -524,6 +524,26 @@ impl App {
             }
         };
 
+        // Spot inks painted by promoted vector objects each get their OWN film,
+        // and (unless the object overprints) knock their footprint out of the
+        // process plates, so a spot area prints once — on its plate — instead of
+        // twice (spot film + the CMYK approximation baked into the raster base).
+        // A document with no spot inks yields no plates and a zero knockout, so
+        // the C/M/Y/K plates below stay byte-identical to before.
+        let (spot_seps, knockout) = {
+            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+            let objects = crate::core::print::collect_pdf_vectors(canvas).objects;
+            crate::core::print::spot_separations(&objects, cw, ch)
+        };
+        if knockout.iter().any(|&k| k > 0.0) {
+            for i in 0..n {
+                let keep = 1.0 - knockout[i].clamp(0.0, 1.0);
+                for plane in 0..4 {
+                    cmyk[i * 4 + plane] = (cmyk[i * 4 + plane] as f32 * keep).round() as u8;
+                }
+            }
+        }
+
         let stem = base
             .file_stem()
             .and_then(|s| s.to_str())
@@ -543,10 +563,34 @@ impl App {
                 return;
             }
         }
-        self.shell.status_msg = if ink_exact {
-            format!("Đã xuất tách màu từ ink planes: {stem}_C/M/Y/K.png")
+
+        // One extra grayscale film per spot colorant (same print convention:
+        // bare paper = white, solid ink = black), named by the ink itself.
+        for sep in &spot_seps {
+            let mut plate = vec![0u8; n];
+            for (dst, &cov) in plate.iter_mut().zip(&sep.coverage) {
+                *dst = 255 - (cov.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+            let safe = crate::core::print::sanitize_plate_name(sep.name.as_str());
+            let path = dir.join(format!("{stem}_{safe}.png"));
+            if let Err(e) = image::save_buffer(&path, &plate, cw, ch, image::ExtendedColorType::L8)
+            {
+                self.shell.status_msg = format!("Lỗi ghi bản spot {safe}: {e}");
+                return;
+            }
+        }
+
+        self.shell.status_msg = if spot_seps.is_empty() {
+            if ink_exact {
+                format!("Đã xuất tách màu từ ink planes: {stem}_C/M/Y/K.png")
+            } else {
+                format!("Đã xuất tách màu CMYK: {stem}_C/M/Y/K.png")
+            }
         } else {
-            format!("Đã xuất tách màu CMYK: {stem}_C/M/Y/K.png")
+            format!(
+                "Đã xuất tách màu CMYK + {} bản spot: {stem}_C/M/Y/K + spot .png",
+                spot_seps.len()
+            )
         };
     }
 

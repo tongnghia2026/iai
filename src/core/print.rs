@@ -838,6 +838,246 @@ pub struct PdfVectorSelection {
     pub above_layer_ids: Vec<u32>,
 }
 
+/// Flatten tolerance (canvas pixels) for spot geometry — matches the object
+/// rasteriser so a spot film registers pixel-for-pixel with its raster twin.
+const SPOT_FLATTEN_TOL: f32 = 0.25;
+
+/// One spot colorant's press separation: the ink coverage it lays on its OWN
+/// film (`0` = bare paper, `1` = solid ink), unioned across every promoted vector
+/// object that paints the ink — fill and stroke — each scaled by its tint. Built
+/// alongside a process knockout mask (see [`spot_separations`]) so a spot area
+/// prints once, on this film, instead of twice.
+pub struct SpotSeparation {
+    pub name: crate::core::vector::color::SpotName,
+    /// Row-major `w*h` ink coverage in `0..=1`.
+    pub coverage: Vec<f32>,
+}
+
+/// Build one [`SpotSeparation`] per distinct spot colorant painted by `objects`
+/// (canvas-pixel geometry from [`collect_pdf_vectors`], `objects[0]` topmost),
+/// plus the process knockout mask that keeps each spot area out of the C/M/Y/K
+/// plates.
+///
+/// Returns `(plates, knockout)` where `knockout[i]` in `0..=1` is how far the
+/// process plates must be scaled DOWN at pixel `i`. The build honours stacking
+/// order: an opaque object HIDES whatever is below it, so a spot only films — and
+/// only knocks the process out — where it is actually the topmost ink. That
+/// matters because the raster base was composited opaquely: a black headline set
+/// over a spot panel bakes real K ink at those pixels, and a naïve
+/// spot-geometry knockout would erase the headline from the K plate. Walking
+/// top→bottom with an occlusion accumulator, the headline (processed first)
+/// occludes the panel beneath it, so the panel neither films nor knocks out under
+/// the letters — the K stays, the spot prints around them.
+///
+/// A spot ink is opaque in the composite, so where it IS on top its footprint in
+/// the raster base is just the ink's own process approximation; removing that lets
+/// it print once on its dedicated film. Overprinting paints (`fill_overprint` /
+/// `stroke_overprint`) neither knock out nor occlude, mirroring the `/op true`
+/// state on the PDF-vector path. Tint screens the film but not the knockout — a
+/// 50% spot still masks the paper solidly.
+///
+/// A document that paints no spot inks yields no plates and an all-zero knockout,
+/// so its four process plates separate byte-for-byte as before (and the whole
+/// rasterisation is skipped).
+pub fn spot_separations(
+    objects: &[PdfVectorObject],
+    w: u32,
+    h: u32,
+) -> (Vec<SpotSeparation>, Vec<f32>) {
+    let n = (w as usize).saturating_mul(h as usize);
+    let mut plates: Vec<SpotSeparation> = Vec::new();
+    let mut knockout = vec![0f32; n];
+    let is_spot = |paint: Option<PdfPaintColor>| matches!(paint, Some(PdfPaintColor::Spot { .. }));
+    // Only objects at or above the DEEPEST spot can affect any spot's visibility;
+    // anything strictly below every spot is irrelevant to the separations. No spot
+    // at all → nothing to do (the common path).
+    let Some(last_spot) = objects
+        .iter()
+        .rposition(|o| is_spot(o.fill) || (is_spot(o.stroke) && o.stroke_width_px > 0.0))
+    else {
+        return (plates, knockout);
+    };
+    if n == 0 {
+        return (plates, knockout);
+    }
+
+    // Coverage already claimed by opaque paints ABOVE the current object.
+    let mut occluded = vec![0f32; n];
+
+    for obj in &objects[..=last_spot] {
+        let fill_cov = obj.fill.map(|_| fill_cov_of(obj, w, h));
+        let stroke_cov =
+            (obj.stroke.is_some() && obj.stroke_width_px > 0.0).then(|| stroke_cov_of(obj, w, h));
+
+        if let (Some(PdfPaintColor::Spot { name, tint, .. }), Some(cov)) =
+            (obj.fill, fill_cov.as_ref())
+        {
+            emit_spot_paint(
+                &mut plates,
+                &mut knockout,
+                &occluded,
+                n,
+                cov,
+                name,
+                tint,
+                obj.fill_overprint,
+            );
+        }
+        if let (Some(PdfPaintColor::Spot { name, tint, .. }), Some(cov)) =
+            (obj.stroke, stroke_cov.as_ref())
+        {
+            emit_spot_paint(
+                &mut plates,
+                &mut knockout,
+                &occluded,
+                n,
+                cov,
+                name,
+                tint,
+                obj.stroke_overprint,
+            );
+        }
+
+        // This object now hides what is below — but only where it paints opaquely
+        // (a non-overprint paint). Overprints let inks below print through.
+        let mut opaque = vec![0f32; n];
+        if let Some(cov) = &fill_cov {
+            if !obj.fill_overprint {
+                for (o, &c) in opaque.iter_mut().zip(cov) {
+                    if c > *o {
+                        *o = c;
+                    }
+                }
+            }
+        }
+        if let Some(cov) = &stroke_cov {
+            if !obj.stroke_overprint {
+                for (o, &c) in opaque.iter_mut().zip(cov) {
+                    if c > *o {
+                        *o = c;
+                    }
+                }
+            }
+        }
+        for (o, &op) in occluded.iter_mut().zip(&opaque) {
+            *o = (*o + op * (1.0 - *o)).min(1.0);
+        }
+    }
+    (plates, knockout)
+}
+
+/// Geometric fill coverage of `obj` over the whole `w`×`h` canvas.
+fn fill_cov_of(obj: &PdfVectorObject, w: u32, h: u32) -> Vec<f32> {
+    let contours = crate::core::vector::flatten::flatten_path(&obj.path, SPOT_FLATTEN_TOL);
+    crate::core::vector::raster::coverage_mask(&contours, w, h, obj.even_odd)
+}
+
+/// Geometric coverage of `obj`'s stroke outline — dashed then outlined exactly
+/// like the object rasteriser, so a dashed spot rule films as dashes at the right
+/// width, caps and joins included.
+fn stroke_cov_of(obj: &PdfVectorObject, w: u32, h: u32) -> Vec<f32> {
+    let flat = crate::core::vector::flatten::flatten_path(&obj.path, SPOT_FLATTEN_TOL);
+    let closed: Vec<bool> = obj.path.contours.iter().map(|c| c.closed).collect();
+    let (lines, lclosed) = crate::core::vector::raster::dashed_polylines(
+        &flat,
+        &closed,
+        obj.stroke_dash.as_slice(),
+        obj.stroke_dash_offset,
+    );
+    let outline = crate::core::vector::stroke::stroke_outline_contours(
+        &lines,
+        &lclosed,
+        obj.stroke_width_px * 0.5,
+        obj.stroke_cap,
+        obj.stroke_join,
+        obj.stroke_miter_limit,
+        SPOT_FLATTEN_TOL,
+    );
+    crate::core::vector::raster::coverage_mask(&outline, w, h, false)
+}
+
+/// Fold one spot paint's VISIBLE coverage (`cov` masked by what is already
+/// `occluded` above it) onto its film, and — unless it overprints — into the
+/// process `knockout`.
+#[allow(clippy::too_many_arguments)]
+fn emit_spot_paint(
+    plates: &mut Vec<SpotSeparation>,
+    knockout: &mut [f32],
+    occluded: &[f32],
+    n: usize,
+    cov: &[f32],
+    name: crate::core::vector::color::SpotName,
+    tint: f32,
+    overprint: bool,
+) {
+    let vis: Vec<f32> = cov
+        .iter()
+        .zip(occluded)
+        .map(|(c, o)| c * (1.0 - o))
+        .collect();
+    add_spot_coverage(plates, n, name, &vis, tint);
+    if !overprint {
+        for (k, v) in knockout.iter_mut().zip(&vis) {
+            *k = (*k + v).min(1.0);
+        }
+    }
+}
+
+/// Union `cov * tint` into the plate for `name` (creating it on first sight),
+/// taking the per-pixel `max` so overlapping shapes of the same ink never exceed
+/// a solid.
+fn add_spot_coverage(
+    plates: &mut Vec<SpotSeparation>,
+    n: usize,
+    name: crate::core::vector::color::SpotName,
+    cov: &[f32],
+    tint: f32,
+) {
+    let t = tint.clamp(0.0, 1.0);
+    let idx = match plates.iter().position(|p| p.name == name) {
+        Some(i) => i,
+        None => {
+            plates.push(SpotSeparation {
+                name,
+                coverage: vec![0f32; n],
+            });
+            plates.len() - 1
+        }
+    };
+    let slot = &mut plates[idx].coverage;
+    for (dst, &c) in slot.iter_mut().zip(cov) {
+        let v = c * t;
+        if v > *dst {
+            *dst = v;
+        }
+    }
+}
+
+/// Fold a spot colorant name into a filesystem-safe plate suffix: keep ASCII
+/// letters, digits and `-`; collapse every other run (spaces, slashes, `®`,
+/// accents…) to a single `_`; trim leading/trailing `_`; fall back to `spot`
+/// when nothing survives. Keeps `<stem>_<name>.png` valid on every platform.
+pub fn sanitize_plate_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut pending_us = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            if pending_us && !out.is_empty() {
+                out.push('_');
+            }
+            out.push(ch);
+            pending_us = false;
+        } else {
+            pending_us = true;
+        }
+    }
+    if out.is_empty() {
+        "spot".to_string()
+    } else {
+        out
+    }
+}
+
 fn shape_as_vector(
     shape: &crate::core::shape::ShapeData,
     layer_offset: (i32, i32),
@@ -2587,6 +2827,232 @@ mod tests {
             !String::from_utf8_lossy(&plain).contains(" rg\n"),
             "raster-only PDF has no vector overlay"
         );
+    }
+
+    /// A `PdfVectorObject` that fills the rect `[x0,x1)×[0,h)` with a spot ink —
+    /// the fixture for the spot-separation tests.
+    fn spot_fill_rect(
+        name: &str,
+        tint: f32,
+        x0: f32,
+        x1: f32,
+        h: f32,
+        overprint: bool,
+    ) -> PdfVectorObject {
+        use crate::core::geometry::Point;
+        use crate::core::vector::color::SpotName;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(x0, 0.0)),
+                    Node::sharp(Point::new(x1, 0.0)),
+                    Node::sharp(Point::new(x1, h)),
+                    Node::sharp(Point::new(x0, h)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        PdfVectorObject {
+            path,
+            fill: Some(PdfPaintColor::Spot {
+                name: SpotName::new(name),
+                tint,
+                alt: [0.0, 1.0, 1.0, 0.0],
+            }),
+            fill_gradient: None,
+            stroke: None,
+            stroke_width_px: 0.0,
+            stroke_cap: crate::core::vector::style::LineCap::Butt,
+            stroke_join: crate::core::vector::style::LineJoin::Miter,
+            stroke_miter_limit: 4.0,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
+            even_odd: false,
+            fill_overprint: overprint,
+            stroke_overprint: false,
+        }
+    }
+
+    #[test]
+    fn spot_fill_gets_its_own_plate_and_knocks_out_process() {
+        // 4×4 canvas, a solid spot square on the left half (x in [0,2)).
+        let obj = spot_fill_rect("PANTONE 185 C", 1.0, 0.0, 2.0, 4.0, false);
+        let (plates, knockout) = spot_separations(std::slice::from_ref(&obj), 4, 4);
+        assert_eq!(plates.len(), 1);
+        assert_eq!(plates[0].name.as_str(), "PANTONE 185 C");
+        let at = |x: usize, y: usize| y * 4 + x;
+        assert!(
+            plates[0].coverage[at(0, 0)] > 0.99,
+            "inside is solid spot ink"
+        );
+        assert!(plates[0].coverage[at(3, 0)] < 0.01, "outside is bare paper");
+        assert!(
+            knockout[at(0, 0)] > 0.99,
+            "process knocked out under the ink"
+        );
+        assert!(knockout[at(3, 0)] < 0.01, "process kept outside the ink");
+    }
+
+    #[test]
+    fn overprinting_spot_fill_keeps_process_ink() {
+        let obj = spot_fill_rect("Silver", 1.0, 0.0, 2.0, 4.0, true);
+        let (plates, knockout) = spot_separations(std::slice::from_ref(&obj), 4, 4);
+        assert_eq!(plates.len(), 1, "overprint ink still films");
+        assert!(plates[0].coverage[0] > 0.99);
+        assert!(
+            knockout.iter().all(|&k| k < 0.01),
+            "overprint leaves process untouched"
+        );
+    }
+
+    #[test]
+    fn half_tint_screens_the_plate_but_masks_the_paper_solidly() {
+        let obj = spot_fill_rect("Spot Green", 0.5, 0.0, 2.0, 4.0, false);
+        let (plates, knockout) = spot_separations(std::slice::from_ref(&obj), 4, 4);
+        assert!(
+            (plates[0].coverage[0] - 0.5).abs() < 0.02,
+            "tint screens the ink to 50%"
+        );
+        assert!(knockout[0] > 0.99, "knockout is geometric, not tint-scaled");
+    }
+
+    #[test]
+    fn same_spot_name_unions_into_one_plate() {
+        // Two adjacent squares of the SAME ink cover the whole 4-wide canvas.
+        let left = spot_fill_rect("PANTONE 032 C", 1.0, 0.0, 2.0, 4.0, false);
+        let right = spot_fill_rect("PANTONE 032 C", 1.0, 2.0, 4.0, 4.0, false);
+        let (plates, _) = spot_separations(&[left, right], 4, 4);
+        assert_eq!(plates.len(), 1, "one colorant → one plate");
+        assert!(
+            plates[0].coverage.iter().all(|&c| c > 0.99),
+            "union covers the canvas"
+        );
+    }
+
+    #[test]
+    fn process_only_document_yields_no_spot_plates_or_knockout() {
+        use crate::core::geometry::Point;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(2.0, 0.0)),
+                    Node::sharp(Point::new(2.0, 2.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        let obj = PdfVectorObject {
+            path,
+            fill: Some(PdfPaintColor::Cmyk([0.0, 0.0, 0.0, 1.0])),
+            fill_gradient: None,
+            stroke: None,
+            stroke_width_px: 0.0,
+            stroke_cap: crate::core::vector::style::LineCap::Butt,
+            stroke_join: crate::core::vector::style::LineJoin::Miter,
+            stroke_miter_limit: 4.0,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
+            even_odd: false,
+            fill_overprint: false,
+            stroke_overprint: false,
+        };
+        let (plates, knockout) = spot_separations(std::slice::from_ref(&obj), 4, 4);
+        assert!(plates.is_empty());
+        assert!(knockout.iter().all(|&k| k == 0.0));
+    }
+
+    #[test]
+    fn spot_stroke_films_along_the_outline() {
+        use crate::core::geometry::Point;
+        use crate::core::vector::color::SpotName;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        // A horizontal open segment across the middle row, thick spot stroke.
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 5.0)),
+                    Node::sharp(Point::new(10.0, 5.0)),
+                ],
+                false,
+            )],
+            FillRule::NonZero,
+        );
+        let obj = PdfVectorObject {
+            path,
+            fill: None,
+            fill_gradient: None,
+            stroke: Some(PdfPaintColor::Spot {
+                name: SpotName::new("Spot Line"),
+                tint: 1.0,
+                alt: [0.0, 0.0, 0.0, 1.0],
+            }),
+            stroke_width_px: 4.0,
+            stroke_cap: crate::core::vector::style::LineCap::Butt,
+            stroke_join: crate::core::vector::style::LineJoin::Miter,
+            stroke_miter_limit: 4.0,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
+            even_odd: false,
+            fill_overprint: false,
+            stroke_overprint: false,
+        };
+        let (plates, knockout) = spot_separations(std::slice::from_ref(&obj), 10, 10);
+        assert_eq!(plates.len(), 1);
+        let at = |x: usize, y: usize| y * 10 + x;
+        assert!(
+            plates[0].coverage[at(5, 5)] > 0.9,
+            "ink on the stroke centre"
+        );
+        assert!(
+            plates[0].coverage[at(5, 0)] < 0.01,
+            "no ink far from the stroke"
+        );
+        assert!(knockout[at(5, 5)] > 0.9, "stroke knocks process out too");
+    }
+
+    #[test]
+    fn process_object_above_a_spot_protects_the_process_plate() {
+        // A spot panel over the whole 4×4 canvas, with an opaque PROCESS square
+        // stacked ON TOP of its left half. `objects[0]` is topmost, so the
+        // process square is listed first. The baked raster has real K ink under
+        // the square; the separations must keep it (not erase it as spot area).
+        let mut process_sq = spot_fill_rect("unused", 1.0, 0.0, 2.0, 4.0, false);
+        process_sq.fill = Some(PdfPaintColor::Cmyk([0.0, 0.0, 0.0, 1.0]));
+        let spot_panel = spot_fill_rect("PANTONE 185 C", 1.0, 0.0, 4.0, 4.0, false);
+        let (plates, knockout) = spot_separations(&[process_sq, spot_panel], 4, 4);
+        assert_eq!(plates.len(), 1, "only the spot colorant makes a plate");
+        let at = |x: usize, y: usize| y * 4 + x;
+        // Left half — spot hidden under the process square: no film, K preserved.
+        assert!(
+            plates[0].coverage[at(0, 0)] < 0.01,
+            "hidden spot is not on the film"
+        );
+        assert!(
+            knockout[at(0, 0)] < 0.01,
+            "the black square's K ink is preserved"
+        );
+        // Right half — spot exposed: it films and knocks the process out.
+        assert!(
+            plates[0].coverage[at(3, 0)] > 0.99,
+            "exposed spot films solid"
+        );
+        assert!(
+            knockout[at(3, 0)] > 0.99,
+            "process removed under the exposed spot"
+        );
+    }
+
+    #[test]
+    fn sanitize_plate_name_is_filesystem_safe() {
+        assert_eq!(sanitize_plate_name("PANTONE 185 C"), "PANTONE_185_C");
+        assert_eq!(sanitize_plate_name("  Reflex/Blue  "), "Reflex_Blue");
+        assert_eq!(sanitize_plate_name("®™"), "spot");
+        assert_eq!(sanitize_plate_name("Silver"), "Silver");
     }
 
     #[test]

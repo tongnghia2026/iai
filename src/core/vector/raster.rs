@@ -56,6 +56,17 @@ pub fn rasterize_clipped(
     rasterize_impl(object, Some(clip))
 }
 
+/// Analytic geometric fill coverage (`0..=1` per pixel) for `contours` given in
+/// the target buffer's OWN pixel space (origin at its top-left), sized `w`×`h`.
+/// A public seam over the same scanline [`rasterize`] fills with, for the CMYK
+/// spot-separation exporter, which lays canvas-space spot geometry straight onto
+/// a full-canvas plate (origin `(0,0)`, so canvas coordinates need no shift).
+/// Open contours are implicitly closed and anything outside `[0,w)×[0,h)` is
+/// clipped, exactly as the object rasteriser does.
+pub(crate) fn coverage_mask(contours: &[Vec<Point>], w: u32, h: u32, even_odd: bool) -> Vec<f32> {
+    fill_coverage(contours, w, h, even_odd)
+}
+
 /// Flattened contours plus the derived raster frame, shared by [`rasterize`]
 /// and [`raster_geometry`] so both compute the identical placement.
 struct RasterLayout {
