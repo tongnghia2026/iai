@@ -423,6 +423,17 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         });
                         ui.menu_button("Trang · Artboard", |ui| {
                             let en = data.doc.has_doc;
+                            if ui
+                                .add_enabled(en, egui::Button::new("Thêm Artboard"))
+                                .on_hover_text(
+                                    "Thêm một trang mới cạnh phải (mở rộng vùng làm việc)",
+                                )
+                                .clicked()
+                            {
+                                actions.doc.add_artboard = true;
+                                ui.close();
+                            }
+                            ui.separator();
                             // Bleed / safe-margin are drawn as guides on the page
                             // sheet. Presets cover the print-standard 3 mm bleed;
                             // 0 turns the guide off.

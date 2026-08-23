@@ -109,6 +109,10 @@ impl App {
         if let Some(mm) = actions.doc.set_page_margin_mm.take() {
             self.set_page_setup(None, Some(mm));
         }
+        if actions.doc.add_artboard {
+            actions.doc.add_artboard = false;
+            self.add_artboard();
+        }
         if let Some((w, h, dpi)) = actions.doc.image_resize.take() {
             let w = w.max(1);
             let h = h.max(1);
@@ -338,6 +342,69 @@ impl App {
             bleed_px / dpi * 25.4,
             margin_px / dpi * 25.4
         );
+    }
+
+    /// Add a new artboard to the active document: same size as the last page,
+    /// appended to the right of the row, growing the shared canvas to hold it — a
+    /// plain one-page document becomes a real two-artboard job. One undoable step
+    /// (a canvas resize + an artboard-list change, bundled), with the GPU texture
+    /// and view refit reconciled through `apply_canvas_event` (the same path
+    /// crop/resize and their undo use).
+    pub fn add_artboard(&mut self) {
+        let idx = self.docs.active_doc_idx;
+        let (w, h, bleed, margin, existing) = {
+            let c = &self.docs.documents[idx].canvas;
+            (
+                c.width,
+                c.height,
+                c.metadata.page_bleed_px,
+                c.metadata.page_margin_px,
+                c.metadata.artboards.clone(),
+            )
+        };
+        let (boards, w2, h2) =
+            crate::core::page::append_artboard_in_row(&existing, w, h, bleed, margin);
+        if !crate::core::canvas::Canvas::fits_flat_buffer(w2, h2) {
+            self.shell.status_msg = "Không thêm được artboard: workspace vượt giới hạn".to_string();
+            return;
+        }
+        let count = boards.len();
+        let resized = {
+            let canvas = &mut self.docs.documents[idx].canvas;
+            // Nest the resize and the artboard-list change in ONE undo group, so a
+            // single Ctrl+Z reverts both (a resize that outlived its artboards would
+            // strand pages off-canvas). `canvas.resize` handles layers, masks,
+            // selection and pixels tile-natively; PageSetupCommand records the new
+            // list through the same gate. begin_undo_group nests, so the resize's
+            // own group is absorbed.
+            canvas.begin_undo_group("Add artboard");
+            let ok = canvas.resize(w2, h2);
+            if ok {
+                let _ = canvas.execute(
+                    Box::new(crate::core::command::PageSetupCommand::new(
+                        "Add artboard",
+                        bleed,
+                        margin,
+                        boards,
+                    )),
+                    crate::core::gateway::ChangeKind::LayerStructure,
+                );
+            }
+            canvas.end_undo_group();
+            ok
+        };
+        if !resized {
+            self.shell.status_msg = "Không thêm được artboard: workspace vượt giới hạn".to_string();
+            return;
+        }
+        if let Some(gpu) = &mut self.win.gpu {
+            gpu.resize_canvas_texture(w2, h2);
+        }
+        self.push_canvas_uniforms();
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.apply_canvas_event(CanvasEvent::SelectionChanged);
+        self.fit_canvas_to_screen();
+        self.shell.status_msg = format!("Đã thêm artboard — tổng {count} trang");
     }
 
     /// Image ▸ Mode CMYK actions: open/close the convert dialog (pre-loading the

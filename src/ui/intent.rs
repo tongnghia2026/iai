@@ -56,6 +56,9 @@ pub struct DocumentIntent {
     pub set_page_bleed_mm: Option<f32>,
     /// Page ▸ Safe margin: set the default page safe-margin, in mm.
     pub set_page_margin_mm: Option<f32>,
+    /// Page ▸ Add Artboard: append a new artboard (same size as the last) to the
+    /// right, growing the canvas — one undoable step.
+    pub add_artboard: bool,
     pub reload_open_file_confirm: bool,
     pub reload_open_file_cancel: bool,
     /// PDF page-selection dialog: confirm with the 0-based page indices to open

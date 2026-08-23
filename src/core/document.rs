@@ -560,4 +560,40 @@ mod tests {
         assert_eq!(doc.canvas.metadata.page_bleed_px, 8.0);
         assert_eq!(doc.effective_artboards()[0].bleed, 8.0);
     }
+
+    #[test]
+    fn add_artboard_grows_canvas_and_undoes_as_one_step() {
+        // Mirrors App::add_artboard: canvas.resize + the artboard-list change
+        // nested in ONE undo group, so a single undo reverts BOTH (size + list).
+        let mut doc = Document::new(DocumentId(1), 100, 80);
+        assert_eq!(doc.effective_artboards().len(), 1);
+        let (boards, w2, h2) = crate::core::page::append_artboard_in_row(&[], 100, 80, 0.0, 0.0);
+
+        doc.canvas.begin_undo_group("Add artboard");
+        assert!(doc.canvas.resize(w2, h2));
+        doc.canvas
+            .execute(
+                Box::new(crate::core::command::PageSetupCommand::new(
+                    "Add artboard",
+                    0.0,
+                    0.0,
+                    boards,
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("add artboard applies");
+        doc.canvas.end_undo_group();
+        assert_eq!(doc.canvas.width, w2, "canvas grew to hold both artboards");
+        assert_eq!(doc.canvas.height, h2);
+        assert_eq!(doc.effective_artboards().len(), 2);
+
+        doc.canvas.undo();
+        assert_eq!(doc.canvas.width, 100, "one undo reverts size AND the list");
+        assert!(doc.canvas.metadata.artboards.is_empty());
+        assert_eq!(doc.effective_artboards().len(), 1);
+
+        doc.canvas.redo();
+        assert_eq!(doc.canvas.width, w2);
+        assert_eq!(doc.effective_artboards().len(), 2);
+    }
 }

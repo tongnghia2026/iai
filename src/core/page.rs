@@ -87,6 +87,71 @@ impl Page {
     }
 }
 
+/// Workspace gap between artboards, as a fraction of the reference page width,
+/// with a floor so a tiny page still gets a visible separation.
+fn row_gap(reference_w: u32) -> f32 {
+    (reference_w as f32 * 0.06).max(24.0)
+}
+
+/// Plan an artboard appended to the RIGHT of `existing` (same size as the last
+/// page, one [`row_gap`] apart). When `existing` is empty, the single implicit
+/// page equal to the canvas is materialised first — so a plain one-page document
+/// becomes a real two-artboard job. Returns `(all artboards including the new
+/// one, new canvas width, new canvas height)`, the canvas grown just enough to
+/// enclose every trim rect (artboards are regions of one shared canvas). New
+/// pages inherit the current default `bleed` / `margin`.
+pub fn append_artboard_in_row(
+    existing: &[Page],
+    canvas_w: u32,
+    canvas_h: u32,
+    bleed: f32,
+    margin: f32,
+) -> (Vec<Page>, u32, u32) {
+    let mut boards: Vec<Page> = if existing.is_empty() {
+        let mut p = Page::implicit(canvas_w, canvas_h);
+        p.bleed = bleed.max(0.0);
+        p.margin = margin.max(0.0);
+        vec![p]
+    } else {
+        existing.to_vec()
+    };
+    let last = boards
+        .last()
+        .expect("non-empty after the implicit fallback");
+    let new_size = last.size;
+    let right_edge = boards
+        .iter()
+        .map(|b| b.origin.x + b.size.0)
+        .fold(0.0_f32, f32::max);
+    let new_id = PageId(
+        boards
+            .iter()
+            .map(|b| b.id.0)
+            .max()
+            .unwrap_or(0)
+            .wrapping_add(1),
+    );
+    boards.push(Page {
+        id: new_id,
+        origin: Point::new(right_edge + row_gap(canvas_w), 0.0),
+        size: new_size,
+        bleed: bleed.max(0.0),
+        margin: margin.max(0.0),
+        background: None,
+    });
+    let max_x = boards
+        .iter()
+        .map(|b| b.origin.x + b.size.0)
+        .fold(0.0_f32, f32::max);
+    let max_y = boards
+        .iter()
+        .map(|b| b.origin.y + b.size.1)
+        .fold(0.0_f32, f32::max);
+    let w2 = (canvas_w as f32).max(max_x).ceil().max(1.0) as u32;
+    let h2 = (canvas_h as f32).max(max_y).ceil().max(1.0) as u32;
+    (boards, w2, h2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +180,47 @@ mod tests {
         let mut p = Page::implicit(100, 100);
         p.size.0 = f32::NAN;
         assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn append_materialises_the_implicit_page_then_adds_a_second() {
+        let (boards, w2, h2) = append_artboard_in_row(&[], 100, 80, 4.0, 3.0);
+        assert_eq!(boards.len(), 2);
+        assert_eq!(boards[0].id, PageId::IMPLICIT);
+        assert_eq!(boards[0].rect(), Rect::new(0.0, 0.0, 100.0, 80.0));
+        assert_eq!((boards[0].bleed, boards[0].margin), (4.0, 3.0));
+        assert!(
+            boards[1].origin.x >= 100.0,
+            "the new page sits to the right of the first"
+        );
+        assert_eq!(boards[1].size, (100.0, 80.0));
+        assert_eq!((boards[1].bleed, boards[1].margin), (4.0, 3.0));
+        assert!(w2 > 100, "canvas grew to hold both artboards");
+        assert_eq!(h2, 80, "same-height row keeps the height");
+        // Every page must enclose within the new canvas.
+        assert!(boards[1].origin.x + boards[1].size.0 <= w2 as f32 + 0.5);
+    }
+
+    #[test]
+    fn append_extends_an_existing_row() {
+        let existing = vec![
+            Page::implicit(50, 50),
+            Page {
+                id: PageId(1),
+                origin: Point::new(70.0, 0.0),
+                size: (50.0, 50.0),
+                bleed: 0.0,
+                margin: 0.0,
+                background: None,
+            },
+        ];
+        let (boards, w2, _) = append_artboard_in_row(&existing, 120, 50, 0.0, 0.0);
+        assert_eq!(boards.len(), 3);
+        assert_eq!(boards[2].id, PageId(2), "id is max + 1");
+        assert!(
+            boards[2].origin.x >= 120.0,
+            "appended past the rightmost page"
+        );
+        assert!(w2 as f32 >= boards[2].origin.x + 50.0 - 0.5);
     }
 }
