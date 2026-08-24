@@ -116,6 +116,25 @@ impl App {
         if let Some(i) = actions.doc.set_active_artboard.take() {
             self.set_active_artboard(i);
         }
+        if let Some(i) = actions.doc.rename_page.take() {
+            self.begin_page_rename(i);
+        }
+        if let Some(text) = actions.doc.page_rename_text.take() {
+            self.shell.ui.page_rename_text = text;
+        }
+        if std::mem::take(&mut actions.doc.page_rename_commit) {
+            self.commit_page_rename();
+        }
+        if std::mem::take(&mut actions.doc.page_rename_cancel) {
+            self.shell.ui.page_rename_target = None;
+            self.shell.ui.page_rename_text.clear();
+        }
+        if let Some((from, to)) = actions.doc.move_page.take() {
+            self.move_page(from, to);
+        }
+        if let Some(i) = actions.doc.delete_page.take() {
+            self.delete_page(i);
+        }
         if let Some((w, h, dpi)) = actions.doc.image_resize.take() {
             let w = w.max(1);
             let h = h.max(1);
@@ -382,6 +401,68 @@ impl App {
         self.refresh_active_document();
         self.fit_canvas_to_screen();
         self.shell.status_msg = format!("Trang {}", index + 1);
+    }
+
+    /// Open the page-tab rename dialog for page `index`, pre-filling its current
+    /// display name so the user edits rather than retypes.
+    pub fn begin_page_rename(&mut self, index: usize) {
+        let idx = self.docs.active_doc_idx;
+        let Some(doc) = self.docs.documents.get(idx) else {
+            return;
+        };
+        if index >= doc.page_count() {
+            return;
+        }
+        self.shell.ui.page_rename_text = doc.page_display_name(index);
+        self.shell.ui.page_rename_target = Some(index);
+    }
+
+    /// Apply the page-tab rename dialog's text to its target page, then close it.
+    /// Blank text clears the custom name (reverts to the "Trang N" label).
+    pub fn commit_page_rename(&mut self) {
+        let Some(index) = self.shell.ui.page_rename_target.take() else {
+            return;
+        };
+        let name = self.shell.ui.page_rename_text.trim().to_string();
+        self.shell.ui.page_rename_text.clear();
+        let idx = self.docs.active_doc_idx;
+        if let Some(doc) = self.docs.documents.get_mut(idx) {
+            let default_label = format!("Trang {}", index + 1);
+            let custom = (!name.is_empty() && name != default_label).then_some(name);
+            doc.set_page_name(index, custom);
+        }
+    }
+
+    /// Reorder a page (tab context menu "move left / right"): keeps the same
+    /// active content, only tab order changes, so no view resync is needed.
+    pub fn move_page(&mut self, from: usize, to: usize) {
+        let idx = self.docs.active_doc_idx;
+        if let Some(doc) = self.docs.documents.get_mut(idx) {
+            doc.move_page(from, to);
+        }
+    }
+
+    /// Delete a page (tab context menu). Keeps at least one page; when the active
+    /// page is removed a neighbour takes over, so resync the GPU/view like a page
+    /// switch. Collapsing back to a single page hides the extra tab.
+    pub fn delete_page(&mut self, index: usize) {
+        let idx = self.docs.active_doc_idx;
+        let Some(doc) = self.docs.documents.get_mut(idx) else {
+            return;
+        };
+        if doc.page_count() <= 1 || index >= doc.page_count() {
+            return;
+        }
+        // If the rename dialog targets this or a later page, its index is stale —
+        // close it rather than risk renaming the wrong page.
+        self.shell.ui.page_rename_target = None;
+        self.sync_brush_gpu_to_cpu();
+        self.docs.documents[idx].remove_page(index);
+        let count = self.docs.documents[idx].page_count();
+        // The checked-out canvas may have changed → full GPU/view resync + reframe.
+        self.refresh_active_document();
+        self.fit_canvas_to_screen();
+        self.shell.status_msg = format!("Đã xoá trang · còn {count}");
     }
 
     /// Image ▸ Mode CMYK actions: open/close the convert dialog (pre-loading the

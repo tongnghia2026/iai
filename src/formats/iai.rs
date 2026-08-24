@@ -175,6 +175,11 @@ fn build_canvas_from_meta<R: Read + Seek>(
     canvas.metadata.artboards = json_to_artboards(meta.get("artboards"));
     canvas.metadata.page_bleed_px = meta["page_bleed"].as_f64().unwrap_or(0.0).max(0.0) as f32;
     canvas.metadata.page_margin_px = meta["page_margin"].as_f64().unwrap_or(0.0).max(0.0) as f32;
+    // Custom page-tab name (multi-page docs). Absent on single-page / older files.
+    canvas.metadata.page_name = meta["page_name"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty());
     // 16-bit mode (post-B2 key; absent on older files = 8-bit). Keeps a reopened
     // 16-bit document in 16-bit mode so its first edit preserves precision
     // instead of quantizing the masters the 16-bit layer PNGs just restored.
@@ -781,6 +786,15 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
     }
     if canvas.metadata.page_margin_px != 0.0 {
         meta["page_margin"] = serde_json::json!(canvas.metadata.page_margin_px);
+    }
+    // Custom page-tab name — written only when set, so unnamed pages stay byte-clean.
+    if let Some(name) = canvas
+        .metadata
+        .page_name
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        meta["page_name"] = serde_json::json!(name);
     }
     meta
 }
@@ -2091,7 +2105,8 @@ mod tests {
         // restored, and the active page is remembered.
         let dir = tmp_dir("artboard-doc");
         let path = dir.join("doc.iai");
-        let p0 = solid([200, 40, 40, 255], 12, 10);
+        let mut p0 = solid([200, 40, 40, 255], 12, 10);
+        p0.metadata.page_name = Some("Bìa".to_string());
         let p1 = solid([40, 60, 200, 255], 12, 10);
         write_artboard_doc(&path, &[&p0, &p1], 1).expect("write artboard doc");
 
@@ -2100,6 +2115,15 @@ mod tests {
         };
         assert_eq!(doc.pages.len(), 2);
         assert_eq!(doc.active_page, 1);
+        assert_eq!(
+            doc.pages[0].metadata.page_name.as_deref(),
+            Some("Bìa"),
+            "custom page name round-trips"
+        );
+        assert_eq!(
+            doc.pages[1].metadata.page_name, None,
+            "an unnamed page stays unnamed"
+        );
         assert!(
             doc.pages[0]
                 .export_flat()

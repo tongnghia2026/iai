@@ -675,6 +675,12 @@ impl App {
                     .documents
                     .get(self.docs.active_doc_idx)
                     .map_or(1, |doc| doc.page_count()),
+                page_names: std::sync::Arc::new(
+                    self.docs
+                        .documents
+                        .get(self.docs.active_doc_idx)
+                        .map_or_else(|| vec!["Trang 1".to_string()], |doc| doc.page_names()),
+                ),
                 pdf_nav: self
                     .docs
                     .documents
@@ -1353,6 +1359,11 @@ impl App {
                 show_resize_dialog: self.shell.ui.show_resize_dialog,
                 show_image_size_dialog: self.shell.ui.show_image_size_dialog,
                 show_rename_dialog: self.shell.ui.show_rename_dialog,
+                page_rename: self
+                    .shell
+                    .ui
+                    .page_rename_target
+                    .map(|idx| (idx, self.shell.ui.page_rename_text.clone())),
                 show_export_dialog: self.shell.ui.show_export_dialog,
                 show_preferences: self.shell.ui.show_preferences,
                 show_adjustment_dialog: self.shell.ui.show_adjustment_dialog,

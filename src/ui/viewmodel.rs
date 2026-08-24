@@ -52,6 +52,8 @@ pub struct DocumentViewModel {
     pub active_artboard: usize,
     /// Number of pages in the active document (≥1). Drives the page-tab bar.
     pub page_count: usize,
+    /// Tab labels for each page, in order (custom name or "Trang N").
+    pub page_names: std::sync::Arc<Vec<String>>,
 }
 /// The layer panel: names, thumbnails, per-layer flags, grouping.
 pub struct LayerViewModel {
@@ -413,6 +415,8 @@ pub struct DialogViewModel {
     pub show_resize_dialog: bool,
     pub show_image_size_dialog: bool,
     pub show_rename_dialog: bool,
+    /// Page-tab rename dialog: `Some((page_index, working_text))` while open.
+    pub page_rename: Option<(usize, String)>,
     pub show_export_dialog: bool,
     pub show_preferences: bool,
     pub show_adjustment_dialog: bool,
@@ -648,6 +652,7 @@ impl Default for UiData {
                 pdf_nav: None,
                 active_artboard: 0,
                 page_count: 1,
+                page_names: std::sync::Arc::new(vec!["Trang 1".to_string()]),
             },
             layers: LayerViewModel {
                 layer_count: 1,
@@ -901,6 +906,7 @@ impl Default for UiData {
                 show_resize_dialog: false,
                 show_image_size_dialog: false,
                 show_rename_dialog: false,
+                page_rename: None,
                 show_export_dialog: false,
                 show_preferences: false,
                 show_adjustment_dialog: false,

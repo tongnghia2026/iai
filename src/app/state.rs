@@ -367,6 +367,10 @@ pub struct UiState {
     pub show_resize_dialog: bool,
     pub show_image_size_dialog: bool,
     pub show_rename_dialog: bool,
+    /// Page-tab rename dialog: the target page index and its working text. `Some`
+    /// while the dialog is open (blocks canvas input like other modal dialogs).
+    pub page_rename_target: Option<usize>,
+    pub page_rename_text: String,
     pub show_export_dialog: bool,
     pub show_print_dialog: bool,
     pub show_preferences: bool,
@@ -1370,6 +1374,8 @@ impl App {
                     show_resize_dialog: false,
                     show_image_size_dialog: false,
                     show_rename_dialog: false,
+                    page_rename_target: None,
+                    page_rename_text: String::new(),
                     show_export_dialog: false,
                     show_print_dialog: false,
                     show_preferences: false,
@@ -2190,6 +2196,7 @@ impl App {
             || self.shell.ui.show_resize_dialog
             || self.shell.ui.show_image_size_dialog
             || self.shell.ui.show_rename_dialog
+            || self.shell.ui.page_rename_target.is_some()
             || self.shell.ui.show_export_dialog
             || self.shell.ui.show_preferences
             || self.shell.ui.show_exit_dialog

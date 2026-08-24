@@ -96,6 +96,11 @@ pub struct CanvasMetadata {
     /// Default page safe-margin, in document units (canvas pixels), applied to the
     /// implicit page. `0` = none.
     pub page_margin_px: f32,
+    /// Custom name shown on this page's tab in a multi-page (artboard) document.
+    /// `None` (or blank) falls back to the positional "Trang N" label. Rides on the
+    /// canvas so it travels with the page through reorder / swap and persists with
+    /// the rest of the canvas metadata.
+    pub page_name: Option<String>,
 }
 
 impl Default for CanvasMetadata {
@@ -113,6 +118,7 @@ impl Default for CanvasMetadata {
             artboards: Vec::new(),
             page_bleed_px: 0.0,
             page_margin_px: 0.0,
+            page_name: None,
         }
     }
 }

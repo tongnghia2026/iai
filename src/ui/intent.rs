@@ -61,6 +61,16 @@ pub struct DocumentIntent {
     pub add_artboard: bool,
     /// Page-tab bar: focus this artboard index (frame it in the view).
     pub set_active_artboard: Option<usize>,
+    /// Page-tab context menu: open the rename dialog for this page index.
+    pub rename_page: Option<usize>,
+    /// Page rename dialog: live text edits / commit / cancel.
+    pub page_rename_text: Option<String>,
+    pub page_rename_commit: bool,
+    pub page_rename_cancel: bool,
+    /// Page-tab context menu / drag: reorder page `from` to position `to`.
+    pub move_page: Option<(usize, usize)>,
+    /// Page-tab context menu: delete this page index (keeps at least one page).
+    pub delete_page: Option<usize>,
     pub reload_open_file_confirm: bool,
     pub reload_open_file_cancel: bool,
     /// PDF page-selection dialog: confirm with the 0-based page indices to open

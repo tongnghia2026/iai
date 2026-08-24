@@ -11,7 +11,6 @@ pub mod dialogs;
 pub mod intent;
 pub mod library;
 pub mod menubar;
-pub mod nav;
 pub mod panels;
 pub mod refine_select;
 pub mod statusbar;
@@ -780,8 +779,6 @@ pub fn build(
         topoptions::build(ctx, data, &mut actions);
 
         tabbar::build(ctx, data, &mut actions);
-
-        nav::build(ctx, data, &mut actions);
 
         toolbar::build(ctx, data, &mut actions);
 

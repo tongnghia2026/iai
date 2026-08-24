@@ -830,6 +830,61 @@ pub(crate) fn rename_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
     }
 }
 
+/// Rename a page (artboard) tab. Mirrors the layer rename dialog but writes to the
+/// page-rename intents. Blank text reverts the tab to its "Trang N" label.
+pub(crate) fn page_rename_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    let Some((index, mut text)) = data.dialogs.page_rename.clone() else {
+        return;
+    };
+    let mut do_rename = false;
+    let mut do_cancel = false;
+
+    modal_overlay(ctx, "page_rename_dialog_overlay");
+
+    egui::Window::new("Đổi tên trang")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .order(DIALOG_ORDER)
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(format!("Tên trang {}:", index + 1));
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut text)
+                    .desired_width(220.0)
+                    .hint_text("Nhập tên trang…"),
+            );
+            resp.request_focus();
+
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                do_rename = true;
+            }
+            if resp.changed() {
+                actions.doc.page_rename_text = Some(text.clone());
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("  OK  ").clicked() {
+                    do_rename = true;
+                }
+                if ui.button("Huỷ").clicked() {
+                    do_cancel = true;
+                }
+            });
+            ui.add_space(4.0);
+        });
+
+    if do_rename {
+        // Push the final text before committing so a click (no `changed`) still lands.
+        actions.doc.page_rename_text = Some(text);
+        actions.doc.page_rename_commit = true;
+    }
+    if do_cancel {
+        actions.doc.page_rename_cancel = true;
+    }
+}
+
 pub(crate) fn export_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut do_export = enter_pressed;

@@ -374,6 +374,116 @@ impl Document {
         self.active_artboard = index;
     }
 
+    /// Delete page `index`, keeping at least one page. Deleting the last remaining
+    /// extra page collapses the document back to a plain single-page one. When the
+    /// active page is removed, a neighbour becomes active; the caller must resync
+    /// the view because the checked-out canvas may change. No-op on a single-page
+    /// document or an out-of-range index.
+    pub fn remove_page(&mut self, index: usize) {
+        if self.pages.len() <= 1 || index >= self.pages.len() {
+            return;
+        }
+        // Park the checked-out active canvas back into its slot so `pages` is a
+        // whole list (every slot `Some`) before the structural edit.
+        let parked = std::mem::replace(&mut self.canvas, Canvas::new(1, 1));
+        self.pages[self.active_artboard] = Some(parked);
+        self.pages.remove(index);
+
+        // Down to one page → collapse to a plain document (empty `pages`).
+        if self.pages.len() == 1 {
+            self.canvas = self.pages.remove(0).unwrap_or_else(|| Canvas::new(1, 1));
+            self.active_artboard = 0;
+            return;
+        }
+
+        // Track where the active page landed, then re-check it out.
+        let mut new_active = self.active_artboard;
+        if index < new_active {
+            new_active -= 1;
+        } else if index == new_active {
+            new_active = index.min(self.pages.len() - 1);
+        }
+        self.active_artboard = new_active;
+        if let Some(canvas) = self.pages[new_active].take() {
+            self.canvas = canvas;
+        }
+    }
+
+    /// Reorder pages: move the page at `from` to position `to` (tab drag / the
+    /// context-menu "move left / right"). The active page keeps its content — only
+    /// tab order and the active index change, so no view resync is needed. No-op
+    /// when out of range or `from == to`.
+    pub fn move_page(&mut self, from: usize, to: usize) {
+        let n = self.pages.len();
+        if n < 2 || from >= n || to >= n || from == to {
+            return;
+        }
+        let parked = std::mem::replace(&mut self.canvas, Canvas::new(1, 1));
+        self.pages[self.active_artboard] = Some(parked);
+        let page = self.pages.remove(from);
+        self.pages.insert(to, page);
+
+        // Follow the active page through the remove+insert shift.
+        let mut active = self.active_artboard;
+        if active == from {
+            active = to;
+        } else {
+            if from < active {
+                active -= 1;
+            }
+            if to <= active {
+                active += 1;
+            }
+        }
+        self.active_artboard = active.min(self.pages.len() - 1);
+        if let Some(canvas) = self.pages[self.active_artboard].take() {
+            self.canvas = canvas;
+        }
+    }
+
+    /// Set (or clear, with `None`) the custom tab name of page `index`. The name
+    /// lives on that page's canvas metadata, so it survives reorder and save.
+    pub fn set_page_name(&mut self, index: usize, name: Option<String>) {
+        let name = name.filter(|s| !s.trim().is_empty());
+        if self.pages.is_empty() {
+            if index == 0 {
+                self.canvas.metadata.page_name = name;
+            }
+            return;
+        }
+        if index == self.active_artboard {
+            self.canvas.metadata.page_name = name;
+        } else if let Some(Some(canvas)) = self.pages.get_mut(index) {
+            canvas.metadata.page_name = name;
+        }
+    }
+
+    /// Display name for page `index`: the custom name if set, else "Trang N".
+    pub fn page_display_name(&self, index: usize) -> String {
+        let custom = if self.pages.is_empty() {
+            (index == 0)
+                .then(|| self.canvas.metadata.page_name.clone())
+                .flatten()
+        } else if index == self.active_artboard {
+            self.canvas.metadata.page_name.clone()
+        } else {
+            self.pages
+                .get(index)
+                .and_then(|slot| slot.as_ref())
+                .and_then(|canvas| canvas.metadata.page_name.clone())
+        };
+        custom
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("Trang {}", index + 1))
+    }
+
+    /// Tab labels for every page, in order (drives the page-tab bar).
+    pub fn page_names(&self) -> Vec<String> {
+        (0..self.page_count())
+            .map(|i| self.page_display_name(i))
+            .collect()
+    }
+
     /// Latch the sticky "this PDF page has been edited" flag from the active
     /// canvas's dirty state. Sticky and save-surviving, so it cannot simply be
     /// derived; call it wherever the active page's dirty state may have changed.
@@ -691,5 +801,76 @@ mod tests {
         assert_eq!(doc.active_artboard, 1);
         doc.switch_page(1);
         assert_eq!(doc.active_artboard, 1);
+    }
+
+    #[test]
+    fn remove_page_keeps_at_least_one_and_tracks_active() {
+        let mut doc = Document::new(DocumentId(1), 100, 80);
+        doc.set_page_name(0, Some("A".into()));
+        doc.add_blank_page();
+        doc.set_page_name(1, Some("B".into()));
+        doc.add_blank_page();
+        doc.set_page_name(2, Some("C".into()));
+        assert_eq!(doc.page_names(), vec!["A", "B", "C"]);
+
+        // Remove a page before the active one → active index shifts down but the
+        // same page (C) stays checked out.
+        doc.switch_page(2);
+        doc.remove_page(0);
+        assert_eq!(doc.page_names(), vec!["B", "C"]);
+        assert_eq!(doc.active_artboard, 1);
+        assert_eq!(doc.page_display_name(doc.active_artboard), "C");
+
+        // Remove the active page → collapse back to a plain single-page document
+        // showing the surviving neighbour.
+        doc.remove_page(1);
+        assert_eq!(doc.page_count(), 1);
+        assert!(doc.pages.is_empty(), "single page → plain document");
+        assert_eq!(doc.page_display_name(0), "B");
+
+        // The sole page cannot be removed.
+        doc.remove_page(0);
+        assert_eq!(doc.page_count(), 1);
+    }
+
+    #[test]
+    fn move_page_reorders_and_active_follows() {
+        let mut doc = Document::new(DocumentId(2), 50, 50);
+        doc.set_page_name(0, Some("A".into()));
+        doc.add_blank_page();
+        doc.set_page_name(1, Some("B".into()));
+        doc.add_blank_page();
+        doc.set_page_name(2, Some("C".into()));
+
+        // Active is C (index 2); move it to the front.
+        doc.move_page(2, 0);
+        assert_eq!(doc.page_names(), vec!["C", "A", "B"]);
+        assert_eq!(doc.active_artboard, 0);
+        assert_eq!(doc.page_display_name(doc.active_artboard), "C");
+
+        // Move a non-active page across the active one; active index follows.
+        doc.switch_page(1); // active = A
+        doc.move_page(2, 0); // B to front → [B, C, A]
+        assert_eq!(doc.page_names(), vec!["B", "C", "A"]);
+        assert_eq!(doc.active_artboard, 2);
+        assert_eq!(doc.page_display_name(doc.active_artboard), "A");
+    }
+
+    #[test]
+    fn page_names_default_to_positional_and_ride_the_canvas() {
+        let mut doc = Document::new(DocumentId(3), 20, 20);
+        assert_eq!(doc.page_names(), vec!["Trang 1"]);
+        doc.set_page_name(0, Some("Bìa".into()));
+        assert_eq!(doc.page_names(), vec!["Bìa"]);
+        // Blank name reverts to the positional label.
+        doc.set_page_name(0, Some("   ".into()));
+        assert_eq!(doc.page_names(), vec!["Trang 1"]);
+
+        doc.add_blank_page();
+        doc.set_page_name(1, Some("Ruột".into()));
+        assert_eq!(doc.page_names(), vec!["Trang 1", "Ruột"]);
+        // The custom name travels with its canvas through a reorder.
+        doc.move_page(1, 0);
+        assert_eq!(doc.page_names(), vec!["Ruột", "Trang 2"]);
     }
 }
