@@ -919,13 +919,23 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
 
     modal_overlay(ctx, "pdf_export_dialog_overlay");
 
+    let default_size = egui::vec2(620.0, 580.0);
+    let screen = ctx.content_rect();
+    let default_pos = egui::pos2(
+        (screen.center().x - default_size.x * 0.5).max(screen.min.x + 12.0),
+        (screen.center().y - default_size.y * 0.5).max(screen.min.y + 12.0),
+    );
+
     egui::Window::new("Xuất PDF")
         .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .min_width(320.0)
+        .resizable(true)
+        .movable(true)
+        .default_pos(default_pos)
+        .default_size(default_size)
+        .min_size(egui::vec2(520.0, 500.0))
         .order(DIALOG_ORDER)
         .show(ctx, |ui| {
+            ui.set_min_size(egui::vec2(500.0, 460.0));
             ui.add_space(8.0);
 
             if is_pdf_import {
