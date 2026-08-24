@@ -1476,6 +1476,202 @@ fn collect_pdf_vectors_impl(
     }
 }
 
+/// True when every group ancestor of `layers[index]` is plain (visible, no mask,
+/// full opacity, Normal blend), so the layer can be lifted out as native vectors
+/// without losing a group effect. Standalone twin of the closure inside
+/// [`collect_pdf_vectors_impl`], for the per-layer SVG extractor below.
+fn ancestors_are_plain_at(layers: &[crate::core::layer::Layer], index: usize) -> bool {
+    use crate::core::layer::BlendMode;
+    let mut parent_id = layers[index].parent_id;
+    while let Some(id) = parent_id {
+        let Some(parent) = layers.iter().find(|layer| layer.id == id) else {
+            return false;
+        };
+        if !parent.visible
+            || parent.mask.is_some()
+            || (parent.opacity - 1.0).abs() > 1e-3
+            || parent.blend_mode != BlendMode::Normal
+        {
+            return false;
+        }
+        parent_id = parent.parent_id;
+    }
+    true
+}
+
+/// The native vector objects for a SINGLE layer if it is fully representable as
+/// sRGB paths (a Path / Shape / editable Text layer with plain ancestors, no
+/// mask, full opacity, Normal blend, opaque solid-or-gradient fills and supported
+/// strokes), or `None` if the layer must be rasterized.
+///
+/// Unlike [`collect_pdf_vectors`] — which promotes only the top contiguous vector
+/// run and bakes everything below into one raster base — this classifies one
+/// layer at a time, so the SVG writer can keep EVERY vector layer crisp at its
+/// own z-position, interleaved with the raster runs above and below it. sRGB
+/// only: CMYK / spot paints resolve to their sRGB preview (SVG has no CMYK/spot
+/// colour space), which is exactly how the SVG writer shows them anyway.
+pub(crate) fn layer_vector_objects_srgb(
+    canvas: &crate::core::canvas::Canvas,
+    index: usize,
+) -> Option<Vec<PdfVectorObject>> {
+    use crate::core::layer::{BlendMode, LayerType};
+    use crate::core::vector::path::FillRule;
+    use crate::core::vector::style::Paint;
+
+    let layers = &canvas.layer_stack.layers;
+    let layer = layers.get(index)?;
+    if layer.is_group() || !canvas.layer_stack.is_effectively_visible(index) {
+        return None;
+    }
+    if layer.mask.is_some()
+        || (layer.opacity - 1.0).abs() > 1e-3
+        || layer.blend_mode != BlendMode::Normal
+        || !ancestors_are_plain_at(layers, index)
+    {
+        return None;
+    }
+    let rgb = |c: crate::core::vector::color::ColorValue| -> PdfPaintColor {
+        let [r, g, b, _] = c.to_rgba8();
+        PdfPaintColor::Rgb([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+    };
+
+    // Editable text → transient glyph outlines (opaque solid fills only).
+    if let LayerType::Text(text) = &layer.layer_type {
+        let text_objects = crate::core::text::text_vector_objects(text, layer.offset);
+        if text_objects.is_empty() {
+            return None;
+        }
+        let mut out = Vec::new();
+        for object in text_objects {
+            if (object.style.opacity - 1.0).abs() > 1e-3 {
+                return None;
+            }
+            let color = match object.style.fill {
+                Paint::Solid(c) if c.alpha() >= 1.0 - 1e-3 => c,
+                _ => return None,
+            };
+            out.push(PdfVectorObject {
+                path: object.path_in_layer_space(),
+                fill: Some(rgb(color)),
+                fill_gradient: None,
+                stroke: None,
+                stroke_width_px: 0.0,
+                stroke_cap: object.style.stroke_style.cap,
+                stroke_join: object.style.stroke_style.join,
+                stroke_miter_limit: object.style.stroke_style.miter_limit,
+                stroke_dash: Vec::new(),
+                stroke_dash_offset: 0.0,
+                even_odd: false,
+                fill_overprint: false,
+                stroke_overprint: false,
+            });
+        }
+        return Some(out);
+    }
+
+    // Path / Shape.
+    let shape_object;
+    let obj = match &layer.layer_type {
+        LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(object)) => object,
+        LayerType::Vector(crate::core::vector::object::VectorGeometry::Primitive(shape)) => {
+            shape_object = shape_as_vector(shape, layer.offset);
+            &shape_object
+        }
+        _ => return None,
+    };
+    if (obj.style.opacity - 1.0).abs() > 1e-3 || matches!(obj.style.stroke, Paint::Gradient(_)) {
+        return None;
+    }
+    let fill_is_opaque = match obj.style.fill {
+        Paint::None => true,
+        Paint::Solid(c) => c.alpha() >= 1.0 - 1e-3,
+        Paint::Gradient(g) => g
+            .active_stops()
+            .iter()
+            .all(|stop| stop.color.alpha() >= 1.0 - 1e-3),
+    };
+    let stroke_is_opaque = match obj.style.stroke {
+        Paint::None => true,
+        Paint::Solid(c) => c.alpha() >= 1.0 - 1e-3,
+        Paint::Gradient(_) => false,
+    };
+    if !fill_is_opaque || !stroke_is_opaque {
+        return None;
+    }
+    let fill = match obj.style.fill {
+        Paint::Solid(c) => Some(rgb(c)),
+        Paint::None | Paint::Gradient(_) => None,
+    };
+    let fill_gradient = match obj.style.fill {
+        Paint::Gradient(mut gradient) => {
+            gradient.transform = obj.transform.then(&gradient.transform);
+            Some(gradient)
+        }
+        _ => None,
+    };
+    let half = obj.style.effective_stroke_width() * 0.5;
+    let stroke = (obj.style.stroke.is_visible() && half > 0.0)
+        .then(|| match obj.style.stroke {
+            Paint::Solid(c) => Some(rgb(c)),
+            _ => None,
+        })
+        .flatten();
+    if fill.is_none() && fill_gradient.is_none() && stroke.is_none() {
+        return None;
+    }
+    let emitted_path = match &obj.brush {
+        Some(brush) => {
+            let mut outline = crate::core::vector::brush::expand_stroke(&obj.path, brush)?;
+            outline.transform(&obj.transform);
+            outline
+        }
+        None => obj.path_in_layer_space(),
+    };
+    let arrow_path = if obj.brush.is_none() && stroke.is_some() {
+        arrowheads_as_pdf_path(
+            &emitted_path,
+            obj.style.effective_stroke_width() * 0.5,
+            obj.style.stroke_style.start_arrow,
+            obj.style.stroke_style.end_arrow,
+        )
+    } else {
+        None
+    };
+    let mut out = vec![PdfVectorObject {
+        path: emitted_path,
+        fill,
+        fill_gradient,
+        stroke,
+        stroke_width_px: obj.style.effective_stroke_width(),
+        stroke_cap: obj.style.stroke_style.cap,
+        stroke_join: obj.style.stroke_style.join,
+        stroke_miter_limit: obj.style.stroke_style.miter_limit,
+        stroke_dash: obj.style.stroke_style.dash.as_slice().to_vec(),
+        stroke_dash_offset: obj.style.stroke_style.dash.offset,
+        even_odd: obj.path.fill_rule == FillRule::EvenOdd,
+        fill_overprint: false,
+        stroke_overprint: false,
+    }];
+    if let (Some(path), Some(fill)) = (arrow_path, stroke) {
+        out.push(PdfVectorObject {
+            path,
+            fill: Some(fill),
+            fill_gradient: None,
+            stroke: None,
+            stroke_width_px: 0.0,
+            stroke_cap: obj.style.stroke_style.cap,
+            stroke_join: obj.style.stroke_style.join,
+            stroke_miter_limit: obj.style.stroke_style.miter_limit,
+            stroke_dash: Vec::new(),
+            stroke_dash_offset: 0.0,
+            even_odd: false,
+            fill_overprint: false,
+            stroke_overprint: false,
+        });
+    }
+    Some(out)
+}
+
 /// The transparent overlay drawn ON TOP of the native vectors: the opaque pixel
 /// layers that sit above the promoted vector run (`above_layer_ids`), flattened
 /// alone over transparency so the vectors (and the base below) show through
