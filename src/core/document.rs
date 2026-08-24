@@ -484,6 +484,24 @@ impl Document {
             .collect()
     }
 
+    /// Every page's canvas in tab order — the checked-out active canvas plus the
+    /// stored inactive ones. One entry for a plain single-page document. Used by
+    /// multi-page save / export so a page is never missed.
+    pub fn all_page_canvases(&self) -> Vec<&Canvas> {
+        if self.pages.is_empty() {
+            return vec![&self.canvas];
+        }
+        (0..self.pages.len())
+            .map(|i| {
+                if i == self.active_artboard {
+                    &self.canvas
+                } else {
+                    self.pages[i].as_ref().unwrap_or(&self.canvas)
+                }
+            })
+            .collect()
+    }
+
     /// Latch the sticky "this PDF page has been edited" flag from the active
     /// canvas's dirty state. Sticky and save-surviving, so it cannot simply be
     /// derived; call it wherever the active page's dirty state may have changed.
@@ -854,6 +872,28 @@ mod tests {
         assert_eq!(doc.page_names(), vec!["B", "C", "A"]);
         assert_eq!(doc.active_artboard, 2);
         assert_eq!(doc.page_display_name(doc.active_artboard), "A");
+    }
+
+    #[test]
+    fn all_page_canvases_returns_every_page_in_order() {
+        let mut doc = Document::new(DocumentId(4), 10, 10);
+        assert_eq!(doc.all_page_canvases().len(), 1, "single page");
+        doc.set_page_name(0, Some("A".into()));
+        doc.add_blank_page();
+        doc.set_page_name(1, Some("B".into()));
+        doc.add_blank_page();
+        doc.set_page_name(2, Some("C".into()));
+        doc.switch_page(1); // active = B; A and C are stored
+        let names: Vec<String> = doc
+            .all_page_canvases()
+            .iter()
+            .map(|c| c.metadata.page_name.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["A", "B", "C"],
+            "active canvas sits at its index"
+        );
     }
 
     #[test]

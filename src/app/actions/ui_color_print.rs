@@ -124,6 +124,10 @@ impl App {
             self.export_multipage_pdf((0..self.docs.documents.len()).collect());
         }
 
+        if actions.print.export_document_pages_pdf {
+            self.export_document_pages_pdf();
+        }
+
         if actions.print.export_svg {
             self.export_svg();
         }

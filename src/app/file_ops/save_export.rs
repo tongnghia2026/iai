@@ -962,6 +962,114 @@ impl App {
         }
     }
 
+    /// Export every page (artboard) of the ACTIVE document as one multi-page PDF —
+    /// each page a print artboard, with the current press-marks / bleed setting.
+    /// Distinct from [`Self::export_multipage_pdf`], which bundles the open tabs;
+    /// this gathers the pages within a single document.
+    pub fn export_document_pages_pdf(&mut self) {
+        if self.edit.text_edit.is_some() {
+            self.commit_text_edit();
+        }
+        self.sync_brush_gpu_to_cpu();
+        let idx = self.docs.active_doc_idx;
+
+        // Encode each page up front while the document is borrowed; release the
+        // borrow before the file dialog and status writes.
+        let (encoded, vectors, encode_error) = {
+            let Some(doc) = self.docs.documents.get(idx) else {
+                return;
+            };
+            let canvases = doc.all_page_canvases();
+            let mut encoded = Vec::with_capacity(canvases.len());
+            let mut vectors = Vec::with_capacity(canvases.len());
+            let mut error = None;
+            for canvas in &canvases {
+                // Split native PDF paths out of the raster base so their cached
+                // anti-aliasing cannot leave a jagged twin (mirrors the tab path).
+                let selection = crate::core::print::collect_pdf_vectors(canvas);
+                let rgba = crate::core::print::pdf_raster_base(canvas, &selection);
+                match crate::core::print::encode_pdf_page(
+                    &rgba,
+                    canvas.width,
+                    canvas.height,
+                    canvas.metadata.resolution_ppi,
+                ) {
+                    Ok(page) => {
+                        encoded.push(page);
+                        vectors.push(selection.objects);
+                    }
+                    Err(e) => {
+                        error = Some(e);
+                        break;
+                    }
+                }
+            }
+            (encoded, vectors, error)
+        };
+        if let Some(e) = encode_error {
+            self.shell.status_msg = format!("Lỗi mã hoá trang PDF: {e}");
+            return;
+        }
+        if encoded.is_empty() {
+            self.shell.status_msg = "Không có trang nào để xuất PDF".to_string();
+            return;
+        }
+
+        let stem = self
+            .docs
+            .documents
+            .get(idx)
+            .and_then(|doc| doc.path.as_deref().or(self.docs.current_file.as_deref()))
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("document")
+            .to_string();
+
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let parent = file_io::dialog_parent(window);
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_file_name(format!("{stem}.pdf"));
+        if let Some(p) = &parent {
+            dialog = dialog.set_parent(p);
+        }
+        let Some(mut path) = dialog.save_file() else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("pdf");
+        }
+
+        let marks = self.shell.ui.export_pdf_marks;
+        let icc = self
+            .shell
+            .ui
+            .export_embed_icc
+            .then(crate::core::cms::srgb_icc_bytes);
+        let n = encoded.len();
+        match crate::core::print::build_pdf_multipage_encoded(
+            &encoded,
+            &vectors,
+            marks,
+            icc.as_deref(),
+        ) {
+            Ok(bytes) => match std::fs::write(&path, &bytes) {
+                Ok(()) => {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    self.shell.status_msg = format!("Đã xuất PDF {n} trang: {name}");
+                }
+                Err(e) => {
+                    self.shell.status_msg = format!("Lỗi ghi PDF: {e}");
+                }
+            },
+            Err(e) => {
+                self.shell.status_msg = format!("Lỗi tạo PDF: {e}");
+            }
+        }
+    }
+
     pub(in crate::app) fn export_pdf_document(&mut self, doc_idx: usize) -> bool {
         const PDF_EXPORT_MAX_PIXELS: u64 = 50_000_000;
         let Some(doc) = self.docs.documents.get(doc_idx) else {

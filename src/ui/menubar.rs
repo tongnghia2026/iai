@@ -180,6 +180,20 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             }
                             if ui
                                 .add(menu_item_enabled(
+                                    "Xuất các trang ra PDF...",
+                                    "",
+                                    data.doc.page_count > 1,
+                                ))
+                                .on_hover_text(
+                                    "Mỗi trang (artboard) của tài liệu thành 1 trang PDF, kèm bông cắt/bleed đang chọn",
+                                )
+                                .clicked()
+                            {
+                                actions.print.export_document_pages_pdf = true;
+                                ui.close();
+                            }
+                            if ui
+                                .add(menu_item_enabled(
                                     "CMYK Separations...",
                                     "",
                                     data.doc.has_doc,
