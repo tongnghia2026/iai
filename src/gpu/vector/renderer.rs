@@ -366,21 +366,13 @@ impl VectorRenderer {
                 });
             };
         for draw in draws {
-            if let Some(fill) = draw.fill {
-                push(
-                    fill,
-                    draw.opacity,
-                    &draw.object_to_canvas,
-                    draw.mesh.fill_range.clone(),
-                );
-            }
-            if let Some(stroke) = draw.stroke {
-                push(
-                    stroke,
-                    draw.opacity,
-                    &draw.object_to_canvas,
-                    draw.mesh.stroke_range.clone(),
-                );
+            for (paint, range) in [
+                (draw.fill, draw.mesh.fill_range.clone()),
+                (draw.stroke, draw.mesh.stroke_range.clone()),
+            ] {
+                if let Some(paint) = paint {
+                    push(paint, draw.opacity, &draw.object_to_canvas, range);
+                }
             }
         }
         if items.is_empty() {
@@ -408,15 +400,21 @@ impl VectorRenderer {
         items: &[DrawItem],
     ) {
         pass.set_pipeline(&self.pipeline);
-        // `items` interleaves fill-then-stroke per draw exactly as `build_uniforms`
-        // produced them; walk the same order to pair each with its mesh buffer.
+        // `items` contains only non-empty fill/stroke ranges. Keep this walk in
+        // exact lock-step with `build_uniforms`: a visible paint can still have
+        // no tessellated geometry (for example a degenerate/open fill). Consuming
+        // an item for that empty part shifts every later range onto the previous
+        // mesh's index buffer, which wgpu rejects as an out-of-bounds draw.
         let mut item = 0usize;
         for draw in draws {
             let buffers = &draw.mesh.buffers;
             pass.set_vertex_buffer(0, buffers.vertices.slice(..));
             pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
-            for present in [draw.fill.is_some(), draw.stroke.is_some()] {
-                if !present {
+            for (paint, range) in [
+                (draw.fill, &draw.mesh.fill_range),
+                (draw.stroke, &draw.mesh.stroke_range),
+            ] {
+                if paint.is_none() || range.is_empty() {
                     continue;
                 }
                 if let Some(it) = items.get(item) {

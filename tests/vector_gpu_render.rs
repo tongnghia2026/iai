@@ -22,7 +22,7 @@ use iai::core::vector::object::VectorObjectData;
 use iai::core::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
 use iai::core::vector::raster::{rasterize, PathRaster};
 use iai::core::vector::style::{Gradient, GradientKind, Paint, VectorStyle};
-use iai::gpu::vector::mesh::tessellate;
+use iai::gpu::vector::mesh::{tessellate, VectorMesh, VectorVertex};
 use iai::gpu::vector::renderer::{
     srgb_to_linear, CanvasView, GpuMesh, GpuPaint, VectorDraw, VectorRenderer,
 };
@@ -682,6 +682,104 @@ fn gpu_run_preserves_intra_run_z_order() {
     assert_eq!(byte(3, 3, 3), 0, "outside both → transparent");
     assert_eq!(byte(72, 12, 3), 0, "outside both (corner) → transparent");
     eprintln!("intra-run z-order ok");
+}
+
+#[test]
+#[ignore = "local GPU snapshot; run with --ignored --nocapture"]
+fn gpu_run_keeps_ranges_aligned_when_a_painted_part_has_no_geometry() {
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter available; skipping empty-part regression");
+        return;
+    };
+    let renderer = VectorRenderer::new(
+        &device,
+        iai::gpu::vector::renderer::VECTOR_TARGET_FORMAT,
+        iai::gpu::vector::renderer::VECTOR_SAMPLE_COUNT,
+    );
+    // This is the shape that exposed the production failure: its style still has
+    // a fill paint, but tessellation produced no fill indices and only a stroke.
+    // The following mesh deliberately has a longer range. If the empty fill
+    // consumes a DrawItem, that longer range is issued against this 3-index mesh
+    // and wgpu rejects the whole vector_run encoder as out of bounds.
+    let stroke_only = VectorMesh {
+        vertices: vec![
+            VectorVertex {
+                position: [2.0, 2.0],
+            },
+            VectorVertex {
+                position: [16.0, 2.0],
+            },
+            VectorVertex {
+                position: [2.0, 16.0],
+            },
+        ],
+        indices: vec![0, 1, 2],
+        fill_range: 0..0,
+        stroke_range: 0..3,
+    };
+    let filled = VectorMesh {
+        vertices: vec![
+            VectorVertex {
+                position: [30.0, 2.0],
+            },
+            VectorVertex {
+                position: [46.0, 2.0],
+            },
+            VectorVertex {
+                position: [46.0, 18.0],
+            },
+            VectorVertex {
+                position: [30.0, 18.0],
+            },
+        ],
+        indices: vec![0, 1, 2, 0, 2, 3],
+        fill_range: 0..6,
+        stroke_range: 6..6,
+    };
+    let mesh_a = GpuMesh::upload(&device, &stroke_only);
+    let mesh_b = GpuMesh::upload(&device, &filled);
+    let draws = [
+        VectorDraw {
+            mesh: &mesh_a,
+            object_to_canvas: AffineTransform::IDENTITY,
+            fill: Some(GpuPaint::Solid([0.9, 0.1, 0.1, 1.0])),
+            stroke: Some(GpuPaint::Solid([0.1, 0.8, 0.2, 1.0])),
+            opacity: 1.0,
+        },
+        VectorDraw {
+            mesh: &mesh_b,
+            object_to_canvas: AffineTransform::IDENTITY,
+            fill: Some(GpuPaint::Solid([0.1, 0.2, 0.9, 1.0])),
+            stroke: None,
+            opacity: 1.0,
+        },
+    ];
+    for zoom in [1.0f32, 2.0] {
+        let width = (52.0 * zoom) as u32;
+        let out = renderer.render_offscreen(
+            &device,
+            &queue,
+            CanvasView {
+                width,
+                height: (24.0 * zoom) as u32,
+                off_x: 0.0,
+                off_y: 0.0,
+                scale: zoom,
+            },
+            &draws,
+        );
+        let alpha = |x: f32, y: f32| {
+            out[((((y * zoom) as u32 * width + (x * zoom) as u32) * 4) + 3) as usize]
+        };
+        assert!(
+            alpha(5.0, 5.0) >= 250,
+            "stroke-only mesh did not render at {zoom}x"
+        );
+        assert!(
+            alpha(36.0, 8.0) >= 250,
+            "mesh after an empty painted part did not render at {zoom}x"
+        );
+    }
 }
 
 /// Exercise the live-compositor stage (`VectorCompositeStage::composite_run`): a
