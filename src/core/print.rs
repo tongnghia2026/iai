@@ -462,11 +462,9 @@ pub fn build_pdf_encoded_with_vectors(
     pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
 
     offsets.push(pdf.len());
-    let shading_resources = if page.components == 3 {
-        pdf_shading_resources(vectors)
-    } else {
-        String::new()
-    };
+    // Gradient shadings on both RGB (DeviceRGB) and CMYK (DeviceCMYK) pages; the
+    // helper returns empty when there are no gradients.
+    let shading_resources = pdf_shading_resources(vectors, page.components == 4);
     let extgstate_resources = pdf_extgstate_resources(vectors);
     // On a colour-managed ink page, expose the embedded CMYK profile (object 6) as
     // a named colour space (`/IaiCmyk`) so the vector paths paint through the same
@@ -1356,12 +1354,6 @@ fn collect_pdf_vectors_impl(
         if matches!(obj.style.stroke, Paint::Gradient(_)) {
             break;
         }
-        // CMYK gradient shadings aren't emitted yet (the shading resource is
-        // DeviceRGB). Keep gradient-FILLED objects in the ink raster base on a
-        // CMYK page rather than dropping the gradient or mixing colour spaces.
-        if cmyk_conv.is_some() && matches!(obj.style.fill, Paint::Gradient(_)) {
-            break;
-        }
         // The native writer does not yet emit transparency graphics states.
         // Keep any translucent paint in the raster base rather than changing
         // its appearance.
@@ -1388,6 +1380,22 @@ fn collect_pdf_vectors_impl(
         let fill_gradient = match obj.style.fill {
             Paint::Gradient(mut gradient) => {
                 gradient.transform = obj.transform.then(&gradient.transform);
+                // On a CMYK page, bake each stop into the page's process ink now
+                // (while the converter is in hand) so the shading writes a
+                // DeviceCMYK function that separates identically to the ink base.
+                if let Some(conv) = &cmyk_conv {
+                    for stop in gradient.stops.iter_mut() {
+                        let a = stop.color.alpha();
+                        let [c, m, y, k] = stop.color.to_cmyk8(conv);
+                        stop.color = crate::core::vector::color::ColorValue::Cmyk {
+                            c: c as f32 / 255.0,
+                            m: m as f32 / 255.0,
+                            y: y as f32 / 255.0,
+                            k: k as f32 / 255.0,
+                            a,
+                        };
+                    }
+                }
                 Some(gradient)
             }
             Paint::None | Paint::Solid(_) => None,
@@ -1779,12 +1787,35 @@ fn append_pdf_path(
     }
 }
 
-fn gradient_function_pdf(gradient: &crate::core::vector::style::Gradient) -> String {
-    let color = |value: crate::core::vector::color::ColorValue| {
-        let [r, g, b, _] = value.to_rgba8();
-        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+/// The PDF stitching function for `gradient`'s stops. `cmyk` selects the output
+/// colour space: `true` writes 4-component DeviceCMYK samples (the stops were
+/// baked to process ink at promotion time), `false` writes 3-component DeviceRGB.
+fn gradient_function_pdf(gradient: &crate::core::vector::style::Gradient, cmyk: bool) -> String {
+    use crate::core::vector::color::ColorValue;
+    let color = |value: ColorValue| -> Vec<f32> {
+        if cmyk {
+            // Stops on a CMYK page are baked to `ColorValue::Cmyk` at promotion;
+            // read the ink directly (a stray non-CMYK stop degrades to its naive
+            // process approximation rather than mixing colour spaces).
+            match value {
+                ColorValue::Cmyk { c, m, y, k, .. } => vec![c, m, y, k],
+                other => {
+                    let [r, g, b, _] = other.to_rgba8();
+                    let cmyk = crate::core::cms::naive_rgb_to_cmyk([r, g, b]);
+                    vec![
+                        cmyk[0] as f32 / 255.0,
+                        cmyk[1] as f32 / 255.0,
+                        cmyk[2] as f32 / 255.0,
+                        cmyk[3] as f32 / 255.0,
+                    ]
+                }
+            }
+        } else {
+            let [r, g, b, _] = value.to_rgba8();
+            vec![r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+        }
     };
-    let mut stops: Vec<(f32, [f32; 3])> = Vec::new();
+    let mut stops: Vec<(f32, Vec<f32>)> = Vec::new();
     for stop in gradient.active_stops() {
         let offset = stop.offset.clamp(0.0, 1.0);
         if stops
@@ -1798,31 +1829,39 @@ fn gradient_function_pdf(gradient: &crate::core::vector::style::Gradient) -> Str
             stops.push((offset, color(stop.color)));
         }
     }
+    let comps = if cmyk { 4 } else { 3 };
     if stops.is_empty() {
-        stops.push((0.0, [0.0; 3]));
+        stops.push((0.0, vec![0.0; comps]));
     }
     if stops[0].0 > 0.0 {
-        stops.insert(0, (0.0, stops[0].1));
+        stops.insert(0, (0.0, stops[0].1.clone()));
     }
     if stops.last().is_some_and(|(offset, _)| *offset < 1.0) {
-        let last = stops.last().expect("checked").1;
+        let last = stops.last().expect("checked").1.clone();
         stops.push((1.0, last));
     }
     if stops.len() == 1 {
-        stops.push((1.0, stops[0].1));
+        stops.push((1.0, stops[0].1.clone()));
     }
-    let type2 = |a: [f32; 3], b: [f32; 3]| {
+    let arr = |v: &[f32]| {
+        v.iter()
+            .map(|c| format!("{c:.5}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let type2 = |a: &[f32], b: &[f32]| {
         format!(
-            "<< /FunctionType 2 /Domain [0 1] /C0 [{:.5} {:.5} {:.5}] /C1 [{:.5} {:.5} {:.5}] /N 1 >>",
-            a[0], a[1], a[2], b[0], b[1], b[2]
+            "<< /FunctionType 2 /Domain [0 1] /C0 [{}] /C1 [{}] /N 1 >>",
+            arr(a),
+            arr(b)
         )
     };
     if stops.len() == 2 {
-        return type2(stops[0].1, stops[1].1);
+        return type2(&stops[0].1, &stops[1].1);
     }
     let functions = stops
         .windows(2)
-        .map(|pair| type2(pair[0].1, pair[1].1))
+        .map(|pair| type2(&pair[0].1, &pair[1].1))
         .collect::<Vec<_>>()
         .join(" ");
     let bounds = stops[1..stops.len() - 1]
@@ -1839,8 +1878,12 @@ fn gradient_function_pdf(gradient: &crate::core::vector::style::Gradient) -> Str
     )
 }
 
-pub(crate) fn pdf_shading_resources(objects: &[PdfVectorObject]) -> String {
+/// The `/Shading` resource dictionary for a page's gradient-filled objects.
+/// `cmyk` selects DeviceCMYK (a CMYK page, stops already baked to process ink)
+/// versus DeviceRGB, so the shading separates identically to the page's ink base.
+pub(crate) fn pdf_shading_resources(objects: &[PdfVectorObject], cmyk: bool) -> String {
     use crate::core::vector::style::GradientKind;
+    let cs = if cmyk { "/DeviceCMYK" } else { "/DeviceRGB" };
     let mut entries = String::new();
     for (index, object) in objects.iter().enumerate() {
         let Some(gradient) = object.fill_gradient else {
@@ -1851,8 +1894,8 @@ pub(crate) fn pdf_shading_resources(objects: &[PdfVectorObject]) -> String {
             GradientKind::Radial => (3, "0 0 0 0 0 1"),
         };
         entries.push_str(&format!(
-            "/IaiSh{index} << /ShadingType {kind} /ColorSpace /DeviceRGB /Coords [{coords}] /Function {} /Extend [true true] >> ",
-            gradient_function_pdf(&gradient)
+            "/IaiSh{index} << /ShadingType {kind} /ColorSpace {cs} /Coords [{coords}] /Function {} /Extend [true true] >> ",
+            gradient_function_pdf(&gradient, cmyk)
         ));
     }
     if entries.is_empty() {
@@ -2376,14 +2419,10 @@ pub fn build_pdf_multipage_encoded(
         let page_obj = base + i * 3;
         let content_obj = page_obj + 1;
         let image_obj = page_obj + 2;
-        let shading_resources = if e.components == 3 {
-            vectors
-                .get(i)
-                .map(|objects| pdf_shading_resources(objects))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let shading_resources = vectors
+            .get(i)
+            .map(|objects| pdf_shading_resources(objects, e.components == 4))
+            .unwrap_or_default();
         let extgstate_resources = vectors
             .get(i)
             .map(|objects| pdf_extgstate_resources(objects))
@@ -4124,6 +4163,83 @@ mod tests {
         assert!(
             !text.contains(" rg\n"),
             "no sRGB fill leaks onto a CMYK page"
+        );
+    }
+
+    /// A gradient-filled vector on a CMYK page is emitted as a native DeviceCMYK
+    /// axial shading (4-component function), not baked into the ink raster.
+    #[test]
+    fn cmyk_gradient_fill_is_a_native_devicecmyk_shading() {
+        use crate::core::canvas::CmykProfile;
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::{Gradient, GradientKind, Paint, VectorStyle};
+
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255; 24 * 24 * 4], 24, 24);
+        canvas
+            .convert_to_cmyk(CmykProfile::Naive)
+            .expect("convert to CMYK");
+        let index = canvas.add_layer();
+        // A linear gradient from cyan to magenta filling a square.
+        let gradient = Gradient::two_color(
+            GradientKind::Linear,
+            ColorValue::cmyk(1.0, 0.0, 0.0, 0.0),
+            ColorValue::cmyk(0.0, 1.0, 0.0, 0.0),
+            AffineTransform::IDENTITY,
+        );
+        let mut style = VectorStyle::filled(ColorValue::cmyk(1.0, 0.0, 0.0, 0.0));
+        style.fill = Paint::Gradient(gradient);
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(3.0, 3.0)),
+                            Node::sharp(Point::new(21.0, 3.0)),
+                            Node::sharp(Point::new(21.0, 21.0)),
+                            Node::sharp(Point::new(3.0, 21.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                style,
+                AffineTransform::IDENTITY,
+            ),
+        );
+
+        let selection = collect_pdf_vectors(&canvas);
+        assert!(
+            selection.objects.iter().any(|o| o.fill_gradient.is_some()),
+            "the CMYK gradient object is promoted, not baked into the raster"
+        );
+        let ink = pdf_ink_base(&canvas, &selection).expect("ink base");
+        let page = encode_pdf_page_cmyk(&ink, 24, 24, 72.0).expect("cmyk page");
+        let pdf = build_pdf_encoded_with_vectors(
+            &page,
+            &selection.objects,
+            &PrintLayout::default(),
+            None,
+        )
+        .expect("cmyk gradient pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(
+            text.contains("/ShadingType 2") && text.contains("/IaiSh0 sh"),
+            "an axial shading is painted"
+        );
+        assert!(
+            text.contains("/ColorSpace /DeviceCMYK /Coords"),
+            "the shading colour space is DeviceCMYK: {text}"
+        );
+        // A 4-component CMYK stop colour appears in the shading function.
+        assert!(
+            text.contains("/C0 [1.00000 0.00000 0.00000 0.00000]"),
+            "the cyan stop is a 4-component DeviceCMYK sample"
         );
     }
 
