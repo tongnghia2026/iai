@@ -1,7 +1,8 @@
-// Autosave + crash recovery for multi-page PDF projects.
+// Autosave + crash recovery for multi-page sessions (imported PDF projects and
+// multi-page artboard documents).
 //
-// A dirty PDF session is mirrored to `%APPDATA%/IAI/autosave/` on a throttle so
-// an unclean shutdown does not lose the edited pages. Files are removed on a
+// A dirty session is mirrored to `%APPDATA%/IAI/autosave/` on a throttle so an
+// unclean shutdown does not lose the edited pages. Files are removed on a
 // clean save/close and on a clean exit, so any file left behind at startup marks
 // a crash and is offered back to the user (loaded and flagged unsaved).
 
@@ -58,9 +59,9 @@ fn read_sidecar_project_path(autosave: &Path) -> Option<PathBuf> {
 }
 
 impl App {
-    /// Periodically mirror the active dirty PDF-project document to the autosave
-    /// dir. Throttled to [`AUTOSAVE_INTERVAL`]; a no-op for clean documents and
-    /// for documents that are not multi-page PDF sessions.
+    /// Periodically mirror the active dirty multi-page document (imported PDF or
+    /// artboard document) to the autosave dir. Throttled to [`AUTOSAVE_INTERVAL`];
+    /// a no-op for clean documents and for plain single-page images.
     pub fn maybe_autosave(&mut self) {
         if self.docs.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
             return;

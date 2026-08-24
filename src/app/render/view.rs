@@ -36,42 +36,6 @@ impl App {
         self.on_view_changed();
     }
 
-    /// Frame a single artboard in the viewport (Corel/Excel-style page switch):
-    /// zoom so the artboard's trim fills the view with a little padding, and centre
-    /// it. Other artboards stay on the shared canvas, just off-screen — zoom out to
-    /// see the whole row. No-op if the index is out of range.
-    pub fn fit_artboard(&mut self, index: usize) {
-        let boards = self.docs.documents[self.docs.active_doc_idx].effective_artboards();
-        let Some(page) = boards.get(index) else {
-            return;
-        };
-        let (rx, ry) = (page.origin.x, page.origin.y);
-        let (rw, rh) = (page.size.0.max(1.0), page.size.1.max(1.0));
-        if let Some(win) = &self.win.window {
-            let sz = win.inner_size();
-            let ruler_size = if self.shell.ui.show_rulers { 20.0 } else { 0.0 };
-            let top_ui = 28.0 + 26.0 + 32.0 + ruler_size;
-            let bottom_ui = self.bottom_chrome_h();
-            let left_ui = self.shell.toolbar_w + ruler_size;
-            let right_ui = self.shell.panel_r_w;
-            let view_w = sz.width as f32 - left_ui - right_ui;
-            let view_h = sz.height as f32 - top_ui - bottom_ui;
-            let padding = 24.0;
-            let zoom_x = (view_w - padding * 2.0) / rw;
-            let zoom_y = (view_h - padding * 2.0) / rh;
-            self.edit.view.zoom = zoom_x.min(zoom_y).clamp(0.01, 64.0);
-            // Centre the artboard's middle on the viewport's middle.
-            let cx = rx + rw * 0.5;
-            let cy = ry + rh * 0.5;
-            self.edit.view.offset_x = (left_ui + view_w * 0.5) - cx * self.edit.view.zoom;
-            self.edit.view.offset_y = (top_ui + view_h * 0.5) - cy * self.edit.view.zoom;
-            self.constrain_pan();
-            self.push_canvas_uniforms();
-            self.shell.status_msg = format!("Trang {}", index + 1);
-        }
-        self.on_view_changed();
-    }
-
     pub fn constrain_pan(&mut self) {
         if let Some(win) = &self.win.window {
             let sz = win.inner_size();
