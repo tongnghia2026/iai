@@ -166,6 +166,9 @@ impl App {
         if actions.layers.powerclip_release {
             self.powerclip_release();
         }
+        if let Some(mode) = actions.layers.powerclip_arrange.take() {
+            self.powerclip_arrange(mode);
+        }
         if actions.layers.toggle_clipping_mask {
             self.toggle_clipping_mask();
         }

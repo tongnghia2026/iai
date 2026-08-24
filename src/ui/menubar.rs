@@ -796,6 +796,48 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                     actions.layers.powerclip_release = true;
                                     ui.close();
                                 }
+                                ui.separator();
+                                // Arrange the content inside its frame (Corel-style).
+                                // Enabled when a selected layer is PowerClip content.
+                                use crate::app::powerclip_ops::PowerClipFit;
+                                let arrange_enabled = (0..data.layers.layer_count).any(|i| {
+                                    data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                                        && data.layers.layer_is_clipped.get(i).copied().unwrap_or(false)
+                                });
+                                for (label, mode, hint) in [
+                                    (
+                                        "Center Content",
+                                        PowerClipFit::Center,
+                                        "Centre the content in the frame (no scaling)",
+                                    ),
+                                    (
+                                        "Fit Content",
+                                        PowerClipFit::Fit,
+                                        "Scale the content to fit entirely inside the frame",
+                                    ),
+                                    (
+                                        "Fill Frame",
+                                        PowerClipFit::Fill,
+                                        "Scale the content to cover the frame (overflow clipped)",
+                                    ),
+                                    (
+                                        "Stretch to Fill",
+                                        PowerClipFit::Stretch,
+                                        "Stretch the content to exactly fill the frame",
+                                    ),
+                                ] {
+                                    if ui
+                                        .add_enabled(
+                                            arrange_enabled,
+                                            egui::Button::new(label),
+                                        )
+                                        .on_hover_text(hint)
+                                        .clicked()
+                                    {
+                                        actions.layers.powerclip_arrange = Some(mode);
+                                        ui.close();
+                                    }
+                                }
                             });
                         }
                         if ui

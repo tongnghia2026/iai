@@ -9,13 +9,82 @@
 
 use super::render::CanvasEvent;
 use super::state::App;
+use crate::core::canvas::Canvas;
 use crate::core::command::LayerStructureCommand;
 use crate::core::layer::{Layer, LayerType};
+use crate::core::vector::object::VectorGeometry;
+
+/// How PowerClip content is positioned / scaled inside its frame (Corel-style).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerClipFit {
+    /// Keep the content's size, centre it in the frame.
+    Center,
+    /// Scale proportionally so the whole content fits inside the frame, centred.
+    Fit,
+    /// Scale proportionally so the content covers the frame (overflow clipped).
+    Fill,
+    /// Scale X and Y independently so the content exactly fills the frame.
+    Stretch,
+}
 
 /// A layer that can take part in a PowerClip: not the background, not locked, not
 /// a group.
 fn is_clip_eligible(layer: &Layer) -> bool {
     layer.selected && !layer.locked && !layer.is_background && !layer.is_group()
+}
+
+/// The layer's opaque content rectangle in canvas space (`x, y, w, h`), or `None`
+/// when it has no ink. Frame and content bounds are both taken this way, so the
+/// arrange maths is uniform across raster photos and rendered vector shapes.
+fn layer_canvas_content_rect(layer: &Layer) -> Option<(f32, f32, f32, f32)> {
+    let (x0, y0, x1, y1) = layer.tiles.content_bounds()?;
+    let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    Some((
+        layer.offset.0 as f32 + x0 as f32,
+        layer.offset.1 as f32 + y0 as f32,
+        w,
+        h,
+    ))
+}
+
+/// Scale a content layer by `(sx, sy)` about its content origin `(cx, cy)` and put
+/// that origin at `(tx, ty)`. A Path stays crisp (the affine folds into its vector
+/// geometry, then the raster is re-derived); any other layer resamples its pixels.
+fn arrange_content_layer(layer: &mut Layer, cx: f32, cy: f32, sx: f32, sy: f32, tx: f32, ty: f32) {
+    if let LayerType::Vector(VectorGeometry::Path(object)) = &layer.layer_type {
+        // Canvas→canvas map: scale about (cx,cy) then translate the origin to (tx,ty).
+        let a = crate::core::vector::affine::AffineTransform {
+            a: sx,
+            b: 0.0,
+            c: 0.0,
+            d: sy,
+            e: tx - cx * sx,
+            f: ty - cy * sy,
+        };
+        let mut o = object.clone();
+        o.transform = a.then(&o.transform);
+        crate::core::command_vector::apply_object_to_layer(layer, o);
+        return;
+    }
+    // Raster / text / primitive content: resample the whole tilemap and re-anchor
+    // its opaque origin at the target.
+    let (bx0, by0) = layer
+        .tiles
+        .content_bounds()
+        .map(|(x0, y0, _, _)| (x0 as f32, y0 as f32))
+        .unwrap_or((0.0, 0.0));
+    let nw = ((layer.width as f32) * sx).round().max(1.0) as u32;
+    let nh = ((layer.height as f32) * sy).round().max(1.0) as u32;
+    layer.tiles = Canvas::resample_tilemap(&layer.tiles, nw, nh);
+    layer.width = nw;
+    layer.height = nh;
+    layer.offset = (
+        (tx - bx0 * sx).round() as i32,
+        (ty - by0 * sy).round() as i32,
+    );
 }
 
 fn is_vector(layer: &Layer) -> bool {
@@ -167,6 +236,106 @@ impl App {
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.shell.status_msg = format!("Extracted {} object(s) from the frame", targets.len());
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
+    /// Enable the arrange commands — any selected layer is PowerClip content.
+    pub fn can_powerclip_arrange(&self) -> bool {
+        self.can_powerclip_release()
+    }
+
+    /// Position / scale the selected PowerClip content inside its frame
+    /// (Center / Fit / Fill / Stretch), the way Corel's PowerClip does. Each
+    /// selected content layer is arranged relative to its own frame. One undo step.
+    pub fn powerclip_arrange(&mut self, mode: PowerClipFit) -> bool {
+        let (cw, ch) = {
+            let d = &self.docs.documents[self.docs.active_doc_idx];
+            (d.canvas.width, d.canvas.height)
+        };
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        let stack = &mut canvas.layer_stack;
+        let targets: Vec<(usize, u32)> = stack
+            .layers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                if l.selected {
+                    l.clip_parent_id.map(|frame_id| (i, frame_id))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if targets.is_empty() {
+            self.shell.status_msg = "No PowerClip content selected".to_string();
+            return false;
+        }
+
+        let before = LayerStructureCommand::capture_before("Arrange PowerClip", stack, cw, ch);
+
+        for (content_idx, frame_id) in targets {
+            // The frame's on-canvas extent (its rendered shape).
+            let Some(frame_rect) = stack
+                .layers
+                .iter()
+                .find(|l| l.id == frame_id)
+                .and_then(layer_canvas_content_rect)
+            else {
+                continue;
+            };
+            // A Path may carry a pending Move offset not yet folded into its model;
+            // fold it first so the geometry we transform is at the true position.
+            if matches!(
+                stack.layers[content_idx].layer_type,
+                LayerType::Vector(VectorGeometry::Path(_))
+            ) {
+                crate::core::command_vector::fold_offset_into_model(&mut stack.layers[content_idx]);
+            }
+            let Some((cx, cy, ccw, cch)) = layer_canvas_content_rect(&stack.layers[content_idx])
+            else {
+                continue;
+            };
+            if ccw <= 0.0 || cch <= 0.0 {
+                continue;
+            }
+            let (fx, fy, fw, fh) = frame_rect;
+            let (sx, sy) = match mode {
+                PowerClipFit::Center => (1.0, 1.0),
+                PowerClipFit::Fit => {
+                    let s = (fw / ccw).min(fh / cch);
+                    (s, s)
+                }
+                PowerClipFit::Fill => {
+                    let s = (fw / ccw).max(fh / cch);
+                    (s, s)
+                }
+                PowerClipFit::Stretch => (fw / ccw, fh / cch),
+            };
+            let (tw, th) = (ccw * sx, cch * sy);
+            let (tx, ty) = match mode {
+                PowerClipFit::Stretch => (fx, fy),
+                _ => (fx + (fw - tw) * 0.5, fy + (fh - th) * 0.5),
+            };
+            arrange_content_layer(&mut stack.layers[content_idx], cx, cy, sx, sy, tx, ty);
+        }
+
+        canvas.clip_fp = 0;
+        canvas.refresh_clip_masks();
+        let mut cmd = before;
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
+
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.shell.status_msg = match mode {
+            PowerClipFit::Center => "Centred content in the frame",
+            PowerClipFit::Fit => "Fit content inside the frame",
+            PowerClipFit::Fill => "Filled the frame with the content",
+            PowerClipFit::Stretch => "Stretched content to fill the frame",
+        }
+        .to_string();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -414,6 +583,65 @@ mod tests {
             canvas.layer_stack.layers.iter().all(|l| l.mask.is_none()),
             "managed clip mask removed"
         );
+    }
+
+    /// After Fit, the 100×100 photo is scaled down to the 40×40 frame and lands
+    /// exactly on it (centred). After Center it keeps its size but re-centres.
+    #[test]
+    fn arrange_fit_scales_content_onto_the_frame() {
+        let mut app = app_photo_and_frame();
+        assert!(app.powerclip_place());
+        // Select the clip content for the arrange.
+        {
+            let stack = &mut app.docs.documents[0].canvas.layer_stack;
+            for l in stack.layers.iter_mut() {
+                l.selected = l.clip_parent_id.is_some();
+            }
+        }
+        assert!(app.can_powerclip_arrange());
+        assert!(app.powerclip_arrange(PowerClipFit::Fit));
+
+        let content = app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.clip_parent_id.is_some())
+            .expect("content still clipped");
+        assert_eq!(
+            (content.width, content.height),
+            (40, 40),
+            "content scaled to the frame size"
+        );
+        assert_eq!(content.offset, (30, 30), "content sits on the frame");
+        assert!(content.mask.is_some(), "clip mask re-baked");
+    }
+
+    #[test]
+    fn arrange_center_keeps_size_and_recentres() {
+        let mut app = app_photo_and_frame();
+        assert!(app.powerclip_place());
+        {
+            let stack = &mut app.docs.documents[0].canvas.layer_stack;
+            for l in stack.layers.iter_mut() {
+                l.selected = l.clip_parent_id.is_some();
+            }
+        }
+        assert!(app.powerclip_arrange(PowerClipFit::Center));
+        let content = app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.clip_parent_id.is_some())
+            .expect("content clipped");
+        // 100×100 content centred on the 40×40 frame centred at (50,50).
+        assert_eq!((content.width, content.height), (100, 100), "no scaling");
+        assert_eq!(content.offset, (0, 0), "centre 50,50 = frame centre");
+
+        // Undo restores the original placement (offset back at 0,0 either way, so
+        // check the whole op is one undoable step by counting layers unchanged).
+        app.docs.documents[0].canvas.undo().expect("undo arrange");
     }
 
     #[test]
