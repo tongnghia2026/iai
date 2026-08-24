@@ -197,6 +197,9 @@ fn set_vector_style(ctx: &mut EditContext, id: u32, style: VectorStyle) -> Resul
 pub struct CreatePathLayer {
     object: VectorObjectData,
     name: String,
+    /// Optional dynamic-connector binding stamped onto the new layer in `execute`
+    /// (so it survives redo, not just the initial create).
+    connector: Option<crate::core::connector::ConnectorBinding>,
     // Filled by `execute` for `undo`:
     created_id: Option<u32>,
     prev_active: usize,
@@ -207,9 +210,19 @@ impl CreatePathLayer {
         Self {
             object,
             name: name.into(),
+            connector: None,
             created_id: None,
             prev_active: 0,
         }
+    }
+
+    /// Stamp a dynamic-connector binding onto the created layer.
+    pub fn with_connector(
+        mut self,
+        connector: Option<crate::core::connector::ConnectorBinding>,
+    ) -> Self {
+        self.connector = connector;
+        self
     }
 
     /// The layer id assigned by the most recent `execute` (for the caller to
@@ -229,6 +242,7 @@ impl Command for CreatePathLayer {
         layer.name = self.name.clone();
         self.created_id = Some(layer.id);
         apply_object_to_layer(layer, self.object.clone());
+        layer.connector = self.connector;
         Ok(())
     }
 

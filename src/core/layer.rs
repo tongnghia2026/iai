@@ -919,6 +919,29 @@ pub struct Layer {
     /// Group-only: whether the folder is expanded in the panel. Ignored for
     /// non-group layers. Defaults to `true`.
     pub expanded: bool,
+    /// Dynamic-connector attachment: set on an arrow/connector Path layer whose
+    /// end(s) stick to other layers, so it re-routes when they move. `None` for
+    /// every ordinary layer — the common case pays nothing.
+    pub connector: Option<crate::core::connector::ConnectorBinding>,
+}
+
+impl Layer {
+    /// The layer's opaque content rectangle in canvas space (`x, y, w, h`), or
+    /// `None` when it has no ink. Used to resolve a connector anchor against the
+    /// shape it sticks to, and to hit-test which shape an endpoint landed on.
+    pub fn canvas_content_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        let (x0, y0, x1, y1) = self.tiles.content_bounds()?;
+        let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        Some((
+            self.offset.0 as f32 + x0 as f32,
+            self.offset.1 as f32 + y0 as f32,
+            w,
+            h,
+        ))
+    }
 }
 
 #[allow(dead_code)]
@@ -947,6 +970,7 @@ impl Layer {
             clip_parent_id: None,
             page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
+            connector: None,
         }
     }
 
@@ -981,6 +1005,7 @@ impl Layer {
             clip_parent_id: None,
             page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
+            connector: None,
         }
     }
 
@@ -1009,6 +1034,7 @@ impl Layer {
             clip_parent_id: None,
             page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
+            connector: None,
         }
     }
 
@@ -1067,6 +1093,8 @@ impl Layer {
             // copied verbatim, unlike the clip relation which is remapped).
             page_id: self.page_id,
             expanded: self.expanded,
+            // A duplicated connector keeps its bindings (same targets).
+            connector: self.connector,
         }
     }
 

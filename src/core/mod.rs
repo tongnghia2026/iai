@@ -17,6 +17,7 @@ pub mod color_reference;
 pub mod command;
 pub mod command_clip;
 pub mod command_vector;
+pub mod connector;
 pub mod develop;
 pub mod develop2;
 pub mod develop_scene;

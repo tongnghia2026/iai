@@ -264,6 +264,26 @@ fn build_canvas_from_meta<R: Read + Seek>(
         layer.page_id =
             crate::core::page::PageId(layer_info["page"].as_u64().map(|p| p as u32).unwrap_or(0));
         layer.expanded = layer_info["expanded"].as_bool().unwrap_or(true);
+        // Dynamic-connector binding (absent on older files → None). Anchor targets
+        // were stored as positions, which equal layer ids on load (like clip_parent).
+        if let Some(conn) = layer_info.get("connector").filter(|v| v.is_object()) {
+            use crate::core::connector::{ConnectorAnchor, ConnectorBinding};
+            let anchor = |v: &serde_json::Value| -> Option<ConnectorAnchor> {
+                Some(ConnectorAnchor {
+                    layer_id: v.get("layer")?.as_u64()? as u32,
+                    fx: v["fx"].as_f64().unwrap_or(0.5) as f32,
+                    fy: v["fy"].as_f64().unwrap_or(0.5) as f32,
+                })
+            };
+            let binding = ConnectorBinding {
+                route: conn["route"].as_u64().unwrap_or(0) as u8,
+                start: conn.get("start").and_then(&anchor),
+                end: conn.get("end").and_then(&anchor),
+            };
+            if binding.is_attached() {
+                layer.connector = Some(binding);
+            }
+        }
         if let Some(adj) = json_to_adjustment(&layer_info["adjustment"]) {
             layer.layer_type = crate::core::layer::LayerType::Adjustment(adj);
         } else if layer_info["layer_type"].as_str() == Some("Text") {
@@ -713,6 +733,35 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
         } else {
             serde_json::Value::Null
         };
+        // Dynamic-connector binding. Targets are stored as layer POSITIONS (which
+        // equal their ids on load, like `clip_parent`); an anchor whose target is
+        // gone is dropped. Written only for an attached connector, null otherwise.
+        let connector_json = layer
+            .connector
+            .filter(|c| c.is_attached())
+            .map(|c| {
+                let anchor_json = |anchor: Option<crate::core::connector::ConnectorAnchor>| {
+                    match anchor.and_then(|a| {
+                        canvas
+                            .layer_stack
+                            .layers
+                            .iter()
+                            .position(|l| l.id == a.layer_id)
+                            .map(|pos| (pos, a))
+                    }) {
+                        Some((pos, a)) => {
+                            serde_json::json!({ "layer": pos as u64, "fx": a.fx, "fy": a.fy })
+                        }
+                        None => serde_json::Value::Null,
+                    }
+                };
+                serde_json::json!({
+                    "route": c.route,
+                    "start": anchor_json(c.start),
+                    "end": anchor_json(c.end),
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
         layers_json.push(serde_json::json!({
             "name": layer.name,
             "opacity": layer.opacity,
@@ -734,6 +783,7 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             "text": text_json,
             "shape": shape_json,
             "path": path_json,
+            "connector": connector_json,
         }));
     }
 
@@ -2202,6 +2252,91 @@ mod tests {
             !doc.pages[1].metadata.use_master,
             "page 1's opt-out round-trips"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn connector_binding_round_trips() {
+        use crate::core::connector::{ConnectorAnchor, ConnectorBinding};
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::from_shape::{elbow_connector_path, ConnectorRoute};
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::style::VectorStyle;
+
+        let dir = tmp_dir("connector");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 60, 60);
+        // Two opaque boxes to link.
+        let mut add_box = |ox: i32, oy: i32| -> u32 {
+            let idx = canvas.layer_stack.add_layer(60, 60);
+            let l = &mut canvas.layer_stack.layers[idx];
+            l.tiles = crate::core::tile::TileMap::from_rgba(&vec![255u8; 10 * 10 * 4], 10, 10);
+            l.width = 10;
+            l.height = 10;
+            l.offset = (ox, oy);
+            l.id
+        };
+        let a = add_box(5, 5);
+        let b = add_box(40, 40);
+        // A connector Path layer bound to both.
+        let idx = canvas.layer_stack.add_layer(60, 60);
+        let obj = VectorObjectData::new(
+            elbow_connector_path(10.0, 10.0, 45.0, 45.0, ConnectorRoute::ElbowHv),
+            VectorStyle::default(),
+            AffineTransform::IDENTITY,
+        );
+        crate::core::command_vector::apply_object_to_layer(
+            &mut canvas.layer_stack.layers[idx],
+            obj,
+        );
+        canvas.layer_stack.layers[idx].connector = Some(ConnectorBinding {
+            start: Some(ConnectorAnchor {
+                layer_id: a,
+                fx: 0.25,
+                fy: 0.75,
+            }),
+            end: Some(ConnectorAnchor {
+                layer_id: b,
+                fx: 0.5,
+                fy: 0.5,
+            }),
+            route: 1,
+        });
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+
+        let conn = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.connector.is_some())
+            .expect("connector layer round-trips")
+            .connector
+            .unwrap();
+        assert_eq!(conn.route, 1, "route preserved");
+        let start = conn.start.expect("start anchor");
+        let end = conn.end.expect("end anchor");
+        assert!((start.fx - 0.25).abs() < 1e-4 && (start.fy - 0.75).abs() < 1e-4);
+        assert!((end.fx - 0.5).abs() < 1e-4);
+        // On load, layer ids equal positions; the anchors point at the two boxes.
+        let a_pos = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == start.layer_id)
+            .expect("start target present");
+        let b_pos = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == end.layer_id)
+            .expect("end target present");
+        assert!(a_pos < b_pos, "anchors resolve to distinct earlier layers");
         std::fs::remove_dir_all(&dir).ok();
     }
 

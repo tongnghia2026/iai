@@ -4,6 +4,7 @@
 mod clip_ops;
 mod clip_render;
 mod color_mode;
+mod connector_render;
 mod geometry_ops;
 mod history_gate;
 mod layer_ops;
@@ -371,6 +372,11 @@ pub struct Canvas {
     /// Lets the per-event refit skip when nothing clip-relevant changed. Derived
     /// state; never serialized.
     pub clip_fp: u64,
+    /// Combined fingerprint of dynamic-connector inputs (each connector's route +
+    /// its anchored targets' positions/sizes) at the last
+    /// [`refresh_connectors`](Self::refresh_connectors) reroute. Lets the per-event
+    /// reroute skip when no connected shape moved. Derived state; never serialized.
+    pub connector_fp: u64,
 }
 
 /// Shortest distance from point `(px,py)` to segment `a–b`. Used by
@@ -453,6 +459,7 @@ impl Canvas {
             pending_alpha_stroke: None,
             plane_dirty: DirtyRegion::default(),
             clip_fp: 0,
+            connector_fp: 0,
         }
     }
 
@@ -507,6 +514,7 @@ impl Canvas {
             pending_alpha_stroke: None,
             plane_dirty: DirtyRegion::default(),
             clip_fp: 0,
+            connector_fp: 0,
         }
     }
 
@@ -556,6 +564,7 @@ impl Canvas {
             pending_alpha_stroke: None,
             plane_dirty: DirtyRegion::default(),
             clip_fp: 0,
+            connector_fp: 0,
         }
     }
 

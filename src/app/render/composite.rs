@@ -42,6 +42,14 @@ impl App {
             // edit that only changed coverage might not).
             self.mark_clip_content_dirty();
         }
+        // Re-route dynamic connectors when a shape they link moved / resized. Like
+        // the clip refit it is fingerprint-gated (idle cost is nil) and skipped
+        // mid-drag; it re-routes on release. It marks its own dirty regions.
+        if !interactive_move {
+            self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .refresh_connectors();
+        }
         if self.docs.documents[self.docs.active_doc_idx]
             .canvas
             .plane_dirty

@@ -31,6 +31,15 @@ impl ConnectorRoute {
             _ => Self::Straight,
         }
     }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Straight => 0,
+            Self::ElbowHv => 1,
+            Self::ElbowVh => 2,
+            Self::ElbowCenter => 3,
+        }
+    }
 }
 
 pub fn elbow_connector_path(sx: f32, sy: f32, ex: f32, ey: f32, route: ConnectorRoute) -> PathData {
