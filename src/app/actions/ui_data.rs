@@ -664,6 +664,15 @@ impl App {
                     .map(|s| s.to_string()),
                 is_modified: self.is_modified(),
                 has_doc: !self.has_only_welcome_placeholder(),
+                active_artboard: self
+                    .docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .map(|doc| {
+                        doc.active_artboard
+                            .min(doc.effective_artboards().len().saturating_sub(1))
+                    })
+                    .unwrap_or(0),
                 pdf_nav: self
                     .docs
                     .documents

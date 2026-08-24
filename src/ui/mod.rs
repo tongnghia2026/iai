@@ -4,6 +4,7 @@
 
 pub mod ai_panel;
 pub mod ai_progress;
+pub mod artboard_bar;
 pub mod color_picker;
 pub mod develop;
 pub mod dialogs;
@@ -795,6 +796,9 @@ pub fn build(
         }
 
         statusbar::build(ctx, data, &mut actions);
+        // Called after the status bar so the page tabs stack ABOVE it (status bar
+        // stays the very bottom strip).
+        artboard_bar::build(ctx, data, &mut actions);
 
         dialogs::build(ctx, data, &mut actions);
         // Suppressed when the Develop stage is hosted in its own OS window.

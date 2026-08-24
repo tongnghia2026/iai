@@ -203,6 +203,10 @@ pub struct Document {
     /// Formatted EXIF line ("ISO … · f/… · …") for a RAW import, shown in the
     /// Develop window. Session-only — parsed by the RAW preview worker.
     pub raw_exif: Option<String>,
+    /// Which artboard the page-tab bar is focused on (index into
+    /// [`Self::effective_artboards`]). View state, session-only; clamped to the
+    /// artboard count on use.
+    pub active_artboard: usize,
 }
 
 impl Document {
@@ -220,6 +224,7 @@ impl Document {
             pdf_page: None,
             pdf_document: None,
             raw_exif: None,
+            active_artboard: 0,
         }
     }
 
@@ -243,6 +248,7 @@ impl Document {
             pdf_page: None,
             pdf_document: None,
             raw_exif: None,
+            active_artboard: 0,
         }
     }
 

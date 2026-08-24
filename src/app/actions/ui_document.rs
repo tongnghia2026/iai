@@ -113,6 +113,9 @@ impl App {
             actions.doc.add_artboard = false;
             self.add_artboard();
         }
+        if let Some(i) = actions.doc.set_active_artboard.take() {
+            self.set_active_artboard(i);
+        }
         if let Some((w, h, dpi)) = actions.doc.image_resize.take() {
             let w = w.max(1);
             let h = h.max(1);
@@ -403,8 +406,21 @@ impl App {
         self.push_canvas_uniforms();
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        self.fit_canvas_to_screen();
+        // Corel/Excel-style: jump to the page you just added.
+        let new_index = count.saturating_sub(1);
+        self.docs.documents[idx].active_artboard = new_index;
+        self.fit_artboard(new_index);
         self.shell.status_msg = format!("Đã thêm artboard — tổng {count} trang");
+    }
+
+    /// Focus artboard `index` from the page-tab bar: clamp it, remember it as the
+    /// document's active artboard, and frame it in the view.
+    pub fn set_active_artboard(&mut self, index: usize) {
+        let idx = self.docs.active_doc_idx;
+        let count = self.docs.documents[idx].effective_artboards().len();
+        let clamped = index.min(count.saturating_sub(1));
+        self.docs.documents[idx].active_artboard = clamped;
+        self.fit_artboard(clamped);
     }
 
     /// Image ▸ Mode CMYK actions: open/close the convert dialog (pre-loading the

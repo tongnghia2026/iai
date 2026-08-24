@@ -59,6 +59,8 @@ pub struct DocumentIntent {
     /// Page ▸ Add Artboard: append a new artboard (same size as the last) to the
     /// right, growing the canvas — one undoable step.
     pub add_artboard: bool,
+    /// Page-tab bar: focus this artboard index (frame it in the view).
+    pub set_active_artboard: Option<usize>,
     pub reload_open_file_confirm: bool,
     pub reload_open_file_cancel: bool,
     /// PDF page-selection dialog: confirm with the 0-based page indices to open
