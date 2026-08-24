@@ -137,6 +137,13 @@ pub struct DocumentIntent {
     pub move_page: Option<(usize, usize)>,
     /// Page-tab context menu: delete this page index (keeps at least one page).
     pub delete_page: Option<usize>,
+    /// Page ▸ Master: create the shared master page (if none) and check it out for
+    /// editing; when already editing, finish and return to the active page.
+    pub toggle_master_edit: bool,
+    /// Page ▸ Master: delete the shared master page.
+    pub delete_master: bool,
+    /// Page-tab context menu: set whether page `index` shows the master beneath it.
+    pub set_page_use_master: Option<(usize, bool)>,
     /// Unified "Xuất PDF" dialog: open it / edit its controls / run the export.
     pub show_pdf_export_dialog: Option<bool>,
     pub set_pdf_export_scope: Option<PdfExportScope>,

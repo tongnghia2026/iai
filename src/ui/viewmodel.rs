@@ -54,6 +54,15 @@ pub struct DocumentViewModel {
     pub page_count: usize,
     /// Tab labels for each page, in order (custom name or "Trang N").
     pub page_names: std::sync::Arc<Vec<String>>,
+    /// The document has a shared master (background) page.
+    pub has_master: bool,
+    /// The master page is currently checked out for editing (canvas = master).
+    pub editing_master: bool,
+    /// The active page shows the master beneath it (its per-page opt-in).
+    pub active_uses_master: bool,
+    /// Per-page "shows the master" flags, in tab order — drives the tab context
+    /// menu checkbox. Empty when the document has no master.
+    pub page_uses_master: std::sync::Arc<Vec<bool>>,
 }
 /// The layer panel: names, thumbnails, per-layer flags, grouping.
 pub struct LayerViewModel {
@@ -658,6 +667,10 @@ impl Default for UiData {
                 active_artboard: 0,
                 page_count: 1,
                 page_names: std::sync::Arc::new(vec!["Trang 1".to_string()]),
+                has_master: false,
+                editing_master: false,
+                active_uses_master: false,
+                page_uses_master: std::sync::Arc::new(Vec::new()),
             },
             layers: LayerViewModel {
                 layer_count: 1,

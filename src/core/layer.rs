@@ -2931,6 +2931,55 @@ impl LayerStack {
     /// materialised, and only inside `(rx,ry,rw,rh)` — so a brush dab or a zoom
     /// rebuilds just the dirty/visible region instead of the whole canvas. Used
     /// only when `has_effected_groups()`; the common case keeps the real stack.
+    /// Build a render-only stack that draws `backdrop` (a shared master / paper
+    /// page) beneath `self` (a document page). Used to composite a master under a
+    /// page without touching either editable stack — the result is throwaway,
+    /// meant only to be composited or flattened, never edited or saved.
+    ///
+    /// - Backdrop layer ids, and their internal `parent_id` / `clip_parent_id`
+    ///   references, are shifted above every id in `self`, so nothing collides.
+    /// - `self`'s bottom `is_background` layer is hidden in the result so the
+    ///   master shows as the page's paper (the master carries the shared
+    ///   background); the layer is kept, just made invisible, so indices and
+    ///   `active_idx` stay aligned with the page's real stack.
+    /// - `active_idx` is offset by the backdrop length to keep pointing at the
+    ///   same foreground layer.
+    pub fn with_backdrop(&self, backdrop: &LayerStack) -> LayerStack {
+        let offset = self
+            .layers
+            .iter()
+            .map(|l| l.id)
+            .max()
+            .map_or(0, |m| m.saturating_add(1));
+        let mut layers: Vec<Layer> = Vec::with_capacity(backdrop.layers.len() + self.layers.len());
+        for layer in &backdrop.layers {
+            let mut l = layer.clone();
+            l.id = l.id.saturating_add(offset);
+            l.parent_id = l.parent_id.map(|p| p.saturating_add(offset));
+            l.clip_parent_id = l.clip_parent_id.map(|p| p.saturating_add(offset));
+            layers.push(l);
+        }
+        for (i, layer) in self.layers.iter().enumerate() {
+            let mut l = layer.clone();
+            if i == 0 && l.is_background {
+                // Master replaces the page's own paper.
+                l.visible = false;
+            }
+            layers.push(l);
+        }
+        let next_id = layers
+            .iter()
+            .map(|l| l.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        LayerStack {
+            active_idx: backdrop.layers.len() + self.active_idx,
+            layers,
+            next_id,
+        }
+    }
+
     pub fn to_render_stack_region(
         &self,
         width: u32,
@@ -3015,6 +3064,37 @@ mod tests {
         curve_is_identity, identity_curve, levels_eval, AdjustmentType, BlendMode, Layer,
         LayerMask, LayerStack, LevelsParams,
     };
+
+    #[test]
+    fn with_backdrop_stacks_master_beneath_and_hides_page_paper() {
+        // A page (its own white background + one content layer) over a master
+        // (paper + a logo). The result must draw the master first, keep the page's
+        // content on top, hide the page's own background, and never collide ids.
+        let mut master = LayerStack::new(8, 8); // bg id 0
+        master.add_layer(8, 8); // "logo"
+        let mut page = LayerStack::new(8, 8); // bg id 0
+        page.add_layer(8, 8); // "photo"
+        page.active_idx = 1;
+
+        let combined = page.with_backdrop(&master);
+        assert_eq!(combined.layers.len(), 4, "master(2) + page(2)");
+        // active_idx points at the same foreground layer, shifted by the backdrop.
+        assert_eq!(combined.active_idx, master.layers.len() + 1);
+        // All ids are distinct (master ids were shifted above the page's).
+        let ids: std::collections::HashSet<u32> = combined.layers.iter().map(|l| l.id).collect();
+        assert_eq!(ids.len(), 4, "no id collisions between master and page");
+        // Bottom two are the master (in order); the page's background (index 2)
+        // is hidden so the master shows as the paper.
+        assert!(
+            combined.layers[0].is_background,
+            "master paper is the bottom"
+        );
+        assert!(
+            !combined.layers[2].visible,
+            "the page's own background is suppressed under a master"
+        );
+        assert!(combined.layers[3].visible, "the page content stays visible");
+    }
 
     #[test]
     fn adjustment16_matches_8bit_at_endpoints() {

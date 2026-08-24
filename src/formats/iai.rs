@@ -58,6 +58,9 @@ pub struct IaiPdfProject {
 pub struct IaiArtboardDoc {
     pub pages: Vec<Canvas>,
     pub active_page: usize,
+    /// The shared master (background) page, when the document has one. Stored
+    /// under the `master/` layer prefix; absent on documents without a master.
+    pub master: Option<Canvas>,
 }
 
 /// Result of decoding a `.iai`: a plain single canvas (v1 / v2 image), a
@@ -180,6 +183,8 @@ fn build_canvas_from_meta<R: Read + Seek>(
         .as_str()
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty());
+    // Master opt-out (multi-page docs). Absent / older files → defaults to on.
+    canvas.metadata.use_master = meta["use_master"].as_bool().unwrap_or(true);
     // 16-bit mode (post-B2 key; absent on older files = 8-bit). Keeps a reopened
     // 16-bit document in 16-bit mode so its first edit preserves precision
     // instead of quantizing the masters the 16-bit layer PNGs just restored.
@@ -498,7 +503,18 @@ fn read_artboard_doc<R: Read + Seek>(
         return Err("Artboard document has no pages".into());
     }
     let active_page = (manifest["active_page"].as_u64().unwrap_or(0) as usize).min(pages.len() - 1);
-    Ok(IaiArtboardDoc { pages, active_page })
+    // Shared master page, when present (stored under `master/`). Absent on
+    // documents without one, and on older files that predate the feature.
+    let master = manifest
+        .get("master")
+        .filter(|m| m.is_object())
+        .map(|meta| build_canvas_from_meta(archive, meta, "master/"))
+        .transpose()?;
+    Ok(IaiArtboardDoc {
+        pages,
+        active_page,
+        master,
+    })
 }
 
 /// Write a multi-page artboard document: `pages` in tab order, each canvas's
@@ -508,6 +524,7 @@ pub fn write_artboard_doc(
     path: &Path,
     pages: &[&Canvas],
     active_page: usize,
+    master: Option<&Canvas>,
 ) -> Result<(), String> {
     if pages.is_empty() {
         return Err("An artboard document needs at least one page".into());
@@ -522,13 +539,18 @@ pub fn write_artboard_doc(
             pages_meta.push(meta);
             write_canvas_layers(zip, canvas, &format!("page_{i}/"))?;
         }
-        let manifest = serde_json::json!({
+        let mut manifest = serde_json::json!({
             "version": IAI_FORMAT_VERSION,
             "kind": "artboard_doc",
             "active_page": active,
             "page_count": pages.len(),
             "pages": pages_meta,
         });
+        // The shared master page: its own canvas metadata + layers under `master/`.
+        if let Some(master) = master {
+            manifest["master"] = canvas_meta_json(master);
+            write_canvas_layers(zip, master, "master/")?;
+        }
         zip.start_file("manifest.json", options)
             .map_err(|e| e.to_string())?;
         zip.write_all(manifest.to_string().as_bytes())
@@ -795,6 +817,11 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
         .filter(|s| !s.trim().is_empty())
     {
         meta["page_name"] = serde_json::json!(name);
+    }
+    // Master opt-out — written only when a page turns the shared master OFF (the
+    // default is on), so ordinary pages add no key and stay byte-clean.
+    if !canvas.metadata.use_master {
+        meta["use_master"] = serde_json::json!(false);
     }
     meta
 }
@@ -2108,13 +2135,14 @@ mod tests {
         let mut p0 = solid([200, 40, 40, 255], 12, 10);
         p0.metadata.page_name = Some("Bìa".to_string());
         let p1 = solid([40, 60, 200, 255], 12, 10);
-        write_artboard_doc(&path, &[&p0, &p1], 1).expect("write artboard doc");
+        write_artboard_doc(&path, &[&p0, &p1], 1, None).expect("write artboard doc");
 
         let IaiLoad::ArtboardDoc(doc) = load(&path).expect("load") else {
             panic!("expected an artboard document");
         };
         assert_eq!(doc.pages.len(), 2);
         assert_eq!(doc.active_page, 1);
+        assert!(doc.master.is_none(), "no master written → none loaded");
         assert_eq!(
             doc.pages[0].metadata.page_name.as_deref(),
             Some("Bìa"),
@@ -2137,6 +2165,42 @@ mod tests {
                 .chunks_exact(4)
                 .all(|px| px[2] > 150 && px[0] < 90),
             "page 1 restores its blue pixels"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn artboard_doc_round_trips_the_master_and_per_page_opt_out() {
+        // A multi-page document with a shared master page, where page 1 opts out.
+        let dir = tmp_dir("artboard-master");
+        let path = dir.join("doc.iai");
+        let p0 = solid([255, 255, 255, 255], 8, 8);
+        let mut p1 = solid([255, 255, 255, 255], 8, 8);
+        p1.metadata.use_master = false; // this page hides the master
+        let mut master = solid([10, 200, 30, 255], 8, 8);
+        master.metadata.page_name = Some("Trang nền".to_string());
+
+        write_artboard_doc(&path, &[&p0, &p1], 0, Some(&master)).expect("write");
+
+        let IaiLoad::ArtboardDoc(doc) = load(&path).expect("load") else {
+            panic!("expected an artboard document");
+        };
+        let master = doc.master.expect("master round-trips");
+        assert_eq!(master.metadata.page_name.as_deref(), Some("Trang nền"));
+        assert!(
+            master
+                .export_flat()
+                .chunks_exact(4)
+                .all(|px| px[1] > 150 && px[0] < 90),
+            "master restores its green pixels"
+        );
+        assert!(
+            doc.pages[0].metadata.use_master,
+            "page 0 keeps the master (default)"
+        );
+        assert!(
+            !doc.pages[1].metadata.use_master,
+            "page 1's opt-out round-trips"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

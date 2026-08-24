@@ -214,6 +214,15 @@ pub struct Document {
     /// one giant canvas), so a document scales to many pages and shows one at a
     /// time, and an empty page costs almost nothing.
     pub pages: Vec<Option<Canvas>>,
+    /// The shared master (background) page composited beneath every page that
+    /// opts in (`CanvasMetadata::use_master`). Edit once, applies to all pages.
+    /// `None` = no master (the common case; behaviour is unchanged). While the
+    /// user is editing the master ([`Self::editing_master`]) this is `None` — the
+    /// master is checked out into [`Self::canvas`], exactly like an active page.
+    pub master: Option<Box<Canvas>>,
+    /// True while the master page is checked out into [`Self::canvas`] for
+    /// editing; the real active page is parked in `pages[active_artboard]`.
+    pub editing_master: bool,
 }
 
 impl Document {
@@ -233,6 +242,8 @@ impl Document {
             raw_exif: None,
             active_artboard: 0,
             pages: Vec::new(),
+            master: None,
+            editing_master: false,
         }
     }
 
@@ -258,6 +269,8 @@ impl Document {
             raw_exif: None,
             active_artboard: 0,
             pages: Vec::new(),
+            master: None,
+            editing_master: false,
         }
     }
 
@@ -302,6 +315,7 @@ impl Document {
     pub fn is_modified(&self) -> bool {
         self.canvas.is_dirty()
             || self.pages.iter().flatten().any(|c| c.is_dirty())
+            || self.master.as_ref().is_some_and(|m| m.is_dirty())
             || self
                 .pdf_document
                 .as_ref()
@@ -320,6 +334,9 @@ impl Document {
         self.canvas.mark_saved();
         for page in self.pages.iter_mut().flatten() {
             page.mark_saved();
+        }
+        if let Some(master) = self.master.as_mut() {
+            master.mark_saved();
         }
         if let Some(pdf) = self.pdf_document.as_mut() {
             for page in pdf.edited_pages.values_mut() {
@@ -347,6 +364,9 @@ impl Document {
     /// Returns the new page's index. The first call materialises the current
     /// single page into the list, so a plain document becomes a two-page one.
     pub fn add_blank_page(&mut self) -> usize {
+        if self.editing_master {
+            self.exit_master_edit();
+        }
         if self.pages.is_empty() {
             // Slot for the page currently checked out into `canvas`.
             self.pages.push(None);
@@ -362,6 +382,9 @@ impl Document {
     /// Switch the active page to `index` by swapping the checked-out canvas with
     /// the stored one. No-op when already active, out of range, or single-page.
     pub fn switch_page(&mut self, index: usize) {
+        if self.editing_master {
+            self.exit_master_edit();
+        }
         if self.pages.is_empty() || index >= self.pages.len() || index == self.active_artboard {
             return;
         }
@@ -380,6 +403,9 @@ impl Document {
     /// the view because the checked-out canvas may change. No-op on a single-page
     /// document or an out-of-range index.
     pub fn remove_page(&mut self, index: usize) {
+        if self.editing_master {
+            self.exit_master_edit();
+        }
         if self.pages.len() <= 1 || index >= self.pages.len() {
             return;
         }
@@ -414,6 +440,9 @@ impl Document {
     /// tab order and the active index change, so no view resync is needed. No-op
     /// when out of range or `from == to`.
     pub fn move_page(&mut self, from: usize, to: usize) {
+        if self.editing_master {
+            self.exit_master_edit();
+        }
         let n = self.pages.len();
         if n < 2 || from >= n || to >= n || from == to {
             return;
@@ -451,7 +480,7 @@ impl Document {
             }
             return;
         }
-        if index == self.active_artboard {
+        if index == self.active_artboard && !self.editing_master {
             self.canvas.metadata.page_name = name;
         } else if let Some(Some(canvas)) = self.pages.get_mut(index) {
             canvas.metadata.page_name = name;
@@ -464,7 +493,7 @@ impl Document {
             (index == 0)
                 .then(|| self.canvas.metadata.page_name.clone())
                 .flatten()
-        } else if index == self.active_artboard {
+        } else if index == self.active_artboard && !self.editing_master {
             self.canvas.metadata.page_name.clone()
         } else {
             self.pages
@@ -493,13 +522,157 @@ impl Document {
         }
         (0..self.pages.len())
             .map(|i| {
-                if i == self.active_artboard {
+                // While editing the master, the active slot holds the real page
+                // (parked) and `canvas` holds the master — so the active slot maps
+                // to `canvas` only when NOT editing the master.
+                if i == self.active_artboard && !self.editing_master {
                     &self.canvas
                 } else {
                     self.pages[i].as_ref().unwrap_or(&self.canvas)
                 }
             })
             .collect()
+    }
+
+    // ── Master (shared background) page ────────────────────────────────────────
+
+    /// The document has a master page — whether stored or currently checked out
+    /// into `canvas` for editing.
+    pub fn has_master(&self) -> bool {
+        self.master.is_some() || self.editing_master
+    }
+
+    /// The master canvas, wherever it currently lives: checked out into `canvas`
+    /// while editing, otherwise the stored `master`. `None` when there is none.
+    pub fn master_canvas(&self) -> Option<&Canvas> {
+        if self.editing_master {
+            Some(&self.canvas)
+        } else {
+            self.master.as_deref()
+        }
+    }
+
+    /// The master to composite BENEATH the active page, or `None` when there is no
+    /// master, the active page opts out, or the master itself is being edited
+    /// (it renders alone then).
+    pub fn active_master_backdrop(&self) -> Option<&Canvas> {
+        if self.editing_master {
+            return None;
+        }
+        let master = self.master.as_deref()?;
+        self.canvas.metadata.use_master.then_some(master)
+    }
+
+    /// The master to composite beneath page `index` (export / thumbnails), honoring
+    /// that page's opt-out. `None` while editing the master or when absent.
+    pub fn master_backdrop_for(&self, index: usize) -> Option<&Canvas> {
+        if self.editing_master {
+            return None;
+        }
+        let master = self.master.as_deref()?;
+        let uses = if self.pages.is_empty() {
+            index == 0 && self.canvas.metadata.use_master
+        } else if index == self.active_artboard {
+            self.canvas.metadata.use_master
+        } else {
+            self.pages
+                .get(index)
+                .and_then(|s| s.as_ref())
+                .is_some_and(|c| c.metadata.use_master)
+        };
+        uses.then_some(master)
+    }
+
+    /// Create a blank master page (matching the active page's size / DPI / print
+    /// setup) if the document has none. No-op if one already exists or is being
+    /// edited. Materialises the single-page document into the multi-page list so
+    /// the master persists through the artboard-document save path.
+    pub fn ensure_master(&mut self) {
+        if self.has_master() {
+            return;
+        }
+        if self.pages.is_empty() {
+            self.pages.push(None);
+            self.active_artboard = 0;
+        }
+        let mut master = self.blank_like_active();
+        master.metadata.page_name = Some("Trang nền".to_string());
+        self.master = Some(Box::new(master));
+    }
+
+    /// Remove the master page. Exits master-edit first so the real page is restored
+    /// into `canvas`. No-op when there is no master.
+    pub fn remove_master(&mut self) {
+        if self.editing_master {
+            self.exit_master_edit();
+        }
+        self.master = None;
+    }
+
+    /// Check the master out into `canvas` for editing, parking the active page in
+    /// its slot. Requires a master and a multi-page list. No-op if already editing.
+    pub fn enter_master_edit(&mut self) {
+        if self.editing_master || self.pages.is_empty() {
+            return;
+        }
+        let Some(master) = self.master.take() else {
+            return;
+        };
+        let active_page = std::mem::replace(&mut self.canvas, *master);
+        self.pages[self.active_artboard] = Some(active_page);
+        self.editing_master = true;
+    }
+
+    /// Park the master back and restore the active page into `canvas`. No-op when
+    /// not editing the master.
+    pub fn exit_master_edit(&mut self) {
+        if !self.editing_master {
+            return;
+        }
+        let master = std::mem::replace(&mut self.canvas, Canvas::new(1, 1));
+        self.master = Some(Box::new(master));
+        self.editing_master = false;
+        if let Some(canvas) = self
+            .pages
+            .get_mut(self.active_artboard)
+            .and_then(|s| s.take())
+        {
+            self.canvas = canvas;
+        }
+    }
+
+    /// A throwaway canvas for rendering / exporting page `index` with its master
+    /// composited beneath, or `None` when the page has no master backdrop (callers
+    /// use the page canvas directly). The result shares tile data with the
+    /// originals via the layer clones, so it is cheap; it must not be edited or
+    /// saved. CMYK pages are skipped for now (the merged canvas is RGB) — the
+    /// master simply doesn't render under a CMYK page.
+    pub fn page_render_canvas(&self, index: usize) -> Option<Canvas> {
+        let master = self.master_backdrop_for(index)?;
+        let page = *self.all_page_canvases().get(index)?;
+        if page.is_cmyk() || master.is_cmyk() {
+            return None;
+        }
+        let mut merged = Canvas::new(page.width, page.height);
+        merged.layer_stack = page.layer_stack.with_backdrop(&master.layer_stack);
+        merged.metadata = page.metadata.clone();
+        merged.color_space = page.color_space;
+        Some(merged)
+    }
+
+    /// Set (or clear) whether page `index` shows the master beneath it.
+    pub fn set_page_use_master(&mut self, index: usize, on: bool) {
+        if self.pages.is_empty() {
+            if index == 0 {
+                self.canvas.metadata.use_master = on;
+            }
+            return;
+        }
+        if index == self.active_artboard && !self.editing_master {
+            self.canvas.metadata.use_master = on;
+        } else if let Some(Some(canvas)) = self.pages.get_mut(index) {
+            canvas.metadata.use_master = on;
+        }
     }
 
     /// Latch the sticky "this PDF page has been edited" flag from the active
@@ -876,5 +1049,101 @@ mod tests {
         // The custom name travels with its canvas through a reorder.
         doc.move_page(1, 0);
         assert_eq!(doc.page_names(), vec!["Ruột", "Trang 2"]);
+    }
+
+    #[test]
+    fn ensure_master_creates_one_and_materialises_pages() {
+        let mut doc = Document::new(DocumentId(1), 120, 90);
+        assert!(!doc.has_master());
+        doc.ensure_master();
+        assert!(doc.has_master());
+        assert!(doc.master.is_some());
+        assert!(!doc.editing_master);
+        // Master matches the page size and became a proper multi-page container.
+        let m = doc.master_canvas().unwrap();
+        assert_eq!((m.width, m.height), (120, 90));
+        assert_eq!(
+            doc.pages.len(),
+            1,
+            "single-page doc materialised for saving"
+        );
+        // Idempotent.
+        doc.ensure_master();
+        assert_eq!(doc.pages.len(), 1);
+    }
+
+    #[test]
+    fn edit_master_checks_it_out_and_restores_the_active_page() {
+        let mut doc = Document::new(DocumentId(1), 60, 60);
+        doc.canvas.metadata.title = "P0".into();
+        doc.add_blank_page();
+        doc.canvas.metadata.title = "P1".into();
+        doc.ensure_master();
+
+        doc.enter_master_edit();
+        assert!(doc.editing_master);
+        assert_eq!(
+            doc.master_canvas().unwrap().metadata.page_name.as_deref(),
+            Some("Trang nền")
+        );
+        assert!(doc.master.is_none(), "master is checked out into canvas");
+        assert!(
+            doc.pages[doc.active_artboard].is_some(),
+            "the real active page is parked while editing the master"
+        );
+        // Page labels still report the real pages, not the master.
+        assert_eq!(doc.all_page_canvases().len(), 2);
+
+        doc.exit_master_edit();
+        assert!(!doc.editing_master);
+        assert!(doc.master.is_some());
+        assert_eq!(doc.canvas.metadata.title, "P1", "active page restored");
+    }
+
+    #[test]
+    fn active_master_backdrop_respects_per_page_opt_out() {
+        let mut doc = Document::new(DocumentId(1), 40, 40);
+        doc.add_blank_page(); // page 1 active
+        doc.ensure_master();
+        // Default: the active page uses the master.
+        assert!(doc.active_master_backdrop().is_some());
+        // Opt the active page out.
+        doc.set_page_use_master(doc.active_artboard, false);
+        assert!(doc.active_master_backdrop().is_none());
+        // A page without a master never has a backdrop.
+        doc.remove_master();
+        assert!(!doc.has_master());
+        assert!(doc.active_master_backdrop().is_none());
+    }
+
+    #[test]
+    fn switching_pages_exits_master_edit_safely() {
+        let mut doc = Document::new(DocumentId(1), 30, 30);
+        doc.canvas.metadata.title = "P0".into();
+        doc.add_blank_page();
+        doc.canvas.metadata.title = "P1".into();
+        doc.ensure_master();
+        doc.enter_master_edit();
+        assert!(doc.editing_master);
+        // A page switch while editing the master must first restore the page.
+        doc.switch_page(0);
+        assert!(!doc.editing_master);
+        assert_eq!(doc.active_artboard, 0);
+        assert_eq!(doc.canvas.metadata.title, "P0");
+        assert!(doc.master.is_some());
+    }
+
+    #[test]
+    fn master_dirty_marks_the_document_modified() {
+        let mut doc = Document::new(DocumentId(1), 20, 20);
+        doc.add_blank_page();
+        doc.ensure_master();
+        doc.mark_saved();
+        assert!(!doc.is_modified());
+        // Dirty the master directly (as an edit would).
+        doc.master.as_mut().unwrap().deselect();
+        assert!(doc.is_modified(), "a master edit marks the document dirty");
+        doc.mark_saved();
+        assert!(!doc.is_modified());
     }
 }

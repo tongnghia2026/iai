@@ -681,6 +681,33 @@ impl App {
                         .get(self.docs.active_doc_idx)
                         .map_or_else(|| vec!["Trang 1".to_string()], |doc| doc.page_names()),
                 ),
+                has_master: self
+                    .docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .is_some_and(|doc| doc.has_master()),
+                editing_master: self
+                    .docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .is_some_and(|doc| doc.editing_master),
+                active_uses_master: self
+                    .docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .is_some_and(|doc| doc.has_master() && doc.active_master_backdrop().is_some()),
+                page_uses_master: std::sync::Arc::new(
+                    self.docs
+                        .documents
+                        .get(self.docs.active_doc_idx)
+                        .filter(|doc| doc.has_master())
+                        .map(|doc| {
+                            (0..doc.page_count())
+                                .map(|i| doc.master_backdrop_for(i).is_some())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
                 pdf_nav: self
                     .docs
                     .documents

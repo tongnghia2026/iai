@@ -128,7 +128,7 @@ impl App {
         let doc = self.docs.documents.get(idx).ok_or("no document")?;
         let refs = doc.all_page_canvases();
         let active = doc.active_artboard.min(refs.len().saturating_sub(1));
-        crate::formats::iai::write_artboard_doc(path, &refs, active)
+        crate::formats::iai::write_artboard_doc(path, &refs, active, doc.master_canvas())
     }
 
     /// Remove the autosave file (if any) for the document at `idx`. Called after a

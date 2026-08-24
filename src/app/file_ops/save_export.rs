@@ -136,16 +136,11 @@ impl App {
             let doc = &self.docs.documents[idx];
             let n = doc.pages.len();
             let active = doc.active_artboard.min(n.saturating_sub(1));
-            let refs: Vec<&Canvas> = (0..n)
-                .map(|i| {
-                    if i == active {
-                        &doc.canvas
-                    } else {
-                        doc.pages[i].as_ref().unwrap_or(&doc.canvas)
-                    }
-                })
-                .collect();
-            crate::formats::iai::write_artboard_doc(path, &refs, active).map(|()| n.max(1))
+            // `all_page_canvases` / `master_canvas` resolve the checked-out active
+            // slot correctly even while the master is being edited.
+            let refs = doc.all_page_canvases();
+            let master = doc.master_canvas();
+            crate::formats::iai::write_artboard_doc(path, &refs, active, master).map(|()| n.max(1))
         };
         match result {
             Ok(n) => {
@@ -416,6 +411,51 @@ impl App {
         if !is_iai && !crate::core::canvas::Canvas::fits_flat_buffer(cw, ch) {
             self.shell.status_msg =
                 "Loi: canvas qua lon de export dang anh phang - hay dung .iai".to_string();
+            return;
+        }
+        // Raster export of a page that shows the shared master: build a throwaway
+        // canvas with the master composited beneath and export THAT. `.iai` keeps
+        // the master stored separately (via the artboard-document save), so it is
+        // never merged here.
+        let mut merged = if is_iai {
+            None
+        } else {
+            let active = self.docs.documents[self.docs.active_doc_idx].active_artboard;
+            self.docs.documents[self.docs.active_doc_idx].page_render_canvas(active)
+        };
+        if let Some(m) = merged.as_mut() {
+            m.pixels = m.layer_stack.flatten(cw, ch);
+            if m.pixels.is_empty() {
+                self.shell.status_msg = "Lỗi: không dựng được ảnh có trang nền".to_string();
+                return;
+            }
+            m.pixels_stale = false;
+            match self.jobs.format_registry.export(
+                m,
+                std::path::Path::new(path_str),
+                &ExportOptions {
+                    embed_icc: self.shell.ui.export_embed_icc,
+                    resize_long_edge: self
+                        .shell
+                        .ui
+                        .export_resize_enabled
+                        .then_some(self.shell.ui.export_resize_long_edge),
+                    output_sharpen: self.shell.ui.export_output_sharpen,
+                    pdf_marks: self.shell.ui.export_pdf_marks,
+                    ..ExportOptions::default()
+                },
+            ) {
+                Ok(_) => {
+                    self.shell.status_msg = format!(
+                        "Saved: {}",
+                        path_buf
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("file")
+                    );
+                }
+                Err(e) => self.shell.status_msg = format!("Export error: {}", e),
+            }
             return;
         }
         if is_large && !is_iai {
@@ -777,9 +817,18 @@ impl App {
             let mut vectors = Vec::with_capacity(page_indices.len());
             let mut error = None;
             for &page_index in page_indices {
-                let Some(canvas) = canvases.get(page_index) else {
-                    error = Some(format!("Trang {} không tồn tại", page_index + 1));
-                    break;
+                // Compose the shared master beneath the page when it uses one; the
+                // merged canvas is throwaway. Falls back to the page as-is.
+                let merged = doc.page_render_canvas(page_index);
+                let canvas: &Canvas = match merged.as_ref() {
+                    Some(c) => c,
+                    None => match canvases.get(page_index) {
+                        Some(&c) => c,
+                        None => {
+                            error = Some(format!("Trang {} không tồn tại", page_index + 1));
+                            break;
+                        }
+                    },
                 };
                 // Split native PDF paths out of the raster base so their cached
                 // anti-aliasing cannot leave a jagged twin (mirrors the tab path).

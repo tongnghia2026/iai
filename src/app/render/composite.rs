@@ -377,13 +377,22 @@ impl App {
                         .filter(|p| p.dirty)
                         .map(|p| p.layer_id)
                 });
-            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+            let doc = &self.docs.documents[self.docs.active_doc_idx];
+            let canvas = &doc.canvas;
+            // Compose the shared master (background) page beneath the active page
+            // when it opts in. Built once per recomposite; `base_stack` is what
+            // actually gets composited. With no master this is `None` and every
+            // path below uses the page's own stack unchanged (byte-identical).
+            let master_combined = doc
+                .active_master_backdrop()
+                .map(|m| canvas.layer_stack.with_backdrop(&m.layer_stack));
+            let base_stack = master_combined.as_ref().unwrap_or(&canvas.layer_stack);
             gpu.compositor.develop_preview = dev_preview;
-            let has_effected_groups = canvas.layer_stack.has_effected_groups();
+            let has_effected_groups = base_stack.has_effected_groups();
             let gpu_isolates_groups = has_effected_groups
                 && gpu
                     .compositor
-                    .can_gpu_isolate_opacity_groups(&canvas.layer_stack, allow_active_gpu_vector);
+                    .can_gpu_isolate_opacity_groups(base_stack, allow_active_gpu_vector);
             let has_groups = has_effected_groups && !gpu_isolates_groups;
             let effective_dirty = if has_groups {
                 dirty_rect.filter(|_| gpu.compositor.ping_initialized)
@@ -407,7 +416,7 @@ impl App {
                     .clamp(0, canvas.width as i32) as u32;
                 let cy1 = (((sy + sh) as f32 * comp_inv_zoom + comp_off_y).ceil() as i32)
                     .clamp(0, canvas.height as i32) as u32;
-                let stack = canvas.layer_stack.to_render_stack_region(
+                let stack = base_stack.to_render_stack_region(
                     canvas.width,
                     canvas.height,
                     cx0,
@@ -418,7 +427,7 @@ impl App {
                 render_stack_owned = Some(stack);
                 render_stack_owned.as_ref().unwrap()
             } else {
-                &canvas.layer_stack
+                base_stack
             };
 
             // The top visible vector run is drawn separately from one
@@ -453,9 +462,11 @@ impl App {
                 // view in but the view transform is part of the snapshot key
                 // (`vp_sig`), so a zoom/pan simply misses and recomposites. Only
                 // disabled for the synthetic group-isolation stack (whose indices
-                // don't match the real stack the cut is computed from) and for a
-                // live clip move (the frozen base would ghost — see above).
-                !has_effected_groups && !clip_live_move,
+                // don't match the real stack the cut is computed from), for a
+                // live clip move (the frozen base would ghost — see above), and
+                // when a master backdrop is injected (the merged stack differs
+                // from the page's real stack the cut would be computed from).
+                !has_effected_groups && !clip_live_move && master_combined.is_none(),
                 allow_active_gpu_vector,
             );
             // Remember which Develop-window view this Mode B composite baked, so

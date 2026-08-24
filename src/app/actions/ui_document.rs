@@ -135,6 +135,15 @@ impl App {
         if let Some(i) = actions.doc.delete_page.take() {
             self.delete_page(i);
         }
+        if std::mem::take(&mut actions.doc.toggle_master_edit) {
+            self.toggle_master_edit();
+        }
+        if std::mem::take(&mut actions.doc.delete_master) {
+            self.delete_master();
+        }
+        if let Some((i, on)) = actions.doc.set_page_use_master.take() {
+            self.set_page_use_master(i, on);
+        }
         if let Some(open) = actions.doc.show_pdf_export_dialog.take() {
             self.shell.ui.show_pdf_export_dialog = open;
         }
@@ -478,6 +487,73 @@ impl App {
         self.refresh_active_document();
         self.fit_canvas_to_screen();
         self.shell.status_msg = format!("Đã xoá trang · còn {count}");
+    }
+
+    /// Page ▸ Master: enter or leave master-editing. On first use it creates the
+    /// shared master page (matching the current page) and checks it out into the
+    /// canvas; called again it finishes editing and restores the active page.
+    /// Either way the checked-out canvas changes → full GPU/view resync + reframe.
+    pub fn toggle_master_edit(&mut self) {
+        self.sync_brush_gpu_to_cpu();
+        let idx = self.docs.active_doc_idx;
+        let Some(doc) = self.docs.documents.get_mut(idx) else {
+            return;
+        };
+        // A PDF-import document is paged by the source, not by artboards — the
+        // master feature belongs to true multi-page artboard documents only.
+        if doc.pdf_document.is_some() {
+            self.shell.status_msg = "Trang nền chỉ dùng cho tài liệu đa trang".to_string();
+            return;
+        }
+        if doc.editing_master {
+            doc.exit_master_edit();
+            self.refresh_active_document();
+            self.fit_canvas_to_screen();
+            self.shell.status_msg = "Đã xong trang nền".to_string();
+        } else {
+            doc.ensure_master();
+            doc.enter_master_edit();
+            self.refresh_active_document();
+            self.fit_canvas_to_screen();
+            self.shell.status_msg =
+                "Đang chỉnh TRANG NỀN (hiện dưới mọi trang) — bấm lại để xong".to_string();
+        }
+    }
+
+    /// Page ▸ Master: delete the shared master page. Exits master-editing first, so
+    /// the active page is restored and the view resynced.
+    pub fn delete_master(&mut self) {
+        let idx = self.docs.active_doc_idx;
+        let Some(doc) = self.docs.documents.get_mut(idx) else {
+            return;
+        };
+        if !doc.has_master() {
+            return;
+        }
+        let was_editing = doc.editing_master;
+        doc.remove_master();
+        if was_editing {
+            self.refresh_active_document();
+            self.fit_canvas_to_screen();
+        } else {
+            // The master vanished from beneath every page → recomposite.
+            self.recomposite();
+        }
+        self.shell.status_msg = "Đã xoá trang nền".to_string();
+    }
+
+    /// Page-tab context menu: toggle whether page `index` shows the master beneath
+    /// it. Recomposites when the active page's own setting changed.
+    pub fn set_page_use_master(&mut self, index: usize, on: bool) {
+        let idx = self.docs.active_doc_idx;
+        let Some(doc) = self.docs.documents.get_mut(idx) else {
+            return;
+        };
+        let affects_active = index == doc.active_artboard && !doc.editing_master;
+        doc.set_page_use_master(index, on);
+        if affects_active {
+            self.recomposite();
+        }
     }
 
     /// Image ▸ Mode CMYK actions: open/close the convert dialog (pre-loading the

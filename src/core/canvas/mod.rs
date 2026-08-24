@@ -101,6 +101,12 @@ pub struct CanvasMetadata {
     /// canvas so it travels with the page through reorder / swap and persists with
     /// the rest of the canvas metadata.
     pub page_name: Option<String>,
+    /// Whether this page shows the document's shared master (background) page
+    /// beneath its own layers. `true` by default so a new page inherits the
+    /// master; a page can opt out. Only meaningful in a multi-page document that
+    /// has a master — see [`crate::core::document::Document::master`]. Persisted
+    /// only when `false`, so default pages stay byte-identical.
+    pub use_master: bool,
 }
 
 impl Default for CanvasMetadata {
@@ -119,6 +125,7 @@ impl Default for CanvasMetadata {
             page_bleed_px: 0.0,
             page_margin_px: 0.0,
             page_name: None,
+            use_master: true,
         }
     }
 }

@@ -88,6 +88,12 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     {
                         actions.doc.add_artboard = true;
                     }
+                    // Master (shared background) is a multi-page workflow, so the
+                    // control only appears once there are ≥2 pages (or one exists).
+                    if count > 1 || data.doc.has_master {
+                        ui.separator();
+                        master_controls(ui, data, actions, &pal);
+                    }
                     ui.separator();
 
                     // One tab per page. A horizontal scroll keeps a long row
@@ -106,6 +112,52 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 });
             });
         });
+}
+
+/// Master (shared background) page controls in the tab bar. Create + edit a
+/// document-wide background that shows beneath every page; while editing it, a
+/// prominent "done" button returns to the pages.
+fn master_controls(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    actions: &mut UiActions,
+    pal: &crate::ui::theme::Palette,
+) {
+    if data.doc.editing_master {
+        if ui
+            .add(egui::Button::new(egui::RichText::new("✓ Xong nền").strong()).small())
+            .on_hover_text("Kết thúc chỉnh trang nền, quay lại trang")
+            .clicked()
+        {
+            actions.doc.toggle_master_edit = true;
+        }
+        ui.label(
+            egui::RichText::new("◆ đang chỉnh TRANG NỀN")
+                .color(pal.accent_primary)
+                .size(11.5),
+        );
+    } else if data.doc.has_master {
+        if ui
+            .add(egui::Button::new("Sửa nền").small())
+            .on_hover_text("Chỉnh trang nền dùng chung (hiện dưới mọi trang)")
+            .clicked()
+        {
+            actions.doc.toggle_master_edit = true;
+        }
+        if ui
+            .add(egui::Button::new("🗑").small())
+            .on_hover_text("Xoá trang nền")
+            .clicked()
+        {
+            actions.doc.delete_master = true;
+        }
+    } else if ui
+        .add(egui::Button::new("＋ Nền").small())
+        .on_hover_text("Tạo trang nền dùng chung cho mọi trang (logo, khung, header/footer…)")
+        .clicked()
+    {
+        actions.doc.toggle_master_edit = true;
+    }
 }
 
 /// One artboard-page tab: a selectable label with a right-click context menu to
@@ -147,6 +199,19 @@ fn page_tab(
                 ui.close();
             }
         });
+        if data.doc.has_master {
+            ui.separator();
+            let uses = data.doc.page_uses_master.get(i).copied().unwrap_or(true);
+            let mut u = uses;
+            if ui
+                .checkbox(&mut u, "Hiện trang nền")
+                .on_hover_text("Trang này có hiện nền dùng chung bên dưới không")
+                .clicked()
+            {
+                actions.doc.set_page_use_master = Some((i, u));
+                ui.close();
+            }
+        }
         ui.separator();
         ui.add_enabled_ui(count > 1, |ui| {
             if ui.button("Xoá trang").clicked() {

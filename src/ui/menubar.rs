@@ -453,6 +453,36 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                     }
                                 }
                             });
+                            ui.separator();
+                            // Master (shared background) page: one background/frame
+                            // inherited by every page, edited once.
+                            let master_label = if data.doc.editing_master {
+                                "✓ Xong trang nền"
+                            } else if data.doc.has_master {
+                                "Chỉnh trang nền (Master)"
+                            } else {
+                                "Tạo trang nền (Master)…"
+                            };
+                            if ui
+                                .add_enabled(en, egui::Button::new(master_label))
+                                .on_hover_text(
+                                    "Trang nền dùng chung hiện dưới mọi trang — sửa một lần, áp cho tất cả",
+                                )
+                                .clicked()
+                            {
+                                actions.doc.toggle_master_edit = true;
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    en && data.doc.has_master,
+                                    egui::Button::new("Xoá trang nền"),
+                                )
+                                .clicked()
+                            {
+                                actions.doc.delete_master = true;
+                                ui.close();
+                            }
                         });
                         ui.separator();
                         if ui.add(menu_item("Develop...", "Ctrl+Shift+A")).clicked() {

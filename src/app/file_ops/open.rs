@@ -399,6 +399,7 @@ impl App {
         loaded: crate::formats::iai::IaiArtboardDoc,
         mark_clean: bool,
     ) -> Option<crate::core::document::DocumentId> {
+        let master = loaded.master;
         let mut slots: Vec<Option<Canvas>> = loaded.pages.into_iter().map(Some).collect();
         let active = loaded.active_page.min(slots.len().saturating_sub(1));
         let Some(active_canvas) = slots.get_mut(active).and_then(|s| s.take()) else {
@@ -410,6 +411,8 @@ impl App {
         if let Some(doc) = self.docs.documents.iter_mut().find(|d| d.id == id) {
             doc.pages = slots;
             doc.active_artboard = active;
+            doc.master = master.map(Box::new);
+            doc.editing_master = false;
             if mark_clean {
                 doc.mark_saved();
             }
