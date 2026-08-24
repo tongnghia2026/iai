@@ -182,6 +182,18 @@ impl App {
                 }
                 continue;
             }
+            // A multi-page artboard document rebuilds all its pages; ordinary
+            // single-canvas `.iai` falls through to the generic image path.
+            if is_iai && crate::formats::iai::is_artboard_doc(&path) {
+                if let Some(idx) = self.find_open_document_by_path(&path) {
+                    self.focus_existing_open_path(idx, path);
+                    continue;
+                }
+                if queued_keys.insert(normalized_path_key(&path)) {
+                    self.open_artboard_doc(path);
+                }
+                continue;
+            }
             if let Some(idx) = self.find_open_document_by_path(&path) {
                 self.focus_existing_open_path(idx, path);
                 continue;
@@ -341,7 +353,8 @@ impl App {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match crate::formats::iai::load(&worker_path) {
                     Ok(crate::formats::iai::IaiLoad::PdfProject(project)) => Ok(project),
-                    Ok(crate::formats::iai::IaiLoad::Canvas(_)) => {
+                    Ok(crate::formats::iai::IaiLoad::Canvas(_))
+                    | Ok(crate::formats::iai::IaiLoad::ArtboardDoc(_)) => {
                         Err("Not a PDF project file".to_string())
                     }
                     Err(error) => Err(error),
@@ -355,6 +368,37 @@ impl App {
         self.shell.status_msg = format!("Opening project: {}", file_name(&path));
         if let Some(w) = &self.win.window {
             w.request_redraw();
+        }
+    }
+
+    /// Open a multi-page artboard `.iai` document synchronously (no PDF render
+    /// worker needed — every page is a stored canvas). The active page becomes the
+    /// live canvas; the rest are held in `Document.pages` for the page-tab bar.
+    pub(in crate::app) fn open_artboard_doc(&mut self, path: PathBuf) {
+        let loaded = match crate::formats::iai::load(&path) {
+            Ok(crate::formats::iai::IaiLoad::ArtboardDoc(doc)) => doc,
+            Ok(_) => {
+                self.shell.status_msg = "Không phải tài liệu đa trang".to_string();
+                return;
+            }
+            Err(error) => {
+                self.shell.status_msg = format!("Lỗi mở tài liệu: {error}");
+                return;
+            }
+        };
+        let mut slots: Vec<Option<Canvas>> = loaded.pages.into_iter().map(Some).collect();
+        let active = loaded.active_page.min(slots.len().saturating_sub(1));
+        let Some(active_canvas) = slots.get_mut(active).and_then(|s| s.take()) else {
+            self.shell.status_msg = "Tài liệu đa trang rỗng".to_string();
+            return;
+        };
+        self.jobs.load_activate_pending = true;
+        if let Some(id) = self.attach_loaded_doc(path, active_canvas, None, None) {
+            if let Some(doc) = self.docs.documents.iter_mut().find(|d| d.id == id) {
+                doc.pages = slots;
+                doc.active_artboard = active;
+                doc.mark_saved();
+            }
         }
     }
 

@@ -10,10 +10,12 @@ use egui;
 const BAR_H: f32 = 26.0;
 
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
-    let count = data.chrome.artboards.len();
-    if count <= 1 {
+    // Always shown once a document is open (Corel/Excel-style), so adding a page
+    // is one click on `+` and the current page is always in view.
+    if !data.doc.has_doc {
         return;
     }
+    let count = data.doc.page_count.max(1);
     let pal = data.chrome.theme_mode.palette();
     let active = data.doc.active_artboard.min(count - 1);
 

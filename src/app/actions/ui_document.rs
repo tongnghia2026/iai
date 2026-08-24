@@ -347,80 +347,41 @@ impl App {
         );
     }
 
-    /// Add a new artboard to the active document: same size as the last page,
-    /// appended to the right of the row, growing the shared canvas to hold it — a
-    /// plain one-page document becomes a real two-artboard job. One undoable step
-    /// (a canvas resize + an artboard-list change, bundled), with the GPU texture
-    /// and view refit reconciled through `apply_canvas_event` (the same path
-    /// crop/resize and their undo use).
+    /// Add a new page to the active document (Corel/Excel-style): an independent
+    /// blank canvas the same size / DPI / bleed as the current page, made active.
+    /// A plain one-page document becomes a two-page one. Pages are separate
+    /// canvases shown one at a time, so a document scales to many pages without a
+    /// giant side-by-side buffer. A document-structure change (like a PDF
+    /// project's pages), not part of the per-page canvas undo history.
     pub fn add_artboard(&mut self) {
+        self.sync_brush_gpu_to_cpu();
         let idx = self.docs.active_doc_idx;
-        let (w, h, bleed, margin, existing) = {
-            let c = &self.docs.documents[idx].canvas;
-            (
-                c.width,
-                c.height,
-                c.metadata.page_bleed_px,
-                c.metadata.page_margin_px,
-                c.metadata.artboards.clone(),
-            )
-        };
-        let (boards, w2, h2) =
-            crate::core::page::append_artboard_in_row(&existing, w, h, bleed, margin);
-        if !crate::core::canvas::Canvas::fits_flat_buffer(w2, h2) {
-            self.shell.status_msg = "Không thêm được artboard: workspace vượt giới hạn".to_string();
-            return;
-        }
-        let count = boards.len();
-        let resized = {
-            let canvas = &mut self.docs.documents[idx].canvas;
-            // Nest the resize and the artboard-list change in ONE undo group, so a
-            // single Ctrl+Z reverts both (a resize that outlived its artboards would
-            // strand pages off-canvas). `canvas.resize` handles layers, masks,
-            // selection and pixels tile-natively; PageSetupCommand records the new
-            // list through the same gate. begin_undo_group nests, so the resize's
-            // own group is absorbed.
-            canvas.begin_undo_group("Add artboard");
-            let ok = canvas.resize(w2, h2);
-            if ok {
-                let _ = canvas.execute(
-                    Box::new(crate::core::command::PageSetupCommand::new(
-                        "Add artboard",
-                        bleed,
-                        margin,
-                        boards,
-                    )),
-                    crate::core::gateway::ChangeKind::LayerStructure,
-                );
-            }
-            canvas.end_undo_group();
-            ok
-        };
-        if !resized {
-            self.shell.status_msg = "Không thêm được artboard: workspace vượt giới hạn".to_string();
-            return;
-        }
-        if let Some(gpu) = &mut self.win.gpu {
-            gpu.resize_canvas_texture(w2, h2);
-        }
-        self.push_canvas_uniforms();
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        // Corel/Excel-style: jump to the page you just added.
-        let new_index = count.saturating_sub(1);
-        self.docs.documents[idx].active_artboard = new_index;
-        self.fit_artboard(new_index);
-        self.shell.status_msg = format!("Đã thêm artboard — tổng {count} trang");
+        let new_index = self.docs.documents[idx].add_blank_page();
+        let count = self.docs.documents[idx].page_count();
+        // Swapped the active canvas → full GPU/view resync (same path as a tab or
+        // PDF-page switch), then frame the fresh page.
+        self.refresh_active_document();
+        self.fit_canvas_to_screen();
+        self.shell.status_msg = format!("Đã thêm trang {} / {count}", new_index + 1);
     }
 
-    /// Focus artboard `index` from the page-tab bar: clamp it, remember it as the
-    /// document's active artboard, and frame it in the view.
+    /// Switch the page-tab bar / canvas to page `index`: flush pending edits into
+    /// the outgoing page, swap it for the target, resync and reframe. No-op when
+    /// already active or out of range.
     pub fn set_active_artboard(&mut self, index: usize) {
         let idx = self.docs.active_doc_idx;
-        let count = self.docs.documents[idx].effective_artboards().len();
-        let clamped = index.min(count.saturating_sub(1));
-        self.docs.documents[idx].active_artboard = clamped;
-        self.fit_artboard(clamped);
+        if index >= self.docs.documents[idx].page_count()
+            || index == self.docs.documents[idx].active_artboard
+        {
+            return;
+        }
+        self.sync_brush_gpu_to_cpu();
+        self.docs.documents[idx].switch_page(index);
+        // Swapped the active canvas → full GPU/view resync (same path as a tab or
+        // PDF-page switch), then frame the page.
+        self.refresh_active_document();
+        self.fit_canvas_to_screen();
+        self.shell.status_msg = format!("Trang {}", index + 1);
     }
 
     /// Image ▸ Mode CMYK actions: open/close the convert dialog (pre-loading the

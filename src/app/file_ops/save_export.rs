@@ -65,6 +65,25 @@ impl App {
             }
             return;
         }
+        // A multi-page artboard document saves as a full `.iai` (every page),
+        // never a flat single canvas.
+        if self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .is_some_and(|doc| !doc.pages.is_empty())
+        {
+            let existing_iai = self.docs.current_file.clone().filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("iai"))
+            });
+            match existing_iai {
+                Some(path) => self.save_artboard_doc_to(&path),
+                None => self.do_save_project_as(),
+            }
+            return;
+        }
         if let Some(path) = self.docs.current_file.clone() {
             self.save_to(&path);
         } else {
@@ -74,6 +93,48 @@ impl App {
 
     pub fn do_save_as(&mut self) {
         self.do_save_as_with_suggestion(self.docs.current_file.clone());
+    }
+
+    /// Save a multi-page artboard document as a full `.iai` (every page). Gathers
+    /// the active canvas plus the stored pages in tab order, writes them, then
+    /// marks the whole document clean and remembers its path.
+    pub fn save_artboard_doc_to(&mut self, path: &std::path::Path) {
+        if self.edit.text_edit.is_some() {
+            self.commit_text_edit();
+        }
+        self.sync_brush_gpu_to_cpu();
+        let idx = self.docs.active_doc_idx;
+        let result = {
+            let doc = &self.docs.documents[idx];
+            let n = doc.pages.len();
+            let active = doc.active_artboard.min(n.saturating_sub(1));
+            let refs: Vec<&Canvas> = (0..n)
+                .map(|i| {
+                    if i == active {
+                        &doc.canvas
+                    } else {
+                        doc.pages[i].as_ref().unwrap_or(&doc.canvas)
+                    }
+                })
+                .collect();
+            crate::formats::iai::write_artboard_doc(path, &refs, active).map(|()| n.max(1))
+        };
+        match result {
+            Ok(n) => {
+                let doc = &mut self.docs.documents[idx];
+                doc.path = Some(path.to_path_buf());
+                doc.file_modified_at = file_modified_at(path);
+                doc.mark_saved();
+                self.docs.current_file = Some(path.to_path_buf());
+                self.shell.status_msg = format!(
+                    "Đã lưu tài liệu {n} trang: {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+            Err(e) => {
+                self.shell.status_msg = format!("Lỗi lưu tài liệu: {e}");
+            }
+        }
     }
 
     fn do_save_project_as(&mut self) {
@@ -145,6 +206,23 @@ impl App {
             } else {
                 self.shell.status_msg = "Dự án PDF nhiều trang chỉ lưu được dạng .iai \
                      (dùng File ▸ Export để xuất PDF)"
+                    .to_string();
+            }
+            return;
+        }
+
+        // A multi-page artboard document also writes every page as an `.iai`.
+        if self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .is_some_and(|doc| !doc.pages.is_empty())
+        {
+            if ext == "iai" {
+                self.save_artboard_doc_to(path);
+            } else {
+                self.shell.status_msg = "Tài liệu nhiều trang chỉ lưu được dạng .iai \
+                     (dùng File ▸ Export để xuất ảnh)"
                     .to_string();
             }
             return;

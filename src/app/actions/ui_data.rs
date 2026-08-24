@@ -668,11 +668,13 @@ impl App {
                     .docs
                     .documents
                     .get(self.docs.active_doc_idx)
-                    .map(|doc| {
-                        doc.active_artboard
-                            .min(doc.effective_artboards().len().saturating_sub(1))
-                    })
+                    .map(|doc| doc.active_artboard.min(doc.page_count().saturating_sub(1)))
                     .unwrap_or(0),
+                page_count: self
+                    .docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .map_or(1, |doc| doc.page_count()),
                 pdf_nav: self
                     .docs
                     .documents

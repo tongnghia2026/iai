@@ -48,8 +48,10 @@ pub struct DocumentViewModel {
     pub has_doc: bool,
     /// Navigator strip: Some when the active document is a page of an imported PDF.
     pub pdf_nav: Option<PdfNavData>,
-    /// Artboard the page-tab bar is focused on (index into `chrome.artboards`).
+    /// Page the tab bar is focused on (0-based index into the document's pages).
     pub active_artboard: usize,
+    /// Number of pages in the active document (≥1). Drives the page-tab bar.
+    pub page_count: usize,
 }
 /// The layer panel: names, thumbnails, per-layer flags, grouping.
 pub struct LayerViewModel {
@@ -645,6 +647,7 @@ impl Default for UiData {
                 has_doc: false,
                 pdf_nav: None,
                 active_artboard: 0,
+                page_count: 1,
             },
             layers: LayerViewModel {
                 layer_count: 1,

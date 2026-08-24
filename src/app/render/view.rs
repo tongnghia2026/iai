@@ -7,11 +7,8 @@ impl App {
     /// (22 px), plus the artboard page-tab bar (26 px) when the active document has
     /// more than one artboard. Keeps fit/pan from tucking the page under the tabs.
     fn bottom_chrome_h(&self) -> f32 {
-        let has_tabs = self
-            .docs
-            .documents
-            .get(self.docs.active_doc_idx)
-            .is_some_and(|d| d.effective_artboards().len() > 1);
+        // The page-tab bar shows for any open document (see ui::artboard_bar).
+        let has_tabs = !self.has_only_welcome_placeholder();
         22.0 + if has_tabs { 26.0 } else { 0.0 }
     }
 

@@ -203,10 +203,17 @@ pub struct Document {
     /// Formatted EXIF line ("ISO … · f/… · …") for a RAW import, shown in the
     /// Develop window. Session-only — parsed by the RAW preview worker.
     pub raw_exif: Option<String>,
-    /// Which artboard the page-tab bar is focused on (index into
-    /// [`Self::effective_artboards`]). View state, session-only; clamped to the
-    /// artboard count on use.
+    /// Which page the page-tab bar is focused on. Index into the page list; the
+    /// active page's content lives in [`Self::canvas`].
     pub active_artboard: usize,
+    /// Multi-page (Corel/Excel-style) document: one independent [`Canvas`] per
+    /// page. EMPTY = a plain single-page document (the one page is `canvas`). When
+    /// non-empty, its length is the page count and the slot at `active_artboard`
+    /// is `None` — that page is currently checked out into `canvas`; every other
+    /// slot holds its page's content. Pages are separate canvases (not regions of
+    /// one giant canvas), so a document scales to many pages and shows one at a
+    /// time, and an empty page costs almost nothing.
+    pub pages: Vec<Option<Canvas>>,
 }
 
 impl Document {
@@ -225,6 +232,7 @@ impl Document {
             pdf_document: None,
             raw_exif: None,
             active_artboard: 0,
+            pages: Vec::new(),
         }
     }
 
@@ -249,6 +257,7 @@ impl Document {
             pdf_document: None,
             raw_exif: None,
             active_artboard: 0,
+            pages: Vec::new(),
         }
     }
 
@@ -292,6 +301,7 @@ impl Document {
     /// undo-back-to-saved wrong.
     pub fn is_modified(&self) -> bool {
         self.canvas.is_dirty()
+            || self.pages.iter().flatten().any(|c| c.is_dirty())
             || self
                 .pdf_document
                 .as_ref()
@@ -308,11 +318,60 @@ impl Document {
     /// differs-from-original state intact.
     pub fn mark_saved(&mut self) {
         self.canvas.mark_saved();
+        for page in self.pages.iter_mut().flatten() {
+            page.mark_saved();
+        }
         if let Some(pdf) = self.pdf_document.as_mut() {
             for page in pdf.edited_pages.values_mut() {
                 page.canvas.mark_saved();
             }
         }
+    }
+
+    /// Number of pages in this document — always at least one (a plain document
+    /// has an empty `pages` list and one page, its `canvas`).
+    pub fn page_count(&self) -> usize {
+        self.pages.len().max(1)
+    }
+
+    /// A blank page the same size / DPI / print-setup as the active page.
+    fn blank_like_active(&self) -> Canvas {
+        let mut c = Canvas::new(self.canvas.width, self.canvas.height);
+        c.metadata.resolution_ppi = self.canvas.metadata.resolution_ppi;
+        c.metadata.page_bleed_px = self.canvas.metadata.page_bleed_px;
+        c.metadata.page_margin_px = self.canvas.metadata.page_margin_px;
+        c
+    }
+
+    /// Append a blank page (same size as the active one) and make it active.
+    /// Returns the new page's index. The first call materialises the current
+    /// single page into the list, so a plain document becomes a two-page one.
+    pub fn add_blank_page(&mut self) -> usize {
+        if self.pages.is_empty() {
+            // Slot for the page currently checked out into `canvas`.
+            self.pages.push(None);
+            self.active_artboard = 0;
+        }
+        let blank = self.blank_like_active();
+        self.pages.push(Some(blank));
+        let new_index = self.pages.len() - 1;
+        self.switch_page(new_index);
+        new_index
+    }
+
+    /// Switch the active page to `index` by swapping the checked-out canvas with
+    /// the stored one. No-op when already active, out of range, or single-page.
+    pub fn switch_page(&mut self, index: usize) {
+        if self.pages.is_empty() || index >= self.pages.len() || index == self.active_artboard {
+            return;
+        }
+        let Some(target) = self.pages[index].take() else {
+            return; // the target slot is unexpectedly empty; leave state untouched
+        };
+        let old = self.active_artboard;
+        let current = std::mem::replace(&mut self.canvas, target);
+        self.pages[old] = Some(current);
+        self.active_artboard = index;
     }
 
     /// Latch the sticky "this PDF page has been edited" flag from the active
@@ -601,5 +660,36 @@ mod tests {
         doc.canvas.redo();
         assert_eq!(doc.canvas.width, w2);
         assert_eq!(doc.effective_artboards().len(), 2);
+    }
+
+    #[test]
+    fn add_and_switch_pages_swap_the_active_canvas() {
+        // Each page is an independent canvas; switching swaps the checked-out one.
+        let mut doc = Document::new(DocumentId(1), 100, 80);
+        assert_eq!(doc.page_count(), 1);
+        doc.canvas.metadata.title = "P0".to_string();
+
+        let idx1 = doc.add_blank_page();
+        assert_eq!(idx1, 1);
+        assert_eq!(doc.page_count(), 2);
+        assert_eq!(doc.active_artboard, 1);
+        doc.canvas.metadata.title = "P1".to_string();
+
+        doc.switch_page(0);
+        assert_eq!(doc.active_artboard, 0);
+        assert_eq!(doc.canvas.metadata.title, "P0", "page 0 checked back in");
+        assert!(doc.pages[0].is_none(), "active slot is empty (checked out)");
+        assert!(doc.pages[1].is_some(), "inactive page 1 is stored");
+
+        doc.switch_page(1);
+        assert_eq!(doc.canvas.metadata.title, "P1");
+        assert!(doc.pages[1].is_none());
+        assert!(doc.pages[0].is_some());
+
+        // Out-of-range / same-page switches are no-ops.
+        doc.switch_page(9);
+        assert_eq!(doc.active_artboard, 1);
+        doc.switch_page(1);
+        assert_eq!(doc.active_artboard, 1);
     }
 }

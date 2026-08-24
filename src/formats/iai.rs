@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 /// it as 8-bit (graceful precision loss they couldn't use anyway); this build
 /// detects the 16-bit payload on load and rebuilds the master. See
 /// `docs/bit-depth-and-color-capability.md`.
-const IAI_FORMAT_VERSION: u64 = 4;
+const IAI_FORMAT_VERSION: u64 = 5;
 
 pub struct IaiImporter;
 pub struct IaiExporter;
@@ -52,11 +52,21 @@ pub struct IaiPdfProject {
     pub pages: Vec<IaiProjectPage>,
 }
 
-/// Result of decoding a `.iai`: either a plain single canvas (v1 / v2 image) or
-/// a multi-page PDF project (v2). The app routes each to the matching open path.
+/// A multi-page (Corel/Excel-style) artboard document: one independent canvas per
+/// page, decoded in tab order. Distinct from a PDF project (no source PDF; every
+/// page is a real stored canvas).
+pub struct IaiArtboardDoc {
+    pub pages: Vec<Canvas>,
+    pub active_page: usize,
+}
+
+/// Result of decoding a `.iai`: a plain single canvas (v1 / v2 image), a
+/// multi-page PDF project (v2), or a multi-page artboard document (v5). The app
+/// routes each to the matching open path.
 pub enum IaiLoad {
     Canvas(Canvas),
     PdfProject(IaiPdfProject),
+    ArtboardDoc(IaiArtboardDoc),
 }
 
 fn read_manifest<R: Read + Seek>(
@@ -85,6 +95,21 @@ pub fn is_pdf_project(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Peek a `.iai` and report whether it is a multi-page artboard document (v5).
+/// Best effort — any error returns `false`, falling back to the single-canvas
+/// open path.
+pub fn is_artboard_doc(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    read_manifest(&mut archive)
+        .map(|m| m["kind"].as_str() == Some("artboard_doc"))
+        .unwrap_or(false)
+}
+
 /// Decode a `.iai` file into either a single canvas or a PDF project.
 pub fn load(path: &Path) -> Result<IaiLoad, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -102,6 +127,9 @@ pub fn load(path: &Path) -> Result<IaiLoad, String> {
 
     if manifest["kind"].as_str() == Some("pdf_project") {
         return read_pdf_project(&mut archive, &manifest).map(IaiLoad::PdfProject);
+    }
+    if manifest["kind"].as_str() == Some("artboard_doc") {
+        return read_artboard_doc(&mut archive, &manifest).map(IaiLoad::ArtboardDoc);
     }
     // v1 (and v2 single-image) store the canvas fields at the manifest root, with
     // layer pixels at the archive root (no prefix).
@@ -444,6 +472,66 @@ fn read_pdf_project<R: Read + Seek>(
     })
 }
 
+/// Decode a multi-page artboard document: one canvas per `pages` entry, with that
+/// page's layers under `page_{i}/` (the same prefix scheme the PDF project uses).
+fn read_artboard_doc<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    manifest: &serde_json::Value,
+) -> Result<IaiArtboardDoc, String> {
+    let entries = manifest["pages"]
+        .as_array()
+        .ok_or("Artboard document is missing its pages")?;
+    let mut pages = Vec::with_capacity(entries.len());
+    for (i, entry) in entries.iter().enumerate() {
+        pages.push(build_canvas_from_meta(
+            archive,
+            entry,
+            &format!("page_{i}/"),
+        )?);
+    }
+    if pages.is_empty() {
+        return Err("Artboard document has no pages".into());
+    }
+    let active_page = (manifest["active_page"].as_u64().unwrap_or(0) as usize).min(pages.len() - 1);
+    Ok(IaiArtboardDoc { pages, active_page })
+}
+
+/// Write a multi-page artboard document: `pages` in tab order, each canvas's
+/// layers stored under `page_{i}/`, `kind: "artboard_doc"` (v5). `active_page` is
+/// the tab to reopen on; the thumbnail is taken from it.
+pub fn write_artboard_doc(
+    path: &Path,
+    pages: &[&Canvas],
+    active_page: usize,
+) -> Result<(), String> {
+    if pages.is_empty() {
+        return Err("An artboard document needs at least one page".into());
+    }
+    let active = active_page.min(pages.len() - 1);
+    write_iai_archive(path, |zip| {
+        let options = deflated_options();
+        let mut pages_meta = Vec::with_capacity(pages.len());
+        for (i, canvas) in pages.iter().enumerate() {
+            let mut meta = canvas_meta_json(canvas);
+            meta["index"] = serde_json::json!(i);
+            pages_meta.push(meta);
+            write_canvas_layers(zip, canvas, &format!("page_{i}/"))?;
+        }
+        let manifest = serde_json::json!({
+            "version": IAI_FORMAT_VERSION,
+            "kind": "artboard_doc",
+            "active_page": active,
+            "page_count": pages.len(),
+            "pages": pages_meta,
+        });
+        zip.start_file("manifest.json", options)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(manifest.to_string().as_bytes())
+            .map_err(|e| e.to_string())?;
+        write_thumbnail(zip, pages[active])
+    })
+}
+
 impl Importer for IaiImporter {
     fn extensions(&self) -> &[&str] {
         &["iai"]
@@ -452,6 +540,12 @@ impl Importer for IaiImporter {
     fn import(&self, path: &Path) -> Result<Canvas, String> {
         match load(path)? {
             IaiLoad::Canvas(canvas) => Ok(canvas),
+            // An artboard document opened through the plain-image path collapses to
+            // its active page; the app routes projects through their own open path.
+            IaiLoad::ArtboardDoc(mut doc) => {
+                let active = doc.active_page.min(doc.pages.len().saturating_sub(1));
+                Ok(doc.pages.swap_remove(active))
+            }
             // A project file opened through the plain image path collapses to its
             // active page; the app routes projects through their own open path.
             IaiLoad::PdfProject(project) => {
@@ -1988,6 +2082,38 @@ mod tests {
         // The implicit page picks the defaults up, so the sheet draws them.
         assert!((loaded.effective_artboards()[0].bleed - 8.5).abs() < 1e-4);
         assert!((loaded.effective_artboards()[0].margin - 12.0).abs() < 1e-4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn artboard_doc_round_trips_all_pages() {
+        // A multi-page (Corel/Excel-style) document: every page is stored and
+        // restored, and the active page is remembered.
+        let dir = tmp_dir("artboard-doc");
+        let path = dir.join("doc.iai");
+        let p0 = solid([200, 40, 40, 255], 12, 10);
+        let p1 = solid([40, 60, 200, 255], 12, 10);
+        write_artboard_doc(&path, &[&p0, &p1], 1).expect("write artboard doc");
+
+        let IaiLoad::ArtboardDoc(doc) = load(&path).expect("load") else {
+            panic!("expected an artboard document");
+        };
+        assert_eq!(doc.pages.len(), 2);
+        assert_eq!(doc.active_page, 1);
+        assert!(
+            doc.pages[0]
+                .export_flat()
+                .chunks_exact(4)
+                .all(|px| px[0] > 150 && px[2] < 90),
+            "page 0 restores its red pixels"
+        );
+        assert!(
+            doc.pages[1]
+                .export_flat()
+                .chunks_exact(4)
+                .all(|px| px[2] > 150 && px[0] < 90),
+            "page 1 restores its blue pixels"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
