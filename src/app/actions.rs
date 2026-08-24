@@ -142,7 +142,6 @@ impl App {
             denied |= actions.tool.edit_text_layer.take().is_some();
             denied |= actions.tool.text_canvas_click.take().is_some();
             denied |= actions.doc.pdf_nav_goto.take().is_some();
-            denied |= std::mem::take(&mut actions.doc.pdf_nav_export);
             if actions.dialogs.show_new_dialog == Some(true) {
                 actions.dialogs.show_new_dialog = None;
                 denied = true;

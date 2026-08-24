@@ -330,18 +330,6 @@ impl App {
         self.refresh_active_document();
     }
 
-    /// Export every still-open page of the active document's PDF group, in page
-    /// order, as one multi-page PDF.
-    pub fn pdf_nav_export(&mut self) {
-        if self.docs.documents[self.docs.active_doc_idx]
-            .pdf_document
-            .is_none()
-        {
-            return;
-        }
-        self.export_multipage_pdf(vec![self.docs.active_doc_idx]);
-    }
-
     /// Open a fresh blank document in a new tab and switch to it.
     pub fn open_new_doc_tab(&mut self) {
         let id = DocumentId(self.docs.next_doc_id);

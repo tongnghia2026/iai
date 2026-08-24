@@ -417,6 +417,11 @@ pub struct DialogViewModel {
     pub show_rename_dialog: bool,
     /// Page-tab rename dialog: `Some((page_index, working_text))` while open.
     pub page_rename: Option<(usize, String)>,
+    /// Unified "Xuất PDF" dialog state.
+    pub show_pdf_export_dialog: bool,
+    pub pdf_export_scope: crate::ui::intent::PdfExportScope,
+    pub pdf_export_range: String,
+    pub pdf_export_dpi: u32,
     pub show_export_dialog: bool,
     pub show_preferences: bool,
     pub show_adjustment_dialog: bool,
@@ -907,6 +912,10 @@ impl Default for UiData {
                 show_image_size_dialog: false,
                 show_rename_dialog: false,
                 page_rename: None,
+                show_pdf_export_dialog: false,
+                pdf_export_scope: crate::ui::intent::PdfExportScope::AllPages,
+                pdf_export_range: String::new(),
+                pdf_export_dpi: 0,
                 show_export_dialog: false,
                 show_preferences: false,
                 show_adjustment_dialog: false,

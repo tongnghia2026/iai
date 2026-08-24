@@ -425,6 +425,12 @@ pub struct UiState {
     pub export_output_sharpen: u8,
     /// Press marks (crop / registration / bleed) for PDF export (default off).
     pub export_pdf_marks: crate::core::print::PrintMarks,
+    /// Unified "Xuất PDF" dialog state: open flag, page scope, range text, and
+    /// target output DPI (0 = keep each page's own resolution, downsample only).
+    pub show_pdf_export_dialog: bool,
+    pub pdf_export_scope: crate::ui::intent::PdfExportScope,
+    pub pdf_export_range: String,
+    pub pdf_export_dpi: u32,
     pub transform_interpolation: InterpolationMode,
     pub show_color_panel: bool,
     pub show_text_panel: bool,
@@ -1418,6 +1424,10 @@ impl App {
                     export_resize_long_edge: 2048,
                     export_output_sharpen: 0,
                     export_pdf_marks: crate::core::print::PrintMarks::none(),
+                    show_pdf_export_dialog: false,
+                    pdf_export_scope: crate::ui::intent::PdfExportScope::AllPages,
+                    pdf_export_range: String::new(),
+                    pdf_export_dpi: 0,
                     transform_interpolation: InterpolationMode::Bilinear,
                     // Color & Brush is now a floating panel opened on demand
                     // (Window ▸ Color Panel), like the Levels dialog. Quick
@@ -2197,6 +2207,7 @@ impl App {
             || self.shell.ui.show_image_size_dialog
             || self.shell.ui.show_rename_dialog
             || self.shell.ui.page_rename_target.is_some()
+            || self.shell.ui.show_pdf_export_dialog
             || self.shell.ui.show_export_dialog
             || self.shell.ui.show_preferences
             || self.shell.ui.show_exit_dialog

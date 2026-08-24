@@ -885,6 +885,237 @@ pub(crate) fn page_rename_dialog(ctx: &egui::Context, data: &UiData, actions: &m
     }
 }
 
+/// The single "Xuất PDF" window: page scope + output resolution + press marks +
+/// colour profile, replacing the three scattered PDF-export menu entries. An
+/// imported-PDF document keeps its original-vector export path, so the dialog
+/// shows a simplified view for it.
+pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    use crate::ui::intent::PdfExportScope;
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_export = enter_pressed;
+    let mut do_cancel = esc_pressed;
+
+    let is_pdf_import = data.doc.pdf_nav.is_some();
+    let page_count = if is_pdf_import {
+        data.doc.pdf_nav.as_ref().map_or(1, |n| n.count.max(1))
+    } else {
+        data.doc.page_count.max(1)
+    };
+    let scope = data.dialogs.pdf_export_scope;
+    let range_error = if scope == PdfExportScope::Range {
+        crate::ui::intent::parse_pdf_page_range(&data.dialogs.pdf_export_range, page_count).err()
+    } else {
+        None
+    };
+    let range_valid = range_error.is_none();
+    let selected_count = match scope {
+        PdfExportScope::AllPages => page_count,
+        PdfExportScope::CurrentPage => 1,
+        PdfExportScope::Range => {
+            crate::ui::intent::parse_pdf_page_range(&data.dialogs.pdf_export_range, page_count)
+                .map_or(0, |pages| pages.len())
+        }
+    };
+
+    modal_overlay(ctx, "pdf_export_dialog_overlay");
+
+    egui::Window::new("Xuất PDF")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .min_width(320.0)
+        .order(DIALOG_ORDER)
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+
+            if is_pdf_import {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Tài liệu PDF — ưu tiên giữ nét vector gốc ({page_count} trang)."
+                    ))
+                    .size(12.0),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Trang gốc vẫn là vector; DPI chỉ áp dụng khi một trang đã sửa phải raster hoá.",
+                    )
+                    .color(egui::Color32::GRAY)
+                    .size(10.0),
+                );
+                ui.add_space(8.0);
+            }
+
+            // ── Page scope ──
+            ui.label(egui::RichText::new("Phạm vi trang").strong());
+            ui.add_space(2.0);
+            if ui
+                .radio(
+                    scope == PdfExportScope::AllPages,
+                    format!("Tất cả trang ({page_count})"),
+                )
+                .clicked()
+            {
+                actions.doc.set_pdf_export_scope = Some(PdfExportScope::AllPages);
+            }
+            if ui
+                .radio(scope == PdfExportScope::CurrentPage, "Trang hiện tại")
+                .clicked()
+            {
+                actions.doc.set_pdf_export_scope = Some(PdfExportScope::CurrentPage);
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .radio(scope == PdfExportScope::Range, "Chọn trang:")
+                    .clicked()
+                {
+                    actions.doc.set_pdf_export_scope = Some(PdfExportScope::Range);
+                }
+                let mut range = data.dialogs.pdf_export_range.clone();
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut range)
+                        .desired_width(140.0)
+                        .hint_text("vd: 1-3,5"),
+                );
+                if resp.changed() {
+                    actions.doc.set_pdf_export_range = Some(range);
+                    actions.doc.set_pdf_export_scope = Some(PdfExportScope::Range);
+                }
+            });
+            if let Some(error) = &range_error {
+                ui.label(
+                    egui::RichText::new(error)
+                        .color(egui::Color32::from_rgb(220, 90, 80))
+                        .size(10.0),
+                );
+            }
+            if range_valid {
+                ui.label(
+                    egui::RichText::new(format!("Sẽ xuất {selected_count} trang theo thứ tự tài liệu."))
+                        .color(egui::Color32::GRAY)
+                        .size(10.0),
+                );
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // ── Output resolution (downsample only) ──
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Độ phân giải:").strong());
+                let cur = data.dialogs.pdf_export_dpi;
+                let label = if cur == 0 {
+                    "Gốc (theo trang)".to_string()
+                } else {
+                    format!("{cur} DPI")
+                };
+                egui::ComboBox::from_id_salt("pdf_export_dpi")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for (val, name) in [
+                            (0u32, "Gốc (theo trang)"),
+                            (1200, "1200 DPI — chế bản nét cao"),
+                            (600, "600 DPI — in chất lượng cao"),
+                            (300, "300 DPI — in tiêu chuẩn"),
+                            (150, "150 DPI — bản duyệt"),
+                            (72, "72 DPI — màn hình"),
+                        ] {
+                            if ui.selectable_label(cur == val, name).clicked() {
+                                actions.doc.set_pdf_export_dpi = Some(val);
+                            }
+                        }
+                    });
+                if cur != 0 {
+                    let mut custom = cur;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut custom)
+                                .range(36..=2400)
+                                .speed(10.0)
+                                .suffix(" DPI"),
+                        )
+                        .on_hover_text("Nhập DPI tuỳ chỉnh (36–2400)")
+                        .changed()
+                    {
+                        actions.doc.set_pdf_export_dpi = Some(custom.clamp(36, 2400));
+                    }
+                }
+            });
+            ui.label(
+                egui::RichText::new("Chỉ giảm mẫu, không phóng to; đối tượng vector vẫn giữ nét.")
+                    .color(egui::Color32::GRAY)
+                    .size(10.0),
+            );
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            if is_pdf_import {
+                ui.label(egui::RichText::new("Chế bản").strong());
+                ui.label(
+                    egui::RichText::new(
+                        "PDF nguồn giữ nguyên khổ trang; bông cắt và bleed không được áp lại.",
+                    )
+                    .color(egui::Color32::GRAY)
+                    .size(10.0),
+                );
+            } else {
+                // ── Press marks & bleed ──
+                ui.label(egui::RichText::new("Chế bản").strong());
+                let mut marks = data.doc.export_pdf_marks;
+                let mut changed = false;
+                changed |= ui.checkbox(&mut marks.crop_marks, "Bông cắt (crop marks)").changed();
+                changed |= ui
+                    .checkbox(&mut marks.registration_marks, "Dấu canh mực (registration)")
+                    .changed();
+                ui.horizontal(|ui| {
+                    ui.label("Bleed:");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut marks.bleed_mm)
+                                .range(0.0..=20.0)
+                                .speed(0.1)
+                                .suffix(" mm"),
+                        )
+                        .changed();
+                });
+                if changed {
+                    marks.bleed_mm = marks.bleed_mm.clamp(0.0, 20.0);
+                    actions.doc.set_export_pdf_marks = Some(marks);
+                }
+
+                ui.add_space(6.0);
+                let mut embed = data.doc.export_embed_icc;
+                if ui.checkbox(&mut embed, "Nhúng hồ sơ màu (ICC)").changed() {
+                    actions.doc.set_export_embed_icc = Some(embed);
+                }
+            }
+
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(range_valid, egui::Button::new("  Xuất…  "))
+                    .clicked()
+                {
+                    do_export = true;
+                }
+                if ui.button("  Huỷ  ").clicked() {
+                    do_cancel = true;
+                }
+            });
+            ui.add_space(4.0);
+        });
+
+    if do_export && range_valid {
+        actions.doc.run_pdf_export = true;
+        actions.doc.show_pdf_export_dialog = Some(false);
+    }
+    if do_cancel {
+        actions.doc.show_pdf_export_dialog = Some(false);
+    }
+}
+
 pub(crate) fn export_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut do_export = enter_pressed;
@@ -912,6 +1143,9 @@ pub(crate) fn export_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
 
             ui.horizontal_wrapped(|ui| {
                 for fmt in ExportFormat::all_export() {
+                    if matches!(fmt, ExportFormat::Pdf { .. }) {
+                        continue;
+                    }
                     let is_selected = std::mem::discriminant(&data.dialogs.export_format)
                         == std::mem::discriminant(&fmt);
                     if ui.selectable_label(is_selected, fmt.name()).clicked() {

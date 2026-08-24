@@ -6,6 +6,72 @@
 
 use super::*;
 
+/// Which pages the unified "Xuất PDF" dialog writes.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PdfExportScope {
+    /// Every page of the active document.
+    #[default]
+    AllPages,
+    /// Only the page currently shown.
+    CurrentPage,
+    /// The pages named by the range text (e.g. "1-3,5").
+    Range,
+}
+
+/// Parse a 1-based page range such as `1-3, 5, 8-10` into unique, ascending
+/// zero-based indices. Keeping this beside [`PdfExportScope`] lets both the
+/// dialog and the export backend share exactly the same validation rules.
+pub fn parse_pdf_page_range(input: &str, page_count: usize) -> Result<Vec<usize>, String> {
+    if page_count == 0 {
+        return Err("Tài liệu không có trang để xuất".to_string());
+    }
+    if input.trim().is_empty() {
+        return Err("Hãy nhập số trang, ví dụ: 1-3,5".to_string());
+    }
+
+    let mut selected = vec![false; page_count];
+    for part in input.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err("Phạm vi trang không hợp lệ".to_string());
+        }
+        let (start, end) = if let Some((a, b)) = part.split_once('-') {
+            if b.contains('-') {
+                return Err(format!("Phạm vi “{part}” không hợp lệ"));
+            }
+            (
+                parse_page_number(a, page_count)?,
+                parse_page_number(b, page_count)?,
+            )
+        } else {
+            let page = parse_page_number(part, page_count)?;
+            (page, page)
+        };
+        if start > end {
+            return Err(format!("Phạm vi “{part}” phải theo thứ tự tăng dần"));
+        }
+        for page in start..=end {
+            selected[page] = true;
+        }
+    }
+    Ok(selected
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, yes)| yes.then_some(index))
+        .collect())
+}
+
+fn parse_page_number(text: &str, page_count: usize) -> Result<usize, String> {
+    let number = text
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("Số trang “{}” không hợp lệ", text.trim()))?;
+    if !(1..=page_count).contains(&number) {
+        return Err(format!("Trang {number} nằm ngoài phạm vi 1-{page_count}"));
+    }
+    Ok(number - 1)
+}
+
 /// File/document commands: open/save/export, undo/redo, resize, tabs,
 /// colour-mode conversion, view zoom, clipboard.
 #[derive(Default)]
@@ -71,6 +137,12 @@ pub struct DocumentIntent {
     pub move_page: Option<(usize, usize)>,
     /// Page-tab context menu: delete this page index (keeps at least one page).
     pub delete_page: Option<usize>,
+    /// Unified "Xuất PDF" dialog: open it / edit its controls / run the export.
+    pub show_pdf_export_dialog: Option<bool>,
+    pub set_pdf_export_scope: Option<PdfExportScope>,
+    pub set_pdf_export_range: Option<String>,
+    pub set_pdf_export_dpi: Option<u32>,
+    pub run_pdf_export: bool,
     pub reload_open_file_confirm: bool,
     pub reload_open_file_cancel: bool,
     /// PDF page-selection dialog: confirm with the 0-based page indices to open
@@ -79,8 +151,6 @@ pub struct DocumentIntent {
     pub pdf_import_cancel: bool,
     /// PDF navigator strip: jump to this page index within the active PDF group.
     pub pdf_nav_goto: Option<usize>,
-    /// PDF navigator strip: export the active PDF group as a multi-page PDF.
-    pub pdf_nav_export: bool,
     /// New canvas: `(name, w, h, dpi, background, unit, cmyk)`. `cmyk` starts the
     /// document in CMYK (Generic naive) instead of RGB.
     pub new_canvas_confirmed: Option<(String, u32, u32, f32, u8, Unit, bool)>,
@@ -516,11 +586,6 @@ pub struct PrintIntent {
     pub clear_print_printer_profile: bool,
     /// File ▸ Export ▸ CMYK Separations… (pick CMYK ICC + base path, write plates).
     pub export_cmyk_separations: bool,
-    /// File ▸ Export ▸ PDF (multi-page)… — write all open tabs as one PDF.
-    pub export_multipage_pdf: bool,
-    /// File ▸ Export ▸ Xuất các trang ra PDF… — write every page (artboard) of the
-    /// ACTIVE document as one multi-page PDF, each page an artboard with press marks.
-    pub export_document_pages_pdf: bool,
     /// File ▸ Export ▸ SVG (Vector)… — write the document as an SVG.
     pub export_svg: bool,
     /// Print dialog: send the current page to the default printer.
@@ -800,4 +865,25 @@ pub struct UiActions {
     pub channels: ChannelsIntent,
     /// AI panel commands and extension-bridge runs.
     pub ai: AiIntent,
+}
+
+#[cfg(test)]
+mod pdf_page_range_tests {
+    use super::parse_pdf_page_range;
+
+    #[test]
+    fn parses_ranges_deduplicates_and_keeps_document_order() {
+        assert_eq!(
+            parse_pdf_page_range("5, 1-3, 3", 6).unwrap(),
+            vec![0, 1, 2, 4]
+        );
+    }
+
+    #[test]
+    fn rejects_empty_reverse_and_out_of_bounds_ranges() {
+        assert!(parse_pdf_page_range("", 5).is_err());
+        assert!(parse_pdf_page_range("4-2", 5).is_err());
+        assert!(parse_pdf_page_range("1,6", 5).is_err());
+        assert!(parse_pdf_page_range("1-2-3", 5).is_err());
+    }
 }

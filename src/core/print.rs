@@ -348,6 +348,8 @@ pub fn build_pdf_with_vectors_overlay(
         h,
         dpi,
         components: 3,
+        vector_w: w,
+        vector_h: h,
         overlay: None,
     }
     .with_overlay(overlay);
@@ -394,6 +396,8 @@ pub fn encode_pdf_page_streamed(
         h,
         dpi,
         components: 3,
+        vector_w: w,
+        vector_h: h,
         overlay: None,
     })
 }
@@ -658,6 +662,11 @@ pub struct EncodedPdfPage {
     /// Colour components per pixel in the compressed stream: 3 = RGB,
     /// 4 = DeviceCMYK (ink planes, 255 = full ink).
     components: u8,
+    /// Coordinate-space size of native vector objects. Usually identical to the
+    /// raster size; it stays at the source canvas size when the raster is
+    /// downsampled for a lower export DPI.
+    vector_w: u32,
+    vector_h: u32,
     /// Optional transparent overlay (raw RGBA, canvas-sized) drawn ON TOP of the
     /// native vectors: the opaque pixel layers stacked above the vector run on an
     /// RGB page (see [`pdf_overlay_raster`]). `None` on the common vectors-on-top
@@ -673,6 +682,14 @@ impl EncodedPdfPage {
         if self.components == 3 {
             self.overlay = overlay;
         }
+        self
+    }
+
+    /// Keep native vector geometry registered to its original canvas while the
+    /// page image uses fewer pixels at a lower output DPI.
+    pub fn with_vector_space(mut self, width: u32, height: u32) -> Self {
+        self.vector_w = width.max(1);
+        self.vector_h = height.max(1);
         self
     }
 }
@@ -696,6 +713,8 @@ pub fn encode_pdf_page(rgba: &[u8], w: u32, h: u32, dpi: f32) -> Result<EncodedP
         h,
         dpi,
         components: 3,
+        vector_w: w,
+        vector_h: h,
         overlay: None,
     })
 }
@@ -732,6 +751,8 @@ pub fn encode_pdf_page_cmyk(
         h,
         dpi,
         components: 4,
+        vector_w: w,
+        vector_h: h,
         overlay: None,
     })
 }
@@ -2112,6 +2133,8 @@ pub fn build_pdf_multipage_encoded(
         tx: f32,
         ty: f32,
         components: u8,
+        vector_w: u32,
+        vector_h: u32,
     }
     let mut encoded: Vec<Encoded<'_>> = Vec::with_capacity(n);
     for page in pages {
@@ -2132,6 +2155,8 @@ pub fn build_pdf_multipage_encoded(
             tx,
             ty,
             components: page.components,
+            vector_w: page.vector_w,
+            vector_h: page.vector_h,
         });
     }
 
@@ -2203,7 +2228,17 @@ pub fn build_pdf_multipage_encoded(
         // Overlay crisp vector paths. RGB pages emit rg/RG; DeviceCMYK ink pages
         // emit raw k/K (multipage pages carry no embedded CMYK profile).
         if let Some(objs) = vectors.get(i) {
-            append_vector_content(&mut content, objs, e.w, e.h, e.dw, e.dh, e.tx, e.ty, None);
+            append_vector_content(
+                &mut content,
+                objs,
+                e.vector_w,
+                e.vector_h,
+                e.dw,
+                e.dh,
+                e.tx,
+                e.ty,
+                None,
+            );
         }
         // Crop / registration marks around the artwork (multipage pages carry no
         // embedded CMYK profile, so ink pages mark in raw all-ink K).

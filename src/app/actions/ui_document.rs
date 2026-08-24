@@ -135,6 +135,21 @@ impl App {
         if let Some(i) = actions.doc.delete_page.take() {
             self.delete_page(i);
         }
+        if let Some(open) = actions.doc.show_pdf_export_dialog.take() {
+            self.shell.ui.show_pdf_export_dialog = open;
+        }
+        if let Some(scope) = actions.doc.set_pdf_export_scope.take() {
+            self.shell.ui.pdf_export_scope = scope;
+        }
+        if let Some(range) = actions.doc.set_pdf_export_range.take() {
+            self.shell.ui.pdf_export_range = range;
+        }
+        if let Some(dpi) = actions.doc.set_pdf_export_dpi.take() {
+            self.shell.ui.pdf_export_dpi = dpi;
+        }
+        if std::mem::take(&mut actions.doc.run_pdf_export) {
+            self.run_pdf_export();
+        }
         if let Some((w, h, dpi)) = actions.doc.image_resize.take() {
             let w = w.max(1);
             let h = h.max(1);

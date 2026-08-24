@@ -170,6 +170,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     if data.dialogs.page_rename.is_some() {
         page_rename_dialog(ctx, data, actions);
     }
+    if data.dialogs.show_pdf_export_dialog {
+        pdf_export_dialog(ctx, data, actions);
+    }
     if data.dialogs.show_export_dialog {
         export_dialog(ctx, data, actions);
     }

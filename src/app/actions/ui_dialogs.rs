@@ -529,9 +529,6 @@ impl App {
         if let Some(target) = actions.doc.pdf_nav_goto.take() {
             self.pdf_nav_goto(target);
         }
-        if actions.doc.pdf_nav_export {
-            self.pdf_nav_export();
-        }
         if let Some(v) = actions.sel.show_feather_dialog.take() {
             self.shell.ui.show_feather_dialog = v;
         }

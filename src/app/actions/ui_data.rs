@@ -1364,6 +1364,10 @@ impl App {
                     .ui
                     .page_rename_target
                     .map(|idx| (idx, self.shell.ui.page_rename_text.clone())),
+                show_pdf_export_dialog: self.shell.ui.show_pdf_export_dialog,
+                pdf_export_scope: self.shell.ui.pdf_export_scope,
+                pdf_export_range: self.shell.ui.pdf_export_range.clone(),
+                pdf_export_dpi: self.shell.ui.pdf_export_dpi,
                 show_export_dialog: self.shell.ui.show_export_dialog,
                 show_preferences: self.shell.ui.show_preferences,
                 show_adjustment_dialog: self.shell.ui.show_adjustment_dialog,

@@ -12,6 +12,34 @@ fn requires_project_save_on_close(layer_count: usize, is_pdf_document: bool) -> 
     is_pdf_document || layer_count > 1
 }
 
+/// Downsample a four-channel page buffer for PDF output while preserving its
+/// physical page size. `target_dpi == 0` means keep the source resolution;
+/// export never upscales a page.
+fn prepare_pdf_pixels(
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    source_dpi: f32,
+    target_dpi: u32,
+) -> Result<(Vec<u8>, u32, u32, f32), String> {
+    let source_dpi = source_dpi.max(1.0);
+    if target_dpi == 0 || target_dpi as f32 >= source_dpi {
+        return Ok((pixels, width, height, source_dpi));
+    }
+    let scale = target_dpi as f64 / source_dpi as f64;
+    let output_w = ((width as f64 * scale).round() as u32).max(1);
+    let output_h = ((height as f64 * scale).round() as u32).max(1);
+    let source = image::RgbaImage::from_raw(width, height, pixels)
+        .ok_or_else(|| "Bộ đệm trang PDF không đúng kích thước".to_string())?;
+    let output = image::imageops::resize(
+        &source,
+        output_w,
+        output_h,
+        image::imageops::FilterType::Lanczos3,
+    );
+    Ok((output.into_raw(), output_w, output_h, target_dpi as f32))
+}
+
 impl App {
     /// Save requested by an exit/close confirmation. A document with multiple
     /// layers defaults to an editable `.iai` project. A flat, single-layer
@@ -964,15 +992,68 @@ impl App {
         }
     }
 
-    /// Export every page (artboard) of the ACTIVE document as one multi-page PDF —
-    /// each page a print artboard, with the current press-marks / bleed setting.
-    /// Distinct from [`Self::export_multipage_pdf`], which bundles the open tabs;
-    /// this gathers the pages within a single document.
-    pub fn export_document_pages_pdf(&mut self) {
+    /// Execute the choices from the unified "Xuất PDF" dialog. Page numbers are
+    /// positions in the active document (or in the imported PDF's selected-page
+    /// list), always written in document order.
+    pub fn run_pdf_export(&mut self) {
+        use crate::ui::intent::PdfExportScope;
+
         if self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
         self.sync_brush_gpu_to_cpu();
+        let idx = self.docs.active_doc_idx;
+        if idx < self.docs.documents.len() {
+            self.docs.documents[idx].reconcile_pdf_page_modified();
+        }
+        let Some(doc) = self.docs.documents.get(idx) else {
+            return;
+        };
+        let is_pdf = doc.pdf_document.is_some();
+        let page_count = if let Some(pdf) = doc.pdf_document.as_ref() {
+            pdf.selected_pages.len().max(1)
+        } else {
+            doc.page_count()
+        };
+        let current = if let Some(pdf) = doc.pdf_document.as_ref() {
+            pdf.selected_pages
+                .iter()
+                .position(|&page| page == pdf.active_page)
+                .unwrap_or(0)
+        } else {
+            doc.active_artboard.min(page_count.saturating_sub(1))
+        };
+        let pages = match self.shell.ui.pdf_export_scope {
+            PdfExportScope::AllPages => Ok((0..page_count).collect()),
+            PdfExportScope::CurrentPage => Ok(vec![current]),
+            PdfExportScope::Range => {
+                crate::ui::intent::parse_pdf_page_range(&self.shell.ui.pdf_export_range, page_count)
+            }
+        };
+        let pages = match pages {
+            Ok(pages) if !pages.is_empty() => pages,
+            Ok(_) => {
+                self.shell.status_msg = "Không có trang nào để xuất PDF".to_string();
+                self.shell.ui.show_pdf_export_dialog = true;
+                return;
+            }
+            Err(error) => {
+                self.shell.status_msg = error;
+                self.shell.ui.show_pdf_export_dialog = true;
+                return;
+            }
+        };
+        let target_dpi = self.shell.ui.pdf_export_dpi;
+        if is_pdf {
+            self.export_pdf_document_selected(idx, &pages, target_dpi);
+        } else {
+            self.export_document_pages_pdf_selected(&pages, target_dpi);
+        }
+    }
+
+    /// Export selected pages of the active artboard document as one PDF, with
+    /// native vector overlays, optional downsampling, ICC and press marks.
+    fn export_document_pages_pdf_selected(&mut self, page_indices: &[usize], target_dpi: u32) {
         let idx = self.docs.active_doc_idx;
 
         // Encode each page up front while the document is borrowed; release the
@@ -982,20 +1063,29 @@ impl App {
                 return;
             };
             let canvases = doc.all_page_canvases();
-            let mut encoded = Vec::with_capacity(canvases.len());
-            let mut vectors = Vec::with_capacity(canvases.len());
+            let mut encoded = Vec::with_capacity(page_indices.len());
+            let mut vectors = Vec::with_capacity(page_indices.len());
             let mut error = None;
-            for canvas in &canvases {
+            for &page_index in page_indices {
+                let Some(canvas) = canvases.get(page_index) else {
+                    error = Some(format!("Trang {} không tồn tại", page_index + 1));
+                    break;
+                };
                 // Split native PDF paths out of the raster base so their cached
                 // anti-aliasing cannot leave a jagged twin (mirrors the tab path).
                 let selection = crate::core::print::collect_pdf_vectors(canvas);
                 let rgba = crate::core::print::pdf_raster_base(canvas, &selection);
-                match crate::core::print::encode_pdf_page(
-                    &rgba,
+                let prepared = prepare_pdf_pixels(
+                    rgba,
                     canvas.width,
                     canvas.height,
                     canvas.metadata.resolution_ppi,
-                ) {
+                    target_dpi,
+                );
+                match prepared.and_then(|(rgba, width, height, dpi)| {
+                    crate::core::print::encode_pdf_page(&rgba, width, height, dpi)
+                        .map(|page| page.with_vector_space(canvas.width, canvas.height))
+                }) {
                     Ok(page) => {
                         encoded.push(page);
                         vectors.push(selection.objects);
@@ -1073,6 +1163,22 @@ impl App {
     }
 
     pub(in crate::app) fn export_pdf_document(&mut self, doc_idx: usize) -> bool {
+        let page_count = self
+            .docs
+            .documents
+            .get(doc_idx)
+            .and_then(|doc| doc.pdf_document.as_ref())
+            .map_or(0, |pdf| pdf.selected_pages.len());
+        let positions: Vec<usize> = (0..page_count).collect();
+        self.export_pdf_document_selected(doc_idx, &positions, 0)
+    }
+
+    fn export_pdf_document_selected(
+        &mut self,
+        doc_idx: usize,
+        positions: &[usize],
+        target_dpi: u32,
+    ) -> bool {
         const PDF_EXPORT_MAX_PIXELS: u64 = 50_000_000;
         let Some(doc) = self.docs.documents.get(doc_idx) else {
             return false;
@@ -1080,12 +1186,18 @@ impl App {
         let Some(pdf) = doc.pdf_document.as_ref() else {
             return false;
         };
-        let all_pages_selected = pdf.selected_pages.len() == pdf.page_count
-            && pdf.selected_pages.iter().copied().eq(0..pdf.page_count);
-
         let original_source = pdf.source.clone();
         let source = pdf.effective_source().to_path_buf();
-        let selected_pages = pdf.selected_pages.clone();
+        let selected_pages: Vec<usize> = positions
+            .iter()
+            .filter_map(|&position| pdf.selected_pages.get(position).copied())
+            .collect();
+        if selected_pages.len() != positions.len() || selected_pages.is_empty() {
+            self.shell.status_msg = "Phạm vi trang PDF không hợp lệ".to_string();
+            return true;
+        }
+        let all_pages_selected = selected_pages.len() == pdf.page_count
+            && selected_pages.iter().copied().eq(0..pdf.page_count);
         let clean = !doc.is_modified();
         let Some(window) = self.win.window.as_ref() else {
             return true;
@@ -1155,11 +1267,18 @@ impl App {
                                     )
                                 },
                             )?;
+                            let (rgba, width, height, dpi) = prepare_pdf_pixels(
+                                rgba,
+                                canvas.width,
+                                canvas.height,
+                                canvas.metadata.resolution_ppi,
+                                target_dpi,
+                            )?;
                             crate::formats::pdf::HybridPageContent::Raster {
                                 rgba,
-                                width: canvas.width,
-                                height: canvas.height,
-                                dpi: canvas.metadata.resolution_ppi,
+                                width,
+                                height,
+                                dpi,
                             }
                         }
                     } else {
@@ -1196,7 +1315,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::requires_project_save_on_close;
+    use super::{prepare_pdf_pixels, requires_project_save_on_close};
 
     #[test]
     fn close_save_keeps_source_format_for_single_layer_image() {
@@ -1207,5 +1326,19 @@ mod tests {
     fn close_save_defaults_to_project_for_multiple_layers_or_pdf() {
         assert!(requires_project_save_on_close(2, false));
         assert!(requires_project_save_on_close(1, true));
+    }
+
+    #[test]
+    fn pdf_dpi_downsamples_without_changing_physical_size() {
+        let pixels = vec![128; 1200 * 600 * 4];
+        let (_, width, height, dpi) = prepare_pdf_pixels(pixels, 1200, 600, 600.0, 300).unwrap();
+        assert_eq!((width, height, dpi), (600, 300, 300.0));
+    }
+
+    #[test]
+    fn pdf_dpi_never_upscales() {
+        let pixels = vec![255; 20 * 10 * 4];
+        let (_, width, height, dpi) = prepare_pdf_pixels(pixels, 20, 10, 150.0, 300).unwrap();
+        assert_eq!((width, height, dpi), (20, 10, 150.0));
     }
 }

@@ -237,10 +237,10 @@ fn build_pdf(
                     ui.separator();
                     if ui
                         .button("Xuất PDF")
-                        .on_hover_text("Xuất PDF nhiều trang")
+                        .on_hover_text("Mở cửa sổ Xuất PDF")
                         .clicked()
                     {
-                        actions.doc.pdf_nav_export = true;
+                        actions.doc.show_pdf_export_dialog = Some(true);
                     }
                     ui.separator();
 

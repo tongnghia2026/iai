@@ -143,7 +143,18 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             }
                             ui.separator();
                             ui.menu_button("Export As", |ui| {
+                                if ui
+                                    .add(menu_item_enabled("PDF…", "", data.doc.has_doc))
+                                    .clicked()
+                                {
+                                    actions.doc.show_pdf_export_dialog = Some(true);
+                                    ui.close();
+                                }
+                                ui.separator();
                                 for fmt in ExportFormat::all_export() {
+                                    if matches!(fmt, ExportFormat::Pdf { .. }) {
+                                        continue;
+                                    }
                                     if ui.button(format!("{}...", fmt.name())).clicked() {
                                         actions.doc.export = Some(fmt);
                                         actions.dialogs.show_export_dialog = Some(true);
@@ -165,31 +176,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 .clicked()
                             {
                                 actions.print.show_print_dialog = Some(true);
-                                ui.close();
-                            }
-                            if ui
-                                .add(menu_item_enabled(
-                                    "PDF (multi-page)...",
-                                    "",
-                                    data.doc.doc_count > 0,
-                                ))
-                                .clicked()
-                            {
-                                actions.print.export_multipage_pdf = true;
-                                ui.close();
-                            }
-                            if ui
-                                .add(menu_item_enabled(
-                                    "Xuất các trang ra PDF...",
-                                    "",
-                                    data.doc.page_count > 1,
-                                ))
-                                .on_hover_text(
-                                    "Mỗi trang (artboard) của tài liệu thành 1 trang PDF, kèm bông cắt/bleed đang chọn",
-                                )
-                                .clicked()
-                            {
-                                actions.print.export_document_pages_pdf = true;
                                 ui.close();
                             }
                             if ui
