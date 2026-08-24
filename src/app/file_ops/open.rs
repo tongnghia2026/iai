@@ -386,20 +386,59 @@ impl App {
                 return;
             }
         };
+        self.install_artboard_doc(path, loaded, true);
+    }
+
+    /// Attach a loaded multi-page artboard document as the active tab. `mark_clean`
+    /// anchors every page to "saved" for a normal open; a crash-recovered document
+    /// passes `false` and latches dirty afterwards so it prompts to save. Returns
+    /// the new document id.
+    pub(in crate::app) fn install_artboard_doc(
+        &mut self,
+        path: PathBuf,
+        loaded: crate::formats::iai::IaiArtboardDoc,
+        mark_clean: bool,
+    ) -> Option<crate::core::document::DocumentId> {
         let mut slots: Vec<Option<Canvas>> = loaded.pages.into_iter().map(Some).collect();
         let active = loaded.active_page.min(slots.len().saturating_sub(1));
         let Some(active_canvas) = slots.get_mut(active).and_then(|s| s.take()) else {
             self.shell.status_msg = "Tài liệu đa trang rỗng".to_string();
-            return;
+            return None;
         };
         self.jobs.load_activate_pending = true;
-        if let Some(id) = self.attach_loaded_doc(path, active_canvas, None, None) {
-            if let Some(doc) = self.docs.documents.iter_mut().find(|d| d.id == id) {
-                doc.pages = slots;
-                doc.active_artboard = active;
+        let id = self.attach_loaded_doc(path, active_canvas, None, None)?;
+        if let Some(doc) = self.docs.documents.iter_mut().find(|d| d.id == id) {
+            doc.pages = slots;
+            doc.active_artboard = active;
+            if mark_clean {
                 doc.mark_saved();
             }
         }
+        Some(id)
+    }
+
+    /// Install a crash-recovered multi-page document: attach it, point it back at
+    /// its original project path (from the sidecar) when known, latch dirty, and
+    /// keep updating the recovery file until the user saves for real.
+    pub(crate) fn install_artboard_doc_recovered(
+        &mut self,
+        autosave_path: PathBuf,
+        loaded: crate::formats::iai::IaiArtboardDoc,
+        project_path: Option<PathBuf>,
+    ) {
+        let Some(id) = self.install_artboard_doc(autosave_path.clone(), loaded, false) else {
+            return;
+        };
+        if let Some(doc) = self.docs.documents.iter_mut().find(|d| d.id == id) {
+            doc.path = project_path.clone();
+            doc.file_modified_at = project_path
+                .as_deref()
+                .and_then(crate::core::document::file_modified_at);
+            // Recovered work has no command/checkpoint proving it matches a file.
+            doc.canvas.mark_dirty_unconditionally();
+        }
+        self.docs.current_file = project_path;
+        self.docs.autosave_files.insert(id, autosave_path);
     }
 
     /// Attach any finished `.iai` project loads.

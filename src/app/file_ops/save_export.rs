@@ -130,6 +130,8 @@ impl App {
                     "Đã lưu tài liệu {n} trang: {}",
                     path.file_name().unwrap_or_default().to_string_lossy()
                 );
+                // A real save supersedes any crash-recovery mirror.
+                self.clear_autosave(idx);
             }
             Err(e) => {
                 self.shell.status_msg = format!("Lỗi lưu tài liệu: {e}");

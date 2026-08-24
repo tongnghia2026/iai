@@ -73,10 +73,12 @@ impl App {
         let Some(doc) = self.docs.documents.get(idx) else {
             return;
         };
-        if doc.pdf_document.is_none() {
+        // Only multi-page sessions carry recovery value: an imported PDF or a
+        // multi-page artboard document. Plain single-image edits are not mirrored.
+        if doc.pdf_document.is_none() && doc.pages.is_empty() {
             return;
         }
-        // `is_modified` already covers the active canvas and every cached page.
+        // `is_modified` already covers the active canvas and every stored page.
         if !doc.is_modified() {
             return;
         }
@@ -97,8 +99,15 @@ impl App {
             .unwrap_or_else(|| {
                 dir.join(format!("recover_{}_{}.iai", std::process::id(), doc_id.0))
             });
-        match self.write_pdf_project(idx, &path) {
-            Ok(_) => {
+        // A multi-page artboard document mirrors every page as an `artboard_doc`;
+        // a PDF session uses the pdf-project writer.
+        let written = if self.docs.documents[idx].pages.is_empty() {
+            self.write_pdf_project(idx, &path).map(|_| ())
+        } else {
+            self.write_artboard_autosave(idx, &path)
+        };
+        match written {
+            Ok(()) => {
                 let project_path = self.docs.documents[idx]
                     .path
                     .clone()
@@ -110,6 +119,15 @@ impl App {
                 // Best effort — a failed autosave must never disrupt editing.
             }
         }
+    }
+
+    /// Mirror a multi-page artboard document to `path` as an `artboard_doc` `.iai`.
+    /// Recovery-only: does not touch the document's saved checkpoint or path.
+    fn write_artboard_autosave(&self, idx: usize, path: &Path) -> Result<(), String> {
+        let doc = self.docs.documents.get(idx).ok_or("no document")?;
+        let refs = doc.all_page_canvases();
+        let active = doc.active_artboard.min(refs.len().saturating_sub(1));
+        crate::formats::iai::write_artboard_doc(path, &refs, active)
     }
 
     /// Remove the autosave file (if any) for the document at `idx`. Called after a
@@ -205,17 +223,23 @@ impl App {
                     {
                         continue;
                     }
-                    if !crate::formats::iai::is_pdf_project(&path) {
+                    if !crate::formats::iai::is_pdf_project(&path)
+                        && !crate::formats::iai::is_artboard_doc(&path)
+                    {
                         continue;
                     }
-                    let project = match crate::formats::iai::load(&path) {
-                        Ok(crate::formats::iai::IaiLoad::PdfProject(project)) => project,
-                        _ => continue,
-                    };
                     let project_path = read_sidecar_project_path(&path);
-
-                    self.install_pdf_project_recovered(path.clone(), project, project_path);
-                    recovered += 1;
+                    match crate::formats::iai::load(&path) {
+                        Ok(crate::formats::iai::IaiLoad::PdfProject(project)) => {
+                            self.install_pdf_project_recovered(path.clone(), project, project_path);
+                            recovered += 1;
+                        }
+                        Ok(crate::formats::iai::IaiLoad::ArtboardDoc(doc)) => {
+                            self.install_artboard_doc_recovered(path.clone(), doc, project_path);
+                            recovered += 1;
+                        }
+                        _ => continue,
+                    }
                 }
             }
         }
