@@ -169,6 +169,9 @@ impl App {
         if let Some(mode) = actions.layers.powerclip_arrange.take() {
             self.powerclip_arrange(mode);
         }
+        if std::mem::take(&mut actions.layers.powerclip_edit_contents) {
+            self.powerclip_edit_contents();
+        }
         if actions.layers.toggle_clipping_mask {
             self.toggle_clipping_mask();
         }

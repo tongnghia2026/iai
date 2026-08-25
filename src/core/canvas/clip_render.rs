@@ -40,6 +40,10 @@ impl Canvas {
             let Some(fid) = layer.clip_parent_id else {
                 continue;
             };
+            // Content being edited in place is intentionally left unclipped.
+            if self.powerclip_edit_frame == Some(fid) {
+                continue;
+            }
             layer.id.hash(&mut h);
             layer.offset.hash(&mut h);
             layer.width.hash(&mut h);
@@ -77,6 +81,11 @@ impl Canvas {
             let Some(fid) = layer.clip_parent_id else {
                 continue;
             };
+            // Skip the frame whose contents are being edited in place — it stays
+            // unclipped until the user finishes editing.
+            if self.powerclip_edit_frame == Some(fid) {
+                continue;
+            }
             let Some(frame) = self.layer_stack.layers.iter().find(|l| l.id == fid) else {
                 continue;
             };

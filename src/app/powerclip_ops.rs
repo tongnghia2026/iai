@@ -342,6 +342,114 @@ impl App {
         true
     }
 
+    /// True while a PowerClip frame's contents are being edited in place.
+    pub fn powerclip_editing_contents(&self) -> bool {
+        self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .powerclip_edit_frame
+            .is_some()
+    }
+
+    /// Enable "Edit Contents": a selected frame with content, a selected content
+    /// layer, or an edit already in progress (to finish it).
+    pub fn can_powerclip_edit_contents(&self) -> bool {
+        if self.powerclip_editing_contents() {
+            return true;
+        }
+        let stack = &self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack;
+        stack
+            .layers
+            .iter()
+            .any(|l| l.selected && l.clip_parent_id.is_some())
+            || stack.layers.iter().any(|frame| {
+                frame.selected
+                    && stack
+                        .layers
+                        .iter()
+                        .any(|c| c.clip_parent_id == Some(frame.id))
+            })
+    }
+
+    /// Toggle editing a PowerClip's contents IN PLACE. Entering unclips the
+    /// selected frame's content (drops the managed clip mask and selects it) so it
+    /// can be moved / scaled / painted freely against the frame; finishing
+    /// re-bakes the clip so the content is clipped again at its new position. The
+    /// clip relation and every content edit are preserved throughout; the unclip
+    /// is derived state (outside history), like the clip mask itself.
+    pub fn powerclip_edit_contents(&mut self) -> bool {
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+
+        // Already editing → finish: re-bake the clip and leave the mode.
+        if canvas.powerclip_edit_frame.take().is_some() {
+            canvas.clip_fp = 0;
+            canvas.refresh_clip_masks();
+            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            self.recomposite();
+            self.shell.status_msg = "Đã xong sửa nội dung PowerClip".to_string();
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return true;
+        }
+
+        // Enter: resolve the frame from the selected content, else a selected frame.
+        let frame_id = {
+            let stack = &canvas.layer_stack;
+            let from_content = stack
+                .layers
+                .iter()
+                .find(|l| l.selected && l.clip_parent_id.is_some())
+                .and_then(|l| l.clip_parent_id);
+            let from_frame = stack
+                .layers
+                .iter()
+                .find(|frame| {
+                    frame.selected
+                        && stack
+                            .layers
+                            .iter()
+                            .any(|c| c.clip_parent_id == Some(frame.id))
+                })
+                .map(|f| f.id);
+            from_content.or(from_frame)
+        };
+        let Some(frame_id) = frame_id else {
+            self.shell.status_msg = "Chọn khung PowerClip hoặc nội dung của nó trước".to_string();
+            return false;
+        };
+
+        canvas.powerclip_edit_frame = Some(frame_id);
+        // Unclip every content layer of this frame and select the top one so tools
+        // target the content. `refresh_clip_masks` now skips this frame, so the
+        // masks stay off until the user finishes.
+        let mut top_content = None;
+        for (i, layer) in canvas.layer_stack.layers.iter_mut().enumerate() {
+            if layer.clip_parent_id == Some(frame_id) {
+                layer.mask = None;
+                layer.mask_active = false;
+                layer.selected = true;
+                top_content = Some(i);
+            } else {
+                layer.selected = false;
+            }
+        }
+        if let Some(i) = top_content {
+            canvas.layer_stack.active_idx = i;
+        }
+        canvas.clip_fp = 0;
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.apply_canvas_event(CanvasEvent::SelectionChanged);
+        self.recomposite();
+        self.shell.status_msg =
+            "Đang sửa nội dung PowerClip — di chuyển/sửa, xong bấm lại để đóng khung".to_string();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     /// Whether the active layer is currently clipped (Photoshop clipping mask /
     /// PowerClip content). Drives the menu label and shortcut toggle.
     pub fn active_is_clipped(&self) -> bool {
@@ -642,6 +750,66 @@ mod tests {
         // Undo restores the original placement (offset back at 0,0 either way, so
         // check the whole op is one undoable step by counting layers unchanged).
         app.docs.documents[0].canvas.undo().expect("undo arrange");
+    }
+
+    #[test]
+    fn edit_contents_unclips_then_re_clips_in_place() {
+        let mut app = app_photo_and_frame();
+        assert!(app.powerclip_place());
+        // The placed content is selected + clipped.
+        assert!(app.can_powerclip_edit_contents());
+
+        // Enter: content is unclipped (mask dropped) and the mode is active.
+        assert!(app.powerclip_edit_contents());
+        assert!(app.powerclip_editing_contents());
+        {
+            let canvas = &app.docs.documents[0].canvas;
+            let content = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .find(|l| l.clip_parent_id.is_some())
+                .expect("still clip content");
+            assert!(
+                content.mask.is_none(),
+                "content shown unclipped while editing"
+            );
+        }
+        // A recomposite-time refresh must NOT re-clip the edited content.
+        app.docs.documents[0].canvas.refresh_clip_masks();
+        assert!(app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.clip_parent_id.is_some())
+            .unwrap()
+            .mask
+            .is_none());
+
+        // Move the content while editing.
+        {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let ci = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .position(|l| l.clip_parent_id.is_some())
+                .unwrap();
+            canvas.layer_stack.layers[ci].offset = (12, 0);
+        }
+
+        // Finish: the clip is re-baked at the new position.
+        assert!(app.powerclip_edit_contents());
+        assert!(!app.powerclip_editing_contents());
+        let canvas = &app.docs.documents[0].canvas;
+        let content = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.clip_parent_id.is_some())
+            .unwrap();
+        assert!(content.mask.is_some(), "content re-clipped after finishing");
     }
 
     #[test]

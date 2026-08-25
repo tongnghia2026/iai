@@ -796,6 +796,42 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                     actions.layers.powerclip_release = true;
                                     ui.close();
                                 }
+                                // Edit the content in place (unclip → edit → re-clip).
+                                let edit_label = if data.layers.powerclip_editing {
+                                    "Finish Editing Contents"
+                                } else {
+                                    "Edit Contents"
+                                };
+                                let edit_enabled = data.layers.powerclip_editing
+                                    || (0..data.layers.layer_count).any(|i| {
+                                        data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                                            && data
+                                                .layers
+                                                .layer_is_clipped
+                                                .get(i)
+                                                .copied()
+                                                .unwrap_or(false)
+                                    })
+                                    || (0..data.layers.layer_count).any(|i| {
+                                        data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                                            && data
+                                                .layers
+                                                .layer_is_clip_base
+                                                .get(i)
+                                                .copied()
+                                                .unwrap_or(false)
+                                    });
+                                if ui
+                                    .add_enabled(edit_enabled, egui::Button::new(edit_label))
+                                    .on_hover_text(
+                                        "Show the frame's content unclipped so you can move / \
+                                         edit it, then finish to re-clip it in place",
+                                    )
+                                    .clicked()
+                                {
+                                    actions.layers.powerclip_edit_contents = true;
+                                    ui.close();
+                                }
                                 ui.separator();
                                 // Arrange the content inside its frame (Corel-style).
                                 // Enabled when a selected layer is PowerClip content.

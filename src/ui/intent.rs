@@ -233,6 +233,8 @@ pub struct LayerIntent {
     /// PowerClip: position / scale the selected content inside its frame
     /// (Center / Fit / Fill / Stretch).
     pub powerclip_arrange: Option<crate::app::powerclip_ops::PowerClipFit>,
+    /// PowerClip: toggle editing the frame's contents in place (unclip / re-clip).
+    pub powerclip_edit_contents: bool,
     /// Clipping mask (Ctrl+Alt+G): clip the active layer to the one below, or
     /// release it. Photoshop-style; shares the PowerClip clip engine.
     pub toggle_clipping_mask: bool,

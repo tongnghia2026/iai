@@ -377,6 +377,12 @@ pub struct Canvas {
     /// [`refresh_connectors`](Self::refresh_connectors) reroute. Lets the per-event
     /// reroute skip when no connected shape moved. Derived state; never serialized.
     pub connector_fp: u64,
+    /// The PowerClip frame whose contents are being edited IN PLACE, if any. While
+    /// set, [`refresh_clip_masks`](Self::refresh_clip_masks) leaves that frame's
+    /// content layers UNCLIPPED (mask off) so the user can see and reposition the
+    /// full content against the frame; finishing clears it and re-bakes the clip.
+    /// Session-only editing mode; never serialized.
+    pub powerclip_edit_frame: Option<u32>,
 }
 
 /// Shortest distance from point `(px,py)` to segment `a–b`. Used by
@@ -460,6 +466,7 @@ impl Canvas {
             plane_dirty: DirtyRegion::default(),
             clip_fp: 0,
             connector_fp: 0,
+            powerclip_edit_frame: None,
         }
     }
 
@@ -492,6 +499,7 @@ impl Canvas {
             plane_dirty: DirtyRegion::default(),
             clip_fp: self.clip_fp,
             connector_fp: self.connector_fp,
+            powerclip_edit_frame: self.powerclip_edit_frame,
         }
     }
 
@@ -547,6 +555,7 @@ impl Canvas {
             plane_dirty: DirtyRegion::default(),
             clip_fp: 0,
             connector_fp: 0,
+            powerclip_edit_frame: None,
         }
     }
 
@@ -597,6 +606,7 @@ impl Canvas {
             plane_dirty: DirtyRegion::default(),
             clip_fp: 0,
             connector_fp: 0,
+            powerclip_edit_frame: None,
         }
     }
 

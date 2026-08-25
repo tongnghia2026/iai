@@ -776,6 +776,7 @@ impl App {
                 layer_selected: self.shell.ui_data_cache.layer_selected.clone(),
                 layer_is_clipped: self.shell.ui_data_cache.layer_is_clipped.clone(),
                 layer_is_clip_base: self.shell.ui_data_cache.layer_is_clip_base.clone(),
+                powerclip_editing: self.powerclip_editing_contents(),
                 layer_thumbnails: self.shell.ui_data_cache.layer_thumbnails.clone(),
                 layer_mask_thumbnails: self.shell.ui_data_cache.layer_mask_thumbnails.clone(),
                 layer_depths: self.shell.ui_data_cache.layer_depths.clone(),
