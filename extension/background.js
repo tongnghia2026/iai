@@ -162,12 +162,25 @@ function jobTabId(id, sender) {
 }
 
 async function focusTab(tabId) {
-  const tab = await chrome.tabs.get(tabId);
-  if (tab.windowId != null) {
-    await chrome.windows.update(tab.windowId, { focused: true });
-  }
-  await chrome.tabs.update(tabId, { active: true });
-  await sleep(180);
+  // Make the tab active in its window and, via CDP, emulate focus + keep it
+  // "active" (unthrottled) — but DO NOT raise/focus the OS window. A minimized or
+  // hidden Chrome otherwise throttles the tab and its clipboard/paste needs focus,
+  // which is why paste/prompt/send were slow or failed unless the user hovered the
+  // taskbar thumbnail. This keeps the browser out of sight yet fully responsive.
+  try {
+    await chrome.tabs.update(tabId, { active: true });
+  } catch (e) {}
+  await withDebugger(tabId, async (target) => {
+    try {
+      await chrome.debugger.sendCommand(target, "Emulation.setFocusEmulationEnabled", {
+        enabled: true,
+      });
+    } catch (e) {}
+    try {
+      await chrome.debugger.sendCommand(target, "Page.setWebLifecycleState", { state: "active" });
+    } catch (e) {}
+  });
+  await sleep(120);
 }
 
 // Keep the debugger attached for the WHOLE job (attach on first use, detach when

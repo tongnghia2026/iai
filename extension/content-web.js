@@ -912,16 +912,55 @@
     );
   }
 
-  // The page's own "Copy image" control (Gemini "Sao chép hình ảnh", ChatGPT
-  // "Copy image"). Clicking it makes the SITE put the full-resolution original on
-  // the system clipboard — which iAi then reads natively at full quality.
+  function isCopyControl(el) {
+    return (
+      isVisible(el) &&
+      /sao chep (hinh anh|anh|hinh)|copy image|copy photo|copy picture/.test(controlLabel(el))
+    );
+  }
+
+  // Any "Copy image" control on the page — used only as a readiness signal.
   function findCopyControl() {
     var btns = deepQuery('button,[role="button"],[aria-label],[mattooltip]');
     for (var i = 0; i < btns.length; i++) {
-      if (!isVisible(btns[i])) continue;
-      if (/sao chep (hinh anh|anh|hinh)|copy image|copy photo|copy picture/.test(controlLabel(btns[i]))) {
-        return btns[i];
+      if (isCopyControl(btns[i])) return btns[i];
+    }
+    return null;
+  }
+
+  // Deep query within one node's subtree, crossing shadow roots under it.
+  function deepQueryWithin(root, sel) {
+    var out = [];
+    function walk(r) {
+      try {
+        r.querySelectorAll(sel).forEach(function (e) {
+          out.push(e);
+        });
+      } catch (e) {}
+      var all;
+      try {
+        all = r.querySelectorAll("*");
+      } catch (e) {
+        all = [];
       }
+      for (var i = 0; i < all.length; i++) if (all[i].shadowRoot) walk(all[i].shadowRoot);
+    }
+    walk(root);
+    return out;
+  }
+
+  // The "Copy image" control belonging to THIS result image. Searches the closest
+  // ancestor subtrees first so, when several results are on the page, we click the
+  // NEW image's copy button — not an older result's (which the page-wide
+  // findCopyControl would return first, downloading a stale image).
+  function findCopyControlNear(img) {
+    var n = img;
+    for (var h = 0; h < 10 && n; h++) {
+      var within = deepQueryWithin(n, 'button,[role="button"],[aria-label],[mattooltip]');
+      for (var i = 0; i < within.length; i++) {
+        if (isCopyControl(within[i])) return within[i];
+      }
+      n = n.parentElement || (n.getRootNode && n.getRootNode() && n.getRootNode().host);
     }
     return null;
   }
@@ -975,7 +1014,9 @@
   async function grabViaCopy(img, id, cb) {
     // Emulate focus first so the composer/toolbar behave as if the tab is active.
     await sendMessage({ type: "emulateFocus", id: id, enabled: true });
-    var btn = findCopyControl();
+    // Scope to THIS image's toolbar so multiple results don't make us copy an old
+    // one; fall back to the page-wide search only if the scoped lookup misses.
+    var btn = findCopyControlNear(img) || findCopyControl();
     if (!btn) {
       var more = findMoreButton(img);
       if (more) {
@@ -983,7 +1024,7 @@
         if (mp) {
           await sendMessage({ type: "clickNoFocus", id: id, x: mp.x, y: mp.y });
           await sleep(500);
-          btn = findCopyControl();
+          btn = findCopyControlNear(img) || findCopyControl();
         }
       }
     }
