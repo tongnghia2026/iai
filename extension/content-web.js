@@ -799,8 +799,11 @@
   }
 
   // Every URL that might hold a higher-quality version of this result, best first:
-  // the full-res googleusercontent rewrite, each srcset entry, the element src, and
-  // any download / full-size anchor near it.
+  // the full-res googleusercontent rewrite, each srcset entry, and the element src.
+  // Deliberately does NOT walk ancestors for <a> download links: on a chat page an
+  // ancestor spans several turns, so that grabbed an OLDER result's download URL.
+  // Only THIS element's own sources are used, so a fetch can never return a
+  // different image than the one detected.
   function candidateUrls(img) {
     var urls = [];
     function push(u) {
@@ -823,24 +826,6 @@
       }
     } catch (e) {}
     push(src);
-    var n = img;
-    for (var h = 0; h < 9 && n; h++) {
-      try {
-        var as = n.querySelectorAll("a[href]");
-        for (var i = 0; i < as.length; i++) {
-          var href = as[i].getAttribute("href") || "";
-          if (
-            as[i].hasAttribute("download") ||
-            /^blob:/.test(href) ||
-            /googleusercontent|oaiusercontent|blob\.core\.windows|\.(png|jpe?g|webp)(\?|$)/i.test(href)
-          ) {
-            push(stripSizeToFull(href));
-            push(href);
-          }
-        }
-      } catch (e) {}
-      n = n.parentElement;
-    }
     return urls;
   }
 
@@ -855,12 +840,13 @@
     }
     fetch(url, { credentials: "include" })
       .then(function (r) {
-        var ct = (r.headers && r.headers.get("content-type")) || "";
-        if (!r.ok || (ct && !/^image\//i.test(ct))) throw new Error("not image: " + r.status + " " + ct);
+        // Google's gg-dl download URL serves the image as application/octet-stream,
+        // so DON'T gate on content-type — accept any 2xx body and let the app's
+        // image decoder reject a non-image (it validates before placing).
+        if (!r.ok) throw new Error("http " + r.status);
         return r.blob();
       })
       .then(function (b) {
-        if (b.type && !/^image\//i.test(b.type)) throw new Error("not image blob: " + b.type);
         var fr = new FileReader();
         fr.onloadend = function () {
           cb(stripDataUrl(fr.result));
@@ -940,6 +926,26 @@
     return null;
   }
 
+  // The page's own "Download (full-size) image" control (Gemini "Tải hình ảnh có
+  // kích thước đầy đủ xuống", ChatGPT "Download"). Used ONLY as a readiness signal
+  // — its presence means the final image + toolbar have rendered, so grabbing now
+  // reads the FINAL full-res src rather than a preview.
+  function findDownloadControl() {
+    var btns = deepQuery('button,[role="button"],[aria-label],[mattooltip],a[download]');
+    for (var i = 0; i < btns.length; i++) {
+      if (!isVisible(btns[i])) continue;
+      if (btns[i].hasAttribute && btns[i].hasAttribute("download")) return btns[i];
+      if (
+        /tai hinh anh|tai xuong|tai ve|kich thuoc day du|download|save image|luu (anh|hinh)/.test(
+          controlLabel(btns[i])
+        )
+      ) {
+        return btns[i];
+      }
+    }
+    return null;
+  }
+
   // A "more options" / overflow (⋮) button near the result — the copy control is
   // sometimes tucked inside it. Returns the closest such button to the result img.
   function findMoreButton(img) {
@@ -993,6 +999,58 @@
     status(id, "Da chep anh goc, dang doc vao IAI...");
     chrome.runtime.sendMessage({ type: "result_clipboard", id: id });
     cb(true);
+  }
+
+  // Compact one-glance description of a URL for the failure diagnostic.
+  function briefUrl(u) {
+    if (!u) return "(none)";
+    if (/^data:/.test(u)) return "data[" + u.length + "b]";
+    if (/^blob:/.test(u)) return "blob:" + u.slice(5, 50);
+    try {
+      var a = new URL(u);
+      return a.host + a.pathname.slice(0, 34);
+    } catch (e) {
+      return u.slice(0, 60);
+    }
+  }
+
+  // When BOTH grab paths fail, dump the real page structure to the app's status
+  // log so the owner can screenshot it: the exact result-image src and the labels
+  // of the buttons around it. This is the ground truth needed to fix detection.
+  function dumpDiag(img, id) {
+    try {
+      status(
+        id,
+        "DIAG " +
+          SITE +
+          " img=" +
+          img.tagName +
+          " " +
+          briefUrl(img.currentSrc || img.src) +
+          " nat=" +
+          img.naturalWidth +
+          "x" +
+          img.naturalHeight +
+          " srcset=" +
+          (img.getAttribute("srcset") ? "yes" : "no") +
+          " urls=" +
+          candidateUrls(img).length
+      );
+    } catch (e) {}
+    try {
+      var labels = [];
+      var n = img;
+      for (var h = 0; h < 8 && n; h++) {
+        var bs = n.querySelectorAll('button,[role="button"],[aria-label],[mattooltip],a[download],a[href]');
+        for (var i = 0; i < bs.length && labels.length < 16; i++) {
+          var l = controlLabel(bs[i]).trim().replace(/\s+/g, " ").slice(0, 22);
+          if (l && labels.indexOf(l) < 0) labels.push(l);
+        }
+        if (labels.length >= 16) break;
+        n = n.parentElement;
+      }
+      status(id, "DIAG nut: " + (labels.join(" | ") || "(khong thay nut nao quanh anh)"));
+    } catch (e) {}
   }
 
   function armGrab(id, timeoutMs, submittedPrompt) {
@@ -1064,13 +1122,12 @@
       }
       done = true;
       cleanup();
-      status(id, "Da thay anh ket qua, dang tai ban goc ve IAI...");
-      // Small settle before grabbing: Gemini may swap the src from a low-res
-      // preview to the final image. candidateUrls reads currentSrc at fetch time,
-      // so the swap is picked up.
-      setTimeout(function () {
-        // 1) Best path: download the ORIGINAL bytes (full-res URL rewrite / srcset /
-        //    background fetch). Headless, full quality.
+      status(id, "Da thay anh ket qua, cho thanh nut hien roi tai ban goc...");
+
+      function doGrab() {
+        // 1) Best path: download the ORIGINAL bytes via background fetch (bypasses
+        //    CORS; content-type no longer gated so gg-dl octet-stream works too).
+        //    Headless, full quality.
         imgToBase64Multi(img, function (b64) {
           if (b64) {
             chrome.runtime.sendMessage({ type: "result", id: id, image: b64 });
@@ -1081,6 +1138,7 @@
           status(id, "Tai truc tiep khong duoc, thu nut Sao chep anh tren trang...");
           grabViaCopy(img, id, function (handed) {
             if (!handed) {
+              dumpDiag(img, id);
               fail(
                 id,
                 "Khong lay duoc anh ket qua (khong tai duoc & khong thay nut Sao chep anh tren " +
@@ -1091,7 +1149,25 @@
             // handed === true: iAi reads the clipboard and reports success/failure.
           });
         });
-      }, 700);
+      }
+
+      // The FINAL full-res src and the action toolbar (Copy / Download full-size)
+      // appear a beat after the image first renders. Grabbing immediately used to
+      // read a preview src (fetch failed) and miss the not-yet-rendered Copy
+      // button. Wait for the toolbar — or a 6s cap — before grabbing.
+      var waited = 0;
+      (function waitControls() {
+        // Min ~500ms settle even if a prior turn's toolbar already exists, so a
+        // second result isn't grabbed before its own final src lands; up to 6s for
+        // the toolbar to appear on the first result.
+        var ready = findCopyControl() || findDownloadControl();
+        if ((ready && waited >= 500) || waited >= 6000) {
+          doGrab();
+        } else {
+          waited += 250;
+          setTimeout(waitControls, 250);
+        }
+      })();
     }
     // Force a lazy image (below the viewport) to load instead of waiting for the
     // user to scroll it into view; its `load` event re-runs the scan.

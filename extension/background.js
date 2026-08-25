@@ -404,17 +404,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "fetchImage") {
     fetch(msg.src, { credentials: "include" })
       .then((r) => {
-        const ct = (r.headers && r.headers.get("content-type")) || "";
-        // Some CDNs serve the image with an empty or generic content-type; only
-        // reject when it's explicitly a NON-image (e.g. a redirect to HTML login).
-        if (!r.ok || (ct && !/^image\//i.test(ct))) throw new Error("not image: " + r.status + " " + ct);
+        // Google's gg-dl download URL serves the generated image as
+        // application/octet-stream, so DON'T gate on content-type — accept any
+        // 2xx body; the app's image decoder rejects a non-image before placing.
+        if (!r.ok) throw new Error("http " + r.status);
         return r.blob();
       })
       .then((b) => {
-        if (b.type && !/^image\//i.test(b.type)) {
-          sendResponse({ image: null });
-          return;
-        }
         const fr = new FileReader();
         fr.onloadend = () => {
           const s = String(fr.result);
