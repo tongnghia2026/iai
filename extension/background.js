@@ -295,6 +295,21 @@ async function realScroll(tabId, x, y) {
   });
 }
 
+// Screenshot the tab through the attached debugger and return the base64 PNG
+// (no data: prefix). Used as the content script's last-resort way to read a
+// result image whose bytes can't be fetched directly (CORS taint / blob: URL /
+// redirect-to-HTML). Deliberately does NOT focus the tab — the point of the web
+// bridge is to stay out of sight; captureScreenshot returns the last painted
+// frame even when the tab is occluded.
+async function captureViewport(tabId) {
+  return await withDebugger(tabId, async (target) => {
+    const res = await chrome.debugger.sendCommand(target, "Page.captureScreenshot", {
+      format: "png",
+    });
+    return res && res.data ? res.data : null;
+  });
+}
+
 async function realType(tabId, text) {
   await focusTab(tabId);
   await withDebugger(tabId, async (target) => {
@@ -484,6 +499,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     realEnter(tabId)
       .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (msg.type === "captureViewport") {
+    const tabId = jobTabId(msg.id, sender);
+    if (!tabId) {
+      sendResponse({ ok: false, error: "missing tab id" });
+      return true;
+    }
+    captureViewport(tabId)
+      .then((image) => sendResponse({ ok: !!image, image }))
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }

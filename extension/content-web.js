@@ -825,6 +825,67 @@
       });
   }
 
+  // Last-resort grab: when reading the <img> bytes fails (cross-origin CORS taint,
+  // a blob: URL the service worker can't fetch, or a redirect to HTML), screenshot
+  // the tab through the already-attached debugger and crop the result image's
+  // rectangle out of it. The screenshot is our OWN PNG (a data: URL), so the crop
+  // canvas is never tainted — this sidesteps every CORS / blob / host-permission
+  // reason imgToBase64 can fail. It only runs after imgToBase64 already returned
+  // null, so it cannot regress a case that currently works.
+  function captureViaScreenshot(img, id, cb) {
+    var rect;
+    try {
+      rect = img.getBoundingClientRect();
+    } catch (e) {
+      cb(null);
+      return;
+    }
+    if (!rect || rect.width < 8 || rect.height < 8) {
+      cb(null);
+      return;
+    }
+    try {
+      img.scrollIntoView({ block: "center", inline: "center" });
+    } catch (e) {}
+    // Let the scroll settle, then screenshot the current viewport and crop.
+    setTimeout(function () {
+      var r = img.getBoundingClientRect();
+      sendMessage({ type: "captureViewport", id: id }).then(function (resp) {
+        if (!resp || !resp.ok || !resp.image) {
+          cb(null);
+          return;
+        }
+        var shot = new Image();
+        shot.onload = function () {
+          try {
+            // Screenshot pixel width ÷ CSS viewport width recovers the device
+            // pixel ratio, so the crop is correct on any display scaling.
+            var scale = shot.naturalWidth / Math.max(1, window.innerWidth);
+            var sx = Math.max(0, Math.round(r.left * scale));
+            var sy = Math.max(0, Math.round(r.top * scale));
+            var sw = Math.min(shot.naturalWidth - sx, Math.round(r.width * scale));
+            var sh = Math.min(shot.naturalHeight - sy, Math.round(r.height * scale));
+            if (sw < 8 || sh < 8) {
+              cb(null);
+              return;
+            }
+            var c = document.createElement("canvas");
+            c.width = sw;
+            c.height = sh;
+            c.getContext("2d").drawImage(shot, sx, sy, sw, sh, 0, 0, sw, sh);
+            cb(stripDataUrl(c.toDataURL("image/png")));
+          } catch (e) {
+            cb(null);
+          }
+        };
+        shot.onerror = function () {
+          cb(null);
+        };
+        shot.src = "data:image/png;base64," + resp.image;
+      });
+    }, 250);
+  }
+
   function armGrab(id, timeoutMs, submittedPrompt) {
     var started = Date.now();
     var beforeElements = Array.prototype.slice.call(document.querySelectorAll("img"));
@@ -900,8 +961,17 @@
       // so the swap is picked up.
       setTimeout(function () {
         imgToBase64(img, function (b64) {
-          if (b64) chrome.runtime.sendMessage({ type: "result", id: id, image: b64 });
-          else fail(id, "Khong lay duoc anh ket qua");
+          if (b64) {
+            chrome.runtime.sendMessage({ type: "result", id: id, image: b64 });
+            return;
+          }
+          // Direct read failed (CORS taint / blob / redirect) — chup lai anh tren
+          // trang qua debugger, cach nay bo qua duoc moi rao can tren.
+          status(id, "Doc anh truc tiep khong duoc, dang chup lai anh tren trang...");
+          captureViaScreenshot(img, id, function (b64b) {
+            if (b64b) chrome.runtime.sendMessage({ type: "result", id: id, image: b64b });
+            else fail(id, "Khong lay duoc anh ket qua");
+          });
         });
       }, 700);
     }
