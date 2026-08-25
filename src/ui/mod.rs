@@ -2539,24 +2539,101 @@ pub fn build(
             }
         }
 
+        // PowerClip Edit-Contents: a floating confirm bar on the canvas so the user
+        // doesn't have to go back to the menu to finish / cancel.
+        if data.layers.powerclip_editing {
+            let pal = data.chrome.theme_mode.palette();
+            egui::Area::new(egui::Id::new("powerclip_edit_bar"))
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 46.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(pal.panel_bg)
+                        .stroke(egui::Stroke::new(1.0_f32, pal.accent_primary))
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .corner_radius(6.0)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Đang sửa nội dung PowerClip")
+                                        .color(pal.text)
+                                        .strong(),
+                                );
+                                ui.add_space(6.0);
+                                if ui
+                                    .button(egui::RichText::new("✓ Xong").strong())
+                                    .on_hover_text("Đóng khung lại, giữ chỉnh sửa")
+                                    .clicked()
+                                {
+                                    actions.layers.powerclip_edit_contents = true;
+                                }
+                                if ui
+                                    .button("✗ Huỷ")
+                                    .on_hover_text("Bỏ chỉnh sửa, trả nội dung về như trước")
+                                    .clicked()
+                                {
+                                    actions.layers.powerclip_cancel_editing = true;
+                                }
+                            });
+                        });
+                });
+        }
+
         if let Some((mx, my)) = data.tool.object_ctx_menu_pos {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 actions.tool.object_ctx_menu_close = true;
             }
             let screen = ctx.content_rect();
-            let menu_w = 230.0;
+            let menu_w = 240.0;
             let px = mx.min(screen.max.x - menu_w).max(screen.min.x);
-            let py = my.min(screen.max.y - 90.0).max(screen.min.y + 28.0);
+            let py = my.min(screen.max.y - 430.0).max(screen.min.y + 28.0);
             let pal = data.chrome.theme_mode.palette();
-            let selected_vectors = data
-                .layers
-                .layer_selected
-                .iter()
-                .zip(data.layers.layer_types.iter())
-                .filter(|(selected, kind)| {
-                    **selected && (kind.as_str() == "Shape" || kind.as_str() == "Path")
+            let lc = data.layers.layer_count;
+            let sel = |i: usize| data.layers.layer_selected.get(i).copied().unwrap_or(false);
+            let is_vec = |i: usize| {
+                data.layers
+                    .layer_types
+                    .get(i)
+                    .map(|k| k.as_str() == "Shape" || k.as_str() == "Path")
+                    .unwrap_or(false)
+            };
+            let selected_vectors = (0..lc).filter(|&i| sel(i) && is_vec(i)).count();
+            let selected_total = (0..lc)
+                .filter(|&i| {
+                    sel(i)
+                        && !data
+                            .layers
+                            .layer_is_background
+                            .get(i)
+                            .copied()
+                            .unwrap_or(false)
                 })
                 .count();
+            let clipped_selected = (0..lc).any(|i| {
+                sel(i)
+                    && data
+                        .layers
+                        .layer_is_clipped
+                        .get(i)
+                        .copied()
+                        .unwrap_or(false)
+            });
+            let frame_selected = (0..lc).any(|i| {
+                sel(i)
+                    && data
+                        .layers
+                        .layer_is_clip_base
+                        .get(i)
+                        .copied()
+                        .unwrap_or(false)
+            });
+            let editing = data.layers.powerclip_editing;
+            let can_place = selected_total >= 2 && selected_vectors >= 1;
+            let can_boolean = selected_vectors >= 2;
+            let active_idx = data.layers.active_layer_idx;
+            let has_doc = data.doc.has_doc;
+            use crate::app::powerclip_ops::PowerClipFit;
+            use crate::core::vector::boolean::BooleanOp;
 
             let resp = egui::Area::new(egui::Id::new("object_ctx_menu"))
                 .fixed_pos(egui::pos2(px, py))
@@ -2571,19 +2648,86 @@ pub fn build(
                             ui.set_min_width(menu_w);
                             ui.set_max_width(menu_w);
                             ui.spacing_mut().item_spacing.y = 0.0;
-                            if flat_context_menu_item(
-                                ui,
-                                menu_w,
-                                selected_vectors > 0,
-                                "Format Selected Vectors…",
-                                None,
-                            ) {
+                            let mut clicked = false;
+                            let item =
+                                |ui: &mut egui::Ui, en: bool, label: &str, sc: Option<&str>| {
+                                    flat_context_menu_item(ui, menu_w, en, label, sc)
+                                };
+
+                            if item(ui, selected_vectors > 0, "Format Selected Vectors…", None) {
                                 actions.dialogs.open_vector_style_dialog =
                                     Some(intent::VectorStyleTarget::Selected);
-                                true
-                            } else {
-                                false
+                                clicked = true;
                             }
+                            if item(ui, has_doc, "Free Transform", Some("Ctrl+T")) {
+                                actions.tool.start_transform = true;
+                                clicked = true;
+                            }
+                            if item(ui, has_doc, "Duplicate", None) {
+                                actions.layers.duplicate_layer = Some(active_idx);
+                                clicked = true;
+                            }
+                            if item(ui, selected_vectors > 0, "Convert to Curves", None) {
+                                actions.layers.convert_to_curves = Some(active_idx);
+                                clicked = true;
+                            }
+                            if item(ui, has_doc, "Delete", None) {
+                                actions.layers.remove_layer = Some(active_idx);
+                                clicked = true;
+                            }
+
+                            flat_context_menu_separator(ui, menu_w);
+                            // Shaping (Boolean) — needs ≥2 vectors.
+                            for (label, op) in [
+                                ("Weld", BooleanOp::Union),
+                                ("Trim", BooleanOp::Difference),
+                                ("Intersect", BooleanOp::Intersect),
+                                ("Simplify", BooleanOp::Exclude),
+                            ] {
+                                if item(ui, can_boolean, label, None) {
+                                    actions.layers.boolean_op = Some(op);
+                                    clicked = true;
+                                }
+                            }
+
+                            flat_context_menu_separator(ui, menu_w);
+                            // PowerClip.
+                            if item(ui, can_place, "PowerClip: Place Inside Frame", None) {
+                                actions.layers.powerclip_place = true;
+                                clicked = true;
+                            }
+                            let edit_label = if editing {
+                                "PowerClip: Finish Editing Contents"
+                            } else {
+                                "PowerClip: Edit Contents"
+                            };
+                            if item(
+                                ui,
+                                editing || clipped_selected || frame_selected,
+                                edit_label,
+                                None,
+                            ) {
+                                actions.layers.powerclip_edit_contents = true;
+                                clicked = true;
+                            }
+                            if item(ui, clipped_selected, "PowerClip: Extract From Frame", None) {
+                                actions.layers.powerclip_release = true;
+                                clicked = true;
+                            }
+                            if clipped_selected {
+                                for (label, mode) in [
+                                    ("PowerClip: Center", PowerClipFit::Center),
+                                    ("PowerClip: Fit", PowerClipFit::Fit),
+                                    ("PowerClip: Fill", PowerClipFit::Fill),
+                                    ("PowerClip: Stretch", PowerClipFit::Stretch),
+                                ] {
+                                    if item(ui, true, label, None) {
+                                        actions.layers.powerclip_arrange = Some(mode);
+                                        clicked = true;
+                                    }
+                                }
+                            }
+                            clicked
                         })
                         .inner
                 });

@@ -383,6 +383,8 @@ impl App {
 
         // Already editing → finish: re-bake the clip and leave the mode.
         if canvas.powerclip_edit_frame.take().is_some() {
+            self.edit.powerclip_edit_undo_mark = None;
+            let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
             canvas.clip_fp = 0;
             canvas.refresh_clip_masks();
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
@@ -421,6 +423,9 @@ impl App {
         };
 
         canvas.powerclip_edit_frame = Some(frame_id);
+        // Remember the undo depth so Cancel can revert every edit made in the
+        // session (the mask changes here aren't commands, so this is stable).
+        let undo_mark = canvas.undo_count();
         // Unclip every content layer of this frame and select the top one so tools
         // target the content. `refresh_clip_masks` now skips this frame, so the
         // masks stay off until the user finishes.
@@ -439,11 +444,48 @@ impl App {
             canvas.layer_stack.active_idx = i;
         }
         canvas.clip_fp = 0;
+        self.edit.powerclip_edit_undo_mark = Some(undo_mark);
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.apply_canvas_event(CanvasEvent::SelectionChanged);
         self.recomposite();
         self.shell.status_msg =
             "Đang sửa nội dung PowerClip — di chuyển/sửa, xong bấm lại để đóng khung".to_string();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
+    /// Cancel PowerClip Edit-Contents: undo every content edit made during the
+    /// session, then re-clip. No-op when not editing.
+    pub fn powerclip_cancel_editing(&mut self) -> bool {
+        if !self.powerclip_editing_contents() {
+            return false;
+        }
+        self.sync_brush_gpu_to_cpu();
+        let mark = self.edit.powerclip_edit_undo_mark.take().unwrap_or(0);
+        // Revert every command recorded since editing began.
+        while self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .undo_count()
+            > mark
+        {
+            if self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .undo()
+                .is_none()
+            {
+                break;
+            }
+        }
+        let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+        canvas.powerclip_edit_frame = None;
+        canvas.clip_fp = 0;
+        canvas.refresh_clip_masks();
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.apply_canvas_event(CanvasEvent::SelectionChanged);
+        self.recomposite();
+        self.shell.status_msg = "Đã huỷ sửa nội dung PowerClip".to_string();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -810,6 +852,52 @@ mod tests {
             .find(|l| l.clip_parent_id.is_some())
             .unwrap();
         assert!(content.mask.is_some(), "content re-clipped after finishing");
+    }
+
+    #[test]
+    fn cancel_editing_reverts_session_edits_and_re_clips() {
+        let mut app = app_photo_and_frame();
+        assert!(app.powerclip_place());
+        let after_place = app.docs.documents[0].canvas.undo_count();
+
+        assert!(app.powerclip_edit_contents()); // enter
+        assert!(app.powerclip_editing_contents());
+
+        // An undoable edit during the session.
+        app.docs.documents[0]
+            .canvas
+            .execute(
+                Box::new(crate::core::command::PageSetupCommand::new(
+                    "edit",
+                    8.0,
+                    5.0,
+                    Vec::new(),
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("edit applies");
+        assert!(app.docs.documents[0].canvas.undo_count() > after_place);
+
+        // Cancel reverts the session edit and re-clips.
+        assert!(app.powerclip_cancel_editing());
+        assert!(!app.powerclip_editing_contents());
+        assert_eq!(
+            app.docs.documents[0].canvas.undo_count(),
+            after_place,
+            "session edits undone back to the entry point"
+        );
+        assert_eq!(
+            app.docs.documents[0].canvas.metadata.page_bleed_px, 0.0,
+            "the edit was reverted"
+        );
+        let content = app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.clip_parent_id.is_some())
+            .unwrap();
+        assert!(content.mask.is_some(), "content re-clipped after cancel");
     }
 
     #[test]

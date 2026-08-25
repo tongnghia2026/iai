@@ -235,6 +235,8 @@ pub struct LayerIntent {
     pub powerclip_arrange: Option<crate::app::powerclip_ops::PowerClipFit>,
     /// PowerClip: toggle editing the frame's contents in place (unclip / re-clip).
     pub powerclip_edit_contents: bool,
+    /// PowerClip: cancel editing contents — revert the session's edits and re-clip.
+    pub powerclip_cancel_editing: bool,
     /// Clipping mask (Ctrl+Alt+G): clip the active layer to the one below, or
     /// release it. Photoshop-style; shares the PowerClip clip engine.
     pub toggle_clipping_mask: bool,

@@ -1281,6 +1281,7 @@ impl App {
                 text_font_preview: None,
                 transform_ctx_menu_pos: None,
                 object_ctx_menu_pos: None,
+                powerclip_edit_undo_mark: None,
                 brush_popup_pos: None,
                 selection_ctx_menu_pos: None,
                 text_drag_hovered: false,

@@ -151,6 +151,9 @@ pub struct EditorInteraction {
     pub(in crate::app) transform_ctx_menu_pos: Option<(f32, f32)>,
     /// Screen-space position of the Move-tool context menu for selected objects.
     pub(in crate::app) object_ctx_menu_pos: Option<(f32, f32)>,
+    /// Undo depth when PowerClip Edit-Contents began, so Cancel can revert every
+    /// content edit made during the session. `None` when not editing.
+    pub(in crate::app) powerclip_edit_undo_mark: Option<usize>,
     /// Screen-space position of the right-click brush settings popup (Brush /
     /// Pencil / Eraser). Set in input.rs, consumed by the UI. None when closed.
     pub(in crate::app) brush_popup_pos: Option<(f32, f32)>,

@@ -172,6 +172,9 @@ impl App {
         if std::mem::take(&mut actions.layers.powerclip_edit_contents) {
             self.powerclip_edit_contents();
         }
+        if std::mem::take(&mut actions.layers.powerclip_cancel_editing) {
+            self.powerclip_cancel_editing();
+        }
         if actions.layers.toggle_clipping_mask {
             self.toggle_clipping_mask();
         }
