@@ -70,8 +70,9 @@ pub struct DevelopShell {
     /// Develop; opening N RAWs appends N transient entries. The ACTIVE entry's
     /// live settings are `ui.develop_settings`; an entry's `settings` field is
     /// its saved state while another image is active. Emptied on commit
-    /// ("Open Image" bakes every entry) and on cancel (which also closes the
-    /// transient RAW documents). `pending_develop` defers entering Develop to
+    /// ("Open Image" bakes only the active entry and discards other transient
+    /// placeholders) and on cancel (which closes every transient RAW document).
+    /// `pending_develop` defers entering Develop to
     /// just after the load is attached (see `enter_pending_develop`).
     pub(in crate::app) develop_session: Vec<DevelopSessionEntry>,
     /// In-progress "Open Image" bake over the session (see [`DevelopBakeAll`]).

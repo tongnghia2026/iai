@@ -1064,9 +1064,9 @@ pub struct DevelopBakeAllResult {
     pub tiles: crate::core::tile::TileMap,
 }
 
-/// Sequential off-thread bake of every session image on "Open Image" (D3).
-/// One image is in flight at a time (`rx`); the Develop window stays open
-/// showing progress until the queue drains, then tears down.
+/// Off-thread bake of the active session image on "Open Image". The queue shape
+/// is retained for the worker/poll state machine, but the Camera-Raw-style
+/// single-selection workflow normally contains exactly one entry.
 pub struct DevelopBakeAll {
     /// Used to suppress a one-frame progress/original-image flash for fast
     /// single-image commits. The last preview frame remains presented until

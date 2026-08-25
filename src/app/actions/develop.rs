@@ -249,6 +249,14 @@ impl App {
             .filter(|e| e.transient)
             .map(|e| e.doc)
             .collect();
+        self.dev.develop_session.clear();
+        self.discard_transient_develop_docs(&ids);
+    }
+
+    /// Close selected transient RAW placeholders/documents and cancel any load
+    /// routed to them. Used both by Cancel (all entries) and by Open Image
+    /// (every filmstrip entry except the active one).
+    pub(crate) fn discard_transient_develop_docs(&mut self, ids: &[DocumentId]) {
         for (key, id) in &self.jobs.raw_preview_docs {
             if ids.contains(id) {
                 self.jobs.cancelled_raw_loads.insert(key.clone());
@@ -258,9 +266,8 @@ impl App {
         self.jobs
             .raw_preview_failures
             .retain(|id, _| !ids.contains(id));
-        self.dev.develop_session.clear();
         for id in ids {
-            if let Some(idx) = self.docs.documents.iter().position(|d| d.id == id) {
+            if let Some(idx) = self.docs.documents.iter().position(|d| d.id == *id) {
                 self.close_doc_confirmed(idx);
             }
         }

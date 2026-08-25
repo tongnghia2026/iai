@@ -407,7 +407,7 @@ fn dist_point_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
 /// (Memory Milestone M1 thumbnails). Colours are averaged in premultiplied
 /// space so alpha edges stay correct; a fully-transparent destination pixel
 /// keeps zero colour. Only ever downscales (callers clamp the target ≤ source).
-fn downscale_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+pub(crate) fn downscale_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let dw = dw.max(1);
     let dh = dh.max(1);
     let mut out = vec![0u8; dw as usize * dh as usize * 4];

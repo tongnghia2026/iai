@@ -13,7 +13,6 @@
 //! the compositor bake this window's view while it is open (D2.4).
 
 use crate::app::develop_shell::DevelopTool;
-use crate::app::file_ops::normalized_path_key;
 use crate::app::state::App;
 use egui_phosphor::regular as ph;
 use std::sync::Arc;
@@ -32,6 +31,13 @@ fn develop_commit_needs_settled_frame(
 
 fn develop_session_entry_blocks_commit(decode_in_flight: bool, decode_failed: bool) -> bool {
     decode_in_flight || decode_failed
+}
+
+fn develop_commit_targets_entry(
+    entry: crate::core::document::DocumentId,
+    active: crate::core::document::DocumentId,
+) -> bool {
+    entry == active
 }
 
 fn develop_display_lut_active(
@@ -298,6 +304,9 @@ impl App {
         }
         self.cancel_develop_preview();
         self.shell.ui.show_develop_dialog = false;
+        // Stop a multi-RAW preview extractor from appending more filmstrip
+        // placeholders after this session has been cancelled.
+        self.jobs.pending_raw_previews.clear();
         // Cancelling the Develop stage discards the whole session's transient
         // RAW documents (pre-editor flow: Open Image is what creates them).
         self.discard_develop_session_docs();
@@ -305,32 +314,31 @@ impl App {
         self.shell.status_msg = "Closed the Develop window".to_string();
     }
 
-    /// Commit path ("Open Image"): bake EVERY image of the session (D3 — the
-    /// decision that "Open Image" commits the whole filmstrip). Non-neutral
-    /// images bake sequentially on a worker while the window stays open
-    /// showing progress (`poll_develop_bake_all` finishes the commit); neutral
-    /// images just open — the decoded pixels stand (mirrors
-    /// `apply_develop_dialog`). Every transient RAW becomes a normal tab.
+    /// Commit path ("Open Image"): bake only the active filmstrip image, matching
+    /// Camera Raw's single-selection workflow. Other transient RAW placeholders
+    /// are discarded instead of being full-decoded and materialized as raster
+    /// tabs; users can select a different filmstrip image before pressing Open.
     fn commit_develop_window(&mut self) {
         if self.win.develop_window.is_none() || self.dev.develop_bake_all.is_some() {
             return;
         }
-        let session_waiting = self.dev.develop_session.iter().any(|entry| {
-            let decode_in_flight = self
-                .docs
-                .documents
-                .iter()
-                .find(|doc| doc.id == entry.doc)
-                .and_then(|doc| doc.path.as_ref())
-                .is_some_and(|path| self.jobs.loading_keys.contains(&normalized_path_key(path)));
-            develop_session_entry_blocks_commit(
-                decode_in_flight,
-                self.jobs.raw_preview_failures.contains_key(&entry.doc),
-            )
-        });
-        if session_waiting {
+        let active_id = self.docs.documents[self.docs.active_doc_idx].id;
+        let active_waiting = self
+            .dev
+            .develop_session
+            .iter()
+            .filter(|entry| develop_commit_targets_entry(entry.doc, active_id))
+            .any(|entry| {
+                let decode_in_flight = self.raw_decode_in_flight_for_doc(entry.doc);
+                develop_session_entry_blocks_commit(
+                    decode_in_flight,
+                    self.jobs.raw_preview_failures.contains_key(&entry.doc),
+                )
+            });
+        if active_waiting || self.docs.documents[self.docs.active_doc_idx].deferred_raw {
+            self.ensure_raw_resident(self.docs.active_doc_idx);
             self.shell.status_msg =
-                "Wait for every RAW to finish decoding, or cancel the failed import".to_string();
+                "Wait for the selected RAW to finish decoding, or select another image".to_string();
             if let Some(w) = &self.win.develop_window {
                 w.request_redraw();
             }
@@ -359,6 +367,10 @@ impl App {
         }
         self.dev.develop_commit_after_refine = false;
         self.develop_session_save_active_settings();
+        // Open commits the current selection only. Drop the preview receiver so
+        // late thumbnails from the original file-dialog batch cannot create a
+        // fresh Develop session after this window tears down.
+        self.jobs.pending_raw_previews.clear();
         // The live preview stays UP through the whole bake: cancelling it here
         // restored the pristine tiles, so the window (and the main canvas
         // behind it) flashed back to the ORIGINAL colours for the entire
@@ -368,12 +380,21 @@ impl App {
         // baked tiles land (poll_develop_bake_all), so the edited look stays
         // on screen from the click to the final canvas.
         let entries = std::mem::take(&mut self.dev.develop_session);
-        let total_images = entries.len();
-        let single_raw = total_images == 1 && entries.first().map_or(false, |e| e.transient);
-        let pending: std::collections::VecDeque<_> = entries
+        let active_entry = entries
             .iter()
-            .map(|e| (e.doc, e.settings.clone()))
+            .find(|entry| develop_commit_targets_entry(entry.doc, active_id));
+        let single_raw = active_entry.is_some_and(|entry| entry.transient);
+        let discarded: Vec<_> = entries
+            .iter()
+            .filter(|entry| !develop_commit_targets_entry(entry.doc, active_id) && entry.transient)
+            .map(|entry| entry.doc)
             .collect();
+        self.discard_transient_develop_docs(&discarded);
+        let pending: std::collections::VecDeque<_> = active_entry
+            .map(|entry| (entry.doc, entry.settings.clone()))
+            .into_iter()
+            .collect();
+        let total_images = usize::from(!pending.is_empty());
         if pending.is_empty() {
             self.finish_develop_bake_all(total_images, 0, single_raw);
             return;
@@ -766,11 +787,8 @@ impl App {
         // multi-image session — prepared here so the UI closure borrows no App
         // state.
         let active_id = self.docs.documents[self.docs.active_doc_idx].id;
-        let active_raw_loading = self
-            .jobs
-            .raw_preview_docs
-            .values()
-            .any(|id| *id == active_id);
+        let active_raw_loading = self.raw_decode_in_flight_for_doc(active_id);
+        let active_raw_deferred = self.docs.documents[self.docs.active_doc_idx].deferred_raw;
         let active_raw_failure = self.jobs.raw_preview_failures.get(&active_id).cloned();
         // Histogram R/G/B readout for the pixel under the cursor (D4).
         self.dev.develop_readout = self.compute_develop_readout();
@@ -797,13 +815,20 @@ impl App {
                         let scale = FILMSTRIP_THUMB_H / (s[1] as f32).max(1.0);
                         (t.id(), egui::vec2(s[0] as f32 * scale, FILMSTRIP_THUMB_H))
                     });
-                    let state = if self.jobs.raw_preview_docs.values().any(|id| *id == e.doc) {
+                    let state = if let Some(error) = self.jobs.raw_preview_failures.get(&e.doc) {
+                        Some(format!("RAW decode failed: {error}"))
+                    } else if self.raw_decode_in_flight_for_doc(e.doc) {
                         Some("Decoding RAW...".to_string())
+                    } else if self
+                        .docs
+                        .documents
+                        .iter()
+                        .find(|doc| doc.id == e.doc)
+                        .is_some_and(|doc| doc.deferred_raw)
+                    {
+                        Some("Preview — click to load".to_string())
                     } else {
-                        self.jobs
-                            .raw_preview_failures
-                            .get(&e.doc)
-                            .map(|error| format!("RAW decode failed: {error}"))
+                        None
                     };
                     (e.doc, title, tex, e.doc == active_id, state)
                 })
@@ -884,26 +909,30 @@ impl App {
                         });
                         return;
                     }
-                    if active_raw_loading {
-                        ui.add_space(32.0);
-                        ui.vertical_centered(|ui| {
-                            ui.add(egui::Spinner::new().size(30.0));
-                            ui.add_space(10.0);
-                            ui.heading("Decoding RAW...");
-                            ui.add_space(6.0);
-                            ui.label("Showing the camera's embedded preview.");
-                            ui.label("Develop controls will unlock when the full scene is ready.");
-                            ui.add_space(18.0);
-                            cancel_dev = ui.button("Cancel").clicked();
-                        });
-                        return;
-                    }
                     if let Some(error) = &active_raw_failure {
                         ui.add_space(32.0);
                         ui.vertical_centered(|ui| {
                             ui.heading("RAW decode failed");
                             ui.add_space(8.0);
                             ui.label(error);
+                            ui.add_space(18.0);
+                            cancel_dev = ui.button("Cancel").clicked();
+                        });
+                        return;
+                    }
+                    if active_raw_deferred {
+                        ui.add_space(32.0);
+                        ui.vertical_centered(|ui| {
+                            ui.add(egui::Spinner::new().size(30.0));
+                            ui.add_space(10.0);
+                            ui.heading(if active_raw_loading {
+                                "Decoding RAW..."
+                            } else {
+                                "RAW queued..."
+                            });
+                            ui.add_space(6.0);
+                            ui.label("Showing the camera's embedded preview.");
+                            ui.label("Develop controls will unlock when the full scene is ready.");
                             ui.add_space(18.0);
                             cancel_dev = ui.button("Cancel").clicked();
                         });
@@ -1266,10 +1295,12 @@ impl App {
                 title.push_str(&format!(" — {cam}"));
             }
         }
-        if self.jobs.raw_preview_docs.values().any(|id| *id == doc.id) {
-            title.push_str(" - Decoding RAW...");
-        } else if self.jobs.raw_preview_failures.contains_key(&doc.id) {
+        if self.jobs.raw_preview_failures.contains_key(&doc.id) {
             title.push_str(" - RAW decode failed");
+        } else if self.raw_decode_in_flight_for_doc(doc.id) {
+            title.push_str(" - Decoding RAW...");
+        } else if doc.deferred_raw {
+            title.push_str(" - Preview");
         }
         title
     }
@@ -1512,9 +1543,10 @@ impl App {
 #[cfg(test)]
 mod phase6_transition_tests {
     use super::{
-        develop_commit_needs_settled_frame, develop_display_lut_active,
-        develop_session_entry_blocks_commit,
+        develop_commit_needs_settled_frame, develop_commit_targets_entry,
+        develop_display_lut_active, develop_session_entry_blocks_commit,
     };
+    use crate::core::document::DocumentId;
 
     #[test]
     fn open_image_waits_for_every_unsettled_preview_state() {
@@ -1529,6 +1561,14 @@ mod phase6_transition_tests {
         assert!(!develop_session_entry_blocks_commit(false, false));
         assert!(develop_session_entry_blocks_commit(true, false));
         assert!(develop_session_entry_blocks_commit(false, true));
+    }
+
+    #[test]
+    fn open_image_targets_only_the_active_filmstrip_entry() {
+        let active = DocumentId(2);
+        assert!(!develop_commit_targets_entry(DocumentId(1), active));
+        assert!(develop_commit_targets_entry(DocumentId(2), active));
+        assert!(!develop_commit_targets_entry(DocumentId(3), active));
     }
 
     #[test]

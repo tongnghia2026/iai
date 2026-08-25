@@ -9,19 +9,43 @@ use crate::file_io;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Embedded camera JPEGs are colour references/thumbnails only. Presenting one
-/// as the main document guarantees a visible replacement when the RAW lands.
+/// Multi-RAW sessions present the embedded camera JPEG immediately, then swap
+/// in iAi's scene-linear render only for the active image. The placeholder is
+/// explicitly marked deferred and its controls stay locked, so it can never be
+/// mistaken for the final RAW render or committed as pixels.
 fn present_embedded_raw_as_canvas() -> bool {
-    false
+    true
 }
+
+fn direct_decode_raw_on_open(raw_count: usize) -> bool {
+    raw_count == 1
+}
+
+const RAW_SESSION_PREVIEW_MAX_DIM: u32 = 2048;
 
 #[cfg(test)]
 mod raw_transition_tests {
-    use super::present_embedded_raw_as_canvas;
+    use super::{
+        direct_decode_raw_on_open, interactive_raw_thread_count, present_embedded_raw_as_canvas,
+    };
 
     #[test]
-    fn embedded_raw_preview_is_never_the_main_canvas() {
-        assert!(!present_embedded_raw_as_canvas());
+    fn embedded_raw_preview_is_available_as_a_deferred_placeholder() {
+        assert!(present_embedded_raw_as_canvas());
+    }
+
+    #[test]
+    fn interactive_raw_decode_leaves_half_the_logical_cpus_free() {
+        assert_eq!(interactive_raw_thread_count(1), 1);
+        assert_eq!(interactive_raw_thread_count(8), 4);
+        assert_eq!(interactive_raw_thread_count(15), 8);
+    }
+
+    #[test]
+    fn multi_raw_open_is_preview_first_but_single_raw_keeps_a_decode_fallback() {
+        assert!(direct_decode_raw_on_open(1));
+        assert!(!direct_decode_raw_on_open(2));
+        assert!(!direct_decode_raw_on_open(20));
     }
 }
 
@@ -67,6 +91,25 @@ pub(in crate::app) fn import_many_guarded(
         })
 }
 
+fn interactive_raw_thread_count(logical_threads: usize) -> usize {
+    logical_threads.div_ceil(2).max(1)
+}
+
+/// RAW demosaic can starve input/rendering when it occupies Rayon's global
+/// pool. Interactive loads use a bounded local pool so the UI and OS retain
+/// roughly half the logical CPUs.
+fn import_many_guarded_interactive_raw(
+    registry: &crate::formats::FormatRegistry,
+    path: &Path,
+) -> Result<Vec<Canvas>, String> {
+    let logical = std::thread::available_parallelism().map_or(1, usize::from);
+    let threads = interactive_raw_thread_count(logical);
+    match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+        Ok(pool) => pool.install(|| import_many_guarded(registry, path)),
+        Err(_) => import_many_guarded(registry, path),
+    }
+}
+
 impl App {
     pub fn do_open(&mut self) {
         if self.jobs.pending_file_dialog.is_some() {
@@ -97,6 +140,18 @@ impl App {
                 .as_deref()
                 .is_some_and(|open_path| normalized_path_key(open_path) == key)
         })
+    }
+
+    pub(in crate::app) fn raw_decode_in_flight_for_doc(
+        &self,
+        id: crate::core::document::DocumentId,
+    ) -> bool {
+        self.docs
+            .documents
+            .iter()
+            .find(|doc| doc.id == id)
+            .and_then(|doc| doc.path.as_ref())
+            .is_some_and(|path| self.jobs.loading_keys.contains(&normalized_path_key(path)))
     }
 
     pub(in crate::app) fn disk_is_newer_than_document(&self, idx: usize, path: &Path) -> bool {
@@ -210,46 +265,73 @@ impl App {
                 // earlier Develop session whose decode may still be in flight
                 // (otherwise the leftover key would swallow the new preview).
                 self.jobs.cancelled_raw_loads.remove(&key);
-                self.jobs.loading_keys.insert(key);
                 paths_to_load.push(path);
             }
         }
         if !paths_to_load.is_empty() {
             let n = paths_to_load.len();
-            // Do not install the embedded camera JPEG as the document canvas.
-            // Its picture style cannot be pixel-identical to our scene-linear
-            // RAW render, so replacing it after demosaic creates an unavoidable
-            // visible colour jump. The RAW importer still decodes that JPEG
-            // privately for default-look statistics; only the finished RAW
-            // pipeline is ever presented as the main image.
-            let raw_stat_paths: Vec<PathBuf> = paths_to_load
+            let raw_paths: Vec<PathBuf> = paths_to_load
                 .iter()
                 .filter(|p| crate::formats::raw::is_raw_path(p))
                 .cloned()
                 .collect();
-            if !raw_stat_paths.is_empty() {
+            // Embedded previews build the filmstrip/session in seconds without
+            // demosaicing every selected file. They are display-only deferred
+            // placeholders; selecting one calls ensure_raw_resident.
+            if !raw_paths.is_empty() {
+                let preview_paths = raw_paths.clone();
+                // Bound decoded preview buffers so a fast extractor cannot
+                // queue 20 full embedded JPEG rasters ahead of the UI thread.
+                let (preview_tx, preview_rx) = std::sync::mpsc::sync_channel(2);
                 std::thread::spawn(move || {
-                    for path in raw_stat_paths {
-                        // `extract` populates the shared stats cache. Discard
-                        // the bitmap here: it must never become the main canvas.
-                        let _ = crate::formats::raw_preview::extract(&path);
+                    for path in preview_paths {
+                        if let Some(preview) = crate::formats::raw_preview::extract(&path) {
+                            if preview_tx.send((path, preview)).is_err() {
+                                break;
+                            }
+                        }
                     }
                 });
+                self.jobs.pending_raw_previews.push(preview_rx);
             }
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                // The registry holds only built-in importers (no runtime plugins), so a
-                // fresh one matches `self.jobs.format_registry` and needs no sharing.
-                let registry = crate::formats::FormatRegistry::new();
-                let path_count = paths_to_load.len();
-                for (index, path) in paths_to_load.into_iter().enumerate() {
-                    let result = import_many_guarded(&registry, &path);
-                    if tx.send((path, result, index + 1 == path_count)).is_err() {
-                        break; // UI dropped the receiver (app closing) — stop decoding.
+
+            // Full-decode ordinary raster files as before. A single RAW keeps
+            // the direct-load fallback for cameras without an embedded JPEG;
+            // a multi-RAW batch starts from previews and attach_raw_preview
+            // queues only the active image for full decode.
+            let direct_raw = direct_decode_raw_on_open(raw_paths.len()).then(|| &raw_paths[0]);
+            let paths_to_decode: Vec<PathBuf> = paths_to_load
+                .into_iter()
+                .filter(|path| {
+                    !crate::formats::raw::is_raw_path(path)
+                        || direct_raw.is_some_and(|direct| {
+                            normalized_path_key(direct) == normalized_path_key(path)
+                        })
+                })
+                .collect();
+            for path in &paths_to_decode {
+                self.jobs.loading_keys.insert(normalized_path_key(path));
+            }
+            if !paths_to_decode.is_empty() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    // The registry holds only built-in importers (no runtime plugins), so a
+                    // fresh one matches `self.jobs.format_registry` and needs no sharing.
+                    let registry = crate::formats::FormatRegistry::new();
+                    let path_count = paths_to_decode.len();
+                    for (index, path) in paths_to_decode.into_iter().enumerate() {
+                        let result = if crate::formats::raw::is_raw_path(&path) {
+                            import_many_guarded_interactive_raw(&registry, &path)
+                        } else {
+                            import_many_guarded(&registry, &path)
+                        };
+                        if tx.send((path, result, index + 1 == path_count)).is_err() {
+                            break; // UI dropped the receiver (app closing) — stop decoding.
+                        }
                     }
-                }
-            });
-            self.jobs.pending_loads.push(rx);
+                });
+                self.jobs.pending_loads.push(rx);
+            }
             self.jobs.load_activate_pending = true;
             self.shell.status_msg = if n == 1 {
                 "Loading…".to_string()
@@ -344,6 +426,17 @@ impl App {
         // this unconditionally made the whole document scan a per-frame path.
         if attached_any {
             self.evict_background_raws();
+        }
+        // A filmstrip click made a deferred RAW active while another RAW was
+        // already decoding. Start the queued active image as soon as that one
+        // lands; ensure_raw_resident remains a no-op if it is already resident.
+        if self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .is_some_and(|doc| doc.deferred_raw)
+        {
+            self.ensure_raw_resident(self.docs.active_doc_idx);
         }
         if !self.jobs.pending_loads.is_empty() {
             if let Some(w) = &self.win.window {
@@ -566,11 +659,27 @@ impl App {
             crate::formats::raw_preview::forget_cached_mean_luma(&path);
             return;
         }
-        let canvas = Canvas::from_rgba(preview.rgba, preview.width, preview.height);
+        let longest = preview.width.max(preview.height).max(1);
+        let scale = (RAW_SESSION_PREVIEW_MAX_DIM as f32 / longest as f32).min(1.0);
+        let width = ((preview.width as f32 * scale).round() as u32).max(1);
+        let height = ((preview.height as f32 * scale).round() as u32).max(1);
+        let rgba = if (width, height) == (preview.width, preview.height) {
+            preview.rgba
+        } else {
+            crate::core::canvas::downscale_rgba(
+                &preview.rgba,
+                preview.width,
+                preview.height,
+                width,
+                height,
+            )
+        };
+        let canvas = Canvas::from_rgba(rgba, width, height);
         let id = crate::core::document::DocumentId(self.docs.next_doc_id);
         self.docs.next_doc_id += 1;
         let mut doc = crate::core::document::Document::from_canvas(id, canvas, Some(path.clone()));
         doc.raw_exif = preview.exif;
+        doc.deferred_raw = true;
         let name = file_name(&path);
         if self.jobs.load_activate_pending {
             // The first finished item (preview or full) claims the active tab.
@@ -618,6 +727,11 @@ impl App {
         }
         if let Some(w) = &self.win.window {
             w.request_redraw();
+        }
+        // The first preview is the initial active filmstrip image. Materialize
+        // only that one; background previews stay light until clicked.
+        if new_idx == self.docs.active_doc_idx {
+            self.ensure_raw_resident(new_idx);
         }
     }
 
@@ -1070,6 +1184,19 @@ impl App {
         if self.jobs.loading_keys.contains(&key) {
             return;
         }
+        let another_raw_is_loading = self.docs.documents.iter().any(|candidate| {
+            candidate.path.as_ref().is_some_and(|candidate_path| {
+                crate::formats::raw::is_raw_path(candidate_path)
+                    && self
+                        .jobs
+                        .loading_keys
+                        .contains(&normalized_path_key(candidate_path))
+            })
+        });
+        if another_raw_is_loading {
+            self.shell.status_msg = format!("Đang xếp hàng RAW: {}", file_name(&path));
+            return;
+        }
         // Route the decode back into this exact document.
         self.jobs.raw_preview_docs.insert(key.clone(), id);
         self.jobs.cancelled_raw_loads.remove(&key);
@@ -1078,7 +1205,7 @@ impl App {
         let worker_path = path.clone();
         std::thread::spawn(move || {
             let registry = crate::formats::FormatRegistry::new();
-            let result = import_many_guarded(&registry, &worker_path);
+            let result = import_many_guarded_interactive_raw(&registry, &worker_path);
             let _ = tx.send((worker_path, result, activate_on_load));
         });
         self.jobs.pending_loads.push(rx);
