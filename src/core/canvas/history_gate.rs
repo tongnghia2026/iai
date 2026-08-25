@@ -64,6 +64,11 @@ impl HistoryGate {
         self.history.undo_count()
     }
 
+    /// Exact billed history bytes — Memory Milestone M0 accounting.
+    pub fn total_memory_bytes(&self) -> usize {
+        self.history.total_memory_bytes()
+    }
+
     pub fn redo_count(&self) -> usize {
         self.history.redo_count()
     }

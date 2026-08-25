@@ -202,6 +202,23 @@ pub struct TileMap {
     pub height: u32,
 }
 
+/// Per-storage-class resident byte totals for a [`TileMap`] (Memory Milestone
+/// M0). Split so the report can charge the RGBA8 mirror, the optional RGBA16
+/// master and the optional CMYK ink plane to distinct memory classes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TileBytes {
+    pub rgba8: u64,
+    pub rgba16: u64,
+    pub ink: u64,
+}
+
+impl TileBytes {
+    #[inline]
+    pub fn total(&self) -> u64 {
+        self.rgba8 + self.rgba16 + self.ink
+    }
+}
+
 #[allow(dead_code)]
 impl TileMap {
     pub fn new(width: u32, height: u32) -> Self {
@@ -210,6 +227,24 @@ impl TileMap {
             width,
             height,
         }
+    }
+
+    /// Resident heap bytes of this map's tiles, split by storage class and
+    /// **deduplicated by Arc pointer** so copy-on-write shared tiles (a
+    /// solid-fill layer whose cells share one `Arc<Tile>`) are counted once.
+    /// Used by [`crate::core::mem_report`] to explain the working set.
+    pub fn resident_bytes(&self) -> TileBytes {
+        let mut seen: std::collections::HashSet<*const Tile> = std::collections::HashSet::new();
+        let mut out = TileBytes::default();
+        for tile in self.tiles.values() {
+            if !seen.insert(Arc::as_ptr(tile)) {
+                continue;
+            }
+            out.rgba8 += TILE_BYTES as u64;
+            out.rgba16 += tile.pixels16.as_ref().map_or(0, |p| (p.len() * 2) as u64);
+            out.ink += tile.ink.as_ref().map_or(0, |p| p.len() as u64);
+        }
+        out
     }
 
     /// Compact identity of the current tile contents for detecting whether an

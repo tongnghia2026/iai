@@ -66,6 +66,13 @@ impl Selection {
         }
     }
 
+    /// Resident heap bytes of the selection mask (one byte per canvas pixel).
+    /// Memory Milestone M0 — allocated at full canvas size even when inactive,
+    /// which M2 later makes lazy.
+    pub fn resident_bytes(&self) -> u64 {
+        self.mask.len() as u64
+    }
+
     pub fn select_all(&mut self) {
         self.mask.fill(255);
         self.active = true;

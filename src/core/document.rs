@@ -226,6 +226,32 @@ pub struct Document {
 }
 
 impl Document {
+    /// Charge every resident buffer this document owns to `report`, under a
+    /// label derived from `owner` (Memory Milestone M0). Covers the active
+    /// canvas plus the multi-page multipliers the plan flags: parked artboard
+    /// `pages`, the shared `master`, and any edited PDF pages held in memory.
+    pub fn account_memory(&self, report: &mut crate::core::mem_report::MemReport, owner: &str) {
+        self.canvas.account_memory(report, owner);
+        for page in self.pages.iter().flatten() {
+            page.account_memory(report, owner);
+        }
+        if let Some(master) = &self.master {
+            master.account_memory(report, owner);
+        }
+        if let Some(pdf) = &self.pdf_document {
+            for cached in pdf.edited_pages.values() {
+                cached.canvas.account_memory(report, owner);
+            }
+        }
+    }
+
+    /// Total resident logical bytes this document owns — Memory Milestone M0.
+    pub fn estimated_resident_bytes(&self) -> u64 {
+        let mut report = crate::core::mem_report::MemReport::new();
+        self.account_memory(&mut report, "");
+        report.total()
+    }
+
     pub fn new(id: DocumentId, width: u32, height: u32) -> Self {
         Self {
             id,

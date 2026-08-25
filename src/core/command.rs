@@ -1056,6 +1056,13 @@ impl CommandHistory {
         self.total_memory_bytes as f32 / 1_048_576.0
     }
 
+    /// Exact billed history bytes (marginal/changed-tile cost). Memory
+    /// Milestone M0 accounting — the `f32` MB figure loses precision the report
+    /// needs to sum across documents.
+    pub fn total_memory_bytes(&self) -> usize {
+        self.total_memory_bytes
+    }
+
     pub fn history_entries(&self) -> Vec<HistoryEntry> {
         let mut entries = Vec::new();
 

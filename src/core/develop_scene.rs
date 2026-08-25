@@ -294,6 +294,20 @@ impl SceneSource {
         }
     }
 
+    /// Resident heap bytes of this scene master, split as
+    /// `(half, alpha, other)` for [`crate::core::mem_report`] (Memory Milestone
+    /// M0). `half` is the RGBA f16 master (8 B/px), `alpha` the optional exact
+    /// UNORM16 alpha (2 B/px), `other` the small fitted camera curve.
+    pub fn resident_bytes(&self) -> (u64, u64, u64) {
+        let half = (self.half.len() * 2) as u64;
+        let alpha = self.alpha.as_ref().map_or(0, |a| (a.len() * 2) as u64);
+        let other = self
+            .camera_rgb_curve
+            .as_ref()
+            .map_or(0, |_| std::mem::size_of::<[[f32; 256]; 3]>() as u64);
+        (half, alpha, other)
+    }
+
     /// Absolute Kelvin/Duv represented by the current Develop2 controls. RAW
     /// scenes are relative to their as-shot white; synthetic/Identity scenes
     /// use D65 as the neutral base.

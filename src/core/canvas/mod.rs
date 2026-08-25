@@ -1008,6 +1008,68 @@ impl Canvas {
     pub fn redo_count(&self) -> usize {
         self.cmd_history.redo_count()
     }
+
+    /// Exact billed undo/redo history bytes — Memory Milestone M0 accounting.
+    pub fn history_memory_bytes(&self) -> usize {
+        self.cmd_history.total_memory_bytes()
+    }
+
+    /// Charge every resident buffer this canvas owns to `report`, under `owner`
+    /// (Memory Milestone M0). Walks each layer's tiles + mask, the flat RGBA8
+    /// composite, the selection mask, the Smart-Select edge cache, the RAW scene
+    /// master, saved alpha channels and undo history. GPU textures are not
+    /// counted here (they are the compositor's, keyed on this scene's Arc).
+    pub fn account_memory(&self, report: &mut crate::core::mem_report::MemReport, owner: &str) {
+        use crate::core::mem_report::MemClass;
+
+        for layer in &self.layer_stack.layers {
+            let t = layer.tiles.resident_bytes();
+            report.add(MemClass::TileRgba8, owner, t.rgba8);
+            report.add(MemClass::TileRgba16, owner, t.rgba16);
+            report.add(MemClass::TileInk, owner, t.ink);
+            if let Some(mask) = &layer.mask {
+                report.add(
+                    MemClass::LayerMask,
+                    owner,
+                    mask.tiles.resident_bytes().total(),
+                );
+            }
+        }
+
+        report.add(MemClass::FlatCanvas, owner, self.pixels.len() as u64);
+        report.add(
+            MemClass::SelectionMask,
+            owner,
+            self.selection.resident_bytes(),
+        );
+
+        if let Some(edge) = &self.edge_cache {
+            let bytes = (edge.lab.len() * std::mem::size_of::<[f32; 3]>()
+                + edge.sobel.len() * std::mem::size_of::<f32>()) as u64;
+            report.add(MemClass::EdgeCache, owner, bytes);
+        }
+
+        if let Some(scene) = &self.develop_source {
+            let (half, alpha, other) = scene.resident_bytes();
+            // The tiny fitted camera curve rides with the half master's class.
+            report.add(MemClass::SceneHalf, owner, half + other);
+            report.add(MemClass::SceneAlpha, owner, alpha);
+        }
+
+        for alpha in &self.channels.alpha {
+            report.add(MemClass::ChannelAlpha, owner, alpha.mask.len() as u64);
+        }
+
+        report.add(MemClass::History, owner, self.history_memory_bytes() as u64);
+    }
+
+    /// Total resident logical bytes this canvas owns (Memory Milestone M0
+    /// convenience over [`Self::account_memory`]).
+    pub fn estimated_resident_bytes(&self) -> u64 {
+        let mut report = crate::core::mem_report::MemReport::new();
+        self.account_memory(&mut report, "");
+        report.total()
+    }
     pub fn history_entries(&self) -> Vec<crate::core::command::HistoryEntry> {
         self.cmd_history.history_entries()
     }

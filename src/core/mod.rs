@@ -25,6 +25,7 @@ pub mod gateway;
 pub mod geometry;
 pub mod hw;
 pub mod layer;
+pub mod mem_report;
 pub mod output_sharpen;
 pub mod page;
 pub mod palette;
