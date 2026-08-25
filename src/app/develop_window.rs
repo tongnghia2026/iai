@@ -13,6 +13,7 @@
 //! the compositor bake this window's view while it is open (D2.4).
 
 use crate::app::develop_shell::DevelopTool;
+use crate::app::file_ops::normalized_path_key;
 use crate::app::state::App;
 use egui_phosphor::regular as ph;
 use std::sync::Arc;
@@ -27,6 +28,10 @@ fn develop_commit_needs_settled_frame(
     receiver_active: bool,
 ) -> bool {
     gpu_preview_active || processing || receiver_active
+}
+
+fn develop_session_entry_blocks_commit(decode_in_flight: bool, decode_failed: bool) -> bool {
+    decode_in_flight || decode_failed
 }
 
 fn develop_display_lut_active(
@@ -311,11 +316,17 @@ impl App {
             return;
         }
         let session_waiting = self.dev.develop_session.iter().any(|entry| {
-            self.jobs
-                .raw_preview_docs
-                .values()
-                .any(|id| *id == entry.doc)
-                || self.jobs.raw_preview_failures.contains_key(&entry.doc)
+            let decode_in_flight = self
+                .docs
+                .documents
+                .iter()
+                .find(|doc| doc.id == entry.doc)
+                .and_then(|doc| doc.path.as_ref())
+                .is_some_and(|path| self.jobs.loading_keys.contains(&normalized_path_key(path)));
+            develop_session_entry_blocks_commit(
+                decode_in_flight,
+                self.jobs.raw_preview_failures.contains_key(&entry.doc),
+            )
         });
         if session_waiting {
             self.shell.status_msg =
@@ -361,7 +372,6 @@ impl App {
         let single_raw = total_images == 1 && entries.first().map_or(false, |e| e.transient);
         let pending: std::collections::VecDeque<_> = entries
             .iter()
-            .filter(|e| !e.settings.is_neutral())
             .map(|e| (e.doc, e.settings.clone()))
             .collect();
         if pending.is_empty() {
@@ -375,6 +385,7 @@ impl App {
             bake_total,
             total_images,
             done: 0,
+            developed: 0,
             single_raw,
             rx: None,
         });
@@ -1500,7 +1511,10 @@ impl App {
 
 #[cfg(test)]
 mod phase6_transition_tests {
-    use super::{develop_commit_needs_settled_frame, develop_display_lut_active};
+    use super::{
+        develop_commit_needs_settled_frame, develop_display_lut_active,
+        develop_session_entry_blocks_commit,
+    };
 
     #[test]
     fn open_image_waits_for_every_unsettled_preview_state() {
@@ -1508,6 +1522,13 @@ mod phase6_transition_tests {
         assert!(develop_commit_needs_settled_frame(false, true, false));
         assert!(develop_commit_needs_settled_frame(false, false, true));
         assert!(!develop_commit_needs_settled_frame(false, false, false));
+    }
+
+    #[test]
+    fn evicted_raw_mapping_does_not_block_open_image_without_a_decode() {
+        assert!(!develop_session_entry_blocks_commit(false, false));
+        assert!(develop_session_entry_blocks_commit(true, false));
+        assert!(develop_session_entry_blocks_commit(false, true));
     }
 
     #[test]

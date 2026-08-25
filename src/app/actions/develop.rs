@@ -111,11 +111,13 @@ impl App {
         if self.dev.develop_bake_all.is_some() || self.win.retiring_develop_window.is_some() {
             return;
         }
+        let mut entered_any = false;
         while !self.dev.pending_develop.is_empty() {
             let id = self.dev.pending_develop.remove(0);
             let Some(idx) = self.docs.documents.iter().position(|d| d.id == id) else {
                 continue;
             };
+            entered_any = true;
             if self.win.develop_window.is_some() {
                 self.develop_session_push(id, true);
                 let title = self.develop_window_title();
@@ -137,11 +139,13 @@ impl App {
                 }
             }
         }
-        // Memory Milestone M1: the session entries the batch's tail RAWs need to
-        // be eviction-eligible are created above; keep only the active (+ one
-        // MRU) working set resident now that they exist. This covers RAWs that
-        // land after `poll_loads` stops running (its pending_loads has drained).
-        self.evict_background_raws();
+        // Memory Milestone M1: evict only on the transition that actually added
+        // session entries. `enter_pending_develop` is called every redraw, so an
+        // unconditional pass here turns an otherwise idle window into a polling
+        // hot path.
+        if entered_any {
+            self.evict_background_raws();
+        }
     }
 
     /// Record `doc` as part of the Develop session (no-op if already present).
@@ -288,21 +292,61 @@ impl App {
             .as_ref()
             .map(|p| (p.doc_id, p.layer_id, p.original_tiles.clone()));
         loop {
-            let Some(state) = &mut self.dev.develop_bake_all else {
-                return;
-            };
-            if state.rx.is_some() {
-                return;
-            }
-            let Some((doc_id, settings)) = state.pending.pop_front() else {
+            let Some((doc_id, settings)) = self.dev.develop_bake_all.as_ref().and_then(|state| {
+                if state.rx.is_some() {
+                    None
+                } else {
+                    state.pending.front().cloned()
+                }
+            }) else {
                 return;
             };
 
-            let Some(doc) = self.docs.documents.iter().find(|d| d.id == doc_id) else {
+            let Some(doc_idx) = self.docs.documents.iter().position(|d| d.id == doc_id) else {
+                if let Some(state) = &mut self.dev.develop_bake_all {
+                    state.pending.pop_front();
+                    state.done += 1;
+                }
                 continue;
             };
+            // A Memory M1 background entry owns only a thumbnail. Keep it at
+            // the head of the queue while its full RAW is decoded; poll_loads
+            // swaps the result back into this exact document, then the next
+            // redraw re-enters here and starts the bake. Never bake thumbnail
+            // pixels or synthesize a scene master from them.
+            if self.docs.documents[doc_idx].deferred_raw {
+                if self.jobs.raw_preview_failures.contains_key(&doc_id) {
+                    if let Some(state) = &mut self.dev.develop_bake_all {
+                        state.pending.pop_front();
+                        state.done += 1;
+                    }
+                    continue;
+                }
+                self.ensure_raw_resident(doc_idx);
+                return;
+            }
+
+            if let Some(state) = &mut self.dev.develop_bake_all {
+                state.pending.pop_front();
+            }
+
+            // Neutral entries still need the full decode when they were
+            // deferred, but need no pixel worker. Opening them consumes the RAW
+            // scene master and leaves the decoded raster as the document.
+            if settings.is_neutral() {
+                self.docs.documents[doc_idx].canvas.develop_source = None;
+                if let Some(state) = &mut self.dev.develop_bake_all {
+                    state.done += 1;
+                }
+                continue;
+            }
+
+            let doc = &self.docs.documents[doc_idx];
             let canvas = &doc.canvas;
             if canvas.layer_stack.layers.is_empty() {
+                if let Some(state) = &mut self.dev.develop_bake_all {
+                    state.done += 1;
+                }
                 continue;
             }
             let idx = canvas
@@ -311,6 +355,9 @@ impl App {
                 .min(canvas.layer_stack.layers.len() - 1);
             let layer = &canvas.layer_stack.layers[idx];
             if (!layer.is_background && layer.locked) || !layer.is_raster() {
+                if let Some(state) = &mut self.dev.develop_bake_all {
+                    state.done += 1;
+                }
                 continue;
             }
             let layer_id = layer.id;
@@ -395,6 +442,7 @@ impl App {
             if let Some(state) = &mut self.dev.develop_bake_all {
                 state.rx = None;
                 state.done += 1;
+                state.developed += 1;
             }
             // The live preview kept the edited image on screen through this
             // bake; its baked tiles land right below, so drop it WITHOUT the
@@ -450,7 +498,7 @@ impl App {
                 .develop_bake_all
                 .take()
                 .expect("checked Some above");
-            self.finish_develop_bake_all(st.total_images, st.done, st.single_raw);
+            self.finish_develop_bake_all(st.total_images, st.developed, st.single_raw);
         }
     }
 

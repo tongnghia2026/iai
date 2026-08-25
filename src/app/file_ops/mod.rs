@@ -7,7 +7,7 @@ use crate::core::canvas::{Canvas, CanvasMetadata};
 use crate::core::tile::TileMap;
 use std::path::Path;
 
-fn normalized_path_key(path: &Path) -> String {
+pub(in crate::app) fn normalized_path_key(path: &Path) -> String {
     let normalized = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let key = normalized.to_string_lossy().to_string();
     #[cfg(windows)]

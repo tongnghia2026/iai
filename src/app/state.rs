@@ -1072,13 +1072,18 @@ pub struct DevelopBakeAll {
     /// single-image commits. The last preview frame remains presented until
     /// this delay expires or the bake finishes.
     pub started_at: std::time::Instant,
-    /// Non-neutral images still to bake, in filmstrip order.
+    /// Session images still to open, in filmstrip order. Deferred images stay
+    /// at the front while their full RAW is re-decoded; neutral images consume
+    /// the scene without launching a pixel worker.
     pub pending: std::collections::VecDeque<(DocumentId, crate::core::develop::DevelopSettings)>,
-    /// Progress denominator: how many images actually bake.
+    /// Progress denominator: how many session images must be processed.
     pub bake_total: usize,
     /// Every session image (including neutral ones) — for the final status.
     pub total_images: usize,
+    /// Session images processed (including neutral/skipped entries).
     pub done: usize,
+    /// Images whose non-neutral settings were baked into pixels.
+    pub developed: usize,
     /// Single-image RAW session (drives the "Opened/Developed RAW" wording).
     pub single_raw: bool,
     pub rx: Option<std::sync::mpsc::Receiver<DevelopBakeAllResult>>,

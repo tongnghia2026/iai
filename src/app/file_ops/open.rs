@@ -272,6 +272,7 @@ impl App {
         if self.jobs.pending_loads.is_empty() {
             return;
         }
+        let mut attached_any = false;
         let mut still_pending = Vec::new();
         for rx in std::mem::take(&mut self.jobs.pending_loads) {
             let mut alive = true;
@@ -288,6 +289,7 @@ impl App {
                             let page = (page_count > 1).then_some((page_index, page_count));
                             last_attached =
                                 self.attach_loaded_doc(path.clone(), canvas, page, None);
+                            attached_any |= last_attached.is_some();
                         }
                         if let Some((w, h)) = dims {
                             self.record_recent(&path, w, h);
@@ -337,10 +339,12 @@ impl App {
             }
         }
         self.jobs.pending_loads = still_pending;
-        // Memory Milestone M1: after attaching this batch, keep only the active
-        // image's RAW working set full-resolution — evict the rest to
-        // thumbnails so opening many RAWs stays near one working set.
-        self.evict_background_raws();
+        // Memory Milestone M1: run eviction only when a load actually landed.
+        // `poll_loads` is pumped on every redraw while any worker lives; doing
+        // this unconditionally made the whole document scan a per-frame path.
+        if attached_any {
+            self.evict_background_raws();
+        }
         if !self.jobs.pending_loads.is_empty() {
             if let Some(w) = &self.win.window {
                 w.request_redraw();
@@ -624,7 +628,12 @@ impl App {
     pub(in crate::app) fn replace_preview_with_full(&mut self, idx: usize, canvas: Canvas) {
         let id = self.docs.documents[idx].id;
         let active = idx == self.docs.active_doc_idx;
-        let in_develop = self.dev.develop_session.iter().any(|entry| entry.doc == id);
+        let in_develop = self.dev.develop_session.iter().any(|entry| entry.doc == id)
+            || self
+                .dev
+                .develop_bake_all
+                .as_ref()
+                .is_some_and(|state| state.pending.iter().any(|(doc, _)| *doc == id));
         let settings = self
             .dev
             .develop_session
@@ -653,7 +662,7 @@ impl App {
             self.refresh_active_document();
         }
         if in_develop {
-            if active {
+            if active && self.dev.develop_bake_all.is_none() {
                 self.begin_develop_preview(settings);
                 self.dev.develop_view_fit = true;
                 self.dev.develop_composited_view = None;
@@ -940,6 +949,12 @@ impl App {
     /// still-transient RAW develop document to a thumbnail. Cheap and
     /// idempotent; already-light or non-evictable documents are skipped.
     pub(in crate::app) fn evict_background_raws(&mut self) {
+        // The sequential Open Image queue deliberately rehydrates one deferred
+        // RAW at a time. Evicting from poll_loads before that queue can bake it
+        // creates a decode/evict loop and can pin CPU at full utilization.
+        if self.dev.develop_bake_all.is_some() {
+            return;
+        }
         let active_id = self
             .docs
             .documents
@@ -1046,6 +1061,10 @@ impl App {
             return;
         };
         let id = doc.id;
+        // A user-initiated filmstrip switch has already made this document
+        // active before asking for residency. The Open Image batch, however,
+        // rehydrates background documents without changing the visible tab.
+        let activate_on_load = idx == self.docs.active_doc_idx;
         let key = normalized_path_key(&path);
         // Already re-decoding (e.g. a double activation): nothing to do.
         if self.jobs.loading_keys.contains(&key) {
@@ -1060,7 +1079,7 @@ impl App {
         std::thread::spawn(move || {
             let registry = crate::formats::FormatRegistry::new();
             let result = import_many_guarded(&registry, &worker_path);
-            let _ = tx.send((worker_path, result, true));
+            let _ = tx.send((worker_path, result, activate_on_load));
         });
         self.jobs.pending_loads.push(rx);
         self.shell.status_msg = format!("Đang tải lại RAW: {}", file_name(&path));

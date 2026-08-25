@@ -183,6 +183,7 @@ fn raw_default_look_variants() {
         flatten: true,
         embed_metadata: false,
         embed_icc: false,
+        ..ExportOptions::default()
     };
 
     // The embedded camera JPEG is a picture-style observation, never an
