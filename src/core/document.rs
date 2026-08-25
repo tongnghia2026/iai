@@ -653,7 +653,9 @@ impl Document {
         if page.is_cmyk() || master.is_cmyk() {
             return None;
         }
-        let mut merged = Canvas::new(page.width, page.height);
+        // This canvas is consumed only by export. Avoid allocating and clearing
+        // a page-sized flat buffer/selection on the UI thread.
+        let mut merged = page.export_snapshot();
         merged.layer_stack = page.layer_stack.with_backdrop(&master.layer_stack);
         merged.metadata = page.metadata.clone();
         merged.color_space = page.color_space;

@@ -17,6 +17,11 @@ pub struct BackgroundJobs {
     /// poll_file_dialog() reads the result via this channel, avoiding blocking the main loop.
     pub(in crate::app) pending_file_dialog:
         Option<std::sync::mpsc::Receiver<crate::file_io::FileDialogResult>>,
+    /// Native PDF save dialog plus PDF construction/write work. Both run away
+    /// from the winit thread so a large document cannot freeze the application.
+    /// `None` is a cancelled dialog; `Some` carries the final user-facing status.
+    pub(in crate::app) pending_pdf_export:
+        Option<std::sync::mpsc::Receiver<Option<Result<String, String>>>>,
     /// Background image-import jobs. A worker thread decodes each path off the UI
     /// thread and streams `(path, Vec<Canvas>|Err, is_last)` back; multi-page formats such
     /// as PDF produce one canvas per page. `poll_loads()` attaches each finished

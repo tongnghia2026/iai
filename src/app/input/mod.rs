@@ -913,6 +913,7 @@ impl ApplicationHandler for App {
             || self.jobs.ai_engine.has_jobs()
             || lama_downloading
             || self.jobs.pending_file_dialog.is_some()
+            || self.jobs.pending_pdf_export.is_some()
             || !self.jobs.pending_loads.is_empty()
             || self
                 .shell
@@ -992,6 +993,7 @@ impl ApplicationHandler for App {
                 .is_some_and(|size| size.width == 0 || size.height == 0);
         if main_window_hidden {
             let background_busy = self.jobs.pending_file_dialog.is_some()
+                || self.jobs.pending_pdf_export.is_some()
                 || !self.jobs.pending_loads.is_empty()
                 || self.edit.pending_transform_commit.is_some()
                 || self.jobs.select_subject.is_busy()
@@ -1024,6 +1026,7 @@ impl ApplicationHandler for App {
         }
 
         if self.jobs.pending_file_dialog.is_some()
+            || self.jobs.pending_pdf_export.is_some()
             || !self.jobs.pending_loads.is_empty()
             || self.edit.pending_transform_commit.is_some()
             || self

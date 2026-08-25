@@ -463,6 +463,38 @@ impl Canvas {
         }
     }
 
+    /// Cheap, immutable-in-practice snapshot for a background export worker.
+    /// Tile maps inside `LayerStack` are copy-on-write, so this captures a stable
+    /// document revision without cloning a full flat pixel buffer or selection.
+    pub fn export_snapshot(&self) -> Self {
+        Self {
+            width: self.width,
+            height: self.height,
+            pixels: Vec::new(),
+            pixels_stale: true,
+            layer_stack: self.layer_stack.clone(),
+            layer_revision: self.layer_revision,
+            selection: Selection::new(0, 0),
+            metadata: self.metadata.clone(),
+            color_space: self.color_space,
+            color_mode: self.color_mode.clone(),
+            bit_depth: self.bit_depth,
+            icc_profile: self.icc_profile.clone(),
+            dirty: DirtyRegion::default(),
+            stroke_dirty: DirtyRegion::default(),
+            pending_stroke: None,
+            pending_stroke_name: String::new(),
+            cmd_history: HistoryGate::new(),
+            edge_cache: None,
+            develop_source: None,
+            channels: super::channels::ChannelsState::default(),
+            pending_alpha_stroke: None,
+            plane_dirty: DirtyRegion::default(),
+            clip_fp: self.clip_fp,
+            connector_fp: self.connector_fp,
+        }
+    }
+
     pub fn new_default() -> Self {
         Self::new(DEFAULT_W, DEFAULT_H)
     }

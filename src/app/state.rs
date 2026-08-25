@@ -1306,6 +1306,7 @@ impl App {
                 bus: create_bus(),
                 format_registry: FormatRegistry::new(),
                 pending_file_dialog: None,
+                pending_pdf_export: None,
                 pending_loads: Vec::new(),
                 pending_raw_previews: Vec::new(),
                 raw_preview_docs: std::collections::HashMap::new(),
@@ -2248,7 +2249,8 @@ impl App {
         // The Develop stage's second OS window is modal over the main window
         // (Track D): while it is open the main window is soft-locked — canvas
         // actions are refused (bell) until Develop closes.
-        self.win.develop_window.is_some()
+        self.jobs.pending_pdf_export.is_some()
+            || self.win.develop_window.is_some()
             || self.is_tool_modal_active()
             || self.edit.text_edit.is_some()
             || self.edit.show_refine_panel
@@ -2279,6 +2281,9 @@ impl App {
     /// Plain tool selection is not enough to block exit; this is only for states
     /// with live edits, overlays, or modal previews that would otherwise be dropped.
     pub fn exit_blocking_operation(&self) -> Option<&'static str> {
+        if self.jobs.pending_pdf_export.is_some() {
+            return Some("PDF export");
+        }
         if self.edit.transform_state.is_some() || self.edit.pending_transform_commit.is_some() {
             return Some("Free Transform");
         }
