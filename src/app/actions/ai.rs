@@ -321,6 +321,16 @@ impl App {
                         win.request_redraw();
                     }
                 }
+                crate::app::ext_bridge::ExtInbound::ResultClipboard {
+                    origin: Some(origin),
+                    ..
+                } => {
+                    let success = self.place_ext_clipboard_result(origin);
+                    self.notify_done(success);
+                    if let Some(win) = &self.win.window {
+                        win.request_redraw();
+                    }
+                }
                 _ => {}
             }
         }
@@ -439,6 +449,42 @@ impl App {
             let title = self.docs.documents[idx].title.clone();
             format!("Ảnh đã vào document \"{title}\" — chuyển qua tab đó để xem")
         }
+    }
+
+    /// Place the full-resolution original the extension just copied to the OS
+    /// clipboard (its "Copy image" path). Reads the clipboard natively — no CORS or
+    /// canvas limits — and guards against a stale clipboard: if it still holds the
+    /// exact source image iAi wrote before the edit, the site's copy did not land,
+    /// so report failure instead of re-placing the original.
+    fn place_ext_clipboard_result(&mut self, origin: crate::app::ext_bridge::EditOrigin) -> bool {
+        let (success, status) = match crate::app::os_clipboard::read_image() {
+            Ok(Some(img)) => {
+                let hash = crate::app::os_clipboard::image_hash(img.width, img.height, &img.pixels);
+                if self.edit.os_clipboard_written == Some(hash) {
+                    (
+                        false,
+                        "Trang chưa chép được ảnh (clipboard vẫn là ảnh gốc) — thử lại".to_string(),
+                    )
+                } else {
+                    let s = self.place_gemini_result(
+                        Some(origin.doc_id),
+                        img.pixels,
+                        img.width,
+                        img.height,
+                        origin.output_new_file,
+                    );
+                    (ai_placement_succeeded(&s), s)
+                }
+            }
+            Ok(None) => (
+                false,
+                "Clipboard trống — không lấy được ảnh kết quả".to_string(),
+            ),
+            Err(e) => (false, format!("Lỗi đọc clipboard: {e}")),
+        };
+        self.jobs.ext.push_log(&status);
+        self.jobs.ext.status = status;
+        success
     }
 
     /// Open the Smart Fill dialog (method picker). Requires a selection.

@@ -788,15 +788,72 @@
     return i >= 0 ? s.slice(i + 7) : s;
   }
 
-  // Read an <img> to pure base64: fetch (blob:/same-origin) → canvas → background
-  // fetch (cross-origin googleusercontent, which the content script can't fetch).
-  function imgToBase64(img, cb) {
-    var src = img.currentSrc || img.src;
-    if (!src) {
+  // Gemini serves the on-screen result downscaled via a googleusercontent size
+  // suffix (…=w512-h512 / …=s512-c). Rewriting it to =s0 asks for the ORIGINAL
+  // full-resolution file, which the background can then fetch. Returns null when
+  // the URL isn't a googleusercontent one or already has no size suffix.
+  function stripSizeToFull(u) {
+    if (!u || !/googleusercontent\.com/.test(u)) return null;
+    var full = u.replace(/=[-\w]+$/i, "=s0");
+    return full !== u ? full : null;
+  }
+
+  // Every URL that might hold a higher-quality version of this result, best first:
+  // the full-res googleusercontent rewrite, each srcset entry, the element src, and
+  // any download / full-size anchor near it.
+  function candidateUrls(img) {
+    var urls = [];
+    function push(u) {
+      if (u && urls.indexOf(u) < 0) urls.push(u);
+    }
+    var src = img.currentSrc || img.src || "";
+    push(stripSizeToFull(src));
+    try {
+      var ss = img.getAttribute("srcset");
+      if (ss) {
+        ss.split(",")
+          .map(function (s) {
+            return s.trim().split(/\s+/)[0];
+          })
+          .filter(Boolean)
+          .forEach(function (u) {
+            push(stripSizeToFull(u));
+            push(u);
+          });
+      }
+    } catch (e) {}
+    push(src);
+    var n = img;
+    for (var h = 0; h < 9 && n; h++) {
+      try {
+        var as = n.querySelectorAll("a[href]");
+        for (var i = 0; i < as.length; i++) {
+          var href = as[i].getAttribute("href") || "";
+          if (
+            as[i].hasAttribute("download") ||
+            /^blob:/.test(href) ||
+            /googleusercontent|oaiusercontent|blob\.core\.windows|\.(png|jpe?g|webp)(\?|$)/i.test(href)
+          ) {
+            push(stripSizeToFull(href));
+            push(href);
+          }
+        }
+      } catch (e) {}
+      n = n.parentElement;
+    }
+    return urls;
+  }
+
+  // Read one URL to pure base64: content-script fetch (blob:/same-origin) →
+  // background fetch (cross-origin googleusercontent/oaiusercontent, covered by
+  // host_permissions, which the content script's fetch can't reach under CORS) →
+  // canvas draw of the element (last resort; works only when not tainted).
+  function readUrlToBase64(url, imgForCanvas, cb) {
+    if (!url) {
       cb(null);
       return;
     }
-    fetch(src, { credentials: "include" })
+    fetch(url, { credentials: "include" })
       .then(function (r) {
         var ct = (r.headers && r.headers.get("content-type")) || "";
         if (!r.ok || (ct && !/^image\//i.test(ct))) throw new Error("not image: " + r.status + " " + ct);
@@ -811,79 +868,131 @@
         fr.readAsDataURL(b);
       })
       .catch(function () {
-        try {
-          var c = document.createElement("canvas");
-          c.width = img.naturalWidth;
-          c.height = img.naturalHeight;
-          c.getContext("2d").drawImage(img, 0, 0);
-          cb(stripDataUrl(c.toDataURL("image/png")));
-        } catch (e) {
-          chrome.runtime.sendMessage({ type: "fetchImage", src: src }, function (resp) {
-            cb(resp && resp.image ? resp.image : null);
-          });
-        }
-      });
-  }
-
-  // Last-resort grab: when reading the <img> bytes fails (cross-origin CORS taint,
-  // a blob: URL the service worker can't fetch, or a redirect to HTML), screenshot
-  // the tab through the already-attached debugger and crop the result image's
-  // rectangle out of it. The screenshot is our OWN PNG (a data: URL), so the crop
-  // canvas is never tainted — this sidesteps every CORS / blob / host-permission
-  // reason imgToBase64 can fail. It only runs after imgToBase64 already returned
-  // null, so it cannot regress a case that currently works.
-  function captureViaScreenshot(img, id, cb) {
-    var rect;
-    try {
-      rect = img.getBoundingClientRect();
-    } catch (e) {
-      cb(null);
-      return;
-    }
-    if (!rect || rect.width < 8 || rect.height < 8) {
-      cb(null);
-      return;
-    }
-    try {
-      img.scrollIntoView({ block: "center", inline: "center" });
-    } catch (e) {}
-    // Let the scroll settle, then screenshot the current viewport and crop.
-    setTimeout(function () {
-      var r = img.getBoundingClientRect();
-      sendMessage({ type: "captureViewport", id: id }).then(function (resp) {
-        if (!resp || !resp.ok || !resp.image) {
-          cb(null);
-          return;
-        }
-        var shot = new Image();
-        shot.onload = function () {
+        chrome.runtime.sendMessage({ type: "fetchImage", src: url }, function (resp) {
+          if (resp && resp.image) {
+            cb(resp.image);
+            return;
+          }
           try {
-            // Screenshot pixel width ÷ CSS viewport width recovers the device
-            // pixel ratio, so the crop is correct on any display scaling.
-            var scale = shot.naturalWidth / Math.max(1, window.innerWidth);
-            var sx = Math.max(0, Math.round(r.left * scale));
-            var sy = Math.max(0, Math.round(r.top * scale));
-            var sw = Math.min(shot.naturalWidth - sx, Math.round(r.width * scale));
-            var sh = Math.min(shot.naturalHeight - sy, Math.round(r.height * scale));
-            if (sw < 8 || sh < 8) {
-              cb(null);
-              return;
-            }
             var c = document.createElement("canvas");
-            c.width = sw;
-            c.height = sh;
-            c.getContext("2d").drawImage(shot, sx, sy, sw, sh, 0, 0, sw, sh);
+            c.width = imgForCanvas.naturalWidth;
+            c.height = imgForCanvas.naturalHeight;
+            c.getContext("2d").drawImage(imgForCanvas, 0, 0);
             cb(stripDataUrl(c.toDataURL("image/png")));
           } catch (e) {
             cb(null);
           }
-        };
-        shot.onerror = function () {
-          cb(null);
-        };
-        shot.src = "data:image/png;base64," + resp.image;
+        });
       });
-    }, 250);
+  }
+
+  // Try every candidate URL in order; return the first that yields image bytes
+  // (full quality — the =s0 rewrite and srcset entries are tried before the
+  // downscaled on-screen src).
+  function imgToBase64Multi(img, cb) {
+    var urls = candidateUrls(img);
+    var i = 0;
+    (function next() {
+      if (i >= urls.length) {
+        cb(null);
+        return;
+      }
+      readUrlToBase64(urls[i++], img, function (b64) {
+        if (b64) cb(b64);
+        else next();
+      });
+    })();
+  }
+
+  function elementCenter(el) {
+    if (!el) return null;
+    try {
+      el.scrollIntoView({ block: "center", inline: "center" });
+    } catch (e) {}
+    var r = el.getBoundingClientRect();
+    if (!r || r.width <= 0 || r.height <= 0) return null;
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }
+
+  function controlLabel(el) {
+    return normText(
+      buttonText(el) +
+        " " +
+        (el.getAttribute("aria-label") || "") +
+        " " +
+        (el.getAttribute("mattooltip") || "") +
+        " " +
+        (el.getAttribute("title") || "")
+    );
+  }
+
+  // The page's own "Copy image" control (Gemini "Sao chép hình ảnh", ChatGPT
+  // "Copy image"). Clicking it makes the SITE put the full-resolution original on
+  // the system clipboard — which iAi then reads natively at full quality.
+  function findCopyControl() {
+    var btns = deepQuery('button,[role="button"],[aria-label],[mattooltip]');
+    for (var i = 0; i < btns.length; i++) {
+      if (!isVisible(btns[i])) continue;
+      if (/sao chep (hinh anh|anh|hinh)|copy image|copy photo|copy picture/.test(controlLabel(btns[i]))) {
+        return btns[i];
+      }
+    }
+    return null;
+  }
+
+  // A "more options" / overflow (⋮) button near the result — the copy control is
+  // sometimes tucked inside it. Returns the closest such button to the result img.
+  function findMoreButton(img) {
+    var n = img;
+    for (var h = 0; h < 9 && n; h++) {
+      try {
+        var btns = n.querySelectorAll('button,[role="button"]');
+        for (var i = 0; i < btns.length; i++) {
+          if (!isVisible(btns[i])) continue;
+          if (/more|tuy chon|tùy chọn|options|khac|khác|overflow|menu/.test(controlLabel(btns[i]))) {
+            return btns[i];
+          }
+        }
+      } catch (e) {}
+      n = n.parentElement;
+    }
+    return null;
+  }
+
+  // Full-quality fallback: drive the page's "Copy image" control with a trusted
+  // click (needed for the site's clipboard write), give the browser a moment to
+  // place the original PNG on the system clipboard, then tell iAi to read it. iAi
+  // reads it natively (no CORS/canvas limits) and guards against a stale clipboard
+  // by hashing. Resolves cb(true) once handed off to iAi, cb(false) if no copy
+  // control could be found/opened.
+  async function grabViaCopy(img, id, cb) {
+    var btn = findCopyControl();
+    if (!btn) {
+      var more = findMoreButton(img);
+      if (more) {
+        var mp = elementCenter(more);
+        if (mp) {
+          await sendMessage({ type: "realClick", id: id, x: mp.x, y: mp.y });
+          await sleep(500);
+          btn = findCopyControl();
+        }
+      }
+    }
+    if (!btn) {
+      cb(false);
+      return;
+    }
+    var p = elementCenter(btn);
+    if (!p) {
+      cb(false);
+      return;
+    }
+    status(id, "Da tim thay nut Sao chep anh, dang bam de lay ban goc...");
+    await sendMessage({ type: "realClick", id: id, x: p.x, y: p.y });
+    await sleep(1400); // let the site write the full-res image to the OS clipboard
+    status(id, "Da chep anh goc, dang doc vao IAI...");
+    chrome.runtime.sendMessage({ type: "result_clipboard", id: id });
+    cb(true);
   }
 
   function armGrab(id, timeoutMs, submittedPrompt) {
@@ -955,22 +1064,31 @@
       }
       done = true;
       cleanup();
-      status(id, "Da thay anh ket qua, dang tai ve IAI...");
+      status(id, "Da thay anh ket qua, dang tai ban goc ve IAI...");
       // Small settle before grabbing: Gemini may swap the src from a low-res
-      // preview to the final image. imgToBase64 reads currentSrc at fetch time,
+      // preview to the final image. candidateUrls reads currentSrc at fetch time,
       // so the swap is picked up.
       setTimeout(function () {
-        imgToBase64(img, function (b64) {
+        // 1) Best path: download the ORIGINAL bytes (full-res URL rewrite / srcset /
+        //    background fetch). Headless, full quality.
+        imgToBase64Multi(img, function (b64) {
           if (b64) {
             chrome.runtime.sendMessage({ type: "result", id: id, image: b64 });
             return;
           }
-          // Direct read failed (CORS taint / blob / redirect) — chup lai anh tren
-          // trang qua debugger, cach nay bo qua duoc moi rao can tren.
-          status(id, "Doc anh truc tiep khong duoc, dang chup lai anh tren trang...");
-          captureViaScreenshot(img, id, function (b64b) {
-            if (b64b) chrome.runtime.sendMessage({ type: "result", id: id, image: b64b });
-            else fail(id, "Khong lay duoc anh ket qua");
+          // 2) Fallback the user asked for: click the page's "Copy image" control so
+          //    the SITE puts the full-res original on the clipboard; iAi reads it.
+          status(id, "Tai truc tiep khong duoc, thu nut Sao chep anh tren trang...");
+          grabViaCopy(img, id, function (handed) {
+            if (!handed) {
+              fail(
+                id,
+                "Khong lay duoc anh ket qua (khong tai duoc & khong thay nut Sao chep anh tren " +
+                  SITE +
+                  ")"
+              );
+            }
+            // handed === true: iAi reads the clipboard and reports success/failure.
           });
         });
       }, 700);

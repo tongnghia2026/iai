@@ -44,6 +44,13 @@ pub enum ExtInbound {
         image_b64: String,
         origin: Option<EditOrigin>,
     },
+    /// The extension clicked the site's "Copy image" control, so the full-resolution
+    /// original now sits on the OS clipboard — the app reads it natively. No image
+    /// bytes travel over the socket for this path.
+    ResultClipboard {
+        id: u64,
+        origin: Option<EditOrigin>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,6 +382,12 @@ impl ExtBridge {
                             });
                         }
                     }
+                    ExtInbound::ResultClipboard { id, .. } => {
+                        if self.awaiting_id.is_some_and(|cur| cur == id || id == 0) {
+                            let origin = self.clear_awaiting();
+                            out.push(ExtInbound::ResultClipboard { id, origin });
+                        }
+                    }
                 },
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
@@ -577,6 +590,10 @@ fn handle_text(
                     origin: None,
                 });
             }
+        }
+        "result_clipboard" if *authed => {
+            let id = v["id"].as_u64().unwrap_or(0);
+            let _ = inbound.send(ExtInbound::ResultClipboard { id, origin: None });
         }
         _ => {}
     }
