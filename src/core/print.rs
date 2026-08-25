@@ -839,6 +839,12 @@ pub struct PdfVectorObject {
     pub fill_overprint: bool,
     /// Overprint the outline, independent of the fill (`/OP true /OPM 1`).
     pub stroke_overprint: bool,
+    /// Constant fill (non-stroking) alpha in `0..=1`. `< 1` makes the writer emit
+    /// a transparency `ExtGState` (`/ca`) so a translucent object stays native
+    /// instead of being flattened into the raster.
+    pub fill_alpha: f32,
+    /// Constant stroke alpha in `0..=1` (`/CA`).
+    pub stroke_alpha: f32,
 }
 
 /// A PDF-ready split of a canvas: opaque Path layers that PDF can represent
@@ -1312,6 +1318,8 @@ fn collect_pdf_vectors_impl(
                     even_odd: false,
                     fill_overprint: false,
                     stroke_overprint: false,
+                    fill_alpha: 1.0,
+                    stroke_alpha: 1.0,
                 });
             }
             promoted_layer_ids.push(layer.id);
@@ -1337,9 +1345,6 @@ fn collect_pdf_vectors_impl(
             }
             _ => break,
         };
-        if (obj.style.opacity - 1.0).abs() > 1e-3 {
-            break;
-        }
         // Overprint only has separation meaning on a DeviceCMYK page: the writer
         // emits an overprint ExtGState so the ink leaves the planes underneath
         // (e.g. black text over colour doesn't knock a hole in it). On an RGB
@@ -1354,25 +1359,28 @@ fn collect_pdf_vectors_impl(
         if matches!(obj.style.stroke, Paint::Gradient(_)) {
             break;
         }
-        // The native writer does not yet emit transparency graphics states.
-        // Keep any translucent paint in the raster base rather than changing
-        // its appearance.
-        let fill_is_opaque = match obj.style.fill {
-            Paint::None => true,
-            Paint::Solid(c) => c.alpha() >= 1.0 - 1e-3,
-            Paint::Gradient(g) => g
-                .active_stops()
-                .iter()
-                .all(|stop| stop.color.alpha() >= 1.0 - 1e-3),
-        };
-        let stroke_is_opaque = match obj.style.stroke {
-            Paint::None => true,
-            Paint::Solid(c) => c.alpha() >= 1.0 - 1e-3,
-            Paint::Gradient(_) => false,
-        };
-        if !fill_is_opaque || !stroke_is_opaque {
+        // Translucent SOLID fills/strokes and a partial object opacity are fine —
+        // the writer emits a `/ca` `/CA` transparency ExtGState so the object
+        // stays native. A translucent GRADIENT fill would need alpha inside the
+        // shading function itself, which isn't emitted yet, so keep those in the
+        // raster base.
+        let translucent_gradient_fill = matches!(obj.style.fill, Paint::Gradient(g)
+            if g.active_stops().iter().any(|s| s.color.alpha() < 1.0 - 1e-3));
+        if translucent_gradient_fill {
             break;
         }
+        // Effective constant alphas (object opacity × paint alpha) for the ExtGState.
+        let obj_opacity = obj.style.opacity.clamp(0.0, 1.0);
+        let fill_alpha = obj_opacity
+            * match obj.style.fill {
+                Paint::Solid(c) => c.alpha(),
+                _ => 1.0,
+            };
+        let stroke_alpha = obj_opacity
+            * match obj.style.stroke {
+                Paint::Solid(c) => c.alpha(),
+                _ => 1.0,
+            };
         let fill = match obj.style.fill {
             Paint::Solid(_) => paint_color(obj.style.fill),
             Paint::None | Paint::Gradient(_) => None,
@@ -1446,6 +1454,8 @@ fn collect_pdf_vectors_impl(
             even_odd: obj.path.fill_rule == FillRule::EvenOdd,
             fill_overprint: obj.style.fill_overprint,
             stroke_overprint: obj.style.stroke_overprint,
+            fill_alpha,
+            stroke_alpha,
         });
         if let (Some(path), Some(fill)) = (arrow_path, stroke) {
             objects.push(PdfVectorObject {
@@ -1464,6 +1474,9 @@ fn collect_pdf_vectors_impl(
                 // the outline's overprint setting.
                 fill_overprint: obj.style.stroke_overprint,
                 stroke_overprint: false,
+                // ...and the outline's alpha.
+                fill_alpha: stroke_alpha,
+                stroke_alpha: 1.0,
             });
         }
         promoted_layer_ids.push(layer.id);
@@ -1572,6 +1585,8 @@ pub(crate) fn layer_vector_objects_srgb(
                 even_odd: false,
                 fill_overprint: false,
                 stroke_overprint: false,
+                fill_alpha: 1.0,
+                stroke_alpha: 1.0,
             });
         }
         return Some(out);
@@ -1659,6 +1674,8 @@ pub(crate) fn layer_vector_objects_srgb(
         even_odd: obj.path.fill_rule == FillRule::EvenOdd,
         fill_overprint: false,
         stroke_overprint: false,
+        fill_alpha: 1.0,
+        stroke_alpha: 1.0,
     }];
     if let (Some(path), Some(fill)) = (arrow_path, stroke) {
         out.push(PdfVectorObject {
@@ -1675,6 +1692,8 @@ pub(crate) fn layer_vector_objects_srgb(
             even_odd: false,
             fill_overprint: false,
             stroke_overprint: false,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         });
     }
     Some(out)
@@ -1916,43 +1935,93 @@ fn object_overprint(o: &PdfVectorObject) -> (bool, bool) {
     )
 }
 
-/// The named `ExtGState` for an object's fill/stroke overprint combination, or
-/// `None` when it overprints nothing. `/op` governs non-stroking (fill) and
-/// `/OP` stroking; `/OPM 1` is the standard mode where a zero colorant leaves
-/// that separation untouched.
-fn overprint_state_name(fill_op: bool, stroke_op: bool) -> Option<&'static str> {
-    match (fill_op, stroke_op) {
-        (true, true) => Some("IaiOPa"),
-        (true, false) => Some("IaiOPf"),
-        (false, true) => Some("IaiOPs"),
-        (false, false) => None,
-    }
+/// A graphics state an object needs: overprint (CMYK separations) and/or a
+/// constant fill/stroke transparency (`/ca`, `/CA`). Alphas are held per-mille so
+/// states dedupe exactly; `1000` = opaque. The all-default state (opaque, no
+/// overprint) is represented by `object_gs` returning `None` (no gs needed).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct GsState {
+    op_fill: bool,
+    op_stroke: bool,
+    ca: u16,
+    ca_stroke: u16,
 }
 
-/// The `/ExtGState` resource entry for the page, holding only the overprint
-/// graphics states the `objects` actually reference. Empty when none overprint.
-pub(crate) fn pdf_extgstate_resources(objects: &[PdfVectorObject]) -> String {
-    let (mut both, mut fill_only, mut stroke_only) = (false, false, false);
+fn quantize_alpha(a: f32) -> u16 {
+    (a.clamp(0.0, 1.0) * 1000.0).round() as u16
+}
+
+/// The graphics state an object references, or `None` when it is fully opaque and
+/// overprints nothing (so it paints with the page default and needs no `gs`).
+fn object_gs(o: &PdfVectorObject) -> Option<GsState> {
+    let (op_fill, op_stroke) = object_overprint(o);
+    let has_fill = o.fill.is_some() || o.fill_gradient.is_some();
+    let has_stroke = o.stroke.is_some() && o.stroke_width_px > 0.0;
+    let ca = if has_fill {
+        quantize_alpha(o.fill_alpha)
+    } else {
+        1000
+    };
+    let ca_stroke = if has_stroke {
+        quantize_alpha(o.stroke_alpha)
+    } else {
+        1000
+    };
+    let state = GsState {
+        op_fill,
+        op_stroke,
+        ca,
+        ca_stroke,
+    };
+    (op_fill || op_stroke || ca < 1000 || ca_stroke < 1000).then_some(state)
+}
+
+/// The distinct graphics states the objects reference, in first-use order (so the
+/// resource dict and the content-stream `gs` names agree).
+fn gs_states(objects: &[PdfVectorObject]) -> Vec<GsState> {
+    let mut states: Vec<GsState> = Vec::new();
     for o in objects {
-        match object_overprint(o) {
-            (true, true) => both = true,
-            (true, false) => fill_only = true,
-            (false, true) => stroke_only = true,
-            (false, false) => {}
+        if let Some(s) = object_gs(o) {
+            if !states.contains(&s) {
+                states.push(s);
+            }
         }
     }
-    if !(both || fill_only || stroke_only) {
+    states
+}
+
+/// The `/IaiGS{i}` name an object paints under, or `None` when it needs no gs.
+fn object_gs_name(o: &PdfVectorObject, states: &[GsState]) -> Option<String> {
+    let s = object_gs(o)?;
+    states
+        .iter()
+        .position(|x| *x == s)
+        .map(|i| format!("IaiGS{i}"))
+}
+
+/// The `/ExtGState` resource entry for the page, holding only the transparency /
+/// overprint graphics states the `objects` actually reference. Empty when every
+/// object is opaque and overprints nothing. `/op` governs non-stroking (fill) and
+/// `/OP` stroking (`/OPM 1` = a zero colorant leaves that separation untouched);
+/// `/ca` and `/CA` are constant fill and stroke alpha.
+pub(crate) fn pdf_extgstate_resources(objects: &[PdfVectorObject]) -> String {
+    let states = gs_states(objects);
+    if states.is_empty() {
         return String::new();
     }
     let mut dict = String::from("/ExtGState << ");
-    if both {
-        dict.push_str("/IaiOPa << /Type /ExtGState /OP true /op true /OPM 1 >> ");
-    }
-    if fill_only {
-        dict.push_str("/IaiOPf << /Type /ExtGState /OP false /op true /OPM 1 >> ");
-    }
-    if stroke_only {
-        dict.push_str("/IaiOPs << /Type /ExtGState /OP true /op false /OPM 1 >> ");
+    for (i, s) in states.iter().enumerate() {
+        dict.push_str(&format!("/IaiGS{i} << /Type /ExtGState"));
+        if s.op_fill || s.op_stroke {
+            dict.push_str(&format!(" /OP {} /op {} /OPM 1", s.op_stroke, s.op_fill));
+        }
+        if s.ca < 1000 {
+            dict.push_str(&format!(" /ca {:.3}", s.ca as f32 / 1000.0));
+        }
+        if s.ca_stroke < 1000 {
+            dict.push_str(&format!(" /CA {:.3}", s.ca_stroke as f32 / 1000.0));
+        }
+        dict.push_str(" >> ");
     }
     dict.push_str(">>");
     dict
@@ -2194,6 +2263,9 @@ pub(crate) fn append_vector_content(
     // Spot inks paint through page-level Separation colour spaces (/IaiSp{i}).
     let plates = spot_plates(objects);
     let spot_index = |name| plates.iter().position(|p| p.name == name).unwrap_or(0);
+    // Transparency / overprint graphics states, in the same order the resource
+    // dictionary declares them (so `/IaiGS{i}` names line up).
+    let gs = gs_states(objects);
 
     out.push_str("q\n");
     for (index, o) in objects.iter().enumerate() {
@@ -2204,8 +2276,13 @@ pub(crate) fn append_vector_content(
         if !has_fill && !has_stroke {
             continue;
         }
+        let gs_name = object_gs_name(o, &gs);
         if let Some(gradient) = o.fill_gradient {
             out.push_str("q\n");
+            // A partial object opacity applies to the shading fill too.
+            if let Some(name) = &gs_name {
+                out.push_str(&format!("/{name} gs\n"));
+            }
             append_pdf_path(out, &o.path, mx, my);
             out.push_str(if o.even_odd { "W* n\n" } else { "W n\n" });
             let page = crate::core::vector::affine::AffineTransform {
@@ -2225,11 +2302,10 @@ pub(crate) fn append_vector_content(
 
         if has_solid_fill || has_stroke {
             out.push_str("q\n");
-            // Set the overprint graphics state for this object (scoped by q/Q),
-            // so its ink leaves the separations underneath instead of knocking
-            // them out. Only DeviceCMYK objects carry these flags.
-            let (fill_op, stroke_op) = object_overprint(o);
-            if let Some(name) = overprint_state_name(fill_op, stroke_op) {
+            // Set the object's transparency / overprint graphics state (scoped by
+            // q/Q): `/ca` `/CA` for a translucent fill/stroke, and on a DeviceCMYK
+            // page `/op` `/OP` so its ink leaves the separations underneath.
+            if let Some(name) = &gs_name {
                 out.push_str(&format!("/{name} gs\n"));
             }
             if let Some(color) = o.fill {
@@ -3072,6 +3148,8 @@ mod tests {
             even_odd: false,
             fill_overprint: false,
             stroke_overprint: false,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         };
         let pdf = build_pdf_with_vectors(
             &rgba,
@@ -3142,6 +3220,8 @@ mod tests {
             even_odd: false,
             fill_overprint: overprint,
             stroke_overprint: false,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         }
     }
 
@@ -3230,6 +3310,8 @@ mod tests {
             even_odd: false,
             fill_overprint: false,
             stroke_overprint: false,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         };
         let (plates, knockout) = spot_separations(std::slice::from_ref(&obj), 4, 4);
         assert!(plates.is_empty());
@@ -3270,6 +3352,8 @@ mod tests {
             even_odd: false,
             fill_overprint: false,
             stroke_overprint: false,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         };
         let (plates, knockout) = spot_separations(std::slice::from_ref(&obj), 10, 10);
         assert_eq!(plates.len(), 1);
@@ -3803,6 +3887,8 @@ mod tests {
             even_odd: false,
             fill_overprint: false,
             stroke_overprint: false,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         };
         let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], PrintMarks::none(), None)
             .expect("pdf");
@@ -3854,6 +3940,8 @@ mod tests {
             even_odd: false,
             fill_overprint: false,
             stroke_overprint: false,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         };
         let pdf = build_pdf_multipage_encoded(&[page], &[vec![obj]], PrintMarks::none(), None)
             .expect("pdf");
@@ -4243,6 +4331,70 @@ mod tests {
         );
     }
 
+    /// A translucent solid fill stays a native PDF path painted under a `/ca`
+    /// transparency ExtGState, instead of being flattened into the raster.
+    #[test]
+    fn translucent_vector_is_native_with_a_ca_extgstate() {
+        use crate::core::command_vector::apply_object_to_layer;
+        use crate::core::geometry::Point;
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::color::ColorValue;
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+        use crate::core::vector::style::VectorStyle;
+
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(vec![255; 24 * 24 * 4], 24, 24);
+        let index = canvas.add_layer();
+        // A half-transparent red square.
+        let fill = ColorValue::Rgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.5,
+        };
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[index],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(3.0, 3.0)),
+                            Node::sharp(Point::new(21.0, 3.0)),
+                            Node::sharp(Point::new(21.0, 21.0)),
+                            Node::sharp(Point::new(3.0, 21.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                VectorStyle::filled(fill),
+                AffineTransform::IDENTITY,
+            ),
+        );
+
+        let selection = collect_pdf_vectors(&canvas);
+        assert!(
+            selection
+                .objects
+                .iter()
+                .any(|o| (o.fill_alpha - 0.5).abs() < 1e-3),
+            "the translucent fill is promoted as native with alpha 0.5"
+        );
+        let base = pdf_raster_base(&canvas, &selection);
+        let page = encode_pdf_page(&base, 24, 24, 72.0).expect("page");
+        let pdf = build_pdf_encoded_with_vectors(
+            &page,
+            &selection.objects,
+            &PrintLayout::default(),
+            None,
+        )
+        .expect("pdf");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/ExtGState"), "an ExtGState is declared");
+        assert!(text.contains("/ca 0.500"), "half-alpha /ca emitted: {text}");
+        assert!(text.contains("/IaiGS0 gs"), "the object references the gs");
+    }
+
     #[test]
     fn pdf_extgstate_resources_lists_only_used_overprint_states() {
         use crate::core::geometry::Point;
@@ -4275,21 +4427,20 @@ mod tests {
             even_odd: false,
             fill_overprint: false,
             stroke_overprint: false,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         };
         // Nothing overprints → no ExtGState resource.
         assert!(pdf_extgstate_resources(&[base.clone()]).is_empty());
 
-        // A fill-overprint object references only the fill-overprint state.
+        // A fill-overprint object references a single overprint state.
         let mut fill_op = base.clone();
         fill_op.fill_overprint = true;
         let res = pdf_extgstate_resources(&[fill_op]);
-        assert!(
-            res.contains("/IaiOPf"),
-            "fill-overprint state present: {res}"
-        );
+        assert!(res.contains("/IaiGS0"), "an overprint state present: {res}");
         assert!(res.contains("/op true"));
         assert!(res.contains("/OPM 1"));
-        assert!(!res.contains("/IaiOPa"), "unused states are omitted: {res}");
+        assert!(!res.contains("/IaiGS1"), "only one state is emitted: {res}");
 
         // A fill overprint flag with no visible fill draws nothing to overprint.
         let mut ghost = base;
@@ -4365,7 +4516,7 @@ mod tests {
         );
         assert!(text.contains("/OPM 1"), "standard overprint mode set");
         assert!(
-            text.contains("/IaiOPf gs\n"),
+            text.contains("/IaiGS0 gs\n"),
             "overprint state applied to the object"
         );
     }
@@ -4631,6 +4782,8 @@ mod tests {
             even_odd: false,
             fill_overprint: false,
             stroke_overprint: false,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         };
         let mut content = String::new();
         append_vector_content(

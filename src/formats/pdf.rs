@@ -1283,6 +1283,8 @@ mod tests {
             even_odd: false,
             fill_overprint: false,
             stroke_overprint: false,
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
         };
         let mut gradient_vector = vector.clone();
         gradient_vector.fill = None;
