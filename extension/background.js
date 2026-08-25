@@ -273,6 +273,46 @@ async function realClick(tabId, x, y) {
   });
 }
 
+// Make the page believe it is focused & active WITHOUT bringing the window to the
+// front. The site's "Copy image" uses navigator.clipboard.write, which requires
+// document focus; this lets it succeed headless (browser stays out of sight).
+// Reset automatically when the debugger detaches at job end.
+async function setFocusEmulation(tabId, enabled) {
+  await withDebugger(tabId, async (target) => {
+    try {
+      await chrome.debugger.sendCommand(target, "Emulation.setFocusEmulationEnabled", {
+        enabled: !!enabled,
+      });
+    } catch (e) {}
+  });
+}
+
+// Trusted click that does NOT focus/raise the tab — for the headless Copy path.
+async function realClickNoFocus(tabId, x, y) {
+  await withDebugger(tabId, async (target) => {
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x,
+      y,
+      button: "none",
+    });
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+    });
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+    });
+  });
+}
+
 async function realScroll(tabId, x, y) {
   // Wheel input is only reliably delivered to the page when its tab is active.
   // The edit workflow already owns this tab, so re-assert focus before each
@@ -452,6 +492,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
     }
     realClick(tabId, msg.x, msg.y)
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (msg.type === "clickNoFocus") {
+    const tabId = jobTabId(msg.id, sender);
+    if (!tabId) {
+      sendResponse({ ok: false, error: "missing tab id" });
+      return true;
+    }
+    realClickNoFocus(tabId, msg.x, msg.y)
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (msg.type === "emulateFocus") {
+    const tabId = jobTabId(msg.id, sender);
+    if (!tabId) {
+      sendResponse({ ok: false, error: "missing tab id" });
+      return true;
+    }
+    setFocusEmulation(tabId, msg.enabled)
       .then(() => sendResponse({ ok: true }))
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;

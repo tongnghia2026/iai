@@ -1243,6 +1243,7 @@ impl App {
                 clipboard: None,
                 clipboard_image_new_doc_hint: None,
                 os_clipboard_written: None,
+                pending_ext_clipboard: None,
                 pending_opacity_cmd: None,
                 transform_state: None,
                 warp_state: None,

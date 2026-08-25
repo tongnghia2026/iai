@@ -49,6 +49,15 @@ pub struct EditorInteraction {
     /// the OS clipboard against this: a mismatch means another app copied
     /// something newer, which then wins over the internal layer clipboard.
     pub(in crate::app) os_clipboard_written: Option<u64>,
+    /// A browser "Copy image" edit that is waiting for the site to finish writing
+    /// the result to the OS clipboard. The site's copy is async, so the app polls
+    /// the clipboard each frame — `(origin, started, last_poll)` — until it holds an
+    /// image different from what iai wrote (the result) or the wait times out.
+    pub(in crate::app) pending_ext_clipboard: Option<(
+        crate::app::ext_bridge::EditOrigin,
+        std::time::Instant,
+        std::time::Instant,
+    )>,
     /// Structure command captured when an opacity-slider drag starts; pushed once when
     /// the drag ends so the whole drag is one undo entry (avoids history spam and
     /// cloning the full layer stack every frame).

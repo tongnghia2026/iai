@@ -965,20 +965,23 @@
     return null;
   }
 
-  // Full-quality fallback: drive the page's "Copy image" control with a trusted
-  // click (needed for the site's clipboard write), give the browser a moment to
-  // place the original PNG on the system clipboard, then tell iAi to read it. iAi
-  // reads it natively (no CORS/canvas limits) and guards against a stale clipboard
-  // by hashing. Resolves cb(true) once handed off to iAi, cb(false) if no copy
-  // control could be found/opened.
+  // Full-quality fallback: drive the page's "Copy image" control so the SITE puts
+  // the original PNG on the system clipboard, which iAi then reads natively. The
+  // clicks are HEADLESS — focus is emulated via the debugger (not by raising the
+  // window), so the browser never pops in front of the user, yet the site's
+  // clipboard write (which needs document focus) still succeeds. iAi polls the
+  // clipboard and guards against a stale one by hashing. Resolves cb(true) once
+  // handed off to iAi, cb(false) if no copy control could be found/opened.
   async function grabViaCopy(img, id, cb) {
+    // Emulate focus first so the composer/toolbar behave as if the tab is active.
+    await sendMessage({ type: "emulateFocus", id: id, enabled: true });
     var btn = findCopyControl();
     if (!btn) {
       var more = findMoreButton(img);
       if (more) {
         var mp = elementCenter(more);
         if (mp) {
-          await sendMessage({ type: "realClick", id: id, x: mp.x, y: mp.y });
+          await sendMessage({ type: "clickNoFocus", id: id, x: mp.x, y: mp.y });
           await sleep(500);
           btn = findCopyControl();
         }
@@ -994,9 +997,9 @@
       return;
     }
     status(id, "Da tim thay nut Sao chep anh, dang bam de lay ban goc...");
-    await sendMessage({ type: "realClick", id: id, x: p.x, y: p.y });
-    await sleep(1400); // let the site write the full-res image to the OS clipboard
-    status(id, "Da chep anh goc, dang doc vao IAI...");
+    await sendMessage({ type: "clickNoFocus", id: id, x: p.x, y: p.y });
+    await sleep(700); // brief settle; iAi then polls the clipboard for a few seconds
+    status(id, "Da bam Copy, dang cho anh vao IAI...");
     chrome.runtime.sendMessage({ type: "result_clipboard", id: id });
     cb(true);
   }

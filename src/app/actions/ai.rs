@@ -325,8 +325,13 @@ impl App {
                     origin: Some(origin),
                     ..
                 } => {
-                    let success = self.place_ext_clipboard_result(origin);
-                    self.notify_done(success);
+                    // The site writes the clipboard asynchronously after the Copy
+                    // click; begin polling for it (handled below, every frame).
+                    let now = std::time::Instant::now();
+                    self.edit.pending_ext_clipboard = Some((origin, now, now));
+                    let s = "Da bam Copy — dang cho trang chep anh vao clipboard...".to_string();
+                    self.jobs.ext.push_log(&s);
+                    self.jobs.ext.status = s;
                     if let Some(win) = &self.win.window {
                         win.request_redraw();
                     }
@@ -340,6 +345,9 @@ impl App {
         if let Some(hash) = self.jobs.ext.last_clipboard_write.take() {
             self.edit.os_clipboard_written = Some(hash);
         }
+
+        // Drive the async "Copy image" clipboard wait, if one is in progress.
+        self.poll_pending_ext_clipboard();
     }
 
     fn notify_done(&self, success: bool) {
@@ -451,40 +459,59 @@ impl App {
         }
     }
 
-    /// Place the full-resolution original the extension just copied to the OS
-    /// clipboard (its "Copy image" path). Reads the clipboard natively — no CORS or
-    /// canvas limits — and guards against a stale clipboard: if it still holds the
-    /// exact source image iAi wrote before the edit, the site's copy did not land,
-    /// so report failure instead of re-placing the original.
-    fn place_ext_clipboard_result(&mut self, origin: crate::app::ext_bridge::EditOrigin) -> bool {
-        let (success, status) = match crate::app::os_clipboard::read_image() {
-            Ok(Some(img)) => {
-                let hash = crate::app::os_clipboard::image_hash(img.width, img.height, &img.pixels);
-                if self.edit.os_clipboard_written == Some(hash) {
-                    (
-                        false,
-                        "Trang chưa chép được ảnh (clipboard vẫn là ảnh gốc) — thử lại".to_string(),
-                    )
-                } else {
-                    let s = self.place_gemini_result(
-                        Some(origin.doc_id),
-                        img.pixels,
-                        img.width,
-                        img.height,
-                        origin.output_new_file,
-                    );
-                    (ai_placement_succeeded(&s), s)
-                }
-            }
-            Ok(None) => (
-                false,
-                "Clipboard trống — không lấy được ảnh kết quả".to_string(),
-            ),
-            Err(e) => (false, format!("Lỗi đọc clipboard: {e}")),
+    /// Poll the OS clipboard for a browser "Copy image" result (called each frame
+    /// while `pending_ext_clipboard` is set). The site writes the clipboard
+    /// asynchronously after the Copy click, so retry ~every 300ms until an image
+    /// that differs from what iai wrote (the result) appears, or the wait times out.
+    /// Reads natively — no CORS/canvas limits — and the source-hash compare keeps a
+    /// not-yet-updated clipboard from being mistaken for the result.
+    pub(crate) fn poll_pending_ext_clipboard(&mut self) {
+        let Some((origin, started, last)) = self.edit.pending_ext_clipboard else {
+            return;
         };
-        self.jobs.ext.push_log(&status);
-        self.jobs.ext.status = status;
-        success
+        let now = std::time::Instant::now();
+        // Throttle reads to ~300ms; keep the frame loop alive while waiting.
+        if now.duration_since(last) < std::time::Duration::from_millis(300) {
+            if let Some(win) = &self.win.window {
+                win.request_redraw();
+            }
+            return;
+        }
+        self.edit.pending_ext_clipboard = Some((origin, started, now));
+
+        if let Ok(Some(img)) = crate::app::os_clipboard::read_image() {
+            let hash = crate::app::os_clipboard::image_hash(img.width, img.height, &img.pixels);
+            if self.edit.os_clipboard_written != Some(hash) {
+                self.edit.pending_ext_clipboard = None;
+                let s = self.place_gemini_result(
+                    Some(origin.doc_id),
+                    img.pixels,
+                    img.width,
+                    img.height,
+                    origin.output_new_file,
+                );
+                let success = ai_placement_succeeded(&s);
+                self.jobs.ext.push_log(&s);
+                self.jobs.ext.status = s;
+                self.notify_done(success);
+                if let Some(win) = &self.win.window {
+                    win.request_redraw();
+                }
+                return;
+            }
+        }
+
+        if now.duration_since(started) >= std::time::Duration::from_secs(6) {
+            self.edit.pending_ext_clipboard = None;
+            let s =
+                "Trang không chép được ảnh vào clipboard sau khi bấm Copy — thử lại".to_string();
+            self.jobs.ext.push_log(&s);
+            self.jobs.ext.status = s;
+            self.notify_done(false);
+        }
+        if let Some(win) = &self.win.window {
+            win.request_redraw();
+        }
     }
 
     /// Open the Smart Fill dialog (method picker). Requires a selection.
