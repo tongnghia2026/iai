@@ -901,6 +901,23 @@ mod tests {
     }
 
     #[test]
+    fn right_click_menu_stays_available_after_editing_powerclip() {
+        // Regression: after finishing Edit-Contents the selected layer is the
+        // (raster) content, not a vector — the object menu must still be offered.
+        let mut app = app_photo_and_frame();
+        assert!(app.powerclip_place());
+        assert!(app.powerclip_edit_contents()); // enter
+        assert!(app.has_right_click_object(), "menu available while editing");
+        assert!(app.powerclip_edit_contents()); // finish
+        assert!(!app.powerclip_editing_contents());
+        // The raster content is still selected and is clip content → menu shows.
+        assert!(
+            app.has_right_click_object(),
+            "right-click menu still available on the clipped raster content"
+        );
+    }
+
+    #[test]
     fn place_needs_a_frame_and_content() {
         let mut app = App::new();
         app.docs.documents[0].canvas = Canvas::new(50, 50);

@@ -172,13 +172,18 @@ impl App {
                     && !self.edit.input.alt_held
                     && !self.edit.input.was_over_ui
                     && self.edit.transform_state.is_none()
-                    && self.edit.tools.active_id() == ToolId::Move
-                    && self.has_selected_vector_layers() =>
+                    && self.edit.tools.active_id() == ToolId::Move =>
             {
-                self.edit.object_ctx_menu_pos =
-                    Some((self.edit.input.mouse_x, self.edit.input.mouse_y));
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
+                // Select the object under the cursor first (Corel-style), so the
+                // menu targets what was clicked and keeps working after a
+                // PowerClip edit leaves a raster content layer selected.
+                self.right_click_select_object();
+                if self.has_right_click_object() {
+                    self.edit.object_ctx_menu_pos =
+                        Some((self.edit.input.mouse_x, self.edit.input.mouse_y));
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
                 }
             }
             MouseButton::Right

@@ -138,16 +138,71 @@ impl App {
         }
     }
 
-    fn has_selected_vector_layers(&self) -> bool {
-        self.docs.documents[self.docs.active_doc_idx]
-            .canvas
-            .layer_stack
-            .layers
-            .iter()
-            .any(|layer| {
-                layer.selected
-                    && matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
-            })
+    /// Whether a right-click on the canvas should open the object context menu: a
+    /// selected vector, a selected PowerClip content or frame, or an active
+    /// Edit-Contents session. Broad enough that the menu still appears for a raster
+    /// photo placed inside a PowerClip frame (not only for vector layers).
+    pub(crate) fn has_right_click_object(&self) -> bool {
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        if canvas.powerclip_edit_frame.is_some() {
+            return true;
+        }
+        let stack = &canvas.layer_stack;
+        stack.layers.iter().any(|l| {
+            l.selected
+                && (matches!(l.layer_type, crate::core::layer::LayerType::Vector(_))
+                    || l.clip_parent_id.is_some()
+                    || stack.layers.iter().any(|c| c.clip_parent_id == Some(l.id)))
+        })
+    }
+
+    /// Corel-style: on right-click, select the topmost visible object under the
+    /// cursor (unless it is already selected), so the context menu targets what
+    /// was clicked rather than only whatever happened to be selected before.
+    fn right_click_select_object(&mut self) {
+        let zoom = self.edit.view.zoom.max(1e-6);
+        let cx = ((self.edit.input.mouse_x - self.edit.view.offset_x) / zoom).floor() as i32;
+        let cy = ((self.edit.input.mouse_y - self.edit.view.offset_y) / zoom).floor() as i32;
+        let changed = {
+            let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
+            let mut hit = None;
+            for (idx, layer) in canvas.layer_stack.layers.iter().enumerate().rev() {
+                if !layer.visible || layer.is_background || layer.is_group() {
+                    continue;
+                }
+                let lx = cx - layer.offset.0;
+                let ly = cy - layer.offset.1;
+                if lx < 0 || ly < 0 || lx as u32 >= layer.width || ly as u32 >= layer.height {
+                    continue;
+                }
+                if layer.tiles.get_pixel(lx as u32, ly as u32).3 == 0 {
+                    continue;
+                }
+                // A clip / managed mask hides part of the layer — don't pick there.
+                if let Some(m) = &layer.mask {
+                    if m.enabled && m.sample(lx as u32, ly as u32) < 0.02 {
+                        continue;
+                    }
+                }
+                hit = Some(idx);
+                break;
+            }
+            match hit {
+                Some(idx) if !canvas.layer_stack.layers[idx].selected => {
+                    for l in &mut canvas.layer_stack.layers {
+                        l.selected = false;
+                    }
+                    canvas.layer_stack.layers[idx].selected = true;
+                    canvas.layer_stack.active_idx = idx;
+                    canvas.layer_revision += 1;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.apply_canvas_event(crate::app::render::CanvasEvent::SelectionChanged);
+        }
     }
 
     /// Index of the guide under the current cursor (within a few screen px), or
