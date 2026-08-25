@@ -33,6 +33,10 @@ impl App {
 
         self.docs.active_doc_idx = idx;
         self.refresh_active_document();
+        // Memory Milestone M1: activating an evicted RAW re-decodes it to
+        // full resolution (the thumbnail shows meanwhile; the swap-in re-enters
+        // Develop with its saved settings).
+        self.ensure_raw_resident(idx);
     }
 
     /// Move the active document to the front of the MRU list and drop entries

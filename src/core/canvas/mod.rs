@@ -403,6 +403,51 @@ fn dist_point_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
     (px - cx).hypot(py - cy)
 }
 
+/// Area-average box downscale of a straight-alpha RGBA8 image to `dw×dh`
+/// (Memory Milestone M1 thumbnails). Colours are averaged in premultiplied
+/// space so alpha edges stay correct; a fully-transparent destination pixel
+/// keeps zero colour. Only ever downscales (callers clamp the target ≤ source).
+fn downscale_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let dw = dw.max(1);
+    let dh = dh.max(1);
+    let mut out = vec![0u8; dw as usize * dh as usize * 4];
+    if sw == 0 || sh == 0 {
+        return out;
+    }
+    for dy in 0..dh {
+        let sy0 = (dy as u64 * sh as u64 / dh as u64) as u32;
+        let sy1 = (((dy + 1) as u64 * sh as u64 / dh as u64) as u32)
+            .max(sy0 + 1)
+            .min(sh);
+        for dx in 0..dw {
+            let sx0 = (dx as u64 * sw as u64 / dw as u64) as u32;
+            let sx1 = (((dx + 1) as u64 * sw as u64 / dw as u64) as u32)
+                .max(sx0 + 1)
+                .min(sw);
+            let (mut r, mut g, mut b, mut a, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let i = ((sy * sw + sx) * 4) as usize;
+                    let av = src[i + 3] as u64;
+                    r += src[i] as u64 * av;
+                    g += src[i + 1] as u64 * av;
+                    b += src[i + 2] as u64 * av;
+                    a += av;
+                    n += 1;
+                }
+            }
+            let di = ((dy * dw + dx) * 4) as usize;
+            if a > 0 {
+                out[di] = (r / a) as u8;
+                out[di + 1] = (g / a) as u8;
+                out[di + 2] = (b / a) as u8;
+                out[di + 3] = (a / n.max(1)) as u8;
+            }
+        }
+    }
+    out
+}
+
 #[allow(dead_code)]
 impl Canvas {
     pub const LARGE_CANVAS_PIXELS: u64 = 25_000_000;
@@ -1069,6 +1114,23 @@ impl Canvas {
         let mut report = crate::core::mem_report::MemReport::new();
         self.account_memory(&mut report, "");
         report.total()
+    }
+
+    /// Build a small standalone RGBA8 thumbnail canvas (longest side ≤ `max_dim`,
+    /// aspect preserved) from this canvas's current composite — Memory Milestone
+    /// M1. The result carries none of the heavy state (no 16-bit tile masters, no
+    /// `develop_source`, no selection), so evicting a background RAW document to
+    /// its thumbnail frees the full-resolution buffers while still showing an
+    /// image in the tab/filmstrip until it is re-decoded on demand.
+    pub fn downscaled_thumbnail(&self, max_dim: u32) -> Canvas {
+        let (w, h) = (self.width, self.height);
+        let longest = w.max(h).max(1);
+        let scale = (max_dim.max(1) as f32 / longest as f32).min(1.0);
+        let tw = ((w as f32 * scale).round() as u32).clamp(1, w.max(1));
+        let th = ((h as f32 * scale).round() as u32).clamp(1, h.max(1));
+        let src = self.layer_stack.flatten(w, h);
+        let dst = downscale_rgba(&src, w, h, tw, th);
+        Canvas::from_rgba(dst, tw, th)
     }
     pub fn history_entries(&self) -> Vec<crate::core::command::HistoryEntry> {
         self.cmd_history.history_entries()
@@ -2221,5 +2283,44 @@ mod hdr_adjust_tests {
             (255, 255, 255, 255),
             "white background maps to white"
         );
+    }
+
+    #[test]
+    fn downscaled_thumbnail_bounds_aspect_and_drops_heavy_state() {
+        // Memory Milestone M1: a background RAW is evicted to this thumbnail.
+        let canvas = Canvas::new(4000, 3000);
+        let thumb = canvas.downscaled_thumbnail(1000);
+        assert!(
+            thumb.width <= 1000 && thumb.height <= 1000,
+            "thumbnail exceeds max_dim: {}x{}",
+            thumb.width,
+            thumb.height
+        );
+        assert_eq!(
+            thumb.width.max(thumb.height),
+            1000,
+            "longest side must hit max_dim"
+        );
+        let ar_src = 4000.0 / 3000.0;
+        let ar_dst = thumb.width as f32 / thumb.height as f32;
+        assert!((ar_src - ar_dst).abs() < 0.05, "aspect ratio drifted");
+        assert!(
+            thumb.develop_source.is_none(),
+            "thumbnail must not carry a RAW scene master"
+        );
+        // The white background must survive the area average.
+        assert_eq!(
+            thumb.layer_stack.layers[0]
+                .tiles
+                .get_pixel(thumb.width / 2, thumb.height / 2),
+            (255, 255, 255, 255),
+        );
+    }
+
+    #[test]
+    fn downscaled_thumbnail_never_upscales() {
+        let canvas = Canvas::new(200, 100);
+        let thumb = canvas.downscaled_thumbnail(1000);
+        assert_eq!((thumb.width, thumb.height), (200, 100), "must not upscale");
     }
 }

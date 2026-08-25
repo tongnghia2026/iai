@@ -137,6 +137,11 @@ impl App {
                 }
             }
         }
+        // Memory Milestone M1: the session entries the batch's tail RAWs need to
+        // be eviction-eligible are created above; keep only the active (+ one
+        // MRU) working set resident now that they exist. This covers RAWs that
+        // land after `poll_loads` stops running (its pending_loads has drained).
+        self.evict_background_raws();
     }
 
     /// Record `doc` as part of the Develop session (no-op if already present).
@@ -197,6 +202,22 @@ impl App {
         self.develop_session_save_active_settings();
         self.cancel_develop_preview();
         self.switch_to_doc(idx);
+        // Memory Milestone M1: if this filmstrip image was evicted, switch_to_doc
+        // kicked off its re-decode. Its thumbnail shows for now; the full decode
+        // lands via replace_preview_with_full, which re-enters the Develop
+        // preview with this entry's saved settings. Developing the thumbnail now
+        // would be wrong (it has no RAW scene master), so stop here.
+        if self.docs.documents[idx].deferred_raw {
+            let title = self.develop_window_title();
+            if let Some(w) = &self.win.develop_window {
+                w.set_title(&title);
+                w.request_redraw();
+            }
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
         // The shared proof LUT is document-profile aware; a filmstrip switch
         // must rebuild it before the Develop window presents the new image.
         self.apply_proof_settings();

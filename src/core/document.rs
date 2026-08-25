@@ -223,6 +223,13 @@ pub struct Document {
     /// True while the master page is checked out into [`Self::canvas`] for
     /// editing; the real active page is parked in `pages[active_artboard]`.
     pub editing_master: bool,
+    /// Memory Milestone M1: this is a RAW document whose heavy full-resolution
+    /// buffers (tiles + `develop_source`) have been evicted to a lightweight
+    /// thumbnail because it is not the active image. `canvas` holds only the
+    /// thumbnail; the RAW at `path` is re-decoded on demand when the user
+    /// activates it (the swap-in goes through the existing preview→full path).
+    /// `false` for every ordinary document. Session-only, never serialized.
+    pub deferred_raw: bool,
 }
 
 impl Document {
@@ -270,6 +277,7 @@ impl Document {
             pages: Vec::new(),
             master: None,
             editing_master: false,
+            deferred_raw: false,
         }
     }
 
@@ -297,6 +305,7 @@ impl Document {
             pages: Vec::new(),
             master: None,
             editing_master: false,
+            deferred_raw: false,
         }
     }
 

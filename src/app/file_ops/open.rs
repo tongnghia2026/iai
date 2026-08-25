@@ -337,6 +337,10 @@ impl App {
             }
         }
         self.jobs.pending_loads = still_pending;
+        // Memory Milestone M1: after attaching this batch, keep only the active
+        // image's RAW working set full-resolution — evict the rest to
+        // thumbnails so opening many RAWs stays near one working set.
+        self.evict_background_raws();
         if !self.jobs.pending_loads.is_empty() {
             if let Some(w) = &self.win.window {
                 w.request_redraw();
@@ -640,6 +644,9 @@ impl App {
         // Force a re-fit for the full-resolution canvas (the preview was lower-res).
         self.docs.documents[idx].saved_zoom = 0.0;
         self.docs.documents[idx].canvas = canvas;
+        // The full-resolution buffers are back: this is no longer a Memory
+        // Milestone M1 deferred/evicted placeholder.
+        self.docs.documents[idx].deferred_raw = false;
         self.jobs.raw_preview_failures.remove(&id);
         self.dev.develop_thumbs.remove(&id);
         if active {
@@ -924,6 +931,141 @@ impl App {
                 self.jobs.pending_reload_job = None;
                 self.shell.status_msg = "Reload worker stopped".to_string();
             }
+        }
+    }
+
+    /// Memory Milestone M1: keep the active image — plus the single
+    /// most-recently-used other RAW (a one-image keep so A/B switching between
+    /// two photos doesn't re-decode) — full-resolution, and evict every other
+    /// still-transient RAW develop document to a thumbnail. Cheap and
+    /// idempotent; already-light or non-evictable documents are skipped.
+    pub(in crate::app) fn evict_background_raws(&mut self) {
+        let active_id = self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .map(|d| d.id);
+        // Most-recently-used resident RAW other than the active one, kept so the
+        // common two-image compare stays instant. `doc_mru` is newest-first.
+        let keep_extra =
+            self.docs.doc_mru.iter().copied().find(|id| {
+                Some(*id) != active_id
+                    && self.docs.documents.iter().any(|d| {
+                        d.id == *id && !d.deferred_raw && d.canvas.develop_source.is_some()
+                    })
+            });
+        for idx in 0..self.docs.documents.len() {
+            if idx == self.docs.active_doc_idx {
+                continue;
+            }
+            if keep_extra.is_some() && Some(self.docs.documents[idx].id) == keep_extra {
+                continue;
+            }
+            self.evict_raw_document(idx);
+        }
+    }
+
+    /// Evict one non-active RAW document's full-resolution buffers (tiles +
+    /// `develop_source`), replacing its canvas with a thumbnail and marking it
+    /// [`Document::deferred_raw`]. The RAW at `path` is re-decoded on demand when
+    /// the user activates it. No-op unless the document is safe to throw away and
+    /// rebuild: a transient (uncommitted) RAW develop image that is not active,
+    /// not already light, has no decode in flight and no live preview.
+    pub(in crate::app) fn evict_raw_document(&mut self, idx: usize) {
+        if idx == self.docs.active_doc_idx || idx >= self.docs.documents.len() {
+            return;
+        }
+        let doc = &self.docs.documents[idx];
+        if doc.deferred_raw {
+            return;
+        }
+        // A committed "Open Image" raster (no scene master) or an edited/raster
+        // document must never be discarded. Only a live RAW render qualifies.
+        if doc.canvas.develop_source.is_none() {
+            return;
+        }
+        // Multi-page / master documents are never RAW develop docs; guard anyway.
+        if !doc.pages.is_empty() || doc.master.is_some() {
+            return;
+        }
+        let Some(path) = doc.path.clone() else {
+            return;
+        };
+        if !crate::formats::raw::is_raw_path(&path) {
+            return;
+        }
+        let id = doc.id;
+        // Must still be a transient develop-session import (Cancel would close
+        // it), so its only "edits" are Develop settings — which are persisted in
+        // the session entry and re-applied on re-decode.
+        let is_transient = self
+            .dev
+            .develop_session
+            .iter()
+            .any(|e| e.doc == id && e.transient);
+        if !is_transient {
+            return;
+        }
+        // A live preview or an in-flight decode means this image is really in
+        // play; leave it resident.
+        if self
+            .dev
+            .develop_preview
+            .as_ref()
+            .is_some_and(|p| p.doc_id == id)
+        {
+            return;
+        }
+        let key = normalized_path_key(&path);
+        if self.jobs.loading_keys.contains(&key) {
+            return;
+        }
+        let thumb = self.docs.documents[idx].canvas.downscaled_thumbnail(2048);
+        self.docs.documents[idx].canvas = thumb;
+        self.docs.documents[idx].deferred_raw = true;
+        // A later decode of this path swaps the full image back into THIS doc
+        // (attach_loaded_doc routes through raw_preview_docs).
+        self.jobs.raw_preview_docs.insert(key, id);
+        // The cached develop thumbnail is rebuilt from the new state on demand.
+        self.dev.develop_thumbs.remove(&id);
+    }
+
+    /// Memory Milestone M1: make an evicted RAW document full-resolution again by
+    /// re-decoding it off-thread. The decode lands in `poll_loads`, where
+    /// `raw_preview_docs` routes it back into this document via
+    /// `replace_preview_with_full` (which also re-enters the Develop preview with
+    /// the entry's saved settings). No-op unless the document is deferred.
+    pub(in crate::app) fn ensure_raw_resident(&mut self, idx: usize) {
+        let Some(doc) = self.docs.documents.get(idx) else {
+            return;
+        };
+        if !doc.deferred_raw {
+            return;
+        }
+        let Some(path) = doc.path.clone() else {
+            return;
+        };
+        let id = doc.id;
+        let key = normalized_path_key(&path);
+        // Already re-decoding (e.g. a double activation): nothing to do.
+        if self.jobs.loading_keys.contains(&key) {
+            return;
+        }
+        // Route the decode back into this exact document.
+        self.jobs.raw_preview_docs.insert(key.clone(), id);
+        self.jobs.cancelled_raw_loads.remove(&key);
+        self.jobs.loading_keys.insert(key);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        std::thread::spawn(move || {
+            let registry = crate::formats::FormatRegistry::new();
+            let result = import_many_guarded(&registry, &worker_path);
+            let _ = tx.send((worker_path, result, true));
+        });
+        self.jobs.pending_loads.push(rx);
+        self.shell.status_msg = format!("Đang tải lại RAW: {}", file_name(&path));
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
         }
     }
 }
