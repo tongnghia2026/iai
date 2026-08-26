@@ -3765,10 +3765,12 @@ fn linear_color_stage_preserves_headroom_and_neutral_is_exact() {
 #[test]
 fn boundary_managed_saturation_beats_the_srgb_hull_knee() {
     // A mid-chroma warm RAW working pixel pushed hard on Saturation. The
-    // boundary-managed (RAW scene) path keeps scaling chroma past the point the
-    // clamped sRGB-hull knee stops; the single OKLCh output boundary then maps
-    // it back in gamut with the hue preserved. This is what keeps strong
-    // Saturation/Mixer pushes "trong"/vivid instead of greying (bạc).
+    // boundary-managed (RAW scene) path scales chroma in OKLCh (Q5 gamut-aware
+    // Saturation): hue and lightness stay fixed while chroma grows past the point
+    // the clamped sRGB-hull knee greys out, and the single OKLCh output boundary
+    // fits any excursion back in gamut. This is what keeps strong Saturation/
+    // Mixer pushes "trong"/vivid AND at the input hue instead of greying (bạc) or
+    // rotating (the pre-Q5 linear-radial defect that turned red toward orange).
     use crate::core::gamut_map::{is_in_gamut, map_to_output_gamut};
     use crate::core::perceptual_color::{linear_srgb_to_oklab, PerceptualColor};
     use crate::core::working_color::OutputColorSpace;
@@ -3777,6 +3779,10 @@ fn boundary_managed_saturation_beats_the_srgb_hull_knee() {
     settings.saturation = 100.0;
     let input = [0.36f32, 0.10, 0.06];
     let oklch = |c: [f32; 3]| PerceptualColor::from_oklab(linear_srgb_to_oklab(c));
+    let hue_gap = |a: f32, b: f32| {
+        let d = (a - b).abs();
+        d.min(std::f32::consts::TAU - d)
+    };
 
     let (mut wr, mut wg, mut wb) = (input[0], input[1], input[2]);
     apply_color_linear(&settings, None, true, &mut wr, &mut wg, &mut wb);
@@ -3787,21 +3793,25 @@ fn boundary_managed_saturation_beats_the_srgb_hull_knee() {
     let knee = [kr, kg, kb];
 
     assert!(wide.iter().all(|v| v.is_finite()));
-    // The wide push overshoots the sRGB gamut; the hull knee never does.
-    assert!(!is_in_gamut(wide, OutputColorSpace::Srgb));
     assert!(is_in_gamut(knee, OutputColorSpace::Srgb));
-    // It carries meaningfully more chroma than the greyed knee result.
+    // The OKLCh push carries meaningfully more chroma than the greyed knee…
     assert!(
         oklch(wide).chroma > oklch(knee).chroma + 1.0e-3,
         "wide {wide:?} did not out-saturate knee {knee:?}"
     );
-    // The single output boundary lands it back in gamut, hue preserved.
+    // …and, unlike the old linear-radial push, keeps the INPUT hue exactly
+    // (chroma-only scale), so a warm colour never drifts toward orange.
+    assert!(
+        hue_gap(oklch(wide).hue, oklch(input).hue) < 0.01,
+        "boundary saturation rotated hue: {} -> {}",
+        oklch(input).hue,
+        oklch(wide).hue
+    );
+    // The single output boundary lands it back in gamut, hue still preserved.
     let mapped = map_to_output_gamut(wide, OutputColorSpace::Srgb);
     assert!(is_in_gamut(mapped, OutputColorSpace::Srgb));
-    let dh = (oklch(mapped).hue - oklch(wide).hue).abs();
-    let dh = dh.min(std::f32::consts::TAU - dh);
     assert!(
-        dh < 0.02,
+        hue_gap(oklch(mapped).hue, oklch(wide).hue) < 0.02,
         "boundary map drifted hue: {} -> {}",
         oklch(wide).hue,
         oklch(mapped).hue

@@ -982,20 +982,27 @@ fn dev_rotate_oklab_hue_working(c: vec3<f32>, deg: f32) -> vec3<f32> {
     return dev_oklab_to_working(vec3<f32>(lab.x, na, nb));
 }
 
-// Hue-preserving linear chroma scale for the RAW scene colour stage. The scene
-// path runs one OKLCh output-boundary gamut compression (dev_gamut_clip_chroma
-// in dev_scene_display), so a positive push scales chroma freely and lets the
-// boundary map any excursion back in gamut a single time — strong
-// Saturation/Mixer pushes stay vivid instead of greying against the sRGB hull.
+// Gamut-aware chroma scale for the RAW scene colour stage. A POSITIVE push
+// scales chroma along a constant OKLCh hue+lightness line (a,b scaled together),
+// so the scene's single OKLCh output-boundary gamut clamp (dev_gamut_clip_chroma
+// in dev_scene_display) fits it to the MAX in-gamut chroma at the same
+// hue/lightness — the colour saturates up to the hull instead of overshooting in
+// linear RGB and folding back to a duller, hue-rotated colour (the pre-Q5
+// defect). Desaturation keeps the exact linear radial scale (already in gamut).
 // CPU twin: scale_linear_chroma_around_luma with boundary_managed = true.
 fn dev_scale_linear_chroma(c: vec3<f32>, factor: f32) -> vec3<f32> {
     let y = clamp(dev_working_luma(c), 0.0, 1.0);
     let protect = dev_smootherstep(0.0027, 0.0174, y)
         * (1.0 - dev_smootherstep(0.7874, 0.9774, y));
     let req = (clamp(factor, 0.0, 3.20) - 1.0) * protect;
+    if (req > 0.0) {
+        var lab = dev_working_to_oklab(c);
+        let s = 1.0 + req;
+        lab = vec3<f32>(lab.x, lab.y * s, lab.z * s);
+        return dev_oklab_to_working(lab);
+    }
     let d = c - vec3<f32>(y);
-    let scale = 1.0 + req;
-    return vec3<f32>(y) + d * scale;
+    return vec3<f32>(y) + d * (1.0 + req);
 }
 
 // Full RAW colour stage on the unclamped linear working pixel. V2 classifies

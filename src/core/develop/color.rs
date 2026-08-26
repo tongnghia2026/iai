@@ -259,16 +259,19 @@ fn apply_mixer_brightness(
 /// equivalents of the old display-domain masks, preserving slider feel.
 ///
 /// `boundary_managed` selects how a POSITIVE push resolves gamut:
-/// - `true` (RAW scene path): keep the hue direction and scale chroma freely
-///   (`1 + req`). The scene has one hue-preserving OKLCh gamut compression at
-///   its output boundary, which maps any excursion back in gamut a single time,
-///   so strong Saturation/Mixer pushes stay vivid instead of greying against
-///   the sRGB hull mid-chain.
+/// - `true` (RAW scene path): scale chroma along a constant OKLCh hue+lightness
+///   line (Q5 gamut-aware Saturation). The scene has one hue-preserving OKLCh
+///   gamut clamp at its output boundary (`working_to_display` →
+///   `map_to_output_gamut`), which fits any excursion back to the MAX in-gamut
+///   chroma at the same hue/lightness. Scaling in OKLCh (not linear RGB) means a
+///   strong push saturates up to the hull instead of overshooting in linear RGB
+///   and folding back to a duller, hue-rotated colour — the pre-Q5 defect where
+///   a full Saturation push turned a saturated red into a duller orange.
 /// - `false` (raster/PTS wrapper, hard-clamped right after): cap chroma at the
-///   sRGB gamut hull with the smooth knee — bit-identical to before.
+///   sRGB gamut hull with the smooth linear-RGB knee — bit-identical to before.
 ///
 /// Desaturation (`req <= 0`) only shrinks chroma toward luma and is always in
-/// gamut, so both paths share the exact `1 + req` scale there.
+/// gamut, so both paths share the exact linear `1 + req` scale there.
 fn scale_linear_chroma_around_luma(
     r: &mut f32,
     g: &mut f32,
@@ -280,6 +283,20 @@ fn scale_linear_chroma_around_luma(
     let y = working_luma(working_space, [*r, *g, *b]).clamp(0.0, 1.0);
     let protect = smootherstep(0.0027, 0.0174, y) * (1.0 - smootherstep(0.7874, 0.9774, y));
     let req = (factor.clamp(0.0, 3.20) - 1.0) * protect;
+    // Q5 gamut-aware positive push (RAW scene path): perceptual OKLCh chroma
+    // scale — hue and lightness stay fixed, the output boundary fits chroma to
+    // the hull. See the doc comment above for why this replaces the old linear
+    // radial scale for `boundary_managed` boosts.
+    if boundary_managed && req > 0.0 {
+        let mut color =
+            crate::core::perceptual_color::working_rgb_to_perceptual([*r, *g, *b], working_space);
+        color.chroma *= 1.0 + req;
+        let out = crate::core::perceptual_color::perceptual_to_working_rgb(color, working_space);
+        *r = out[0];
+        *g = out[1];
+        *b = out[2];
+        return;
+    }
     let d = [*r - y, *g - y, *b - y];
     let scale = if boundary_managed || req <= 0.0 {
         1.0 + req

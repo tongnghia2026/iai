@@ -44,12 +44,13 @@
 //! Whites     zone centred at +4.5 EV (narrow); the far-highlight anchor.
 //! Blacks     zone centred at −4.6 EV; same noise-confidence gate on positive
 //!            lift as Shadows. Positive brightens, negative deepens.
-//! Saturation domain ±`CONTROL_LIMIT`; a direct chroma scale around linear
-//!            luminance, protecting near-black and near-white. Region: all
-//!            chromatic pixels; neutrals untouched. Gamut policy: the RAW path
-//!            pushes chroma freely and the OKLCh boundary compresses ONCE — hue
-//!            is preserved and no channel inverts, so a full push saturates up to
-//!            the hull without a hue flip.
+//! Saturation domain ±`CONTROL_LIMIT`; protects near-black and near-white.
+//!            Region: all chromatic pixels; neutrals untouched. Gamut policy
+//!            (Q5): the RAW path scales chroma along a constant OKLCh hue+
+//!            lightness line and the OKLCh output boundary clamps ONCE, so a push
+//!            saturates up to the hull with hue LOCKED — never rotating or going
+//!            duller than the base (the pre-Q5 linear-radial fold-back). The
+//!            hard-clamped raster/PTS path keeps the old linear-RGB hull knee.
 //! Vibrance   domain ±`CONTROL_LIMIT`; low-chroma-priority saturation — pours
 //!            into pale/muted colour and leaves already-vivid colour (chroma ≳
 //!            0.35) alone. Neutrals untouched.
@@ -381,14 +382,13 @@ fn no_light_or_colour_slider_tints_a_neutral() {
 
 #[test]
 fn saturation_enriches_chroma_and_preserves_hue() {
-    // The contract the RAW path GUARANTEES for positive Saturation:
-    //   * hue never swings and output stays finite / in gamut, at ANY setting;
-    //   * MODERATE positive Saturation (≤ +50 %) never goes duller than the
-    //     neutral setting — it adds colour, as a user expects; and
-    //   * the sweep's PEAK chroma exceeds the base, i.e. the control does enrich.
-    // Strict monotonicity all the way to +100 % is deliberately NOT asserted:
-    // near the sRGB hull an already-vivid colour folds back — the documented Q5
-    // defect measured by `saturation_near_hull_chroma_foldback_is_bounded`.
+    // Contract the gamut-aware (OKLCh) RAW Saturation GUARANTEES at EVERY setting:
+    //   * output is finite and in gamut;
+    //   * hue is LOCKED — chroma is scaled along a constant OKLCh hue line, so a
+    //     positive push never rotates a colour (the pre-Q5 red→orange defect);
+    //   * it never goes DULLER than the neutral setting — pushing Saturation up
+    //     only ever adds colour, up to the gamut hull, as a user expects; and
+    //   * the sweep's peak chroma exceeds the base, i.e. the control enriches.
     for &(label, lin) in CHROMATICS {
         let scene = solid_linear_scene(lin);
         let base = lab_of(eval_scene_pixel_for_scene(
@@ -409,23 +409,18 @@ fn saturation_enriches_chroma_and_preserves_hue() {
             );
             let m = lab_of(out);
             peak = peak.max(m.chroma);
-            // Moderate positive saturation (≤ +50 %) must enrich, not dull, and
-            // must hold hue. Beyond that the near-hull fold-back also rotates hue
-            // (red→orange) — recorded, not asserted, by the finding test below.
-            if frac <= 0.5 {
-                assert!(
-                    m.chroma >= base.chroma - 5e-3,
-                    "{label}@{frac}: moderate +saturation went duller than base ({} < {})",
-                    m.chroma,
-                    base.chroma
-                );
-                assert!(
-                    hue_gap(m.hue_deg, base.hue_deg) < 12.0,
-                    "{label}@{frac}: moderate saturation shifted hue {}° → {}°",
-                    base.hue_deg,
-                    m.hue_deg
-                );
-            }
+            assert!(
+                m.chroma >= base.chroma - 5e-3,
+                "{label}@{frac}: +saturation went duller than base ({} < {})",
+                m.chroma,
+                base.chroma
+            );
+            assert!(
+                hue_gap(m.hue_deg, base.hue_deg) < 3.0,
+                "{label}@{frac}: saturation shifted hue {}° → {}°",
+                base.hue_deg,
+                m.hue_deg
+            );
         }
         assert!(
             peak > base.chroma + 1e-3,
@@ -437,14 +432,16 @@ fn saturation_enriches_chroma_and_preserves_hue() {
 
 #[test]
 fn saturation_near_hull_chroma_foldback_is_bounded() {
-    // Q5 finding (predicted by the Q0 baseline: "saturation ±100% breaks gamut →
-    // needs gamut compression"). On the real path a near-primary colour pushed
-    // past the sRGB hull is folded back by the single OKLCh boundary
-    // compression, so its MEASURED output chroma can peak mid-sweep and dip
-    // toward full scale instead of climbing all the way. That is acceptable (no
-    // hue flip, stays in gamut) but is the behaviour a future gamut-aware
-    // Saturation would smooth out — so we record it and bound the worst dip
-    // rather than pretend the response is strictly monotonic.
+    // Q5 gamut-aware Saturation guard (the fix for the Q0-predicted "saturation
+    // ±100% breaks gamut"). BEFORE: scaling chroma radially in linear RGB drove
+    // near-primaries far out of the hull and the boundary folded them back —
+    // red collapsed ~53 % in chroma AND rotated ~58° toward yellow by +100 %.
+    // AFTER: chroma is scaled along a constant OKLCh hue line, so the boundary
+    // clamp fits it to the max in-gamut chroma at the SAME hue — hue-swing is
+    // ~0° and any peak→full dip is small (a colour that already hit the hull by
+    // +50 % simply plateaus). This test records the sweep and bounds both the
+    // residual dip and the hue swing, failing if a change regresses toward the
+    // old linear-radial fold-back.
     let mut worst_drop_pct = 0.0f32;
     let mut worst = "";
     let mut worst_hue = 0.0f32;
@@ -491,22 +488,18 @@ fn saturation_near_hull_chroma_foldback_is_bounded() {
     println!(
         "worst near-hull chroma fold-back: {worst_drop_pct:.1}% on {worst}; worst hue swing: {worst_hue:.1}° on {worst_hue_label}"
     );
-    // KNOWN Q5 DEFECT, locked to the 2026-08-26 baseline: pushing global
-    // Saturation past ~+50 % on a near-primary drives it far out of the sRGB
-    // hull, and the single OKLCh boundary compression folds it back — red peaks
-    // at +50 % then collapses ~53 % in chroma by +100 % AND rotates ~58 % of the
-    // way toward yellow (58°), ending DULLER and a different hue than the
-    // unsaturated base. These bounds do not bless the defect — they record it and
-    // fail loudly if a change makes it WORSE. The gamut-aware Saturation fix
-    // (scale chroma along constant-hue OKLCh lines with a soft hull limiter,
-    // CPU+GPU parity) must instead DRIVE THESE DOWN, at which point they tighten.
+    // Locked to the 2026-08-26 gamut-aware (OKLCh) baseline: worst peak→full dip
+    // ~19 % (blue) and worst hue swing ~0.3 % of a degree. The bounds sit just
+    // above those so a regression toward the old linear-radial fold-back (~53 %
+    // dip, ~58° swing) fails loudly. Tighten further if the residual dip is ever
+    // reduced (e.g. a soft hull limiter before the boundary).
     assert!(
-        worst_drop_pct < 60.0,
-        "near-hull saturation fold-back regressed to {worst_drop_pct:.1}% on {worst} (baseline ~53%)"
+        worst_drop_pct < 25.0,
+        "near-hull saturation fold-back regressed to {worst_drop_pct:.1}% on {worst} (OKLCh baseline ~19%)"
     );
     assert!(
-        worst_hue < 65.0,
-        "near-hull saturation hue swing regressed to {worst_hue:.1}° on {worst_hue_label} (baseline ~58°)"
+        worst_hue < 3.0,
+        "near-hull saturation hue swing regressed to {worst_hue:.1}° on {worst_hue_label} (OKLCh baseline ~0.3°)"
     );
 }
 
