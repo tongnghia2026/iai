@@ -658,27 +658,70 @@ fn select_rawler_xyz_to_cam(
     Err("rawler: camera has no usable deterministic XYZ-to-camera matrix".into())
 }
 
-/// Which parts of the embedded-JPEG default-look matching to apply at decode,
-/// returned as `(apply_baseline_gain, apply_color_matrix_and_curve)`.
+/// Independently gated embedded-JPEG matching stages. Keeping matrix and curves
+/// separate is important: either can be A/B-tested without changing sensor
+/// normalization, demosaic, camera WB, or the decoder characterization matrix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct JpegMatchPlan {
+    apply_gain: bool,
+    apply_matrix: bool,
+    apply_curves: bool,
+}
 ///
 /// A profile-backed DCP render is already colour-accurate, so it defaults to no
 /// embedded-JPEG fit (`none`). The decoder-matrix fallback keeps the shipping
 /// brightness+colour match. The `IAI_RAW_JPEG_MATCH` override still wins:
-/// `on`/`full` force both, `off` keeps only the brightness baseline, `none`
-/// drops all embedded-JPEG matching. Camera characterization work continues to
-/// replace this heuristic (master plan §14/§33).
-fn jpeg_match_mode(dcp_selected: bool) -> (bool, bool) {
-    match std::env::var("IAI_RAW_JPEG_MATCH").as_deref() {
-        Ok("on") | Ok("full") => (true, true),
-        Ok("off") => (true, false),
-        Ok("none") => (false, false),
+/// `on`/`full` force both colour stages; `matrix` and `curves` isolate one;
+/// `off` keeps only the brightness baseline; `none` drops all matching. Camera
+/// characterization work continues to replace this heuristic (master plan
+/// §14/§33).
+fn jpeg_match_plan_for(value: Option<&str>, dcp_selected: bool) -> JpegMatchPlan {
+    match value.map(str::trim) {
+        Some("on") | Some("full") => JpegMatchPlan {
+            apply_gain: true,
+            apply_matrix: true,
+            apply_curves: true,
+        },
+        Some("matrix") => JpegMatchPlan {
+            apply_gain: true,
+            apply_matrix: true,
+            apply_curves: false,
+        },
+        Some("curves") | Some("curve") => JpegMatchPlan {
+            apply_gain: true,
+            apply_matrix: false,
+            apply_curves: true,
+        },
+        Some("off") => JpegMatchPlan {
+            apply_gain: true,
+            apply_matrix: false,
+            apply_curves: false,
+        },
+        Some("none") => JpegMatchPlan {
+            apply_gain: false,
+            apply_matrix: false,
+            apply_curves: false,
+        },
         // A resolved DCP supplies the colour characterization, so drop the
         // embedded-JPEG COLOUR fit — but keep the brightness baseline so the
         // render opens at the camera's exposure instead of a dark scene-linear
         // level (the owner-validated "gain-only" DCP look).
-        _ if dcp_selected => (true, false),
-        _ => (true, true),
+        _ if dcp_selected => JpegMatchPlan {
+            apply_gain: true,
+            apply_matrix: false,
+            apply_curves: false,
+        },
+        _ => JpegMatchPlan {
+            apply_gain: true,
+            apply_matrix: true,
+            apply_curves: true,
+        },
     }
+}
+
+fn jpeg_match_plan(dcp_selected: bool) -> JpegMatchPlan {
+    let value = std::env::var("IAI_RAW_JPEG_MATCH").ok();
+    jpeg_match_plan_for(value.as_deref(), dcp_selected)
 }
 
 /// Build the iAi scene + canvas from a decoded rawloader mosaic. Shared by both
@@ -999,20 +1042,21 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     // is already colour-accurate, so it defaults to no JPEG fit, while the
     // decoder-matrix fallback keeps the shipping brightness+colour match. An
     // explicit IAI_RAW_JPEG_MATCH override still wins.
-    let (apply_gain, apply_color) = jpeg_match_mode(dcp_selected);
+    let jpeg_match = jpeg_match_plan(dcp_selected);
 
     // Always consume any cached preview stats so stale preview data cannot leak
     // into a later decode, but only read/compute them when a mode needs them.
     let cached_preview = crate::formats::raw_preview::take_cached_stats(path);
-    let preview_stats = if apply_gain || apply_color {
-        cached_preview.or_else(|| {
-            std::fs::read(path)
-                .ok()
-                .and_then(|bytes| crate::formats::raw_preview::preview_stats_from_bytes(&bytes))
-        })
-    } else {
-        None
-    };
+    let preview_stats =
+        if jpeg_match.apply_gain || jpeg_match.apply_matrix || jpeg_match.apply_curves {
+            cached_preview.or_else(|| {
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| crate::formats::raw_preview::preview_stats_from_bytes(&bytes))
+            })
+        } else {
+            None
+        };
 
     let mut scene = SceneSource {
         width: fw as u32,
@@ -1023,21 +1067,25 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
         color_pipeline: crate::core::working_color::ColorPipelineMetadata::default(),
         camera_profile: Some(RawSceneCharacterization {
             resolution: resolver_provenance,
-            jpeg_match: JpegMatchMode::from_flags(apply_gain, apply_color),
+            jpeg_match: JpegMatchMode::from_stages(
+                jpeg_match.apply_gain,
+                jpeg_match.apply_matrix,
+                jpeg_match.apply_curves,
+            ),
             raw_render_recipe: raw_render_recipe.version,
         }),
         as_shot_white_balance: as_shot_white,
         camera_rgb_curve: None,
     };
     if let Some(target) = preview_stats {
-        if apply_gain {
+        if jpeg_match.apply_gain {
             let gain =
                 crate::core::develop_scene::baseline_rgb_gains_for_scene(&scene, target.mean_rgb);
             if gain.iter().any(|g| (g - 1.0).abs() > 0.01) {
                 scale_scene_rgb(&mut scene.half, gain);
             }
         }
-        if apply_color {
+        if jpeg_match.apply_matrix {
             let matrix = crate::core::develop_scene::fit_camera_color_matrix(
                 &scene,
                 &target.thumbnail_rgb,
@@ -1047,12 +1095,10 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
             if camera_color_matrix_is_material(matrix) {
                 transform_scene_rgb(&mut scene.half, matrix);
             }
-            // Restore the camera-preview midtone saturation the linear render
-            // otherwise lands short of; done before the tone-curve fit so the
-            // per-channel match below re-normalises brightness on top of it.
-            // Overridable (`IAI_SCENE_CHROMA_ENRICH`) so the Q1 taste/technical
-            // separation can render this creative enrichment off for A/B without
-            // touching the default; the default value is unchanged.
+        }
+        if jpeg_match.apply_curves {
+            // Restore the camera-preview midtone saturation before fitting the
+            // per-channel curves. Technical-neutral keeps this at identity.
             enrich_scene_chroma(&mut scene.half, raw_render_recipe.chroma_enrich);
             scene.camera_rgb_curve = Some(crate::core::develop_scene::fit_camera_rgb_curve(
                 &scene,
@@ -1068,7 +1114,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     // denoised master, AFTER the baseline brightness match, and bakes into the one
     // scene master so the GPU preview and the CPU commit inherit it identically.
     // Hue-preserving and saturation-protected; neutrals stay neutral.
-    if !apply_color {
+    if !jpeg_match.apply_matrix && !jpeg_match.apply_curves {
         let brightness = raw_render_recipe.scene_brightness;
         if (brightness - 1.0).abs() > 1e-4 {
             scale_scene(&mut scene.half, brightness);
@@ -2623,6 +2669,50 @@ fn apply_orientation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jpeg_match_plan_splits_matrix_and_curves_without_env_state() {
+        assert_eq!(
+            jpeg_match_plan_for(Some("matrix"), false),
+            JpegMatchPlan {
+                apply_gain: true,
+                apply_matrix: true,
+                apply_curves: false,
+            }
+        );
+        assert_eq!(
+            jpeg_match_plan_for(Some("curves"), false),
+            JpegMatchPlan {
+                apply_gain: true,
+                apply_matrix: false,
+                apply_curves: true,
+            }
+        );
+        assert_eq!(
+            jpeg_match_plan_for(Some("off"), false),
+            JpegMatchPlan {
+                apply_gain: true,
+                apply_matrix: false,
+                apply_curves: false,
+            }
+        );
+        assert_eq!(
+            jpeg_match_plan_for(None, true),
+            JpegMatchPlan {
+                apply_gain: true,
+                apply_matrix: false,
+                apply_curves: false,
+            }
+        );
+        assert_eq!(
+            jpeg_match_plan_for(None, false),
+            JpegMatchPlan {
+                apply_gain: true,
+                apply_matrix: true,
+                apply_curves: true,
+            }
+        );
+    }
 
     #[test]
     fn white_level_source_stays_in_step_with_the_chooser() {

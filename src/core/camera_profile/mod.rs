@@ -68,6 +68,10 @@ pub enum JpegMatchMode {
     None,
     /// Only the baseline brightness match was applied.
     BrightnessOnly,
+    /// Baseline brightness plus the spatially fitted 3x3 colour matrix.
+    BrightnessAndMatrix,
+    /// Baseline brightness plus the fitted per-channel tone curves.
+    BrightnessAndCurves,
     /// Brightness plus the per-channel colour matrix and tone curve.
     Full,
 }
@@ -95,13 +99,17 @@ impl RawRenderRecipeVersion {
 }
 
 impl JpegMatchMode {
-    /// Map the decoder's `(apply_baseline_gain, apply_color_matrix_and_curve)`
-    /// pair to a stable mode. The `(false, true)` combination is never produced.
-    pub fn from_flags(apply_gain: bool, apply_color: bool) -> Self {
-        match (apply_gain, apply_color) {
-            (_, true) => Self::Full,
-            (true, false) => Self::BrightnessOnly,
-            (false, false) => Self::None,
+    /// Map the decoder's independently gated embedded-JPEG fit stages to stable
+    /// provenance. Matrix/curve diagnostic modes always retain baseline gain.
+    pub fn from_stages(apply_gain: bool, apply_matrix: bool, apply_curves: bool) -> Self {
+        match (apply_gain, apply_matrix, apply_curves) {
+            (_, true, true) => Self::Full,
+            (true, true, false) => Self::BrightnessAndMatrix,
+            (true, false, true) => Self::BrightnessAndCurves,
+            (true, false, false) => Self::BrightnessOnly,
+            (false, false, false) => Self::None,
+            (false, true, false) => Self::BrightnessAndMatrix,
+            (false, false, true) => Self::BrightnessAndCurves,
         }
     }
 }
@@ -173,6 +181,30 @@ pub fn resolve_decoder_matrix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jpeg_match_provenance_distinguishes_matrix_and_curve_diagnostics() {
+        assert_eq!(
+            JpegMatchMode::from_stages(true, true, true),
+            JpegMatchMode::Full
+        );
+        assert_eq!(
+            JpegMatchMode::from_stages(true, true, false),
+            JpegMatchMode::BrightnessAndMatrix
+        );
+        assert_eq!(
+            JpegMatchMode::from_stages(true, false, true),
+            JpegMatchMode::BrightnessAndCurves
+        );
+        assert_eq!(
+            JpegMatchMode::from_stages(true, false, false),
+            JpegMatchMode::BrightnessOnly
+        );
+        assert_eq!(
+            JpegMatchMode::from_stages(false, false, false),
+            JpegMatchMode::None
+        );
+    }
 
     /// Frozen copy of the matrix composition removed from `formats/raw.rs`.
     /// Keep this independent of the production constant so the test catches a
