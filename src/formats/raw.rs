@@ -265,19 +265,129 @@ struct DecodedRaw {
     backend: RawDecoderBackend,
 }
 
-fn decode_raw(path: &Path) -> Result<Canvas, String> {
-    // Primary decoder: rawloader. Fallback: rawler, which adds Canon CR3 and a
-    // much larger camera database. Files rawloader already decodes never reach
-    // the fallback, so their output is byte-for-byte unchanged.
-    let decoded = match rawloader::decode_file(path) {
-        Ok(image) => DecodedRaw {
+/// Select the RAW front-end and decode into the shared `DecodedRaw` model.
+/// Primary decoder: rawloader. Fallback: rawler, which adds Canon CR3 and a much
+/// larger camera database. Files rawloader already decodes never reach the
+/// fallback, so their output is byte-for-byte unchanged.
+fn decode_front_end(path: &Path) -> Result<DecodedRaw, String> {
+    match rawloader::decode_file(path) {
+        Ok(image) => Ok(DecodedRaw {
             image,
             backend: RawDecoderBackend::Rawloader,
-        },
-        Err(primary) => decode_via_rawler(path)
-            .map_err(|fallback| format!("rawloader: {primary}; {fallback}"))?,
-    };
-    decode_raw_from(decoded, path)
+        }),
+        Err(primary) => {
+            decode_via_rawler(path).map_err(|fallback| format!("rawloader: {primary}; {fallback}"))
+        }
+    }
+}
+
+fn decode_raw(path: &Path) -> Result<Canvas, String> {
+    decode_raw_from(decode_front_end(path)?, path)
+}
+
+/// Where a channel's effective white level came from. The Q1 sensor-preprocessing
+/// audit must record when reported metadata was NOT trusted: silently swapping in
+/// the observed sensor maximum brightens a genuinely underexposed frame, so the
+/// substitution has to remain visible in provenance rather than be assumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhiteLevelSource {
+    /// Reported white level trusted and used as-is.
+    Reported,
+    /// Reported ≤ black (missing/degenerate); observed sensor maximum used.
+    MissingReplacedByObserved,
+    /// Reported looked like a 16-bit container maximum; observed maximum used.
+    ContainerMaxReplacedByObserved,
+}
+
+/// Classify one channel's white-level decision, mirroring
+/// [`choose_effective_white_level`] branch-for-branch so the audit's provenance
+/// stays exactly in step with the value the decode actually normalizes by. A
+/// unit test pins the two together.
+fn white_level_source(reported: f32, black: f32, observed: f32) -> WhiteLevelSource {
+    let observed = observed.max(black + 1.0);
+    if !reported.is_finite() || reported <= black + 1.0 {
+        return WhiteLevelSource::MissingReplacedByObserved;
+    }
+    let observed_span = observed - black;
+    let reported_span = reported - black;
+    if reported >= 60_000.0 && observed_span <= 20_000.0 && reported_span > observed_span * 2.5 {
+        WhiteLevelSource::ContainerMaxReplacedByObserved
+    } else {
+        WhiteLevelSource::Reported
+    }
+}
+
+/// Read-only sensor metadata a RAW decode exposes, with provenance — the Q1
+/// "normalized RAW master" foundation. Downstream preprocessing stages (optical
+/// black, defect/PDAF correction, green equilibration, lens shading) read these
+/// facts; recording exactly what the decoder returns keeps later work from
+/// assuming fields the corpus does not actually carry.
+#[derive(Clone, Debug)]
+pub struct RawSensorMetadata {
+    pub backend: RawDecoderBackend,
+    pub make: String,
+    pub model: String,
+    pub width: usize,
+    pub height: usize,
+    /// Samples per pixel: 1 = Bayer mosaic or monochrome, 3 = linear/demosaiced.
+    pub cpp: usize,
+    pub cfa_name: String,
+    pub cfa_valid: bool,
+    pub is_mono: bool,
+    /// Active image rectangle after the decoder crop: [top, left, width, height].
+    pub active_area: [usize; 4],
+    /// rawloader crop margins [top, right, bottom, left].
+    pub crop_margins: [usize; 4],
+    pub black_levels: [f32; 4],
+    pub reported_white_levels: [f32; 4],
+    pub observed_white_maxima: [f32; 4],
+    pub effective_white_levels: [f32; 4],
+    pub white_level_source: [WhiteLevelSource; 4],
+    /// As-shot white-balance multipliers from the decoder (0 where absent).
+    pub wb_coeffs: [f32; 4],
+    /// Count of masked optical-black regions the decoder exposed (0 = none).
+    pub black_area_count: usize,
+    pub orientation: String,
+}
+
+/// Decode `path` far enough to report [`RawSensorMetadata`] — it reads the mosaic
+/// and derives the level/area facts but skips demosaic and the full render, so it
+/// is cheap enough to audit a whole corpus. It changes no rendered pixel.
+pub fn probe_sensor_metadata(path: &Path) -> Result<RawSensorMetadata, String> {
+    let decoded = decode_front_end(path)?;
+    let raw = &decoded.image;
+    let area = active_area(raw)?;
+    let levels = raw_levels(raw, area);
+    let is_mono = raw.cpp == 1 && !raw.cfa.is_valid();
+    let mut source = [WhiteLevelSource::Reported; 4];
+    for c in 0..4 {
+        source[c] = white_level_source(
+            raw.whitelevels[c] as f32,
+            raw.blacklevels[c] as f32,
+            levels.observed_white[c],
+        );
+    }
+    Ok(RawSensorMetadata {
+        backend: decoded.backend,
+        make: raw.clean_make.trim().to_string(),
+        model: raw.clean_model.trim().to_string(),
+        width: raw.width,
+        height: raw.height,
+        cpp: raw.cpp,
+        cfa_name: raw.cfa.name.clone(),
+        cfa_valid: raw.cfa.is_valid(),
+        is_mono,
+        active_area: [area.top, area.left, area.width, area.height],
+        crop_margins: raw.crops,
+        black_levels: levels.black,
+        reported_white_levels: raw.whitelevels.map(|value| value as f32),
+        observed_white_maxima: levels.observed_white,
+        effective_white_levels: levels.effective_white,
+        white_level_source: source,
+        wb_coeffs: raw.wb_coeffs,
+        black_area_count: raw.blackareas.len(),
+        orientation: format!("{:?}", raw.orientation),
+    })
 }
 
 /// Decode a RAW with rawler and adapt it into a `rawloader::RawImage`, so the
@@ -2268,6 +2378,33 @@ fn apply_orientation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn white_level_source_stays_in_step_with_the_chooser() {
+        // (reported, black, observed): trusted, missing/degenerate, container-max,
+        // and high-observed (reported kept despite the 16-bit container value).
+        let cases = [
+            (16_383.0_f32, 512.0_f32, 15_000.0_f32),
+            (0.0, 512.0, 9_000.0),
+            (65_535.0, 512.0, 12_000.0),
+            (65_535.0, 2_000.0, 40_000.0),
+        ];
+        for (reported, black, observed) in cases {
+            let effective = choose_effective_white_level(reported, black, observed);
+            let observed_floor = observed.max(black + 1.0);
+            match white_level_source(reported, black, observed) {
+                WhiteLevelSource::Reported => assert_eq!(
+                    effective, reported,
+                    "reported-trusted must equal the reported level"
+                ),
+                WhiteLevelSource::MissingReplacedByObserved
+                | WhiteLevelSource::ContainerMaxReplacedByObserved => assert_eq!(
+                    effective, observed_floor,
+                    "a fallback source must equal the observed maximum"
+                ),
+            }
+        }
+    }
 
     #[test]
     fn rawler_fallback_prefers_a_valid_d65_matrix_deterministically() {
