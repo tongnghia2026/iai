@@ -666,6 +666,7 @@ struct JpegMatchPlan {
     apply_gain: bool,
     apply_matrix: bool,
     apply_curves: bool,
+    preview_safe: bool,
 }
 ///
 /// A profile-backed DCP render is already colour-accurate, so it defaults to no
@@ -681,26 +682,37 @@ fn jpeg_match_plan_for(value: Option<&str>, dcp_selected: bool) -> JpegMatchPlan
             apply_gain: true,
             apply_matrix: true,
             apply_curves: true,
+            preview_safe: false,
+        },
+        Some("safe") | Some("preview-safe") => JpegMatchPlan {
+            apply_gain: true,
+            apply_matrix: true,
+            apply_curves: false,
+            preview_safe: true,
         },
         Some("matrix") => JpegMatchPlan {
             apply_gain: true,
             apply_matrix: true,
             apply_curves: false,
+            preview_safe: false,
         },
         Some("curves") | Some("curve") => JpegMatchPlan {
             apply_gain: true,
             apply_matrix: false,
             apply_curves: true,
+            preview_safe: false,
         },
         Some("off") => JpegMatchPlan {
             apply_gain: true,
             apply_matrix: false,
             apply_curves: false,
+            preview_safe: false,
         },
         Some("none") => JpegMatchPlan {
             apply_gain: false,
             apply_matrix: false,
             apply_curves: false,
+            preview_safe: false,
         },
         // A resolved DCP supplies the colour characterization, so drop the
         // embedded-JPEG COLOUR fit — but keep the brightness baseline so the
@@ -710,11 +722,13 @@ fn jpeg_match_plan_for(value: Option<&str>, dcp_selected: bool) -> JpegMatchPlan
             apply_gain: true,
             apply_matrix: false,
             apply_curves: false,
+            preview_safe: false,
         },
         _ => JpegMatchPlan {
             apply_gain: true,
             apply_matrix: true,
             apply_curves: true,
+            preview_safe: false,
         },
     }
 }
@@ -1047,16 +1061,19 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     // Always consume any cached preview stats so stale preview data cannot leak
     // into a later decode, but only read/compute them when a mode needs them.
     let cached_preview = crate::formats::raw_preview::take_cached_stats(path);
-    let preview_stats =
-        if jpeg_match.apply_gain || jpeg_match.apply_matrix || jpeg_match.apply_curves {
-            cached_preview.or_else(|| {
-                std::fs::read(path)
-                    .ok()
-                    .and_then(|bytes| crate::formats::raw_preview::preview_stats_from_bytes(&bytes))
-            })
-        } else {
-            None
-        };
+    let preview_stats = if jpeg_match.apply_gain
+        || jpeg_match.apply_matrix
+        || jpeg_match.apply_curves
+        || jpeg_match.preview_safe
+    {
+        cached_preview.or_else(|| {
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| crate::formats::raw_preview::preview_stats_from_bytes(&bytes))
+        })
+    } else {
+        None
+    };
 
     let mut scene = SceneSource {
         width: fw as u32,
@@ -1071,6 +1088,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
                 jpeg_match.apply_gain,
                 jpeg_match.apply_matrix,
                 jpeg_match.apply_curves,
+                jpeg_match.preview_safe,
             ),
             raw_render_recipe: raw_render_recipe.version,
         }),
@@ -1095,6 +1113,31 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
             if camera_color_matrix_is_material(matrix) {
                 transform_scene_rgb(&mut scene.half, matrix);
             }
+        }
+        if jpeg_match.preview_safe {
+            // The spatial matrix changes the display mean slightly. Re-fit only
+            // a scalar exposure afterwards so brightness returns to the camera
+            // preview without introducing a per-channel cast.
+            let post_gain = fit_preview_luma_gain_for_scene(
+                &scene,
+                target.mean_luma,
+                target.thumbnail_width,
+                target.thumbnail_height,
+            );
+            if (post_gain - 1.0).abs() > 0.005 {
+                scale_scene(&mut scene.half, post_gain);
+            }
+
+            // Match only aggregate display chroma with a bounded, hue- and
+            // luminance-preserving scale. Unlike the removed RGB histogram
+            // curves this has no spatial filter and cannot soften detail.
+            let chroma_strength = fit_preview_chroma_strength(
+                &scene,
+                &target.thumbnail_rgb,
+                target.thumbnail_width,
+                target.thumbnail_height,
+            );
+            enrich_scene_chroma(&mut scene.half, chroma_strength);
         }
         if jpeg_match.apply_curves {
             // Restore the camera-preview midtone saturation before fitting the
@@ -2203,6 +2246,153 @@ fn transform_scene_rgb(scene: &mut [u16], matrix: [[f32; 3]; 3]) {
 /// photographer sees against the camera preview. 0 = off.
 const CHROMA_ENRICH: f32 = 0.85;
 
+/// Evaluate the luminance-preserving chroma operator for one scene-linear pixel.
+/// Kept pure so the preview-fit search uses exactly the same math as the full
+/// scene pass below.
+fn enrich_rgb_chroma(rgb: [f32; 3], strength: f32) -> [f32; 3] {
+    if strength.abs() < 1e-4 {
+        return rgb;
+    }
+    const LW: [f32; 3] = [0.22, 0.69, 0.09];
+    const CENTER: f32 = -2.47;
+    const SIGMA: f32 = 1.4;
+    let luma = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
+    if luma <= 1e-5 {
+        return rgb;
+    }
+    let mx = rgb[0].max(rgb[1]).max(rgb[2]);
+    let mn = rgb[0].min(rgb[1]).min(rgb[2]);
+    let sat = if mx > 1e-6 { (mx - mn) / mx } else { 0.0 };
+    let protect = (1.0 - sat).clamp(0.0, 1.0);
+    let e = luma.max(1e-5).log2();
+    let d = (e - CENTER) / SIGMA;
+    let mid = (-0.5 * d * d).exp();
+    let factor = 1.0 + strength * mid * protect;
+    rgb.map(|channel| (luma + (channel - luma) * factor).max(0.0))
+}
+
+fn preview_sample_coord(index: u32, source_len: u32, sample_len: u32) -> u32 {
+    ((((index as u64 * 2 + 1) * source_len as u64) / (sample_len.max(1) as u64 * 2))
+        .min(source_len.saturating_sub(1) as u64)) as u32
+}
+
+/// Scalar post-matrix exposure fit against the embedded preview. The bounded
+/// geometric search changes brightness only; it cannot introduce a colour cast.
+fn fit_preview_luma_gain_for_scene(
+    scene: &SceneSource,
+    target_luma: f32,
+    sample_w: u32,
+    sample_h: u32,
+) -> f32 {
+    if sample_w == 0 || sample_h == 0 || !target_luma.is_finite() {
+        return 1.0;
+    }
+    let tone = crate::core::develop_scene::build_scene_tone_for_scene(&Default::default(), scene);
+    let mean = |gain: f32| -> f32 {
+        let mut sum = 0.0f64;
+        let mut count = 0u64;
+        for y in 0..sample_h {
+            let sy = preview_sample_coord(y, scene.height, sample_h);
+            for x in 0..sample_w {
+                let sx = preview_sample_coord(x, scene.width, sample_w);
+                let rgb = scene.get_rgb(sx, sy).map(|v| v * gain);
+                let d = tone.scene_to_display(rgb, None);
+                sum += (0.2126 * d[0] + 0.7152 * d[1] + 0.0722 * d[2]) as f64;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            0.0
+        } else {
+            (sum / count as f64) as f32
+        }
+    };
+    let target = target_luma.clamp(0.02, 0.98);
+    let (mut lo, mut hi) = (0.25f32, 4.0f32);
+    if mean(lo) >= target {
+        return lo;
+    }
+    if mean(hi) <= target {
+        return hi;
+    }
+    for _ in 0..16 {
+        let mid = (lo * hi).sqrt();
+        if mean(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo * hi).sqrt()
+}
+
+fn display_oklab_chroma(encoded: [f32; 3]) -> f32 {
+    let linear = encoded.map(crate::core::develop::srgb_to_linear);
+    let lab = crate::core::perceptual_color::linear_srgb_to_oklab(linear);
+    lab.a.hypot(lab.b)
+}
+
+/// Fit the existing chroma enrichment strength to the camera preview while
+/// bounding the requested chroma change to -15%/+25%. This resists extreme
+/// picture styles and bad/misaligned preview samples.
+fn fit_preview_chroma_strength(
+    scene: &SceneSource,
+    target: &[[u8; 3]],
+    sample_w: u32,
+    sample_h: u32,
+) -> f32 {
+    if sample_w == 0 || sample_h == 0 || target.len() != sample_w as usize * sample_h as usize {
+        return 0.0;
+    }
+    let tone = crate::core::develop_scene::build_scene_tone_for_scene(&Default::default(), scene);
+    let mut selected = Vec::with_capacity(target.len());
+    let mut target_sum = 0.0f64;
+    for y in 0..sample_h {
+        let sy = preview_sample_coord(y, scene.height, sample_h);
+        for x in 0..sample_w {
+            let t = target[(y * sample_w + x) as usize].map(|v| v as f32 / 255.0);
+            let luma = 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
+            if !(0.03..=0.97).contains(&luma) {
+                continue;
+            }
+            let sx = preview_sample_coord(x, scene.width, sample_w);
+            selected.push(scene.get_rgb(sx, sy));
+            target_sum += display_oklab_chroma(t) as f64;
+        }
+    }
+    if selected.len() < 24 {
+        return 0.0;
+    }
+    let mean_for = |strength: f32| -> f32 {
+        selected
+            .iter()
+            .map(|&rgb| {
+                display_oklab_chroma(tone.scene_to_display(enrich_rgb_chroma(rgb, strength), None))
+            })
+            .sum::<f32>()
+            / selected.len() as f32
+    };
+    let base = mean_for(0.0).max(1e-5);
+    let measured_target = (target_sum / selected.len() as f64) as f32;
+    let target = measured_target.clamp(base * 0.85, base * 1.25);
+    let (mut lo, mut hi) = (-0.25f32, 1.5f32);
+    if mean_for(lo) >= target {
+        return lo;
+    }
+    if mean_for(hi) <= target {
+        return hi;
+    }
+    for _ in 0..14 {
+        let mid = 0.5 * (lo + hi);
+        if mean_for(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
 /// Luminance-anchored vibrance on the LINEAR scene master, applied once at
 /// import so the default look, the GPU preview (scene master upload) and the
 /// CPU commit inherit one identical enrichment — no per-stage mirroring, and
@@ -2216,35 +2406,15 @@ fn enrich_scene_chroma(scene: &mut [u16], strength: f32) {
     if strength.abs() < 1e-4 {
         return;
     }
-    // Rec.709-ish luma; the exact weights only set which luminance is held
-    // constant, so an approximation in the wide working space is fine — neutral
-    // preservation holds for any weights that sum to one.
-    const LW: [f32; 3] = [0.22, 0.69, 0.09];
-    // Midtone window in EV around 18% grey (log2 domain), ~1.4-stop sigma.
-    const CENTER: f32 = -2.47; // log2(0.18)
-    const SIGMA: f32 = 1.4;
     scene.par_chunks_mut(4).for_each(|px| {
         let rgb = [
             f16_bits_to_f32(px[0]),
             f16_bits_to_f32(px[1]),
             f16_bits_to_f32(px[2]),
         ];
-        let luma = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
-        if luma <= 1e-5 {
-            return;
-        }
-        let mx = rgb[0].max(rgb[1]).max(rgb[2]);
-        let mn = rgb[0].min(rgb[1]).min(rgb[2]);
-        // Saturation proxy in [0,1]; protect pixels that are already vivid.
-        let sat = if mx > 1e-6 { (mx - mn) / mx } else { 0.0 };
-        let protect = (1.0 - sat).clamp(0.0, 1.0);
-        // Midtone weight: Gaussian on exposure so deep shadows/near-clip stay put.
-        let e = luma.max(1e-5).log2();
-        let d = (e - CENTER) / SIGMA;
-        let mid = (-0.5 * d * d).exp();
-        let factor = 1.0 + strength * mid * protect;
-        for c in 0..3 {
-            px[c] = f32_to_f16_bits((luma + (rgb[c] - luma) * factor).max(0.0));
+        let enriched = enrich_rgb_chroma(rgb, strength);
+        for (dst, value) in px[..3].iter_mut().zip(enriched) {
+            *dst = f32_to_f16_bits(value);
         }
     });
 }
@@ -2678,6 +2848,7 @@ mod tests {
                 apply_gain: true,
                 apply_matrix: true,
                 apply_curves: false,
+                preview_safe: false,
             }
         );
         assert_eq!(
@@ -2686,6 +2857,7 @@ mod tests {
                 apply_gain: true,
                 apply_matrix: false,
                 apply_curves: true,
+                preview_safe: false,
             }
         );
         assert_eq!(
@@ -2694,6 +2866,7 @@ mod tests {
                 apply_gain: true,
                 apply_matrix: false,
                 apply_curves: false,
+                preview_safe: false,
             }
         );
         assert_eq!(
@@ -2702,6 +2875,7 @@ mod tests {
                 apply_gain: true,
                 apply_matrix: false,
                 apply_curves: false,
+                preview_safe: false,
             }
         );
         assert_eq!(
@@ -2710,7 +2884,71 @@ mod tests {
                 apply_gain: true,
                 apply_matrix: true,
                 apply_curves: true,
+                preview_safe: false,
             }
+        );
+        assert_eq!(
+            jpeg_match_plan_for(Some("safe"), false),
+            JpegMatchPlan {
+                apply_gain: true,
+                apply_matrix: true,
+                apply_curves: false,
+                preview_safe: true,
+            }
+        );
+    }
+
+    #[test]
+    fn preview_safe_fit_recovers_brightness_and_chroma_without_rgb_curves() {
+        let (w, h) = (24u32, 24u32);
+        let mut scene = SceneSource::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let fx = x as f32 / (w - 1) as f32;
+                let fy = y as f32 / (h - 1) as f32;
+                scene.set_rgb(
+                    x,
+                    y,
+                    [
+                        0.035 + 0.30 * fx,
+                        0.045 + 0.24 * fy,
+                        0.040 + 0.20 * (1.0 - fx * fy),
+                    ],
+                );
+            }
+        }
+        let tone =
+            crate::core::develop_scene::build_scene_tone_for_scene(&Default::default(), &scene);
+        let expected_gain = 1.35f32;
+        let expected_chroma = 0.70f32;
+        let mut target = Vec::with_capacity((w * h) as usize);
+        let mut target_luma = 0.0f32;
+        for y in 0..h {
+            for x in 0..w {
+                let rgb = scene.get_rgb(x, y).map(|v| v * expected_gain);
+                let d = tone.scene_to_display(enrich_rgb_chroma(rgb, expected_chroma), None);
+                target_luma += 0.2126 * d[0] + 0.7152 * d[1] + 0.0722 * d[2];
+                target.push(d.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8));
+            }
+        }
+        target_luma /= (w * h) as f32;
+
+        let fitted_gain = fit_preview_luma_gain_for_scene(&scene, target_luma, w, h);
+        assert!((1.05..=1.6).contains(&fitted_gain));
+        let fitted_luma = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let d = tone.scene_to_display(scene.get_rgb(x, y).map(|v| v * fitted_gain), None);
+                0.2126 * d[0] + 0.7152 * d[1] + 0.0722 * d[2]
+            })
+            .sum::<f32>()
+            / (w * h) as f32;
+        assert!((fitted_luma - target_luma).abs() < 0.005);
+        scale_scene(&mut scene.half, fitted_gain);
+        let fitted_chroma = fit_preview_chroma_strength(&scene, &target, w, h);
+        assert!(
+            (fitted_chroma - expected_chroma).abs() < 0.20,
+            "chroma {fitted_chroma} vs {expected_chroma}"
         );
     }
 

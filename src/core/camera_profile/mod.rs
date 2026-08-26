@@ -72,6 +72,9 @@ pub enum JpegMatchMode {
     BrightnessAndMatrix,
     /// Baseline brightness plus the fitted per-channel tone curves.
     BrightnessAndCurves,
+    /// Bounded preview match: 3x3 matrix, a post-matrix scalar exposure fit,
+    /// and luminance-preserving chroma enrichment. No RGB tone curves.
+    PreviewSafe,
     /// Brightness plus the per-channel colour matrix and tone curve.
     Full,
 }
@@ -101,15 +104,21 @@ impl RawRenderRecipeVersion {
 impl JpegMatchMode {
     /// Map the decoder's independently gated embedded-JPEG fit stages to stable
     /// provenance. Matrix/curve diagnostic modes always retain baseline gain.
-    pub fn from_stages(apply_gain: bool, apply_matrix: bool, apply_curves: bool) -> Self {
-        match (apply_gain, apply_matrix, apply_curves) {
-            (_, true, true) => Self::Full,
-            (true, true, false) => Self::BrightnessAndMatrix,
-            (true, false, true) => Self::BrightnessAndCurves,
-            (true, false, false) => Self::BrightnessOnly,
-            (false, false, false) => Self::None,
-            (false, true, false) => Self::BrightnessAndMatrix,
-            (false, false, true) => Self::BrightnessAndCurves,
+    pub fn from_stages(
+        apply_gain: bool,
+        apply_matrix: bool,
+        apply_curves: bool,
+        preview_safe: bool,
+    ) -> Self {
+        match (apply_gain, apply_matrix, apply_curves, preview_safe) {
+            (_, _, _, true) => Self::PreviewSafe,
+            (_, true, true, false) => Self::Full,
+            (true, true, false, false) => Self::BrightnessAndMatrix,
+            (true, false, true, false) => Self::BrightnessAndCurves,
+            (true, false, false, false) => Self::BrightnessOnly,
+            (false, false, false, false) => Self::None,
+            (false, true, false, false) => Self::BrightnessAndMatrix,
+            (false, false, true, false) => Self::BrightnessAndCurves,
         }
     }
 }
@@ -185,24 +194,28 @@ mod tests {
     #[test]
     fn jpeg_match_provenance_distinguishes_matrix_and_curve_diagnostics() {
         assert_eq!(
-            JpegMatchMode::from_stages(true, true, true),
+            JpegMatchMode::from_stages(true, true, true, false),
             JpegMatchMode::Full
         );
         assert_eq!(
-            JpegMatchMode::from_stages(true, true, false),
+            JpegMatchMode::from_stages(true, true, false, false),
             JpegMatchMode::BrightnessAndMatrix
         );
         assert_eq!(
-            JpegMatchMode::from_stages(true, false, true),
+            JpegMatchMode::from_stages(true, false, true, false),
             JpegMatchMode::BrightnessAndCurves
         );
         assert_eq!(
-            JpegMatchMode::from_stages(true, false, false),
+            JpegMatchMode::from_stages(true, false, false, false),
             JpegMatchMode::BrightnessOnly
         );
         assert_eq!(
-            JpegMatchMode::from_stages(false, false, false),
+            JpegMatchMode::from_stages(false, false, false, false),
             JpegMatchMode::None
+        );
+        assert_eq!(
+            JpegMatchMode::from_stages(true, true, false, true),
+            JpegMatchMode::PreviewSafe
         );
     }
 
