@@ -901,7 +901,13 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
             // Restore the camera-preview midtone saturation the linear render
             // otherwise lands short of; done before the tone-curve fit so the
             // per-channel match below re-normalises brightness on top of it.
-            enrich_scene_chroma(&mut scene.half, CHROMA_ENRICH);
+            // Overridable (`IAI_SCENE_CHROMA_ENRICH`) so the Q1 taste/technical
+            // separation can render this creative enrichment off for A/B without
+            // touching the default; the default value is unchanged.
+            enrich_scene_chroma(
+                &mut scene.half,
+                env_f32("IAI_SCENE_CHROMA_ENRICH", CHROMA_ENRICH),
+            );
             scene.camera_rgb_curve = Some(crate::core::develop_scene::fit_camera_rgb_curve(
                 &scene,
                 &target.histogram,
