@@ -1168,6 +1168,15 @@ impl Canvas {
             return;
         }
         self.pixels_stale = true;
+        // Free the now-stale flat RGBA8 composite cache instead of holding a
+        // full-resolution mirror through the stale window (Memory Milestone M2).
+        // `ensure_pixels()` reallocates it wholesale on the next read anyway, so
+        // this is pixel-identical and adds no work: every flat-pixels reader
+        // calls `ensure_pixels()` first, and the sole `flatten_dirty()` caller
+        // guards on `!pixels_stale && !pixels.is_empty()`, so neither observes
+        // the freed buffer. A 16-bit RAW then stops keeping a redundant
+        // full-resolution RGBA8 mirror resident once its layers change.
+        self.pixels = Vec::new();
     }
 
     /// Ensure `pixels` is up-to-date. Call before any code that reads `canvas.pixels`
@@ -1253,6 +1262,39 @@ impl Canvas {
 mod hdr_adjust_tests {
     use super::*;
     use crate::core::layer::AdjustmentType;
+
+    #[test]
+    fn flatten_full_frees_flat_cache_and_ensure_rebuilds_identically() {
+        // A small (fits-flat-buffer) canvas holds a flat RGBA8 composite cache.
+        let (w, h) = (8u32, 6u32);
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        for (i, px) in pixels.chunks_exact_mut(4).enumerate() {
+            px.copy_from_slice(&[(i * 3) as u8, (i * 5) as u8, (i * 7) as u8, 255]);
+        }
+        let mut canvas = Canvas::from_rgba(pixels, w, h);
+        canvas.ensure_pixels();
+        assert!(
+            !canvas.pixels.is_empty(),
+            "a small canvas keeps a flat cache"
+        );
+        let expected = canvas.flatten_for_export();
+
+        // Going stale frees the redundant full-resolution mirror (M2)…
+        canvas.flatten_full();
+        assert!(canvas.pixels_stale);
+        assert!(
+            canvas.pixels.is_empty(),
+            "M2: the stale flat cache is freed"
+        );
+
+        // …and the next read rebuilds it pixel-identically.
+        canvas.ensure_pixels();
+        assert!(!canvas.pixels_stale);
+        assert_eq!(
+            canvas.pixels, expected,
+            "rebuilt flat cache must match a fresh flatten"
+        );
+    }
 
     #[test]
     fn destructive_adjustment_on_16bit_doc_stays_16bit() {
