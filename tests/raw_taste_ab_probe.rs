@@ -2,17 +2,16 @@
 //!
 //! The plan wants the technical RAW master free of un-versioned creative taste.
 //! On the corpus (all embedded-JPEG matched, no camera profile) the one clearly
-//! separable creative constant baked into the master is `CHROMA_ENRICH` — a
-//! midtone saturation boost added to compensate for the JPEG match landing ~15%
-//! low on chroma. This probe renders every corpus file BOTH ways — current
-//! default (taste on) and taste-off (`IAI_SCENE_CHROMA_ENRICH=0`, the technical
-//! master) — writes a side-by-side montage (left = current, right = taste-off)
-//! and measures the chroma the enrichment actually adds, so the owner can judge
-//! whether it helps or reads as over-saturation before any default is changed.
+//! separable constants are now collected under a versioned `raw_render_recipe`.
+//! This probe renders every corpus file BOTH ways — current `legacy-baked-v1`
+//! and opt-in `technical-neutral-v2` (`IAI_RAW_RENDER_RECIPE=technical`) — writes
+//! a side-by-side montage (left = current, right = technical), and measures the
+//! lightness, chroma, and acutance the baked recipe actually adds before any
+//! default is changed.
 //!
-//! It changes no default: the enrichment is only disabled for the "off" render
-//! via the env override. `#[ignore]`d and gated on `IAI_RAW_CORPUS`. Set
-//! `IAI_Q0_OUT` for the montages + CSV.
+//! It changes no default: the technical recipe is selected only for the right-
+//! hand render via the env override. `#[ignore]`d and gated on
+//! `IAI_RAW_CORPUS`. Set `IAI_Q0_OUT` for the montages + CSV.
 //!
 //! ```text
 //! $env:IAI_RAW_CORPUS='C:\Users\Admin\Pictures\anh-raw'
@@ -69,8 +68,7 @@ fn resample(px16: &[u16], w: u32, h: u32, target_w: u32) -> (Vec<u16>, u32, u32)
     (out, sw, sh)
 }
 
-/// Render one corpus file's neutral default look at the current chroma-enrich.
-/// The caller sets `IAI_SCENE_CHROMA_ENRICH` before calling for the "off" pass.
+/// Render one corpus file's neutral default look at the selected RAW recipe.
 fn render_resampled(path: &std::path::Path) -> Option<(Vec<u16>, u32, u32)> {
     let canvas = RawImporter.import(path).ok()?;
     let scene = canvas.develop_source.as_ref()?;
@@ -120,12 +118,12 @@ fn raw_taste_ab_montage() {
         ..ExportOptions::default()
     };
     println!(
-        "\nQ1 taste A/B — current (chroma-enrich on) vs technical-neutral (off)\n  {} → montages left=current right=taste-off\n",
+        "\nQ1 taste A/B — legacy-baked-v1 vs technical-neutral-v2\n  {} → montages left=legacy right=technical\n",
         montage_dir.display()
     );
 
     let mut csv = String::from(
-        "file,chroma_on,chroma_off,chroma_delta,shadow_on,shadow_off,mid_on,mid_off,high_on,high_off\n",
+        "file,lightness_legacy,lightness_technical,chroma_legacy,chroma_technical,chroma_delta,acutance_legacy,acutance_technical,shadow_legacy,shadow_technical,mid_legacy,mid_technical,high_legacy,high_technical\n",
     );
     let mut delta_sum = 0.0f64;
     let mut count = 0usize;
@@ -142,16 +140,16 @@ fn raw_taste_ab_montage() {
             .take(46)
             .collect();
 
-        // Current default (enrichment on): make sure no override lingers.
-        std::env::remove_var("IAI_SCENE_CHROMA_ENRICH");
+        // Current default: make sure no recipe override lingers.
+        std::env::remove_var("IAI_RAW_RENDER_RECIPE");
         let Some((on, w, h)) = render_resampled(path) else {
             println!("  DECODE-ERR {name}");
             continue;
         };
-        // Technical-neutral (enrichment off).
-        std::env::set_var("IAI_SCENE_CHROMA_ENRICH", "0");
+        // Technical-neutral v2 disables all decode-time taste as one recipe.
+        std::env::set_var("IAI_RAW_RENDER_RECIPE", "technical");
         let off = render_resampled(path);
-        std::env::remove_var("IAI_SCENE_CHROMA_ENRICH");
+        std::env::remove_var("IAI_RAW_RENDER_RECIPE");
         let Some((off, ow, oh)) = off else {
             println!("  DECODE-ERR(off) {name}");
             continue;
@@ -186,7 +184,7 @@ fn raw_taste_ab_montage() {
             .expect("write taste A/B montage");
 
         println!(
-            "  {:<40} chroma on={:.4} off={:.4} Δ={:+.4} ({:+.1}%)",
+            "  {:<40} C legacy={:.4} technical={:.4} Δ={:+.4} ({:+.1}%)  acutance {:.5}→{:.5}",
             name.chars().take(40).collect::<String>(),
             sum_on.mean_oklab_chroma,
             sum_off.mean_oklab_chroma,
@@ -196,14 +194,20 @@ fn raw_taste_ab_montage() {
             } else {
                 0.0
             },
+            sum_on.laplacian_acutance,
+            sum_off.laplacian_acutance,
         );
         writeln!(
             csv,
-            "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
+            "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
             name.replace(',', ";"),
+            sum_on.mean_oklab_lightness,
+            sum_off.mean_oklab_lightness,
             sum_on.mean_oklab_chroma,
             sum_off.mean_oklab_chroma,
             delta,
+            sum_on.laplacian_acutance,
+            sum_off.laplacian_acutance,
             sum_on.shadow_chroma,
             sum_off.shadow_chroma,
             sum_on.midtone_chroma,
@@ -216,7 +220,7 @@ fn raw_taste_ab_montage() {
 
     assert!(count > 0, "no corpus file rendered for the taste A/B");
     println!(
-        "\naggregate: mean chroma added by CHROMA_ENRICH = {:+.4} OKLab over {count} files\n  montages: {}",
+        "\naggregate: mean chroma added by legacy-baked-v1 = {:+.4} OKLab over {count} files\n  montages: {}",
         delta_sum / count as f64,
         montage_dir.display()
     );

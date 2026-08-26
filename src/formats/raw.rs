@@ -19,7 +19,7 @@ use crate::core::camera_profile::resolver::{
 };
 use crate::core::camera_profile::{
     discovery, embedded_dng, resolve_decoder_matrix, JpegMatchMode, RawDecoderBackend,
-    RawSceneCharacterization,
+    RawRenderRecipeVersion, RawSceneCharacterization,
 };
 use crate::core::canvas::Canvas;
 use crate::core::develop_scene::{
@@ -682,6 +682,10 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     };
     let dcp_selected = matches!(writer, SceneWriter::Dcp { .. });
     let writer = &writer;
+    // Resolve every decode-time taste knob once into a named recipe. The
+    // shipping default remains byte-identical; `technical-neutral-v2` is an
+    // opt-in Q1 audit path until its look has owner GUI approval.
+    let raw_render_recipe = RawRenderRecipe::resolve();
 
     let crop_top = area.top;
     let crop_left = area.left;
@@ -819,7 +823,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     // Default colour-noise reduction on the linear scene, before capture sharpen
     // (so the sharpener never re-amplifies chroma speckle) and before any chroma
     // enrichment. Skipped for monochrome (no chroma to clean).
-    let scene_color_nr = env_f32("IAI_SCENE_COLOR_NR", SCENE_COLOR_NR);
+    let scene_color_nr = raw_render_recipe.scene_color_nr;
     if !mono && scene_color_nr > 1e-4 {
         denoise_scene_chroma(&mut out, cw, ch, scene_color_nr);
     }
@@ -827,14 +831,14 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     // Capture sharpening on the linear scene, after demosaic and before the
     // master is frozen (before orientation too, but the pass is isotropic so
     // the order is irrelevant).
-    if CAPTURE_SHARPEN {
+    if raw_render_recipe.capture_sharpen_gain > 1e-4 {
         capture_sharpen(
             &mut out,
             cw,
             ch,
-            env_f32("IAI_CS_GAIN", CS_GAIN),
-            env_f32("IAI_CS_DARK_RATIO", CS_DARK_RATIO),
-            env_f32("IAI_CS_FLOOR", CS_FLOOR),
+            raw_render_recipe.capture_sharpen_gain,
+            raw_render_recipe.capture_sharpen_dark_ratio,
+            raw_render_recipe.capture_sharpen_floor,
         );
     }
 
@@ -876,6 +880,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
         camera_profile: Some(RawSceneCharacterization {
             resolution: resolver_provenance,
             jpeg_match: JpegMatchMode::from_flags(apply_gain, apply_color),
+            raw_render_recipe: raw_render_recipe.version,
         }),
         as_shot_white_balance: as_shot_white,
         camera_rgb_curve: None,
@@ -904,10 +909,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
             // Overridable (`IAI_SCENE_CHROMA_ENRICH`) so the Q1 taste/technical
             // separation can render this creative enrichment off for A/B without
             // touching the default; the default value is unchanged.
-            enrich_scene_chroma(
-                &mut scene.half,
-                env_f32("IAI_SCENE_CHROMA_ENRICH", CHROMA_ENRICH),
-            );
+            enrich_scene_chroma(&mut scene.half, raw_render_recipe.chroma_enrich);
             scene.camera_rgb_curve = Some(crate::core::develop_scene::fit_camera_rgb_curve(
                 &scene,
                 &target.histogram,
@@ -923,18 +925,18 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     // scene master so the GPU preview and the CPU commit inherit it identically.
     // Hue-preserving and saturation-protected; neutrals stay neutral.
     if !apply_color {
-        let brightness = env_f32("IAI_SCENE_BRIGHTNESS", SCENE_BRIGHTNESS);
+        let brightness = raw_render_recipe.scene_brightness;
         if (brightness - 1.0).abs() > 1e-4 {
             scale_scene(&mut scene.half, brightness);
         }
         enrich_scene_chroma_shadow(
             &mut scene.half,
-            env_f32("IAI_SCENE_CHROMA_BASE", SCENE_CHROMA_BASE),
-            env_f32("IAI_SCENE_CHROMA_SHADOW", SCENE_CHROMA_SHADOW),
-            env_f32("IAI_SCENE_SHADOW_LOW_EV", CHROMA_SHADOW_LOW_EV),
-            env_f32("IAI_SCENE_SHADOW_HIGH_EV", CHROMA_SHADOW_HIGH_EV),
+            raw_render_recipe.scene_chroma_base,
+            raw_render_recipe.scene_chroma_shadow,
+            raw_render_recipe.chroma_shadow_low_ev,
+            raw_render_recipe.chroma_shadow_high_ev,
         );
-        warm_scene(&mut scene.half, env_f32("IAI_SCENE_WARM", SCENE_WARM));
+        warm_scene(&mut scene.half, raw_render_recipe.scene_warm);
     }
 
     // The unclamped linear master + its neutral default-look render.
@@ -2251,6 +2253,83 @@ const CHROMA_SHADOW_HIGH_EV: f32 = -3.3;
 /// matrix's cool-olive cast. 0 = off. Override: `IAI_SCENE_WARM`.
 const SCENE_WARM: f32 = 0.0;
 
+/// All non-technical decode-time shaping which is currently baked into a RAW
+/// scene master. Centralising it behind a named version is the Q1 migration
+/// boundary: callers can audit a genuinely neutral master without coordinating
+/// seven independent environment variables, while the default v1 remains exact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RawRenderRecipe {
+    version: RawRenderRecipeVersion,
+    scene_color_nr: f32,
+    capture_sharpen_gain: f32,
+    capture_sharpen_dark_ratio: f32,
+    capture_sharpen_floor: f32,
+    chroma_enrich: f32,
+    scene_brightness: f32,
+    scene_chroma_base: f32,
+    scene_chroma_shadow: f32,
+    chroma_shadow_low_ev: f32,
+    chroma_shadow_high_ev: f32,
+    scene_warm: f32,
+}
+
+impl RawRenderRecipe {
+    /// Exact pre-Q1 shipping behaviour, including the existing tuning env vars.
+    fn legacy_baked_v1() -> Self {
+        Self {
+            version: RawRenderRecipeVersion::LegacyBaked1,
+            scene_color_nr: env_f32("IAI_SCENE_COLOR_NR", SCENE_COLOR_NR),
+            capture_sharpen_gain: if CAPTURE_SHARPEN {
+                env_f32("IAI_CS_GAIN", CS_GAIN)
+            } else {
+                0.0
+            },
+            capture_sharpen_dark_ratio: env_f32("IAI_CS_DARK_RATIO", CS_DARK_RATIO),
+            capture_sharpen_floor: env_f32("IAI_CS_FLOOR", CS_FLOOR),
+            chroma_enrich: env_f32("IAI_SCENE_CHROMA_ENRICH", CHROMA_ENRICH),
+            scene_brightness: env_f32("IAI_SCENE_BRIGHTNESS", SCENE_BRIGHTNESS),
+            scene_chroma_base: env_f32("IAI_SCENE_CHROMA_BASE", SCENE_CHROMA_BASE),
+            scene_chroma_shadow: env_f32("IAI_SCENE_CHROMA_SHADOW", SCENE_CHROMA_SHADOW),
+            chroma_shadow_low_ev: env_f32("IAI_SCENE_SHADOW_LOW_EV", CHROMA_SHADOW_LOW_EV),
+            chroma_shadow_high_ev: env_f32("IAI_SCENE_SHADOW_HIGH_EV", CHROMA_SHADOW_HIGH_EV),
+            scene_warm: env_f32("IAI_SCENE_WARM", SCENE_WARM),
+        }
+    }
+
+    /// Technical decode only: sensor correction, demosaic, false-colour
+    /// suppression, camera characterization, WB and level normalization remain;
+    /// global denoise/sharpen and creative brightness/chroma/warmth are identity.
+    fn technical_neutral_v2() -> Self {
+        Self {
+            version: RawRenderRecipeVersion::TechnicalNeutral2,
+            scene_color_nr: 0.0,
+            capture_sharpen_gain: 0.0,
+            capture_sharpen_dark_ratio: 0.0,
+            capture_sharpen_floor: 1.0,
+            chroma_enrich: 0.0,
+            scene_brightness: 1.0,
+            scene_chroma_base: 0.0,
+            scene_chroma_shadow: 0.0,
+            chroma_shadow_low_ev: CHROMA_SHADOW_LOW_EV,
+            chroma_shadow_high_ev: CHROMA_SHADOW_HIGH_EV,
+            scene_warm: 0.0,
+        }
+    }
+
+    fn resolve() -> Self {
+        match std::env::var("IAI_RAW_RENDER_RECIPE")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("technical") | Some("technical-neutral") | Some("v2") => {
+                Self::technical_neutral_v2()
+            }
+            _ => Self::legacy_baked_v1(),
+        }
+    }
+}
+
 /// Read a float tuning knob from the environment, falling back to `default`.
 fn env_f32(name: &str, default: f32) -> f32 {
     std::env::var(name)
@@ -3251,6 +3330,29 @@ mod tests {
             CS_GAIN <= 0.7,
             "gain must stay moderate to avoid edge beads"
         );
+    }
+
+    #[test]
+    fn raw_render_recipe_versions_pin_shipping_and_technical_boundaries() {
+        let shipping = RawRenderRecipe::legacy_baked_v1();
+        assert_eq!(shipping.version, RawRenderRecipeVersion::LegacyBaked1);
+        assert_eq!(shipping.scene_color_nr, SCENE_COLOR_NR);
+        assert_eq!(shipping.capture_sharpen_gain, CS_GAIN);
+        assert_eq!(shipping.chroma_enrich, CHROMA_ENRICH);
+        assert_eq!(shipping.scene_brightness, SCENE_BRIGHTNESS);
+        assert_eq!(shipping.scene_chroma_base, SCENE_CHROMA_BASE);
+        assert_eq!(shipping.scene_chroma_shadow, SCENE_CHROMA_SHADOW);
+        assert_eq!(shipping.scene_warm, SCENE_WARM);
+
+        let neutral = RawRenderRecipe::technical_neutral_v2();
+        assert_eq!(neutral.version, RawRenderRecipeVersion::TechnicalNeutral2);
+        assert_eq!(neutral.scene_color_nr, 0.0);
+        assert_eq!(neutral.capture_sharpen_gain, 0.0);
+        assert_eq!(neutral.chroma_enrich, 0.0);
+        assert_eq!(neutral.scene_brightness, 1.0);
+        assert_eq!(neutral.scene_chroma_base, 0.0);
+        assert_eq!(neutral.scene_chroma_shadow, 0.0);
+        assert_eq!(neutral.scene_warm, 0.0);
     }
 
     /// Build an f16 RGBA scene buffer from per-pixel linear RGB triples.

@@ -72,6 +72,28 @@ pub enum JpegMatchMode {
     Full,
 }
 
+/// Version of the decode-time RAW master recipe.
+///
+/// `LegacyBaked1` is the exact look that shipped before the Q1 technical/creative
+/// split. `TechnicalNeutral2` is an opt-in audit recipe which removes the
+/// global colour-NR, capture-sharpen, brightness, warmth, and chroma taste
+/// stages. Keeping this in provenance makes A/B output explainable instead of
+/// depending on an unrecorded collection of environment overrides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RawRenderRecipeVersion {
+    LegacyBaked1,
+    TechnicalNeutral2,
+}
+
+impl RawRenderRecipeVersion {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::LegacyBaked1 => "legacy-baked-v1",
+            Self::TechnicalNeutral2 => "technical-neutral-v2",
+        }
+    }
+}
+
 impl JpegMatchMode {
     /// Map the decoder's `(apply_baseline_gain, apply_color_matrix_and_curve)`
     /// pair to a stable mode. The `(false, true)` combination is never produced.
@@ -93,6 +115,7 @@ impl JpegMatchMode {
 pub struct RawSceneCharacterization {
     pub resolution: resolver::ResolverProvenance,
     pub jpeg_match: JpegMatchMode,
+    pub raw_render_recipe: RawRenderRecipeVersion,
 }
 
 impl RawSceneCharacterization {
