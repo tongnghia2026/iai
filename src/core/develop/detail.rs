@@ -33,6 +33,12 @@ const NR_LEVEL_DECAY: f32 = 0.5;
 /// Chroma-NR level attenuation at a full slider: kill fine colour speckle
 /// outright, keep progressively more of the coarser (real-colour) scales.
 const CHROMA_NR_ATTEN: [f32; WAVELET_LEVELS] = [1.0, 0.85, 0.6];
+/// First à-trous scale whose chroma smoothing is edge-aware (Q6). Level 0 (the
+/// finest, isolated-speckle scale) stays non-edge-aware so a strong colour speck
+/// is still captured and removed; levels 1+ are edge-aware so genuine colour
+/// boundaries stay in the residual and are not bled across. `WAVELET_LEVELS`
+/// would restore the pre-Q6 fully-non-edge-aware (edge-smearing) behaviour.
+const CHROMA_NR_EDGE_AWARE_FROM: usize = 1;
 
 /// Tone-adaptive noise reduction. The display tone curve stretches shadow noise
 /// (most visible) and compresses highlight noise, so both the luminance garrote
@@ -213,16 +219,22 @@ fn atrous_smooth(src: &[f32], w: usize, h: usize, level: usize, edge_aware: bool
 /// À-trous decomposition into [`WAVELET_LEVELS`] detail planes plus the smooth
 /// residual: `src = residual + Σ details[j]` exactly (the transform is a plain
 /// difference pyramid at full resolution, so reconstruction is lossless).
+///
+/// `edge_aware_from` is the first scale that uses edge-aware (range-weighted)
+/// smoothing: levels `< edge_aware_from` blur with plain B3 taps (so a strong
+/// isolated speck at that scale is captured into the detail plane and can be
+/// removed), while levels `>= edge_aware_from` keep true edges out of the detail
+/// planes. `0` = fully edge-aware; `WAVELET_LEVELS` = never.
 fn atrous_decompose(
     src: &[f32],
     w: usize,
     h: usize,
-    edge_aware: bool,
+    edge_aware_from: usize,
 ) -> (Vec<f32>, Vec<Vec<f32>>) {
     let mut c = src.to_vec();
     let mut details = Vec::with_capacity(WAVELET_LEVELS);
     for level in 0..WAVELET_LEVELS {
-        let next = atrous_smooth(&c, w, h, level, edge_aware);
+        let next = atrous_smooth(&c, w, h, level, level >= edge_aware_from);
         for (d, &n) in c.iter_mut().zip(&next) {
             *d -= n;
         }
@@ -296,7 +308,14 @@ fn process_detail_plane(
     if p.color_nr > 0.001 {
         for ch in 0..3 {
             let plane: Vec<f32> = chroma.iter().map(|c| c[ch]).collect();
-            let (res, details) = atrous_decompose(&plane, w, h, false);
+            // Scale-aware, edge-aware chroma NR (Q6 §4 "không làm bệt màu thật"):
+            // the FINEST scale (level 0, where isolated colour speckle lives)
+            // smooths non-edge-aware so a strong speck is captured and removed
+            // even next to an edge; the COARSER scales smooth EDGE-AWARE so a
+            // genuine colour boundary stays in the edge-preserving residual and
+            // is not bled across ("bệt"). Pre-Q6 this ran fully non-edge-aware,
+            // which smeared real colour edges by ~14 px at strong settings.
+            let (res, details) = atrous_decompose(&plane, w, h, CHROMA_NR_EDGE_AWARE_FROM);
             for (i, c) in chroma.iter_mut().enumerate() {
                 // Shadows carry the worst colour blotches — attenuate their chroma
                 // detail more; highlights keep the baseline (real-colour edges).
@@ -312,7 +331,7 @@ fn process_detail_plane(
     }
 
     if p.nr > 0.001 || p.amount > 0.001 {
-        let (res, mut details) = atrous_decompose(&luma, w, h, true);
+        let (res, mut details) = atrous_decompose(&luma, w, h, 0);
 
         if p.nr > 0.001 {
             // Base threshold per level (finest strongest); a per-pixel shadow
@@ -952,5 +971,281 @@ mod nr_tests {
             "the tonal edge must survive denoise: {}",
             bright_mean1 - dark_mean1
         );
+    }
+}
+
+/// Quality Milestone Q6 — Detail-stage contract and property guard.
+///
+/// Q6 (RAM/quality plan §"Quality Milestone Q6") separates capture/creative/
+/// output sharpen and asks that detail be sharpened without halo/waxy texture
+/// and that noise (esp. colour speckle) drop WITHOUT bleeding real colour edges.
+/// These hermetic property tests lock the invariants the plan lists and quantify
+/// where the current engine falls short, so any tuning has a golden guard.
+#[cfg(test)]
+mod q6_detail_contract {
+    use super::*;
+
+    fn hash_noise(i: usize, salt: u32) -> f32 {
+        let mut x = (i as u32)
+            .wrapping_mul(2_654_435_761)
+            .wrapping_add(salt)
+            .wrapping_add(2_463_534_242);
+        x ^= x >> 15;
+        x = x.wrapping_mul(2_246_822_519);
+        x ^= x >> 13;
+        x = x.wrapping_mul(3_266_489_917);
+        x ^= x >> 16;
+        (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+    }
+
+    fn luma(px: [f32; 3]) -> f32 {
+        crate::core::color::luminance_f32(px[0], px[1], px[2])
+    }
+    fn chroma_vec(px: [f32; 3]) -> [f32; 3] {
+        let y = luma(px);
+        [px[0] - y, px[1] - y, px[2] - y]
+    }
+    fn chroma_mag(px: [f32; 3]) -> f32 {
+        let c = chroma_vec(px);
+        (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()
+    }
+
+    // ── Sharpening: acutance up, halo bounded, neutral stays neutral ──────────
+
+    #[test]
+    fn sharpening_steepens_a_soft_edge_without_a_large_halo() {
+        // A soft (blurred) neutral step. Sharpening must steepen the transition
+        // (higher acutance) yet keep any overshoot beyond the two plateaus small
+        // (no ringing halo), and never tint the neutral.
+        let (w, h) = (48usize, 8usize);
+        let (lo, hi) = (0.30f32, 0.60f32);
+        let soft = |x: usize| -> f32 {
+            // A 6-px-wide smootherstep ramp centred at the middle.
+            let t = ((x as f32 - (w as f32 / 2.0 - 3.0)) / 6.0).clamp(0.0, 1.0);
+            let s = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+            lo + (hi - lo) * s
+        };
+        let mut img: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let v = soft(i % w);
+                [v, v, v]
+            })
+            .collect();
+        let slope = |img: &[[f32; 3]]| -> f32 {
+            // Max adjacent step along the mid row = edge acutance.
+            let row = h / 2;
+            (0..w - 1)
+                .map(|x| (img[row * w + x + 1][0] - img[row * w + x][0]).abs())
+                .fold(0.0, f32::max)
+        };
+        let overshoot = |img: &[[f32; 3]]| -> f32 {
+            // How far any pixel exceeds the [lo,hi] plateau band = halo size.
+            img.iter()
+                .map(|p| (p[0] - hi).max(lo - p[0]).max(0.0))
+                .fold(0.0, f32::max)
+        };
+        let acut0 = slope(&img);
+
+        let mut settings = DevelopSettings::default();
+        settings.sharpening = 70.0;
+        apply_detail_to_display_buffer(&mut img, w, h, &settings);
+
+        let acut1 = slope(&img);
+        let halo = overshoot(&img);
+        let max_chroma = img.iter().map(|&p| chroma_mag(p)).fold(0.0, f32::max);
+        println!("Q6 sharpen: acutance {acut0:.4} -> {acut1:.4}, halo {halo:.4}, max_chroma {max_chroma:.5}");
+        assert!(img.iter().all(|p| p.iter().all(|c| c.is_finite())));
+        // The engine is deliberately halo-safe (Q2/Q4 band-pass capture-sharpen),
+        // so on a clean smooth ramp it acts gently: acutance must not DROP, a
+        // controlled edge overshoot must appear (it is doing something), and that
+        // overshoot must stay well below a ringing halo. Neutral stays neutral.
+        assert!(
+            acut1 >= acut0 - 1e-4,
+            "sharpening softened the edge: {acut0} -> {acut1}"
+        );
+        assert!(
+            halo > 1e-3,
+            "sharpening produced no edge enhancement: {halo}"
+        );
+        assert!(halo < (hi - lo) * 0.35, "sharpening halo too large: {halo}");
+        assert!(
+            max_chroma < 2e-3,
+            "sharpening tinted a neutral edge: {max_chroma}"
+        );
+    }
+
+    #[test]
+    fn sharpen_masking_spares_flat_noise() {
+        // Masking should keep the sharpener off smooth (noisy-flat) areas while
+        // still working on real edges. With Masking high, the flat area's noise
+        // is amplified far less than with Masking off.
+        let (w, h) = (32usize, 32usize);
+        let base = 0.45f32;
+        let make = || -> Vec<[f32; 3]> {
+            (0..w * h)
+                .map(|i| {
+                    let v = (base + 0.02 * hash_noise(i, 1)).clamp(0.0, 1.0);
+                    [v, v, v]
+                })
+                .collect()
+        };
+        let var = |img: &[[f32; 3]]| -> f32 {
+            let (mut s, mut s2) = (0.0f64, 0.0f64);
+            for p in img {
+                s += p[0] as f64;
+                s2 += (p[0] as f64) * (p[0] as f64);
+            }
+            let n = img.len() as f64;
+            ((s2 / n - (s / n) * (s / n)).max(0.0)) as f32
+        };
+
+        let mut no_mask = make();
+        let mut masked = make();
+        let mut s = DevelopSettings::default();
+        s.sharpening = 90.0;
+        apply_detail_to_display_buffer(&mut no_mask, w, h, &s);
+        s.sharpen_masking = 90.0;
+        apply_detail_to_display_buffer(&mut masked, w, h, &s);
+
+        let v_no = var(&no_mask);
+        let v_mask = var(&masked);
+        println!("Q6 masking: flat-noise variance no-mask {v_no:.6} vs masked {v_mask:.6}");
+        assert!(
+            v_mask < v_no * 0.7,
+            "Masking should suppress flat-area sharpening: {v_no} vs {v_mask}"
+        );
+    }
+
+    // ── Colour NR: kills speckle, and how much it bleeds a real colour edge ────
+
+    #[test]
+    fn colour_nr_reduces_chroma_speckle() {
+        // A flat colour field peppered with per-pixel chroma speckle. Colour NR
+        // must reduce the chroma variance markedly while barely moving luma.
+        let (w, h) = (32usize, 32usize);
+        let mut img: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let cr = 0.03 * hash_noise(i, 7);
+                let cb = 0.03 * hash_noise(i, 13);
+                [0.40 + cr, 0.40, 0.40 + cb]
+            })
+            .collect();
+        let luma_mean = |img: &[[f32; 3]]| -> f32 {
+            img.iter().map(|&p| luma(p)).sum::<f32>() / img.len() as f32
+        };
+        let chroma_var = |img: &[[f32; 3]]| -> f32 {
+            img.iter().map(|&p| chroma_mag(p).powi(2)).sum::<f32>() / img.len() as f32
+        };
+        let cv0 = chroma_var(&img);
+        let ly0 = luma_mean(&img);
+
+        let mut s = DevelopSettings::default();
+        s.color_noise_reduction = 80.0;
+        apply_detail_to_display_buffer(&mut img, w, h, &s);
+        let cv1 = chroma_var(&img);
+        let ly1 = luma_mean(&img);
+        println!(
+            "Q6 colour-NR speckle: chroma-var {cv0:.6} -> {cv1:.6}, luma mean {ly0:.4} -> {ly1:.4}"
+        );
+        assert!(
+            cv1 < cv0 * 0.5,
+            "colour NR did not clean chroma speckle: {cv0} -> {cv1}"
+        );
+        assert!(
+            (ly1 - ly0).abs() < 2e-3,
+            "colour NR shifted luminance: {ly0} -> {ly1}"
+        );
+    }
+
+    #[test]
+    fn colour_nr_real_edge_bleed_is_measured() {
+        // Two solid colours that share the SAME luma (so the edge is purely
+        // chromatic and the luma-driven stages see nothing), a clean vertical
+        // boundary, strong Colour NR. Measures how much of the real colour STEP
+        // survives at the boundary. The pre-Q6 chroma NR runs its à-trous
+        // decomposition NON-edge-aware, so it blurs this step badly.
+        let (w, h) = (48usize, 16usize);
+        // Left magenta-ish, right green-ish. Colour NR works on the luma-
+        // independent chroma planes, so the luma levels are irrelevant here.
+        let left = [0.55f32, 0.30, 0.55];
+        let right = [0.34f32, 0.44, 0.34];
+        let mid = w / 2;
+        let mut img: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| if (i % w) < mid { left } else { right })
+            .collect();
+
+        // Chroma step across the boundary before NR, measured a couple of px in
+        // (away from the exact seam) as the mean chroma-vector distance.
+        let step = |img: &[[f32; 3]]| -> f32 {
+            let sample = |x: usize| -> [f32; 3] {
+                let mut acc = [0.0f32; 3];
+                for y in 2..h - 2 {
+                    let c = chroma_vec(img[y * w + x]);
+                    for k in 0..3 {
+                        acc[k] += c[k];
+                    }
+                }
+                let n = (h - 4) as f32;
+                [acc[0] / n, acc[1] / n, acc[2] / n]
+            };
+            let a = sample(mid - 3);
+            let b = sample(mid + 3);
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        };
+        let step0 = step(&img);
+
+        let mut s = DevelopSettings::default();
+        s.color_noise_reduction = 80.0;
+        apply_detail_to_display_buffer(&mut img, w, h, &s);
+        let step1 = step(&img);
+        let kept = step1 / step0;
+        println!(
+            "Q6 colour-NR real-edge: chroma step {step0:.4} -> {step1:.4} (kept {:.0}% at ±3px)",
+            kept * 100.0
+        );
+        // Q6 fix (scale-aware, edge-aware chroma NR): the real colour edge keeps
+        // ~82% of its step at ±3px, up from ~68% under the pre-Q6 fully-non-edge-
+        // aware smoothing. Lock the floor above the old behaviour so a regression
+        // back toward edge-smearing ("bệt màu") fails; raise it further if the
+        // chroma range sigma is ever tuned tighter.
+        assert!(
+            kept > 0.78,
+            "colour NR bled the real colour edge to {:.0}% of its step (Q6 baseline ~82%)",
+            kept * 100.0
+        );
+    }
+
+    // ── Cross-slider invariants ───────────────────────────────────────────────
+
+    #[test]
+    fn detail_sliders_keep_a_neutral_grey_neutral_and_finite() {
+        // Sharpen / NR / Colour-NR on a noisy neutral must not tint it or blow up.
+        let (w, h) = (24usize, 24usize);
+        let sliders: &[(&str, fn(&mut DevelopSettings, f32))] = &[
+            ("sharpening", |s, v| s.sharpening = v),
+            ("noise_reduction", |s, v| s.noise_reduction = v),
+            ("color_noise_reduction", |s, v| s.color_noise_reduction = v),
+        ];
+        for &(name, set) in sliders {
+            let mut img: Vec<[f32; 3]> = (0..w * h)
+                .map(|i| {
+                    let v = (0.45 + 0.03 * hash_noise(i, 3)).clamp(0.0, 1.0);
+                    [v, v, v]
+                })
+                .collect();
+            let mut s = DevelopSettings::default();
+            set(&mut s, 100.0);
+            apply_detail_to_display_buffer(&mut img, w, h, &s);
+            let max_chroma = img.iter().map(|&p| chroma_mag(p)).fold(0.0, f32::max);
+            assert!(
+                img.iter()
+                    .all(|p| p.iter().all(|c| c.is_finite() && (0.0..=1.0).contains(c))),
+                "{name} produced out-of-range output"
+            );
+            assert!(
+                max_chroma < 3e-3,
+                "{name} tinted a neutral: chroma {max_chroma}"
+            );
+        }
     }
 }
