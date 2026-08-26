@@ -24,7 +24,10 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use iai::formats::raw::RawImporter;
-use iai::formats::raw::{probe_sensor_metadata, RawSensorMetadata, WhiteLevelSource};
+use iai::formats::raw::{
+    probe_sensor_metadata, BlackLevelSource, RawSensorMetadata, SensorCorrectionReason,
+    SensorMetadataAvailability, WhiteLevelSource,
+};
 use iai::formats::Importer;
 
 fn corpus_dir() -> Option<PathBuf> {
@@ -38,6 +41,29 @@ fn source_tag(source: WhiteLevelSource) -> &'static str {
         WhiteLevelSource::Reported => "ok",
         WhiteLevelSource::MissingReplacedByObserved => "missing",
         WhiteLevelSource::ContainerMaxReplacedByObserved => "container",
+    }
+}
+
+fn availability_tag(source: SensorMetadataAvailability) -> &'static str {
+    match source {
+        SensorMetadataAvailability::Reported => "reported",
+        SensorMetadataAvailability::ReportedAbsent => "absent",
+        SensorMetadataAvailability::NotExposedBySharedModel => "not-exposed",
+    }
+}
+
+fn correction_reason_tag(reason: SensorCorrectionReason) -> &'static str {
+    match reason {
+        SensorCorrectionReason::BayerDefectBaseline => "bayer-baseline",
+        SensorCorrectionReason::NotBayerMosaic => "not-bayer",
+        SensorCorrectionReason::MissingMetadataOrDiagnostic => "no-diagnostic",
+    }
+}
+
+fn black_source_tag(source: BlackLevelSource) -> &'static str {
+    match source {
+        BlackLevelSource::DecoderSupplied => "decoder",
+        BlackLevelSource::DecoderSuppliedWithMaskedAreas => "decoder+masked-areas",
     }
 }
 
@@ -82,7 +108,7 @@ fn raw_sensor_metadata_audit() {
         match probe_sensor_metadata(path) {
             Ok(meta) => {
                 println!(
-                    "  {:<40} {:<9} {:<20} {}x{} cpp{} cfa={}({}) active={:?} black={:?} white_eff={:?} src=[{},{},{},{}] blackareas={}",
+                    "  {:<40} {:<9} {:<20} {}x{} cpp{} cfa={}({}) active={:?} black={:?}({}) white_eff={:?} src=[{},{},{},{}] blackareas={} defect={} green={}",
                     name.chars().take(40).collect::<String>(),
                     format!("{:?}", meta.backend),
                     format!("{} {}", meta.make, meta.model).chars().take(20).collect::<String>(),
@@ -93,12 +119,15 @@ fn raw_sensor_metadata_audit() {
                     if meta.is_mono { "mono" } else if meta.cfa_valid { "bayer" } else { "?" },
                     meta.active_area,
                     meta.black_levels.map(|v| v as i32),
+                    black_source_tag(meta.black_level_source),
                     meta.effective_white_levels.map(|v| v as i32),
                     source_tag(meta.white_level_source[0]),
                     source_tag(meta.white_level_source[1]),
                     source_tag(meta.white_level_source[2]),
                     source_tag(meta.white_level_source[3]),
                     meta.black_area_count,
+                    correction_reason_tag(meta.correction_plan.isolated_bayer_defects.reason),
+                    correction_reason_tag(meta.correction_plan.green_equilibration.reason),
                 );
                 metas.push((name, meta));
             }
@@ -159,12 +188,12 @@ fn raw_sensor_metadata_audit() {
     if let Some(out) = std::env::var_os("IAI_Q0_OUT").map(PathBuf::from) {
         std::fs::create_dir_all(&out).expect("create Q0 output directory");
         let mut csv = String::from(
-            "file,backend,make,model,width,height,cpp,cfa,mono,active_top,active_left,active_w,active_h,black_r,black_g,black_b,white_eff_r,white_eff_g,white_eff_b,src_r,src_g,src_b,wb_r,wb_g,wb_b,black_areas\n",
+            "file,backend,make,model,width,height,cpp,cfa,mono,active_top,active_left,active_w,active_h,black_r,black_g,black_b,black_source,white_eff_r,white_eff_g,white_eff_b,src_r,src_g,src_b,wb_r,wb_g,wb_b,wb_availability,black_areas,optical_black,gain_map,pdaf_mask,iso,lens_data,defect_enabled,defect_reason,defect_scratch_bytes,green_enabled,green_reason,green_scratch_bytes\n",
         );
         for (name, m) in &metas {
             writeln!(
                 csv,
-                "{},{:?},{},{},{},{},{},{},{},{},{},{},{},{:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{},{},{},{:.4},{:.4},{:.4},{}",
+                "{},{:?},{},{},{},{},{},{},{},{},{},{},{},{:.0},{:.0},{:.0},{},{:.0},{:.0},{:.0},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 name.replace(',', ";"),
                 m.backend,
                 m.make.replace(',', ";"),
@@ -172,10 +201,23 @@ fn raw_sensor_metadata_audit() {
                 m.width, m.height, m.cpp, m.cfa_name, m.is_mono,
                 m.active_area[0], m.active_area[1], m.active_area[2], m.active_area[3],
                 m.black_levels[0], m.black_levels[1], m.black_levels[2],
+                black_source_tag(m.black_level_source),
                 m.effective_white_levels[0], m.effective_white_levels[1], m.effective_white_levels[2],
                 source_tag(m.white_level_source[0]), source_tag(m.white_level_source[1]), source_tag(m.white_level_source[2]),
                 m.wb_coeffs[0], m.wb_coeffs[1], m.wb_coeffs[2],
+                availability_tag(m.wb_availability),
                 m.black_area_count,
+                availability_tag(m.optical_black_availability),
+                availability_tag(m.gain_map_availability),
+                availability_tag(m.pdaf_mask_availability),
+                availability_tag(m.iso_availability),
+                availability_tag(m.lens_data_availability),
+                m.correction_plan.isolated_bayer_defects.enabled,
+                correction_reason_tag(m.correction_plan.isolated_bayer_defects.reason),
+                m.correction_plan.isolated_bayer_defects.estimated_scratch_bytes,
+                m.correction_plan.green_equilibration.enabled,
+                correction_reason_tag(m.correction_plan.green_equilibration.reason),
+                m.correction_plan.green_equilibration.estimated_scratch_bytes,
             )
             .unwrap();
         }
@@ -190,28 +232,50 @@ fn raw_sensor_metadata_audit() {
             "white_level_fallback": white_fallback,
             "with_masked_black_areas": with_black_areas,
             "cfa_patterns": patterns,
-            "records": metas.iter().map(|(name, m)| serde_json::json!({
-                "file": name,
-                "backend": format!("{:?}", m.backend),
-                "make": m.make,
-                "model": m.model,
-                "width": m.width,
-                "height": m.height,
-                "cpp": m.cpp,
-                "cfa": m.cfa_name,
-                "cfa_valid": m.cfa_valid,
-                "is_mono": m.is_mono,
-                "active_area": m.active_area,
-                "crop_margins": m.crop_margins,
-                "black_levels": m.black_levels,
-                "reported_white_levels": m.reported_white_levels,
-                "observed_white_maxima": m.observed_white_maxima,
-                "effective_white_levels": m.effective_white_levels,
-                "white_level_source": m.white_level_source.iter().map(|&s| source_tag(s)).collect::<Vec<_>>(),
-                "wb_coeffs": m.wb_coeffs,
-                "black_area_count": m.black_area_count,
-                "orientation": m.orientation,
-            })).collect::<Vec<_>>(),
+            "records": metas.iter().map(|(name, m)| {
+                let correction_plan = serde_json::json!({
+                    "isolated_bayer_defects": {
+                        "enabled": m.correction_plan.isolated_bayer_defects.enabled,
+                        "reason": correction_reason_tag(m.correction_plan.isolated_bayer_defects.reason),
+                        "estimated_scratch_bytes": m.correction_plan.isolated_bayer_defects.estimated_scratch_bytes,
+                    },
+                    "green_equilibration": {
+                        "enabled": m.correction_plan.green_equilibration.enabled,
+                        "reason": correction_reason_tag(m.correction_plan.green_equilibration.reason),
+                        "estimated_scratch_bytes": m.correction_plan.green_equilibration.estimated_scratch_bytes,
+                    },
+                });
+                serde_json::json!({
+                    "file": name,
+                    "backend": format!("{:?}", m.backend),
+                    "make": m.make,
+                    "model": m.model,
+                    "width": m.width,
+                    "height": m.height,
+                    "cpp": m.cpp,
+                    "cfa": m.cfa_name,
+                    "cfa_valid": m.cfa_valid,
+                    "is_mono": m.is_mono,
+                    "active_area": m.active_area,
+                    "crop_margins": m.crop_margins,
+                    "black_levels": m.black_levels,
+                    "black_level_source": black_source_tag(m.black_level_source),
+                    "reported_white_levels": m.reported_white_levels,
+                    "observed_white_maxima": m.observed_white_maxima,
+                    "effective_white_levels": m.effective_white_levels,
+                    "white_level_source": m.white_level_source.iter().map(|&s| source_tag(s)).collect::<Vec<_>>(),
+                    "wb_coeffs": m.wb_coeffs,
+                    "wb_availability": availability_tag(m.wb_availability),
+                    "black_area_count": m.black_area_count,
+                    "optical_black_availability": availability_tag(m.optical_black_availability),
+                    "gain_map_availability": availability_tag(m.gain_map_availability),
+                    "pdaf_mask_availability": availability_tag(m.pdaf_mask_availability),
+                    "iso_availability": availability_tag(m.iso_availability),
+                    "lens_data_availability": availability_tag(m.lens_data_availability),
+                    "correction_plan": correction_plan,
+                    "orientation": m.orientation,
+                })
+            }).collect::<Vec<_>>(),
         });
         std::fs::write(
             out.join("q1_sensor_metadata.json"),

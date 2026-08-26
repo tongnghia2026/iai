@@ -299,6 +299,93 @@ pub enum WhiteLevelSource {
     ContainerMaxReplacedByObserved,
 }
 
+/// Provenance the shared decoder boundary can guarantee for black levels. When
+/// masked areas are present we record that fact without claiming whether a
+/// decoder preferred fixed camera constants or measured those samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlackLevelSource {
+    DecoderSupplied,
+    DecoderSuppliedWithMaskedAreas,
+}
+
+/// Whether an optional sensor fact is present in the shared rawloader/rawler
+/// model used by the renderer. `NotExposedBySharedModel` is deliberately
+/// different from `ReportedAbsent`: the former means iAi cannot tell whether
+/// the file contains the fact and must not infer a value for a correction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SensorMetadataAvailability {
+    Reported,
+    ReportedAbsent,
+    NotExposedBySharedModel,
+}
+
+/// Why a sensor correction stage is enabled or disabled for this decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SensorCorrectionReason {
+    /// Existing isolated-site correction on an ordinary Bayer mosaic.
+    BayerDefectBaseline,
+    /// The source is mono, already demosaiced, or has no valid Bayer CFA.
+    NotBayerMosaic,
+    /// The shared decoder model exposes no metadata/diagnostic that would make
+    /// applying the correction safer than leaving clean image detail alone.
+    MissingMetadataOrDiagnostic,
+}
+
+/// One Q1 sensor correction stage and its bounded scratch estimate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SensorCorrectionStage {
+    pub enabled: bool,
+    pub reason: SensorCorrectionReason,
+    /// Conservative upper bound for temporary bytes owned by this stage. The
+    /// defect stage normally allocates far less because it records only sites
+    /// that pass both outlier checks.
+    pub estimated_scratch_bytes: usize,
+}
+
+/// Decode-specific Q1 plan. Keeping disabled stages explicit prevents a future
+/// implementation from silently applying green blur or inventing PDAF data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SensorCorrectionPlan {
+    pub isolated_bayer_defects: SensorCorrectionStage,
+    pub green_equilibration: SensorCorrectionStage,
+}
+
+fn sensor_correction_plan(
+    width: usize,
+    height: usize,
+    cpp: usize,
+    cfa_valid: bool,
+    is_mono: bool,
+) -> SensorCorrectionPlan {
+    let bayer = cpp == 1 && cfa_valid && !is_mono;
+    let defect_candidates = width
+        .saturating_sub(8)
+        .saturating_mul(height.saturating_sub(8));
+    SensorCorrectionPlan {
+        isolated_bayer_defects: SensorCorrectionStage {
+            enabled: bayer,
+            reason: if bayer {
+                SensorCorrectionReason::BayerDefectBaseline
+            } else {
+                SensorCorrectionReason::NotBayerMosaic
+            },
+            estimated_scratch_bytes: if bayer {
+                defect_candidates.saturating_mul(std::mem::size_of::<(usize, f32)>())
+            } else {
+                0
+            },
+        },
+        // Q1 audit found no green-split diagnostic, ISO model, gain map, or
+        // camera correction metadata. Stay bit-exact until one exists and is
+        // backed by clean/no-op plus affected-sensor crop tests.
+        green_equilibration: SensorCorrectionStage {
+            enabled: false,
+            reason: SensorCorrectionReason::MissingMetadataOrDiagnostic,
+            estimated_scratch_bytes: 0,
+        },
+    }
+}
+
 /// Classify one channel's white-level decision, mirroring
 /// [`choose_effective_white_level`] branch-for-branch so the audit's provenance
 /// stays exactly in step with the value the decode actually normalizes by. A
@@ -339,14 +426,24 @@ pub struct RawSensorMetadata {
     /// rawloader crop margins [top, right, bottom, left].
     pub crop_margins: [usize; 4],
     pub black_levels: [f32; 4],
+    pub black_level_source: BlackLevelSource,
     pub reported_white_levels: [f32; 4],
     pub observed_white_maxima: [f32; 4],
     pub effective_white_levels: [f32; 4],
     pub white_level_source: [WhiteLevelSource; 4],
     /// As-shot white-balance multipliers from the decoder (0 where absent).
     pub wb_coeffs: [f32; 4],
+    pub wb_availability: SensorMetadataAvailability,
     /// Count of masked optical-black regions the decoder exposed (0 = none).
     pub black_area_count: usize,
+    pub optical_black_availability: SensorMetadataAvailability,
+    /// These facts are not present in the shared decoder boundary today. The
+    /// explicit provenance prevents downstream stages from guessing them.
+    pub gain_map_availability: SensorMetadataAvailability,
+    pub pdaf_mask_availability: SensorMetadataAvailability,
+    pub iso_availability: SensorMetadataAvailability,
+    pub lens_data_availability: SensorMetadataAvailability,
+    pub correction_plan: SensorCorrectionPlan,
     pub orientation: String,
 }
 
@@ -359,6 +456,7 @@ pub fn probe_sensor_metadata(path: &Path) -> Result<RawSensorMetadata, String> {
     let area = active_area(raw)?;
     let levels = raw_levels(raw, area);
     let is_mono = raw.cpp == 1 && !raw.cfa.is_valid();
+    let black_area_count = raw.blackareas.len();
     let mut source = [WhiteLevelSource::Reported; 4];
     for c in 0..4 {
         source[c] = white_level_source(
@@ -380,12 +478,38 @@ pub fn probe_sensor_metadata(path: &Path) -> Result<RawSensorMetadata, String> {
         active_area: [area.top, area.left, area.width, area.height],
         crop_margins: raw.crops,
         black_levels: levels.black,
+        black_level_source: if black_area_count > 0 {
+            BlackLevelSource::DecoderSuppliedWithMaskedAreas
+        } else {
+            BlackLevelSource::DecoderSupplied
+        },
         reported_white_levels: raw.whitelevels.map(|value| value as f32),
         observed_white_maxima: levels.observed_white,
         effective_white_levels: levels.effective_white,
         white_level_source: source,
         wb_coeffs: raw.wb_coeffs,
-        black_area_count: raw.blackareas.len(),
+        wb_availability: if raw.wb_coeffs[..3].iter().all(|gain| *gain > 0.0) {
+            SensorMetadataAvailability::Reported
+        } else {
+            SensorMetadataAvailability::ReportedAbsent
+        },
+        black_area_count,
+        optical_black_availability: if black_area_count > 0 {
+            SensorMetadataAvailability::Reported
+        } else {
+            SensorMetadataAvailability::ReportedAbsent
+        },
+        gain_map_availability: SensorMetadataAvailability::NotExposedBySharedModel,
+        pdaf_mask_availability: SensorMetadataAvailability::NotExposedBySharedModel,
+        iso_availability: SensorMetadataAvailability::NotExposedBySharedModel,
+        lens_data_availability: SensorMetadataAvailability::NotExposedBySharedModel,
+        correction_plan: sensor_correction_plan(
+            raw.width,
+            raw.height,
+            raw.cpp,
+            raw.cfa.is_valid(),
+            is_mono,
+        ),
         orientation: format!("{:?}", raw.orientation),
     })
 }
@@ -411,6 +535,21 @@ fn decode_via_rawler(path: &Path) -> Result<DecodedRaw, String> {
     let to_u16_4 = |a: [f32; 4]| a.map(|v| v.round().clamp(0.0, u16::MAX as f32) as u16);
     let whitelevels = to_u16_4(img.whitelevel.as_bayer_array());
     let blacklevels = to_u16_4(img.blacklevel.as_bayer_array());
+    // Preserve rawler's masked optical-black rectangles across the compatibility
+    // adapter. The pixel path already uses rawler's resolved black levels; this
+    // only keeps the provenance/audit data that the old adapter discarded.
+    let blackareas = img
+        .blackareas
+        .iter()
+        .map(|rect| {
+            (
+                rect.p.y as u64,
+                rect.p.x.saturating_add(rect.d.w) as u64,
+                rect.p.y.saturating_add(rect.d.h) as u64,
+                rect.p.x as u64,
+            )
+        })
+        .collect();
 
     // rawloader crops are margins [top, right, bottom, left]. Prefer the default
     // crop, then the active area, else the whole frame.
@@ -446,7 +585,7 @@ fn decode_via_rawler(path: &Path) -> Result<DecodedRaw, String> {
         crops,
         orientation,
         data,
-        blackareas: Vec::new(),
+        blackareas,
     };
     Ok(DecodedRaw {
         image,
@@ -690,6 +829,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     let crop_top = area.top;
     let crop_left = area.left;
     let cfa = &raw.cfa;
+    let sensor_corrections = sensor_correction_plan(w, h, raw.cpp, cfa.is_valid(), mono);
     let mut out = vec![0u16; cw * ch * 4];
 
     match raw.cpp {
@@ -709,9 +849,13 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
             // Camera pipelines such as ART/ACR suppress isolated dead/hot
             // sensels before interpolation. Without this, one defective Bayer
             // sample expands into a small black/coloured dot after demosaic.
-            if !mono {
-                correct_isolated_bayer_defects(&mut plane, w, h, cfa);
-            }
+            apply_isolated_bayer_defect_stage(
+                &mut plane,
+                w,
+                h,
+                cfa,
+                sensor_corrections.isolated_bayer_defects,
+            );
             // Reconstruct clipped highlights on the mosaic, before demosaic.
             if !mono {
                 inpaint_opposed_bayer(&mut plane, w, h, cfa, gain);
@@ -1440,6 +1584,22 @@ fn correct_isolated_bayer_defects(plane: &mut [f32], w: usize, h: usize, cfa: &r
     for (i, value) in updates {
         plane[i] = value;
     }
+}
+
+/// Stage boundary for isolated Bayer defects. The disabled path returns before
+/// touching the buffer, which is pinned by a bit-exact neutral no-op test.
+fn apply_isolated_bayer_defect_stage(
+    plane: &mut [f32],
+    w: usize,
+    h: usize,
+    cfa: &rawloader::CFA,
+    stage: SensorCorrectionStage,
+) {
+    if !stage.enabled {
+        return;
+    }
+    debug_assert_eq!(stage.reason, SensorCorrectionReason::BayerDefectBaseline);
+    correct_isolated_bayer_defects(plane, w, h, cfa);
 }
 
 /// Opposed highlight reconstruction on the white-balanced Bayer plane, BEFORE
@@ -3310,6 +3470,60 @@ mod tests {
         assert!((plane[12 * w + 12] - 0.4).abs() < 1e-6);
         assert_eq!(plane[10 * w + 5], 0.03);
         assert_eq!(plane[10 * w + 6], 0.03);
+    }
+
+    #[test]
+    fn sensor_correction_plan_is_explicit_and_bounded() {
+        let bayer = sensor_correction_plan(20, 20, 1, true, false);
+        assert!(bayer.isolated_bayer_defects.enabled);
+        assert_eq!(
+            bayer.isolated_bayer_defects.reason,
+            SensorCorrectionReason::BayerDefectBaseline
+        );
+        assert_eq!(
+            bayer.isolated_bayer_defects.estimated_scratch_bytes,
+            12 * 12 * std::mem::size_of::<(usize, f32)>()
+        );
+        assert!(!bayer.green_equilibration.enabled);
+        assert_eq!(
+            bayer.green_equilibration.reason,
+            SensorCorrectionReason::MissingMetadataOrDiagnostic
+        );
+        assert_eq!(bayer.green_equilibration.estimated_scratch_bytes, 0);
+
+        for plan in [
+            sensor_correction_plan(20, 20, 1, false, true),
+            sensor_correction_plan(20, 20, 3, false, false),
+        ] {
+            assert!(!plan.isolated_bayer_defects.enabled);
+            assert_eq!(
+                plan.isolated_bayer_defects.reason,
+                SensorCorrectionReason::NotBayerMosaic
+            );
+            assert_eq!(plan.isolated_bayer_defects.estimated_scratch_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn disabled_sensor_correction_stage_is_bit_exact_noop() {
+        let (w, h) = (20usize, 20usize);
+        let cfa = rawloader::CFA::new("RGGB");
+        let mut plane = vec![0.4f32; w * h];
+        plane[8 * w + 8] = 0.0;
+        plane[12 * w + 12] = 4.0;
+        let original = plane.clone();
+        apply_isolated_bayer_defect_stage(
+            &mut plane,
+            w,
+            h,
+            &cfa,
+            SensorCorrectionStage {
+                enabled: false,
+                reason: SensorCorrectionReason::NotBayerMosaic,
+                estimated_scratch_bytes: 0,
+            },
+        );
+        assert_eq!(plane, original, "disabled correction must touch no sample");
     }
 
     #[test]
