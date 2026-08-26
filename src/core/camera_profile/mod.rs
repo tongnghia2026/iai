@@ -75,6 +75,9 @@ pub enum JpegMatchMode {
     /// Bounded preview match: 3x3 matrix, a post-matrix scalar exposure fit,
     /// and luminance-preserving chroma enrichment. No RGB tone curves.
     PreviewSafe,
+    /// Preview-safe plus a hue/chroma-preserving luminance tone match to the
+    /// embedded preview's contrast distribution. Still no RGB tone curves.
+    PreviewSafeTone,
     /// Brightness plus the per-channel colour matrix and tone curve.
     Full,
 }
@@ -109,16 +112,24 @@ impl JpegMatchMode {
         apply_matrix: bool,
         apply_curves: bool,
         preview_safe: bool,
+        preview_tone: bool,
     ) -> Self {
-        match (apply_gain, apply_matrix, apply_curves, preview_safe) {
-            (_, _, _, true) => Self::PreviewSafe,
-            (_, true, true, false) => Self::Full,
-            (true, true, false, false) => Self::BrightnessAndMatrix,
-            (true, false, true, false) => Self::BrightnessAndCurves,
-            (true, false, false, false) => Self::BrightnessOnly,
-            (false, false, false, false) => Self::None,
-            (false, true, false, false) => Self::BrightnessAndMatrix,
-            (false, false, true, false) => Self::BrightnessAndCurves,
+        match (
+            apply_gain,
+            apply_matrix,
+            apply_curves,
+            preview_safe,
+            preview_tone,
+        ) {
+            (_, _, _, _, true) => Self::PreviewSafeTone,
+            (_, _, _, true, false) => Self::PreviewSafe,
+            (_, true, true, false, false) => Self::Full,
+            (true, true, false, false, false) => Self::BrightnessAndMatrix,
+            (true, false, true, false, false) => Self::BrightnessAndCurves,
+            (true, false, false, false, false) => Self::BrightnessOnly,
+            (false, false, false, false, false) => Self::None,
+            (false, true, false, false, false) => Self::BrightnessAndMatrix,
+            (false, false, true, false, false) => Self::BrightnessAndCurves,
         }
     }
 }
@@ -194,28 +205,32 @@ mod tests {
     #[test]
     fn jpeg_match_provenance_distinguishes_matrix_and_curve_diagnostics() {
         assert_eq!(
-            JpegMatchMode::from_stages(true, true, true, false),
+            JpegMatchMode::from_stages(true, true, true, false, false),
             JpegMatchMode::Full
         );
         assert_eq!(
-            JpegMatchMode::from_stages(true, true, false, false),
+            JpegMatchMode::from_stages(true, true, false, false, false),
             JpegMatchMode::BrightnessAndMatrix
         );
         assert_eq!(
-            JpegMatchMode::from_stages(true, false, true, false),
+            JpegMatchMode::from_stages(true, false, true, false, false),
             JpegMatchMode::BrightnessAndCurves
         );
         assert_eq!(
-            JpegMatchMode::from_stages(true, false, false, false),
+            JpegMatchMode::from_stages(true, false, false, false, false),
             JpegMatchMode::BrightnessOnly
         );
         assert_eq!(
-            JpegMatchMode::from_stages(false, false, false, false),
+            JpegMatchMode::from_stages(false, false, false, false, false),
             JpegMatchMode::None
         );
         assert_eq!(
-            JpegMatchMode::from_stages(true, true, false, true),
+            JpegMatchMode::from_stages(true, true, false, true, false),
             JpegMatchMode::PreviewSafe
+        );
+        assert_eq!(
+            JpegMatchMode::from_stages(true, true, false, true, true),
+            JpegMatchMode::PreviewSafeTone
         );
     }
 

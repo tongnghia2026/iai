@@ -667,6 +667,9 @@ struct JpegMatchPlan {
     apply_matrix: bool,
     apply_curves: bool,
     preview_safe: bool,
+    /// Preview-safe plus a hue/chroma-preserving luminance tone match to the
+    /// embedded preview (no per-channel RGB curves, no spatial filter).
+    preview_tone: bool,
 }
 ///
 /// A profile-backed DCP render is already colour-accurate, so it defaults to no
@@ -683,36 +686,49 @@ fn jpeg_match_plan_for(value: Option<&str>, dcp_selected: bool) -> JpegMatchPlan
             apply_matrix: true,
             apply_curves: true,
             preview_safe: false,
+            preview_tone: false,
         },
         Some("safe") | Some("preview-safe") => JpegMatchPlan {
             apply_gain: true,
             apply_matrix: true,
             apply_curves: false,
             preview_safe: true,
+            preview_tone: false,
+        },
+        Some("safe-tone") | Some("safe2") | Some("preview-safe-tone") => JpegMatchPlan {
+            apply_gain: true,
+            apply_matrix: true,
+            apply_curves: false,
+            preview_safe: true,
+            preview_tone: true,
         },
         Some("matrix") => JpegMatchPlan {
             apply_gain: true,
             apply_matrix: true,
             apply_curves: false,
             preview_safe: false,
+            preview_tone: false,
         },
         Some("curves") | Some("curve") => JpegMatchPlan {
             apply_gain: true,
             apply_matrix: false,
             apply_curves: true,
             preview_safe: false,
+            preview_tone: false,
         },
         Some("off") => JpegMatchPlan {
             apply_gain: true,
             apply_matrix: false,
             apply_curves: false,
             preview_safe: false,
+            preview_tone: false,
         },
         Some("none") => JpegMatchPlan {
             apply_gain: false,
             apply_matrix: false,
             apply_curves: false,
             preview_safe: false,
+            preview_tone: false,
         },
         // A resolved DCP supplies the colour characterization, so drop the
         // embedded-JPEG COLOUR fit — but keep the brightness baseline so the
@@ -723,12 +739,14 @@ fn jpeg_match_plan_for(value: Option<&str>, dcp_selected: bool) -> JpegMatchPlan
             apply_matrix: false,
             apply_curves: false,
             preview_safe: false,
+            preview_tone: false,
         },
         _ => JpegMatchPlan {
             apply_gain: true,
             apply_matrix: true,
             apply_curves: true,
             preview_safe: false,
+            preview_tone: false,
         },
     }
 }
@@ -1089,6 +1107,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
                 jpeg_match.apply_matrix,
                 jpeg_match.apply_curves,
                 jpeg_match.preview_safe,
+                jpeg_match.preview_tone,
             ),
             raw_render_recipe: raw_render_recipe.version,
         }),
@@ -1115,17 +1134,33 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
             }
         }
         if jpeg_match.preview_safe {
-            // The spatial matrix changes the display mean slightly. Re-fit only
-            // a scalar exposure afterwards so brightness returns to the camera
-            // preview without introducing a per-channel cast.
-            let post_gain = fit_preview_luma_gain_for_scene(
-                &scene,
-                target.mean_luma,
-                target.thumbnail_width,
-                target.thumbnail_height,
-            );
-            if (post_gain - 1.0).abs() > 0.005 {
-                scale_scene(&mut scene.half, post_gain);
+            if jpeg_match.preview_tone {
+                // Preview-safe-tone: recover the camera preview's whole
+                // luminance/contrast distribution, not just its mean. A monotone
+                // display-luma CDF match applied as a per-pixel scene-linear
+                // scale — hue- and chroma-preserving, no spatial filter, no
+                // per-channel RGB curves — so it closes the tone "jump" the
+                // scalar exposure leaves without the smear the curves caused.
+                apply_preview_luma_tone_match(
+                    &mut scene,
+                    &target.thumbnail_rgb,
+                    target.thumbnail_width,
+                    target.thumbnail_height,
+                    PREVIEW_TONE_STRENGTH,
+                );
+            } else {
+                // The spatial matrix changes the display mean slightly. Re-fit
+                // only a scalar exposure afterwards so brightness returns to the
+                // camera preview without introducing a per-channel cast.
+                let post_gain = fit_preview_luma_gain_for_scene(
+                    &scene,
+                    target.mean_luma,
+                    target.thumbnail_width,
+                    target.thumbnail_height,
+                );
+                if (post_gain - 1.0).abs() > 0.005 {
+                    scale_scene(&mut scene.half, post_gain);
+                }
             }
 
             // Match only aggregate display chroma with a bounded, hue- and
@@ -2393,6 +2428,206 @@ fn fit_preview_chroma_strength(
     0.5 * (lo + hi)
 }
 
+/// Strength of the preview-safe-tone luminance match, blended toward identity so
+/// it recovers most of the camera preview's contrast without over-crushing.
+const PREVIEW_TONE_STRENGTH: f32 = 0.9;
+
+/// Samples in the neutral scene->display luminance response and its inverse.
+const TONE_LUT_N: usize = 256;
+/// EV span (log2 of the scene-linear value) the neutral response is tabulated
+/// over: deep shadow to well past display white, so shadows are well resolved.
+const TONE_EV_MIN: f32 = -14.0;
+const TONE_EV_MAX: f32 = 6.0;
+
+#[inline]
+fn tone_lut_lerp(lut: &[f32], t01: f32) -> f32 {
+    let n = lut.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let pos = t01.clamp(0.0, 1.0) * (n - 1) as f32;
+    let i = pos.floor() as usize;
+    if i + 1 >= n {
+        return lut[n - 1];
+    }
+    let f = pos - i as f32;
+    lut[i] * (1.0 - f) + lut[i + 1] * f
+}
+
+#[inline]
+fn tone_ev_at(i: usize) -> f32 {
+    TONE_EV_MIN + (TONE_EV_MAX - TONE_EV_MIN) * i as f32 / (TONE_LUT_N - 1) as f32
+}
+
+/// Display luma of a neutral scene grey at each tabulated EV, using the exact
+/// tone the preview and the commit share. Forced monotone nondecreasing so the
+/// inverse below is well defined.
+fn neutral_display_luma_over_ev(
+    tone: &crate::core::develop_scene::SceneToneData,
+) -> [f32; TONE_LUT_N] {
+    let mut g = [0.0f32; TONE_LUT_N];
+    for (i, slot) in g.iter_mut().enumerate() {
+        let v = tone_ev_at(i).exp2();
+        *slot = luma_lin(tone.scene_to_display([v, v, v], None));
+    }
+    for i in 1..TONE_LUT_N {
+        if g[i] < g[i - 1] {
+            g[i] = g[i - 1];
+        }
+    }
+    g
+}
+
+/// Current display luma (neutral approximation) for a scene-linear luma.
+#[inline]
+fn forward_display_luma(g_ev: &[f32; TONE_LUT_N], ys: f32) -> f32 {
+    let e = ys.max(1e-8).log2();
+    let t = ((e - TONE_EV_MIN) / (TONE_EV_MAX - TONE_EV_MIN)).clamp(0.0, 1.0);
+    tone_lut_lerp(g_ev, t)
+}
+
+/// Invert the neutral response: for each display luma on a uniform grid, the
+/// scene-linear value that renders at it. Built once, sampled per pixel.
+fn invert_display_luma_table(g_ev: &[f32; TONE_LUT_N]) -> [f32; TONE_LUT_N] {
+    let mut inv = [0.0f32; TONE_LUT_N];
+    let lo = g_ev[0];
+    let hi = g_ev[TONE_LUT_N - 1];
+    for (j, slot) in inv.iter_mut().enumerate() {
+        let d = j as f32 / (TONE_LUT_N - 1) as f32;
+        *slot = if d <= lo {
+            TONE_EV_MIN.exp2()
+        } else if d >= hi {
+            TONE_EV_MAX.exp2()
+        } else {
+            let mut k = 0usize;
+            while k + 1 < TONE_LUT_N && g_ev[k + 1] < d {
+                k += 1;
+            }
+            let (g0, g1) = (g_ev[k], g_ev[k + 1]);
+            let f = if g1 > g0 { (d - g0) / (g1 - g0) } else { 0.0 };
+            (tone_ev_at(k) + (tone_ev_at(k + 1) - tone_ev_at(k)) * f).exp2()
+        };
+    }
+    inv
+}
+
+fn tone_identity_lut() -> [f32; 256] {
+    let mut id = [0.0f32; 256];
+    for (i, slot) in id.iter_mut().enumerate() {
+        *slot = i as f32 / 255.0;
+    }
+    id
+}
+
+/// Monotone display-luma CDF match from the current render to the embedded
+/// preview, blended toward identity by `strength`. Same CDF construction as the
+/// per-channel curve fit, but on luminance only, so no channel is remapped
+/// independently. Endpoints pinned; output forced nondecreasing.
+fn fit_display_luma_match(
+    g_ev: &[f32; TONE_LUT_N],
+    scene: &SceneSource,
+    target: &[[u8; 3]],
+    target_w: u32,
+    target_h: u32,
+    strength: f32,
+) -> [f32; 256] {
+    // Source display-luma histogram from a strided full-scene sample, computed
+    // the SAME way the per-pixel apply computes display luma so the match lands.
+    let mut source = [0u64; 256];
+    const BUDGET: u64 = 100_000;
+    let total = scene.width as u64 * scene.height as u64;
+    let step = (((total / BUDGET).max(1) as f64).sqrt().ceil() as u32).max(1);
+    let mut source_total = 0u64;
+    // A freshly decoded RAW scene is fully opaque, so every sample counts.
+    for y in (0..scene.height).step_by(step as usize) {
+        for x in (0..scene.width).step_by(step as usize) {
+            let yd = forward_display_luma(g_ev, luma_lin(scene.get_rgb(x, y)));
+            source[(yd.clamp(0.0, 1.0) * 255.0).round() as usize] += 1;
+            source_total += 1;
+        }
+    }
+    // Target display-luma histogram from the embedded preview thumbnail.
+    let mut target_hist = [0u64; 256];
+    let mut target_total = 0u64;
+    if target_w > 0 && target_h > 0 && target.len() == target_w as usize * target_h as usize {
+        for t in target {
+            let yd = 0.2126 * t[0] as f32 + 0.7152 * t[1] as f32 + 0.0722 * t[2] as f32;
+            target_hist[yd.round().clamp(0.0, 255.0) as usize] += 1;
+            target_total += 1;
+        }
+    }
+    if source_total == 0 || target_total == 0 {
+        return tone_identity_lut();
+    }
+    let mut match_lut = [0.0f32; 256];
+    let mut source_cdf = 0u64;
+    let mut target_bin = 0usize;
+    let mut target_cdf = target_hist[0];
+    for (i, slot) in match_lut.iter_mut().enumerate() {
+        source_cdf += source[i];
+        while target_bin < 255 && target_cdf * source_total < source_cdf * target_total {
+            target_bin += 1;
+            target_cdf += target_hist[target_bin];
+        }
+        *slot = target_bin as f32 / 255.0;
+    }
+    match_lut[0] = 0.0;
+    match_lut[255] = 1.0;
+    // Blend toward identity, then force nondecreasing so ordering never inverts.
+    let s = strength.clamp(0.0, 1.0);
+    let mut out = [0.0f32; 256];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let id = i as f32 / 255.0;
+        *slot = (id + s * (match_lut[i] - id)).clamp(0.0, 1.0);
+    }
+    for i in 1..256 {
+        if out[i] < out[i - 1] {
+            out[i] = out[i - 1];
+        }
+    }
+    out
+}
+
+/// Apply a hue/chroma-preserving luminance tone match to the whole scene master
+/// so the full render reproduces the embedded preview's contrast distribution,
+/// not just its mean. Builds the neutral display-luma response, its inverse and
+/// a bounded CDF match, then scales every pixel by ONE scene-linear factor
+/// (uniform across R/G/B -> hue and chroma preserved; no spatial filter, no
+/// per-channel RGB curves). Monotone and slope-bounded.
+fn apply_preview_luma_tone_match(
+    scene: &mut SceneSource,
+    target: &[[u8; 3]],
+    target_w: u32,
+    target_h: u32,
+    strength: f32,
+) {
+    let tone = crate::core::develop_scene::build_scene_tone_for_scene(&Default::default(), scene);
+    let g_ev = neutral_display_luma_over_ev(&tone);
+    let ginv = invert_display_luma_table(&g_ev);
+    let match_lut = fit_display_luma_match(&g_ev, scene, target, target_w, target_h, strength);
+    scene.half.par_chunks_mut(4).for_each(|px| {
+        let rgb = [
+            f16_bits_to_f32(px[0]),
+            f16_bits_to_f32(px[1]),
+            f16_bits_to_f32(px[2]),
+        ];
+        let ys = luma_lin(rgb);
+        if ys <= 1e-6 {
+            return;
+        }
+        let yd = forward_display_luma(&g_ev, ys);
+        let yd2 = tone_lut_lerp(&match_lut, yd);
+        let v2 = tone_lut_lerp(&ginv, yd2);
+        let scale = (v2 / ys).clamp(0.4, 3.0);
+        if (scale - 1.0).abs() < 1e-4 {
+            return;
+        }
+        for (dst, value) in px[..3].iter_mut().zip(rgb) {
+            *dst = f32_to_f16_bits((value * scale).max(0.0));
+        }
+    });
+}
+
 /// Luminance-anchored vibrance on the LINEAR scene master, applied once at
 /// import so the default look, the GPU preview (scene master upload) and the
 /// CPU commit inherit one identical enrichment — no per-stage mirroring, and
@@ -2849,6 +3084,7 @@ mod tests {
                 apply_matrix: true,
                 apply_curves: false,
                 preview_safe: false,
+                preview_tone: false,
             }
         );
         assert_eq!(
@@ -2858,6 +3094,7 @@ mod tests {
                 apply_matrix: false,
                 apply_curves: true,
                 preview_safe: false,
+                preview_tone: false,
             }
         );
         assert_eq!(
@@ -2867,6 +3104,7 @@ mod tests {
                 apply_matrix: false,
                 apply_curves: false,
                 preview_safe: false,
+                preview_tone: false,
             }
         );
         assert_eq!(
@@ -2876,6 +3114,7 @@ mod tests {
                 apply_matrix: false,
                 apply_curves: false,
                 preview_safe: false,
+                preview_tone: false,
             }
         );
         assert_eq!(
@@ -2885,6 +3124,7 @@ mod tests {
                 apply_matrix: true,
                 apply_curves: true,
                 preview_safe: false,
+                preview_tone: false,
             }
         );
         assert_eq!(
@@ -2894,6 +3134,19 @@ mod tests {
                 apply_matrix: true,
                 apply_curves: false,
                 preview_safe: true,
+                preview_tone: false,
+            }
+        );
+        // safe-tone is preview-safe plus the luminance tone match; matrix stays
+        // on and the RGB histogram curves stay off.
+        assert_eq!(
+            jpeg_match_plan_for(Some("safe-tone"), false),
+            JpegMatchPlan {
+                apply_gain: true,
+                apply_matrix: true,
+                apply_curves: false,
+                preview_safe: true,
+                preview_tone: true,
             }
         );
     }
@@ -2949,6 +3202,67 @@ mod tests {
         assert!(
             (fitted_chroma - expected_chroma).abs() < 0.20,
             "chroma {fitted_chroma} vs {expected_chroma}"
+        );
+    }
+
+    #[test]
+    fn preview_luma_tone_match_moves_display_luma_toward_preview() {
+        let (w, h) = (32u32, 32u32);
+        let mut scene = SceneSource::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let fx = x as f32 / (w - 1) as f32;
+                let fy = y as f32 / (h - 1) as f32;
+                scene.set_rgb(
+                    x,
+                    y,
+                    [
+                        0.02 + 0.20 * fx,
+                        0.02 + 0.20 * fy,
+                        0.02 + 0.18 * (1.0 - fx * fy),
+                    ],
+                );
+            }
+        }
+        let tone =
+            crate::core::develop_scene::build_scene_tone_for_scene(&Default::default(), &scene);
+        // A brighter, higher-contrast preview target built from the scene's own
+        // display luma so hue is unchanged and only the tone distribution moves.
+        let mut target = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let d = tone.scene_to_display(scene.get_rgb(x, y), None);
+                let yl = luma_lin(d);
+                let yl2 = (0.5 + (yl - 0.5) * 1.4 + 0.12).clamp(0.0, 1.0);
+                let k = if yl > 1e-4 { yl2 / yl } else { 1.0 };
+                target.push(d.map(|c| ((c * k).clamp(0.0, 1.0) * 255.0 + 0.5) as u8));
+            }
+        }
+        let mean_display_luma = |s: &SceneSource| -> f32 {
+            let mut sum = 0.0f32;
+            for y in 0..h {
+                for x in 0..w {
+                    sum += luma_lin(tone.scene_to_display(s.get_rgb(x, y), None));
+                }
+            }
+            sum / (w * h) as f32
+        };
+        let target_mean = target
+            .iter()
+            .map(|t| (0.2126 * t[0] as f32 + 0.7152 * t[1] as f32 + 0.0722 * t[2] as f32) / 255.0)
+            .sum::<f32>()
+            / target.len() as f32;
+        let before = mean_display_luma(&scene);
+        apply_preview_luma_tone_match(&mut scene, &target, w, h, 1.0);
+        let after = mean_display_luma(&scene);
+        assert!(after.is_finite());
+        assert!(
+            after > before + 0.02,
+            "tone match should brighten toward the preview: before {before} after {after}"
+        );
+        assert!(
+            (after - target_mean).abs() < (before - target_mean).abs(),
+            "after {after} should be closer to target {target_mean} than before {before}"
         );
     }
 
