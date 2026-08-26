@@ -1049,15 +1049,24 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
 
     // Capture sharpening on the linear scene, after demosaic and before the
     // master is frozen (before orientation too, but the pass is isotropic so
-    // the order is irrelevant).
-    if raw_render_recipe.capture_sharpen_gain > 1e-4 {
+    // the order is irrelevant). The opt-in `IAI_RAW_DETAIL` diagnostic raises the
+    // acutance but band-passes it (stronger on fine texture, faded on strong
+    // edges) and tightens the bright cap, so it adds "nét" without edge halos;
+    // the default stays byte-identical (full-band, 2.0 cap).
+    let detail = detail_sharpen_params();
+    let cs_gain = detail
+        .map(|d| d.0)
+        .unwrap_or(raw_render_recipe.capture_sharpen_gain);
+    if cs_gain > 1e-4 {
         capture_sharpen(
             &mut out,
             cw,
             ch,
-            raw_render_recipe.capture_sharpen_gain,
+            cs_gain,
             raw_render_recipe.capture_sharpen_dark_ratio,
             raw_render_recipe.capture_sharpen_floor,
+            detail.map(|d| d.1).unwrap_or(2.0),
+            detail.map(|d| d.2),
         );
     }
 
@@ -1973,6 +1982,47 @@ const CS_GUARD_FLOOR: f32 = 0.02;
 const CS_DARK_RATIO: f32 = 0.0;
 const CS_FLOOR: f32 = 0.85;
 
+/// Opt-in `IAI_RAW_DETAIL` capture-sharpen preset. A higher unsharp gain for more
+/// fine-texture acutance ("nét"), but band-passed (faded on strong edges) and
+/// with a tighter bright cap so it cannot raise an edge halo. The default render
+/// stays byte-identical (this returns None unless the env is truthy).
+const DETAIL_CS_GAIN: f32 = 0.95;
+/// Bright-side factor cap in detail mode — a lower halo backstop than the 2.0
+/// used by the shipping full-band sharpen.
+const DETAIL_CS_BRIGHT_CAP: f32 = 1.55;
+/// Band-pass edge window (relative contrast): the sharpen fades from full toward
+/// `DETAIL_EDGE_FLOOR` as relative contrast climbs `LO..HI`, so strong edges keep
+/// only a fraction of the gain while fine texture below `LO` keeps all of it.
+const DETAIL_EDGE_LO: f32 = 0.18;
+const DETAIL_EDGE_HI: f32 = 0.45;
+const DETAIL_EDGE_FLOOR: f32 = 0.35;
+
+/// Resolve the opt-in detail-sharpen preset: `(gain, bright_cap, (edge_lo,
+/// edge_hi, edge_floor))`, or None for the shipping full-band sharpen. Enabled by
+/// a truthy `IAI_RAW_DETAIL`; `IAI_CS_GAIN` still overrides the gain.
+fn detail_sharpen_params() -> Option<(f32, f32, (f32, f32, f32))> {
+    let on = std::env::var("IAI_RAW_DETAIL")
+        .ok()
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("off")
+        })
+        .unwrap_or(false);
+    if !on {
+        return None;
+    }
+    let gain = std::env::var("IAI_CS_GAIN")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|g| g.is_finite() && *g >= 0.0)
+        .unwrap_or(DETAIL_CS_GAIN);
+    Some((
+        gain,
+        DETAIL_CS_BRIGHT_CAP,
+        (DETAIL_EDGE_LO, DETAIL_EDGE_HI, DETAIL_EDGE_FLOOR),
+    ))
+}
+
 /// Separable 5-tap blur over an f32 plane, edge-clamped.
 fn blur_plane_5(src: &[f32], w: usize, h: usize, k: &[f32; 5]) -> Vec<f32> {
     let mut tmp = vec![0.0f32; w * h];
@@ -2004,8 +2054,23 @@ fn blur_plane_5(src: &[f32], w: usize, h: usize, k: &[f32; 5]) -> Vec<f32> {
 /// Capture-sharpen an RGBA f16 scene buffer in place (see the constants above).
 /// `gain` is the per-iteration unsharp gain (default [`CS_GAIN`]); `dark_ratio`
 /// damps the dark-side undershoot and `floor` bounds how far a pixel may be
-/// dimmed, so no edge pixel is crushed toward black.
-fn capture_sharpen(half: &mut [u16], w: usize, h: usize, gain: f32, dark_ratio: f32, floor: f32) {
+/// dimmed, so no edge pixel is crushed toward black. `bright_cap` bounds the
+/// bright-side (overshoot) factor — a halo backstop. `edge_atten`, when Some
+/// `(lo, hi, floor)`, band-passes the sharpen: it fades toward `floor` on
+/// relative contrast above `lo..hi`, so strong edges keep only a fraction of the
+/// gain (no halo) while fine texture below `lo` keeps the full gain (more
+/// acutance). None is the shipping full-band behaviour.
+#[allow(clippy::too_many_arguments)]
+fn capture_sharpen(
+    half: &mut [u16],
+    w: usize,
+    h: usize,
+    gain: f32,
+    dark_ratio: f32,
+    floor: f32,
+    bright_cap: f32,
+    edge_atten: Option<(f32, f32, f32)>,
+) {
     if w < 4 || h < 4 {
         return;
     }
@@ -2039,11 +2104,15 @@ fn capture_sharpen(half: &mut [u16], w: usize, h: usize, gain: f32, dark_ratio: 
                     continue;
                 }
                 let d = l - blur[i];
-                let guard = crate::core::develop::smootherstep(
-                    CS_GUARD_LO,
-                    CS_GUARD_HI,
-                    d.abs() / (blur[i].max(0.0) + CS_GUARD_FLOOR),
-                );
+                let rc = d.abs() / (blur[i].max(0.0) + CS_GUARD_FLOOR);
+                let mut guard = crate::core::develop::smootherstep(CS_GUARD_LO, CS_GUARD_HI, rc);
+                // Band-pass: fade the sharpen out on strong edges (high relative
+                // contrast) toward `edge_floor`, so texture is boosted but strong
+                // edges do not gain a halo rim.
+                if let Some((elo, ehi, efloor)) = edge_atten {
+                    let strong = crate::core::develop::smootherstep(elo, ehi, rc);
+                    guard *= efloor + (1.0 - efloor) * (1.0 - strong);
+                }
                 if guard <= 0.0 {
                     continue;
                 }
@@ -2051,7 +2120,7 @@ fn capture_sharpen(half: &mut [u16], w: usize, h: usize, gain: f32, dark_ratio: 
                 // the dark side (d<0, undershoot) is damped and floored so an edge
                 // pixel is never dimmed toward black (the dotted-rim artifact).
                 let eff_gain = if d < 0.0 { gain * dark_ratio } else { gain };
-                let factor = ((l + eff_gain * guard * d) / l).clamp(floor, 2.0);
+                let factor = ((l + eff_gain * guard * d) / l).clamp(floor, bright_cap);
                 for ch in 0..3 {
                     let v = f16_bits_to_f32(row[x * 4 + ch]);
                     row[x * 4 + ch] = f32_to_f16_bits(v * factor);
@@ -4030,7 +4099,7 @@ mod tests {
             .map(|i| if i % w < w / 2 { 0.15 } else { 0.55 })
             .collect();
         let mut buf = scene_buf_from(&vals);
-        capture_sharpen(&mut buf, w, h, CS_GAIN, CS_DARK_RATIO, CS_FLOOR);
+        capture_sharpen(&mut buf, w, h, CS_GAIN, CS_DARK_RATIO, CS_FLOOR, 2.0, None);
         let at =
             |x: usize, y: usize| crate::core::develop_scene::f16_bits_to_f32(buf[(y * w + x) * 4]);
 
@@ -4061,7 +4130,7 @@ mod tests {
             .map(|i| if i % w < w / 2 { 0.55 } else { dark })
             .collect();
         let mut buf = scene_buf_from(&vals);
-        capture_sharpen(&mut buf, w, h, CS_GAIN, CS_DARK_RATIO, CS_FLOOR);
+        capture_sharpen(&mut buf, w, h, CS_GAIN, CS_DARK_RATIO, CS_FLOOR, 2.0, None);
         let at =
             |x: usize, y: usize| crate::core::develop_scene::f16_bits_to_f32(buf[(y * w + x) * 4]);
         // First dark pixel (the edge's dark side) keeps at least `floor` of its
@@ -4090,8 +4159,56 @@ mod tests {
         let vals: Vec<f32> = (0..w * h).map(|_| 0.3 + 0.008 * rand()).collect();
         let mut buf = scene_buf_from(&vals);
         let original = buf.clone();
-        capture_sharpen(&mut buf, w, h, CS_GAIN, CS_DARK_RATIO, CS_FLOOR);
+        capture_sharpen(&mut buf, w, h, CS_GAIN, CS_DARK_RATIO, CS_FLOOR, 2.0, None);
         assert_eq!(buf, original, "flat noise must not be sharpened");
+    }
+
+    #[test]
+    fn detail_sharpen_band_passes_strong_edges() {
+        // A strong high-contrast edge is exactly where an unsharp mask raises a
+        // halo rim. At the SAME gain, the opt-in detail preset (band-passed +
+        // tighter bright cap) must overshoot the edge LESS than the full-band
+        // sharpen — the halo-safety property — while flat regions stay put.
+        let (w, h) = (64usize, 16usize);
+        let vals: Vec<f32> = (0..w * h)
+            .map(|i| if i % w < w / 2 { 0.15 } else { 0.85 })
+            .collect();
+        let gain = DETAIL_CS_GAIN;
+        let at =
+            |b: &[u16], x: usize| crate::core::develop_scene::f16_bits_to_f32(b[(8 * w + x) * 4]);
+
+        let mut full = scene_buf_from(&vals);
+        capture_sharpen(&mut full, w, h, gain, CS_DARK_RATIO, CS_FLOOR, 2.0, None);
+        let mut detail = scene_buf_from(&vals);
+        capture_sharpen(
+            &mut detail,
+            w,
+            h,
+            gain,
+            CS_DARK_RATIO,
+            CS_FLOOR,
+            DETAIL_CS_BRIGHT_CAP,
+            Some((DETAIL_EDGE_LO, DETAIL_EDGE_HI, DETAIL_EDGE_FLOOR)),
+        );
+
+        // Bright side of the edge = first bright pixel (x = w/2); both overshoot,
+        // but the band-passed detail preset overshoots less (no halo rim).
+        let over_full = at(&full, w / 2) - 0.85;
+        let over_detail = at(&detail, w / 2) - 0.85;
+        assert!(
+            over_full > 0.0,
+            "full-band overshoots strong edge: {over_full}"
+        );
+        assert!(
+            over_detail >= -1e-4 && over_detail < over_full,
+            "band-pass reduces strong-edge overshoot: full={over_full} detail={over_detail}"
+        );
+        // Flat interior untouched under either mode.
+        assert!((at(&detail, 4) - 0.15).abs() < 1e-3, "flat left untouched");
+        assert!(
+            (at(&detail, w - 4) - 0.85).abs() < 1e-3,
+            "flat right untouched"
+        );
     }
 
     #[test]
