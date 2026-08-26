@@ -93,6 +93,11 @@ pub enum JpegMatchMode {
 pub enum RawRenderRecipeVersion {
     LegacyBaked1,
     TechnicalNeutral2,
+    /// Shipping default from Q2/Q4: the legacy baked look plus the band-passed
+    /// capture-sharpen ("nét") and, when no camera profile resolves, the
+    /// preview-safe embedded-JPEG colour fit (matrix + bounded exposure/chroma,
+    /// no RGB histogram curves) instead of the full curve fit.
+    NaturalV3,
 }
 
 impl RawRenderRecipeVersion {
@@ -100,6 +105,7 @@ impl RawRenderRecipeVersion {
         match self {
             Self::LegacyBaked1 => "legacy-baked-v1",
             Self::TechnicalNeutral2 => "technical-neutral-v2",
+            Self::NaturalV3 => "natural-v3",
         }
     }
 }

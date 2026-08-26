@@ -679,7 +679,11 @@ struct JpegMatchPlan {
 /// `off` keeps only the brightness baseline; `none` drops all matching. Camera
 /// characterization work continues to replace this heuristic (master plan
 /// §14/§33).
-fn jpeg_match_plan_for(value: Option<&str>, dcp_selected: bool) -> JpegMatchPlan {
+fn jpeg_match_plan_for(
+    value: Option<&str>,
+    dcp_selected: bool,
+    natural_default: bool,
+) -> JpegMatchPlan {
     match value.map(str::trim) {
         Some("on") | Some("full") => JpegMatchPlan {
             apply_gain: true,
@@ -741,6 +745,15 @@ fn jpeg_match_plan_for(value: Option<&str>, dcp_selected: bool) -> JpegMatchPlan
             preview_safe: false,
             preview_tone: false,
         },
+        // Natural v3 no-profile default: preview-safe (matrix + bounded
+        // exposure/chroma, no RGB curves) instead of the full curve fit.
+        _ if natural_default => JpegMatchPlan {
+            apply_gain: true,
+            apply_matrix: true,
+            apply_curves: false,
+            preview_safe: true,
+            preview_tone: false,
+        },
         _ => JpegMatchPlan {
             apply_gain: true,
             apply_matrix: true,
@@ -751,9 +764,9 @@ fn jpeg_match_plan_for(value: Option<&str>, dcp_selected: bool) -> JpegMatchPlan
     }
 }
 
-fn jpeg_match_plan(dcp_selected: bool) -> JpegMatchPlan {
+fn jpeg_match_plan(dcp_selected: bool, natural_default: bool) -> JpegMatchPlan {
     let value = std::env::var("IAI_RAW_JPEG_MATCH").ok();
-    jpeg_match_plan_for(value.as_deref(), dcp_selected)
+    jpeg_match_plan_for(value.as_deref(), dcp_selected, natural_default)
 }
 
 /// Build the iAi scene + canvas from a decoded rawloader mosaic. Shared by both
@@ -1053,10 +1066,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     // acutance but band-passes it (stronger on fine texture, faded on strong
     // edges) and tightens the bright cap, so it adds "nét" without edge halos;
     // the default stays byte-identical (full-band, 2.0 cap).
-    let detail = detail_sharpen_params();
-    let cs_gain = detail
-        .map(|d| d.0)
-        .unwrap_or(raw_render_recipe.capture_sharpen_gain);
+    let (cs_gain, cs_cap, cs_edge) = resolve_capture_sharpen(&raw_render_recipe);
     if cs_gain > 1e-4 {
         capture_sharpen(
             &mut out,
@@ -1065,8 +1075,8 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
             cs_gain,
             raw_render_recipe.capture_sharpen_dark_ratio,
             raw_render_recipe.capture_sharpen_floor,
-            detail.map(|d| d.1).unwrap_or(2.0),
-            detail.map(|d| d.2),
+            cs_cap,
+            cs_edge,
         );
     }
 
@@ -1080,10 +1090,10 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     // JPEG), which reads as the image "jumping dark" once the full decode replaces
     // the instant preview. Best-effort: files without a preview are left as-is.
     // Decide the embedded-JPEG match policy first: a profile-backed DCP render
-    // is already colour-accurate, so it defaults to no JPEG fit, while the
-    // decoder-matrix fallback keeps the shipping brightness+colour match. An
-    // explicit IAI_RAW_JPEG_MATCH override still wins.
-    let jpeg_match = jpeg_match_plan(dcp_selected);
+    // is already colour-accurate, so it defaults to no JPEG fit; the no-profile
+    // default is preview-safe under Natural v3 (matrix, no RGB curves) and the
+    // full curve fit under legacy. An explicit IAI_RAW_JPEG_MATCH override wins.
+    let jpeg_match = jpeg_match_plan(dcp_selected, raw_render_recipe.no_profile_preview_safe);
 
     // Always consume any cached preview stats so stale preview data cannot leak
     // into a later decode, but only read/compute them when a mode needs them.
@@ -1997,30 +2007,44 @@ const DETAIL_EDGE_LO: f32 = 0.18;
 const DETAIL_EDGE_HI: f32 = 0.45;
 const DETAIL_EDGE_FLOOR: f32 = 0.35;
 
-/// Resolve the opt-in detail-sharpen preset: `(gain, bright_cap, (edge_lo,
-/// edge_hi, edge_floor))`, or None for the shipping full-band sharpen. Enabled by
-/// a truthy `IAI_RAW_DETAIL`; `IAI_CS_GAIN` still overrides the gain.
-fn detail_sharpen_params() -> Option<(f32, f32, (f32, f32, f32))> {
-    let on = std::env::var("IAI_RAW_DETAIL")
-        .ok()
-        .map(|v| {
-            let v = v.trim();
-            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("off")
-        })
-        .unwrap_or(false);
-    if !on {
+/// Parse `IAI_RAW_DETAIL`: `Some(true)` for a truthy value, `Some(false)` for
+/// `0`/`off`/`false`, `None` when unset (use the recipe default).
+fn detail_override() -> Option<bool> {
+    let value = std::env::var("IAI_RAW_DETAIL").ok()?;
+    let value = value.trim();
+    if value.is_empty() {
         return None;
     }
-    let gain = std::env::var("IAI_CS_GAIN")
-        .ok()
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .filter(|g| g.is_finite() && *g >= 0.0)
-        .unwrap_or(DETAIL_CS_GAIN);
-    Some((
-        gain,
-        DETAIL_CS_BRIGHT_CAP,
-        (DETAIL_EDGE_LO, DETAIL_EDGE_HI, DETAIL_EDGE_FLOOR),
-    ))
+    Some(value != "0" && !value.eq_ignore_ascii_case("off") && !value.eq_ignore_ascii_case("false"))
+}
+
+/// Resolve the capture-sharpen `(gain, bright_cap, edge_atten)` for this decode.
+/// Defaults come from the recipe (Natural v3 = band-passed detail; legacy =
+/// full-band). `IAI_RAW_DETAIL` overrides for A/B — truthy forces the band-pass
+/// detail preset, `0`/`off` forces the legacy full-band sharpen. `IAI_CS_GAIN`
+/// overrides the gain in every case.
+fn resolve_capture_sharpen(recipe: &RawRenderRecipe) -> (f32, f32, Option<(f32, f32, f32)>) {
+    match detail_override() {
+        Some(true) => (
+            env_f32("IAI_CS_GAIN", DETAIL_CS_GAIN),
+            DETAIL_CS_BRIGHT_CAP,
+            Some((DETAIL_EDGE_LO, DETAIL_EDGE_HI, DETAIL_EDGE_FLOOR)),
+        ),
+        Some(false) => (
+            if CAPTURE_SHARPEN {
+                env_f32("IAI_CS_GAIN", CS_GAIN)
+            } else {
+                0.0
+            },
+            2.0,
+            None,
+        ),
+        None => (
+            recipe.capture_sharpen_gain,
+            recipe.capture_sharpen_bright_cap,
+            recipe.capture_sharpen_edge_atten,
+        ),
+    }
 }
 
 /// Separable 5-tap blur over an f32 plane, edge-clamped.
@@ -2944,6 +2968,14 @@ struct RawRenderRecipe {
     capture_sharpen_gain: f32,
     capture_sharpen_dark_ratio: f32,
     capture_sharpen_floor: f32,
+    /// Bright-side factor cap for the capture sharpen (halo backstop).
+    capture_sharpen_bright_cap: f32,
+    /// Band-pass edge window `(lo, hi, floor)` for the capture sharpen, or None
+    /// for the full-band sharpen. See [`capture_sharpen`].
+    capture_sharpen_edge_atten: Option<(f32, f32, f32)>,
+    /// When no camera profile resolves, use the preview-safe embedded-JPEG fit
+    /// (matrix + bounded exposure/chroma, no RGB curves) as the colour default.
+    no_profile_preview_safe: bool,
     chroma_enrich: f32,
     scene_brightness: f32,
     scene_chroma_base: f32,
@@ -2966,6 +2998,9 @@ impl RawRenderRecipe {
             },
             capture_sharpen_dark_ratio: env_f32("IAI_CS_DARK_RATIO", CS_DARK_RATIO),
             capture_sharpen_floor: env_f32("IAI_CS_FLOOR", CS_FLOOR),
+            capture_sharpen_bright_cap: 2.0,
+            capture_sharpen_edge_atten: None,
+            no_profile_preview_safe: false,
             chroma_enrich: env_f32("IAI_SCENE_CHROMA_ENRICH", CHROMA_ENRICH),
             scene_brightness: env_f32("IAI_SCENE_BRIGHTNESS", SCENE_BRIGHTNESS),
             scene_chroma_base: env_f32("IAI_SCENE_CHROMA_BASE", SCENE_CHROMA_BASE),
@@ -2973,6 +3008,26 @@ impl RawRenderRecipe {
             chroma_shadow_low_ev: env_f32("IAI_SCENE_SHADOW_LOW_EV", CHROMA_SHADOW_LOW_EV),
             chroma_shadow_high_ev: env_f32("IAI_SCENE_SHADOW_HIGH_EV", CHROMA_SHADOW_HIGH_EV),
             scene_warm: env_f32("IAI_SCENE_WARM", SCENE_WARM),
+        }
+    }
+
+    /// Shipping default (Q2/Q4): the legacy baked look, plus the band-passed
+    /// capture-sharpen for more fine "nét" without edge halos, plus the
+    /// preview-safe colour fit for RAWs that resolve no camera profile. All
+    /// creative brightness/chroma/warmth constants are inherited from
+    /// `legacy_baked_v1` so only detail and no-profile colour change.
+    fn natural_v3() -> Self {
+        Self {
+            version: RawRenderRecipeVersion::NaturalV3,
+            capture_sharpen_gain: if CAPTURE_SHARPEN {
+                env_f32("IAI_CS_GAIN", DETAIL_CS_GAIN)
+            } else {
+                0.0
+            },
+            capture_sharpen_bright_cap: DETAIL_CS_BRIGHT_CAP,
+            capture_sharpen_edge_atten: Some((DETAIL_EDGE_LO, DETAIL_EDGE_HI, DETAIL_EDGE_FLOOR)),
+            no_profile_preview_safe: true,
+            ..Self::legacy_baked_v1()
         }
     }
 
@@ -2986,6 +3041,9 @@ impl RawRenderRecipe {
             capture_sharpen_gain: 0.0,
             capture_sharpen_dark_ratio: 0.0,
             capture_sharpen_floor: 1.0,
+            capture_sharpen_bright_cap: 2.0,
+            capture_sharpen_edge_atten: None,
+            no_profile_preview_safe: false,
             chroma_enrich: 0.0,
             scene_brightness: 1.0,
             scene_chroma_base: 0.0,
@@ -3005,7 +3063,9 @@ impl RawRenderRecipe {
             Some("technical") | Some("technical-neutral") | Some("v2") => {
                 Self::technical_neutral_v2()
             }
-            _ => Self::legacy_baked_v1(),
+            Some("legacy") | Some("legacy-baked") | Some("v1") => Self::legacy_baked_v1(),
+            // Shipping default: the Natural v3 look (detail + preview-safe colour).
+            _ => Self::natural_v3(),
         }
     }
 }
@@ -3147,7 +3207,7 @@ mod tests {
     #[test]
     fn jpeg_match_plan_splits_matrix_and_curves_without_env_state() {
         assert_eq!(
-            jpeg_match_plan_for(Some("matrix"), false),
+            jpeg_match_plan_for(Some("matrix"), false, false),
             JpegMatchPlan {
                 apply_gain: true,
                 apply_matrix: true,
@@ -3157,7 +3217,7 @@ mod tests {
             }
         );
         assert_eq!(
-            jpeg_match_plan_for(Some("curves"), false),
+            jpeg_match_plan_for(Some("curves"), false, false),
             JpegMatchPlan {
                 apply_gain: true,
                 apply_matrix: false,
@@ -3167,7 +3227,7 @@ mod tests {
             }
         );
         assert_eq!(
-            jpeg_match_plan_for(Some("off"), false),
+            jpeg_match_plan_for(Some("off"), false, false),
             JpegMatchPlan {
                 apply_gain: true,
                 apply_matrix: false,
@@ -3177,7 +3237,7 @@ mod tests {
             }
         );
         assert_eq!(
-            jpeg_match_plan_for(None, true),
+            jpeg_match_plan_for(None, true, false),
             JpegMatchPlan {
                 apply_gain: true,
                 apply_matrix: false,
@@ -3186,8 +3246,9 @@ mod tests {
                 preview_tone: false,
             }
         );
+        // Legacy no-profile default: the full brightness+matrix+curve fit.
         assert_eq!(
-            jpeg_match_plan_for(None, false),
+            jpeg_match_plan_for(None, false, false),
             JpegMatchPlan {
                 apply_gain: true,
                 apply_matrix: true,
@@ -3196,8 +3257,30 @@ mod tests {
                 preview_tone: false,
             }
         );
+        // Natural v3 no-profile default: preview-safe (matrix, no RGB curves).
         assert_eq!(
-            jpeg_match_plan_for(Some("safe"), false),
+            jpeg_match_plan_for(None, false, true),
+            JpegMatchPlan {
+                apply_gain: true,
+                apply_matrix: true,
+                apply_curves: false,
+                preview_safe: true,
+                preview_tone: false,
+            }
+        );
+        // A resolved DCP still wins over the natural default (gain-only).
+        assert_eq!(
+            jpeg_match_plan_for(None, true, true),
+            JpegMatchPlan {
+                apply_gain: true,
+                apply_matrix: false,
+                apply_curves: false,
+                preview_safe: false,
+                preview_tone: false,
+            }
+        );
+        assert_eq!(
+            jpeg_match_plan_for(Some("safe"), false, false),
             JpegMatchPlan {
                 apply_gain: true,
                 apply_matrix: true,
@@ -3209,7 +3292,7 @@ mod tests {
         // safe-tone is preview-safe plus the luminance tone match; matrix stays
         // on and the RGB histogram curves stay off.
         assert_eq!(
-            jpeg_match_plan_for(Some("safe-tone"), false),
+            jpeg_match_plan_for(Some("safe-tone"), false, false),
             JpegMatchPlan {
                 apply_gain: true,
                 apply_matrix: true,
@@ -4311,11 +4394,29 @@ mod tests {
         assert_eq!(shipping.version, RawRenderRecipeVersion::LegacyBaked1);
         assert_eq!(shipping.scene_color_nr, SCENE_COLOR_NR);
         assert_eq!(shipping.capture_sharpen_gain, CS_GAIN);
+        assert_eq!(shipping.capture_sharpen_bright_cap, 2.0);
+        assert_eq!(shipping.capture_sharpen_edge_atten, None);
+        assert!(!shipping.no_profile_preview_safe);
         assert_eq!(shipping.chroma_enrich, CHROMA_ENRICH);
         assert_eq!(shipping.scene_brightness, SCENE_BRIGHTNESS);
         assert_eq!(shipping.scene_chroma_base, SCENE_CHROMA_BASE);
         assert_eq!(shipping.scene_chroma_shadow, SCENE_CHROMA_SHADOW);
         assert_eq!(shipping.scene_warm, SCENE_WARM);
+
+        // Natural v3 is the shipping default: legacy creative constants, plus the
+        // band-pass detail sharpen and the preview-safe no-profile colour default.
+        let natural = RawRenderRecipe::natural_v3();
+        assert_eq!(natural.version, RawRenderRecipeVersion::NaturalV3);
+        assert_eq!(natural.capture_sharpen_gain, DETAIL_CS_GAIN);
+        assert_eq!(natural.capture_sharpen_bright_cap, DETAIL_CS_BRIGHT_CAP);
+        assert_eq!(
+            natural.capture_sharpen_edge_atten,
+            Some((DETAIL_EDGE_LO, DETAIL_EDGE_HI, DETAIL_EDGE_FLOOR))
+        );
+        assert!(natural.no_profile_preview_safe);
+        assert_eq!(natural.chroma_enrich, CHROMA_ENRICH);
+        assert_eq!(natural.scene_brightness, SCENE_BRIGHTNESS);
+        assert_eq!(natural.scene_color_nr, SCENE_COLOR_NR);
 
         let neutral = RawRenderRecipe::technical_neutral_v2();
         assert_eq!(neutral.version, RawRenderRecipeVersion::TechnicalNeutral2);
