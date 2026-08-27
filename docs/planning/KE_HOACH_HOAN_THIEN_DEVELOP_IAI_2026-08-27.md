@@ -11,6 +11,20 @@ Midtones activation cho graph/raster và chống áp Midtones lần hai ở RAW.
 thay đổi Phase 0 hiện đã được stage nhưng **chưa commit** vì phiên Codex bị dừng
 giữa bước commit. Người tiếp quản phải chốt Phase 0 trước khi bắt đầu Phase 1.
 
+## Cập nhật tiến độ — 2026-08-27 (đợt Light/Mixer + rollout)
+
+Đã push toàn bộ lên `origin/feat/vector-core-foundation`.
+
+- **Phase 0 (khóa baseline, engine badge, Midtones): ✅ XONG** — commit `2d515be`, owner GUI-OK.
+- **Phase 1 (harness A/B ART↔iAi): ✅ XONG** — commit `56cdbbb`; owner chấm "iAI đẹp hơn, ART thật hơn" → **quyết giữ look đẹp làm mặc định**. (Chưa mở rộng corpus §6 — không chặn.)
+- **Phase 3 (Light sạch/mượt): ✅ XONG (owner GUI-OK)** — Exposure drag mịn, tone-eq zones khớp reach ART, **Blacks = band scene-linear kiểu ART + fill-light phủ rộng** (`1a0fe0d`, `3e88963`); ease + soft-knee. Công tắc `IAI_BLACK_SPREAD` để tinh chỉnh độ phủ.
+- **Phase 4 (Color Mixer liên tục): ✅ code + parity** — guided control planes (Hue/Sat/Lum), owner GUI-OK "Mixer ổn". Parity GPU↔commit có proxy = ≤2/255.
+- **Phase 8 bước 2 (Develop3 = mặc định): ✅ XONG** — commit `b43e159`. `default_engine_version()`→Develop3; **gỡ 2 cờ opt-in** `IAI_LIGHT_MIXER_V3` + `IAI_LIGHT_SMOOTH` (smooth-Light giờ luôn bật cho Develop3). Tài liệu/project cũ GIỮ engine đã serialize (thiếu field → Scene1) nên mở lại KHÔNG đổi look. 1472 lib test, parity 3/3.
+
+**CÒN LẠI (chưa làm):** Phase 2 (chuẩn hóa/hợp nhất camera profile + DCP hợp lệ để **ship** — đang xài DCP ART cục bộ, cấm ship); Phase 5 (tách Detail 3 tầng + **G6 preview source-scale P0** + output sharpening); Phase 6 (latency/cache 3 tier); Phase 7 (monitor ICC/soft-proof); Phase 8 bước 3–5 (thu bug corpus → đóng băng look → dọn Legacy/Scene1). Blind-review vs ART trên recipe khóa (Phase 1 §gate) chưa chạy đủ.
+
+---
+
 ## 0. Handoff cho Claude
 
 ### 0.1 Trạng thái repository phải giữ nguyên
