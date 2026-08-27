@@ -373,6 +373,9 @@ pub struct DevelopViewModel {
     /// Preview quality state exposed as a small debug/quality badge.
     pub develop_preview_settled: bool,
     pub develop_preview_refining: bool,
+    /// Scene/profile/working/output trace shown in the engine badge tooltip.
+    /// `None` for sessions without a scene source.
+    pub develop_pipeline_diagnostic: Option<String>,
     pub develop_presets: std::sync::Arc<Vec<crate::core::presets::DevelopPreset>>,
     /// Develop local masks: which row is selected, which placement is armed,
     /// and the selected mask's screen-space outline.
@@ -893,6 +896,7 @@ impl Default for UiData {
                 develop_auto_available: false,
                 develop_preview_settled: false,
                 develop_preview_refining: false,
+                develop_pipeline_diagnostic: None,
                 develop_presets: std::sync::Arc::new(Vec::new()),
                 develop_local_selected: None,
                 develop_local_arm: None,

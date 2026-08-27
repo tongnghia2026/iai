@@ -3,6 +3,25 @@ use crate::core::color::{luminance_f32, oklab_hue_deg, rgb_to_hsl};
 use crate::core::tile::{quantize_dither, TileMap};
 
 #[test]
+fn develop3_midtones_only_activates_and_changes_display_fallback() {
+    let settings = DevelopSettings {
+        develop_engine_version: DevelopEngineVersion::Develop3,
+        midtones: 100.0,
+        ..Default::default()
+    };
+    assert!(tone_is_active(&settings));
+    assert!(settings.has_local_tone());
+
+    let source = TileMap::from_rgba(&[118, 118, 118, 255], 1, 1);
+    let output = apply_to_tilemap_direct(&source, &settings, None).flatten();
+    assert!(
+        output[0] > 118 && output[1] > 118 && output[2] > 118,
+        "positive Midtones must lift a middle-grey raster, got {:?}",
+        &output[..4]
+    );
+}
+
+#[test]
 fn develop_16bit_keeps_hdr_and_beats_banding() {
     // A 16-bit ramp through a global Develop edit (exposure + contrast) must
     // stay 16-bit and keep far more than 256 distinct levels — no tone banding.

@@ -1134,6 +1134,11 @@ pub(crate) fn build_tone_lut(settings: &DevelopSettings) -> [f32; 256] {
     let sh = eased_control(settings.shadows);
     let wh = eased_control(settings.whites);
     let bl = eased_control(settings.blacks);
+    let mt = if settings.develop_engine_version == DevelopEngineVersion::Develop3 {
+        eased_control(settings.midtones)
+    } else {
+        0.0
+    };
     let ch = eased_control(settings.curve_highlights);
     let cl = eased_control(settings.curve_lights);
     let cd = eased_control(settings.curve_darks);
@@ -1143,7 +1148,7 @@ pub(crate) fn build_tone_lut(settings: &DevelopSettings) -> [f32; 256] {
     for (i, slot) in lut.iter_mut().enumerate() {
         let p0 = i as f32 / 255.0;
         let p = contrast_curve(p0, contrast * 1.05);
-        let mut l = apply_light_luma(p, hi, sh, wh, bl);
+        let mut l = apply_midtones_luma(apply_light_luma(p, hi, sh, wh, bl), mt);
         l += ch * 0.18 * smootherstep(0.64, 1.0, l);
         l += cl * 0.18 * bell(l, 0.62, 0.34);
         l += cd * 0.16 * darks_mask(l);
@@ -1203,11 +1208,16 @@ fn build_local_tone_lut(settings: &DevelopSettings) -> [f32; 256] {
     let sh = eased_control(settings.shadows);
     let wh = eased_control(settings.whites);
     let bl = eased_control(settings.blacks);
+    let mt = if settings.develop_engine_version == DevelopEngineVersion::Develop3 {
+        eased_control(settings.midtones)
+    } else {
+        0.0
+    };
 
     let mut lut = [0.0f32; 256];
     for (i, slot) in lut.iter_mut().enumerate() {
         let p = contrast_curve(i as f32 / 255.0, contrast * 1.05);
-        *slot = apply_light_luma(p, hi, sh, wh, bl) - p;
+        *slot = apply_midtones_luma(apply_light_luma(p, hi, sh, wh, bl), mt) - p;
     }
     lut
 }
@@ -1220,6 +1230,7 @@ fn has_light(settings: &DevelopSettings) -> bool {
     settings.contrast.abs() > 0.001
         || settings.highlights.abs() > 0.001
         || settings.shadows.abs() > 0.001
+        || settings.midtones.abs() > 0.001
         || settings.whites.abs() > 0.001
         || settings.blacks.abs() > 0.001
 }

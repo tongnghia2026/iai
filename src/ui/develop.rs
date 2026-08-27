@@ -149,6 +149,36 @@ pub(crate) fn develop_panel_contents(
         };
         ui.colored_label(color, text);
     });
+    let engine_color = if settings.develop_engine_version
+        == crate::core::develop::DevelopEngineVersion::Develop3
+    {
+        egui::Color32::from_rgb(104, 190, 132)
+    } else {
+        egui::Color32::from_gray(150)
+    };
+    let source_kind = if data.develop.develop_mode {
+        "RAW"
+    } else {
+        "Raster"
+    };
+    let engine_badge = ui.colored_label(
+        engine_color,
+        egui::RichText::new(format!(
+            "Engine: {} · {source_kind}",
+            settings.develop_engine_version.label()
+        ))
+        .monospace()
+        .size(10.5),
+    );
+    let mut engine_tooltip = format!(
+        "Renderer: {}\nSession: {source_kind}",
+        settings.develop_engine_version.label()
+    );
+    if let Some(diagnostic) = data.develop.develop_pipeline_diagnostic.as_deref() {
+        engine_tooltip.push('\n');
+        engine_tooltip.push_str(diagnostic);
+    }
+    engine_badge.on_hover_text(engine_tooltip);
 
     // ── D4 header: RGB histogram + cursor readout + EXIF + Auto/B&W ─────────
     let header_top = ui.cursor().top();

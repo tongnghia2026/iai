@@ -85,6 +85,25 @@ pub(crate) fn apply_light_luma(
     (l + d).clamp(0.0, 1.0)
 }
 
+/// Display-referred fallback for Develop3's dedicated Midtones control.
+///
+/// RAW scene sessions apply Midtones on the log-EV regional field. Oversized
+/// raster/display sessions cannot use that scene path, so this continuous bell
+/// gives the control a bounded perceptual-luma twin instead of silently treating
+/// a Midtones-only recipe as a no-op. A zero amount is exact identity and older
+/// engines never pass a non-zero amount here.
+pub(crate) fn apply_midtones_luma(luma: f32, midtones: f32) -> f32 {
+    let l = luma.clamp(0.0, 1.0);
+    let amount = tone_response(midtones);
+    let mask = bell(l, 0.46, 0.34);
+    let delta = if amount >= 0.0 {
+        amount * 0.18 * mask * (1.0 - l).powf(0.60)
+    } else {
+        -(-amount) * 0.18 * mask * l.powf(0.60)
+    };
+    (l + delta).clamp(0.0, 1.0)
+}
+
 /// Gentle filmic shoulder above a knee so a pushed exposure compresses into
 /// [0,1] rather than clipping flat. Below the knee it is the identity, and it is
 /// C1-continuous at the knee (slope 1) so there is no visible seam. The

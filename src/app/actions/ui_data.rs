@@ -21,6 +21,60 @@ fn web_ai_label(site: &str) -> &'static str {
     }
 }
 
+fn develop_pipeline_diagnostic(
+    scene: Option<&crate::core::develop_scene::SceneSource>,
+) -> Option<String> {
+    use crate::core::camera_profile::resolver::SelectedProfileProvenance;
+    use crate::core::develop_scene::BaseLook;
+    use crate::core::working_color::OutputColorSpace;
+
+    let scene = scene?;
+    let source = match scene.look {
+        BaseLook::Raw => "RAW scene",
+        BaseLook::Identity => "display-referred raster",
+    };
+    let output = match scene.color_pipeline.output {
+        OutputColorSpace::Srgb => "sRGB",
+        OutputColorSpace::DisplayP3 => "Display P3",
+    };
+    let mut lines = vec![
+        format!("Source: {source}"),
+        format!(
+            "Working/output: {} -> {} (pipeline v{})",
+            scene.color_pipeline.working.name(),
+            output,
+            scene.color_pipeline.algorithm_version
+        ),
+    ];
+
+    if let Some(characterization) = scene.camera_profile.as_ref() {
+        lines.push(format!(
+            "RAW recipe: {} | JPEG match: {:?}",
+            characterization.raw_render_recipe.name(),
+            characterization.jpeg_match
+        ));
+        let selected = match &characterization.resolution.selected {
+            SelectedProfileProvenance::Dcp {
+                tier,
+                profile_name,
+                locator,
+                ..
+            } => format!(
+                "DCP ({tier:?}): {}",
+                profile_name.as_deref().unwrap_or(locator)
+            ),
+            SelectedProfileProvenance::SceneIcc { tier, locator, .. } => {
+                format!("Scene ICC ({tier:?}): {locator}")
+            }
+            SelectedProfileProvenance::DecoderMatrix { backend, reason } => {
+                format!("Decoder matrix ({backend:?}): {reason:?}")
+            }
+        };
+        lines.push(format!("Camera profile: {selected}"));
+    }
+    Some(lines.join("\n"))
+}
+
 fn bilinear_rgba_sample<F>(x: f32, y: f32, mut sample: F) -> [u8; 4]
 where
     F: FnMut(i32, i32) -> [u8; 4],
@@ -1328,6 +1382,12 @@ impl App {
                     .develop_preview
                     .as_ref()
                     .is_some_and(|p| p.processing || p.detail_refine_at.is_some()),
+                develop_pipeline_diagnostic: develop_pipeline_diagnostic(
+                    self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .develop_source
+                        .as_deref(),
+                ),
                 develop_local_selected: self.shell.ui.develop_local_selected,
                 develop_local_arm: self.shell.ui.develop_local_arm.map(|(k, _)| k),
                 develop_local_overlay: self.build_develop_local_overlay(),

@@ -2096,6 +2096,7 @@ pub fn strip_scene_handled(settings: &DevelopSettings) -> DevelopSettings {
         contrast: 0.0,
         highlights: 0.0,
         shadows: 0.0,
+        midtones: 0.0,
         whites: 0.0,
         blacks: 0.0,
         temperature: 0.0,
@@ -3405,6 +3406,25 @@ mod tests {
         assert!(
             at_highlight < 0.03,
             "Midtones leaked {at_highlight} EV into Highlights"
+        );
+    }
+
+    #[test]
+    fn scene_tail_strips_develop3_midtones_after_scene_tone() {
+        use crate::core::develop::DevelopEngineVersion;
+
+        let settings = DevelopSettings {
+            develop_engine_version: DevelopEngineVersion::Develop3,
+            midtones: 80.0,
+            saturation: 20.0,
+            ..Default::default()
+        };
+        let tail = strip_scene_handled(&settings);
+        assert_eq!(tail.midtones, 0.0);
+        assert_eq!(tail.saturation, settings.saturation);
+        assert!(
+            !tail.has_local_tone(),
+            "scene-handled Light controls must not leak into the display tail"
         );
     }
 

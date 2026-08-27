@@ -309,6 +309,7 @@ fn compile_with_scene_color(
             scene,
             settings.highlights.abs() > 0.001
                 || settings.shadows.abs() > 0.001
+                || settings.midtones.abs() > 0.001
                 || settings.whites.abs() > 0.001
                 || settings.blacks.abs() > 0.001,
         ),
@@ -474,6 +475,24 @@ mod tests {
             compile(&a).unwrap().signature,
             compile(&b).unwrap().signature
         );
+    }
+
+    #[test]
+    fn develop3_midtones_only_activates_tone_zones_and_changes_signature() {
+        let mut neutral = DevelopSettings {
+            develop_engine_version: DevelopEngineVersion::Develop3,
+            ..Default::default()
+        };
+        let neutral_graph = compile(&neutral).unwrap();
+        neutral.midtones = 50.0;
+        let graph = compile(&neutral).unwrap();
+        let tone = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::ToneZones)
+            .expect("canonical graph must contain ToneZones");
+        assert!(tone.active, "Midtones-only must activate ToneZones");
+        assert_ne!(graph.signature, neutral_graph.signature);
     }
 
     #[test]

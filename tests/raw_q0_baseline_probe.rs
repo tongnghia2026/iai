@@ -37,6 +37,7 @@ use std::path::PathBuf;
 use iai::core::camera_profile::resolver::SelectedProfileProvenance;
 use iai::core::canvas::Canvas;
 use iai::core::color_reference::{summarize_encoded_rgba16, ImageQualitySummary};
+use iai::core::develop::DevelopSettings;
 use iai::core::develop_scene::render_default_look;
 use iai::formats::png::PngExporter;
 use iai::formats::raw::RawImporter;
@@ -165,6 +166,11 @@ struct FileRecord {
     provenance_kind: &'static str,
     provenance_detail: String,
     jpeg_match: String,
+    raw_recipe: &'static str,
+    develop_engine: &'static str,
+    working_space: String,
+    output_space: String,
+    pipeline_version: u16,
     summary: ImageQualitySummary,
     wb_g_over_r: f32,
     wb_g_over_b: f32,
@@ -250,6 +256,11 @@ fn raw_q0_corpus_baseline() {
             provenance_detail(&characterization.resolution.selected),
         );
         let jpeg_match = format!("{:?}", characterization.jpeg_match);
+        let raw_recipe = characterization.raw_render_recipe.name();
+        let develop_engine = DevelopSettings::default().develop_engine_version.label();
+        let working_space = scene.color_pipeline.working.name().to_string();
+        let output_space = format!("{:?}", scene.color_pipeline.output);
+        let pipeline_version = scene.color_pipeline.algorithm_version;
 
         let px16 = render_default_look(scene);
         let (w, h) = (scene.width, scene.height);
@@ -279,6 +290,11 @@ fn raw_q0_corpus_baseline() {
             provenance_kind: kind,
             provenance_detail: detail,
             jpeg_match,
+            raw_recipe,
+            develop_engine,
+            working_space,
+            output_space,
+            pipeline_version,
             summary,
             wb_g_over_r: if wp[0] > 0.0 { wp[1] / wp[0] } else { 0.0 },
             wb_g_over_b: if wp[2] > 0.0 { wp[1] / wp[2] } else { 0.0 },
@@ -355,18 +371,23 @@ fn raw_q0_corpus_baseline() {
 
     // ── Machine-readable artifacts ────────────────────────────────────────────
     let mut csv = String::from(
-        "file,ext,camera,megapixels,provenance,jpeg_match,mean_oklab_L,mean_oklab_C,shadow_chroma,midtone_chroma,highlight_chroma,clip_fraction,acutance,wb_g_over_r,wb_g_over_b\n",
+        "file,ext,camera,megapixels,provenance,jpeg_match,raw_recipe,develop_engine,working_space,output_space,pipeline_version,mean_oklab_L,mean_oklab_C,shadow_chroma,midtone_chroma,highlight_chroma,clip_fraction,acutance,wb_g_over_r,wb_g_over_b\n",
     );
     for r in &records {
         writeln!(
             csv,
-            "{},{},{},{:.2},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.4},{:.4}",
+            "{},{},{},{:.2},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.6},{:.4},{:.4}",
             r.name.replace(',', ";"),
             r.ext,
             r.camera.replace(',', ";"),
             r.megapixels,
             r.provenance_kind,
             r.jpeg_match,
+            r.raw_recipe,
+            r.develop_engine,
+            r.working_space,
+            r.output_space,
+            r.pipeline_version,
             r.summary.mean_oklab_lightness,
             r.summary.mean_oklab_chroma,
             r.summary.shadow_chroma,
@@ -399,6 +420,11 @@ fn raw_q0_corpus_baseline() {
             "provenance": r.provenance_kind,
             "provenance_detail": r.provenance_detail,
             "jpeg_match": r.jpeg_match,
+            "raw_recipe": r.raw_recipe,
+            "develop_engine": r.develop_engine,
+            "working_space": r.working_space,
+            "output_space": r.output_space,
+            "pipeline_version": r.pipeline_version,
             "mean_oklab_lightness": r.summary.mean_oklab_lightness,
             "mean_oklab_chroma": r.summary.mean_oklab_chroma,
             "shadow_chroma": r.summary.shadow_chroma,

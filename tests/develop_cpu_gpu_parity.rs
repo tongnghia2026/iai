@@ -168,6 +168,7 @@ fn headless_gpu_preview_matches_committed_scene() {
     // Hue/Saturation/Luminance controls instead of reclassifying each pixel.
     let mut v3 = settings;
     v3.develop_engine_version = DevelopEngineVersion::Develop3;
+    v3.midtones = 35.0;
     let committed_v3 = apply_scene_to_tilemap(&scene, &v3, None).flatten();
     let tone = iai::core::develop_scene::build_scene_tone_for_scene(&v3, &scene);
     let (base, pw, ph) =

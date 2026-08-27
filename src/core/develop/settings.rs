@@ -20,6 +20,19 @@ pub enum DevelopEngineVersion {
     Develop3,
 }
 
+impl DevelopEngineVersion {
+    /// Stable, user-facing renderer name used by diagnostics and the Develop UI.
+    /// Keep this independent of `Debug`, whose spelling is not a UI contract.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Legacy1 => "Legacy1",
+            Self::Scene1 => "Scene1",
+            Self::Develop2 => "Develop2",
+            Self::Develop3 => "Develop3",
+        }
+    }
+}
+
 fn default_engine_version() -> DevelopEngineVersion {
     match std::env::var("IAI_LIGHT_MIXER_V3") {
         Ok(v) if matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES") => {
@@ -68,6 +81,14 @@ mod tone_v2_settings_tests {
             DevelopSettings::default().develop_engine_version,
             DevelopEngineVersion::Develop2
         );
+    }
+
+    #[test]
+    fn engine_labels_are_stable_and_unambiguous() {
+        assert_eq!(DevelopEngineVersion::Legacy1.label(), "Legacy1");
+        assert_eq!(DevelopEngineVersion::Scene1.label(), "Scene1");
+        assert_eq!(DevelopEngineVersion::Develop2.label(), "Develop2");
+        assert_eq!(DevelopEngineVersion::Develop3.label(), "Develop3");
     }
 }
 
@@ -610,7 +631,7 @@ impl DevelopSettings {
             && (self.temperature != other.temperature || self.tint != other.tint)
     }
 
-    /// True when Highlights/Shadows or Whites/Blacks are engaged. These get
+    /// True when any local Light zone is engaged. These get
     /// edge-aware local adaptation (region-based, detail-preserving); the GPU
     /// preview samples a regional base-luma proxy to reproduce it.
     pub fn has_local_tone(&self) -> bool {
