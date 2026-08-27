@@ -843,10 +843,30 @@ pub(crate) fn light_slider_ease(unit: f32, smooth: bool) -> f32 {
     unit.signum() * unit.abs().powf(LIGHT_SLIDER_EASE_POWER)
 }
 
+/// Gaussian band width (variance denominator) for the ART Blacks response.
+/// ART uses `4.0` (σ≈√2), which grips only the deepest tones. iAI widens it so
+/// the lift fades smoothly *up* into the shadows and lays a thin, even fill over
+/// the whole image — the "fill light" quality of ART/Lightroom Blacks the owner
+/// asked for — while the response stays monotonic (deepest tones lifted most).
+/// Read once; override for GUI A/B with `IAI_BLACK_SPREAD` (clamped to [4, 20],
+/// where 4 = ART-faithful narrow, higher = wider whole-image spread).
+fn art_black_spread_denom() -> f32 {
+    static DENOM: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *DENOM.get_or_init(|| {
+        std::env::var("IAI_BLACK_SPREAD")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .map(|v| v.clamp(4.0, 20.0))
+            .unwrap_or(8.0)
+    })
+}
+
 /// Relative gain of ART's Blacks band, returned as an EV offset. ART's positive
 /// endpoint is +3 EV and its negative endpoint is -2 EV; iAI's ±200 range maps
 /// to those ±100 endpoints. Dividing by the all-neutral response makes slider
-/// zero exactly identity while preserving ART's band weighting.
+/// zero exactly identity while preserving ART's band weighting. The band width
+/// is widened (see [`art_black_spread_denom`]) so Blacks reads as a broad, even
+/// fill light rather than a deep-only grip.
 #[inline]
 fn art_blacks_offset_ev(unit: f32, absolute_e: f32) -> f32 {
     if unit.abs() <= 1e-7 {
@@ -855,11 +875,12 @@ fn art_blacks_offset_ev(unit: f32, absolute_e: f32) -> f32 {
     let luma_e = absolute_e.clamp(-14.0, 4.0);
     let endpoint_ev = if unit < 0.0 { 2.0 } else { 3.0 };
     let black_gain = (unit * endpoint_ev).exp2();
+    let denom = art_black_spread_denom();
     let mut black_weight = 0.0;
     let mut total_weight = 0.0;
     for (index, center) in ART_TONE_EQ_CENTERS.iter().enumerate() {
         let d = luma_e - center;
-        let weight = (-d * d / 4.0).exp();
+        let weight = (-d * d / denom).exp();
         total_weight += weight;
         if index < ART_BLACK_BAND_COUNT {
             black_weight += weight;
@@ -3554,11 +3575,34 @@ mod tests {
         }
 
         // ART endpoints: positive Blacks approaches +3 EV (8×) in the deepest
-        // owned bands; negative Blacks approaches -2 EV (1/4×).
+        // owned bands; negative Blacks approaches -2 EV (1/4×). The widened band
+        // (art_black_spread_denom) leaks a little of the neutral bands into the
+        // deepest tone, so the endpoints sit just inside 8× / 0.25×.
         let deep_positive_gain = art_blacks_offset_ev(1.0, -12.0).exp2();
         let deep_negative_gain = art_blacks_offset_ev(-1.0, -12.0).exp2();
-        assert!((deep_positive_gain - 8.0).abs() < 0.02);
-        assert!((deep_negative_gain - 0.25).abs() < 0.002);
+        assert!((deep_positive_gain - 8.0).abs() < 0.06);
+        assert!((deep_negative_gain - 0.25).abs() < 0.01);
+
+        // The widened band gives Blacks a broad, monotonic fill: a shadow (scene
+        // -4 EV) now takes a clearly visible lift and even the midtone (~mid grey,
+        // -2.44 EV) gets a thin whole-image touch — the "fill light" the owner
+        // wanted — yet always far less than the deep blacks (monotonic).
+        let g = |e: f32| art_blacks_offset_ev(1.0, e).exp2();
+        assert!(
+            g(-4.0) > 1.1,
+            "a shadow must take a visible fill: {}",
+            g(-4.0)
+        );
+        let mid_e = SCENE_MID_GRAY.log2();
+        assert!(
+            g(mid_e) > 1.005,
+            "midtone must get a thin touch: {}",
+            g(mid_e)
+        );
+        assert!(
+            g(mid_e) < g(-4.0) && g(-4.0) < g(-8.0),
+            "fill must stay monotonic"
+        );
 
         // A near-zero pixel changes very little in absolute terms even though
         // the gain is large; successively brighter black values receive more
