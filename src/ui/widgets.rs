@@ -57,6 +57,78 @@ pub(crate) fn sample_gradient(colors: &[Color32], t: f32) -> Color32 {
 const LABEL_W: f32 = 84.0;
 const VALUE_W: f32 = 42.0;
 
+/// Track-position easing exponent for the Exposure slider. `> 1` expands the
+/// near-neutral part of the track so small drags there change exposure gently
+/// (an ART/PTS-like light touch), while the track ends still reach the full
+/// range. Interaction is unchanged (thumb follows the cursor); only the
+/// position↔value arithmetic is eased. `1.0` everywhere else (linear).
+pub(crate) const EXPOSURE_POS_POWER: f32 = 2.0;
+
+/// Map a normalized track position `t` (0..1) to a slider value, optionally with
+/// a symmetric centre-fine ease (`power > 1`). Exact linear map when `power == 1`.
+fn pos_to_value(t: f32, min: f32, max: f32, power: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if (power - 1.0).abs() < 1e-6 {
+        return min + (max - min) * t;
+    }
+    let mid = (min + max) * 0.5;
+    let half = (max - min) * 0.5;
+    let c = 2.0 * t - 1.0;
+    mid + c.signum() * c.abs().powf(power) * half
+}
+
+/// Inverse of [`pos_to_value`]: slider value → normalized track position, so the
+/// thumb sits under the cursor and typed values land at the right spot.
+fn value_to_pos(value: f32, min: f32, max: f32, power: f32) -> f32 {
+    if (power - 1.0).abs() < 1e-6 {
+        return ((value - min) / (max - min)).clamp(0.0, 1.0);
+    }
+    let mid = (min + max) * 0.5;
+    let half = (max - min) * 0.5;
+    let e = ((value - mid) / half).clamp(-1.0, 1.0);
+    let c = e.signum() * e.abs().powf(1.0 / power);
+    ((c + 1.0) * 0.5).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod slider_ease_tests {
+    use super::{pos_to_value, value_to_pos, EXPOSURE_POS_POWER};
+
+    #[test]
+    fn pos_value_roundtrip_and_anchors() {
+        let (min, max, p) = (-50.0f32, 50.0f32, EXPOSURE_POS_POWER);
+        // Anchors: both ends and the centre map exactly, either power.
+        for power in [1.0, p] {
+            assert!((pos_to_value(0.0, min, max, power) - min).abs() < 1e-4);
+            assert!((pos_to_value(1.0, min, max, power) - max).abs() < 1e-4);
+            assert!((pos_to_value(0.5, min, max, power) - 0.0).abs() < 1e-4);
+        }
+        // Round-trip position → value → position is stable.
+        for i in 0..=20 {
+            let t = i as f32 / 20.0;
+            let v = pos_to_value(t, min, max, p);
+            let back = value_to_pos(v, min, max, p);
+            assert!((back - t).abs() < 1e-3, "roundtrip {t} -> {v} -> {back}");
+        }
+    }
+
+    #[test]
+    fn centre_fine_ease_is_gentler_near_neutral() {
+        let (min, max, p) = (-50.0f32, 50.0f32, EXPOSURE_POS_POWER);
+        // Just off centre, the eased value is smaller in magnitude than linear:
+        // more track is devoted to small exposures → finer control there.
+        let t = 0.62;
+        assert!(pos_to_value(t, min, max, p).abs() < pos_to_value(t, min, max, 1.0).abs());
+        // Monotonic across the track.
+        let mut prev = f32::NEG_INFINITY;
+        for i in 0..=40 {
+            let v = pos_to_value(i as f32 / 40.0, min, max, p);
+            assert!(v >= prev - 1e-4, "must stay monotonic");
+            prev = v;
+        }
+    }
+}
+
 /// Camera-Raw-style slider returning the track `Response` (so callers can debounce
 /// on `drag_stopped()` like the filter dialogs). `label` (fixed-width) · gradient
 /// track that FILLS the remaining row width · triangle thumb · numeric value. The
@@ -89,7 +161,14 @@ pub fn dev_slider_resp(
                     changed = true;
                 }
             }
-            paint_gradient_slider(ui, rect, *value, min, max, colors);
+            paint_gradient_slider(
+                ui,
+                rect,
+                value_to_pos(*value, min, max, 1.0),
+                min,
+                max,
+                colors,
+            );
             // Small ranges (e.g. a 0..5 filter amount) need a decimal; wide ranges
             // (−100..100, 0..255) read better as integers.
             let text = if (max - min) <= 12.0 {
@@ -129,8 +208,9 @@ pub fn dev_slider_colored_stacked(
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     colors: &[Color32],
+    pos_power: f32,
 ) -> bool {
-    dev_slider_stacked_resp(ui, label, value, range, colors).changed()
+    dev_slider_stacked_resp(ui, label, value, range, colors, pos_power).changed()
 }
 
 pub fn dev_slider_stacked_resp(
@@ -139,6 +219,8 @@ pub fn dev_slider_stacked_resp(
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     colors: &[Color32],
+    // Track-position ease exponent (1.0 = linear; > 1 = centre-fine).
+    pos_power: f32,
 ) -> egui::Response {
     let min = *range.start();
     let max = *range.end();
@@ -190,7 +272,7 @@ pub fn dev_slider_stacked_resp(
         } else if !pressed_in_value_box {
             if let Some(pos) = response.interact_pointer_pos() {
                 let t = ((pos.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
-                let new_value = min + (max - min) * t;
+                let new_value = pos_to_value(t, min, max, pos_power);
                 if (*value - new_value).abs() > f32::EPSILON {
                     *value = new_value;
                     response.mark_changed();
@@ -199,7 +281,14 @@ pub fn dev_slider_stacked_resp(
         }
     }
 
-    paint_gradient_slider(ui, track_rect, *value, min, max, colors);
+    paint_gradient_slider(
+        ui,
+        track_rect,
+        value_to_pos(*value, min, max, pos_power),
+        min,
+        max,
+        colors,
+    );
     let font = egui::FontId::proportional(12.5);
     let color = ui.visuals().text_color();
     ui.painter().text(
@@ -278,7 +367,7 @@ fn neutral_track(ui: &egui::Ui) -> [Color32; 3] {
 fn paint_gradient_slider(
     ui: &egui::Ui,
     rect: egui::Rect,
-    value: f32,
+    thumb_t: f32,
     min: f32,
     max: f32,
     colors: &[Color32],
@@ -308,8 +397,7 @@ fn paint_gradient_slider(
             egui::Stroke::new(1.0_f32, ui.visuals().weak_text_color()),
         );
     }
-    let t = ((value - min) / (max - min)).clamp(0.0, 1.0);
-    let x = egui::lerp(track.left()..=track.right(), t);
+    let x = egui::lerp(track.left()..=track.right(), thumb_t.clamp(0.0, 1.0));
     let thumb = [
         egui::pos2(x, rect.top() + 1.0),
         egui::pos2(x - 7.0, rect.top() + 12.0),

@@ -212,9 +212,10 @@ const TONE_EQ_CLAMP_EV: f32 = 4.0;
 const SCENE_TONE_GUIDED_EPS: f32 = 0.25;
 
 /// Exponent of the opt-in Light slider ease (`> 1` → gentler near neutral, full
-/// strength only at the ends). A first clean-room taste value tuned by GUI A/B,
-/// not derived from ART. See [`light_slider_ease`].
-const LIGHT_SLIDER_EASE_POWER: f32 = 1.5;
+/// strength only at the ends). A clean-room taste value tuned by GUI A/B, not
+/// derived from ART. `1.25`: keeps the gentle near-neutral onset the owner liked
+/// while restoring most of the mid-travel strength (`1.5` felt too weak).
+const LIGHT_SLIDER_EASE_POWER: f32 = 1.25;
 
 // ── f16 (IEEE 754 half) helpers — no external dependency ────────────────────
 

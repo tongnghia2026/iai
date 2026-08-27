@@ -333,11 +333,12 @@ pub(crate) fn develop_panel_contents(
                                 .changed();
                         });
                 });
-                changed |= slider_row(
+                changed |= slider_row_fine(
                     ui,
                     "Exposure",
                     &mut settings.exposure,
                     -EXPOSURE_LIMIT..=EXPOSURE_LIMIT,
+                    crate::ui::widgets::EXPOSURE_POS_POWER,
                 );
                 changed |= slider_row(
                     ui,
@@ -1046,7 +1047,20 @@ fn slider_row(
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
 ) -> bool {
-    gradient_slider_row(ui, label, value, range, &tone_gradient(label))
+    gradient_slider_row(ui, label, value, range, &tone_gradient(label), 1.0)
+}
+
+/// Like [`slider_row`] but with a centre-fine track ease (`pos_power > 1`), so
+/// small drags near neutral are gentle. Used by Exposure, whose wide ±5 EV range
+/// otherwise makes the narrow panel track jump brightness too fast.
+fn slider_row_fine(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    pos_power: f32,
+) -> bool {
+    gradient_slider_row(ui, label, value, range, &tone_gradient(label), pos_power)
 }
 
 fn grade_row(ui: &mut egui::Ui, label: &str, hue: &mut f32, strength: &mut f32) -> bool {
@@ -1233,6 +1247,7 @@ fn mixer_slider_row(
         value,
         -CONTROL_LIMIT..=CONTROL_LIMIT,
         &mixer_gradient(color, kind),
+        1.0,
     )
 }
 
@@ -1259,8 +1274,9 @@ fn gradient_slider_row(
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     colors: &[egui::Color32],
+    pos_power: f32,
 ) -> bool {
-    crate::ui::widgets::dev_slider_colored_stacked(ui, label, value, range, colors)
+    crate::ui::widgets::dev_slider_colored_stacked(ui, label, value, range, colors, pos_power)
 }
 
 /// Interactive point-curve editor: Luma/R/G/B channel tabs over a plot with
