@@ -871,13 +871,18 @@ fn art_blacks_offset_ev(unit: f32, absolute_e: f32) -> f32 {
     gain.max(1e-12).log2()
 }
 
-/// iAI's base sigmoid is steeper in the deepest display tones than ART's host
-/// pipeline. Fade the otherwise-identical ART gain only at the actual pixel's
-/// display-linear black point; upper blacks receive the unmodified formula.
+/// Fade factor in [0,1] for the ART Blacks gain at a display-linear luma EV.
+/// iAI's base sigmoid is steeper than ART's host pipeline in the deepest display
+/// tones, so the ART gain is rolled off below the black point. This is baked
+/// straight into the `art_black` LUT and evaluated on the *regional* (guided)
+/// exposure only — never the individual pixel — so within one lighting region
+/// every pixel shares a single multiplier and its own texture rides on top,
+/// exactly the tone-equalizer trick. No per-pixel gate means no blotch and no
+/// hard transition (the earlier own-luma guard caused both); CPU and GPU read
+/// the same baked LUT, so preview and commit stay in parity.
 #[inline]
-fn art_black_point_guard(display_linear_luma: f32) -> f32 {
-    let e = display_linear_luma.max(SCENE_EV_MIN.exp2()).log2();
-    smootherstep(ART_BLACK_GUARD_LOW_EV, ART_BLACK_GUARD_HIGH_EV, e)
+fn art_black_point_guard_ev(display_e: f32) -> f32 {
+    smootherstep(ART_BLACK_GUARD_LOW_EV, ART_BLACK_GUARD_HIGH_EV, display_e)
 }
 
 /// Signed tone-equalizer offset (EV) for a regional exposure `e` (EV, absolute)
@@ -1211,7 +1216,9 @@ fn build_scene_tone_impl(
         let last = (art_black.len() - 1) as f32;
         for (i, slot) in art_black.iter_mut().enumerate() {
             let display_e = SCENE_EV_MIN + (SCENE_EV_MAX - SCENE_EV_MIN) * i as f32 / last;
-            *slot = art_blacks_offset_ev(unit, display_e);
+            // Bake the black-point guard into the LUT so the applied gain is a
+            // pure function of the regional exposure (one multiplier per region).
+            *slot = art_blacks_offset_ev(unit, display_e) * art_black_point_guard_ev(display_e);
         }
     }
     SceneToneData {
@@ -1557,11 +1564,13 @@ impl SceneToneData {
             pc
         };
         if self.art_black_active {
+            // ART-style Blacks: one multiplier per lighting region, taken from
+            // the guided regional exposure alone (the black-point guard is baked
+            // into the LUT). Every pixel in a region shares this gain and its own
+            // texture rides on top — no per-pixel gate, so no blotch/hard edge.
             let e = sampled_region_e.unwrap_or_else(|| self.own_e(v));
             let mapped_region = self.tone_map(e.exp2()).max(SCENE_EV_MIN.exp2());
-            let own_luma = working_luma(self.working_space, out).max(0.0);
-            let guard = art_black_point_guard(own_luma);
-            let gain = (self.art_black_at(mapped_region.log2()) * guard).exp2();
+            let gain = self.art_black_at(mapped_region.log2()).exp2();
             out = [out[0] * gain, out[1] * gain, out[2] * gain];
         }
         let out = self.apply_scene_contrast(out);
@@ -3591,8 +3600,19 @@ mod tests {
         let deep_negative_gain = art_blacks_offset_ev(-1.0, -12.0).exp2();
         assert!((deep_positive_gain - 8.0).abs() < 0.02);
         assert!((deep_negative_gain - 0.25).abs() < 0.002);
-        assert_eq!(art_black_point_guard(ART_BLACK_GUARD_LOW_EV.exp2()), 0.0);
-        assert_eq!(art_black_point_guard(ART_BLACK_GUARD_HIGH_EV.exp2()), 1.0);
+        // The black-point guard is a function of the *regional* display-luma EV
+        // only (no per-pixel gate) and is baked straight into the ART LUT, so one
+        // lighting region shares a single multiplier. Below the black point the
+        // gain fades to zero; above it the raw band response is unmodified.
+        assert_eq!(art_black_point_guard_ev(ART_BLACK_GUARD_LOW_EV), 0.0);
+        assert_eq!(art_black_point_guard_ev(ART_BLACK_GUARD_HIGH_EV), 1.0);
+        let baked = |e: f32| art_blacks_offset_ev(1.0, e) * art_black_point_guard_ev(e);
+        assert_eq!(baked(ART_BLACK_GUARD_LOW_EV - 1.0), 0.0);
+        let above_black_point = ART_BLACK_GUARD_HIGH_EV + 1.0;
+        assert_eq!(
+            baked(above_black_point),
+            art_blacks_offset_ev(1.0, above_black_point)
+        );
 
         // A near-zero pixel changes very little in absolute terms even though
         // the gain is large; successively brighter black values receive more
@@ -4254,7 +4274,6 @@ mod tests {
             "6.1035156e-5",
             "dev_effects[10]",
             "dev_rgb_curve[2465u + i0]",
-            "dev_smootherstep(-8.6, -7.6, own_e)",
             "dev_effects[16]",
             "dev_effects[25]",
             "dev_smootherstep(0.5, 1.0, mapped_n)",

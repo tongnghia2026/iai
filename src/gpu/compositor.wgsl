@@ -1220,10 +1220,11 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
         );
     }
     if (dev_effects[10] > 0.5 && u.adj_p[1].x > 0.5) {
+        // ART-style Blacks: one multiplier per lighting region from the guided
+        // regional exposure. The black-point guard is baked into the LUT, so
+        // there is no per-pixel gate. CPU twin: SceneToneData::scene_to_working.
         let mapped_region = max(dev_scene_lut(exp2(region_e)), 6.1035156e-5);
-        let own_e = log2(max(dev_working_luma(outc), 6.1035156e-5));
-        let guard = dev_smootherstep(-8.6, -7.6, own_e);
-        outc = outc * exp2(dev_art_black_at(log2(mapped_region)) * guard);
+        outc = outc * exp2(dev_art_black_at(log2(mapped_region)));
     }
     // Contrast is independent of the sigmoid shoulder: a two-sided power
     // curve fixed at black, 18.45% grey and white. CPU twin: apply_scene_contrast.
