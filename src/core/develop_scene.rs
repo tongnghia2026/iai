@@ -205,6 +205,19 @@ const TONE_EQ_V3_BLACKS: (f32, f32, f32) = (-4.7, 0.9, 2.4);
 const TONE_EQ_V3_MIDTONES: (f32, f32, f32) = (0.0, 0.95, 1.0);
 const TONE_EQ_V3_HIGHLIGHTS: (f32, f32, f32) = (2.7, 1.0, 1.8);
 const TONE_EQ_V3_WHITES: (f32, f32, f32) = (4.7, 0.85, 1.4);
+// Smooth-mode zones (opt-in `IAI_LIGHT_SMOOTH`, Develop3), retuned so each
+// slider's tonal *reach* tracks ART's, measured black-box on the corpus
+// (`tests/art_tone_eq_probe.rs`; owner: "learn from ART"). The shipped V3 zones
+// above sit at the extremes (whites +4.7 EV, blacks −4.7 EV) where real photos
+// have almost no pixels — so Whites felt inert, Highlights did all the bright
+// work ("too wide"), and Blacks/Shadows gripped too little. These pull the
+// centres inward and widen them so each control spans a broad, useful band. No
+// ART code/constant is used — only its observed input→output reach.
+const TONE_EQ_V3S_BLACKS: (f32, f32, f32) = (-4.0, 1.0, 2.4);
+const TONE_EQ_V3S_SHADOWS: (f32, f32, f32) = (-2.7, 1.5, 1.4);
+const TONE_EQ_V3S_MIDTONES: (f32, f32, f32) = (-0.4, 1.3, 1.0);
+const TONE_EQ_V3S_HIGHLIGHTS: (f32, f32, f32) = (1.2, 1.4, 1.8);
+const TONE_EQ_V3S_WHITES: (f32, f32, f32) = (1.9, 1.3, 1.4);
 const TONE_EQ_CLAMP_EV: f32 = 4.0;
 /// Guided-filter regularisation for the regional-E plane, in EV² (variance).
 /// Windows varying less than ~0.5 EV read as one lighting region and smooth
@@ -830,10 +843,10 @@ pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
 }
 
 /// As [`tone_eq_offset_ev`], with the opt-in smoother response. When `smooth`,
-/// each slider is eased for finer near-neutral control (see [`light_slider_ease`])
-/// and the combined offset saturates through a `tanh` soft-knee instead of a hard
-/// clamp, so strong or stacked pushes roll off gradually rather than hitting a
-/// wall. Both changes are shape-only: zone centres/widths/gains are untouched.
+/// each slider is eased for finer near-neutral control (see [`light_slider_ease`]),
+/// the combined offset saturates through a soft-knee instead of a hard clamp, and
+/// Develop3 uses the ART-matched zone layout (`TONE_EQ_V3S_*`) so each control's
+/// tonal reach spans a broad, useful band. Disabled: shipped zones, hard clamp.
 pub(crate) fn tone_eq_offset_ev_opts(settings: &DevelopSettings, e: f32, smooth: bool) -> f32 {
     let er = e - SCENE_MID_GRAY.log2();
     let g = |zone: (f32, f32, f32), u: f32| -> f32 {
@@ -851,25 +864,31 @@ pub(crate) fn tone_eq_offset_ev_opts(settings: &DevelopSettings, e: f32, smooth:
     let black_u = ease(settings.blacks);
     let v3 =
         settings.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3;
-    let shadows_zone = if v3 {
-        TONE_EQ_V3_SHADOWS
+    // (shadows, blacks, midtones, highlights, whites)
+    let (shadows_zone, blacks_zone, midtones_zone, highlights_zone, whites_zone) = if v3 && smooth {
+        (
+            TONE_EQ_V3S_SHADOWS,
+            TONE_EQ_V3S_BLACKS,
+            TONE_EQ_V3S_MIDTONES,
+            TONE_EQ_V3S_HIGHLIGHTS,
+            TONE_EQ_V3S_WHITES,
+        )
+    } else if v3 {
+        (
+            TONE_EQ_V3_SHADOWS,
+            TONE_EQ_V3_BLACKS,
+            TONE_EQ_V3_MIDTONES,
+            TONE_EQ_V3_HIGHLIGHTS,
+            TONE_EQ_V3_WHITES,
+        )
     } else {
-        TONE_EQ_SHADOWS
-    };
-    let blacks_zone = if v3 {
-        TONE_EQ_V3_BLACKS
-    } else {
-        TONE_EQ_BLACKS
-    };
-    let highlights_zone = if v3 {
-        TONE_EQ_V3_HIGHLIGHTS
-    } else {
-        TONE_EQ_HIGHLIGHTS
-    };
-    let whites_zone = if v3 {
-        TONE_EQ_V3_WHITES
-    } else {
-        TONE_EQ_WHITES
+        (
+            TONE_EQ_SHADOWS,
+            TONE_EQ_BLACKS,
+            TONE_EQ_V3_MIDTONES, // unused when !v3 (midtones term gated below)
+            TONE_EQ_HIGHLIGHTS,
+            TONE_EQ_WHITES,
+        )
     };
     let off = g(
         shadows_zone,
@@ -883,7 +902,7 @@ pub(crate) fn tone_eq_offset_ev_opts(settings: &DevelopSettings, e: f32, smooth:
         blacks_zone,
         black_u * if black_u > 0.0 { noise_confidence } else { 1.0 },
     ) + if v3 {
-        g(TONE_EQ_V3_MIDTONES, ease(settings.midtones))
+        g(midtones_zone, ease(settings.midtones))
     } else {
         0.0
     } + g(highlights_zone, ease(settings.highlights))
@@ -3426,32 +3445,33 @@ mod tests {
                 tone_eq_offset_ev(&s, e)
             );
         }
-        // A partial (half-travel) push is gentler with smoothing on, but keeps
-        // sign and stays non-zero — finer control, not an inert slider.
-        let half = DevelopSettings {
-            develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop3,
-            shadows: 100.0,
-            ..settings()
+        // Peak (over EV) of a single Shadows push under smoothing — zone-agnostic,
+        // so it holds regardless of the retuned smooth-zone centre/width.
+        let peak_smooth = |shadows: f32| -> f32 {
+            let s = DevelopSettings {
+                develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop3,
+                shadows,
+                ..settings()
+            };
+            (-80..=40)
+                .map(|k| tone_eq_offset_ev_opts(&s, mid + k as f32 * 0.1, true).abs())
+                .fold(0.0f32, f32::max)
         };
-        let e = mid - 2.8; // Shadows V3 zone centre.
-        let legacy = tone_eq_offset_ev_opts(&half, e, false);
-        let smooth = tone_eq_offset_ev_opts(&half, e, true);
-        assert!(legacy > 0.0 && smooth > 0.0);
+        let half = peak_smooth(100.0);
+        let full = peak_smooth(200.0);
+        // Finer control: a half-travel push gives LESS than half a full push's
+        // effect (the ease), yet is clearly non-zero (not an inert slider).
+        assert!(half > 0.0 && full > 0.0);
         assert!(
-            smooth < legacy,
-            "eased half-push must be gentler: {smooth} < {legacy}"
+            half < 0.5 * full,
+            "eased half-push must be gentler than half of full: {half} < {}",
+            0.5 * full
         );
-        // A full-travel single push keeps its peak (ease is identity at ±1).
-        let full = DevelopSettings {
-            develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop3,
-            shadows: 200.0,
-            ..settings()
-        };
+        // A single full push's peak is below the 2 EV soft-knee, so the soft-knee
+        // leaves it unattenuated (Shadows gain is 1.4 EV).
         assert!(
-            (tone_eq_offset_ev_opts(&full, e, true) - tone_eq_offset_ev_opts(&full, e, false))
-                .abs()
-                < 1e-4,
-            "full single push must keep its peak under the soft-knee"
+            (full - 1.4).abs() < 0.05,
+            "full single Shadows peak should sit at its ~1.4 EV gain, got {full}"
         );
     }
 
