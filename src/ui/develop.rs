@@ -327,6 +327,16 @@ pub(crate) fn develop_panel_contents(
                     &mut settings.shadows,
                     -CONTROL_LIMIT..=CONTROL_LIMIT,
                 );
+                if settings.develop_engine_version
+                    == crate::core::develop::DevelopEngineVersion::Develop3
+                {
+                    changed |= slider_row(
+                        ui,
+                        "Midtones",
+                        &mut settings.midtones,
+                        -CONTROL_LIMIT..=CONTROL_LIMIT,
+                    );
+                }
                 changed |= slider_row(
                     ui,
                     "Whites",
@@ -1443,7 +1453,9 @@ fn tone_gradient(label: &str) -> Vec<egui::Color32> {
     let light = egui::Color32::from_rgb(235, 235, 235);
     match label {
         "Exposure" | "Highlights" | "Whites" => vec![black, mid, light],
-        "Shadows" | "Blacks" | "Darks" => vec![egui::Color32::BLACK, mid, light],
+        "Shadows" | "Blacks" | "Darks" | "Midtones" => {
+            vec![egui::Color32::BLACK, mid, light]
+        }
         "Contrast" | "Definition" | "Defog" => vec![
             egui::Color32::from_rgb(82, 82, 82),
             egui::Color32::from_rgb(154, 154, 154),

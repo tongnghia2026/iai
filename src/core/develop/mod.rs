@@ -35,7 +35,7 @@ pub use self::mixer::{mixer_mask_preview, mixer_target_from_srgb, MixerTarget};
 pub use self::settings::{
     ColorMixerAlgorithm, DevelopEngineVersion, DevelopSettings, PointCurveMode, ToneMapMode,
 };
-pub use self::spatial::{apply_color_to_region, fast_preview_downsample};
+pub use self::spatial::{apply_color_to_region, fast_preview_downsample, guided_mixer_controls};
 
 pub const MIXER_BANDS: usize = 8;
 pub const MIXER_LABELS: [&str; MIXER_BANDS] = [

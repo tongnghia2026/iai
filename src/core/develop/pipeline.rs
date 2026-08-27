@@ -147,7 +147,7 @@ pub fn apply_to_tilemap_direct(
                     None
                 };
                 let color_bufs = if plan.use_color
-                    && plan.settings.color_smoothing > 0.001
+                    && plan.settings.effective_color_smoothing() > 0.001
                     && valid_w > 0
                     && valid_h > 0
                 {
@@ -282,7 +282,7 @@ pub fn apply_to_tilemap_direct(
             // push does not magnify the source JPEG's chroma blocks into patches.
             // Built once per tile, reading a halo from the source for seam-free blur.
             let color_bufs = if plan.use_color
-                && plan.settings.color_smoothing > 0.001
+                && plan.settings.effective_color_smoothing() > 0.001
                 && valid_w > 0
                 && valid_h > 0
             {
@@ -963,7 +963,7 @@ impl<'a> DevelopPlan<'a> {
         // Quality mode is the full-resolution direct colour transform. The
         // guided/proxy reconstruction is now an explicit optional smoothing
         // control instead of silently discarding half the chroma detail.
-        let smoothing = (self.settings.color_smoothing / 100.0).clamp(0.0, 1.0);
+        let smoothing = (self.settings.effective_color_smoothing() / 100.0).clamp(0.0, 1.0);
         if smoothing < 1.0 {
             let (mut direct_r, mut direct_g, mut direct_b) = (toned[0], toned[1], toned[2]);
             apply_color(

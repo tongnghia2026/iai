@@ -4252,3 +4252,86 @@ fn vignette_darkens_corners_not_center() {
         "corner should be darker than center"
     );
 }
+
+#[test]
+fn develop3_guided_mixer_mask_smooths_noise_but_keeps_luma_edge() {
+    let (w, h) = (64usize, 16usize);
+    let mut guide = vec![0.0f32; w * h];
+    let mut noisy = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let left = x < w / 2;
+            guide[i] = if left { 0.24 } else { 0.78 };
+            let base = if left { 1.0 } else { -1.0 };
+            noisy[i] = base + if (x + y) % 2 == 0 { 0.35 } else { -0.35 };
+        }
+    }
+    let smooth = guided_filter_plane(&guide, &noisy, w, h, 4, 0.0025);
+    let stats = |p: &[f32], x0: usize, x1: usize| {
+        let values: Vec<f32> = (0..h)
+            .flat_map(|y| (x0..x1).map(move |x| p[y * w + x]))
+            .collect();
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32;
+        (mean, var)
+    };
+    let (_, before_var) = stats(&noisy, 4, w / 2 - 4);
+    let (left, after_var) = stats(&smooth, 4, w / 2 - 4);
+    let (right, _) = stats(&smooth, w / 2 + 4, w - 4);
+    assert!(
+        after_var < before_var * 0.20,
+        "flat-region mask variance did not fall enough: {before_var} -> {after_var}"
+    );
+    assert!(
+        left - right > 1.70,
+        "guided mask bled across the real luma edge: {left} vs {right}"
+    );
+}
+
+#[test]
+fn develop3_mixer_saturation_prefers_muted_over_vivid_colour() {
+    use crate::core::perceptual_color::{working_rgb_to_perceptual, PerceptualColor};
+    use crate::core::working_color::WorkingColorSpace;
+
+    let mut settings = DevelopSettings::default();
+    settings.develop_engine_version = DevelopEngineVersion::Develop3;
+    settings.mixer_algorithm = ColorMixerAlgorithm::V2;
+    settings.mixer_saturation[0] = CONTROL_LIMIT;
+    let curves = build_mixer_curves_opt(&settings).unwrap();
+    let red = working_rgb_to_perceptual(
+        [
+            srgb_to_linear(210.0 / 255.0),
+            srgb_to_linear(69.0 / 255.0),
+            srgb_to_linear(69.0 / 255.0),
+        ],
+        WorkingColorSpace::LinearSrgb,
+    );
+    let gain = |chroma: f32| {
+        let input = PerceptualColor {
+            lightness: red.lightness,
+            chroma,
+            hue: red.hue,
+        };
+        let [mut r, mut g, mut b] = crate::core::perceptual_color::perceptual_to_working_rgb(
+            input,
+            WorkingColorSpace::LinearSrgb,
+        );
+        apply_color_linear_in_space(
+            &settings,
+            Some(&curves),
+            true,
+            WorkingColorSpace::LinearSrgb,
+            &mut r,
+            &mut g,
+            &mut b,
+        );
+        working_rgb_to_perceptual([r, g, b], WorkingColorSpace::LinearSrgb).chroma / chroma
+    };
+    let muted = gain(0.08);
+    let vivid = gain(0.28);
+    assert!(
+        muted > vivid + 0.25,
+        "Develop3 saturation response was not chroma-shaped: muted {muted}, vivid {vivid}"
+    );
+}

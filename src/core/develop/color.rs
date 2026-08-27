@@ -29,6 +29,69 @@ pub(crate) fn apply_color(
     *b = linear_to_srgb(bl).clamp(0.0, 1.0);
 }
 
+/// Display-domain proxy twin of the V2 mixer path with externally supplied
+/// (spatially guided) Hue/Saturation/Luminance controls. Global Saturation and
+/// Vibrance still run through the normal colour stage after the selective edit.
+pub(crate) fn apply_color_with_mixer_controls(
+    settings: &DevelopSettings,
+    controls: [f32; 3],
+    r: &mut f32,
+    g: &mut f32,
+    b: &mut f32,
+) {
+    let (mut rl, mut gl, mut bl) = (srgb_to_linear(*r), srgb_to_linear(*g), srgb_to_linear(*b));
+    apply_color_linear_with_mixer_controls_in_space(
+        settings,
+        controls,
+        false,
+        WorkingColorSpace::LinearSrgb,
+        &mut rl,
+        &mut gl,
+        &mut bl,
+    );
+    *r = linear_to_srgb(rl).clamp(0.0, 1.0);
+    *g = linear_to_srgb(gl).clamp(0.0, 1.0);
+    *b = linear_to_srgb(bl).clamp(0.0, 1.0);
+}
+
+pub(crate) fn apply_color_linear_with_mixer_controls_in_space(
+    settings: &DevelopSettings,
+    controls: [f32; 3],
+    boundary_managed: bool,
+    working_space: WorkingColorSpace,
+    r: &mut f32,
+    g: &mut f32,
+    b: &mut f32,
+) {
+    let mut color =
+        crate::core::perceptual_color::working_rgb_to_perceptual([*r, *g, *b], working_space);
+    color.hue = (color.hue + (eased_control(controls[0]) * MIXER_HUE_SHIFT_MAX_DEG).to_radians())
+        .rem_euclid(std::f32::consts::TAU);
+    let sat_delta = eased_control(controls[1]);
+    let response = if sat_delta > 0.0 {
+        1.35 - 0.73 * smootherstep(0.05, 0.30, color.chroma)
+    } else {
+        1.0
+    };
+    let chroma_scale = if sat_delta >= 0.0 {
+        1.0 + 1.15 * sat_delta * response
+    } else {
+        1.0 + 0.95 * sat_delta
+    };
+    color.chroma *= chroma_scale.max(0.0);
+    let light_delta = eased_control(controls[2]);
+    let room = if light_delta >= 0.0 {
+        (1.0 - color.lightness).max(0.0)
+    } else {
+        color.lightness.max(0.0)
+    };
+    color.lightness += light_delta * 0.32 * room;
+    [*r, *g, *b] = crate::core::perceptual_color::perceptual_to_working_rgb(color, working_space);
+    // Curves=None means only global Saturation/Vibrance are applied here; the
+    // mixer controls above are therefore neither reclassified nor doubled.
+    apply_color_linear_in_space(settings, None, boundary_managed, working_space, r, g, b);
+}
+
 /// Linear working-space colour stage. Mixer V2 classifies and edits one
 /// unclamped working-space OKLCh value; Legacy keeps its bounded display-domain
 /// UCS/HSV semantics. This is the RAW path's #10 building block;
@@ -145,8 +208,19 @@ pub(crate) fn apply_color_linear_classified_in_space(
         color.hue = (color.hue + (eased_control(mixer_hue) * MIXER_HUE_SHIFT_MAX_DEG).to_radians())
             .rem_euclid(std::f32::consts::TAU);
         let sat_delta = eased_control(mixer_sat);
+        let response = if settings.develop_engine_version == DevelopEngineVersion::Develop3
+            && sat_delta > 0.0
+        {
+            // Develop3 mixer Saturation is intentionally strongest on muted
+            // colour and tapers on already-vivid colour. The chroma-confidence
+            // gate in mixer.rs still protects the neutral axis; this shapes
+            // only the response after a pixel has a trustworthy hue.
+            1.35 - 0.73 * smootherstep(0.05, 0.30, color.chroma)
+        } else {
+            1.0
+        };
         let chroma_scale = if sat_delta >= 0.0 {
-            1.0 + 1.15 * sat_delta
+            1.0 + 1.15 * sat_delta * response
         } else {
             1.0 + 0.95 * sat_delta
         };

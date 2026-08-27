@@ -229,7 +229,10 @@ impl DevelopGraph {
         if self.schema_version != GRAPH_SCHEMA_VERSION {
             return Err(GraphError::UnsupportedSchema(self.schema_version));
         }
-        if self.engine_version != DevelopEngineVersion::Develop2 {
+        if !matches!(
+            self.engine_version,
+            DevelopEngineVersion::Develop2 | DevelopEngineVersion::Develop3
+        ) {
             return Err(GraphError::WrongEngine(self.engine_version));
         }
         if self.nodes.is_empty() {
@@ -274,7 +277,10 @@ fn compile_with_scene_color(
     settings: &DevelopSettings,
     scene_color: ColorModel,
 ) -> Result<DevelopGraph, GraphError> {
-    if settings.develop_engine_version != DevelopEngineVersion::Develop2 {
+    if !matches!(
+        settings.develop_engine_version,
+        DevelopEngineVersion::Develop2 | DevelopEngineVersion::Develop3
+    ) {
         return Err(GraphError::WrongEngine(settings.develop_engine_version));
     }
     let scene = BufferContract::scene_master(scene_color);
@@ -362,7 +368,7 @@ fn compile_with_scene_color(
     let signature = graph_signature(settings, &nodes);
     let graph = DevelopGraph {
         schema_version: GRAPH_SCHEMA_VERSION,
-        engine_version: DevelopEngineVersion::Develop2,
+        engine_version: settings.develop_engine_version,
         nodes,
         signature,
     };

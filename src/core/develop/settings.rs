@@ -14,6 +14,19 @@ pub enum DevelopEngineVersion {
     Legacy1,
     Scene1,
     Develop2,
+    /// Opt-in Light/Color-Mixer recipe. Existing documents remain pinned to
+    /// their serialized engine; fresh sessions opt in with
+    /// `IAI_LIGHT_MIXER_V3=1` until the look has passed GUI approval.
+    Develop3,
+}
+
+fn default_engine_version() -> DevelopEngineVersion {
+    match std::env::var("IAI_LIGHT_MIXER_V3") {
+        Ok(v) if matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES") => {
+            DevelopEngineVersion::Develop3
+        }
+        _ => DevelopEngineVersion::Develop2,
+    }
 }
 
 fn legacy_engine_version() -> DevelopEngineVersion {
@@ -256,6 +269,9 @@ pub struct DevelopSettings {
     pub contrast: f32,
     pub highlights: f32,
     pub shadows: f32,
+    /// Dedicated middle-grey tone-equalizer zone (Develop3). Older recipes
+    /// deserialize this as zero and therefore remain byte-compatible.
+    pub midtones: f32,
     pub whites: f32,
     pub blacks: f32,
     pub temperature: f32,
@@ -320,12 +336,13 @@ pub struct DevelopSettings {
 impl Default for DevelopSettings {
     fn default() -> Self {
         Self {
-            develop_engine_version: DevelopEngineVersion::Develop2,
+            develop_engine_version: default_engine_version(),
             tone_map_mode: ToneMapMode::Perceptual,
             exposure: 0.0,
             contrast: 0.0,
             highlights: 0.0,
             shadows: 0.0,
+            midtones: 0.0,
             whites: 0.0,
             blacks: 0.0,
             temperature: 0.0,
@@ -373,11 +390,26 @@ fn same_grade(hue: f32, strength: f32, other_hue: f32, other_strength: f32) -> b
 }
 
 impl DevelopSettings {
+    /// Develop3's guided mixer masks are part of the recipe, not an optional
+    /// deblocking taste control. Older engines retain the exact user slider.
+    pub(crate) fn effective_color_smoothing(&self) -> f32 {
+        if self.develop_engine_version == DevelopEngineVersion::Develop3
+            && (self.mixer_hue.iter().any(|v| v.abs() > 0.001)
+                || self.mixer_saturation.iter().any(|v| v.abs() > 0.001)
+                || self.mixer_luminance.iter().any(|v| v.abs() > 0.001))
+        {
+            100.0
+        } else {
+            self.color_smoothing
+        }
+    }
+
     pub fn is_neutral(&self) -> bool {
         self.exposure.abs() <= 0.001
             && self.contrast.abs() <= 0.001
             && self.highlights.abs() <= 0.001
             && self.shadows.abs() <= 0.001
+            && self.midtones.abs() <= 0.001
             && self.whites.abs() <= 0.001
             && self.blacks.abs() <= 0.001
             && self.temperature.abs() <= 0.001
@@ -416,6 +448,7 @@ impl DevelopSettings {
             && self.contrast == other.contrast
             && self.highlights == other.highlights
             && self.shadows == other.shadows
+            && self.midtones == other.midtones
             && self.whites == other.whites
             && self.blacks == other.blacks
             && self.temperature == other.temperature
@@ -462,12 +495,14 @@ impl DevelopSettings {
     }
 
     pub fn differs_only_color_mixer(&self, other: &Self) -> bool {
-        self.tone_map_mode == other.tone_map_mode
+        self.develop_engine_version == other.develop_engine_version
+            && self.tone_map_mode == other.tone_map_mode
             && self.point_curve_mode == other.point_curve_mode
             && self.exposure == other.exposure
             && self.contrast == other.contrast
             && self.highlights == other.highlights
             && self.shadows == other.shadows
+            && self.midtones == other.midtones
             && self.whites == other.whites
             && self.blacks == other.blacks
             && self.temperature == other.temperature
@@ -523,12 +558,14 @@ impl DevelopSettings {
     /// throttled; that is what keeps a Temperature/Tint drag smooth instead of
     /// stepping at the throttle rate when Colour/local-tone/Effects are engaged.
     pub fn differs_only_white_balance(&self, other: &Self) -> bool {
-        self.tone_map_mode == other.tone_map_mode
+        self.develop_engine_version == other.develop_engine_version
+            && self.tone_map_mode == other.tone_map_mode
             && self.point_curve_mode == other.point_curve_mode
             && self.exposure == other.exposure
             && self.contrast == other.contrast
             && self.highlights == other.highlights
             && self.shadows == other.shadows
+            && self.midtones == other.midtones
             && self.whites == other.whites
             && self.blacks == other.blacks
             && self.vibrance == other.vibrance
@@ -579,6 +616,7 @@ impl DevelopSettings {
     pub fn has_local_tone(&self) -> bool {
         self.highlights.abs() > 0.001
             || self.shadows.abs() > 0.001
+            || self.midtones.abs() > 0.001
             || self.whites.abs() > 0.001
             || self.blacks.abs() > 0.001
     }

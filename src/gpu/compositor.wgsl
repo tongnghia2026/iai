@@ -848,15 +848,73 @@ fn dev_filmlike_clip(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(lo) + (c - vec3<f32>(lo)) * scale;
 }
 
-fn dev_compress_highlight_chroma(c: vec3<f32>, mapped_n: f32, scene_n: f32, mode: f32) -> vec3<f32> {
+// Safdar Jzazbz (2017), normalized so display-linear 1.0 is 100 cd/m².
+// CPU twin: core::perceptual_color::jzazbz.
+fn dev_jz_pq(v: f32) -> f32 {
+    let vn = pow(abs(v) / 10000.0, 0.15930176);
+    return sign(v) * pow((0.8359375 + 18.851563 * vn) / (1.0 + 18.6875 * vn), 134.03438);
+}
+
+fn dev_jz_inverse_pq(v: f32) -> f32 {
+    let vp = pow(abs(v), 1.0 / 134.03438);
+    let base = max((vp - 0.8359375) / (18.851563 - 18.6875 * vp), 0.0);
+    return sign(v) * 10000.0 * pow(base, 1.0 / 0.15930176);
+}
+
+fn dev_linear_srgb_to_jzazbz(rgb: vec3<f32>) -> vec3<f32> {
+    let x = 100.0 * dot(vec3<f32>(0.4124564, 0.3575761, 0.1804375), rgb);
+    let y = 100.0 * dot(vec3<f32>(0.2126729, 0.7151522, 0.0721750), rgb);
+    let z = 100.0 * dot(vec3<f32>(0.0193339, 0.1191920, 0.9503041), rgb);
+    let xp = 1.15 * x - 0.15 * z;
+    let yp = 0.66 * y + 0.34 * x;
+    let lp = dev_jz_pq(0.4147897 * xp + 0.579999 * yp + 0.014648 * z);
+    let mp = dev_jz_pq(-0.20151 * xp + 1.120649 * yp + 0.0531008 * z);
+    let sp = dev_jz_pq(-0.0166008 * xp + 0.2648 * yp + 0.6684799 * z);
+    let iz = 0.5 * (lp + mp);
+    let jz = 0.44 * iz / (1.0 - 0.56 * iz) - 1.6295499e-11;
+    let az = 3.524 * lp - 4.066708 * mp + 0.542708 * sp;
+    let bz = 0.199076 * lp + 1.096799 * mp - 1.295875 * sp;
+    return vec3<f32>(jz, az, bz);
+}
+
+fn dev_jzazbz_to_linear_srgb(jab: vec3<f32>) -> vec3<f32> {
+    let q = jab.x + 1.6295499e-11;
+    let iz = q / (0.44 + 0.56 * q);
+    let lp = iz + 0.13860504 * jab.y + 0.058047317 * jab.z;
+    let mp = iz - 0.13860504 * jab.y - 0.058047317 * jab.z;
+    let sp = iz - 0.09601924 * jab.y - 0.8118919 * jab.z;
+    let l = dev_jz_inverse_pq(lp);
+    let m = dev_jz_inverse_pq(mp);
+    let s = dev_jz_inverse_pq(sp);
+    let xp = 1.9242264 * l - 1.0047923 * m + 0.037651405 * s;
+    let yp = 0.35031676 * l + 0.7264812 * m - 0.065384425 * s;
+    let z = -0.09098281 * l - 0.3127283 * m + 1.5227666 * s;
+    let x = (xp + 0.15 * z) / 1.15;
+    let y = (yp - 0.34 * x) / 0.66;
+    let xyz = vec3<f32>(x, y, z) / 100.0;
+    return vec3<f32>(
+        dot(vec3<f32>(3.2404542, -1.5371385, -0.4985314), xyz),
+        dot(vec3<f32>(-0.9692660, 1.8760108, 0.0415560), xyz),
+        dot(vec3<f32>(0.0556434, -0.2040259, 1.0572252), xyz),
+    );
+}
+
+fn dev_compress_highlight_chroma(c: vec3<f32>, mapped_n: f32, scene_n: f32, mode: f32, perceptual_recipe: bool) -> vec3<f32> {
     if (mode > 1.5) { return c; }
     let ratio = mapped_n / max(scene_n, 1e-8);
     if (ratio >= 1.0) { return c; }
-    let compression = dev_smootherstep(0.02, 0.80, 1.0 - ratio);
-    let highlight = dev_smootherstep(0.55, 1.0, mapped_n);
+    let compression = select(dev_smootherstep(0.02, 0.80, 1.0 - ratio),
+                             dev_smootherstep(0.015, 0.92, 1.0 - ratio), perceptual_recipe);
+    let highlight = select(dev_smootherstep(0.55, 1.0, mapped_n),
+                           dev_smootherstep(0.48, 1.0, mapped_n), perceptual_recipe);
     let excursion = max(max(max(-c.r, c.r - 1.0), max(-c.g, c.g - 1.0)), max(-c.b, c.b - 1.0));
     let strength = select(0.12 + 0.38 * dev_smootherstep(0.0, 0.25, max(excursion, 0.0)), 0.65, mode > 0.5);
-    let amount = compression * highlight * strength;
+    let amount = compression * highlight * strength * select(1.0, 0.82, perceptual_recipe);
+    if (perceptual_recipe) {
+        let jab = dev_linear_srgb_to_jzazbz(dev_working_to_linear_srgb(c));
+        let scaled = vec3<f32>(jab.x, jab.y * (1.0 - amount), jab.z * (1.0 - amount));
+        return dev_linear_srgb_to_working(dev_jzazbz_to_linear_srgb(scaled));
+    }
     return mix(c, vec3<f32>(mapped_n), amount);
 }
 
@@ -1008,7 +1066,7 @@ fn dev_scale_linear_chroma(c: vec3<f32>, factor: f32) -> vec3<f32> {
 // Full RAW colour stage on the unclamped linear working pixel. V2 classifies
 // and edits the same working-space OKLab value; Legacy keeps display-referred
 // UCS/HSV band semantics.
-fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>) -> vec3<f32> {
+fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>, guided: vec3<f32>, use_guided: bool) -> vec3<f32> {
     var c = input;
     let display = classification;
     let working_lab = dev_working_to_oklab(c);
@@ -1033,6 +1091,11 @@ fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>) -> vec3<f32> {
     var lum_ctl = clamp(dev_mixer_curve_at(2105u, h)
         * select(dev_mixer_weight(display, 0.10) * legacy_lum_guard,
                  v2_w * v2_lum_guard, dev_effects[7] > 0.5), -200.0, 200.0);
+    if (use_guided) {
+        hue_ctl = guided.x;
+        sat_ctl = guided.y;
+        lum_ctl = guided.z;
+    }
 
     if (dev_effects[7] > 0.5) {
         var lab = working_lab;
@@ -1040,8 +1103,12 @@ fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>) -> vec3<f32> {
         let chroma = length(lab.yz);
         var hue = select(0.0, atan2(lab.z, lab.y), chroma > 0.0000001) + rad;
         let sat_delta = dev_eased(sat_ctl);
+        let shaped_response = select(1.0,
+            1.35 - 0.73 * dev_smootherstep(0.05, 0.30, chroma),
+            dev_effects[82] > 0.5 && sat_delta > 0.0);
         let chroma_scale = max(0.0, select(1.0 + 0.95 * sat_delta,
-                                           1.0 + 1.15 * sat_delta, sat_delta >= 0.0));
+                                           1.0 + 1.15 * sat_delta * shaped_response,
+                                           sat_delta >= 0.0));
         let light_delta = dev_eased(lum_ctl);
         let room = select(max(lab.x, 0.0), max(1.0 - lab.x, 0.0), light_delta >= 0.0);
         lab.x = lab.x + light_delta * 0.32 * room;
@@ -1138,7 +1205,9 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
             if (dev_effects[8] < 0.5) { blend = min(blend + 0.10, 1.0); }
         }
         outc = mix(pc, v * (mapped_n / n), blend);
-        outc = dev_compress_highlight_chroma(outc, mapped_n, n, dev_effects[8]);
+        outc = dev_compress_highlight_chroma(
+            outc, mapped_n, n, dev_effects[8], dev_effects[83] > 0.5
+        );
     }
     // Contrast is independent of the sigmoid shoulder: a two-sided power
     // curve fixed at black, 18.45% grey and white. CPU twin: apply_scene_contrast.
@@ -1183,7 +1252,18 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
             dev_rgb_curve_at(2u, classification.b),
         );
     }
-    outc = dev_scene_color(outc, classification);
+    let use_guided = dev_effects[82] > 0.5 && u.adj_p[2].x > 2.5;
+    var guided = vec3<f32>(0.0);
+    if (use_guided) {
+        // Fragment UVs address pixel centres. Convert to the integer
+        // layer-pixel coordinate expected by dev_color_proxy_at so an s=1
+        // settled proxy samples its exact control, not a half-pixel blend.
+        guided = dev_color_proxy_at(
+            local.x * u.layer_w - 0.5,
+            local.y * u.layer_h - 0.5
+        ).adjusted;
+    }
+    outc = dev_scene_color(outc, classification, guided, use_guided);
     let output_linear = dev_gamut_clip_chroma(
         dev_filmlike_clip(dev_working_to_linear_srgb(outc))
     );
@@ -1485,6 +1565,9 @@ fn develop_apply(srgb_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     }
     if (u.adj_p[2].x > 0.5) {
         let cp = dev_color_proxy_at(local.x * u.layer_w, local.y * u.layer_h);
+        if (u.adj_p[2].x > 2.5) {
+            return dev_effects_stage(toned, local, dev_luma(cp.region));
+        }
         toned = dev_finish_colored(toned, cp.region, cp.adjusted);
         if (u.adj_p[2].x > 1.5) {
             return clamp(toned, vec3(0.0), vec3(1.0));

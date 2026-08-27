@@ -703,7 +703,13 @@ fn develop_scene_to_gpu(
     let mut adj_p = [0.0f32; 12];
     if let Some(c) = color {
         if !c.region.is_empty() {
-            adj_p[8] = if c.fast_preview { 2.0 } else { 1.0 };
+            adj_p[8] = if c.guided_controls {
+                3.0
+            } else if c.fast_preview {
+                2.0
+            } else {
+                1.0
+            };
             adj_p[9] = c.downsample.max(1) as f32;
             adj_p[10] = c.w as f32;
             adj_p[11] = c.h as f32;
@@ -768,6 +774,9 @@ pub struct ColorProxies {
     pub origin_y: u32,
     pub downsample: u32,
     pub fast_preview: bool,
+    /// `adjusted` stores guided [hue, saturation, luminance] controls rather
+    /// than RGB. Scene WGSL applies them to its full-resolution working pixel.
+    pub guided_controls: bool,
 }
 
 #[derive(Clone)]
@@ -1924,6 +1933,10 @@ struct VsOut {
             };
             effects[9] =
                 f32::from(s.point_curve_mode == crate::core::develop::PointCurveMode::Perceptual);
+            effects[82] = f32::from(
+                s.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3,
+            );
+            effects[83] = effects[82];
 
             // R/G/B point curves: [flag, 3×256] — the exact tables the CPU
             // ToneData::apply_rgb_curves reads, so preview and bake match.

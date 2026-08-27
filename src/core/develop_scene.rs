@@ -31,11 +31,12 @@ use crate::core::cat16;
 use crate::core::color::luminance_f32;
 use crate::core::develop::{
     apply_color, apply_color_linear_classified_in_space, apply_color_linear_in_space,
-    apply_detail_to_working_buffer_in_space, apply_effects_linear_in_space, apply_luma_target,
-    apply_luma_target_in_space, apply_point_curve_outer, bell, contrast_curve, control_to_unit,
-    curve_is_identity, curve_shadows_mask, darks_mask, eased_control, guided_lowpass_plane,
-    linear_to_srgb, luma_lin, lut_lerp, rgb_curve_luts, sample_plane_bilinear, smootherstep,
-    srgb_to_linear, DevelopSettings, EXPOSURE_LIMIT, TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
+    apply_color_linear_with_mixer_controls_in_space, apply_detail_to_working_buffer_in_space,
+    apply_effects_linear_in_space, apply_luma_target, apply_luma_target_in_space,
+    apply_point_curve_outer, bell, contrast_curve, control_to_unit, curve_is_identity,
+    curve_shadows_mask, darks_mask, eased_control, guided_lowpass_plane, linear_to_srgb, luma_lin,
+    lut_lerp, rgb_curve_luts, sample_plane_bilinear, smootherstep, srgb_to_linear, DevelopSettings,
+    EXPOSURE_LIMIT, TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
 };
 #[cfg(test)]
 use crate::core::develop::{apply_color_linear, apply_color_linear_classified};
@@ -106,10 +107,20 @@ impl LookRecipe {
         engine: crate::core::develop::DevelopEngineVersion,
     ) -> Self {
         use crate::core::develop::{DevelopEngineVersion, ToneMapMode};
-        if engine != DevelopEngineVersion::Develop2 {
+        if matches!(
+            engine,
+            DevelopEngineVersion::Legacy1 | DevelopEngineVersion::Scene1
+        ) {
             return Self {
                 name: "iAi legacy sigmoid",
                 sigmoid_c: LEGACY_SIGMOID_C,
+            };
+        }
+        if engine == DevelopEngineVersion::Develop3 {
+            return match mode {
+                ToneMapMode::Perceptual => Self::natural_v2(),
+                ToneMapMode::FilmLike => Self::filmic_v2(),
+                ToneMapMode::Neutral => Self::neutral_v2(),
             };
         }
         match mode {
@@ -146,6 +157,31 @@ impl LookRecipe {
             sigmoid_c: 1.55,
         }
     }
+
+    /// Develop3 recipes keep the 18% grey and white anchors but use a slightly
+    /// gentler log-logistic shoulder. This leaves more separation in hot
+    /// highlights before the final gamut boundary instead of bunching them
+    /// abruptly near white.
+    pub const fn natural_v2() -> Self {
+        Self {
+            name: "iAi Natural v2",
+            sigmoid_c: 1.72,
+        }
+    }
+
+    pub const fn filmic_v2() -> Self {
+        Self {
+            name: "iAi Filmic v2",
+            sigmoid_c: 1.88,
+        }
+    }
+
+    pub const fn neutral_v2() -> Self {
+        Self {
+            name: "iAi Neutral v2",
+            sigmoid_c: 1.48,
+        }
+    }
 }
 
 // ── Tone-equalizer zones (H/S/W/B as EV offsets) ────────────────────────────
@@ -164,6 +200,11 @@ const TONE_EQ_SHADOWS: (f32, f32, f32) = (-3.0, 1.6, 1.4); // (centre EV, width,
 const TONE_EQ_BLACKS: (f32, f32, f32) = (-4.6, 1.5, 2.6);
 const TONE_EQ_HIGHLIGHTS: (f32, f32, f32) = (2.5, 1.6, 2.0);
 const TONE_EQ_WHITES: (f32, f32, f32) = (4.5, 1.3, 1.5);
+const TONE_EQ_V3_SHADOWS: (f32, f32, f32) = (-2.8, 1.0, 1.4);
+const TONE_EQ_V3_BLACKS: (f32, f32, f32) = (-4.7, 0.9, 2.4);
+const TONE_EQ_V3_MIDTONES: (f32, f32, f32) = (0.0, 0.95, 1.0);
+const TONE_EQ_V3_HIGHLIGHTS: (f32, f32, f32) = (2.7, 1.0, 1.8);
+const TONE_EQ_V3_WHITES: (f32, f32, f32) = (4.7, 0.85, 1.4);
 const TONE_EQ_CLAMP_EV: f32 = 4.0;
 /// Guided-filter regularisation for the regional-E plane, in EV² (variance).
 /// Windows varying less than ~0.5 EV read as one lighting region and smooth
@@ -778,8 +819,30 @@ pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
     let noise_confidence = smootherstep(-9.0, -7.0, er);
     let shadow_u = control_to_unit(settings.shadows);
     let black_u = control_to_unit(settings.blacks);
+    let v3 =
+        settings.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3;
+    let shadows_zone = if v3 {
+        TONE_EQ_V3_SHADOWS
+    } else {
+        TONE_EQ_SHADOWS
+    };
+    let blacks_zone = if v3 {
+        TONE_EQ_V3_BLACKS
+    } else {
+        TONE_EQ_BLACKS
+    };
+    let highlights_zone = if v3 {
+        TONE_EQ_V3_HIGHLIGHTS
+    } else {
+        TONE_EQ_HIGHLIGHTS
+    };
+    let whites_zone = if v3 {
+        TONE_EQ_V3_WHITES
+    } else {
+        TONE_EQ_WHITES
+    };
     let off = g(
-        TONE_EQ_SHADOWS,
+        shadows_zone,
         shadow_u
             * if shadow_u > 0.0 {
                 noise_confidence
@@ -787,10 +850,14 @@ pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
                 1.0
             },
     ) + g(
-        TONE_EQ_BLACKS,
+        blacks_zone,
         black_u * if black_u > 0.0 { noise_confidence } else { 1.0 },
-    ) + g(TONE_EQ_HIGHLIGHTS, control_to_unit(settings.highlights))
-        + g(TONE_EQ_WHITES, control_to_unit(settings.whites));
+    ) + if v3 {
+        g(TONE_EQ_V3_MIDTONES, control_to_unit(settings.midtones))
+    } else {
+        0.0
+    } + g(highlights_zone, control_to_unit(settings.highlights))
+        + g(whites_zone, control_to_unit(settings.whites));
     off.clamp(-TONE_EQ_CLAMP_EV, TONE_EQ_CLAMP_EV)
 }
 
@@ -801,6 +868,7 @@ pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
 /// same matrix + LUTs). Built once per slider change, never per pixel.
 #[derive(Clone)]
 pub struct SceneToneData {
+    pub develop_engine_version: crate::core::develop::DevelopEngineVersion,
     pub tone_map_mode: crate::core::develop::ToneMapMode,
     pub point_curve_mode: crate::core::develop::PointCurveMode,
     /// RGB primaries carried between the technical scene stage and the single
@@ -845,9 +913,11 @@ pub fn build_scene_tone_for_scene(
     scene: &SceneSource,
 ) -> SceneToneData {
     validate_develop2_recipe(settings);
-    let working_space = if settings.develop_engine_version
-        == crate::core::develop::DevelopEngineVersion::Develop2
-    {
+    let working_space = if matches!(
+        settings.develop_engine_version,
+        crate::core::develop::DevelopEngineVersion::Develop2
+            | crate::core::develop::DevelopEngineVersion::Develop3
+    ) {
         scene.color_pipeline.working
     } else {
         WorkingColorSpace::LinearSrgb
@@ -898,7 +968,11 @@ pub fn build_scene_tone_for(settings: &DevelopSettings, look: BaseLook) -> Scene
 
 #[inline]
 fn validate_develop2_recipe(settings: &DevelopSettings) {
-    if settings.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop2 {
+    if matches!(
+        settings.develop_engine_version,
+        crate::core::develop::DevelopEngineVersion::Develop2
+            | crate::core::develop::DevelopEngineVersion::Develop3
+    ) {
         crate::core::develop2::compile(settings)
             .expect("Develop2 settings must compile to a valid canonical graph");
     }
@@ -911,9 +985,11 @@ fn build_scene_tone_impl(
     output_space: OutputColorSpace,
     as_shot_white: Option<crate::core::cat16::WhiteBalance>,
 ) -> SceneToneData {
-    let wb_srgb = if settings.develop_engine_version
-        == crate::core::develop::DevelopEngineVersion::Develop2
-        && look == BaseLook::Raw
+    let wb_srgb = if matches!(
+        settings.develop_engine_version,
+        crate::core::develop::DevelopEngineVersion::Develop2
+            | crate::core::develop::DevelopEngineVersion::Develop3
+    ) && look == BaseLook::Raw
     {
         as_shot_white.map_or_else(
             || cat16::wb_matrix(settings.temperature, settings.tint),
@@ -983,6 +1059,7 @@ fn build_scene_tone_impl(
         }
     }
     SceneToneData {
+        develop_engine_version: settings.develop_engine_version,
         tone_map_mode: settings.tone_map_mode,
         point_curve_mode: settings.point_curve_mode,
         working_space,
@@ -1137,6 +1214,8 @@ fn compress_highlight_chroma(
     mapped_n: f32,
     scene_n: f32,
     mode: crate::core::develop::ToneMapMode,
+    perceptual_recipe: bool,
+    working_space: WorkingColorSpace,
 ) -> [f32; 3] {
     if mode == crate::core::develop::ToneMapMode::Neutral {
         return c;
@@ -1145,8 +1224,16 @@ fn compress_highlight_chroma(
     if ratio >= 1.0 {
         return c;
     }
-    let compression = smootherstep(0.02, 0.80, 1.0 - ratio);
-    let highlight = smootherstep(0.55, 1.0, mapped_n);
+    let compression = if perceptual_recipe {
+        smootherstep(0.015, 0.92, 1.0 - ratio)
+    } else {
+        smootherstep(0.02, 0.80, 1.0 - ratio)
+    };
+    let highlight = if perceptual_recipe {
+        smootherstep(0.48, 1.0, mapped_n)
+    } else {
+        smootherstep(0.55, 1.0, mapped_n)
+    };
     let excursion = c
         .into_iter()
         .map(|v| (-v).max(v - 1.0).max(0.0))
@@ -1158,7 +1245,21 @@ fn compress_highlight_chroma(
         }
         crate::core::develop::ToneMapMode::Neutral => 0.0,
     };
-    let amount = compression * highlight * strength;
+    let amount = compression * highlight * strength * if perceptual_recipe { 0.82 } else { 1.0 };
+    if perceptual_recipe {
+        // Develop3 attenuates highlight colourfulness in JzCzhz instead of
+        // interpolating RGB toward grey. Scaling az/bz keeps Jz and hue fixed,
+        // so hot saturated colours roll off without the hue skew that an RGB
+        // bleach introduces. The legacy recipe below remains byte-identical.
+        let jz = crate::core::perceptual_color::jzazbz::from_working_rgb(c, working_space);
+        let adjusted = crate::core::perceptual_color::jzazbz::to_working_rgb(
+            jz.scale_chroma(1.0 - amount),
+            working_space,
+        );
+        if adjusted.into_iter().all(f32::is_finite) {
+            return adjusted;
+        }
+    }
     [
         c[0] + (mapped_n - c[0]) * amount,
         c[1] + (mapped_n - c[1]) * amount,
@@ -1277,7 +1378,14 @@ impl SceneToneData {
                 pc[1] + (v[1] * s - pc[1]) * blend,
                 pc[2] + (v[2] * s - pc[2]) * blend,
             ];
-            compress_highlight_chroma(mixed, mapped_n, n, self.tone_map_mode)
+            compress_highlight_chroma(
+                mixed,
+                mapped_n,
+                n,
+                self.tone_map_mode,
+                self.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3,
+                self.working_space,
+            )
         } else {
             pc
         };
@@ -1436,7 +1544,13 @@ pub fn finish_region_e(
         })
         .collect();
     let r = (TONE_REGION_RADIUS / s.max(1)).max(1);
-    guided_lowpass_plane(&e, pw, ph, r, SCENE_TONE_GUIDED_EPS)
+    let eps = if tone.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3
+    {
+        0.10
+    } else {
+        SCENE_TONE_GUIDED_EPS
+    };
+    guided_lowpass_plane(&e, pw, ph, r, eps)
 }
 
 // ── GPU-preview proxy builders (scene twins of the legacy box builders) ────
@@ -1504,12 +1618,19 @@ pub fn tone_lowpass_scene_region(
     tone: &SceneToneData,
     s: usize,
 ) -> Vec<[f32; 3]> {
-    let toned: Vec<[f32; 3]> = base
-        .par_iter()
-        .map(|p| tone.scene_to_display(*p, None))
-        .collect();
+    let toned = tone_scene_color_samples(base, tone);
     let r = (crate::core::develop::COLOR_REGION_RADIUS / s.max(1)).max(1);
     crate::core::develop::guided_lowpass(&toned, pw, ph, r, crate::core::develop::COLOR_GUIDED_EPS)
+}
+
+/// Tone the cached scene samples without an RGB spatial blur. Develop3 uses
+/// these values to classify mixer hue and then guides the resulting adjustment
+/// planes by their luma; blurring RGB before classification would shift hues at
+/// object boundaries and reintroduce the very cross-colour bleed being fixed.
+pub fn tone_scene_color_samples(base: &[[f32; 3]], tone: &SceneToneData) -> Vec<[f32; 3]> {
+    base.par_iter()
+        .map(|p| tone.scene_to_display(*p, None))
+        .collect()
 }
 
 /// Cacheable linear scene base for the fast spatial preview. Effects/Local use
@@ -1815,6 +1936,10 @@ fn render_scene_display_inner(
 ) -> Vec<u16> {
     let w = scene.width as usize;
     let h = scene.height as usize;
+    let guided_mixer = develop.filter(|(settings, curves)| {
+        settings.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3
+            && curves.is_some_and(|c| c.algorithm == crate::core::develop::ColorMixerAlgorithm::V2)
+    });
     let region = if tone.tone_eq_active {
         let (base, pw, ph) = build_scene_region_base(scene, TONE_DOWNSAMPLE);
         Some((
@@ -1840,22 +1965,49 @@ fn render_scene_display_inner(
                 sample_plane_bilinear(plane, *pw, *ph, (x as f32 + 0.5) / s - 0.5, fy)
             });
             let [mut r, mut g, mut b] = tone.scene_to_working(rgb, e);
-            if let Some((settings, curves)) = develop {
-                let classification = tone.working_to_display([r, g, b]);
-                apply_color_linear_classified_in_space(
-                    settings,
-                    curves,
-                    Some(classification),
-                    true,
-                    tone.working_space,
-                    &mut r,
-                    &mut g,
-                    &mut b,
-                );
+            if guided_mixer.is_none() {
+                if let Some((settings, curves)) = develop {
+                    let classification = tone.working_to_display([r, g, b]);
+                    apply_color_linear_classified_in_space(
+                        settings,
+                        curves,
+                        Some(classification),
+                        true,
+                        tone.working_space,
+                        &mut r,
+                        &mut g,
+                        &mut b,
+                    );
+                }
             }
             *slot = [r, g, b];
         }
     });
+
+    if let Some((settings, Some(_curves))) = guided_mixer {
+        let display_samples: Vec<[f32; 3]> = working
+            .par_iter()
+            .map(|p| tone.working_to_display(*p))
+            .collect();
+        let controls =
+            crate::core::develop::guided_mixer_controls(&display_samples, settings, w, h)
+                .expect("Develop3 V2 mixer must produce guided controls");
+        working
+            .par_iter_mut()
+            .zip(controls.par_iter())
+            .for_each(|(p, controls)| {
+                let [r, g, b] = p;
+                apply_color_linear_with_mixer_controls_in_space(
+                    settings,
+                    *controls,
+                    true,
+                    tone.working_space,
+                    r,
+                    g,
+                    b,
+                );
+            });
+    }
 
     if let Some((settings, _)) = develop
         .filter(|(settings, _)| settings.has_spatial_effects() || settings.vignette.abs() > 0.001)
@@ -2018,7 +2170,8 @@ pub fn apply_scene_to_tilemap(
     selection: Option<crate::core::develop::DevelopSelection>,
 ) -> TileMap {
     match settings.develop_engine_version {
-        crate::core::develop::DevelopEngineVersion::Develop2 => {
+        crate::core::develop::DevelopEngineVersion::Develop2
+        | crate::core::develop::DevelopEngineVersion::Develop3 => {
             crate::core::develop2::execute_scene(scene, settings, selection)
                 .expect("the canonical Develop2 recipe must validate")
         }
@@ -2625,6 +2778,8 @@ mod tests {
             0.80,
             0.80,
             crate::core::develop::ToneMapMode::Perceptual,
+            false,
+            WorkingColorSpace::LinearSrgb,
         );
         assert_eq!(uncompressed, color);
 
@@ -2633,17 +2788,49 @@ mod tests {
             0.80,
             1.0,
             crate::core::develop::ToneMapMode::FilmLike,
+            false,
+            WorkingColorSpace::LinearSrgb,
         );
         let strong = compress_highlight_chroma(
             color,
             0.80,
             4.0,
             crate::core::develop::ToneMapMode::FilmLike,
+            false,
+            WorkingColorSpace::LinearSrgb,
         );
         let chroma = |c: [f32; 3]| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
         assert!(chroma(strong) < chroma(mild));
         assert!(chroma(mild) < chroma(color));
         assert!((strong[0] - 0.80).abs() < 1e-7);
+    }
+
+    #[test]
+    fn develop3_highlight_compression_preserves_jzczhz_lightness_and_hue() {
+        use crate::core::perceptual_color::jzazbz::{from_working_rgb, JzCzHz};
+        let color = [0.80, 0.32, 0.12];
+        let before = JzCzHz::from(from_working_rgb(color, WorkingColorSpace::LinearSrgb));
+        let out = compress_highlight_chroma(
+            color,
+            0.80,
+            4.0,
+            crate::core::develop::ToneMapMode::FilmLike,
+            true,
+            WorkingColorSpace::LinearSrgb,
+        );
+        let after = JzCzHz::from(from_working_rgb(out, WorkingColorSpace::LinearSrgb));
+        let hue_error = (after.hz - before.hz)
+            .abs()
+            .min(std::f32::consts::TAU - (after.hz - before.hz).abs());
+        assert!(
+            after.cz < before.cz * 0.90,
+            "Cz did not roll off: {before:?} -> {after:?}"
+        );
+        assert!(
+            (after.jz - before.jz).abs() < 2.0e-5,
+            "Jz drift: {before:?} -> {after:?}"
+        );
+        assert!(hue_error < 2.0e-4, "hue drift: {before:?} -> {after:?}");
     }
 
     #[test]
@@ -3196,6 +3383,32 @@ mod tests {
     }
 
     #[test]
+    fn develop3_tone_zones_are_surgical_and_midtones_are_independent() {
+        use crate::core::develop::DevelopEngineVersion;
+        let mut highlights = settings();
+        highlights.develop_engine_version = DevelopEngineVersion::Develop3;
+        highlights.highlights = 200.0;
+        let mid = tone_eq_offset_ev(&highlights, SCENE_MID_GRAY.log2()).abs();
+        let centre = tone_eq_offset_ev(&highlights, SCENE_MID_GRAY.log2() + 2.7);
+        assert!(mid < 0.08, "Highlights leaked {mid} EV into middle grey");
+        assert!(
+            centre > 1.65,
+            "Highlights centre response too weak: {centre}"
+        );
+
+        let mut midtones = settings();
+        midtones.develop_engine_version = DevelopEngineVersion::Develop3;
+        midtones.midtones = 200.0;
+        let at_mid = tone_eq_offset_ev(&midtones, SCENE_MID_GRAY.log2());
+        let at_highlight = tone_eq_offset_ev(&midtones, SCENE_MID_GRAY.log2() + 2.7).abs();
+        assert!(at_mid > 0.95, "Midtones centre response too weak: {at_mid}");
+        assert!(
+            at_highlight < 0.03,
+            "Midtones leaked {at_highlight} EV into Highlights"
+        );
+    }
+
+    #[test]
     fn tone_eq_regional_gain_preserves_local_texture_ratio() {
         // Two pixels in one region (same regional E) get the SAME linear gain,
         // so their scene-linear ratio — the texture — is untouched.
@@ -3310,7 +3523,7 @@ mod tests {
     }
 
     #[test]
-    fn develop2_keeps_the_scene_master_working_space_until_output() {
+    fn modern_engines_keep_the_scene_master_working_space_until_output() {
         use crate::core::develop::DevelopEngineVersion;
         use crate::core::working_color::WorkingColorSpace;
 
@@ -3325,6 +3538,15 @@ mod tests {
             develop2.wb_ev,
             [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             "neutral Develop2 must not round-trip the scene master through sRGB"
+        );
+
+        let mut develop3_settings = settings();
+        develop3_settings.develop_engine_version = DevelopEngineVersion::Develop3;
+        let develop3 = build_scene_tone_for_scene(&develop3_settings, &scene);
+        assert_eq!(develop3.working_space, WorkingColorSpace::LinearProPhoto);
+        assert_eq!(
+            develop3.wb_ev, develop2.wb_ev,
+            "Develop3 must retain the canonical wide-working-space/WB boundary"
         );
 
         let mut scene1_settings = settings();
@@ -3690,6 +3912,8 @@ mod tests {
             "fn dev_apply_working_luma_target(",
             "fn dev_filmlike_clip(",
             "fn dev_compress_highlight_chroma(",
+            "fn dev_linear_srgb_to_jzazbz(",
+            "fn dev_jzazbz_to_linear_srgb(",
             "fn dev_restore_shadow_chroma(",
             "dev_smootherstep(0.02, 0.80, 1.0 - ratio)",
             "dev_smootherstep(0.55, 1.0, mapped_n)",

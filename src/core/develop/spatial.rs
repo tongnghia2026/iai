@@ -93,16 +93,7 @@ pub(crate) fn build_color_lowpass(
     let s = COLOR_DOWNSAMPLE.max(1);
     let (low, lw, lh) = downsample_box(&halo, hw, hh, s);
     let region_low = guided_lowpass(&low, lw, lh, (r / s).max(1), COLOR_GUIDED_EPS);
-    let mut adjusted_low = region_low.clone();
-    let curves = build_mixer_curves_opt(settings);
-    for p in adjusted_low.iter_mut() {
-        let (mut r0, mut g0, mut b0) = (p[0], p[1], p[2]);
-        apply_color(settings, curves.as_ref(), &mut r0, &mut g0, &mut b0);
-        *p = [r0.clamp(0.0, 1.0), g0.clamp(0.0, 1.0), b0.clamp(0.0, 1.0)];
-    }
-    if should_suppress_color_edges(settings) {
-        suppress_edge_correction(&region_low, &mut adjusted_low, lw, lh);
-    }
+    let adjusted_low = apply_color_to_region(&region_low, settings, lw, lh);
     let region_full = upsample_bilinear(&region_low, lw, lh, hw, hh, s);
     let adjusted_full = upsample_bilinear(&adjusted_low, lw, lh, hw, hh, s);
 
@@ -500,24 +491,90 @@ pub fn apply_color_to_region(
     ph: usize,
 ) -> Vec<[f32; 3]> {
     let curves = build_mixer_curves_opt(settings);
-    let mut adjusted: Vec<[f32; 3]> = region
-        .par_iter()
-        .map(|p| {
-            let (mut r0, mut g0, mut b0) = (p[0], p[1], p[2]);
-            apply_color(settings, curves.as_ref(), &mut r0, &mut g0, &mut b0);
-            [r0.clamp(0.0, 1.0), g0.clamp(0.0, 1.0), b0.clamp(0.0, 1.0)]
-        })
-        .collect();
-    // A selective Luminance edit is already confined during full-resolution
-    // reconstruction by `mixer_edit_affinity`.  Fading its proxy correction a
-    // second time here removes light from the edited side of the boundary and
-    // produces the familiar dark/doubled rim around brightened skin.  Keep the
-    // suppressor for colour-only edits, where it can still soften chroma edges,
-    // but let the reconstruction gate own Luminance boundaries.
+    let guided_controls = guided_mixer_controls(region, settings, pw, ph);
+    let mut adjusted: Vec<[f32; 3]> = if let Some(controls) = guided_controls {
+        region
+            .par_iter()
+            .zip(controls.par_iter())
+            .map(|(p, controls)| {
+                let (mut r0, mut g0, mut b0) = (p[0], p[1], p[2]);
+                apply_color_with_mixer_controls(settings, *controls, &mut r0, &mut g0, &mut b0);
+                [r0.clamp(0.0, 1.0), g0.clamp(0.0, 1.0), b0.clamp(0.0, 1.0)]
+            })
+            .collect()
+    } else {
+        region
+            .par_iter()
+            .map(|p| {
+                let (mut r0, mut g0, mut b0) = (p[0], p[1], p[2]);
+                apply_color(settings, curves.as_ref(), &mut r0, &mut g0, &mut b0);
+                [r0.clamp(0.0, 1.0), g0.clamp(0.0, 1.0), b0.clamp(0.0, 1.0)]
+            })
+            .collect()
+    };
     if should_suppress_color_edges(settings) {
         suppress_edge_correction(region, &mut adjusted, pw, ph);
     }
     adjusted
+}
+
+/// Build the three spatially coherent V2 mixer control planes packed as RGB.
+/// `None` means the caller should retain the legacy/direct colour path.
+pub fn guided_mixer_controls(
+    samples: &[[f32; 3]],
+    settings: &DevelopSettings,
+    pw: usize,
+    ph: usize,
+) -> Option<Vec<[f32; 3]>> {
+    let curves = build_mixer_curves_opt(settings)?;
+    if settings.develop_engine_version != DevelopEngineVersion::Develop3
+        || curves.algorithm != ColorMixerAlgorithm::V2
+        || pw <= 1
+        || ph <= 1
+        || samples.len() != pw * ph
+    {
+        return None;
+    }
+    let guide: Vec<f32> = samples
+        .par_iter()
+        .map(|p| luminance_f32(p[0], p[1], p[2]).clamp(0.0, 1.0))
+        .collect();
+    let controls: Vec<[f32; 3]> = samples
+        .par_iter()
+        .map(|p| {
+            let lab = crate::core::perceptual_color::linear_srgb_to_oklab([
+                srgb_to_linear(p[0]),
+                srgb_to_linear(p[1]),
+                srgb_to_linear(p[2]),
+            ]);
+            let c = crate::core::perceptual_color::PerceptualColor::from_oklab(lab);
+            let (h, s, l) = mixer_adjustments_for_perceptual(&curves, c);
+            [h, s, l]
+        })
+        .collect();
+    let hue: Vec<f32> = controls.iter().map(|c| c[0]).collect();
+    let sat: Vec<f32> = controls.iter().map(|c| c[1]).collect();
+    let lum: Vec<f32> = controls.iter().map(|c| c[2]).collect();
+    // Hue/Saturation follow small colour regions; Luminance deliberately
+    // sees a broader lighting neighbourhood. Radii are clamped for tiny
+    // test/preview grids and are independent of the source RGB blur.
+    let short_r = 4usize
+        .min(pw.saturating_sub(1))
+        .min(ph.saturating_sub(1))
+        .max(1);
+    let long_r = 12usize
+        .min(pw.saturating_sub(1))
+        .min(ph.saturating_sub(1))
+        .max(1);
+    let hue = guided_filter_plane(&guide, &hue, pw, ph, short_r, 0.0025);
+    let sat = guided_filter_plane(&guide, &sat, pw, ph, short_r, 0.0025);
+    let lum = guided_filter_plane(&guide, &lum, pw, ph, long_r, 0.0025);
+    Some(
+        (0..samples.len())
+            .into_par_iter()
+            .map(|i| [hue[i], sat[i], lum[i]])
+            .collect(),
+    )
 }
 
 /// Luminance-band edits are already confined by the full-resolution mixer gate.
@@ -1176,5 +1233,50 @@ pub(crate) fn guided_lowpass_plane(i: &[f32], w: usize, h: usize, r: usize, eps:
     (0..n)
         .into_par_iter()
         .map(|k| mean_a[k] * i[k] + mean_b[k])
+        .collect()
+}
+
+/// Guided filter of an arbitrary scalar adjustment plane `p` using luminance
+/// `guide` as the edge signal. Unlike `guided_lowpass_plane` this smooths the
+/// edit amount itself: hue noise inside one lighting region converges, while a
+/// real luminance edge prevents the correction from bleeding across objects.
+pub(crate) fn guided_filter_plane(
+    guide: &[f32],
+    p: &[f32],
+    w: usize,
+    h: usize,
+    r: usize,
+    eps: f32,
+) -> Vec<f32> {
+    let n = w.saturating_mul(h);
+    if n == 0 || guide.len() != n || p.len() != n {
+        return Vec::new();
+    }
+    let ii: Vec<f32> = guide.par_iter().map(|v| v * v).collect();
+    let ip: Vec<f32> = guide
+        .par_iter()
+        .zip(p.par_iter())
+        .map(|(i, p)| i * p)
+        .collect();
+    let mean_i = box_blur_plane(guide, w, h, r);
+    let mean_p = box_blur_plane(p, w, h, r);
+    let mean_ii = box_blur_plane(&ii, w, h, r);
+    let mean_ip = box_blur_plane(&ip, w, h, r);
+    let mut a = vec![0.0f32; n];
+    let mut b = vec![0.0f32; n];
+    a.par_iter_mut()
+        .zip(b.par_iter_mut())
+        .enumerate()
+        .for_each(|(k, (ak, bk))| {
+            let variance = (mean_ii[k] - mean_i[k] * mean_i[k]).max(0.0);
+            let covariance = mean_ip[k] - mean_i[k] * mean_p[k];
+            *ak = covariance / (variance + eps);
+            *bk = mean_p[k] - *ak * mean_i[k];
+        });
+    let mean_a = box_blur_plane(&a, w, h, r);
+    let mean_b = box_blur_plane(&b, w, h, r);
+    (0..n)
+        .into_par_iter()
+        .map(|k| mean_a[k] * guide[k] + mean_b[k])
         .collect()
 }

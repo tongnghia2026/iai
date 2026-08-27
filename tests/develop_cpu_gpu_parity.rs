@@ -1,12 +1,12 @@
 //! CPU/commit and headless GPU/commit parity gates. The GPU gate skips cleanly
 //! when the test host exposes no compatible adapter.
 
-use iai::core::develop::DevelopSettings;
+use iai::core::develop::{DevelopEngineVersion, DevelopSettings};
 use iai::core::develop_scene::{
     apply_scene_to_tilemap, eval_scene_pixel_for_scene, render_default_look, SceneSource,
 };
 use iai::core::layer::{Layer, LayerStack};
-use iai::gpu::compositor::{CompositorState, DevelopGpuPreview};
+use iai::gpu::compositor::{ColorProxies, CompositorState, DevelopGpuPreview, RegionLumaProxy};
 use std::sync::Arc;
 
 #[test]
@@ -98,6 +98,7 @@ fn headless_gpu_preview_matches_committed_scene() {
         }
     }
     scene.camera_rgb_curve = Some(camera_curve);
+    let scene = Arc::new(scene);
     let settings = DevelopSettings {
         temperature: -120.0,
         tint: 37.0,
@@ -120,10 +121,10 @@ fn headless_gpu_preview_matches_committed_scene() {
     let mut compositor = CompositorState::new(&device, width, height, max_texture);
     compositor.develop_preview = Some(DevelopGpuPreview {
         layer_id: 0,
-        settings,
+        settings: settings.clone(),
         region_luma: None,
         color: None,
-        scene: Some(Arc::new(scene)),
+        scene: Some(scene.clone()),
     });
     let result_is_ping =
         compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
@@ -161,4 +162,62 @@ fn headless_gpu_preview_matches_committed_scene() {
     }
     assert!(max_error <= 2, "GPU/commit max error {max_error}/255");
     assert!(p99 <= 1, "GPU/commit p99 error {p99}/255");
+
+    // Develop3 routes selective colour through CPU-built, luma-guided control
+    // planes. Exercise that path explicitly: the shader must consume the same
+    // Hue/Saturation/Luminance controls instead of reclassifying each pixel.
+    let mut v3 = settings;
+    v3.develop_engine_version = DevelopEngineVersion::Develop3;
+    let committed_v3 = apply_scene_to_tilemap(&scene, &v3, None).flatten();
+    let tone = iai::core::develop_scene::build_scene_tone_for_scene(&v3, &scene);
+    let (base, pw, ph) =
+        iai::core::develop_scene::build_scene_color_base_box(&scene, 0, 0, width, height, 1);
+    let toned_samples = iai::core::develop_scene::tone_scene_color_samples(&base, &tone);
+    let region = iai::core::develop_scene::tone_lowpass_scene_region(&base, pw, ph, &tone, 1);
+    let controls = iai::core::develop::guided_mixer_controls(&toned_samples, &v3, pw, ph)
+        .expect("Develop3 V2 mixer must build guided controls");
+    let (tone_base, tone_w, tone_h) = iai::core::develop_scene::build_scene_region_base(
+        &scene,
+        iai::core::develop::TONE_DOWNSAMPLE,
+    );
+    let regional_e = iai::core::develop_scene::finish_region_e(
+        &tone_base,
+        tone_w,
+        tone_h,
+        &tone,
+        iai::core::develop::TONE_DOWNSAMPLE,
+    );
+    compositor.develop_preview = Some(DevelopGpuPreview {
+        layer_id: 0,
+        settings: v3,
+        region_luma: Some(RegionLumaProxy {
+            data: Arc::new(regional_e),
+            w: tone_w,
+            h: tone_h,
+            downsample: iai::core::develop::TONE_DOWNSAMPLE as u32,
+        }),
+        color: Some(ColorProxies {
+            region: Arc::new(region),
+            adjusted: Arc::new(controls),
+            w: pw,
+            h: ph,
+            origin_x: 0,
+            origin_y: 0,
+            downsample: 1,
+            fast_preview: false,
+            guided_controls: true,
+        }),
+        scene: Some(scene),
+    });
+    let result_is_ping =
+        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+    let gpu_v3 = compositor.readback_rgba8(&device, &queue, result_is_ping);
+    let max_v3 = gpu_v3
+        .chunks_exact(4)
+        .zip(committed_v3.chunks_exact(4))
+        .flat_map(|(gpu, cpu)| (0..3).map(move |channel| gpu[channel].abs_diff(cpu[channel])))
+        .max()
+        .unwrap_or(0);
+    eprintln!("Develop3 guided GPU/commit max={max_v3}/255");
+    assert!(max_v3 <= 2, "Develop3 GPU/commit max error {max_v3}/255");
 }

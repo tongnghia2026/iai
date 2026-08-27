@@ -2,8 +2,9 @@
 
 use crate::app::state::App;
 
-fn raw_color_runs_per_pixel(has_color: bool) -> bool {
-    has_color
+fn raw_color_runs_per_pixel(settings: &crate::core::develop::DevelopSettings) -> bool {
+    settings.has_color()
+        && settings.develop_engine_version != crate::core::develop::DevelopEngineVersion::Develop3
 }
 
 impl App {
@@ -99,7 +100,7 @@ impl App {
         // changing models on release was the visible brightness/chroma jump.
         let linear_scene_color = scene.as_ref().is_some_and(|sc| {
             sc.look == crate::core::develop_scene::BaseLook::Raw
-                && raw_color_runs_per_pixel(settings.has_color())
+                && raw_color_runs_per_pixel(&settings)
         });
         let needs_spatial_proxy = settings.texture.abs() > 0.001
             || settings.clarity.abs() > 0.001
@@ -457,6 +458,9 @@ impl App {
                 let color_region = cache.color_region.as_ref().unwrap();
                 // Apply the CURRENT tone to the cached raw base, then colour — so the
                 // preview's tone base tracks the shader's per-pixel tone every frame.
+                let toned_samples = scene_tone.as_ref().map(|st| {
+                    crate::core::develop_scene::tone_scene_color_samples(&color_region.region, st)
+                });
                 let region = std::sync::Arc::new(match &scene_tone {
                     Some(st) => crate::core::develop_scene::tone_lowpass_scene_region(
                         &color_region.region,
@@ -473,12 +477,23 @@ impl App {
                         color_region.downsample as usize,
                     ),
                 });
-                let adjusted = develop::apply_color_to_region(
-                    &region,
-                    &settings,
-                    color_region.w,
-                    color_region.h,
-                );
+                let guided_controls = toned_samples.as_ref().and_then(|samples| {
+                    develop::guided_mixer_controls(
+                        samples,
+                        &settings,
+                        color_region.w,
+                        color_region.h,
+                    )
+                });
+                let uses_guided_controls = guided_controls.is_some();
+                let adjusted = guided_controls.unwrap_or_else(|| {
+                    develop::apply_color_to_region(
+                        &region,
+                        &settings,
+                        color_region.w,
+                        color_region.h,
+                    )
+                });
                 crate::gpu::compositor::ColorProxies {
                     region,
                     adjusted: std::sync::Arc::new(adjusted),
@@ -488,6 +503,7 @@ impl App {
                     origin_y: color_region.origin_y,
                     downsample: color_region.downsample,
                     fast_preview: false,
+                    guided_controls: uses_guided_controls,
                 }
             } else {
                 let fast = cache.fast_region.as_ref().unwrap();
@@ -539,6 +555,7 @@ impl App {
                     origin_y: fast.origin_y,
                     downsample: fast.downsample,
                     fast_preview: true,
+                    guided_controls: false,
                 }
             };
             let cache = self.dev.develop_proxy_cache.as_mut().unwrap();
@@ -570,10 +587,17 @@ impl App {
 #[cfg(test)]
 mod phase6_native_interaction_tests {
     use super::raw_color_runs_per_pixel;
+    use crate::core::develop::{DevelopEngineVersion, DevelopSettings};
 
     #[test]
     fn raw_color_uses_one_per_pixel_model_for_drag_and_release() {
-        assert!(raw_color_runs_per_pixel(true));
-        assert!(!raw_color_runs_per_pixel(false));
+        let mut s = DevelopSettings::default();
+        s.mixer_saturation[0] = 50.0;
+        s.develop_engine_version = DevelopEngineVersion::Develop2;
+        assert!(raw_color_runs_per_pixel(&s));
+        s.develop_engine_version = DevelopEngineVersion::Develop3;
+        assert!(!raw_color_runs_per_pixel(&s));
+        s.mixer_saturation = [0.0; crate::core::develop::MIXER_BANDS];
+        assert!(!raw_color_runs_per_pixel(&s));
     }
 }
