@@ -211,6 +211,11 @@ const TONE_EQ_CLAMP_EV: f32 = 4.0;
 /// out; larger swings are real light↔dark edges and are preserved (no halo).
 const SCENE_TONE_GUIDED_EPS: f32 = 0.25;
 
+/// Exponent of the opt-in Light slider ease (`> 1` → gentler near neutral, full
+/// strength only at the ends). A first clean-room taste value tuned by GUI A/B,
+/// not derived from ART. See [`light_slider_ease`].
+const LIGHT_SLIDER_EASE_POWER: f32 = 1.5;
+
 // ── f16 (IEEE 754 half) helpers — no external dependency ────────────────────
 
 /// f32 → half bits, round-to-nearest-even. Overflow → ±Inf, NaN preserved.
@@ -803,9 +808,32 @@ fn baseline_rgb_gains_with_tone(
     gain
 }
 
+/// Slider-feed ease for the Light tone equalizer: gentle near neutral for fine,
+/// smooth control, reaching full strength only at the slider ends. Exactly
+/// identity at `0` and `±1`, so both the neutral look and the full-travel peak
+/// are preserved — only the mid-travel response softens. `smooth == false`
+/// returns the raw unit (byte-identical legacy feed). Clean-room; the smooth
+/// *behaviour* targets ART's gentler feel but no ART code/constant is used.
+pub(crate) fn light_slider_ease(unit: f32, smooth: bool) -> f32 {
+    if !smooth {
+        return unit;
+    }
+    unit.signum() * unit.abs().powf(LIGHT_SLIDER_EASE_POWER)
+}
+
 /// Signed tone-equalizer offset (EV) for a regional exposure `e` (EV, absolute)
-/// under the four Light sliders. Direct evaluation — the LUT bakes this.
+/// under the four Light sliders. Direct evaluation — the LUT bakes this. The
+/// public entry keeps the shipped (legacy) response byte-identical.
 pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
+    tone_eq_offset_ev_opts(settings, e, false)
+}
+
+/// As [`tone_eq_offset_ev`], with the opt-in smoother response. When `smooth`,
+/// each slider is eased for finer near-neutral control (see [`light_slider_ease`])
+/// and the combined offset saturates through a `tanh` soft-knee instead of a hard
+/// clamp, so strong or stacked pushes roll off gradually rather than hitting a
+/// wall. Both changes are shape-only: zone centres/widths/gains are untouched.
+pub(crate) fn tone_eq_offset_ev_opts(settings: &DevelopSettings, e: f32, smooth: bool) -> f32 {
     let er = e - SCENE_MID_GRAY.log2();
     let g = |zone: (f32, f32, f32), u: f32| -> f32 {
         let d = (er - zone.0) / zone.1;
@@ -817,8 +845,9 @@ pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
     // therefore it has no discontinuous mask edge and does not weaken normal
     // photographic shadows.
     let noise_confidence = smootherstep(-9.0, -7.0, er);
-    let shadow_u = control_to_unit(settings.shadows);
-    let black_u = control_to_unit(settings.blacks);
+    let ease = |slider: f32| light_slider_ease(control_to_unit(slider), smooth);
+    let shadow_u = ease(settings.shadows);
+    let black_u = ease(settings.blacks);
     let v3 =
         settings.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3;
     let shadows_zone = if v3 {
@@ -853,12 +882,46 @@ pub fn tone_eq_offset_ev(settings: &DevelopSettings, e: f32) -> f32 {
         blacks_zone,
         black_u * if black_u > 0.0 { noise_confidence } else { 1.0 },
     ) + if v3 {
-        g(TONE_EQ_V3_MIDTONES, control_to_unit(settings.midtones))
+        g(TONE_EQ_V3_MIDTONES, ease(settings.midtones))
     } else {
         0.0
-    } + g(highlights_zone, control_to_unit(settings.highlights))
-        + g(whites_zone, control_to_unit(settings.whites));
-    off.clamp(-TONE_EQ_CLAMP_EV, TONE_EQ_CLAMP_EV)
+    } + g(highlights_zone, ease(settings.highlights))
+        + g(whites_zone, ease(settings.whites));
+    if smooth {
+        soft_knee_ev(off, TONE_EQ_CLAMP_EV)
+    } else {
+        off.clamp(-TONE_EQ_CLAMP_EV, TONE_EQ_CLAMP_EV)
+    }
+}
+
+/// Smooth replacement for the hard `±limit` clamp on the combined tone-eq offset:
+/// identity up to a knee, then a C1-continuous roll-off approaching `±limit`, so
+/// stacked or extreme Light pushes compress gradually instead of hitting a wall.
+/// Single moderate pushes (below the knee) are left exactly unchanged.
+fn soft_knee_ev(x: f32, limit: f32) -> f32 {
+    const KNEE: f32 = 2.0;
+    let a = x.abs();
+    if a <= KNEE {
+        x
+    } else {
+        let span = limit - KNEE;
+        x.signum() * (KNEE + span * ((a - KNEE) / span).tanh())
+    }
+}
+
+/// Opt-in smoother Light response, Develop3 only. Off by default, so the baked
+/// tone-equalizer LUT (and the GPU LUT it mirrors) stays byte-identical to the
+/// shipped engine. Toggled with `IAI_LIGHT_SMOOTH` (`1`/`true`/`yes`) for GUI A/B
+/// before it becomes the Develop3 default.
+fn light_smooth_enabled(settings: &DevelopSettings) -> bool {
+    settings.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3
+        && matches!(
+            std::env::var("IAI_LIGHT_SMOOTH")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("1" | "true" | "TRUE" | "yes" | "YES")
+        )
 }
 
 // ── SceneToneData: the per-edit precomputed chain ───────────────────────────
@@ -1053,9 +1116,12 @@ fn build_scene_tone_impl(
     let tone_eq_active = settings.has_local_tone();
     let mut tone_eq = [0.0f32; 256];
     if tone_eq_active {
+        // Read the opt-in flag once per LUT rebuild (not per entry). The GPU
+        // preview samples this same baked LUT, so parity is preserved for free.
+        let smooth = light_smooth_enabled(settings);
         for (i, slot) in tone_eq.iter_mut().enumerate() {
             let e = SCENE_EV_MIN + (SCENE_EV_MAX - SCENE_EV_MIN) * i as f32 / 255.0;
-            *slot = tone_eq_offset_ev(settings, e);
+            *slot = tone_eq_offset_ev_opts(settings, e, smooth);
         }
     }
     SceneToneData {
@@ -3316,6 +3382,75 @@ mod tests {
         assert!(
             b - a > 0.03,
             "texture above display white must separate after recovery: {a} vs {b} (was {d0a} vs {d0b})"
+        );
+    }
+
+    #[test]
+    fn light_slider_ease_is_gentle_midtravel_but_keeps_ends() {
+        // Exact identity at the neutral and the two extremes.
+        assert_eq!(light_slider_ease(0.0, true), 0.0);
+        assert!((light_slider_ease(1.0, true) - 1.0).abs() < 1e-6);
+        assert!((light_slider_ease(-1.0, true) + 1.0).abs() < 1e-6);
+        // Monotonic, sign-preserving, and never stronger than linear mid-travel.
+        let mut prev = f32::NEG_INFINITY;
+        for i in 0..=20 {
+            let u = -1.0 + i as f32 * 0.1;
+            let eased = light_slider_ease(u, true);
+            assert!(eased >= prev - 1e-6, "ease must be monotonic");
+            prev = eased;
+            assert_eq!(eased.signum() as i32, u.signum() as i32);
+            if u.abs() > 0.05 && u.abs() < 0.95 {
+                assert!(eased.abs() < u.abs(), "eased mid-travel must be gentler");
+            }
+        }
+        // Disabled is exact identity — the legacy feed is byte-identical.
+        assert_eq!(light_slider_ease(0.37, false), 0.37);
+        assert_eq!(light_slider_ease(-0.81, false), -0.81);
+    }
+
+    #[test]
+    fn tone_eq_smooth_is_optin_and_softens_midtravel() {
+        let s = DevelopSettings {
+            develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop3,
+            shadows: 100.0,
+            blacks: 100.0,
+            ..settings()
+        };
+        let mid = SCENE_MID_GRAY.log2();
+        // Disabled path is byte-identical to the shipped tone equalizer.
+        for k in -8..=6 {
+            let e = mid + k as f32;
+            assert_eq!(
+                tone_eq_offset_ev_opts(&s, e, false),
+                tone_eq_offset_ev(&s, e)
+            );
+        }
+        // A partial (half-travel) push is gentler with smoothing on, but keeps
+        // sign and stays non-zero — finer control, not an inert slider.
+        let half = DevelopSettings {
+            develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop3,
+            shadows: 100.0,
+            ..settings()
+        };
+        let e = mid - 2.8; // Shadows V3 zone centre.
+        let legacy = tone_eq_offset_ev_opts(&half, e, false);
+        let smooth = tone_eq_offset_ev_opts(&half, e, true);
+        assert!(legacy > 0.0 && smooth > 0.0);
+        assert!(
+            smooth < legacy,
+            "eased half-push must be gentler: {smooth} < {legacy}"
+        );
+        // A full-travel single push keeps its peak (ease is identity at ±1).
+        let full = DevelopSettings {
+            develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop3,
+            shadows: 200.0,
+            ..settings()
+        };
+        assert!(
+            (tone_eq_offset_ev_opts(&full, e, true) - tone_eq_offset_ev_opts(&full, e, false))
+                .abs()
+                < 1e-4,
+            "full single push must keep its peak under the soft-knee"
         );
     }
 
