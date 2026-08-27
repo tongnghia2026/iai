@@ -1980,7 +1980,17 @@ pub fn scene_fast_region_develop(
         );
     });
     if settings.has_detail() {
-        apply_detail_to_working_buffer_in_space(&mut working, w, h, settings, tone.working_space);
+        // Live-preview proxy: `step` (source px per proxy px) rescales Detail's
+        // wavelet radii to source scale so the drag preview tracks the settled
+        // full-resolution bake instead of exaggerating at proxy scale (G6).
+        apply_detail_to_working_buffer_in_space(
+            &mut working,
+            w,
+            h,
+            settings,
+            tone.working_space,
+            step,
+        );
     }
     if settings.has_locals() {
         apply_scene_locals_linear_region(
@@ -2199,7 +2209,15 @@ fn render_scene_display_inner(
     }
 
     if let Some((settings, _)) = develop.filter(|(settings, _)| settings.has_detail()) {
-        apply_detail_to_working_buffer_in_space(&mut working, w, h, settings, tone.working_space);
+        // Full-resolution render: `preview_scale = 1` → bit-exact commit Detail.
+        apply_detail_to_working_buffer_in_space(
+            &mut working,
+            w,
+            h,
+            settings,
+            tone.working_space,
+            1,
+        );
     }
 
     if let Some((settings, _)) = develop.filter(|(settings, _)| settings.has_locals()) {

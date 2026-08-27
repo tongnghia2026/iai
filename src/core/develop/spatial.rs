@@ -1048,7 +1048,9 @@ pub(crate) fn apply_fast_preview_to_region(
             plan.apply_locals(r, g, b, x, y);
         });
     }
-    apply_detail_to_display_buffer(&mut out, w, h, settings);
+    // `sample_step` = proxy downsample, so Detail's wavelet radii are rescaled
+    // back to source pixels and the drag preview matches the settled bake.
+    apply_detail_to_display_buffer(&mut out, w, h, settings, sample_step);
     out
 }
 

@@ -251,6 +251,29 @@ fn nr_shadow_weight(brightness: f32, gain: f32) -> f32 {
     1.0 + gain * (1.0 - smootherstep(0.0, NR_SHADOW_MID, brightness.clamp(0.0, 1.0)))
 }
 
+/// Per-à-trous-level weight that scales the Detail contribution down when the
+/// pass runs on a reduced-resolution live-preview proxy. `preview_scale` is the
+/// proxy downsample in SOURCE pixels per proxy pixel; it is `1` for every full-
+/// resolution path (per-tile commit, Apply, settled 100 % bake), which makes
+/// every weight exactly `1.0` and this a bit-exact no-op there.
+///
+/// Why scale at all (plan G6, "quy đổi bán kính về pixel nguồn"): level `l`
+/// sharpens/denoises structure at ≈ `2^l` PROXY px, i.e. `2^l · S` SOURCE px.
+/// The commit only ever touches 1–4 source px, so on the 8–48× live proxy the
+/// proxy's own levels sit at 8–192 source px — far coarser than anything the
+/// commit does. Running them at full strength paints a broad, wrong-scale
+/// halo/blur that then snaps to the fine commit result on pointer release (the
+/// "scale jump"). Weighting each level by the fraction of its intended source
+/// scale the proxy can still resolve, `min(2^l / S, 1)`, keeps the finest (most
+/// objectionable) false level the most suppressed and lets only a coarse hint
+/// through, so the drag preview tracks the settled bake instead of exaggerating
+/// it. Full physical detail returns with the settled full-resolution bake.
+#[inline]
+fn preview_level_survive(preview_scale: u32) -> [f32; WAVELET_LEVELS] {
+    let s = preview_scale.max(1) as f32;
+    std::array::from_fn(|l| ((1u32 << l) as f32 / s).clamp(0.0, 1.0))
+}
+
 /// Colour NR → Luminance NR → Sharpen over one halo'd RGB plane.
 ///
 /// The pixel is split into luminance + chroma offsets (luminance of the chroma
@@ -276,8 +299,12 @@ fn process_detail_plane(
     h: usize,
     p: &DetailParams,
     linear_space: Option<crate::core::working_color::WorkingColorSpace>,
+    preview_scale: u32,
 ) -> Vec<[f32; 3]> {
     let linear = linear_space.is_some();
+    // All-ones for every full-resolution path (`preview_scale == 1`), so the
+    // per-level multiplies below are bit-exact no-ops on the commit/Apply path.
+    let survive = preview_level_survive(preview_scale);
     let mut luma: Vec<f32> = rgb
         .iter()
         .map(|c| {
@@ -322,7 +349,11 @@ fn process_detail_plane(
                 let shadow_w = nr_shadow_weight(luma[i], NR_CHROMA_SHADOW_GAIN);
                 let mut v = res[i];
                 for (j, d) in details.iter().enumerate() {
-                    let atten = (p.color_nr * CHROMA_NR_ATTEN[j] * shadow_w).min(1.0);
+                    // `survive[j]` folds Colour NR toward off on a coarse proxy:
+                    // the fine colour speckle it targets is already averaged out
+                    // by the downsample, so smoothing at proxy scale would only
+                    // bleed broad colour the settled bake keeps.
+                    let atten = (p.color_nr * CHROMA_NR_ATTEN[j] * shadow_w * survive[j]).min(1.0);
                     v += d[i] * (1.0 - atten);
                 }
                 c[ch] = v;
@@ -338,9 +369,13 @@ fn process_detail_plane(
             // boost then cleans shadow grain harder while highlights stay at the
             // pre-upgrade garrote exactly.
             let mut base = p.nr * NR_LUMA_THRESH;
-            for d in details.iter_mut() {
+            for (j, d) in details.iter_mut().enumerate() {
+                // On a coarse proxy the finest levels' grain is gone to the
+                // downsample; `survive[j]` shrinks their garrote threshold toward
+                // 0 (→ no shrink) so preview NR matches the settled result.
+                let level_base = base * survive[j];
                 for (i, v) in d.iter_mut().enumerate() {
-                    let t = base * nr_shadow_weight(res[i], NR_LUMA_SHADOW_GAIN);
+                    let t = level_base * nr_shadow_weight(res[i], NR_LUMA_SHADOW_GAIN);
                     let a = v.abs();
                     // Non-negative garrote: kills sub-threshold coefficients,
                     // barely touches the large (edge/texture) ones.
@@ -375,7 +410,10 @@ fn process_detail_plane(
                         }
                         let weight =
                             p.detail + (1.0 - p.detail) * smootherstep(0.0, SHARPEN_KNEE, dv.abs());
-                        delta += p.amount * level_gain[j] * weight * dv;
+                        // `survive[j]` folds the wrong-scale proxy boost down so
+                        // the drag preview does not paint a coarse false halo the
+                        // fine settled bake never produces.
+                        delta += p.amount * level_gain[j] * weight * dv * survive[j];
                     }
                     let mask = if p.masking > 0.001 {
                         let xl = res[y * w + x.saturating_sub(1)];
@@ -397,7 +435,10 @@ fn process_detail_plane(
                     };
 
                     let edge_gate = smootherstep(0.006, 0.055, edge_mag);
-                    let fr = (p.amount * edge_gate * 0.4).min(0.6) * mask;
+                    // The chroma edge pull guards fine (level-0-scale) demosaic
+                    // fringing, which does not exist on the downsampled proxy;
+                    // `survive[0]` scales it out there and is 1.0 at full res.
+                    let fr = (p.amount * edge_gate * 0.4).min(0.6) * mask * survive[0];
                     if fr > 0.001 {
                         for ch in 0..3 {
                             chroma[i][ch] += (cavg[ch][i] - chroma[i][ch]) * fr;
@@ -452,38 +493,54 @@ pub(crate) fn apply_detail_to_working_buffer(
         height,
         settings,
         crate::core::working_color::WorkingColorSpace::LinearSrgb,
+        1,
     );
 }
 
+/// `preview_scale` is the live-preview proxy downsample (source px per proxy px),
+/// or `1` for the full-resolution commit/settled render. See
+/// [`preview_level_survive`] — it is a bit-exact no-op at `1`.
 pub(crate) fn apply_detail_to_working_buffer_in_space(
     working: &mut Vec<[f32; 3]>,
     width: usize,
     height: usize,
     settings: &DevelopSettings,
     working_space: crate::core::working_color::WorkingColorSpace,
+    preview_scale: u32,
 ) {
     if width == 0 || height == 0 || working.len() != width * height || !has_detail(settings) {
         return;
     }
     let params = DetailParams::new(settings);
-    *working = process_detail_plane(working, width, height, &params, Some(working_space));
+    *working = process_detail_plane(
+        working,
+        width,
+        height,
+        &params,
+        Some(working_space),
+        preview_scale,
+    );
 }
 
 /// Reduced-resolution twin of the display-domain Detail bake. Interactive
 /// preview feeds this an anti-aliased viewport proxy; the wavelet/NR model and
 /// slider constants stay identical to the commit path, only the pixel grid is
-/// smaller.
+/// smaller. `preview_scale` (source px per proxy px) rescales the wavelet radii
+/// back to source scale so the drag preview tracks the settled bake instead of
+/// exaggerating Detail at proxy scale (see [`preview_level_survive`]); pass `1`
+/// to run at native resolution.
 pub(crate) fn apply_detail_to_display_buffer(
     display: &mut Vec<[f32; 3]>,
     width: usize,
     height: usize,
     settings: &DevelopSettings,
+    preview_scale: u32,
 ) {
     if width == 0 || height == 0 || display.len() != width * height || !has_detail(settings) {
         return;
     }
     let params = DetailParams::new(settings);
-    *display = process_detail_plane(display, width, height, &params, None);
+    *display = process_detail_plane(display, width, height, &params, None, preview_scale);
 }
 
 /// Gather a `DETAIL_HALO`-apron'd f32 RGB plane around one tile (edge-clamped,
@@ -557,7 +614,7 @@ pub(crate) fn apply_detail_to_tilemap(source: &TileMap, settings: &DevelopSettin
             }
 
             let (plane, hw, _hh) = gather_detail_plane(source, base_x, base_y, valid_w, valid_h);
-            let out = process_detail_plane(&plane, hw, _hh, &p, None);
+            let out = process_detail_plane(&plane, hw, _hh, &p, None, 1);
             let r = DETAIL_HALO;
 
             for ty in 0..valid_h as usize {
@@ -850,7 +907,7 @@ mod defringe_tests {
                 / (2 * h) as f32
         };
         let rim_before = rim(&edge);
-        apply_detail_to_display_buffer(&mut edge, w, h, &settings);
+        apply_detail_to_display_buffer(&mut edge, w, h, &settings, 1);
         let rim_after = rim(&edge);
         assert!(
             rim_after < rim_before * 0.5,
@@ -860,7 +917,7 @@ mod defringe_tests {
         // 2) Uniform saturated magenta, no edges → preserved.
         let mut flat = vec![[0.42f32, 0.16, 0.50]; w * h];
         let flat_before = chroma_mag(flat[w * h / 2]);
-        apply_detail_to_display_buffer(&mut flat, w, h, &settings);
+        apply_detail_to_display_buffer(&mut flat, w, h, &settings, 1);
         let flat_after = chroma_mag(flat[w * h / 2]);
         assert!(
             (flat_after - flat_before).abs() < 0.02,
@@ -879,7 +936,7 @@ mod defringe_tests {
             }
         }
         let red_before = chroma_mag(red[3 * w + 12]);
-        apply_detail_to_display_buffer(&mut red, w, h, &settings);
+        apply_detail_to_display_buffer(&mut red, w, h, &settings, 1);
         let red_after = chroma_mag(red[3 * w + 12]);
         assert!(
             red_after > red_before * 0.8,
@@ -947,7 +1004,7 @@ mod nr_tests {
         // dark half harder — that gap is what the tone-adaptive upgrade adds.
         let mut settings = DevelopSettings::default();
         settings.noise_reduction = 25.0;
-        apply_detail_to_display_buffer(&mut img, w, h, &settings);
+        apply_detail_to_display_buffer(&mut img, w, h, &settings, 1);
 
         let (dark_mean1, dark_std1) = stats(&img, 0, w / 2);
         let (bright_mean1, bright_std1) = stats(&img, w / 2, w);
@@ -1048,7 +1105,7 @@ mod q6_detail_contract {
 
         let mut settings = DevelopSettings::default();
         settings.sharpening = 70.0;
-        apply_detail_to_display_buffer(&mut img, w, h, &settings);
+        apply_detail_to_display_buffer(&mut img, w, h, &settings, 1);
 
         let acut1 = slope(&img);
         let halo = overshoot(&img);
@@ -1103,9 +1160,9 @@ mod q6_detail_contract {
         let mut masked = make();
         let mut s = DevelopSettings::default();
         s.sharpening = 90.0;
-        apply_detail_to_display_buffer(&mut no_mask, w, h, &s);
+        apply_detail_to_display_buffer(&mut no_mask, w, h, &s, 1);
         s.sharpen_masking = 90.0;
-        apply_detail_to_display_buffer(&mut masked, w, h, &s);
+        apply_detail_to_display_buffer(&mut masked, w, h, &s, 1);
 
         let v_no = var(&no_mask);
         let v_mask = var(&masked);
@@ -1141,7 +1198,7 @@ mod q6_detail_contract {
 
         let mut s = DevelopSettings::default();
         s.color_noise_reduction = 80.0;
-        apply_detail_to_display_buffer(&mut img, w, h, &s);
+        apply_detail_to_display_buffer(&mut img, w, h, &s, 1);
         let cv1 = chroma_var(&img);
         let ly1 = luma_mean(&img);
         println!(
@@ -1196,7 +1253,7 @@ mod q6_detail_contract {
 
         let mut s = DevelopSettings::default();
         s.color_noise_reduction = 80.0;
-        apply_detail_to_display_buffer(&mut img, w, h, &s);
+        apply_detail_to_display_buffer(&mut img, w, h, &s, 1);
         let step1 = step(&img);
         let kept = step1 / step0;
         println!(
@@ -1235,7 +1292,7 @@ mod q6_detail_contract {
                 .collect();
             let mut s = DevelopSettings::default();
             set(&mut s, 100.0);
-            apply_detail_to_display_buffer(&mut img, w, h, &s);
+            apply_detail_to_display_buffer(&mut img, w, h, &s, 1);
             let max_chroma = img.iter().map(|&p| chroma_mag(p)).fold(0.0, f32::max);
             assert!(
                 img.iter()
@@ -1247,5 +1304,93 @@ mod q6_detail_contract {
                 "{name} tinted a neutral: chroma {max_chroma}"
             );
         }
+    }
+
+    // ── G6: preview Detail is rescaled to source pixels ───────────────────────
+
+    #[test]
+    fn preview_scale_folds_detail_back_to_source_scale() {
+        // `preview_level_survive` is a bit-exact no-op at full resolution and
+        // folds each wavelet level toward off as the live proxy coarsens.
+        assert_eq!(preview_level_survive(1), [1.0, 1.0, 1.0]);
+        for s in [1u32, 2, 4, 8, 16, 48] {
+            let w = preview_level_survive(s);
+            assert!(
+                w.iter().all(|&v| (0.0..=1.0).contains(&v)),
+                "scale {s}: {w:?} outside [0,1]"
+            );
+        }
+        // Coarser proxy ⇒ never MORE survival at any level (monotone), and the
+        // finest level (worst false halo) folds at least as hard as the coarse.
+        let mut prev = preview_level_survive(1);
+        for s in [2u32, 4, 8, 16, 48] {
+            let cur = preview_level_survive(s);
+            for l in 0..WAVELET_LEVELS {
+                assert!(
+                    cur[l] <= prev[l] + 1e-6,
+                    "scale {s} level {l}: {} > {}",
+                    cur[l],
+                    prev[l]
+                );
+            }
+            prev = cur;
+        }
+        let w8 = preview_level_survive(8);
+        assert!(
+            w8[0] <= w8[1] && w8[1] <= w8[2],
+            "finest must fold hardest: {w8:?}"
+        );
+
+        // On a soft neutral edge, the sharpen acutance the PREVIEW adds must
+        // shrink as the proxy coarsens: the drag preview stops exaggerating
+        // Detail at proxy scale and tracks the fine settled/commit bake.
+        let (w, h) = (48usize, 8usize);
+        let (lo, hi) = (0.30f32, 0.60f32);
+        let make = || -> Vec<[f32; 3]> {
+            (0..w * h)
+                .map(|i| {
+                    let x = i % w;
+                    let t = ((x as f32 - (w as f32 / 2.0 - 3.0)) / 6.0).clamp(0.0, 1.0);
+                    let s = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+                    let v = lo + (hi - lo) * s;
+                    [v, v, v]
+                })
+                .collect()
+        };
+        let acut = |img: &[[f32; 3]]| -> f32 {
+            let row = h / 2;
+            (0..w - 1)
+                .map(|x| (img[row * w + x + 1][0] - img[row * w + x][0]).abs())
+                .fold(0.0, f32::max)
+        };
+        let a0 = acut(&make());
+        let mut settings = DevelopSettings::default();
+        settings.sharpening = 80.0;
+        let added = |scale: u32| -> f32 {
+            let mut img = make();
+            apply_detail_to_display_buffer(&mut img, w, h, &settings, scale);
+            assert!(img.iter().all(|p| p.iter().all(|c| c.is_finite())));
+            acut(&img) - a0
+        };
+        let a_full = added(1);
+        let a_p2 = added(2);
+        let a_p8 = added(8);
+        println!("G6 preview sharpen add: full {a_full:.4}, 2x {a_p2:.4}, 8x {a_p8:.4}");
+        assert!(
+            a_full > 1e-3,
+            "full-res sharpen should add acutance: {a_full}"
+        );
+        assert!(
+            a_p2 <= a_full + 1e-4,
+            "2x proxy must not exceed full-res add: {a_p2} vs {a_full}"
+        );
+        assert!(
+            a_p8 < a_full - 1e-4,
+            "8x proxy must add clearly less than full res: {a_p8} vs {a_full}"
+        );
+        assert!(
+            a_p8 <= a_p2 + 1e-4,
+            "coarser proxy must not add more: {a_p8} vs {a_p2}"
+        );
     }
 }
