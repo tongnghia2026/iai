@@ -64,9 +64,8 @@ struct CompositorUniforms {
 // Applied last in develop_apply; Clarity/Dehaze are spatial and take their
 // regional base from the colour region proxy (see dev_effects_stage).
 @group(2) @binding(7) var<storage, read> dev_effects: array<f32>;
-// Develop per-channel R/G/B point-curve LUTs: [active_flag, R 256, G 256,
-// B 256]. Applied right after the tone stage, mirroring the CPU
-// `ToneData::apply_rgb_curves` (same tables, both interpolated).
+// Develop curve tables: [active_flag, R 256, G 256, B 256], scene display-luma
+// 256, mixer gate/H/S/L (4×360), ART-Blacks EV gain 256, then gamut cusp data.
 @group(2) @binding(8) var<storage, read> dev_rgb_curve: array<f32>;
 
 struct VsOut {
@@ -1169,6 +1168,16 @@ fn dev_display_lum_at(v: f32) -> f32 {
     return mix(dev_rgb_curve[769u + i0], dev_rgb_curve[769u + i1], t);
 }
 
+// ART-style Blacks EV gain over display-linear EV [-14,+6]. CPU twin:
+// SceneToneData::art_black_at. This follows the RGB/display/mixer curve tables.
+fn dev_art_black_at(e: f32) -> f32 {
+    let x = clamp((e + 14.0) / 20.0, 0.0, 1.0) * 255.0;
+    let i0 = u32(floor(x));
+    let i1 = min(i0 + 1u, 255u);
+    let t = x - f32(i0);
+    return mix(dev_rgb_curve[2465u + i0], dev_rgb_curve[2465u + i1], t);
+}
+
 // The full scene chain: linear scene RGB → display-referred gamma sRGB.
 // CPU twin: SceneToneData::scene_to_display (region_e from the proxy).
 fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
@@ -1176,9 +1185,10 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     let m1 = vec3<f32>(dev_effects[19], dev_effects[20], dev_effects[21]);
     let m2 = vec3<f32>(dev_effects[22], dev_effects[23], dev_effects[24]);
     var v = vec3<f32>(dot(m0, scene_rgb), dot(m1, scene_rgb), dot(m2, scene_rgb));
+    var region_e = 0.0;
     if (u.adj_p[1].x > 0.5) {
-        let e = dev_region_luma_at(local.x * u.layer_w, local.y * u.layer_h);
-        v = v * exp2(dev_tone_eq_at(e));
+        region_e = dev_region_luma_at(local.x * u.layer_w, local.y * u.layer_h);
+        v = v * exp2(dev_tone_eq_at(region_e));
     }
     // Scene-linear split grade. CPU twin: apply_scene_grade.
     let grade_shadow = vec3<f32>(dev_effects[27], dev_effects[28], dev_effects[29]);
@@ -1208,6 +1218,12 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
         outc = dev_compress_highlight_chroma(
             outc, mapped_n, n, dev_effects[8], dev_effects[83] > 0.5
         );
+    }
+    if (dev_effects[10] > 0.5 && u.adj_p[1].x > 0.5) {
+        let mapped_region = max(dev_scene_lut(exp2(region_e)), 6.1035156e-5);
+        let own_e = log2(max(dev_working_luma(outc), 6.1035156e-5));
+        let guard = dev_smootherstep(-8.6, -7.6, own_e);
+        outc = outc * exp2(dev_art_black_at(log2(mapped_region)) * guard);
     }
     // Contrast is independent of the sigmoid shoulder: a two-sided power
     // curve fixed at black, 18.45% grey and white. CPU twin: apply_scene_contrast.

@@ -5,7 +5,8 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 const DEV_EFFECTS_LEN: usize = 84;
-const DEV_RGB_CURVE_BASE_LEN: usize = 2465;
+const DEV_ART_BLACK_LUT_OFFSET: usize = 2465;
+const DEV_RGB_CURVE_BASE_LEN: usize = DEV_ART_BLACK_LUT_OFFSET + 256;
 
 /// Deepest LOD proxy level built for a zoomed-out layer (`S = 2^level`). Level 8
 /// reduces by 256×, enough to render a ~12k-px layer at zoom ≈ 0.004.
@@ -1400,7 +1401,7 @@ struct VsOut {
         let dev_effects_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dev_effects_buf"),
             // [texture, clarity, dehaze, vignette, mixer_gate_active,
-            //  5..16 free (the mixer re-gate table lives in dev_rgb_curve),
+            //  10 scene ART-Blacks flag, 11..16 free,
             //  scene: CAT16·2^EV matrix 16..25, shadow-chroma flag 25,
             //  display-curve flag 26, split-grade RGB vectors 27..33,
             //  working<->sRGB matrices 36..54, working-luma coefficients 54..57,
@@ -1419,6 +1420,7 @@ struct VsOut {
             label: Some("dev_rgb_curve_buf"),
             // [active flag, R 256, G 256, B 256, scene display luma 256,
             // mixer gate + H/S/L working-space curves (4 x 360 entries),
+            // scene ART-Blacks EV LUT (256 entries),
             // then the shared sRGB OKLCh cusp table.
             contents: bytemuck::cast_slice(&dev_rgb_curve_initial),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
@@ -1967,6 +1969,7 @@ struct VsOut {
                     effects[16 + i * 3 + 2] = row[2];
                 }
                 effects[25] = f32::from(tone.shadow_chroma_active);
+                effects[10] = f32::from(tone.art_black_active);
                 effects[27..30].copy_from_slice(&tone.grade_shadow);
                 effects[30..33].copy_from_slice(&tone.grade_highlight);
                 effects[33] = tone.scene_contrast_gamma;
@@ -2017,6 +2020,8 @@ struct VsOut {
                     effects[26] = 1.0;
                     rgb[769..1025].copy_from_slice(display.as_ref());
                 }
+                rgb[DEV_ART_BLACK_LUT_OFFSET..DEV_ART_BLACK_LUT_OFFSET + 256]
+                    .copy_from_slice(&tone.art_black);
                 // Scene-specific RGB curves include the camera-picture-style
                 // fit (and compose user RGB curves over it). Upload the
                 // composed tables, not only `rgb_curve_luts(settings)`: the

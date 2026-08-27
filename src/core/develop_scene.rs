@@ -218,6 +218,16 @@ const TONE_EQ_V3S_SHADOWS: (f32, f32, f32) = (-2.7, 1.5, 1.4);
 const TONE_EQ_V3S_MIDTONES: (f32, f32, f32) = (-0.4, 1.3, 1.0);
 const TONE_EQ_V3S_HIGHLIGHTS: (f32, f32, f32) = (1.2, 1.4, 1.8);
 const TONE_EQ_V3S_WHITES: (f32, f32, f32) = (1.9, 1.3, 1.4);
+/// ART's tone-equalizer samples twelve 2-EV-spaced luminance bands. Its Blacks
+/// control owns the five deepest bands; the remaining bands stay neutral. iAI
+/// independently expresses that mathematical response as an EV-offset LUT so
+/// the existing CPU and GPU regional pipelines can share it unchanged.
+const ART_TONE_EQ_CENTERS: [f32; 12] = [
+    -16.0, -14.0, -12.0, -10.0, -8.0, -6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0,
+];
+const ART_BLACK_BAND_COUNT: usize = 5;
+const ART_BLACK_GUARD_LOW_EV: f32 = -8.6;
+const ART_BLACK_GUARD_HIGH_EV: f32 = -7.6;
 const TONE_EQ_CLAMP_EV: f32 = 4.0;
 /// Guided-filter regularisation for the regional-E plane, in EV² (variance).
 /// Windows varying less than ~0.5 EV read as one lighting region and smooth
@@ -835,6 +845,41 @@ pub(crate) fn light_slider_ease(unit: f32, smooth: bool) -> f32 {
     unit.signum() * unit.abs().powf(LIGHT_SLIDER_EASE_POWER)
 }
 
+/// Relative gain of ART's Blacks band, returned as an EV offset. ART's positive
+/// endpoint is +3 EV and its negative endpoint is -2 EV; iAI's ±200 range maps
+/// to those ±100 endpoints. Dividing by the all-neutral response makes slider
+/// zero exactly identity while preserving ART's band weighting.
+#[inline]
+fn art_blacks_offset_ev(unit: f32, absolute_e: f32) -> f32 {
+    if unit.abs() <= 1e-7 {
+        return 0.0;
+    }
+    let luma_e = absolute_e.clamp(-14.0, 4.0);
+    let endpoint_ev = if unit < 0.0 { 2.0 } else { 3.0 };
+    let black_gain = (unit * endpoint_ev).exp2();
+    let mut black_weight = 0.0;
+    let mut total_weight = 0.0;
+    for (index, center) in ART_TONE_EQ_CENTERS.iter().enumerate() {
+        let d = luma_e - center;
+        let weight = (-d * d / 4.0).exp();
+        total_weight += weight;
+        if index < ART_BLACK_BAND_COUNT {
+            black_weight += weight;
+        }
+    }
+    let gain = (total_weight + black_weight * (black_gain - 1.0)) / total_weight.max(1e-12);
+    gain.max(1e-12).log2()
+}
+
+/// iAI's base sigmoid is steeper in the deepest display tones than ART's host
+/// pipeline. Fade the otherwise-identical ART gain only at the actual pixel's
+/// display-linear black point; upper blacks receive the unmodified formula.
+#[inline]
+fn art_black_point_guard(display_linear_luma: f32) -> f32 {
+    let e = display_linear_luma.max(SCENE_EV_MIN.exp2()).log2();
+    smootherstep(ART_BLACK_GUARD_LOW_EV, ART_BLACK_GUARD_HIGH_EV, e)
+}
+
 /// Signed tone-equalizer offset (EV) for a regional exposure `e` (EV, absolute)
 /// under the four Light sliders. Direct evaluation — the LUT bakes this. The
 /// public entry keeps the shipped (legacy) response byte-identical.
@@ -859,6 +904,7 @@ pub(crate) fn tone_eq_offset_ev_opts(settings: &DevelopSettings, e: f32, smooth:
     // therefore it has no discontinuous mask edge and does not weaken normal
     // photographic shadows.
     let noise_confidence = smootherstep(-9.0, -7.0, er);
+    let shadows_lift_floor = noise_confidence;
     let ease = |slider: f32| light_slider_ease(control_to_unit(slider), smooth);
     let shadow_u = ease(settings.shadows);
     let black_u = ease(settings.blacks);
@@ -890,22 +936,32 @@ pub(crate) fn tone_eq_offset_ev_opts(settings: &DevelopSettings, e: f32, smooth:
             TONE_EQ_WHITES,
         )
     };
+    let black_term = if v3 && smooth {
+        // Smooth Develop3 applies ART Blacks in its own post-base-tone LUT.
+        // Keeping it out of this pre-sigmoid sum prevents the sigmoid slope
+        // from turning a multiplicative lift into a raised black pedestal.
+        0.0
+    } else {
+        g(
+            blacks_zone,
+            black_u * if black_u > 0.0 { noise_confidence } else { 1.0 },
+        )
+    };
     let off = g(
         shadows_zone,
         shadow_u
             * if shadow_u > 0.0 {
-                noise_confidence
+                shadows_lift_floor
             } else {
                 1.0
             },
-    ) + g(
-        blacks_zone,
-        black_u * if black_u > 0.0 { noise_confidence } else { 1.0 },
-    ) + if v3 {
-        g(midtones_zone, ease(settings.midtones))
-    } else {
-        0.0
-    } + g(highlights_zone, ease(settings.highlights))
+    ) + black_term
+        + if v3 {
+            g(midtones_zone, ease(settings.midtones))
+        } else {
+            0.0
+        }
+        + g(highlights_zone, ease(settings.highlights))
         + g(whites_zone, ease(settings.whites));
     if smooth {
         soft_knee_ev(off, TONE_EQ_CLAMP_EV)
@@ -967,6 +1023,10 @@ pub struct SceneToneData {
     /// Tone-equalizer EV offsets over the same axis (all zero when inactive).
     pub tone_eq: [f32; 256],
     pub tone_eq_active: bool,
+    /// ART-style Blacks EV gain over the display-linear EV axis. Kept separate
+    /// so it multiplies the base-toned signal instead of entering the sigmoid.
+    pub art_black: [f32; 256],
+    pub art_black_active: bool,
     /// Raw-look perceptual shadow-chroma compensation. Identity sources bypass
     /// it so tone-neutral non-RAW pixels remain bit-stable.
     pub shadow_chroma_active: bool,
@@ -1134,14 +1194,24 @@ fn build_scene_tone_impl(
         }
     }
     let tone_eq_active = settings.has_local_tone();
+    let smooth = tone_eq_active && light_smooth_enabled(settings);
     let mut tone_eq = [0.0f32; 256];
     if tone_eq_active {
         // Read the opt-in flag once per LUT rebuild (not per entry). The GPU
         // preview samples this same baked LUT, so parity is preserved for free.
-        let smooth = light_smooth_enabled(settings);
         for (i, slot) in tone_eq.iter_mut().enumerate() {
             let e = SCENE_EV_MIN + (SCENE_EV_MAX - SCENE_EV_MIN) * i as f32 / 255.0;
             *slot = tone_eq_offset_ev_opts(settings, e, smooth);
+        }
+    }
+    let art_black_active = smooth && settings.blacks.abs() > 0.001;
+    let mut art_black = [0.0f32; 256];
+    if art_black_active {
+        let unit = control_to_unit(settings.blacks);
+        let last = (art_black.len() - 1) as f32;
+        for (i, slot) in art_black.iter_mut().enumerate() {
+            let display_e = SCENE_EV_MIN + (SCENE_EV_MAX - SCENE_EV_MIN) * i as f32 / last;
+            *slot = art_blacks_offset_ev(unit, display_e);
         }
     }
     SceneToneData {
@@ -1154,6 +1224,8 @@ fn build_scene_tone_impl(
         lut,
         tone_eq,
         tone_eq_active,
+        art_black,
+        art_black_active,
         shadow_chroma_active: look == BaseLook::Raw
             && settings.tone_map_mode == crate::core::develop::ToneMapMode::Perceptual,
         grade_shadow: grade_vector(
@@ -1420,6 +1492,13 @@ impl SceneToneData {
         lut_lerp(&self.tone_eq, t)
     }
 
+    /// ART Blacks EV gain at a display-linear exposure.
+    #[inline]
+    pub fn art_black_at(&self, display_e: f32) -> f32 {
+        let t = ((display_e - SCENE_EV_MIN) / (SCENE_EV_MAX - SCENE_EV_MIN)).clamp(0.0, 1.0);
+        lut_lerp(&self.art_black, t)
+    }
+
     /// Sigmoid through the LUT (display-linear output).
     #[inline]
     fn tone_map(&self, v: f32) -> f32 {
@@ -1435,8 +1514,10 @@ impl SceneToneData {
     /// proxy-free paths — identical for smooth areas by construction).
     pub(crate) fn scene_to_working(&self, rgb: [f32; 3], region_e: Option<f32>) -> [f32; 3] {
         let mut v = cat16::mat_apply(&self.wb_ev, rgb);
+        let mut sampled_region_e = None;
         if self.tone_eq_active {
             let e = region_e.unwrap_or_else(|| self.own_e(v));
+            sampled_region_e = Some(e);
             let gain = self.tone_eq_at(e).exp2();
             v = [v[0] * gain, v[1] * gain, v[2] * gain];
         }
@@ -1449,7 +1530,7 @@ impl SceneToneData {
         ];
         // …blended toward the max-RGB ratio path (spectral hue preserved).
         let n = v[0].max(v[1]).max(v[2]);
-        let out = if n > 1e-8 {
+        let mut out = if n > 1e-8 {
             let mapped_n = self.tone_map(n);
             let s = mapped_n / n;
             let blend = match self.tone_map_mode {
@@ -1475,6 +1556,14 @@ impl SceneToneData {
         } else {
             pc
         };
+        if self.art_black_active {
+            let e = sampled_region_e.unwrap_or_else(|| self.own_e(v));
+            let mapped_region = self.tone_map(e.exp2()).max(SCENE_EV_MIN.exp2());
+            let own_luma = working_luma(self.working_space, out).max(0.0);
+            let guard = art_black_point_guard(own_luma);
+            let gain = (self.art_black_at(mapped_region.log2()) * guard).exp2();
+            out = [out[0] * gain, out[1] * gain, out[2] * gain];
+        }
         let out = self.apply_scene_contrast(out);
         let out = if self.shadow_chroma_active {
             restore_shadow_chroma(out, self.working_space)
@@ -3476,6 +3565,72 @@ mod tests {
     }
 
     #[test]
+    fn smooth_blacks_uses_art_band_gain_shape() {
+        let mid = SCENE_MID_GRAY.log2();
+        let at_er = |slider: &str, value: f32, er: f32, smooth: bool| {
+            let mut s = DevelopSettings {
+                develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop3,
+                ..settings()
+            };
+            match slider {
+                "blacks" => s.blacks = value,
+                "shadows" => s.shadows = value,
+                _ => unreachable!(),
+            }
+            tone_eq_offset_ev_opts(&s, mid + er, smooth)
+        };
+
+        // Neutral is exact identity across the whole ART luminance axis.
+        for e in [-16.0, -14.0, -10.0, -8.0, -6.0, -4.0, 0.0, 4.0] {
+            assert_eq!(art_blacks_offset_ev(0.0, e), 0.0);
+        }
+
+        // ART endpoints: positive Blacks approaches +3 EV (8×) in the deepest
+        // owned bands; negative Blacks approaches -2 EV (1/4×).
+        let deep_positive_gain = art_blacks_offset_ev(1.0, -12.0).exp2();
+        let deep_negative_gain = art_blacks_offset_ev(-1.0, -12.0).exp2();
+        assert!((deep_positive_gain - 8.0).abs() < 0.02);
+        assert!((deep_negative_gain - 0.25).abs() < 0.002);
+        assert_eq!(art_black_point_guard(ART_BLACK_GUARD_LOW_EV.exp2()), 0.0);
+        assert_eq!(art_black_point_guard(ART_BLACK_GUARD_HIGH_EV.exp2()), 1.0);
+
+        // A near-zero pixel changes very little in absolute terms even though
+        // the gain is large; successively brighter black values receive more
+        // visible lift, then the effect rolls away above the Blacks band.
+        let delta = |e: f32| e.exp2() * (art_blacks_offset_ev(1.0, e).exp2() - 1.0);
+        let d14 = delta(-14.0);
+        let d10 = delta(-10.0);
+        let d8 = delta(-8.0);
+        let d6 = delta(-6.0);
+        let d4 = delta(-4.0);
+        assert!(d14 < d10 && d10 < d8 && d8 < d6);
+        assert!(d4 < d6, "Blacks must roll away above its upper-dark peak");
+
+        // Smooth Develop3 removes Blacks from the pre-sigmoid LUT; its separate
+        // ART LUT carries the response. Shadows stays in the existing LUT.
+        assert_eq!(at_er("blacks", 100.0, -5.0, true), 0.0);
+        assert!(at_er("shadows", 100.0, -5.0, true) > 0.0);
+
+        // The opt-out contract remains exact: the ART path must not alter the
+        // shipped Develop3 response.
+        for slider in ["blacks", "shadows"] {
+            let mut s = DevelopSettings {
+                develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop3,
+                ..settings()
+            };
+            if slider == "blacks" {
+                s.blacks = 100.0;
+            } else {
+                s.shadows = 100.0;
+            }
+            assert_eq!(
+                at_er(slider, 100.0, -5.0, false),
+                tone_eq_offset_ev(&s, mid - 5.0)
+            );
+        }
+    }
+
+    #[test]
     fn tone_eq_sliders_move_only_their_zone() {
         let zones = [
             (
@@ -4079,6 +4234,7 @@ mod tests {
             "fn dev_scene_display(",
             "fn dev_scene_lut(",
             "fn dev_tone_eq_at(",
+            "fn dev_art_black_at(",
             "fn dev_gamut_clip_chroma(",
             "fn dev_cusp_chroma(",
             "fn dev_working_to_linear_srgb(",
@@ -4096,6 +4252,9 @@ mod tests {
             "(ev + 14.0) / 20.0",
             "(e + 14.0) / 20.0",
             "6.1035156e-5",
+            "dev_effects[10]",
+            "dev_rgb_curve[2465u + i0]",
+            "dev_smootherstep(-8.6, -7.6, own_e)",
             "dev_effects[16]",
             "dev_effects[25]",
             "dev_smootherstep(0.5, 1.0, mapped_n)",

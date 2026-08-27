@@ -203,10 +203,27 @@ fn run_art(art: &(PathBuf, PathBuf), raw: &Path, tmp: &Path) {
         }
         let (praw, pw, ph) = decode(&png).expect("decode ART band");
         let pushed = box_resample_width(&praw, pw, ph, WIDTH).0;
-        let (_, peak, lo, hi) = influence_curve(&art_neutral, &pushed);
-        println!("  {name:<11} reach luma {lo:.2}..{hi:.2}  peak@{peak:.2}");
+        let (curve, peak, lo, hi) = influence_curve(&art_neutral, &pushed);
+        println!(
+            "  {name:<11} reach luma {lo:.2}..{hi:.2}  peak@{peak:.2}  {}",
+            dark_profile(&curve)
+        );
     }
     let _ = (sw, sh);
+}
+
+/// Normalized influence in the darkest bins (display luma ~0.02/0.06/0.10/0.15),
+/// so the true-black behaviour is visible: a fill light that protects the black
+/// point reads low→high; one that washes it reads high→low.
+fn dark_profile(curve: &[f32]) -> String {
+    let max = curve.iter().cloned().fold(0.0f32, f32::max).max(1e-9);
+    format!(
+        "dark[.02/.06/.10/.15]={:.2}/{:.2}/{:.2}/{:.2}",
+        curve[0] / max,
+        curve[1] / max,
+        curve[2] / max,
+        curve[3] / max,
+    )
 }
 
 /// Measure iAi Develop3's per-slider reach the same way. Reads `IAI_LIGHT_SMOOTH`
@@ -234,7 +251,10 @@ fn measure_iai(raw: &Path) {
         set(&mut s);
         let pushed_full = apply_scene_to_tilemap(scene, &s, None).flatten16();
         let pushed = box_resample_width(&pushed_full, scene.width, scene.height, WIDTH).0;
-        let (_, peak, lo, hi) = influence_curve(&iai_neutral, &pushed);
-        println!("  {name:<11} reach luma {lo:.2}..{hi:.2}  peak@{peak:.2}");
+        let (curve, peak, lo, hi) = influence_curve(&iai_neutral, &pushed);
+        println!(
+            "  {name:<11} reach luma {lo:.2}..{hi:.2}  peak@{peak:.2}  {}",
+            dark_profile(&curve)
+        );
     }
 }
