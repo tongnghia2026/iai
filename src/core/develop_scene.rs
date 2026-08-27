@@ -1004,19 +1004,13 @@ fn soft_knee_ev(x: f32, limit: f32) -> f32 {
     }
 }
 
-/// Opt-in smoother Light response, Develop3 only. Off by default, so the baked
-/// tone-equalizer LUT (and the GPU LUT it mirrors) stays byte-identical to the
-/// shipped engine. Toggled with `IAI_LIGHT_SMOOTH` (`1`/`true`/`yes`) for GUI A/B
-/// before it becomes the Develop3 default.
+/// The smoother Light response is the Develop3 look: eased sliders, ART-shaped
+/// Blacks as a scene-linear tone-eq band, the ART-matched tone zones and the
+/// soft-knee combine. It shipped opt-in behind `IAI_LIGHT_SMOOTH` for GUI A/B;
+/// now that the owner approved it, every Develop3 render uses it. Develop2 and
+/// the legacy engines are untouched, so serialized documents keep their look.
 fn light_smooth_enabled(settings: &DevelopSettings) -> bool {
     settings.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3
-        && matches!(
-            std::env::var("IAI_LIGHT_SMOOTH")
-                .ok()
-                .as_deref()
-                .map(str::trim),
-            Some("1" | "true" | "TRUE" | "yes" | "YES")
-        )
 }
 
 // ── SceneToneData: the per-edit precomputed chain ───────────────────────────
@@ -2537,6 +2531,17 @@ mod tests {
         DevelopSettings::default()
     }
 
+    /// A Develop2-pinned snapshot. Develop3 is now the fresh-document default, so
+    /// tests that assert the Develop2 / legacy-engine contract (its tone curve,
+    /// tone-eq zone layout, non-spatial colour path, sRGB reference) pin the
+    /// engine explicitly — Develop2 must stay intact for old-document compat.
+    fn develop2_settings() -> DevelopSettings {
+        DevelopSettings {
+            develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop2,
+            ..DevelopSettings::default()
+        }
+    }
+
     #[test]
     fn develop2_raw_look_is_punchier_than_scene1() {
         // Phase 3 versions the RAW render transform. A fresh RAW opens on
@@ -2545,7 +2550,7 @@ mod tests {
         // curve, so re-opening it never shifts. The two must therefore DIFFER,
         // Scene1 must stay on the legacy steepness, and Develop2 must carry a
         // steeper (more contrasty) tone curve — pivoted so 18% grey holds.
-        let develop2 = DevelopSettings::default();
+        let develop2 = develop2_settings();
         let mut scene1 = develop2.clone();
         scene1.develop_engine_version = crate::core::develop::DevelopEngineVersion::Scene1;
 
@@ -2662,7 +2667,7 @@ mod tests {
                 scene.set_rgb(x, y, [0.05 + t * 0.9, 0.02 + t * 0.6, 0.4 - t * 0.3]);
             }
         }
-        let mut develop2 = DevelopSettings::default();
+        let mut develop2 = develop2_settings();
         develop2.exposure = 12.0;
         develop2.contrast = 18.0;
         develop2.highlights = -24.0;
@@ -3648,7 +3653,7 @@ mod tests {
                 TONE_EQ_SHADOWS,
                 DevelopSettings {
                     shadows: 200.0,
-                    ..settings()
+                    ..develop2_settings()
                 },
             ),
             (
@@ -3656,7 +3661,7 @@ mod tests {
                 TONE_EQ_BLACKS,
                 DevelopSettings {
                     blacks: 200.0,
-                    ..settings()
+                    ..develop2_settings()
                 },
             ),
             (
@@ -3664,7 +3669,7 @@ mod tests {
                 TONE_EQ_HIGHLIGHTS,
                 DevelopSettings {
                     highlights: 200.0,
-                    ..settings()
+                    ..develop2_settings()
                 },
             ),
             (
@@ -3672,7 +3677,7 @@ mod tests {
                 TONE_EQ_WHITES,
                 DevelopSettings {
                     whites: 200.0,
-                    ..settings()
+                    ..develop2_settings()
                 },
             ),
         ];
@@ -3914,8 +3919,11 @@ mod tests {
             );
             srgb.set_rgb(x, 0, [value; 3]);
         }
-        let wide_rendered = render_default_look(&wide);
-        let srgb_rendered = render_default_look(&srgb);
+        // Pinned to Develop2: this is the legacy sRGB reference contract. (The
+        // fresh-document default is now Develop3; render_default_look follows it.)
+        let d2 = develop2_settings();
+        let wide_rendered = render_scene_display(&wide, &build_scene_tone_for_scene(&d2, &wide));
+        let srgb_rendered = render_scene_display(&srgb, &build_scene_tone_for_scene(&d2, &srgb));
         for (index, (actual, reference)) in
             wide_rendered.iter().zip(srgb_rendered.iter()).enumerate()
         {

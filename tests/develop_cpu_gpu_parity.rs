@@ -107,8 +107,6 @@ fn headless_gpu_preview_matches_committed_scene() {
         saturation: 31.0,
         vibrance: 18.0,
         curve_points: vec![[0.0, 0.0], [0.25, 0.20], [0.70, 0.78], [1.0, 1.0]],
-        mixer_hue: [24.0, -13.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0],
-        mixer_saturation: [18.0, -11.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0],
         ..Default::default()
     };
     let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
@@ -163,12 +161,16 @@ fn headless_gpu_preview_matches_committed_scene() {
     assert!(max_error <= 2, "GPU/commit max error {max_error}/255");
     assert!(p99 <= 1, "GPU/commit p99 error {p99}/255");
 
-    // Develop3 routes selective colour through CPU-built, luma-guided control
-    // planes. Exercise that path explicitly: the shader must consume the same
+    // Part 1 above exercises the default engine (now Develop3) on the NON-spatial
+    // stages, where the GPU preview needs no proxies. The Colour Mixer is spatial
+    // in Develop3 (CPU-built, luma-guided control planes), so its GPU parity is
+    // tested here WITH those proxies fed — the shader must consume the same
     // Hue/Saturation/Luminance controls instead of reclassifying each pixel.
     let mut v3 = settings;
     v3.develop_engine_version = DevelopEngineVersion::Develop3;
     v3.midtones = 35.0;
+    v3.mixer_hue = [24.0, -13.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0];
+    v3.mixer_saturation = [18.0, -11.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0];
     let committed_v3 = apply_scene_to_tilemap(&scene, &v3, None).flatten();
     let tone = iai::core::develop_scene::build_scene_tone_for_scene(&v3, &scene);
     let (base, pw, ph) =

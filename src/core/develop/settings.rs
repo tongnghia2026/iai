@@ -7,16 +7,16 @@ use super::*;
 /// Renderer recipe used to interpret a Develop settings snapshot.
 ///
 /// Missing fields deserialize as `Scene1`, preserving the renderer that created
-/// projects and presets before Develop Engine 2 existed. New snapshots opt into
-/// Develop2 through `Default`.
+/// projects and presets before Develop Engine 2 existed. Fresh snapshots default
+/// to `Develop3` through `Default` (the owner-approved Light/Mixer look).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DevelopEngineVersion {
     Legacy1,
     Scene1,
     Develop2,
-    /// Opt-in Light/Color-Mixer recipe. Existing documents remain pinned to
-    /// their serialized engine; fresh sessions opt in with
-    /// `IAI_LIGHT_MIXER_V3=1` until the look has passed GUI approval.
+    /// The current default renderer for fresh RAW sessions (owner-approved
+    /// Light + Color-Mixer look). Existing documents remain pinned to their
+    /// serialized engine, so re-opening an old project never shifts its look.
     Develop3,
 }
 
@@ -33,13 +33,12 @@ impl DevelopEngineVersion {
     }
 }
 
+/// Engine for a fresh `DevelopSettings` (a new RAW session or raster edit).
+/// Now Develop3 — the owner-approved Light/Mixer look. Documents that serialized
+/// an older engine keep it (see the `#[serde(default)]` on the field, which maps
+/// a missing engine to `Scene1`), so re-opening old projects never shifts.
 fn default_engine_version() -> DevelopEngineVersion {
-    match std::env::var("IAI_LIGHT_MIXER_V3") {
-        Ok(v) if matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES") => {
-            DevelopEngineVersion::Develop3
-        }
-        _ => DevelopEngineVersion::Develop2,
-    }
+    DevelopEngineVersion::Develop3
 }
 
 fn legacy_engine_version() -> DevelopEngineVersion {
@@ -76,10 +75,27 @@ mod tone_v2_settings_tests {
     }
 
     #[test]
-    fn new_documents_default_to_develop2() {
+    fn new_documents_default_to_develop3() {
         assert_eq!(
             DevelopSettings::default().develop_engine_version,
-            DevelopEngineVersion::Develop2
+            DevelopEngineVersion::Develop3
+        );
+    }
+
+    #[test]
+    fn documents_without_an_engine_field_stay_on_legacy_scene1() {
+        // The serde default for a MISSING engine field is Scene1, independent of
+        // the fresh-document default above — so promoting Develop3 must not shift
+        // pre-engine-field projects/presets.
+        let mut value = serde_json::to_value(DevelopSettings::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("develop_engine_version");
+        let reopened: DevelopSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            reopened.develop_engine_version,
+            DevelopEngineVersion::Scene1
         );
     }
 

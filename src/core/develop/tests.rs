@@ -1719,7 +1719,13 @@ fn default_color_quality_is_full_resolution_direct() {
             ]);
         }
     }
-    let mut settings = DevelopSettings::default();
+    // Develop2-pinned: this checks the non-spatial colour path (tilemap bake ==
+    // per-pixel). Develop3's mixer is spatial (guided) by design, so it does not
+    // satisfy this equality; the Develop2 legacy path must, for old-doc compat.
+    let mut settings = DevelopSettings {
+        develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop2,
+        ..Default::default()
+    };
     settings.saturation = 65.0;
     settings.mixer_hue[5] = -35.0;
     assert_eq!(settings.color_smoothing, 0.0);
@@ -3104,7 +3110,12 @@ fn orange_luminance_tile_bake_keeps_unsuppressed_boundary_correction() {
         }
     }
     let source = TileMap::from_rgba(&px, w, h);
-    let mut settings = DevelopSettings::default();
+    // Develop2-pinned: the legacy colour-bake proxy contract (no second spatial
+    // fade). Develop3 routes the mixer through guided control planes instead.
+    let mut settings = DevelopSettings {
+        develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop2,
+        ..Default::default()
+    };
     settings.mixer_luminance[O] = CONTROL_LIMIT;
     let (_toned, region, adjusted) =
         build_color_lowpass(&source, &None, &settings, 0, 0, w, h, false, None);
