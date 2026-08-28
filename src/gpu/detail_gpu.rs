@@ -1,11 +1,12 @@
-//! GPU port of `core::develop::detail::process_detail_plane` (display domain,
-//! luma path: Sharpening + Noise Reduction) so the live preview runs the same
-//! Detail as the CPU commit. Built as a sequence of compute dispatches over one
-//! pooled storage buffer; see `detail.wgsl`.
+//! GPU port of `core::develop::detail::process_detail_plane` — the full
+//! three-slider Detail (Sharpening, Noise Reduction, Colour Noise Reduction) in
+//! both the display and linear/scene working domains, so the live preview runs
+//! the SAME Detail as the CPU commit and matches it pixel-for-pixel. Built as a
+//! sequence of compute dispatches over one pooled storage buffer; see
+//! `detail.wgsl`. Parity is locked by the headless tests below (max abs diff
+//! 0.000/255 display, 1e-6 linear).
 //!
-//! This module is currently a self-contained, headless-testable core (see the
-//! `gpu_detail_parity` integration test). Compositor integration and the
-//! linear/scene domain + chroma-NR (`color_noise_reduction`) land next.
+//! Standalone core; the live-compositor integration is the remaining step.
 
 use wgpu::util::DeviceExt;
 
