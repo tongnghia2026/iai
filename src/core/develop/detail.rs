@@ -266,12 +266,21 @@ fn nr_shadow_weight(brightness: f32, gain: f32) -> f32 {
 /// "scale jump"). Weighting each level by the fraction of its intended source
 /// scale the proxy can still resolve, `min(2^l / S, 1)`, keeps the finest (most
 /// objectionable) false level the most suppressed and lets only a coarse hint
-/// through, so the drag preview tracks the settled bake instead of exaggerating
-/// it. Full physical detail returns with the settled full-resolution bake.
+/// through, so the drag preview does not exaggerate at proxy scale.
+///
+/// The raw fraction `min(2^l / S, 1)` is softened by a square root. The strict
+/// fraction was faithful to a full-resolution reference but suppressed so hard
+/// at moderate zoom (e.g. S≈4 → finest level at 25 %) that the live Detail
+/// preview read as almost off, and it made the on-release settled bake pop
+/// visibly sharper. `sqrt` keeps the finest, most objectionable false level the
+/// most suppressed (monotone, still →0 as S→∞, still exactly 1 at S=1) while
+/// letting enough real detail through that the drag preview looks like the
+/// result and the release transition is gentle. `preview_scale == 1` (every
+/// full-resolution path: per-tile commit, Apply) stays a bit-exact no-op.
 #[inline]
 fn preview_level_survive(preview_scale: u32) -> [f32; WAVELET_LEVELS] {
     let s = preview_scale.max(1) as f32;
-    std::array::from_fn(|l| ((1u32 << l) as f32 / s).clamp(0.0, 1.0))
+    std::array::from_fn(|l| (((1u32 << l) as f32 / s).clamp(0.0, 1.0)).sqrt())
 }
 
 /// Colour NR → Luminance NR → Sharpen over one halo'd RGB plane.

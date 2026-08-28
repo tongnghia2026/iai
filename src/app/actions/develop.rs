@@ -769,7 +769,16 @@ impl App {
             // result harmless; polling it is what releases the single-flight
             // gate before the newest settled settings are baked.
 
-            if settings.has_detail() || settings.has_locals() {
+            // Only Locals still schedule the debounced full-resolution settled
+            // bake. A Detail-only edit deliberately does NOT: its bake re-rendered
+            // the whole image at full-res and swapped it in ~250 ms after release,
+            // which the owner saw as the smooth drag preview "jumping" to a
+            // different (sharper/cleaner) result. The live proxy — now fine at
+            // high zoom and softened (see `preview_level_survive`) — is kept as
+            // the preview instead, so what you drag is what stays; the exact
+            // full-resolution Detail is produced by Apply. Locals need the settled
+            // bake for accurate mask evaluation, so they keep it.
+            if settings.has_locals() {
                 preview.detail_refine_at = if preview.detail_refine_waiting_for_release {
                     None
                 } else {
