@@ -430,26 +430,14 @@ pub(crate) fn develop_panel_contents(
             });
             note_section(out, SEC_COLOR, actions);
 
+            // Detail is intentionally three sliders, like Photoshop's simplified
+            // panel: Sharpening, Noise Reduction, Color Noise Reduction. The
+            // Sharpen Radius/Detail/Masking sub-controls stay at their defaults
+            // (1.0 / 25 / 0 — the Lightroom-standard combo) and Defringe is
+            // retired from the UI; their fields and passes remain in the engine
+            // for old projects and future re-exposure, just not shown here.
             let out = section(ui, data, SEC_DETAIL, "Detail", |ui| {
                 changed |= slider_row(ui, "Sharpening", &mut settings.sharpening, 0.0..=100.0);
-                changed |= slider_row(
-                    ui,
-                    "Sharpen Radius",
-                    &mut settings.sharpen_radius,
-                    0.5..=3.0,
-                );
-                changed |= slider_row(
-                    ui,
-                    "Sharpen Detail",
-                    &mut settings.sharpen_detail,
-                    0.0..=100.0,
-                );
-                changed |= slider_row(
-                    ui,
-                    "Sharpen Masking",
-                    &mut settings.sharpen_masking,
-                    0.0..=100.0,
-                );
                 changed |= slider_row(
                     ui,
                     "Noise Reduction",
@@ -462,10 +450,12 @@ pub(crate) fn develop_panel_contents(
                     &mut settings.color_noise_reduction,
                     0.0..=100.0,
                 );
-                // Defringe slider hidden pending a native fringe sample to tune
-                // against (GUI acceptance failed). The `defringe` field, its
-                // apply_defringe pass and its regression test remain in place so
-                // it can be re-exposed once validated on a real crop.
+            });
+            note_section(out, SEC_DETAIL, actions);
+
+            // Presence/Effects: Texture and Definition (clarity) are creative
+            // local-contrast tools, not Detail — grouped here with Defog/Vignette.
+            let out = section(ui, data, SEC_EFFECTS, "Effects", |ui| {
                 changed |= slider_row(
                     ui,
                     "Texture",
@@ -478,10 +468,6 @@ pub(crate) fn develop_panel_contents(
                     &mut settings.clarity,
                     -CONTROL_LIMIT..=CONTROL_LIMIT,
                 );
-            });
-            note_section(out, SEC_DETAIL, actions);
-
-            let out = section(ui, data, SEC_EFFECTS, "Effects", |ui| {
                 changed |= slider_row(
                     ui,
                     "Defog",

@@ -1295,29 +1295,9 @@ pub(crate) fn export_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                             .size(10.0),
                     );
                 }
-
-                ui.add_space(6.0);
-                ui.label("Output sharpening:");
-                // Map the stored strength back to the nearest preset for display.
-                let cur = data.doc.export_output_sharpen;
-                let cur_name = match cur {
-                    0 => "Off",
-                    1..=45 => "Low",
-                    46..=72 => "Standard",
-                    _ => "High",
-                };
-                ui.horizontal(|ui| {
-                    for (name, val) in [("Off", 0u8), ("Low", 35), ("Standard", 60), ("High", 85)] {
-                        if ui.selectable_label(cur_name == name, name).clicked() {
-                            actions.doc.set_export_output_sharpen = Some(val);
-                        }
-                    }
-                });
-                ui.label(
-                    egui::RichText::new("Re-crisps detail at the export size.")
-                        .color(egui::Color32::GRAY)
-                        .size(10.0),
-                );
+                // Output sharpening control retired from the UI (owner: redundant).
+                // `export_output_sharpen` stays in state at 0, so export never
+                // sharpens; the engine + wiring remain for future re-exposure.
             }
 
             // Press marks — PDF export only. The document is the bleed area; the
