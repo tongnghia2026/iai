@@ -1881,6 +1881,51 @@ pub fn scene_fast_region_develop(
     source_h: u32,
     downsample: u32,
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+    scene_fast_region_develop_with_detail(
+        base,
+        tone,
+        settings,
+        regional_e,
+        w,
+        h,
+        origin_x,
+        origin_y,
+        source_w,
+        source_h,
+        downsample,
+        |working, working_space| {
+            apply_detail_to_working_buffer_in_space(
+                working,
+                w,
+                h,
+                settings,
+                working_space,
+                downsample.max(1),
+            );
+        },
+    )
+}
+
+/// Variant used by the live compositor to inject the cached GPU Detail pass
+/// at the exact same working-space boundary as the CPU commit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scene_fast_region_develop_with_detail<F>(
+    base: &[[f32; 3]],
+    tone: &SceneToneData,
+    settings: &DevelopSettings,
+    regional_e: Option<(&[f32], usize, usize, u32)>,
+    w: usize,
+    h: usize,
+    origin_x: u32,
+    origin_y: u32,
+    source_w: u32,
+    source_h: u32,
+    downsample: u32,
+    apply_detail: F,
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>)
+where
+    F: FnOnce(&mut Vec<[f32; 3]>, crate::core::working_color::WorkingColorSpace),
+{
     let curves = crate::core::develop::build_mixer_curves_opt(settings);
     let mut working: Vec<[f32; 3]> = base
         .par_iter()
@@ -1980,17 +2025,7 @@ pub fn scene_fast_region_develop(
         );
     });
     if settings.has_detail() {
-        // Live-preview proxy: `step` (source px per proxy px) rescales Detail's
-        // wavelet radii to source scale so the drag preview tracks the settled
-        // full-resolution bake instead of exaggerating at proxy scale (G6).
-        apply_detail_to_working_buffer_in_space(
-            &mut working,
-            w,
-            h,
-            settings,
-            tone.working_space,
-            step,
-        );
+        apply_detail(&mut working, tone.working_space);
     }
     if settings.has_locals() {
         apply_scene_locals_linear_region(

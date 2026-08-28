@@ -7,6 +7,43 @@ fn raw_color_runs_per_pixel(settings: &crate::core::develop::DevelopSettings) ->
         && settings.develop_engine_version != crate::core::develop::DevelopEngineVersion::Develop3
 }
 
+fn run_native_gpu_detail(
+    gpu: &crate::gpu::GpuState,
+    pixels: &mut Vec<[f32; 3]>,
+    w: usize,
+    h: usize,
+    settings: &crate::core::develop::DevelopSettings,
+    linear: bool,
+    luma_coeff: [f32; 3],
+) {
+    let params = crate::gpu::detail_gpu::DetailWorkingParams::from_sliders(
+        settings.sharpening,
+        settings.sharpen_radius,
+        settings.sharpen_detail,
+        settings.sharpen_masking,
+        settings.noise_reduction,
+        settings.color_noise_reduction,
+    );
+    let mut rgb = Vec::with_capacity(pixels.len() * 3);
+    for pixel in pixels.iter() {
+        rgb.extend_from_slice(pixel);
+    }
+    let detailed = crate::gpu::detail_gpu::run_detail_tiled_with_runtime(
+        &gpu.detail_runtime,
+        &gpu.device,
+        &gpu.queue,
+        &rgb,
+        w as u32,
+        h as u32,
+        params,
+        linear,
+        luma_coeff,
+    );
+    for (pixel, rgb) in pixels.iter_mut().zip(detailed.chunks_exact(3)) {
+        *pixel = [rgb[0], rgb[1], rgb[2]];
+    }
+}
+
 impl App {
     pub fn flush_develop_gpu_preview(&mut self) {
         if !self.dev.develop_gpu_preview_dirty {
@@ -165,7 +202,28 @@ impl App {
             let mut rw = lx1.saturating_sub(lx0).max(1);
             let mut rh = ly1.saturating_sub(ly0).max(1);
             let downsample = if settings.has_detail() {
-                develop::detail_preview_downsample(rw, rh)
+                // Native-resolution viewport Detail is the WYSIWYG path. Bound
+                // the uploaded RGB proxy by both the adapter's storage-binding
+                // limit and a CPU-latency ceiling; zoomed-out views keep the
+                // existing reduced proxy until the compositor-native capture
+                // path can cover them without a giant host allocation.
+                let storage_pixels = self
+                    .win
+                    .gpu
+                    .as_ref()
+                    .map(|gpu| {
+                        (gpu.device.limits().max_storage_buffer_binding_size as u64 / 12)
+                            .saturating_mul(4)
+                            / 5
+                    })
+                    .unwrap_or(0)
+                    .min(4_000_000);
+                let padded_pixels = (rw as u64 + 128).saturating_mul(rh as u64 + 128);
+                if padded_pixels <= storage_pixels {
+                    1
+                } else {
+                    develop::detail_preview_downsample(rw, rh)
+                }
             } else {
                 develop::fast_preview_downsample(rw, rh)
             } as u32;
@@ -504,14 +562,45 @@ impl App {
                     downsample: color_region.downsample,
                     fast_preview: false,
                     guided_controls: uses_guided_controls,
+                    exact_detail: false,
                 }
             } else {
                 let fast = cache.fast_region.as_ref().unwrap();
+                let exact_detail = settings.has_detail() && fast.downsample == 1;
                 let regional = cache
                     .region_luma
                     .as_ref()
                     .map(|r| (r.data.as_slice(), r.w, r.h, r.downsample));
                 let (region, adjusted) = match &scene_tone {
+                    Some(st) if exact_detail => {
+                        let gpu = self.win.gpu.as_ref().expect("GPU preview checked above");
+                        let (region, adjusted) =
+                            crate::core::develop_scene::scene_fast_region_develop_with_detail(
+                                &fast.region,
+                                st,
+                                &settings,
+                                regional,
+                                fast.w,
+                                fast.h,
+                                fast.origin_x,
+                                fast.origin_y,
+                                fast.source_w,
+                                fast.source_h,
+                                fast.downsample,
+                                |working, working_space| {
+                                    run_native_gpu_detail(
+                                        gpu,
+                                        working,
+                                        fast.w,
+                                        fast.h,
+                                        &settings,
+                                        true,
+                                        working_space.render_luminance_coefficients(),
+                                    );
+                                },
+                            );
+                        (std::sync::Arc::new(region), adjusted)
+                    }
                     Some(st) => {
                         let (region, adjusted) =
                             crate::core::develop_scene::scene_fast_region_develop(
@@ -528,6 +617,34 @@ impl App {
                                 fast.downsample,
                             );
                         (std::sync::Arc::new(region), adjusted)
+                    }
+                    None if exact_detail => {
+                        let gpu = self.win.gpu.as_ref().expect("GPU preview checked above");
+                        let region = fast.region.clone();
+                        let adjusted = develop::apply_fast_preview_to_region_with_detail(
+                            &region,
+                            &settings,
+                            regional,
+                            fast.w,
+                            fast.h,
+                            fast.origin_x,
+                            fast.origin_y,
+                            fast.source_w,
+                            fast.source_h,
+                            fast.downsample,
+                            |pixels| {
+                                run_native_gpu_detail(
+                                    gpu,
+                                    pixels,
+                                    fast.w,
+                                    fast.h,
+                                    &settings,
+                                    false,
+                                    [0.2126, 0.7152, 0.0722],
+                                );
+                            },
+                        );
+                        (region, adjusted)
                     }
                     None => {
                         let region = fast.region.clone();
@@ -556,6 +673,7 @@ impl App {
                     downsample: fast.downsample,
                     fast_preview: true,
                     guided_controls: false,
+                    exact_detail,
                 }
             };
             let cache = self.dev.develop_proxy_cache.as_mut().unwrap();

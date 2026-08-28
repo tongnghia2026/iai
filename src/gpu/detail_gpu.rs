@@ -57,7 +57,7 @@ struct PassParams {
     flags: u32,
     linear: u32,
     chan: u32,
-    _pad1: u32,
+    groups_x: u32,
     src_off: u32,
     dst_off: u32,
     a_off: u32,
@@ -160,13 +160,108 @@ pub fn run_detail_display(
     run_detail(device, queue, rgb, w, h, p, false, [0.2126, 0.7152, 0.0722])
 }
 
+/// Cached shader and compute pipelines for repeated live-preview runs.
+pub struct DetailGpuRuntime {
+    bgl: wgpu::BindGroupLayout,
+    pipelines: Vec<wgpu::ComputePipeline>,
+}
+
+impl DetailGpuRuntime {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("detail_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("detail.wgsl").into()),
+        });
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("detail_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<PassParams>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("detail_pl"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        let pipelines = ENTRIES
+            .iter()
+            .map(|name| {
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("detail_pipe"),
+                    layout: Some(&pl),
+                    module: &shader,
+                    entry_point: Some(name),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            })
+            .collect();
+        Self { bgl, pipelines }
+    }
+
+    /// Run one bounded plane. Callers handling full-resolution photographs
+    /// should use [`run_detail_tiled_with_runtime`] so storage stays bounded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rgb: &[f32],
+        w: u32,
+        h: u32,
+        p: DetailWorkingParams,
+        linear: bool,
+        luma_coeff: [f32; 3],
+    ) -> Vec<f32> {
+        run_detail_impl(self, device, queue, rgb, w, h, p, linear, luma_coeff)
+    }
+}
+
 /// Run the full Detail pipeline (Sharpening + Noise Reduction + Colour NR) on the
 /// GPU and return the RGB result (`3·w·h` f32). `linear` selects the scene/working
 /// domain (working-space `luma_coeff`, no upper clamp) vs the display domain
 /// (clamp at the ends); this is the exact `process_detail_plane` computation, so
-/// the result matches the CPU commit. Builds pipelines per call — fine for tests;
-/// the compositor path will cache them.
+/// the result matches the CPU commit. This convenience entry point builds a
+/// runtime for one call. Live preview
+/// keeps a [`DetailGpuRuntime`] and uses [`run_detail_tiled_with_runtime`].
 pub fn run_detail(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    rgb: &[f32],
+    w: u32,
+    h: u32,
+    p: DetailWorkingParams,
+    linear: bool,
+    luma_coeff: [f32; 3],
+) -> Vec<f32> {
+    let runtime = DetailGpuRuntime::new(device);
+    runtime.run(device, queue, rgb, w, h, p, linear, luma_coeff)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_detail_impl(
+    runtime: &DetailGpuRuntime,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     rgb: &[f32],
@@ -179,6 +274,17 @@ pub fn run_detail(
     let lay = Layout::new(w, h);
     let n = lay.n as usize;
     assert_eq!(rgb.len(), 3 * n, "rgb must be 3*w*h");
+    if n == 0 {
+        return Vec::new();
+    }
+    let total_groups = lay.n.div_ceil(64);
+    let dispatch_limit = device.limits().max_compute_workgroups_per_dimension.max(1);
+    let groups_x = total_groups.min(dispatch_limit);
+    let groups_y = total_groups.div_ceil(groups_x);
+    assert!(
+        groups_y <= dispatch_limit,
+        "detail plane exceeds the device's 2-D dispatch capacity"
+    );
 
     // Pool buffer: upload input into the img region, zero the rest.
     let mut pool_init = vec![0f32; lay.total as usize];
@@ -201,7 +307,7 @@ pub fn run_detail(
         flags: 0,
         linear: if linear { 1 } else { 0 },
         chan: 0,
-        _pad1: 0,
+        groups_x,
         src_off: 0,
         dst_off: 0,
         a_off: 0,
@@ -361,40 +467,9 @@ pub fn run_detail(
         queue.write_buffer(&uniform, i as u64 * STRIDE, bytemuck::bytes_of(pp));
     }
 
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("detail_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("detail.wgsl").into()),
-    });
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("detail_bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: true,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<PassParams>() as u64
-                    ),
-                },
-                count: None,
-            },
-        ],
-    });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("detail_bg"),
-        layout: &bgl,
+        layout: &runtime.bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -410,25 +485,6 @@ pub fn run_detail(
             },
         ],
     });
-    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("detail_pl"),
-        bind_group_layouts: &[Some(&bgl)],
-        immediate_size: 0,
-    });
-    let pipelines: Vec<wgpu::ComputePipeline> = ENTRIES
-        .iter()
-        .map(|name| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("detail_pipe"),
-                layout: Some(&pl),
-                module: &shader,
-                entry_point: Some(name),
-                compilation_options: Default::default(),
-                cache: None,
-            })
-        })
-        .collect();
-
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("detail_encoder"),
     });
@@ -437,11 +493,10 @@ pub fn run_detail(
             label: Some("detail_pass"),
             timestamp_writes: None,
         });
-        let groups = (lay.n + 63) / 64;
         for (i, (pi, _)) in passes.iter().enumerate() {
-            cpass.set_pipeline(&pipelines[*pi]);
+            cpass.set_pipeline(&runtime.pipelines[*pi]);
             cpass.set_bind_group(0, &bind_group, &[(i as u64 * STRIDE) as u32]);
-            cpass.dispatch_workgroups(groups, 1, 1);
+            cpass.dispatch_workgroups(groups_x, groups_y, 1);
         }
     }
 
@@ -468,6 +523,99 @@ pub fn run_detail(
     let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
     drop(data);
     readback.unmap();
+    out
+}
+
+const DETAIL_HALO: u32 = 16;
+const PREFERRED_TILE_CORE: u32 = 1024;
+
+/// Full-resolution entry point used by live preview. The source is split into
+/// apron'd tiles so the pooled working storage remains bounded even for a
+/// 24–60 MP photograph. The 16-pixel apron covers the widest dependency chain
+/// in the three-level à-trous pass plus the sharpening chroma average; cropping
+/// it after each run therefore matches one monolithic pass without seams.
+#[allow(clippy::too_many_arguments)]
+pub fn run_detail_tiled_with_runtime(
+    runtime: &DetailGpuRuntime,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    rgb: &[f32],
+    w: u32,
+    h: u32,
+    p: DetailWorkingParams,
+    linear: bool,
+    luma_coeff: [f32; 3],
+) -> Vec<f32> {
+    let available_bytes = device
+        .limits()
+        .max_buffer_size
+        .min(device.limits().max_storage_buffer_binding_size as u64);
+    // Pool layout is exactly 20 f32 values per pixel. Leave a little room for
+    // alignment/driver bookkeeping and account for the apron on both sides.
+    let max_plane_pixels = (available_bytes.saturating_mul(9) / 10 / 80).max(1);
+    let max_plane_edge = (max_plane_pixels as f64).sqrt().floor() as u32;
+    let core_edge = PREFERRED_TILE_CORE.min(max_plane_edge.saturating_sub(2 * DETAIL_HALO).max(1));
+    run_detail_tiled_with_core(
+        runtime, device, queue, rgb, w, h, p, linear, luma_coeff, core_edge,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_detail_tiled_with_core(
+    runtime: &DetailGpuRuntime,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    rgb: &[f32],
+    w: u32,
+    h: u32,
+    p: DetailWorkingParams,
+    linear: bool,
+    luma_coeff: [f32; 3],
+    core_edge: u32,
+) -> Vec<f32> {
+    let n = (w as usize).saturating_mul(h as usize);
+    assert_eq!(rgb.len(), 3 * n, "rgb must be 3*w*h");
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let core_edge = core_edge.max(1);
+    let mut out = vec![0.0f32; 3 * n];
+    for core_y in (0..h).step_by(core_edge as usize) {
+        let core_h = core_edge.min(h - core_y);
+        for core_x in (0..w).step_by(core_edge as usize) {
+            let core_w = core_edge.min(w - core_x);
+            // Do not synthesize padding outside the full image: every à-trous
+            // level clamps its intermediate plane at the real image edge, and
+            // pre-extending source pixels would not be mathematically equal.
+            let source_x0 = core_x.saturating_sub(DETAIL_HALO);
+            let source_y0 = core_y.saturating_sub(DETAIL_HALO);
+            let source_x1 = (core_x + core_w + DETAIL_HALO).min(w);
+            let source_y1 = (core_y + core_h + DETAIL_HALO).min(h);
+            let tile_w = source_x1 - source_x0;
+            let tile_h = source_y1 - source_y0;
+            let crop_x = core_x - source_x0;
+            let crop_y = core_y - source_y0;
+            let mut tile = vec![0.0f32; 3 * (tile_w * tile_h) as usize];
+            for tile_y in 0..tile_h {
+                for tile_x in 0..tile_w {
+                    let source_x = source_x0 + tile_x;
+                    let source_y = source_y0 + tile_y;
+                    let source_i = 3 * (source_y * w + source_x) as usize;
+                    let tile_i = 3 * (tile_y * tile_w + tile_x) as usize;
+                    tile[tile_i..tile_i + 3].copy_from_slice(&rgb[source_i..source_i + 3]);
+                }
+            }
+
+            let detailed = runtime.run(device, queue, &tile, tile_w, tile_h, p, linear, luma_coeff);
+            for y in 0..core_h {
+                let source_row = 3 * ((y + crop_y) * tile_w + crop_x) as usize;
+                let dest_row = 3 * ((core_y + y) * w + core_x) as usize;
+                let row_len = 3 * core_w as usize;
+                out[dest_row..dest_row + row_len]
+                    .copy_from_slice(&detailed[source_row..source_row + row_len]);
+            }
+        }
+    }
     out
 }
 
@@ -600,5 +748,64 @@ mod tests {
         }
         println!("GPU vs CPU linear Detail max abs diff = {max_diff:.6}");
         assert!(max_diff < 3e-3, "GPU linear Detail diverges: {max_diff}");
+    }
+
+    #[test]
+    fn gpu_detail_tiled_matches_monolithic_without_seams() {
+        let Some((device, queue)) = crate::gpu::vector::renderer::headless_device() else {
+            eprintln!("no headless GPU adapter; skipped");
+            return;
+        };
+        let (w, h) = (73u32, 57u32);
+        let mut rgb = vec![0.0f32; (3 * w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) as usize;
+                let edge = if x >= 37 { 0.71 } else { 0.19 };
+                let noise = (((i as u32)
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223)
+                    >> 8) as f32
+                    / 16_777_215.0
+                    - 0.5)
+                    * 0.07;
+                rgb[3 * i] = (edge + noise).clamp(0.0, 1.0);
+                rgb[3 * i + 1] = (edge * 0.91 - noise * 0.4).clamp(0.0, 1.0);
+                rgb[3 * i + 2] = (edge * 0.73 + noise * 0.7).clamp(0.0, 1.0);
+            }
+        }
+        let params = DetailWorkingParams::from_sliders(72.0, 1.0, 25.0, 0.0, 43.0, 58.0);
+        let runtime = DetailGpuRuntime::new(&device);
+        let whole = runtime.run(
+            &device,
+            &queue,
+            &rgb,
+            w,
+            h,
+            params,
+            false,
+            [0.2126, 0.7152, 0.0722],
+        );
+        // A deliberately tiny core forces seams through both smooth and edge
+        // regions; the apron must make every cropped pixel identical.
+        let tiled = run_detail_tiled_with_core(
+            &runtime,
+            &device,
+            &queue,
+            &rgb,
+            w,
+            h,
+            params,
+            false,
+            [0.2126, 0.7152, 0.0722],
+            29,
+        );
+        let max_diff = whole
+            .iter()
+            .zip(&tiled)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        println!("GPU tiled vs monolithic Detail max abs diff = {max_diff:.8}");
+        assert!(max_diff < 1e-6, "tiled GPU Detail has a seam: {max_diff}");
     }
 }

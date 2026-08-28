@@ -124,6 +124,9 @@ pub struct GpuState {
     ///   - the GPU brush pipeline is disabled (CPU brush is used instead)
     pub is_large_canvas: bool,
     pub compositor: compositor::CompositorState,
+    /// Cached compute pipelines for Develop Detail. Kept beside the compositor
+    /// so slider frames reuse shader/pipeline compilation.
+    pub detail_runtime: detail_gpu::DetailGpuRuntime,
     pub current_frame_is_ping: bool,
     /// Set by wgpu's device-lost callback (driver reset / TDR — e.g. after a
     /// heavy AI inference or an idle power cycle). Every resource on this
@@ -689,6 +692,7 @@ impl GpuState {
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
 
         let compositor = compositor::CompositorState::new(&device, 1, 1, max_tex);
+        let detail_runtime = detail_gpu::DetailGpuRuntime::new(&device);
 
         let is_large_canvas = canvas_w > max_tex
             || canvas_h > max_tex
@@ -734,6 +738,7 @@ impl GpuState {
             max_texture_dimension: max_tex,
             is_large_canvas,
             compositor,
+            detail_runtime,
             current_frame_is_ping: true,
             device_lost,
             missing_texture_logged: std::collections::HashSet::new(),

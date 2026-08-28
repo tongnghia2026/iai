@@ -930,6 +930,40 @@ pub(crate) fn apply_fast_preview_to_region(
     source_h: u32,
     downsample: u32,
 ) -> Vec<[f32; 3]> {
+    apply_fast_preview_to_region_with_detail(
+        region,
+        settings,
+        regional_luma,
+        w,
+        h,
+        origin_x,
+        origin_y,
+        source_w,
+        source_h,
+        downsample,
+        |out| apply_detail_to_display_buffer(out, w, h, settings, downsample.max(1)),
+    )
+}
+
+/// Live-compositor variant that injects GPU Detail after the legacy display
+/// chain's Local stage, matching the order used by the destructive commit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_fast_preview_to_region_with_detail<F>(
+    region: &[[f32; 3]],
+    settings: &DevelopSettings,
+    regional_luma: Option<(&[f32], usize, usize, u32)>,
+    w: usize,
+    h: usize,
+    origin_x: u32,
+    origin_y: u32,
+    source_w: u32,
+    source_h: u32,
+    downsample: u32,
+    apply_detail: F,
+) -> Vec<[f32; 3]>
+where
+    F: FnOnce(&mut Vec<[f32; 3]>),
+{
     let tone = tone_is_active(settings).then(|| build_tone_data(settings));
     let use_color = has_color(settings);
     let curves = build_mixer_curves_opt(settings);
@@ -1062,7 +1096,7 @@ pub(crate) fn apply_fast_preview_to_region(
     }
     // `sample_step` = proxy downsample, so Detail's wavelet radii are rescaled
     // back to source pixels and the drag preview matches the settled bake.
-    apply_detail_to_display_buffer(&mut out, w, h, settings, sample_step);
+    apply_detail(&mut out);
     out
 }
 

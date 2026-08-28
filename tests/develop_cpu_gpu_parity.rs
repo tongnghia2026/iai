@@ -192,7 +192,7 @@ fn headless_gpu_preview_matches_committed_scene() {
     );
     compositor.develop_preview = Some(DevelopGpuPreview {
         layer_id: 0,
-        settings: v3,
+        settings: v3.clone(),
         region_luma: Some(RegionLumaProxy {
             data: Arc::new(regional_e),
             w: tone_w,
@@ -209,8 +209,9 @@ fn headless_gpu_preview_matches_committed_scene() {
             downsample: 1,
             fast_preview: false,
             guided_controls: true,
+            exact_detail: false,
         }),
-        scene: Some(scene),
+        scene: Some(scene.clone()),
     });
     let result_is_ping =
         compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
@@ -223,4 +224,58 @@ fn headless_gpu_preview_matches_committed_scene() {
         .unwrap_or(0);
     eprintln!("Develop3 guided GPU/commit max={max_v3}/255");
     assert!(max_v3 <= 2, "Develop3 GPU/commit max error {max_v3}/255");
+
+    // Native Detail preview supplies the already output-transformed, full-density
+    // viewport plane. Mode 4 must select it directly (no proxy delta re-combine
+    // or second effects pass), while keeping the compositor's final quantisation.
+    let detail_settings = DevelopSettings {
+        sharpening: 68.0,
+        noise_reduction: 34.0,
+        color_noise_reduction: 51.0,
+        ..v3
+    };
+    let committed_detail16 = apply_scene_to_tilemap(&scene, &detail_settings, None).flatten16();
+    let committed_detail = apply_scene_to_tilemap(&scene, &detail_settings, None).flatten();
+    let exact: Vec<[f32; 3]> = committed_detail16
+        .chunks_exact(4)
+        .map(|p| {
+            [
+                p[0] as f32 / 65535.0,
+                p[1] as f32 / 65535.0,
+                p[2] as f32 / 65535.0,
+            ]
+        })
+        .collect();
+    compositor.develop_preview = Some(DevelopGpuPreview {
+        layer_id: 0,
+        settings: detail_settings,
+        region_luma: None,
+        color: Some(ColorProxies {
+            region: Arc::new(exact.clone()),
+            adjusted: Arc::new(exact),
+            w: width as usize,
+            h: height as usize,
+            origin_x: 0,
+            origin_y: 0,
+            downsample: 1,
+            fast_preview: true,
+            guided_controls: false,
+            exact_detail: true,
+        }),
+        scene: Some(scene),
+    });
+    let result_is_ping =
+        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+    let gpu_detail = compositor.readback_rgba8(&device, &queue, result_is_ping);
+    let max_detail = gpu_detail
+        .chunks_exact(4)
+        .zip(committed_detail.chunks_exact(4))
+        .flat_map(|(gpu, cpu)| (0..3).map(move |channel| gpu[channel].abs_diff(cpu[channel])))
+        .max()
+        .unwrap_or(0);
+    eprintln!("native Detail proxy/commit max={max_detail}/255");
+    assert!(
+        max_detail <= 1,
+        "native Detail proxy/commit max error {max_detail}/255"
+    );
 }

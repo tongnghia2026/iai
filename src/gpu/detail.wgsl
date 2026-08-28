@@ -19,7 +19,7 @@ struct PassParams {
     flags: u32,      // bit0 = horizontal pass, bit1 = edge-aware
     linear: u32,
     chan: u32,       // chroma channel (0..2) for the chroma-NR passes
-    _pad1: u32,
+    groups_x: u32,  // number of dispatched workgroups in X (for 2-D linearisation)
     // generic buffer offsets (in f32 elements)
     src_off: u32,
     dst_off: u32,
@@ -68,6 +68,10 @@ const NR_CHROMA_SHADOW_GAIN: f32 = 1.2;
 // Chroma-NR per-level attenuation at a full slider (finest killed hardest).
 const CHROMA_NR_ATTEN: array<f32, 3> = array<f32, 3>(1.0, 0.85, 0.6);
 
+fn linear_index(gid: vec3<u32>) -> u32 {
+    return gid.y * P.groups_x * 64u + gid.x;
+}
+
 fn luminance(r: f32, g: f32, b: f32) -> f32 {
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
@@ -84,7 +88,7 @@ fn nr_shadow_weight(brightness: f32, gain: f32) -> f32 {
 // Split RGB into luminance + chroma offsets (display domain).
 @compute @workgroup_size(64)
 fn split(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = linear_index(gid);
     if (i >= P.n) { return; }
     let r = pool[P.img_off + i * 3u];
     let g = pool[P.img_off + i * 3u + 1u];
@@ -107,7 +111,7 @@ fn split(@builtin(global_invocation_id) gid: vec3<u32>) {
 // single-plane offsets.
 @compute @workgroup_size(64)
 fn atrous(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = linear_index(gid);
     if (i >= P.n) { return; }
     let w = i32(P.w);
     let h = i32(P.h);
@@ -146,7 +150,7 @@ fn atrous(@builtin(global_invocation_id) gid: vec3<u32>) {
 // Detail coefficient dst = a − b.
 @compute @workgroup_size(64)
 fn diff(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = linear_index(gid);
     if (i >= P.n) { return; }
     pool[P.dst_off + i] = pool[P.a_off + i] - pool[P.b_off + i];
 }
@@ -155,7 +159,7 @@ fn diff(@builtin(global_invocation_id) gid: vec3<u32>) {
 // à-trous kernels can decompose it.
 @compute @workgroup_size(64)
 fn extract_channel(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = linear_index(gid);
     if (i >= P.n) { return; }
     pool[P.dst_off + i] = pool[P.chroma_off + i * 3u + P.chan];
 }
@@ -164,7 +168,7 @@ fn extract_channel(@builtin(global_invocation_id) gid: vec3<u32>) {
 // tone-adaptive (luma-shadow) attenuation. Mirrors the CPU chroma-NR recombine.
 @compute @workgroup_size(64)
 fn chroma_recombine(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = linear_index(gid);
     if (i >= P.n) { return; }
     let shadow_w = nr_shadow_weight(pool[P.luma_off + i], NR_CHROMA_SHADOW_GAIN);
     var v = pool[P.res_off + i];
@@ -180,7 +184,7 @@ fn chroma_recombine(@builtin(global_invocation_id) gid: vec3<u32>) {
 // threshold using the residual brightness.
 @compute @workgroup_size(64)
 fn nr_garrote(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = linear_index(gid);
     if (i >= P.n) { return; }
     let sw = nr_shadow_weight(pool[P.res_off + i], NR_LUMA_SHADOW_GAIN);
     let base = P.nr * NR_LUMA_THRESH;
@@ -203,7 +207,7 @@ fn garrote_at(idx: u32, t: f32) {
 // 3-channel chroma plane. flags bit0 = horizontal.
 @compute @workgroup_size(64)
 fn box_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = linear_index(gid);
     if (i >= P.n) { return; }
     let w = i32(P.w);
     let h = i32(P.h);
@@ -237,7 +241,7 @@ fn box_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
 // NR-only reconstruction: luma = residual + Σ (shrunk) details.
 @compute @workgroup_size(64)
 fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = linear_index(gid);
     if (i >= P.n) { return; }
     let base = pool[P.res_off + i] + pool[P.d0_off + i] + pool[P.d1_off + i] + pool[P.d2_off + i];
     if (P.linear == 0u) {
@@ -251,7 +255,7 @@ fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
 // the chroma de-fringe pull. Writes the new luma and the pulled chroma.
 @compute @workgroup_size(64)
 fn sharpen(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = linear_index(gid);
     if (i >= P.n) { return; }
     let w = i32(P.w);
     let h = i32(P.h);
@@ -309,7 +313,7 @@ fn sharpen(@builtin(global_invocation_id) gid: vec3<u32>) {
 // Recombine luminance + chroma back to RGB (display clamp at the ends).
 @compute @workgroup_size(64)
 fn combine(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = linear_index(gid);
     if (i >= P.n) { return; }
     let l = pool[P.luma_off + i];
     for (var c = 0u; c < 3u; c = c + 1u) {

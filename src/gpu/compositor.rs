@@ -656,7 +656,13 @@ fn develop_to_gpu(
     // needs adj_p[1].z/.w (reused here for the colour origin).
     if let Some(c) = color {
         if !c.region.is_empty() {
-            adj_p[8] = if c.fast_preview { 2.0 } else { 1.0 };
+            adj_p[8] = if c.exact_detail {
+                4.0
+            } else if c.fast_preview {
+                2.0
+            } else {
+                1.0
+            };
             adj_p[9] = c.downsample.max(1) as f32;
             adj_p[10] = c.w as f32;
             adj_p[11] = c.h as f32;
@@ -703,7 +709,9 @@ fn develop_scene_to_gpu(
     let mut adj_p = [0.0f32; 12];
     if let Some(c) = color {
         if !c.region.is_empty() {
-            adj_p[8] = if c.guided_controls {
+            adj_p[8] = if c.exact_detail {
+                4.0
+            } else if c.guided_controls {
                 3.0
             } else if c.fast_preview {
                 2.0
@@ -777,6 +785,9 @@ pub struct ColorProxies {
     /// `adjusted` stores guided [hue, saturation, luminance] controls rather
     /// than RGB. Scene WGSL applies them to its full-resolution working pixel.
     pub guided_controls: bool,
+    /// Native-resolution GPU Detail result. The shader samples `adjusted`
+    /// directly instead of re-combining a reduced proxy delta.
+    pub exact_detail: bool,
 }
 
 #[derive(Clone)]

@@ -1303,8 +1303,15 @@ fn dev_color_proxy_at(lx: f32, ly: f32) -> CrColorProxy {
     }
     let origin = vec2<f32>(u.adj_p[1].z, u.adj_p[1].w);
     let s = max(u.adj_p[2].y, 1.0);
-    let fx = clamp((lx - origin.x + 0.5) / s - 0.5, 0.0, f32(pw - 1u));
-    let fy = clamp((ly - origin.y + 0.5) / s - 0.5, 0.0, f32(ph - 1u));
+    // Reduced proxies are indexed from source-pixel coordinates as before.
+    // The native Detail plane instead follows texture pixel-centre semantics:
+    // the first layer fragment arrives at lx=0.5 and must select texel 0,
+    // rather than interpolate texels 0/1 and soften the exact result.
+    let native_detail = u.adj_p[2].x > 3.5;
+    let sample_x = select(lx - origin.x + 0.5, lx - origin.x, native_detail);
+    let sample_y = select(ly - origin.y + 0.5, ly - origin.y, native_detail);
+    let fx = clamp(sample_x / s - 0.5, 0.0, f32(pw - 1u));
+    let fy = clamp(sample_y / s - 0.5, 0.0, f32(ph - 1u));
     let x0 = u32(floor(fx));
     let y0 = u32(floor(fy));
     let x1 = min(x0 + 1u, pw - 1u);
@@ -1566,6 +1573,9 @@ fn develop_apply(srgb_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     }
     if (u.adj_p[2].x > 0.5) {
         let cp = dev_color_proxy_at(local.x * u.layer_w, local.y * u.layer_h);
+        if (u.adj_p[2].x > 3.5) {
+            return clamp(cp.adjusted, vec3(0.0), vec3(1.0));
+        }
         if (u.adj_p[2].x > 2.5) {
             return dev_effects_stage(toned, local, dev_luma(cp.region));
         }
