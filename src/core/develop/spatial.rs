@@ -667,22 +667,34 @@ pub(crate) fn suppress_edge_correction(
 }
 
 pub fn fast_preview_downsample(width: u32, height: u32) -> usize {
-    fast_preview_downsample_for_target(width, height, crate::core::hw::fast_preview_target_pixels())
+    fast_preview_downsample_for_target(
+        width,
+        height,
+        crate::core::hw::fast_preview_target_pixels(),
+        FAST_PREVIEW_MIN_DOWNSAMPLE,
+    )
 }
 
 /// Detail's wavelet/NR tail is heavier than Effects/Local point operations.
 /// Keep its live proxy within two thirds of the normal tier budget so the same
 /// model stays under the slider-to-frame latency gate without weakening the
 /// commit kernel.
+///
+/// Unlike the general fast preview, Detail is allowed all the way down to a 1×
+/// (native) proxy. The pixel-count budget already caps per-frame cost, so on the
+/// small visible crop of a zoomed-in view the proxy becomes fine enough to show
+/// the real, source-scale sharpening/NR live (paired with G6's source-scale
+/// rescale it then matches the settled bake) — instead of the old 8× floor that
+/// forced every Detail preview coarse even at 100 %, where fine detail lives.
 pub(crate) fn detail_preview_downsample(width: u32, height: u32) -> usize {
     let target = (crate::core::hw::fast_preview_target_pixels() * 2 / 3).max(1);
-    fast_preview_downsample_for_target(width, height, target)
+    fast_preview_downsample_for_target(width, height, target, 1)
 }
 
-fn fast_preview_downsample_for_target(width: u32, height: u32, target: usize) -> usize {
+fn fast_preview_downsample_for_target(width: u32, height: u32, target: usize, min: usize) -> usize {
     let pixels = (width as usize).saturating_mul(height as usize).max(1);
     let s = ((pixels as f32 / target as f32).sqrt().ceil() as usize)
-        .clamp(FAST_PREVIEW_MIN_DOWNSAMPLE, FAST_PREVIEW_MAX_DOWNSAMPLE);
+        .clamp(min.max(1), FAST_PREVIEW_MAX_DOWNSAMPLE);
     s.max(1)
 }
 
