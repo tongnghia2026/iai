@@ -267,7 +267,15 @@ pub(crate) fn apply_color_linear_classified_in_space(
     let vib_delta = vibrance * vib_w * 0.88;
     let factor = saturation_factor(global_sat_delta, mixer_sat_delta, vib_delta);
     if (factor - 1.0).abs() > 0.001 {
-        scale_linear_chroma_around_luma(r, g, b, factor, boundary_managed, working_space);
+        scale_linear_chroma_around_luma(
+            r,
+            g,
+            b,
+            factor,
+            boundary_managed,
+            settings.develop_engine_version == DevelopEngineVersion::Develop3,
+            working_space,
+        );
     }
 
     let lum_delta = eased_control(mixer_lum);
@@ -333,14 +341,11 @@ fn apply_mixer_brightness(
 /// equivalents of the old display-domain masks, preserving slider feel.
 ///
 /// `boundary_managed` selects how a POSITIVE push resolves gamut:
-/// - `true` (RAW scene path): scale chroma along a constant OKLCh hue+lightness
-///   line (Q5 gamut-aware Saturation). The scene has one hue-preserving OKLCh
-///   gamut clamp at its output boundary (`working_to_display` →
-///   `map_to_output_gamut`), which fits any excursion back to the MAX in-gamut
-///   chroma at the same hue/lightness. Scaling in OKLCh (not linear RGB) means a
-///   strong push saturates up to the hull instead of overshooting in linear RGB
-///   and folding back to a duller, hue-rotated colour — the pre-Q5 defect where
-///   a full Saturation push turned a saturated red into a duller orange.
+/// - `true` (RAW scene path): Develop3 (`perceptual_positive_push`) scales chroma
+///   along a constant OKLCh hue+lightness line (Q5 gamut-aware Saturation). The
+///   scene's output boundary fits it to the MAX in-gamut chroma at the same
+///   hue/lightness. Develop2 deliberately retains its versioned pre-Q5 radial
+///   response so serialized projects do not change when reopened.
 /// - `false` (raster/PTS wrapper, hard-clamped right after): cap chroma at the
 ///   sRGB gamut hull with the smooth linear-RGB knee — bit-identical to before.
 ///
@@ -352,6 +357,7 @@ fn scale_linear_chroma_around_luma(
     b: &mut f32,
     factor: f32,
     boundary_managed: bool,
+    perceptual_positive_push: bool,
     working_space: WorkingColorSpace,
 ) {
     let y = working_luma(working_space, [*r, *g, *b]).clamp(0.0, 1.0);
@@ -361,7 +367,7 @@ fn scale_linear_chroma_around_luma(
     // scale — hue and lightness stay fixed, the output boundary fits chroma to
     // the hull. See the doc comment above for why this replaces the old linear
     // radial scale for `boundary_managed` boosts.
-    if boundary_managed && req > 0.0 {
+    if boundary_managed && perceptual_positive_push && req > 0.0 {
         let mut color =
             crate::core::perceptual_color::working_rgb_to_perceptual([*r, *g, *b], working_space);
         color.chroma *= 1.0 + req;

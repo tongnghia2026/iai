@@ -233,6 +233,11 @@ mod tests {
         let back: Vec<DevelopPreset> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].name, "Punchy");
+        assert_eq!(
+            back[0].settings.develop_engine_version,
+            crate::core::develop::DevelopEngineVersion::Develop3,
+            "a fresh preset must stay pinned to the renderer it was authored with"
+        );
         assert_eq!(back[0].settings, preset.settings);
     }
 

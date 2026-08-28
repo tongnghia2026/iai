@@ -41,6 +41,7 @@ fn develop2_wide_working_reference_values_are_stable() {
         );
     }
     let settings = DevelopSettings {
+        develop_engine_version: DevelopEngineVersion::Develop2,
         saturation: 65.0,
         vibrance: 30.0,
         mixer_hue: [18.0, -7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0],
@@ -85,6 +86,7 @@ fn every_engine_version_roundtrips_without_renderer_drift() {
         DevelopEngineVersion::Legacy1,
         DevelopEngineVersion::Scene1,
         DevelopEngineVersion::Develop2,
+        DevelopEngineVersion::Develop3,
     ] {
         let settings = DevelopSettings {
             develop_engine_version: engine,
@@ -105,6 +107,71 @@ fn every_engine_version_roundtrips_without_renderer_drift() {
         let after = apply_scene_to_tilemap(&scene, &reopened, None).flatten16();
         assert_eq!(after, before, "renderer drift after {engine:?} reopen");
     }
+}
+
+#[test]
+fn develop3_locked_recipe_bitmap_golden_is_stable() {
+    let (w, h) = (24u32, 16u32);
+    let mut scene = SceneSource::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let xf = x as f32 / (w - 1) as f32;
+            let yf = y as f32 / (h - 1) as f32;
+            let texture = 0.012 * (x as f32 * 0.73).sin() + 0.009 * (y as f32 * 0.51).cos();
+            scene.set_rgb(
+                x,
+                y,
+                [
+                    (0.018 + 0.76 * xf + texture).max(0.0),
+                    (0.012 + 0.48 * yf - texture * 0.35).max(0.0),
+                    (0.025 + 0.31 * (1.0 - xf) + 0.16 * xf * yf + texture * 0.6).max(0.0),
+                ],
+            );
+        }
+    }
+
+    // Moderate values span Develop3's Light, perceptual colour, guided Mixer,
+    // Curve and Detail stages. This is an internal look-freeze guard: any
+    // intentional tuning must update the hash with an accompanying visual note.
+    let settings = DevelopSettings {
+        develop_engine_version: DevelopEngineVersion::Develop3,
+        exposure: 7.0,
+        contrast: 14.0,
+        highlights: -19.0,
+        shadows: 16.0,
+        midtones: 9.0,
+        whites: 6.0,
+        blacks: -8.0,
+        temperature: 5.0,
+        tint: -3.0,
+        vibrance: 17.0,
+        saturation: 8.0,
+        texture: 11.0,
+        clarity: 7.0,
+        sharpening: 24.0,
+        sharpen_detail: 31.0,
+        sharpen_masking: 18.0,
+        noise_reduction: 8.0,
+        color_noise_reduction: 10.0,
+        curve_highlights: -6.0,
+        curve_lights: 8.0,
+        curve_darks: -5.0,
+        curve_shadows: 4.0,
+        mixer_hue: [9.0, -5.0, 4.0, 0.0, -3.0, 6.0, -4.0, 7.0],
+        mixer_saturation: [13.0, -8.0, 6.0, 3.0, -5.0, 7.0, -4.0, 9.0],
+        mixer_luminance: [4.0, -3.0, 5.0, 0.0, -2.0, 3.0, -4.0, 2.0],
+        ..Default::default()
+    };
+    let pixels = apply_scene_to_tilemap(&scene, &settings, None).flatten16();
+    let fingerprint = pixels.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, value| {
+        value.to_le_bytes().into_iter().fold(hash, |hash, byte| {
+            (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    });
+    assert_eq!(
+        fingerprint, 0x44be_2c9d_ca48_1750,
+        "Develop3 locked recipe bitmap changed; review the visual delta before accepting a new golden"
+    );
 }
 
 #[test]

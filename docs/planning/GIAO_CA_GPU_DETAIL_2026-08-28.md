@@ -16,6 +16,13 @@ HEAD lúc giao: `ef37abd`. **11 commit LOCAL chưa push** (quy tắc: chỉ push
 > save/reopen và có diagnostic fallback sau khi scene master bị giải phóng. File
 > cũ và tài liệu không phải RAW vẫn giữ hành vi/manifest cũ.
 
+> **Recipe guard Codex 2026-08-28:** đã thêm bitmap golden toàn pipeline
+> Develop3 (`0x44be2c9dca481750`), pin đủ bốn engine qua JSON reopen và pin preset
+> mới ở Develop3. Guard phát hiện rồi sửa regression: Q5 Saturation từng làm đổi
+> look Develop2; công thức perceptual mới nay chỉ chạy ở Develop3 trên CPU/WGSL.
+> Golden Develop2 trở lại đúng, GPU/CPU cả hai engine tối đa `1/255`. Blind review
+> ART/freeze phát hành vẫn còn.
+
 ---
 
 ## 0. TL;DR cho người nhận

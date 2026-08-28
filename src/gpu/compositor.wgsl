@@ -1047,12 +1047,14 @@ fn dev_rotate_oklab_hue_working(c: vec3<f32>, deg: f32) -> vec3<f32> {
 // linear RGB and folding back to a duller, hue-rotated colour (the pre-Q5
 // defect). Desaturation keeps the exact linear radial scale (already in gamut).
 // CPU twin: scale_linear_chroma_around_luma with boundary_managed = true.
+// The perceptual positive push belongs to the Develop3 recipe; Develop2 keeps
+// its serialized pre-Q5 radial response so reopening an older edit cannot drift.
 fn dev_scale_linear_chroma(c: vec3<f32>, factor: f32) -> vec3<f32> {
     let y = clamp(dev_working_luma(c), 0.0, 1.0);
     let protect = dev_smootherstep(0.0027, 0.0174, y)
         * (1.0 - dev_smootherstep(0.7874, 0.9774, y));
     let req = (clamp(factor, 0.0, 3.20) - 1.0) * protect;
-    if (req > 0.0) {
+    if (req > 0.0 && dev_effects[82] > 0.5) {
         var lab = dev_working_to_oklab(c);
         let s = 1.0 + req;
         lab = vec3<f32>(lab.x, lab.y * s, lab.z * s);
