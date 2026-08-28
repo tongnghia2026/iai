@@ -95,6 +95,10 @@ pub struct GpuState {
     lut3d_tex: wgpu::Texture,
     lut3d_view: wgpu::TextureView,
     lut3d_sampler: wgpu::Sampler,
+    /// Separate display LUT for the Develop OS window: it may be presented on
+    /// another monitor with a different ICC profile.
+    develop_lut3d_tex: wgpu::Texture,
+    develop_lut3d_view: wgpu::TextureView,
     canvas_uniform_buf: wgpu::Buffer,
     cursor_uniform_buf: wgpu::Buffer,
     selection_uniform_buf: wgpu::Buffer,
@@ -485,6 +489,38 @@ impl GpuState {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let develop_lut3d_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("develop_proof_lut3d"),
+            size: wgpu::Extent3d {
+                width: lut_size,
+                height: lut_size,
+                depth_or_array_layers: lut_size,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            develop_lut3d_tex.as_image_copy(),
+            &crate::core::cms::identity_lut(crate::core::cms::PROOF_LUT_SIZE),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(lut_size * 4),
+                rows_per_image: Some(lut_size),
+            },
+            wgpu::Extent3d {
+                width: lut_size,
+                height: lut_size,
+                depth_or_array_layers: lut_size,
+            },
+        );
+        let develop_lut3d_view = develop_lut3d_tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
 
         let bind_group = Self::make_canvas_bind_group(
             &device,
@@ -716,6 +752,8 @@ impl GpuState {
             lut3d_tex,
             lut3d_view,
             lut3d_sampler,
+            develop_lut3d_tex,
+            develop_lut3d_view,
             canvas_uniform_buf,
             cursor_uniform_buf,
             selection_uniform_buf,
@@ -848,6 +886,26 @@ impl GpuState {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(n * 4),
+                rows_per_image: Some(n),
+            },
+            wgpu::Extent3d {
+                width: n,
+                height: n,
+                depth_or_array_layers: n,
+            },
+        );
+    }
+
+    /// Replace the Develop window's display LUT without changing the main
+    /// window. Both windows still share document/proof settings.
+    pub fn upload_develop_proof_lut(&self, data: &[u8]) {
+        let n = crate::core::cms::PROOF_LUT_SIZE as u32;
+        self.queue.write_texture(
+            self.develop_lut3d_tex.as_image_copy(),
             data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
@@ -1760,7 +1818,7 @@ impl GpuState {
                 display_view,
                 &self.sampler,
                 &self.develop_canvas_uniform_buf,
-                &self.lut3d_view,
+                &self.develop_lut3d_view,
                 &self.lut3d_sampler,
             )
         });

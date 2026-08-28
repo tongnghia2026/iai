@@ -842,6 +842,10 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::Moved(_) => {
+                self.refresh_main_system_display_profile();
+            }
+
             WindowEvent::DroppedFile(path) => {
                 // Strict modal lock: opening documents is refused while a
                 // modal operation is in progress.

@@ -29,14 +29,17 @@ shader sample LUT bằng Rust rồi so với lcms trực tiếp:
 Giá trị: đường màu đã đúng → deliverable Q7 = **guard chống hồi quy** (double
 gamma, LUT thô đi, rò transform vào export, lệch parity) — đúng thứ §6/§7 yêu cầu.
 
-## ⚠️ Gap Q7 còn lại (hẹp, để slice sau)
+## ✅ Gap Q7 per-window đã đóng — 2026-08-28
 
-`cms::system_display_profile()` lấy ICC màn hình bằng `GetDC(null)` = **màn hình
-CHÍNH**, KHÔNG theo màn hình chứa cửa sổ (§2). Chỉ ảnh hưởng khi: (1) bật Display
-CMS (opt-in, mặc định TẮT) + (2) nhiều màn hình calibrate KHÁC nhau + (3) cửa sổ
-ở màn hình phụ. Fix cần Windows FFI (`MonitorFromWindow`→HDC màn hình đó→
-`GetICMProfile`) + refresh khi kéo cửa sổ sang màn hình khác → rủi ro trên tool
-thật, lợi ích hẹp → GÁC, làm khi owner cần.
+`system_display_profile_for_hwnd` resolve `MonitorFromWindow` →
+`MONITORINFOEXW.szDevice` → `CreateDCW` → `GetICMProfileW`, nên không còn lấy
+profile màn hình chính bằng virtual-screen DC. Main và Develop giữ hai texture
+LUT riêng để có thể đồng thời nằm trên hai màn hình calibrate khác nhau.
+`WindowEvent::Moved` refresh riêng từng cửa sổ, byte-identical profile là no-op;
+chỉ chế độ **From System** tự đổi, còn **Load Profile...** giữ nguyên profile tay.
+`cargo test --lib`: **1478 passed, 0 failed, 6 ignored**.
+`cargo build --release --bin iai`: pass; portable SHA-256
+`675226F9909C15E92B44D0A6F64A826552A3A844EEE2C92CE65DB9AFBA5E0DA0`.
 
 ## ➡️ NEXT (theo plan §7, phần chưa làm)
 
@@ -44,7 +47,7 @@ Memory M3 (batch tuần tự + spill) / M4 (tiled AHD demosaic + peak scratch) /
 (viewport/crop preview dùng exact pipeline) / M6 (global budget manager). Lưu ý:
 **RAM goal đã đạt qua M1** (owner GUI-OK, <3GB) → M-track ưu tiên THẤP. Q-track
 (Q0–Q7) coi như xong phần chất lượng cốt lõi. Còn tùy chọn nhỏ: Q6 output-sharpen
-theo export (GÁC), Q5 soft hull limiter, Q7 per-window monitor profile.
+theo export (GÁC), Q5 soft hull limiter.
 
 ## Lệnh
 

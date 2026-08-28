@@ -41,10 +41,12 @@ giữa bước commit. Người tiếp quản phải chốt Phase 0 trước khi
   đầu p95 `149.76 ms`, sau khi bỏ upload pool zero `20·N` và chỉ upload RGB
   `3·N` còn p95 `72.44 ms` (gate `<100 ms`). Probe nằm trong
   `tests/perf_develop.rs` và vẫn `#[ignore]` vì phụ thuộc phần cứng.
-- **Phase 7 phải sửa trạng thái cũ:** monitor ICC, soft-proof, gamut warning và
-  display/export parity đã có; guard `cms_display_parity_probe` đã chứng minh
-  đường LUT/LCMS đúng. Gap còn lại chỉ là tự chọn/refresh ICC theo cửa sổ khi
-  chuyển giữa nhiều màn hình.
+- **Phase 7 — CMS per-window: ✅ XONG 2026-08-28** — main và Develop có LUT
+  monitor riêng; Windows resolve `MonitorFromWindow` → display DC →
+  `GetICMProfileW`, refresh trên `WindowEvent::Moved` và chỉ rebuild khi bytes
+  profile đổi. Chế độ `From System` tự theo màn hình; ICC nạp thủ công không bị
+  ghi đè. Soft-proof/document transform vẫn dùng chung và chỉ tác động preview.
+  Release/portable SHA-256: `675226F9909C15E92B44D0A6F64A826552A3A844EEE2C92CE65DB9AFBA5E0DA0`.
 - **Phase 8 — provenance recipe: ✅ XONG** — `raw_render_recipe` giờ được ghi
   tùy chọn vào metadata `.iai`, round-trip qua save/reopen và còn hiển thị trong
   diagnostic khi scene master đã mất. Tài liệu không phải RAW giữ nguyên shape
@@ -64,8 +66,7 @@ giữa bước commit. Người tiếp quản phải chốt Phase 0 trước khi
 **CÒN LẠI:** hoàn tất blind-review ART trên corpus/recipe khóa (đặc biệt Mixer
 từng band + Detail crop 100%); GPU-exact cho fit zoom ảnh lớn (hiện native
 viewport exact, vùng quá lớn fallback proxy); thu bug corpus và đóng băng look
-phát hành sau blind review; chỉ dọn Legacy/Scene1 sau khi có migration; CMS
-per-window multi-monitor; các phần
+phát hành sau blind review; chỉ dọn Legacy/Scene1 sau khi có migration; các phần
 capture/creative/output Detail nâng cao chỉ quay lại nếu UX thực tế cần. Phase 2
 canonical/licensed camera-profile package làm sau cùng theo quyết định owner.
 
@@ -426,7 +427,8 @@ Hoàn thiện Develop theo hướng:
 
 - Phân biệt rõ input profile, scene working space, display working space,
   monitor profile và output profile.
-- Nạp monitor ICC theo hệ điều hành; cache transform theo profile hash/intent.
+- [x] Nạp monitor ICC theo hệ điều hành và refresh riêng theo main/Develop khi
+  cửa sổ đổi màn hình; profile bytes không đổi thì không rebuild LUT.
 - Thêm soft proof, black-point compensation và gamut warning.
 - Canvas và export dùng chung rendering intent contract.
 - Test màn hình sRGB và wide-gamut; kiểm tra ảnh có embedded ICC.
@@ -434,7 +436,8 @@ Hoàn thiện Develop theo hướng:
 ### Gate hoàn thành
 
 - Canvas screenshot qua monitor transform khớp export mở trong viewer quản lý màu.
-- Đổi monitor profile không thay scene master hoặc histogram scene-referred.
+- [x] Đổi monitor profile chỉ thay LUT preview, không thay scene master hoặc
+  histogram scene-referred; manual ICC không auto-refresh.
 - Export ICC được nhúng đúng và round-trip trong sai số đã định.
 
 ## 13. Phase 8 — Rollout Develop3 và dọn renderer cũ

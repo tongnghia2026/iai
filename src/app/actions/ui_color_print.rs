@@ -67,16 +67,13 @@ impl App {
         // -- Display colour management (View > Display Profile) --
         if actions.print.display_cms_off {
             self.shell.display_cms_enabled = false;
+            self.shell.display_profile_from_system = false;
             self.apply_proof_settings();
             self.shell.status_msg = "Display color management off".to_string();
         }
         if actions.print.display_cms_from_system {
-            match crate::core::cms::system_display_profile() {
-                Some((name, bytes)) => {
-                    self.shell.display_profile = Some(bytes);
-                    self.shell.display_profile_name = name.clone();
-                    self.shell.display_cms_enabled = true;
-                    self.apply_proof_settings();
+            match self.enable_system_display_profiles() {
+                Some(name) => {
                     self.shell.status_msg = format!("Display profile: {name}");
                 }
                 None => {
@@ -103,6 +100,9 @@ impl App {
                                 .to_string();
                             self.shell.display_profile = Some(bytes);
                             self.shell.display_profile_name = name.clone();
+                            self.shell.develop_display_profile = self.shell.display_profile.clone();
+                            self.shell.develop_display_profile_name = name.clone();
+                            self.shell.display_profile_from_system = false;
                             self.shell.display_cms_enabled = true;
                             self.apply_proof_settings();
                             self.shell.status_msg = format!("Display profile: {name}");

@@ -278,6 +278,7 @@ impl App {
         self.win.develop_egui_ctx = Some(ctx);
         self.win.develop_egui_state = Some(egui_state);
         self.win.develop_window = Some(window);
+        self.refresh_develop_system_display_profile();
         // Start from a fresh fit view each time the window opens.
         self.dev.develop_view_fit = true;
         self.dev.develop_pan_drag = None;
@@ -534,6 +535,9 @@ impl App {
                         w.request_redraw();
                     }
                 }
+            }
+            WindowEvent::Moved(_) => {
+                self.refresh_develop_system_display_profile();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let now = (position.x as f32, position.y as f32);

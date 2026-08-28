@@ -29,8 +29,15 @@ pub struct UiShell {
     /// Display colour management: when on, the composite is corrected to the
     /// monitor's ICC profile in the blit shader (same 3D-LUT path as soft proof).
     pub(in crate::app) display_cms_enabled: bool,
+    /// True only for View > Display Profile > From System. Manual profiles
+    /// must never be replaced just because a window crosses monitors.
+    pub(in crate::app) display_profile_from_system: bool,
     pub(in crate::app) display_profile: Option<Vec<u8>>,
     pub(in crate::app) display_profile_name: String,
+    /// The Develop OS window can live on a different monitor from main, so it
+    /// owns a separate monitor profile while sharing proof/document settings.
+    pub(in crate::app) develop_display_profile: Option<Vec<u8>>,
+    pub(in crate::app) develop_display_profile_name: String,
     /// Page setup for File ▸ Print (persists across the dialog opening).
     pub(in crate::app) print_layout: crate::core::print::PrintLayout,
     pub(in crate::app) print_printers: Vec<crate::core::print::PrinterInfo>,

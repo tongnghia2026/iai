@@ -4,7 +4,88 @@
 use crate::app::state::App;
 use crate::gpu::{CanvasUniforms, CursorUniforms, SelectionUniforms};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DisplayWindow {
+    Main,
+    Develop,
+}
+
+fn system_profile_auto_refresh_enabled(cms_enabled: bool, from_system: bool) -> bool {
+    cms_enabled && from_system
+}
+
 impl App {
+    fn system_display_profile_for_window(
+        &self,
+        target: DisplayWindow,
+    ) -> Option<(String, Vec<u8>)> {
+        let window = match target {
+            DisplayWindow::Main => self.win.window.as_deref(),
+            DisplayWindow::Develop => self.win.develop_window.as_deref(),
+        }?;
+        let hwnd = crate::file_io::dialog_parent(window)?.hwnd();
+        crate::core::cms::system_display_profile_for_hwnd(hwnd)
+    }
+
+    /// Refresh a system-managed monitor profile after an OS-window move. A
+    /// byte-for-byte comparison avoids rebuilding the LUT for the many Moved
+    /// events emitted while dragging inside one monitor.
+    fn refresh_system_display_profile(&mut self, target: DisplayWindow) {
+        if !system_profile_auto_refresh_enabled(
+            self.shell.display_cms_enabled,
+            self.shell.display_profile_from_system,
+        ) {
+            return;
+        }
+        let Some((name, bytes)) = self.system_display_profile_for_window(target) else {
+            return;
+        };
+        let changed = match target {
+            DisplayWindow::Main => self.shell.display_profile.as_deref() != Some(bytes.as_slice()),
+            DisplayWindow::Develop => {
+                self.shell.develop_display_profile.as_deref() != Some(bytes.as_slice())
+            }
+        };
+        if !changed {
+            return;
+        }
+        match target {
+            DisplayWindow::Main => {
+                self.shell.display_profile = Some(bytes);
+                self.shell.display_profile_name = name;
+            }
+            DisplayWindow::Develop => {
+                self.shell.develop_display_profile = Some(bytes);
+                self.shell.develop_display_profile_name = name;
+            }
+        }
+        self.apply_proof_settings();
+    }
+
+    pub(crate) fn enable_system_display_profiles(&mut self) -> Option<String> {
+        let (main_name, main_bytes) =
+            self.system_display_profile_for_window(DisplayWindow::Main)?;
+        let (develop_name, develop_bytes) = self
+            .system_display_profile_for_window(DisplayWindow::Develop)
+            .unwrap_or_else(|| (main_name.clone(), main_bytes.clone()));
+        self.shell.display_profile_from_system = true;
+        self.shell.display_cms_enabled = true;
+        self.shell.display_profile = Some(main_bytes);
+        self.shell.display_profile_name = main_name.clone();
+        self.shell.develop_display_profile = Some(develop_bytes);
+        self.shell.develop_display_profile_name = develop_name;
+        self.apply_proof_settings();
+        Some(main_name)
+    }
+
+    pub(crate) fn refresh_main_system_display_profile(&mut self) {
+        self.refresh_system_display_profile(DisplayWindow::Main);
+    }
+
+    pub(crate) fn refresh_develop_system_display_profile(&mut self) {
+        self.refresh_system_display_profile(DisplayWindow::Develop);
+    }
+
     /// Canvas rectangle on screen (physical px) used to scissor the canvas quad —
     /// standard clip-to-canvas: layer content outside the canvas isn't drawn
     /// into the black area. None when the canvas is (almost) fully offscreen →
@@ -90,36 +171,52 @@ impl App {
                 && !canvas.icc_profile.data.is_empty())
             .then(|| canvas.icc_profile.data.clone())
         };
-        if self.shell.proof_enabled || self.shell.display_cms_enabled || document_profile.is_some()
-        {
-            let proof = if self.shell.proof_enabled {
-                Some(self.shell.proof_target.icc_bytes())
-            } else {
-                None
-            };
-            let monitor = if self.shell.display_cms_enabled {
-                self.shell.display_profile.clone()
-            } else {
-                None
-            };
-            let lut = crate::core::cms::build_document_display_lut(
+        let active = self.shell.proof_enabled
+            || self.shell.display_cms_enabled
+            || document_profile.is_some();
+        let proof = self
+            .shell
+            .proof_enabled
+            .then(|| self.shell.proof_target.icc_bytes());
+        let main_monitor = self
+            .shell
+            .display_cms_enabled
+            .then(|| self.shell.display_profile.as_deref())
+            .flatten();
+        let develop_monitor = self
+            .shell
+            .display_cms_enabled
+            .then(|| {
+                self.shell
+                    .develop_display_profile
+                    .as_deref()
+                    .or(main_monitor)
+            })
+            .flatten();
+        let build_lut = |monitor: Option<&[u8]>| {
+            if !active {
+                return crate::core::cms::identity_lut(crate::core::cms::PROOF_LUT_SIZE);
+            }
+            crate::core::cms::build_document_display_lut(
                 document_profile.as_deref(),
                 proof.as_deref(),
                 self.shell.proof_gamut_warn,
-                monitor.as_deref(),
+                monitor,
                 crate::core::cms::PROOF_LUT_SIZE,
             )
-            .unwrap_or_else(|| crate::core::cms::identity_lut(crate::core::cms::PROOF_LUT_SIZE));
-            if let Some(gpu) = &self.win.gpu {
-                gpu.upload_proof_lut(&lut);
-            }
-        } else if let Some(gpu) = &self.win.gpu {
-            gpu.upload_proof_lut(&crate::core::cms::identity_lut(
-                crate::core::cms::PROOF_LUT_SIZE,
-            ));
+            .unwrap_or_else(|| crate::core::cms::identity_lut(crate::core::cms::PROOF_LUT_SIZE))
+        };
+        let main_lut = build_lut(main_monitor);
+        let develop_lut = build_lut(develop_monitor);
+        if let Some(gpu) = &self.win.gpu {
+            gpu.upload_proof_lut(&main_lut);
+            gpu.upload_develop_proof_lut(&develop_lut);
         }
         self.push_canvas_uniforms();
         if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        if let Some(w) = &self.win.develop_window {
             w.request_redraw();
         }
     }
@@ -398,5 +495,17 @@ impl App {
             sel.offset.0,
             sel.offset.1,
         );
+    }
+}
+
+#[cfg(test)]
+mod display_profile_tests {
+    use super::system_profile_auto_refresh_enabled;
+
+    #[test]
+    fn only_an_enabled_system_profile_follows_window_moves() {
+        assert!(system_profile_auto_refresh_enabled(true, true));
+        assert!(!system_profile_auto_refresh_enabled(true, false));
+        assert!(!system_profile_auto_refresh_enabled(false, true));
     }
 }

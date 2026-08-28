@@ -671,12 +671,18 @@ pub fn build_document_display_lut(
     Some(pack_rgba(&grid))
 }
 
-/// The OS default display ICC profile as `(name, bytes)`. Windows reads it via
-/// `GetICMProfile`; other platforms return `None` (load it manually instead).
+/// The display ICC profile for a native window as `(name, bytes)`. Passing a
+/// null HWND asks Windows for the desktop/default display profile. For a real
+/// HWND, resolve its nearest monitor and create a DC for that display device;
+/// a virtual-screen DC would otherwise keep returning the primary profile.
 #[cfg(target_os = "windows")]
-pub fn system_display_profile() -> Option<(String, Vec<u8>)> {
+pub fn system_display_profile_for_hwnd(hwnd: isize) -> Option<(String, Vec<u8>)> {
     use core::ffi::c_void;
     use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateDCW, DeleteDC, GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITORINFOEXW,
+        MONITOR_DEFAULTTONEAREST,
+    };
 
     #[link(name = "user32")]
     extern "system" {
@@ -689,32 +695,74 @@ pub fn system_display_profile() -> Option<(String, Vec<u8>)> {
     }
 
     unsafe {
-        let hdc = GetDC(std::ptr::null_mut());
+        let native_hwnd = hwnd as *mut c_void;
+        let mut created_dc = false;
+        let hdc = if hwnd == 0 {
+            GetDC(std::ptr::null_mut())
+        } else {
+            let monitor = MonitorFromWindow(native_hwnd, MONITOR_DEFAULTTONEAREST);
+            if monitor.is_null() {
+                return None;
+            }
+            let mut info = MONITORINFOEXW::default();
+            info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            if GetMonitorInfoW(
+                monitor,
+                &mut info as *mut MONITORINFOEXW as *mut MONITORINFO,
+            ) == 0
+            {
+                return None;
+            }
+            let dc = CreateDCW(
+                info.szDevice.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            );
+            created_dc = !dc.is_null();
+            dc
+        };
         if hdc.is_null() {
             return None;
         }
-        let mut size: u32 = 260; // MAX_PATH chars (incl. NUL)
-        let mut buf = vec![0u16; size as usize];
-        let ok = GetICMProfileW(hdc, &mut size, buf.as_mut_ptr());
-        ReleaseDC(std::ptr::null_mut(), hdc);
-        if ok == 0 {
-            return None;
+        let result = (|| {
+            let mut size = 0u32;
+            if GetICMProfileW(hdc, &mut size, std::ptr::null_mut()) == 0 || size == 0 {
+                return None;
+            }
+            let mut buf = vec![0u16; size as usize];
+            if GetICMProfileW(hdc, &mut size, buf.as_mut_ptr()) == 0 {
+                return None;
+            }
+            buf.truncate(size.saturating_sub(1) as usize); // drop trailing NUL
+            let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf));
+            let bytes = std::fs::read(&path).ok()?;
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Display")
+                .to_string();
+            Some((name, bytes))
+        })();
+        if created_dc {
+            DeleteDC(hdc);
+        } else {
+            ReleaseDC(std::ptr::null_mut(), hdc);
         }
-        buf.truncate(size.saturating_sub(1) as usize); // drop trailing NUL
-        let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf));
-        let bytes = std::fs::read(&path).ok()?;
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Display")
-            .to_string();
-        Some((name, bytes))
+        result
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn system_display_profile() -> Option<(String, Vec<u8>)> {
+pub fn system_display_profile_for_hwnd(_hwnd: isize) -> Option<(String, Vec<u8>)> {
     None
+}
+
+/// The OS default display ICC profile. Prefer
+/// [`system_display_profile_for_hwnd`] when a window is available so a
+/// multi-monitor setup resolves the correct device profile.
+pub fn system_display_profile() -> Option<(String, Vec<u8>)> {
+    system_display_profile_for_hwnd(0)
 }
 
 #[cfg(test)]
