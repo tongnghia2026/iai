@@ -18,7 +18,7 @@ struct PassParams {
     level: u32,
     flags: u32,      // bit0 = horizontal pass, bit1 = edge-aware
     linear: u32,
-    _pad0: u32,
+    chan: u32,       // chroma channel (0..2) for the chroma-NR passes
     _pad1: u32,
     // generic buffer offsets (in f32 elements)
     src_off: u32,
@@ -48,9 +48,9 @@ struct PassParams {
     lg0: f32,
     lg1: f32,
     lg2: f32,
-    _fpad0: f32,
-    _fpad1: f32,
-    _fpad2: f32,
+    lc0: f32,     // working-space luma coefficients
+    lc1: f32,
+    lc2: f32,
 };
 
 @group(0) @binding(0) var<storage, read_write> pool: array<f32>;
@@ -64,6 +64,9 @@ const NR_LUMA_THRESH: f32 = 0.08;
 const NR_LEVEL_DECAY: f32 = 0.5;
 const NR_SHADOW_MID: f32 = 0.5;
 const NR_LUMA_SHADOW_GAIN: f32 = 1.5;
+const NR_CHROMA_SHADOW_GAIN: f32 = 1.2;
+// Chroma-NR per-level attenuation at a full slider (finest killed hardest).
+const CHROMA_NR_ATTEN: array<f32, 3> = array<f32, 3>(1.0, 0.85, 0.6);
 
 fn luminance(r: f32, g: f32, b: f32) -> f32 {
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -86,7 +89,13 @@ fn split(@builtin(global_invocation_id) gid: vec3<u32>) {
     let r = pool[P.img_off + i * 3u];
     let g = pool[P.img_off + i * 3u + 1u];
     let b = pool[P.img_off + i * 3u + 2u];
-    let l = clamp(luminance(r, g, b), 0.0, 1.0);
+    let y = P.lc0 * r + P.lc1 * g + P.lc2 * b;
+    var l: f32;
+    if (P.linear == 0u) {
+        l = clamp(y, 0.0, 1.0);
+    } else {
+        l = max(y, 0.0);
+    }
     pool[P.luma_off + i] = l;
     pool[P.chroma_off + i * 3u] = r - l;
     pool[P.chroma_off + i * 3u + 1u] = g - l;
@@ -140,6 +149,31 @@ fn diff(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if (i >= P.n) { return; }
     pool[P.dst_off + i] = pool[P.a_off + i] - pool[P.b_off + i];
+}
+
+// Copy one chroma channel (P.chan) out to a contiguous scratch plane so the
+// à-trous kernels can decompose it.
+@compute @workgroup_size(64)
+fn extract_channel(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= P.n) { return; }
+    pool[P.dst_off + i] = pool[P.chroma_off + i * 3u + P.chan];
+}
+
+// Chroma NR recombine: chroma[chan] = residual + Σ detail_j·(1 − atten_j), with a
+// tone-adaptive (luma-shadow) attenuation. Mirrors the CPU chroma-NR recombine.
+@compute @workgroup_size(64)
+fn chroma_recombine(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= P.n) { return; }
+    let shadow_w = nr_shadow_weight(pool[P.luma_off + i], NR_CHROMA_SHADOW_GAIN);
+    var v = pool[P.res_off + i];
+    var dd = array<f32, 3>(pool[P.d0_off + i], pool[P.d1_off + i], pool[P.d2_off + i]);
+    for (var j = 0; j < 3; j = j + 1) {
+        let atten = min(P.color_nr * CHROMA_NR_ATTEN[j] * shadow_w, 1.0);
+        v = v + dd[j] * (1.0 - atten);
+    }
+    pool[P.chroma_off + i * 3u + P.chan] = v;
 }
 
 // Non-negative garrote luma NR over the three detail levels, shadow-boosted
