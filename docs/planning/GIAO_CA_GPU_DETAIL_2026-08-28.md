@@ -11,6 +11,11 @@ HEAD lúc giao: `ef37abd`. **11 commit LOCAL chưa push** (quy tắc: chỉ push
 > được đo p95 `72.44 ms` sau khi chỉ upload RGB thay vì zero-fill toàn pool.
 > Phần M4 còn lại là fit zoom vùng nguồn quá lớn, hiện vẫn fallback proxy.
 
+> **Tiếp tục Codex 2026-08-28:** đã khóa thêm provenance decode-time:
+> `raw_render_recipe` được persist tùy chọn trong `.iai`, round-trip qua
+> save/reopen và có diagnostic fallback sau khi scene master bị giải phóng. File
+> cũ và tài liệu không phải RAW vẫn giữ hành vi/manifest cũ.
+
 ---
 
 ## 0. TL;DR cho người nhận

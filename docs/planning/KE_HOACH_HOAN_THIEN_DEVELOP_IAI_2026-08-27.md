@@ -45,14 +45,19 @@ giữa bước commit. Người tiếp quản phải chốt Phase 0 trước khi
   display/export parity đã có; guard `cms_display_parity_probe` đã chứng minh
   đường LUT/LCMS đúng. Gap còn lại chỉ là tự chọn/refresh ICC theo cửa sổ khi
   chuyển giữa nhiều màn hình.
+- **Phase 8 — provenance recipe: ✅ XONG** — `raw_render_recipe` giờ được ghi
+  tùy chọn vào metadata `.iai`, round-trip qua save/reopen và còn hiển thị trong
+  diagnostic khi scene master đã mất. Tài liệu không phải RAW giữ nguyên shape
+  manifest cũ; file cũ/recipe tương lai không nhận diện vẫn mở baked pixels an
+  toàn mà không bị gán nhầm recipe.
 - **Ưu tiên owner:** tiếp tục từ dễ tới khó. Chuẩn hóa profile hợp pháp để phát
   hành được chuyển xuống cuối vì hiện chỉ dùng cá nhân, chưa công khai. DCP ART
   vẫn chỉ được dùng local và tuyệt đối không đưa vào bản phát hành công khai.
 
 **CÒN LẠI:** hoàn tất blind-review ART trên corpus/recipe khóa (đặc biệt Mixer
 từng band + Detail crop 100%); GPU-exact cho fit zoom ảnh lớn (hiện native
-viewport exact, vùng quá lớn fallback proxy); persist `raw_render_recipe` và
-đóng băng look/migration; Phase 8 bước 3–5 (bug corpus → recipe freeze → chỉ dọn
+viewport exact, vùng quá lớn fallback proxy); đóng băng look/migration; Phase 8
+bước 3–5 (bug corpus → recipe freeze → chỉ dọn
 Legacy/Scene1 sau khi có migration); CMS per-window multi-monitor; các phần
 capture/creative/output Detail nâng cao chỉ quay lại nếu UX thực tế cần. Phase 2
 canonical/licensed camera-profile package làm sau cùng theo quyết định owner.

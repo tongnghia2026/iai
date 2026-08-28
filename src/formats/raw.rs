@@ -1241,6 +1241,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     canvas.metadata.develop_working_space =
         crate::core::working_color::WorkingColorSpace::LinearProPhoto;
     canvas.metadata.color_pipeline_version = 2;
+    canvas.metadata.raw_render_recipe = Some(raw_render_recipe.version);
     Ok(canvas)
 }
 

@@ -108,6 +108,18 @@ impl RawRenderRecipeVersion {
             Self::NaturalV3 => "natural-v3",
         }
     }
+
+    /// Parse the stable manifest/provenance spelling. Unknown future recipes
+    /// stay `None` so older builds can open the baked pixels without silently
+    /// claiming a different RAW decode contract.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "legacy-baked-v1" => Some(Self::LegacyBaked1),
+            "technical-neutral-v2" => Some(Self::TechnicalNeutral2),
+            "natural-v3" => Some(Self::NaturalV3),
+            _ => None,
+        }
+    }
 }
 
 impl JpegMatchMode {
@@ -207,6 +219,22 @@ pub fn resolve_decoder_matrix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_render_recipe_manifest_names_round_trip_and_reject_unknown() {
+        for recipe in [
+            RawRenderRecipeVersion::LegacyBaked1,
+            RawRenderRecipeVersion::TechnicalNeutral2,
+            RawRenderRecipeVersion::NaturalV3,
+        ] {
+            assert_eq!(
+                RawRenderRecipeVersion::from_name(recipe.name()),
+                Some(recipe)
+            );
+        }
+        assert_eq!(RawRenderRecipeVersion::from_name("natural-v4"), None);
+        assert_eq!(RawRenderRecipeVersion::from_name(""), None);
+    }
 
     #[test]
     fn jpeg_match_provenance_distinguishes_matrix_and_curve_diagnostics() {

@@ -80,6 +80,11 @@ pub struct CanvasMetadata {
     pub develop_working_space: crate::core::working_color::WorkingColorSpace,
     /// Version of the scene color-pipeline contract stored by `.iai`.
     pub color_pipeline_version: u16,
+    /// Decode-time RAW look that produced the baked document pixels. `None` for
+    /// non-RAW documents and legacy `.iai` files that predate this provenance.
+    /// The scene master itself remains transient; this tag prevents saved work
+    /// from losing which versioned input recipe created it.
+    pub raw_render_recipe: Option<crate::core::camera_profile::RawRenderRecipeVersion>,
     /// Named process colours owned by this document. Kept out of global UI
     /// preferences so each `.iai` project carries its production palette.
     pub swatches: Vec<crate::core::palette::DocumentSwatch>,
@@ -121,6 +126,7 @@ impl Default for CanvasMetadata {
             source_profile: String::new(),
             develop_working_space: crate::core::working_color::WorkingColorSpace::LinearSrgb,
             color_pipeline_version: 1,
+            raw_render_recipe: None,
             swatches: Vec::new(),
             artboards: Vec::new(),
             page_bleed_px: 0.0,

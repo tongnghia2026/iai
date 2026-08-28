@@ -172,6 +172,9 @@ fn build_canvas_from_meta<R: Read + Seek>(
     };
     canvas.metadata.color_pipeline_version =
         meta["color_pipeline_version"].as_u64().unwrap_or(1) as u16;
+    canvas.metadata.raw_render_recipe = meta["raw_render_recipe"]
+        .as_str()
+        .and_then(crate::core::camera_profile::RawRenderRecipeVersion::from_name);
     canvas.metadata.swatches = super::iai_palette::json_to_palette(meta.get("document_swatches"));
     // Artboards / multi-page container (contract #10). Absent on one-page docs and
     // older files → empty → the canvas falls back to its single implicit page.
@@ -831,6 +834,13 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
         "layers": layers_json,
         "alpha_channels": alpha_json,
     });
+
+    // RAW provenance is optional: non-RAW and legacy documents keep their old
+    // manifest shape, while a RAW-derived document remains auditable after the
+    // transient scene master has been committed or the project reopened.
+    if let Some(recipe) = canvas.metadata.raw_render_recipe {
+        meta["raw_render_recipe"] = serde_json::json!(recipe.name());
+    }
 
     // CMYK (v3): mode tag + conversion space. Ink pixels live at
     // {prefix}layer_{i}_ink.png; an ICC space's bytes at {prefix}cmyk_profile.icc.
@@ -1811,6 +1821,56 @@ mod tests {
             ),
             (8, 8)
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn raw_render_recipe_provenance_round_trips_without_changing_non_raw_manifests() {
+        use crate::core::camera_profile::RawRenderRecipeVersion;
+
+        let dir = tmp_dir("raw-recipe-provenance");
+        let raw_path = dir.join("raw-derived.iai");
+        let plain_path = dir.join("plain.iai");
+
+        let mut raw_canvas = solid([10, 20, 30, 255], 8, 8);
+        raw_canvas.metadata.raw_render_recipe = Some(RawRenderRecipeVersion::NaturalV3);
+        IaiExporter
+            .export(&raw_canvas, &raw_path, &ExportOptions::default())
+            .expect("export RAW-derived project");
+
+        let raw_manifest = {
+            let file = std::fs::File::open(&raw_path).unwrap();
+            let mut archive = zip::ZipArchive::new(file).unwrap();
+            read_manifest(&mut archive).unwrap()
+        };
+        assert_eq!(raw_manifest["raw_render_recipe"], "natural-v3");
+        let IaiLoad::Canvas(reopened) = load(&raw_path).expect("reopen RAW-derived project") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(
+            reopened.metadata.raw_render_recipe,
+            Some(RawRenderRecipeVersion::NaturalV3)
+        );
+
+        let plain_canvas = solid([30, 20, 10, 255], 8, 8);
+        IaiExporter
+            .export(&plain_canvas, &plain_path, &ExportOptions::default())
+            .expect("export non-RAW project");
+        let plain_manifest = {
+            let file = std::fs::File::open(&plain_path).unwrap();
+            let mut archive = zip::ZipArchive::new(file).unwrap();
+            read_manifest(&mut archive).unwrap()
+        };
+        assert!(
+            plain_manifest.get("raw_render_recipe").is_none(),
+            "non-RAW projects should retain their old manifest shape"
+        );
+        let IaiLoad::Canvas(reopened_plain) = load(&plain_path).expect("reopen non-RAW project")
+        else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(reopened_plain.metadata.raw_render_recipe, None);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

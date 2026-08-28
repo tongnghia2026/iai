@@ -23,12 +23,19 @@ fn web_ai_label(site: &str) -> &'static str {
 
 fn develop_pipeline_diagnostic(
     scene: Option<&crate::core::develop_scene::SceneSource>,
+    persisted_raw_recipe: Option<crate::core::camera_profile::RawRenderRecipeVersion>,
 ) -> Option<String> {
     use crate::core::camera_profile::resolver::SelectedProfileProvenance;
     use crate::core::develop_scene::BaseLook;
     use crate::core::working_color::OutputColorSpace;
 
-    let scene = scene?;
+    let scene = match scene {
+        Some(scene) => scene,
+        None => {
+            return persisted_raw_recipe
+                .map(|recipe| format!("RAW recipe: {} (saved provenance)", recipe.name()));
+        }
+    };
     let source = match scene.look {
         BaseLook::Raw => "RAW scene",
         BaseLook::Identity => "display-referred raster",
@@ -71,6 +78,8 @@ fn develop_pipeline_diagnostic(
             }
         };
         lines.push(format!("Camera profile: {selected}"));
+    } else if let Some(recipe) = persisted_raw_recipe {
+        lines.push(format!("RAW recipe: {} (saved provenance)", recipe.name()));
     }
     Some(lines.join("\n"))
 }
@@ -1387,6 +1396,10 @@ impl App {
                         .canvas
                         .develop_source
                         .as_deref(),
+                    self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .metadata
+                        .raw_render_recipe,
                 ),
                 develop_local_selected: self.shell.ui.develop_local_selected,
                 develop_local_arm: self.shell.ui.develop_local_arm.map(|(k, _)| k),
