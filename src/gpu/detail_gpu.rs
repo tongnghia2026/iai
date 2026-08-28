@@ -6,9 +6,7 @@
 //! `detail.wgsl`. Parity is locked by the headless tests below (max abs diff
 //! 0.000/255 display, 1e-6 linear).
 //!
-//! Standalone core; the live-compositor integration is the remaining step.
-
-use wgpu::util::DeviceExt;
+//! Shared core used by the live native-resolution compositor and parity probes.
 
 /// Slider values folded to working units — mirrors `detail::DetailParams::new`.
 #[derive(Clone, Copy, Debug)]
@@ -286,16 +284,22 @@ fn run_detail_impl(
         "detail plane exceeds the device's 2-D dispatch capacity"
     );
 
-    // Pool buffer: upload input into the img region, zero the rest.
-    let mut pool_init = vec![0f32; lay.total as usize];
-    pool_init[lay.img as usize..lay.img as usize + 3 * n].copy_from_slice(rgb);
-    let pool = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    // Every scratch plane is fully written before its first read. Allocate the
+    // pooled storage uninitialised and upload only the RGB image (3·N), rather
+    // than transferring a 20·N zero-filled host vector on every slider frame.
+    let pool = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("detail_pool"),
-        contents: bytemuck::cast_slice(&pool_init),
+        size: lay.total as u64 * std::mem::size_of::<f32>() as u64,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
     });
+    queue.write_buffer(
+        &pool,
+        lay.img as u64 * std::mem::size_of::<f32>() as u64,
+        bytemuck::cast_slice(rgb),
+    );
 
     // Build the pass list (entry index into ENTRIES, PassParams).
     let lg = p.level_gain();
@@ -527,7 +531,11 @@ fn run_detail_impl(
 }
 
 const DETAIL_HALO: u32 = 16;
-const PREFERRED_TILE_CORE: u32 = 1024;
+// Large enough to use the adapter's storage-binding budget efficiently. A
+// typical 128 MiB limit yields a ~1196 px core after the apron (two tiles for
+// 1920×1080 instead of four); adapters with a larger limit stay capped so one
+// transient host/pool allocation cannot grow without bound.
+const PREFERRED_TILE_CORE: u32 = 2048;
 
 /// Full-resolution entry point used by live preview. The source is split into
 /// apron'd tiles so the pooled working storage remains bounded even for a
@@ -623,11 +631,17 @@ fn run_detail_tiled_with_core(
 mod tests {
     use super::*;
 
+    // Multiple WGPU adapters/devices mapping readbacks concurrently is flaky on
+    // some Windows drivers. The production path is single-device; serialize
+    // these three headless parity probes so `cargo test --lib` is deterministic.
+    static GPU_DETAIL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Headless GPU Detail (Sharpening + Noise Reduction, display domain) must
     /// match the CPU `apply_detail_to_display_buffer` within a tight tolerance,
     /// so the future live preview equals the commit.
     #[test]
     fn gpu_detail_matches_cpu_display() {
+        let _guard = GPU_DETAIL_TEST_LOCK.lock().expect("GPU Detail test lock");
         let Some((device, queue)) = crate::gpu::vector::renderer::headless_device() else {
             eprintln!("no headless GPU adapter; skipped");
             return;
@@ -695,6 +709,7 @@ mod tests {
     /// `apply_detail_to_working_buffer_in_space` in the working colour space.
     #[test]
     fn gpu_detail_matches_cpu_linear_scene() {
+        let _guard = GPU_DETAIL_TEST_LOCK.lock().expect("GPU Detail test lock");
         let Some((device, queue)) = crate::gpu::vector::renderer::headless_device() else {
             eprintln!("no headless GPU adapter; skipped");
             return;
@@ -752,6 +767,7 @@ mod tests {
 
     #[test]
     fn gpu_detail_tiled_matches_monolithic_without_seams() {
+        let _guard = GPU_DETAIL_TEST_LOCK.lock().expect("GPU Detail test lock");
         let Some((device, queue)) = crate::gpu::vector::renderer::headless_device() else {
             eprintln!("no headless GPU adapter; skipped");
             return;

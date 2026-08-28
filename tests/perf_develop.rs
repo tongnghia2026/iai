@@ -134,6 +134,64 @@ fn perf_headless_develop_slider_frames() {
     assert!(p95 < 50.0, "Develop slider-to-frame p95 {p95:.2} ms");
 }
 
+/// End-to-end cost of the native-resolution Detail path added for zoomed-in
+/// WYSIWYG preview. Includes host upload, tiled compute and readback because all
+/// three currently sit on the interactive frame boundary.
+#[test]
+#[ignore = "manual native GPU Detail p95 probe; hardware dependent"]
+fn perf_headless_gpu_detail_native_frames() {
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("perf_headless_gpu_detail_native_frames: no GPU adapter - skipping");
+        return;
+    };
+    let (w, h) = (1920u32, 1080u32);
+    let mut rgb = vec![0.0f32; (3 * w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let fx = x as f32 / (w - 1) as f32;
+            let fy = y as f32 / (h - 1) as f32;
+            let texture = 0.018 * (x as f32 * 0.31).sin() + 0.012 * (y as f32 * 0.27).cos();
+            rgb[3 * i] = (0.12 + 0.72 * fx + texture).max(0.0);
+            rgb[3 * i + 1] = (0.10 + 0.61 * fy - texture * 0.4).max(0.0);
+            rgb[3 * i + 2] = (0.08 + 0.48 * (1.0 - fx) + texture * 0.7).max(0.0);
+        }
+    }
+    let params =
+        iai::gpu::detail_gpu::DetailWorkingParams::from_sliders(60.0, 1.0, 25.0, 0.0, 25.0, 35.0);
+    let runtime = iai::gpu::detail_gpu::DetailGpuRuntime::new(&device);
+    let run = || {
+        iai::gpu::detail_gpu::run_detail_tiled_with_runtime(
+            &runtime,
+            &device,
+            &queue,
+            &rgb,
+            w,
+            h,
+            params,
+            true,
+            [0.272_229, 0.674_082, 0.053_689],
+        )
+    };
+    std::hint::black_box(run());
+    let mut samples = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let started = Instant::now();
+        std::hint::black_box(run());
+        samples.push(started.elapsed().as_secs_f64() * 1e3);
+    }
+    samples.sort_by(f64::total_cmp);
+    let p95 = samples[((samples.len() as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples.len() - 1)];
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    eprintln!(
+        "native GPU Detail 1920x1080: best {:.2} ms mean {mean:.2} ms p95 {p95:.2} ms",
+        samples[0]
+    );
+    assert!(p95 < 100.0, "native GPU Detail p95 {p95:.2} ms");
+}
+
 fn probe_viewport(
     scene: &SceneSource,
     settings: &DevelopSettings,

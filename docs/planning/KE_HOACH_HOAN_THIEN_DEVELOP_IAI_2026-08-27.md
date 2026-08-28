@@ -27,7 +27,35 @@ giữa bước commit. Người tiếp quản phải chốt Phase 0 trước khi
   - `1de2892` **preview realtime**: bỏ sàn 8× downsample cho path Detail (min→1; budget pixel vẫn chặn cost) → zoom gần crop nhỏ ⇒ proxy mịn gần 1:1 ⇒ thấy Sharpen/NR THẬT realtime, khớp settled bake (kết hợp G6); zoom xa vẫn coarse; fast-preview thường giữ sàn 8×. Throttle Detail giữ (proxy nhỏ ~107k px ≈ 40fps).
   - **CÒN (nếu owner muốn realtime hơn nữa mọi zoom):** đưa Detail lên GPU (WGSL à-trous — hiện Detail CPU-only). Tier-split capture/creative + noise-aware sharpen của kế hoạch gốc TẠM GÁC (phụ thuộc Phase 2 profile, và owner muốn UX đơn giản hơn là kỹ thuật). `dist/iAi-portable/iai.exe` sha `17fc4038…`.
 
-**CÒN LẠI (chưa làm):** Phase 2 (chuẩn hóa/hợp nhất camera profile + DCP hợp lệ để **ship** — đang xài DCP ART cục bộ, cấm ship); Phase 5 phần còn lại (tách Detail 3 tầng capture/creative/output + output sharpening — G6 XONG); Phase 6 (latency/cache 3 tier — bao gồm tùy chọn cho preview Detail proxy mịn hơn khi zoom gần để thấy nét live); Phase 7 (monitor ICC/soft-proof); Phase 8 bước 3–5 (thu bug corpus → đóng băng look → dọn Legacy/Scene1). Blind-review vs ART trên recipe khóa (Phase 1 §gate) chưa chạy đủ.
+## Cập nhật tiến độ — 2026-08-28 (GPU Detail GUI-OK + performance gate)
+
+- **Phase 5 — GPU Detail native viewport: ✅ owner GUI-OK** — commit `ed2b314` nối
+  đúng ba slider Detail vào preview native-resolution: RAW chạy trong working
+  space trước Local/output transform; raster chạy đúng boundary commit. Shader
+  dùng trực tiếp plane native thay vì tái tổ hợp proxy delta. Detail = 0 giữ
+  nguyên đường cũ. Core có pipeline cache, dispatch 2-D và tiling 16 px không seam.
+- **Parity khóa lại:** GPU/CPU display `0/255`; linear scene khoảng `1e-6`;
+  tiled/monolithic `0`; native compositor/commit tối đa `1/255`.
+- **Phase 6 — số đo trên máy owner:** Develop shader 1920×1080 p95 `7.86 ms`;
+  CPU Detail+Local proxy 160k p95 `48.60 ms`; native GPU Detail 1920×1080 ban
+  đầu p95 `149.76 ms`, sau khi bỏ upload pool zero `20·N` và chỉ upload RGB
+  `3·N` còn p95 `72.44 ms` (gate `<100 ms`). Probe nằm trong
+  `tests/perf_develop.rs` và vẫn `#[ignore]` vì phụ thuộc phần cứng.
+- **Phase 7 phải sửa trạng thái cũ:** monitor ICC, soft-proof, gamut warning và
+  display/export parity đã có; guard `cms_display_parity_probe` đã chứng minh
+  đường LUT/LCMS đúng. Gap còn lại chỉ là tự chọn/refresh ICC theo cửa sổ khi
+  chuyển giữa nhiều màn hình.
+- **Ưu tiên owner:** tiếp tục từ dễ tới khó. Chuẩn hóa profile hợp pháp để phát
+  hành được chuyển xuống cuối vì hiện chỉ dùng cá nhân, chưa công khai. DCP ART
+  vẫn chỉ được dùng local và tuyệt đối không đưa vào bản phát hành công khai.
+
+**CÒN LẠI:** hoàn tất blind-review ART trên corpus/recipe khóa (đặc biệt Mixer
+từng band + Detail crop 100%); GPU-exact cho fit zoom ảnh lớn (hiện native
+viewport exact, vùng quá lớn fallback proxy); persist `raw_render_recipe` và
+đóng băng look/migration; Phase 8 bước 3–5 (bug corpus → recipe freeze → chỉ dọn
+Legacy/Scene1 sau khi có migration); CMS per-window multi-monitor; các phần
+capture/creative/output Detail nâng cao chỉ quay lại nếu UX thực tế cần. Phase 2
+canonical/licensed camera-profile package làm sau cùng theo quyết định owner.
 
 ---
 

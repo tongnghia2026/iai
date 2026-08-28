@@ -4,6 +4,13 @@ Ngày: 2026-08-28. Người giao: Claude (Opus 4.8). Người nhận: Codex (ho�
 Repo sống: `C:\Users\Admin\Documents\IAI`, nhánh `feat/vector-core-foundation`, remote `tongnghia2026/iai`.
 HEAD lúc giao: `ef37abd`. **11 commit LOCAL chưa push** (quy tắc: chỉ push khi owner bảo).
 
+> **Cập nhật Codex 2026-08-28:** compositor integration native-resolution đã
+> xong ở `ed2b314` và owner GUI-test **OK**. GPU/CPU display `0/255`, linear
+> khoảng `1e-6`, tiled/monolithic `0`, compositor/commit tối đa `1/255`. Runtime
+> đã cache pipeline, dispatch 2-D và tile có halo. Native GPU Detail 1920×1080
+> được đo p95 `72.44 ms` sau khi chỉ upload RGB thay vì zero-fill toàn pool.
+> Phần M4 còn lại là fit zoom vùng nguồn quá lớn, hiện vẫn fallback proxy.
+
 ---
 
 ## 0. TL;DR cho người nhận
