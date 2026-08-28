@@ -1,7 +1,5 @@
 use iai::core::develop::{DevelopEngineVersion, DevelopSettings};
-use iai::core::develop_scene::{
-    apply_scene_to_tilemap, eval_scene_pixel, eval_scene_pixel_for_scene, BaseLook, SceneSource,
-};
+use iai::core::develop_scene::{apply_scene_to_tilemap, eval_scene_pixel, BaseLook, SceneSource};
 
 #[test]
 fn scene_v1_neutral_reference_values_are_stable() {
@@ -25,46 +23,18 @@ fn scene_v1_neutral_reference_values_are_stable() {
 }
 
 #[test]
-fn develop2_wide_working_reference_values_are_stable() {
-    let inputs = [
-        [0.18, 0.18, 0.18],
-        [0.70, 0.02, 0.01],
-        [0.01, 0.55, 0.04],
-        [-0.04, 0.12, 1.35],
-    ];
-    let mut scene = SceneSource::new(inputs.len() as u32, 1);
-    for (x, input) in inputs.into_iter().enumerate() {
-        scene.set_rgb(
-            x as u32,
-            0,
-            scene.color_pipeline.working.from_linear_srgb(input),
-        );
-    }
-    let settings = DevelopSettings {
-        develop_engine_version: DevelopEngineVersion::Develop2,
-        saturation: 65.0,
-        vibrance: 30.0,
-        mixer_hue: [18.0, -7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0],
-        mixer_saturation: [22.0, -12.0, 0.0, 0.0, 0.0, 0.0, 0.0, 8.0],
-        ..Default::default()
-    };
-    let actual: Vec<[f32; 3]> = (0..inputs.len())
-        .map(|x| eval_scene_pixel_for_scene(&scene, scene.get_rgb(x as u32, 0), &settings))
-        .collect();
-    let expected = [
-        [0.458_745_3, 0.458_744_6, 0.458_744_88],
-        [0.584_970_36, 0.430_418_37, 0.001_601_021_3],
-        [0.144_731_07, 0.810_542_3, 0.003_895_895_6],
-        [0.131_268_14, 0.271_369_58, 0.999_999_94],
-    ];
-    for (case, (actual, expected)) in actual.into_iter().zip(expected).enumerate() {
-        for channel in 0..3 {
-            assert!(
-                (actual[channel] - expected[channel]).abs() <= 2.0e-6,
-                "Develop2 wide-working golden changed for case {case}: {actual:?} != {expected:?}"
-            );
-        }
-    }
+fn serialized_develop2_snapshot_migrates_to_develop3_without_a_stale_engine() {
+    let mut value = serde_json::to_value(DevelopSettings::default()).unwrap();
+    value["develop_engine_version"] = serde_json::json!("Develop2");
+    let migrated: DevelopSettings = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        migrated.develop_engine_version,
+        DevelopEngineVersion::Develop3
+    );
+    assert_eq!(
+        serde_json::to_value(&migrated).unwrap()["develop_engine_version"],
+        "Develop3"
+    );
 }
 
 #[test]
@@ -85,7 +55,6 @@ fn every_engine_version_roundtrips_without_renderer_drift() {
     for engine in [
         DevelopEngineVersion::Legacy1,
         DevelopEngineVersion::Scene1,
-        DevelopEngineVersion::Develop2,
         DevelopEngineVersion::Develop3,
     ] {
         let settings = DevelopSettings {

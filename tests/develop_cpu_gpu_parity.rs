@@ -161,33 +161,6 @@ fn headless_gpu_preview_matches_committed_scene() {
     assert!(max_error <= 2, "GPU/commit max error {max_error}/255");
     assert!(p99 <= 1, "GPU/commit p99 error {p99}/255");
 
-    // Develop2 is a serialized compatibility recipe. Its pre-Q5 positive
-    // Saturation response must remain identical on CPU and GPU even though
-    // Develop3 uses the newer perceptual, hue-preserving gamut push.
-    let mut d2 = settings.clone();
-    d2.develop_engine_version = DevelopEngineVersion::Develop2;
-    d2.saturation = 65.0;
-    d2.vibrance = 30.0;
-    let committed_d2 = apply_scene_to_tilemap(&scene, &d2, None).flatten();
-    compositor.develop_preview = Some(DevelopGpuPreview {
-        layer_id: 0,
-        settings: d2,
-        region_luma: None,
-        color: None,
-        scene: Some(scene.clone()),
-    });
-    let result_is_ping =
-        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
-    let gpu_d2 = compositor.readback_rgba8(&device, &queue, result_is_ping);
-    let max_d2 = gpu_d2
-        .chunks_exact(4)
-        .zip(committed_d2.chunks_exact(4))
-        .flat_map(|(gpu, cpu)| (0..3).map(move |channel| gpu[channel].abs_diff(cpu[channel])))
-        .max()
-        .unwrap_or(0);
-    eprintln!("Develop2 compatibility GPU/commit max={max_d2}/255");
-    assert!(max_d2 <= 2, "Develop2 GPU/commit max error {max_d2}/255");
-
     // Part 1 above exercises the default engine (now Develop3) on the NON-spatial
     // stages, where the GPU preview needs no proxies. The Colour Mixer is spatial
     // in Develop3 (CPU-built, luma-guided control planes), so its GPU parity is

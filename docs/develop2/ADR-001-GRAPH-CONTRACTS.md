@@ -5,10 +5,11 @@ Status: accepted for the first hybrid-rebuild milestone (2026-08-09).
 ## Decision
 
 Develop UI state remains `DevelopSettings`. A serialized
-`develop_engine_version` selects `Legacy1`, `Scene1`, or `Develop2`; absent
-fields select `Scene1`, while newly-created settings select `Develop2`.
+`develop_engine_version` selects `Legacy1`, `Scene1`, or `Develop3`; absent
+fields select `Scene1`, while the retired serialized value `Develop2` migrates
+to `Develop3`.
 
-Develop2 compiles that snapshot into a canonical, versioned sequence whose
+The canonical Develop graph compiles that snapshot into a versioned sequence whose
 edges declare color model, scene/display reference domain, precision, signed
 range, and boundedness. Validation rejects representation mismatches, stage
 order inversions, unsupported schema versions, and graphs without exactly the

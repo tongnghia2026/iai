@@ -711,7 +711,7 @@ mod phase6_native_interaction_tests {
     fn raw_color_uses_one_per_pixel_model_for_drag_and_release() {
         let mut s = DevelopSettings::default();
         s.mixer_saturation[0] = 50.0;
-        s.develop_engine_version = DevelopEngineVersion::Develop2;
+        s.develop_engine_version = DevelopEngineVersion::Scene1;
         assert!(raw_color_runs_per_pixel(&s));
         s.develop_engine_version = DevelopEngineVersion::Develop3;
         assert!(!raw_color_runs_per_pixel(&s));

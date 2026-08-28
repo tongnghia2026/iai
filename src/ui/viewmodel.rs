@@ -355,7 +355,7 @@ pub struct DevelopViewModel {
     pub develop_settings: DevelopSettings,
     /// R/G/B/Luma histogram of the develop source — curve editor backdrop.
     pub develop_histogram: Option<std::sync::Arc<[[f32; 256]; 4]>>,
-    /// Display-post-render, pre-monitor scopes produced by Develop2 core.
+    /// Display-post-render, pre-monitor scopes produced by the canonical Develop core.
     pub develop_scopes: Option<std::sync::Arc<crate::core::develop2::scopes::DevelopScopes>>,
     pub develop_scopes_revision: u64,
     pub develop_scope_visibility: u8,

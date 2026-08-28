@@ -344,8 +344,7 @@ fn apply_mixer_brightness(
 /// - `true` (RAW scene path): Develop3 (`perceptual_positive_push`) scales chroma
 ///   along a constant OKLCh hue+lightness line (Q5 gamut-aware Saturation). The
 ///   scene's output boundary fits it to the MAX in-gamut chroma at the same
-///   hue/lightness. Develop2 deliberately retains its versioned pre-Q5 radial
-///   response so serialized projects do not change when reopened.
+///   hue/lightness. Retained legacy engines keep their historical radial response.
 /// - `false` (raster/PTS wrapper, hard-clamped right after): cap chroma at the
 ///   sRGB gamut hull with the smooth linear-RGB knee — bit-identical to before.
 ///

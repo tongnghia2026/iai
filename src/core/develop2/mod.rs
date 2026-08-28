@@ -229,10 +229,7 @@ impl DevelopGraph {
         if self.schema_version != GRAPH_SCHEMA_VERSION {
             return Err(GraphError::UnsupportedSchema(self.schema_version));
         }
-        if !matches!(
-            self.engine_version,
-            DevelopEngineVersion::Develop2 | DevelopEngineVersion::Develop3
-        ) {
+        if self.engine_version != DevelopEngineVersion::Develop3 {
             return Err(GraphError::WrongEngine(self.engine_version));
         }
         if self.nodes.is_empty() {
@@ -256,7 +253,7 @@ impl DevelopGraph {
     }
 }
 
-/// Compile the public UI snapshot into the canonical Develop2 recipe. This
+/// Compile the public UI snapshot into the canonical Develop3 recipe. This
 /// assumes the default RAW ProPhoto scene master; use [`compile_for_scene`] when
 /// the concrete scene master's working space is known.
 pub fn compile(settings: &DevelopSettings) -> Result<DevelopGraph, GraphError> {
@@ -277,10 +274,7 @@ fn compile_with_scene_color(
     settings: &DevelopSettings,
     scene_color: ColorModel,
 ) -> Result<DevelopGraph, GraphError> {
-    if !matches!(
-        settings.develop_engine_version,
-        DevelopEngineVersion::Develop2 | DevelopEngineVersion::Develop3
-    ) {
+    if settings.develop_engine_version != DevelopEngineVersion::Develop3 {
         return Err(GraphError::WrongEngine(settings.develop_engine_version));
     }
     let scene = BufferContract::scene_master(scene_color);

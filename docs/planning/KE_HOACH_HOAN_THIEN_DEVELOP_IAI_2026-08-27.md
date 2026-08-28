@@ -52,11 +52,11 @@ giữa bước commit. Người tiếp quản phải chốt Phase 0 trước khi
   toàn mà không bị gán nhầm recipe.
 - **Phase 8 — internal look guard: ✅ XONG** — thêm bitmap fingerprint cố định
   `0x44be2c9dca481750` phủ Light + perceptual colour + guided Mixer + Curve +
-  Detail của Develop3; vòng save/reopen giờ gồm đủ Legacy1, Scene1, Develop2 và
-  Develop3, preset mới bị pin rõ Develop3. Golden này phát hiện Q5 Saturation đã
-  vô tình đổi look Develop2; công thức perceptual mới đã được gate riêng cho
-  Develop3 trên cả CPU/WGSL, khôi phục golden Develop2 và giữ parity tối đa
-  `1/255`. Đây là guard nội bộ, chưa thay thế blind review ART/freeze phát hành.
+  Detail của Develop3; preset mới bị pin rõ Develop3 và parity tối đa `1/255`.
+  Theo quyết định owner sau đó, engine Develop2 đã bị gỡ khỏi runtime: JSON cũ
+  mang giá trị `Develop2` tự migrate sang Develop3 và lần save kế tiếp ghi
+  `Develop3`. Engine còn hoạt động là Legacy1, Scene1 và Develop3. Đây là guard
+  nội bộ, chưa thay thế blind review ART/freeze phát hành.
 - **Ưu tiên owner:** tiếp tục từ dễ tới khó. Chuẩn hóa profile hợp pháp để phát
   hành được chuyển xuống cuối vì hiện chỉ dùng cá nhân, chưa công khai. DCP ART
   vẫn chỉ được dùng local và tuyệt đối không đưa vào bản phát hành công khai.
@@ -171,7 +171,8 @@ Hoàn thiện Develop theo hướng:
 ## 2. Những gì đã có
 
 - Master RAW tuyến tính dải rộng, giữ headroom đến biên output.
-- Develop2/Develop3 có engine version và đường tương thích tài liệu cũ.
+- Develop3 có engine version; Legacy1/Scene1 giữ đường tương thích tài liệu cũ.
+  Giá trị Develop2 đã retire được migrate thẳng sang Develop3 khi deserialize.
 - Develop3 đã có Midtones, tone-zone mới, highlight chroma roll-off và guided
   control planes cho Color Mixer.
 - Color Mixer làm việc trong không gian perceptual, có neutral/chroma guard.
@@ -184,7 +185,7 @@ Hoàn thiện Develop theo hướng:
 
 | ID | Thiếu sót | Hậu quả nhìn thấy | Mức ưu tiên |
 |---|---|---|---|
-| G0 | Develop3 còn opt-in và project cũ có thể ghim engine cũ | Dễ test nhầm Develop2, kết luận sai về code mới | P0 |
+| G0 | Develop3 còn opt-in và project cũ có thể ghim engine cũ | Dễ test nhầm renderer, kết luận sai về code mới | P0 |
 | G1 | Chưa có A/B ART trên cùng RAW và cùng recipe | Test kỹ thuật đạt nhưng chưa biết hình có đẹp hơn | P0 |
 | G2 | Hai bộ `camera_profiles` khác nhau và chưa có manifest chuẩn | Màu thay đổi theo nơi chạy; khó tái lập | P0 |
 | G3 | Camera characterization còn ít; sensor metadata/correction thiếu | Màu da, highlight và shadow noise không ổn định | P1 |
@@ -214,12 +215,12 @@ Hoàn thiện Develop theo hướng:
 
 ### Việc làm
 
-- Hiển thị engine đang dùng trong Develop diagnostics/status: Scene1, Develop2
+- Hiển thị engine đang dùng trong Develop diagnostics/status: Legacy1, Scene1
   hoặc Develop3.
 - Ghi engine version, RAW recipe, profile camera và output transform vào log Q0.
 - Sửa toàn bộ active/signature path để Midtones-only edit luôn kích hoạt ToneZones.
 - Thêm launcher A/B rõ ràng:
-  - Develop2 baseline;
+  - Develop3 baseline;
   - Develop3 candidate.
 - Không tự động đổi engine của preset/tài liệu cũ.
 
@@ -448,7 +449,7 @@ Hoàn thiện Develop theo hướng:
 ### Trình tự
 
 1. Develop3 opt-in nội bộ.
-2. Develop3 default cho session RAW mới, vẫn giữ Develop2 cho tài liệu đã serialize.
+2. Develop3 default cho session RAW mới; Develop2 đã retire và migrate sang Develop3 theo quyết định owner ngày 2026-08-28.
 3. Thu thập bug corpus và sửa theo recipe có thể tái lập.
 4. Đóng băng look, tăng recipe version.
 5. Chỉ xóa code Legacy/Scene1 khi không còn document/preset cần mở và đã có công cụ

@@ -1995,8 +1995,8 @@ mod tests {
 
         IaiExporter
             .export(&canvas, &project_path, &ExportOptions::default())
-            .expect("save Develop2 project");
-        let IaiLoad::Canvas(reopened) = load(&project_path).expect("reopen Develop2 project")
+            .expect("save Develop3 project");
+        let IaiLoad::Canvas(reopened) = load(&project_path).expect("reopen Develop3 project")
         else {
             panic!("expected a plain canvas");
         };

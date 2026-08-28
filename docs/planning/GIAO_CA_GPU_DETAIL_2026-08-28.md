@@ -23,6 +23,11 @@ HEAD lúc giao: `ef37abd`. **11 commit LOCAL chưa push** (quy tắc: chỉ push
 > Golden Develop2 trở lại đúng, GPU/CPU cả hai engine tối đa `1/255`. Blind review
 > ART/freeze phát hành vẫn còn.
 
+> **Quyết định owner tiếp theo:** gỡ engine Develop2 vì không còn dùng. Variant
+> runtime đã bị xóa; serde nhận chuỗi cũ `Develop2` như alias của Develop3, nên
+> project/preset cũ mở được và lần lưu sau được chuẩn hóa thành `Develop3`.
+> Legacy1/Scene1 vẫn còn cho file cổ hơn.
+
 ---
 
 ## 0. TL;DR cho người nhận

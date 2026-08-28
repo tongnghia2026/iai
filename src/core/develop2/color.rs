@@ -196,7 +196,7 @@ pub fn rgb_to_rgb(src: RgbPrimaries, dst: RgbPrimaries) -> Mat3 {
 }
 
 /// Linear RGB → CIE XYZ adapted to the D50 profile-connection white.
-/// This is the profile-independent boundary a Develop2 input node targets.
+/// This is the profile-independent boundary a canonical Develop input node targets.
 pub fn rgb_to_pcs_xyz_d50(primaries: RgbPrimaries) -> Mat3 {
     let to_xyz = rgb_to_xyz(primaries);
     let adapt = bradford(xyz_from_xy(primaries.white), xyz_from_xy(D50));

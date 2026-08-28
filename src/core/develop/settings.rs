@@ -13,10 +13,12 @@ use super::*;
 pub enum DevelopEngineVersion {
     Legacy1,
     Scene1,
-    Develop2,
     /// The current default renderer for fresh RAW sessions (owner-approved
     /// Light + Color-Mixer look). Existing documents remain pinned to their
     /// serialized engine, so re-opening an old project never shifts its look.
+    /// The serde alias intentionally migrates the retired Develop2 engine to
+    /// the current renderer when an older project or preset is opened.
+    #[serde(alias = "Develop2")]
     Develop3,
 }
 
@@ -27,7 +29,6 @@ impl DevelopEngineVersion {
         match self {
             Self::Legacy1 => "Legacy1",
             Self::Scene1 => "Scene1",
-            Self::Develop2 => "Develop2",
             Self::Develop3 => "Develop3",
         }
     }
@@ -100,10 +101,16 @@ mod tone_v2_settings_tests {
     }
 
     #[test]
+    fn serialized_develop2_is_migrated_to_develop3() {
+        let reopened: DevelopEngineVersion = serde_json::from_str("\"Develop2\"").unwrap();
+        assert_eq!(reopened, DevelopEngineVersion::Develop3);
+        assert_eq!(serde_json::to_string(&reopened).unwrap(), "\"Develop3\"");
+    }
+
+    #[test]
     fn engine_labels_are_stable_and_unambiguous() {
         assert_eq!(DevelopEngineVersion::Legacy1.label(), "Legacy1");
         assert_eq!(DevelopEngineVersion::Scene1.label(), "Scene1");
-        assert_eq!(DevelopEngineVersion::Develop2.label(), "Develop2");
         assert_eq!(DevelopEngineVersion::Develop3.label(), "Develop3");
     }
 }

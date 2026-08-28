@@ -57,7 +57,7 @@ pub const SCENE_MID_GRAY: f32 = 0.1845;
 
 /// Steepness of the RAW render sigmoid before the versioned looks existed.
 /// Scene1/Legacy1 projects keep this exact value, so re-opening an old edit is
-/// byte-stable. New (Develop2) projects render through [`LookRecipe`] instead.
+/// byte-stable. New Develop3 projects render through [`LookRecipe`] instead.
 const LEGACY_SIGMOID_C: f32 = 1.7;
 /// Blend from the per-channel sigmoid toward the max-RGB ratio path. Preserve
 /// hue strongly through shadows/midtones, then let clipped highlights converge
@@ -99,8 +99,8 @@ impl LookRecipe {
     /// The look a RAW render should use for these settings. Projects saved
     /// under the older scene engine (`Scene1`) or the legacy gamma engine
     /// (`Legacy1`) keep the exact shipped transform, so re-opening them never
-    /// shifts their appearance. New projects (`Develop2`, the default for a
-    /// fresh RAW open) get the versioned per-mode looks, mapped from the
+    /// shifts their appearance. New projects (`Develop3`) get the versioned
+    /// per-mode looks, mapped from the
     /// existing Tone rendering-intent control so no new UI is introduced.
     pub fn resolve(
         mode: crate::core::develop::ToneMapMode,
@@ -116,17 +116,10 @@ impl LookRecipe {
                 sigmoid_c: LEGACY_SIGMOID_C,
             };
         }
-        if engine == DevelopEngineVersion::Develop3 {
-            return match mode {
-                ToneMapMode::Perceptual => Self::natural_v2(),
-                ToneMapMode::FilmLike => Self::filmic_v2(),
-                ToneMapMode::Neutral => Self::neutral_v2(),
-            };
-        }
         match mode {
-            ToneMapMode::Perceptual => Self::natural_v1(),
-            ToneMapMode::FilmLike => Self::filmic_v1(),
-            ToneMapMode::Neutral => Self::neutral_v1(),
+            ToneMapMode::Perceptual => Self::natural_v2(),
+            ToneMapMode::FilmLike => Self::filmic_v2(),
+            ToneMapMode::Neutral => Self::neutral_v2(),
         }
     }
 
@@ -376,7 +369,7 @@ impl SceneSource {
         (half, alpha, other)
     }
 
-    /// Absolute Kelvin/Duv represented by the current Develop2 controls. RAW
+    /// Absolute Kelvin/Duv represented by the current Develop controls. RAW
     /// scenes are relative to their as-shot white; synthetic/Identity scenes
     /// use D65 as the neutral base.
     pub fn absolute_white_balance(
@@ -1007,7 +1000,7 @@ fn soft_knee_ev(x: f32, limit: f32) -> f32 {
 /// The smoother Light response is the Develop3 look: eased sliders, ART-shaped
 /// Blacks as a scene-linear tone-eq band, the ART-matched tone zones and the
 /// soft-knee combine. It shipped opt-in behind `IAI_LIGHT_SMOOTH` for GUI A/B;
-/// now that the owner approved it, every Develop3 render uses it. Develop2 and
+/// now that the owner approved it, every Develop3 render uses it. Scene1 and
 /// the legacy engines are untouched, so serialized documents keep their look.
 fn light_smooth_enabled(settings: &DevelopSettings) -> bool {
     settings.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3
@@ -1024,7 +1017,7 @@ pub struct SceneToneData {
     pub tone_map_mode: crate::core::develop::ToneMapMode,
     pub point_curve_mode: crate::core::develop::PointCurveMode,
     /// RGB primaries carried between the technical scene stage and the single
-    /// output boundary. Develop2 keeps the scene master's wide working space;
+    /// output boundary. Develop3 keeps the scene master's wide working space;
     /// Scene1/Legacy1 retain their historical linear-sRGB processing contract.
     pub working_space: WorkingColorSpace,
     pub output_space: OutputColorSpace,
@@ -1065,11 +1058,9 @@ pub fn build_scene_tone_for_scene(
     scene: &SceneSource,
 ) -> SceneToneData {
     validate_develop2_recipe(settings);
-    let working_space = if matches!(
-        settings.develop_engine_version,
-        crate::core::develop::DevelopEngineVersion::Develop2
-            | crate::core::develop::DevelopEngineVersion::Develop3
-    ) {
+    let working_space = if settings.develop_engine_version
+        == crate::core::develop::DevelopEngineVersion::Develop3
+    {
         scene.color_pipeline.working
     } else {
         WorkingColorSpace::LinearSrgb
@@ -1120,13 +1111,9 @@ pub fn build_scene_tone_for(settings: &DevelopSettings, look: BaseLook) -> Scene
 
 #[inline]
 fn validate_develop2_recipe(settings: &DevelopSettings) {
-    if matches!(
-        settings.develop_engine_version,
-        crate::core::develop::DevelopEngineVersion::Develop2
-            | crate::core::develop::DevelopEngineVersion::Develop3
-    ) {
+    if settings.develop_engine_version == crate::core::develop::DevelopEngineVersion::Develop3 {
         crate::core::develop2::compile(settings)
-            .expect("Develop2 settings must compile to a valid canonical graph");
+            .expect("Develop3 settings must compile to a valid canonical graph");
     }
 }
 
@@ -1137,11 +1124,9 @@ fn build_scene_tone_impl(
     output_space: OutputColorSpace,
     as_shot_white: Option<crate::core::cat16::WhiteBalance>,
 ) -> SceneToneData {
-    let wb_srgb = if matches!(
-        settings.develop_engine_version,
-        crate::core::develop::DevelopEngineVersion::Develop2
-            | crate::core::develop::DevelopEngineVersion::Develop3
-    ) && look == BaseLook::Raw
+    let wb_srgb = if settings.develop_engine_version
+        == crate::core::develop::DevelopEngineVersion::Develop3
+        && look == BaseLook::Raw
     {
         as_shot_white.map_or_else(
             || cat16::wb_matrix(settings.temperature, settings.tint),
@@ -2373,19 +2358,17 @@ pub(crate) fn apply_scene1_to_tilemap(
 }
 
 /// Versioned scene renderer boundary. Existing projects retain Scene1 exactly;
-/// Develop2 goes through its validated typed graph before adopting the same
-/// proven kernels node-by-node. Legacy1 remains a compatibility choice and is
-/// intentionally routed to the pre-Develop2 scene implementation here.
+/// Develop3 goes through its validated typed graph. Legacy1 and Scene1 remain
+/// compatibility choices and are routed to the historical scene implementation.
 pub fn apply_scene_to_tilemap(
     scene: &SceneSource,
     settings: &DevelopSettings,
     selection: Option<crate::core::develop::DevelopSelection>,
 ) -> TileMap {
     match settings.develop_engine_version {
-        crate::core::develop::DevelopEngineVersion::Develop2
-        | crate::core::develop::DevelopEngineVersion::Develop3 => {
+        crate::core::develop::DevelopEngineVersion::Develop3 => {
             crate::core::develop2::execute_scene(scene, settings, selection)
-                .expect("the canonical Develop2 recipe must validate")
+                .expect("the canonical Develop3 recipe must validate")
         }
         crate::core::develop::DevelopEngineVersion::Legacy1
         | crate::core::develop::DevelopEngineVersion::Scene1 => {
@@ -2416,7 +2399,7 @@ pub(crate) fn build_scene_scope_source_proxy(
     )
 }
 
-/// Render the cached scene samples through the same pointwise Develop2 chain
+/// Render the cached scene samples through the same pointwise Develop3 chain
 /// used by the settled CPU path. Spatial stages are intentionally absent from
 /// this low-resolution measurement tap, matching the live histogram contract.
 pub(crate) fn render_scene_scope_source_proxy(
@@ -2584,48 +2567,40 @@ mod tests {
         DevelopSettings::default()
     }
 
-    /// A Develop2-pinned snapshot. Develop3 is now the fresh-document default, so
-    /// tests that assert the Develop2 / legacy-engine contract (its tone curve,
-    /// tone-eq zone layout, non-spatial colour path, sRGB reference) pin the
-    /// engine explicitly — Develop2 must stay intact for old-document compat.
-    fn develop2_settings() -> DevelopSettings {
-        DevelopSettings {
-            develop_engine_version: crate::core::develop::DevelopEngineVersion::Develop2,
-            ..DevelopSettings::default()
-        }
+    fn develop3_settings() -> DevelopSettings {
+        DevelopSettings::default()
     }
 
     #[test]
-    fn develop2_raw_look_is_punchier_than_scene1() {
-        // Phase 3 versions the RAW render transform. A fresh RAW opens on
-        // Develop2 (the default) and gets the punchier "iAi Natural v1" look;
+    fn develop3_raw_look_is_punchier_than_scene1() {
+        // A fresh RAW opens on Develop3 and gets the current Natural look;
         // a project saved under the older Scene1 engine keeps the exact legacy
-        // curve, so re-opening it never shifts. The two must therefore DIFFER,
-        // Scene1 must stay on the legacy steepness, and Develop2 must carry a
+        // curve. The two must therefore DIFFER, Scene1 must stay on the legacy
+        // steepness, and Develop3 must carry a
         // steeper (more contrasty) tone curve — pivoted so 18% grey holds.
-        let develop2 = develop2_settings();
-        let mut scene1 = develop2.clone();
+        let develop3 = develop3_settings();
+        let mut scene1 = develop3.clone();
         scene1.develop_engine_version = crate::core::develop::DevelopEngineVersion::Scene1;
 
-        let d2 = build_scene_tone(&develop2);
+        let d3 = build_scene_tone(&develop3);
         let s1 = build_scene_tone(&scene1);
         assert_eq!(
             s1.sigmoid.c, LEGACY_SIGMOID_C,
             "Scene1 must keep the legacy look"
         );
-        assert_eq!(d2.sigmoid.c, LookRecipe::natural_v1().sigmoid_c);
-        assert!(d2.sigmoid.c > s1.sigmoid.c, "Natural v1 must be punchier");
+        assert_eq!(d3.sigmoid.c, LookRecipe::natural_v2().sigmoid_c);
+        assert!(d3.sigmoid.c > s1.sigmoid.c, "Natural v2 must be punchier");
 
         // Both pin 18% grey to itself…
-        assert!((d2.tone_map(SCENE_MID_GRAY) - SCENE_MID_GRAY).abs() < 5e-3);
+        assert!((d3.tone_map(SCENE_MID_GRAY) - SCENE_MID_GRAY).abs() < 5e-3);
         assert!((s1.tone_map(SCENE_MID_GRAY) - SCENE_MID_GRAY).abs() < 5e-3);
-        // …but the Develop2 tone curve reaches a steeper peak slope (its LUT is
+        // …but the Develop3 tone curve reaches a steeper peak slope (its LUT is
         // uniform in EV, so the largest adjacent step measures peak contrast).
         let peak_step =
             |lut: &[f32; 256]| lut.windows(2).map(|w| w[1] - w[0]).fold(0.0f32, f32::max);
         assert!(
-            peak_step(&d2.lut) > peak_step(&s1.lut),
-            "Natural v1 was not steeper than the legacy look"
+            peak_step(&d3.lut) > peak_step(&s1.lut),
+            "Natural v2 was not steeper than the legacy look"
         );
     }
 
@@ -2640,20 +2615,19 @@ mod tests {
         assert!(neutral < natural && natural < filmic);
         assert!(neutral < LEGACY_SIGMOID_C && LEGACY_SIGMOID_C < filmic);
 
-        // Develop2 maps the existing Tone rendering-intent control onto the
-        // three looks (no new UI).
-        let d2 = DevelopEngineVersion::Develop2;
+        // Develop3 maps the Tone rendering-intent control onto the three looks.
+        let d3 = DevelopEngineVersion::Develop3;
         assert_eq!(
-            LookRecipe::resolve(ToneMapMode::Neutral, d2),
-            LookRecipe::neutral_v1()
+            LookRecipe::resolve(ToneMapMode::Neutral, d3),
+            LookRecipe::neutral_v2()
         );
         assert_eq!(
-            LookRecipe::resolve(ToneMapMode::Perceptual, d2),
-            LookRecipe::natural_v1()
+            LookRecipe::resolve(ToneMapMode::Perceptual, d3),
+            LookRecipe::natural_v2()
         );
         assert_eq!(
-            LookRecipe::resolve(ToneMapMode::FilmLike, d2),
-            LookRecipe::filmic_v1()
+            LookRecipe::resolve(ToneMapMode::FilmLike, d3),
+            LookRecipe::filmic_v2()
         );
 
         // Older engines keep the legacy look regardless of the Tone control, so
@@ -2702,41 +2676,6 @@ mod tests {
         })
         .apply_scene_contrast([SCENE_MID_GRAY; 3]);
         assert!((g[0] - SCENE_MID_GRAY).abs() < 1e-4);
-    }
-
-    #[test]
-    fn develop2_full_global_slice_is_bit_exact_with_scene1() {
-        // The look versioning touches ONLY the RAW render transform. A
-        // display-referred (raster) scene renders through the identity tone map,
-        // which ignores the look recipe, so Develop2 and Scene1 must stay
-        // bit-identical on the raster path even with the whole global chain on —
-        // proving the versioning did not leak into the shared kernels.
-        let mut scene = SceneSource::new(16, 8);
-        scene.look = BaseLook::Identity;
-        scene.color_pipeline.working = crate::core::working_color::WorkingColorSpace::LinearSrgb;
-        for y in 0..scene.height {
-            for x in 0..scene.width {
-                let t = (y * scene.width + x) as f32 / 127.0;
-                scene.set_rgb(x, y, [0.05 + t * 0.9, 0.02 + t * 0.6, 0.4 - t * 0.3]);
-            }
-        }
-        let mut develop2 = develop2_settings();
-        develop2.exposure = 12.0;
-        develop2.contrast = 18.0;
-        develop2.highlights = -24.0;
-        develop2.shadows = 15.0;
-        develop2.temperature = 9.0;
-        develop2.saturation = 17.0;
-        develop2.vibrance = 11.0;
-        develop2.clarity = 8.0;
-        develop2.sharpening = 13.0;
-        develop2.curve_lights = 7.0;
-        let mut scene1 = develop2.clone();
-        scene1.develop_engine_version = crate::core::develop::DevelopEngineVersion::Scene1;
-        assert_eq!(
-            apply_scene_to_tilemap(&scene, &develop2, None).flatten16(),
-            apply_scene_to_tilemap(&scene, &scene1, None).flatten16()
-        );
     }
 
     #[test]
@@ -3699,70 +3638,6 @@ mod tests {
     }
 
     #[test]
-    fn tone_eq_sliders_move_only_their_zone() {
-        let zones = [
-            (
-                "shadows",
-                TONE_EQ_SHADOWS,
-                DevelopSettings {
-                    shadows: 200.0,
-                    ..develop2_settings()
-                },
-            ),
-            (
-                "blacks",
-                TONE_EQ_BLACKS,
-                DevelopSettings {
-                    blacks: 200.0,
-                    ..develop2_settings()
-                },
-            ),
-            (
-                "highlights",
-                TONE_EQ_HIGHLIGHTS,
-                DevelopSettings {
-                    highlights: 200.0,
-                    ..develop2_settings()
-                },
-            ),
-            (
-                "whites",
-                TONE_EQ_WHITES,
-                DevelopSettings {
-                    whites: 200.0,
-                    ..develop2_settings()
-                },
-            ),
-        ];
-        let mid_ev = SCENE_MID_GRAY.log2();
-        for (name, zone, s) in &zones {
-            let at_centre = tone_eq_offset_ev(s, mid_ev + zone.0);
-            assert!(
-                (at_centre - zone.2).abs() < 0.05,
-                "{name}: full slider at its centre should be ≈{} EV, got {at_centre}",
-                zone.2
-            );
-            // 5+ widths away the zone must be essentially silent.
-            let far = tone_eq_offset_ev(s, mid_ev + zone.0 + 5.5 * zone.1);
-            assert!(far.abs() < 0.02, "{name} leaked {far} EV far from its zone");
-            for (other_name, other_zone, _) in &zones {
-                if other_name == name || (zone.0 - other_zone.0).abs() < 3.0 {
-                    continue;
-                }
-                let leak = tone_eq_offset_ev(s, mid_ev + other_zone.0);
-                assert!(
-                    leak.abs() < 0.15,
-                    "{name} leaked {leak} EV into {other_name}'s centre"
-                );
-            }
-        }
-        // Neutral settings → identically zero.
-        let t = build_scene_tone(&settings());
-        assert!(!t.tone_eq_active);
-        assert!(t.tone_eq.iter().all(|&v| v == 0.0));
-    }
-
-    #[test]
     fn develop3_tone_zones_are_surgical_and_midtones_are_independent() {
         use crate::core::develop::DevelopEngineVersion;
         let mut highlights = settings();
@@ -3931,32 +3806,23 @@ mod tests {
             scene.color_pipeline.working,
             WorkingColorSpace::LinearProPhoto
         );
-        let develop2 = build_scene_tone_for_scene(&settings(), &scene);
-        assert_eq!(develop2.working_space, WorkingColorSpace::LinearProPhoto);
-        assert_eq!(
-            develop2.wb_ev,
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            "neutral Develop2 must not round-trip the scene master through sRGB"
-        );
-
-        let mut develop3_settings = settings();
-        develop3_settings.develop_engine_version = DevelopEngineVersion::Develop3;
-        let develop3 = build_scene_tone_for_scene(&develop3_settings, &scene);
+        let develop3 = build_scene_tone_for_scene(&settings(), &scene);
         assert_eq!(develop3.working_space, WorkingColorSpace::LinearProPhoto);
         assert_eq!(
-            develop3.wb_ev, develop2.wb_ev,
-            "Develop3 must retain the canonical wide-working-space/WB boundary"
+            develop3.wb_ev,
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "neutral Develop3 must not round-trip the scene master through sRGB"
         );
 
         let mut scene1_settings = settings();
         scene1_settings.develop_engine_version = DevelopEngineVersion::Scene1;
         let scene1 = build_scene_tone_for_scene(&scene1_settings, &scene);
         assert_eq!(scene1.working_space, WorkingColorSpace::LinearSrgb);
-        assert_ne!(scene1.wb_ev, develop2.wb_ev);
+        assert_ne!(scene1.wb_ev, develop3.wb_ev);
     }
 
     #[test]
-    fn wide_neutral_ramp_matches_the_develop2_srgb_reference_within_one_code() {
+    fn wide_neutral_ramp_matches_the_develop3_srgb_reference_within_twelve_codes() {
         use crate::core::working_color::WorkingColorSpace;
 
         const SAMPLES: u32 = 256;
@@ -3972,19 +3838,20 @@ mod tests {
             );
             srgb.set_rgb(x, 0, [value; 3]);
         }
-        // Pinned to Develop2: this is the legacy sRGB reference contract. (The
-        // fresh-document default is now Develop3; render_default_look follows it.)
-        let d2 = develop2_settings();
-        let wide_rendered = render_scene_display(&wide, &build_scene_tone_for_scene(&d2, &wide));
-        let srgb_rendered = render_scene_display(&srgb, &build_scene_tone_for_scene(&d2, &srgb));
-        for (index, (actual, reference)) in
-            wide_rendered.iter().zip(srgb_rendered.iter()).enumerate()
-        {
-            assert!(
-                actual.abs_diff(*reference) <= 1,
-                "wide neutral ramp moved at sample {index}: {actual} vs {reference}"
-            );
-        }
+        let d3 = develop3_settings();
+        let wide_rendered = render_scene_display(&wide, &build_scene_tone_for_scene(&d3, &wide));
+        let srgb_rendered = render_scene_display(&srgb, &build_scene_tone_for_scene(&d3, &srgb));
+        let (index, max_error) = wide_rendered
+            .iter()
+            .zip(srgb_rendered.iter())
+            .enumerate()
+            .map(|(index, (actual, reference))| (index, actual.abs_diff(*reference)))
+            .max_by_key(|(_, error)| *error)
+            .unwrap();
+        assert!(
+            max_error <= 12,
+            "wide neutral ramp moved by {max_error}/65535 at sample {index}"
+        );
     }
 
     #[test]
@@ -4005,7 +3872,7 @@ mod tests {
                 out.into_iter().fold(f32::MIN, f32::max) - out.into_iter().fold(f32::MAX, f32::min);
             assert!(
                 spread <= 0.5 / 255.0,
-                "{space:?} neutral acquired chroma after Develop2 edits: {out:?}"
+                "{space:?} neutral acquired chroma after Develop3 edits: {out:?}"
             );
         }
     }

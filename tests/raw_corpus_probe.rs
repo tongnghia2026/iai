@@ -5,7 +5,7 @@
 //! available. This harness closes that gap without embedding anyone's RAW files
 //! in the repository: it reads a directory from the `IAI_RAW_CORPUS` environment
 //! variable, decodes each supported file through iAi's real importer, runs a
-//! neutral Develop2 render, and reports coverage + timing.
+//! neutral Develop3 render, and reports coverage + timing.
 //!
 //! It is `#[ignore]`d so `cargo test` stays hermetic; run it explicitly with the
 //! corpus path set:
@@ -133,10 +133,10 @@ fn raw_corpus_decodes_and_renders_through_develop2() {
             "{name}: input boundary must validate"
         );
 
-        // Neutral Develop2 render must produce a full-size result.
+        // Neutral Develop3 render must produce a full-size result.
         let t1 = Instant::now();
         let tile = develop2::execute_scene(scene, &DevelopSettings::default(), None)
-            .expect("neutral Develop2 must render a RAW scene");
+            .expect("neutral Develop3 must render a RAW scene");
         let dev_ms = t1.elapsed().as_millis();
         assert_eq!(
             (tile.width, tile.height),
@@ -159,7 +159,7 @@ fn raw_corpus_decodes_and_renders_through_develop2() {
     // Harness sanity: the corpus must contain at least one file iAi can develop.
     assert!(
         decoded > 0,
-        "no RAW file in {} decoded through Develop2",
+        "no RAW file in {} decoded through Develop3",
         dir.display()
     );
 }
