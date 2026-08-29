@@ -9,7 +9,8 @@ HEAD lúc giao: `ef37abd`. **11 commit LOCAL chưa push** (quy tắc: chỉ push
 > khoảng `1e-6`, tiled/monolithic `0`, compositor/commit tối đa `1/255`. Runtime
 > đã cache pipeline, dispatch 2-D và tile có halo. Native GPU Detail 1920×1080
 > được đo p95 `72.44 ms` sau khi chỉ upload RGB thay vì zero-fill toàn pool.
-> Phần M4 còn lại là fit zoom vùng nguồn quá lớn, hiện vẫn fallback proxy.
+> Phần M4 cốt lõi đã hoàn tất. Chỉ fit zoom vùng nguồn quá lớn còn fallback
+> proxy; native viewport đã exact và owner GUI-test OK.
 
 > **Tiếp tục Codex 2026-08-28:** đã khóa thêm provenance decode-time:
 > `raw_render_recipe` được persist tùy chọn trong `.iai`, round-trip qua
@@ -34,7 +35,8 @@ HEAD lúc giao: `ef37abd`. **11 commit LOCAL chưa push** (quy tắc: chỉ push
 
 - **Owner (end-user, không quan tâm kỹ thuật) muốn:** panel Detail đúng **3 thanh** (Sharpening, Noise Reduction, Color Noise) + **preview realtime giống Photoshop** + **preview phải KHỚP TUYỆT ĐỐI với kết quả sau commit** (WYSIWYG). Owner đã **chọn phương án: đưa Detail lên GPU**.
 - **ĐÃ XONG (mình làm phiên này):** "bộ não" GPU Detail — port đầy đủ 3 slider sang WGSL compute, **parity BIT-EXACT với CPU commit** (headless test: display 0.000/255, linear 1e-6). Đây là phần khó nhất về thuật toán, đã chạy đúng.
-- **CÒN LẠI (việc của bạn — MILESTONE 4):** **tích hợp** module GPU Detail này vào luồng preview live trong compositor, sao cho preview dùng chính GPU Detail full-res → preview = commit. Đây là phần LỚN và RỦI RO (compositor đã tinh chỉnh parity rất kỹ, dễ phá).
+- **ĐÃ XONG MILESTONE 4:** module GPU Detail đã được tích hợp vào preview live ở
+  `ed2b314`, cache pipeline, dispatch 2-D, tile halo và đạt parity/latency gate.
 - **Ràng buộc bất di:** Detail slider = 0 → byte-identical (không đổi look mặc định owner đã duyệt). Không push. `cargo fmt --check` + `cargo test --lib` trước mọi push. Cấm ship DCP ART (GPL).
 
 ---
@@ -96,7 +98,10 @@ DetailWorkingParams::from_sliders(sharpening, sharpen_radius, sharpen_detail, sh
 
 ---
 
-## 3. VIỆC CÒN LẠI — Milestone 4: tích hợp compositor (PHẦN LỚN)
+## 3. Thiết kế Milestone 4 đã thực hiện — lưu làm lịch sử
+
+> Phần tích hợp mô tả dưới đây đã hoàn tất. Không triển khai lại. Gap duy nhất
+> còn liên quan là fit zoom vùng nguồn quá lớn fallback proxy.
 
 ### Vấn đề cần giải
 Preview live hiện **KHÔNG** chạy à-trous trên shader. Nó lấy Detail từ **CPU proxy** `dev_adjusted_rgb` (build ở downsample S) rồi blend per-pixel trong `compositor.wgsl` (`dev_finish_colored`, ~dòng 1380). Đó là lý do preview ≠ commit.
@@ -151,10 +156,11 @@ Preview live hiện **KHÔNG** chạy à-trous trên shader. Nó lấy Detail t�
 
 ## 6. Build & chạy
 - Lib test: `cargo test --lib` (1475 pass hiện tại). GPU detail: `cargo test --lib gpu_detail -- --nocapture`. Parity: `cargo test --test develop_cpu_gpu_parity`.
-- Release: `cargo build --release --bin iai` → copy `target/release/iai.exe` → `dist/iAi-portable/iai.exe` cho owner GUI-test (portable hiện `b3159efe`, CHƯA có GPU detail integration).
+- Release hiện tại đã có GPU Detail + CMS per-window: portable SHA-256
+  `675226F9909C15E92B44D0A6F64A826552A3A844EEE2C92CE65DB9AFBA5E0DA0`.
 - Corpus RAW: `C:\Users\Admin\Pictures\anh-raw`. ART-cli headless để A/B (nếu cần): `C:\Users\Admin\Pictures\1111\ART_1.26.7_Win64_portable\ART-cli.exe`.
 
-## 7. Thứ tự đề xuất cho người nhận
+## 7. Thứ tự đề xuất lịch sử — đã hoàn tất
 1. Đọc `process_detail_plane` (detail.rs) + `run_detail`/`detail.wgsl` để nắm phép tính (parity đã đúng, đừng sửa lệch).
 2. Quyết cách chụp working-space full-res (mục 3, hướng a GPU vs b CPU). Nếu chọn (a): thêm flag output-working-space cho `compositor.wgsl` + tách output-transform. Nếu (b): thêm biến thể `scene_fast_region_develop` downsample=1, no-detail, trả `working` cho GPU.
 3. Cache pipeline GPU detail (di `run_detail` internals thành struct giữ pipeline/bind group; hàm `run` chỉ upload pool + update uniform + dispatch + readback/hoặc dùng thẳng texture).

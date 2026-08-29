@@ -1,19 +1,19 @@
 # Kế hoạch hoàn thiện Develop iAI
 
 Ngày lập: 2026-08-27  
-Baseline mã nguồn: `0c0edb5` (`feat(develop): add opt-in light mixer v3`)  
-Baseline chạy thử: `dist/iAi-portable/iai.exe`, Develop3 bật bằng
-`IAI_LIGHT_MIXER_V3=1`.
+Cập nhật gần nhất: 2026-08-29
+Baseline code chức năng: `edc6816` (`feat(cms): follow per-window monitor profiles`)
+Baseline chạy thử: `dist/iAi-portable/iai.exe`; Develop3 là mặc định, không còn
+cần feature flag.
 
-Trạng thái 2026-08-27: **Phase 0 đã được owner kiểm thử toàn bộ bằng mắt và xác
-nhận OK**. Implementation gồm engine badge, pipeline provenance tooltip,
-Midtones activation cho graph/raster và chống áp Midtones lần hai ở RAW. Toàn bộ
-thay đổi Phase 0 hiện đã được stage nhưng **chưa commit** vì phiên Codex bị dừng
-giữa bước commit. Người tiếp quản phải chốt Phase 0 trước khi bắt đầu Phase 1.
+Trạng thái hiện tại: **phần code cốt lõi của Develop3 gần hoàn tất**. Phase
+0/1/3/4/5/6/7 và phần rollout chính của Phase 8 đã đóng bằng code/test; Develop2
+đã retire có migration. Các commit mới vẫn đang local, chưa push so với origin.
+Các hướng dẫn handoff cũ phía dưới chỉ giữ làm lịch sử, không được thực thi lại.
 
 ## Cập nhật tiến độ — 2026-08-27 (đợt Light/Mixer + rollout)
 
-Đã push toàn bộ lên `origin/feat/vector-core-foundation`.
+Mốc 2026-08-27 từng đã push; các thay đổi sau đó hiện vẫn local theo yêu cầu owner.
 
 - **Phase 0 (khóa baseline, engine badge, Midtones): ✅ XONG** — commit `2d515be`, owner GUI-OK.
 - **Phase 1 (harness A/B ART↔iAi): ✅ XONG** — commit `56cdbbb`; owner chấm "iAI đẹp hơn, ART thật hơn" → **quyết giữ look đẹp làm mặc định**. (Chưa mở rộng corpus §6 — không chặn.)
@@ -25,7 +25,9 @@ giữa bước commit. Người tiếp quản phải chốt Phase 0 trước khi
 - **Phase 5 — ĐỔI HƯỚNG theo owner (2026-08-28): làm Detail "giống Photoshop/PTS", KHÔNG theo split kỹ thuật 3-tầng của kế hoạch gốc.** Owner: *"mấy thứ này khá dư thừa; Detail chỉ có 3 thanh kéo (Sharpening, Noise Reduction, Color Noise); cần preview REALTIME giống PTS; tập trung UX, kỹ thuật ko quan tâm; đọc code ART tham khảo."* Đã làm (LOCAL, chờ GUI):
   - `29c5791` **Detail = đúng 3 thanh**: ẩn Sharpen Radius/Detail/Masking (giữ default 1.0/25/0 = combo Lightroom → look ko đổi), Defringe ẩn sẵn; **Texture+Definition dời sang mục Effects**; **gỡ Output Sharpening khỏi Export dialog** (owner thấy dư thừa; `export_output_sharpen`=0, engine `core/output_sharpen.rs` để yên).
   - `1de2892` **preview realtime**: bỏ sàn 8× downsample cho path Detail (min→1; budget pixel vẫn chặn cost) → zoom gần crop nhỏ ⇒ proxy mịn gần 1:1 ⇒ thấy Sharpen/NR THẬT realtime, khớp settled bake (kết hợp G6); zoom xa vẫn coarse; fast-preview thường giữ sàn 8×. Throttle Detail giữ (proxy nhỏ ~107k px ≈ 40fps).
-  - **CÒN (nếu owner muốn realtime hơn nữa mọi zoom):** đưa Detail lên GPU (WGSL à-trous — hiện Detail CPU-only). Tier-split capture/creative + noise-aware sharpen của kế hoạch gốc TẠM GÁC (phụ thuộc Phase 2 profile, và owner muốn UX đơn giản hơn là kỹ thuật). `dist/iAi-portable/iai.exe` sha `17fc4038…`.
+  - Dòng “đưa Detail lên GPU” của mốc này đã được hoàn tất ở `ed2b314`; chỉ còn
+    fit-zoom vùng nguồn quá lớn fallback proxy. Tier-split capture/creative và
+    noise-aware sharpen vẫn TẠM GÁC theo quyết định UX của owner.
 
 ## Cập nhật tiến độ — 2026-08-28 (GPU Detail GUI-OK + performance gate)
 
@@ -41,7 +43,7 @@ giữa bước commit. Người tiếp quản phải chốt Phase 0 trước khi
   đầu p95 `149.76 ms`, sau khi bỏ upload pool zero `20·N` và chỉ upload RGB
   `3·N` còn p95 `72.44 ms` (gate `<100 ms`). Probe nằm trong
   `tests/perf_develop.rs` và vẫn `#[ignore]` vì phụ thuộc phần cứng.
-- **Phase 7 — CMS per-window: ✅ XONG 2026-08-28** — main và Develop có LUT
+- **Phase 7 — CMS per-window: ✅ code/test, chờ GUI đa màn hình** — main và Develop có LUT
   monitor riêng; Windows resolve `MonitorFromWindow` → display DC →
   `GetICMProfileW`, refresh trên `WindowEvent::Moved` và chỉ rebuild khi bytes
   profile đổi. Chế độ `From System` tự theo màn hình; ICC nạp thủ công không bị
@@ -63,16 +65,38 @@ giữa bước commit. Người tiếp quản phải chốt Phase 0 trước khi
   hành được chuyển xuống cuối vì hiện chỉ dùng cá nhân, chưa công khai. DCP ART
   vẫn chỉ được dùng local và tuyệt đối không đưa vào bản phát hành công khai.
 
-**CÒN LẠI:** hoàn tất blind-review ART trên corpus/recipe khóa (đặc biệt Mixer
-từng band + Detail crop 100%); GPU-exact cho fit zoom ảnh lớn (hiện native
-viewport exact, vùng quá lớn fallback proxy); thu bug corpus và đóng băng look
-phát hành sau blind review; chỉ dọn Legacy/Scene1 sau khi có migration; các phần
-capture/creative/output Detail nâng cao chỉ quay lại nếu UX thực tế cần. Phase 2
-canonical/licensed camera-profile package làm sau cùng theo quyết định owner.
+## Còn lại sau rà soát 2026-08-29
+
+**Làm tiếp ngay, từ dễ tới khó:**
+
+1. Owner GUI-test CMS `From System` bằng cách kéo main và Develop qua hai màn
+   hình có ICC khác nhau; test thêm `Load Profile...` không bị tự ghi đè.
+2. Hoàn tất blind-review ART trên corpus/recipe đã khóa, ưu tiên Mixer từng band
+   và Detail crop 100%; ghi các lỗi nhìn thấy thành recipe tái lập.
+3. Nếu blind review phát hiện blocker thì sửa theo corpus, chạy lại parity rồi
+   đóng băng look/recipe phát hành.
+4. Hoàn thiện GPU-exact ở fit zoom ảnh rất lớn; hiện native viewport đã exact,
+   chỉ vùng nguồn quá lớn mới fallback proxy. Đây là phần kỹ thuật đáng kể nhất.
+
+**Để sau, không chặn dùng cá nhân hiện tại:**
+
+- Chỉ dọn Legacy1/Scene1 sau khi có công cụ migration và corpus file cũ.
+- Canonical/licensed camera-profile package làm cuối theo quyết định owner; tuyệt
+  đối không đưa DCP/ICC của ART vào bản phát hành.
+- Capture/creative/output Detail nâng cao, Defringe và soft-hull limiter chỉ mở
+  lại nếu UX/corpus thực tế chứng minh cần.
+
+Đánh giá khối lượng: **không còn nhiều cho bản dùng cá nhân** (một vòng GUI CMS +
+blind review). **Bản phát hành công khai vẫn còn mức vừa**, chủ yếu profile hợp
+pháp, migration tương thích và đóng băng look; đây là các việc đã chủ động để sau.
 
 ---
 
-## 0. Handoff cho Claude
+## 0. Handoff lịch sử 2026-08-27 — KHÔNG thực thi lại
+
+> Mục 0 được giữ để truy vết quyết định ban đầu. Trạng thái HEAD/index, feature
+> flag và việc “làm tiếp ngay” trong mục này đã lỗi thời; dùng phần cập nhật
+> 2026-08-29 ở đầu tài liệu làm nguồn sự thật.
 
 ### 0.1 Trạng thái repository phải giữ nguyên
 
@@ -460,21 +484,17 @@ Hoàn thiện Develop theo hướng:
 
 ## 14. Thứ tự triển khai đề nghị
 
-| Sprint | Công việc | Lý do |
+| Thứ tự hiện tại | Công việc | Trạng thái |
 |---|---|---|
-| S0 | G0, G10, engine diagnostics | Ngăn test nhầm và no-op Midtones |
-| S1 | ART A/B harness + corpus bổ sung | Có thước đo trước khi tuning tiếp |
-| S2 | Canonical camera-profile package | Ổn định đầu vào giữa các máy/build |
-| S3 | Detail preview source-scale | Sửa lỗi cảm nhận rõ nhất khi kéo |
-| S4 | Light control field + regularization | Cải thiện chuyển vùng sáng/tối |
-| S5 | Mixer curve liên tục | Cải thiện chọn màu và feather |
-| S6 | Capture/creative/output Detail split | Nâng chất lượng chi tiết thực |
-| S7 | Preview latency/cache | Hoàn thiện cảm giác tương tác |
-| S8 | Monitor/output CMS | Khóa tính nhất quán hiển thị |
-| S9 | Develop3 default + migration | Phát hành có kiểm soát |
+| 1 | GUI-test CMS hai màn hình | Code/test xong; cần owner xác nhận |
+| 2 | Blind review ART + corpus recipe | Harness có; review cuối chưa khóa |
+| 3 | Sửa blocker và freeze look/recipe | Chỉ làm nếu review tìm thấy lỗi |
+| 4 | GPU-exact fit zoom ảnh rất lớn | Native viewport xong; fallback proxy còn |
+| 5 | Migration Legacy1/Scene1 | Hoãn, không xóa đường tương thích sớm |
+| 6 | Canonical profile có giấy phép | Làm cuối trước phát hành công khai |
 
-Không chạy song song S4/S5/S6 trước khi S1 và S2 ổn định; nếu đầu vào/profile thay
-đổi giữa lúc tuning thì mọi đánh giá slider sẽ mất giá trị.
+Các sprint cũ S0/S3/S4/S5/S7/S8 và rollout Develop3 đã hoàn tất. Detail split
+nâng cao bị bỏ khỏi đường bắt buộc theo quyết định giữ UI ba slider.
 
 ## 15. Quy tắc cho mỗi pull request/commit
 
@@ -498,8 +518,8 @@ Develop được coi là hoàn thiện khi:
 3. Preview đang kéo, settled preview và Apply không đổi scale/semantics.
 4. Light không halo, không gãy gradient và giữ hue vùng sáng.
 5. Mixer phản hồi liên tục qua hue wheel, giữ neutral và không tách mảng da.
-6. Detail giảm noise đúng tầng, không sharpen sensor floor và có output sharpening.
-7. Canvas/export đúng theo monitor/output ICC.
+6. Detail ba slider giảm noise/sharpen ổn định và preview native khớp Apply.
+7. Canvas/export đúng theo monitor/output ICC; owner xác nhận chuyển màn hình.
 8. ART A/B và blind review được lưu cho toàn bộ recipe chuẩn.
 9. Project/preset cũ mở đúng hoặc có migration/rollback rõ ràng.
 10. Không còn feature flag thử nghiệm cần nhớ bằng tay trong bản phát hành chính thức.

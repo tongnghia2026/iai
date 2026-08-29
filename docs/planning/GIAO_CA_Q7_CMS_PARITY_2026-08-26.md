@@ -29,7 +29,7 @@ shader sample LUT bằng Rust rồi so với lcms trực tiếp:
 Giá trị: đường màu đã đúng → deliverable Q7 = **guard chống hồi quy** (double
 gamma, LUT thô đi, rò transform vào export, lệch parity) — đúng thứ §6/§7 yêu cầu.
 
-## ✅ Gap Q7 per-window đã đóng — 2026-08-28
+## ✅ Gap Q7 per-window đã đóng bằng code/test — 2026-08-28
 
 `system_display_profile_for_hwnd` resolve `MonitorFromWindow` →
 `MONITORINFOEXW.szDevice` → `CreateDCW` → `GetICMProfileW`, nên không còn lấy
@@ -40,8 +40,12 @@ chỉ chế độ **From System** tự đổi, còn **Load Profile...** giữ ng
 `cargo test --lib`: **1478 passed, 0 failed, 6 ignored**.
 `cargo build --release --bin iai`: pass; portable SHA-256
 `675226F9909C15E92B44D0A6F64A826552A3A844EEE2C92CE65DB9AFBA5E0DA0`.
+Gate còn lại duy nhất là owner GUI-test thực tế với hai màn hình có ICC khác nhau.
 
-## ➡️ NEXT (theo plan §7, phần chưa làm)
+## NEXT lịch sử của mốc 2026-08-26
+
+> Danh sách dưới đây là ghi nhận tại thời điểm Q7 parity, không còn là thứ tự
+> thực thi hiện tại. Xem kế hoạch chính cập nhật 2026-08-29.
 
 Memory M3 (batch tuần tự + spill) / M4 (tiled AHD demosaic + peak scratch) / M5
 (viewport/crop preview dùng exact pipeline) / M6 (global budget manager). Lưu ý:
