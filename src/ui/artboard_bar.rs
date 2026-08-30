@@ -10,7 +10,18 @@
 use super::{PdfNavData, UiActions, UiData};
 use egui;
 
-const BAR_H: f32 = 26.0;
+// The solid horizontal scrollbar needs its own row below the page tabs. The old
+// 26 px strip used egui's floating scrollbar, which expanded over a tab on hover
+// and intercepted both left- and right-clicks.
+const BAR_H: f32 = 42.0;
+
+fn separate_page_scrollbar(ui: &mut egui::Ui) {
+    let scroll = &mut ui.style_mut().spacing.scroll;
+    scroll.floating = false;
+    scroll.bar_width = 6.0;
+    scroll.bar_inner_margin = 6.0;
+    scroll.bar_outer_margin = 1.0;
+}
 
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     if !data.doc.has_doc {
@@ -99,16 +110,20 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     // One tab per page. A horizontal scroll keeps a long row
                     // reachable without stealing the whole strip. Right-click a tab
                     // to rename, delete, or reorder it.
-                    egui::ScrollArea::horizontal()
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 2.0;
-                                for i in 0..count {
-                                    page_tab(ui, data, actions, i, active, count);
-                                }
+                    ui.scope(|ui| {
+                        separate_page_scrollbar(ui);
+                        egui::ScrollArea::horizontal()
+                            .id_salt("artboard_page_tabs_scroll")
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    for i in 0..count {
+                                        page_tab(ui, data, actions, i, active, count);
+                                    }
+                                });
                             });
-                        });
+                    });
                 });
             });
         });
@@ -222,6 +237,70 @@ fn page_tab(
     });
 }
 
+/// One imported-PDF tab. PDF page order is the compact `selected_pages` list,
+/// so rename/delete/reorder remain metadata-only and preserve the source PDF.
+fn pdf_page_tab(
+    ui: &mut egui::Ui,
+    actions: &mut UiActions,
+    nav: &PdfNavData,
+    i: usize,
+    active: usize,
+    count: usize,
+) {
+    let label = nav
+        .page_names
+        .get(i)
+        .cloned()
+        .unwrap_or_else(|| format!("Trang {}", i + 1));
+    let tab = ui.selectable_label(i == active, label);
+    if tab.clicked() {
+        actions.doc.pdf_nav_goto = Some(i);
+    }
+    tab.context_menu(|ui| {
+        ui.set_min_width(170.0);
+        if ui.button("＋ Trang trắng phía trước").clicked() {
+            actions.doc.insert_pdf_blank = Some(i);
+            ui.close();
+        }
+        if ui.button("＋ Ảnh/PDF phía trước…").clicked() {
+            actions.doc.insert_pdf_files = Some(i);
+            ui.close();
+        }
+        if ui.button("＋ Trang trắng phía sau").clicked() {
+            actions.doc.insert_pdf_blank = Some(i + 1);
+            ui.close();
+        }
+        if ui.button("＋ Ảnh/PDF phía sau…").clicked() {
+            actions.doc.insert_pdf_files = Some(i + 1);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Đổi tên…").clicked() {
+            actions.doc.rename_page = Some(i);
+            ui.close();
+        }
+        ui.add_enabled_ui(i > 0, |ui| {
+            if ui.button("◀ Chuyển sang trái").clicked() {
+                actions.doc.move_page = Some((i, i - 1));
+                ui.close();
+            }
+        });
+        ui.add_enabled_ui(i + 1 < count, |ui| {
+            if ui.button("Chuyển sang phải ▶").clicked() {
+                actions.doc.move_page = Some((i, i + 1));
+                ui.close();
+            }
+        });
+        ui.separator();
+        ui.add_enabled_ui(count > 1, |ui| {
+            if ui.button("Xoá trang").clicked() {
+                actions.doc.delete_page = Some(i);
+                ui.close();
+            }
+        });
+    });
+}
+
 /// PDF navigator variant of the strip: source name, page nav, an Export button,
 /// and one tab per imported page. Clicking a tab pages the PDF (async on-demand
 /// render), so it routes through the PDF navigation intent, not artboard storage.
@@ -307,25 +386,87 @@ fn build_pdf(
                     {
                         actions.doc.show_pdf_export_dialog = Some(true);
                     }
+                    ui.menu_button("＋ Chèn", |ui| {
+                        if ui.button("Trang trắng trước trang hiện tại").clicked() {
+                            actions.doc.insert_pdf_blank = Some(index);
+                            ui.close();
+                        }
+                        if ui.button("Ảnh/PDF trước trang hiện tại…").clicked() {
+                            actions.doc.insert_pdf_files = Some(index);
+                            ui.close();
+                        }
+                        if ui.button("Trang trắng sau trang hiện tại").clicked() {
+                            actions.doc.insert_pdf_blank = Some(index + 1);
+                            ui.close();
+                        }
+                        if ui.button("Ảnh/PDF sau trang hiện tại…").clicked() {
+                            actions.doc.insert_pdf_files = Some(index + 1);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Trang trắng ở đầu tài liệu").clicked() {
+                            actions.doc.insert_pdf_blank = Some(0);
+                            ui.close();
+                        }
+                        if ui.button("Ảnh/PDF ở cuối tài liệu…").clicked() {
+                            actions.doc.insert_pdf_files = Some(count);
+                            ui.close();
+                        }
+                    });
+                    let active_is_background = data
+                        .layers
+                        .layer_is_background
+                        .get(data.layers.active_layer_idx)
+                        .copied()
+                        .unwrap_or(false);
+                    if ui
+                        .add_enabled(
+                            data.sel.has_selection && active_is_background,
+                            egui::Button::new("Xóa vùng · mọi trang"),
+                        )
+                        .on_hover_text(
+                            "Dùng vùng chọn chữ nhật hiện tại để che cùng vị trí trên mọi trang (Shift+Delete)",
+                        )
+                        .clicked()
+                    {
+                        actions.sel.clear_selection_all_pdf_pages = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            nav.global_clear_count > 0,
+                            egui::Button::new("Hoàn tác xóa mọi trang").small(),
+                        )
+                        .clicked()
+                    {
+                        actions.sel.undo_pdf_global_clear = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            nav.global_clear_redo_count > 0,
+                            egui::Button::new("Làm lại").small(),
+                        )
+                        .clicked()
+                    {
+                        actions.sel.redo_pdf_global_clear = true;
+                    }
                     ui.separator();
 
                     // One tab per PDF page; a horizontal scroll keeps a long row
                     // reachable without stealing the whole strip.
-                    egui::ScrollArea::horizontal()
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
+                    ui.scope(|ui| {
+                        separate_page_scrollbar(ui);
+                        egui::ScrollArea::horizontal()
+                            .id_salt("pdf_page_tabs_scroll")
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 2.0;
                                 for i in 0..count {
-                                    if ui
-                                        .selectable_label(i == index, format!("Trang {}", i + 1))
-                                        .clicked()
-                                    {
-                                        actions.doc.pdf_nav_goto = Some(i);
-                                    }
+                                    pdf_page_tab(ui, actions, nav, i, index, count);
                                 }
                             });
                         });
+                    });
                 });
             });
             // Clicking the strip during a modal op denies it (matches the old

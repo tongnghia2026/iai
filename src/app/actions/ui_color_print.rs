@@ -155,22 +155,7 @@ impl App {
                 .and_then(|window| crate::file_io::dialog_parent(window.as_ref()))
                 .map(crate::file_io::DialogParent::hwnd)
                 .unwrap_or(0);
-            match crate::core::print::open_printer_settings(
-                &self.shell.print_selected_printer,
-                self.shell.print_driver_settings.as_ref(),
-                owner_hwnd,
-            ) {
-                Ok(Some(settings)) => {
-                    self.shell.print_driver_settings = Some(settings);
-                    self.shell.status_msg = format!(
-                        "Printer settings applied to this IAI print only: {}",
-                        self.shell.print_selected_printer
-                    );
-                    self.refresh_selected_printer();
-                }
-                Ok(None) => {}
-                Err(e) => self.shell.status_msg = e,
-            }
+            self.open_printer_settings_async(owner_hwnd);
         }
         if actions.print.clear_print_printer_profile {
             self.shell.print_printer_profile = None;

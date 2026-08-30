@@ -90,6 +90,18 @@ pub struct BackgroundJobs {
     pub(in crate::app) pdf_render_target_dpi: f32,
     /// `(document, target page)` while an on-demand page render is in flight.
     pub(in crate::app) pending_pdf_page_render: Option<(crate::core::document::DocumentId, usize)>,
+    /// `(document, physical source page)` to remove after an active PDF page has
+    /// switched successfully. Inactive pages are removed immediately.
+    pub(in crate::app) pending_pdf_page_delete: Option<(crate::core::document::DocumentId, usize)>,
+    /// Decode of image/PDF files selected for insertion into an existing PDF.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::app) pending_pdf_page_insert: Option<
+        std::sync::mpsc::Receiver<(
+            crate::core::document::DocumentId,
+            usize,
+            Result<Vec<(crate::core::canvas::Canvas, String)>, String>,
+        )>,
+    >,
     pub(in crate::app) pending_reload_prompt: Option<PendingReloadPrompt>,
     pub(in crate::app) pending_reload_job: Option<
         std::sync::mpsc::Receiver<(
@@ -110,6 +122,17 @@ pub struct BackgroundJobs {
     >,
     pub(in crate::app) pending_printer_refresh:
         Option<std::sync::mpsc::Receiver<Result<Vec<crate::core::print::PrinterInfo>, String>>>,
+    /// The native printer-driver property sheet runs on a worker thread.  Calling
+    /// `DocumentPropertiesW(DM_IN_PROMPT)` from inside winit's event handler can
+    /// re-enter the Windows message loop and leave the borderless main window in
+    /// a permanent nested-modal spin (most often after changing Borderless).
+    #[allow(clippy::type_complexity)]
+    pub(in crate::app) pending_printer_settings: Option<
+        std::sync::mpsc::Receiver<(
+            String,
+            Result<Option<crate::core::print_gdi::PrinterSettings>, String>,
+        )>,
+    >,
     /// Off-thread Shape rasterization in flight. See [`ShapeBakeInFlight`].
     pub(in crate::app) shape_bake: Option<ShapeBakeInFlight>,
     /// Off-thread Path (vector) rasterization in flight — used by the live

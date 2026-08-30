@@ -3,6 +3,73 @@
 use crate::app::state::App;
 
 impl App {
+    /// Apply the result of the native printer property sheet without ever
+    /// blocking/re-entering winit's UI thread.
+    pub(super) fn poll_printer_settings(&mut self) {
+        let Some(rx) = self.jobs.pending_printer_settings.take() else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok((printer, Ok(Some(settings)))) => {
+                // The native sheet is modal, but keep this guard so a stale
+                // worker result can never be applied to a newly selected device.
+                if printer == self.shell.print_selected_printer {
+                    self.shell.print_driver_settings = Some(settings);
+                    self.shell.status_msg =
+                        format!("Printer settings applied to this IAI print only: {printer}");
+                    self.refresh_selected_printer();
+                }
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            Ok((_printer, Ok(None))) => {
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            Ok((_printer, Err(e))) => {
+                self.shell.status_msg = e;
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.jobs.pending_printer_settings = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.shell.status_msg = "Printer settings dialog stopped unexpectedly".to_string();
+            }
+        }
+    }
+
+    /// Start the selected driver's property sheet away from the winit thread.
+    /// The HWND remains the native owner, so Windows keeps the sheet in front
+    /// and restores focus correctly when it closes.
+    pub(crate) fn open_printer_settings_async(&mut self, owner_hwnd: isize) {
+        if self.jobs.pending_printer_settings.is_some() {
+            return;
+        }
+        let printer = self.shell.print_selected_printer.clone();
+        let settings = self.shell.print_driver_settings.clone();
+        let worker_printer = printer.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.jobs.pending_printer_settings = Some(rx);
+        self.shell.status_msg = format!("Opening printer settings: {printer}");
+        std::thread::spawn(move || {
+            let result = crate::core::print::open_printer_settings(
+                &worker_printer,
+                settings.as_ref(),
+                owner_hwnd,
+            );
+            let _ = tx.send((worker_printer, result));
+        });
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
     pub(super) fn apply_printer_list(
         &mut self,
         mut printers: Vec<crate::core::print::PrinterInfo>,

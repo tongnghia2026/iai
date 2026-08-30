@@ -22,7 +22,12 @@ use std::path::{Path, PathBuf};
 /// it as 8-bit (graceful precision loss they couldn't use anyway); this build
 /// detects the 16-bit payload on load and rebuilds the master. See
 /// `docs/bit-depth-and-color-capability.md`.
-const IAI_FORMAT_VERSION: u64 = 5;
+/// v6 adds compact document-level PDF clear rectangles. Older builds must reject
+/// these projects rather than silently dropping an edit that affects every page.
+/// v7 adds custom tab names for source PDF pages.
+/// v8 adds materialized blank/image/PDF pages whose ids are outside the source
+/// PDF's physical page range.
+const IAI_FORMAT_VERSION: u64 = 8;
 
 pub struct IaiImporter;
 pub struct IaiExporter;
@@ -47,8 +52,10 @@ pub struct IaiPdfProject {
     pub embedded_pdf: Option<Vec<u8>>,
     pub page_count: usize,
     pub selected_pages: Vec<usize>,
+    pub page_names: std::collections::BTreeMap<usize, String>,
     pub requested_dpi: f32,
     pub active_page: usize,
+    pub global_clears: Vec<crate::core::document::PdfGlobalClear>,
     pub pages: Vec<IaiProjectPage>,
 }
 
@@ -458,6 +465,56 @@ fn read_pdf_project<R: Read + Seek>(
                 .collect()
         })
         .unwrap_or_else(|| (0..page_count).collect());
+    let page_names = project["page_names"]
+        .as_object()
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|(index, name)| {
+                    let index = index.parse::<usize>().ok()?;
+                    let name = name.as_str()?.trim();
+                    ((index < page_count || selected_pages.contains(&index)) && !name.is_empty())
+                        .then(|| (index, name.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let global_clears = project["global_clears"]
+        .as_array()
+        .map(|operations| {
+            operations
+                .iter()
+                .filter_map(|operation| {
+                    let rect = operation["rect"].as_array()?;
+                    let color = operation["color"].as_array()?;
+                    if rect.len() != 4 || color.len() != 4 {
+                        return None;
+                    }
+                    let read_f32 = |index: usize| rect[index].as_f64().map(|v| v as f32);
+                    let read_u8 =
+                        |index: usize| color[index].as_u64().and_then(|v| u8::try_from(v).ok());
+                    let clear = crate::core::document::PdfGlobalClear {
+                        x0: read_f32(0)?,
+                        y0: read_f32(1)?,
+                        x1: read_f32(2)?,
+                        y1: read_f32(3)?,
+                        color: [read_u8(0)?, read_u8(1)?, read_u8(2)?, read_u8(3)?],
+                    };
+                    (clear.x0.is_finite()
+                        && clear.y0.is_finite()
+                        && clear.x1.is_finite()
+                        && clear.y1.is_finite()
+                        && clear.x0 >= 0.0
+                        && clear.y0 >= 0.0
+                        && clear.x1 <= 1.0
+                        && clear.y1 <= 1.0
+                        && clear.x1 > clear.x0
+                        && clear.y1 > clear.y0)
+                        .then_some(clear)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut pages = Vec::new();
     if let Some(arr) = manifest["pages"].as_array() {
@@ -499,8 +556,10 @@ fn read_pdf_project<R: Read + Seek>(
         embedded_pdf,
         page_count,
         selected_pages,
+        page_names,
         requested_dpi,
         active_page,
+        global_clears,
         pages,
     })
 }
@@ -563,7 +622,7 @@ pub fn write_artboard_doc(
             write_canvas_layers(zip, canvas, &format!("page_{i}/"))?;
         }
         let mut manifest = serde_json::json!({
-            "version": IAI_FORMAT_VERSION,
+            "version": 5,
             "kind": "artboard_doc",
             "active_page": active,
             "page_count": pages.len(),
@@ -1048,8 +1107,10 @@ pub struct IaiProjectMeta {
     pub source_modified_secs: Option<u64>,
     pub page_count: usize,
     pub selected_pages: Vec<usize>,
+    pub page_names: std::collections::BTreeMap<usize, String>,
     pub requested_dpi: f32,
     pub active_page: usize,
+    pub global_clears: Vec<crate::core::document::PdfGlobalClear>,
 }
 
 /// Write a multi-page PDF project `.iai` (format v2) atomically. Stores the link
@@ -1082,13 +1143,33 @@ pub fn save_pdf_project(
                         || l.clip_parent_id.is_some()
                 })
         });
-        let version = if has_v4_model {
+        let has_inserted_pages = meta
+            .selected_pages
+            .iter()
+            .any(|&index| index >= meta.page_count);
+        let version = if has_inserted_pages {
+            8u64
+        } else if !meta.page_names.is_empty() {
+            7u64
+        } else if !meta.global_clears.is_empty() {
+            6u64
+        } else if has_v4_model {
             4u64
         } else if pages.iter().any(|p| p.canvas.is_cmyk()) {
             3u64
         } else {
             2u64
         };
+        let global_clears: Vec<serde_json::Value> = meta
+            .global_clears
+            .iter()
+            .map(|clear| {
+                serde_json::json!({
+                    "rect": [clear.x0, clear.y0, clear.x1, clear.y1],
+                    "color": clear.color,
+                })
+            })
+            .collect();
         let manifest = serde_json::json!({
             "version": version,
             "kind": "pdf_project",
@@ -1098,8 +1179,10 @@ pub fn save_pdf_project(
                 "source_modified": meta.source_modified_secs,
                 "page_count": meta.page_count,
                 "selected_pages": meta.selected_pages,
+                "page_names": meta.page_names,
                 "requested_dpi": meta.requested_dpi,
                 "active_page": meta.active_page,
+                "global_clears": global_clears,
                 "embedded": source_pdf.is_some(),
             },
             "pages": pages_json,
@@ -2933,8 +3016,10 @@ mod tests {
             source_modified_secs: Some(999),
             page_count: 1,
             selected_pages: vec![0],
+            page_names: std::collections::BTreeMap::new(),
             requested_dpi: 144.0,
             active_page: 0,
+            global_clears: Vec::new(),
         };
         let pages = vec![IaiProjectPageOut {
             index: 0,
@@ -2970,8 +3055,10 @@ mod tests {
             source_modified_secs: None,
             page_count: 2,
             selected_pages: vec![0, 1],
+            page_names: std::collections::BTreeMap::new(),
             requested_dpi: 300.0,
             active_page: 0,
+            global_clears: Vec::new(),
         };
         let pages = vec![IaiProjectPageOut {
             index: 0,
@@ -3001,6 +3088,63 @@ mod tests {
     }
 
     #[test]
+    fn inserted_pdf_page_round_trips_as_materialized_v8_page() {
+        let dir = tmp_dir("inserted-page-project");
+        let path = dir.join("doc.iai");
+        let inserted = solid([245, 245, 245, 255], 7, 9);
+        let meta = IaiProjectMeta {
+            source: dir.join("original.pdf"),
+            source_len: None,
+            source_modified_secs: None,
+            page_count: 1,
+            selected_pages: vec![0, 1],
+            page_names: [(1, "Ảnh chèn".to_string())].into_iter().collect(),
+            requested_dpi: 144.0,
+            active_page: 1,
+            global_clears: Vec::new(),
+        };
+        save_pdf_project(
+            &path,
+            &meta,
+            &[IaiProjectPageOut {
+                index: 1,
+                base_pristine: false,
+                view: (1.0, 0.0, 0.0),
+                canvas: &inserted,
+            }],
+            None,
+        )
+        .unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(8)
+        );
+        drop(zip);
+        let IaiLoad::PdfProject(project) = load(&path).unwrap() else {
+            panic!("expected PDF project");
+        };
+        assert_eq!(project.selected_pages, vec![0, 1]);
+        assert_eq!(project.active_page, 1);
+        assert_eq!(
+            project.page_names.get(&1).map(String::as_str),
+            Some("Ảnh chèn")
+        );
+        assert_eq!(project.pages.len(), 1);
+        assert_eq!(project.pages[0].index, 1);
+        assert_eq!(
+            (
+                project.pages[0].canvas.width,
+                project.pages[0].canvas.height
+            ),
+            (7, 9)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn pdf_project_round_trips_metadata_and_edited_pages() {
         let dir = tmp_dir("project-roundtrip");
         let path = dir.join("doc.iai");
@@ -3014,8 +3158,16 @@ mod tests {
             source_modified_secs: Some(456),
             page_count: 5,
             selected_pages: vec![0, 2, 4],
+            page_names: [(2, "Trang minh họa".to_string())].into_iter().collect(),
             requested_dpi: 300.0,
             active_page: 2,
+            global_clears: vec![crate::core::document::PdfGlobalClear {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 0.2,
+                y1: 0.25,
+                color: [255, 255, 255, 255],
+            }],
         };
         let pages = vec![
             IaiProjectPageOut {
@@ -3043,8 +3195,10 @@ mod tests {
                 assert!(project.embedded_pdf.is_none());
                 assert_eq!(project.page_count, 5);
                 assert_eq!(project.selected_pages, vec![0, 2, 4]);
+                assert_eq!(project.page_names, meta.page_names);
                 assert_eq!(project.requested_dpi, 300.0);
                 assert_eq!(project.active_page, 2);
+                assert_eq!(project.global_clears, meta.global_clears);
                 assert_eq!(project.pages.len(), 2);
 
                 let p0 = project.pages.iter().find(|p| p.index == 0).unwrap();

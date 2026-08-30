@@ -81,10 +81,17 @@ mod tests {
             embedded_source: None,
             page_count: 3,
             selected_pages: vec![0, 1, 2],
+            selected_pages_saved: vec![0, 1, 2],
+            page_names: std::collections::BTreeMap::new(),
+            page_names_saved: std::collections::BTreeMap::new(),
             requested_dpi: 300.0,
             active_page: 0,
             active_page_modified: true,
             edited_pages: edited,
+            global_clears: Vec::new(),
+            global_clears_saved: Vec::new(),
+            global_clears_redo: Vec::new(),
+            global_overlay_cache: None,
         });
 
         app.save_pdf_project_to(&project_path);

@@ -331,6 +331,7 @@ impl App {
             .and_then(|name| name.to_str())
             .unwrap_or("PDF");
         doc.title = format!("{file_name} - Page {}", target_index + 1);
+        doc.rebuild_pdf_global_overlay();
         self.refresh_active_document();
     }
 
@@ -471,10 +472,17 @@ mod tests {
             embedded_source: None,
             page_count: 1_000,
             selected_pages: (0..1_000).collect(),
+            selected_pages_saved: (0..1_000).collect(),
+            page_names: std::collections::BTreeMap::new(),
+            page_names_saved: std::collections::BTreeMap::new(),
             requested_dpi: 72.0,
             active_page: 0,
             active_page_modified: true,
             edited_pages: std::collections::HashMap::new(),
+            global_clears: Vec::new(),
+            global_clears_saved: Vec::new(),
+            global_clears_redo: Vec::new(),
+            global_overlay_cache: None,
         });
 
         app.install_rendered_pdf_page(0, 1, solid_canvas([10, 10, 220, 255]));
@@ -501,5 +509,60 @@ mod tests {
         assert!(pixels
             .chunks_exact(4)
             .all(|pixel| pixel[0] > 200 && pixel[2] < 20));
+    }
+
+    #[test]
+    fn blank_page_can_be_inserted_before_the_active_pdf_page() {
+        let mut app = App::new();
+        let source = std::path::PathBuf::from("book.pdf");
+        app.docs.documents[0].canvas = solid_canvas([30, 40, 50, 255]);
+        let mut reference = crate::core::document::PdfPageRef {
+            group_id: 1,
+            source: source.clone(),
+            index: 0,
+            count: 2,
+            requested_dpi: 72.0,
+            loaded: true,
+            original_width: 0,
+            original_height: 0,
+            original_dpi: 72.0,
+            original_layer_id: 0,
+            original_tiles_fingerprint: 0,
+        };
+        reference.record_canvas_baseline(&app.docs.documents[0].canvas);
+        app.docs.documents[0].pdf_page = Some(reference);
+        app.docs.documents[0].pdf_document = Some(crate::core::document::PdfDocumentState {
+            source,
+            embedded_source: None,
+            page_count: 2,
+            selected_pages: vec![0, 1],
+            selected_pages_saved: vec![0, 1],
+            page_names: std::collections::BTreeMap::new(),
+            page_names_saved: std::collections::BTreeMap::new(),
+            requested_dpi: 72.0,
+            active_page: 0,
+            active_page_modified: false,
+            edited_pages: std::collections::HashMap::new(),
+            global_clears: Vec::new(),
+            global_clears_saved: Vec::new(),
+            global_clears_redo: Vec::new(),
+            global_overlay_cache: None,
+        });
+
+        app.insert_blank_pdf_page(0);
+
+        let pdf = app.docs.documents[0].pdf_document.as_ref().unwrap();
+        assert_eq!(pdf.selected_pages, vec![2, 0, 1]);
+        assert_eq!(pdf.active_page, 2);
+        assert_eq!(
+            pdf.page_names.get(&2).map(String::as_str),
+            Some("Trang trắng")
+        );
+        assert!(app.docs.documents[0]
+            .canvas
+            .export_flat()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [255, 255, 255, 255]));
+        assert!(app.docs.documents[0].is_modified());
     }
 }

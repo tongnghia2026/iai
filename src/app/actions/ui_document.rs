@@ -135,6 +135,12 @@ impl App {
         if let Some(i) = actions.doc.delete_page.take() {
             self.delete_page(i);
         }
+        if let Some(position) = actions.doc.insert_pdf_blank.take() {
+            self.insert_blank_pdf_page(position);
+        }
+        if let Some(position) = actions.doc.insert_pdf_files.take() {
+            self.begin_pdf_page_insert_dialog(position);
+        }
         if std::mem::take(&mut actions.doc.toggle_master_edit) {
             self.toggle_master_edit();
         }
@@ -434,6 +440,14 @@ impl App {
         let Some(doc) = self.docs.documents.get(idx) else {
             return;
         };
+        if let Some(pdf) = doc.pdf_document.as_ref() {
+            if index >= pdf.selected_pages.len() {
+                return;
+            }
+            self.shell.ui.page_rename_text = pdf.page_display_name(index);
+            self.shell.ui.page_rename_target = Some(index);
+            return;
+        }
         if index >= doc.page_count() {
             return;
         }
@@ -453,7 +467,11 @@ impl App {
         if let Some(doc) = self.docs.documents.get_mut(idx) {
             let default_label = format!("Trang {}", index + 1);
             let custom = (!name.is_empty() && name != default_label).then_some(name);
-            doc.set_page_name(index, custom);
+            if let Some(pdf) = doc.pdf_document.as_mut() {
+                pdf.set_page_name(index, custom);
+            } else {
+                doc.set_page_name(index, custom);
+            }
         }
     }
 
@@ -462,7 +480,12 @@ impl App {
     pub fn move_page(&mut self, from: usize, to: usize) {
         let idx = self.docs.active_doc_idx;
         if let Some(doc) = self.docs.documents.get_mut(idx) {
-            doc.move_page(from, to);
+            if let Some(pdf) = doc.pdf_document.as_mut() {
+                pdf.move_page(from, to);
+                self.shell.status_msg = format!("Đã chuyển trang {}", to + 1);
+            } else {
+                doc.move_page(from, to);
+            }
         }
     }
 
@@ -471,6 +494,10 @@ impl App {
     /// switch. Collapsing back to a single page hides the extra tab.
     pub fn delete_page(&mut self, index: usize) {
         let idx = self.docs.active_doc_idx;
+        if self.docs.documents[idx].pdf_document.is_some() {
+            self.delete_pdf_page(index);
+            return;
+        }
         let Some(doc) = self.docs.documents.get_mut(idx) else {
             return;
         };
@@ -487,6 +514,81 @@ impl App {
         self.refresh_active_document();
         self.fit_canvas_to_screen();
         self.shell.status_msg = format!("Đã xoá trang · còn {count}");
+    }
+
+    fn delete_pdf_page(&mut self, position: usize) {
+        if self.jobs.pending_pdf_page_delete.is_some() {
+            self.shell.status_msg = "Đang chuyển trang trước khi xóa".to_string();
+            return;
+        }
+        let idx = self.docs.active_doc_idx;
+        let Some(pdf) = self.docs.documents[idx].pdf_document.as_ref() else {
+            return;
+        };
+        if pdf.selected_pages.len() <= 1 || position >= pdf.selected_pages.len() {
+            return;
+        }
+        let source_index = pdf.selected_pages[position];
+        let active_page = pdf.active_page;
+        let doc_id = self.docs.documents[idx].id;
+
+        if source_index != active_page {
+            self.finish_pdf_page_delete(doc_id, source_index);
+            return;
+        }
+
+        // Keep displaying a valid page at every instant. Cached neighbours swap
+        // synchronously; clean neighbours render asynchronously and finalize the
+        // deletion only after that render succeeds.
+        let target_position = if position + 1 < pdf.selected_pages.len() {
+            position + 1
+        } else {
+            position - 1
+        };
+        self.pdf_nav_goto(target_position);
+        let switched = self.docs.documents[idx]
+            .pdf_document
+            .as_ref()
+            .is_some_and(|pdf| pdf.active_page != source_index);
+        if switched {
+            self.finish_pdf_page_delete(doc_id, source_index);
+        } else if self
+            .jobs
+            .pending_pdf_page_render
+            .is_some_and(|(pending_doc, _)| pending_doc == doc_id)
+        {
+            self.jobs.pending_pdf_page_delete = Some((doc_id, source_index));
+            self.shell.status_msg = format!("Đang chuyển khỏi trang {} để xóa…", position + 1);
+        }
+    }
+
+    pub(crate) fn finish_pdf_page_delete(
+        &mut self,
+        doc_id: crate::core::document::DocumentId,
+        source_index: usize,
+    ) {
+        let Some(doc_idx) = self.docs.documents.iter().position(|doc| doc.id == doc_id) else {
+            return;
+        };
+        let Some(pdf) = self.docs.documents[doc_idx].pdf_document.as_mut() else {
+            return;
+        };
+        if pdf.active_page == source_index {
+            return;
+        }
+        let Some(position) = pdf
+            .selected_pages
+            .iter()
+            .position(|&page| page == source_index)
+        else {
+            return;
+        };
+        if pdf.remove_page(position).is_none() {
+            return;
+        }
+        self.shell.ui.page_rename_target = None;
+        self.shell.ui.page_rename_text.clear();
+        self.shell.status_msg = format!("Đã xoá trang · còn {}", pdf.selected_pages.len());
     }
 
     /// Page ▸ Master: enter or leave master-editing. On first use it creates the

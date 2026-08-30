@@ -3,6 +3,12 @@ use crate::core::document::GuideOrientation;
 use crate::core::snapping::{best_snap, SnapKind, SnapLine, SNAP_THRESHOLD_PX};
 use crate::core::vector::object::VectorGeometry;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstrainedAxis {
+    Horizontal,
+    Vertical,
+}
+
 pub struct MoveTool {
     pub drag_start_x: f32,
     pub drag_start_y: f32,
@@ -50,6 +56,10 @@ pub struct MoveTool {
     /// Smart-guide lines to draw this frame; read by the app for the overlay.
     pub snap_guides: Vec<SnapLine>,
     snap_context_dirty: bool,
+    /// Dominant axis chosen when Shift is first observed during a drag. Keep it
+    /// stable until Shift is released so crossing the diagonal cannot make the
+    /// moving layer group jump from horizontal to vertical (or vice versa).
+    constrained_axis: Option<ConstrainedAxis>,
 }
 
 impl MoveTool {
@@ -84,6 +94,7 @@ impl MoveTool {
             snap_targets_y: Vec::new(),
             snap_guides: Vec::new(),
             snap_context_dirty: false,
+            constrained_axis: None,
         }
     }
 
@@ -322,6 +333,7 @@ impl Tool for MoveTool {
         self.snap_targets_x.clear();
         self.snap_targets_y.clear();
         self.snap_context_dirty = true;
+        self.constrained_axis = None;
         if changed_selection {
             ToolResponse::redraw()
         } else {
@@ -375,16 +387,34 @@ impl Tool for MoveTool {
         let mut raw_dx = event.canvas_x - self.press_cx;
         let mut raw_dy = event.canvas_y - self.press_cy;
 
-        // Shift = constrain to a straight line (lock the smaller axis).
-        if event.shift {
-            if raw_dx.abs() >= raw_dy.abs() {
-                raw_dy = 0.0;
-            } else {
-                raw_dx = 0.0;
+        // Shift = constrain to the dominant axis chosen at the start of the
+        // constraint. Do not recalculate it on every pointer event: otherwise a
+        // small wobble across the diagonal makes the entire selection change
+        // direction and visibly jump off the intended straight line.
+        let (lock_x, lock_y) = if event.shift {
+            let axis = *self.constrained_axis.get_or_insert_with(|| {
+                if raw_dx.abs() >= raw_dy.abs() {
+                    ConstrainedAxis::Horizontal
+                } else {
+                    ConstrainedAxis::Vertical
+                }
+            });
+            match axis {
+                ConstrainedAxis::Horizontal => {
+                    raw_dy = 0.0;
+                    (false, true)
+                }
+                ConstrainedAxis::Vertical => {
+                    raw_dx = 0.0;
+                    (true, false)
+                }
             }
-        }
-        let lock_x = event.shift && raw_dx == 0.0;
-        let lock_y = event.shift && raw_dy == 0.0;
+        } else {
+            // Releasing Shift returns to free movement; pressing it again starts
+            // a fresh constraint based on the pointer's current dominant axis.
+            self.constrained_axis = None;
+            (false, false)
+        };
 
         let mut snap_dx = raw_dx;
         let mut snap_dy = raw_dy;
@@ -735,6 +765,7 @@ impl Tool for MoveTool {
         self.snap_targets_x.clear();
         self.snap_targets_y.clear();
         self.snap_context_dirty = false;
+        self.constrained_axis = None;
         ToolResponse::none()
     }
 }
@@ -846,5 +877,32 @@ mod tests {
 
         assert_eq!(doc.canvas.layer_stack.layers[first].offset, (100, 50));
         assert_eq!(doc.canvas.layer_stack.layers[second].offset, (130, 70));
+    }
+
+    #[test]
+    fn shift_keeps_the_initial_axis_for_the_whole_multi_layer_drag() {
+        let mut t = MoveTool::new();
+        t.snap_enabled = false;
+        let mut doc = Document::new(DocumentId(1), 400, 300);
+        let first = add_empty_vector_layer(&mut doc, 40, 50, 80, 80, true);
+        let second = add_empty_vector_layer(&mut doc, 70, 70, 80, 80, true);
+        doc.canvas.layer_stack.active_idx = second;
+
+        let press = PointerEvent::new(90.0, 90.0);
+        let mut horizontal_drag = PointerEvent::new(150.0, 105.0);
+        horizontal_drag.shift = true;
+        let mut crosses_diagonal = PointerEvent::new(155.0, 180.0);
+        crosses_diagonal.shift = true;
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(press, &mut c);
+            t.on_drag(horizontal_drag, &press, &mut c);
+            t.on_drag(crosses_diagonal, &horizontal_drag, &mut c);
+        }
+
+        // The first Shift-drag chose horizontal. Even though the later pointer
+        // delta is vertically dominant, both selected layers stay on that line.
+        assert_eq!(doc.canvas.layer_stack.layers[first].offset, (105, 50));
+        assert_eq!(doc.canvas.layer_stack.layers[second].offset, (135, 70));
     }
 }

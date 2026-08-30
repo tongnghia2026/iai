@@ -394,7 +394,11 @@ impl App {
             let master_combined = doc
                 .active_master_backdrop()
                 .map(|m| canvas.layer_stack.with_backdrop(&m.layer_stack));
-            let base_stack = master_combined.as_ref().unwrap_or(&canvas.layer_stack);
+            let page_stack = master_combined.as_ref().unwrap_or(&canvas.layer_stack);
+            let pdf_overlay_combined = doc
+                .active_pdf_global_overlay()
+                .map(|overlay| page_stack.with_overlay(overlay));
+            let base_stack = pdf_overlay_combined.as_ref().unwrap_or(page_stack);
             gpu.compositor.develop_preview = dev_preview;
             let has_effected_groups = base_stack.has_effected_groups();
             let gpu_isolates_groups = has_effected_groups
@@ -474,7 +478,10 @@ impl App {
                 // live clip move (the frozen base would ghost — see above), and
                 // when a master backdrop is injected (the merged stack differs
                 // from the page's real stack the cut would be computed from).
-                !has_effected_groups && !clip_live_move && master_combined.is_none(),
+                !has_effected_groups
+                    && !clip_live_move
+                    && master_combined.is_none()
+                    && pdf_overlay_combined.is_none(),
                 allow_active_gpu_vector,
             );
             // Remember which Develop-window view this Mode B composite baked, so

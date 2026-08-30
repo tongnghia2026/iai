@@ -110,8 +110,10 @@ impl App {
             source_modified_secs,
             page_count: pdf.page_count,
             selected_pages: pdf.selected_pages.clone(),
+            page_names: pdf.page_names.clone(),
             requested_dpi: pdf.requested_dpi,
             active_page: pdf.active_page,
+            global_clears: pdf.global_clears.clone(),
         };
         let source_pdf = std::fs::read(pdf.effective_source()).ok();
 
@@ -135,7 +137,7 @@ impl App {
         }
         // The active page lives in doc.canvas; include it when it has edits. The
         // live `is_modified` catches edits not yet folded into active_page_modified.
-        if pdf.active_page_modified || self.is_modified() {
+        if pdf.active_page_modified || doc.canvas.is_dirty() {
             if let Some(reference) = doc.pdf_page.as_ref() {
                 pages.push(crate::formats::iai::IaiProjectPageOut {
                     index: pdf.active_page,
@@ -333,12 +335,20 @@ impl App {
                     source: source.clone(),
                     embedded_source: None,
                     page_count: total,
+                    selected_pages_saved: selected.clone(),
                     selected_pages: selected,
+                    page_names: std::collections::BTreeMap::new(),
+                    page_names_saved: std::collections::BTreeMap::new(),
                     requested_dpi,
                     active_page: page_index,
                     active_page_modified: false,
                     edited_pages: std::collections::HashMap::new(),
+                    global_clears: Vec::new(),
+                    global_clears_saved: Vec::new(),
+                    global_clears_redo: Vec::new(),
+                    global_overlay_cache: None,
                 });
+                doc.rebuild_pdf_global_overlay();
                 self.docs.pdf_render_services.insert(
                     document_id,
                     crate::formats::pdf::PdfRenderService::start(source),
@@ -363,6 +373,216 @@ impl App {
                 self.maybe_start_next_pdf_probe();
             }
         }
+    }
+
+    pub fn begin_pdf_page_insert_dialog(&mut self, position: usize) {
+        if self.jobs.pending_file_dialog.is_some() || self.jobs.pending_pdf_page_insert.is_some() {
+            self.shell.status_msg = "Một tác vụ chèn trang khác đang chạy".to_string();
+            return;
+        }
+        let Some(doc) = self.docs.documents.get(self.docs.active_doc_idx) else {
+            return;
+        };
+        let Some(pdf) = doc.pdf_document.as_ref() else {
+            return;
+        };
+        let document_id = doc.id;
+        let position = position.min(pdf.selected_pages.len());
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let parent = crate::file_io::dialog_parent(window);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Some(paths) = crate::file_io::dialog_insert_pdf_pages(parent) {
+                if !paths.is_empty() {
+                    let _ = tx.send(crate::file_io::FileDialogResult::InsertPdfPages {
+                        document_id,
+                        position,
+                        paths,
+                    });
+                }
+            }
+        });
+        self.jobs.pending_file_dialog = Some(rx);
+    }
+
+    pub(crate) fn start_pdf_page_insert(
+        &mut self,
+        document_id: crate::core::document::DocumentId,
+        position: usize,
+        paths: Vec<PathBuf>,
+    ) {
+        if self.jobs.pending_pdf_page_insert.is_some() {
+            self.shell.status_msg = "Một tác vụ chèn trang khác đang chạy".to_string();
+            return;
+        }
+        let Some(doc) = self.docs.documents.iter().find(|doc| doc.id == document_id) else {
+            return;
+        };
+        let Some(pdf) = doc.pdf_document.as_ref() else {
+            return;
+        };
+        let dpi = pdf.requested_dpi;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let registry = crate::formats::FormatRegistry::new();
+                let mut inserted = Vec::new();
+                for path in paths {
+                    let stem = path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Trang chèn")
+                        .to_string();
+                    let canvases = if crate::formats::pdf::is_pdf_path(&path) {
+                        let probe = crate::formats::pdf::PdfImporter::probe(&path)?;
+                        let pages: Vec<usize> = (0..probe.page_count).collect();
+                        crate::formats::pdf::PdfImporter::render_selected(&path, &pages, Some(dpi))?
+                    } else {
+                        super::open::import_many_guarded(&registry, &path)?
+                    };
+                    let many = canvases.len() > 1;
+                    for (index, canvas) in canvases.into_iter().enumerate() {
+                        let label = if many {
+                            format!("{stem} · {}", index + 1)
+                        } else {
+                            stem.clone()
+                        };
+                        inserted.push((canvas, label));
+                    }
+                }
+                (!inserted.is_empty())
+                    .then_some(inserted)
+                    .ok_or_else(|| "Không có trang hợp lệ để chèn".to_string())
+            })();
+            let _ = tx.send((document_id, position, result));
+        });
+        self.jobs.pending_pdf_page_insert = Some(rx);
+        self.shell.status_msg = "Đang nhập ảnh/PDF để chèn trang…".to_string();
+        if let Some(window) = &self.win.window {
+            window.request_redraw();
+        }
+    }
+
+    pub fn poll_pdf_page_insert(&mut self) {
+        let result = match self.jobs.pending_pdf_page_insert.as_ref() {
+            Some(rx) => rx.try_recv(),
+            None => return,
+        };
+        match result {
+            Ok((document_id, position, Ok(pages))) => {
+                self.jobs.pending_pdf_page_insert = None;
+                self.insert_materialized_pdf_pages(document_id, position, pages);
+            }
+            Ok((_document_id, _position, Err(error))) => {
+                self.jobs.pending_pdf_page_insert = None;
+                self.shell.status_msg = format!("Không thể chèn trang: {error}");
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if let Some(window) = &self.win.window {
+                    window.request_redraw();
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.jobs.pending_pdf_page_insert = None;
+                self.shell.status_msg = "Tác vụ chèn trang dừng ngoài dự kiến".to_string();
+            }
+        }
+    }
+
+    pub fn insert_blank_pdf_page(&mut self, position: usize) {
+        let doc_idx = self.docs.active_doc_idx;
+        let Some(doc) = self.docs.documents.get(doc_idx) else {
+            return;
+        };
+        if doc.pdf_document.is_none() {
+            return;
+        }
+        let Some(len) =
+            crate::core::canvas::Canvas::checked_rgba_len(doc.canvas.width, doc.canvas.height)
+        else {
+            self.shell.status_msg = "Trang hiện tại quá lớn để tạo trang trắng".to_string();
+            return;
+        };
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(
+            vec![255; len],
+            doc.canvas.width,
+            doc.canvas.height,
+        );
+        canvas.metadata.resolution_ppi = doc.canvas.metadata.resolution_ppi;
+        canvas.icc_profile = doc.canvas.icc_profile.clone();
+        let document_id = doc.id;
+        self.insert_materialized_pdf_pages(
+            document_id,
+            position,
+            vec![(canvas, "Trang trắng".to_string())],
+        );
+    }
+
+    fn insert_materialized_pdf_pages(
+        &mut self,
+        document_id: crate::core::document::DocumentId,
+        position: usize,
+        pages: Vec<(crate::core::canvas::Canvas, String)>,
+    ) {
+        let Some(doc_idx) = self
+            .docs
+            .documents
+            .iter()
+            .position(|doc| doc.id == document_id)
+        else {
+            return;
+        };
+        let activate = doc_idx == self.docs.active_doc_idx;
+        if activate {
+            self.sync_brush_gpu_to_cpu();
+        }
+        let group_id = self.docs.documents[doc_idx]
+            .pdf_page
+            .as_ref()
+            .map_or(0, |page| page.group_id);
+        let Some(pdf) = self.docs.documents[doc_idx].pdf_document.as_mut() else {
+            return;
+        };
+        let position = position.min(pdf.selected_pages.len());
+        let mut inserted_count = 0usize;
+        for (offset, (mut canvas, label)) in pages.into_iter().enumerate() {
+            let Some(page_id) = pdf.allocate_inserted_page_id() else {
+                self.shell.status_msg = "Đã đạt giới hạn số trang có thể chèn".to_string();
+                break;
+            };
+            canvas.mark_saved();
+            let mut reference = fresh_pdf_page_ref(
+                group_id,
+                &pdf.source,
+                page_id,
+                pdf.page_count,
+                canvas.metadata.resolution_ppi,
+            );
+            reference.record_canvas_baseline(&canvas);
+            reference.mark_base_dirty();
+            pdf.edited_pages.insert(
+                page_id,
+                crate::core::document::PdfCachedPage {
+                    canvas,
+                    reference,
+                    saved_zoom: 0.0,
+                    saved_offset_x: 0.0,
+                    saved_offset_y: 0.0,
+                },
+            );
+            pdf.selected_pages.insert(position + offset, page_id);
+            if !label.trim().is_empty() {
+                pdf.page_names.insert(page_id, label);
+            }
+            inserted_count += 1;
+        }
+        let total = pdf.selected_pages.len();
+        if activate && inserted_count > 0 {
+            self.pdf_nav_goto(position);
+        }
+        self.shell.status_msg = format!("Đã chèn {inserted_count} trang · tổng {total}");
     }
 
     /// Start rendering a lazy PDF page. The current page remains visible
@@ -428,13 +648,30 @@ impl App {
                         else {
                             return;
                         };
+                        let still_selected = self.docs.documents[idx]
+                            .pdf_document
+                            .as_ref()
+                            .is_some_and(|pdf| pdf.selected_pages.contains(&result.page_index));
+                        if !still_selected {
+                            self.shell.status_msg =
+                                "Đã bỏ kết quả render của trang vừa xóa".to_string();
+                            return;
+                        }
                         self.install_rendered_pdf_page(idx, result.page_index, canvas);
                         self.shell.status_msg = format!(
                             "Rendered PDF page {} at {dpi:.0} DPI",
                             result.page_index + 1
                         );
+                        if let Some((doc_id, source_index)) =
+                            self.jobs.pending_pdf_page_delete.take()
+                        {
+                            if doc_id == result.document_id {
+                                self.finish_pdf_page_delete(doc_id, source_index);
+                            }
+                        }
                     }
                     Err(error) => {
+                        self.jobs.pending_pdf_page_delete = None;
                         self.shell.status_msg = format!("Error rendering PDF page: {error}");
                     }
                 }
@@ -446,6 +683,7 @@ impl App {
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.jobs.pending_pdf_page_render = None;
+                self.jobs.pending_pdf_page_delete = None;
                 self.shell.status_msg = "PDF page renderer stopped unexpectedly".to_string();
             }
         }
@@ -465,11 +703,19 @@ impl App {
         let source = project.source.clone();
         let page_count = project.page_count.max(1);
         let requested_dpi = project.requested_dpi;
-        let active_page = project.active_page.min(page_count - 1);
+        let stored_page_indices: std::collections::HashSet<usize> =
+            project.pages.iter().map(|page| page.index).collect();
         let mut selected_pages = project.selected_pages.clone();
+        selected_pages.retain(|index| *index < page_count || stored_page_indices.contains(index));
+        let mut seen_pages = std::collections::HashSet::new();
+        selected_pages.retain(|index| seen_pages.insert(*index));
         if selected_pages.is_empty() {
             selected_pages = (0..page_count).collect();
         }
+        let active_page = selected_pages
+            .contains(&project.active_page)
+            .then_some(project.active_page)
+            .unwrap_or(selected_pages[0]);
 
         let id = DocumentId(self.docs.next_doc_id);
         self.docs.next_doc_id += 1;
@@ -587,12 +833,20 @@ impl App {
             source: source.clone(),
             embedded_source: embedded_source.clone(),
             page_count,
+            selected_pages_saved: selected_pages.clone(),
             selected_pages,
+            page_names: project.page_names.clone(),
+            page_names_saved: project.page_names,
             requested_dpi,
             active_page: active_index,
             active_page_modified: active_differs,
             edited_pages: edited,
+            global_clears: project.global_clears.clone(),
+            global_clears_saved: project.global_clears,
+            global_clears_redo: Vec::new(),
+            global_overlay_cache: None,
         });
+        doc.rebuild_pdf_global_overlay();
         // Everything just came off disk — this state IS the file.
         doc.mark_saved();
 

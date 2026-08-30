@@ -279,7 +279,10 @@ impl SelectionModifyKind {
 pub struct PdfNavData {
     pub index: usize,
     pub count: usize,
+    pub page_names: std::sync::Arc<Vec<String>>,
     pub source_name: String,
+    pub global_clear_count: usize,
+    pub global_clear_redo_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

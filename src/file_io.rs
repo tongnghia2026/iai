@@ -78,6 +78,12 @@ pub enum FileDialogResult {
     Export(crate::formats::ExportFormat, PathBuf),
     /// A folder chosen in the Library grid browser (Track B) → scan for images.
     PickedFolder(PathBuf),
+    /// Files selected for insertion into an existing multi-page PDF document.
+    InsertPdfPages {
+        document_id: crate::core::document::DocumentId,
+        position: usize,
+        paths: Vec<PathBuf>,
+    },
 }
 
 /// Send-safe parent window handle (just the HWND/HINSTANCE integers on Windows)
@@ -165,6 +171,30 @@ pub fn dialog_open_many(parent: Option<DialogParent>) -> Option<Vec<PathBuf>> {
         .set_title("Open Files");
     if let Some(p) = parent {
         dialog = dialog.set_parent(&p);
+    }
+    dialog.pick_files()
+}
+
+/// Select image/PDF files to insert as pages in the active PDF document. The
+/// actual decode runs on a second worker after this native dialog returns.
+pub fn dialog_insert_pdf_pages(parent: Option<DialogParent>) -> Option<Vec<PathBuf>> {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter(
+            "Images and PDF",
+            &[
+                "png", "jpg", "jpeg", "jfif", "jpe", "bmp", "gif", "tiff", "tif", "webp", "pdf",
+            ],
+        )
+        .add_filter(
+            "Images",
+            &[
+                "png", "jpg", "jpeg", "jfif", "jpe", "bmp", "gif", "tiff", "tif", "webp",
+            ],
+        )
+        .add_filter("PDF Document", &["pdf"])
+        .set_title("Chèn ảnh hoặc PDF thành trang");
+    if let Some(parent) = parent {
+        dialog = dialog.set_parent(&parent);
     }
     dialog.pick_files()
 }

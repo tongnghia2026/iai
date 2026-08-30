@@ -3008,6 +3008,38 @@ impl LayerStack {
         }
     }
 
+    /// Build a render-only stack with `overlay` drawn above this editable stack.
+    /// Used by document-level PDF clears: the shared cover is never exposed as a
+    /// per-page layer and therefore does not multiply memory by page count.
+    pub fn with_overlay(&self, overlay: &LayerStack) -> LayerStack {
+        let offset = self
+            .layers
+            .iter()
+            .map(|layer| layer.id)
+            .max()
+            .map_or(0, |id| id.saturating_add(1));
+        let mut layers = self.layers.clone();
+        layers.reserve(overlay.layers.len());
+        for layer in &overlay.layers {
+            let mut layer = layer.clone();
+            layer.id = layer.id.saturating_add(offset);
+            layer.parent_id = layer.parent_id.map(|id| id.saturating_add(offset));
+            layer.clip_parent_id = layer.clip_parent_id.map(|id| id.saturating_add(offset));
+            layers.push(layer);
+        }
+        let next_id = layers
+            .iter()
+            .map(|layer| layer.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        LayerStack {
+            layers,
+            active_idx: self.active_idx,
+            next_id,
+        }
+    }
+
     pub fn to_render_stack_region(
         &self,
         width: u32,
@@ -3511,6 +3543,22 @@ mod tests {
             active_idx: 0,
             next_id: n,
         }
+    }
+
+    #[test]
+    fn render_overlay_is_above_page_and_keeps_active_layer() {
+        let mut page = stack_of(2);
+        page.active_idx = 1;
+        let overlay = stack_of(1);
+        let combined = page.with_overlay(&overlay);
+        assert_eq!(combined.layers.len(), 3);
+        assert_eq!(combined.active_idx, 1);
+        assert_eq!(combined.layers[0].name, "L0");
+        assert_eq!(combined.layers[1].name, "L1");
+        assert_eq!(combined.layers[2].name, "L0");
+        let ids: std::collections::HashSet<_> =
+            combined.layers.iter().map(|layer| layer.id).collect();
+        assert_eq!(ids.len(), combined.layers.len());
     }
 
     #[test]

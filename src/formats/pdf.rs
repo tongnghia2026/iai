@@ -807,6 +807,52 @@ fn add_vector_overlay(
     Ok(true)
 }
 
+/// Paint one normalized top-left rectangle over a PDF page. This is vector PDF
+/// content (a few bytes per page), so a 1,000-page scan stays compact and no
+/// source page needs to be rasterized. `/Rotate` is inverted so "top-left" in
+/// the editor remains top-left on rotated source pages.
+fn add_global_clear_rect(
+    document: &mut lopdf::Document,
+    page_id: lopdf::ObjectId,
+    clear: &crate::core::document::PdfGlobalClear,
+) -> Result<bool, String> {
+    let rect =
+        page_rect(document, page_id).ok_or_else(|| "PDF page has no page box".to_string())?;
+    let (sx0, sy0, sx1, sy1) = (
+        clear.x0.clamp(0.0, 1.0),
+        clear.y0.clamp(0.0, 1.0),
+        clear.x1.clamp(0.0, 1.0),
+        clear.y1.clamp(0.0, 1.0),
+    );
+    if sx1 <= sx0 || sy1 <= sy0 {
+        return Ok(false);
+    }
+    let (px0, py0, px1, py1) = match page_rotation(document, page_id) {
+        90 => (sy0, sx0, sy1, sx1),
+        180 => (1.0 - sx1, sy0, 1.0 - sx0, sy1),
+        270 => (1.0 - sy1, 1.0 - sx1, 1.0 - sy0, 1.0 - sx0),
+        _ => (sx0, 1.0 - sy1, sx1, 1.0 - sy0),
+    };
+    let x = rect.x + px0 * rect.width;
+    let y = rect.y + py0 * rect.height;
+    let width = (px1 - px0) * rect.width;
+    let height = (py1 - py0) * rect.height;
+    if width <= 0.0 || height <= 0.0 {
+        return Ok(false);
+    }
+    let [r, g, b, _] = clear.color;
+    let content = format!(
+        "q\n{:.6} {:.6} {:.6} rg\n{x:.4} {y:.4} {width:.4} {height:.4} re f\nQ\n",
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
+    );
+    document
+        .add_page_contents(page_id, content.into_bytes())
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn replace_page_with_raster(
     document: &mut lopdf::Document,
     page_id: lopdf::ObjectId,
@@ -875,7 +921,76 @@ fn replace_page_with_raster(
     Ok(())
 }
 
+fn root_pages_id(document: &lopdf::Document) -> Result<lopdf::ObjectId, String> {
+    let catalog_id = document
+        .trailer
+        .get(b"Root")
+        .and_then(lopdf::Object::as_reference)
+        .map_err(|error| error.to_string())?;
+    document
+        .get_dictionary(catalog_id)
+        .and_then(|catalog| catalog.get(b"Pages"))
+        .and_then(lopdf::Object::as_reference)
+        .map_err(|error| error.to_string())
+}
+
+fn flatten_page_tree(
+    document: &mut lopdf::Document,
+    pages_root: lopdf::ObjectId,
+    page_ids: &[lopdf::ObjectId],
+) -> Result<(), String> {
+    // A page may inherit these values from an intermediate /Pages node. Copy
+    // them onto the page before reparenting every selected page directly under
+    // the root, otherwise a valid source PDF can lose its box or resources.
+    for &page_id in page_ids {
+        let inherited: Vec<(&[u8], lopdf::Object)> = [
+            b"Resources".as_slice(),
+            b"MediaBox",
+            b"CropBox",
+            b"Rotate",
+            b"UserUnit",
+            b"BleedBox",
+            b"TrimBox",
+            b"ArtBox",
+        ]
+        .into_iter()
+        .filter_map(|key| inherited_page_object(document, page_id, key).map(|value| (key, value)))
+        .collect();
+        let page = document
+            .get_dictionary_mut(page_id)
+            .map_err(|error| error.to_string())?;
+        for (key, value) in inherited {
+            if !page.has(key) {
+                page.set(key, value);
+            }
+        }
+        page.set("Parent", pages_root);
+    }
+
+    let root = document
+        .get_dictionary_mut(pages_root)
+        .map_err(|error| error.to_string())?;
+    root.set(
+        "Kids",
+        page_ids
+            .iter()
+            .copied()
+            .map(lopdf::Object::Reference)
+            .collect::<Vec<_>>(),
+    );
+    root.set("Count", page_ids.len() as i64);
+    Ok(())
+}
+
 pub fn build_hybrid_pdf(path: &Path, pages: &[HybridPage]) -> Result<HybridPdf, String> {
+    build_hybrid_pdf_with_global_clears(path, pages, &[])
+}
+
+pub fn build_hybrid_pdf_with_global_clears(
+    path: &Path,
+    pages: &[HybridPage],
+    global_clears: &[crate::core::document::PdfGlobalClear],
+) -> Result<HybridPdf, String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let mut document = lopdf::Document::load_mem(&bytes)
         .map_err(|error| format!("Could not parse PDF structure: {error}"))?;
@@ -883,27 +998,48 @@ pub fn build_hybrid_pdf(path: &Path, pages: &[HybridPage]) -> Result<HybridPdf, 
         return Err("Hybrid export does not support encrypted PDFs".to_string());
     }
     let source_pages = document.get_pages();
-    if pages.is_empty()
-        || pages
-            .iter()
-            .any(|page| page.source_index >= source_pages.len())
-        || pages
-            .windows(2)
-            .any(|pair| pair[0].source_index >= pair[1].source_index)
-    {
-        return Err("Hybrid export pages must be unique and in ascending source order".to_string());
+    if pages.is_empty() {
+        return Err("Hybrid export needs at least one page".to_string());
     }
+    let mut unique_pages = std::collections::HashSet::new();
+    if pages
+        .iter()
+        .any(|page| !unique_pages.insert(page.source_index))
+    {
+        return Err("Hybrid export pages must be unique".to_string());
+    }
+    let pages_root = root_pages_id(&document)?;
 
     let mut vector_pages = 0;
     let mut overlay_pages = 0;
     let mut raster_pages = 0;
-    for page in pages {
-        let page_id = *source_pages
-            .get(&(page.source_index as u32 + 1))
-            .ok_or_else(|| format!("PDF page {} is missing", page.source_index + 1))?;
-        let name = format!("IAIPage{}", page.source_index + 1).into_bytes();
+    let mut ordered_page_ids = Vec::with_capacity(pages.len());
+    for (position, page) in pages.iter().enumerate() {
+        let source_page_id = source_pages.get(&(page.source_index as u32 + 1)).copied();
+        let page_id = if let Some(page_id) = source_page_id {
+            page_id
+        } else if matches!(page.content, HybridPageContent::Raster { .. }) {
+            let content_id =
+                document.add_object(lopdf::Stream::new(lopdf::Dictionary::new(), Vec::new()));
+            document.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_root,
+                "MediaBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+                "Resources" => lopdf::Dictionary::new(),
+                "Contents" => content_id,
+            })
+        } else {
+            return Err(format!(
+                "Inserted page {} must carry raster content",
+                position + 1
+            ));
+        };
+        ordered_page_ids.push(page_id);
+        let name = format!("IAIPage{}", position + 1).into_bytes();
+        let mut page_has_overlay = false;
+        let page_is_raster = matches!(page.content, HybridPageContent::Raster { .. });
         match &page.content {
-            HybridPageContent::Original => vector_pages += 1,
+            HybridPageContent::Original => {}
             HybridPageContent::Overlay {
                 rgba,
                 vectors,
@@ -915,11 +1051,7 @@ pub fn build_hybrid_pdf(path: &Path, pages: &[HybridPage]) -> Result<HybridPdf, 
                     add_overlay(&mut document, page_id, &name, rgba, *width, *height, *dpi)?;
                 let vector_added =
                     add_vector_overlay(&mut document, page_id, vectors, *width, *height, *dpi)?;
-                if raster_added || vector_added {
-                    overlay_pages += 1;
-                } else {
-                    vector_pages += 1;
-                }
+                page_has_overlay |= raster_added || vector_added;
             }
             HybridPageContent::Raster {
                 rgba,
@@ -936,24 +1068,24 @@ pub fn build_hybrid_pdf(path: &Path, pages: &[HybridPage]) -> Result<HybridPdf, 
                     *height,
                     *dpi,
                 )?;
-                raster_pages += 1;
             }
+        }
+        for clear in global_clears {
+            page_has_overlay |= add_global_clear_rect(&mut document, page_id, clear)?;
+        }
+        if page_is_raster {
+            raster_pages += 1;
+        } else if page_has_overlay {
+            overlay_pages += 1;
+        } else {
+            vector_pages += 1;
         }
     }
 
-    if pages.len() != source_pages.len() {
-        let selected: std::collections::HashSet<u32> = pages
-            .iter()
-            .map(|page| page.source_index as u32 + 1)
-            .collect();
-        let removed: Vec<u32> = source_pages
-            .keys()
-            .copied()
-            .filter(|page_number| !selected.contains(page_number))
-            .collect();
-        document.delete_pages(&removed);
-        document.prune_objects();
-    }
+    // Flattening lets the visible document order differ from the physical
+    // source order and also lets newly created raster pages sit anywhere.
+    flatten_page_tree(&mut document, pages_root, &ordered_page_ids)?;
+    document.prune_objects();
 
     document.change_producer("iAi Hybrid PDF");
     document.compress();
@@ -1649,6 +1781,119 @@ mod tests {
             rendered_pixel[0] > 200 && rendered_pixel[1] < 80 && rendered_pixel[2] < 80,
             "overlay pixel moved or flipped: {rendered_pixel:?}"
         );
+
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn global_clear_rect_covers_same_normalized_corner_on_every_page() {
+        let source_path = temp_pdf_path("pdf-global-clear-source");
+        let output_path = temp_pdf_path("pdf-global-clear-output");
+        std::fs::write(&source_path, minimal_pdf(&[(20, 20), (40, 20)])).unwrap();
+        let pages = vec![
+            HybridPage {
+                source_index: 0,
+                content: HybridPageContent::Original,
+            },
+            HybridPage {
+                source_index: 1,
+                content: HybridPageContent::Original,
+            },
+        ];
+        let clear = crate::core::document::PdfGlobalClear {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 0.25,
+            y1: 0.25,
+            color: [230, 20, 30, 255],
+        };
+        let hybrid = build_hybrid_pdf_with_global_clears(&source_path, &pages, &[clear]).unwrap();
+        assert_eq!(
+            (
+                hybrid.vector_pages,
+                hybrid.overlay_pages,
+                hybrid.raster_pages
+            ),
+            (0, 2, 0)
+        );
+        std::fs::write(&output_path, hybrid.bytes).unwrap();
+
+        let rendered = PdfImporter::render_selected(&output_path, &[0, 1], Some(72.0)).unwrap();
+        for canvas in &rendered {
+            let pixels = canvas.export_flat();
+            let top_left = &pixels[((canvas.width + 1) * 4) as usize..];
+            assert!(
+                top_left[0] > 180 && top_left[1] < 80 && top_left[2] < 80,
+                "global cover missed top-left on {}x{} page: {:?}",
+                canvas.width,
+                canvas.height,
+                &top_left[..4]
+            );
+            let center = ((canvas.height / 2 * canvas.width + canvas.width / 2) * 4) as usize;
+            assert!(pixels[center..center + 3]
+                .iter()
+                .all(|&channel| channel > 220));
+        }
+
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn hybrid_export_reorders_source_pages_and_inserts_a_raster_page() {
+        let source_path = temp_pdf_path("pdf-insert-source");
+        let output_path = temp_pdf_path("pdf-insert-output");
+        std::fs::write(&source_path, minimal_pdf(&[(20, 30), (40, 50)])).unwrap();
+
+        let inserted_rgba = [25, 180, 60, 255]
+            .into_iter()
+            .cycle()
+            .take(10 * 12 * 4)
+            .collect();
+        let hybrid = build_hybrid_pdf(
+            &source_path,
+            &[
+                HybridPage {
+                    source_index: 1,
+                    content: HybridPageContent::Original,
+                },
+                HybridPage {
+                    source_index: 2,
+                    content: HybridPageContent::Raster {
+                        rgba: inserted_rgba,
+                        width: 10,
+                        height: 12,
+                        dpi: 72.0,
+                    },
+                },
+                HybridPage {
+                    source_index: 0,
+                    content: HybridPageContent::Original,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                hybrid.vector_pages,
+                hybrid.overlay_pages,
+                hybrid.raster_pages
+            ),
+            (2, 0, 1)
+        );
+        std::fs::write(&output_path, hybrid.bytes).unwrap();
+
+        let probe = PdfImporter::probe(&output_path).unwrap();
+        assert_eq!(probe.page_count, 3);
+        assert_eq!(
+            probe.page_dims,
+            vec![(40.0, 50.0), (10.0, 12.0), (20.0, 30.0)]
+        );
+        let rendered = PdfImporter::render_selected(&output_path, &[1], Some(72.0)).unwrap();
+        assert!(rendered[0].export_flat().chunks_exact(4).all(|pixel| {
+            pixel[0] == 25 && pixel[1] == 180 && pixel[2] == 60 && pixel[3] == 255
+        }));
 
         let _ = std::fs::remove_file(source_path);
         let _ = std::fs::remove_file(output_path);

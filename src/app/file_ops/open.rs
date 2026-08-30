@@ -925,6 +925,13 @@ impl App {
                             w.request_redraw();
                         }
                     }
+                    file_io::FileDialogResult::InsertPdfPages {
+                        document_id,
+                        position,
+                        paths,
+                    } => {
+                        self.start_pdf_page_insert(document_id, position, paths);
+                    }
                 }
                 if self.shell.close_requested {
                     self.shell.close_requested = false;

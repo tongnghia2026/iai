@@ -6,6 +6,88 @@ use crate::app::state::App;
 use crate::ui::UiActions;
 
 impl App {
+    pub(crate) fn clear_selection_on_all_pdf_pages(&mut self) {
+        let doc_idx = self.docs.active_doc_idx;
+        let (canvas_width, canvas_height, active_is_background) = {
+            let doc = &self.docs.documents[doc_idx];
+            let canvas = &doc.canvas;
+            (
+                canvas.width,
+                canvas.height,
+                canvas
+                    .layer_stack
+                    .layers
+                    .get(canvas.layer_stack.active_idx)
+                    .is_some_and(|layer| layer.is_background),
+            )
+        };
+        if self.docs.documents[doc_idx].pdf_document.is_none() {
+            self.shell.status_msg = "Tính năng này chỉ dùng cho tài liệu PDF nhiều trang".into();
+            return;
+        }
+        if !active_is_background {
+            self.shell.status_msg =
+                "Hãy chọn layer Background của trang PDF trước khi xóa mọi trang".into();
+            return;
+        }
+        let operation = {
+            let selection = &mut self.docs.documents[doc_idx].canvas.selection;
+            crate::core::document::PdfGlobalClear::from_selection(
+                selection,
+                canvas_width,
+                canvas_height,
+                self.edit.bg_color,
+            )
+        };
+        let operation = match operation {
+            Ok(operation) => operation,
+            Err(message) => {
+                self.shell.status_msg = message;
+                return;
+            }
+        };
+        let page_count = {
+            let doc = &mut self.docs.documents[doc_idx];
+            let pdf = doc.pdf_document.as_mut().expect("checked above");
+            pdf.global_clears.push(operation);
+            pdf.global_clears_redo.clear();
+            let page_count = pdf.page_count;
+            doc.rebuild_pdf_global_overlay();
+            page_count
+        };
+        self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+        self.shell.status_msg =
+            format!("Đã xóa vùng chọn tại cùng vị trí trên {page_count} trang PDF");
+    }
+
+    pub(crate) fn undo_pdf_global_clear(&mut self) {
+        let doc = &mut self.docs.documents[self.docs.active_doc_idx];
+        let Some(pdf) = doc.pdf_document.as_mut() else {
+            return;
+        };
+        let Some(operation) = pdf.global_clears.pop() else {
+            return;
+        };
+        pdf.global_clears_redo.push(operation);
+        doc.rebuild_pdf_global_overlay();
+        self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+        self.shell.status_msg = "Đã hoàn tác lần xóa vùng trên mọi trang PDF".into();
+    }
+
+    pub(crate) fn redo_pdf_global_clear(&mut self) {
+        let doc = &mut self.docs.documents[self.docs.active_doc_idx];
+        let Some(pdf) = doc.pdf_document.as_mut() else {
+            return;
+        };
+        let Some(operation) = pdf.global_clears_redo.pop() else {
+            return;
+        };
+        pdf.global_clears.push(operation);
+        doc.rebuild_pdf_global_overlay();
+        self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+        self.shell.status_msg = "Đã làm lại lần xóa vùng trên mọi trang PDF".into();
+    }
+
     pub(super) fn handle_selection_refine_actions(&mut self, actions: &mut UiActions) {
         if let Some(mode) = actions.sel.set_selection_mode.take() {
             self.edit.selection_mode = mode;
@@ -191,6 +273,15 @@ impl App {
             {
                 self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
             }
+        }
+        if actions.sel.clear_selection_all_pdf_pages {
+            self.clear_selection_on_all_pdf_pages();
+        }
+        if actions.sel.undo_pdf_global_clear {
+            self.undo_pdf_global_clear();
+        }
+        if actions.sel.redo_pdf_global_clear {
+            self.redo_pdf_global_clear();
         }
         if actions.sel.select_all {
             let (cw, ch) = {

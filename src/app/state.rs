@@ -1331,10 +1331,13 @@ impl App {
                 pdf_render_selected_pages: Vec::new(),
                 pdf_render_target_dpi: 300.0,
                 pending_pdf_page_render: None,
+                pending_pdf_page_delete: None,
+                pending_pdf_page_insert: None,
                 pending_reload_prompt: None,
                 pending_reload_job: None,
                 pending_iai_projects: Vec::new(),
                 pending_printer_refresh: None,
+                pending_printer_settings: None,
                 shape_bake: None,
                 path_bake: None,
                 path_bake_next: None,
@@ -2225,6 +2228,7 @@ impl App {
             || self.jobs.pending_reload_prompt.is_some()
             || self.jobs.pending_pdf_prompt.is_some()
             || self.jobs.pending_pdf_page_render.is_some()
+            || self.jobs.pending_pdf_page_insert.is_some()
             || self.shell.ui.show_refine_color_dialog
             || self.shell.ui.show_paint_color_dialog
     }

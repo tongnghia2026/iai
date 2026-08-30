@@ -137,6 +137,9 @@ pub struct DocumentIntent {
     pub move_page: Option<(usize, usize)>,
     /// Page-tab context menu: delete this page index (keeps at least one page).
     pub delete_page: Option<usize>,
+    /// PDF page manager: insert at an ordinal boundary in `0..=page_count`.
+    pub insert_pdf_blank: Option<usize>,
+    pub insert_pdf_files: Option<usize>,
     /// Page ▸ Master: create the shared master page (if none) and check it out for
     /// editing; when already editing, finish and return to the active page.
     pub toggle_master_edit: bool,
@@ -493,6 +496,11 @@ pub struct ToolIntent {
 #[derive(Default)]
 pub struct SelectionIntent {
     pub clear_selection_pixels: bool,
+    /// Multi-page PDF: cover the current hard rectangular selection on every
+    /// source page without materializing each page in memory.
+    pub clear_selection_all_pdf_pages: bool,
+    pub undo_pdf_global_clear: bool,
+    pub redo_pdf_global_clear: bool,
     /// Select menu actions (functionality already exists via keyboard shortcuts).
     pub select_all: bool,
     pub deselect: bool,

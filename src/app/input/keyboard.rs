@@ -217,6 +217,27 @@ impl App {
                     w.request_redraw();
                 }
             }
+            // Multi-page PDF: Shift+Delete covers the same hard rectangular
+            // selection on every page without rendering/caching every page.
+            PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
+                if pressed
+                    && !repeat
+                    && self.edit.input.shift_held
+                    && !self.edit.input.alt_held
+                    && !self.edit.input.ctrl_held
+                    && self.docs.documents[self.docs.active_doc_idx]
+                        .pdf_document
+                        .is_some()
+                    && self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .selection
+                        .active =>
+            {
+                self.clear_selection_on_all_pdf_pages();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
             // Text layer selected + Alt/Ctrl+Delete: recolour the type to the
             // foreground (Alt) or background (Ctrl) colour — Photoshop's fill
             // shortcut applied to a Text layer — instead of filling raster pixels.

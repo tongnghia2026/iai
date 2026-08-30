@@ -65,6 +65,76 @@ pub struct PdfCachedPage {
     pub saved_offset_y: f32,
 }
 
+/// One non-destructive rectangle painted over every page of a multi-page PDF.
+/// Coordinates are normalized in the rendered page's top-left coordinate space,
+/// so the same corner is covered even when pages have different pixel sizes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfGlobalClear {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub color: [u8; 4],
+}
+
+impl PdfGlobalClear {
+    pub fn from_selection(
+        selection: &mut crate::core::selection::Selection,
+        canvas_width: u32,
+        canvas_height: u32,
+        mut color: [u8; 4],
+    ) -> Result<Self, String> {
+        if !selection.active || canvas_width == 0 || canvas_height == 0 {
+            return Err("Hãy tạo vùng chọn chữ nhật trước".to_string());
+        }
+        selection.refresh_bbox();
+        let (bx0, by0, bx1, by1) = selection.bounding_box_cached();
+        let x0 = (bx0.floor() as i32).clamp(0, canvas_width as i32) as u32;
+        let y0 = (by0.floor() as i32).clamp(0, canvas_height as i32) as u32;
+        let x1 = (bx1.ceil() as i32).clamp(0, canvas_width as i32) as u32;
+        let y1 = (by1.ceil() as i32).clamp(0, canvas_height as i32) as u32;
+        if x1 <= x0 || y1 <= y0 {
+            return Err("Vùng chọn nằm ngoài trang".to_string());
+        }
+
+        // A global edit must be predictable. A lasso/feathered mask cannot be
+        // represented by the compact vector rectangle used for 1,000-page PDFs.
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if selection.sample(x, y) < 0.999 {
+                    return Err(
+                        "Xóa mọi trang hiện hỗ trợ vùng chọn chữ nhật, Feather = 0".to_string()
+                    );
+                }
+            }
+        }
+
+        color[3] = 255;
+        Ok(Self {
+            x0: x0 as f32 / canvas_width as f32,
+            y0: y0 as f32 / canvas_height as f32,
+            x1: x1 as f32 / canvas_width as f32,
+            y1: y1 as f32 / canvas_height as f32,
+            color,
+        })
+    }
+
+    pub fn pixel_rect(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let x0 = (self.x0.clamp(0.0, 1.0) * width as f32).floor() as u32;
+        let y0 = (self.y0.clamp(0.0, 1.0) * height as f32).floor() as u32;
+        let x1 = (self.x1.clamp(0.0, 1.0) * width as f32).ceil() as u32;
+        let y1 = (self.y1.clamp(0.0, 1.0) * height as f32).ceil() as u32;
+        (x0.min(width), y0.min(height), x1.min(width), y1.min(height))
+    }
+}
+
+pub struct PdfGlobalOverlayCache {
+    pub width: u32,
+    pub height: u32,
+    pub operation_count: usize,
+    pub stack: crate::core::layer::LayerStack,
+}
+
 pub struct PdfDocumentState {
     pub source: PathBuf,
     /// Materialized embedded PDF used by self-contained `.iai` projects.
@@ -72,6 +142,13 @@ pub struct PdfDocumentState {
     pub embedded_source: Option<PathBuf>,
     pub page_count: usize,
     pub selected_pages: Vec<usize>,
+    /// Saved checkpoint for page removal/reordering. Keeping this separate from
+    /// the active canvas avoids marking a clean source page as raster-edited.
+    pub selected_pages_saved: Vec<usize>,
+    /// Optional tab names keyed by physical source-page index. The key follows
+    /// the page when `selected_pages` is reordered.
+    pub page_names: std::collections::BTreeMap<usize, String>,
+    pub page_names_saved: std::collections::BTreeMap<usize, String>,
     pub requested_dpi: f32,
     pub active_page: usize,
     /// The active page differs from a clean render of the source (has edits).
@@ -82,6 +159,12 @@ pub struct PdfDocumentState {
     /// canvas's dirty state by [`Document::reconcile_pdf_page_modified`].
     pub active_page_modified: bool,
     pub edited_pages: std::collections::HashMap<usize, PdfCachedPage>,
+    /// Compact, document-level covers applied to every source page. Unlike
+    /// `edited_pages`, this stays O(number of operations), not O(page count).
+    pub global_clears: Vec<PdfGlobalClear>,
+    pub global_clears_saved: Vec<PdfGlobalClear>,
+    pub global_clears_redo: Vec<PdfGlobalClear>,
+    pub global_overlay_cache: Option<PdfGlobalOverlayCache>,
 }
 
 impl PdfDocumentState {
@@ -93,9 +176,126 @@ impl PdfDocumentState {
     /// file. The active page lives on [`Document::canvas`], so the whole-document
     /// answer is [`Document::is_modified`].
     pub fn cached_pages_dirty(&self) -> bool {
-        self.edited_pages
-            .values()
-            .any(|page| page.canvas.is_dirty())
+        self.selected_pages != self.selected_pages_saved
+            || self.page_names != self.page_names_saved
+            || self.global_clears != self.global_clears_saved
+            || self
+                .edited_pages
+                .values()
+                .any(|page| page.canvas.is_dirty())
+    }
+
+    pub fn page_display_name(&self, position: usize) -> String {
+        self.selected_pages
+            .get(position)
+            .and_then(|source_index| self.page_names.get(source_index))
+            .filter(|name| !name.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("Trang {}", position + 1))
+    }
+
+    pub fn display_names(&self) -> Vec<String> {
+        (0..self.selected_pages.len())
+            .map(|position| self.page_display_name(position))
+            .collect()
+    }
+
+    pub fn set_page_name(&mut self, position: usize, name: Option<String>) {
+        let Some(&source_index) = self.selected_pages.get(position) else {
+            return;
+        };
+        match name.filter(|name| !name.trim().is_empty()) {
+            Some(name) => {
+                self.page_names.insert(source_index, name);
+            }
+            None => {
+                self.page_names.remove(&source_index);
+            }
+        }
+    }
+
+    pub fn move_page(&mut self, from: usize, to: usize) {
+        if from >= self.selected_pages.len() || to >= self.selected_pages.len() || from == to {
+            return;
+        }
+        let page = self.selected_pages.remove(from);
+        self.selected_pages.insert(to, page);
+    }
+
+    /// Allocate an id outside the physical page range of the source PDF. Such
+    /// ids always have a materialized canvas in `edited_pages` and represent a
+    /// blank/image/imported-PDF page inserted by the user.
+    pub fn allocate_inserted_page_id(&self) -> Option<usize> {
+        self.selected_pages
+            .iter()
+            .copied()
+            .chain(self.edited_pages.keys().copied())
+            .max()
+            .unwrap_or_else(|| self.page_count.saturating_sub(1))
+            .max(self.page_count.saturating_sub(1))
+            .checked_add(1)
+    }
+
+    /// Remove a visible page and its cached edit/name. The active canvas must be
+    /// switched away by the caller before removing its physical source index.
+    pub fn remove_page(&mut self, position: usize) -> Option<usize> {
+        if self.selected_pages.len() <= 1 || position >= self.selected_pages.len() {
+            return None;
+        }
+        let source_index = self.selected_pages.remove(position);
+        self.edited_pages.remove(&source_index);
+        self.page_names.remove(&source_index);
+        Some(source_index)
+    }
+
+    pub fn rebuild_global_overlay(&mut self, width: u32, height: u32) {
+        if self.global_clears.is_empty() || width == 0 || height == 0 {
+            self.global_overlay_cache = None;
+            return;
+        }
+        if self.global_overlay_cache.as_ref().is_some_and(|cache| {
+            cache.width == width
+                && cache.height == height
+                && cache.operation_count == self.global_clears.len()
+        }) {
+            return;
+        }
+
+        let mut stack = crate::core::layer::LayerStack::new(width, height);
+        stack.layers.clear();
+        for (index, operation) in self.global_clears.iter().enumerate() {
+            let (x0, y0, x1, y1) = operation.pixel_rect(width, height);
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            let w = x1 - x0;
+            let h = y1 - y0;
+            let Some(len) = crate::core::canvas::Canvas::checked_rgba_len(w, h) else {
+                continue;
+            };
+            let mut rgba = vec![0u8; len];
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel.copy_from_slice(&operation.color);
+            }
+            let mut layer = crate::core::layer::Layer::new(
+                index as u32,
+                "Xóa vùng trên mọi trang PDF",
+                width,
+                height,
+            );
+            layer.tiles.write_region(x0, y0, w, h, &rgba);
+            layer.locked = true;
+            layer.selected = false;
+            stack.layers.push(layer);
+        }
+        stack.active_idx = 0;
+        stack.set_next_id(stack.layers.len() as u32);
+        self.global_overlay_cache = (!stack.layers.is_empty()).then_some(PdfGlobalOverlayCache {
+            width,
+            height,
+            operation_count: self.global_clears.len(),
+            stack,
+        });
     }
 }
 
@@ -374,6 +574,9 @@ impl Document {
             master.mark_saved();
         }
         if let Some(pdf) = self.pdf_document.as_mut() {
+            pdf.selected_pages_saved = pdf.selected_pages.clone();
+            pdf.page_names_saved = pdf.page_names.clone();
+            pdf.global_clears_saved = pdf.global_clears.clone();
             for page in pdf.edited_pages.values_mut() {
                 page.canvas.mark_saved();
             }
@@ -720,6 +923,23 @@ impl Document {
         if let Some(pdf) = self.pdf_document.as_mut() {
             pdf.active_page_modified |= dirty;
         }
+        self.rebuild_pdf_global_overlay();
+    }
+
+    pub fn rebuild_pdf_global_overlay(&mut self) {
+        let (width, height) = (self.canvas.width, self.canvas.height);
+        if let Some(pdf) = self.pdf_document.as_mut() {
+            pdf.rebuild_global_overlay(width, height);
+        }
+    }
+
+    pub fn active_pdf_global_overlay(&self) -> Option<&crate::core::layer::LayerStack> {
+        self.pdf_document
+            .as_ref()?
+            .global_overlay_cache
+            .as_ref()
+            .filter(|cache| cache.width == self.canvas.width && cache.height == self.canvas.height)
+            .map(|cache| &cache.stack)
     }
 
     /// Return the pixels added above an untouched imported PDF base layer.
@@ -762,7 +982,11 @@ pub fn disambiguated_tab_titles(docs: &[Document]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{disambiguated_tab_titles, Document, DocumentId, PdfPageRef};
+    use super::{
+        disambiguated_tab_titles, Document, DocumentId, PdfDocumentState, PdfGlobalClear,
+        PdfPageRef,
+    };
+    use crate::core::canvas::Canvas;
     use std::path::PathBuf;
 
     #[test]
@@ -788,6 +1012,45 @@ mod tests {
         assert_eq!(
             disambiguated_tab_titles(&docs),
             vec!["photo.png", "photo.png (2)", "photo.png (3)"]
+        );
+    }
+
+    #[test]
+    fn pdf_page_metadata_renames_reorders_and_removes_without_touching_pixels() {
+        let mut pdf = PdfDocumentState {
+            source: PathBuf::from("book.pdf"),
+            embedded_source: None,
+            page_count: 8,
+            selected_pages: vec![1, 3, 6],
+            selected_pages_saved: vec![1, 3, 6],
+            page_names: std::collections::BTreeMap::new(),
+            page_names_saved: std::collections::BTreeMap::new(),
+            requested_dpi: 144.0,
+            active_page: 1,
+            active_page_modified: false,
+            edited_pages: std::collections::HashMap::new(),
+            global_clears: Vec::new(),
+            global_clears_saved: Vec::new(),
+            global_clears_redo: Vec::new(),
+            global_overlay_cache: None,
+        };
+
+        assert_eq!(pdf.display_names(), vec!["Trang 1", "Trang 2", "Trang 3"]);
+        assert!(!pdf.cached_pages_dirty());
+        pdf.set_page_name(1, Some("Minh họa".to_string()));
+        pdf.move_page(1, 0);
+        assert_eq!(pdf.selected_pages, vec![3, 1, 6]);
+        assert_eq!(pdf.display_names(), vec!["Minh họa", "Trang 2", "Trang 3"]);
+        assert!(pdf.cached_pages_dirty());
+
+        assert_eq!(pdf.remove_page(2), Some(6));
+        assert_eq!(pdf.selected_pages, vec![3, 1]);
+        assert_eq!(pdf.allocate_inserted_page_id(), Some(8));
+        assert_eq!(pdf.remove_page(1), Some(1));
+        assert_eq!(
+            pdf.remove_page(0),
+            None,
+            "the final visible page is retained"
         );
     }
 
@@ -902,6 +1165,21 @@ mod tests {
             big.effective_artboards()[0].rect(),
             Rect::new(0.0, 0.0, 1920.0, 1080.0)
         );
+    }
+
+    #[test]
+    fn pdf_global_clear_captures_and_scales_a_hard_rectangle() {
+        let mut canvas = Canvas::new(100, 80);
+        canvas.select_rect(0, 0, 20, 16);
+        let clear = PdfGlobalClear::from_selection(
+            &mut canvas.selection,
+            canvas.width,
+            canvas.height,
+            [250, 249, 248, 120],
+        )
+        .unwrap();
+        assert_eq!(clear.color, [250, 249, 248, 255]);
+        assert_eq!(clear.pixel_rect(200, 160), (0, 0, 40, 32));
     }
 
     #[test]

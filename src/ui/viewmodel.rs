@@ -399,6 +399,8 @@ pub struct PrintViewModel {
     pub print_selected_printer: String,
     pub print_copies: u32,
     pub print_refreshing: bool,
+    /// A native printer-driver property sheet is currently open.
+    pub print_settings_open: bool,
     pub print_preview_image: Option<std::sync::Arc<egui::ColorImage>>,
     /// Loaded printer ICC profile name for app-managed print colour ("" = printer
     /// manages colour).
@@ -914,6 +916,7 @@ impl Default for UiData {
                 print_selected_printer: String::new(),
                 print_copies: 1,
                 print_refreshing: false,
+                print_settings_open: false,
                 print_preview_image: None,
                 print_printer_profile_name: String::new(),
             },

@@ -10,7 +10,9 @@ pub(crate) fn print_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
     let mut do_done = false;
     let mut do_cancel = false;
     let print_layout = print_layout_for_selected_printer(data, layout);
-    let can_print = !data.print.print_refreshing && !data.print.print_printers.is_empty();
+    let can_print = !data.print.print_refreshing
+        && !data.print.print_settings_open
+        && !data.print.print_printers.is_empty();
     let default_size = egui::vec2(980.0, 540.0);
     let screen = ctx.content_rect();
     let default_pos = egui::pos2(
@@ -416,9 +418,14 @@ pub(crate) fn print_settings_panel(
                 } else {
                     data.print.print_selected_printer.clone()
                 };
-                printer_picker(ui, data, actions, selected);
+                ui.add_enabled_ui(!data.print.print_settings_open, |ui| {
+                    printer_picker(ui, data, actions, selected);
+                });
                 if ui
-                    .add_enabled(!data.print.print_refreshing, egui::Button::new("Refresh"))
+                    .add_enabled(
+                        !data.print.print_refreshing && !data.print.print_settings_open,
+                        egui::Button::new("Refresh"),
+                    )
                     .clicked()
                 {
                     actions.print.refresh_printers = true;
@@ -470,7 +477,17 @@ pub(crate) fn print_settings_panel(
                 {
                     actions.print.set_print_copies = Some(copies.clamp(1, 999) as u32);
                 }
-                if ui.button("Print Settings...").clicked() {
+                if ui
+                    .add_enabled(
+                        !data.print.print_refreshing && !data.print.print_settings_open,
+                        egui::Button::new(if data.print.print_settings_open {
+                            "Printer Settings Open..."
+                        } else {
+                            "Print Settings..."
+                        }),
+                    )
+                    .clicked()
+                {
                     actions.print.open_printer_settings = true;
                 }
             });

@@ -9,7 +9,7 @@ impl App {
     fn bottom_chrome_h(&self) -> f32 {
         // The page-tab bar shows for any open document (see ui::artboard_bar).
         let has_tabs = !self.has_only_welcome_placeholder();
-        22.0 + if has_tabs { 26.0 } else { 0.0 }
+        22.0 + if has_tabs { 42.0 } else { 0.0 }
     }
 
     pub fn fit_canvas_to_screen(&mut self) {

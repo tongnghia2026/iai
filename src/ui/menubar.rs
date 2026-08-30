@@ -278,6 +278,25 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.sel.clear_selection_pixels = true;
                             ui.close();
                         }
+                        let pdf_base_selected = data.doc.pdf_nav.is_some()
+                            && data.sel.has_selection
+                            && data
+                                .layers
+                                .layer_is_background
+                                .get(data.layers.active_layer_idx)
+                                .copied()
+                                .unwrap_or(false);
+                        if ui
+                            .add(menu_item_enabled(
+                                "Clear on All PDF Pages",
+                                "Shift+Delete",
+                                pdf_base_selected,
+                            ))
+                            .clicked()
+                        {
+                            actions.sel.clear_selection_all_pdf_pages = true;
+                            ui.close();
+                        }
                         if ui
                             .add(menu_item_enabled(
                                 "Smart Fill",

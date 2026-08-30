@@ -353,6 +353,7 @@ impl App {
     }
 
     pub fn collect_ui_data(&mut self) -> UiData {
+        self.poll_printer_settings();
         self.poll_printer_refresh();
 
         // Welcome screen: recent files + their thumbnails (uploads ready
@@ -789,9 +790,20 @@ impl App {
                                         pdf.selected_pages.len(),
                                     )
                                 });
+                        let (global_clear_count, global_clear_redo_count) =
+                            doc.pdf_document.as_ref().map_or((0, 0), |pdf| {
+                                (pdf.global_clears.len(), pdf.global_clears_redo.len())
+                            });
                         Some(crate::ui::PdfNavData {
                             index,
                             count,
+                            page_names: std::sync::Arc::new(
+                                doc.pdf_document
+                                    .as_ref()
+                                    .map_or_else(Vec::new, |pdf| pdf.display_names()),
+                            ),
+                            global_clear_count,
+                            global_clear_redo_count,
                             source_name: page
                                 .source
                                 .file_name()
@@ -1418,6 +1430,7 @@ impl App {
                 print_selected_printer: self.shell.print_selected_printer.clone(),
                 print_copies: self.shell.print_copies,
                 print_refreshing: self.jobs.pending_printer_refresh.is_some(),
+                print_settings_open: self.jobs.pending_printer_settings.is_some(),
                 print_preview_image,
                 print_printer_profile_name: self.shell.print_printer_profile_name.clone(),
             },

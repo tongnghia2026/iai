@@ -935,6 +935,7 @@ impl App {
         };
         let original_source = pdf.source.clone();
         let source = pdf.effective_source().to_path_buf();
+        let global_clears = pdf.global_clears.clone();
         let selected_pages: Vec<usize> = positions
             .iter()
             .filter_map(|&position| pdf.selected_pages.get(position).copied())
@@ -970,7 +971,7 @@ impl App {
         let stem = stem.to_string();
         let page_total = snapshots.len();
         let rx = spawn_pdf_export(parent, stem, move |path| {
-            if clean && all_pages_selected {
+            if clean && all_pages_selected && global_clears.is_empty() {
                 let bytes = std::fs::read(&source).map_err(|e| format!("Lỗi đọc PDF gốc: {e}"))?;
                 std::fs::write(&path, bytes).map_err(|e| format!("Lỗi sao chép PDF gốc: {e}"))?;
                 return Ok("Đã xuất PDF vector gốc".to_string());
@@ -1023,10 +1024,21 @@ impl App {
                 Ok::<_, String>(pages)
             };
             let hybrid = make_pages(true)
-                .and_then(|pages| crate::formats::pdf::build_hybrid_pdf(&source, &pages))
+                .and_then(|pages| {
+                    crate::formats::pdf::build_hybrid_pdf_with_global_clears(
+                        &source,
+                        &pages,
+                        &global_clears,
+                    )
+                })
                 .or_else(|_| {
-                    make_pages(false)
-                        .and_then(|pages| crate::formats::pdf::build_hybrid_pdf(&source, &pages))
+                    make_pages(false).and_then(|pages| {
+                        crate::formats::pdf::build_hybrid_pdf_with_global_clears(
+                            &source,
+                            &pages,
+                            &global_clears,
+                        )
+                    })
                 })
                 .map_err(|e| format!("Lỗi tạo PDF: {e}"))?;
             std::fs::write(&path, hybrid.bytes).map_err(|e| format!("Lỗi ghi PDF: {e}"))?;
