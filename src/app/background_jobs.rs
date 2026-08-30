@@ -93,6 +93,9 @@ pub struct BackgroundJobs {
     /// `(document, physical source page)` to remove after an active PDF page has
     /// switched successfully. Inactive pages are removed immediately.
     pub(in crate::app) pending_pdf_page_delete: Option<(crate::core::document::DocumentId, usize)>,
+    /// Image/PDF files dropped from the OS onto a PDF document, staged for one
+    /// batched page insert on the next frame (winit sends one event per file).
+    pub(in crate::app) dropped_pdf_page_files: Vec<PathBuf>,
     /// Decode of image/PDF files selected for insertion into an existing PDF.
     #[allow(clippy::type_complexity)]
     pub(in crate::app) pending_pdf_page_insert: Option<

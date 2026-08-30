@@ -23,6 +23,32 @@ fn separate_page_scrollbar(ui: &mut egui::Ui) {
     scroll.bar_outer_margin = 1.0;
 }
 
+/// Payload carried while a page tab is dragged to a new slot in the row.
+#[derive(Clone, Copy)]
+struct PageTabDrag(usize);
+
+/// Draw a page tab as a drag-to-reorder source and a drop target. `i` is the
+/// tab's position. Dropping another tab over this one emits `move_page`; egui
+/// paints the dragged tab as a floating preview for free. The returned response
+/// is the label itself, so the caller keeps its own click/context-menu handling.
+fn reorderable_tab(
+    ui: &mut egui::Ui,
+    i: usize,
+    selected: bool,
+    label: String,
+    actions: &mut UiActions,
+) -> egui::Response {
+    let out = ui.dnd_drag_source(egui::Id::new(("page_tab_drag", i)), PageTabDrag(i), |ui| {
+        ui.selectable_label(selected, label)
+    });
+    if let Some(payload) = out.response.dnd_release_payload::<PageTabDrag>() {
+        if payload.0 != i {
+            actions.doc.move_page = Some((payload.0, i));
+        }
+    }
+    out.inner
+}
+
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     if !data.doc.has_doc {
         return;
@@ -115,6 +141,8 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         egui::ScrollArea::horizontal()
                             .id_salt("artboard_page_tabs_scroll")
                             .auto_shrink([false, true])
+                            // Let a tab drag reorder pages; the scrollbar row scrolls.
+                            .drag_to_scroll(false)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -192,28 +220,17 @@ fn page_tab(
         .get(i)
         .cloned()
         .unwrap_or_else(|| format!("Trang {}", i + 1));
-    let tab = ui.selectable_label(i == active, label);
+    let tab = reorderable_tab(ui, i, i == active, label, actions);
     if tab.clicked() {
         actions.doc.set_active_artboard = Some(i);
     }
+    // Reordering is done by dragging tabs; the menu keeps rename/master/delete.
     tab.context_menu(|ui| {
         ui.set_min_width(150.0);
         if ui.button("Đổi tên…").clicked() {
             actions.doc.rename_page = Some(i);
             ui.close();
         }
-        ui.add_enabled_ui(i > 0, |ui| {
-            if ui.button("◀ Chuyển sang trái").clicked() {
-                actions.doc.move_page = Some((i, i - 1));
-                ui.close();
-            }
-        });
-        ui.add_enabled_ui(i + 1 < count, |ui| {
-            if ui.button("Chuyển sang phải ▶").clicked() {
-                actions.doc.move_page = Some((i, i + 1));
-                ui.close();
-            }
-        });
         if data.doc.has_master {
             ui.separator();
             let uses = data.doc.page_uses_master.get(i).copied().unwrap_or(true);
@@ -252,25 +269,19 @@ fn pdf_page_tab(
         .get(i)
         .cloned()
         .unwrap_or_else(|| format!("Trang {}", i + 1));
-    let tab = ui.selectable_label(i == active, label);
+    let tab = reorderable_tab(ui, i, i == active, label, actions);
     if tab.clicked() {
         actions.doc.pdf_nav_goto = Some(i);
     }
+    // A new page lands right after the tab you invoked the menu on, matching the
+    // "add after the current page" model; reordering is done by dragging tabs.
     tab.context_menu(|ui| {
         ui.set_min_width(170.0);
-        if ui.button("＋ Trang trắng phía trước").clicked() {
-            actions.doc.insert_pdf_blank = Some(i);
-            ui.close();
-        }
-        if ui.button("＋ Ảnh/PDF phía trước…").clicked() {
-            actions.doc.insert_pdf_files = Some(i);
-            ui.close();
-        }
-        if ui.button("＋ Trang trắng phía sau").clicked() {
+        if ui.button("＋ Thêm trang trắng").clicked() {
             actions.doc.insert_pdf_blank = Some(i + 1);
             ui.close();
         }
-        if ui.button("＋ Ảnh/PDF phía sau…").clicked() {
+        if ui.button("＋ Chèn ảnh/PDF…").clicked() {
             actions.doc.insert_pdf_files = Some(i + 1);
             ui.close();
         }
@@ -279,19 +290,6 @@ fn pdf_page_tab(
             actions.doc.rename_page = Some(i);
             ui.close();
         }
-        ui.add_enabled_ui(i > 0, |ui| {
-            if ui.button("◀ Chuyển sang trái").clicked() {
-                actions.doc.move_page = Some((i, i - 1));
-                ui.close();
-            }
-        });
-        ui.add_enabled_ui(i + 1 < count, |ui| {
-            if ui.button("Chuyển sang phải ▶").clicked() {
-                actions.doc.move_page = Some((i, i + 1));
-                ui.close();
-            }
-        });
-        ui.separator();
         ui.add_enabled_ui(count > 1, |ui| {
             if ui.button("Xoá trang").clicked() {
                 actions.doc.delete_page = Some(i);
@@ -386,33 +384,22 @@ fn build_pdf(
                     {
                         actions.doc.show_pdf_export_dialog = Some(true);
                     }
-                    ui.menu_button("＋ Chèn", |ui| {
-                        if ui.button("Trang trắng trước trang hiện tại").clicked() {
-                            actions.doc.insert_pdf_blank = Some(index);
-                            ui.close();
-                        }
-                        if ui.button("Ảnh/PDF trước trang hiện tại…").clicked() {
-                            actions.doc.insert_pdf_files = Some(index);
-                            ui.close();
-                        }
-                        if ui.button("Trang trắng sau trang hiện tại").clicked() {
-                            actions.doc.insert_pdf_blank = Some(index + 1);
-                            ui.close();
-                        }
-                        if ui.button("Ảnh/PDF sau trang hiện tại…").clicked() {
-                            actions.doc.insert_pdf_files = Some(index + 1);
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Trang trắng ở đầu tài liệu").clicked() {
-                            actions.doc.insert_pdf_blank = Some(0);
-                            ui.close();
-                        }
-                        if ui.button("Ảnh/PDF ở cuối tài liệu…").clicked() {
-                            actions.doc.insert_pdf_files = Some(count);
-                            ui.close();
-                        }
-                    });
+                    // Two one-click actions instead of a nested menu: both add
+                    // right after the current page (page 9 active → new page 10).
+                    if ui
+                        .button("＋ Thêm trang")
+                        .on_hover_text("Thêm trang trắng ngay sau trang hiện tại")
+                        .clicked()
+                    {
+                        actions.doc.insert_pdf_blank = Some(index + 1);
+                    }
+                    if ui
+                        .button("＋ Chèn ảnh/PDF")
+                        .on_hover_text("Chèn ảnh hoặc file PDF ngay sau trang hiện tại")
+                        .clicked()
+                    {
+                        actions.doc.insert_pdf_files = Some(index + 1);
+                    }
                     let active_is_background = data
                         .layers
                         .layer_is_background
@@ -458,6 +445,8 @@ fn build_pdf(
                         egui::ScrollArea::horizontal()
                             .id_salt("pdf_page_tabs_scroll")
                             .auto_shrink([false, true])
+                            // Let a tab drag reorder pages; the scrollbar row scrolls.
+                            .drag_to_scroll(false)
                             .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 2.0;

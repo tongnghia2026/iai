@@ -1332,6 +1332,7 @@ impl App {
                 pdf_render_target_dpi: 300.0,
                 pending_pdf_page_render: None,
                 pending_pdf_page_delete: None,
+                dropped_pdf_page_files: Vec::new(),
                 pending_pdf_page_insert: None,
                 pending_reload_prompt: None,
                 pending_reload_job: None,

@@ -853,8 +853,25 @@ impl ApplicationHandler for App {
                     self.deny_modal_action();
                     return;
                 }
-                // Decode off the UI thread (a large dropped image used to freeze the
-                // window) and open it as a new tab via the shared async loader.
+                // Dropping an image/PDF onto an open PDF document inserts it as a
+                // page after the current one; winit fires one event per file, so
+                // stage them for a single batched insert on the next frame.
+                let onto_pdf = self
+                    .docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .is_some_and(|doc| doc.pdf_document.is_some());
+                let insertable = crate::formats::pdf::is_pdf_path(&path)
+                    || crate::app::library::is_supported_image(&path);
+                if onto_pdf && insertable {
+                    self.jobs.dropped_pdf_page_files.push(path);
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                // Otherwise decode off the UI thread (a large dropped image used to
+                // freeze the window) and open it as a new tab via the async loader.
                 self.start_load_paths(vec![path]);
             }
 

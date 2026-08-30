@@ -333,7 +333,7 @@ impl LibraryGrid {
 /// True for files the grid shows: camera RAW (rendered from its embedded
 /// preview) and the ordinary raster formats the thumbnailer can decode. PSD/PDF
 /// are excluded — the thumbnail path (`image::open`) cannot render them.
-fn is_supported_image(path: &Path) -> bool {
+pub(crate) fn is_supported_image(path: &Path) -> bool {
     if crate::formats::raw::is_raw_path(path) {
         return true;
     }

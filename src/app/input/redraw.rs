@@ -45,6 +45,7 @@ impl App {
         self.poll_pdf_probe();
         self.poll_pdf_render();
         self.poll_pdf_page_render();
+        self.flush_dropped_pdf_page_files();
         self.poll_pdf_page_insert();
         self.enter_pending_develop(event_loop);
         self.poll_develop_bake_all();

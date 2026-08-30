@@ -465,6 +465,33 @@ impl App {
         }
     }
 
+    /// Insert files dropped from the OS onto a PDF document as pages right after
+    /// the current page. Batched: winit reports one drop event per file, so the
+    /// whole selection lands as one contiguous block in drop order.
+    pub fn flush_dropped_pdf_page_files(&mut self) {
+        if self.jobs.dropped_pdf_page_files.is_empty() {
+            return;
+        }
+        // Wait for any in-flight insert/dialog so the batch stays one block.
+        if self.jobs.pending_pdf_page_insert.is_some() || self.jobs.pending_file_dialog.is_some() {
+            return;
+        }
+        let paths = std::mem::take(&mut self.jobs.dropped_pdf_page_files);
+        let Some(doc) = self.docs.documents.get(self.docs.active_doc_idx) else {
+            return;
+        };
+        let Some(pdf) = doc.pdf_document.as_ref() else {
+            return;
+        };
+        let document_id = doc.id;
+        let after = pdf
+            .selected_pages
+            .iter()
+            .position(|&page| page == pdf.active_page)
+            .map_or(pdf.selected_pages.len(), |pos| pos + 1);
+        self.start_pdf_page_insert(document_id, after, paths);
+    }
+
     pub fn poll_pdf_page_insert(&mut self) {
         let result = match self.jobs.pending_pdf_page_insert.as_ref() {
             Some(rx) => rx.try_recv(),
