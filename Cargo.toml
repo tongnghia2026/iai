@@ -61,7 +61,7 @@ unicode-normalization = "0.1"
 hmac-sha256 = "1.1.14"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # Embeds the app icon into iai.exe (see build.rs) so Explorer and the Windows
 # taskbar show the iAi logo instead of the generic executable icon.

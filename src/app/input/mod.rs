@@ -29,6 +29,30 @@ fn load_window_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
+/// Reliable "is the main window iconic (minimized)?" check.
+///
+/// winit's Windows backend never emits `WindowEvent::Occluded`, and
+/// `Window::is_minimized()` there does not reliably report the iconic state
+/// (it can stay `Some(false)` while the window is minimized, and the client
+/// inner size keeps its restored value). Query the native `IsIconic` on the
+/// raw HWND so the event loop can actually park while minimized instead of
+/// free-spinning redraws against a hidden surface.
+#[cfg(windows)]
+pub(in crate::app) fn window_is_minimized(window: &Window) -> bool {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(w)) => unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(w.hwnd.get() as _) != 0
+        },
+        _ => false,
+    }
+}
+
+#[cfg(not(windows))]
+pub(in crate::app) fn window_is_minimized(window: &Window) -> bool {
+    window.is_minimized() == Some(true)
+}
+
 impl App {
     fn alpha_view_allows_tool(&self, tool: ToolId) -> bool {
         !matches!(
@@ -537,10 +561,20 @@ impl ApplicationHandler for App {
             }
         }
 
+        // egui-winit reports `repaint = true` for `RedrawRequested` itself, so
+        // blindly forwarding that flag to `request_redraw()` below feeds an
+        // unbreakable redraw loop: each frame schedules the next regardless of
+        // whether egui actually wants to animate. Visible, the vsync-blocking
+        // present paces it (~one core at refresh rate); minimized, the frame
+        // early-returns before that present, so the loop free-spins a full core
+        // with zero GPU work. egui's genuine repaint needs travel through
+        // `repaint_delay` → `egui_repaint_deadline`, scheduled (throttled) by
+        // `about_to_wait`, so the RedrawRequested self-nudge is pure waste.
+        let is_redraw_event = matches!(event, WindowEvent::RedrawRequested);
         if let Some(state) = &mut self.win.egui_state {
             if let Some(window) = &self.win.window {
                 let resp = state.on_window_event(window, &event);
-                if resp.repaint {
+                if resp.repaint && !is_redraw_event {
                     window.request_redraw();
                 }
                 self.edit.input.is_over_ui = self.win.egui_ctx.egui_wants_pointer_input()
@@ -765,7 +799,7 @@ impl ApplicationHandler for App {
 
         // Any real event (input, resize, async-driven) means the next frame may
         // carry new UI state, so the cached-UI ants fast path must not be taken.
-        if !matches!(event, WindowEvent::RedrawRequested) {
+        if !is_redraw_event {
             self.win.ants_redraw_pending = false;
         }
 
@@ -1003,7 +1037,15 @@ impl ApplicationHandler for App {
                 .as_ref()
                 .is_some_and(|p| p.processing || p.detail_refine_at.is_some());
 
-        if needs_redraw {
+        // Never re-arm a redraw from within the RedrawRequested tail: that
+        // double-schedules against `about_to_wait` (the single, throttled
+        // scheduler), forcing back-to-back frames that defeat the marching-ants
+        // 15fps cap — and, while minimized where the frame early-returns before
+        // presenting, an unpaced full-core spin (a pending redraw always
+        // overrides ControlFlow::Wait). Every legitimate continuation
+        // (interaction, marching ants, background-job polling, egui animation)
+        // is (re)scheduled by `about_to_wait` at its proper cadence.
+        if needs_redraw && !is_redraw_event {
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
@@ -1061,7 +1103,17 @@ impl ApplicationHandler for App {
             return;
         }
 
+        // `WindowEvent::Occluded` is not emitted by winit's Windows backend.
+        // Query the native minimized state explicitly; `inner_size()` is only a
+        // fallback because Windows can keep the restored client size while the
+        // window is iconic. Without this check a stale egui repaint deadline
+        // leaves ControlFlow::Poll spinning a full UI-thread core while hidden.
         let main_window_hidden = self.win.window_occluded
+            || self
+                .win
+                .window
+                .as_ref()
+                .is_some_and(|window| window_is_minimized(window))
             || self
                 .win
                 .window
@@ -1104,12 +1156,21 @@ impl ApplicationHandler for App {
             return;
         }
 
+        // Background/async work that must keep pumping frames until it lands.
+        // This mirrors the `needs_redraw` set in `window_event`: since the
+        // RedrawRequested tail no longer re-arms redraws, `about_to_wait` is the
+        // single scheduler, so every polled job has to be represented here or it
+        // would stall the moment the UI otherwise goes idle.
         if self.jobs.pending_file_dialog.is_some()
             || self.jobs.pending_pdf_export.is_some()
             || self.jobs.pending_pdf_page_insert.is_some()
             || self.jobs.pending_printer_settings.is_some()
             || !self.jobs.pending_loads.is_empty()
             || self.edit.pending_transform_commit.is_some()
+            || self.jobs.select_subject.is_busy()
+            || self.jobs.ai_engine.has_jobs()
+            || crate::core::lama::is_downloading()
+            || self.win.pending_view_change
             || self
                 .shell
                 .filter_preview

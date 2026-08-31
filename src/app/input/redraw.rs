@@ -132,7 +132,7 @@ impl App {
             .win
             .window
             .as_ref()
-            .is_some_and(|window| window.is_minimized() == Some(true));
+            .is_some_and(|window| super::window_is_minimized(window));
         if self.win.window_occluded || degenerate_size || minimized {
             self.win.rendering = false;
             return;
