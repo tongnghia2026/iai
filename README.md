@@ -4,7 +4,7 @@
 
 # iAi
 
-**A high-performance, GPU-accelerated image editor written in Rust.**
+**A high-performance, GPU-accelerated raster & vector image editor written in Rust.**
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![wgpu](https://img.shields.io/badge/wgpu-29-blue.svg)](https://wgpu.rs/)
@@ -16,21 +16,27 @@
 
 ## Overview
 
-iAi is a desktop raster image editor built from the ground up in Rust.
+iAi is a desktop image editor built from the ground up in Rust. It pairs a
+photo/raster engine (layers, painting, retouch, adjustments, RAW develop) with a
+vector engine (Bézier paths, shapes, boolean shaping, PowerClip, connectors) on a
+single GPU-accelerated canvas, so vector art and raster pixels live and render
+together in the same document.
 
 ## Features
 
-- **Layers** — raster & non-destructive adjustment layers, masks, blend modes, opacity
+- **Layers** — raster and vector layers, non-destructive adjustment layers, masks, blend modes, opacity, groups
 - **Painting** — brush, pencil, eraser, gradient, shapes, text; pressure-aware dab engine
+- **Vector** — pen/Bézier paths, primitive shapes, node editing, boolean shaping (union / intersect / difference), outline & stroke, a vector brush, **PowerClip** (clip content into a frame), **connector** lines, and text converted to editable curves — all rendered on the GPU (Lyon tessellation + MSAA) alongside the raster content
 - **Selection** — marquee, ellipse, lasso, polygonal lasso, wand, smart select, and a refine-selection edge brush
 - **Retouch** — clone, repair brush, patch, smudge, dodge & burn, smart fill (content-aware) & warp
 - **Adjustments** — levels, curves, hue/saturation, colour balance, exposure, black & white, photo filter, gradient map, channel mixer, and more
 - **Develop** — a raw/raster develop panel: exposure, contrast, highlights/shadows/whites/blacks, tone curve, HSL colour mixer, detail & effects
 - **Colour management** — ICC profiles, soft-proofing, display CMS, CMYK separations, print
-- **Formats** — PNG, JPEG, TIFF, WebP, PSD, RAW and multi-page PDF import, PDF export, plus the native `.iai` project format
+- **Artboards & pages** — multi-artboard documents; import multi-page PDFs and manage their pages (insert blank / image / PDF pages, rename, reorder, delete)
+- **Formats** — imports PNG, JPEG, TIFF, WebP, BMP, PSD, RAW (broad camera coverage, including Canon CR3) and multi-page PDF; exports PNG, JPEG, TIFF, WebP, BMP, multi-page PDF, and vector **SVG** (web / cut plotters), plus the native `.iai` project format (raster + vector, 16-bit)
 - **16-bit** editing — RAW / 16-bit PNG / TIFF decode to a 16-bit master that survives Develop, global adjustments, the common raster edits (paint, fill, crop, flip, rotate, resize, merge, filters) and a `.iai` save/reopen round-trip; display is 8-bit-dithered (see the [bit-depth capability matrix](docs/bit-depth-and-color-capability.md))
-- **GPU-accelerated** compositing (wgpu / WGSL)
-- **AI** — subject/background masking, inpainting fill, face restoration, and a Gemini-powered retouch panel
+- **GPU-accelerated** hybrid compositing (wgpu / WGSL) — raster tiles and tessellated vector geometry drawn on the same surface
+- **AI** — subject/background masking, content-aware inpainting fill, and a Gemini/ChatGPT-powered retouch panel
 
 ## Installation
 
@@ -179,15 +185,17 @@ Use `cargo check` for a quick compile test, or `cargo test` before making a rele
 | Area            | Crate(s)                          |
 | --------------- | --------------------------------- |
 | Rendering       | `wgpu`, `bytemuck`                            |
+| Vector geometry | `lyon` (tessellation), `i_overlay` (boolean ops) |
 | Windowing       | `winit`                                       |
 | UI              | `egui`, `egui-wgpu`, `egui-winit`, `egui-phosphor` |
-| Image I/O       | `image`, `png`, `tiff`, `hayro` (PSD & `.iai` use native readers/writers) |
+| Image I/O       | `image` (PNG/JPEG/WebP/BMP), `png`, `tiff` (PSD & `.iai` use native readers/writers) |
+| PDF             | `hayro` (render / import), `lopdf` (write)     |
+| RAW decode      | `rawloader`, `rawler` (CR3 + wider camera DB) |
 | Parallelism     | `rayon`                                       |
 | AI inference    | `ort` (ONNX Runtime)                          |
 | Colour mgmt     | `lcms2` (ICC / soft-proof)                    |
-| RAW decode      | `rawloader`                                   |
 | File dialogs    | `rfd`                                         |
-| Networking      | `reqwest`, `tungstenite` (AI API & model downloads) |
+| Networking      | `reqwest`, `tungstenite` (AI API, bridge & model downloads) |
 | Text rasterizer | `ab_glyph`                                    |
 
 ## Project Structure
@@ -195,11 +203,11 @@ Use `cargo check` for a quick compile test, or `cargo test` before making a rele
 ```
 src/
 ├── app/       Application state, event loop, input, rendering, file ops
-├── core/      Canvas, layers, selection, history, color, geometry
-├── gpu/       wgpu state, compositor, WGSL shaders
-├── tools/     Brush, eraser, selection, crop, clone, warp, text, …
-├── formats/   PNG/JPEG/TIFF/WebP/PSD/RAW/PDF/iAi importers & exporters
-├── ui/        Menubar, panels, toolbar, dialogs, overlays
+├── core/      Canvas, layers, selection, history, colour, geometry, vector objects, SVG
+├── gpu/       wgpu state, raster compositor, vector (Lyon/MSAA) renderer, WGSL shaders
+├── tools/     Brush, eraser, selection, crop, clone, warp, text, pen, node, shape, gradient, …
+├── formats/   PNG/JPEG/TIFF/WebP/BMP/PSD/RAW/PDF/SVG/iAi importers & exporters
+├── ui/        Menubar, panels, toolbar, tab bar, dialogs, overlays
 └── extension/ Internal tool/filter trait seams (compile-time, not a plugin SDK)
 ```
 
