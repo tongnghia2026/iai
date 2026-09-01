@@ -249,6 +249,19 @@ impl App {
                 }
                 continue;
             }
+            // Flowing-text `.iai` files are model documents, not raster imports.
+            // Route them before the generic importer so they never collapse into
+            // the 1x1 compatibility canvas.
+            if is_iai && crate::formats::iai::is_flow_text_doc(&path) {
+                if let Some(idx) = self.find_open_document_by_path(&path) {
+                    self.focus_existing_open_path(idx, path);
+                    continue;
+                }
+                if queued_keys.insert(normalized_path_key(&path)) {
+                    self.open_flow_text_doc(path);
+                }
+                continue;
+            }
             if let Some(idx) = self.find_open_document_by_path(&path) {
                 self.focus_existing_open_path(idx, path);
                 continue;
@@ -455,7 +468,8 @@ impl App {
                 match crate::formats::iai::load(&worker_path) {
                     Ok(crate::formats::iai::IaiLoad::PdfProject(project)) => Ok(project),
                     Ok(crate::formats::iai::IaiLoad::Canvas(_))
-                    | Ok(crate::formats::iai::IaiLoad::ArtboardDoc(_)) => {
+                    | Ok(crate::formats::iai::IaiLoad::ArtboardDoc(_))
+                    | Ok(crate::formats::iai::IaiLoad::FlowTextDocument(_)) => {
                         Err("Not a PDF project file".to_string())
                     }
                     Err(error) => Err(error),
@@ -488,6 +502,38 @@ impl App {
             }
         };
         self.install_artboard_doc(path, loaded, true);
+    }
+
+    /// Open a lightweight flowing-text `.iai` as a normal application tab.
+    /// The editor/layout cache is rebuilt lazily by the UI from this canonical
+    /// model, so opening does not allocate page rasters or touch the compositor.
+    pub(in crate::app) fn open_flow_text_doc(&mut self, path: PathBuf) {
+        let loaded = match crate::formats::iai::load(&path) {
+            Ok(crate::formats::iai::IaiLoad::FlowTextDocument(document)) => document,
+            Ok(_) => {
+                self.shell.status_msg = "Không phải tài liệu văn bản".to_string();
+                return;
+            }
+            Err(error) => {
+                self.shell.status_msg = format!("Lỗi mở văn bản: {error}");
+                return;
+            }
+        };
+        let id = crate::core::document::DocumentId(self.docs.next_doc_id);
+        self.docs.next_doc_id += 1;
+        let mut doc = crate::core::document::Document::new_flow_text(id);
+        doc.flow_text = Some(crate::core::document::FlowTextDocumentState::new(loaded));
+        doc.path = Some(path.clone());
+        doc.file_modified_at = file_modified_at(&path);
+        doc.title = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Văn bản")
+            .to_string();
+        doc.mark_saved();
+        self.jobs.load_activate_pending = false;
+        self.activate_new_document(doc);
+        self.shell.status_msg = format!("Đã mở văn bản: {}", file_name(&path));
     }
 
     /// Attach a loaded multi-page artboard document as the active tab. `mark_clean`

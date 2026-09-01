@@ -1092,7 +1092,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     });
 
                     // Everything that acts on type, gathered in one place.
-                    ui.menu_button("Text", |ui| {
+                    ui.menu_button("Soạn thảo văn bản", |ui| {
                         if ui
                             .add(menu_item_enabled(
                                 "Format All Text…",
@@ -1120,12 +1120,11 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             ui.close();
                         }
                         ui.separator();
-                        let doc_on = super::document_mode::is_active();
                         if ui
-                            .selectable_label(doc_on, "Soạn thảo văn bản… (thử nghiệm)")
+                            .button("Tài liệu văn bản mới…")
                             .clicked()
                         {
-                            super::document_mode::toggle_active();
+                            actions.doc.new_flow_text_document = true;
                             ui.close();
                         }
                     });

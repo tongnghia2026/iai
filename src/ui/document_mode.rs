@@ -5,16 +5,14 @@
 //! while this module renders the current page (glyphs → texture) with the caret
 //! and selection painted on top, and paginates the flowing buffer for display.
 //!
-//! Self-contained: all state lives in a UI-thread-local (the main-window egui
-//! frame always runs on the winit main thread), so the only app hooks are one
-//! call from `ui::build` and a menu toggle.
+//! Canonical text lives on the active application `Document`; this module keeps
+//! only the ephemeral cosmic-text editor and page texture projection.
 //!
 //! v1 edits one uniform style. Per-selection bold / italic and paragraph
 //! alignment are the next step; PDF export already writes selectable vector text.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use cosmic_text::{
@@ -23,15 +21,15 @@ use cosmic_text::{
 };
 use egui_phosphor::regular as ph;
 
-use crate::core::text_document::{PageSetup, PaperSize, TextDocument};
-use crate::core::text_layout::DocumentLayout;
+use crate::core::document::DocumentId;
+use crate::core::text_document::{PageSetup, PaperSize, ParagraphAlign, TextDocument};
+use crate::ui::{FlowTextViewModel, UiActions, UiData};
 
 const DPI: f32 = 96.0;
 const LINE_SPACING: f32 = 1.3;
 
 struct DocRuntime {
-    active: bool,
-    engine: Option<(FontSystem, SwashCache)>,
+    bound_model_revision: u64,
     editor: Option<Editor<'static>>,
     setup: PageSetup,
     font_pt: f32,
@@ -46,15 +44,12 @@ struct DocRuntime {
     tex: Option<(u64, usize, egui::TextureHandle)>,
     /// Bumped whenever the text content changes, to invalidate `tex`.
     revision: u64,
-    status: String,
-    pending_pdf: Option<Receiver<Option<PathBuf>>>,
 }
 
 impl Default for DocRuntime {
     fn default() -> Self {
         Self {
-            active: false,
-            engine: None,
+            bound_model_revision: 0,
             editor: None,
             setup: PageSetup::default(),
             font_pt: 13.0,
@@ -64,55 +59,71 @@ impl Default for DocRuntime {
             page_count: 1,
             tex: None,
             revision: 0,
-            status: String::new(),
-            pending_pdf: None,
         }
     }
 }
 
-const SAMPLE_TEXT: &str = "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM\n\
-Độc lập – Tự do – Hạnh phúc\n\
-\n\
-HỢP ĐỒNG THUÊ NHÀ\n\
-\n\
-Hôm nay, ngày … tháng … năm …, tại …, chúng tôi gồm:\n\
-- Bên cho thuê (Bên A): …\n\
-- Bên thuê (Bên B): …\n\
-\n\
-Hai bên cùng thỏa thuận ký kết hợp đồng thuê nhà với các điều khoản sau đây.";
+struct DocumentModeRuntime {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    documents: HashMap<DocumentId, DocRuntime>,
+}
+
+impl Default for DocumentModeRuntime {
+    fn default() -> Self {
+        Self {
+            font_system: FontSystem::new(),
+            swash_cache: SwashCache::new(),
+            documents: HashMap::new(),
+        }
+    }
+}
 
 thread_local! {
-    static DOC: RefCell<DocRuntime> = RefCell::new(DocRuntime::default());
+    static DOCUMENT_MODE: RefCell<DocumentModeRuntime> =
+        RefCell::new(DocumentModeRuntime::default());
 }
 
-pub fn is_active() -> bool {
-    DOC.with(|d| d.borrow().active)
-}
+/// Draw the active flowing-text document inside the shared central viewport.
+pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions, viewport: egui::Rect) {
+    let Some(view) = data.doc.flow_text.as_ref() else {
+        return;
+    };
+    DOCUMENT_MODE.with(|cell| {
+        let mut runtime = cell.borrow_mut();
+        runtime
+            .documents
+            .retain(|id, _| data.doc.doc_ids.iter().any(|open_id| open_id == id));
+        let DocumentModeRuntime {
+            font_system,
+            swash_cache,
+            documents,
+        } = &mut *runtime;
+        let d = documents.entry(data.doc.id).or_default();
+        sync_runtime(d, font_system, view);
+        d.zoom = data.doc.zoom;
+        let revision_before = d.revision;
 
-pub fn toggle_active() {
-    DOC.with(|d| {
-        let mut d = d.borrow_mut();
-        d.active = !d.active;
-    });
-}
+        egui::Area::new(egui::Id::new("flow_text_document_surface"))
+            // Keep modal dialogs and floating panels above the editing surface.
+            .order(egui::Order::Background)
+            .fixed_pos(viewport.min)
+            .show(ctx, |ui| {
+                ui.set_min_size(viewport.size());
+                ui.set_max_size(viewport.size());
+                egui::Frame::new()
+                    .fill(egui::Color32::from_gray(54))
+                    .inner_margin(egui::Margin::ZERO)
+                    .show(ui, |ui| {
+                        window_ui(ctx, ui, d, font_system, swash_cache, actions, data)
+                    });
+            });
 
-/// Draw the document-mode window if it is open. Call once per main-window frame.
-pub fn build(ctx: &egui::Context) {
-    DOC.with(|cell| {
-        let mut d = cell.borrow_mut();
-        if !d.active {
-            return;
+        if d.revision != revision_before {
+            actions.doc.replace_flow_text_document = Some((data.doc.id, editor_document(&d)));
         }
-        let mut open = true;
-        // Open as a fixed, near-fullscreen editing surface.
-        let screen = ctx.screen_rect();
-        egui::Window::new("Soạn thảo văn bản (thử nghiệm)")
-            .open(&mut open)
-            .fixed_rect(screen.shrink(6.0))
-            .collapsible(false)
-            .show(ctx, |ui| window_ui(ctx, ui, &mut d));
-        if !open {
-            d.active = false;
+        if d.page_count != view.page_count || d.page_index != view.active_page {
+            actions.doc.set_flow_text_layout = Some((data.doc.id, d.page_count, d.page_index));
         }
     });
 }
@@ -127,28 +138,53 @@ fn base_metrics(font_pt: f32) -> Metrics {
     Metrics::new(px, px * LINE_SPACING)
 }
 
-/// Create the editor (and font engine) on first open.
-fn ensure_editor(d: &mut DocRuntime) {
-    if d.editor.is_some() {
+fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewModel) {
+    if d.bound_model_revision == view.revision && d.editor.is_some() {
+        d.page_index = view.active_page.min(view.page_count.saturating_sub(1));
         return;
     }
-    if d.engine.is_none() {
-        d.engine = Some((FontSystem::new(), SwashCache::new()));
+
+    // An update emitted by this editor comes back through UiData on the next
+    // frame. If content is already identical, acknowledge the model revision
+    // without rebuilding and losing caret/selection.
+    if d.editor.is_some() && editor_document(d) == *view.document {
+        d.bound_model_revision = view.revision;
+        d.page_index = view.active_page.min(view.page_count.saturating_sub(1));
+        return;
     }
+    d.setup = view.document.page;
+    d.font_pt = view.document.default_char.size_pt;
     let cw = d.setup.content_width_px(DPI);
-    let fs = &mut d.engine.as_mut().expect("engine").0;
     let mut buffer = Buffer::new(fs, base_metrics(d.font_pt));
     buffer.set_size(Some(cw), None);
-    let attrs = Attrs::new().family(Family::Name("Times New Roman"));
-    buffer.set_text(SAMPLE_TEXT, &attrs, Shaping::Advanced, None);
+    let attrs = Attrs::new().family(Family::Name(view.document.default_char.font.name()));
+    buffer.set_text(&view.document.plain_text(), &attrs, Shaping::Advanced, None);
+    for (line, paragraph) in buffer.lines.iter_mut().zip(&view.document.paragraphs) {
+        line.set_align(Some(match paragraph.style.align {
+            ParagraphAlign::Left => Align::Left,
+            ParagraphAlign::Center => Align::Center,
+            ParagraphAlign::Right => Align::Right,
+            ParagraphAlign::Justify => Align::Justified,
+        }));
+    }
     buffer.shape_until_scroll(fs, false);
     d.editor = Some(Editor::new(buffer));
+    d.bound_model_revision = view.revision;
+    d.page_index = view.active_page.min(view.page_count.saturating_sub(1));
+    d.page_count = view.page_count.max(1);
+    d.tex = None;
+    d.revision = d.revision.wrapping_add(1);
 }
 
-fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
-    poll_pdf_export(ctx, d);
-    ensure_editor(d);
-
+fn window_ui(
+    ctx: &egui::Context,
+    ui: &mut egui::Ui,
+    d: &mut DocRuntime,
+    fs: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    actions: &mut UiActions,
+    data: &UiData,
+) {
     // --- Toolbar (Phosphor icons) ---
     let mut reshape = false;
     let mut align_cmd: Option<Align> = None;
@@ -201,42 +237,27 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
         // Zoom.
         if ui
             .button(ph::MAGNIFYING_GLASS_MINUS)
-            .on_hover_text("Thu nhỏ")
+            .on_hover_text("Thu nhỏ (Alt + lăn xuống)")
             .clicked()
         {
-            d.zoom = (d.zoom / 1.25).max(0.3);
+            actions.doc.zoom_out = true;
         }
         ui.label(format!("{}%", (d.zoom * 100.0).round() as i32));
         if ui
             .button(ph::MAGNIFYING_GLASS_PLUS)
-            .on_hover_text("Phóng to")
+            .on_hover_text("Phóng to (Alt + lăn lên)")
             .clicked()
         {
-            d.zoom = (d.zoom * 1.25).min(4.0);
+            actions.doc.zoom_in = true;
         }
-        if ui.button("Vừa khít").clicked() {
-            d.zoom = 1.0;
-        }
-        ui.separator();
-
-        let exporting = d.pending_pdf.is_some();
-        if ui
-            .add_enabled(
-                !exporting,
-                egui::Button::new(format!("{} Xuất PDF", ph::FILE_PDF)),
-            )
-            .clicked()
-        {
-            d.pending_pdf = Some(spawn_save_dialog());
-            d.status = "Đang chọn nơi lưu…".to_string();
-        }
+        ui.label("Alt + lăn chuột");
     });
 
     if reshape {
-        apply_reshape(d);
+        apply_reshape(d, fs);
     }
     if let Some(a) = align_cmd {
-        apply_align(d, a);
+        apply_align(d, fs, a);
     }
 
     // --- Page geometry (layout px at 96 dpi) ---
@@ -247,21 +268,59 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
     let ph_px = page_h.ceil() as usize;
     let lh = line_height(d.font_pt);
 
-    // Fit-to-box scale, then the user zoom. Leave room for the footer.
-    let footer_h = 34.0;
+    // Reserve fixed top/left strips for the same ruler geometry used by canvas
+    // mode. Only the paper workspace scrolls; the ruler never moves with it.
     let avail_w = ui.available_width().max(120.0);
-    let avail_h = (ui.available_height() - footer_h).max(120.0);
-    let fit = (avail_w / page_w).min(avail_h / page_h);
+    let avail_h = ui.available_height().max(120.0);
+    let ruler_size = if data.chrome.show_rulers {
+        super::RULER_SIZE
+    } else {
+        0.0
+    };
+    let surface_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(avail_w, avail_h));
+    ui.allocate_rect(surface_rect, egui::Sense::hover());
+    let h_ruler_rect = egui::Rect::from_min_max(
+        egui::pos2(surface_rect.left() + ruler_size, surface_rect.top()),
+        egui::pos2(surface_rect.right(), surface_rect.top() + ruler_size),
+    );
+    let v_ruler_rect = egui::Rect::from_min_max(
+        egui::pos2(surface_rect.left(), surface_rect.top() + ruler_size),
+        egui::pos2(surface_rect.left() + ruler_size, surface_rect.bottom()),
+    );
+    let scroll_rect = egui::Rect::from_min_max(
+        egui::pos2(
+            surface_rect.left() + ruler_size,
+            surface_rect.top() + ruler_size,
+        ),
+        surface_rect.right_bottom(),
+    );
+    let fit_w = scroll_rect.width().max(80.0);
+    let fit_h = scroll_rect.height().max(80.0);
+    let fit = (fit_w / page_w).min(fit_h / page_h);
     let scale = (fit * d.zoom).clamp(0.05, 6.0);
     let disp = egui::vec2(page_w * scale, page_h * scale);
 
     // The page lives in a scroll area so a zoomed-in sheet can be panned.
-    egui::ScrollArea::both()
+    let mut scroll_ui = ui.new_child(egui::UiBuilder::new().max_rect(scroll_rect));
+    let scroll_output = egui::ScrollArea::both()
         .id_salt("doc_page_scroll")
         .auto_shrink([false, false])
-        .max_height(avail_h)
-        .show(ui, |ui| {
-            let (rect, response) = ui.allocate_exact_size(disp, egui::Sense::click_and_drag());
+        .max_height(scroll_rect.height())
+        .show(&mut scroll_ui, |ui| {
+            // Keep a fit/small page centred in the editing surface. At larger
+            // zoom levels the workspace grows with the page and the scroll area
+            // continues to provide normal two-axis panning.
+            let workspace_size = egui::vec2(
+                scroll_rect.width().max(disp.x + 12.0),
+                scroll_rect.height().max(disp.y + 12.0),
+            );
+            let (workspace_rect, _) = ui.allocate_exact_size(workspace_size, egui::Sense::hover());
+            let rect = egui::Rect::from_center_size(workspace_rect.center(), disp);
+            let response = ui.interact(
+                rect,
+                ui.id().with("doc_page_interaction"),
+                egui::Sense::click_and_drag(),
+            );
             if response.clicked() || response.drag_started() {
                 response.request_focus();
             }
@@ -274,10 +333,7 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
             };
 
             let (image, sel_rects, caret, page_count, page_index, revision) = {
-                let engine = d.engine.as_mut().expect("engine");
                 let editor = d.editor.as_mut().expect("editor");
-                let fs = &mut engine.0;
-                let sc = &mut engine.1;
                 let page_index = d.page_index;
                 let mut dirty = false;
 
@@ -393,7 +449,17 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
 
                 let need = d.tex.as_ref().map(|(r, p, _)| (*r, *p)) != Some((revision, page_index));
                 let image = if need {
-                    let px = render_page(editor, fs, sc, page_index, cx, cy, ch, page_w, page_h);
+                    let px = render_page(
+                        editor,
+                        fs,
+                        swash_cache,
+                        page_index,
+                        cx,
+                        cy,
+                        ch,
+                        page_w,
+                        page_h,
+                    );
                     Some(egui::ColorImage::from_rgba_unmultiplied([pw, ph_px], &px))
                 } else {
                     None
@@ -404,6 +470,13 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
                     editor.with_buffer(|b| {
                         for run in b.layout_runs() {
                             if (run.line_top / ch).floor() as usize != page_index {
+                                continue;
+                            }
+                            // LayoutRun::highlight only clips character indices
+                            // on the two boundary lines. Without this explicit
+                            // line-range check it considers every unrelated line
+                            // selected because both boundary line IDs differ.
+                            if !selection_contains_line(start.line, end.line, run.line_i) {
                                 continue;
                             }
                             let top = cy + run.line_top - page_index as f32 * ch;
@@ -446,7 +519,7 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
                         if blink {
                             painter.line_segment(
                                 [egui::pos2(x, y0), egui::pos2(x, y0 + lh * scale)],
-                                egui::Stroke::new(1.5, egui::Color32::from_rgb(20, 20, 20)),
+                                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(20, 20, 20)),
                             );
                         }
                         let caret_rect = egui::Rect::from_min_max(
@@ -463,26 +536,146 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
                     ctx.request_repaint_after(Duration::from_millis(400)); // caret blink
                 }
             }
+            rect
         });
 
-    // --- Footer: page nav + hint / status ---
-    ui.horizontal(|ui| {
-        if ui.button(ph::CARET_LEFT).clicked() && d.page_index > 0 {
-            d.page_index -= 1;
+    if data.chrome.show_rulers {
+        paint_document_rulers(
+            ui.painter(),
+            h_ruler_rect,
+            v_ruler_rect,
+            scroll_output.inner,
+            scale,
+            d.setup,
+            data.chrome.theme_mode.palette(),
+        );
+    }
+}
+
+/// Paint fixed ruler strips around the flowing-text viewport. Their zero follows
+/// the physical sheet while the bars themselves remain stationary, matching the
+/// canvas editor; accent markers show the active text margins.
+fn paint_document_rulers(
+    painter: &egui::Painter,
+    h: egui::Rect,
+    v: egui::Rect,
+    page: egui::Rect,
+    scale: f32,
+    setup: PageSetup,
+    pal: crate::ui::theme::Palette,
+) {
+    let corner = egui::Rect::from_min_max(
+        egui::pos2(v.left(), h.top()),
+        egui::pos2(v.right(), h.bottom()),
+    );
+    for rect in [h, v, corner] {
+        painter.rect_filled(rect, 1.0, pal.ruler_bg);
+        painter.rect_stroke(
+            rect,
+            1.0,
+            egui::Stroke::new(1.0_f32, pal.border_subtle),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let px_per_mm = DPI / 25.4 * scale;
+    let major_mm = [5.0_f32, 10.0, 20.0, 50.0, 100.0]
+        .into_iter()
+        .find(|step| step * px_per_mm >= 34.0)
+        .unwrap_or(100.0);
+    let font = egui::FontId::monospace(9.0);
+    let h_painter = painter.with_clip_rect(h);
+    let v_painter = painter.with_clip_rect(v);
+
+    let mut mm = 0.0_f32;
+    while mm <= setup.paper.width_mm + 0.01 {
+        let x = page.left() + mm * px_per_mm;
+        h_painter.line_segment(
+            [egui::pos2(x, h.bottom() - 7.0), egui::pos2(x, h.bottom())],
+            egui::Stroke::new(1.0_f32, pal.text_disabled),
+        );
+        h_painter.text(
+            egui::pos2(x + 2.0, h.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            format!("{}", mm.round() as i32),
+            font.clone(),
+            pal.text_secondary,
+        );
+        let mid = x + major_mm * px_per_mm * 0.5;
+        if mid < h.right() {
+            h_painter.line_segment(
+                [
+                    egui::pos2(mid, h.bottom() - 3.0),
+                    egui::pos2(mid, h.bottom()),
+                ],
+                egui::Stroke::new(1.0_f32, pal.text_disabled),
+            );
         }
-        ui.label(format!(
-            "Trang {}/{}",
-            d.page_index + 1,
-            d.page_count.max(1)
-        ));
-        if ui.button(ph::CARET_RIGHT).clicked() && d.page_index + 1 < d.page_count {
-            d.page_index += 1;
+        mm += major_mm;
+    }
+
+    mm = 0.0;
+    while mm <= setup.paper.height_mm + 0.01 {
+        let y = page.top() + mm * px_per_mm;
+        v_painter.line_segment(
+            [egui::pos2(v.right() - 7.0, y), egui::pos2(v.right(), y)],
+            egui::Stroke::new(1.0_f32, pal.text_disabled),
+        );
+        v_painter.text(
+            egui::pos2(v.left() + 2.0, y + 2.0),
+            egui::Align2::LEFT_TOP,
+            format!("{}", mm.round() as i32),
+            font.clone(),
+            pal.text_secondary,
+        );
+        let mid = y + major_mm * px_per_mm * 0.5;
+        if mid < v.bottom() {
+            v_painter.line_segment(
+                [egui::pos2(v.right() - 3.0, mid), egui::pos2(v.right(), mid)],
+                egui::Stroke::new(1.0_f32, pal.text_disabled),
+            );
         }
-        if !d.status.is_empty() {
-            ui.separator();
-            ui.label(&d.status);
-        }
-    });
+        mm += major_mm;
+    }
+
+    let margin_stroke = egui::Stroke::new(2.0_f32, pal.accent_guide);
+    for margin_mm in [
+        setup.margins.left_mm,
+        setup.paper.width_mm - setup.margins.right_mm,
+    ] {
+        let x = page.left() + margin_mm * px_per_mm;
+        h_painter.line_segment(
+            [
+                egui::pos2(x, h.top() + 1.0),
+                egui::pos2(x, h.bottom() - 1.0),
+            ],
+            margin_stroke,
+        );
+    }
+    for margin_mm in [
+        setup.margins.top_mm,
+        setup.paper.height_mm - setup.margins.bottom_mm,
+    ] {
+        let y = page.top() + margin_mm * px_per_mm;
+        v_painter.line_segment(
+            [
+                egui::pos2(v.left() + 1.0, y),
+                egui::pos2(v.right() - 1.0, y),
+            ],
+            margin_stroke,
+        );
+    }
+    painter.text(
+        corner.center(),
+        egui::Align2::CENTER_CENTER,
+        "mm",
+        egui::FontId::monospace(8.0),
+        pal.text_secondary,
+    );
+}
+
+fn selection_contains_line(start_line: usize, end_line: usize, line: usize) -> bool {
+    (start_line..=end_line).contains(&line)
 }
 
 /// Extend or collapse the selection, then move the cursor.
@@ -498,23 +691,21 @@ fn motion(editor: &mut Editor<'static>, fs: &mut FontSystem, m: Motion, extend: 
 }
 
 /// Re-apply page width / metrics to the editor buffer after a toolbar change.
-fn apply_reshape(d: &mut DocRuntime) {
+fn apply_reshape(d: &mut DocRuntime, fs: &mut FontSystem) {
     let cw = d.setup.content_width_px(DPI);
     let metrics = base_metrics(d.font_pt);
-    let engine = d.engine.as_mut().expect("engine");
     let editor = d.editor.as_mut().expect("editor");
     editor.with_buffer_mut(|b| {
         b.set_metrics(metrics);
         b.set_size(Some(cw), None);
     });
-    editor.shape_as_needed(&mut engine.0, false);
+    editor.shape_as_needed(fs, false);
     d.revision = d.revision.wrapping_add(1);
 }
 
 /// Set the alignment of every paragraph touched by the selection (or the caret
 /// line when there is no selection).
-fn apply_align(d: &mut DocRuntime, align: Align) {
-    let engine = d.engine.as_mut().expect("engine");
+fn apply_align(d: &mut DocRuntime, fs: &mut FontSystem, align: Align) {
     let editor = d.editor.as_mut().expect("editor");
     let (l0, l1) = match editor.selection_bounds() {
         Some((s, e)) => (s.line, e.line),
@@ -530,7 +721,7 @@ fn apply_align(d: &mut DocRuntime, align: Align) {
             }
         }
     });
-    editor.shape_as_needed(&mut engine.0, false);
+    editor.shape_as_needed(fs, false);
     d.revision = d.revision.wrapping_add(1);
 }
 
@@ -598,57 +789,6 @@ fn paper_name(p: PaperSize) -> &'static str {
     }
 }
 
-// --- PDF export -----------------------------------------------------------
-
-fn spawn_save_dialog() -> Receiver<Option<PathBuf>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let path = rfd::FileDialog::new()
-            .add_filter("PDF", &["pdf"])
-            .set_file_name("tai-lieu.pdf")
-            .save_file()
-            .map(|mut p| {
-                if p.extension().is_none() {
-                    p.set_extension("pdf");
-                }
-                p
-            });
-        let _ = tx.send(path);
-    });
-    rx
-}
-
-fn poll_pdf_export(ctx: &egui::Context, d: &mut DocRuntime) {
-    enum Poll {
-        Idle,
-        Waiting,
-        Done(Option<PathBuf>),
-    }
-    let poll = match &d.pending_pdf {
-        None => Poll::Idle,
-        Some(rx) => match rx.try_recv() {
-            Ok(path) => Poll::Done(path),
-            Err(TryRecvError::Empty) => Poll::Waiting,
-            Err(TryRecvError::Disconnected) => Poll::Done(None),
-        },
-    };
-    match poll {
-        Poll::Idle => {}
-        Poll::Waiting => ctx.request_repaint_after(Duration::from_millis(100)),
-        Poll::Done(Some(path)) => {
-            d.status = match export_pdf(d, &path) {
-                Ok(pages) => format!("Đã lưu PDF ({pages} trang): {}", path.display()),
-                Err(e) => format!("Lỗi xuất PDF: {e}"),
-            };
-            d.pending_pdf = None;
-        }
-        Poll::Done(None) => {
-            d.status = "Đã hủy xuất PDF.".to_string();
-            d.pending_pdf = None;
-        }
-    }
-}
-
 /// Plain text of the document (one paragraph per hard line).
 fn editor_text(editor: &Editor<'static>) -> String {
     editor.with_buffer(|b| {
@@ -660,27 +800,53 @@ fn editor_text(editor: &Editor<'static>) -> String {
     })
 }
 
-/// Write the document as a selectable-text vector PDF. Returns the page count.
-fn export_pdf(d: &mut DocRuntime, path: &std::path::Path) -> Result<usize, String> {
-    let text = editor_text(d.editor.as_ref().expect("editor"));
-    let mut tdoc = TextDocument::from_plain_text(&text);
-    tdoc.default_char.size_pt = d.font_pt;
-    tdoc.page = d.setup;
-    for p in &mut tdoc.paragraphs {
-        for r in &mut p.runs {
-            r.style.size_pt = d.font_pt;
+/// Snapshot the interactive cosmic-text projection back into the canonical
+/// engine-agnostic document model. The current surface supports one character
+/// style plus per-paragraph alignment; richer run mapping is added behind this
+/// same bridge rather than creating a second source of truth.
+fn editor_document(d: &DocRuntime) -> TextDocument {
+    let editor = d.editor.as_ref().expect("editor");
+    let mut document = TextDocument::from_plain_text(&editor_text(editor));
+    document.page = d.setup;
+    document.default_char.size_pt = d.font_pt;
+    document.default_para.line_spacing = LINE_SPACING;
+
+    editor.with_buffer(|buffer| {
+        for (paragraph, line) in document.paragraphs.iter_mut().zip(&buffer.lines) {
+            paragraph.style.line_spacing = LINE_SPACING;
+            paragraph.style.align = match line.align().unwrap_or(Align::Left) {
+                Align::Center => ParagraphAlign::Center,
+                Align::Right | Align::End => ParagraphAlign::Right,
+                Align::Justified => ParagraphAlign::Justify,
+                _ => ParagraphAlign::Left,
+            };
+            for run in &mut paragraph.runs {
+                run.style.size_pt = d.font_pt;
+            }
         }
-    }
-    let engine = d.engine.as_mut().expect("engine");
-    let layout = DocumentLayout::build(&tdoc, DPI, &mut engine.0);
-    let pages = layout.page_count();
-    layout.write_text_pdf(&mut engine.0, path)?;
-    Ok(pages)
+    });
+    document
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_highlight_is_limited_to_selected_lines() {
+        assert!(!selection_contains_line(2, 4, 1));
+        assert!(selection_contains_line(2, 4, 2));
+        assert!(selection_contains_line(2, 4, 3));
+        assert!(selection_contains_line(2, 4, 4));
+        assert!(!selection_contains_line(2, 4, 5));
+    }
+
+    #[test]
+    fn single_line_selection_does_not_highlight_other_lines() {
+        assert!(selection_contains_line(7, 7, 7));
+        assert!(!selection_contains_line(7, 7, 6));
+        assert!(!selection_contains_line(7, 7, 8));
+    }
 
     #[test]
     fn render_page_rasterises_editor_text() {

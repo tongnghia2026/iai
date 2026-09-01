@@ -8,7 +8,18 @@ use super::*;
 
 /// The active document as the UI sees it: geometry, colour mode, view,
 /// history counters, the tab strip and the PDF navigator.
+#[derive(Clone)]
+pub struct FlowTextViewModel {
+    pub document: std::sync::Arc<crate::core::text_document::TextDocument>,
+    pub revision: u64,
+    pub active_page: usize,
+    pub page_count: usize,
+}
+
 pub struct DocumentViewModel {
+    pub id: crate::core::document::DocumentId,
+    pub kind: crate::core::document::DocumentKind,
+    pub flow_text: Option<FlowTextViewModel>,
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub canvas_dpi: f32,
@@ -42,6 +53,7 @@ pub struct DocumentViewModel {
     pub is_modified: bool,
     pub doc_count: usize,
     pub active_doc_idx: usize,
+    pub doc_ids: std::sync::Arc<Vec<crate::core::document::DocumentId>>,
     pub doc_titles: std::sync::Arc<Vec<String>>,
     pub doc_modified: std::sync::Arc<Vec<bool>>,
     pub doc_ai_busy: std::sync::Arc<Vec<Option<DocAiBusy>>>,
@@ -642,6 +654,9 @@ impl Default for UiData {
     fn default() -> Self {
         Self {
             doc: DocumentViewModel {
+                id: crate::core::document::DocumentId::NONE,
+                kind: crate::core::document::DocumentKind::Canvas,
+                flow_text: None,
                 canvas_w: 800,
                 canvas_h: 600,
                 canvas_dpi: 72.0,
@@ -666,6 +681,7 @@ impl Default for UiData {
                 is_modified: false,
                 doc_count: 1,
                 active_doc_idx: 0,
+                doc_ids: std::sync::Arc::new(vec![crate::core::document::DocumentId::NONE]),
                 doc_titles: std::sync::Arc::new(vec!["Untitled".to_string()]),
                 doc_modified: std::sync::Arc::new(vec![false]),
                 doc_ai_busy: std::sync::Arc::new(vec![None]),

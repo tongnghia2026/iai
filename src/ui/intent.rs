@@ -76,6 +76,16 @@ fn parse_page_number(text: &str, page_count: usize) -> Result<usize, String> {
 /// colour-mode conversion, view zoom, clipboard.
 #[derive(Default)]
 pub struct DocumentIntent {
+    /// Create a lightweight flowing-text document in a normal application tab.
+    pub new_flow_text_document: bool,
+    /// Replace canonical flowing-text content after an editor transaction.
+    pub replace_flow_text_document: Option<(
+        crate::core::document::DocumentId,
+        crate::core::text_document::TextDocument,
+    )>,
+    /// Derived layout/navigation state: `(doc id, page count, active page)`.
+    /// This never marks document content dirty.
+    pub set_flow_text_layout: Option<(crate::core::document::DocumentId, usize, usize)>,
     pub fit_to_screen: bool,
     pub zoom_in: bool,
     pub zoom_out: bool,

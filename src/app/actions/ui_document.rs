@@ -14,27 +14,67 @@ impl App {
         actions: &mut UiActions,
         event_loop: &ActiveEventLoop,
     ) -> bool {
+        if actions.doc.new_flow_text_document {
+            actions.doc.new_flow_text_document = false;
+            self.open_new_flow_text_doc_tab();
+        }
+        if let Some((doc_id, document)) = actions.doc.replace_flow_text_document.take() {
+            if let Some(doc) = self.docs.documents.iter_mut().find(|doc| doc.id == doc_id) {
+                if let Some(text) = doc.flow_text.as_mut() {
+                    text.replace_document(document);
+                }
+            }
+        }
+        if let Some((doc_id, page_count, active_page)) = actions.doc.set_flow_text_layout.take() {
+            if let Some(doc) = self.docs.documents.iter_mut().find(|doc| doc.id == doc_id) {
+                if let Some(text) = doc.flow_text.as_mut() {
+                    text.set_layout_page_count(page_count);
+                    text.set_active_page(active_page);
+                }
+            }
+        }
+        let flow_text_active = self.docs.documents[self.docs.active_doc_idx].is_flow_text();
         if actions.doc.fit_to_screen {
-            self.fit_canvas_to_screen();
+            if flow_text_active {
+                self.edit.view.zoom = 1.0;
+            } else {
+                self.fit_canvas_to_screen();
+            }
         }
         if actions.doc.zoom_in {
-            self.edit.view.zoom = (self.edit.view.zoom * 1.25).clamp(0.02, 64.0);
-            self.push_canvas_uniforms();
-            self.on_view_changed();
+            let (min_zoom, max_zoom) = if flow_text_active {
+                (0.3, 4.0)
+            } else {
+                (0.02, 64.0)
+            };
+            self.edit.view.zoom = (self.edit.view.zoom * 1.25).clamp(min_zoom, max_zoom);
+            if !flow_text_active {
+                self.push_canvas_uniforms();
+                self.on_view_changed();
+            }
             self.win.last_cursor_radius = 0;
             self.sync_cursor(event_loop);
         }
         if actions.doc.zoom_out {
-            self.edit.view.zoom = (self.edit.view.zoom / 1.25).clamp(0.02, 64.0);
-            self.push_canvas_uniforms();
-            self.on_view_changed();
+            let (min_zoom, max_zoom) = if flow_text_active {
+                (0.3, 4.0)
+            } else {
+                (0.02, 64.0)
+            };
+            self.edit.view.zoom = (self.edit.view.zoom / 1.25).clamp(min_zoom, max_zoom);
+            if !flow_text_active {
+                self.push_canvas_uniforms();
+                self.on_view_changed();
+            }
             self.win.last_cursor_radius = 0;
             self.sync_cursor(event_loop);
         }
         if actions.doc.zoom_100 {
             self.edit.view.zoom = 1.0;
-            self.push_canvas_uniforms();
-            self.on_view_changed();
+            if !flow_text_active {
+                self.push_canvas_uniforms();
+                self.on_view_changed();
+            }
         }
         // Flip and 90° rotate are tile-native (per-layer TileMap::flip_*/rotate_*
         // + offset/mask/selection remap), and flatten_full skips the flat buffer on
@@ -114,7 +154,12 @@ impl App {
             self.add_artboard();
         }
         if let Some(i) = actions.doc.set_active_artboard.take() {
-            self.set_active_artboard(i);
+            let active = &mut self.docs.documents[self.docs.active_doc_idx];
+            if let Some(text) = active.flow_text.as_mut() {
+                text.set_active_page(i);
+            } else {
+                self.set_active_artboard(i);
+            }
         }
         if let Some(i) = actions.doc.rename_page.take() {
             self.begin_page_rename(i);

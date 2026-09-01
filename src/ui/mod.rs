@@ -786,7 +786,7 @@ pub fn build(
 
         toolbar::build(ctx, data, &mut actions);
 
-        if data.chrome.show_rulers {
+        if data.chrome.show_rulers && data.doc.kind == crate::core::document::DocumentKind::Canvas {
             draw_rulers(ctx, data, &mut actions);
         }
 
@@ -809,12 +809,13 @@ pub fn build(
         warp::build(ctx, data, &mut actions);
         ai_panel::build(ctx, data, &mut actions);
         ai_progress::build(ctx, data, &mut actions);
-        document_mode::build(ctx);
         draw_paint_color_dialog(ctx, data, &mut actions);
 
         let canvas_viewport = {
             let screen = ctx.content_rect();
-            let ruler_off = if data.chrome.show_rulers {
+            let ruler_off = if data.chrome.show_rulers
+                && data.doc.kind == crate::core::document::DocumentKind::Canvas
+            {
                 20.0_f32
             } else {
                 0.0
@@ -827,6 +828,11 @@ pub fn build(
                 egui::pos2(screen.max.x - data.chrome.panel_r_w, screen.max.y - 22.0),
             )
         };
+
+        if data.doc.kind == crate::core::document::DocumentKind::FlowText {
+            document_mode::build(ctx, data, &mut actions, ctx.available_rect());
+            return;
+        }
 
         if data.sel.show_refine_panel
             && data.sel.refine_view_mode == crate::ui::refine_select::RefineViewMode::Overlay

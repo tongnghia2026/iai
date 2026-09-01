@@ -72,6 +72,20 @@ impl App {
 
         self.docs.current_file = self.docs.documents[idx].path.clone();
 
+        if self.docs.documents[idx].is_flow_text() {
+            self.edit.view.zoom = self.docs.documents[idx].saved_zoom.max(0.3);
+            self.edit.view.offset_x = 0.0;
+            self.edit.view.offset_y = 0.0;
+            self.edit.transform_state = None;
+            self.edit.input.painting = false;
+            self.edit.pending_stroke_inputs.clear();
+            self.win.pending_gpu_sync = Default::default();
+            if let Some(window) = &self.win.window {
+                window.request_redraw();
+            }
+            return;
+        }
+
         if self.docs.documents[idx].saved_zoom <= 0.0 {
             self.edit.view.zoom = 1.0;
             self.fit_canvas_to_screen();
@@ -345,6 +359,18 @@ impl App {
         self.switch_to_doc(new_idx);
         self.shell.ui.show_welcome = false;
     }
+
+    /// Open a lightweight flowing-text document in the normal tab lifecycle.
+    /// Its 1x1 compatibility canvas is never the page backing; layout produces
+    /// derived text pages in the document viewport.
+    pub fn open_new_flow_text_doc_tab(&mut self) {
+        let id = DocumentId(self.docs.next_doc_id);
+        self.docs.next_doc_id += 1;
+        self.docs.documents.push(Document::new_flow_text(id));
+        let new_idx = self.docs.documents.len() - 1;
+        self.switch_to_doc(new_idx);
+        self.shell.ui.show_welcome = false;
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +383,22 @@ mod tests {
             4,
             4,
         )
+    }
+
+    #[test]
+    fn new_flow_text_document_uses_the_normal_tab_lifecycle() {
+        let mut app = App::new();
+        let old_count = app.docs.documents.len();
+
+        app.open_new_flow_text_doc_tab();
+
+        assert_eq!(app.docs.documents.len(), old_count + 1);
+        assert_eq!(app.docs.active_doc_idx, old_count);
+        let doc = &app.docs.documents[old_count];
+        assert!(doc.is_flow_text());
+        assert_eq!((doc.canvas.width, doc.canvas.height), (1, 1));
+        assert!(doc.pages.is_empty());
+        assert!(!app.shell.ui.show_welcome);
     }
 
     #[test]

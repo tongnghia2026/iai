@@ -664,6 +664,17 @@ impl App {
 
         UiData {
             doc: DocumentViewModel {
+                id: self.docs.documents[self.docs.active_doc_idx].id,
+                kind: self.docs.documents[self.docs.active_doc_idx].kind,
+                flow_text: self.docs.documents[self.docs.active_doc_idx]
+                    .flow_text
+                    .as_ref()
+                    .map(|text| crate::ui::FlowTextViewModel {
+                        document: text.document_arc(),
+                        revision: text.revision(),
+                        active_page: text.active_page(),
+                        page_count: text.page_count(),
+                    }),
                 canvas_w: self.docs.documents[self.docs.active_doc_idx].canvas.width,
                 canvas_h: self.docs.documents[self.docs.active_doc_idx].canvas.height,
                 canvas_dpi: self.docs.documents[self.docs.active_doc_idx]
@@ -728,11 +739,19 @@ impl App {
                     .map(|s| s.to_string()),
                 is_modified: self.is_modified(),
                 has_doc: !self.has_only_welcome_placeholder(),
+                doc_ids: std::sync::Arc::new(
+                    self.docs.documents.iter().map(|doc| doc.id).collect(),
+                ),
                 active_artboard: self
                     .docs
                     .documents
                     .get(self.docs.active_doc_idx)
-                    .map(|doc| doc.active_artboard.min(doc.page_count().saturating_sub(1)))
+                    .map(|doc| {
+                        doc.flow_text.as_ref().map_or_else(
+                            || doc.active_artboard.min(doc.page_count().saturating_sub(1)),
+                            |text| text.active_page(),
+                        )
+                    })
                     .unwrap_or(0),
                 page_count: self
                     .docs

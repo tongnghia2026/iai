@@ -77,6 +77,15 @@ impl App {
     /// document keeps the regular Save behavior and may overwrite its source
     /// PNG/JPEG/etc. An existing `.iai` project is always updated in place.
     pub fn do_save_project(&mut self) {
+        if self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .is_some_and(|doc| doc.is_flow_text())
+        {
+            self.do_save();
+            return;
+        }
         let requires_project = self
             .docs
             .documents
@@ -105,6 +114,25 @@ impl App {
     }
 
     pub fn do_save(&mut self) {
+        // Flowing text is an editable `.iai` document, never a flattened 1x1
+        // compatibility canvas. PDF remains an explicit export operation.
+        if self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .is_some_and(|doc| doc.is_flow_text())
+        {
+            let existing_iai = self.docs.current_file.clone().filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("iai"))
+            });
+            match existing_iai {
+                Some(path) => self.save_flow_text_doc_to(&path),
+                None => self.do_save_project_as(),
+            }
+            return;
+        }
         // Multi-page PDF sessions save as a full `.iai` project (all edited pages),
         // never as a flat single canvas — otherwise the other pages would be lost.
         if self
@@ -151,7 +179,47 @@ impl App {
     }
 
     pub fn do_save_as(&mut self) {
+        if self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .is_some_and(|doc| doc.is_flow_text())
+        {
+            self.do_save_project_as();
+            return;
+        }
         self.do_save_as_with_suggestion(self.docs.current_file.clone());
+    }
+
+    /// Save the canonical flowing-text model. Layout pages, glyph caches and the
+    /// 1x1 compatibility canvas are derived/session state and are intentionally
+    /// excluded from the file.
+    pub fn save_flow_text_doc_to(&mut self, path: &std::path::Path) {
+        let idx = self.docs.active_doc_idx;
+        let result = self
+            .docs
+            .documents
+            .get(idx)
+            .and_then(|doc| doc.flow_text.as_ref())
+            .ok_or_else(|| "Không có tài liệu văn bản đang hoạt động".to_string())
+            .and_then(|flow| crate::formats::iai::write_flow_text_doc(path, flow.document()));
+        match result {
+            Ok(()) => {
+                let doc = &mut self.docs.documents[idx];
+                doc.path = Some(path.to_path_buf());
+                doc.file_modified_at = file_modified_at(path);
+                doc.mark_saved();
+                self.docs.current_file = Some(path.to_path_buf());
+                self.shell.status_msg = format!(
+                    "Đã lưu văn bản: {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+                self.clear_autosave(idx);
+            }
+            Err(error) => {
+                self.shell.status_msg = format!("Lỗi lưu văn bản: {error}");
+            }
+        }
     }
 
     /// Save a multi-page artboard document as a full `.iai` (every page). Gathers
@@ -238,18 +306,32 @@ impl App {
     }
 
     pub fn save_to(&mut self, path: &std::path::Path) {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .is_some_and(|doc| doc.is_flow_text())
+        {
+            if ext == "iai" {
+                self.save_flow_text_doc_to(path);
+            } else {
+                self.shell.status_msg =
+                    "Văn bản chỉnh sửa chỉ lưu được dạng .iai; dùng Xuất PDF để tạo PDF"
+                        .to_string();
+            }
+            return;
+        }
         if self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
         self.sync_brush_gpu_to_cpu();
 
         let is_large = self.win.gpu.as_ref().map_or(false, |g| g.is_large_canvas);
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
         // A multi-page PDF session is written as a project, not a flat canvas.
         if self
             .docs
@@ -783,18 +865,26 @@ impl App {
             self.shell.status_msg = "Một tác vụ xuất tệp khác đang chạy".to_string();
             return;
         }
-        if self.edit.text_edit.is_some() {
+        let idx = self.docs.active_doc_idx;
+        let flow_text_active = self
+            .docs
+            .documents
+            .get(idx)
+            .is_some_and(|doc| doc.is_flow_text());
+        if !flow_text_active && self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
-        self.sync_brush_gpu_to_cpu();
-        let idx = self.docs.active_doc_idx;
-        if idx < self.docs.documents.len() {
+        if !flow_text_active {
+            self.sync_brush_gpu_to_cpu();
+        }
+        if !flow_text_active && idx < self.docs.documents.len() {
             self.docs.documents[idx].reconcile_pdf_page_modified();
         }
         let Some(doc) = self.docs.documents.get(idx) else {
             return;
         };
         let is_pdf = doc.pdf_document.is_some();
+        let flow_text_document = doc.flow_text.as_ref().map(|flow| flow.document_arc());
         let page_count = if let Some(pdf) = doc.pdf_document.as_ref() {
             pdf.selected_pages.len().max(1)
         } else {
@@ -805,6 +895,8 @@ impl App {
                 .iter()
                 .position(|&page| page == pdf.active_page)
                 .unwrap_or(0)
+        } else if let Some(flow) = doc.flow_text.as_ref() {
+            flow.active_page()
         } else {
             doc.active_artboard.min(page_count.saturating_sub(1))
         };
@@ -829,10 +921,53 @@ impl App {
             }
         };
         let target_dpi = self.shell.ui.pdf_export_dpi;
-        if is_pdf {
+        if let Some(document) = flow_text_document {
+            self.export_flow_text_pdf_selected(document, pages);
+        } else if is_pdf {
             self.export_pdf_document_selected(idx, &pages, target_dpi);
         } else {
             self.export_document_pages_pdf_selected(&pages, target_dpi);
+        }
+    }
+
+    /// Export the canonical flowing-text model through the application's shared
+    /// PDF job queue. The output remains vector/selectable and no canvas/GPU
+    /// snapshot is created.
+    fn export_flow_text_pdf_selected(
+        &mut self,
+        document: std::sync::Arc<crate::core::text_document::TextDocument>,
+        pages: Vec<usize>,
+    ) {
+        let idx = self.docs.active_doc_idx;
+        let stem = self
+            .docs
+            .documents
+            .get(idx)
+            .and_then(|doc| doc.path.as_deref().or(self.docs.current_file.as_deref()))
+            .and_then(|path| path.file_stem())
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("tai-lieu")
+            .to_string();
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let parent = file_io::dialog_parent(window);
+        let page_total = pages.len();
+        let rx = spawn_pdf_export(parent, stem, move |path| {
+            let mut font_system = cosmic_text::FontSystem::new();
+            let layout = crate::core::text_layout::DocumentLayout::build(
+                document.as_ref(),
+                96.0,
+                &mut font_system,
+            );
+            layout.write_text_pdf_pages(&mut font_system, &path, &pages)?;
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            Ok(format!("Đã xuất PDF văn bản {page_total} trang: {name}"))
+        });
+        self.jobs.pending_pdf_export = Some(rx);
+        self.shell.status_msg = format!("Đang xuất PDF văn bản {page_total} trang…");
+        if let Some(window) = &self.win.window {
+            window.request_redraw();
         }
     }
 

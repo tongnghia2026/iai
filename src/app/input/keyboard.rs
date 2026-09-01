@@ -40,6 +40,21 @@ impl App {
             }
             _ => {}
         }
+        // A flowing-text document gives editing keys to egui/cosmic-text. Keep
+        // only application-lifecycle shortcuts here; allowing the normal tool
+        // router to continue would nudge layers, switch tools or undo the dormant
+        // 1x1 compatibility canvas underneath the document surface.
+        if self.docs.documents[self.docs.active_doc_idx].is_flow_text() {
+            if pressed && self.edit.input.ctrl_held {
+                match physical_key {
+                    PhysicalKey::Code(KeyCode::KeyS) => self.do_save(),
+                    PhysicalKey::Code(KeyCode::KeyO) => self.do_open(),
+                    PhysicalKey::Code(KeyCode::KeyW) => self.close_doc(self.docs.active_doc_idx),
+                    _ => {}
+                }
+            }
+            return;
+        }
         if self.shell.ui.show_welcome
             && !self.shell.ui.show_new_dialog
             && pressed

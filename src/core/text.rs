@@ -59,7 +59,7 @@ pub enum TextAlign {
     Right,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TextFontFamily {
     SegoeUi,
     Arial,

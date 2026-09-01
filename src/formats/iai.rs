@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 /// v7 adds custom tab names for source PDF pages.
 /// v8 adds materialized blank/image/PDF pages whose ids are outside the source
 /// PDF's physical page range.
-const IAI_FORMAT_VERSION: u64 = 8;
+const IAI_FORMAT_VERSION: u64 = 9;
 
 pub struct IaiImporter;
 pub struct IaiExporter;
@@ -77,6 +77,7 @@ pub enum IaiLoad {
     Canvas(Canvas),
     PdfProject(IaiPdfProject),
     ArtboardDoc(IaiArtboardDoc),
+    FlowTextDocument(crate::core::text_document::TextDocument),
 }
 
 fn read_manifest<R: Read + Seek>(
@@ -120,6 +121,20 @@ pub fn is_artboard_doc(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Peek a `.iai` and report whether it contains a lightweight flowing-text
+/// document rather than raster/artboard canvas content.
+pub fn is_flow_text_doc(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    read_manifest(&mut archive)
+        .map(|m| m["kind"].as_str() == Some("flow_text_document"))
+        .unwrap_or(false)
+}
+
 /// Decode a `.iai` file into either a single canvas or a PDF project.
 pub fn load(path: &Path) -> Result<IaiLoad, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -141,9 +156,37 @@ pub fn load(path: &Path) -> Result<IaiLoad, String> {
     if manifest["kind"].as_str() == Some("artboard_doc") {
         return read_artboard_doc(&mut archive, &manifest).map(IaiLoad::ArtboardDoc);
     }
+    if manifest["kind"].as_str() == Some("flow_text_document") {
+        let document: crate::core::text_document::TextDocument =
+            serde_json::from_value(manifest["document"].clone()).map_err(|e| e.to_string())?;
+        document.validate()?;
+        return Ok(IaiLoad::FlowTextDocument(document));
+    }
     // v1 (and v2 single-image) store the canvas fields at the manifest root, with
     // layer pixels at the archive root (no prefix).
     build_canvas_from_meta(&mut archive, &manifest, "").map(IaiLoad::Canvas)
+}
+
+/// Store a flowing-text document in the normal `.iai` ZIP envelope. No canvas,
+/// layer PNG or tile payload is written, so file size scales with text content.
+pub fn write_flow_text_doc(
+    path: &Path,
+    document: &crate::core::text_document::TextDocument,
+) -> Result<(), String> {
+    document.validate()?;
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipWriter::new(file);
+    let manifest = serde_json::json!({
+        "version": IAI_FORMAT_VERSION,
+        "kind": "flow_text_document",
+        "document": document,
+    });
+    zip.start_file("manifest.json", deflated_options())
+        .map_err(|e| e.to_string())?;
+    zip.write_all(manifest.to_string().as_bytes())
+        .map_err(|e| e.to_string())?;
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Rebuild a [`Canvas`] from its manifest metadata object and prefixed layer
@@ -666,6 +709,9 @@ impl Importer for IaiImporter {
                     .or(if pages.is_empty() { None } else { Some(0) })
                     .ok_or_else(|| "PDF project has no stored pages to display".to_string())?;
                 Ok(pages.swap_remove(idx).canvas)
+            }
+            IaiLoad::FlowTextDocument(_) => {
+                Err("Tài liệu văn bản không thể nhập thành canvas".to_string())
             }
         }
     }
@@ -1868,6 +1914,34 @@ mod tests {
 
     fn minimal_pdf() -> Vec<u8> {
         b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n".to_vec()
+    }
+
+    #[test]
+    fn flow_text_document_round_trips_without_canvas_payloads() {
+        let dir = tmp_dir("flow-text");
+        let path = dir.join("van-ban.iai");
+        let mut document = crate::core::text_document::TextDocument::from_plain_text(
+            "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM\nĐộc lập – Tự do – Hạnh phúc",
+        );
+        document.paragraphs[0].style.align = crate::core::text_document::ParagraphAlign::Center;
+        document.page.margins.left_mm = 32.0;
+        document.page.margins.right_mm = 18.0;
+
+        write_flow_text_doc(&path, &document).expect("write flowing text");
+        assert!(is_flow_text_doc(&path));
+        assert!(!is_artboard_doc(&path));
+        assert!(!is_pdf_project(&path));
+
+        let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("reopen flowing text") else {
+            panic!("expected flowing-text document");
+        };
+        assert_eq!(reopened, document);
+
+        let file = std::fs::File::open(&path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("read zip");
+        assert_eq!(archive.len(), 1, "text files must not carry raster pages");
+        assert_eq!(archive.by_index(0).unwrap().name(), "manifest.json");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

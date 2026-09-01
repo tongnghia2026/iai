@@ -12,6 +12,106 @@ use std::time::SystemTime;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DocumentId(pub u32);
 
+/// The backing content hosted by one application document/tab.
+///
+/// `FlowText` is deliberately additive for the first integration slice: the
+/// existing `canvas` field remains as a tiny compatibility shell so image code
+/// does not need a risky repository-wide enum migration. Text pages themselves
+/// are never materialised as canvases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DocumentKind {
+    #[default]
+    Canvas,
+    FlowText,
+}
+
+/// Persistent, lightweight state for a flowing-text document. Layout/editor
+/// caches live outside this core type; this is the canonical content used by
+/// dirty tracking, save/open and export.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlowTextDocumentState {
+    document: std::sync::Arc<crate::core::text_document::TextDocument>,
+    revision: u64,
+    saved_revision: u64,
+    /// Session-only page selected in the shared page bar.
+    active_page: usize,
+    /// Derived by layout; never causes the document to become dirty.
+    layout_page_count: usize,
+}
+
+impl Default for FlowTextDocumentState {
+    fn default() -> Self {
+        Self::new(crate::core::text_document::TextDocument::new())
+    }
+}
+
+impl FlowTextDocumentState {
+    pub fn new(document: crate::core::text_document::TextDocument) -> Self {
+        Self {
+            document: std::sync::Arc::new(document),
+            revision: 0,
+            saved_revision: 0,
+            active_page: 0,
+            layout_page_count: 1,
+        }
+    }
+
+    pub fn document(&self) -> &crate::core::text_document::TextDocument {
+        &self.document
+    }
+
+    /// Cheap immutable snapshot for the UI read contract. Long documents are
+    /// not cloned every frame; mutation uses `Arc::make_mut` below.
+    pub fn document_arc(&self) -> std::sync::Arc<crate::core::text_document::TextDocument> {
+        self.document.clone()
+    }
+
+    /// Mutate canonical text content and mark the document dirty. Callers that
+    /// only change caret, selection, view or derived layout must use the
+    /// dedicated session-state methods instead.
+    pub fn document_mut(&mut self) -> &mut crate::core::text_document::TextDocument {
+        self.revision = self.revision.wrapping_add(1);
+        std::sync::Arc::make_mut(&mut self.document)
+    }
+
+    pub fn replace_document(&mut self, document: crate::core::text_document::TextDocument) {
+        if self.document.as_ref() != &document {
+            self.document = std::sync::Arc::new(document);
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.revision != self.saved_revision
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.saved_revision = self.revision;
+    }
+
+    pub fn active_page(&self) -> usize {
+        self.active_page
+            .min(self.layout_page_count.saturating_sub(1))
+    }
+
+    pub fn set_active_page(&mut self, page: usize) {
+        self.active_page = page.min(self.layout_page_count.saturating_sub(1));
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.layout_page_count.max(1)
+    }
+
+    pub fn set_layout_page_count(&mut self, count: usize) {
+        self.layout_page_count = count.max(1);
+        self.active_page = self.active_page.min(self.layout_page_count - 1);
+    }
+}
+
 /// Orientation of a ruler guide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuideOrientation {
@@ -384,6 +484,10 @@ impl PdfPageRef {
 
 pub struct Document {
     pub id: DocumentId,
+    pub kind: DocumentKind,
+    /// Present exactly when `kind == FlowText`. This is the canonical flowing
+    /// text model; the 1x1 `canvas` remains dormant compatibility storage.
+    pub flow_text: Option<FlowTextDocumentState>,
     pub canvas: Canvas,
     pub path: Option<PathBuf>,
     pub file_modified_at: Option<SystemTime>,
@@ -462,6 +566,8 @@ impl Document {
     pub fn new(id: DocumentId, width: u32, height: u32) -> Self {
         Self {
             id,
+            kind: DocumentKind::Canvas,
+            flow_text: None,
             canvas: Canvas::new(width, height),
             path: None,
             file_modified_at: None,
@@ -490,6 +596,8 @@ impl Document {
             .to_string();
         Self {
             id,
+            kind: DocumentKind::Canvas,
+            flow_text: None,
             canvas,
             file_modified_at: path.as_deref().and_then(file_modified_at),
             path,
@@ -507,6 +615,24 @@ impl Document {
             editing_master: false,
             deferred_raw: false,
         }
+    }
+
+    /// Create a lightweight flowing-text document without allocating an A4
+    /// raster canvas. The 1x1 canvas only preserves the current app invariant
+    /// while the viewport/input code is migrated by document kind.
+    pub fn new_flow_text(id: DocumentId) -> Self {
+        let mut document = Self::new(id, 1, 1);
+        document.kind = DocumentKind::FlowText;
+        document.flow_text = Some(FlowTextDocumentState::default());
+        document.title = "Tài liệu chưa đặt tên".to_string();
+        // Document-surface zoom is a fit-relative multiplier; avoid running the
+        // canvas first-view fit calculation against the 1x1 compatibility shell.
+        document.saved_zoom = 1.0;
+        document
+    }
+
+    pub fn is_flow_text(&self) -> bool {
+        self.kind == DocumentKind::FlowText
     }
 
     /// The artboards this document renders, never empty — see
@@ -548,7 +674,8 @@ impl Document {
     /// `App`, which had to be kept in sync by ~100 call sites and still got
     /// undo-back-to-saved wrong.
     pub fn is_modified(&self) -> bool {
-        self.canvas.is_dirty()
+        self.flow_text.as_ref().is_some_and(|text| text.is_dirty())
+            || self.canvas.is_dirty()
             || self.pages.iter().flatten().any(|c| c.is_dirty())
             || self.master.as_ref().is_some_and(|m| m.is_dirty())
             || self
@@ -559,13 +686,16 @@ impl Document {
 
     /// Unsaved changes on the page the user is looking at.
     pub fn active_is_modified(&self) -> bool {
-        self.canvas.is_dirty()
+        self.flow_text.as_ref().is_some_and(|text| text.is_dirty()) || self.canvas.is_dirty()
     }
 
     /// Anchor every canvas in this document to "clean". Called after a
     /// successful write; keeps the page canvases and their sticky
     /// differs-from-original state intact.
     pub fn mark_saved(&mut self) {
+        if let Some(text) = self.flow_text.as_mut() {
+            text.mark_saved();
+        }
         self.canvas.mark_saved();
         for page in self.pages.iter_mut().flatten() {
             page.mark_saved();
@@ -586,7 +716,9 @@ impl Document {
     /// Number of pages in this document — always at least one (a plain document
     /// has an empty `pages` list and one page, its `canvas`).
     pub fn page_count(&self) -> usize {
-        self.pages.len().max(1)
+        self.flow_text
+            .as_ref()
+            .map_or_else(|| self.pages.len().max(1), |text| text.page_count())
     }
 
     /// A blank page the same size / DPI / print-setup as the active page.
@@ -983,11 +1115,64 @@ pub fn disambiguated_tab_titles(docs: &[Document]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        disambiguated_tab_titles, Document, DocumentId, PdfDocumentState, PdfGlobalClear,
-        PdfPageRef,
+        disambiguated_tab_titles, Document, DocumentId, DocumentKind, PdfDocumentState,
+        PdfGlobalClear, PdfPageRef,
     };
     use crate::core::canvas::Canvas;
     use std::path::PathBuf;
+
+    #[test]
+    fn flow_text_document_is_lightweight_and_clean_at_creation() {
+        let doc = Document::new_flow_text(DocumentId(7));
+        assert_eq!(doc.kind, DocumentKind::FlowText);
+        assert!(doc.is_flow_text());
+        assert_eq!((doc.canvas.width, doc.canvas.height), (1, 1));
+        assert!(
+            doc.pages.is_empty(),
+            "text pages must not materialise canvases"
+        );
+        assert_eq!(doc.page_count(), 1);
+        assert!(!doc.is_modified());
+    }
+
+    #[test]
+    fn flow_text_revision_participates_in_document_dirty_tracking() {
+        let mut doc = Document::new_flow_text(DocumentId(8));
+        let text = doc.flow_text.as_mut().expect("flow text state");
+        text.replace_document(crate::core::text_document::TextDocument::from_plain_text(
+            "Hợp đồng thuê nhà",
+        ));
+        assert!(doc.is_modified());
+
+        doc.mark_saved();
+        assert!(!doc.is_modified());
+
+        doc.flow_text
+            .as_mut()
+            .expect("flow text state")
+            .document_mut()
+            .page
+            .margins
+            .left_mm = 35.0;
+        assert!(doc.is_modified());
+    }
+
+    #[test]
+    fn derived_flow_text_paging_does_not_dirty_content_and_clamps_navigation() {
+        let mut doc = Document::new_flow_text(DocumentId(9));
+        let text = doc.flow_text.as_mut().expect("flow text state");
+        text.set_layout_page_count(12);
+        text.set_active_page(11);
+        assert_eq!(text.active_page(), 11);
+        assert_eq!(doc.page_count(), 12);
+        assert!(!doc.is_modified());
+
+        let text = doc.flow_text.as_mut().expect("flow text state");
+        text.set_layout_page_count(3);
+        assert_eq!(text.active_page(), 2);
+        assert_eq!(doc.page_count(), 3);
+        assert!(!doc.is_modified());
+    }
 
     #[test]
     fn duplicate_tab_titles_get_suffixes() {

@@ -896,6 +896,7 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
     let mut do_cancel = esc_pressed;
 
     let is_pdf_import = data.doc.pdf_nav.is_some();
+    let is_flow_text = data.doc.kind == crate::core::document::DocumentKind::FlowText;
     let page_count = if is_pdf_import {
         data.doc.pdf_nav.as_ref().map_or(1, |n| n.count.max(1))
     } else {
@@ -919,7 +920,11 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
 
     modal_overlay(ctx, "pdf_export_dialog_overlay");
 
-    let default_size = egui::vec2(620.0, 580.0);
+    let default_size = if is_flow_text {
+        egui::vec2(520.0, 360.0)
+    } else {
+        egui::vec2(620.0, 580.0)
+    };
     let screen = ctx.content_rect();
     let default_pos = egui::pos2(
         (screen.center().x - default_size.x * 0.5).max(screen.min.x + 12.0),
@@ -932,10 +937,18 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
         .movable(true)
         .default_pos(default_pos)
         .default_size(default_size)
-        .min_size(egui::vec2(520.0, 500.0))
+        .min_size(if is_flow_text {
+            egui::vec2(460.0, 300.0)
+        } else {
+            egui::vec2(520.0, 500.0)
+        })
         .order(DIALOG_ORDER)
         .show(ctx, |ui| {
-            ui.set_min_size(egui::vec2(500.0, 460.0));
+            ui.set_min_size(if is_flow_text {
+                egui::vec2(440.0, 260.0)
+            } else {
+                egui::vec2(500.0, 460.0)
+            });
             ui.add_space(8.0);
 
             if is_pdf_import {
@@ -951,6 +964,14 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                     )
                     .color(egui::Color32::GRAY)
                     .size(10.0),
+                );
+                ui.add_space(8.0);
+            } else if is_flow_text {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Văn bản — xuất chữ vector có thể chọn và tìm kiếm ({page_count} trang)."
+                    ))
+                    .size(12.0),
                 );
                 ui.add_space(8.0);
             }
@@ -1006,12 +1027,13 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                 );
             }
 
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
+            if !is_flow_text {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
 
-            // ── Output resolution (downsample only) ──
-            ui.horizontal(|ui| {
+                // ── Output resolution (downsample only) ──
+                ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Độ phân giải:").strong());
                 let cur = data.dialogs.pdf_export_dpi;
                 let label = if cur == 0 {
@@ -1050,55 +1072,60 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                         actions.doc.set_pdf_export_dpi = Some(custom.clamp(36, 2400));
                     }
                 }
-            });
-            ui.label(
-                egui::RichText::new("Chỉ giảm mẫu, không phóng to; đối tượng vector vẫn giữ nét.")
-                    .color(egui::Color32::GRAY)
-                    .size(10.0),
-            );
-
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
-
-            if is_pdf_import {
-                ui.label(egui::RichText::new("Chế bản").strong());
+                });
                 ui.label(
                     egui::RichText::new(
-                        "PDF nguồn giữ nguyên khổ trang; bông cắt và bleed không được áp lại.",
+                        "Chỉ giảm mẫu, không phóng to; đối tượng vector vẫn giữ nét.",
                     )
                     .color(egui::Color32::GRAY)
                     .size(10.0),
                 );
-            } else {
-                // ── Press marks & bleed ──
-                ui.label(egui::RichText::new("Chế bản").strong());
-                let mut marks = data.doc.export_pdf_marks;
-                let mut changed = false;
-                changed |= ui.checkbox(&mut marks.crop_marks, "Bông cắt (crop marks)").changed();
-                changed |= ui
-                    .checkbox(&mut marks.registration_marks, "Dấu canh mực (registration)")
-                    .changed();
-                ui.horizontal(|ui| {
-                    ui.label("Bleed:");
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut marks.bleed_mm)
-                                .range(0.0..=20.0)
-                                .speed(0.1)
-                                .suffix(" mm"),
-                        )
-                        .changed();
-                });
-                if changed {
-                    marks.bleed_mm = marks.bleed_mm.clamp(0.0, 20.0);
-                    actions.doc.set_export_pdf_marks = Some(marks);
-                }
 
-                ui.add_space(6.0);
-                let mut embed = data.doc.export_embed_icc;
-                if ui.checkbox(&mut embed, "Nhúng hồ sơ màu (ICC)").changed() {
-                    actions.doc.set_export_embed_icc = Some(embed);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                if is_pdf_import {
+                    ui.label(egui::RichText::new("Chế bản").strong());
+                    ui.label(
+                        egui::RichText::new(
+                            "PDF nguồn giữ nguyên khổ trang; bông cắt và bleed không được áp lại.",
+                        )
+                        .color(egui::Color32::GRAY)
+                        .size(10.0),
+                    );
+                } else {
+                    // ── Press marks & bleed ──
+                    ui.label(egui::RichText::new("Chế bản").strong());
+                    let mut marks = data.doc.export_pdf_marks;
+                    let mut changed = false;
+                    changed |= ui
+                        .checkbox(&mut marks.crop_marks, "Bông cắt (crop marks)")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut marks.registration_marks, "Dấu canh mực (registration)")
+                        .changed();
+                    ui.horizontal(|ui| {
+                        ui.label("Bleed:");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut marks.bleed_mm)
+                                    .range(0.0..=20.0)
+                                    .speed(0.1)
+                                    .suffix(" mm"),
+                            )
+                            .changed();
+                    });
+                    if changed {
+                        marks.bleed_mm = marks.bleed_mm.clamp(0.0, 20.0);
+                        actions.doc.set_export_pdf_marks = Some(marks);
+                    }
+
+                    ui.add_space(6.0);
+                    let mut embed = data.doc.export_embed_icc;
+                    if ui.checkbox(&mut embed, "Nhúng hồ sơ màu (ICC)").changed() {
+                        actions.doc.set_export_embed_icc = Some(embed);
+                    }
                 }
             }
 

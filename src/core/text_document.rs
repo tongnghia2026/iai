@@ -35,7 +35,7 @@ pub const DEFAULT_DPI: f32 = 96.0;
 // ---------------------------------------------------------------------------
 
 /// Style shared by one contiguous stretch of characters (a [`Run`]).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CharStyle {
     /// Font identity; reuses [`TextFontFamily`] so the existing system-font index
     /// and Vietnamese handling are shared with the graphical text tool.
@@ -76,7 +76,7 @@ impl CharStyle {
 // ---------------------------------------------------------------------------
 
 /// A contiguous stretch of text sharing one [`CharStyle`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Run {
     pub text: String,
     pub style: CharStyle,
@@ -93,7 +93,7 @@ impl Run {
 
 /// Horizontal alignment of a paragraph. Richer than [`crate::core::text::TextAlign`]
 /// (the graphical text box) because a document needs justification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ParagraphAlign {
     #[default]
     Left,
@@ -103,7 +103,7 @@ pub enum ParagraphAlign {
 }
 
 /// List decoration for a paragraph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ListKind {
     #[default]
     None,
@@ -113,7 +113,7 @@ pub enum ListKind {
 
 /// Paragraph-level style. Spacing / indents are in points to match the units a
 /// word processor exposes; they convert to pixels at render time.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParagraphStyle {
     pub align: ParagraphAlign,
     /// Line spacing as a multiple of single spacing (1.0, 1.5, 2.0, ...).
@@ -144,7 +144,7 @@ impl Default for ParagraphStyle {
 
 /// One paragraph: a run of styled text plus paragraph-level formatting. A
 /// paragraph with no runs (or only empty runs) is a legal empty line.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Paragraph {
     pub runs: Vec<Run>,
     pub style: ParagraphStyle,
@@ -208,7 +208,7 @@ impl Paragraph {
 // ---------------------------------------------------------------------------
 
 /// Physical paper size in millimetres.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PaperSize {
     pub width_mm: f32,
     pub height_mm: f32,
@@ -239,7 +239,7 @@ impl PaperSize {
 }
 
 /// Page margins in millimetres.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Margins {
     pub top_mm: f32,
     pub right_mm: f32,
@@ -272,7 +272,7 @@ impl Default for Margins {
 }
 
 /// Paper size + margins for a document. The text column is `paper − margins`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PageSetup {
     pub paper: PaperSize,
     pub margins: Margins,
@@ -368,7 +368,7 @@ impl PageSetup {
 /// A flowing-text document: an ordered list of paragraphs plus page setup and
 /// the styles new text inherits. Always holds at least one paragraph so an
 /// editor cursor has a home.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TextDocument {
     pub paragraphs: Vec<Paragraph>,
     pub page: PageSetup,

@@ -37,6 +37,10 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         build_pdf(ctx, data, actions, &nav, &pal);
         return;
     }
+    if data.doc.kind == crate::core::document::DocumentKind::FlowText {
+        build_flow_text(ctx, data, actions, &pal);
+        return;
+    }
 
     let count = data.doc.page_count.max(1);
     let active = data.doc.active_artboard.min(count - 1);
@@ -124,6 +128,87 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 });
                             });
                     });
+                });
+            });
+        });
+}
+
+/// Flowing-text pages are derived by layout, not independent artboard canvases.
+/// Reuse the page strip for navigation only: no add/delete/reorder/master
+/// controls may mutate the derived page list.
+fn build_flow_text(
+    ctx: &egui::Context,
+    data: &UiData,
+    actions: &mut UiActions,
+    pal: &crate::ui::theme::Palette,
+) {
+    let count = data.doc.page_count.max(1);
+    let active = data.doc.active_artboard.min(count - 1);
+    #[allow(deprecated)]
+    egui::TopBottomPanel::bottom("artboard_tabs")
+        .exact_size(BAR_H)
+        .frame(
+            egui::Frame::new()
+                .fill(pal.panel_bg)
+                .inner_margin(egui::Margin::symmetric(6, 0)),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (label, target, enabled, tip) in [
+                    ("◀◀", 0, active > 0, "Trang đầu"),
+                    ("◀", active.saturating_sub(1), active > 0, "Trang trước"),
+                ] {
+                    if ui
+                        .add_enabled(enabled, egui::Button::new(label).small())
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        actions.doc.set_active_artboard = Some(target);
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(format!("{} / {}", active + 1, count))
+                        .color(pal.text_dim)
+                        .size(11.5),
+                );
+                for (label, target, enabled, tip) in [
+                    (
+                        "▶",
+                        (active + 1).min(count - 1),
+                        active + 1 < count,
+                        "Trang sau",
+                    ),
+                    ("▶▶", count - 1, active + 1 < count, "Trang cuối"),
+                ] {
+                    if ui
+                        .add_enabled(enabled, egui::Button::new(label).small())
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        actions.doc.set_active_artboard = Some(target);
+                    }
+                }
+                ui.separator();
+                ui.scope(|ui| {
+                    separate_page_scrollbar(ui);
+                    egui::ScrollArea::horizontal()
+                        .id_salt("flow_text_page_tabs_scroll")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                for page in 0..count {
+                                    let selected = page == active;
+                                    if ui
+                                        .selectable_label(selected, format!("Trang {}", page + 1))
+                                        .clicked()
+                                    {
+                                        actions.doc.set_active_artboard = Some(page);
+                                    }
+                                }
+                            });
+                        });
                 });
             });
         });

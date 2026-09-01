@@ -14,6 +14,32 @@ use winit::{
     window::{CursorIcon, Window, WindowId},
 };
 
+fn flow_text_zoom_from_wheel(current: f32, vertical_delta: f64) -> f32 {
+    if vertical_delta == 0.0 {
+        return current;
+    }
+    let factor = if vertical_delta > 0.0 {
+        1.15_f32
+    } else {
+        1.0 / 1.15
+    };
+    (current * factor).clamp(0.3, 4.0)
+}
+
+#[cfg(test)]
+mod flow_text_zoom_tests {
+    use super::flow_text_zoom_from_wheel;
+
+    #[test]
+    fn alt_wheel_zoom_has_stable_direction_and_bounds() {
+        assert!(flow_text_zoom_from_wheel(1.0, 1.0) > 1.0);
+        assert!(flow_text_zoom_from_wheel(1.0, -1.0) < 1.0);
+        assert_eq!(flow_text_zoom_from_wheel(4.0, 1.0), 4.0);
+        assert_eq!(flow_text_zoom_from_wheel(0.3, -1.0), 0.3);
+        assert_eq!(flow_text_zoom_from_wheel(1.0, 0.0), 1.0);
+    }
+}
+
 /// Logo shown by the OS (title bar / taskbar / Alt-Tab).
 fn load_window_icon() -> Option<winit::window::Icon> {
     let bytes = include_bytes!("../../../logo_iAi.png");
@@ -561,6 +587,32 @@ impl ApplicationHandler for App {
             }
         }
 
+        // Flowing-text zoom follows the same gesture as the canvas: Alt + wheel.
+        // Handle it before forwarding to egui so the wheel cannot also scroll the
+        // document in the same event.
+        if self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .is_some_and(|doc| doc.is_flow_text())
+            && self.edit.input.alt_held
+        {
+            if let WindowEvent::MouseWheel { delta, .. } = &event {
+                let sy = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y as f64,
+                    MouseScrollDelta::PixelDelta(p) => p.y * 0.1,
+                };
+                if sy != 0.0 {
+                    self.edit.view.zoom = flow_text_zoom_from_wheel(self.edit.view.zoom, sy);
+                    self.docs.documents[self.docs.active_doc_idx].saved_zoom = self.edit.view.zoom;
+                    if let Some(window) = &self.win.window {
+                        window.request_redraw();
+                    }
+                }
+                return;
+            }
+        }
+
         // egui-winit reports `repaint = true` for `RedrawRequested` itself, so
         // blindly forwarding that flag to `request_redraw()` below feeds an
         // unbreakable redraw loop: each frame schedules the next regardless of
@@ -924,6 +976,11 @@ impl ApplicationHandler for App {
                 if self.is_blocking_modal() {
                     return;
                 }
+                if self.docs.documents[self.docs.active_doc_idx].is_flow_text() {
+                    // Already queued into egui above; the document ScrollArea
+                    // owns wheel scrolling. Do not pan the dormant canvas.
+                    return;
+                }
                 if self.edit.input.alt_right_dragging {
                     return;
                 }
@@ -982,11 +1039,15 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                self.on_main_mouse_input(event_loop, state, button)
+                if !self.docs.documents[self.docs.active_doc_idx].is_flow_text() {
+                    self.on_main_mouse_input(event_loop, state, button)
+                }
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                self.on_main_cursor_moved(event_loop, position)
+                if !self.docs.documents[self.docs.active_doc_idx].is_flow_text() {
+                    self.on_main_cursor_moved(event_loop, position)
+                }
             }
 
             WindowEvent::RedrawRequested => self.on_main_redraw(event_loop),

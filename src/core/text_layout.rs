@@ -241,6 +241,24 @@ impl DocumentLayout {
     /// any zoom, no rasterised pixels), small, and copy/searchable — Vietnamese
     /// included, via a ToUnicode CMap. Works from a layout built at any dpi.
     pub fn write_text_pdf(&self, font_system: &mut FontSystem, path: &Path) -> Result<(), String> {
+        let pages: Vec<usize> = (0..self.pages).collect();
+        self.write_text_pdf_pages(font_system, path, &pages)
+    }
+
+    /// Write only the selected zero-based page positions, preserving the order
+    /// supplied by the unified File → Export PDF dialog.
+    pub fn write_text_pdf_pages(
+        &self,
+        font_system: &mut FontSystem,
+        path: &Path,
+        selected_pages: &[usize],
+    ) -> Result<(), String> {
+        if selected_pages.is_empty() {
+            return Err("Không có trang văn bản nào để xuất".to_string());
+        }
+        if let Some(page) = selected_pages.iter().find(|&&page| page >= self.pages) {
+            return Err(format!("Trang {} không tồn tại", *page + 1));
+        }
         let s = 72.0 / self.dpi; // built-dpi px -> PDF points
         let (cx, cy, _, _) = self.content_rect;
         let (pw_px, ph_px) = self.page_px;
@@ -252,7 +270,7 @@ impl DocumentLayout {
         let mut to_unicode: Vec<BTreeMap<u16, String>> = Vec::new();
         let mut pages: Vec<Vec<Glyph>> = Vec::new();
 
-        for page in 0..self.pages {
+        for &page in selected_pages {
             let mut glyphs = Vec::new();
             for para in &self.paras {
                 for (li, run) in para.buffer.layout_runs().enumerate() {
@@ -589,5 +607,21 @@ mod tests {
         let reloaded = lopdf::Document::load(&path).expect("re-parse written PDF");
         assert_eq!(reloaded.get_pages().len(), 1);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_text_pdf_pages_respects_unified_export_scope() {
+        let mut fs = FontSystem::new();
+        let doc = TextDocument::from_plain_text(&"Một dòng văn bản\n".repeat(180));
+        let layout = DocumentLayout::build(&doc, DPI, &mut fs);
+        assert!(layout.page_count() > 1);
+        let path = std::env::temp_dir().join(format!(
+            "iai_text_pdf_scope_{}_test.pdf",
+            std::process::id()
+        ));
+        layout.write_text_pdf_pages(&mut fs, &path, &[1]).unwrap();
+        let reloaded = lopdf::Document::load(&path).expect("re-parse selected-page PDF");
+        assert_eq!(reloaded.get_pages().len(), 1);
+        let _ = std::fs::remove_file(path);
     }
 }
