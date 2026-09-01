@@ -1216,6 +1216,72 @@ impl App {
             }
         }
     }
+
+    /// Pick a picture (native dialog on a worker thread) to insert into the
+    /// active flowing-text document. The decode happens off the UI thread; the
+    /// bytes reach the document editor via `poll_flow_text_image`.
+    pub fn pick_flow_text_image(&mut self) {
+        if self.jobs.pending_flow_image.is_some() {
+            return;
+        }
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let parent = file_io::dialog_parent(window);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut dialog = rfd::FileDialog::new()
+                .add_filter(
+                    "Ảnh",
+                    &[
+                        "png", "jpg", "jpeg", "jfif", "jpe", "bmp", "gif", "tiff", "tif", "webp",
+                    ],
+                )
+                .set_title("Chèn ảnh");
+            if let Some(parent) = &parent {
+                dialog = dialog.set_parent(parent);
+            }
+            let result = dialog.pick_file().and_then(|path| {
+                let (w, h) = image::image_dimensions(&path).ok()?;
+                let bytes = std::fs::read(&path).ok()?;
+                Some((bytes, w, h))
+            });
+            let _ = tx.send(result);
+        });
+        self.jobs.pending_flow_image = Some(rx);
+        if let Some(window) = &self.win.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Drain the image picker worker; hand a decoded picture to the document
+    /// editor for insertion at the caret.
+    pub(crate) fn poll_flow_text_image(&mut self) {
+        let result = match self.jobs.pending_flow_image.as_ref() {
+            Some(rx) => rx.try_recv(),
+            None => return,
+        };
+        match result {
+            Ok(Some((data, w, h))) => {
+                self.jobs.pending_flow_image = None;
+                crate::ui::document_mode::queue_image(data, w, h);
+                if let Some(window) = &self.win.window {
+                    window.request_redraw();
+                }
+            }
+            Ok(None) => {
+                self.jobs.pending_flow_image = None; // dialog cancelled
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if let Some(window) = &self.win.window {
+                    window.request_redraw();
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.jobs.pending_flow_image = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

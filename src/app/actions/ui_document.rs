@@ -18,6 +18,10 @@ impl App {
             actions.doc.new_flow_text_document = false;
             self.open_new_flow_text_doc_tab();
         }
+        if actions.doc.pick_flow_text_image {
+            actions.doc.pick_flow_text_image = false;
+            self.pick_flow_text_image();
+        }
         if let Some((doc_id, document)) = actions.doc.replace_flow_text_document.take() {
             if let Some(doc) = self.docs.documents.iter_mut().find(|doc| doc.id == doc_id) {
                 if let Some(text) = doc.flow_text.as_mut() {

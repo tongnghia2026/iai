@@ -86,6 +86,8 @@ pub struct DocumentIntent {
     /// Derived layout/navigation state: `(doc id, page count, active page)`.
     /// This never marks document content dirty.
     pub set_flow_text_layout: Option<(crate::core::document::DocumentId, usize, usize)>,
+    /// Open a file picker to insert a picture into the active flowing-text doc.
+    pub pick_flow_text_image: bool,
     pub fit_to_screen: bool,
     pub zoom_in: bool,
     pub zoom_out: bool,

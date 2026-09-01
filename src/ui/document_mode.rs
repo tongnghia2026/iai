@@ -27,9 +27,41 @@ use crate::core::color::Color;
 use crate::core::document::DocumentId;
 use crate::core::text::TextFontFamily;
 use crate::core::text_document::{
-    CharStyle, PageSetup, PaperSize, Paragraph, ParagraphAlign, ParagraphStyle, Run, TextDocument,
+    CharStyle, ImageBlock, PageSetup, PaperSize, Paragraph, ParagraphAlign, ParagraphStyle, Run,
+    TextDocument,
 };
 use crate::ui::{FlowTextViewModel, UiActions, UiData};
+
+/// The Unicode object-replacement character marks a line that holds one block
+/// image. Its glyph is drawn transparent; the picture is painted as an overlay.
+const IMAGE_PLACEHOLDER: &str = "\u{FFFC}";
+/// Default displayed width for a freshly inserted image (clamped to the column).
+const DEFAULT_IMAGE_WIDTH_MM: f32 = 60.0;
+
+/// A picture chosen by the user, waiting to be inserted at the caret. Filled by
+/// the app's file-dialog worker via [`queue_image`], drained next frame.
+struct PendingImage {
+    data: Vec<u8>,
+    natural_w: u32,
+    natural_h: u32,
+}
+
+thread_local! {
+    /// Images picked via the file dialog, pending insertion into the active doc.
+    static IMAGE_INBOX: RefCell<Vec<PendingImage>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Hand a loaded picture to the document editor; it is inserted at the caret on
+/// the next frame. Called by the app after its file-dialog worker decodes one.
+pub fn queue_image(data: Vec<u8>, natural_w: u32, natural_h: u32) {
+    IMAGE_INBOX.with(|inbox| {
+        inbox.borrow_mut().push(PendingImage {
+            data,
+            natural_w,
+            natural_h,
+        });
+    });
+}
 
 /// A character-style flag that can be toggled over the selection.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,6 +127,12 @@ struct DocRuntime {
     tex: Option<(u64, usize, u32, egui::TextureHandle)>,
     /// Bumped whenever the text content changes, to invalidate `tex`.
     revision: u64,
+    /// Image blocks referenced by placeholder lines, keyed by the id stored in
+    /// the placeholder glyph's `Attrs` metadata.
+    images: HashMap<usize, ImageBlock>,
+    next_image_id: usize,
+    /// Lazily-built egui textures for image blocks, keyed by image id.
+    image_tex: HashMap<usize, egui::TextureHandle>,
 }
 
 impl Default for DocRuntime {
@@ -112,6 +150,9 @@ impl Default for DocRuntime {
             page_count: 1,
             tex: None,
             revision: 0,
+            images: HashMap::new(),
+            next_image_id: 1,
+            image_tex: HashMap::new(),
         }
     }
 }
@@ -156,6 +197,12 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions, viewpo
         sync_runtime(d, font_system, view);
         d.zoom = data.doc.zoom;
         let revision_before = d.revision;
+        // Insert any pictures the file dialog handed us (queued via `queue_image`).
+        let pending: Vec<PendingImage> =
+            IMAGE_INBOX.with(|inbox| inbox.borrow_mut().drain(..).collect());
+        for image in pending {
+            insert_image_at_caret(d, font_system, image);
+        }
 
         egui::Area::new(egui::Id::new("flow_text_document_surface"))
             // Keep modal dialogs and floating panels above the editing surface.
@@ -213,19 +260,72 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
     } else {
         DEFAULT_LINE_SPACING
     };
+    // Rebuild the image store with fresh ids for this buffer generation.
+    d.images.clear();
+    d.image_tex.clear();
+    d.next_image_id = 1;
+    let mut image_ids: Vec<Option<usize>> = Vec::with_capacity(view.document.paragraphs.len());
+    let buffer_text = view
+        .document
+        .paragraphs
+        .iter()
+        .map(|p| {
+            if let Some(block) = &p.image {
+                let id = d.next_image_id;
+                d.next_image_id += 1;
+                d.images.insert(id, block.clone());
+                image_ids.push(Some(id));
+                IMAGE_PLACEHOLDER
+            } else {
+                image_ids.push(None);
+                ""
+            }
+        })
+        .collect::<Vec<_>>();
+    // Text lines are the paragraph text; images stand in as a placeholder char.
+    let joined = view
+        .document
+        .paragraphs
+        .iter()
+        .zip(&buffer_text)
+        .map(|(p, ph)| {
+            if ph.is_empty() {
+                p.text()
+            } else {
+                ph.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
     let cw = d.setup.content_width_px(DPI);
     let mut buffer = Buffer::new(fs, base_metrics(d.font_pt, d.line_spacing));
     buffer.set_size(Some(cw), None);
-    let font_name = d.font.name();
-    let attrs = Attrs::new().family(Family::Name(font_name));
-    buffer.set_text(&view.document.plain_text(), &attrs, Shaping::Advanced, None);
-    for (line, paragraph) in buffer.lines.iter_mut().zip(&view.document.paragraphs) {
+    let font_name = d.font.name().to_string();
+    let attrs = Attrs::new().family(Family::Name(font_name.as_str()));
+    buffer.set_text(&joined, &attrs, Shaping::Advanced, None);
+    for (i, (line, paragraph)) in buffer
+        .lines
+        .iter_mut()
+        .zip(&view.document.paragraphs)
+        .enumerate()
+    {
         line.set_align(Some(match paragraph.style.align {
             ParagraphAlign::Left => Align::Left,
             ParagraphAlign::Center => Align::Center,
             ParagraphAlign::Right => Align::Right,
             ParagraphAlign::Justify => Align::Justified,
         }));
+        // Image line: attach the placeholder attrs (id + tall metrics).
+        if let Some(Some(id)) = image_ids.get(i) {
+            if let Some(block) = d.images.get(id) {
+                let (_, h_px) = image_display_px(block, &d.setup);
+                let ph_attrs = placeholder_attrs(font_name.as_str(), *id, h_px);
+                line.set_attrs_list(AttrsList::new(&ph_attrs));
+                line.set_align(Some(Align::Center));
+            }
+            continue;
+        }
         // Reproduce per-run emphasis / colour as attribute spans. Size stays on
         // the buffer metrics (not the spans) so the global size control keeps
         // working; underline is drawn by the renderer from these spans.
@@ -236,7 +336,7 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
                 let len = run.text.len();
                 let fmt = fmt_of(&run.style);
                 if len > 0 && fmt.is_styled() {
-                    list.add_span(byte..byte + len, &styled_attrs(font_name, fmt));
+                    list.add_span(byte..byte + len, &styled_attrs(font_name.as_str(), fmt));
                 }
                 byte += len;
             }
@@ -370,6 +470,12 @@ fn window_ui(
             });
         ui.separator();
 
+        // Insert a picture at the caret (letterhead, signature, stamp).
+        if ui.button(ph::IMAGE).on_hover_text("Chèn ảnh").clicked() {
+            actions.doc.pick_flow_text_image = true;
+        }
+        ui.separator();
+
         // Zoom.
         if ui
             .button(ph::MAGNIFYING_GLASS_MINUS)
@@ -406,7 +512,7 @@ fn window_ui(
     }
 
     // --- Page geometry (layout px at 96 dpi) ---
-    let (cx, cy, _cw, ch) = d.setup.content_rect_px(DPI);
+    let (cx, cy, cw, ch) = d.setup.content_rect_px(DPI);
     let page_w = d.setup.paper.width_px(DPI);
     let page_h = d.setup.paper.height_px(DPI);
     let lh = line_height(d.font_pt, d.line_spacing);
@@ -487,7 +593,7 @@ fn window_ui(
             };
 
             let font_name = d.font.name().to_string();
-            let (image, sel_rects, caret, page_count, page_index, revision) = {
+            let (image, sel_rects, caret, page_count, page_index, revision, image_lines) = {
                 let editor = d.editor.as_mut().expect("editor");
                 let page_index = d.page_index;
                 let mut dirty = false;
@@ -526,16 +632,21 @@ fn window_ui(
                 if focused {
                     let events = ui.input(|i| i.events.clone());
                     for ev in events {
+                        // An image line is an atomic block: typing is ignored,
+                        // Backspace/Delete removes the picture.
+                        let on_image = line_is_image(editor, editor.cursor().line);
                         match ev {
-                            egui::Event::Text(t) if !t.is_empty() => {
+                            egui::Event::Text(t) if !t.is_empty() && !on_image => {
                                 editor.insert_string(&t, None);
                                 dirty = true;
                             }
-                            egui::Event::Paste(t) if !t.is_empty() => {
+                            egui::Event::Paste(t) if !t.is_empty() && !on_image => {
                                 editor.insert_string(&t, None);
                                 dirty = true;
                             }
-                            egui::Event::Ime(egui::ImeEvent::Commit(t)) if !t.is_empty() => {
+                            egui::Event::Ime(egui::ImeEvent::Commit(t))
+                                if !t.is_empty() && !on_image =>
+                            {
                                 editor.insert_string(&t, None);
                                 dirty = true;
                             }
@@ -560,6 +671,14 @@ fn window_ui(
                             } => {
                                 let shift = modifiers.shift;
                                 match key {
+                                    egui::Key::Backspace | egui::Key::Delete if on_image => {
+                                        // Remove the picture: delete the placeholder char.
+                                        let line = editor.cursor().line;
+                                        editor.set_cursor(Cursor::new(line, 0));
+                                        editor.action(fs, Action::Delete);
+                                        dirty = true;
+                                    }
+                                    egui::Key::Enter if on_image => {} // atomic block: no split
                                     egui::Key::Backspace => {
                                         editor.action(fs, Action::Backspace);
                                         dirty = true;
@@ -673,8 +792,32 @@ fn window_ui(
                         }
                     });
                 }
+                // Image placeholder lines on this page: `(id, line_top, height)`
+                // in content pixels. The picture itself is painted as an overlay.
+                let mut image_lines: Vec<(usize, f32, f32)> = Vec::new();
+                editor.with_buffer(|b| {
+                    for run in b.layout_runs() {
+                        if (run.line_top / ch).floor() as usize != page_index {
+                            continue;
+                        }
+                        if run.text != IMAGE_PLACEHOLDER {
+                            continue;
+                        }
+                        if let Some(g) = run.glyphs.first() {
+                            image_lines.push((g.metadata, run.line_top, run.line_height));
+                        }
+                    }
+                });
                 let caret = editor.cursor_position();
-                (image, sel_rects, caret, page_count, page_index, revision)
+                (
+                    image,
+                    sel_rects,
+                    caret,
+                    page_count,
+                    page_index,
+                    revision,
+                    image_lines,
+                )
             };
 
             d.page_index = page_index;
@@ -694,6 +837,40 @@ fn window_ui(
             let sel_color = egui::Color32::from_rgba_unmultiplied(60, 120, 240, 70);
             for r in sel_rects {
                 painter.rect_filled(r, 0.0, sel_color);
+            }
+            // Paint image blocks over their (transparent) placeholder lines.
+            for (id, line_top, _lh) in image_lines {
+                let Some(block) = d.images.get(&id) else {
+                    continue;
+                };
+                let (w_px, h_px) = image_display_px(block, &d.setup);
+                let need_tex = !d.image_tex.contains_key(&id);
+                let data = if need_tex {
+                    Some(block.data.clone())
+                } else {
+                    None
+                };
+                if let Some(bytes) = data {
+                    if let Some(ci) = decode_color_image(&bytes) {
+                        let tex = ctx.load_texture(
+                            format!("iai_doc_img_{id}"),
+                            ci,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        d.image_tex.insert(id, tex);
+                    }
+                }
+                if let Some(tex) = d.image_tex.get(&id) {
+                    let top = cy + line_top - page_index as f32 * ch;
+                    let x = rect.min.x + (cx + (cw - w_px) * 0.5) * scale;
+                    let y = rect.min.y + top * scale;
+                    let img_rect = egui::Rect::from_min_size(
+                        egui::pos2(x, y),
+                        egui::vec2(w_px * scale, h_px * scale),
+                    );
+                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                    painter.image(tex.id(), img_rect, uv, egui::Color32::WHITE);
+                }
             }
             if focused {
                 if let Some((qx, qy)) = caret {
@@ -1184,6 +1361,100 @@ fn restyle_selection(
     changed
 }
 
+/// Displayed pixel size of an image block at the editor DPI, clamped so the
+/// width never exceeds the text column (height follows the aspect ratio).
+fn image_display_px(block: &ImageBlock, setup: &PageSetup) -> (f32, f32) {
+    let cw = setup.content_width_px(DPI);
+    let mut w = block.width_mm / 25.4 * DPI;
+    let mut h = block.height_mm() / 25.4 * DPI;
+    if w > cw && w > 0.0 {
+        let s = cw / w;
+        w = cw;
+        h *= s;
+    }
+    (w.max(1.0), h.max(1.0))
+}
+
+/// Attrs for an image placeholder glyph: invisible ink, the image id in the
+/// metadata, and a line height equal to the displayed image height so the line
+/// reserves the picture's vertical space.
+fn placeholder_attrs(font_name: &str, id: usize, h_px: f32) -> Attrs<'_> {
+    Attrs::new()
+        .family(Family::Name(font_name))
+        .metadata(id)
+        .color(CtColor::rgba(0, 0, 0, 0))
+        .metrics(Metrics::new(8.0, h_px.max(1.0)))
+}
+
+/// Decode image bytes into an egui `ColorImage`, capping the longest side so a
+/// large source photo does not become an oversized GPU texture.
+fn decode_color_image(bytes: &[u8]) -> Option<egui::ColorImage> {
+    const MAX_SIDE: u32 = 1600;
+    let rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let rgba = if w.max(h) > MAX_SIDE && w.max(h) > 0 {
+        let scale = MAX_SIDE as f32 / w.max(h) as f32;
+        image::imageops::resize(
+            &rgba,
+            (w as f32 * scale).round().max(1.0) as u32,
+            (h as f32 * scale).round().max(1.0) as u32,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        rgba
+    };
+    let (w, h) = rgba.dimensions();
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [w as usize, h as usize],
+        rgba.as_raw(),
+    ))
+}
+
+/// True if buffer line `line_i` is an image placeholder line.
+fn line_is_image(editor: &Editor<'static>, line_i: usize) -> bool {
+    editor.with_buffer(|b| {
+        b.lines
+            .get(line_i)
+            .is_some_and(|l| l.text() == IMAGE_PLACEHOLDER)
+    })
+}
+
+/// Insert a picture as its own block at the caret. Stores the block under a new
+/// id and inserts a placeholder line carrying that id, with a blank line after
+/// so the caret lands on editable text.
+fn insert_image_at_caret(d: &mut DocRuntime, fs: &mut FontSystem, image: PendingImage) {
+    let id = d.next_image_id;
+    d.next_image_id += 1;
+    let cw_mm = d.setup.content_width_mm();
+    let block = ImageBlock {
+        data: image.data,
+        natural_w: image.natural_w.max(1),
+        natural_h: image.natural_h.max(1),
+        width_mm: DEFAULT_IMAGE_WIDTH_MM.min(cw_mm),
+        align: ParagraphAlign::Center,
+    };
+    let (_, h_px) = image_display_px(&block, &d.setup);
+    d.images.insert(id, block);
+
+    let font_name = d.font.name().to_string();
+    let editor = d.editor.as_mut().expect("editor");
+    // Start the image on its own fresh line, then leave a clean line after it.
+    editor.action(fs, Action::Motion(Motion::End));
+    editor.insert_string("\n", None);
+    let ph_attrs = placeholder_attrs(&font_name, id, h_px);
+    editor.insert_string(IMAGE_PLACEHOLDER, Some(AttrsList::new(&ph_attrs)));
+    // Center the image line and add a trailing empty text line for the caret.
+    let img_line = editor.cursor().line;
+    editor.with_buffer_mut(|b| {
+        if let Some(line) = b.lines.get_mut(img_line) {
+            line.set_align(Some(Align::Center));
+        }
+    });
+    editor.insert_string("\n", None);
+    editor.shape_as_needed(fs, false);
+    d.revision = d.revision.wrapping_add(1);
+}
+
 /// Rasterise one page of the editor buffer to opaque white RGBA at
 /// `render_scale` device pixels per layout pixel. Returns the pixels and the
 /// texture dimensions `(width, height)`. Rendering at the display resolution
@@ -1342,6 +1613,18 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
                     line_spacing: d.line_spacing,
                     ..ParagraphStyle::default()
                 };
+                // An image line carries the picture id in the placeholder's
+                // metadata; look the block up in the runtime store.
+                if line.text() == IMAGE_PLACEHOLDER {
+                    let id = line.attrs_list().get_span(0).metadata;
+                    if let Some(block) = d.images.get(&id) {
+                        return Paragraph {
+                            image: Some(block.clone()),
+                            style,
+                            runs: Vec::new(),
+                        };
+                    }
+                }
                 Paragraph {
                     runs: runs_from_line(line, &base_char),
                     style,
@@ -1579,6 +1862,41 @@ mod tests {
         let runs = editor.with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()));
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].style.color, Color::BLACK);
+    }
+
+    #[test]
+    fn image_paragraph_round_trips_through_the_editor() {
+        let mut fs = FontSystem::new();
+        let mut d = DocRuntime::default();
+        let block = ImageBlock {
+            data: vec![9, 8, 7, 6],
+            natural_w: 200,
+            natural_h: 100,
+            width_mm: 40.0,
+            align: ParagraphAlign::Center,
+        };
+        let mut doc = TextDocument::from_plain_text("Trước ảnh");
+        doc.paragraphs.push(Paragraph::image(block.clone()));
+        doc.paragraphs
+            .push(Paragraph::plain("Sau ảnh", CharStyle::default()));
+        let view = FlowTextViewModel {
+            document: std::sync::Arc::new(doc),
+            revision: 1,
+            active_page: 0,
+            page_count: 1,
+        };
+        sync_runtime(&mut d, &mut fs, &view);
+
+        // The middle buffer line is the image placeholder.
+        assert!(line_is_image(d.editor.as_ref().unwrap(), 1));
+        assert!(!line_is_image(d.editor.as_ref().unwrap(), 0));
+
+        // Reading the editor back reproduces the image paragraph unchanged.
+        let back = editor_document(&d);
+        assert_eq!(back.paragraphs.len(), 3);
+        assert!(back.paragraphs[0].image.is_none());
+        assert_eq!(back.paragraphs[1].image.as_ref(), Some(&block));
+        assert!(back.paragraphs[2].image.is_none());
     }
 
     #[test]

@@ -1314,6 +1314,7 @@ impl App {
                 format_registry: FormatRegistry::new(),
                 pending_file_dialog: None,
                 pending_pdf_export: None,
+                pending_flow_image: None,
                 pending_loads: Vec::new(),
                 pending_raw_previews: Vec::new(),
                 raw_preview_docs: std::collections::HashMap::new(),

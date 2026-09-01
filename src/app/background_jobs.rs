@@ -22,6 +22,12 @@ pub struct BackgroundJobs {
     /// `None` is a cancelled dialog; `Some` carries the final user-facing status.
     pub(in crate::app) pending_pdf_export:
         Option<std::sync::mpsc::Receiver<Option<Result<String, String>>>>,
+    /// Picking + decoding an image to insert into a flowing-text document. The
+    /// worker runs the native dialog and decodes the file; `poll_flow_text_image`
+    /// hands the result to the document editor. `Some(None)` = cancelled.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::app) pending_flow_image:
+        Option<std::sync::mpsc::Receiver<Option<(Vec<u8>, u32, u32)>>>,
     /// Background image-import jobs. A worker thread decodes each path off the UI
     /// thread and streams `(path, Vec<Canvas>|Err, is_last)` back; multi-page formats such
     /// as PDF produce one canvas per page. `poll_loads()` attaches each finished
