@@ -196,13 +196,34 @@ fn main() {
     };
     let layout = DocumentLayout::build(&doc, 96.0, &mut font_system);
     let (dpw, dph) = layout.page_px();
+    let (wpt, hpt) = (
+        doc.page.paper.width_mm / 25.4 * 72.0,
+        doc.page.paper.height_mm / 25.4 * 72.0,
+    );
+    let mut pdf_pages = Vec::new();
     for p in 0..layout.page_count() {
         let img = layout.render_page(p, &mut font_system, &mut swash_cache);
         let path = format!("{out_dir}/spike_docpage_{p}.png");
-        image::RgbaImage::from_raw(dpw as u32, dph as u32, img)
+        image::RgbaImage::from_raw(dpw as u32, dph as u32, img.clone())
             .unwrap()
             .save(&path)
             .unwrap();
+        pdf_pages.push(iai::formats::pdf::ImagePdfPage {
+            rgba: img,
+            width: dpw as u32,
+            height: dph as u32,
+            page_points: (wpt, hpt),
+        });
+    }
+    let pdf_path = format!("{out_dir}/spike_doc.pdf");
+    iai::formats::pdf::write_image_pdf(std::path::Path::new(&pdf_path), &pdf_pages).unwrap();
+    // Re-open with hayro (the app's own PDF reader) to prove it is valid.
+    match iai::formats::pdf::PdfImporter::probe(std::path::Path::new(&pdf_path)) {
+        Ok(pr) => println!(
+            "[pdf]   wrote {pdf_path} — probe OK: {} pages, dims {:?}",
+            pr.page_count, pr.page_dims
+        ),
+        Err(e) => println!("[pdf]   PROBE FAILED: {e}"),
     }
 
     println!("--- cosmic-text VN spike ---");

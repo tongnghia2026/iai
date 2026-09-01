@@ -12,13 +12,19 @@
 //! text and formats the whole document (font size + alignment) uniformly.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::Duration;
 
 use cosmic_text::{FontSystem, SwashCache};
 
 use crate::core::text_document::{PaperSize, ParagraphAlign, TextDocument};
 use crate::core::text_layout::DocumentLayout;
+use crate::formats::pdf::{write_image_pdf, ImagePdfPage};
 
+/// Preview DPI (screen). PDF export renders at [`EXPORT_DPI`] for print quality.
 const DPI: f32 = 96.0;
+const EXPORT_DPI: f32 = 200.0;
 
 struct DocRuntime {
     active: bool,
@@ -35,6 +41,10 @@ struct DocRuntime {
     /// Cached page texture keyed by `(content hash, page index)`.
     tex: Option<(u64, usize, egui::TextureHandle)>,
     preview_px: [f32; 2],
+    /// Last export result / progress line shown under the editor.
+    status: String,
+    /// Set while a "Save as…" dialog runs on a background thread.
+    pending_pdf: Option<Receiver<Option<PathBuf>>>,
 }
 
 impl Default for DocRuntime {
@@ -51,6 +61,8 @@ impl Default for DocRuntime {
             layout: None,
             tex: None,
             preview_px: [1.0, 1.0],
+            status: String::new(),
+            pending_pdf: None,
         }
     }
 }
@@ -104,7 +116,10 @@ pub fn build(ctx: &egui::Context) {
 }
 
 fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
-    // --- Toolbar: paper, alignment, font size ---
+    // Pick up a finished "Save as…" dialog from its background thread.
+    poll_pdf_export(ctx, d);
+
+    // --- Toolbar: paper, alignment, font size, export ---
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt("doc_paper")
             .selected_text(paper_name(d.paper))
@@ -126,6 +141,15 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
         }
         ui.separator();
         ui.add(egui::Slider::new(&mut d.font_pt, 8.0..=48.0).text("Cỡ chữ"));
+        ui.separator();
+        let exporting = d.pending_pdf.is_some();
+        if ui
+            .add_enabled(!exporting, egui::Button::new("Xuất PDF"))
+            .clicked()
+        {
+            d.pending_pdf = Some(spawn_save_dialog());
+            d.status = "Đang chọn nơi lưu…".to_string();
+        }
     });
     ui.separator();
 
@@ -177,6 +201,11 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
                 }
             });
     });
+
+    if !d.status.is_empty() {
+        ui.separator();
+        ui.label(&d.status);
+    }
 }
 
 /// Rebuild the flow + page texture only when the content or page changed.
@@ -260,4 +289,84 @@ fn paper_name(p: PaperSize) -> &'static str {
     } else {
         "Tùy chỉnh"
     }
+}
+
+/// Open a "Save as…" dialog on a background thread — rfd must not block the UI
+/// frame — and deliver the chosen path, or `None` if cancelled.
+fn spawn_save_dialog() -> Receiver<Option<PathBuf>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let path = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_file_name("tai-lieu.pdf")
+            .save_file()
+            .map(|mut p| {
+                if p.extension().is_none() {
+                    p.set_extension("pdf");
+                }
+                p
+            });
+        let _ = tx.send(path);
+    });
+    rx
+}
+
+/// Pick up a finished save dialog; when a path arrives, render + write the PDF.
+fn poll_pdf_export(ctx: &egui::Context, d: &mut DocRuntime) {
+    enum Poll {
+        Idle,
+        Waiting,
+        Done(Option<PathBuf>),
+    }
+    let poll = match &d.pending_pdf {
+        None => Poll::Idle,
+        Some(rx) => match rx.try_recv() {
+            Ok(path) => Poll::Done(path),
+            Err(TryRecvError::Empty) => Poll::Waiting,
+            Err(TryRecvError::Disconnected) => Poll::Done(None),
+        },
+    };
+    match poll {
+        Poll::Idle => {}
+        Poll::Waiting => ctx.request_repaint_after(Duration::from_millis(100)),
+        Poll::Done(Some(path)) => {
+            d.status = match export_pdf(d, &path) {
+                Ok(pages) => format!("Đã lưu PDF ({pages} trang): {}", path.display()),
+                Err(e) => format!("Lỗi xuất PDF: {e}"),
+            };
+            d.pending_pdf = None;
+        }
+        Poll::Done(None) => {
+            d.status = "Đã hủy xuất PDF.".to_string();
+            d.pending_pdf = None;
+        }
+    }
+}
+
+/// Render every page at print resolution and write a multi-page image PDF.
+/// Returns the page count on success.
+fn export_pdf(d: &mut DocRuntime, path: &std::path::Path) -> Result<usize, String> {
+    let doc = build_doc(d);
+    let (wpt, hpt) = (
+        d.paper.width_mm / 25.4 * 72.0,
+        d.paper.height_mm / 25.4 * 72.0,
+    );
+    if d.engine.is_none() {
+        d.engine = Some((FontSystem::new(), SwashCache::new()));
+    }
+    let engine = d.engine.as_mut().expect("engine inited");
+    let (fs, sc) = (&mut engine.0, &mut engine.1);
+    let layout = DocumentLayout::build(&doc, EXPORT_DPI, fs);
+    let (pw, ph) = layout.page_px();
+    let mut pages = Vec::with_capacity(layout.page_count());
+    for p in 0..layout.page_count() {
+        pages.push(ImagePdfPage {
+            rgba: layout.render_page(p, fs, sc),
+            width: pw as u32,
+            height: ph as u32,
+            page_points: (wpt, hpt),
+        });
+    }
+    write_image_pdf(path, &pages)?;
+    Ok(pages.len())
 }

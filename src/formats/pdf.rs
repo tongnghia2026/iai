@@ -982,6 +982,86 @@ fn flatten_page_tree(
     Ok(())
 }
 
+/// One page for [`write_image_pdf`]: an opaque RGBA raster and the physical page
+/// size in PDF points (1/72 in).
+pub struct ImagePdfPage {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub page_points: (f32, f32),
+}
+
+/// Write a fresh multi-page PDF where each page is one full-page raster image.
+/// Document mode uses this to export a typed document at print resolution. Text
+/// is rasterised (not selectable) in this v1; a font-embedding text path can
+/// replace it later without changing callers.
+pub fn write_image_pdf(path: &Path, pages: &[ImagePdfPage]) -> Result<(), String> {
+    if pages.is_empty() {
+        return Err("PDF export needs at least one page".to_string());
+    }
+    let mut document = lopdf::Document::with_version("1.5");
+    let pages_id = document.new_object_id();
+
+    let mut kids: Vec<lopdf::Object> = Vec::with_capacity(pages.len());
+    for page in pages {
+        let rgb = flatten_white(&page.rgba, page.width, page.height)?;
+        let image = lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => page.width,
+                "Height" => page.height,
+                "ColorSpace" => "DeviceRGB",
+                "BitsPerComponent" => 8,
+                "Filter" => "FlateDecode",
+            },
+            zlib_compress(&rgb)?,
+        )
+        .with_compression(false);
+        let image_id = document.add_object(image);
+
+        let (wpt, hpt) = page.page_points;
+        // Full-page image transform: scale the unit image up to the page box.
+        let content = format!("q\n{wpt:.4} 0 0 {hpt:.4} 0 0 cm\n/Im0 Do\nQ\n");
+        let content_id = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            content.into_bytes(),
+        ));
+        let resources = document.add_object(dictionary! {
+            "XObject" => dictionary! { "Im0" => image_id },
+        });
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), pdf_real(wpt), pdf_real(hpt)],
+            "Contents" => content_id,
+            "Resources" => resources,
+        });
+        kids.push(page_id.into());
+    }
+
+    let count = kids.len() as i64;
+    document.objects.insert(
+        pages_id,
+        lopdf::Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => kids,
+            "Count" => count,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.change_producer("iAi Document");
+    document.compress();
+    document
+        .save(path)
+        .map(|_| ())
+        .map_err(|error| format!("Could not write PDF: {error}"))
+}
+
 pub fn build_hybrid_pdf(path: &Path, pages: &[HybridPage]) -> Result<HybridPdf, String> {
     build_hybrid_pdf_with_global_clears(path, pages, &[])
 }
@@ -1978,5 +2058,22 @@ mod tests {
 
         let _ = std::fs::remove_file(source_path);
         let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn write_image_pdf_makes_a_valid_one_page_pdf() {
+        let page = super::ImagePdfPage {
+            rgba: vec![255u8; 8 * 8 * 4], // opaque white 8x8
+            width: 8,
+            height: 8,
+            page_points: (595.28, 841.89), // A4
+        };
+        let path = std::env::temp_dir().join("iai_write_image_pdf_test.pdf");
+        super::write_image_pdf(&path, std::slice::from_ref(&page)).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"), "missing PDF header");
+        let reloaded = lopdf::Document::load(&path).expect("re-parse written PDF");
+        assert_eq!(reloaded.get_pages().len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 }
