@@ -151,10 +151,70 @@ fn main() {
         .save(&editor_png)
         .unwrap();
 
+    // ---- Check 3: full model -> layout -> multi-page A4 raster ----
+    use iai::core::text_document::{
+        CharStyle, Paragraph, ParagraphAlign, ParagraphStyle, Run, TextDocument,
+    };
+    use iai::core::text_layout::DocumentLayout;
+
+    let body = CharStyle::default();
+    let mut bold = CharStyle::default();
+    bold.bold = true;
+    let centered = |text: &str, style: CharStyle| Paragraph {
+        runs: vec![Run::new(text, style)],
+        style: ParagraphStyle {
+            align: ParagraphAlign::Center,
+            ..Default::default()
+        },
+    };
+    let justified = |text: String| Paragraph {
+        runs: vec![Run::new(text, body.clone())],
+        style: ParagraphStyle {
+            align: ParagraphAlign::Justify,
+            space_after_pt: 6.0,
+            ..Default::default()
+        },
+    };
+
+    let mut paras = vec![
+        centered("CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM", bold.clone()),
+        centered("Độc lập – Tự do – Hạnh phúc", body.clone()),
+        Paragraph::empty(),
+        centered("HỢP ĐỒNG THUÊ NHÀ", bold.clone()),
+        Paragraph::empty(),
+    ];
+    for i in 1..=16 {
+        paras.push(justified(format!(
+            "Điều {i}: Bên A và Bên B cùng thống nhất các điều khoản dưới đây, được \
+             lập thành văn bản dài cố ý nhằm lấp đầy chiều cao trang giấy và kiểm tra \
+             việc tự động chảy chữ sang trang tiếp theo khi nội dung vượt quá một trang."
+        )));
+    }
+    let doc = TextDocument {
+        paragraphs: paras,
+        ..Default::default()
+    };
+    let layout = DocumentLayout::build(&doc, 96.0, &mut font_system);
+    let (dpw, dph) = layout.page_px();
+    for p in 0..layout.page_count() {
+        let img = layout.render_page(p, &mut font_system, &mut swash_cache);
+        let path = format!("{out_dir}/spike_docpage_{p}.png");
+        image::RgbaImage::from_raw(dpw as u32, dph as u32, img)
+            .unwrap()
+            .save(&path)
+            .unwrap();
+    }
+
     println!("--- cosmic-text VN spike ---");
     println!("font faces indexed : {font_faces}");
     println!("FontSystem::new    : {t_fonts:?}  (one-time, shared)");
     println!("[page]  lines={lines1} glyphs={glyphs1} raster={t_draw1:?} -> {page_png}");
     println!("[editor] glyphs={glyphs2} -> {editor_png}");
     println!("[editor] model text: {roundtrip}");
+    println!(
+        "[doc]   pages={} lines={} page_px={:?} -> {out_dir}/spike_docpage_*.png",
+        layout.page_count(),
+        layout.line_count(),
+        layout.page_px()
+    );
 }

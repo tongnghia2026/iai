@@ -53,6 +53,7 @@ pub mod snapping;
 pub mod svg;
 pub mod text;
 pub mod text_document;
+pub mod text_layout;
 pub mod tile;
 
 pub use canvas::{Canvas, DEFAULT_H, DEFAULT_W};
