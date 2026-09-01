@@ -22,7 +22,21 @@ use cosmic_text::{
 };
 use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
 
-use crate::core::text_document::{CharStyle, ImageBlock, ParagraphAlign, TextDocument};
+use crate::core::text_document::{CharStyle, ImageBlock, ListKind, ParagraphAlign, TextDocument};
+
+/// Standard hanging indent for a list item, in millimetres: the marker sits in
+/// this gutter and wrapped lines align at the indent.
+const LIST_INDENT_MM: f32 = 8.0;
+
+/// The marker text for a list paragraph at position `number` (1-based, used for
+/// numbered lists). Returns `None` for a non-list paragraph.
+fn list_marker(kind: ListKind, number: usize) -> Option<String> {
+    match kind {
+        ListKind::None => None,
+        ListKind::Bullet => Some("•".to_string()),
+        ListKind::Numbered => Some(format!("{number}.")),
+    }
+}
 
 /// Build the `Attrs` for one run: font family, weight, slant, colour, and the
 /// per-run metrics (size + leading) so mixed sizes on a line resolve correctly.
@@ -71,6 +85,10 @@ enum Block {
         /// `(page index, top y within the content area)` per visual line, in the
         /// same order as `buffer.layout_runs()`.
         line_pages: Vec<(usize, f32)>,
+        /// Left indent in px (list hanging indent); 0 for a normal paragraph.
+        indent: f32,
+        /// A shaped single-line list marker drawn in the indent gutter.
+        marker: Option<Buffer>,
     },
     Image {
         block: ImageBlock,
@@ -108,8 +126,13 @@ impl DocumentLayout {
         let mut blocks = Vec::with_capacity(doc.paragraphs.len());
         let mut page = 0usize;
         let mut y = 0.0f32; // running top within the current page's content area
+        let mut list_number = 0usize; // running counter for numbered lists
 
         for para in &doc.paragraphs {
+            // A non-numbered paragraph interrupts and resets the number sequence.
+            if para.style.list != ListKind::Numbered {
+                list_number = 0;
+            }
             // Image blocks reserve their scaled height and page-break as a unit.
             if let Some(img) = &para.image {
                 let mut w_px = img.width_mm / 25.4 * dpi;
@@ -146,8 +169,30 @@ impl DocumentLayout {
             let base_px = base_pt * px_per_pt;
             let metrics = Metrics::new(base_px, base_px * ls.max(0.1));
 
+            // List paragraphs hang: the text column is narrowed by the indent and
+            // shifted right; the marker is shaped separately for the gutter.
+            let (indent, marker) = if para.style.list != ListKind::None {
+                let indent = LIST_INDENT_MM / 25.4 * dpi;
+                let number = if para.style.list == ListKind::Numbered {
+                    list_number += 1;
+                    list_number
+                } else {
+                    0
+                };
+                let marker = list_marker(para.style.list, number).map(|text| {
+                    let mut mb = Buffer::new(font_system, metrics);
+                    mb.set_size(Some(indent.max(1.0)), None);
+                    mb.set_text(&text, &default_attrs, Shaping::Advanced, None);
+                    mb.shape_until_scroll(font_system, false);
+                    mb
+                });
+                (indent, marker)
+            } else {
+                (0.0, None)
+            };
+
             let mut buffer = Buffer::new(font_system, metrics);
-            buffer.set_size(Some(cw), None); // unbounded height: lay out every line
+            buffer.set_size(Some((cw - indent).max(1.0)), None); // narrowed for lists
             let align = align_for(para.style.align);
             if para.runs.is_empty() {
                 buffer.set_text("", &default_attrs, Shaping::Advanced, align);
@@ -177,7 +222,12 @@ impl DocumentLayout {
             }
 
             y += para.style.space_after_pt * px_per_pt;
-            blocks.push(Block::Text { buffer, line_pages });
+            blocks.push(Block::Text {
+                buffer,
+                line_pages,
+                indent,
+                marker,
+            });
         }
 
         Self {
@@ -191,6 +241,19 @@ impl DocumentLayout {
 
     pub fn page_count(&self) -> usize {
         self.pages
+    }
+
+    /// Per text block: `(indent_px, has_marker)`. Image blocks are skipped.
+    /// Exposed for tests of list layout.
+    #[cfg(test)]
+    pub(crate) fn text_block_list_info(&self) -> Vec<(f32, bool)> {
+        self.blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text { indent, marker, .. } => Some((*indent, marker.is_some())),
+                Block::Image { .. } => None,
+            })
+            .collect()
     }
 
     /// Whole-sheet pixel size `(width, height)` at the build dpi.
@@ -213,7 +276,10 @@ impl DocumentLayout {
     pub fn placed_lines(&self) -> Vec<(usize, f32, f32)> {
         let mut out = Vec::new();
         for block in &self.blocks {
-            if let Block::Text { buffer, line_pages } = block {
+            if let Block::Text {
+                buffer, line_pages, ..
+            } = block
+            {
                 for (li, run) in buffer.layout_runs().enumerate() {
                     let (page, top) = line_pages[li];
                     out.push((page, top, run.line_height));
@@ -238,7 +304,13 @@ impl DocumentLayout {
 
         for block in &self.blocks {
             match block {
-                Block::Text { buffer, line_pages } => {
+                Block::Text {
+                    buffer,
+                    line_pages,
+                    indent,
+                    marker,
+                } => {
+                    let ox = cx + indent;
                     for (li, run) in buffer.layout_runs().enumerate() {
                         let (lp, top) = line_pages[li];
                         if lp != page {
@@ -249,10 +321,36 @@ impl DocumentLayout {
                         let base_y = cy + top + (run.line_y - run.line_top);
                         for glyph in run.glyphs {
                             let color = glyph.color_opt.unwrap_or(default_ink);
-                            let phys = glyph.physical((cx, base_y), 1.0);
+                            let phys = glyph.physical((ox, base_y), 1.0);
                             cache.with_pixels(font_system, phys.cache_key, color, |gx, gy, col| {
                                 blend_px(&mut buf, pw, ph, phys.x + gx, phys.y + gy, col);
                             });
+                        }
+                        // Draw the list marker in the gutter on the first line.
+                        if li == 0 {
+                            if let Some(mb) = marker {
+                                for mrun in mb.layout_runs() {
+                                    for glyph in mrun.glyphs {
+                                        let color = glyph.color_opt.unwrap_or(default_ink);
+                                        let phys = glyph.physical((cx, base_y), 1.0);
+                                        cache.with_pixels(
+                                            font_system,
+                                            phys.cache_key,
+                                            color,
+                                            |gx, gy, col| {
+                                                blend_px(
+                                                    &mut buf,
+                                                    pw,
+                                                    ph,
+                                                    phys.x + gx,
+                                                    phys.y + gy,
+                                                    col,
+                                                );
+                                            },
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -411,8 +509,13 @@ impl DocumentLayout {
             let mut rects = Vec::new();
             let mut images: Vec<ImgPlace> = Vec::new();
             for block in &self.blocks {
-                let (buffer, line_pages) = match block {
-                    Block::Text { buffer, line_pages } => (buffer, line_pages),
+                let (buffer, line_pages, indent, marker) = match block {
+                    Block::Text {
+                        buffer,
+                        line_pages,
+                        indent,
+                        marker,
+                    } => (buffer, line_pages, *indent, marker),
                     Block::Image {
                         block,
                         page: bp,
@@ -435,12 +538,17 @@ impl DocumentLayout {
                         continue;
                     }
                 };
+                let ox = cx + indent;
+                let mut first_baseline: Option<f32> = None;
                 for (li, run) in buffer.layout_runs().enumerate() {
                     let (lp, top) = line_pages[li];
                     if lp != page {
                         continue;
                     }
                     let baseline = (cy + top + (run.line_y - run.line_top)) * s;
+                    if li == 0 {
+                        first_baseline = Some(baseline);
+                    }
                     for g in run.glyphs {
                         let fi = match font_ids.iter().position(|id| *id == g.font_id) {
                             Some(i) => i,
@@ -465,7 +573,7 @@ impl DocumentLayout {
                         glyphs.push(Glyph {
                             font: fi,
                             gid: g.glyph_id,
-                            x: (cx + g.x) * s,
+                            x: (ox + g.x) * s,
                             y: page_h - baseline,
                             size: g.font_size * s,
                             color,
@@ -503,7 +611,7 @@ impl DocumentLayout {
                         // Underline top edge, top-down in points, then flip to PDF's
                         // bottom-up frame (rectangle y is its bottom edge).
                         let uy = baseline - span.data.underline_metrics.offset * fs_px * s;
-                        let x = (cx + x_min) * s;
+                        let x = (ox + x_min) * s;
                         let w = width * s;
                         let mut push = |uy_top: f32| {
                             rects.push(FillRect {
@@ -517,6 +625,37 @@ impl DocumentLayout {
                         push(uy);
                         if underline == UnderlineStyle::Double {
                             push(uy + thickness * 2.0);
+                        }
+                    }
+                }
+                // List marker in the gutter, on the paragraph's first-line baseline.
+                if let (Some(mb), Some(baseline)) = (marker, first_baseline) {
+                    for mrun in mb.layout_runs() {
+                        for g in mrun.glyphs {
+                            let fi = match font_ids.iter().position(|id| *id == g.font_id) {
+                                Some(i) => i,
+                                None => {
+                                    font_ids.push(g.font_id);
+                                    font_weight.push(g.font_weight);
+                                    to_unicode.push(BTreeMap::new());
+                                    font_ids.len() - 1
+                                }
+                            };
+                            if let Some(src) = mrun.text.get(g.start..g.end) {
+                                if !src.is_empty() {
+                                    to_unicode[fi]
+                                        .entry(g.glyph_id)
+                                        .or_insert_with(|| src.to_string());
+                                }
+                            }
+                            glyphs.push(Glyph {
+                                font: fi,
+                                gid: g.glyph_id,
+                                x: (cx + g.x) * s,
+                                y: page_h - baseline,
+                                size: g.font_size * s,
+                                color: [26, 26, 26, 255],
+                            });
                         }
                     }
                 }
@@ -787,7 +926,9 @@ fn build_to_unicode(map: &BTreeMap<u16, String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::text_document::{CharStyle, ImageBlock, Paragraph, ParagraphStyle, Run};
+    use crate::core::text_document::{
+        CharStyle, ImageBlock, ListKind, Paragraph, ParagraphStyle, Run,
+    };
 
     /// A small solid-colour PNG for image-block tests.
     fn tiny_png(w: u32, h: u32) -> Vec<u8> {
@@ -851,6 +992,53 @@ mod tests {
             "200 lines should overflow one page, got {} page(s)",
             layout.page_count()
         );
+    }
+
+    #[test]
+    fn list_marker_text_is_bullet_or_number() {
+        assert_eq!(list_marker(ListKind::None, 3), None);
+        assert_eq!(list_marker(ListKind::Bullet, 3).as_deref(), Some("•"));
+        assert_eq!(list_marker(ListKind::Numbered, 3).as_deref(), Some("3."));
+    }
+
+    fn list_para(text: &str, kind: ListKind) -> Paragraph {
+        let mut p = Paragraph::plain(text, CharStyle::default());
+        p.style.list = kind;
+        p
+    }
+
+    #[test]
+    fn list_paragraphs_get_indent_and_marker_numbers_restart() {
+        let mut fs = FontSystem::new();
+        let doc = TextDocument {
+            paragraphs: vec![
+                para("Mở đầu"),                       // normal: no indent, no marker
+                list_para("Một", ListKind::Numbered), // 1.
+                list_para("Hai", ListKind::Numbered), // 2.
+                para("Chen ngang"),                   // resets numbering
+                list_para("Gạch", ListKind::Bullet),  // bullet
+                list_para("Ba", ListKind::Numbered),  // restarts at 1.
+            ],
+            ..Default::default()
+        };
+        let layout = DocumentLayout::build(&doc, DPI, &mut fs);
+        let info = layout.text_block_list_info();
+        assert_eq!(info.len(), 6);
+        assert_eq!(info[0], (0.0, false), "normal paragraph is not indented");
+        assert!(
+            info[1].0 > 0.0 && info[1].1,
+            "list item is indented + marked"
+        );
+        assert!(
+            info[4].0 > 0.0 && info[4].1,
+            "bullet item is indented + marked"
+        );
+        // The whole thing still lays out and exports without panicking.
+        let path =
+            std::env::temp_dir().join(format!("iai_list_pdf_{}_test.pdf", std::process::id()));
+        layout.write_text_pdf(&mut fs, &path).unwrap();
+        assert!(lopdf::Document::load(&path).is_ok());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
