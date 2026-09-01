@@ -18,9 +18,10 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
 use cosmic_text::{
-    Action, Attrs, Buffer, Color as CtColor, Edit, Editor, Family, FontSystem, Metrics, Motion,
-    Selection, Shaping, SwashCache,
+    Action, Align, Attrs, Buffer, Color as CtColor, Edit, Editor, Family, FontSystem, Metrics,
+    Motion, Selection, Shaping, SwashCache,
 };
+use egui_phosphor::regular as ph;
 
 use crate::core::text_document::{PageSetup, PaperSize, TextDocument};
 use crate::core::text_layout::DocumentLayout;
@@ -34,6 +35,11 @@ struct DocRuntime {
     editor: Option<Editor<'static>>,
     setup: PageSetup,
     font_pt: f32,
+    /// Display zoom multiplier on top of fit-to-window (1.0 = fit).
+    zoom: f32,
+    /// True while a click-drag selection is in progress (so the anchor Click is
+    /// always sent before the first Drag — otherwise the anchor is stale).
+    drag_active: bool,
     page_index: usize,
     page_count: usize,
     /// Cached current-page texture, keyed by `(content revision, page)`.
@@ -52,6 +58,8 @@ impl Default for DocRuntime {
             editor: None,
             setup: PageSetup::default(),
             font_pt: 13.0,
+            zoom: 1.0,
+            drag_active: false,
             page_index: 0,
             page_count: 1,
             tex: None,
@@ -96,10 +104,11 @@ pub fn build(ctx: &egui::Context) {
             return;
         }
         let mut open = true;
+        // Open as a fixed, near-fullscreen editing surface.
+        let screen = ctx.screen_rect();
         egui::Window::new("Soạn thảo văn bản (thử nghiệm)")
             .open(&mut open)
-            .default_size([760.0, 860.0])
-            .min_width(520.0)
+            .fixed_rect(screen.shrink(6.0))
             .collapsible(false)
             .show(ctx, |ui| window_ui(ctx, ui, &mut d));
         if !open {
@@ -140,8 +149,9 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
     poll_pdf_export(ctx, d);
     ensure_editor(d);
 
-    // --- Toolbar ---
+    // --- Toolbar (Phosphor icons) ---
     let mut reshape = false;
+    let mut align_cmd: Option<Align> = None;
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt("doc_paper")
             .selected_text(paper_name(d.setup.paper))
@@ -159,16 +169,62 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
                 }
             });
         ui.separator();
+
+        // Font size.
+        ui.label(ph::TEXT_AA);
         if ui
-            .add(egui::Slider::new(&mut d.font_pt, 8.0..=48.0).text("Cỡ chữ"))
+            .add(
+                egui::DragValue::new(&mut d.font_pt)
+                    .range(8.0..=48.0)
+                    .speed(0.25)
+                    .suffix(" pt"),
+            )
             .changed()
         {
             reshape = true;
         }
         ui.separator();
+
+        // Paragraph alignment.
+        for (icon, a, tip) in [
+            (ph::TEXT_ALIGN_LEFT, Align::Left, "Căn trái"),
+            (ph::TEXT_ALIGN_CENTER, Align::Center, "Căn giữa"),
+            (ph::TEXT_ALIGN_RIGHT, Align::Right, "Căn phải"),
+            (ph::TEXT_ALIGN_JUSTIFY, Align::Justified, "Căn đều"),
+        ] {
+            if ui.button(icon).on_hover_text(tip).clicked() {
+                align_cmd = Some(a);
+            }
+        }
+        ui.separator();
+
+        // Zoom.
+        if ui
+            .button(ph::MAGNIFYING_GLASS_MINUS)
+            .on_hover_text("Thu nhỏ")
+            .clicked()
+        {
+            d.zoom = (d.zoom / 1.25).max(0.3);
+        }
+        ui.label(format!("{}%", (d.zoom * 100.0).round() as i32));
+        if ui
+            .button(ph::MAGNIFYING_GLASS_PLUS)
+            .on_hover_text("Phóng to")
+            .clicked()
+        {
+            d.zoom = (d.zoom * 1.25).min(4.0);
+        }
+        if ui.button("Vừa khít").clicked() {
+            d.zoom = 1.0;
+        }
+        ui.separator();
+
         let exporting = d.pending_pdf.is_some();
         if ui
-            .add_enabled(!exporting, egui::Button::new("Xuất PDF"))
+            .add_enabled(
+                !exporting,
+                egui::Button::new(format!("{} Xuất PDF", ph::FILE_PDF)),
+            )
             .clicked()
         {
             d.pending_pdf = Some(spawn_save_dialog());
@@ -179,203 +235,239 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
     if reshape {
         apply_reshape(d);
     }
+    if let Some(a) = align_cmd {
+        apply_align(d, a);
+    }
 
     // --- Page geometry (layout px at 96 dpi) ---
     let (cx, cy, _cw, ch) = d.setup.content_rect_px(DPI);
     let page_w = d.setup.paper.width_px(DPI);
     let page_h = d.setup.paper.height_px(DPI);
+    let pw = page_w.ceil() as usize;
+    let ph_px = page_h.ceil() as usize;
+    let lh = line_height(d.font_pt);
 
-    // Reserve the page area; scale it to fit the available box (leave room for
-    // the page-nav footer) so the whole sheet stays visible.
+    // Fit-to-box scale, then the user zoom. Leave room for the footer.
+    let footer_h = 34.0;
     let avail_w = ui.available_width().max(120.0);
-    let avail_h = (ui.available_height() - 36.0).max(120.0);
-    let scale = (avail_w / page_w).min(avail_h / page_h).min(1.4);
+    let avail_h = (ui.available_height() - footer_h).max(120.0);
+    let fit = (avail_w / page_w).min(avail_h / page_h);
+    let scale = (fit * d.zoom).clamp(0.05, 6.0);
     let disp = egui::vec2(page_w * scale, page_h * scale);
-    let (rect, response) = ui.allocate_exact_size(disp, egui::Sense::click_and_drag());
 
-    if response.clicked() || response.drag_started() {
-        response.request_focus();
-    }
-    let focused = response.has_focus();
+    // The page lives in a scroll area so a zoomed-in sheet can be panned.
+    egui::ScrollArea::both()
+        .id_salt("doc_page_scroll")
+        .auto_shrink([false, false])
+        .max_height(avail_h)
+        .show(ui, |ui| {
+            let (rect, response) = ui.allocate_exact_size(disp, egui::Sense::click_and_drag());
+            if response.clicked() || response.drag_started() {
+                response.request_focus();
+            }
+            let focused = response.has_focus();
 
-    // Split disjoint borrows of the runtime.
-    let page_index = d.page_index;
-    let engine = d.engine.as_mut().expect("engine");
-    let editor = d.editor.as_mut().expect("editor");
-    let fs = &mut engine.0;
-    let sc = &mut engine.1;
-
-    let mut dirty = false;
-
-    // Pointer → caret / selection (buffer coords).
-    if focused && (response.clicked() || response.dragged()) {
-        if let Some(pos) = response.interact_pointer_pos() {
-            let bx = ((pos.x - rect.min.x) / scale - cx).max(0.0);
-            let by = page_index as f32 * ch + (pos.y - rect.min.y) / scale - cy;
-            let act = if response.dragged() && !response.drag_started() {
-                Action::Drag {
-                    x: bx as i32,
-                    y: by as i32,
-                }
-            } else {
-                Action::Click {
-                    x: bx as i32,
-                    y: by as i32,
-                }
+            let map = |pos: egui::Pos2, page: usize| {
+                let bx = ((pos.x - rect.min.x) / scale - cx).max(0.0);
+                let by = page as f32 * ch + (pos.y - rect.min.y) / scale - cy;
+                (bx as i32, by as i32)
             };
-            editor.action(fs, act);
-        }
-    }
 
-    // Keyboard / text / IME.
-    if focused {
-        let events = ui.input(|i| i.events.clone());
-        for ev in events {
-            match ev {
-                egui::Event::Text(t) if !t.is_empty() => {
-                    editor.insert_string(&t, None);
-                    dirty = true;
-                }
-                egui::Event::Paste(t) if !t.is_empty() => {
-                    editor.insert_string(&t, None);
-                    dirty = true;
-                }
-                egui::Event::Ime(egui::ImeEvent::Commit(t)) if !t.is_empty() => {
-                    editor.insert_string(&t, None);
-                    dirty = true;
-                }
-                egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => {
-                    let shift = modifiers.shift;
-                    match key {
-                        egui::Key::Backspace => {
-                            editor.action(fs, Action::Backspace);
-                            dirty = true;
+            let (image, sel_rects, caret, page_count, page_index, revision) = {
+                let engine = d.engine.as_mut().expect("engine");
+                let editor = d.editor.as_mut().expect("editor");
+                let fs = &mut engine.0;
+                let sc = &mut engine.1;
+                let page_index = d.page_index;
+                let mut dirty = false;
+
+                // Pointer → caret / selection. `drag_active` guarantees an anchor
+                // Click precedes the first Drag, so a drag selects only its span.
+                if focused {
+                    if response.drag_started() {
+                        if let Some(p) = response.interact_pointer_pos() {
+                            let (x, y) = map(p, page_index);
+                            editor.action(fs, Action::Click { x, y });
                         }
-                        egui::Key::Delete => {
-                            editor.action(fs, Action::Delete);
-                            dirty = true;
+                        d.drag_active = true;
+                    } else if response.dragged() {
+                        if let Some(p) = response.interact_pointer_pos() {
+                            let (x, y) = map(p, page_index);
+                            if d.drag_active {
+                                editor.action(fs, Action::Drag { x, y });
+                            } else {
+                                editor.action(fs, Action::Click { x, y });
+                                d.drag_active = true;
+                            }
                         }
-                        egui::Key::Enter => {
-                            editor.action(fs, Action::Enter);
-                            dirty = true;
+                    } else if response.clicked() {
+                        if let Some(p) = response.interact_pointer_pos() {
+                            let (x, y) = map(p, page_index);
+                            editor.action(fs, Action::Click { x, y });
                         }
-                        egui::Key::ArrowLeft => motion(editor, fs, Motion::Left, shift),
-                        egui::Key::ArrowRight => motion(editor, fs, Motion::Right, shift),
-                        egui::Key::ArrowUp => motion(editor, fs, Motion::Up, shift),
-                        egui::Key::ArrowDown => motion(editor, fs, Motion::Down, shift),
-                        egui::Key::Home => motion(editor, fs, Motion::Home, shift),
-                        egui::Key::End => motion(editor, fs, Motion::End, shift),
-                        _ => {}
+                    }
+                    if response.drag_stopped() {
+                        d.drag_active = false;
                     }
                 }
-                _ => {}
-            }
-        }
-    }
 
-    editor.shape_as_needed(fs, false);
-    if dirty {
-        d.revision = d.revision.wrapping_add(1);
-    }
-
-    // Pagination from the flowed buffer height.
-    let total_h = editor.with_buffer(|b| {
-        b.layout_runs()
-            .fold(0.0f32, |m, run| m.max(run.line_top + run.line_height))
-    });
-    let page_count = ((total_h / ch).ceil() as usize).max(1);
-    let mut page_index = page_index.min(page_count - 1);
-
-    // Rasterise the current page (cached by revision + page).
-    let revision = d.revision;
-    let need = d.tex.as_ref().map(|(r, p, _)| (*r, *p)) != Some((revision, page_index));
-    let new_tex = if need {
-        let px = render_page(editor, fs, sc, page_index, cx, cy, ch, page_w, page_h);
-        Some(egui::ColorImage::from_rgba_unmultiplied(
-            [page_w.ceil() as usize, page_h.ceil() as usize],
-            &px,
-        ))
-    } else {
-        None
-    };
-
-    // Collect selection rects and the caret (page-local px) for overlay drawing.
-    let sel = editor.selection_bounds();
-    let caret = editor.cursor_position();
-    let mut sel_rects: Vec<egui::Rect> = Vec::new();
-    let lh = line_height(d.font_pt);
-    if let Some((start, end)) = sel {
-        editor.with_buffer(|b| {
-            for run in b.layout_runs() {
-                let p = (run.line_top / ch).floor() as usize;
-                if p != page_index {
-                    continue;
+                // Keyboard / text / IME / clipboard.
+                if focused {
+                    let events = ui.input(|i| i.events.clone());
+                    for ev in events {
+                        match ev {
+                            egui::Event::Text(t) if !t.is_empty() => {
+                                editor.insert_string(&t, None);
+                                dirty = true;
+                            }
+                            egui::Event::Paste(t) if !t.is_empty() => {
+                                editor.insert_string(&t, None);
+                                dirty = true;
+                            }
+                            egui::Event::Ime(egui::ImeEvent::Commit(t)) if !t.is_empty() => {
+                                editor.insert_string(&t, None);
+                                dirty = true;
+                            }
+                            egui::Event::Copy => {
+                                if let Some(s) = editor.copy_selection() {
+                                    ctx.copy_text(s);
+                                }
+                            }
+                            egui::Event::Cut => {
+                                if let Some(s) = editor.copy_selection() {
+                                    ctx.copy_text(s);
+                                }
+                                if editor.delete_selection() {
+                                    dirty = true;
+                                }
+                            }
+                            egui::Event::Key {
+                                key,
+                                pressed: true,
+                                modifiers,
+                                ..
+                            } => {
+                                let shift = modifiers.shift;
+                                match key {
+                                    egui::Key::Backspace => {
+                                        editor.action(fs, Action::Backspace);
+                                        dirty = true;
+                                    }
+                                    egui::Key::Delete => {
+                                        editor.action(fs, Action::Delete);
+                                        dirty = true;
+                                    }
+                                    egui::Key::Enter => {
+                                        editor.action(fs, Action::Enter);
+                                        dirty = true;
+                                    }
+                                    egui::Key::ArrowLeft => motion(editor, fs, Motion::Left, shift),
+                                    egui::Key::ArrowRight => {
+                                        motion(editor, fs, Motion::Right, shift)
+                                    }
+                                    egui::Key::ArrowUp => motion(editor, fs, Motion::Up, shift),
+                                    egui::Key::ArrowDown => motion(editor, fs, Motion::Down, shift),
+                                    egui::Key::Home => motion(editor, fs, Motion::Home, shift),
+                                    egui::Key::End => motion(editor, fs, Motion::End, shift),
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-                let top = cy + run.line_top - page_index as f32 * ch;
-                for (hx, hw) in run.highlight(start, end) {
-                    let min = rect.min + egui::vec2((cx + hx) * scale, top * scale);
-                    let max = min + egui::vec2(hw.max(2.0) * scale, lh * scale);
-                    sel_rects.push(egui::Rect::from_min_max(min, max));
+
+                editor.shape_as_needed(fs, false);
+                let revision = if dirty {
+                    d.revision.wrapping_add(1)
+                } else {
+                    d.revision
+                };
+
+                let total_h = editor.with_buffer(|b| {
+                    b.layout_runs()
+                        .fold(0.0f32, |m, run| m.max(run.line_top + run.line_height))
+                });
+                let page_count = ((total_h / ch).ceil() as usize).max(1);
+                let page_index = page_index.min(page_count - 1);
+
+                let need = d.tex.as_ref().map(|(r, p, _)| (*r, *p)) != Some((revision, page_index));
+                let image = if need {
+                    let px = render_page(editor, fs, sc, page_index, cx, cy, ch, page_w, page_h);
+                    Some(egui::ColorImage::from_rgba_unmultiplied([pw, ph_px], &px))
+                } else {
+                    None
+                };
+
+                let mut sel_rects: Vec<egui::Rect> = Vec::new();
+                if let Some((start, end)) = editor.selection_bounds() {
+                    editor.with_buffer(|b| {
+                        for run in b.layout_runs() {
+                            if (run.line_top / ch).floor() as usize != page_index {
+                                continue;
+                            }
+                            let top = cy + run.line_top - page_index as f32 * ch;
+                            for (hx, hw) in run.highlight(start, end) {
+                                let min = rect.min + egui::vec2((cx + hx) * scale, top * scale);
+                                let max = min + egui::vec2(hw.max(2.0) * scale, lh * scale);
+                                sel_rects.push(egui::Rect::from_min_max(min, max));
+                            }
+                        }
+                    });
+                }
+                let caret = editor.cursor_position();
+                (image, sel_rects, caret, page_count, page_index, revision)
+            };
+
+            d.page_index = page_index;
+            d.page_count = page_count;
+            d.revision = revision;
+            if let Some(img) = image {
+                let tex = ctx.load_texture("iai_doc_page", img, egui::TextureOptions::LINEAR);
+                d.tex = Some((revision, page_index, tex));
+            }
+
+            // Paint the page, selection then caret.
+            let painter = ui.painter_at(rect);
+            if let Some((_, _, tex)) = &d.tex {
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
+            }
+            let sel_color = egui::Color32::from_rgba_unmultiplied(60, 120, 240, 70);
+            for r in sel_rects {
+                painter.rect_filled(r, 0.0, sel_color);
+            }
+            if focused {
+                if let Some((qx, qy)) = caret {
+                    if (qy as f32 / ch).floor() as usize == page_index {
+                        let x = rect.min.x + (cx + qx as f32) * scale;
+                        let y0 = rect.min.y + (cy + qy as f32 - page_index as f32 * ch) * scale;
+                        let blink = ui.input(|i| (i.time * 1.5) as i64 % 2 == 0);
+                        if blink {
+                            painter.line_segment(
+                                [egui::pos2(x, y0), egui::pos2(x, y0 + lh * scale)],
+                                egui::Stroke::new(1.5, egui::Color32::from_rgb(20, 20, 20)),
+                            );
+                        }
+                        let caret_rect = egui::Rect::from_min_max(
+                            egui::pos2(x, y0),
+                            egui::pos2(x + 1.0, y0 + lh * scale),
+                        );
+                        ctx.output_mut(|o| {
+                            o.ime = Some(egui::output::IMEOutput {
+                                rect: caret_rect,
+                                cursor_rect: caret_rect,
+                            });
+                        });
+                    }
+                    ctx.request_repaint_after(Duration::from_millis(400)); // caret blink
                 }
             }
         });
-    }
 
-    // Done with the editor/engine borrows.
-    d.page_index = page_index;
-    d.page_count = page_count;
-    if let Some(image) = new_tex {
-        let tex = ctx.load_texture("iai_doc_page", image, egui::TextureOptions::LINEAR);
-        d.tex = Some((revision, page_index, tex));
-    }
-
-    // --- Paint page, selection, caret ---
-    let painter = ui.painter_at(rect);
-    if let Some((_, _, tex)) = &d.tex {
-        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
-    }
-    let sel_color = egui::Color32::from_rgba_unmultiplied(60, 120, 240, 70);
-    for r in sel_rects {
-        painter.rect_filled(r, 0.0, sel_color);
-    }
-    if focused {
-        if let Some((qx, qy)) = caret {
-            let p = (qy as f32 / ch).floor() as usize;
-            if p == page_index {
-                let x = rect.min.x + (cx + qx as f32) * scale;
-                let y0 = rect.min.y + (cy + qy as f32 - page_index as f32 * ch) * scale;
-                let blink = ui.input(|i| (i.time * 1.5) as i64 % 2 == 0);
-                if blink {
-                    painter.line_segment(
-                        [egui::pos2(x, y0), egui::pos2(x, y0 + lh * scale)],
-                        egui::Stroke::new(1.5, egui::Color32::from_rgb(20, 20, 20)),
-                    );
-                }
-                // Position the OS IME candidate window at the caret.
-                let caret_rect = egui::Rect::from_min_max(
-                    egui::pos2(x, y0),
-                    egui::pos2(x + 1.0, y0 + lh * scale),
-                );
-                ctx.output_mut(|o| {
-                    o.ime = Some(egui::output::IMEOutput {
-                        rect: caret_rect,
-                        cursor_rect: caret_rect,
-                    });
-                });
-            }
-            ctx.request_repaint_after(Duration::from_millis(400)); // caret blink
-        }
-    }
-
-    // --- Footer: page nav + status ---
+    // --- Footer: page nav + hint / status ---
     ui.horizontal(|ui| {
-        if ui.small_button("‹").clicked() && d.page_index > 0 {
+        if ui.button(ph::CARET_LEFT).clicked() && d.page_index > 0 {
             d.page_index -= 1;
         }
         ui.label(format!(
@@ -383,17 +475,14 @@ fn window_ui(ctx: &egui::Context, ui: &mut egui::Ui, d: &mut DocRuntime) {
             d.page_index + 1,
             d.page_count.max(1)
         ));
-        if ui.small_button("›").clicked() && d.page_index + 1 < d.page_count {
+        if ui.button(ph::CARET_RIGHT).clicked() && d.page_index + 1 < d.page_count {
             d.page_index += 1;
         }
-        if !focused {
+        if !d.status.is_empty() {
             ui.separator();
-            ui.weak("Bấm vào trang để bắt đầu gõ");
+            ui.label(&d.status);
         }
     });
-    if !d.status.is_empty() {
-        ui.label(&d.status);
-    }
 }
 
 /// Extend or collapse the selection, then move the cursor.
@@ -417,6 +506,29 @@ fn apply_reshape(d: &mut DocRuntime) {
     editor.with_buffer_mut(|b| {
         b.set_metrics(metrics);
         b.set_size(Some(cw), None);
+    });
+    editor.shape_as_needed(&mut engine.0, false);
+    d.revision = d.revision.wrapping_add(1);
+}
+
+/// Set the alignment of every paragraph touched by the selection (or the caret
+/// line when there is no selection).
+fn apply_align(d: &mut DocRuntime, align: Align) {
+    let engine = d.engine.as_mut().expect("engine");
+    let editor = d.editor.as_mut().expect("editor");
+    let (l0, l1) = match editor.selection_bounds() {
+        Some((s, e)) => (s.line, e.line),
+        None => {
+            let c = editor.cursor();
+            (c.line, c.line)
+        }
+    };
+    editor.with_buffer_mut(|b| {
+        for i in l0..=l1 {
+            if let Some(line) = b.lines.get_mut(i) {
+                line.set_align(Some(align));
+            }
+        }
     });
     editor.shape_as_needed(&mut engine.0, false);
     d.revision = d.revision.wrapping_add(1);
