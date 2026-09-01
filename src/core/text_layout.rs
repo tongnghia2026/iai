@@ -18,7 +18,7 @@ use std::path::Path;
 
 use cosmic_text::{
     Align, Attrs, Buffer, Color as CtColor, Family, FontSystem, Metrics, Shaping, Style,
-    SwashCache, Weight,
+    SwashCache, UnderlineStyle, Weight,
 };
 use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
 
@@ -40,6 +40,11 @@ fn attrs_for(style: &CharStyle, px_per_pt: f32, line_spacing: f32) -> Attrs<'_> 
             Style::Italic
         } else {
             Style::Normal
+        })
+        .underline(if style.underline {
+            UnderlineStyle::Single
+        } else {
+            UnderlineStyle::None
         })
         .color(CtColor::rgba(
             style.color.r,
@@ -234,6 +239,16 @@ struct Glyph {
     color: [u8; 4],
 }
 
+/// A filled rectangle (underline) for PDF emission, in PDF points with the
+/// origin at the page's bottom-left, matching the glyph coordinate frame.
+struct FillRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [u8; 4],
+}
+
 impl DocumentLayout {
     /// Write the document as a fresh multi-page PDF with **real, selectable
     /// text**: each used face is embedded once as a Type0 / Identity-H CID font
@@ -268,10 +283,11 @@ impl DocumentLayout {
         let mut font_ids = Vec::new(); // unique face ids, insertion order (type inferred)
         let mut font_weight = Vec::new();
         let mut to_unicode: Vec<BTreeMap<u16, String>> = Vec::new();
-        let mut pages: Vec<Vec<Glyph>> = Vec::new();
+        let mut pages: Vec<(Vec<Glyph>, Vec<FillRect>)> = Vec::new();
 
         for &page in selected_pages {
             let mut glyphs = Vec::new();
+            let mut rects = Vec::new();
             for para in &self.paras {
                 for (li, run) in para.buffer.layout_runs().enumerate() {
                     let (lp, top) = para.line_pages[li];
@@ -309,9 +325,57 @@ impl DocumentLayout {
                             color,
                         });
                     }
+                    // Underline decorations as filled rectangles (vector), matching
+                    // the on-screen renderer: same offset/thickness from the font.
+                    for span in run.decorations {
+                        let underline = span.data.text_decoration.underline;
+                        if underline == UnderlineStyle::None {
+                            continue;
+                        }
+                        let Some(gs) = run.glyphs.get(span.glyph_range.clone()) else {
+                            continue;
+                        };
+                        if gs.is_empty() {
+                            continue;
+                        }
+                        let x_min = gs.iter().fold(f32::INFINITY, |m, g| m.min(g.x));
+                        let x_max = gs.iter().fold(f32::NEG_INFINITY, |m, g| m.max(g.x + g.w));
+                        let width = x_max - x_min;
+                        if width <= 0.0 {
+                            continue;
+                        }
+                        let fs_px = span.font_size;
+                        let thickness =
+                            (span.data.underline_metrics.thickness * fs_px).max(1.0) * s;
+                        let color = span
+                            .data
+                            .text_decoration
+                            .underline_color_opt
+                            .or(span.color_opt)
+                            .map(|c| [c.r(), c.g(), c.b(), c.a()])
+                            .unwrap_or([26, 26, 26, 255]);
+                        // Underline top edge, top-down in points, then flip to PDF's
+                        // bottom-up frame (rectangle y is its bottom edge).
+                        let uy = baseline - span.data.underline_metrics.offset * fs_px * s;
+                        let x = (cx + x_min) * s;
+                        let w = width * s;
+                        let mut push = |uy_top: f32| {
+                            rects.push(FillRect {
+                                x,
+                                y: page_h - (uy_top + thickness),
+                                w,
+                                h: thickness,
+                                color,
+                            });
+                        };
+                        push(uy);
+                        if underline == UnderlineStyle::Double {
+                            push(uy + thickness * 2.0);
+                        }
+                    }
                 }
             }
-            pages.push(glyphs);
+            pages.push((glyphs, rects));
         }
 
         let mut doc = Document::with_version("1.5");
@@ -384,8 +448,8 @@ impl DocumentLayout {
         let resources = doc.add_object(dictionary! { "Font" => font_dict });
 
         let mut kids: Vec<Object> = Vec::with_capacity(pages.len());
-        for glyphs in &pages {
-            let content = page_content(glyphs);
+        for (glyphs, rects) in &pages {
+            let content = page_content(glyphs, rects);
             let content_id = doc.add_object(
                 Stream::new(
                     dictionary! { "Filter" => "FlateDecode" },
@@ -428,8 +492,9 @@ fn deflate(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Place each glyph by absolute text matrix, re-emitting `Tf`/`rg` only when the
-/// font, size or colour changes.
-fn page_content(glyphs: &[Glyph]) -> String {
+/// font, size or colour changes, then fill any underline rectangles (path fills
+/// must sit outside the `BT`/`ET` text object).
+fn page_content(glyphs: &[Glyph], rects: &[FillRect]) -> String {
     let mut out = String::new();
     let mut cur: Option<(usize, u32, [u8; 4])> = None;
     let mut open = false;
@@ -457,6 +522,22 @@ fn page_content(glyphs: &[Glyph]) -> String {
     }
     if open {
         out.push_str("ET\n");
+    }
+    let mut fill: Option<[u8; 4]> = None;
+    for r in rects {
+        if fill != Some(r.color) {
+            out.push_str(&format!(
+                "{:.4} {:.4} {:.4} rg\n",
+                r.color[0] as f32 / 255.0,
+                r.color[1] as f32 / 255.0,
+                r.color[2] as f32 / 255.0
+            ));
+            fill = Some(r.color);
+        }
+        out.push_str(&format!(
+            "{:.2} {:.2} {:.2} {:.2} re f\n",
+            r.x, r.y, r.w, r.h
+        ));
     }
     out
 }
@@ -589,6 +670,35 @@ mod tests {
         let layout = DocumentLayout::build(&doc, DPI, &mut fs);
         assert_eq!(layout.page_count(), 1);
         assert!(layout.line_count() >= 1);
+    }
+
+    #[test]
+    fn underlined_run_emits_a_fill_and_stays_valid() {
+        let mut fs = FontSystem::new();
+        let mut ul = CharStyle::default();
+        ul.underline = true;
+        let doc = TextDocument {
+            paragraphs: vec![Paragraph {
+                runs: vec![Run::new("Chữ ký bên A", ul)],
+                style: ParagraphStyle::default(),
+            }],
+            ..Default::default()
+        };
+        let layout = DocumentLayout::build(&doc, DPI, &mut fs);
+        let path =
+            std::env::temp_dir().join(format!("iai_underline_pdf_{}_test.pdf", std::process::id()));
+        layout.write_text_pdf(&mut fs, &path).unwrap();
+        let reloaded = lopdf::Document::load(&path).expect("re-parse underlined PDF");
+        // The single page's content stream must contain a rectangle-fill op for
+        // the underline (`re` ... `f`), decoded from its FlateDecode stream.
+        let (_, page_id) = reloaded.get_pages().into_iter().next().unwrap();
+        let content = reloaded.get_page_content(page_id).expect("page content");
+        let text = String::from_utf8_lossy(&content);
+        assert!(
+            text.contains("re f"),
+            "expected an underline rectangle fill"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

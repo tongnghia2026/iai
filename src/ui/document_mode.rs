@@ -8,10 +8,10 @@
 //! Canonical text lives on the active application `Document`; this module keeps
 //! only the ephemeral cosmic-text editor and page texture projection.
 //!
-//! Formatting so far: per-selection bold / italic (Ctrl+B / Ctrl+I) and
-//! per-paragraph alignment; one shared body face and size. Per-run font, size
-//! and colour, plus lists and inline images, are the next steps. PDF export and
-//! `.iai` save already carry the styled runs.
+//! Formatting so far: per-selection bold / italic / underline (Ctrl+B / I / U)
+//! and text colour, plus per-paragraph alignment; one shared body face and size.
+//! Per-run font and size, lists and inline images are the next steps. PDF export
+//! and `.iai` save already carry the styled runs.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -19,10 +19,11 @@ use std::time::Duration;
 
 use cosmic_text::{
     Action, Align, Attrs, AttrsList, Buffer, Color as CtColor, Cursor, Edit, Editor, Family,
-    FontSystem, Metrics, Motion, Selection, Shaping, Style, SwashCache, Weight,
+    FontSystem, Metrics, Motion, Selection, Shaping, Style, SwashCache, UnderlineStyle, Weight,
 };
 use egui_phosphor::regular as ph;
 
+use crate::core::color::Color;
 use crate::core::document::DocumentId;
 use crate::core::text::TextFontFamily;
 use crate::core::text_document::{
@@ -35,6 +36,26 @@ use crate::ui::{FlowTextViewModel, UiActions, UiData};
 enum CharToggle {
     Bold,
     Italic,
+    Underline,
+}
+
+/// The character formatting that varies per run in the editor: emphasis plus an
+/// optional explicit colour (`None` = the document's default ink). Font and size
+/// are uniform across the document, so they are not carried here.
+#[derive(Clone, Copy, PartialEq)]
+struct RunFmt {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    color: Option<Color>,
+}
+
+impl RunFmt {
+    /// True when this run differs from the plain body style and therefore needs
+    /// its own attribute span (plain runs rely on the line's default attrs).
+    fn is_styled(&self) -> bool {
+        self.bold || self.italic || self.underline || self.color.is_some()
+    }
 }
 
 const DPI: f32 = 96.0;
@@ -188,22 +209,17 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
             ParagraphAlign::Right => Align::Right,
             ParagraphAlign::Justify => Align::Justified,
         }));
-        // Reproduce per-run bold / italic as attribute spans. Size stays on the
-        // buffer metrics (not the spans) so the global size control keeps working.
-        if paragraph
-            .runs
-            .iter()
-            .any(|r| r.style.bold || r.style.italic)
-        {
+        // Reproduce per-run emphasis / colour as attribute spans. Size stays on
+        // the buffer metrics (not the spans) so the global size control keeps
+        // working; underline is drawn by the renderer from these spans.
+        if paragraph.runs.iter().any(|r| fmt_of(&r.style).is_styled()) {
             let mut list = AttrsList::new(&attrs);
             let mut byte = 0usize;
             for run in &paragraph.runs {
                 let len = run.text.len();
-                if len > 0 && (run.style.bold || run.style.italic) {
-                    list.add_span(
-                        byte..byte + len,
-                        &styled_attrs(font_name, run.style.bold, run.style.italic),
-                    );
+                let fmt = fmt_of(&run.style);
+                if len > 0 && fmt.is_styled() {
+                    list.add_span(byte..byte + len, &styled_attrs(font_name, fmt));
                 }
                 byte += len;
             }
@@ -232,7 +248,8 @@ fn window_ui(
     let mut reshape = false;
     let mut align_cmd: Option<Align> = None;
     let mut char_toggle: Option<CharToggle> = None;
-    let (cur_bold, cur_italic) = current_flags(d.editor.as_ref().expect("editor"));
+    let mut char_color: Option<Color> = None;
+    let cur = current_fmt(d.editor.as_ref().expect("editor"));
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt("doc_paper")
             .selected_text(paper_name(d.setup.paper))
@@ -268,18 +285,36 @@ fn window_ui(
 
         // Character emphasis (applies to the selection).
         if ui
-            .selectable_label(cur_bold, ph::TEXT_B)
+            .selectable_label(cur.bold, ph::TEXT_B)
             .on_hover_text("Đậm (Ctrl+B)")
             .clicked()
         {
             char_toggle = Some(CharToggle::Bold);
         }
         if ui
-            .selectable_label(cur_italic, ph::TEXT_ITALIC)
+            .selectable_label(cur.italic, ph::TEXT_ITALIC)
             .on_hover_text("Nghiêng (Ctrl+I)")
             .clicked()
         {
             char_toggle = Some(CharToggle::Italic);
+        }
+        if ui
+            .selectable_label(cur.underline, ph::TEXT_UNDERLINE)
+            .on_hover_text("Gạch chân (Ctrl+U)")
+            .clicked()
+        {
+            char_toggle = Some(CharToggle::Underline);
+        }
+
+        // Text colour (applies to the selection).
+        let base = cur.color.unwrap_or(Color::BLACK);
+        let mut rgba = egui::Color32::from_rgb(base.r, base.g, base.b);
+        if ui
+            .color_edit_button_srgba(&mut rgba)
+            .on_hover_text("Màu chữ")
+            .changed()
+        {
+            char_color = Some(Color::new(rgba.r(), rgba.g(), rgba.b(), 255));
         }
         ui.separator();
 
@@ -323,6 +358,9 @@ fn window_ui(
     }
     if let Some(toggle) = char_toggle {
         apply_char_style(d, fs, toggle);
+    }
+    if let Some(color) = char_color {
+        apply_char_color(d, fs, color);
     }
 
     // --- Page geometry (layout px at 96 dpi) ---
@@ -514,6 +552,14 @@ fn window_ui(
                                             fs,
                                             &font_name,
                                             CharToggle::Italic,
+                                        );
+                                    }
+                                    egui::Key::U if modifiers.command => {
+                                        dirty |= toggle_selection_style(
+                                            editor,
+                                            fs,
+                                            &font_name,
+                                            CharToggle::Underline,
                                         );
                                     }
                                     _ => {}
@@ -822,26 +868,59 @@ fn apply_align(d: &mut DocRuntime, fs: &mut FontSystem, align: Align) {
     d.revision = d.revision.wrapping_add(1);
 }
 
-/// Attrs for a run: body face plus bold / italic. Size is intentionally left on
-/// the buffer metrics so the global font-size control is not pinned per span.
-fn styled_attrs(font_name: &str, bold: bool, italic: bool) -> Attrs<'_> {
-    Attrs::new()
-        .family(Family::Name(font_name))
-        .weight(if bold { Weight::BOLD } else { Weight::NORMAL })
-        .style(if italic { Style::Italic } else { Style::Normal })
+/// Map a model [`CharStyle`] to the editor's per-run format. A pure-black colour
+/// is represented as `None` so plain body text keeps the softened ink look and
+/// does not need an explicit colour span.
+fn fmt_of(style: &CharStyle) -> RunFmt {
+    RunFmt {
+        bold: style.bold,
+        italic: style.italic,
+        underline: style.underline,
+        color: (style.color != Color::BLACK).then_some(style.color),
+    }
 }
 
-/// Read the bold / italic state of a byte position within a line's attr list.
-fn span_flags(list: &AttrsList, index: usize) -> (bool, bool) {
+/// Attrs for a run: body face plus emphasis, underline and colour. Size is
+/// intentionally left on the buffer metrics so the global font-size control is
+/// not pinned per span.
+fn styled_attrs(font_name: &str, fmt: RunFmt) -> Attrs<'_> {
+    let mut attrs = Attrs::new()
+        .family(Family::Name(font_name))
+        .weight(if fmt.bold {
+            Weight::BOLD
+        } else {
+            Weight::NORMAL
+        })
+        .style(if fmt.italic {
+            Style::Italic
+        } else {
+            Style::Normal
+        });
+    if fmt.underline {
+        attrs = attrs.underline(UnderlineStyle::Single);
+    }
+    if let Some(c) = fmt.color {
+        attrs = attrs.color(CtColor::rgba(c.r, c.g, c.b, c.a));
+    }
+    attrs
+}
+
+/// Read the formatting at a byte position within a line's attr list.
+fn span_fmt(list: &AttrsList, index: usize) -> RunFmt {
     let a = list.get_span(index);
-    (a.weight == Weight::BOLD, a.style == Style::Italic)
+    RunFmt {
+        bold: a.weight == Weight::BOLD,
+        italic: a.style == Style::Italic,
+        underline: a.text_decoration.underline != UnderlineStyle::None,
+        color: a.color_opt.map(|c| Color::new(c.r(), c.g(), c.b(), c.a())),
+    }
 }
 
 /// The selected byte range on `line_i`, clamped to `[0, line_len]`.
 fn line_selection_range(
     line_i: usize,
-    start: cosmic_text::Cursor,
-    end: cosmic_text::Cursor,
+    start: Cursor,
+    end: Cursor,
     line_len: usize,
 ) -> std::ops::Range<usize> {
     let lo = if line_i == start.line { start.index } else { 0 };
@@ -853,14 +932,16 @@ fn line_selection_range(
     lo.min(line_len)..hi.min(line_len)
 }
 
-/// Bold / italic state to reflect in the toolbar: for a selection, the flag is
-/// "on" only when every selected character has it; with no selection it is the
-/// style new typing would inherit (the character before the caret).
-fn current_flags(editor: &Editor<'static>) -> (bool, bool) {
+/// Formatting to reflect in the toolbar. For a selection, a flag is "on" only
+/// when every selected character has it, and the colour is reported only when
+/// uniform; with no selection it is the style new typing would inherit (the
+/// character before the caret).
+fn current_fmt(editor: &Editor<'static>) -> RunFmt {
     editor.with_buffer(|b| {
         if let Some((start, end)) = editor.selection_bounds() {
             let mut any = false;
-            let (mut all_bold, mut all_italic) = (true, true);
+            let (mut bold, mut italic, mut underline) = (true, true, true);
+            let mut color: Option<Option<Color>> = None; // None = not seen; Some(x) = uniform x
             for li in start.line..=end.line {
                 let Some(line) = b.lines.get(li) else {
                     continue;
@@ -872,31 +953,52 @@ fn current_flags(editor: &Editor<'static>) -> (bool, bool) {
                     if i < range.start || i >= range.end {
                         continue;
                     }
+                    let f = span_fmt(list, i);
+                    bold &= f.bold;
+                    italic &= f.italic;
+                    underline &= f.underline;
+                    color = match color {
+                        None => Some(f.color),
+                        Some(c) if c == f.color => Some(c),
+                        Some(_) => Some(None), // mixed colours -> treat as default
+                    };
                     any = true;
-                    let (bold, italic) = span_flags(list, i);
-                    all_bold &= bold;
-                    all_italic &= italic;
                 }
             }
             if any {
-                (all_bold, all_italic)
+                RunFmt {
+                    bold,
+                    italic,
+                    underline,
+                    color: color.flatten(),
+                }
             } else {
-                (false, false)
+                RunFmt {
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    color: None,
+                }
             }
         } else {
             let c = editor.cursor();
             match b.lines.get(c.line) {
-                Some(line) if c.index > 0 => span_flags(line.attrs_list(), c.index - 1),
-                _ => (false, false),
+                Some(line) if c.index > 0 => span_fmt(line.attrs_list(), c.index - 1),
+                _ => RunFmt {
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    color: None,
+                },
             }
         }
     })
 }
 
-/// Toggle bold or italic across the current selection (word-processor rule: if
-/// every selected character already has it, clear it; otherwise set it). The
-/// orthogonal flag and per-character boundaries are preserved. A caret with no
-/// selection is a no-op — there is no pending-style buffer yet.
+/// Toggle bold / italic / underline across the current selection (word-processor
+/// rule: if every selected character already has it, clear it; otherwise set
+/// it). Other attributes and per-character boundaries are preserved. A caret
+/// with no selection is a no-op — there is no pending-style buffer yet.
 fn apply_char_style(d: &mut DocRuntime, fs: &mut FontSystem, toggle: CharToggle) {
     let font_name = d.font.name().to_string();
     let editor = d.editor.as_mut().expect("editor");
@@ -905,9 +1007,22 @@ fn apply_char_style(d: &mut DocRuntime, fs: &mut FontSystem, toggle: CharToggle)
     }
 }
 
+/// Set the text colour of the current selection (`Color::BLACK` clears back to
+/// the default ink). A caret with no selection is a no-op.
+fn apply_char_color(d: &mut DocRuntime, fs: &mut FontSystem, color: Color) {
+    let font_name = d.font.name().to_string();
+    let target = (color != Color::BLACK).then_some(color);
+    let editor = d.editor.as_mut().expect("editor");
+    if restyle_selection(editor, fs, &font_name, |mut f| {
+        f.color = target;
+        f
+    }) {
+        d.revision = d.revision.wrapping_add(1);
+    }
+}
+
 /// Core of [`apply_char_style`], operating directly on the editor so the
 /// keyboard handler can reuse it while it already holds the editor borrow.
-/// Returns whether any line changed.
 fn toggle_selection_style(
     editor: &mut Editor<'static>,
     fs: &mut FontSystem,
@@ -917,9 +1032,8 @@ fn toggle_selection_style(
     let Some((start, end)) = editor.selection_bounds() else {
         return false;
     };
-    let mut changed = false;
-    editor.with_buffer_mut(|b| {
-        // First pass: is the toggled flag set on every selected character?
+    // Decide the target value once: clear only if every selected char has it.
+    let (any, all_set) = editor.with_buffer(|b| {
         let mut any = false;
         let mut all_set = true;
         for li in start.line..=end.line {
@@ -934,23 +1048,45 @@ fn toggle_selection_style(
                     continue;
                 }
                 any = true;
-                let (bold, italic) = span_flags(list, i);
+                let f = span_fmt(list, i);
                 let set = match toggle {
-                    CharToggle::Bold => bold,
-                    CharToggle::Italic => italic,
+                    CharToggle::Bold => f.bold,
+                    CharToggle::Italic => f.italic,
+                    CharToggle::Underline => f.underline,
                 };
-                if !set {
-                    all_set = false;
-                }
+                all_set &= set;
             }
         }
-        if !any {
-            return;
+        (any, all_set)
+    });
+    if !any {
+        return false;
+    }
+    let make = !all_set;
+    restyle_selection(editor, fs, font_name, |mut f| {
+        match toggle {
+            CharToggle::Bold => f.bold = make,
+            CharToggle::Italic => f.italic = make,
+            CharToggle::Underline => f.underline = make,
         }
-        let make = !all_set;
+        f
+    })
+}
 
-        // Second pass: rebuild each affected line's attr list with the flag
-        // applied inside the selection and every other span left intact.
+/// Rebuild the attr spans of every line the selection touches, mapping each
+/// selected character's [`RunFmt`] through `map` and leaving everything else
+/// intact. Returns whether any line actually changed.
+fn restyle_selection(
+    editor: &mut Editor<'static>,
+    fs: &mut FontSystem,
+    font_name: &str,
+    map: impl Fn(RunFmt) -> RunFmt,
+) -> bool {
+    let Some((start, end)) = editor.selection_bounds() else {
+        return false;
+    };
+    let mut changed = false;
+    editor.with_buffer_mut(|b| {
         for li in start.line..=end.line {
             let Some(line) = b.lines.get(li) else {
                 continue;
@@ -961,30 +1097,26 @@ fn toggle_selection_style(
             let base = Attrs::new().family(Family::Name(font_name));
             let mut list = AttrsList::new(&base);
 
-            let mut seg: Option<(usize, bool, bool)> = None; // (start_byte, bold, italic)
-            let flush = |list: &mut AttrsList, seg: (usize, bool, bool), stop: usize| {
-                let (s, bold, italic) = seg;
-                if bold || italic {
-                    list.add_span(s..stop, &styled_attrs(font_name, bold, italic));
+            let mut seg: Option<(usize, RunFmt)> = None; // (start_byte, fmt)
+            let flush = |list: &mut AttrsList, seg: (usize, RunFmt), stop: usize| {
+                let (s, fmt) = seg;
+                if fmt.is_styled() {
+                    list.add_span(s..stop, &styled_attrs(font_name, fmt));
                 }
             };
-            for (i, ch) in text.char_indices() {
-                let (mut bold, mut italic) = span_flags(old, i);
+            for (i, _) in text.char_indices() {
+                let mut fmt = span_fmt(old, i);
                 if i >= range.start && i < range.end {
-                    match toggle {
-                        CharToggle::Bold => bold = make,
-                        CharToggle::Italic => italic = make,
-                    }
+                    fmt = map(fmt);
                 }
                 match seg {
-                    Some((s, b, it)) if b == bold && it == italic => seg = Some((s, b, it)),
+                    Some((_, f)) if f == fmt => {}
                     Some(prev) => {
                         flush(&mut list, prev, i);
-                        seg = Some((i, bold, italic));
+                        seg = Some((i, fmt));
                     }
-                    None => seg = Some((i, bold, italic)),
+                    None => seg = Some((i, fmt)),
                 }
-                let _ = ch;
             }
             if let Some(prev) = seg {
                 flush(&mut list, prev, text.len());
@@ -1036,9 +1168,70 @@ fn render_page(
                     blend_px(&mut buf, pw, ph, phys.x + gx, phys.y + gy, col);
                 });
             }
+            // Underline (from the shaped decoration spans). cosmic-text rasterises
+            // only glyphs, so the line is drawn here at the font's own metrics.
+            for span in run.decorations {
+                let underline = span.data.text_decoration.underline;
+                if underline == UnderlineStyle::None {
+                    continue;
+                }
+                let Some(glyphs) = run.glyphs.get(span.glyph_range.clone()) else {
+                    continue;
+                };
+                if glyphs.is_empty() {
+                    continue;
+                }
+                let x_min = glyphs.iter().fold(f32::INFINITY, |m, g| m.min(g.x));
+                let x_max = glyphs
+                    .iter()
+                    .fold(f32::NEG_INFINITY, |m, g| m.max(g.x + g.w));
+                let width = x_max - x_min;
+                if width <= 0.0 {
+                    continue;
+                }
+                let fsz = span.font_size;
+                let thickness = (span.data.underline_metrics.thickness * fsz).max(1.0);
+                let col = span
+                    .data
+                    .text_decoration
+                    .underline_color_opt
+                    .or(span.color_opt)
+                    .unwrap_or(ink);
+                let uy = base_y - span.data.underline_metrics.offset * fsz;
+                let x = (cx + x_min) * render_scale;
+                let w = width * render_scale;
+                let t = thickness * render_scale;
+                fill_rect(&mut buf, pw, ph, x, uy * render_scale, w, t, col);
+                if underline == UnderlineStyle::Double {
+                    fill_rect(
+                        &mut buf,
+                        pw,
+                        ph,
+                        x,
+                        (uy + thickness * 2.0) * render_scale,
+                        w,
+                        t,
+                        col,
+                    );
+                }
+            }
         }
     });
     (buf, pw, ph)
+}
+
+/// Fill an axis-aligned rectangle (device pixels) with a colour, used for
+/// underline decorations.
+fn fill_rect(buf: &mut [u8], w: usize, h: usize, x: f32, y: f32, rw: f32, rh: f32, color: CtColor) {
+    let x0 = x.round() as i32;
+    let y0 = y.round() as i32;
+    let x1 = (x + rw).round() as i32;
+    let y1 = (y + rh.max(1.0)).round() as i32;
+    for py in y0..y1 {
+        for px in x0..x1 {
+            blend_px(buf, w, h, px, py, color);
+        }
+    }
 }
 
 fn blend_px(buf: &mut [u8], w: usize, h: usize, x: i32, y: i32, color: CtColor) {
@@ -1117,37 +1310,38 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
 }
 
 /// Split one buffer line into runs, coalescing consecutive characters that share
-/// bold / italic. Font, size and colour are uniform (`base`); only weight and
-/// slant vary per run today.
+/// bold / italic / underline / colour. Font and size are uniform (`base`).
 fn runs_from_line(line: &cosmic_text::BufferLine, base: &CharStyle) -> Vec<Run> {
     let text = line.text();
     let list = line.attrs_list();
     let mut runs: Vec<Run> = Vec::new();
-    let mut cur: Option<(String, bool, bool)> = None;
+    let mut cur: Option<(String, RunFmt)> = None;
     for (i, ch) in text.char_indices() {
-        let (bold, italic) = span_flags(list, i);
+        let fmt = span_fmt(list, i);
         match &mut cur {
-            Some((s, b, it)) if *b == bold && *it == italic => s.push(ch),
+            Some((s, f)) if *f == fmt => s.push(ch),
             _ => {
-                if let Some((s, b, it)) = cur.take() {
-                    runs.push(styled_run(s, b, it, base));
+                if let Some((s, f)) = cur.take() {
+                    runs.push(styled_run(s, f, base));
                 }
-                cur = Some((ch.to_string(), bold, italic));
+                cur = Some((ch.to_string(), fmt));
             }
         }
     }
-    if let Some((s, b, it)) = cur.take() {
-        runs.push(styled_run(s, b, it, base));
+    if let Some((s, f)) = cur.take() {
+        runs.push(styled_run(s, f, base));
     }
     runs
 }
 
-fn styled_run(text: String, bold: bool, italic: bool, base: &CharStyle) -> Run {
+fn styled_run(text: String, fmt: RunFmt, base: &CharStyle) -> Run {
     Run::new(
         text,
         CharStyle {
-            bold,
-            italic,
+            bold: fmt.bold,
+            italic: fmt.italic,
+            underline: fmt.underline,
+            color: fmt.color.unwrap_or(base.color),
             ..base.clone()
         },
     )
@@ -1188,7 +1382,13 @@ mod tests {
         let mut buffer = buffer_with("Hello world", &mut fs);
         let base = Attrs::new().family(Family::Name("Times New Roman"));
         let mut list = AttrsList::new(&base);
-        list.add_span(6..11, &styled_attrs("Times New Roman", true, false)); // "world"
+        let bold = RunFmt {
+            bold: true,
+            italic: false,
+            underline: false,
+            color: None,
+        };
+        list.add_span(6..11, &styled_attrs("Times New Roman", bold)); // "world"
         buffer.lines[0].set_attrs_list(list);
 
         let runs = runs_from_line(&buffer.lines[0], &CharStyle::default());
@@ -1214,7 +1414,8 @@ mod tests {
             "Times New Roman",
             CharToggle::Bold
         ));
-        assert_eq!(current_flags(&editor), (true, false));
+        let cur = current_fmt(&editor);
+        assert!(cur.bold && !cur.italic);
         let bold: String = editor
             .with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()))
             .into_iter()
@@ -1261,6 +1462,70 @@ mod tests {
             .find(|r| r.text == "beta")
             .expect("styled run");
         assert!(!styled.style.bold && styled.style.italic);
+    }
+
+    #[test]
+    fn underline_toggles_and_survives_the_model_round_trip() {
+        let mut fs = FontSystem::new();
+        let buffer = buffer_with("alpha beta", &mut fs);
+        let mut editor = Editor::new(buffer);
+        editor.set_selection(Selection::Normal(Cursor::new(0, 6))); // "beta"
+        editor.set_cursor(Cursor::new(0, 10));
+
+        assert!(toggle_selection_style(
+            &mut editor,
+            &mut fs,
+            "Times New Roman",
+            CharToggle::Underline
+        ));
+        let styled = editor
+            .with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()))
+            .into_iter()
+            .find(|r| r.text == "beta")
+            .expect("styled run");
+        assert!(styled.style.underline && !styled.style.bold);
+        assert!(current_fmt(&editor).underline);
+    }
+
+    #[test]
+    fn colour_applies_to_selection_and_black_clears_it() {
+        let mut fs = FontSystem::new();
+        let buffer = buffer_with("alpha beta", &mut fs);
+        let mut editor = Editor::new(buffer);
+        editor.set_selection(Selection::Normal(Cursor::new(0, 6))); // "beta"
+        editor.set_cursor(Cursor::new(0, 10));
+
+        let red = Color::new(220, 30, 30, 255);
+        assert!(restyle_selection(
+            &mut editor,
+            &mut fs,
+            "Times New Roman",
+            |mut f| {
+                f.color = Some(red);
+                f
+            }
+        ));
+        let styled = editor
+            .with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()))
+            .into_iter()
+            .find(|r| r.text == "beta")
+            .expect("coloured run");
+        assert_eq!(styled.style.color, red);
+
+        // Setting the colour span back to None returns "beta" to the default,
+        // so the whole line coalesces to one plain run again.
+        assert!(restyle_selection(
+            &mut editor,
+            &mut fs,
+            "Times New Roman",
+            |mut f| {
+                f.color = None;
+                f
+            }
+        ));
+        let runs = editor.with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()));
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].style.color, Color::BLACK);
     }
 
     #[test]
