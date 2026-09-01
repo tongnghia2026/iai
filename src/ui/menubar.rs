@@ -1119,6 +1119,15 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.layers.text_to_curves = Some(data.layers.active_layer_idx);
                             ui.close();
                         }
+                        ui.separator();
+                        let doc_on = super::document_mode::is_active();
+                        if ui
+                            .selectable_label(doc_on, "Soạn thảo văn bản… (thử nghiệm)")
+                            .clicked()
+                        {
+                            super::document_mode::toggle_active();
+                            ui.close();
+                        }
                     });
 
                     ui.menu_button("Select", |ui| {

@@ -8,6 +8,7 @@ pub mod artboard_bar;
 pub mod color_picker;
 pub mod develop;
 pub mod dialogs;
+pub mod document_mode;
 pub mod intent;
 pub mod library;
 pub mod menubar;
@@ -808,6 +809,7 @@ pub fn build(
         warp::build(ctx, data, &mut actions);
         ai_panel::build(ctx, data, &mut actions);
         ai_progress::build(ctx, data, &mut actions);
+        document_mode::build(ctx);
         draw_paint_color_dialog(ctx, data, &mut actions);
 
         let canvas_viewport = {
