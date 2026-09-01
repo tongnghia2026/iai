@@ -12,10 +12,15 @@
 //! shaped buffers plus the shared glyph cache (see the phase-0 measurements in
 //! `src/bin/text_spike.rs`).
 
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::Path;
+
 use cosmic_text::{
     Align, Attrs, Buffer, Color as CtColor, Family, FontSystem, Metrics, Shaping, Style,
     SwashCache, Weight,
 };
+use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
 
 use crate::core::text_document::{CharStyle, ParagraphAlign, TextDocument};
 
@@ -219,6 +224,245 @@ fn blend_px(buf: &mut [u8], w: usize, h: usize, x: i32, y: i32, color: CtColor) 
     }
 }
 
+/// One placed glyph for PDF text emission (position in PDF points, bottom-up).
+struct Glyph {
+    font: usize, // index into the export's font table
+    gid: u16,
+    x: f32,
+    y: f32,
+    size: f32,
+    color: [u8; 4],
+}
+
+impl DocumentLayout {
+    /// Write the document as a fresh multi-page PDF with **real, selectable
+    /// text**: each used face is embedded once as a Type0 / Identity-H CID font
+    /// and glyphs are drawn by shaped position. The result is vector (sharp at
+    /// any zoom, no rasterised pixels), small, and copy/searchable — Vietnamese
+    /// included, via a ToUnicode CMap. Works from a layout built at any dpi.
+    pub fn write_text_pdf(&self, font_system: &mut FontSystem, path: &Path) -> Result<(), String> {
+        let s = 72.0 / self.dpi; // built-dpi px -> PDF points
+        let (cx, cy, _, _) = self.content_rect;
+        let (pw_px, ph_px) = self.page_px;
+        let page_w = pw_px as f32 * s;
+        let page_h = ph_px as f32 * s;
+
+        let mut font_ids = Vec::new(); // unique face ids, insertion order (type inferred)
+        let mut font_weight = Vec::new();
+        let mut to_unicode: Vec<BTreeMap<u16, String>> = Vec::new();
+        let mut pages: Vec<Vec<Glyph>> = Vec::new();
+
+        for page in 0..self.pages {
+            let mut glyphs = Vec::new();
+            for para in &self.paras {
+                for (li, run) in para.buffer.layout_runs().enumerate() {
+                    let (lp, top) = para.line_pages[li];
+                    if lp != page {
+                        continue;
+                    }
+                    let baseline = (cy + top + (run.line_y - run.line_top)) * s;
+                    for g in run.glyphs {
+                        let fi = match font_ids.iter().position(|id| *id == g.font_id) {
+                            Some(i) => i,
+                            None => {
+                                font_ids.push(g.font_id);
+                                font_weight.push(g.font_weight);
+                                to_unicode.push(BTreeMap::new());
+                                font_ids.len() - 1
+                            }
+                        };
+                        if let Some(src) = run.text.get(g.start..g.end) {
+                            if !src.is_empty() {
+                                to_unicode[fi]
+                                    .entry(g.glyph_id)
+                                    .or_insert_with(|| src.to_string());
+                            }
+                        }
+                        let color = g
+                            .color_opt
+                            .map(|c| [c.r(), c.g(), c.b(), c.a()])
+                            .unwrap_or([26, 26, 26, 255]);
+                        glyphs.push(Glyph {
+                            font: fi,
+                            gid: g.glyph_id,
+                            x: (cx + g.x) * s,
+                            y: page_h - baseline,
+                            size: g.font_size * s,
+                            color,
+                        });
+                    }
+                }
+            }
+            pages.push(glyphs);
+        }
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+
+        let mut type0_ids = Vec::with_capacity(font_ids.len());
+        for (i, id) in font_ids.iter().enumerate() {
+            let font = font_system
+                .get_font(*id, font_weight[i])
+                .ok_or_else(|| "failed to load a document font for embedding".to_string())?;
+            let data = font.data().to_vec();
+            let length1 = data.len() as i64;
+            let base = format!("IAIFont{i}");
+
+            let font_file = doc.add_object(
+                Stream::new(
+                    dictionary! { "Length1" => length1, "Filter" => "FlateDecode" },
+                    deflate(&data),
+                )
+                .with_compression(false),
+            );
+            let descriptor = doc.add_object(dictionary! {
+                "Type" => "FontDescriptor",
+                "FontName" => Object::Name(base.clone().into_bytes()),
+                "Flags" => 4,
+                "FontBBox" => vec![0.into(), (-250).into(), 1000.into(), 1000.into()],
+                "ItalicAngle" => 0,
+                "Ascent" => 800,
+                "Descent" => (-250),
+                "CapHeight" => 700,
+                "StemV" => 80,
+                "FontFile2" => font_file,
+            });
+            let cid = doc.add_object(dictionary! {
+                "Type" => "Font",
+                "Subtype" => "CIDFontType2",
+                "BaseFont" => Object::Name(base.clone().into_bytes()),
+                "CIDSystemInfo" => dictionary! {
+                    "Registry" => Object::String(b"Adobe".to_vec(), StringFormat::Literal),
+                    "Ordering" => Object::String(b"Identity".to_vec(), StringFormat::Literal),
+                    "Supplement" => 0,
+                },
+                "FontDescriptor" => descriptor,
+                "CIDToGIDMap" => "Identity",
+                "DW" => 1000,
+            });
+            let cmap = build_to_unicode(&to_unicode[i]);
+            let to_uni = doc.add_object(
+                Stream::new(
+                    dictionary! { "Filter" => "FlateDecode" },
+                    deflate(cmap.as_bytes()),
+                )
+                .with_compression(false),
+            );
+            let type0 = doc.add_object(dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type0",
+                "BaseFont" => Object::Name(base.into_bytes()),
+                "Encoding" => "Identity-H",
+                "DescendantFonts" => vec![cid.into()],
+                "ToUnicode" => to_uni,
+            });
+            type0_ids.push(type0);
+        }
+
+        let mut font_dict = Dictionary::new();
+        for (i, type0) in type0_ids.iter().enumerate() {
+            font_dict.set(format!("F{i}"), *type0);
+        }
+        let resources = doc.add_object(dictionary! { "Font" => font_dict });
+
+        let mut kids: Vec<Object> = Vec::with_capacity(pages.len());
+        for glyphs in &pages {
+            let content = page_content(glyphs);
+            let content_id = doc.add_object(
+                Stream::new(
+                    dictionary! { "Filter" => "FlateDecode" },
+                    deflate(content.as_bytes()),
+                )
+                .with_compression(false),
+            );
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![0.into(), 0.into(), Object::Real(page_w), Object::Real(page_h)],
+                "Contents" => content_id,
+                "Resources" => resources,
+            });
+            kids.push(page_id.into());
+        }
+
+        let count = kids.len() as i64;
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => count,
+            }),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+        doc.change_producer("iAi Document");
+        doc.save(path)
+            .map(|_| ())
+            .map_err(|e| format!("Could not write PDF: {e}"))
+    }
+}
+
+fn deflate(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let _ = encoder.write_all(bytes);
+    encoder.finish().unwrap_or_default()
+}
+
+/// Place each glyph by absolute text matrix, re-emitting `Tf`/`rg` only when the
+/// font, size or colour changes.
+fn page_content(glyphs: &[Glyph]) -> String {
+    let mut out = String::new();
+    let mut cur: Option<(usize, u32, [u8; 4])> = None;
+    let mut open = false;
+    for g in glyphs {
+        let key = (g.font, g.size.to_bits(), g.color);
+        if cur != Some(key) {
+            if open {
+                out.push_str("ET\n");
+            }
+            out.push_str("BT\n");
+            out.push_str(&format!("/F{} {:.2} Tf\n", g.font, g.size));
+            out.push_str(&format!(
+                "{:.4} {:.4} {:.4} rg\n",
+                g.color[0] as f32 / 255.0,
+                g.color[1] as f32 / 255.0,
+                g.color[2] as f32 / 255.0
+            ));
+            open = true;
+            cur = Some(key);
+        }
+        out.push_str(&format!(
+            "1 0 0 1 {:.2} {:.2} Tm <{:04X}> Tj\n",
+            g.x, g.y, g.gid
+        ));
+    }
+    if open {
+        out.push_str("ET\n");
+    }
+    out
+}
+
+/// A ToUnicode CMap mapping glyph ids back to source text (for copy / search).
+fn build_to_unicode(map: &BTreeMap<u16, String>) -> String {
+    let mut s = String::new();
+    s.push_str("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n");
+    s.push_str("/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n");
+    s.push_str("/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n");
+    s.push_str("1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n");
+    let entries: Vec<_> = map.iter().collect();
+    for chunk in entries.chunks(100) {
+        s.push_str(&format!("{} beginbfchar\n", chunk.len()));
+        for (gid, src) in chunk {
+            let utf16: String = src.encode_utf16().map(|u| format!("{u:04X}")).collect();
+            s.push_str(&format!("<{gid:04X}> <{utf16}>\n"));
+        }
+        s.push_str("endbfchar\n");
+    }
+    s.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +571,23 @@ mod tests {
         let layout = DocumentLayout::build(&doc, DPI, &mut fs);
         assert_eq!(layout.page_count(), 1);
         assert!(layout.line_count() >= 1);
+    }
+
+    #[test]
+    fn write_text_pdf_embeds_a_valid_pdf() {
+        let mut fs = FontSystem::new();
+        let doc = TextDocument::from_plain_text("Cộng hòa xã hội\nĐộc lập – Tự do");
+        let layout = DocumentLayout::build(&doc, DPI, &mut fs);
+        let path = std::env::temp_dir().join("iai_write_text_pdf_test.pdf");
+        layout.write_text_pdf(&mut fs, &path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"), "missing PDF header");
+        assert!(
+            bytes.len() > 2000,
+            "an embedded font should make it non-trivial"
+        );
+        let reloaded = lopdf::Document::load(&path).expect("re-parse written PDF");
+        assert_eq!(reloaded.get_pages().len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 }

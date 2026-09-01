@@ -196,34 +196,43 @@ fn main() {
     };
     let layout = DocumentLayout::build(&doc, 96.0, &mut font_system);
     let (dpw, dph) = layout.page_px();
-    let (wpt, hpt) = (
-        doc.page.paper.width_mm / 25.4 * 72.0,
-        doc.page.paper.height_mm / 25.4 * 72.0,
-    );
-    let mut pdf_pages = Vec::new();
     for p in 0..layout.page_count() {
         let img = layout.render_page(p, &mut font_system, &mut swash_cache);
-        let path = format!("{out_dir}/spike_docpage_{p}.png");
-        image::RgbaImage::from_raw(dpw as u32, dph as u32, img.clone())
+        image::RgbaImage::from_raw(dpw as u32, dph as u32, img)
             .unwrap()
-            .save(&path)
+            .save(format!("{out_dir}/spike_docpage_{p}.png"))
             .unwrap();
-        pdf_pages.push(iai::formats::pdf::ImagePdfPage {
-            rgba: img,
-            width: dpw as u32,
-            height: dph as u32,
-            page_points: (wpt, hpt),
-        });
     }
+    // Selectable-text vector PDF — exactly what document mode now exports.
     let pdf_path = format!("{out_dir}/spike_doc.pdf");
-    iai::formats::pdf::write_image_pdf(std::path::Path::new(&pdf_path), &pdf_pages).unwrap();
-    // Re-open with hayro (the app's own PDF reader) to prove it is valid.
+    layout
+        .write_text_pdf(&mut font_system, std::path::Path::new(&pdf_path))
+        .unwrap();
     match iai::formats::pdf::PdfImporter::probe(std::path::Path::new(&pdf_path)) {
         Ok(pr) => println!(
-            "[pdf]   wrote {pdf_path} — probe OK: {} pages, dims {:?}",
+            "[pdf]   text PDF {pdf_path} — probe OK: {} pages, dims {:?}",
             pr.page_count, pr.page_dims
         ),
         Err(e) => println!("[pdf]   PROBE FAILED: {e}"),
+    }
+    // Rasterise page 1 back through hayro to prove the embedded fonts render.
+    match iai::formats::pdf::PdfImporter::render_selected(
+        std::path::Path::new(&pdf_path),
+        &[0],
+        Some(150.0),
+    ) {
+        Ok(canvases) => {
+            let c = &canvases[0];
+            image::RgbaImage::from_raw(c.width, c.height, c.flatten_for_export())
+                .unwrap()
+                .save(format!("{out_dir}/spike_doc_rendered.png"))
+                .unwrap();
+            println!(
+                "[pdf]   rendered back via hayro -> spike_doc_rendered.png ({}x{})",
+                c.width, c.height
+            );
+        }
+        Err(e) => println!("[pdf]   RENDER-BACK FAILED: {e}"),
     }
 
     println!("--- cosmic-text VN spike ---");

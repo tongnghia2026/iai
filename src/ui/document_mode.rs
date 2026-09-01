@@ -20,11 +20,10 @@ use cosmic_text::{FontSystem, SwashCache};
 
 use crate::core::text_document::{PaperSize, ParagraphAlign, TextDocument};
 use crate::core::text_layout::DocumentLayout;
-use crate::formats::pdf::{write_image_pdf, ImagePdfPage};
 
-/// Preview DPI (screen). PDF export renders at [`EXPORT_DPI`] for print quality.
+/// Preview / layout DPI. PDF export is vector (embedded fonts), so it is
+/// resolution-independent and needs no separate export dpi.
 const DPI: f32 = 96.0;
-const EXPORT_DPI: f32 = 200.0;
 
 struct DocRuntime {
     active: bool,
@@ -343,30 +342,15 @@ fn poll_pdf_export(ctx: &egui::Context, d: &mut DocRuntime) {
     }
 }
 
-/// Render every page at print resolution and write a multi-page image PDF.
-/// Returns the page count on success.
+/// Write the document as a selectable-text vector PDF. Returns the page count.
 fn export_pdf(d: &mut DocRuntime, path: &std::path::Path) -> Result<usize, String> {
     let doc = build_doc(d);
-    let (wpt, hpt) = (
-        d.paper.width_mm / 25.4 * 72.0,
-        d.paper.height_mm / 25.4 * 72.0,
-    );
     if d.engine.is_none() {
         d.engine = Some((FontSystem::new(), SwashCache::new()));
     }
     let engine = d.engine.as_mut().expect("engine inited");
-    let (fs, sc) = (&mut engine.0, &mut engine.1);
-    let layout = DocumentLayout::build(&doc, EXPORT_DPI, fs);
-    let (pw, ph) = layout.page_px();
-    let mut pages = Vec::with_capacity(layout.page_count());
-    for p in 0..layout.page_count() {
-        pages.push(ImagePdfPage {
-            rgba: layout.render_page(p, fs, sc),
-            width: pw as u32,
-            height: ph as u32,
-            page_points: (wpt, hpt),
-        });
-    }
-    write_image_pdf(path, &pages)?;
-    Ok(pages.len())
+    let layout = DocumentLayout::build(&doc, DPI, &mut engine.0);
+    let pages = layout.page_count();
+    layout.write_text_pdf(&mut engine.0, path)?;
+    Ok(pages)
 }
