@@ -623,7 +623,13 @@ impl Document {
     pub fn new_flow_text(id: DocumentId) -> Self {
         let mut document = Self::new(id, 1, 1);
         document.kind = DocumentKind::FlowText;
-        document.flow_text = Some(FlowTextDocumentState::default());
+        // Start slightly loose (1.3), the historical document-mode default, so a
+        // fresh page reads comfortably; the editor's line-spacing control changes
+        // it from here.
+        let mut text = crate::core::text_document::TextDocument::new();
+        text.default_para.line_spacing = 1.3;
+        text.paragraphs[0].style.line_spacing = 1.3;
+        document.flow_text = Some(FlowTextDocumentState::new(text));
         document.title = "Tài liệu chưa đặt tên".to_string();
         // Document-surface zoom is a fit-relative multiplier; avoid running the
         // canvas first-view fit calculation against the 1x1 compatibility shell.

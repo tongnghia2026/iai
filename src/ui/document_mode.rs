@@ -59,7 +59,16 @@ impl RunFmt {
 }
 
 const DPI: f32 = 96.0;
-const LINE_SPACING: f32 = 1.3;
+/// Fallback line spacing when a document does not specify one.
+const DEFAULT_LINE_SPACING: f32 = 1.3;
+/// Line-spacing presets offered in the toolbar.
+const LINE_SPACING_PRESETS: [(f32, &str); 5] = [
+    (1.0, "1,0"),
+    (1.15, "1,15"),
+    (1.3, "1,3"),
+    (1.5, "1,5"),
+    (2.0, "2,0"),
+];
 /// Longest side (in device pixels) allowed for a rendered page texture; caps
 /// the supersample so an extreme zoom cannot allocate a huge bitmap.
 const MAX_PAGE_TEX_PX: f32 = 4096.0;
@@ -72,6 +81,8 @@ struct DocRuntime {
     /// picker yet). Stored so the buffer and the model round-trip faithfully.
     font: TextFontFamily,
     font_pt: f32,
+    /// Line spacing as a multiple of single spacing, applied document-wide.
+    line_spacing: f32,
     /// Display zoom multiplier on top of fit-to-window (1.0 = fit).
     zoom: f32,
     /// True while a click-drag selection is in progress (so the anchor Click is
@@ -94,6 +105,7 @@ impl Default for DocRuntime {
             setup: PageSetup::default(),
             font: CharStyle::default().font,
             font_pt: 13.0,
+            line_spacing: DEFAULT_LINE_SPACING,
             zoom: 1.0,
             drag_active: false,
             page_index: 0,
@@ -170,13 +182,13 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions, viewpo
 }
 
 /// Line height in layout pixels for the current font size.
-fn line_height(font_pt: f32) -> f32 {
-    font_pt * DPI / 72.0 * LINE_SPACING
+fn line_height(font_pt: f32, line_spacing: f32) -> f32 {
+    font_pt * DPI / 72.0 * line_spacing
 }
 
-fn base_metrics(font_pt: f32) -> Metrics {
+fn base_metrics(font_pt: f32, line_spacing: f32) -> Metrics {
     let px = font_pt * DPI / 72.0;
-    Metrics::new(px, px * LINE_SPACING)
+    Metrics::new(px, px * line_spacing.max(0.1))
 }
 
 fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewModel) {
@@ -196,8 +208,13 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
     d.setup = view.document.page;
     d.font = view.document.default_char.font.clone();
     d.font_pt = view.document.default_char.size_pt;
+    d.line_spacing = if view.document.default_para.line_spacing > 0.0 {
+        view.document.default_para.line_spacing
+    } else {
+        DEFAULT_LINE_SPACING
+    };
     let cw = d.setup.content_width_px(DPI);
-    let mut buffer = Buffer::new(fs, base_metrics(d.font_pt));
+    let mut buffer = Buffer::new(fs, base_metrics(d.font_pt, d.line_spacing));
     buffer.set_size(Some(cw), None);
     let font_name = d.font.name();
     let attrs = Attrs::new().family(Family::Name(font_name));
@@ -249,6 +266,7 @@ fn window_ui(
     let mut align_cmd: Option<Align> = None;
     let mut char_toggle: Option<CharToggle> = None;
     let mut char_color: Option<Color> = None;
+    let mut spacing_cmd: Option<f32> = None;
     let cur = current_fmt(d.editor.as_ref().expect("editor"));
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt("doc_paper")
@@ -331,6 +349,27 @@ fn window_ui(
         }
         ui.separator();
 
+        // Line spacing (whole document).
+        let spacing_label = LINE_SPACING_PRESETS
+            .iter()
+            .find(|(v, _)| (v - d.line_spacing).abs() < 1e-3)
+            .map(|(_, l)| *l)
+            .unwrap_or("—");
+        ui.label(ph::ARROWS_VERTICAL).on_hover_text("Giãn dòng");
+        egui::ComboBox::from_id_salt("doc_line_spacing")
+            .selected_text(spacing_label)
+            .show_ui(ui, |ui| {
+                for (v, label) in LINE_SPACING_PRESETS {
+                    if ui
+                        .selectable_label((v - d.line_spacing).abs() < 1e-3, label)
+                        .clicked()
+                    {
+                        spacing_cmd = Some(v);
+                    }
+                }
+            });
+        ui.separator();
+
         // Zoom.
         if ui
             .button(ph::MAGNIFYING_GLASS_MINUS)
@@ -362,12 +401,15 @@ fn window_ui(
     if let Some(color) = char_color {
         apply_char_color(d, fs, color);
     }
+    if let Some(spacing) = spacing_cmd {
+        apply_line_spacing(d, fs, spacing);
+    }
 
     // --- Page geometry (layout px at 96 dpi) ---
     let (cx, cy, _cw, ch) = d.setup.content_rect_px(DPI);
     let page_w = d.setup.paper.width_px(DPI);
     let page_h = d.setup.paper.height_px(DPI);
-    let lh = line_height(d.font_pt);
+    let lh = line_height(d.font_pt, d.line_spacing);
 
     // Reserve fixed top/left strips for the same ruler geometry used by canvas
     // mode. Only the paper workspace scrolls; the ruler never moves with it.
@@ -836,7 +878,7 @@ fn motion(editor: &mut Editor<'static>, fs: &mut FontSystem, m: Motion, extend: 
 /// Re-apply page width / metrics to the editor buffer after a toolbar change.
 fn apply_reshape(d: &mut DocRuntime, fs: &mut FontSystem) {
     let cw = d.setup.content_width_px(DPI);
-    let metrics = base_metrics(d.font_pt);
+    let metrics = base_metrics(d.font_pt, d.line_spacing);
     let editor = d.editor.as_mut().expect("editor");
     editor.with_buffer_mut(|b| {
         b.set_metrics(metrics);
@@ -844,6 +886,16 @@ fn apply_reshape(d: &mut DocRuntime, fs: &mut FontSystem) {
     });
     editor.shape_as_needed(fs, false);
     d.revision = d.revision.wrapping_add(1);
+}
+
+/// Change the document-wide line spacing and re-flow. Spacing lives on the
+/// buffer metrics, so this reshapes the whole document (and repaginates).
+fn apply_line_spacing(d: &mut DocRuntime, fs: &mut FontSystem, spacing: f32) {
+    if (d.line_spacing - spacing).abs() < 1e-4 {
+        return;
+    }
+    d.line_spacing = spacing.max(0.1);
+    apply_reshape(d, fs);
 }
 
 /// Set the alignment of every paragraph touched by the selection (or the caret
@@ -1287,7 +1339,7 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
                 };
                 let style = ParagraphStyle {
                     align,
-                    line_spacing: LINE_SPACING,
+                    line_spacing: d.line_spacing,
                     ..ParagraphStyle::default()
                 };
                 Paragraph {
@@ -1303,7 +1355,7 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
         page: d.setup,
         default_char: base_char,
         default_para: ParagraphStyle {
-            line_spacing: LINE_SPACING,
+            line_spacing: d.line_spacing,
             ..ParagraphStyle::default()
         },
     }
@@ -1368,7 +1420,7 @@ mod tests {
     }
 
     fn buffer_with(text: &str, fs: &mut FontSystem) -> Buffer {
-        let mut buffer = Buffer::new(fs, base_metrics(13.0));
+        let mut buffer = Buffer::new(fs, base_metrics(13.0, DEFAULT_LINE_SPACING));
         buffer.set_size(Some(400.0), None);
         let base = Attrs::new().family(Family::Name("Times New Roman"));
         buffer.set_text(text, &base, Shaping::Advanced, None);
@@ -1552,7 +1604,7 @@ mod tests {
         let page_w = setup.paper.width_px(DPI);
         let page_h = setup.paper.height_px(DPI);
 
-        let mut buffer = Buffer::new(&mut fs, base_metrics(13.0));
+        let mut buffer = Buffer::new(&mut fs, base_metrics(13.0, DEFAULT_LINE_SPACING));
         buffer.set_size(Some(setup.content_width_px(DPI)), None);
         buffer.set_text(
             "Cộng hòa xã hội chủ nghĩa Việt Nam",

@@ -619,6 +619,26 @@ mod tests {
     }
 
     #[test]
+    fn wider_line_spacing_uses_more_pages() {
+        let mut fs = FontSystem::new();
+        let body = "Một dòng văn bản\n".repeat(60);
+        let mut tight = TextDocument::from_plain_text(&body);
+        for p in &mut tight.paragraphs {
+            p.style.line_spacing = 1.0;
+        }
+        let mut loose = TextDocument::from_plain_text(&body);
+        for p in &mut loose.paragraphs {
+            p.style.line_spacing = 2.5;
+        }
+        let tight_pages = DocumentLayout::build(&tight, DPI, &mut fs).page_count();
+        let loose_pages = DocumentLayout::build(&loose, DPI, &mut fs).page_count();
+        assert!(
+            loose_pages > tight_pages,
+            "2.5x spacing ({loose_pages}p) should need more pages than 1.0x ({tight_pages}p)"
+        );
+    }
+
+    #[test]
     fn placed_lines_respect_content_height() {
         let mut fs = FontSystem::new();
         let doc = TextDocument::from_plain_text(&"Một dòng\n".repeat(120));
