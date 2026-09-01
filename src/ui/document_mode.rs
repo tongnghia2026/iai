@@ -27,10 +27,35 @@ use crate::core::color::Color;
 use crate::core::document::DocumentId;
 use crate::core::text::TextFontFamily;
 use crate::core::text_document::{
-    CharStyle, ImageBlock, PageSetup, PaperSize, Paragraph, ParagraphAlign, ParagraphStyle, Run,
-    TextDocument,
+    CharStyle, ImageBlock, ListKind, PageSetup, PaperSize, Paragraph, ParagraphAlign,
+    ParagraphStyle, Run, TextDocument,
 };
 use crate::ui::{FlowTextViewModel, UiActions, UiData};
+
+/// Hanging indent for a list item, in mm (matches `text_layout::LIST_INDENT_MM`).
+const LIST_INDENT_MM: f32 = 8.0;
+
+fn list_indent_px() -> f32 {
+    LIST_INDENT_MM / 25.4 * DPI
+}
+
+/// List kind stored in a `BufferLine`'s metadata (survives edits; only a full
+/// line reset clears it). 0 = none, 1 = bullet, 2 = numbered.
+fn list_kind_to_code(kind: ListKind) -> usize {
+    match kind {
+        ListKind::None => 0,
+        ListKind::Bullet => 1,
+        ListKind::Numbered => 2,
+    }
+}
+
+fn list_kind_from_code(code: usize) -> ListKind {
+    match code {
+        1 => ListKind::Bullet,
+        2 => ListKind::Numbered,
+        _ => ListKind::None,
+    }
+}
 
 /// The Unicode object-replacement character marks a line that holds one block
 /// image. Its glyph is drawn transparent; the picture is painted as an overlay.
@@ -326,6 +351,8 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
             }
             continue;
         }
+        // Remember the list kind in the line metadata (survives edits).
+        line.set_metadata(list_kind_to_code(paragraph.style.list));
         // Reproduce per-run emphasis / colour as attribute spans. Size stays on
         // the buffer metrics (not the spans) so the global size control keeps
         // working; underline is drawn by the renderer from these spans.
@@ -345,6 +372,8 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
     }
     buffer.shape_until_scroll(fs, false);
     d.editor = Some(Editor::new(buffer));
+    // Narrow the list lines so their hanging indent shows from the first frame.
+    relayout_list_lines(d.editor.as_mut().expect("editor"), fs, cw);
     d.bound_model_revision = view.revision;
     d.page_index = view.active_page.min(view.page_count.saturating_sub(1));
     d.page_count = view.page_count.max(1);
@@ -367,7 +396,9 @@ fn window_ui(
     let mut char_toggle: Option<CharToggle> = None;
     let mut char_color: Option<Color> = None;
     let mut spacing_cmd: Option<f32> = None;
+    let mut list_cmd: Option<ListKind> = None;
     let cur = current_fmt(d.editor.as_ref().expect("editor"));
+    let cur_list = caret_list_kind(d.editor.as_ref().expect("editor"));
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt("doc_paper")
             .selected_text(paper_name(d.setup.paper))
@@ -449,6 +480,23 @@ fn window_ui(
         }
         ui.separator();
 
+        // Lists (apply to the selected paragraphs).
+        if ui
+            .selectable_label(cur_list == ListKind::Bullet, ph::LIST_BULLETS)
+            .on_hover_text("Danh sách chấm")
+            .clicked()
+        {
+            list_cmd = Some(ListKind::Bullet);
+        }
+        if ui
+            .selectable_label(cur_list == ListKind::Numbered, ph::LIST_NUMBERS)
+            .on_hover_text("Danh sách đánh số")
+            .clicked()
+        {
+            list_cmd = Some(ListKind::Numbered);
+        }
+        ui.separator();
+
         // Line spacing (whole document).
         let spacing_label = LINE_SPACING_PRESETS
             .iter()
@@ -509,6 +557,9 @@ fn window_ui(
     }
     if let Some(spacing) = spacing_cmd {
         apply_line_spacing(d, fs, spacing);
+    }
+    if let Some(kind) = list_cmd {
+        apply_list(d, fs, kind);
     }
 
     // --- Page geometry (layout px at 96 dpi) ---
@@ -593,7 +644,17 @@ fn window_ui(
             };
 
             let font_name = d.font.name().to_string();
-            let (image, sel_rects, caret, page_count, page_index, revision, image_lines) = {
+            let (
+                image,
+                sel_rects,
+                caret,
+                page_count,
+                page_index,
+                revision,
+                image_lines,
+                marker_draws,
+                caret_on_list,
+            ) = {
                 let editor = d.editor.as_mut().expect("editor");
                 let page_index = d.page_index;
                 let mut dirty = false;
@@ -603,13 +664,15 @@ fn window_ui(
                 if focused {
                     if response.drag_started() {
                         if let Some(p) = response.interact_pointer_pos() {
-                            let (x, y) = map(p, page_index);
+                            let (mut x, y) = map(p, page_index);
+                            x -= list_indent_at_y(editor, y); // list lines are shifted right
                             editor.action(fs, Action::Click { x, y });
                         }
                         d.drag_active = true;
                     } else if response.dragged() {
                         if let Some(p) = response.interact_pointer_pos() {
-                            let (x, y) = map(p, page_index);
+                            let (mut x, y) = map(p, page_index);
+                            x -= list_indent_at_y(editor, y); // list lines are shifted right
                             if d.drag_active {
                                 editor.action(fs, Action::Drag { x, y });
                             } else {
@@ -619,7 +682,8 @@ fn window_ui(
                         }
                     } else if response.clicked() {
                         if let Some(p) = response.interact_pointer_pos() {
-                            let (x, y) = map(p, page_index);
+                            let (mut x, y) = map(p, page_index);
+                            x -= list_indent_at_y(editor, y); // list lines are shifted right
                             editor.action(fs, Action::Click { x, y });
                         }
                     }
@@ -732,6 +796,9 @@ fn window_ui(
                 }
 
                 editor.shape_as_needed(fs, false);
+                // Edits re-lay list lines at the global width; narrow them again
+                // so the hanging indent and pagination stay correct.
+                relayout_list_lines(editor, fs, cw);
                 let revision = if dirty {
                     d.revision.wrapping_add(1)
                 } else {
@@ -795,20 +862,59 @@ fn window_ui(
                 // Image placeholder lines on this page: `(id, line_top, height)`
                 // in content pixels. The picture itself is painted as an overlay.
                 let mut image_lines: Vec<(usize, f32, f32)> = Vec::new();
+                // List markers on this page: `(text, line_top, height)`, drawn in
+                // the gutter on each list paragraph's first visual line.
+                let mut marker_draws: Vec<(String, f32, f32)> = Vec::new();
                 editor.with_buffer(|b| {
+                    let mut last_line: Option<usize> = None;
+                    let mut num = 0usize;
                     for run in b.layout_runs() {
-                        if (run.line_top / ch).floor() as usize != page_index {
+                        let first_visual = Some(run.line_i) != last_line;
+                        last_line = Some(run.line_i);
+                        if run.text == IMAGE_PLACEHOLDER {
+                            if (run.line_top / ch).floor() as usize == page_index {
+                                if let Some(g) = run.glyphs.first() {
+                                    image_lines.push((g.metadata, run.line_top, run.line_height));
+                                }
+                            }
+                            num = 0;
                             continue;
                         }
-                        if run.text != IMAGE_PLACEHOLDER {
+                        if !first_visual {
                             continue;
                         }
-                        if let Some(g) = run.glyphs.first() {
-                            image_lines.push((g.metadata, run.line_top, run.line_height));
+                        let kind = list_kind_from_code(b.lines[run.line_i].metadata().unwrap_or(0));
+                        let marker = match kind {
+                            ListKind::None => {
+                                num = 0;
+                                None
+                            }
+                            ListKind::Bullet => {
+                                num = 0;
+                                Some("•".to_string())
+                            }
+                            ListKind::Numbered => {
+                                num += 1;
+                                Some(format!("{num}."))
+                            }
+                        };
+                        if let Some(text) = marker {
+                            if (run.line_top / ch).floor() as usize == page_index {
+                                marker_draws.push((text, run.line_top, run.line_height));
+                            }
                         }
                     }
                 });
                 let caret = editor.cursor_position();
+                let caret_on_list = {
+                    let cl = editor.cursor().line;
+                    editor.with_buffer(|b| {
+                        b.lines
+                            .get(cl)
+                            .map(|l| l.metadata().unwrap_or(0) != 0)
+                            .unwrap_or(false)
+                    })
+                };
                 (
                     image,
                     sel_rects,
@@ -817,6 +923,8 @@ fn window_ui(
                     page_index,
                     revision,
                     image_lines,
+                    marker_draws,
+                    caret_on_list,
                 )
             };
 
@@ -872,10 +980,24 @@ fn window_ui(
                     painter.image(tex.id(), img_rect, uv, egui::Color32::WHITE);
                 }
             }
+            // Draw list markers in the gutter (left of the hanging indent).
+            for (text, line_top, mlh) in marker_draws {
+                let top = cy + line_top - page_index as f32 * ch;
+                let x = rect.min.x + cx * scale;
+                let y = rect.min.y + top * scale;
+                painter.text(
+                    egui::pos2(x, y + mlh * scale * 0.12),
+                    egui::Align2::LEFT_TOP,
+                    text,
+                    egui::FontId::proportional(d.font_pt * DPI / 72.0 * scale),
+                    egui::Color32::from_rgb(0x1a, 0x1a, 0x1a),
+                );
+            }
+            let caret_indent = if caret_on_list { list_indent_px() } else { 0.0 };
             if focused {
                 if let Some((qx, qy)) = caret {
                     if (qy as f32 / ch).floor() as usize == page_index {
-                        let x = rect.min.x + (cx + qx as f32) * scale;
+                        let x = rect.min.x + (cx + caret_indent + qx as f32) * scale;
                         let y0 = rect.min.y + (cy + qy as f32 - page_index as f32 * ch) * scale;
                         let blink = ui.input(|i| (i.time * 1.5) as i64 % 2 == 0);
                         if blink {
@@ -1410,6 +1532,86 @@ fn decode_color_image(bytes: &[u8]) -> Option<egui::ColorImage> {
     ))
 }
 
+/// Re-lay every list line at the narrowed (hanging-indent) width so `layout_runs`
+/// reflects it. cosmic-text lays all lines at the buffer's global width; this
+/// overrides just the list lines after each shape (image lines are excluded).
+fn relayout_list_lines(editor: &mut Editor<'static>, fs: &mut FontSystem, content_w: f32) {
+    let narrow = (content_w - list_indent_px()).max(1.0);
+    editor.with_buffer_mut(|b| {
+        let fss = b.metrics().font_size;
+        let wrap = b.wrap();
+        let ell = b.ellipsize();
+        let mono = b.monospace_width();
+        let tab = b.tab_width();
+        let hint = b.hinting();
+        for line in b.lines.iter_mut() {
+            if line.metadata().unwrap_or(0) != 0 && line.text() != IMAGE_PLACEHOLDER {
+                line.reset_layout();
+                line.layout(fs, fss, Some(narrow), wrap, ell, mono, tab, hint);
+            }
+        }
+    });
+}
+
+/// The list indent (px, rounded) applied to the line at buffer-y `by`, so a
+/// click on a list line can be mapped back into the narrowed layout.
+fn list_indent_at_y(editor: &Editor<'static>, by: i32) -> i32 {
+    let y = by as f32;
+    editor.with_buffer(|b| {
+        for run in b.layout_runs() {
+            if y >= run.line_top && y < run.line_top + run.line_height {
+                return if b.lines[run.line_i].metadata().unwrap_or(0) != 0 {
+                    list_indent_px().round() as i32
+                } else {
+                    0
+                };
+            }
+        }
+        0
+    })
+}
+
+/// The list kind currently on the caret's line (for the toolbar toggle state).
+fn caret_list_kind(editor: &Editor<'static>) -> ListKind {
+    let line = editor.cursor().line;
+    editor.with_buffer(|b| {
+        b.lines
+            .get(line)
+            .map(|l| list_kind_from_code(l.metadata().unwrap_or(0)))
+            .unwrap_or(ListKind::None)
+    })
+}
+
+/// Toggle a list kind over every line the selection touches (or the caret line).
+/// Toggling the kind that is already set clears it.
+fn apply_list(d: &mut DocRuntime, fs: &mut FontSystem, kind: ListKind) {
+    let content_w = d.setup.content_width_px(DPI);
+    let editor = d.editor.as_mut().expect("editor");
+    let (l0, l1) = match editor.selection_bounds() {
+        Some((s, e)) => (s.line, e.line),
+        None => {
+            let c = editor.cursor();
+            (c.line, c.line)
+        }
+    };
+    let target = list_kind_to_code(kind);
+    editor.with_buffer_mut(|b| {
+        for i in l0..=l1 {
+            if let Some(line) = b.lines.get_mut(i) {
+                if line.text() == IMAGE_PLACEHOLDER {
+                    continue; // images are never list items
+                }
+                let now = line.metadata().unwrap_or(0);
+                let next = if now == target { 0 } else { target };
+                line.set_metadata(next);
+                line.set_align(Some(Align::Left)); // lists read left-aligned
+            }
+        }
+    });
+    relayout_list_lines(editor, fs, content_w);
+    d.revision = d.revision.wrapping_add(1);
+}
+
 /// True if buffer line `line_i` is an image placeholder line.
 fn line_is_image(editor: &Editor<'static>, line_i: usize) -> bool {
     editor.with_buffer(|b| {
@@ -1477,16 +1679,24 @@ fn render_page(
     let ph = (page_h * render_scale).ceil().max(1.0) as usize;
     let mut buf = vec![255u8; pw * ph * 4];
     let ink = CtColor::rgb(0x1a, 0x1a, 0x1a);
+    let list_indent = list_indent_px();
     editor.with_buffer(|b| {
         for run in b.layout_runs() {
             let p = (run.line_top / ch).floor() as usize;
             if p != page {
                 continue;
             }
+            // List lines are shifted right by the hanging indent.
+            let ox = cx
+                + if b.lines[run.line_i].metadata().unwrap_or(0) != 0 {
+                    list_indent
+                } else {
+                    0.0
+                };
             let base_y = cy + run.line_y - page as f32 * ch;
             for glyph in run.glyphs {
                 let color = glyph.color_opt.unwrap_or(ink);
-                let phys = glyph.physical((cx * render_scale, base_y * render_scale), render_scale);
+                let phys = glyph.physical((ox * render_scale, base_y * render_scale), render_scale);
                 cache.with_pixels(fs, phys.cache_key, color, |gx, gy, col| {
                     blend_px(&mut buf, pw, ph, phys.x + gx, phys.y + gy, col);
                 });
@@ -1521,7 +1731,7 @@ fn render_page(
                     .or(span.color_opt)
                     .unwrap_or(ink);
                 let uy = base_y - span.data.underline_metrics.offset * fsz;
-                let x = (cx + x_min) * render_scale;
+                let x = (ox + x_min) * render_scale;
                 let w = width * render_scale;
                 let t = thickness * render_scale;
                 fill_rect(&mut buf, pw, ph, x, uy * render_scale, w, t, col);
@@ -1611,6 +1821,7 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
                 let style = ParagraphStyle {
                     align,
                     line_spacing: d.line_spacing,
+                    list: list_kind_from_code(line.metadata().unwrap_or(0)),
                     ..ParagraphStyle::default()
                 };
                 // An image line carries the picture id in the placeholder's
@@ -1897,6 +2108,75 @@ mod tests {
         assert!(back.paragraphs[0].image.is_none());
         assert_eq!(back.paragraphs[1].image.as_ref(), Some(&block));
         assert!(back.paragraphs[2].image.is_none());
+    }
+
+    #[test]
+    fn list_kind_round_trips_and_toggle_sets_it() {
+        let mut fs = FontSystem::new();
+        let mut d = DocRuntime::default();
+        let mut doc = TextDocument::from_plain_text("Mở đầu");
+        let mut p1 = Paragraph::plain("Một", CharStyle::default());
+        p1.style.list = ListKind::Numbered;
+        let mut p2 = Paragraph::plain("Hai", CharStyle::default());
+        p2.style.list = ListKind::Bullet;
+        doc.paragraphs.push(p1);
+        doc.paragraphs.push(p2);
+        let view = FlowTextViewModel {
+            document: std::sync::Arc::new(doc),
+            revision: 1,
+            active_page: 0,
+            page_count: 1,
+        };
+        sync_runtime(&mut d, &mut fs, &view);
+
+        let back = editor_document(&d);
+        assert_eq!(back.paragraphs[0].style.list, ListKind::None);
+        assert_eq!(back.paragraphs[1].style.list, ListKind::Numbered);
+        assert_eq!(back.paragraphs[2].style.list, ListKind::Bullet);
+
+        // Toggling a bullet on the first (caret) line, then off again.
+        d.editor.as_mut().unwrap().set_cursor(Cursor::new(0, 0));
+        apply_list(&mut d, &mut fs, ListKind::Bullet);
+        assert_eq!(
+            editor_document(&d).paragraphs[0].style.list,
+            ListKind::Bullet
+        );
+        apply_list(&mut d, &mut fs, ListKind::Bullet);
+        assert_eq!(editor_document(&d).paragraphs[0].style.list, ListKind::None);
+    }
+
+    #[test]
+    fn per_line_narrow_layout_override_reflows_that_line() {
+        let mut fs = FontSystem::new();
+        let mut buffer = Buffer::new(&mut fs, base_metrics(13.0, DEFAULT_LINE_SPACING));
+        buffer.set_size(Some(400.0), None);
+        let long = "từ ".repeat(80);
+        buffer.set_text(
+            &long,
+            &Attrs::new().family(Family::Name("Times New Roman")),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut fs, false);
+        let wide = buffer.layout_runs().count();
+
+        // Re-lay line 0 at a much narrower width; layout_runs must reflect it.
+        let fss = buffer.metrics().font_size;
+        let wrap = buffer.wrap();
+        let ell = buffer.ellipsize();
+        let mono = buffer.monospace_width();
+        let tab = buffer.tab_width();
+        let hint = buffer.hinting();
+        {
+            let line = &mut buffer.lines[0];
+            line.reset_layout();
+            line.layout(&mut fs, fss, Some(120.0), wrap, ell, mono, tab, hint);
+        }
+        let narrow = buffer.layout_runs().count();
+        assert!(
+            narrow > wide,
+            "narrow override should wrap into more visual lines: {narrow} vs {wide}"
+        );
     }
 
     #[test]
