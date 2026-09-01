@@ -39,6 +39,9 @@ enum CharToggle {
 
 const DPI: f32 = 96.0;
 const LINE_SPACING: f32 = 1.3;
+/// Longest side (in device pixels) allowed for a rendered page texture; caps
+/// the supersample so an extreme zoom cannot allocate a huge bitmap.
+const MAX_PAGE_TEX_PX: f32 = 4096.0;
 
 struct DocRuntime {
     bound_model_revision: u64,
@@ -55,8 +58,9 @@ struct DocRuntime {
     drag_active: bool,
     page_index: usize,
     page_count: usize,
-    /// Cached current-page texture, keyed by `(content revision, page)`.
-    tex: Option<(u64, usize, egui::TextureHandle)>,
+    /// Cached current-page texture, keyed by `(content revision, page, render
+    /// scale key)` so it re-rasterises when the content, page or zoom changes.
+    tex: Option<(u64, usize, u32, egui::TextureHandle)>,
     /// Bumped whenever the text content changes, to invalidate `tex`.
     revision: u64,
 }
@@ -325,8 +329,6 @@ fn window_ui(
     let (cx, cy, _cw, ch) = d.setup.content_rect_px(DPI);
     let page_w = d.setup.paper.width_px(DPI);
     let page_h = d.setup.paper.height_px(DPI);
-    let pw = page_w.ceil() as usize;
-    let ph_px = page_h.ceil() as usize;
     let lh = line_height(d.font_pt);
 
     // Reserve fixed top/left strips for the same ruler geometry used by canvas
@@ -360,6 +362,17 @@ fn window_ui(
     let fit = (fit_w / page_w).min(fit_h / page_h);
     let scale = (fit * d.zoom).clamp(0.05, 6.0);
     let disp = egui::vec2(page_w * scale, page_h * scale);
+
+    // Rasterise the page at the real device-pixel resolution so glyphs are crisp
+    // (a fixed 96-dpi bitmap upsampled by the display scale looks blurry). One
+    // texel maps to one device pixel: render_scale = on-screen scale × the
+    // window's points-to-pixels factor, capped so a zoomed-in sheet can't blow up
+    // the texture — beyond the cap egui falls back to a mild linear upscale.
+    let max_render_scale = (MAX_PAGE_TEX_PX / page_w.max(page_h)).max(1.0);
+    let render_scale = {
+        let raw = (scale * ctx.pixels_per_point()).clamp(1.0, max_render_scale);
+        (raw * 4.0).round() / 4.0 // quantise to 0.25 steps so resizing doesn't thrash the cache
+    };
 
     // The page lives in a scroll area so a zoomed-in sheet can be panned.
     let mut scroll_ui = ui.new_child(egui::UiBuilder::new().max_rect(scroll_rect));
@@ -525,9 +538,11 @@ fn window_ui(
                 let page_count = ((total_h / ch).ceil() as usize).max(1);
                 let page_index = page_index.min(page_count - 1);
 
-                let need = d.tex.as_ref().map(|(r, p, _)| (*r, *p)) != Some((revision, page_index));
+                let rs_key = (render_scale * 256.0) as u32;
+                let need = d.tex.as_ref().map(|(r, p, k, _)| (*r, *p, *k))
+                    != Some((revision, page_index, rs_key));
                 let image = if need {
-                    let px = render_page(
+                    let (px, tw, th) = render_page(
                         editor,
                         fs,
                         swash_cache,
@@ -537,8 +552,12 @@ fn window_ui(
                         ch,
                         page_w,
                         page_h,
+                        render_scale,
                     );
-                    Some(egui::ColorImage::from_rgba_unmultiplied([pw, ph_px], &px))
+                    Some((
+                        egui::ColorImage::from_rgba_unmultiplied([tw, th], &px),
+                        rs_key,
+                    ))
                 } else {
                     None
                 };
@@ -573,14 +592,14 @@ fn window_ui(
             d.page_index = page_index;
             d.page_count = page_count;
             d.revision = revision;
-            if let Some(img) = image {
+            if let Some((img, rs_key)) = image {
                 let tex = ctx.load_texture("iai_doc_page", img, egui::TextureOptions::LINEAR);
-                d.tex = Some((revision, page_index, tex));
+                d.tex = Some((revision, page_index, rs_key, tex));
             }
 
             // Paint the page, selection then caret.
             let painter = ui.painter_at(rect);
-            if let Some((_, _, tex)) = &d.tex {
+            if let Some((_, _, _, tex)) = &d.tex {
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                 painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
             }
@@ -981,7 +1000,11 @@ fn toggle_selection_style(
     changed
 }
 
-/// Rasterise one page of the editor buffer to opaque white RGBA.
+/// Rasterise one page of the editor buffer to opaque white RGBA at
+/// `render_scale` device pixels per layout pixel. Returns the pixels and the
+/// texture dimensions `(width, height)`. Rendering at the display resolution
+/// (rather than a fixed 96 dpi bitmap that egui then upsamples) is what keeps
+/// the on-page text crisp.
 #[allow(clippy::too_many_arguments)]
 fn render_page(
     editor: &Editor<'static>,
@@ -993,9 +1016,10 @@ fn render_page(
     ch: f32,
     page_w: f32,
     page_h: f32,
-) -> Vec<u8> {
-    let pw = page_w.ceil() as usize;
-    let ph = page_h.ceil() as usize;
+    render_scale: f32,
+) -> (Vec<u8>, usize, usize) {
+    let pw = (page_w * render_scale).ceil().max(1.0) as usize;
+    let ph = (page_h * render_scale).ceil().max(1.0) as usize;
     let mut buf = vec![255u8; pw * ph * 4];
     let ink = CtColor::rgb(0x1a, 0x1a, 0x1a);
     editor.with_buffer(|b| {
@@ -1007,14 +1031,14 @@ fn render_page(
             let base_y = cy + run.line_y - page as f32 * ch;
             for glyph in run.glyphs {
                 let color = glyph.color_opt.unwrap_or(ink);
-                let phys = glyph.physical((cx, base_y), 1.0);
+                let phys = glyph.physical((cx * render_scale, base_y * render_scale), render_scale);
                 cache.with_pixels(fs, phys.cache_key, color, |gx, gy, col| {
                     blend_px(&mut buf, pw, ph, phys.x + gx, phys.y + gy, col);
                 });
             }
         }
     });
-    buf
+    (buf, pw, ph)
 }
 
 fn blend_px(buf: &mut [u8], w: usize, h: usize, x: i32, y: i32, color: CtColor) {
@@ -1274,11 +1298,24 @@ mod tests {
         buffer.shape_until_scroll(&mut fs, false);
         let editor = Editor::new(buffer);
 
-        let px = render_page(&editor, &mut fs, &mut sc, 0, cx, cy, ch, page_w, page_h);
-        assert_eq!(
-            px.len(),
-            page_w.ceil() as usize * page_h.ceil() as usize * 4
+        // At 2x device resolution the texture is 2x larger on each side and the
+        // reported dimensions match the buffer length.
+        let render_scale = 2.0;
+        let (px, tw, th) = render_page(
+            &editor,
+            &mut fs,
+            &mut sc,
+            0,
+            cx,
+            cy,
+            ch,
+            page_w,
+            page_h,
+            render_scale,
         );
+        assert_eq!(tw, (page_w * render_scale).ceil() as usize);
+        assert_eq!(th, (page_h * render_scale).ceil() as usize);
+        assert_eq!(px.len(), tw * th * 4);
         assert!(
             px.chunks_exact(4).any(|p| p[0] < 200),
             "expected rasterised ink on the page"
