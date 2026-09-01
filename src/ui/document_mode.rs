@@ -8,22 +8,34 @@
 //! Canonical text lives on the active application `Document`; this module keeps
 //! only the ephemeral cosmic-text editor and page texture projection.
 //!
-//! v1 edits one uniform style. Per-selection bold / italic and paragraph
-//! alignment are the next step; PDF export already writes selectable vector text.
+//! Formatting so far: per-selection bold / italic (Ctrl+B / Ctrl+I) and
+//! per-paragraph alignment; one shared body face and size. Per-run font, size
+//! and colour, plus lists and inline images, are the next steps. PDF export and
+//! `.iai` save already carry the styled runs.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Duration;
 
 use cosmic_text::{
-    Action, Align, Attrs, Buffer, Color as CtColor, Edit, Editor, Family, FontSystem, Metrics,
-    Motion, Selection, Shaping, SwashCache,
+    Action, Align, Attrs, AttrsList, Buffer, Color as CtColor, Cursor, Edit, Editor, Family,
+    FontSystem, Metrics, Motion, Selection, Shaping, Style, SwashCache, Weight,
 };
 use egui_phosphor::regular as ph;
 
 use crate::core::document::DocumentId;
-use crate::core::text_document::{PageSetup, PaperSize, ParagraphAlign, TextDocument};
+use crate::core::text::TextFontFamily;
+use crate::core::text_document::{
+    CharStyle, PageSetup, PaperSize, Paragraph, ParagraphAlign, ParagraphStyle, Run, TextDocument,
+};
 use crate::ui::{FlowTextViewModel, UiActions, UiData};
+
+/// A character-style flag that can be toggled over the selection.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CharToggle {
+    Bold,
+    Italic,
+}
 
 const DPI: f32 = 96.0;
 const LINE_SPACING: f32 = 1.3;
@@ -32,6 +44,9 @@ struct DocRuntime {
     bound_model_revision: u64,
     editor: Option<Editor<'static>>,
     setup: PageSetup,
+    /// Body font family; the whole document shares one face (no per-run font
+    /// picker yet). Stored so the buffer and the model round-trip faithfully.
+    font: TextFontFamily,
     font_pt: f32,
     /// Display zoom multiplier on top of fit-to-window (1.0 = fit).
     zoom: f32,
@@ -52,6 +67,7 @@ impl Default for DocRuntime {
             bound_model_revision: 0,
             editor: None,
             setup: PageSetup::default(),
+            font: CharStyle::default().font,
             font_pt: 13.0,
             zoom: 1.0,
             drag_active: false,
@@ -153,11 +169,13 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
         return;
     }
     d.setup = view.document.page;
+    d.font = view.document.default_char.font.clone();
     d.font_pt = view.document.default_char.size_pt;
     let cw = d.setup.content_width_px(DPI);
     let mut buffer = Buffer::new(fs, base_metrics(d.font_pt));
     buffer.set_size(Some(cw), None);
-    let attrs = Attrs::new().family(Family::Name(view.document.default_char.font.name()));
+    let font_name = d.font.name();
+    let attrs = Attrs::new().family(Family::Name(font_name));
     buffer.set_text(&view.document.plain_text(), &attrs, Shaping::Advanced, None);
     for (line, paragraph) in buffer.lines.iter_mut().zip(&view.document.paragraphs) {
         line.set_align(Some(match paragraph.style.align {
@@ -166,6 +184,27 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
             ParagraphAlign::Right => Align::Right,
             ParagraphAlign::Justify => Align::Justified,
         }));
+        // Reproduce per-run bold / italic as attribute spans. Size stays on the
+        // buffer metrics (not the spans) so the global size control keeps working.
+        if paragraph
+            .runs
+            .iter()
+            .any(|r| r.style.bold || r.style.italic)
+        {
+            let mut list = AttrsList::new(&attrs);
+            let mut byte = 0usize;
+            for run in &paragraph.runs {
+                let len = run.text.len();
+                if len > 0 && (run.style.bold || run.style.italic) {
+                    list.add_span(
+                        byte..byte + len,
+                        &styled_attrs(font_name, run.style.bold, run.style.italic),
+                    );
+                }
+                byte += len;
+            }
+            line.set_attrs_list(list);
+        }
     }
     buffer.shape_until_scroll(fs, false);
     d.editor = Some(Editor::new(buffer));
@@ -188,6 +227,8 @@ fn window_ui(
     // --- Toolbar (Phosphor icons) ---
     let mut reshape = false;
     let mut align_cmd: Option<Align> = None;
+    let mut char_toggle: Option<CharToggle> = None;
+    let (cur_bold, cur_italic) = current_flags(d.editor.as_ref().expect("editor"));
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt("doc_paper")
             .selected_text(paper_name(d.setup.paper))
@@ -218,6 +259,23 @@ fn window_ui(
             .changed()
         {
             reshape = true;
+        }
+        ui.separator();
+
+        // Character emphasis (applies to the selection).
+        if ui
+            .selectable_label(cur_bold, ph::TEXT_B)
+            .on_hover_text("Đậm (Ctrl+B)")
+            .clicked()
+        {
+            char_toggle = Some(CharToggle::Bold);
+        }
+        if ui
+            .selectable_label(cur_italic, ph::TEXT_ITALIC)
+            .on_hover_text("Nghiêng (Ctrl+I)")
+            .clicked()
+        {
+            char_toggle = Some(CharToggle::Italic);
         }
         ui.separator();
 
@@ -258,6 +316,9 @@ fn window_ui(
     }
     if let Some(a) = align_cmd {
         apply_align(d, fs, a);
+    }
+    if let Some(toggle) = char_toggle {
+        apply_char_style(d, fs, toggle);
     }
 
     // --- Page geometry (layout px at 96 dpi) ---
@@ -332,6 +393,7 @@ fn window_ui(
                 (bx as i32, by as i32)
             };
 
+            let font_name = d.font.name().to_string();
             let (image, sel_rects, caret, page_count, page_index, revision) = {
                 let editor = d.editor.as_mut().expect("editor");
                 let page_index = d.page_index;
@@ -425,6 +487,22 @@ fn window_ui(
                                     egui::Key::ArrowDown => motion(editor, fs, Motion::Down, shift),
                                     egui::Key::Home => motion(editor, fs, Motion::Home, shift),
                                     egui::Key::End => motion(editor, fs, Motion::End, shift),
+                                    egui::Key::B if modifiers.command => {
+                                        dirty |= toggle_selection_style(
+                                            editor,
+                                            fs,
+                                            &font_name,
+                                            CharToggle::Bold,
+                                        );
+                                    }
+                                    egui::Key::I if modifiers.command => {
+                                        dirty |= toggle_selection_style(
+                                            editor,
+                                            fs,
+                                            &font_name,
+                                            CharToggle::Italic,
+                                        );
+                                    }
                                     _ => {}
                                 }
                             }
@@ -725,6 +803,184 @@ fn apply_align(d: &mut DocRuntime, fs: &mut FontSystem, align: Align) {
     d.revision = d.revision.wrapping_add(1);
 }
 
+/// Attrs for a run: body face plus bold / italic. Size is intentionally left on
+/// the buffer metrics so the global font-size control is not pinned per span.
+fn styled_attrs(font_name: &str, bold: bool, italic: bool) -> Attrs<'_> {
+    Attrs::new()
+        .family(Family::Name(font_name))
+        .weight(if bold { Weight::BOLD } else { Weight::NORMAL })
+        .style(if italic { Style::Italic } else { Style::Normal })
+}
+
+/// Read the bold / italic state of a byte position within a line's attr list.
+fn span_flags(list: &AttrsList, index: usize) -> (bool, bool) {
+    let a = list.get_span(index);
+    (a.weight == Weight::BOLD, a.style == Style::Italic)
+}
+
+/// The selected byte range on `line_i`, clamped to `[0, line_len]`.
+fn line_selection_range(
+    line_i: usize,
+    start: cosmic_text::Cursor,
+    end: cosmic_text::Cursor,
+    line_len: usize,
+) -> std::ops::Range<usize> {
+    let lo = if line_i == start.line { start.index } else { 0 };
+    let hi = if line_i == end.line {
+        end.index
+    } else {
+        line_len
+    };
+    lo.min(line_len)..hi.min(line_len)
+}
+
+/// Bold / italic state to reflect in the toolbar: for a selection, the flag is
+/// "on" only when every selected character has it; with no selection it is the
+/// style new typing would inherit (the character before the caret).
+fn current_flags(editor: &Editor<'static>) -> (bool, bool) {
+    editor.with_buffer(|b| {
+        if let Some((start, end)) = editor.selection_bounds() {
+            let mut any = false;
+            let (mut all_bold, mut all_italic) = (true, true);
+            for li in start.line..=end.line {
+                let Some(line) = b.lines.get(li) else {
+                    continue;
+                };
+                let text = line.text();
+                let range = line_selection_range(li, start, end, text.len());
+                let list = line.attrs_list();
+                for (i, _) in text.char_indices() {
+                    if i < range.start || i >= range.end {
+                        continue;
+                    }
+                    any = true;
+                    let (bold, italic) = span_flags(list, i);
+                    all_bold &= bold;
+                    all_italic &= italic;
+                }
+            }
+            if any {
+                (all_bold, all_italic)
+            } else {
+                (false, false)
+            }
+        } else {
+            let c = editor.cursor();
+            match b.lines.get(c.line) {
+                Some(line) if c.index > 0 => span_flags(line.attrs_list(), c.index - 1),
+                _ => (false, false),
+            }
+        }
+    })
+}
+
+/// Toggle bold or italic across the current selection (word-processor rule: if
+/// every selected character already has it, clear it; otherwise set it). The
+/// orthogonal flag and per-character boundaries are preserved. A caret with no
+/// selection is a no-op — there is no pending-style buffer yet.
+fn apply_char_style(d: &mut DocRuntime, fs: &mut FontSystem, toggle: CharToggle) {
+    let font_name = d.font.name().to_string();
+    let editor = d.editor.as_mut().expect("editor");
+    if toggle_selection_style(editor, fs, &font_name, toggle) {
+        d.revision = d.revision.wrapping_add(1);
+    }
+}
+
+/// Core of [`apply_char_style`], operating directly on the editor so the
+/// keyboard handler can reuse it while it already holds the editor borrow.
+/// Returns whether any line changed.
+fn toggle_selection_style(
+    editor: &mut Editor<'static>,
+    fs: &mut FontSystem,
+    font_name: &str,
+    toggle: CharToggle,
+) -> bool {
+    let Some((start, end)) = editor.selection_bounds() else {
+        return false;
+    };
+    let mut changed = false;
+    editor.with_buffer_mut(|b| {
+        // First pass: is the toggled flag set on every selected character?
+        let mut any = false;
+        let mut all_set = true;
+        for li in start.line..=end.line {
+            let Some(line) = b.lines.get(li) else {
+                continue;
+            };
+            let text = line.text();
+            let range = line_selection_range(li, start, end, text.len());
+            let list = line.attrs_list();
+            for (i, _) in text.char_indices() {
+                if i < range.start || i >= range.end {
+                    continue;
+                }
+                any = true;
+                let (bold, italic) = span_flags(list, i);
+                let set = match toggle {
+                    CharToggle::Bold => bold,
+                    CharToggle::Italic => italic,
+                };
+                if !set {
+                    all_set = false;
+                }
+            }
+        }
+        if !any {
+            return;
+        }
+        let make = !all_set;
+
+        // Second pass: rebuild each affected line's attr list with the flag
+        // applied inside the selection and every other span left intact.
+        for li in start.line..=end.line {
+            let Some(line) = b.lines.get(li) else {
+                continue;
+            };
+            let text = line.text().to_string();
+            let range = line_selection_range(li, start, end, text.len());
+            let old = line.attrs_list();
+            let base = Attrs::new().family(Family::Name(font_name));
+            let mut list = AttrsList::new(&base);
+
+            let mut seg: Option<(usize, bool, bool)> = None; // (start_byte, bold, italic)
+            let flush = |list: &mut AttrsList, seg: (usize, bool, bool), stop: usize| {
+                let (s, bold, italic) = seg;
+                if bold || italic {
+                    list.add_span(s..stop, &styled_attrs(font_name, bold, italic));
+                }
+            };
+            for (i, ch) in text.char_indices() {
+                let (mut bold, mut italic) = span_flags(old, i);
+                if i >= range.start && i < range.end {
+                    match toggle {
+                        CharToggle::Bold => bold = make,
+                        CharToggle::Italic => italic = make,
+                    }
+                }
+                match seg {
+                    Some((s, b, it)) if b == bold && it == italic => seg = Some((s, b, it)),
+                    Some(prev) => {
+                        flush(&mut list, prev, i);
+                        seg = Some((i, bold, italic));
+                    }
+                    None => seg = Some((i, bold, italic)),
+                }
+                let _ = ch;
+            }
+            if let Some(prev) = seg {
+                flush(&mut list, prev, text.len());
+            }
+            if b.lines[li].set_attrs_list(list) {
+                changed = true;
+            }
+        }
+    });
+    if changed {
+        editor.shape_as_needed(fs, false);
+    }
+    changed
+}
+
 /// Rasterise one page of the editor buffer to opaque white RGBA.
 #[allow(clippy::too_many_arguments)]
 fn render_page(
@@ -789,43 +1045,88 @@ fn paper_name(p: PaperSize) -> &'static str {
     }
 }
 
-/// Plain text of the document (one paragraph per hard line).
-fn editor_text(editor: &Editor<'static>) -> String {
-    editor.with_buffer(|b| {
-        b.lines
-            .iter()
-            .map(|l| l.text())
-            .collect::<Vec<_>>()
-            .join("\n")
-    })
-}
-
 /// Snapshot the interactive cosmic-text projection back into the canonical
-/// engine-agnostic document model. The current surface supports one character
-/// style plus per-paragraph alignment; richer run mapping is added behind this
-/// same bridge rather than creating a second source of truth.
+/// engine-agnostic document model: one paragraph per buffer line, split into
+/// runs wherever bold / italic changes. This is the single bridge between the
+/// editor and the stored model — save, PDF export and reopen all read from it.
 fn editor_document(d: &DocRuntime) -> TextDocument {
     let editor = d.editor.as_ref().expect("editor");
-    let mut document = TextDocument::from_plain_text(&editor_text(editor));
-    document.page = d.setup;
-    document.default_char.size_pt = d.font_pt;
-    document.default_para.line_spacing = LINE_SPACING;
+    let base_char = CharStyle {
+        font: d.font.clone(),
+        size_pt: d.font_pt,
+        ..CharStyle::default()
+    };
 
-    editor.with_buffer(|buffer| {
-        for (paragraph, line) in document.paragraphs.iter_mut().zip(&buffer.lines) {
-            paragraph.style.line_spacing = LINE_SPACING;
-            paragraph.style.align = match line.align().unwrap_or(Align::Left) {
-                Align::Center => ParagraphAlign::Center,
-                Align::Right | Align::End => ParagraphAlign::Right,
-                Align::Justified => ParagraphAlign::Justify,
-                _ => ParagraphAlign::Left,
-            };
-            for run in &mut paragraph.runs {
-                run.style.size_pt = d.font_pt;
+    let paragraphs = editor.with_buffer(|buffer| {
+        buffer
+            .lines
+            .iter()
+            .map(|line| {
+                let align = match line.align().unwrap_or(Align::Left) {
+                    Align::Center => ParagraphAlign::Center,
+                    Align::Right | Align::End => ParagraphAlign::Right,
+                    Align::Justified => ParagraphAlign::Justify,
+                    _ => ParagraphAlign::Left,
+                };
+                let style = ParagraphStyle {
+                    align,
+                    line_spacing: LINE_SPACING,
+                    ..ParagraphStyle::default()
+                };
+                Paragraph {
+                    runs: runs_from_line(line, &base_char),
+                    style,
+                }
+            })
+            .collect()
+    });
+
+    TextDocument {
+        paragraphs,
+        page: d.setup,
+        default_char: base_char,
+        default_para: ParagraphStyle {
+            line_spacing: LINE_SPACING,
+            ..ParagraphStyle::default()
+        },
+    }
+}
+
+/// Split one buffer line into runs, coalescing consecutive characters that share
+/// bold / italic. Font, size and colour are uniform (`base`); only weight and
+/// slant vary per run today.
+fn runs_from_line(line: &cosmic_text::BufferLine, base: &CharStyle) -> Vec<Run> {
+    let text = line.text();
+    let list = line.attrs_list();
+    let mut runs: Vec<Run> = Vec::new();
+    let mut cur: Option<(String, bool, bool)> = None;
+    for (i, ch) in text.char_indices() {
+        let (bold, italic) = span_flags(list, i);
+        match &mut cur {
+            Some((s, b, it)) if *b == bold && *it == italic => s.push(ch),
+            _ => {
+                if let Some((s, b, it)) = cur.take() {
+                    runs.push(styled_run(s, b, it, base));
+                }
+                cur = Some((ch.to_string(), bold, italic));
             }
         }
-    });
-    document
+    }
+    if let Some((s, b, it)) = cur.take() {
+        runs.push(styled_run(s, b, it, base));
+    }
+    runs
+}
+
+fn styled_run(text: String, bold: bool, italic: bool, base: &CharStyle) -> Run {
+    Run::new(
+        text,
+        CharStyle {
+            bold,
+            italic,
+            ..base.clone()
+        },
+    )
 }
 
 #[cfg(test)]
@@ -846,6 +1147,111 @@ mod tests {
         assert!(selection_contains_line(7, 7, 7));
         assert!(!selection_contains_line(7, 7, 6));
         assert!(!selection_contains_line(7, 7, 8));
+    }
+
+    fn buffer_with(text: &str, fs: &mut FontSystem) -> Buffer {
+        let mut buffer = Buffer::new(fs, base_metrics(13.0));
+        buffer.set_size(Some(400.0), None);
+        let base = Attrs::new().family(Family::Name("Times New Roman"));
+        buffer.set_text(text, &base, Shaping::Advanced, None);
+        buffer.shape_until_scroll(fs, false);
+        buffer
+    }
+
+    #[test]
+    fn runs_split_where_bold_span_begins_and_ends() {
+        let mut fs = FontSystem::new();
+        let mut buffer = buffer_with("Hello world", &mut fs);
+        let base = Attrs::new().family(Family::Name("Times New Roman"));
+        let mut list = AttrsList::new(&base);
+        list.add_span(6..11, &styled_attrs("Times New Roman", true, false)); // "world"
+        buffer.lines[0].set_attrs_list(list);
+
+        let runs = runs_from_line(&buffer.lines[0], &CharStyle::default());
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].text, "Hello ");
+        assert!(!runs[0].style.bold);
+        assert_eq!(runs[1].text, "world");
+        assert!(runs[1].style.bold && !runs[1].style.italic);
+    }
+
+    #[test]
+    fn toggle_bold_over_selection_sets_then_clears_that_span_only() {
+        let mut fs = FontSystem::new();
+        let buffer = buffer_with("Xin chào Việt Nam", &mut fs);
+        let mut editor = Editor::new(buffer);
+        // Select "chào": "Xin " is 4 bytes, "chào" is 5 (à = 2 bytes) -> 4..9.
+        editor.set_selection(Selection::Normal(Cursor::new(0, 4)));
+        editor.set_cursor(Cursor::new(0, 9));
+
+        assert!(toggle_selection_style(
+            &mut editor,
+            &mut fs,
+            "Times New Roman",
+            CharToggle::Bold
+        ));
+        assert_eq!(current_flags(&editor), (true, false));
+        let bold: String = editor
+            .with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()))
+            .into_iter()
+            .filter(|r| r.style.bold)
+            .map(|r| r.text)
+            .collect();
+        assert_eq!(bold, "chào", "only the selected word is bold");
+
+        // Toggling again clears it (every selected char was already bold).
+        assert!(toggle_selection_style(
+            &mut editor,
+            &mut fs,
+            "Times New Roman",
+            CharToggle::Bold
+        ));
+        assert!(editor
+            .with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()))
+            .iter()
+            .all(|r| !r.style.bold));
+    }
+
+    #[test]
+    fn bold_and_italic_are_independent_on_the_same_span() {
+        let mut fs = FontSystem::new();
+        let buffer = buffer_with("alpha beta", &mut fs);
+        let mut editor = Editor::new(buffer);
+        editor.set_selection(Selection::Normal(Cursor::new(0, 6))); // "beta"
+        editor.set_cursor(Cursor::new(0, 10));
+
+        toggle_selection_style(&mut editor, &mut fs, "Times New Roman", CharToggle::Bold);
+        toggle_selection_style(&mut editor, &mut fs, "Times New Roman", CharToggle::Italic);
+        let styled = editor
+            .with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()))
+            .into_iter()
+            .find(|r| r.text == "beta")
+            .expect("styled run");
+        assert!(styled.style.bold && styled.style.italic);
+
+        // Clearing bold must leave italic intact.
+        toggle_selection_style(&mut editor, &mut fs, "Times New Roman", CharToggle::Bold);
+        let styled = editor
+            .with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()))
+            .into_iter()
+            .find(|r| r.text == "beta")
+            .expect("styled run");
+        assert!(!styled.style.bold && styled.style.italic);
+    }
+
+    #[test]
+    fn caret_with_no_selection_does_not_toggle() {
+        let mut fs = FontSystem::new();
+        let buffer = buffer_with("plain", &mut fs);
+        let mut editor = Editor::new(buffer);
+        editor.set_selection(Selection::None);
+        editor.set_cursor(Cursor::new(0, 2));
+        assert!(!toggle_selection_style(
+            &mut editor,
+            &mut fs,
+            "Times New Roman",
+            CharToggle::Bold
+        ));
     }
 
     #[test]
