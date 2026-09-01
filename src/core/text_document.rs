@@ -142,12 +142,61 @@ impl Default for ParagraphStyle {
     }
 }
 
-/// One paragraph: a run of styled text plus paragraph-level formatting. A
-/// paragraph with no runs (or only empty runs) is a legal empty line.
+/// Base64 (de)serialisation for the raw image bytes, so an [`ImageBlock`] is a
+/// self-contained JSON value that round-trips through the `.iai` manifest.
+mod image_b64 {
+    use base64::Engine;
+    use serde::Deserialize;
+
+    pub fn serialize<S: serde::Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// A block-level image (letterhead, signature, stamp) placed on its own line.
+/// The encoded bytes travel with the document so it embeds directly into PDF
+/// and needs no external file.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImageBlock {
+    /// Encoded image bytes (PNG or JPEG), base64 in the manifest.
+    #[serde(with = "image_b64")]
+    pub data: Vec<u8>,
+    /// Natural pixel size, kept for the aspect ratio.
+    pub natural_w: u32,
+    pub natural_h: u32,
+    /// Displayed width in millimetres; height follows the aspect ratio.
+    pub width_mm: f32,
+    /// Horizontal placement of the image within the text column.
+    pub align: ParagraphAlign,
+}
+
+impl ImageBlock {
+    /// Displayed height in millimetres, from `width_mm` and the aspect ratio.
+    pub fn height_mm(&self) -> f32 {
+        if self.natural_w == 0 {
+            return 0.0;
+        }
+        self.width_mm * self.natural_h as f32 / self.natural_w as f32
+    }
+}
+
+/// One paragraph: either styled text or a single block image, plus
+/// paragraph-level formatting. A paragraph with no runs (or only empty runs)
+/// and no image is a legal empty line.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Paragraph {
     pub runs: Vec<Run>,
     pub style: ParagraphStyle,
+    /// When set, this paragraph is an image block; `runs` are ignored.
+    #[serde(default)]
+    pub image: Option<ImageBlock>,
 }
 
 impl Paragraph {
@@ -168,7 +217,22 @@ impl Paragraph {
         Self {
             runs,
             style: ParagraphStyle::default(),
+            image: None,
         }
+    }
+
+    /// A paragraph that is a single block image.
+    pub fn image(block: ImageBlock) -> Self {
+        Self {
+            runs: Vec::new(),
+            style: ParagraphStyle::default(),
+            image: Some(block),
+        }
+    }
+
+    /// True when this paragraph is an image block rather than text.
+    pub fn is_image(&self) -> bool {
+        self.image.is_some()
     }
 
     /// Concatenated plain text of every run.
@@ -181,9 +245,9 @@ impl Paragraph {
         self.runs.iter().map(|r| r.text.chars().count()).sum()
     }
 
-    /// True when the paragraph carries no visible text.
+    /// True when the paragraph carries no visible text and no image.
     pub fn is_empty(&self) -> bool {
-        self.runs.iter().all(|r| r.text.is_empty())
+        self.image.is_none() && self.runs.iter().all(|r| r.text.is_empty())
     }
 
     /// Canonicalise: drop empty runs and merge adjacent runs with identical
@@ -503,6 +567,7 @@ mod tests {
                 Run::new("Việt", bold.clone()),
             ],
             style: ParagraphStyle::default(),
+            image: None,
         };
         p.normalize();
         assert_eq!(p.runs.len(), 2, "same-style runs merge, empties drop");
@@ -580,5 +645,47 @@ mod tests {
         let doc = TextDocument::from_plain_text("");
         assert_eq!(doc.paragraphs.len(), 1);
         assert!(doc.is_empty());
+    }
+
+    #[test]
+    fn image_block_round_trips_through_json_as_base64() {
+        let block = ImageBlock {
+            data: vec![0x89, b'P', b'N', b'G', 1, 2, 3, 250, 0, 42],
+            natural_w: 400,
+            natural_h: 200,
+            width_mm: 50.0,
+            align: ParagraphAlign::Center,
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"data\""));
+        assert!(!json.contains("[137,")); // bytes are base64, not a number array
+        let back: ImageBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, block);
+        approx(block.height_mm(), 25.0); // 50mm * 200/400
+    }
+
+    #[test]
+    fn image_paragraph_is_not_empty_and_carries_no_text() {
+        let block = ImageBlock {
+            data: vec![1, 2, 3],
+            natural_w: 10,
+            natural_h: 10,
+            width_mm: 30.0,
+            align: ParagraphAlign::Center,
+        };
+        let p = Paragraph::image(block);
+        assert!(p.is_image());
+        assert!(!p.is_empty());
+        assert_eq!(p.text(), "");
+        assert_eq!(p.char_len(), 0);
+    }
+
+    #[test]
+    fn paragraph_without_image_field_deserialises_to_none() {
+        // A v9-era paragraph JSON has no `image` key; serde(default) fills None.
+        let p: Paragraph =
+            serde_json::from_str(r#"{"runs":[],"style":{"align":"Left","line_spacing":1.0,"space_before_pt":0.0,"space_after_pt":0.0,"indent_first_pt":0.0,"indent_left_pt":0.0,"indent_right_pt":0.0,"list":"None"}}"#)
+                .unwrap();
+        assert!(p.image.is_none());
     }
 }

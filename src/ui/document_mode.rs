@@ -1345,6 +1345,7 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
                 Paragraph {
                     runs: runs_from_line(line, &base_char),
                     style,
+                    image: None,
                 }
             })
             .collect()

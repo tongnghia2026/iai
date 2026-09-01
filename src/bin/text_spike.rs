@@ -166,6 +166,7 @@ fn main() {
             align: ParagraphAlign::Center,
             ..Default::default()
         },
+        image: None,
     };
     let justified = |text: String| Paragraph {
         runs: vec![Run::new(text, body.clone())],
@@ -174,6 +175,7 @@ fn main() {
             space_after_pt: 6.0,
             ..Default::default()
         },
+        image: None,
     };
 
     let mut paras = vec![

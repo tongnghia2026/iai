@@ -22,7 +22,7 @@ use cosmic_text::{
 };
 use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
 
-use crate::core::text_document::{CharStyle, ParagraphAlign, TextDocument};
+use crate::core::text_document::{CharStyle, ImageBlock, ParagraphAlign, TextDocument};
 
 /// Build the `Attrs` for one run: font family, weight, slant, colour, and the
 /// per-run metrics (size + leading) so mixed sizes on a line resolve correctly.
@@ -64,16 +64,27 @@ fn align_for(align: ParagraphAlign) -> Option<Align> {
     }
 }
 
-/// One shaped paragraph plus the page + top-offset of each of its visual lines.
-struct ParaLayout {
-    buffer: Buffer,
-    /// `(page index, top y within the content area)` per visual line, in the
-    /// same order as `buffer.layout_runs()`.
-    line_pages: Vec<(usize, f32)>,
+/// A laid-out block: a shaped text paragraph, or a placed image.
+enum Block {
+    Text {
+        buffer: Buffer,
+        /// `(page index, top y within the content area)` per visual line, in the
+        /// same order as `buffer.layout_runs()`.
+        line_pages: Vec<(usize, f32)>,
+    },
+    Image {
+        block: ImageBlock,
+        page: usize,
+        /// Top y within the content area, in build-dpi pixels.
+        top: f32,
+        w_px: f32,
+        h_px: f32,
+    },
 }
 
-/// A fully flowed document: every visual line assigned to a page and position.
-/// Owns the shaped buffers so rendering re-reads them without re-shaping.
+/// A fully flowed document: every visual line / image assigned to a page and
+/// position. Owns the shaped buffers so rendering re-reads them without
+/// re-shaping.
 pub struct DocumentLayout {
     pub dpi: f32,
     /// Text column rectangle in page-local pixels: `(x, y, w, h)`.
@@ -81,7 +92,7 @@ pub struct DocumentLayout {
     /// Whole-sheet pixel size at `dpi`.
     page_px: (usize, usize),
     pages: usize,
-    paras: Vec<ParaLayout>,
+    blocks: Vec<Block>,
 }
 
 impl DocumentLayout {
@@ -94,11 +105,38 @@ impl DocumentLayout {
         let px_per_pt = dpi / 72.0;
         let default_attrs = attrs_for(&doc.default_char, px_per_pt, doc.default_para.line_spacing);
 
-        let mut paras = Vec::with_capacity(doc.paragraphs.len());
+        let mut blocks = Vec::with_capacity(doc.paragraphs.len());
         let mut page = 0usize;
         let mut y = 0.0f32; // running top within the current page's content area
 
         for para in &doc.paragraphs {
+            // Image blocks reserve their scaled height and page-break as a unit.
+            if let Some(img) = &para.image {
+                let mut w_px = img.width_mm / 25.4 * dpi;
+                let mut h_px = img.height_mm() / 25.4 * dpi;
+                if w_px > cw && w_px > 0.0 {
+                    let s = cw / w_px;
+                    w_px = cw;
+                    h_px *= s;
+                }
+                y += para.style.space_before_pt * px_per_pt;
+                if y > 0.0 && y + h_px > ch {
+                    page += 1;
+                    y = 0.0;
+                }
+                let top = y;
+                let this_page = page;
+                y += h_px + para.style.space_after_pt * px_per_pt;
+                blocks.push(Block::Image {
+                    block: img.clone(),
+                    page: this_page,
+                    top,
+                    w_px,
+                    h_px,
+                });
+                continue;
+            }
+
             let ls = para.style.line_spacing;
             let base_pt = para
                 .runs
@@ -139,7 +177,7 @@ impl DocumentLayout {
             }
 
             y += para.style.space_after_pt * px_per_pt;
-            paras.push(ParaLayout { buffer, line_pages });
+            blocks.push(Block::Text { buffer, line_pages });
         }
 
         Self {
@@ -147,7 +185,7 @@ impl DocumentLayout {
             content_rect: (cx, cy, cw, ch),
             page_px: (pw, ph),
             pages: page + 1,
-            paras,
+            blocks,
         }
     }
 
@@ -161,17 +199,25 @@ impl DocumentLayout {
     }
 
     pub fn line_count(&self) -> usize {
-        self.paras.iter().map(|p| p.line_pages.len()).sum()
+        self.blocks
+            .iter()
+            .map(|b| match b {
+                Block::Text { line_pages, .. } => line_pages.len(),
+                Block::Image { .. } => 0,
+            })
+            .sum()
     }
 
-    /// Every placed line as `(page, top_y_in_content, line_height)`, in reading
-    /// order. Exposed for tests and, later, hit-testing.
+    /// Every placed text line as `(page, top_y_in_content, line_height)`, in
+    /// reading order. Image blocks are not lines. Exposed for tests / hit-testing.
     pub fn placed_lines(&self) -> Vec<(usize, f32, f32)> {
         let mut out = Vec::new();
-        for para in &self.paras {
-            for (li, run) in para.buffer.layout_runs().enumerate() {
-                let (page, top) = para.line_pages[li];
-                out.push((page, top, run.line_height));
+        for block in &self.blocks {
+            if let Block::Text { buffer, line_pages } = block {
+                for (li, run) in buffer.layout_runs().enumerate() {
+                    let (page, top) = line_pages[li];
+                    out.push((page, top, run.line_height));
+                }
             }
         }
         out
@@ -187,28 +233,93 @@ impl DocumentLayout {
     ) -> Vec<u8> {
         let (pw, ph) = self.page_px;
         let mut buf = vec![255u8; pw * ph * 4];
-        let (cx, cy, _, _) = self.content_rect;
+        let (cx, cy, cw, _) = self.content_rect;
         let default_ink = CtColor::rgb(0x1a, 0x1a, 0x1a);
 
-        for para in &self.paras {
-            for (li, run) in para.buffer.layout_runs().enumerate() {
-                let (lp, top) = para.line_pages[li];
-                if lp != page {
-                    continue;
+        for block in &self.blocks {
+            match block {
+                Block::Text { buffer, line_pages } => {
+                    for (li, run) in buffer.layout_runs().enumerate() {
+                        let (lp, top) = line_pages[li];
+                        if lp != page {
+                            continue;
+                        }
+                        // Move the line so its top sits at `cy + top`; the engine
+                        // places glyphs relative to the baseline `run.line_y`.
+                        let base_y = cy + top + (run.line_y - run.line_top);
+                        for glyph in run.glyphs {
+                            let color = glyph.color_opt.unwrap_or(default_ink);
+                            let phys = glyph.physical((cx, base_y), 1.0);
+                            cache.with_pixels(font_system, phys.cache_key, color, |gx, gy, col| {
+                                blend_px(&mut buf, pw, ph, phys.x + gx, phys.y + gy, col);
+                            });
+                        }
+                    }
                 }
-                // Move the line so its top sits at `cy + top`; the engine places
-                // glyphs relative to the baseline `run.line_y`.
-                let base_y = cy + top + (run.line_y - run.line_top);
-                for glyph in run.glyphs {
-                    let color = glyph.color_opt.unwrap_or(default_ink);
-                    let phys = glyph.physical((cx, base_y), 1.0);
-                    cache.with_pixels(font_system, phys.cache_key, color, |gx, gy, col| {
-                        blend_px(&mut buf, pw, ph, phys.x + gx, phys.y + gy, col);
-                    });
+                Block::Image {
+                    block,
+                    page: bp,
+                    top,
+                    w_px,
+                    h_px,
+                } if *bp == page => {
+                    let x0 = cx + align_offset(block.align, cw, *w_px);
+                    blit_image(&mut buf, pw, ph, block, x0, cy + *top, *w_px, *h_px);
                 }
+                Block::Image { .. } => {}
             }
         }
         buf
+    }
+}
+
+/// Left edge (relative to the content-left `cx`) for an image of width `w`
+/// aligned within a column of width `cw`.
+fn align_offset(align: ParagraphAlign, cw: f32, w: f32) -> f32 {
+    match align {
+        ParagraphAlign::Left => 0.0,
+        ParagraphAlign::Center => ((cw - w) * 0.5).max(0.0),
+        ParagraphAlign::Right | ParagraphAlign::Justify => (cw - w).max(0.0),
+    }
+}
+
+/// Decode, scale (over white) and blit an image block into the RGBA page buffer.
+fn blit_image(
+    buf: &mut [u8],
+    pw: usize,
+    ph: usize,
+    block: &ImageBlock,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    let tw = w.round().max(1.0) as u32;
+    let th = h.round().max(1.0) as u32;
+    let Ok(decoded) = image::load_from_memory(&block.data) else {
+        return;
+    };
+    let scaled = decoded
+        .resize_exact(tw, th, image::imageops::FilterType::Triangle)
+        .to_rgba8();
+    let x0 = x.round() as i32;
+    let y0 = y.round() as i32;
+    for (px, py, pixel) in scaled.enumerate_pixels() {
+        let dx = x0 + px as i32;
+        let dy = y0 + py as i32;
+        if dx < 0 || dy < 0 || dx as usize >= pw || dy as usize >= ph {
+            continue;
+        }
+        let a = pixel[3] as f32 / 255.0;
+        if a <= 0.0 {
+            continue;
+        }
+        let idx = (dy as usize * pw + dx as usize) * 4;
+        for c in 0..3 {
+            let src = pixel[c] as f32;
+            let dst = buf[idx + c] as f32;
+            buf[idx + c] = (src * a + dst * (1.0 - a)).round() as u8;
+        }
     }
 }
 
@@ -249,6 +360,16 @@ struct FillRect {
     color: [u8; 4],
 }
 
+/// An image placement for PDF emission: the bottom-left corner and drawn size in
+/// PDF points (origin bottom-left), referencing the source block for its bytes.
+struct ImgPlace<'a> {
+    block: &'a ImageBlock,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
 impl DocumentLayout {
     /// Write the document as a fresh multi-page PDF with **real, selectable
     /// text**: each used face is embedded once as a Type0 / Identity-H CID font
@@ -275,7 +396,7 @@ impl DocumentLayout {
             return Err(format!("Trang {} không tồn tại", *page + 1));
         }
         let s = 72.0 / self.dpi; // built-dpi px -> PDF points
-        let (cx, cy, _, _) = self.content_rect;
+        let (cx, cy, cw, _) = self.content_rect;
         let (pw_px, ph_px) = self.page_px;
         let page_w = pw_px as f32 * s;
         let page_h = ph_px as f32 * s;
@@ -283,14 +404,39 @@ impl DocumentLayout {
         let mut font_ids = Vec::new(); // unique face ids, insertion order (type inferred)
         let mut font_weight = Vec::new();
         let mut to_unicode: Vec<BTreeMap<u16, String>> = Vec::new();
-        let mut pages: Vec<(Vec<Glyph>, Vec<FillRect>)> = Vec::new();
+        let mut pages: Vec<(Vec<Glyph>, Vec<FillRect>, Vec<ImgPlace>)> = Vec::new();
 
         for &page in selected_pages {
             let mut glyphs = Vec::new();
             let mut rects = Vec::new();
-            for para in &self.paras {
-                for (li, run) in para.buffer.layout_runs().enumerate() {
-                    let (lp, top) = para.line_pages[li];
+            let mut images: Vec<ImgPlace> = Vec::new();
+            for block in &self.blocks {
+                let (buffer, line_pages) = match block {
+                    Block::Text { buffer, line_pages } => (buffer, line_pages),
+                    Block::Image {
+                        block,
+                        page: bp,
+                        top,
+                        w_px,
+                        h_px,
+                    } => {
+                        if *bp == page {
+                            let x = (cx + align_offset(block.align, cw, *w_px)) * s;
+                            let w = *w_px * s;
+                            let h = *h_px * s;
+                            images.push(ImgPlace {
+                                block,
+                                x,
+                                y: page_h - ((cy + *top) * s + h),
+                                w,
+                                h,
+                            });
+                        }
+                        continue;
+                    }
+                };
+                for (li, run) in buffer.layout_runs().enumerate() {
+                    let (lp, top) = line_pages[li];
                     if lp != page {
                         continue;
                     }
@@ -375,7 +521,7 @@ impl DocumentLayout {
                     }
                 }
             }
-            pages.push((glyphs, rects));
+            pages.push((glyphs, rects, images));
         }
 
         let mut doc = Document::with_version("1.5");
@@ -445,11 +591,45 @@ impl DocumentLayout {
         for (i, type0) in type0_ids.iter().enumerate() {
             font_dict.set(format!("F{i}"), *type0);
         }
-        let resources = doc.add_object(dictionary! { "Font" => font_dict });
+        // Font resources are shared; images are per-page XObjects (see below).
+        let font_res = doc.add_object(Object::Dictionary(font_dict));
 
         let mut kids: Vec<Object> = Vec::with_capacity(pages.len());
-        for (glyphs, rects) in &pages {
-            let content = page_content(glyphs, rects);
+        for (glyphs, rects, images) in &pages {
+            // Embed this page's images as XObjects, referenced by `/Im{n}`.
+            let mut xobjects = Dictionary::new();
+            let mut names = Vec::with_capacity(images.len());
+            for (n, img) in images.iter().enumerate() {
+                let name = format!("Im{n}");
+                if let Some((rgb, iw, ih)) = image_rgb_for_pdf(img.block) {
+                    let xobj = doc.add_object(
+                        Stream::new(
+                            dictionary! {
+                                "Type" => "XObject",
+                                "Subtype" => "Image",
+                                "Width" => iw as i64,
+                                "Height" => ih as i64,
+                                "ColorSpace" => "DeviceRGB",
+                                "BitsPerComponent" => 8,
+                                "Filter" => "FlateDecode",
+                            },
+                            deflate(&rgb),
+                        )
+                        .with_compression(false),
+                    );
+                    xobjects.set(name.clone(), xobj);
+                    names.push(Some(name));
+                } else {
+                    names.push(None); // undecodable image: skip drawing it
+                }
+            }
+            let mut resources = dictionary! { "Font" => font_res };
+            if !xobjects.is_empty() {
+                resources.set("XObject", Object::Dictionary(xobjects));
+            }
+            let resources_id = doc.add_object(Object::Dictionary(resources));
+
+            let content = page_content(glyphs, rects, images, &names);
             let content_id = doc.add_object(
                 Stream::new(
                     dictionary! { "Filter" => "FlateDecode" },
@@ -462,7 +642,7 @@ impl DocumentLayout {
                 "Parent" => pages_id,
                 "MediaBox" => vec![0.into(), 0.into(), Object::Real(page_w), Object::Real(page_h)],
                 "Contents" => content_id,
-                "Resources" => resources,
+                "Resources" => resources_id,
             });
             kids.push(page_id.into());
         }
@@ -491,10 +671,44 @@ fn deflate(bytes: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap_or_default()
 }
 
+/// Composite an image over white and return `(rgb_bytes, width, height)` for a
+/// DeviceRGB PDF XObject. The longest side is capped so a large source photo
+/// does not bloat the PDF. Returns `None` if the bytes cannot be decoded.
+fn image_rgb_for_pdf(block: &ImageBlock) -> Option<(Vec<u8>, u32, u32)> {
+    const MAX_SIDE: u32 = 1600;
+    let rgba = image::load_from_memory(&block.data).ok()?.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let rgba = if w.max(h) > MAX_SIDE && w.max(h) > 0 {
+        let scale = MAX_SIDE as f32 / w.max(h) as f32;
+        image::imageops::resize(
+            &rgba,
+            (w as f32 * scale).round().max(1.0) as u32,
+            (h as f32 * scale).round().max(1.0) as u32,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        rgba
+    };
+    let (w, h) = rgba.dimensions();
+    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    for p in rgba.pixels() {
+        let a = p[3] as f32 / 255.0;
+        for c in 0..3 {
+            rgb.push((p[c] as f32 * a + 255.0 * (1.0 - a)).round() as u8);
+        }
+    }
+    Some((rgb, w, h))
+}
+
 /// Place each glyph by absolute text matrix, re-emitting `Tf`/`rg` only when the
-/// font, size or colour changes, then fill any underline rectangles (path fills
-/// must sit outside the `BT`/`ET` text object).
-fn page_content(glyphs: &[Glyph], rects: &[FillRect]) -> String {
+/// font, size or colour changes, then fill underline rectangles and draw images
+/// (path fills and `Do` must sit outside the `BT`/`ET` text object).
+fn page_content(
+    glyphs: &[Glyph],
+    rects: &[FillRect],
+    images: &[ImgPlace],
+    image_names: &[Option<String>],
+) -> String {
     let mut out = String::new();
     let mut cur: Option<(usize, u32, [u8; 4])> = None;
     let mut open = false;
@@ -539,6 +753,14 @@ fn page_content(glyphs: &[Glyph], rects: &[FillRect]) -> String {
             r.x, r.y, r.w, r.h
         ));
     }
+    // Draw images: a unit image XObject scaled and translated by the CTM.
+    for (img, name) in images.iter().zip(image_names) {
+        let Some(name) = name else { continue };
+        out.push_str(&format!(
+            "q {:.2} 0 0 {:.2} {:.2} {:.2} cm /{} Do Q\n",
+            img.w, img.h, img.x, img.y, name
+        ));
+    }
     out
 }
 
@@ -565,7 +787,20 @@ fn build_to_unicode(map: &BTreeMap<u16, String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::text_document::{CharStyle, Paragraph, ParagraphStyle, Run};
+    use crate::core::text_document::{CharStyle, ImageBlock, Paragraph, ParagraphStyle, Run};
+
+    /// A small solid-colour PNG for image-block tests.
+    fn tiny_png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([210, 40, 40, 255]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
 
     const DPI: f32 = 96.0;
 
@@ -616,6 +851,42 @@ mod tests {
             "200 lines should overflow one page, got {} page(s)",
             layout.page_count()
         );
+    }
+
+    #[test]
+    fn image_block_reserves_space_and_embeds_in_pdf() {
+        let mut fs = FontSystem::new();
+        let block = ImageBlock {
+            data: tiny_png(400, 200),
+            natural_w: 400,
+            natural_h: 200,
+            width_mm: 80.0,
+            align: ParagraphAlign::Center,
+        };
+        let doc = TextDocument {
+            paragraphs: vec![para("Trước ảnh"), Paragraph::image(block), para("Sau ảnh")],
+            ..Default::default()
+        };
+        let layout = DocumentLayout::build(&doc, DPI, &mut fs);
+        // Two text lines are placed; the image is not a "line".
+        assert_eq!(layout.line_count(), 2);
+
+        let path =
+            std::env::temp_dir().join(format!("iai_image_pdf_{}_test.pdf", std::process::id()));
+        layout.write_text_pdf(&mut fs, &path).unwrap();
+        let reloaded = lopdf::Document::load(&path).expect("re-parse image PDF");
+        let (_, page_id) = reloaded.get_pages().into_iter().next().unwrap();
+        let content = reloaded.get_page_content(page_id).unwrap();
+        assert!(
+            String::from_utf8_lossy(&content).contains("Do"),
+            "expected an image draw op"
+        );
+        let has_image_xobject = reloaded.objects.values().any(|o| {
+            matches!(o, lopdf::Object::Stream(s)
+                if s.dict.get(b"Subtype").ok().and_then(|v| v.as_name().ok()) == Some(&b"Image"[..]))
+        });
+        assert!(has_image_xobject, "expected an embedded image XObject");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -684,6 +955,7 @@ mod tests {
                     align: ParagraphAlign::Justify,
                     ..Default::default()
                 },
+                image: None,
             }],
             ..Default::default()
         };
@@ -701,6 +973,7 @@ mod tests {
             paragraphs: vec![Paragraph {
                 runs: vec![Run::new("Chữ ký bên A", ul)],
                 style: ParagraphStyle::default(),
+                image: None,
             }],
             ..Default::default()
         };
