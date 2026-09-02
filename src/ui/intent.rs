@@ -165,6 +165,12 @@ pub struct DocumentIntent {
     pub set_pdf_export_range: Option<String>,
     pub set_pdf_export_dpi: Option<u32>,
     pub run_pdf_export: bool,
+    /// Mail merge (flowing-text docs): open the data-file picker to start a
+    /// batch merge; edit the filename pattern; run or cancel the batch.
+    pub start_mail_merge: bool,
+    pub set_mail_merge_pattern: Option<String>,
+    pub run_mail_merge: bool,
+    pub cancel_mail_merge: bool,
     pub reload_open_file_confirm: bool,
     pub reload_open_file_cancel: bool,
     /// PDF page-selection dialog: confirm with the 0-based page indices to open

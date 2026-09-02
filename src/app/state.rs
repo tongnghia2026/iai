@@ -431,6 +431,11 @@ pub struct UiState {
     pub pdf_export_scope: crate::ui::intent::PdfExportScope,
     pub pdf_export_range: String,
     pub pdf_export_dpi: u32,
+    /// Mail merge: the active pre-export session (parsed data + field analysis),
+    /// present exactly while the mail-merge dialog is open; and the persistent
+    /// output filename pattern (`{{field}}` syntax).
+    pub mail_merge: Option<crate::app::file_ops::mail_merge::MailMergeSession>,
+    pub mail_merge_pattern: String,
     pub transform_interpolation: InterpolationMode,
     pub show_color_panel: bool,
     pub show_text_panel: bool,
@@ -1315,6 +1320,8 @@ impl App {
                 pending_file_dialog: None,
                 pending_pdf_export: None,
                 pending_flow_image: None,
+                pending_mail_merge_data: None,
+                pending_mail_merge_export: None,
                 pending_loads: Vec::new(),
                 pending_raw_previews: Vec::new(),
                 raw_preview_docs: std::collections::HashMap::new(),
@@ -1441,6 +1448,8 @@ impl App {
                     pdf_export_scope: crate::ui::intent::PdfExportScope::AllPages,
                     pdf_export_range: String::new(),
                     pdf_export_dpi: 0,
+                    mail_merge: None,
+                    mail_merge_pattern: String::new(),
                     transform_interpolation: InterpolationMode::Bilinear,
                     // Color & Brush is now a floating panel opened on demand
                     // (Window ▸ Color Panel), like the Levels dialog. Quick
@@ -2224,6 +2233,7 @@ impl App {
             || self.shell.ui.show_rename_dialog
             || self.shell.ui.page_rename_target.is_some()
             || self.shell.ui.show_pdf_export_dialog
+            || self.shell.ui.mail_merge.is_some()
             || self.shell.ui.show_export_dialog
             || self.shell.ui.show_preferences
             || self.shell.ui.show_exit_dialog

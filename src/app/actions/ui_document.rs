@@ -22,6 +22,21 @@ impl App {
             actions.doc.pick_flow_text_image = false;
             self.pick_flow_text_image();
         }
+        if actions.doc.start_mail_merge {
+            actions.doc.start_mail_merge = false;
+            self.start_mail_merge();
+        }
+        if let Some(pattern) = actions.doc.set_mail_merge_pattern.take() {
+            self.shell.ui.mail_merge_pattern = pattern;
+        }
+        if actions.doc.run_mail_merge {
+            actions.doc.run_mail_merge = false;
+            self.run_mail_merge();
+        }
+        if actions.doc.cancel_mail_merge {
+            actions.doc.cancel_mail_merge = false;
+            self.cancel_mail_merge();
+        }
         if let Some((doc_id, document)) = actions.doc.replace_flow_text_document.take() {
             if let Some(doc) = self.docs.documents.iter_mut().find(|doc| doc.id == doc_id) {
                 if let Some(text) = doc.flow_text.as_mut() {

@@ -28,6 +28,19 @@ pub struct BackgroundJobs {
     #[allow(clippy::type_complexity)]
     pub(in crate::app) pending_flow_image:
         Option<std::sync::mpsc::Receiver<Option<(Vec<u8>, u32, u32)>>>,
+    /// Mail merge: the native picker + parse of the CSV/Excel data source runs on
+    /// a worker; `poll_mail_merge_data` opens the dialog with the parsed table.
+    /// `None` payload = cancelled dialog.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::app) pending_mail_merge_data: Option<
+        std::sync::mpsc::Receiver<
+            Option<Result<(std::path::PathBuf, crate::core::mail_merge::MergeTable), String>>,
+        >,
+    >,
+    /// Mail merge: the batch PDF export (folder picker + one PDF per data row)
+    /// streams progress and a final summary from a worker thread.
+    pub(in crate::app) pending_mail_merge_export:
+        Option<std::sync::mpsc::Receiver<crate::app::file_ops::mail_merge::MailMergeProgress>>,
     /// Background image-import jobs. A worker thread decodes each path off the UI
     /// thread and streams `(path, Vec<Canvas>|Err, is_last)` back; multi-page formats such
     /// as PDF produce one canvas per page. `poll_loads()` attaches each finished

@@ -16,6 +16,21 @@ pub struct FlowTextViewModel {
     pub page_count: usize,
 }
 
+/// Read-only slice of the mail-merge session for its dialog.
+pub struct MailMergeViewModel {
+    /// Display name of the chosen data file.
+    pub data_file: String,
+    pub row_count: usize,
+    /// Template fields present in the data.
+    pub matched: Vec<String>,
+    /// Template fields with no matching column.
+    pub missing: Vec<String>,
+    /// Output filename pattern (`{{field}}` syntax).
+    pub filename_pattern: String,
+    /// The pattern applied to the first data row, shown as a live preview.
+    pub filename_preview: String,
+}
+
 pub struct DocumentViewModel {
     pub id: crate::core::document::DocumentId,
     pub kind: crate::core::document::DocumentKind,
@@ -450,6 +465,9 @@ pub struct DialogViewModel {
     pub pdf_export_scope: crate::ui::intent::PdfExportScope,
     pub pdf_export_range: String,
     pub pdf_export_dpi: u32,
+    /// Mail-merge dialog contents; `Some` exactly while the dialog is open, and
+    /// only ever set for a flowing-text document.
+    pub mail_merge: Option<MailMergeViewModel>,
     pub show_export_dialog: bool,
     pub show_preferences: bool,
     pub show_adjustment_dialog: bool,
@@ -955,6 +973,7 @@ impl Default for UiData {
                 pdf_export_scope: crate::ui::intent::PdfExportScope::AllPages,
                 pdf_export_range: String::new(),
                 pdf_export_dpi: 0,
+                mail_merge: None,
                 show_export_dialog: false,
                 show_preferences: false,
                 show_adjustment_dialog: false,

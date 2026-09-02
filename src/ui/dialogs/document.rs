@@ -1153,6 +1153,128 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
     }
 }
 
+/// Mail-merge dialog: shown after a data source is chosen. Reviews field
+/// matching, edits the output filename pattern, and launches the batch export.
+pub(crate) fn mail_merge_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    let Some(mm) = data.dialogs.mail_merge.as_ref() else {
+        return;
+    };
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_export = enter_pressed;
+    let mut do_cancel = esc_pressed;
+
+    modal_overlay(ctx, "mail_merge_dialog_overlay");
+    let warn = egui::Color32::from_rgb(210, 120, 40);
+    let good = egui::Color32::from_rgb(80, 160, 90);
+    let gray = egui::Color32::GRAY;
+
+    egui::Window::new("Trộn thư")
+        .collapsible(false)
+        .resizable(true)
+        .movable(true)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_size(egui::vec2(520.0, 380.0))
+        .min_size(egui::vec2(460.0, 320.0))
+        .order(DIALOG_ORDER)
+        .show(ctx, |ui| {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(format!("Nguồn dữ liệu: {}", mm.data_file)).strong());
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} dòng — mỗi dòng sẽ tạo một tệp PDF.",
+                    mm.row_count
+                ))
+                .size(11.0)
+                .color(gray),
+            );
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            // ── Field matching ──
+            ui.label(egui::RichText::new("Khớp trường trộn").strong());
+            ui.add_space(2.0);
+            if mm.matched.is_empty() {
+                ui.label(
+                    egui::RichText::new("Không có trường nào trong mẫu khớp với cột dữ liệu.")
+                        .color(warn),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(format!("✔ Khớp: {}", mm.matched.join(", ")))
+                        .size(12.0)
+                        .color(good),
+                );
+            }
+            if !mm.missing.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("⚠ Không có cột cho: {}", mm.missing.join(", ")))
+                        .size(12.0)
+                        .color(warn),
+                );
+                ui.label(
+                    egui::RichText::new("(các trường này sẽ giữ nguyên {{…}} trong tài liệu)")
+                        .size(10.0)
+                        .color(gray),
+                );
+            }
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            // ── Output filename ──
+            ui.label(egui::RichText::new("Tên tệp đầu ra").strong());
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label("Mẫu tên:");
+                let mut pattern = mm.filename_pattern.clone();
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut pattern)
+                        .desired_width(320.0)
+                        .hint_text("vd: HĐ {{Họ tên}}"),
+                );
+                if resp.changed() {
+                    actions.doc.set_mail_merge_pattern = Some(pattern);
+                }
+            });
+            ui.label(
+                egui::RichText::new(
+                    "Dùng {{Tên cột}} để chèn dữ liệu. Tệp trùng tên tự thêm (2), (3)…",
+                )
+                .size(10.0)
+                .color(gray),
+            );
+            if !mm.filename_preview.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("Ví dụ dòng 1: {}", mm.filename_preview))
+                        .size(11.0)
+                        .color(gray),
+                );
+            }
+
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(mm.row_count > 0, egui::Button::new("  Xuất hàng loạt…  "))
+                    .clicked()
+                {
+                    do_export = true;
+                }
+                if ui.button("  Huỷ  ").clicked() {
+                    do_cancel = true;
+                }
+            });
+            ui.add_space(4.0);
+        });
+
+    if do_export && mm.row_count > 0 {
+        actions.doc.run_mail_merge = true;
+    } else if do_cancel {
+        actions.doc.cancel_mail_merge = true;
+    }
+}
+
 pub(crate) fn export_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut do_export = enter_pressed;

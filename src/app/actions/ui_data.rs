@@ -1501,6 +1501,30 @@ impl App {
                 pdf_export_scope: self.shell.ui.pdf_export_scope,
                 pdf_export_range: self.shell.ui.pdf_export_range.clone(),
                 pdf_export_dpi: self.shell.ui.pdf_export_dpi,
+                mail_merge: self.shell.ui.mail_merge.as_ref().map(|session| {
+                    let pattern = &self.shell.ui.mail_merge_pattern;
+                    let filename_preview = session
+                        .table
+                        .row(0)
+                        .map(|row| {
+                            let stem = crate::core::mail_merge::expand_filename(pattern, &row);
+                            let stem = if stem.is_empty() {
+                                "hop-dong-001".to_string()
+                            } else {
+                                stem
+                            };
+                            format!("{stem}.pdf")
+                        })
+                        .unwrap_or_default();
+                    crate::ui::MailMergeViewModel {
+                        data_file: session.data_file.clone(),
+                        row_count: session.table.row_count(),
+                        matched: session.matched.clone(),
+                        missing: session.missing.clone(),
+                        filename_pattern: pattern.clone(),
+                        filename_preview,
+                    }
+                }),
                 show_export_dialog: self.shell.ui.show_export_dialog,
                 show_preferences: self.shell.ui.show_preferences,
                 show_adjustment_dialog: self.shell.ui.show_adjustment_dialog,

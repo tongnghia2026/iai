@@ -40,6 +40,8 @@ impl App {
         self.poll_file_dialog(event_loop);
         self.poll_pdf_export();
         self.poll_flow_text_image();
+        self.poll_mail_merge_data();
+        self.poll_mail_merge_export();
         self.poll_raw_previews(event_loop);
         self.poll_loads();
         self.poll_iai_projects();
@@ -169,6 +171,8 @@ impl App {
                 && !self.jobs.ai_engine.has_jobs()
                 && self.jobs.pending_file_dialog.is_none()
                 && self.jobs.pending_pdf_export.is_none()
+                && self.jobs.pending_mail_merge_data.is_none()
+                && self.jobs.pending_mail_merge_export.is_none()
                 && self.jobs.pending_loads.is_empty()
                 && !self.jobs.ext.busy()
                 && !crate::core::lama::is_downloading();

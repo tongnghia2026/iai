@@ -528,6 +528,17 @@ fn window_ui(
         }
         ui.separator();
 
+        // Mail merge: fill {{field}} placeholders from a CSV/Excel file and
+        // export one PDF per row.
+        if ui
+            .button(ph::ENVELOPE_SIMPLE)
+            .on_hover_text("Trộn thư — xuất hàng loạt từ Excel/CSV (chỗ giữ chỗ {{Tên cột}})")
+            .clicked()
+        {
+            actions.doc.start_mail_merge = true;
+        }
+        ui.separator();
+
         // Zoom.
         if ui
             .button(ph::MAGNIFYING_GLASS_MINUS)
