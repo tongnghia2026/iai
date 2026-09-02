@@ -1,7 +1,8 @@
 # Kế hoạch: "Document mode" — trình soạn thảo văn bản nhẹ trong iAi
 
-> Trạng thái: **MVP HOÀN TẤT & ĐÃ PUSH (2026-09-02).** Xem mục 0 bên dưới. Chủ dự
-> án (end-user) muốn trình soạn thảo kiểu Word cơ bản, nhấn mạnh **phải nhẹ máy**.
+> Trạng thái: **MVP HOÀN TẤT & ĐÃ PUSH (2026-09-02)** + **Trộn thư (mail-merge)
+> XONG — commit LOCAL, chờ chủ GUI-test.** Xem mục 0 bên dưới. Chủ dự án
+> (end-user) muốn trình soạn thảo kiểu Word cơ bản, nhấn mạnh **phải nhẹ máy**.
 
 ---
 
@@ -29,13 +30,23 @@ Tài liệu văn bản mới…**).
 2 chiều với model qua `FlowTextViewModel`/UiActions). Chi tiết + gotcha đầy đủ ở
 memory `project_iai_wordprocessor_plan`.
 
+**ĐÃ LÀM THÊM — Trộn thư (mail-merge), Pha 6 ✅ (LOCAL, chờ chủ GUI-test):**
+- Nút **"Trộn thư"** trên thanh công cụ tài liệu văn bản → chọn tệp **Excel
+  (.xlsx/.xls/.ods) hoặc CSV** → hộp thoại soát trường + đặt mẫu tên tệp → **xuất
+  hàng loạt: mỗi dòng dữ liệu = một PDF chữ-vector** vào thư mục chọn (chạy nền,
+  có thanh tiến độ; tên trùng tự thêm (2),(3)…). Chỗ giữ chỗ `{{Tên cột}}` trong
+  mẫu; trường không có cột → giữ nguyên `{{…}}` để lộ lỗi; ô trống → rỗng. Giữ
+  đúng định dạng từng run (đậm/nghiêng/màu của chỗ đặt trường).
+- Lõi thuần `src/core/mail_merge.rs` (23 test, gồm fixture .xlsx thật + e2e
+  merge→PDF). App-side `src/app/file_ops/mail_merge.rs` (picker+worker+poll).
+- Deps mới: `csv`, `calamine` (dates), `chrono` — thuần Rust, nhẹ.
+
 **CÒN LẠI — đều là phần cộng thêm, KHÔNG bắt buộc (chủ đã chốt MVP đủ dùng):**
-1. **Trộn thư (mail-merge)** — mẫu + Excel/CSV → xuất hàng loạt PDF. ⭐ Chủ được
-   khuyên làm mục này trước (đúng nghề hợp đồng-theo-khách). Pha 6.
-2. **Đầu/chân trang + số trang.**
-3. **Bảng (tables)** — Pha 4.
-4. **Xuất `.docx`** (`docx-rs` + `zip`).
-5. Tinh chỉnh: per-run font/cỡ; subset font nhúng PDF (nhẹ hơn); đo RAM/CPU thật.
+1. **Đầu/chân trang + số trang.**
+2. **Bảng (tables)** — Pha 4.
+3. **Xuất `.docx`** (`docx-rs` + `zip`).
+4. Tinh chỉnh: per-run font/cỡ; subset font nhúng PDF (nhẹ hơn); đo RAM/CPU thật.
+5. Mail-merge nâng cao (nếu cần): gộp tất cả vào MỘT PDF; lọc/chọn dòng để xuất.
 
 **ĐÃ CHỐT BỎ:** AutoPrint khỏi kế hoạch này; split-view; egui_kittest (chủ tự test).
 
