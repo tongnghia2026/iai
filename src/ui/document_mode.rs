@@ -351,8 +351,6 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
             }
             continue;
         }
-        // Remember the list kind in the line metadata (survives edits).
-        line.set_metadata(list_kind_to_code(paragraph.style.list));
         // Reproduce per-run emphasis / colour as attribute spans. Size stays on
         // the buffer metrics (not the spans) so the global size control keeps
         // working; underline is drawn by the renderer from these spans.
@@ -368,6 +366,12 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
                 byte += len;
             }
             line.set_attrs_list(list);
+        }
+        // Store the list kind in the line's attrs defaults (preserved across
+        // edits, unlike BufferLine::set_metadata which cosmic clears on insert).
+        let list_code = list_kind_to_code(paragraph.style.list);
+        if list_code != 0 {
+            set_line_list_code(line, list_code);
         }
     }
     buffer.shape_until_scroll(fs, false);
@@ -883,7 +887,7 @@ fn window_ui(
                         if !first_visual {
                             continue;
                         }
-                        let kind = list_kind_from_code(b.lines[run.line_i].metadata().unwrap_or(0));
+                        let kind = list_kind_from_code(line_list_code(&b.lines[run.line_i]));
                         let marker = match kind {
                             ListKind::None => {
                                 num = 0;
@@ -911,7 +915,7 @@ fn window_ui(
                     editor.with_buffer(|b| {
                         b.lines
                             .get(cl)
-                            .map(|l| l.metadata().unwrap_or(0) != 0)
+                            .map(|l| line_list_code(l) != 0)
                             .unwrap_or(false)
                     })
                 };
@@ -1532,6 +1536,33 @@ fn decode_color_image(bytes: &[u8]) -> Option<egui::ColorImage> {
     ))
 }
 
+/// The list code for a buffer line, stored in the line's `AttrsList` defaults
+/// metadata. Unlike `BufferLine::set_metadata` (cleared by `split_off`/`append`
+/// on every edit), the attrs defaults are preserved across edits — and copied to
+/// the new line on Enter, so a list continues. Image placeholder lines never
+/// count as lists (their defaults metadata holds the image id instead).
+fn line_list_code(line: &cosmic_text::BufferLine) -> usize {
+    if line.text() == IMAGE_PLACEHOLDER {
+        return 0;
+    }
+    line.attrs_list().defaults().metadata
+}
+
+/// Rebuild `line`'s attr list so its defaults carry `code` in the metadata,
+/// preserving the family and any character spans.
+fn set_line_list_code(line: &mut cosmic_text::BufferLine, code: usize) {
+    let new_list = {
+        let old = line.attrs_list();
+        let new_defaults = old.defaults().metadata(code);
+        let mut nl = AttrsList::new(&new_defaults);
+        for (range, attrs) in old.spans() {
+            nl.add_span(range.clone(), &attrs.as_attrs());
+        }
+        nl
+    };
+    line.set_attrs_list(new_list);
+}
+
 /// Re-lay every list line at the narrowed (hanging-indent) width so `layout_runs`
 /// reflects it. cosmic-text lays all lines at the buffer's global width; this
 /// overrides just the list lines after each shape (image lines are excluded).
@@ -1545,7 +1576,7 @@ fn relayout_list_lines(editor: &mut Editor<'static>, fs: &mut FontSystem, conten
         let tab = b.tab_width();
         let hint = b.hinting();
         for line in b.lines.iter_mut() {
-            if line.metadata().unwrap_or(0) != 0 && line.text() != IMAGE_PLACEHOLDER {
+            if line_list_code(line) != 0 {
                 line.reset_layout();
                 line.layout(fs, fss, Some(narrow), wrap, ell, mono, tab, hint);
             }
@@ -1560,7 +1591,7 @@ fn list_indent_at_y(editor: &Editor<'static>, by: i32) -> i32 {
     editor.with_buffer(|b| {
         for run in b.layout_runs() {
             if y >= run.line_top && y < run.line_top + run.line_height {
-                return if b.lines[run.line_i].metadata().unwrap_or(0) != 0 {
+                return if line_list_code(&b.lines[run.line_i]) != 0 {
                     list_indent_px().round() as i32
                 } else {
                     0
@@ -1577,7 +1608,7 @@ fn caret_list_kind(editor: &Editor<'static>) -> ListKind {
     editor.with_buffer(|b| {
         b.lines
             .get(line)
-            .map(|l| list_kind_from_code(l.metadata().unwrap_or(0)))
+            .map(|l| list_kind_from_code(line_list_code(l)))
             .unwrap_or(ListKind::None)
     })
 }
@@ -1601,9 +1632,9 @@ fn apply_list(d: &mut DocRuntime, fs: &mut FontSystem, kind: ListKind) {
                 if line.text() == IMAGE_PLACEHOLDER {
                     continue; // images are never list items
                 }
-                let now = line.metadata().unwrap_or(0);
+                let now = line_list_code(line);
                 let next = if now == target { 0 } else { target };
-                line.set_metadata(next);
+                set_line_list_code(line, next);
                 line.set_align(Some(Align::Left)); // lists read left-aligned
             }
         }
@@ -1688,7 +1719,7 @@ fn render_page(
             }
             // List lines are shifted right by the hanging indent.
             let ox = cx
-                + if b.lines[run.line_i].metadata().unwrap_or(0) != 0 {
+                + if line_list_code(&b.lines[run.line_i]) != 0 {
                     list_indent
                 } else {
                     0.0
@@ -1821,7 +1852,7 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
                 let style = ParagraphStyle {
                     align,
                     line_spacing: d.line_spacing,
-                    list: list_kind_from_code(line.metadata().unwrap_or(0)),
+                    list: list_kind_from_code(line_list_code(line)),
                     ..ParagraphStyle::default()
                 };
                 // An image line carries the picture id in the placeholder's
@@ -2143,6 +2174,53 @@ mod tests {
         );
         apply_list(&mut d, &mut fs, ListKind::Bullet);
         assert_eq!(editor_document(&d).paragraphs[0].style.list, ListKind::None);
+    }
+
+    #[test]
+    fn list_kind_survives_typing_and_enter_continues_it() {
+        let mut fs = FontSystem::new();
+        let mut d = DocRuntime::default();
+        let mut p = Paragraph::plain("Mục", CharStyle::default());
+        p.style.list = ListKind::Bullet;
+        let view = FlowTextViewModel {
+            document: std::sync::Arc::new(TextDocument {
+                paragraphs: vec![p],
+                ..Default::default()
+            }),
+            revision: 1,
+            active_page: 0,
+            page_count: 1,
+        };
+        sync_runtime(&mut d, &mut fs, &view);
+
+        // Typing on the list line must NOT drop the bullet (the reported bug).
+        {
+            let editor = d.editor.as_mut().unwrap();
+            editor.action(&mut fs, Action::Motion(Motion::End));
+            editor.insert_string(" thêm", None);
+            editor.shape_as_needed(&mut fs, false);
+        }
+        assert_eq!(
+            editor_document(&d).paragraphs[0].style.list,
+            ListKind::Bullet,
+            "list kind must survive typing"
+        );
+
+        // Enter starts a new paragraph that continues the list.
+        {
+            let editor = d.editor.as_mut().unwrap();
+            editor.action(&mut fs, Action::Enter);
+            editor.insert_string("Mục hai", None);
+            editor.shape_as_needed(&mut fs, false);
+        }
+        let back = editor_document(&d);
+        assert_eq!(back.paragraphs.len(), 2);
+        assert_eq!(back.paragraphs[0].style.list, ListKind::Bullet);
+        assert_eq!(
+            back.paragraphs[1].style.list,
+            ListKind::Bullet,
+            "Enter continues the list"
+        );
     }
 
     #[test]
