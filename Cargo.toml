@@ -52,6 +52,7 @@ ab_glyph = "0.2"
 egui-phosphor = "0.12.0"
 base64 = "0.22"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+socket2 = "0.6"
 hayro = "0.7.1"
 lopdf = { version = "0.43", default-features = false }
 i_overlay = "7.0.2"

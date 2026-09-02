@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -447,9 +447,34 @@ impl ExtBridge {
     }
 }
 
+/// Bind the bridge port with `SO_REUSEADDR` so a restart succeeds even while the
+/// previous socket lingers in `TIME_WAIT` (otherwise a quick relaunch leaves the
+/// bridge dead for the whole session and the extension can't connect). Retries a
+/// few times to ride out a slow OS release.
+fn bind_bridge_listener() -> std::io::Result<TcpListener> {
+    let addr: SocketAddr = ([127, 0, 0, 1], PORT).into();
+    let mut last_err = None;
+    for attempt in 0..5 {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        socket.set_reuse_address(true)?;
+        match socket.bind(&addr.into()).and_then(|()| socket.listen(128)) {
+            Ok(()) => return Ok(socket.into()),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(Duration::from_millis(150 * (attempt + 1)));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("bind failed")))
+}
+
 /// Accept loop: one client at a time. Reconnects after a drop.
 fn server_loop(inbound: Sender<ExtInbound>, outbound: Receiver<ExtOutbound>, token: String) {
-    let listener = match TcpListener::bind(("127.0.0.1", PORT)) {
+    let listener = match bind_bridge_listener() {
         Ok(l) => l,
         Err(e) => {
             let _ = inbound.send(ExtInbound::Status(format!(
