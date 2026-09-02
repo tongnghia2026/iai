@@ -57,6 +57,33 @@ fn list_kind_from_code(code: usize) -> ListKind {
     }
 }
 
+// A buffer line's `AttrsList` defaults `metadata` packs two per-paragraph
+// properties that must survive edits (cosmic preserves the defaults across
+// `split_off`/`append`): the list kind in the low byte, and a per-line line
+// spacing override (multiplier × 1000, 0 = inherit the document default) in the
+// high bits. Image placeholder lines instead store the image id and never carry
+// either property.
+const LIST_CODE_MASK: usize = 0xFF;
+const SPACING_SHIFT: usize = 8;
+
+/// Encode a line-spacing multiplier for the metadata high bits.
+fn spacing_to_code(mult: f32) -> usize {
+    (mult * 1000.0).round().max(0.0) as usize
+}
+
+/// Decode a per-line spacing override; `None` when the line inherits the default.
+fn code_to_spacing(code: usize) -> Option<f32> {
+    (code != 0).then(|| code as f32 / 1000.0)
+}
+
+/// The per-line spacing override on `line`, if it sets one.
+fn line_spacing_override(line: &cosmic_text::BufferLine) -> Option<f32> {
+    if line.text() == IMAGE_PLACEHOLDER {
+        return None;
+    }
+    code_to_spacing(line.attrs_list().defaults().metadata >> SPACING_SHIFT)
+}
+
 /// The Unicode object-replacement character marks a line that holds one block
 /// image. Its glyph is drawn transparent; the picture is painted as an overlay.
 const IMAGE_PLACEHOLDER: &str = "\u{FFFC}";
@@ -373,6 +400,13 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
         if list_code != 0 {
             set_line_list_code(line, list_code);
         }
+        // A per-paragraph line spacing that differs from the document default is
+        // stored as a per-line override (applied by `refresh_line_spacing`).
+        if paragraph.style.line_spacing > 0.0
+            && (paragraph.style.line_spacing - d.line_spacing).abs() > 1e-4
+        {
+            set_line_spacing_code(line, spacing_to_code(paragraph.style.line_spacing));
+        }
     }
     buffer.shape_until_scroll(fs, false);
     d.editor = Some(Editor::new(buffer));
@@ -394,6 +428,12 @@ fn window_ui(
     actions: &mut UiActions,
     data: &UiData,
 ) {
+    // A popup (colour picker, a combo) open coming into this frame swallows the
+    // click that dismisses it. Capture that here, before the toolbar renders and
+    // closes it, so the dismiss click does not also land on the page and move
+    // the caret — which would drop the selection the user is still formatting.
+    let popup_open = ctx.any_popup_open();
+
     // --- Toolbar (Phosphor icons) ---
     let mut reshape = false;
     let mut align_cmd: Option<Align> = None;
@@ -401,8 +441,15 @@ fn window_ui(
     let mut char_color: Option<Color> = None;
     let mut spacing_cmd: Option<f32> = None;
     let mut list_cmd: Option<ListKind> = None;
+    // Image commands from the contextual image row (see below).
+    let mut img_align_cmd: Option<ParagraphAlign> = None;
+    let mut img_width_cmd: Option<f32> = None;
+    let mut img_move_cmd: Option<i32> = None;
+    let mut img_delete_cmd = false;
     let cur = current_fmt(d.editor.as_ref().expect("editor"));
     let cur_list = caret_list_kind(d.editor.as_ref().expect("editor"));
+    let cur_spacing = caret_spacing(d.editor.as_ref().expect("editor"), d.line_spacing);
+    let active_image = active_image_id(d.editor.as_ref().expect("editor"));
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt("doc_paper")
             .selected_text(paper_name(d.setup.paper))
@@ -501,19 +548,20 @@ fn window_ui(
         }
         ui.separator();
 
-        // Line spacing (whole document).
+        // Line spacing (applies to the selected paragraphs).
         let spacing_label = LINE_SPACING_PRESETS
             .iter()
-            .find(|(v, _)| (v - d.line_spacing).abs() < 1e-3)
+            .find(|(v, _)| (v - cur_spacing).abs() < 1e-3)
             .map(|(_, l)| *l)
             .unwrap_or("—");
-        ui.label(ph::ARROWS_VERTICAL).on_hover_text("Giãn dòng");
+        ui.label(ph::ARROWS_VERTICAL)
+            .on_hover_text("Giãn dòng (đoạn đang chọn)");
         egui::ComboBox::from_id_salt("doc_line_spacing")
             .selected_text(spacing_label)
             .show_ui(ui, |ui| {
                 for (v, label) in LINE_SPACING_PRESETS {
                     if ui
-                        .selectable_label((v - d.line_spacing).abs() < 1e-3, label)
+                        .selectable_label((v - cur_spacing).abs() < 1e-3, label)
                         .clicked()
                     {
                         spacing_cmd = Some(v);
@@ -558,6 +606,69 @@ fn window_ui(
         ui.label("Alt + lăn chuột");
     });
 
+    // Contextual image row: shown when the caret sits on an image block, so the
+    // picture can be aligned, resized, moved between paragraphs or removed.
+    if let Some(id) = active_image {
+        let (cur_align, cur_width) = d
+            .images
+            .get(&id)
+            .map(|b| (b.align, b.width_mm))
+            .unwrap_or((ParagraphAlign::Center, DEFAULT_IMAGE_WIDTH_MM));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(ph::IMAGE).on_hover_text("Ảnh đang chọn");
+            for (icon, a, tip) in [
+                (ph::TEXT_ALIGN_LEFT, ParagraphAlign::Left, "Ảnh sát trái"),
+                (
+                    ph::TEXT_ALIGN_CENTER,
+                    ParagraphAlign::Center,
+                    "Ảnh căn giữa",
+                ),
+                (ph::TEXT_ALIGN_RIGHT, ParagraphAlign::Right, "Ảnh sát phải"),
+            ] {
+                if ui
+                    .selectable_label(cur_align == a, icon)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    img_align_cmd = Some(a);
+                }
+            }
+            ui.separator();
+            ui.label("Rộng").on_hover_text("Chiều rộng ảnh (mm)");
+            let mut width_mm = cur_width;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut width_mm)
+                        .range(10.0..=d.setup.content_width_mm().max(10.0))
+                        .speed(0.5)
+                        .suffix(" mm"),
+                )
+                .changed()
+            {
+                img_width_cmd = Some(width_mm);
+            }
+            ui.separator();
+            if ui
+                .button(ph::ARROW_UP)
+                .on_hover_text("Đưa ảnh lên trên")
+                .clicked()
+            {
+                img_move_cmd = Some(-1);
+            }
+            if ui
+                .button(ph::ARROW_DOWN)
+                .on_hover_text("Đưa ảnh xuống dưới")
+                .clicked()
+            {
+                img_move_cmd = Some(1);
+            }
+            ui.separator();
+            if ui.button(ph::TRASH).on_hover_text("Xoá ảnh").clicked() {
+                img_delete_cmd = true;
+            }
+        });
+    }
+
     if reshape {
         apply_reshape(d, fs);
     }
@@ -575,6 +686,20 @@ fn window_ui(
     }
     if let Some(kind) = list_cmd {
         apply_list(d, fs, kind);
+    }
+    if let Some(id) = active_image {
+        if let Some(a) = img_align_cmd {
+            apply_image_align(d, fs, id, a);
+        }
+        if let Some(w) = img_width_cmd {
+            apply_image_width(d, fs, id, w);
+        }
+        if let Some(dir) = img_move_cmd {
+            apply_image_move(d, fs, id, dir);
+        }
+        if img_delete_cmd {
+            apply_image_delete(d, fs, id);
+        }
     }
 
     // --- Page geometry (layout px at 96 dpi) ---
@@ -677,7 +802,9 @@ fn window_ui(
 
                 // Pointer → caret / selection. `drag_active` guarantees an anchor
                 // Click precedes the first Drag, so a drag selects only its span.
-                if focused {
+                // Skip while a popup was dismissed this frame: that click is for
+                // the popup, not a caret move (keeps the selection during colour).
+                if focused && !popup_open {
                     if response.drag_started() {
                         if let Some(p) = response.interact_pointer_pos() {
                             let (mut x, y) = map(p, page_index);
@@ -812,6 +939,9 @@ fn window_ui(
                 }
 
                 editor.shape_as_needed(fs, false);
+                // Give paragraphs with a custom line spacing their per-line line
+                // height (via metrics_opt), recomputed against the current size.
+                refresh_line_spacing(editor, fs, font_pt * DPI / 72.0);
                 // Edits re-lay list lines at the global width; narrow them again
                 // so the hanging indent and pagination stay correct.
                 relayout_list_lines(editor, fs, cw);
@@ -964,7 +1094,7 @@ fn window_ui(
                 }
                 if let Some(tex) = d.image_tex.get(&id) {
                     let top = cy + line_top - page_index as f32 * ch;
-                    let x = rect.min.x + (cx + (cw - w_px) * 0.5) * scale;
+                    let x = rect.min.x + (cx + image_align_offset(block.align, cw, w_px)) * scale;
                     let y = rect.min.y + top * scale;
                     let img_rect = egui::Rect::from_min_size(
                         egui::pos2(x, y),
@@ -1168,14 +1298,51 @@ fn apply_reshape(d: &mut DocRuntime, fs: &mut FontSystem) {
     d.revision = d.revision.wrapping_add(1);
 }
 
-/// Change the document-wide line spacing and re-flow. Spacing lives on the
-/// buffer metrics, so this reshapes the whole document (and repaginates).
+/// Set the line spacing of the paragraphs the selection touches (or the caret
+/// line). Spacing that equals the document default clears the override so the
+/// line follows the buffer's global metrics; other values are stored per line
+/// and applied via `refresh_line_spacing`.
 fn apply_line_spacing(d: &mut DocRuntime, fs: &mut FontSystem, spacing: f32) {
-    if (d.line_spacing - spacing).abs() < 1e-4 {
-        return;
-    }
-    d.line_spacing = spacing.max(0.1);
-    apply_reshape(d, fs);
+    let spacing = spacing.max(0.1);
+    let default = d.line_spacing;
+    let base_px = d.font_pt * DPI / 72.0;
+    let editor = d.editor.as_mut().expect("editor");
+    let (l0, l1) = match editor.selection_bounds() {
+        Some((s, e)) => (s.line, e.line),
+        None => {
+            let c = editor.cursor();
+            (c.line, c.line)
+        }
+    };
+    let code = if (spacing - default).abs() < 1e-4 {
+        0
+    } else {
+        spacing_to_code(spacing)
+    };
+    editor.with_buffer_mut(|b| {
+        for i in l0..=l1 {
+            if let Some(line) = b.lines.get_mut(i) {
+                if line.text() == IMAGE_PLACEHOLDER {
+                    continue;
+                }
+                set_line_spacing_code(line, code);
+            }
+        }
+    });
+    editor.shape_as_needed(fs, false);
+    refresh_line_spacing(editor, fs, base_px);
+    d.revision = d.revision.wrapping_add(1);
+}
+
+/// The effective line spacing on the caret's line (its override or the default).
+fn caret_spacing(editor: &Editor<'static>, default: f32) -> f32 {
+    let line = editor.cursor().line;
+    editor.with_buffer(|b| {
+        b.lines
+            .get(line)
+            .and_then(line_spacing_override)
+            .unwrap_or(default)
+    })
 }
 
 /// Set the alignment of every paragraph touched by the selection (or the caret
@@ -1472,6 +1639,29 @@ fn restyle_selection(
     changed
 }
 
+/// Horizontal offset (content px) of an image of width `w` in a column of width
+/// `cw`, per its paragraph alignment. Mirrors the PDF/preview `align_offset`.
+fn image_align_offset(align: ParagraphAlign, cw: f32, w: f32) -> f32 {
+    match align {
+        ParagraphAlign::Center => ((cw - w) * 0.5).max(0.0),
+        ParagraphAlign::Right => (cw - w).max(0.0),
+        _ => 0.0,
+    }
+}
+
+/// The id of the image on the caret's line, if that line is an image block.
+fn active_image_id(editor: &Editor<'static>) -> Option<usize> {
+    let line = editor.cursor().line;
+    editor.with_buffer(|b| {
+        let line = b.lines.get(line)?;
+        if line.text() == IMAGE_PLACEHOLDER {
+            Some(line.attrs_list().get_span(0).metadata)
+        } else {
+            None
+        }
+    })
+}
+
 /// Displayed pixel size of an image block at the editor DPI, clamped so the
 /// width never exceeds the text column (height follows the aspect ratio).
 fn image_display_px(block: &ImageBlock, setup: &PageSetup) -> (f32, f32) {
@@ -1530,15 +1720,16 @@ fn line_list_code(line: &cosmic_text::BufferLine) -> usize {
     if line.text() == IMAGE_PLACEHOLDER {
         return 0;
     }
-    line.attrs_list().defaults().metadata
+    line.attrs_list().defaults().metadata & LIST_CODE_MASK
 }
 
-/// Rebuild `line`'s attr list so its defaults carry `code` in the metadata,
-/// preserving the family and any character spans.
+/// Rebuild `line`'s attr list so its defaults carry list `code` (low byte),
+/// preserving the spacing bits, the family and any character spans.
 fn set_line_list_code(line: &mut cosmic_text::BufferLine, code: usize) {
     let new_list = {
         let old = line.attrs_list();
-        let new_defaults = old.defaults().metadata(code);
+        let meta = (old.defaults().metadata & !LIST_CODE_MASK) | (code & LIST_CODE_MASK);
+        let new_defaults = old.defaults().metadata(meta);
         let mut nl = AttrsList::new(&new_defaults);
         for (range, attrs) in old.spans() {
             nl.add_span(range.clone(), &attrs.as_attrs());
@@ -1546,6 +1737,61 @@ fn set_line_list_code(line: &mut cosmic_text::BufferLine, code: usize) {
         nl
     };
     line.set_attrs_list(new_list);
+}
+
+/// Rebuild `line`'s attr list so its defaults carry the spacing `code` (high
+/// bits), preserving the list byte, the family and any character spans.
+fn set_line_spacing_code(line: &mut cosmic_text::BufferLine, code: usize) {
+    let new_list = {
+        let old = line.attrs_list();
+        let meta = (old.defaults().metadata & LIST_CODE_MASK) | ((code & 0xFFFF) << SPACING_SHIFT);
+        let new_defaults = old.defaults().metadata(meta);
+        let mut nl = AttrsList::new(&new_defaults);
+        for (range, attrs) in old.spans() {
+            nl.add_span(range.clone(), &attrs.as_attrs());
+        }
+        nl
+    };
+    line.set_attrs_list(new_list);
+}
+
+/// After each shape, give every line that overrides its spacing a per-line line
+/// height via `metrics_opt` on the defaults and every span (so even a fully
+/// emphasised line keeps the override), and clear it from lines that inherit the
+/// document default (which use the buffer's global metrics). Recomputed against
+/// the current `base_px` so a global font-size change stays consistent. Runs
+/// only when a line actually differs, so it does not force reshaping every frame.
+fn refresh_line_spacing(editor: &mut Editor<'static>, fs: &mut FontSystem, base_px: f32) {
+    let mut changed = false;
+    editor.with_buffer_mut(|b| {
+        for line in b.lines.iter_mut() {
+            if line.text() == IMAGE_PLACEHOLDER {
+                continue; // image lines carry their own placeholder metrics
+            }
+            let desired: Option<cosmic_text::CacheMetrics> = line_spacing_override(line)
+                .map(|m| Metrics::new(base_px, (base_px * m).max(1.0)).into());
+            if line.attrs_list().defaults().metrics_opt == desired {
+                continue;
+            }
+            let new_list = {
+                let old = line.attrs_list();
+                let mut def = old.defaults();
+                def.metrics_opt = desired;
+                let mut nl = AttrsList::new(&def);
+                for (range, attrs) in old.spans() {
+                    let mut a = attrs.as_attrs();
+                    a.metrics_opt = desired;
+                    nl.add_span(range.clone(), &a);
+                }
+                nl
+            };
+            line.set_attrs_list(new_list);
+            changed = true;
+        }
+    });
+    if changed {
+        editor.shape_as_needed(fs, false);
+    }
 }
 
 /// Re-lay every list line at the narrowed (hanging-indent) width so `layout_runs`
@@ -1669,6 +1915,108 @@ fn insert_image_at_caret(d: &mut DocRuntime, fs: &mut FontSystem, image: Pending
         }
     });
     editor.insert_string("\n", None);
+    editor.shape_as_needed(fs, false);
+    d.revision = d.revision.wrapping_add(1);
+}
+
+/// Index of the buffer line holding the image block `id`, if present.
+fn find_image_line(editor: &Editor<'static>, id: usize) -> Option<usize> {
+    editor.with_buffer(|b| {
+        b.lines.iter().position(|l| {
+            l.text() == IMAGE_PLACEHOLDER && l.attrs_list().get_span(0).metadata == id
+        })
+    })
+}
+
+/// Set an image block's horizontal alignment within the text column.
+fn apply_image_align(d: &mut DocRuntime, fs: &mut FontSystem, id: usize, align: ParagraphAlign) {
+    if let Some(block) = d.images.get_mut(&id) {
+        if block.align == align {
+            return;
+        }
+        block.align = align;
+    } else {
+        return;
+    }
+    let ct_align = match align {
+        ParagraphAlign::Center => Align::Center,
+        ParagraphAlign::Right => Align::Right,
+        _ => Align::Left,
+    };
+    let editor = d.editor.as_mut().expect("editor");
+    if let Some(li) = find_image_line(editor, id) {
+        editor.with_buffer_mut(|b| {
+            if let Some(line) = b.lines.get_mut(li) {
+                line.set_align(Some(ct_align));
+            }
+        });
+    }
+    editor.shape_as_needed(fs, false);
+    d.revision = d.revision.wrapping_add(1);
+}
+
+/// Resize an image block by width (mm); height follows the aspect ratio. The
+/// placeholder line's reserved height is updated so the layout re-flows.
+fn apply_image_width(d: &mut DocRuntime, fs: &mut FontSystem, id: usize, width_mm: f32) {
+    let max_mm = d.setup.content_width_mm();
+    let width_mm = width_mm.clamp(10.0, max_mm.max(10.0));
+    let h_px = {
+        let Some(block) = d.images.get_mut(&id) else {
+            return;
+        };
+        if (block.width_mm - width_mm).abs() < 0.05 {
+            return;
+        }
+        block.width_mm = width_mm;
+        image_display_px(block, &d.setup).1
+    };
+    let font_name = d.font.name().to_string();
+    let editor = d.editor.as_mut().expect("editor");
+    if let Some(li) = find_image_line(editor, id) {
+        editor.with_buffer_mut(|b| {
+            if let Some(line) = b.lines.get_mut(li) {
+                line.set_attrs_list(AttrsList::new(&placeholder_attrs(&font_name, id, h_px)));
+            }
+        });
+    }
+    editor.shape_as_needed(fs, false);
+    d.revision = d.revision.wrapping_add(1);
+}
+
+/// Move an image block up (`-1`) or down (`+1`) one paragraph by swapping lines.
+fn apply_image_move(d: &mut DocRuntime, fs: &mut FontSystem, id: usize, dir: i32) {
+    let editor = d.editor.as_mut().expect("editor");
+    let Some(li) = find_image_line(editor, id) else {
+        return;
+    };
+    let target = li as i32 + dir;
+    let moved = editor.with_buffer_mut(|b| {
+        if target < 0 || target as usize >= b.lines.len() {
+            return false;
+        }
+        b.lines.swap(li, target as usize);
+        b.lines[li].reset_layout();
+        b.lines[target as usize].reset_layout();
+        true
+    });
+    if moved {
+        editor.set_selection(Selection::None);
+        editor.set_cursor(Cursor::new(target as usize, 0));
+        editor.shape_as_needed(fs, false);
+        d.revision = d.revision.wrapping_add(1);
+    }
+}
+
+/// Delete an image block: remove its placeholder line.
+fn apply_image_delete(d: &mut DocRuntime, fs: &mut FontSystem, id: usize) {
+    let editor = d.editor.as_mut().expect("editor");
+    let Some(li) = find_image_line(editor, id) else {
+        return;
+    };
+    editor.set_selection(Selection::None);
+    editor.set_cursor(Cursor::new(li, 0));
+    editor.action(fs, Action::Delete);
+    d.images.remove(&id);
     editor.shape_as_needed(fs, false);
     d.revision = d.revision.wrapping_add(1);
 }
@@ -1884,7 +2232,7 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
                 };
                 let style = ParagraphStyle {
                     align,
-                    line_spacing: d.line_spacing,
+                    line_spacing: line_spacing_override(line).unwrap_or(d.line_spacing),
                     list: list_kind_from_code(line_list_code(line)),
                     ..ParagraphStyle::default()
                 };
@@ -2046,6 +2394,48 @@ mod tests {
             .with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()))
             .iter()
             .all(|r| !r.style.bold));
+    }
+
+    #[test]
+    fn line_spacing_and_list_code_coexist_in_metadata() {
+        let mut fs = FontSystem::new();
+        let mut buffer = buffer_with("một dòng", &mut fs);
+        let line = &mut buffer.lines[0];
+        set_line_list_code(line, list_kind_to_code(ListKind::Numbered));
+        set_line_spacing_code(line, spacing_to_code(1.5));
+        assert_eq!(line_list_code(line), 2);
+        assert_eq!(line_spacing_override(line), Some(1.5));
+        // Changing the list kind must not disturb the spacing override.
+        set_line_list_code(line, list_kind_to_code(ListKind::Bullet));
+        assert_eq!(line_list_code(line), 1);
+        assert_eq!(line_spacing_override(line), Some(1.5));
+        // Clearing spacing (code 0) leaves the list intact.
+        set_line_spacing_code(line, 0);
+        assert_eq!(line_spacing_override(line), None);
+        assert_eq!(line_list_code(line), 1);
+    }
+
+    #[test]
+    fn custom_line_spacing_sets_per_line_metrics_only_where_overridden() {
+        let mut fs = FontSystem::new();
+        let buffer = buffer_with("dòng một\ndòng hai", &mut fs);
+        let mut editor = Editor::new(buffer);
+        let base_px = 13.0 * DPI / 72.0;
+        editor.with_buffer_mut(|b| set_line_spacing_code(&mut b.lines[0], spacing_to_code(2.0)));
+        refresh_line_spacing(&mut editor, &mut fs, base_px);
+        editor.with_buffer(|b| {
+            let m0 = b.lines[0]
+                .attrs_list()
+                .defaults()
+                .metrics_opt
+                .expect("line 0 has a per-line metric");
+            let lh = Metrics::from(m0).line_height;
+            assert!((lh - base_px * 2.0).abs() < 0.5, "line height follows 2.0×");
+            assert!(
+                b.lines[1].attrs_list().defaults().metrics_opt.is_none(),
+                "the default-spacing line keeps the global metrics"
+            );
+        });
     }
 
     #[test]
