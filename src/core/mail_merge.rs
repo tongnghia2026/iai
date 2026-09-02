@@ -616,6 +616,53 @@ mod tests {
     }
 
     #[test]
+    fn merge_to_pdf_writes_one_valid_pdf_per_row() {
+        // Exercises the batch worker's pipeline (minus the native dialogs):
+        // fixture -> merge each row -> layout -> selectable-text PDF on disk.
+        use crate::core::text_layout::DocumentLayout;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/core/testdata/mail_merge_sample.xlsx");
+        let table = read_data_file(&path).unwrap();
+        let template = TextDocument::from_plain_text(
+            "HỢP ĐỒNG\nKhách hàng: {{Họ tên}}\nSố tiền: {{Số tiền}} đồng\nNgày: {{Ngày ký}}",
+        );
+        let mut fs = cosmic_text::FontSystem::new();
+        let dir = std::env::temp_dir().join(format!("iai_mm_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut used = std::collections::HashSet::new();
+        for i in 0..table.row_count() {
+            let row = table.row(i).unwrap();
+            let merged = merge_document(&template, &row);
+            let stem = unique_stem(&expand_filename("{{Họ tên}}", &row), &mut used);
+            let out = dir.join(format!("{stem}.pdf"));
+            let layout = DocumentLayout::build(&merged, 96.0, &mut fs);
+            layout.write_text_pdf(&mut fs, &out).unwrap();
+            let bytes = std::fs::read(&out).unwrap();
+            assert!(bytes.starts_with(b"%PDF"), "output is not a PDF");
+            assert!(bytes.len() > 1000, "PDF suspiciously small");
+        }
+        let count = std::fs::read_dir(&dir).unwrap().count();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(count, 2, "expected one PDF per data row");
+    }
+
+    #[test]
+    fn reads_xlsx_fixture_with_date_and_number() {
+        // Verifies the calamine path end to end: headers, an integer amount
+        // (no trailing .0) and an Excel serial date formatted dd/mm/yyyy.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/core/testdata/mail_merge_sample.xlsx");
+        let t = read_data_file(&path).unwrap();
+        assert_eq!(t.headers, vec!["Họ tên", "Số tiền", "Ngày ký"]);
+        assert_eq!(t.row_count(), 2);
+        let row0 = t.row(0).unwrap();
+        assert_eq!(row0.get("Họ tên"), Some("Nguyễn Văn A"));
+        assert_eq!(row0.get("Số tiền"), Some("1500000"));
+        assert_eq!(row0.get("Ngày ký"), Some("01/09/2026"));
+        assert_eq!(t.row(1).unwrap().get("Ngày ký"), Some("25/12/2026"));
+    }
+
+    #[test]
     fn newline_in_cell_collapses_to_space() {
         let t = MergeTable {
             headers: vec!["Địa chỉ".into()],
