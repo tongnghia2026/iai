@@ -45,6 +45,7 @@ pub mod filters;
 pub mod gamut_map;
 pub mod imposition;
 pub mod lama;
+pub mod mail_merge;
 pub mod presets;
 pub mod print;
 pub mod print_gdi;

@@ -61,6 +61,12 @@ lyon_tessellation = "1"
 unicode-normalization = "0.1"
 hmac-sha256 = "1.1.14"
 cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "sys-locale"] }
+# Mail-merge data sources: CSV and Excel (.xlsx/.xls). calamine is pure-Rust and
+# reuses quick-xml/zip/chrono already in the tree; `dates` formats Excel serial
+# dates via chrono for Vietnamese dd/mm/yyyy contract fields.
+csv = "1"
+calamine = { version = "0.26", features = ["dates"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
