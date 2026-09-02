@@ -648,6 +648,8 @@ fn window_ui(
             };
 
             let font_name = d.font.name().to_string();
+            let font_pt = d.font_pt;
+            let doc_line_spacing = d.line_spacing;
             let (
                 image,
                 sel_rects,
@@ -656,7 +658,6 @@ fn window_ui(
                 page_index,
                 revision,
                 image_lines,
-                marker_draws,
                 caret_on_list,
             ) = {
                 let editor = d.editor.as_mut().expect("editor");
@@ -831,6 +832,9 @@ fn window_ui(
                         page_w,
                         page_h,
                         render_scale,
+                        &font_name,
+                        font_pt,
+                        doc_line_spacing,
                     );
                     Some((
                         egui::ColorImage::from_rgba_unmultiplied([tw, th], &px),
@@ -855,8 +859,15 @@ fn window_ui(
                                 continue;
                             }
                             let top = cy + run.line_top - page_index as f32 * ch;
+                            // List lines are shifted right; match the highlight.
+                            let ox = cx
+                                + if line_list_code(&b.lines[run.line_i]) != 0 {
+                                    list_indent_px()
+                                } else {
+                                    0.0
+                                };
                             for (hx, hw) in run.highlight(start, end) {
-                                let min = rect.min + egui::vec2((cx + hx) * scale, top * scale);
+                                let min = rect.min + egui::vec2((ox + hx) * scale, top * scale);
                                 let max = min + egui::vec2(hw.max(2.0) * scale, lh * scale);
                                 sel_rects.push(egui::Rect::from_min_max(min, max));
                             }
@@ -864,47 +875,16 @@ fn window_ui(
                     });
                 }
                 // Image placeholder lines on this page: `(id, line_top, height)`
-                // in content pixels. The picture itself is painted as an overlay.
+                // in content pixels. The picture itself is painted as an overlay;
+                // list markers are drawn into the page texture by `render_page`.
                 let mut image_lines: Vec<(usize, f32, f32)> = Vec::new();
-                // List markers on this page: `(text, line_top, height)`, drawn in
-                // the gutter on each list paragraph's first visual line.
-                let mut marker_draws: Vec<(String, f32, f32)> = Vec::new();
                 editor.with_buffer(|b| {
-                    let mut last_line: Option<usize> = None;
-                    let mut num = 0usize;
                     for run in b.layout_runs() {
-                        let first_visual = Some(run.line_i) != last_line;
-                        last_line = Some(run.line_i);
-                        if run.text == IMAGE_PLACEHOLDER {
-                            if (run.line_top / ch).floor() as usize == page_index {
-                                if let Some(g) = run.glyphs.first() {
-                                    image_lines.push((g.metadata, run.line_top, run.line_height));
-                                }
-                            }
-                            num = 0;
-                            continue;
-                        }
-                        if !first_visual {
-                            continue;
-                        }
-                        let kind = list_kind_from_code(line_list_code(&b.lines[run.line_i]));
-                        let marker = match kind {
-                            ListKind::None => {
-                                num = 0;
-                                None
-                            }
-                            ListKind::Bullet => {
-                                num = 0;
-                                Some("•".to_string())
-                            }
-                            ListKind::Numbered => {
-                                num += 1;
-                                Some(format!("{num}."))
-                            }
-                        };
-                        if let Some(text) = marker {
-                            if (run.line_top / ch).floor() as usize == page_index {
-                                marker_draws.push((text, run.line_top, run.line_height));
+                        if run.text == IMAGE_PLACEHOLDER
+                            && (run.line_top / ch).floor() as usize == page_index
+                        {
+                            if let Some(g) = run.glyphs.first() {
+                                image_lines.push((g.metadata, run.line_top, run.line_height));
                             }
                         }
                     }
@@ -927,7 +907,6 @@ fn window_ui(
                     page_index,
                     revision,
                     image_lines,
-                    marker_draws,
                     caret_on_list,
                 )
             };
@@ -983,19 +962,6 @@ fn window_ui(
                     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                     painter.image(tex.id(), img_rect, uv, egui::Color32::WHITE);
                 }
-            }
-            // Draw list markers in the gutter (left of the hanging indent).
-            for (text, line_top, mlh) in marker_draws {
-                let top = cy + line_top - page_index as f32 * ch;
-                let x = rect.min.x + cx * scale;
-                let y = rect.min.y + top * scale;
-                painter.text(
-                    egui::pos2(x, y + mlh * scale * 0.12),
-                    egui::Align2::LEFT_TOP,
-                    text,
-                    egui::FontId::proportional(d.font_pt * DPI / 72.0 * scale),
-                    egui::Color32::from_rgb(0x1a, 0x1a, 0x1a),
-                );
             }
             let caret_indent = if caret_on_list { list_indent_px() } else { 0.0 };
             if focused {
@@ -1694,6 +1660,7 @@ fn insert_image_at_caret(d: &mut DocRuntime, fs: &mut FontSystem, image: Pending
 /// (rather than a fixed 96 dpi bitmap that egui then upsamples) is what keeps
 /// the on-page text crisp.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn render_page(
     editor: &Editor<'static>,
     fs: &mut FontSystem,
@@ -1705,26 +1672,73 @@ fn render_page(
     page_w: f32,
     page_h: f32,
     render_scale: f32,
+    font_name: &str,
+    font_pt: f32,
+    line_spacing: f32,
 ) -> (Vec<u8>, usize, usize) {
     let pw = (page_w * render_scale).ceil().max(1.0) as usize;
     let ph = (page_h * render_scale).ceil().max(1.0) as usize;
     let mut buf = vec![255u8; pw * ph * 4];
     let ink = CtColor::rgb(0x1a, 0x1a, 0x1a);
     let list_indent = list_indent_px();
+    // Marker text per buffer line (numbered items count up, restart on interrupt).
+    let markers: Vec<Option<String>> = editor.with_buffer(|b| {
+        let mut out = Vec::with_capacity(b.lines.len());
+        let mut num = 0usize;
+        for line in &b.lines {
+            out.push(match list_kind_from_code(line_list_code(line)) {
+                ListKind::None => {
+                    num = 0;
+                    None
+                }
+                ListKind::Bullet => {
+                    num = 0;
+                    Some("•".to_string())
+                }
+                ListKind::Numbered => {
+                    num += 1;
+                    Some(format!("{num}."))
+                }
+            });
+        }
+        out
+    });
     editor.with_buffer(|b| {
+        let mut last_line: Option<usize> = None;
         for run in b.layout_runs() {
             let p = (run.line_top / ch).floor() as usize;
+            let first_visual = Some(run.line_i) != last_line;
+            last_line = Some(run.line_i);
             if p != page {
                 continue;
             }
             // List lines are shifted right by the hanging indent.
-            let ox = cx
-                + if line_list_code(&b.lines[run.line_i]) != 0 {
-                    list_indent
-                } else {
-                    0.0
-                };
+            let is_list = line_list_code(&b.lines[run.line_i]) != 0;
+            let ox = cx + if is_list { list_indent } else { 0.0 };
             let base_y = cy + run.line_y - page as f32 * ch;
+            // Draw the list marker (same font + baseline as the body) in the gutter.
+            if is_list && first_visual {
+                if let Some(Some(text)) = markers.get(run.line_i) {
+                    let mut mb = Buffer::new(fs, base_metrics(font_pt, line_spacing));
+                    mb.set_size(Some(list_indent.max(1.0)), None);
+                    mb.set_text(
+                        text,
+                        &Attrs::new().family(Family::Name(font_name)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    mb.shape_until_scroll(fs, false);
+                    for mr in mb.layout_runs() {
+                        for glyph in mr.glyphs {
+                            let phys = glyph
+                                .physical((cx * render_scale, base_y * render_scale), render_scale);
+                            cache.with_pixels(fs, phys.cache_key, ink, |gx, gy, col| {
+                                blend_px(&mut buf, pw, ph, phys.x + gx, phys.y + gy, col);
+                            });
+                        }
+                    }
+                }
+            }
             for glyph in run.glyphs {
                 let color = glyph.color_opt.unwrap_or(ink);
                 let phys = glyph.physical((ox * render_scale, base_y * render_scale), render_scale);
@@ -2306,6 +2320,9 @@ mod tests {
             page_w,
             page_h,
             render_scale,
+            "Times New Roman",
+            13.0,
+            DEFAULT_LINE_SPACING,
         );
         assert_eq!(tw, (page_w * render_scale).ceil() as usize);
         assert_eq!(th, (page_h * render_scale).ceil() as usize);
