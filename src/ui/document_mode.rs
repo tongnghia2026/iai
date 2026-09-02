@@ -187,6 +187,8 @@ struct DocRuntime {
     image_tex: HashMap<usize, egui::TextureHandle>,
     /// Whether the document outline panel (text sections + images) is shown.
     show_outline: bool,
+    /// The image id currently being dragged on the page (realign / reorder).
+    dragging_image: Option<usize>,
 }
 
 impl Default for DocRuntime {
@@ -208,6 +210,7 @@ impl Default for DocRuntime {
             next_image_id: 1,
             image_tex: HashMap::new(),
             show_outline: false,
+            dragging_image: None,
         }
     }
 }
@@ -799,6 +802,56 @@ fn window_ui(
             let font_name = d.font.name().to_string();
             let font_pt = d.font_pt;
             let doc_line_spacing = d.line_spacing;
+
+            // Image drag: grab a picture and drag it to realign (by horizontal
+            // third) or reorder between paragraphs (vertical). Runs before text
+            // hit-testing so dragging a picture never selects text.
+            let mut image_drag = false;
+            if focused && !popup_open {
+                let pointer = response.interact_pointer_pos().map(|p| {
+                    let bx = ((p.x - rect.min.x) / scale - cx).max(0.0);
+                    let by = d.page_index as f32 * ch + (p.y - rect.min.y) / scale - cy;
+                    (bx, by)
+                });
+                if response.drag_started() {
+                    if let Some((bx, by)) = pointer {
+                        if let Some((id, line)) = image_at(d, cw, bx, by) {
+                            d.dragging_image = Some(id);
+                            if let Some(e) = d.editor.as_mut() {
+                                e.set_selection(Selection::None);
+                                e.set_cursor(Cursor::new(line, 0));
+                            }
+                            image_drag = true;
+                        }
+                    }
+                } else if response.dragged() {
+                    if let (Some(id), Some((bx, by))) = (d.dragging_image, pointer) {
+                        image_drag = true;
+                        let third = cw / 3.0;
+                        let align = if bx < third {
+                            ParagraphAlign::Left
+                        } else if bx > 2.0 * third {
+                            ParagraphAlign::Right
+                        } else {
+                            ParagraphAlign::Center
+                        };
+                        apply_image_align(d, fs, id, align);
+                        let cur = find_image_line(d.editor.as_ref().expect("editor"), id);
+                        let target = line_at_y(d.editor.as_ref().expect("editor"), by);
+                        if let (Some(cur), Some(target)) = (cur, target) {
+                            if target > cur {
+                                apply_image_move(d, fs, id, 1);
+                            } else if target < cur {
+                                apply_image_move(d, fs, id, -1);
+                            }
+                        }
+                    }
+                }
+                if response.drag_stopped() {
+                    d.dragging_image = None;
+                }
+            }
+
             let (
                 image,
                 sel_rects,
@@ -817,7 +870,8 @@ fn window_ui(
                 // Click precedes the first Drag, so a drag selects only its span.
                 // Skip while a popup was dismissed this frame: that click is for
                 // the popup, not a caret move (keeps the selection during colour).
-                if focused && !popup_open {
+                // Also skip while dragging an image (handled above).
+                if focused && !popup_open && !image_drag {
                     if response.drag_started() {
                         if let Some(p) = response.interact_pointer_pos() {
                             let (mut x, y) = map(p, page_index);
@@ -1115,6 +1169,16 @@ fn window_ui(
                     );
                     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                     painter.image(tex.id(), img_rect, uv, egui::Color32::WHITE);
+                    // Outline the selected / dragged image so it reads as picked
+                    // up and its contextual controls make sense.
+                    if active_image == Some(id) || d.dragging_image == Some(id) {
+                        painter.rect_stroke(
+                            img_rect.expand(2.0),
+                            2.0,
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(60, 120, 240)),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
                 }
             }
             let caret_indent = if caret_on_list { list_indent_px() } else { 0.0 };
@@ -1828,6 +1892,47 @@ fn active_image_id(editor: &Editor<'static>) -> Option<usize> {
         } else {
             None
         }
+    })
+}
+
+/// The image `(id, line)` whose displayed rectangle contains the content-space
+/// point `(bx, by)` (buffer pixels, `by` continuous across pages), if any.
+fn image_at(d: &DocRuntime, cw: f32, bx: f32, by: f32) -> Option<(usize, usize)> {
+    let editor = d.editor.as_ref()?;
+    editor.with_buffer(|b| {
+        for run in b.layout_runs() {
+            if run.text != IMAGE_PLACEHOLDER {
+                continue;
+            }
+            if by < run.line_top || by > run.line_top + run.line_height {
+                continue;
+            }
+            let Some(g) = run.glyphs.first() else {
+                continue;
+            };
+            let id = g.metadata;
+            let Some(block) = d.images.get(&id) else {
+                continue;
+            };
+            let (w_px, _) = image_display_px(block, &d.setup);
+            let ox = image_align_offset(block.align, cw, w_px);
+            if bx >= ox && bx <= ox + w_px {
+                return Some((id, run.line_i));
+            }
+        }
+        None
+    })
+}
+
+/// The buffer line whose laid-out rows contain the content-space y `by`.
+fn line_at_y(editor: &Editor<'static>, by: f32) -> Option<usize> {
+    editor.with_buffer(|b| {
+        for run in b.layout_runs() {
+            if by >= run.line_top && by < run.line_top + run.line_height {
+                return Some(run.line_i);
+            }
+        }
+        None
     })
 }
 
