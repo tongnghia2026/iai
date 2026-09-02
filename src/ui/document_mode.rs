@@ -185,6 +185,8 @@ struct DocRuntime {
     next_image_id: usize,
     /// Lazily-built egui textures for image blocks, keyed by image id.
     image_tex: HashMap<usize, egui::TextureHandle>,
+    /// Whether the document outline panel (text sections + images) is shown.
+    show_outline: bool,
 }
 
 impl Default for DocRuntime {
@@ -205,6 +207,7 @@ impl Default for DocRuntime {
             images: HashMap::new(),
             next_image_id: 1,
             image_tex: HashMap::new(),
+            show_outline: false,
         }
     }
 }
@@ -584,6 +587,16 @@ fn window_ui(
             .clicked()
         {
             actions.doc.start_mail_merge = true;
+        }
+        ui.separator();
+
+        // Toggle the document outline panel (text sections + images).
+        if ui
+            .selectable_label(d.show_outline, ph::SIDEBAR_SIMPLE)
+            .on_hover_text("Bố cục tài liệu (danh sách đoạn văn & ảnh)")
+            .clicked()
+        {
+            d.show_outline = !d.show_outline;
         }
         ui.separator();
 
@@ -1145,6 +1158,162 @@ fn window_ui(
             data.chrome.theme_mode.palette(),
         );
     }
+
+    outline_window(ctx, d, ch);
+}
+
+/// One entry in the document outline panel.
+struct OutlineEntry {
+    line: usize,
+    page: usize,
+    kind: OutlineKind,
+}
+
+enum OutlineKind {
+    /// A text paragraph with a short preview.
+    Text(String),
+    /// An image block (the runtime image id).
+    Image(usize),
+}
+
+/// Build the outline: one entry per buffer line, tagged with its page and either
+/// a text preview or the image id. `ch` is the content height (px) used to page.
+fn collect_outline(editor: &Editor<'static>, ch: f32) -> Vec<OutlineEntry> {
+    editor.with_buffer(|b| {
+        let mut page_of_line = vec![0usize; b.lines.len()];
+        for run in b.layout_runs() {
+            if let Some(slot) = page_of_line.get_mut(run.line_i) {
+                *slot = (run.line_top / ch).floor().max(0.0) as usize;
+            }
+        }
+        b.lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let page = page_of_line.get(i).copied().unwrap_or(0);
+                if line.text() == IMAGE_PLACEHOLDER {
+                    let id = line.attrs_list().get_span(0).metadata;
+                    OutlineEntry {
+                        line: i,
+                        page,
+                        kind: OutlineKind::Image(id),
+                    }
+                } else {
+                    let snippet: String = line.text().chars().take(48).collect();
+                    OutlineEntry {
+                        line: i,
+                        page,
+                        kind: OutlineKind::Text(snippet),
+                    }
+                }
+            })
+            .collect()
+    })
+}
+
+/// The document outline panel: text sections and images listed separately, each
+/// jumping the caret (and page) to its place. Toggled from the toolbar.
+fn outline_window(ctx: &egui::Context, d: &mut DocRuntime, ch: f32) {
+    if !d.show_outline {
+        return;
+    }
+    let Some(editor) = d.editor.as_ref() else {
+        return;
+    };
+    let entries = collect_outline(editor, ch);
+    // Ensure a thumbnail texture exists for every image before borrowing d in
+    // the window closure.
+    let image_ids: Vec<usize> = entries
+        .iter()
+        .filter_map(|e| match e.kind {
+            OutlineKind::Image(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    for id in image_ids {
+        if !d.image_tex.contains_key(&id) {
+            if let Some(block) = d.images.get(&id) {
+                if let Some(ci) = decode_color_image(&block.data) {
+                    let tex = ctx.load_texture(
+                        format!("iai_doc_img_{id}"),
+                        ci,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    d.image_tex.insert(id, tex);
+                }
+            }
+        }
+    }
+
+    let mut open = d.show_outline;
+    let mut jump: Option<(usize, usize)> = None;
+    let image_tex = &d.image_tex;
+    egui::Window::new("Bố cục tài liệu")
+        .open(&mut open)
+        .resizable(true)
+        .default_width(240.0)
+        .default_pos(ctx.screen_rect().right_top() + egui::vec2(-260.0, 80.0))
+        .show(ctx, |ui| {
+            let image_count = entries
+                .iter()
+                .filter(|e| matches!(e.kind, OutlineKind::Image(_)))
+                .count();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.label(egui::RichText::new(format!("{} hình ảnh", image_count)).strong());
+                let mut img_no = 0;
+                for e in &entries {
+                    if let OutlineKind::Image(id) = e.kind {
+                        img_no += 1;
+                        ui.horizontal(|ui| {
+                            if let Some(tex) = image_tex.get(&id) {
+                                let size = tex.size_vec2();
+                                let h = 28.0;
+                                let w = (h * size.x / size.y.max(1.0)).clamp(8.0, 64.0);
+                                ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(w, h)));
+                            }
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    format!("Ảnh {img_no} (tr. {})", e.page + 1),
+                                )
+                                .clicked()
+                            {
+                                jump = Some((e.line, e.page));
+                            }
+                        });
+                    }
+                }
+                if image_count == 0 {
+                    ui.label(egui::RichText::new("(chưa có ảnh)").weak());
+                }
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(egui::RichText::new("Đoạn văn").strong());
+                let mut para_no = 0;
+                for e in &entries {
+                    if let OutlineKind::Text(snippet) = &e.kind {
+                        para_no += 1;
+                        let label = if snippet.trim().is_empty() {
+                            format!("{para_no}. (dòng trống)")
+                        } else {
+                            format!("{para_no}. {snippet}")
+                        };
+                        if ui.selectable_label(false, label).clicked() {
+                            jump = Some((e.line, e.page));
+                        }
+                    }
+                }
+            });
+        });
+
+    if let Some((line, page)) = jump {
+        if let Some(e) = d.editor.as_mut() {
+            e.set_selection(Selection::None);
+            e.set_cursor(Cursor::new(line, 0));
+        }
+        d.page_index = page;
+    }
+    d.show_outline = open;
 }
 
 /// Paint fixed ruler strips around the flowing-text viewport. Their zero follows
