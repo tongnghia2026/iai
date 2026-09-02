@@ -1,8 +1,46 @@
 # Kế hoạch: "Document mode" — trình soạn thảo văn bản nhẹ trong iAi
 
-> Trạng thái: **ĐÃ CHỐT HƯỚNG, CHƯA CODE.** Tạo 2026-09-01 để một hội thoại mới
-> mở ra là bắt tay được ngay (bắt đầu từ **Pha 0 — spike**). Chủ dự án (end-user)
-> muốn thêm trình soạn thảo kiểu Word cơ bản, nhấn mạnh **phải nhẹ máy**.
+> Trạng thái: **MVP HOÀN TẤT & ĐÃ PUSH (2026-09-02).** Xem mục 0 bên dưới. Chủ dự
+> án (end-user) muốn trình soạn thảo kiểu Word cơ bản, nhấn mạnh **phải nhẹ máy**.
+
+---
+
+## 0. TÌNH TRẠNG HIỆN TẠI (2026-09-02) — đọc trước
+
+**MVP đã xong, chủ GUI-test OK, đã push** lên `github tongnghia2026/iai` nhánh
+`feat/vector-core-foundation` (tới commit `5f73c46`). Trình soạn thảo là **tài
+liệu hạng nhất** (`DocumentKind::FlowText`, tab riêng; menu **Soạn thảo văn bản →
+Tài liệu văn bản mới…**).
+
+**ĐÃ LÀM (Pha 0–3 + xuất/nhập + hơn thế):**
+- Gõ tiếng Việt WYSIWYG trên trang A4, đa trang, preview **nét device-resolution**.
+- Định dạng ký tự: **đậm / nghiêng / gạch chân / màu chữ** (theo vùng chọn,
+  Ctrl+B/I/U + toolbar). Căn lề đoạn (trái/giữa/phải/đều). **Giãn dòng** cả tài liệu.
+- **Chèn ảnh** khối (logo/chữ ký/con dấu) — placeholder U+FFFC + overlay egui.
+- **Danh sách chấm/số** hanging-indent (mẹo `BufferLine::layout` ép width từng dòng;
+  list-kind lưu ở **AttrsList defaults metadata** để sống qua edit).
+- **Lưu/mở `.iai`** (serde, format v9), **xuất PDF chữ-vector chọn-được** (nhúng
+  font Type0/Identity-H; ảnh = XObject; underline/màu/list giữ đúng).
+- Đã fix ext-bridge (SO_REUSEADDR) — xem memory `project_iai_ai_web_bridge`.
+
+**Bản đồ code:** model `src/core/text_document.rs`; layout+PDF `src/core/text_layout.rs`
+(chỗ DUY NHẤT gặp cosmic-text ở đường xuất, dùng per-para buffer); editor in-app
+`src/ui/document_mode.rs` (thread-local, 1 cosmic-text `Editor`/`Buffer`, đồng bộ
+2 chiều với model qua `FlowTextViewModel`/UiActions). Chi tiết + gotcha đầy đủ ở
+memory `project_iai_wordprocessor_plan`.
+
+**CÒN LẠI — đều là phần cộng thêm, KHÔNG bắt buộc (chủ đã chốt MVP đủ dùng):**
+1. **Trộn thư (mail-merge)** — mẫu + Excel/CSV → xuất hàng loạt PDF. ⭐ Chủ được
+   khuyên làm mục này trước (đúng nghề hợp đồng-theo-khách). Pha 6.
+2. **Đầu/chân trang + số trang.**
+3. **Bảng (tables)** — Pha 4.
+4. **Xuất `.docx`** (`docx-rs` + `zip`).
+5. Tinh chỉnh: per-run font/cỡ; subset font nhúng PDF (nhẹ hơn); đo RAM/CPU thật.
+
+**ĐÃ CHỐT BỎ:** AutoPrint khỏi kế hoạch này; split-view; egui_kittest (chủ tự test).
+
+**Quy ước:** commit local, push khi chủ bảo; `cargo fmt --all --check` +
+`cargo test --lib` trước push; comment tiếng Anh tối thiểu, đừng đụng chuỗi UI VN.
 
 ---
 
