@@ -1412,10 +1412,18 @@ fn restyle_selection(
             let Some(line) = b.lines.get(li) else {
                 continue;
             };
+            if line.text() == IMAGE_PLACEHOLDER {
+                continue; // never restyle an image placeholder line
+            }
             let text = line.text().to_string();
             let range = line_selection_range(li, start, end, text.len());
             let old = line.attrs_list();
-            let base = Attrs::new().family(Family::Name(font_name));
+            // Preserve the line's list kind (stored in the defaults metadata) so
+            // colour/emphasis changes don't clear the bullet/number.
+            let list_code = old.defaults().metadata;
+            let base = Attrs::new()
+                .family(Family::Name(font_name))
+                .metadata(list_code);
             let mut list = AttrsList::new(&base);
 
             let mut seg: Option<(usize, RunFmt)> = None; // (start_byte, fmt)
@@ -2234,6 +2242,45 @@ mod tests {
             back.paragraphs[1].style.list,
             ListKind::Bullet,
             "Enter continues the list"
+        );
+    }
+
+    #[test]
+    fn colour_and_emphasis_keep_the_list_number() {
+        let mut fs = FontSystem::new();
+        let mut d = DocRuntime::default();
+        let mut p = Paragraph::plain("alpha beta", CharStyle::default());
+        p.style.list = ListKind::Numbered;
+        let view = FlowTextViewModel {
+            document: std::sync::Arc::new(TextDocument {
+                paragraphs: vec![p],
+                ..Default::default()
+            }),
+            revision: 1,
+            active_page: 0,
+            page_count: 1,
+        };
+        sync_runtime(&mut d, &mut fs, &view);
+        {
+            let e = d.editor.as_mut().unwrap();
+            e.set_selection(Selection::Normal(Cursor::new(0, 0)));
+            e.set_cursor(Cursor::new(0, 10));
+        }
+        let red = Color::new(220, 30, 30, 255);
+        apply_char_color(&mut d, &mut fs, red);
+        let back = editor_document(&d);
+        assert_eq!(
+            back.paragraphs[0].style.list,
+            ListKind::Numbered,
+            "colouring must not drop the list number"
+        );
+        assert!(back.paragraphs[0].runs.iter().any(|r| r.style.color == red));
+
+        // Bold (the other restyle path) must also keep the list.
+        apply_char_style(&mut d, &mut fs, CharToggle::Bold);
+        assert_eq!(
+            editor_document(&d).paragraphs[0].style.list,
+            ListKind::Numbered
         );
     }
 
