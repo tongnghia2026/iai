@@ -515,75 +515,87 @@ impl CloneTool {
             let db = a[2] - b[2];
             (dr * dr + dg * dg + db * db).sqrt()
         };
-        let collect_ring = |cx: f32, cy: f32, min_samples: usize| -> Option<([f32; 3], f32)> {
-            const DIRS: usize = 16;
+        let collect_stats = |cx: f32, cy: f32, probes: &[(f32, f32)]| -> Option<([f32; 3], f32)> {
             let mut sum = [0.0f32; 3];
             let mut lsum = 0.0f32;
             let mut lsum2 = 0.0f32;
-            let mut count = 0usize;
-            for scale in [0.62f32, 0.92] {
-                let rr = r * scale;
-                for i in 0..DIRS {
-                    let a = std::f32::consts::TAU * i as f32 / DIRS as f32;
-                    let Some(rgb) = sample_rgb(cx + rr * a.cos(), cy + rr * a.sin()) else {
-                        continue;
-                    };
-                    let y = luma(rgb);
-                    sum[0] += rgb[0];
-                    sum[1] += rgb[1];
-                    sum[2] += rgb[2];
-                    lsum += y;
-                    lsum2 += y * y;
-                    count += 1;
-                }
+            for &(dx, dy) in probes {
+                let rgb = sample_rgb(cx + dx, cy + dy)?;
+                let y = luma(rgb);
+                sum[0] += rgb[0];
+                sum[1] += rgb[1];
+                sum[2] += rgb[2];
+                lsum += y;
+                lsum2 += y * y;
             }
-            if count < min_samples {
-                return None;
-            }
-            let n = count as f32;
+            let n = probes.len() as f32;
             let mean = [sum[0] / n, sum[1] / n, sum[2] / n];
             let lum_mean = lsum / n;
             let var = (lsum2 / n - lum_mean * lum_mean).max(0.0);
             Some((mean, var.sqrt()))
         };
-        let collect_body_std = |cx: f32, cy: f32, min_samples: usize| -> Option<f32> {
-            let offsets = [
-                (0.0, 0.0),
-                (0.45, 0.0),
-                (-0.45, 0.0),
-                (0.0, 0.45),
-                (0.0, -0.45),
-                (0.55, 0.55),
-                (-0.55, 0.55),
-                (0.55, -0.55),
-                (-0.55, -0.55),
-            ];
-            let mut sum = 0.0f32;
-            let mut sum2 = 0.0f32;
-            let mut count = 0usize;
-            for (ox, oy) in offsets {
-                let Some(rgb) = sample_rgb(cx + ox * r, cy + oy * r) else {
-                    continue;
-                };
-                let y = luma(rgb);
-                sum += y;
-                sum2 += y * y;
-                count += 1;
+
+        // Score a candidate with the exact same relative probes that are visible
+        // at the destination. A brush crossing the page edge must not make the
+        // source require pixels for the clipped-away half of the dab.
+        const DIRS: usize = 16;
+        let mut ring_probes = Vec::with_capacity(DIRS * 2);
+        for scale in [0.62f32, 0.92] {
+            let rr = r * scale;
+            for i in 0..DIRS {
+                let a = std::f32::consts::TAU * i as f32 / DIRS as f32;
+                let probe = (rr * a.cos(), rr * a.sin());
+                if sample_rgb(dst_cx + probe.0, dst_cy + probe.1).is_some() {
+                    ring_probes.push(probe);
+                }
             }
-            if count < min_samples {
-                return None;
-            }
-            let n = count as f32;
-            let mean = sum / n;
-            Some((sum2 / n - mean * mean).max(0.0).sqrt())
+        }
+        if ring_probes.len() < 8 {
+            return None;
+        }
+
+        let body_probe_candidates = [
+            (0.0, 0.0),
+            (0.45, 0.0),
+            (-0.45, 0.0),
+            (0.0, 0.45),
+            (0.0, -0.45),
+            (0.55, 0.55),
+            (-0.55, 0.55),
+            (0.55, -0.55),
+            (-0.55, -0.55),
+        ];
+        let body_probes: Vec<(f32, f32)> = body_probe_candidates
+            .into_iter()
+            .map(|(x, y)| (x * r, y * r))
+            .filter(|&(dx, dy)| sample_rgb(dst_cx + dx, dst_cy + dy).is_some())
+            .collect();
+
+        let (dst_rim_mean, dst_rim_std) = collect_stats(dst_cx, dst_cy, &ring_probes)?;
+        let dst_body_std = if body_probes.len() >= 3 {
+            collect_stats(dst_cx, dst_cy, &body_probes)?.1
+        } else {
+            dst_rim_std
         };
 
-        // The destination brush is allowed to cross the page/layer boundary.
-        // At least one quarter of its probes must remain paintable, which covers
-        // a brush centred on an edge (half visible) and even a page corner. Clean
-        // source candidates below still require every probe to be valid.
-        let (dst_rim_mean, dst_rim_std) = collect_ring(dst_cx, dst_cy, 8)?;
-        let dst_body_std = collect_body_std(dst_cx, dst_cy, 3).unwrap_or(dst_rim_std);
+        // The scoring probes stop at 0.92r. Also require the candidate to
+        // contain the complete part of the dab that survives edge clipping, so
+        // the unprobed outer pixels cannot turn transparent at the page edge.
+        let left = ox as f32;
+        let top = oy as f32;
+        let right = left + lw as f32;
+        let bottom = top + lh as f32;
+        let visible_dx0 = (-r).max(left - dst_cx);
+        let visible_dy0 = (-r).max(top - dst_cy);
+        let visible_dx1 = r.min(right - dst_cx);
+        let visible_dy1 = r.min(bottom - dst_cy);
+        let covers_visible_dab = |cx: f32, cy: f32| {
+            cx + visible_dx0 >= left
+                && cy + visible_dy0 >= top
+                && cx + visible_dx1 < right
+                && cy + visible_dy1 < bottom
+        };
+
         let mut best_score = f32::MAX;
         let mut best_off: Option<(f32, f32)> = None;
         for radius_factor in [1.55f32, 2.15, 2.85, 3.65] {
@@ -592,11 +604,20 @@ impl CloneTool {
                 let a = std::f32::consts::TAU * (i as f32 + 0.25 * radius_factor) / 16.0;
                 let scx = dst_cx + dist * a.cos();
                 let scy = dst_cy + dist * a.sin();
-                let Some((src_rim_mean, src_rim_std)) = collect_ring(scx, scy, 32) else {
+                if !covers_visible_dab(scx, scy) {
+                    continue;
+                }
+                let Some((src_rim_mean, src_rim_std)) = collect_stats(scx, scy, &ring_probes)
+                else {
                     continue;
                 };
-                let Some(src_body_std) = collect_body_std(scx, scy, 9) else {
-                    continue;
+                let src_body_std = if body_probes.len() >= 3 {
+                    let Some((_, std)) = collect_stats(scx, scy, &body_probes) else {
+                        continue;
+                    };
+                    std
+                } else {
+                    src_rim_std
                 };
 
                 let color = rgb_dist(src_rim_mean, dst_rim_mean) / 255.0;
@@ -872,6 +893,22 @@ mod tests {
         assert!(
             tool.spot_pick_offset(&canvas, 64.0, 0.0).is_some(),
             "top-edge click must still find a clean source"
+        );
+    }
+
+    #[test]
+    fn spot_heal_uses_only_visible_footprint_on_narrow_page() {
+        // No 80 px diameter source circle fits inside this 64 px-wide page.
+        // The right half of a dab centred on the left edge does fit, however,
+        // and an offset along the tall axis provides a complete source for it.
+        let canvas = Canvas::new(64, 256);
+        let mut tool = CloneTool::new();
+        tool.size = 40.0;
+        tool.stroke_source = Some(canvas.active_layer().tiles.clone());
+
+        assert!(
+            tool.spot_pick_offset(&canvas, 0.0, 128.0).is_some(),
+            "clipped destination footprint must not require a full source circle"
         );
     }
 }
