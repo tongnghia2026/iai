@@ -1,8 +1,9 @@
 # Kế hoạch: "Document mode" — trình soạn thảo văn bản nhẹ trong iAi
 
-> Trạng thái: **MVP HOÀN TẤT & ĐÃ PUSH (2026-09-02)** + **Trộn thư (mail-merge)
-> XONG — commit LOCAL, chờ chủ GUI-test.** Xem mục 0 bên dưới. Chủ dự án
-> (end-user) muốn trình soạn thảo kiểu Word cơ bản, nhấn mạnh **phải nhẹ máy**.
+> Trạng thái (2026-09-03): **MVP + Trộn thư + nhiều bản vá editor + REDESIGN ẢNH
+> kiểu Word — TẤT CẢ ĐÃ PUSH** (nhánh `feat/vector-core-foundation`, tới `3be6eb4`).
+> **Việc kế tiếp cho hội thoại MỚI: BAO CHỮ (Square wrap)** — xem mục 0.4 bên dưới.
+> Chủ dự án (end-user) muốn trình soạn thảo kiểu Word cơ bản, nhấn mạnh **nhẹ máy**.
 
 ---
 
@@ -30,23 +31,55 @@ Tài liệu văn bản mới…**).
 2 chiều với model qua `FlowTextViewModel`/UiActions). Chi tiết + gotcha đầy đủ ở
 memory `project_iai_wordprocessor_plan`.
 
-**ĐÃ LÀM THÊM — Trộn thư (mail-merge), Pha 6 ✅ (LOCAL, chờ chủ GUI-test):**
-- Nút **"Trộn thư"** trên thanh công cụ tài liệu văn bản → chọn tệp **Excel
-  (.xlsx/.xls/.ods) hoặc CSV** → hộp thoại soát trường + đặt mẫu tên tệp → **xuất
-  hàng loạt: mỗi dòng dữ liệu = một PDF chữ-vector** vào thư mục chọn (chạy nền,
-  có thanh tiến độ; tên trùng tự thêm (2),(3)…). Chỗ giữ chỗ `{{Tên cột}}` trong
-  mẫu; trường không có cột → giữ nguyên `{{…}}` để lộ lỗi; ô trống → rỗng. Giữ
-  đúng định dạng từng run (đậm/nghiêng/màu của chỗ đặt trường).
-- Lõi thuần `src/core/mail_merge.rs` (23 test, gồm fixture .xlsx thật + e2e
-  merge→PDF). App-side `src/app/file_ops/mail_merge.rs` (picker+worker+poll).
-- Deps mới: `csv`, `calamine` (dates), `chrono` — thuần Rust, nhẹ.
+### 0.1 Trộn thư (mail-merge), Pha 6 ✅ ĐÃ PUSH (chủ GUI-test OK)
+- Nút **"Trộn thư"** → chọn **Excel (.xlsx/.xls/.ods) hoặc CSV** → hộp thoại soát
+  trường + mẫu tên tệp → **xuất hàng loạt: mỗi dòng = một PDF chữ-vector** (chạy
+  nền, thanh tiến độ, tên trùng tự thêm (2),(3)…). Chỗ giữ chỗ `{{Tên cột}}`;
+  trường thiếu cột → giữ nguyên `{{…}}`; ô trống → rỗng; giữ định dạng từng run.
+- Lõi `src/core/mail_merge.rs` (fixture .xlsx + e2e merge→PDF). App-side
+  `src/app/file_ops/mail_merge.rs`. Deps: `csv`, `calamine`(dates), `chrono`.
 
-**CÒN LẠI — đều là phần cộng thêm, KHÔNG bắt buộc (chủ đã chốt MVP đủ dùng):**
-1. **Đầu/chân trang + số trang.**
-2. **Bảng (tables)** — Pha 4.
-3. **Xuất `.docx`** (`docx-rs` + `zip`).
-4. Tinh chỉnh: per-run font/cỡ; subset font nhúng PDF (nhẹ hơn); đo RAM/CPU thật.
-5. Mail-merge nâng cao (nếu cần): gộp tất cả vào MỘT PDF; lọc/chọn dòng để xuất.
+### 0.2 Bản vá editor sau góp ý chủ ✅ ĐÃ PUSH
+- Đổi màu chữ **không còn mất vùng chọn** (chặn cú click đóng popup rơi vào trang
+  qua `ctx.any_popup_open()`).
+- **Giãn dòng theo VÙNG CHỌN** (per-đoạn): multiplier×1000 gói vào metadata bit
+  cao (list ở byte thấp), `refresh_line_spacing` đặt `metrics_opt` per-dòng.
+- Ảnh inline: hàng công cụ (căn/cỡ/lên-xuống/xoá) + **kéo ảnh trực tiếp**.
+
+### 0.3 Redesign ẢNH kiểu Word ✅ ĐÃ PUSH (chủ chọn mức ĐẦY ĐỦ, kể cả bao chữ)
+- **Bảng Layer** khi ở FlowText → liệt kê đối tượng: "Văn bản" + mỗi ảnh (inline
+  & nổi) 1 dòng, bấm để focus (`flow_text_objects_panel` trong `panels.rs`;
+  `DocumentIntent.flow_text_focus` → `document_mode::request_focus`). Cửa sổ "Bố
+  cục" cũ đã bỏ.
+- **3 chế độ vị trí ảnh** (combo "Kiểu ảnh"): **Cùng dòng / Nổi trên chữ / Nổi sau
+  chữ**. Model: `ImageBlock.wrap: ImageWrap{Inline,BehindText,InFrontOfText,
+  Square,TopBottom}` + `page,x_mm,y_mm` (serde default); `TextDocument.
+  floating_images: Vec<ImageBlock>`. Editor: `d.floating`/`selected_floating`/
+  `float_drag`; `handle_floating_pointer` (chọn/kéo-move/kéo-góc-resize, chạy
+  TRƯỚC text). Ảnh sau chữ: render_page nền TRONG SUỐT (`blend_px` ghi alpha) +
+  vẽ giấy trắng riêng + thứ tự vẽ (paper→behind→chữ→inline→front). PDF:
+  `ImgPlace.behind`, vẽ behind trước BT/in-front sau ET.
+
+### 0.4 ➜ VIỆC KẾ TIẾP: BAO CHỮ (Square wrap) — chưa làm
+Chủ đã chốt muốn **chữ chạy vòng quanh ảnh** (Square/tight của Word). Đây là phần
+NẶNG & rủi ro nhất; làm ở hội thoại mới, **chủ test bản trung gian**.
+- **Cách:** `ImageWrap::Square` áp exclusion-rect. Mẹo per-line như list: lấy
+  hàm thuần `square_wrap(floating, page, cx, cy, cw, ly, line_h) -> Option<(x_off,
+  width)>` (ảnh bên trái→đẩy text sang phải+hẹp; bên phải→hẹp; giữa/hẹp quá→None).
+  Gộp với list qua `line_layout(is_list, cw, wrap) -> (offset,width)`.
+- **Điểm cắm (mỗi chỗ đang xử lý list_indent, thêm wrap_offset song song):**
+  (1) relayout mới `relayout_wrap_lines` (2-pass reflow, GATE no-op khi ko có ảnh
+  Square) — chạy cạnh `relayout_list_lines`; (2) `render_page` thêm param
+  `floating` + offset per-dòng; (3) selection rect trong `window_ui`; (4)
+  `list_indent_at_y` (hit-test click); (5) caret; (6) `text_layout` (PDF flow
+  per-para — khác editor, khó hơn, làm sau cùng).
+- **GATE bắt buộc:** khi tài liệu KHÔNG có ảnh `Square`, mọi hàm trả về như cũ →
+  0 thay đổi cho tài liệu hiện có (rào rủi ro). `TopBottom` có thể bỏ/để sau.
+
+### 0.5 CÒN LẠI khác (tùy chọn, KHÔNG gấp)
+1. **Đầu/chân trang + số trang.** 2. **Bảng (tables)** — Pha 4. 3. **Xuất `.docx`**
+   (`docx-rs` + `zip`). 4. per-run font/cỡ; subset font nhúng PDF; đo RAM/CPU.
+5. Mail-merge nâng cao: gộp 1 PDF; lọc/chọn dòng.
 
 **ĐÃ CHỐT BỎ:** AutoPrint khỏi kế hoạch này; split-view; egui_kittest (chủ tự test).
 
