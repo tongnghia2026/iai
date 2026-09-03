@@ -72,6 +72,15 @@ fn parse_page_number(text: &str, page_count: usize) -> Result<usize, String> {
     Ok(number - 1)
 }
 
+/// A document object to focus from the flowing-text Layers panel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FlowTextFocus {
+    /// The text body (caret to the first text line).
+    Text,
+    /// The image at this 0-based ordinal among the document's images.
+    Image(usize),
+}
+
 /// File/document commands: open/save/export, undo/redo, resize, tabs,
 /// colour-mode conversion, view zoom, clipboard.
 #[derive(Default)]
@@ -88,6 +97,9 @@ pub struct DocumentIntent {
     pub set_flow_text_layout: Option<(crate::core::document::DocumentId, usize, usize)>,
     /// Open a file picker to insert a picture into the active flowing-text doc.
     pub pick_flow_text_image: bool,
+    /// Layers panel (flowing-text mode): focus a document object — the whole
+    /// text, or the image at this 0-based ordinal among images.
+    pub flow_text_focus: Option<FlowTextFocus>,
     pub fit_to_screen: bool,
     pub zoom_in: bool,
     pub zoom_out: bool,

@@ -26,6 +26,17 @@ impl App {
             actions.doc.start_mail_merge = false;
             self.start_mail_merge();
         }
+        if let Some(focus) = actions.doc.flow_text_focus.take() {
+            let idx = self.docs.active_doc_idx;
+            if let Some(doc) = self.docs.documents.get(idx) {
+                if doc.is_flow_text() {
+                    crate::ui::document_mode::request_focus(doc.id, focus);
+                    if let Some(window) = &self.win.window {
+                        window.request_redraw();
+                    }
+                }
+            }
+        }
         if let Some(pattern) = actions.doc.set_mail_merge_pattern.take() {
             self.shell.ui.mail_merge_pattern = pattern;
         }

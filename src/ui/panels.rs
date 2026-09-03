@@ -1901,6 +1901,86 @@ fn ps_flat_popup_button(ui: &mut egui::Ui, width: f32, icon: &str, label: &str) 
     resp
 }
 
+/// The Layers panel body for a flowing-text document: the whole text is one
+/// object, and every image (later: tables, charts) is its own object. Clicking
+/// an object focuses it on the page — an image also opens its on-page controls.
+fn flow_text_objects_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    use crate::ui::intent::FlowTextFocus;
+    let pal = data.chrome.theme_mode.palette();
+    let Some(flow) = data.doc.flow_text.as_ref() else {
+        return;
+    };
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Đối tượng tài liệu")
+                .strong()
+                .size(11.0),
+        );
+    });
+    ui.add_space(2.0);
+    ui.separator();
+
+    egui::ScrollArea::vertical()
+        .id_salt("flow_text_objects_scroll")
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.add_space(2.0);
+
+            // The text body — a single object covering every paragraph's text.
+            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                if ui
+                    .selectable_label(
+                        false,
+                        egui::RichText::new(format!("{}  Văn bản", ph::TEXT_T)).size(12.0),
+                    )
+                    .on_hover_text("Toàn bộ chữ trong tài liệu")
+                    .clicked()
+                {
+                    actions.doc.flow_text_focus = Some(FlowTextFocus::Text);
+                }
+            });
+
+            // One row per image, in document order.
+            let mut img_no = 0;
+            for para in flow.document.paragraphs.iter() {
+                if para.image.is_some() {
+                    let ordinal = img_no;
+                    img_no += 1;
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        if ui
+                            .selectable_label(
+                                false,
+                                egui::RichText::new(format!("{}  Ảnh {}", ph::IMAGE, img_no))
+                                    .size(12.0),
+                            )
+                            .on_hover_text("Chọn để sửa vị trí / kích thước ảnh")
+                            .clicked()
+                        {
+                            actions.doc.flow_text_focus = Some(FlowTextFocus::Image(ordinal));
+                        }
+                    });
+                }
+            }
+            if img_no == 0 {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("(chưa có ảnh — dùng nút Chèn ảnh)")
+                            .weak()
+                            .size(10.5),
+                    );
+                });
+            }
+        });
+    let _ = pal;
+}
+
 fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
     let channels_active = data.chrome.show_channels_panel;
@@ -2025,6 +2105,13 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                 });
 
             ui.separator();
+            // A flowing-text document manages "objects" (the text body plus each
+            // image / table / chart), not raster layers, so the panel switches to
+            // an object list in that mode.
+            if data.doc.kind == crate::core::document::DocumentKind::FlowText {
+                flow_text_objects_panel(ui, data, actions);
+                return;
+            }
             if channels_active {
                 channels_panel_contents(ui, data, actions);
                 return;
