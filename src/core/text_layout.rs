@@ -469,6 +469,9 @@ struct ImgPlace<'a> {
     y: f32,
     w: f32,
     h: f32,
+    /// Drawn before the text object (a `BehindText` floating image) rather than
+    /// after it.
+    behind: bool,
 }
 
 impl DocumentLayout {
@@ -536,6 +539,7 @@ impl DocumentLayout {
                                 y: page_h - ((cy + *top) * s + h),
                                 w,
                                 h,
+                                behind: false,
                             });
                         }
                         continue;
@@ -678,6 +682,7 @@ impl DocumentLayout {
                     y: page_h - (fb.y_mm / 25.4 * 72.0) - h,
                     w,
                     h,
+                    behind: fb.wrap == crate::core::text_document::ImageWrap::BehindText,
                 });
             }
             pages.push((glyphs, rects, images));
@@ -869,6 +874,17 @@ fn page_content(
     image_names: &[Option<String>],
 ) -> String {
     let mut out = String::new();
+    // Behind-text images are drawn first so the text sits on top of them.
+    for (img, name) in images.iter().zip(image_names) {
+        if !img.behind {
+            continue;
+        }
+        let Some(name) = name else { continue };
+        out.push_str(&format!(
+            "q {:.2} 0 0 {:.2} {:.2} {:.2} cm /{} Do Q\n",
+            img.w, img.h, img.x, img.y, name
+        ));
+    }
     let mut cur: Option<(usize, u32, [u8; 4])> = None;
     let mut open = false;
     for g in glyphs {
@@ -912,8 +928,11 @@ fn page_content(
             r.x, r.y, r.w, r.h
         ));
     }
-    // Draw images: a unit image XObject scaled and translated by the CTM.
+    // Draw in-front images last: a unit XObject scaled and translated by the CTM.
     for (img, name) in images.iter().zip(image_names) {
+        if img.behind {
+            continue;
+        }
         let Some(name) = name else { continue };
         out.push_str(&format!(
             "q {:.2} 0 0 {:.2} {:.2} {:.2} cm /{} Do Q\n",
@@ -1116,6 +1135,36 @@ mod tests {
                 if s.dict.get(b"Subtype").ok().and_then(|v| v.as_name().ok()) == Some(&b"Image"[..]))
         });
         assert!(has_image, "floating image should embed as an XObject");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn behind_text_image_draws_before_the_text() {
+        let mut fs = FontSystem::new();
+        let mut fb = ImageBlock::inline(tiny_png(200, 200), 200, 200, 60.0, ParagraphAlign::Left);
+        fb.wrap = crate::core::text_document::ImageWrap::BehindText;
+        fb.page = 0;
+        fb.x_mm = 20.0;
+        fb.y_mm = 20.0;
+        let doc = TextDocument {
+            paragraphs: vec![para("Chữ nằm trên ảnh nền")],
+            floating_images: vec![fb],
+            ..Default::default()
+        };
+        let layout = DocumentLayout::build(&doc, DPI, &mut fs);
+        let path =
+            std::env::temp_dir().join(format!("iai_behind_pdf_{}_test.pdf", std::process::id()));
+        layout.write_text_pdf(&mut fs, &path).unwrap();
+        let reloaded = lopdf::Document::load(&path).expect("re-parse behind PDF");
+        let (_, page_id) = reloaded.get_pages().into_iter().next().unwrap();
+        let content = reloaded.get_page_content(page_id).unwrap();
+        let text = String::from_utf8_lossy(&content);
+        let do_pos = text.find("Do").expect("image draw op");
+        let tj_pos = text.find("Tj").expect("text show op");
+        assert!(
+            do_pos < tj_pos,
+            "behind image must be drawn before the text"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

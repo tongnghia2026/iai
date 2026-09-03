@@ -497,8 +497,8 @@ fn window_ui(
     let mut img_move_cmd: Option<i32> = None;
     let mut img_delete_cmd = false;
     // Image layout-mode conversions + floating-image controls.
-    let mut img_to_floating = false;
-    let mut float_to_inline = false;
+    let mut img_to_floating: Option<ImageWrap> = None;
+    let mut float_set_wrap: Option<ImageWrap> = None;
     let mut float_width_cmd: Option<f32> = None;
     let mut float_delete_cmd = false;
     let cur = current_fmt(d.editor.as_ref().expect("editor"));
@@ -678,7 +678,10 @@ fn window_ui(
                 .show_ui(ui, |ui| {
                     let _ = ui.selectable_label(true, "Cùng dòng chữ");
                     if ui.selectable_label(false, "Nổi trên chữ").clicked() {
-                        img_to_floating = true;
+                        img_to_floating = Some(ImageWrap::InFrontOfText);
+                    }
+                    if ui.selectable_label(false, "Nổi sau chữ").clicked() {
+                        img_to_floating = Some(ImageWrap::BehindText);
                     }
                 });
             ui.separator();
@@ -737,16 +740,32 @@ fn window_ui(
 
     // Contextual row for a selected floating image (Word "in front of text").
     if let Some(fi) = d.selected_floating {
-        if let Some(cur_width) = d.floating.get(fi).map(|b| b.width_mm) {
+        if let Some((cur_width, cur_wrap)) = d.floating.get(fi).map(|b| (b.width_mm, b.wrap)) {
+            let wrap_label = if cur_wrap == ImageWrap::BehindText {
+                "Nổi sau chữ"
+            } else {
+                "Nổi trên chữ"
+            };
             ui.horizontal_wrapped(|ui| {
                 ui.label(ph::IMAGE).on_hover_text("Ảnh nổi đang chọn");
                 egui::ComboBox::from_id_salt("doc_img_wrap_float")
-                    .selected_text("Nổi trên chữ")
+                    .selected_text(wrap_label)
                     .show_ui(ui, |ui| {
                         if ui.selectable_label(false, "Cùng dòng chữ").clicked() {
-                            float_to_inline = true;
+                            float_set_wrap = Some(ImageWrap::Inline);
                         }
-                        let _ = ui.selectable_label(true, "Nổi trên chữ");
+                        if ui
+                            .selectable_label(cur_wrap == ImageWrap::InFrontOfText, "Nổi trên chữ")
+                            .clicked()
+                        {
+                            float_set_wrap = Some(ImageWrap::InFrontOfText);
+                        }
+                        if ui
+                            .selectable_label(cur_wrap == ImageWrap::BehindText, "Nổi sau chữ")
+                            .clicked()
+                        {
+                            float_set_wrap = Some(ImageWrap::BehindText);
+                        }
                     });
                 ui.separator();
                 ui.label("Rộng").on_hover_text("Chiều rộng ảnh (mm)");
@@ -803,13 +822,20 @@ fn window_ui(
         if img_delete_cmd {
             apply_image_delete(d, fs, id);
         }
-        if img_to_floating {
-            convert_inline_to_floating(d, fs, id);
+        if let Some(wrap) = img_to_floating {
+            convert_inline_to_floating(d, fs, id, wrap);
         }
     }
     if let Some(fi) = d.selected_floating {
-        if float_to_inline {
-            convert_floating_to_inline(d, fs, fi);
+        if let Some(wrap) = float_set_wrap {
+            if wrap == ImageWrap::Inline {
+                convert_floating_to_inline(d, fs, fi);
+            } else if let Some(block) = d.floating.get_mut(fi) {
+                if block.wrap != wrap {
+                    block.wrap = wrap;
+                    d.revision = d.revision.wrapping_add(1);
+                }
+            }
         } else if let Some(w) = float_width_cmd {
             if let Some(block) = d.floating.get_mut(fi) {
                 block.width_mm = w.clamp(10.0, 400.0);
@@ -1242,8 +1268,18 @@ fn window_ui(
                 d.tex = Some((revision, page_index, rs_key, tex));
             }
 
-            // Paint the page, selection then caret.
+            // Build floating textures before painting (paint reads them).
+            ensure_floating_textures(ctx, d, page_index);
+
+            // Paint order: white paper → behind-text images → the (transparent)
+            // text texture → selection → inline images → in-front images → caret.
             let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
+            for i in 0..d.floating.len() {
+                if d.floating[i].page == page_index && d.floating[i].wrap == ImageWrap::BehindText {
+                    paint_floating_image(&painter, d, i, rect, scale);
+                }
+            }
             if let Some((_, _, _, tex)) = &d.tex {
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                 painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
@@ -1297,76 +1333,11 @@ fn window_ui(
                 }
             }
 
-            // Floating images (in front of the text) for this page, with a
-            // transform frame + corner handles when selected.
-            let float_count = d.floating.len();
-            for i in 0..float_count {
-                let (page, x_mm, y_mm, w_mm, h_mm, need_tex, bytes) = {
-                    let block = &d.floating[i];
-                    let key = FLOATING_TEX_BASE + i;
-                    let need = !d.image_tex.contains_key(&key);
-                    (
-                        block.page,
-                        block.x_mm,
-                        block.y_mm,
-                        block.width_mm,
-                        block.height_mm(),
-                        need,
-                        need.then(|| block.data.clone()),
-                    )
-                };
-                if page != page_index {
-                    continue;
-                }
-                let key = FLOATING_TEX_BASE + i;
-                if let Some(bytes) = bytes {
-                    if let Some(ci) = decode_color_image(&bytes) {
-                        let tex = ctx.load_texture(
-                            format!("iai_doc_float_{i}"),
-                            ci,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        d.image_tex.insert(key, tex);
-                    }
-                }
-                let _ = need_tex;
-                let img_rect = egui::Rect::from_min_size(
-                    egui::pos2(
-                        rect.min.x + mm_to_px(x_mm) * scale,
-                        rect.min.y + mm_to_px(y_mm) * scale,
-                    ),
-                    egui::vec2(mm_to_px(w_mm) * scale, mm_to_px(h_mm) * scale),
-                );
-                if let Some(tex) = d.image_tex.get(&key) {
-                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                    painter.image(tex.id(), img_rect, uv, egui::Color32::WHITE);
-                }
-                if d.selected_floating == Some(i) {
-                    let accent = egui::Color32::from_rgb(60, 120, 240);
-                    painter.rect_stroke(
-                        img_rect,
-                        0.0,
-                        egui::Stroke::new(1.5, accent),
-                        egui::StrokeKind::Outside,
-                    );
-                    for c in [
-                        img_rect.left_top(),
-                        img_rect.right_top(),
-                        img_rect.right_bottom(),
-                        img_rect.left_bottom(),
-                    ] {
-                        painter.rect_filled(
-                            egui::Rect::from_center_size(c, egui::vec2(8.0, 8.0)),
-                            1.0,
-                            egui::Color32::WHITE,
-                        );
-                        painter.rect_stroke(
-                            egui::Rect::from_center_size(c, egui::vec2(8.0, 8.0)),
-                            1.0,
-                            egui::Stroke::new(1.5, accent),
-                            egui::StrokeKind::Outside,
-                        );
-                    }
+            // Floating images that sit in front of the text (everything except
+            // BehindText, which was drawn under the text texture above).
+            for i in 0..d.floating.len() {
+                if d.floating[i].page == page_index && d.floating[i].wrap != ImageWrap::BehindText {
+                    paint_floating_image(&painter, d, i, rect, scale);
                 }
             }
             let caret_indent = if caret_on_list { list_indent_px() } else { 0.0 };
@@ -2397,6 +2368,77 @@ fn clear_floating_textures(d: &mut DocRuntime) {
     d.image_tex.retain(|k, _| *k < FLOATING_TEX_BASE);
 }
 
+/// Ensure a texture exists for every floating image on `page_index`.
+fn ensure_floating_textures(ctx: &egui::Context, d: &mut DocRuntime, page_index: usize) {
+    for i in 0..d.floating.len() {
+        let key = FLOATING_TEX_BASE + i;
+        if d.floating[i].page == page_index && !d.image_tex.contains_key(&key) {
+            let bytes = d.floating[i].data.clone();
+            if let Some(ci) = decode_color_image(&bytes) {
+                let tex = ctx.load_texture(
+                    format!("iai_doc_float_{i}"),
+                    ci,
+                    egui::TextureOptions::LINEAR,
+                );
+                d.image_tex.insert(key, tex);
+            }
+        }
+    }
+}
+
+/// Paint one floating image (texture already built), plus its transform frame
+/// and corner handles when it is the selected image.
+fn paint_floating_image(
+    painter: &egui::Painter,
+    d: &DocRuntime,
+    i: usize,
+    rect: egui::Rect,
+    scale: f32,
+) {
+    let Some(block) = d.floating.get(i) else {
+        return;
+    };
+    let key = FLOATING_TEX_BASE + i;
+    let img_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            rect.min.x + mm_to_px(block.x_mm) * scale,
+            rect.min.y + mm_to_px(block.y_mm) * scale,
+        ),
+        egui::vec2(
+            mm_to_px(block.width_mm) * scale,
+            mm_to_px(block.height_mm()) * scale,
+        ),
+    );
+    if let Some(tex) = d.image_tex.get(&key) {
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        painter.image(tex.id(), img_rect, uv, egui::Color32::WHITE);
+    }
+    if d.selected_floating == Some(i) {
+        let accent = egui::Color32::from_rgb(60, 120, 240);
+        painter.rect_stroke(
+            img_rect,
+            0.0,
+            egui::Stroke::new(1.5, accent),
+            egui::StrokeKind::Outside,
+        );
+        for c in [
+            img_rect.left_top(),
+            img_rect.right_top(),
+            img_rect.right_bottom(),
+            img_rect.left_bottom(),
+        ] {
+            let handle = egui::Rect::from_center_size(c, egui::vec2(8.0, 8.0));
+            painter.rect_filled(handle, 1.0, egui::Color32::WHITE);
+            painter.rect_stroke(
+                handle,
+                1.0,
+                egui::Stroke::new(1.5, accent),
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
+}
+
 /// A floating image's page rectangle in millimetres: `(x, y, w, h)`.
 fn floating_rect_mm(block: &ImageBlock) -> (f32, f32, f32, f32) {
     (block.x_mm, block.y_mm, block.width_mm, block.height_mm())
@@ -2527,9 +2569,9 @@ fn handle_floating_pointer(
     false
 }
 
-/// Convert the inline image `id` into a floating "in front of text" image at a
-/// default position on the current page.
-fn convert_inline_to_floating(d: &mut DocRuntime, fs: &mut FontSystem, id: usize) {
+/// Convert the inline image `id` into a floating image (`wrap`) at a default
+/// position on the current page.
+fn convert_inline_to_floating(d: &mut DocRuntime, fs: &mut FontSystem, id: usize, wrap: ImageWrap) {
     let Some(block) = d.images.get(&id).cloned() else {
         return;
     };
@@ -2544,7 +2586,11 @@ fn convert_inline_to_floating(d: &mut DocRuntime, fs: &mut FontSystem, id: usize
     }
     d.images.remove(&id);
     let mut fb = block;
-    fb.wrap = ImageWrap::InFrontOfText;
+    fb.wrap = if wrap == ImageWrap::Inline {
+        ImageWrap::InFrontOfText
+    } else {
+        wrap
+    };
     fb.page = d.page_index;
     fb.x_mm = d.setup.margins.left_mm + 10.0;
     fb.y_mm = d.setup.margins.top_mm + 10.0;
@@ -2593,7 +2639,9 @@ fn render_page(
 ) -> (Vec<u8>, usize, usize) {
     let pw = (page_w * render_scale).ceil().max(1.0) as usize;
     let ph = (page_h * render_scale).ceil().max(1.0) as usize;
-    let mut buf = vec![255u8; pw * ph * 4];
+    // Transparent background: the white paper is painted separately so a
+    // `BehindText` floating image can show through the gaps between glyphs.
+    let mut buf = vec![0u8; pw * ph * 4];
     let ink = CtColor::rgb(0x1a, 0x1a, 0x1a);
     let list_indent = list_indent_px();
     // Marker text per buffer line (numbered items count up, restart on interrupt).
@@ -2736,11 +2784,21 @@ fn blend_px(buf: &mut [u8], w: usize, h: usize, x: i32, y: i32, color: CtColor) 
         return;
     }
     let idx = (y as usize * w + x as usize) * 4;
+    // Straight-alpha "over" compositing so the page texture can be transparent
+    // where there is no ink (a `BehindText` image shows through those pixels).
+    let da = buf[idx + 3] as f32 / 255.0;
+    let out_a = a + da * (1.0 - a);
+    if out_a <= 0.0 {
+        return;
+    }
     let src = [color.r() as f32, color.g() as f32, color.b() as f32];
     for (c, s) in src.iter().enumerate() {
         let d = buf[idx + c] as f32;
-        buf[idx + c] = (s * a + d * (1.0 - a)).round() as u8;
+        buf[idx + c] = ((s * a + d * da * (1.0 - a)) / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u8;
     }
+    buf[idx + 3] = (out_a * 255.0).round() as u8;
 }
 
 fn paper_name(p: PaperSize) -> &'static str {
@@ -3318,9 +3376,14 @@ mod tests {
         assert_eq!(tw, (page_w * render_scale).ceil() as usize);
         assert_eq!(th, (page_h * render_scale).ceil() as usize);
         assert_eq!(px.len(), tw * th * 4);
+        // Ink is present as pixels with coverage (alpha) so it composites over
+        // the separately-painted white paper.
         assert!(
-            px.chunks_exact(4).any(|p| p[0] < 200),
+            px.chunks_exact(4).any(|p| p[3] > 0 && p[0] < 200),
             "expected rasterised ink on the page"
         );
+        // The background stays transparent so a BehindText image can show through.
+        let corner = &px[0..4];
+        assert_eq!(corner[3], 0, "the page background must be transparent");
     }
 }
