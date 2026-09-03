@@ -160,9 +160,40 @@ mod image_b64 {
     }
 }
 
-/// A block-level image (letterhead, signature, stamp) placed on its own line.
-/// The encoded bytes travel with the document so it embeds directly into PDF
-/// and needs no external file.
+/// How an image relates to the surrounding text — mirrors Word's layout
+/// options. `Inline` flows in the paragraph; the rest float at a page position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ImageWrap {
+    /// In line with text: the image sits in the flow on its own line.
+    #[default]
+    Inline,
+    /// Floating, drawn behind the text; the text is not moved.
+    BehindText,
+    /// Floating, drawn in front of the text; the text is not moved.
+    InFrontOfText,
+    /// Floating; text wraps around the image's box (square).
+    Square,
+    /// Floating full width; text keeps clear above and below the image.
+    TopBottom,
+}
+
+impl ImageWrap {
+    /// True for every mode except `Inline` (i.e. positioned on the page).
+    pub fn is_floating(self) -> bool {
+        !matches!(self, ImageWrap::Inline)
+    }
+
+    /// True when text must avoid the image (its box for `Square`, its full-width
+    /// vertical band for `TopBottom`).
+    pub fn excludes_text(self) -> bool {
+        matches!(self, ImageWrap::Square | ImageWrap::TopBottom)
+    }
+}
+
+/// A block image (letterhead, signature, stamp). When `wrap` is `Inline` it sits
+/// in the paragraph flow on its own line; otherwise it floats at `(page, x_mm,
+/// y_mm)` from that page's top-left corner. The encoded bytes travel with the
+/// document so it embeds directly into PDF and needs no external file.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImageBlock {
     /// Encoded image bytes (PNG or JPEG), base64 in the manifest.
@@ -173,11 +204,42 @@ pub struct ImageBlock {
     pub natural_h: u32,
     /// Displayed width in millimetres; height follows the aspect ratio.
     pub width_mm: f32,
-    /// Horizontal placement of the image within the text column.
+    /// Horizontal placement of an inline image within the text column.
     pub align: ParagraphAlign,
+    /// Relationship to the text. `Inline` (default) keeps the pre-v10 behaviour.
+    #[serde(default)]
+    pub wrap: ImageWrap,
+    /// Floating anchor: 0-based page and offset (mm) from its top-left corner.
+    #[serde(default)]
+    pub page: usize,
+    #[serde(default)]
+    pub x_mm: f32,
+    #[serde(default)]
+    pub y_mm: f32,
 }
 
 impl ImageBlock {
+    /// An inline image (the default relationship): flows in the paragraph.
+    pub fn inline(
+        data: Vec<u8>,
+        natural_w: u32,
+        natural_h: u32,
+        width_mm: f32,
+        align: ParagraphAlign,
+    ) -> Self {
+        Self {
+            data,
+            natural_w,
+            natural_h,
+            width_mm,
+            align,
+            wrap: ImageWrap::Inline,
+            page: 0,
+            x_mm: 0.0,
+            y_mm: 0.0,
+        }
+    }
+
     /// Displayed height in millimetres, from `width_mm` and the aspect ratio.
     pub fn height_mm(&self) -> f32 {
         if self.natural_w == 0 {
@@ -438,6 +500,10 @@ pub struct TextDocument {
     pub page: PageSetup,
     pub default_char: CharStyle,
     pub default_para: ParagraphStyle,
+    /// Floating images (Word-style wrapping): anchored to a page position rather
+    /// than the text flow. Inline images stay in `paragraphs` as `Paragraph::image`.
+    #[serde(default)]
+    pub floating_images: Vec<ImageBlock>,
 }
 
 impl Default for TextDocument {
@@ -447,6 +513,7 @@ impl Default for TextDocument {
             page: PageSetup::default(),
             default_char: CharStyle::default(),
             default_para: ParagraphStyle::default(),
+            floating_images: Vec::new(),
         }
     }
 }
@@ -649,13 +716,13 @@ mod tests {
 
     #[test]
     fn image_block_round_trips_through_json_as_base64() {
-        let block = ImageBlock {
-            data: vec![0x89, b'P', b'N', b'G', 1, 2, 3, 250, 0, 42],
-            natural_w: 400,
-            natural_h: 200,
-            width_mm: 50.0,
-            align: ParagraphAlign::Center,
-        };
+        let block = ImageBlock::inline(
+            vec![0x89, b'P', b'N', b'G', 1, 2, 3, 250, 0, 42],
+            400,
+            200,
+            50.0,
+            ParagraphAlign::Center,
+        );
         let json = serde_json::to_string(&block).unwrap();
         assert!(json.contains("\"data\""));
         assert!(!json.contains("[137,")); // bytes are base64, not a number array
@@ -665,14 +732,32 @@ mod tests {
     }
 
     #[test]
-    fn image_paragraph_is_not_empty_and_carries_no_text() {
-        let block = ImageBlock {
-            data: vec![1, 2, 3],
-            natural_w: 10,
-            natural_h: 10,
-            width_mm: 30.0,
-            align: ParagraphAlign::Center,
+    fn floating_image_round_trips_and_defaults_to_inline() {
+        // A pre-v10 inline image (no wrap/pos fields) still deserialises.
+        let legacy =
+            r#"{"data":"AQID","natural_w":10,"natural_h":10,"width_mm":30.0,"align":"Center"}"#;
+        let back: ImageBlock = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.wrap, ImageWrap::Inline);
+        assert_eq!(back.page, 0);
+
+        // A floating image round-trips its wrap + position through the document.
+        let mut fb = ImageBlock::inline(vec![9, 9], 100, 50, 40.0, ParagraphAlign::Left);
+        fb.wrap = ImageWrap::InFrontOfText;
+        fb.page = 2;
+        fb.x_mm = 25.0;
+        fb.y_mm = 60.0;
+        let doc = TextDocument {
+            floating_images: vec![fb.clone()],
+            ..TextDocument::default()
         };
+        let json = serde_json::to_string(&doc).unwrap();
+        let back: TextDocument = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.floating_images, vec![fb]);
+    }
+
+    #[test]
+    fn image_paragraph_is_not_empty_and_carries_no_text() {
+        let block = ImageBlock::inline(vec![1, 2, 3], 10, 10, 30.0, ParagraphAlign::Center);
         let p = Paragraph::image(block);
         assert!(p.is_image());
         assert!(!p.is_empty());

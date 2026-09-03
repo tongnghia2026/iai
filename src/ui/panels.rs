@@ -1966,7 +1966,24 @@ fn flow_text_objects_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAct
                     });
                 }
             }
-            if img_no == 0 {
+            // Floating images (Word "in front of text").
+            for (i, _fb) in flow.document.floating_images.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add_space(6.0);
+                    if ui
+                        .selectable_label(
+                            false,
+                            egui::RichText::new(format!("{}  Ảnh nổi {}", ph::IMAGE, i + 1))
+                                .size(12.0),
+                        )
+                        .on_hover_text("Ảnh nổi trên chữ — chọn để sửa")
+                        .clicked()
+                    {
+                        actions.doc.flow_text_focus = Some(FlowTextFocus::FloatingImage(i));
+                    }
+                });
+            }
+            if img_no == 0 && flow.document.floating_images.is_empty() {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);

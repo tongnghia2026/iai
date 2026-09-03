@@ -27,7 +27,7 @@ use crate::core::color::Color;
 use crate::core::document::DocumentId;
 use crate::core::text::TextFontFamily;
 use crate::core::text_document::{
-    CharStyle, ImageBlock, ListKind, PageSetup, PaperSize, Paragraph, ParagraphAlign,
+    CharStyle, ImageBlock, ImageWrap, ListKind, PageSetup, PaperSize, Paragraph, ParagraphAlign,
     ParagraphStyle, Run, TextDocument,
 };
 use crate::ui::intent::FlowTextFocus;
@@ -194,10 +194,27 @@ struct DocRuntime {
     /// the placeholder glyph's `Attrs` metadata.
     images: HashMap<usize, ImageBlock>,
     next_image_id: usize,
-    /// Lazily-built egui textures for image blocks, keyed by image id.
+    /// Lazily-built egui textures for image blocks, keyed by image id. Floating
+    /// images reuse this map under keys offset by `FLOATING_TEX_BASE`.
     image_tex: HashMap<usize, egui::TextureHandle>,
     /// The image id currently being dragged on the page (realign / reorder).
     dragging_image: Option<usize>,
+    /// Floating images (Word-style wrapping), in document order. Not part of the
+    /// text buffer; drawn as overlays and round-tripped via `floating_images`.
+    floating: Vec<ImageBlock>,
+    /// The selected floating image (index into `floating`), if any.
+    selected_floating: Option<usize>,
+    /// An in-progress floating-image transform (move or resize by a handle).
+    float_drag: Option<FloatDrag>,
+}
+
+/// The kind of drag acting on the selected floating image.
+#[derive(Clone, Copy)]
+enum FloatDrag {
+    /// Moving the whole image; the field is the grab offset (mm) from its corner.
+    Move { dx_mm: f32, dy_mm: f32 },
+    /// Resizing from a corner handle (0=TL, 1=TR, 2=BR, 3=BL).
+    Resize { corner: u8 },
 }
 
 impl Default for DocRuntime {
@@ -219,9 +236,16 @@ impl Default for DocRuntime {
             next_image_id: 1,
             image_tex: HashMap::new(),
             dragging_image: None,
+            floating: Vec::new(),
+            selected_floating: None,
+            float_drag: None,
         }
     }
 }
+
+/// Texture-key offset so floating images do not collide with inline image ids in
+/// `image_tex`. Floating image at index `i` uses key `FLOATING_TEX_BASE + i`.
+const FLOATING_TEX_BASE: usize = 1_000_000;
 
 struct DocumentModeRuntime {
     font_system: FontSystem,
@@ -337,6 +361,11 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
     d.images.clear();
     d.image_tex.clear();
     d.next_image_id = 1;
+    // Floating images come straight from the model (no line references).
+    d.floating = view.document.floating_images.clone();
+    if d.selected_floating.is_some_and(|i| i >= d.floating.len()) {
+        d.selected_floating = None;
+    }
     let mut image_ids: Vec<Option<usize>> = Vec::with_capacity(view.document.paragraphs.len());
     let buffer_text = view
         .document
@@ -467,6 +496,11 @@ fn window_ui(
     let mut img_width_cmd: Option<f32> = None;
     let mut img_move_cmd: Option<i32> = None;
     let mut img_delete_cmd = false;
+    // Image layout-mode conversions + floating-image controls.
+    let mut img_to_floating = false;
+    let mut float_to_inline = false;
+    let mut float_width_cmd: Option<f32> = None;
+    let mut float_delete_cmd = false;
     let cur = current_fmt(d.editor.as_ref().expect("editor"));
     let cur_list = caret_list_kind(d.editor.as_ref().expect("editor"));
     let cur_spacing = caret_spacing(d.editor.as_ref().expect("editor"), d.line_spacing);
@@ -627,9 +661,10 @@ fn window_ui(
         ui.label("Alt + lăn chuột");
     });
 
-    // Contextual image row: shown when the caret sits on an image block, so the
-    // picture can be aligned, resized, moved between paragraphs or removed.
-    if let Some(id) = active_image {
+    // Contextual image row: shown when the caret sits on an inline image block,
+    // so the picture can be aligned, resized, moved, converted or removed. A
+    // selected floating image takes priority (its own row below).
+    if let Some(id) = active_image.filter(|_| d.selected_floating.is_none()) {
         let (cur_align, cur_width) = d
             .images
             .get(&id)
@@ -637,6 +672,16 @@ fn window_ui(
             .unwrap_or((ParagraphAlign::Center, DEFAULT_IMAGE_WIDTH_MM));
         ui.horizontal_wrapped(|ui| {
             ui.label(ph::IMAGE).on_hover_text("Ảnh đang chọn");
+            // Word-style layout mode: in line with text vs floating on top.
+            egui::ComboBox::from_id_salt("doc_img_wrap_inline")
+                .selected_text("Cùng dòng chữ")
+                .show_ui(ui, |ui| {
+                    let _ = ui.selectable_label(true, "Cùng dòng chữ");
+                    if ui.selectable_label(false, "Nổi trên chữ").clicked() {
+                        img_to_floating = true;
+                    }
+                });
+            ui.separator();
             for (icon, a, tip) in [
                 (ph::TEXT_ALIGN_LEFT, ParagraphAlign::Left, "Ảnh sát trái"),
                 (
@@ -690,6 +735,43 @@ fn window_ui(
         });
     }
 
+    // Contextual row for a selected floating image (Word "in front of text").
+    if let Some(fi) = d.selected_floating {
+        if let Some(cur_width) = d.floating.get(fi).map(|b| b.width_mm) {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(ph::IMAGE).on_hover_text("Ảnh nổi đang chọn");
+                egui::ComboBox::from_id_salt("doc_img_wrap_float")
+                    .selected_text("Nổi trên chữ")
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(false, "Cùng dòng chữ").clicked() {
+                            float_to_inline = true;
+                        }
+                        let _ = ui.selectable_label(true, "Nổi trên chữ");
+                    });
+                ui.separator();
+                ui.label("Rộng").on_hover_text("Chiều rộng ảnh (mm)");
+                let mut width_mm = cur_width;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut width_mm)
+                            .range(10.0..=400.0)
+                            .speed(0.5)
+                            .suffix(" mm"),
+                    )
+                    .changed()
+                {
+                    float_width_cmd = Some(width_mm);
+                }
+                ui.separator();
+                ui.label("Kéo ảnh để di chuyển; kéo góc để đổi cỡ.");
+                ui.separator();
+                if ui.button(ph::TRASH).on_hover_text("Xoá ảnh").clicked() {
+                    float_delete_cmd = true;
+                }
+            });
+        }
+    }
+
     if reshape {
         apply_reshape(d, fs);
     }
@@ -720,6 +802,26 @@ fn window_ui(
         }
         if img_delete_cmd {
             apply_image_delete(d, fs, id);
+        }
+        if img_to_floating {
+            convert_inline_to_floating(d, fs, id);
+        }
+    }
+    if let Some(fi) = d.selected_floating {
+        if float_to_inline {
+            convert_floating_to_inline(d, fs, fi);
+        } else if let Some(w) = float_width_cmd {
+            if let Some(block) = d.floating.get_mut(fi) {
+                block.width_mm = w.clamp(10.0, 400.0);
+                d.revision = d.revision.wrapping_add(1);
+            }
+        } else if float_delete_cmd {
+            if fi < d.floating.len() {
+                d.floating.remove(fi);
+                d.selected_floating = None;
+                clear_floating_textures(d);
+                d.revision = d.revision.wrapping_add(1);
+            }
         }
     }
 
@@ -808,11 +910,19 @@ fn window_ui(
             let font_pt = d.font_pt;
             let doc_line_spacing = d.line_spacing;
 
+            // Floating images (Word-style, in front of text) take the pointer
+            // first: select / move / resize free of the text flow.
+            let float_consumed = if focused && !popup_open {
+                handle_floating_pointer(d, &response, rect, scale, d.page_index)
+            } else {
+                false
+            };
+
             // Image drag: grab a picture and drag it to realign (by horizontal
             // third) or reorder between paragraphs (vertical). Runs before text
             // hit-testing so dragging a picture never selects text.
             let mut image_drag = false;
-            if focused && !popup_open {
+            if focused && !popup_open && !float_consumed {
                 let pointer = response.interact_pointer_pos().map(|p| {
                     let bx = ((p.x - rect.min.x) / scale - cx).max(0.0);
                     let by = d.page_index as f32 * ch + (p.y - rect.min.y) / scale - cy;
@@ -876,7 +986,7 @@ fn window_ui(
                 // Skip while a popup was dismissed this frame: that click is for
                 // the popup, not a caret move (keeps the selection during colour).
                 // Also skip while dragging an image (handled above).
-                if focused && !popup_open && !image_drag {
+                if focused && !popup_open && !image_drag && !float_consumed {
                     if response.drag_started() {
                         if let Some(p) = response.interact_pointer_pos() {
                             let (mut x, y) = map(p, page_index);
@@ -1181,6 +1291,79 @@ fn window_ui(
                             img_rect.expand(2.0),
                             2.0,
                             egui::Stroke::new(2.0, egui::Color32::from_rgb(60, 120, 240)),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                }
+            }
+
+            // Floating images (in front of the text) for this page, with a
+            // transform frame + corner handles when selected.
+            let float_count = d.floating.len();
+            for i in 0..float_count {
+                let (page, x_mm, y_mm, w_mm, h_mm, need_tex, bytes) = {
+                    let block = &d.floating[i];
+                    let key = FLOATING_TEX_BASE + i;
+                    let need = !d.image_tex.contains_key(&key);
+                    (
+                        block.page,
+                        block.x_mm,
+                        block.y_mm,
+                        block.width_mm,
+                        block.height_mm(),
+                        need,
+                        need.then(|| block.data.clone()),
+                    )
+                };
+                if page != page_index {
+                    continue;
+                }
+                let key = FLOATING_TEX_BASE + i;
+                if let Some(bytes) = bytes {
+                    if let Some(ci) = decode_color_image(&bytes) {
+                        let tex = ctx.load_texture(
+                            format!("iai_doc_float_{i}"),
+                            ci,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        d.image_tex.insert(key, tex);
+                    }
+                }
+                let _ = need_tex;
+                let img_rect = egui::Rect::from_min_size(
+                    egui::pos2(
+                        rect.min.x + mm_to_px(x_mm) * scale,
+                        rect.min.y + mm_to_px(y_mm) * scale,
+                    ),
+                    egui::vec2(mm_to_px(w_mm) * scale, mm_to_px(h_mm) * scale),
+                );
+                if let Some(tex) = d.image_tex.get(&key) {
+                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                    painter.image(tex.id(), img_rect, uv, egui::Color32::WHITE);
+                }
+                if d.selected_floating == Some(i) {
+                    let accent = egui::Color32::from_rgb(60, 120, 240);
+                    painter.rect_stroke(
+                        img_rect,
+                        0.0,
+                        egui::Stroke::new(1.5, accent),
+                        egui::StrokeKind::Outside,
+                    );
+                    for c in [
+                        img_rect.left_top(),
+                        img_rect.right_top(),
+                        img_rect.right_bottom(),
+                        img_rect.left_bottom(),
+                    ] {
+                        painter.rect_filled(
+                            egui::Rect::from_center_size(c, egui::vec2(8.0, 8.0)),
+                            1.0,
+                            egui::Color32::WHITE,
+                        );
+                        painter.rect_stroke(
+                            egui::Rect::from_center_size(c, egui::vec2(8.0, 8.0)),
+                            1.0,
+                            egui::Stroke::new(1.5, accent),
                             egui::StrokeKind::Outside,
                         );
                     }
@@ -1789,6 +1972,14 @@ fn line_page(editor: &Editor<'static>, line: usize, ch: f32) -> usize {
 /// first line, or on the nth image's line, and page to it. Selecting an image
 /// line makes `active_image` pick it up so its on-page controls appear.
 fn apply_focus(d: &mut DocRuntime, fs: &mut FontSystem, target: FlowTextFocus) {
+    if let FlowTextFocus::FloatingImage(idx) = target {
+        if let Some(block) = d.floating.get(idx) {
+            d.page_index = block.page;
+            d.selected_floating = Some(idx);
+        }
+        return;
+    }
+    d.selected_floating = None;
     let editor = d.editor.as_mut().expect("editor");
     let line = editor.with_buffer(|b| match target {
         FlowTextFocus::Text => b.lines.iter().position(|l| l.text() != IMAGE_PLACEHOLDER),
@@ -1804,6 +1995,7 @@ fn apply_focus(d: &mut DocRuntime, fs: &mut FontSystem, target: FlowTextFocus) {
             }
             None
         }
+        FlowTextFocus::FloatingImage(_) => None, // handled above
     });
     let Some(line) = line else {
         return;
@@ -2052,16 +2244,22 @@ fn line_is_image(editor: &Editor<'static>, line_i: usize) -> bool {
 /// id and inserts a placeholder line carrying that id, with a blank line after
 /// so the caret lands on editable text.
 fn insert_image_at_caret(d: &mut DocRuntime, fs: &mut FontSystem, image: PendingImage) {
+    let cw_mm = d.setup.content_width_mm();
+    let block = ImageBlock::inline(
+        image.data,
+        image.natural_w.max(1),
+        image.natural_h.max(1),
+        DEFAULT_IMAGE_WIDTH_MM.min(cw_mm),
+        ParagraphAlign::Center,
+    );
+    insert_inline_image_block(d, fs, block);
+}
+
+/// Insert an existing image block as an inline paragraph at the caret.
+fn insert_inline_image_block(d: &mut DocRuntime, fs: &mut FontSystem, mut block: ImageBlock) {
+    block.wrap = ImageWrap::Inline;
     let id = d.next_image_id;
     d.next_image_id += 1;
-    let cw_mm = d.setup.content_width_mm();
-    let block = ImageBlock {
-        data: image.data,
-        natural_w: image.natural_w.max(1),
-        natural_h: image.natural_h.max(1),
-        width_mm: DEFAULT_IMAGE_WIDTH_MM.min(cw_mm),
-        align: ParagraphAlign::Center,
-    };
     let (_, h_px) = image_display_px(&block, &d.setup);
     d.images.insert(id, block);
 
@@ -2184,6 +2382,191 @@ fn apply_image_delete(d: &mut DocRuntime, fs: &mut FontSystem, id: usize) {
     d.images.remove(&id);
     editor.shape_as_needed(fs, false);
     d.revision = d.revision.wrapping_add(1);
+}
+
+// --- Floating images (Word-style "in front of text") -----------------------
+
+/// Millimetres → editor pixels at the canonical DPI.
+fn mm_to_px(mm: f32) -> f32 {
+    mm / 25.4 * DPI
+}
+
+/// Drop cached floating-image textures (keyed by list index) after the floating
+/// list is reordered or shortened, so indices no longer point at stale pictures.
+fn clear_floating_textures(d: &mut DocRuntime) {
+    d.image_tex.retain(|k, _| *k < FLOATING_TEX_BASE);
+}
+
+/// A floating image's page rectangle in millimetres: `(x, y, w, h)`.
+fn floating_rect_mm(block: &ImageBlock) -> (f32, f32, f32, f32) {
+    (block.x_mm, block.y_mm, block.width_mm, block.height_mm())
+}
+
+fn point_in_block(block: &ImageBlock, pmm: (f32, f32)) -> bool {
+    let (x, y, w, h) = floating_rect_mm(block);
+    pmm.0 >= x && pmm.0 <= x + w && pmm.1 >= y && pmm.1 <= y + h
+}
+
+/// Which corner handle (0=TL,1=TR,2=BR,3=BL) is within `r` mm of `pmm`, if any.
+fn hit_corner(block: &ImageBlock, pmm: (f32, f32), r: f32) -> Option<u8> {
+    let (x, y, w, h) = floating_rect_mm(block);
+    let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
+    corners.iter().enumerate().find_map(|(i, (cx, cy))| {
+        ((pmm.0 - cx).abs() <= r && (pmm.1 - cy).abs() <= r).then_some(i as u8)
+    })
+}
+
+/// Resize a floating block by dragging `corner` to `pmm`, keeping the aspect
+/// ratio and holding the opposite corner fixed.
+fn resize_floating(block: &mut ImageBlock, corner: u8, pmm: (f32, f32)) {
+    let (x, y, w, h) = floating_rect_mm(block);
+    let min_w = 8.0;
+    let aspect = if w > 0.0 { h / w } else { 1.0 };
+    match corner {
+        0 => {
+            let (ax, ay) = (x + w, y + h);
+            let nw = (ax - pmm.0).max(min_w);
+            block.width_mm = nw;
+            block.x_mm = ax - nw;
+            block.y_mm = ay - nw * aspect;
+        }
+        1 => {
+            let ay = y + h;
+            let nw = (pmm.0 - x).max(min_w);
+            block.width_mm = nw;
+            block.y_mm = ay - nw * aspect;
+        }
+        3 => {
+            let ax = x + w;
+            let nw = (ax - pmm.0).max(min_w);
+            block.width_mm = nw;
+            block.x_mm = ax - nw;
+        }
+        _ => {
+            block.width_mm = (pmm.0 - x).max(min_w);
+        }
+    }
+}
+
+/// Handle pointer input for floating images (select / move / resize). Returns
+/// true when it consumed the pointer so text/inline handling is skipped.
+fn handle_floating_pointer(
+    d: &mut DocRuntime,
+    response: &egui::Response,
+    rect: egui::Rect,
+    scale: f32,
+    page_index: usize,
+) -> bool {
+    let Some(p) = response.interact_pointer_pos() else {
+        if response.drag_stopped() {
+            if d.float_drag.is_some() {
+                d.revision = d.revision.wrapping_add(1);
+            }
+            d.float_drag = None;
+        }
+        return false;
+    };
+    let pmm = (
+        (p.x - rect.min.x) / scale / DPI * 25.4,
+        (p.y - rect.min.y) / scale / DPI * 25.4,
+    );
+    let handle_mm = 3.5;
+
+    if response.drag_started() || response.clicked() {
+        // A handle of the already-selected image starts a resize.
+        if let Some(sel) = d.selected_floating {
+            if let Some(block) = d.floating.get(sel) {
+                if block.page == page_index {
+                    if let Some(corner) = hit_corner(block, pmm, handle_mm) {
+                        d.float_drag = Some(FloatDrag::Resize { corner });
+                        return true;
+                    }
+                }
+            }
+        }
+        // Otherwise select the top-most floating image under the pointer.
+        let mut hit = None;
+        for (i, block) in d.floating.iter().enumerate() {
+            if block.page == page_index && point_in_block(block, pmm) {
+                hit = Some(i);
+            }
+        }
+        if let Some(i) = hit {
+            d.selected_floating = Some(i);
+            let block = &d.floating[i];
+            d.float_drag = Some(FloatDrag::Move {
+                dx_mm: pmm.0 - block.x_mm,
+                dy_mm: pmm.1 - block.y_mm,
+            });
+            return true;
+        }
+        d.selected_floating = None;
+        d.float_drag = None;
+        return false;
+    }
+    if response.dragged() {
+        if let (Some(sel), Some(drag)) = (d.selected_floating, d.float_drag) {
+            if let Some(block) = d.floating.get_mut(sel) {
+                match drag {
+                    FloatDrag::Move { dx_mm, dy_mm } => {
+                        block.x_mm = (pmm.0 - dx_mm).max(0.0);
+                        block.y_mm = (pmm.1 - dy_mm).max(0.0);
+                    }
+                    FloatDrag::Resize { corner } => resize_floating(block, corner, pmm),
+                }
+                return true;
+            }
+        }
+    }
+    if response.drag_stopped() {
+        if d.float_drag.is_some() {
+            d.revision = d.revision.wrapping_add(1); // commit the move/resize to the model
+        }
+        d.float_drag = None;
+    }
+    false
+}
+
+/// Convert the inline image `id` into a floating "in front of text" image at a
+/// default position on the current page.
+fn convert_inline_to_floating(d: &mut DocRuntime, fs: &mut FontSystem, id: usize) {
+    let Some(block) = d.images.get(&id).cloned() else {
+        return;
+    };
+    {
+        let editor = d.editor.as_mut().expect("editor");
+        if let Some(li) = find_image_line(editor, id) {
+            editor.set_selection(Selection::None);
+            editor.set_cursor(Cursor::new(li, 0));
+            editor.action(fs, Action::Delete);
+        }
+        editor.shape_as_needed(fs, false);
+    }
+    d.images.remove(&id);
+    let mut fb = block;
+    fb.wrap = ImageWrap::InFrontOfText;
+    fb.page = d.page_index;
+    fb.x_mm = d.setup.margins.left_mm + 10.0;
+    fb.y_mm = d.setup.margins.top_mm + 10.0;
+    d.floating.push(fb);
+    d.selected_floating = Some(d.floating.len() - 1);
+    d.revision = d.revision.wrapping_add(1);
+}
+
+/// Convert the floating image at `idx` back into an inline block at the caret.
+fn convert_floating_to_inline(d: &mut DocRuntime, fs: &mut FontSystem, idx: usize) {
+    if idx >= d.floating.len() {
+        return;
+    }
+    let mut block = d.floating.remove(idx);
+    d.selected_floating = None;
+    clear_floating_textures(d);
+    block.wrap = ImageWrap::Inline;
+    let cw_mm = d.setup.content_width_mm();
+    if block.width_mm > cw_mm {
+        block.width_mm = cw_mm;
+    }
+    insert_inline_image_block(d, fs, block);
 }
 
 /// Rasterise one page of the editor buffer to opaque white RGBA at
@@ -2430,6 +2813,7 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
             line_spacing: d.line_spacing,
             ..ParagraphStyle::default()
         },
+        floating_images: d.floating.clone(),
     }
 }
 
@@ -2698,13 +3082,7 @@ mod tests {
     fn image_paragraph_round_trips_through_the_editor() {
         let mut fs = FontSystem::new();
         let mut d = DocRuntime::default();
-        let block = ImageBlock {
-            data: vec![9, 8, 7, 6],
-            natural_w: 200,
-            natural_h: 100,
-            width_mm: 40.0,
-            align: ParagraphAlign::Center,
-        };
+        let block = ImageBlock::inline(vec![9, 8, 7, 6], 200, 100, 40.0, ParagraphAlign::Center);
         let mut doc = TextDocument::from_plain_text("Trước ảnh");
         doc.paragraphs.push(Paragraph::image(block.clone()));
         doc.paragraphs

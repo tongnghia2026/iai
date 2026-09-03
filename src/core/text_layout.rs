@@ -111,6 +111,8 @@ pub struct DocumentLayout {
     page_px: (usize, usize),
     pages: usize,
     blocks: Vec<Block>,
+    /// Floating images (Word-style), drawn on top of the text at a page position.
+    floating_images: Vec<crate::core::text_document::ImageBlock>,
 }
 
 impl DocumentLayout {
@@ -236,6 +238,7 @@ impl DocumentLayout {
             page_px: (pw, ph),
             pages: page + 1,
             blocks,
+            floating_images: doc.floating_images.clone(),
         }
     }
 
@@ -660,6 +663,23 @@ impl DocumentLayout {
                     }
                 }
             }
+            // Floating images: positioned from the page top-left, drawn on top of
+            // the text (page_content emits images after the text object).
+            for fb in &self.floating_images {
+                if fb.page != page {
+                    continue;
+                }
+                let w = fb.width_mm / 25.4 * 72.0;
+                let h = fb.height_mm() / 25.4 * 72.0;
+                let x = fb.x_mm / 25.4 * 72.0;
+                images.push(ImgPlace {
+                    block: fb,
+                    x,
+                    y: page_h - (fb.y_mm / 25.4 * 72.0) - h,
+                    w,
+                    h,
+                });
+            }
             pages.push((glyphs, rects, images));
         }
 
@@ -1044,13 +1064,7 @@ mod tests {
     #[test]
     fn image_block_reserves_space_and_embeds_in_pdf() {
         let mut fs = FontSystem::new();
-        let block = ImageBlock {
-            data: tiny_png(400, 200),
-            natural_w: 400,
-            natural_h: 200,
-            width_mm: 80.0,
-            align: ParagraphAlign::Center,
-        };
+        let block = ImageBlock::inline(tiny_png(400, 200), 400, 200, 80.0, ParagraphAlign::Center);
         let doc = TextDocument {
             paragraphs: vec![para("Trước ảnh"), Paragraph::image(block), para("Sau ảnh")],
             ..Default::default()
@@ -1074,6 +1088,34 @@ mod tests {
                 if s.dict.get(b"Subtype").ok().and_then(|v| v.as_name().ok()) == Some(&b"Image"[..]))
         });
         assert!(has_image_xobject, "expected an embedded image XObject");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn floating_image_embeds_in_pdf_without_reserving_text_space() {
+        let mut fs = FontSystem::new();
+        let mut fb = ImageBlock::inline(tiny_png(300, 300), 300, 300, 40.0, ParagraphAlign::Left);
+        fb.wrap = crate::core::text_document::ImageWrap::InFrontOfText;
+        fb.page = 0;
+        fb.x_mm = 30.0;
+        fb.y_mm = 40.0;
+        let doc = TextDocument {
+            paragraphs: vec![para("Một dòng"), para("Hai dòng")],
+            floating_images: vec![fb],
+            ..Default::default()
+        };
+        let layout = DocumentLayout::build(&doc, DPI, &mut fs);
+        // The floating image does not take a text line.
+        assert_eq!(layout.line_count(), 2);
+        let path =
+            std::env::temp_dir().join(format!("iai_float_pdf_{}_test.pdf", std::process::id()));
+        layout.write_text_pdf(&mut fs, &path).unwrap();
+        let reloaded = lopdf::Document::load(&path).expect("re-parse floating PDF");
+        let has_image = reloaded.objects.values().any(|o| {
+            matches!(o, lopdf::Object::Stream(s)
+                if s.dict.get(b"Subtype").ok().and_then(|v| v.as_name().ok()) == Some(&b"Image"[..]))
+        });
+        assert!(has_image, "floating image should embed as an XObject");
         let _ = std::fs::remove_file(&path);
     }
 

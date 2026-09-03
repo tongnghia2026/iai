@@ -77,8 +77,10 @@ fn parse_page_number(text: &str, page_count: usize) -> Result<usize, String> {
 pub enum FlowTextFocus {
     /// The text body (caret to the first text line).
     Text,
-    /// The image at this 0-based ordinal among the document's images.
+    /// The inline image at this 0-based ordinal among inline images.
     Image(usize),
+    /// The floating image at this index in `floating_images`.
+    FloatingImage(usize),
 }
 
 /// File/document commands: open/save/export, undo/redo, resize, tabs,
