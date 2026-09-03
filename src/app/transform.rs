@@ -126,6 +126,20 @@ fn clamp_live_scale(value: f32, drag_start: f32) -> f32 {
     (value * sign).max(MIN_LIVE_SCALE) * sign
 }
 
+/// Shift-constrained translation for a Free Transform center drag. The axis is
+/// chosen from the pointer's displacement since press, so pressing or releasing
+/// Shift midway through a drag remains predictable and does not accumulate
+/// off-axis movement.
+fn constrained_move_delta(dx: f32, dy: f32, shift: bool) -> (f32, f32) {
+    if !shift {
+        (dx, dy)
+    } else if dx.abs() >= dy.abs() {
+        (dx, 0.0)
+    } else {
+        (0.0, dy)
+    }
+}
+
 /// Uniform scale ratio whose transformed corner is closest to the pointer.
 /// `along_*` is the pointer in the transform's unrotated coordinate system.
 /// When scaling around the opposite corner, measure from that fixed corner;
@@ -1533,13 +1547,12 @@ impl App {
             if ts.mode == crate::app::state::TransformMode::Free || ts.quad.is_none() {
                 false
             } else if let Some(Some(h)) = ts.drag_handle {
-                let candidate = dragged_projective_quad(
-                    ts.drag_start_quad,
-                    h,
-                    ts.mode,
+                let (dx, dy) = constrained_move_delta(
                     canvas_x - ts.drag_start_cx,
                     canvas_y - ts.drag_start_cy,
+                    shift && h == TransformHandle::Center,
                 );
+                let candidate = dragged_projective_quad(ts.drag_start_quad, h, ts.mode, dx, dy);
                 let valid = crate::core::geometry::Homography::square_to_quad(
                     candidate.map(|(x, y)| crate::core::geometry::Point::new(x, y)),
                 )
@@ -1586,8 +1599,12 @@ impl App {
                     };
                 }
                 Some(Some(TransformHandle::Center)) => {
-                    ts.translate_x = ts.drag_start_tx + (canvas_x - ts.drag_start_cx);
-                    ts.translate_y = ts.drag_start_ty + (canvas_y - ts.drag_start_cy);
+                    let raw_dx = canvas_x - ts.drag_start_cx;
+                    let raw_dy = canvas_y - ts.drag_start_cy;
+                    let (dx, dy) = constrained_move_delta(raw_dx, raw_dy, shift);
+                    ts.translate_x = ts.drag_start_tx + dx;
+                    ts.translate_y = ts.drag_start_ty + dy;
+                    let moving_horizontally = raw_dx.abs() >= raw_dy.abs();
 
                     // Snap the moving bbox edges/center to targets (like the Move tool).
                     if snap_enabled && angle0 {
@@ -1596,25 +1613,32 @@ impl App {
                         let r = c.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
                         let t = c.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
                         let b = c.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-                        if let Some((adj, pos, kind)) =
-                            best_snap(&[l, (l + r) * 0.5, r], &tx_targets, threshold)
-                        {
-                            ts.translate_x += adj;
-                            guides.push(SnapLine {
-                                vertical: true,
-                                pos,
-                                kind,
-                            });
+                        // With Shift held, only snap along the chosen movement
+                        // axis. Snapping the other axis would reintroduce the
+                        // diagonal drift that the constraint is meant to remove.
+                        if !shift || moving_horizontally {
+                            if let Some((adj, pos, kind)) =
+                                best_snap(&[l, (l + r) * 0.5, r], &tx_targets, threshold)
+                            {
+                                ts.translate_x += adj;
+                                guides.push(SnapLine {
+                                    vertical: true,
+                                    pos,
+                                    kind,
+                                });
+                            }
                         }
-                        if let Some((adj, pos, kind)) =
-                            best_snap(&[t, (t + b) * 0.5, b], &ty_targets, threshold)
-                        {
-                            ts.translate_y += adj;
-                            guides.push(SnapLine {
-                                vertical: false,
-                                pos,
-                                kind,
-                            });
+                        if !shift || !moving_horizontally {
+                            if let Some((adj, pos, kind)) =
+                                best_snap(&[t, (t + b) * 0.5, b], &ty_targets, threshold)
+                            {
+                                ts.translate_y += adj;
+                                guides.push(SnapLine {
+                                    vertical: false,
+                                    pos,
+                                    kind,
+                                });
+                            }
                         }
                     }
                 }
@@ -2114,6 +2138,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_constrains_transform_move_to_horizontal_axis() {
+        assert_eq!(constrained_move_delta(24.0, 7.0, true), (24.0, 0.0));
+        assert_eq!(constrained_move_delta(-24.0, 7.0, true), (-24.0, 0.0));
+    }
+
+    #[test]
+    fn shift_constrains_transform_move_to_vertical_axis() {
+        assert_eq!(constrained_move_delta(7.0, 24.0, true), (0.0, 24.0));
+        assert_eq!(constrained_move_delta(7.0, -24.0, true), (0.0, -24.0));
+    }
+
+    #[test]
+    fn transform_move_remains_free_without_shift() {
+        assert_eq!(constrained_move_delta(24.0, 7.0, false), (24.0, 7.0));
+    }
 
     #[test]
     fn free_transform_corner_tracks_pointer_without_doubling_drag() {

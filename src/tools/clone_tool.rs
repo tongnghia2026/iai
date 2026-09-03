@@ -515,32 +515,38 @@ impl CloneTool {
             let db = a[2] - b[2];
             (dr * dr + dg * dg + db * db).sqrt()
         };
-        let collect_ring = |cx: f32, cy: f32| -> Option<([f32; 3], f32)> {
+        let collect_ring = |cx: f32, cy: f32, min_samples: usize| -> Option<([f32; 3], f32)> {
             const DIRS: usize = 16;
             let mut sum = [0.0f32; 3];
             let mut lsum = 0.0f32;
             let mut lsum2 = 0.0f32;
-            let mut count = 0.0f32;
+            let mut count = 0usize;
             for scale in [0.62f32, 0.92] {
                 let rr = r * scale;
                 for i in 0..DIRS {
                     let a = std::f32::consts::TAU * i as f32 / DIRS as f32;
-                    let rgb = sample_rgb(cx + rr * a.cos(), cy + rr * a.sin())?;
+                    let Some(rgb) = sample_rgb(cx + rr * a.cos(), cy + rr * a.sin()) else {
+                        continue;
+                    };
                     let y = luma(rgb);
                     sum[0] += rgb[0];
                     sum[1] += rgb[1];
                     sum[2] += rgb[2];
                     lsum += y;
                     lsum2 += y * y;
-                    count += 1.0;
+                    count += 1;
                 }
             }
-            let mean = [sum[0] / count, sum[1] / count, sum[2] / count];
-            let lum_mean = lsum / count;
-            let var = (lsum2 / count - lum_mean * lum_mean).max(0.0);
+            if count < min_samples {
+                return None;
+            }
+            let n = count as f32;
+            let mean = [sum[0] / n, sum[1] / n, sum[2] / n];
+            let lum_mean = lsum / n;
+            let var = (lsum2 / n - lum_mean * lum_mean).max(0.0);
             Some((mean, var.sqrt()))
         };
-        let collect_body_std = |cx: f32, cy: f32| -> Option<f32> {
+        let collect_body_std = |cx: f32, cy: f32, min_samples: usize| -> Option<f32> {
             let offsets = [
                 (0.0, 0.0),
                 (0.45, 0.0),
@@ -554,19 +560,30 @@ impl CloneTool {
             ];
             let mut sum = 0.0f32;
             let mut sum2 = 0.0f32;
-            let mut count = 0.0f32;
+            let mut count = 0usize;
             for (ox, oy) in offsets {
-                let y = luma(sample_rgb(cx + ox * r, cy + oy * r)?);
+                let Some(rgb) = sample_rgb(cx + ox * r, cy + oy * r) else {
+                    continue;
+                };
+                let y = luma(rgb);
                 sum += y;
                 sum2 += y * y;
-                count += 1.0;
+                count += 1;
             }
-            let mean = sum / count;
-            Some((sum2 / count - mean * mean).max(0.0).sqrt())
+            if count < min_samples {
+                return None;
+            }
+            let n = count as f32;
+            let mean = sum / n;
+            Some((sum2 / n - mean * mean).max(0.0).sqrt())
         };
 
-        let (dst_rim_mean, dst_rim_std) = collect_ring(dst_cx, dst_cy)?;
-        let dst_body_std = collect_body_std(dst_cx, dst_cy).unwrap_or(dst_rim_std);
+        // The destination brush is allowed to cross the page/layer boundary.
+        // At least one quarter of its probes must remain paintable, which covers
+        // a brush centred on an edge (half visible) and even a page corner. Clean
+        // source candidates below still require every probe to be valid.
+        let (dst_rim_mean, dst_rim_std) = collect_ring(dst_cx, dst_cy, 8)?;
+        let dst_body_std = collect_body_std(dst_cx, dst_cy, 3).unwrap_or(dst_rim_std);
         let mut best_score = f32::MAX;
         let mut best_off: Option<(f32, f32)> = None;
         for radius_factor in [1.55f32, 2.15, 2.85, 3.65] {
@@ -575,10 +592,10 @@ impl CloneTool {
                 let a = std::f32::consts::TAU * (i as f32 + 0.25 * radius_factor) / 16.0;
                 let scx = dst_cx + dist * a.cos();
                 let scy = dst_cy + dist * a.sin();
-                let Some((src_rim_mean, src_rim_std)) = collect_ring(scx, scy) else {
+                let Some((src_rim_mean, src_rim_std)) = collect_ring(scx, scy, 32) else {
                     continue;
                 };
-                let Some(src_body_std) = collect_body_std(scx, scy) else {
+                let Some(src_body_std) = collect_body_std(scx, scy, 9) else {
                     continue;
                 };
 
@@ -834,5 +851,27 @@ impl Tool for CloneTool {
             self.has_source = false;
         }
         ToolResponse::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spot_heal_finds_source_when_half_the_brush_crosses_page_edge() {
+        let canvas = Canvas::new(128, 128);
+        let mut tool = CloneTool::new();
+        tool.size = 16.0;
+        tool.stroke_source = Some(canvas.active_layer().tiles.clone());
+
+        assert!(
+            tool.spot_pick_offset(&canvas, 0.0, 64.0).is_some(),
+            "left-edge click must still find a clean source"
+        );
+        assert!(
+            tool.spot_pick_offset(&canvas, 64.0, 0.0).is_some(),
+            "top-edge click must still find a clean source"
+        );
     }
 }

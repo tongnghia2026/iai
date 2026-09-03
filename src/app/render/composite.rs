@@ -587,14 +587,17 @@ impl App {
         }
     }
 
-    /// True while dragging a Free Transform, moving layers, or dragging a Shape
-    /// handle — these recomposite a large region every frame, so they run in
-    /// Mode B (viewport resolution).
+    /// True while a live edit needs a viewport-sized composite. Crop stays in
+    /// Mode B for the whole pending crop (not just while the pointer is down),
+    /// because its preview frame may extend beyond the old canvas and therefore
+    /// cannot be represented by Mode A's canvas-sized texture.
     pub(in crate::app) fn is_interactive_edit(&self) -> bool {
         self.edit.transform_state.is_some()
             || (self.edit.input.painting
                 && self.edit.tools.active_id() == crate::tools::ToolId::Move)
             || self.edit.shape_drag.is_some()
+            || (self.edit.tools.active_id() == crate::tools::ToolId::Crop
+                && self.edit.tools.crop().has_selection())
     }
 
     /// The committed active vector may use the native GPU path whenever no live
@@ -781,5 +784,22 @@ mod hybrid_canvas_mode_tests {
 
         app.edit.pending_path_style = None;
         assert!(app.active_vector_gpu_idle());
+    }
+
+    #[test]
+    fn pending_crop_uses_viewport_composite_until_commit_or_cancel() {
+        let mut app = App::new();
+        app.edit.tools.select(crate::tools::ToolId::Crop);
+        {
+            let crop = app.edit.tools.crop_mut();
+            crop.crop_x0 = 10.0;
+            crop.crop_y0 = -20.0;
+            crop.crop_x1 = 110.0;
+            crop.crop_y1 = 80.0;
+        }
+        assert!(app.is_interactive_edit());
+
+        app.edit.tools.crop_mut().cancel();
+        assert!(!app.is_interactive_edit());
     }
 }

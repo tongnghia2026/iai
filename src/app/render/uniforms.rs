@@ -14,6 +14,39 @@ fn system_profile_auto_refresh_enabled(cms_enabled: bool, from_system: bool) -> 
     cms_enabled && from_system
 }
 
+/// Canvas-space bounds that must remain visible while Crop is pending. The
+/// ordinary canvas remains visible (dimmed by the Crop overlay), while any part
+/// of the crop frame outside it is added so the live preview matches the area
+/// that commit will create.
+fn canvas_preview_bounds(canvas_w: f32, canvas_h: f32, crop: Option<([f32; 4], f32)>) -> [f32; 4] {
+    let mut bounds = [0.0, 0.0, canvas_w, canvas_h];
+    let Some(([x0, y0, x1, y1], rotation)) = crop else {
+        return bounds;
+    };
+    if ![x0, y0, x1, y1, rotation].iter().all(|v| v.is_finite()) {
+        return bounds;
+    }
+
+    let left = x0.min(x1);
+    let right = x0.max(x1);
+    let top = y0.min(y1);
+    let bottom = y0.max(y1);
+    let cx = (left + right) * 0.5;
+    let cy = (top + bottom) * 0.5;
+    let (sin, cos) = rotation.sin_cos();
+    for (x, y) in [(left, top), (right, top), (right, bottom), (left, bottom)] {
+        let dx = x - cx;
+        let dy = y - cy;
+        let rx = cx + cos * dx - sin * dy;
+        let ry = cy + sin * dx + cos * dy;
+        bounds[0] = bounds[0].min(rx);
+        bounds[1] = bounds[1].min(ry);
+        bounds[2] = bounds[2].max(rx);
+        bounds[3] = bounds[3].max(ry);
+    }
+    bounds
+}
+
 impl App {
     fn system_display_profile_for_window(
         &self,
@@ -86,10 +119,10 @@ impl App {
         self.refresh_system_display_profile(DisplayWindow::Develop);
     }
 
-    /// Canvas rectangle on screen (physical px) used to scissor the canvas quad —
-    /// standard clip-to-canvas: layer content outside the canvas isn't drawn
-    /// into the black area. None when the canvas is (almost) fully offscreen →
-    /// draw fullscreen (nothing is visible anyway, so it's still correct).
+    /// Canvas rectangle on screen (physical px) used to scissor the canvas quad.
+    /// Normally this is the committed canvas. During Crop it expands to the union
+    /// of the old canvas and the pending crop frame, allowing transformed image
+    /// pixels beyond the old edge to remain visible before commit.
     pub fn canvas_screen_clip(&self) -> Option<(u32, u32, u32, u32)> {
         let win = self.win.window.as_ref()?;
         let sz = win.inner_size();
@@ -97,13 +130,26 @@ impl App {
         let sh = sz.height as f32;
         let cw = self.docs.documents[self.docs.active_doc_idx].canvas.width as f32;
         let ch = self.docs.documents[self.docs.active_doc_idx].canvas.height as f32;
-        let x0 = self.edit.view.offset_x.max(0.0).min(sw).floor();
-        let y0 = self.edit.view.offset_y.max(0.0).min(sh).floor();
-        let x1 = (self.edit.view.offset_x + cw * self.edit.view.zoom)
+        let crop = (self.edit.tools.active_id() == crate::tools::ToolId::Crop
+            && self.edit.tools.crop().has_selection())
+        .then(|| {
+            let c = self.edit.tools.crop();
+            ([c.crop_x0, c.crop_y0, c.crop_x1, c.crop_y1], c.rotation)
+        });
+        let [bx0, by0, bx1, by1] = canvas_preview_bounds(cw, ch, crop);
+        let x0 = (self.edit.view.offset_x + bx0 * self.edit.view.zoom)
+            .max(0.0)
+            .min(sw)
+            .floor();
+        let y0 = (self.edit.view.offset_y + by0 * self.edit.view.zoom)
+            .max(0.0)
+            .min(sh)
+            .floor();
+        let x1 = (self.edit.view.offset_x + bx1 * self.edit.view.zoom)
             .max(0.0)
             .min(sw)
             .ceil();
-        let y1 = (self.edit.view.offset_y + ch * self.edit.view.zoom)
+        let y1 = (self.edit.view.offset_y + by1 * self.edit.view.zoom)
             .max(0.0)
             .min(sh)
             .ceil();
@@ -500,12 +546,28 @@ impl App {
 
 #[cfg(test)]
 mod display_profile_tests {
-    use super::system_profile_auto_refresh_enabled;
+    use super::{canvas_preview_bounds, system_profile_auto_refresh_enabled};
 
     #[test]
     fn only_an_enabled_system_profile_follows_window_moves() {
         assert!(system_profile_auto_refresh_enabled(true, true));
         assert!(!system_profile_auto_refresh_enabled(true, false));
         assert!(!system_profile_auto_refresh_enabled(false, true));
+    }
+
+    #[test]
+    fn crop_preview_bounds_include_area_beyond_original_canvas() {
+        assert_eq!(
+            canvas_preview_bounds(400.0, 400.0, Some(([40.0, -80.0, 360.0, 240.0], 0.0))),
+            [0.0, -80.0, 400.0, 400.0]
+        );
+    }
+
+    #[test]
+    fn normal_preview_bounds_remain_the_committed_canvas() {
+        assert_eq!(
+            canvas_preview_bounds(400.0, 300.0, None),
+            [0.0, 0.0, 400.0, 300.0]
+        );
     }
 }
