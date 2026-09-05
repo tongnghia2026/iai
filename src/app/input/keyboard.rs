@@ -248,7 +248,7 @@ impl App {
                         .selection
                         .active =>
             {
-                self.clear_selection_on_all_pdf_pages();
+                self.open_pdf_batch_dialog(crate::ui::intent::PdfBatchOperation::Clear);
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }

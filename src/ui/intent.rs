@@ -525,12 +525,28 @@ pub struct ToolIntent {
     pub start_transform: bool,
 }
 /// Selection commands: mode, modify, Select Subject, Refine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdfBatchOperation {
+    Clear,
+    Text,
+}
+
 #[derive(Default)]
 pub struct SelectionIntent {
     pub clear_selection_pixels: bool,
-    /// Multi-page PDF: cover the current hard rectangular selection on every
-    /// source page without materializing each page in memory.
+    /// Multi-page PDF: open the page-count dialog for the current rectangular
+    /// clear operation without materializing each page in memory.
     pub clear_selection_all_pdf_pages: bool,
+    /// Open the page-count dialog for repeating the active editable text layer.
+    pub add_text_all_pdf_pages: bool,
+    /// Repeat the active raster/image layer at the same relative position on
+    /// every other page of the current PDF document.
+    pub add_image_all_pdf_pages: bool,
+    /// Batch PDF range dialog: update the number of consecutive pages.
+    pub set_pdf_batch_page_count: Option<usize>,
+    /// Confirm/cancel the pending clear-or-text batch operation.
+    pub apply_pdf_batch: bool,
+    pub cancel_pdf_batch: bool,
     pub undo_pdf_global_clear: bool,
     pub redo_pdf_global_clear: bool,
     /// Select menu actions (functionality already exists via keyboard shortcuts).
@@ -893,6 +909,9 @@ pub struct AiIntent {
     pub ext_run: Option<String>,
     /// Cancel whichever API/bridge job belongs to the active document.
     pub ai_cancel_active: bool,
+    /// Run/cancel the local offline Auto Retouch pipeline.
+    pub retouch_run: bool,
+    pub retouch_cancel: bool,
 }
 
 #[derive(Default)]

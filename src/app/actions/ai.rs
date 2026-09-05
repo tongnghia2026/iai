@@ -194,6 +194,101 @@ impl App {
         }
     }
 
+    /// Start the fully local Auto Retouch pipeline.  The worker owns all image
+    /// buffers, so the UI remains responsive while each model/fallback stage is
+    /// loaded and released sequentially.
+    pub fn do_offline_retouch(&mut self) {
+        if self.has_only_welcome_placeholder() {
+            self.shell.ui.ai_status = "Hãy mở một ảnh trước".to_string();
+            return;
+        }
+        let doc_id = self.docs.documents[self.docs.active_doc_idx].id.0;
+        if self.jobs.retouch_engine.is_busy(doc_id)
+            || self.jobs.ai_engine.doc_running(doc_id)
+            || self.jobs.ext.doc_busy(doc_id)
+        {
+            self.shell.ui.ai_status =
+                "Tài liệu này đang có lệnh AI — đợi xong hoặc bấm Hủy".to_string();
+            return;
+        }
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let width = canvas.width;
+        let height = canvas.height;
+        let rgba = canvas.flatten_for_export();
+        let config = self.shell.ui.ai.retouch.clone();
+        if self
+            .jobs
+            .retouch_engine
+            .run_async(doc_id, rgba, width, height, config)
+        {
+            self.shell.ui.ai_status = "Đang chạy AI Auto Retouch offline…".to_string();
+        } else {
+            self.shell.ui.ai_status = "Không thể bắt đầu Auto Retouch".to_string();
+        }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Drain offline retouch workers and place the result as an undoable layer.
+    pub fn poll_offline_retouch(&mut self) {
+        let finished = self.jobs.retouch_engine.poll_finished();
+        for job in finished {
+            if job.abandoned {
+                continue;
+            }
+            match job.result {
+                Ok(result) => {
+                    let timing = crate::core::ai::retouch::benchmark_line(&result);
+                    let warnings = result.warnings.clone();
+                    let mask_preview = result.mask_preview_rgba;
+                    let result_width = result.width;
+                    let result_height = result.height;
+                    let mut status = self.place_ai_result_named(
+                        Some(job.doc_id),
+                        result.rgba,
+                        result_width,
+                        result_height,
+                        false,
+                        "AI Auto Retouch",
+                    );
+                    if let Some(mask_rgba) = mask_preview {
+                        let mask_status = self.place_ai_result_named(
+                            Some(job.doc_id),
+                            mask_rgba,
+                            result_width,
+                            result_height,
+                            false,
+                            "AI Retouch Mask Preview",
+                        );
+                        if ai_placement_succeeded(&mask_status) {
+                            status.push_str(" — đã thêm layer Preview Masks");
+                        }
+                    }
+                    if !warnings.is_empty() {
+                        status.push_str(" — ");
+                        status.push_str(&warnings.join("; "));
+                    }
+                    self.shell.ui.ai_status = format!("{status}. {timing}");
+                    self.shell.status_msg = timing;
+                    self.notify_done(true);
+                }
+                Err(e) => {
+                    self.shell.ui.ai_status = format!("Lỗi Auto Retouch: {e}");
+                    self.notify_done(false);
+                }
+            }
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
+        if self.jobs.retouch_engine.has_jobs() {
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
+    }
+
     /// Run an edit through the browser extension: send the flattened canvas + prompt
     /// to the user's logged-in Gemini/ChatGPT tab. The result returns via
     /// `poll_ext_bridge`. Site is taken from the currently-selected web source.
@@ -261,9 +356,13 @@ impl App {
         }
         let doc_id = self.docs.documents[self.docs.active_doc_idx].id.0;
         let api = self.jobs.ai_engine.abandon_doc_job(doc_id);
+        let retouch = self.jobs.retouch_engine.cancel_doc(doc_id);
         let bridge = self.jobs.ext.cancel_for_doc(doc_id);
         if api {
             self.shell.ui.ai_status = "Đã hủy lệnh API của ảnh này".to_string();
+        }
+        if retouch {
+            self.shell.ui.ai_status = "Đã hủy Auto Retouch của ảnh này".to_string();
         }
         if bridge {
             self.jobs.ext.status = "Đã hủy lệnh của ảnh này".to_string();
@@ -375,6 +474,18 @@ impl App {
         h: u32,
         output_new_file: bool,
     ) -> String {
+        self.place_ai_result_named(origin_id, rgba, w, h, output_new_file, "Gemini")
+    }
+
+    fn place_ai_result_named(
+        &mut self,
+        origin_id: Option<u32>,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+        output_new_file: bool,
+        layer_name: &str,
+    ) -> String {
         // New-file mode: the result becomes its own document — origin irrelevant.
         if output_new_file {
             let id = crate::core::document::DocumentId(self.docs.next_doc_id);
@@ -420,7 +531,7 @@ impl App {
 
         let tiles = crate::core::tile::TileMap::from_rgba(&rgba, w, h);
         let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
-            "AI Gemini",
+            layer_name,
             &self.docs.documents[idx].canvas.layer_stack,
             cw,
             ch,
@@ -431,7 +542,7 @@ impl App {
         let new_idx = self.docs.documents[idx].canvas.layer_stack.add_layer(w, h);
         {
             let layer = &mut self.docs.documents[idx].canvas.layer_stack.layers[new_idx];
-            layer.name = "Gemini".to_string();
+            layer.name = layer_name.to_string();
             layer.tiles = tiles;
             layer.width = w;
             layer.height = h;
@@ -450,7 +561,7 @@ impl App {
             self.upload_full();
             self.upload_selection_mask();
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            "Xong — layer Gemini trên Background".to_string()
+            format!("Xong — layer {layer_name} trên Background")
         } else {
             // Result went to a non-active doc; it shows on switch (switch_to_doc
             // re-uploads). Tell the user where it landed.

@@ -293,6 +293,12 @@ impl App {
         if actions.ai.ai_cancel_active {
             self.cancel_active_ai();
         }
+        if actions.ai.retouch_run {
+            self.do_offline_retouch();
+        }
+        if actions.ai.retouch_cancel {
+            self.cancel_active_ai();
+        }
         if let Some((paper, kind, gap)) = actions.doc.impose_sheet.take() {
             self.do_impose_sheet(paper, kind, gap);
         }

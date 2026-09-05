@@ -1070,7 +1070,7 @@ impl App {
         };
         let original_source = pdf.source.clone();
         let source = pdf.effective_source().to_path_buf();
-        let global_clears = pdf.global_clears.clone();
+        let global_edits = pdf.global_edits.clone();
         let selected_pages: Vec<usize> = positions
             .iter()
             .filter_map(|&position| pdf.selected_pages.get(position).copied())
@@ -1092,7 +1092,7 @@ impl App {
             .unwrap_or("document");
         let mut snapshots = Vec::with_capacity(selected_pages.len());
         for &page_index in &selected_pages {
-            let edited = if page_index == pdf.active_page && pdf.active_page_modified {
+            let mut edited = if page_index == pdf.active_page && pdf.active_page_modified {
                 doc.pdf_page
                     .as_ref()
                     .map(|reference| (doc.canvas.export_snapshot(), reference.clone()))
@@ -1101,12 +1101,26 @@ impl App {
                     .get(&page_index)
                     .map(|page| (page.canvas.export_snapshot(), page.reference.clone()))
             };
+            if let Some((canvas, _)) = edited.as_mut() {
+                if let Some(overlay) = crate::core::document::build_pdf_global_overlay_stack(
+                    &global_edits,
+                    page_index,
+                    canvas.width,
+                    canvas.height,
+                ) {
+                    canvas.layer_stack = canvas.layer_stack.with_overlay(&overlay);
+                }
+            }
             snapshots.push((page_index, edited));
         }
+        let baked_global_pages: Vec<usize> = snapshots
+            .iter()
+            .filter_map(|(page_index, edited)| edited.is_some().then_some(*page_index))
+            .collect();
         let stem = stem.to_string();
         let page_total = snapshots.len();
         let rx = spawn_pdf_export(parent, stem, move |path| {
-            if clean && all_pages_selected && global_clears.is_empty() {
+            if clean && all_pages_selected && global_edits.is_empty() {
                 let bytes = std::fs::read(&source).map_err(|e| format!("Lỗi đọc PDF gốc: {e}"))?;
                 std::fs::write(&path, bytes).map_err(|e| format!("Lỗi sao chép PDF gốc: {e}"))?;
                 return Ok("Đã xuất PDF vector gốc".to_string());
@@ -1160,18 +1174,20 @@ impl App {
             };
             let hybrid = make_pages(true)
                 .and_then(|pages| {
-                    crate::formats::pdf::build_hybrid_pdf_with_global_clears(
+                    crate::formats::pdf::build_hybrid_pdf_with_global_edits_baked(
                         &source,
                         &pages,
-                        &global_clears,
+                        &global_edits,
+                        &baked_global_pages,
                     )
                 })
                 .or_else(|_| {
                     make_pages(false).and_then(|pages| {
-                        crate::formats::pdf::build_hybrid_pdf_with_global_clears(
+                        crate::formats::pdf::build_hybrid_pdf_with_global_edits_baked(
                             &source,
                             &pages,
-                            &global_clears,
+                            &global_edits,
+                            &baked_global_pages,
                         )
                     })
                 })

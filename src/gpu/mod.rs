@@ -191,6 +191,21 @@ impl GpuState {
                 .to_string()
         })?;
 
+        let adapter_info = adapter.get_info();
+        let ai_candidate = match adapter_info.device_type {
+            wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::VirtualGpu => true,
+            wgpu::DeviceType::IntegratedGpu => {
+                crate::core::hw::get().tier != crate::core::hw::HwTier::Low
+            }
+            wgpu::DeviceType::Cpu | wgpu::DeviceType::Other => false,
+        };
+        crate::core::hw::record_gpu_adapter(crate::core::hw::GpuInfo {
+            name: adapter_info.name.clone(),
+            device_type: format!("{:?}", adapter_info.device_type),
+            backend: format!("{:?}", adapter_info.backend),
+            ai_candidate,
+        });
+
         let adapter_limits = adapter.limits();
         let max_tex = adapter_limits.max_texture_dimension_2d;
 

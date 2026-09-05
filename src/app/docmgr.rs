@@ -101,6 +101,7 @@ impl App {
         };
         if let Some(gpu) = &mut self.win.gpu {
             gpu.compositor.crop_preview = None;
+            gpu.compositor.crop_preview_background = None;
             gpu.resize_canvas_texture(w, h);
             gpu.compositor.tile_atlas.clear();
             gpu.compositor.ping_initialized = false;
@@ -521,9 +522,9 @@ mod tests {
             active_page: 0,
             active_page_modified: true,
             edited_pages: std::collections::HashMap::new(),
-            global_clears: Vec::new(),
-            global_clears_saved: Vec::new(),
-            global_clears_redo: Vec::new(),
+            global_edits: Vec::new(),
+            global_edits_saved: Vec::new(),
+            global_edits_redo: Vec::new(),
             global_overlay_cache: None,
         });
 
@@ -585,9 +586,9 @@ mod tests {
             active_page: 0,
             active_page_modified: false,
             edited_pages: std::collections::HashMap::new(),
-            global_clears: Vec::new(),
-            global_clears_saved: Vec::new(),
-            global_clears_redo: Vec::new(),
+            global_edits: Vec::new(),
+            global_edits_saved: Vec::new(),
+            global_edits_redo: Vec::new(),
             global_overlay_cache: None,
         });
 

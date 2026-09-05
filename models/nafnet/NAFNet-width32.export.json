@@ -1,0 +1,49 @@
+{
+  "model": "NAFNet-SIDD-width32",
+  "source": "https://github.com/megvii-research/NAFNet/tree/2b4af71ebe098a92a75910c233a3965a3e93ede4",
+  "checkpoint": "upstream official NAFNet-SIDD-width32.pth",
+  "checkpoint_sha256": "89c70e808d1783b6c07911306e106aaf0d4f7f3da8c61078b99ff7f8929a26f4",
+  "onnx": "models/nafnet/NAFNet-width32.onnx",
+  "onnx_sha256": "6b1943601008e5432d0770553e43956ca41f769e99da4f124514ffdadb0acbf3",
+  "opset": 17,
+  "input": {
+    "name": "input",
+    "dtype": "float32",
+    "layout": "NCHW",
+    "range": [
+      0.0,
+      1.0
+    ]
+  },
+  "output": {
+    "name": "output",
+    "dtype": "float32",
+    "layout": "NCHW",
+    "range": [
+      0.0,
+      1.0
+    ]
+  },
+  "dynamic_axes": [
+    "height_multiple_16",
+    "width_multiple_16"
+  ],
+  "validation": {
+    "provider": "CPUExecutionProvider",
+    "max_abs_error": 5.364418029785156e-07,
+    "mean_abs_error": 7.640337429393185e-08,
+    "dynamic_max_abs_error": 6.556510925292969e-07,
+    "shape": [
+      1,
+      3,
+      64,
+      80
+    ],
+    "dynamic_shape": [
+      1,
+      3,
+      80,
+      96
+    ]
+  }
+}

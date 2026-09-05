@@ -1,0 +1,39 @@
+{
+  "model": "RealESRGAN_x4plus RRDBNet",
+  "source": "https://github.com/xinntao/Real-ESRGAN/tree/a4abfb2979a7bbff3f69f58f58ae324608821e27",
+  "checkpoint": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+  "checkpoint_sha256": "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
+  "onnx": "models/realesrgan/RealESRGAN_x4plus.onnx",
+  "onnx_sha256": "b644aab83761a02489ef1cfd581a4ac677ba43380adb6a8c3c0a3ad801c9f17e",
+  "opset": 17,
+  "input": {
+    "name": "input",
+    "dtype": "float32",
+    "layout": "NCHW",
+    "range": [
+      0.0,
+      1.0
+    ]
+  },
+  "output": {
+    "name": "output",
+    "dtype": "float32",
+    "layout": "NCHW",
+    "range": [
+      0.0,
+      1.0
+    ],
+    "scale": 4
+  },
+  "validation": {
+    "provider": "CPUExecutionProvider",
+    "max_abs_error": 1.9073486328125e-06,
+    "mean_abs_error": 3.058827076074522e-07,
+    "shape": [
+      1,
+      3,
+      128,
+      160
+    ]
+  }
+}

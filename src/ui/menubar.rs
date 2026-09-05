@@ -288,13 +288,49 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 .unwrap_or(false);
                         if ui
                             .add(menu_item_enabled(
-                                "Clear on All PDF Pages",
+                                "Clear on PDF Page Range…",
                                 "Shift+Delete",
                                 pdf_base_selected,
                             ))
                             .clicked()
                         {
                             actions.sel.clear_selection_all_pdf_pages = true;
+                            ui.close();
+                        }
+                        let active_layer_type = data
+                            .layers
+                            .layer_types
+                            .get(data.layers.active_layer_idx)
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        let active_is_background = data
+                            .layers
+                            .layer_is_background
+                            .get(data.layers.active_layer_idx)
+                            .copied()
+                            .unwrap_or(false);
+                        if ui
+                            .add(menu_item_enabled(
+                                "Add Current Text to PDF Page Range…",
+                                "",
+                                data.doc.pdf_nav.is_some() && active_layer_type == "Text",
+                            ))
+                            .clicked()
+                        {
+                            actions.sel.add_text_all_pdf_pages = true;
+                            ui.close();
+                        }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Add Current Image to All PDF Pages",
+                                "",
+                                data.doc.pdf_nav.is_some()
+                                    && matches!(active_layer_type, "Raster" | "SmartObject")
+                                    && !active_is_background,
+                            ))
+                            .clicked()
+                        {
+                            actions.sel.add_image_all_pdf_pages = true;
                             ui.close();
                         }
                         if ui

@@ -57,6 +57,15 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         self.jobs.pending_printer_settings = Some(rx);
         self.shell.status_msg = format!("Opening printer settings: {printer}");
+
+        // Reset before the worker creates the native property sheet.  Waiting
+        // for a later redraw leaves a small race where Windows can inherit the
+        // active brush/pen/tool cursor (or the hidden-cursor state).
+        if let Some(w) = &self.win.window {
+            w.set_cursor_visible(true);
+            w.set_cursor(winit::window::CursorIcon::Default);
+        }
+
         std::thread::spawn(move || {
             let result = crate::core::print::open_printer_settings(
                 &worker_printer,

@@ -99,6 +99,14 @@ fn is_full_canvas_background(
         && layer.height == canvas_h
 }
 
+fn crop_preview_background_color(
+    crop_active: bool,
+    has_background_layer: bool,
+    background_color: [u8; 4],
+) -> Option<[u8; 4]> {
+    (crop_active && has_background_layer).then_some(background_color)
+}
+
 impl App {
     /// Commit the active Crop tool. Crop is tile-native (chunked blit/resample), so
     /// it runs under Viewport Streaming; the canvas crop methods only reject output
@@ -109,6 +117,7 @@ impl App {
         // gate. The canvas crop methods still reject dimensions past MAX_DIMENSION.
         if let Some(gpu) = &mut self.win.gpu {
             gpu.compositor.crop_preview = None;
+            gpu.compositor.crop_preview_background = None;
         }
         {
             let mut ctx = crate::extension::tool::ToolCtx::new(
@@ -137,9 +146,9 @@ impl App {
     }
 
     pub fn update_crop_preview(&mut self) {
-        let preview = if self.edit.tools.active_id() == crate::tools::ToolId::Crop
-            && self.edit.tools.crop().has_selection()
-        {
+        let crop_active = self.edit.tools.active_id() == crate::tools::ToolId::Crop
+            && self.edit.tools.crop().has_selection();
+        let preview = if crop_active {
             let c = self.edit.tools.crop();
             if c.rotation.abs() > 0.001 || c.image_tx.abs() > 0.001 || c.image_ty.abs() > 0.001 {
                 let (pivot_x, pivot_y) = c.box_center();
@@ -161,9 +170,21 @@ impl App {
         } else {
             None
         };
+        // Match CropTool::on_confirm exactly: documents carrying a Background
+        // layer fill newly exposed crop pixels with the current toolbar
+        // background colour; alpha documents retain transparency/checkerboard.
+        let has_background_layer = self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .any(|layer| layer.is_background);
+        let preview_background =
+            crop_preview_background_color(crop_active, has_background_layer, self.edit.bg_color);
 
         if let Some(gpu) = &mut self.win.gpu {
             gpu.compositor.crop_preview = preview;
+            gpu.compositor.crop_preview_background = preview_background;
         }
         self.recomposite();
     }
@@ -1034,12 +1055,20 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::transformed_layer_placement;
+    use super::{crop_preview_background_color, transformed_layer_placement};
     use crate::app::state::App;
     use crate::core::canvas::Canvas;
     use crate::core::tile::TileMap;
     use crate::core::vector::object::VectorGeometry;
     use crate::ui::{LayerAlign, LayerDistribute, MoveTransformAction};
+
+    #[test]
+    fn crop_preview_uses_commit_background_only_for_background_documents() {
+        let bg = [240, 230, 220, 255];
+        assert_eq!(crop_preview_background_color(true, true, bg), Some(bg));
+        assert_eq!(crop_preview_background_color(true, false, bg), None);
+        assert_eq!(crop_preview_background_color(false, true, bg), None);
+    }
 
     /// Apply the placement to every layer and return the transformed union box.
     fn transformed_union(

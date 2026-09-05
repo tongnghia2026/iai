@@ -440,6 +440,9 @@ pub struct DialogViewModel {
     pub show_new_dialog: bool,
     /// Batch "Change font" dialog is open.
     pub show_font_change_dialog: bool,
+    /// Pending PDF clear/text batch operation and its consecutive page count.
+    pub pdf_batch_operation: Option<crate::ui::intent::PdfBatchOperation>,
+    pub pdf_batch_page_count: usize,
     /// Batch vector fill/outline dialog is open.
     pub show_vector_style_dialog: bool,
     /// "Làm sạch bản scan" dialog is open.
@@ -598,6 +601,7 @@ pub struct AiViewModel {
     pub show_ai_panel: bool,
     pub ai: crate::core::ai::AiPanelState,
     pub ai_status: String,
+    pub retouch_progress: Option<crate::core::ai::retouch::RetouchProgress>,
     pub ai_history: Vec<String>,
     // Browser-extension bridge (see app/ext_bridge.rs).
     pub ext_connected: bool,
@@ -958,6 +962,8 @@ impl Default for UiData {
                 paint_dialog_ink: None,
                 show_new_dialog: false,
                 show_font_change_dialog: false,
+                pdf_batch_operation: None,
+                pdf_batch_page_count: 1,
                 show_vector_style_dialog: false,
                 show_scan_cleanup_dialog: false,
                 scan_is_pdf: false,
@@ -1074,6 +1080,7 @@ impl Default for UiData {
                 show_ai_panel: false,
                 ai: crate::core::ai::AiPanelState::default(),
                 ai_status: String::new(),
+                retouch_progress: None,
                 ai_history: Vec::new(),
                 ext_connected: false,
                 ext_queue_len: 0,

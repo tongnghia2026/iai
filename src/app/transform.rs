@@ -284,23 +284,6 @@ fn translate_only(ts: &TransformState) -> Option<(i32, i32)> {
     Some((dx as i32, dy as i32))
 }
 
-fn axis_aligned_positive_text_scale(ts: &TransformState) -> Option<(f32, f32)> {
-    if ts.quad.is_some() {
-        return None;
-    }
-    let angle = ts.angle_deg.rem_euclid(360.0);
-    let angle_is_zero = angle <= TRANSFORM_EPS || (360.0 - angle) <= TRANSFORM_EPS;
-    if !angle_is_zero
-        || !ts.scale_x.is_finite()
-        || !ts.scale_y.is_finite()
-        || ts.scale_x <= 0.0
-        || ts.scale_y <= 0.0
-    {
-        return None;
-    }
-    Some((ts.scale_x, ts.scale_y))
-}
-
 fn text_scales_are_uniform(sx: f32, sy: f32) -> bool {
     (sx - sy).abs() <= sx.max(sy).max(1.0) * 0.02
 }
@@ -314,13 +297,19 @@ fn scaled_text_data(td: &TextData, sx: f32, sy: f32) -> TextData {
     } else {
         sy
     };
-    out.font_px = (out.font_px * font_scale).clamp(4.0, 1600.0);
+    out.font_px = (out.font_px * font_scale).clamp(
+        crate::core::text::MIN_EDITABLE_FONT_PX,
+        crate::core::text::MAX_EDITABLE_FONT_PX,
+    );
     // Font size carries the vertical scale; retain the independent horizontal
     // component so reopening the Type tool reproduces the transformed glyphs.
     out.stretch_x = (out.stretch_x * sx / font_scale.max(TRANSFORM_EPS)).clamp(0.01, 100.0);
     out.tracking_px = (out.tracking_px * font_scale).clamp(-200.0, 500.0);
     for gs in &mut out.glyph_styles {
-        gs.font_px = (gs.font_px * font_scale).clamp(4.0, 1600.0);
+        gs.font_px = (gs.font_px * font_scale).clamp(
+            crate::core::text::MIN_EDITABLE_FONT_PX,
+            crate::core::text::MAX_EDITABLE_FONT_PX,
+        );
     }
     out
 }
@@ -355,25 +344,31 @@ fn transformed_text_data(td: &TextData, ts: &TransformState) -> Option<TextData>
     Some(out)
 }
 
-fn rasterized_text_layer_at(
+fn rasterized_text_layer_centered_in(
     td: &TextData,
-    content_origin: (i32, i32),
+    target_ink_bounds: (i32, i32, u32, u32),
 ) -> Option<(TileMap, u32, u32, (i32, i32))> {
-    let (raster, delta) = rasterize_placed(td)?;
+    let (raster, _delta) = rasterize_placed(td)?;
     let tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
-    let placed_origin = (
-        content_origin.0.saturating_add(delta.0),
-        content_origin.1.saturating_add(delta.1),
+    let (min_x, min_y, max_x, max_y) = tiles.content_bounds()?;
+
+    // Font hinting and raster padding mean that re-laying editable text after
+    // a scale is not always pixel-for-pixel the same size as scaling its old
+    // bitmap.  Preserve the transform pivot by aligning ink centres, not the
+    // top-left corner; otherwise a large scale/rotation visibly jumps when the
+    // worker swaps the preview for the committed text or Type reopens it.
+    let target_cx = target_ink_bounds.0 as f64 + target_ink_bounds.2 as f64 * 0.5;
+    let target_cy = target_ink_bounds.1 as f64 + target_ink_bounds.3 as f64 * 0.5;
+    let local_cx = (min_x as f64 + max_x as f64) * 0.5;
+    let local_cy = (min_y as f64 + max_y as f64) * 0.5;
+    let offset = (
+        (target_cx - local_cx)
+            .round()
+            .clamp(i32::MIN as f64, i32::MAX as f64) as i32,
+        (target_cy - local_cy)
+            .round()
+            .clamp(i32::MIN as f64, i32::MAX as f64) as i32,
     );
-    let offset = tiles
-        .content_bounds()
-        .map(|(min_x, min_y, _, _)| {
-            (
-                placed_origin.0.saturating_sub(min_x),
-                placed_origin.1.saturating_sub(min_y),
-            )
-        })
-        .unwrap_or(placed_origin);
     Some((tiles, raster.width, raster.height, offset))
 }
 
@@ -550,16 +545,16 @@ fn bake_transform_commit(
         let mut after_layer_type = ls.layer_type.clone();
         let mut crisp_vector_layer = None;
         if let LayerType::Text(td) = &ls.layer_type {
-            if let Some((sx, sy)) = axis_aligned_positive_text_scale(&ts) {
-                let next_td = scaled_text_data(td, sx, sy);
-                after_layer_type = LayerType::Text(next_td.clone());
-                if text_scales_are_uniform(sx, sy) && ls.mask.is_none() {
-                    crisp_vector_layer = rasterized_text_layer_at(&next_td, (new_ox, new_oy));
-                }
-            } else if let Some(next_td) = transformed_text_data(td, &ts) {
+            if let Some(next_td) = transformed_text_data(td, &ts) {
                 after_layer_type = LayerType::Text(next_td.clone());
                 if ls.mask.is_none() {
-                    crisp_vector_layer = rasterized_text_layer_at(&next_td, (new_ox, new_oy));
+                    // Always rebuild an affine-transformed Text layer from its
+                    // updated metadata.  Keeping a resampled bitmap only for
+                    // non-uniform positive scales made the pixels disagree with
+                    // TextData, so reopening Type reconstructed a different,
+                    // usually smaller object.
+                    crisp_vector_layer =
+                        rasterized_text_layer_centered_in(&next_td, (new_ox, new_oy, new_w, new_h));
                 }
             } else {
                 after_layer_type = LayerType::Raster;
@@ -2492,6 +2487,8 @@ mod tests {
             mode: crate::app::state::TransformMode::Free,
         };
 
+        let target_bounds =
+            transformed_content_bounds(&ts, &ts.layer_states[0]).expect("scaled bounds are valid");
         let result = bake_transform_commit(
             DocumentId(1),
             ts,
@@ -2505,6 +2502,31 @@ mod tests {
         assert!((after_td.font_px - 24.0).abs() < 0.01);
         assert!((after_td.stretch_x - 2.0).abs() < 0.01);
         assert!(result.layers[0].width > raster.width);
+
+        // The committed pixels must be the exact raster described by TextData.
+        // Type mode blanks these pixels and reconstructs them from the metadata;
+        // a mismatch here is the shrink-on-edit regression.
+        let (rebuilt, _) = rasterize_placed(after_td).expect("metadata rerasterizes");
+        let rebuilt_tiles = TileMap::from_rgba(&rebuilt.rgba, rebuilt.width, rebuilt.height);
+        assert_eq!(result.layers[0].width, rebuilt.width);
+        assert_eq!(result.layers[0].height, rebuilt.height);
+        assert_eq!(
+            tile_content_fingerprint(&result.layers[0].tiles),
+            tile_content_fingerprint(&rebuilt_tiles)
+        );
+
+        // Re-layout can differ from scaled bitmap bounds by a pixel because of
+        // font hinting; it must remain centred on the transform's destination.
+        let (min_x, min_y, max_x, max_y) = result.layers[0]
+            .tiles
+            .content_bounds()
+            .expect("committed text has ink");
+        let actual_cx = result.layers[0].offset.0 as f64 + (min_x + max_x) as f64 * 0.5;
+        let actual_cy = result.layers[0].offset.1 as f64 + (min_y + max_y) as f64 * 0.5;
+        let target_cx = target_bounds.0 as f64 + target_bounds.2 as f64 * 0.5;
+        let target_cy = target_bounds.1 as f64 + target_bounds.3 as f64 * 0.5;
+        assert!((actual_cx - target_cx).abs() <= 0.5);
+        assert!((actual_cy - target_cy).abs() <= 0.5);
 
         let mut stack = LayerStack::new(160, 120);
         let idx = stack.add_layer(160, 120);
@@ -2532,6 +2554,18 @@ mod tests {
         };
         assert!((undo_td.font_px - 24.0).abs() < 0.01);
         assert!((undo_td.stretch_x - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn large_text_scale_does_not_snap_to_the_old_font_limit() {
+        let td = TextData {
+            content: "A".to_string(),
+            font_px: 32.0,
+            ..TextData::default()
+        };
+        let scaled = scaled_text_data(&td, 64.0, 64.0);
+        assert!((scaled.font_px - 2048.0).abs() < 0.01);
+        assert!((scaled.stretch_x - 1.0).abs() < 0.01);
     }
 
     #[test]
@@ -2595,6 +2629,8 @@ mod tests {
             mode: crate::app::state::TransformMode::Free,
         };
 
+        let target_bounds =
+            transformed_content_bounds(&ts, &ts.layer_states[0]).expect("rotated bounds are valid");
         let result = bake_transform_commit(
             DocumentId(1),
             ts,
@@ -2606,6 +2642,16 @@ mod tests {
             panic!("rotated text stays editable");
         };
         assert!((after_td.rotation_deg - 30.0).abs() < 0.01);
+        let (min_x, min_y, max_x, max_y) = result.layers[0]
+            .tiles
+            .content_bounds()
+            .expect("committed text has ink");
+        let actual_cx = result.layers[0].offset.0 as f64 + (min_x + max_x) as f64 * 0.5;
+        let actual_cy = result.layers[0].offset.1 as f64 + (min_y + max_y) as f64 * 0.5;
+        let target_cx = target_bounds.0 as f64 + target_bounds.2 as f64 * 0.5;
+        let target_cy = target_bounds.1 as f64 + target_bounds.3 as f64 * 0.5;
+        assert!((actual_cx - target_cx).abs() <= 0.5);
+        assert!((actual_cy - target_cy).abs() <= 0.5);
     }
 
     #[test]

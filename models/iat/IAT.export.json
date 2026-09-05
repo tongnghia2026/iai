@@ -1,0 +1,48 @@
+{
+  "model": "IAT exposure correction",
+  "source": "https://github.com/cuiziteng/Illumination-Adaptive-Transformer/tree/c76472265247f47cea57649af28b15018bb64cb1/IAT_enhance",
+  "checkpoint": "IAT_enhance/best_Epoch_exposure.pth",
+  "checkpoint_sha256": "15a9494582f028bef996d4af7145860eaa5d67799d2b0625ed93ff8c546ea3ee",
+  "onnx": "models/iat/IAT.onnx",
+  "onnx_sha256": "90e1f7850cb363c8296418d28ee111ba3d74d2cc35335aab944c5d521302fbe2",
+  "opset": 17,
+  "input": {
+    "name": "input",
+    "dtype": "float32",
+    "layout": "NCHW",
+    "range": [
+      0.0,
+      1.0
+    ]
+  },
+  "output": {
+    "name": "output",
+    "dtype": "float32",
+    "layout": "NCHW",
+    "range": [
+      0.0,
+      1.0
+    ]
+  },
+  "dynamic_axes": [
+    "height",
+    "width"
+  ],
+  "validation": {
+    "provider": "CPUExecutionProvider",
+    "max_abs_error": 8.940696716308594e-07,
+    "mean_abs_error": 8.373212523338225e-08,
+    "shape": [
+      1,
+      3,
+      256,
+      320
+    ],
+    "dynamic_shape": [
+      1,
+      3,
+      192,
+      288
+    ]
+  }
+}

@@ -532,7 +532,10 @@ impl App {
                     }
                 }
                 if let Some(px) = fmt.set_size {
-                    let px = px.clamp(4.0, 1600.0);
+                    let px = px.clamp(
+                        crate::core::text::MIN_EDITABLE_FONT_PX,
+                        crate::core::text::MAX_EDITABLE_FONT_PX,
+                    );
                     if new_td.font_px != px {
                         new_td.font_px = px;
                         changed = true;
@@ -1045,7 +1048,10 @@ impl App {
                 style.color = c;
             }
             if let Some(px) = font_px {
-                style.font_px = px.clamp(4.0, 1600.0);
+                style.font_px = px.clamp(
+                    crate::core::text::MIN_EDITABLE_FONT_PX,
+                    crate::core::text::MAX_EDITABLE_FONT_PX,
+                );
             }
             if let Some(family) = &font_family {
                 style.font_family = family.clone();

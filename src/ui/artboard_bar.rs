@@ -350,6 +350,12 @@ fn pdf_page_tab(
         .get(data.layers.active_layer_idx)
         .copied()
         .unwrap_or(false);
+    let active_layer_type = data
+        .layers
+        .layer_types
+        .get(data.layers.active_layer_idx)
+        .map(String::as_str)
+        .unwrap_or("");
     tab.context_menu(|ui| {
         ui.set_min_width(190.0);
         if ui.button("＋ Thêm trang trắng").clicked() {
@@ -381,10 +387,10 @@ fn pdf_page_tab(
         if ui
             .add_enabled(
                 data.sel.has_selection && active_is_background,
-                egui::Button::new("Xóa vùng · mọi trang"),
+                egui::Button::new("Xóa vùng · chọn số trang…"),
             )
             .on_hover_text(
-                "Dùng vùng chọn chữ nhật hiện tại để che cùng vị trí trên mọi trang (Shift+Delete)",
+                "Chọn số trang liên tiếp từ trang hiện tại để che cùng vị trí (Shift+Delete)",
             )
             .clicked()
         {
@@ -393,8 +399,34 @@ fn pdf_page_tab(
         }
         if ui
             .add_enabled(
+                active_layer_type == "Text",
+                egui::Button::new("Thêm văn bản · chọn số trang…"),
+            )
+            .on_hover_text(
+                "Chọn số trang liên tiếp từ trang hiện tại để lặp lại layer chữ cùng vị trí",
+            )
+            .clicked()
+        {
+            actions.sel.add_text_all_pdf_pages = true;
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                matches!(active_layer_type, "Raster" | "SmartObject") && !active_is_background,
+                egui::Button::new("Thêm hình ảnh hiện tại · mọi trang"),
+            )
+            .on_hover_text(
+                "Giữ layer ảnh ở trang hiện tại và lặp lại cùng vị trí trên mọi trang PDF",
+            )
+            .clicked()
+        {
+            actions.sel.add_image_all_pdf_pages = true;
+            ui.close();
+        }
+        if ui
+            .add_enabled(
                 nav.global_clear_count > 0,
-                egui::Button::new("Hoàn tác xóa mọi trang"),
+                egui::Button::new("Hoàn tác thao tác mọi trang"),
             )
             .clicked()
         {
@@ -404,7 +436,7 @@ fn pdf_page_tab(
         if ui
             .add_enabled(
                 nav.global_clear_redo_count > 0,
-                egui::Button::new("Làm lại xóa mọi trang"),
+                egui::Button::new("Làm lại thao tác mọi trang"),
             )
             .clicked()
         {
@@ -516,7 +548,7 @@ fn build_pdf(
                     )
                     .on_hover_text(
                         "Chuột phải vào một trang để: thêm trang, chèn ảnh/PDF, đổi tên, \
-                         chuyển vị trí, xóa vùng mọi trang, hoàn tác/làm lại, xoá trang",
+                         chuyển vị trí, xóa vùng theo số trang, hoàn tác/làm lại, xoá trang",
                     );
                     ui.separator();
 

@@ -517,6 +517,35 @@ impl App {
             self.shell.ui_data_cache.ui_cache_doc_id = doc_id;
         }
 
+        // Selection is lightweight UI state, not layer image data. Keep it in
+        // lockstep with the model every frame instead of relying exclusively on
+        // `layer_revision`: several undoable/model operations restore or adjust
+        // `Layer::selected` without changing pixels. A stale cache could leave
+        // two rows highlighted while Ctrl+E saw a different real selection.
+        let selection_cache_is_current = {
+            let layers = &self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .layer_stack
+                .layers;
+            let cached = self.shell.ui_data_cache.layer_selected.as_ref();
+            cached.len() == layers.len()
+                && cached
+                    .iter()
+                    .zip(layers.iter())
+                    .all(|(selected, layer)| *selected == layer.selected)
+        };
+        if !selection_cache_is_current {
+            self.shell.ui_data_cache.layer_selected = std::sync::Arc::new(
+                self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .layer_stack
+                    .layers
+                    .iter()
+                    .map(|layer| layer.selected)
+                    .collect(),
+            );
+        }
+
         // Channels panel thumbnails. The colour plates sample the flat
         // composite buffer, which may need a full CPU flatten — so they only
         // rebuild while the panel is open, at most every few hundred ms, and
@@ -621,6 +650,14 @@ impl App {
                 .iter()
                 .map(|doc| {
                     let doc_id = doc.id.0;
+                    if let Some(job) = self.jobs.retouch_engine.job_for_doc(doc_id) {
+                        let elapsed = job.started.elapsed().as_secs();
+                        return Some(crate::ui::DocAiBusy {
+                            label: "AI Auto Retouch offline".to_string(),
+                            elapsed_secs: Some(elapsed),
+                            queue_pos: None,
+                        });
+                    }
                     if let Some(job) = self.jobs.ai_engine.job_for_doc(doc_id) {
                         let label = match job.provider {
                             crate::core::ai::AiProvider::Gemini => "Gemini API",
@@ -811,7 +848,7 @@ impl App {
                                 });
                         let (global_clear_count, global_clear_redo_count) =
                             doc.pdf_document.as_ref().map_or((0, 0), |pdf| {
-                                (pdf.global_clears.len(), pdf.global_clears_redo.len())
+                                (pdf.global_edits.len(), pdf.global_edits_redo.len())
                             });
                         Some(crate::ui::PdfNavData {
                             index,
@@ -1461,6 +1498,8 @@ impl App {
                 },
                 show_new_dialog: self.shell.ui.show_new_dialog,
                 show_font_change_dialog: self.shell.ui.show_font_change_dialog,
+                pdf_batch_operation: self.shell.ui.pdf_batch_operation,
+                pdf_batch_page_count: self.shell.ui.pdf_batch_page_count,
                 show_vector_style_dialog: self.shell.ui.show_vector_style_dialog,
                 show_scan_cleanup_dialog: self.shell.ui.show_scan_cleanup_dialog,
                 scan_is_pdf: self
@@ -1729,6 +1768,11 @@ impl App {
                 show_ai_panel: self.shell.ui.show_ai_panel,
                 ai: self.shell.ui.ai.clone(),
                 ai_status: self.shell.ui.ai_status.clone(),
+                retouch_progress: self
+                    .jobs
+                    .retouch_engine
+                    .job_for_doc(self.docs.documents[self.docs.active_doc_idx].id.0)
+                    .and_then(|job| job.status.lock().ok().map(|s| s.progress.clone())),
                 ai_history: self.jobs.ai_engine.settings.history.clone(),
                 ext_connected: self.jobs.ext.connected,
                 ext_queue_len: self.jobs.ext.queue_len(),

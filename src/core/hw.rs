@@ -27,6 +27,33 @@ pub struct HwInfo {
 
 static HW: OnceLock<HwInfo> = OnceLock::new();
 
+#[derive(Debug, Clone)]
+pub struct GpuInfo {
+    pub name: String,
+    pub device_type: String,
+    pub backend: String,
+    /// True for a real discrete/integrated/virtual GPU. Software adapters do
+    /// not qualify, because DirectML would only add overhead there.
+    pub ai_candidate: bool,
+}
+
+static GPU: OnceLock<GpuInfo> = OnceLock::new();
+
+/// Called once by `GpuState` after wgpu has selected the actual display
+/// adapter. Retouch then uses the same hardware decision without probing the
+/// system a second time on its worker thread.
+pub fn record_gpu_adapter(info: GpuInfo) {
+    let _ = GPU.set(info);
+}
+
+pub fn gpu() -> Option<&'static GpuInfo> {
+    GPU.get()
+}
+
+pub fn ai_gpu_candidate() -> bool {
+    gpu().is_some_and(|info| info.ai_candidate)
+}
+
 /// The detected hardware profile (detected on first call, then cached).
 pub fn get() -> &'static HwInfo {
     HW.get_or_init(detect)

@@ -760,6 +760,19 @@ pub struct CropPreviewUniform {
     pub ty: f32,
 }
 
+fn crop_preview_clear_color(color: Option<[u8; 4]>) -> wgpu::Color {
+    let Some([r, g, b, a]) = color else {
+        return wgpu::Color::TRANSPARENT;
+    };
+    let linear = |v: u8| crate::gpu::vector::renderer::srgb_to_linear(v as f32 / 255.0) as f64;
+    wgpu::Color {
+        r: linear(r),
+        g: linear(g),
+        b: linear(b),
+        a: a as f64 / 255.0,
+    }
+}
+
 /// Downsampled regional base-luma proxy for the GPU local-tone preview, built by
 /// `build_region_luma_proxy` on the App side and uploaded to `dev_region_luma_buf`.
 #[derive(Clone)]
@@ -906,6 +919,10 @@ pub struct CompositorState {
     pub transform_previews: Vec<TransformPreviewUniform>,
 
     pub crop_preview: Option<CropPreviewUniform>,
+    /// Background colour that a pending Crop commit will use for newly exposed
+    /// canvas pixels. None preserves transparency/checkerboard for documents
+    /// without a Background layer.
+    pub crop_preview_background: Option<[u8; 4]>,
 
     pub develop_preview: Option<DevelopGpuPreview>,
 
@@ -1519,6 +1536,7 @@ struct VsOut {
             last_result_is_ping: false,
             transform_previews: Vec::new(),
             crop_preview: None,
+            crop_preview_background: None,
             develop_preview: None,
             preview_adj: None,
             preview_filter: None,
@@ -2884,6 +2902,7 @@ struct VsOut {
         allow_active_gpu_vector: bool,
     ) -> bool {
         let mut command_buffers: Vec<wgpu::CommandBuffer> = Vec::new();
+        let full_clear_color = crop_preview_clear_color(self.crop_preview_background);
 
         // Each entry keeps its original stack index; `boundary` is the backdrop
         // cut = the visible-composited layers *below* the active layer. The active
@@ -2969,6 +2988,7 @@ struct VsOut {
             // A crop preview transforms the *whole* stack (applied per-layer, not
             // by id), so it would alter the frozen prefix too.
             || self.crop_preview.is_some()
+            || self.crop_preview_background.is_some()
             // A multi-layer free-transform can drag a layer that sits below the
             // active one; freezing it in the backdrop would show it un-transformed.
             || self
@@ -3371,7 +3391,7 @@ struct VsOut {
                                     resolve_target: None,
                                     depth_slice: None,
                                     ops: wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                        load: wgpu::LoadOp::Clear(full_clear_color),
                                         store: wgpu::StoreOp::Store,
                                     },
                                 })],
@@ -3942,7 +3962,7 @@ struct VsOut {
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                load: wgpu::LoadOp::Clear(full_clear_color),
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
@@ -4020,7 +4040,7 @@ struct VsOut {
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            load: wgpu::LoadOp::Clear(full_clear_color),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -4057,6 +4077,8 @@ struct VsOut {
 
 #[cfg(test)]
 mod shader_tests {
+    use super::crop_preview_clear_color;
+
     fn validate(label: &str, src: &str) {
         let module = naga::front::wgsl::parse_str(src)
             .unwrap_or_else(|e| panic!("{label} failed to parse:\n{}", e.emit_to_string(src)));
@@ -4072,6 +4094,18 @@ mod shader_tests {
     fn shaders_are_valid_wgsl() {
         validate("compositor", super::COMPOSITOR_SHADER);
         validate("adjustment", super::ADJUSTMENT_SHADER);
+    }
+
+    #[test]
+    fn crop_background_clear_matches_srgb_colour_and_alpha() {
+        let transparent = crop_preview_clear_color(None);
+        assert_eq!(transparent.a, 0.0);
+
+        let c = crop_preview_clear_color(Some([128, 64, 255, 128]));
+        assert!((c.r - 0.21586).abs() < 0.0001);
+        assert!((c.g - 0.05127).abs() < 0.0001);
+        assert!((c.b - 1.0).abs() < f64::EPSILON);
+        assert!((c.a - 128.0 / 255.0).abs() < f64::EPSILON);
     }
 
     #[test]

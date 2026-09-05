@@ -20,7 +20,10 @@ impl App {
             self.update_text_cursor_cache(selection, caret);
         }
         if let Some(px) = actions.tool.set_text_font_px.take() {
-            let px = px.clamp(4.0, 1600.0);
+            let px = px.clamp(
+                crate::core::text::MIN_EDITABLE_FONT_PX,
+                crate::core::text::MAX_EDITABLE_FONT_PX,
+            );
             // Apply to the selection (or pending caret) before changing the
             // default, so unselected characters keep their prior size.
             if self.edit.text_edit.is_some() {

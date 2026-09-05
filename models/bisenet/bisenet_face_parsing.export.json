@@ -1,0 +1,35 @@
+{
+  "model": "BiSeNet 19-class face parsing",
+  "source": "https://github.com/zllrunning/face-parsing.PyTorch/tree/d2e684cf1588b46145635e8fe7bcc29544e5537e",
+  "checkpoint": "upstream official 79999_iter.pth",
+  "checkpoint_sha256": "468e13ca13a9b43cc0881a9f99083a430e9c0a38abd935431d1c28ee94b26567",
+  "onnx": "models/bisenet/bisenet_face_parsing.onnx",
+  "onnx_sha256": "71b20280c2aeac6f646e85e392977869bef3c472555cb53a5573320d15ebd5e0",
+  "opset": 17,
+  "input": {
+    "name": "input",
+    "dtype": "float32",
+    "layout": "NCHW",
+    "size": [
+      512,
+      512
+    ],
+    "normalization": "ImageNet RGB"
+  },
+  "output": {
+    "name": "logits",
+    "dtype": "float32",
+    "layout": "NCHW",
+    "shape": [
+      1,
+      19,
+      512,
+      512
+    ]
+  },
+  "validation": {
+    "provider": "CPUExecutionProvider",
+    "max_abs_error": 8.344650268554688e-06,
+    "mean_abs_error": 8.585996624788095e-07
+  }
+}

@@ -174,6 +174,8 @@ pub struct BackgroundJobs {
     pub(in crate::app) select_subject: crate::core::select_subject::SelectSubjectEngine,
     /// Gemini AI image-edit engine (see core/ai/edit.rs).
     pub(in crate::app) ai_engine: crate::core::ai::edit::AiEditEngine,
+    /// Offline sequential AI retouch pipeline (see core/ai/retouch.rs).
+    pub(in crate::app) retouch_engine: crate::core::ai::retouch::RetouchEngine,
     /// Browser-extension bridge: localhost WS server (see app/ext_bridge.rs).
     pub(in crate::app) ext: crate::app::ext_bridge::ExtBridge,
 }

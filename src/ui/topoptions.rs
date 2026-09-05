@@ -2667,7 +2667,10 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui
         .add(
             egui::DragValue::new(&mut px)
-                .range(4.0..=1600.0)
+                .range(
+                    crate::core::text::MIN_EDITABLE_FONT_PX
+                        ..=crate::core::text::MAX_EDITABLE_FONT_PX,
+                )
                 .suffix(" px")
                 .speed(0.5),
         )

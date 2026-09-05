@@ -114,6 +114,7 @@ impl App {
 
         self.poll_select_subject();
         self.poll_ai_edits();
+        self.poll_offline_retouch();
         self.poll_ext_bridge();
 
         self.update_refine_overlay_tex();
@@ -244,6 +245,17 @@ impl App {
                 };
                 self.apply_ui_actions(actions, event_loop);
                 self.flush_pending_adjustment_preview();
+
+                // `ui::build` has just passed egui's platform output to winit.
+                // When egui changes its cursor while the pointer crosses from a
+                // widget back onto the canvas, that native cursor can overwrite
+                // the brush ring installed by the input handler. Re-assert the
+                // app-owned canvas cursor after UI actions so the ring cannot
+                // remain missing/stale until another click or zoom. Do not do
+                // this over UI: egui must retain ownership of widget cursors.
+                if !self.edit.input.was_over_ui {
+                    self.sync_cursor(event_loop);
+                }
 
                 if self.docs.documents[self.docs.active_doc_idx]
                     .canvas

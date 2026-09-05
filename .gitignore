@@ -1,6 +1,13 @@
 /target/
 /.target-*/
 /dist/
+/output/
+/tmp/
+/_photo_plan/
+/_tu-dong-in-fix/
+/models/**/*.onnx
+/models/**/*.pth
+/models/**/*.tflite
 **/*.rs.bk
 .env
 *.psd

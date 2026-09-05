@@ -853,6 +853,136 @@ fn add_global_clear_rect(
     Ok(true)
 }
 
+/// Create one reusable transparent PDF image for a global text/image stamp.
+/// The returned XObject is referenced by every target page, so a 1,000-page PDF
+/// stores the pixels once rather than duplicating them 1,000 times.
+fn create_global_stamp_xobject(
+    document: &mut lopdf::Document,
+    stamp: &crate::core::document::PdfGlobalStamp,
+) -> Result<Option<lopdf::ObjectId>, String> {
+    let pixels = (stamp.width as usize)
+        .checked_mul(stamp.height as usize)
+        .ok_or_else(|| "PDF global image dimensions overflow".to_string())?;
+    if stamp.rgba.len() < pixels.saturating_mul(4) || pixels == 0 {
+        return Err("PDF global image buffer is invalid".to_string());
+    }
+    if !stamp
+        .rgba
+        .chunks_exact(4)
+        .take(pixels)
+        .any(|pixel| pixel[3] != 0)
+    {
+        return Ok(None);
+    }
+    let mut rgb = Vec::with_capacity(pixels * 3);
+    let mut alpha = Vec::with_capacity(pixels);
+    for pixel in stamp.rgba.chunks_exact(4).take(pixels) {
+        rgb.extend_from_slice(&pixel[..3]);
+        alpha.push(pixel[3]);
+    }
+    let smask = if alpha.iter().all(|&value| value == 255) {
+        None
+    } else {
+        Some(
+            document.add_object(
+                lopdf::Stream::new(
+                    dictionary! {
+                        "Type" => "XObject", "Subtype" => "Image",
+                        "Width" => stamp.width, "Height" => stamp.height,
+                        "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8,
+                        "Filter" => "FlateDecode",
+                    },
+                    zlib_compress(&alpha)?,
+                )
+                .with_compression(false),
+            ),
+        )
+    };
+    let mut dictionary = dictionary! {
+        "Type" => "XObject", "Subtype" => "Image",
+        "Width" => stamp.width, "Height" => stamp.height,
+        "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8,
+        "Filter" => "FlateDecode",
+    };
+    if let Some(smask) = smask {
+        dictionary.set("SMask", smask);
+    }
+    Ok(Some(document.add_object(
+        lopdf::Stream::new(dictionary, zlib_compress(&rgb)?).with_compression(false),
+    )))
+}
+
+/// Place a normalized top-left stamp and counter-rotate its image axes so text
+/// and photos stay upright on source pages carrying `/Rotate`.
+fn add_global_stamp(
+    document: &mut lopdf::Document,
+    page_id: lopdf::ObjectId,
+    name: &[u8],
+    image_id: lopdf::ObjectId,
+    stamp: &crate::core::document::PdfGlobalStamp,
+) -> Result<bool, String> {
+    let rect =
+        page_rect(document, page_id).ok_or_else(|| "PDF page has no page box".to_string())?;
+    let (u0, v0, u1, v1) = (
+        stamp.x0.clamp(0.0, 1.0),
+        stamp.y0.clamp(0.0, 1.0),
+        stamp.x1.clamp(0.0, 1.0),
+        stamp.y1.clamp(0.0, 1.0),
+    );
+    if u1 <= u0 || v1 <= v0 {
+        return Ok(false);
+    }
+    let (du, dv) = (u1 - u0, v1 - v0);
+    let (a, b, c, d, e, f) = match page_rotation(document, page_id) {
+        90 => (
+            0.0,
+            du * rect.height,
+            -dv * rect.width,
+            0.0,
+            v1 * rect.width,
+            u0 * rect.height,
+        ),
+        180 => (
+            -du * rect.width,
+            0.0,
+            0.0,
+            -dv * rect.height,
+            (1.0 - u0) * rect.width,
+            v1 * rect.height,
+        ),
+        270 => (
+            0.0,
+            -du * rect.height,
+            dv * rect.width,
+            0.0,
+            (1.0 - v1) * rect.width,
+            (1.0 - u0) * rect.height,
+        ),
+        _ => (
+            du * rect.width,
+            0.0,
+            0.0,
+            dv * rect.height,
+            u0 * rect.width,
+            (1.0 - v1) * rect.height,
+        ),
+    };
+    inherit_resources_onto_page(document, page_id)?;
+    document
+        .add_xobject(page_id, name.to_vec(), image_id)
+        .map_err(|error| error.to_string())?;
+    let content = format!(
+        "q\n{a:.4} {b:.4} {c:.4} {d:.4} {:.4} {:.4} cm\n/{} Do\nQ\n",
+        rect.x + e,
+        rect.y + f,
+        String::from_utf8_lossy(name),
+    );
+    document
+        .add_page_contents(page_id, content.into_bytes())
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn replace_page_with_raster(
     document: &mut lopdf::Document,
     page_id: lopdf::ObjectId,
@@ -1063,13 +1193,69 @@ pub fn write_image_pdf(path: &Path, pages: &[ImagePdfPage]) -> Result<(), String
 }
 
 pub fn build_hybrid_pdf(path: &Path, pages: &[HybridPage]) -> Result<HybridPdf, String> {
-    build_hybrid_pdf_with_global_clears(path, pages, &[])
+    build_hybrid_pdf_with_global_edits(path, pages, &[])
 }
 
 pub fn build_hybrid_pdf_with_global_clears(
     path: &Path,
     pages: &[HybridPage],
     global_clears: &[crate::core::document::PdfGlobalClear],
+) -> Result<HybridPdf, String> {
+    let edits: Vec<_> = global_clears
+        .iter()
+        .cloned()
+        .map(crate::core::document::PdfGlobalEdit::Clear)
+        .collect();
+    build_hybrid_pdf_with_global_edits(path, pages, &edits)
+}
+
+fn add_global_edits_to_page(
+    document: &mut lopdf::Document,
+    page_id: lopdf::ObjectId,
+    source_index: usize,
+    global_edits: &[crate::core::document::PdfGlobalEdit],
+    global_stamp_images: &[Option<lopdf::ObjectId>],
+) -> Result<bool, String> {
+    let mut added = false;
+    for stamps_pass in [false, true] {
+        for (edit_index, edit) in global_edits.iter().enumerate() {
+            if !edit.applies_to_page(source_index)
+                || matches!(edit, crate::core::document::PdfGlobalEdit::Stamp(_)) != stamps_pass
+            {
+                continue;
+            }
+            match edit {
+                crate::core::document::PdfGlobalEdit::Clear(clear) => {
+                    added |= add_global_clear_rect(document, page_id, clear)?;
+                }
+                crate::core::document::PdfGlobalEdit::Stamp(stamp) => {
+                    if let Some(image_id) = global_stamp_images[edit_index] {
+                        let name = format!("IAIGlobal{edit_index}");
+                        added |=
+                            add_global_stamp(document, page_id, name.as_bytes(), image_id, stamp)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(added)
+}
+
+pub fn build_hybrid_pdf_with_global_edits(
+    path: &Path,
+    pages: &[HybridPage],
+    global_edits: &[crate::core::document::PdfGlobalEdit],
+) -> Result<HybridPdf, String> {
+    build_hybrid_pdf_with_global_edits_baked(path, pages, global_edits, &[])
+}
+
+/// Hybrid export variant used when edited raster/overlay page snapshots already
+/// contain their global edit stack below local foreground content.
+pub fn build_hybrid_pdf_with_global_edits_baked(
+    path: &Path,
+    pages: &[HybridPage],
+    global_edits: &[crate::core::document::PdfGlobalEdit],
+    baked_global_pages: &[usize],
 ) -> Result<HybridPdf, String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let mut document = lopdf::Document::load_mem(&bytes)
@@ -1089,6 +1275,17 @@ pub fn build_hybrid_pdf_with_global_clears(
         return Err("Hybrid export pages must be unique".to_string());
     }
     let pages_root = root_pages_id(&document)?;
+
+    let mut global_stamp_images = Vec::with_capacity(global_edits.len());
+    for edit in global_edits {
+        let image = match edit {
+            crate::core::document::PdfGlobalEdit::Stamp(stamp) => {
+                create_global_stamp_xobject(&mut document, stamp)?
+            }
+            crate::core::document::PdfGlobalEdit::Clear(_) => None,
+        };
+        global_stamp_images.push(image);
+    }
 
     let mut vector_pages = 0;
     let mut overlay_pages = 0;
@@ -1118,6 +1315,19 @@ pub fn build_hybrid_pdf_with_global_clears(
         let name = format!("IAIPage{}", position + 1).into_bytes();
         let mut page_has_overlay = false;
         let page_is_raster = matches!(page.content, HybridPageContent::Raster { .. });
+        let globals_baked = baked_global_pages.contains(&page.source_index);
+        // Original/vector-overlay pages can receive shared edits first, then
+        // local foreground content is appended above them. Raster snapshots
+        // need those shared edits pre-baked by the caller to preserve layering.
+        if !globals_baked && !page_is_raster {
+            page_has_overlay |= add_global_edits_to_page(
+                &mut document,
+                page_id,
+                page.source_index,
+                global_edits,
+                &global_stamp_images,
+            )?;
+        }
         match &page.content {
             HybridPageContent::Original => {}
             HybridPageContent::Overlay {
@@ -1150,8 +1360,14 @@ pub fn build_hybrid_pdf_with_global_clears(
                 )?;
             }
         }
-        for clear in global_clears {
-            page_has_overlay |= add_global_clear_rect(&mut document, page_id, clear)?;
+        if !globals_baked && page_is_raster {
+            page_has_overlay |= add_global_edits_to_page(
+                &mut document,
+                page_id,
+                page.source_index,
+                global_edits,
+                &global_stamp_images,
+            )?;
         }
         if page_is_raster {
             raster_pages += 1;
@@ -1887,6 +2103,7 @@ mod tests {
             x1: 0.25,
             y1: 0.25,
             color: [230, 20, 30, 255],
+            target_pages: Vec::new(),
         };
         let hybrid = build_hybrid_pdf_with_global_clears(&source_path, &pages, &[clear]).unwrap();
         assert_eq!(
@@ -1915,6 +2132,225 @@ mod tests {
                 .iter()
                 .all(|&channel| channel > 220));
         }
+
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn scoped_global_clear_leaves_pages_outside_the_range_untouched() {
+        let source_path = temp_pdf_path("pdf-scoped-clear-source");
+        let output_path = temp_pdf_path("pdf-scoped-clear-output");
+        std::fs::write(&source_path, minimal_pdf(&[(20, 20), (20, 20), (20, 20)])).unwrap();
+        let pages: Vec<_> = (0..3)
+            .map(|source_index| HybridPage {
+                source_index,
+                content: HybridPageContent::Original,
+            })
+            .collect();
+        let clear = crate::core::document::PdfGlobalClear {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 0.25,
+            y1: 0.25,
+            color: [230, 20, 30, 255],
+            target_pages: vec![1],
+        };
+        let hybrid = build_hybrid_pdf_with_global_clears(&source_path, &pages, &[clear]).unwrap();
+        assert_eq!((hybrid.vector_pages, hybrid.overlay_pages), (2, 1));
+        std::fs::write(&output_path, hybrid.bytes).unwrap();
+
+        let rendered = PdfImporter::render_selected(&output_path, &[0, 1, 2], Some(72.0)).unwrap();
+        for (index, canvas) in rendered.iter().enumerate() {
+            let pixels = canvas.export_flat();
+            let sample = ((canvas.width + 1) * 4) as usize;
+            let rgb = &pixels[sample..sample + 3];
+            if index == 1 {
+                assert!(rgb[0] > 180 && rgb[1] < 80 && rgb[2] < 80);
+            } else {
+                assert!(rgb.iter().all(|&channel| channel > 220));
+            }
+        }
+
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn local_text_like_overlay_is_appended_above_global_clear() {
+        let source_path = temp_pdf_path("pdf-clear-below-text-source");
+        let output_path = temp_pdf_path("pdf-clear-below-text-output");
+        std::fs::write(&source_path, minimal_pdf(&[(20, 20)])).unwrap();
+        let mut rgba = vec![0u8; 20 * 20 * 4];
+        for y in 1..6 {
+            for x in 1..6 {
+                let pixel = (y * 20 + x) * 4;
+                rgba[pixel..pixel + 4].copy_from_slice(&[220, 20, 30, 255]);
+            }
+        }
+        let clear = crate::core::document::PdfGlobalClear {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 0.5,
+            y1: 0.5,
+            color: [255; 4],
+            target_pages: vec![0],
+        };
+        let hybrid = build_hybrid_pdf_with_global_edits(
+            &source_path,
+            &[HybridPage {
+                source_index: 0,
+                content: HybridPageContent::Overlay {
+                    rgba,
+                    vectors: Vec::new(),
+                    width: 20,
+                    height: 20,
+                    dpi: 72.0,
+                },
+            }],
+            &[crate::core::document::PdfGlobalEdit::Clear(clear)],
+        )
+        .unwrap();
+        std::fs::write(&output_path, hybrid.bytes).unwrap();
+        let rendered = PdfImporter::render_selected(&output_path, &[0], Some(72.0)).unwrap();
+        let pixels = rendered[0].export_flat();
+        let sample = (3 * 20 + 3) * 4;
+        assert!(
+            pixels[sample] > 180 && pixels[sample + 1] < 80 && pixels[sample + 2] < 80,
+            "local foreground was hidden by the global clear: {:?}",
+            &pixels[sample..sample + 4]
+        );
+
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn global_image_stamp_covers_every_page_and_reuses_one_xobject() {
+        let source_path = temp_pdf_path("pdf-global-stamp-source");
+        let output_path = temp_pdf_path("pdf-global-stamp-output");
+        std::fs::write(&source_path, minimal_pdf(&[(20, 20), (20, 20), (20, 20)])).unwrap();
+        let pages: Vec<_> = (0..3)
+            .map(|source_index| HybridPage {
+                source_index,
+                content: HybridPageContent::Original,
+            })
+            .collect();
+        let stamp = crate::core::document::PdfGlobalStamp {
+            x0: 0.25,
+            y0: 0.25,
+            x1: 0.5,
+            y1: 0.5,
+            width: 2,
+            height: 2,
+            rgba: vec![230, 20, 30, 255].repeat(4),
+            kind: crate::core::document::PdfGlobalStampKind::Image,
+            name: "Logo".to_string(),
+            source_page: Some(0),
+            source_layer_id: Some(9),
+            target_pages: Vec::new(),
+        };
+        let hybrid = build_hybrid_pdf_with_global_edits(
+            &source_path,
+            &pages,
+            &[crate::core::document::PdfGlobalEdit::Stamp(stamp)],
+        )
+        .unwrap();
+        assert_eq!((hybrid.vector_pages, hybrid.overlay_pages), (0, 3));
+        std::fs::write(&output_path, &hybrid.bytes).unwrap();
+
+        let output = lopdf::Document::load(&output_path).unwrap();
+        let image_objects = output
+            .objects
+            .values()
+            .filter(|object| {
+                object.as_stream().ok().is_some_and(|stream| {
+                    stream
+                        .dict
+                        .get(b"Subtype")
+                        .ok()
+                        .and_then(|v| v.as_name().ok())
+                        == Some(b"Image")
+                })
+            })
+            .count();
+        assert_eq!(
+            image_objects, 1,
+            "the opaque stamp is stored once for both target pages"
+        );
+
+        let rendered = PdfImporter::render_selected(&output_path, &[0, 1, 2], Some(72.0)).unwrap();
+        let sample = |page: usize| {
+            let pixels = rendered[page].export_flat();
+            let i = (6 * 20 + 6) * 4;
+            [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+        };
+        for page in 0..=2 {
+            let pixel = sample(page);
+            assert!(
+                pixel[0] > 180 && pixel[1] < 80 && pixel[2] < 80,
+                "stamp missing on page {page}: {pixel:?}"
+            );
+        }
+
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn global_stamp_stays_upright_on_rotated_pdf_page() {
+        let source_path = temp_pdf_path("pdf-global-stamp-rotated-source");
+        let output_path = temp_pdf_path("pdf-global-stamp-rotated-output");
+        std::fs::write(&source_path, minimal_pdf(&[(20, 30)])).unwrap();
+        let mut source = lopdf::Document::load(&source_path).unwrap();
+        let page_id = source.get_pages()[&1];
+        source
+            .get_dictionary_mut(page_id)
+            .unwrap()
+            .set("Rotate", 90);
+        source.save(&source_path).unwrap();
+
+        let stamp = crate::core::document::PdfGlobalStamp {
+            x0: 0.1,
+            y0: 0.2,
+            x1: 0.5,
+            y1: 0.6,
+            width: 2,
+            height: 1,
+            rgba: vec![230, 20, 30, 255, 20, 40, 230, 255],
+            kind: crate::core::document::PdfGlobalStampKind::Text,
+            name: "AB".to_string(),
+            source_page: None,
+            source_layer_id: None,
+            target_pages: Vec::new(),
+        };
+        let hybrid = build_hybrid_pdf_with_global_edits(
+            &source_path,
+            &[HybridPage {
+                source_index: 0,
+                content: HybridPageContent::Original,
+            }],
+            &[crate::core::document::PdfGlobalEdit::Stamp(stamp)],
+        )
+        .unwrap();
+        std::fs::write(&output_path, hybrid.bytes).unwrap();
+        let rendered = PdfImporter::render_selected(&output_path, &[0], Some(72.0)).unwrap();
+        assert_eq!((rendered[0].width, rendered[0].height), (30, 20));
+        let pixels = rendered[0].export_flat();
+        let sample = |x: usize, y: usize| {
+            let i = (y * 30 + x) * 4;
+            [pixels[i], pixels[i + 1], pixels[i + 2]]
+        };
+        let left = sample(5, 7);
+        let right = sample(12, 7);
+        assert!(
+            left[0] > 180 && left[2] < 80,
+            "left half rotated/flipped: {left:?}"
+        );
+        assert!(
+            right[2] > 180 && right[0] < 80,
+            "right half rotated/flipped: {right:?}"
+        );
 
         let _ = std::fs::remove_file(source_path);
         let _ = std::fs::remove_file(output_path);

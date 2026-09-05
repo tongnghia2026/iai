@@ -32,17 +32,17 @@ together in the same document.
 - **Adjustments** — levels, curves, hue/saturation, colour balance, exposure, black & white, photo filter, gradient map, channel mixer, and more
 - **Develop** — a raw/raster develop panel: exposure, contrast, highlights/shadows/whites/blacks, tone curve, HSL colour mixer, detail & effects
 - **Colour management** — ICC profiles, soft-proofing, display CMS, CMYK separations, print
-- **Artboards & pages** — multi-artboard documents; import multi-page PDFs and manage their pages (insert blank / image / PDF pages, rename, reorder, delete)
+- **Artboards & pages** — multi-artboard documents; import multi-page PDFs and manage their pages (insert blank / image / PDF pages, rename, reorder, delete), including clearing or repeating positioned text over a chosen consecutive page count and repeating images across every PDF page
 - **Formats** — imports PNG, JPEG, TIFF, WebP, BMP, PSD, RAW (broad camera coverage, including Canon CR3) and multi-page PDF; exports PNG, JPEG, TIFF, WebP, BMP, multi-page PDF, and vector **SVG** (web / cut plotters), plus the native `.iai` project format (raster + vector, 16-bit)
 - **16-bit** editing — RAW / 16-bit PNG / TIFF decode to a 16-bit master that survives Develop, global adjustments, the common raster edits (paint, fill, crop, flip, rotate, resize, merge, filters) and a `.iai` save/reopen round-trip; display is 8-bit-dithered (see the [bit-depth capability matrix](docs/bit-depth-and-color-capability.md))
 - **GPU-accelerated** hybrid compositing (wgpu / WGSL) — raster tiles and tessellated vector geometry drawn on the same surface
-- **AI** — subject/background masking, content-aware inpainting fill, and a Gemini/ChatGPT-powered retouch panel
+- **AI** — offline Auto Retouch with independent face/hair/skin/eyes/lips/clothes stages, DirectML acceleration, semantic masks, denoise, restoration, upscale and automatic colour correction; plus subject masking, content-aware fill and Gemini/ChatGPT editing
 
 ## Installation
 
 iAi is built from source with Cargo. The steps below take you from a clean machine to a running build on **Windows**, **macOS** and **Linux**, including installing Git and the Rust toolchain.
 
-> **Requirements at a glance:** Git · Rust (stable, edition 2021) · a C/C++ toolchain · a GPU with Vulkan, Metal, DX12 or OpenGL support. The first use of an AI feature downloads its model (internet required).
+> **Requirements at a glance:** Git · Rust (stable, edition 2021) · a C/C++ toolchain · a GPU with Vulkan, Metal, DX12 or OpenGL support. Some AI features download a model on first use; offline Auto Retouch instead uses separately supplied, checksum-locked models described in [`docs/AI_MODELS.md`](docs/AI_MODELS.md).
 
 > **Platform support.** Windows is the primary target — full CI (build + test) and the only one with a release build. macOS and Linux are **compile-checked in CI on every push** and build from the same source; they are not yet runtime-verified, so there are no prebuilt binaries for them yet.
 
@@ -166,9 +166,15 @@ cargo run --release
 
 Use `cargo check` for a quick compile test, or `cargo test` before making a release build.
 
-> The first use of an **AI feature** (Select Subject / Smart Fill) downloads
+> The first use of some **AI features** (Select Subject / Smart Fill) downloads
 > its ONNX model (tens of MB) to your local application-data directory. An internet
 > connection is required for that first download only.
+
+> **Offline Auto Retouch models are not stored in Git.** Model binaries exceed
+> GitHub's ordinary file limit and retain their upstream licenses. The public
+> repository contains their exact source revisions, tensor contracts and
+> SHA-256 values in [`docs/AI_MODELS.md`](docs/AI_MODELS.md) and
+> [`models/retouch-manifest.json`](models/retouch-manifest.json).
 
 > **AI Gemini / ChatGPT panel.** The free *Web* mode drives your **own** logged-in
 > Gemini or ChatGPT tab through the **IAI Bridge browser extension** (in
@@ -213,8 +219,11 @@ src/
 
 ## Contributing
 
-Contributions are welcome. The codebase is organized around a stable rendering core, so new tools, filters, formats, UI improvements and bug fixes can be added without touching the engine internals. Please open an issue to discuss larger changes before submitting a pull request.
+Contributions are welcome. The codebase is organized around a stable rendering core, so new tools, filters, formats, UI improvements and bug fixes can be added without touching the engine internals. For a bug, open a GitHub issue with reproduction steps, OS/GPU, the complete status message and a sample image that you have permission to share. Please discuss larger changes before submitting a pull request.
 
 ## License
 
-Released under the [MIT License](LICENSE). © 2026 tongnghia2026.
+The iAi source code is released under the [MIT License](LICENSE). © 2026
+tongnghia2026. Linked dependencies, runtime binaries and AI models retain
+their own terms; see [third-party notices](THIRD_PARTY.md) before distributing
+a binary or model bundle.

@@ -5,8 +5,73 @@ use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 use crate::ui::UiActions;
 
+fn consecutive_pdf_pages(selected_pages: &[usize], active_page: usize, count: usize) -> Vec<usize> {
+    let start = selected_pages
+        .iter()
+        .position(|&page| page == active_page)
+        .unwrap_or(0);
+    let end = start.saturating_add(count).min(selected_pages.len());
+    selected_pages[start..end].to_vec()
+}
+
 impl App {
-    pub(crate) fn clear_selection_on_all_pdf_pages(&mut self) {
+    fn set_pdf_global_stamp_source_visible(
+        &mut self,
+        stamp: &crate::core::document::PdfGlobalStamp,
+        visible: bool,
+    ) {
+        let (Some(source_page), Some(layer_id)) = (stamp.source_page, stamp.source_layer_id) else {
+            return;
+        };
+        let doc = &mut self.docs.documents[self.docs.active_doc_idx];
+        let Some(pdf) = doc.pdf_document.as_mut() else {
+            return;
+        };
+        let canvas = if pdf.active_page == source_page {
+            &mut doc.canvas
+        } else if let Some(cached) = pdf.edited_pages.get_mut(&source_page) {
+            &mut cached.canvas
+        } else {
+            return;
+        };
+        if let Some(layer) = canvas
+            .layer_stack
+            .layers
+            .iter_mut()
+            .find(|layer| layer.id == layer_id)
+        {
+            if layer.visible != visible {
+                layer.visible = visible;
+                canvas.layer_revision = canvas.layer_revision.wrapping_add(1);
+            }
+        }
+    }
+
+    pub(crate) fn open_pdf_batch_dialog(
+        &mut self,
+        operation: crate::ui::intent::PdfBatchOperation,
+    ) {
+        let doc = &self.docs.documents[self.docs.active_doc_idx];
+        let Some(pdf) = doc.pdf_document.as_ref() else {
+            self.shell.status_msg = "Tính năng này chỉ dùng cho tài liệu PDF nhiều trang".into();
+            return;
+        };
+        let remaining = consecutive_pdf_pages(&pdf.selected_pages, pdf.active_page, usize::MAX)
+            .len()
+            .max(1);
+        self.shell.ui.pdf_batch_operation = Some(operation);
+        self.shell.ui.pdf_batch_page_count = remaining;
+    }
+
+    fn pdf_batch_target_pages(&self, count: usize) -> Vec<usize> {
+        let doc = &self.docs.documents[self.docs.active_doc_idx];
+        let Some(pdf) = doc.pdf_document.as_ref() else {
+            return Vec::new();
+        };
+        consecutive_pdf_pages(&pdf.selected_pages, pdf.active_page, count)
+    }
+
+    pub(crate) fn clear_selection_on_pdf_pages(&mut self, target_pages: Vec<usize>) {
         let doc_idx = self.docs.active_doc_idx;
         let (canvas_width, canvas_height, active_is_background) = {
             let doc = &self.docs.documents[doc_idx];
@@ -39,25 +104,27 @@ impl App {
                 self.edit.bg_color,
             )
         };
-        let operation = match operation {
+        let mut operation = match operation {
             Ok(operation) => operation,
             Err(message) => {
                 self.shell.status_msg = message;
                 return;
             }
         };
+        operation.target_pages = target_pages;
         let page_count = {
             let doc = &mut self.docs.documents[doc_idx];
             let pdf = doc.pdf_document.as_mut().expect("checked above");
-            pdf.global_clears.push(operation);
-            pdf.global_clears_redo.clear();
-            let page_count = pdf.page_count;
+            let page_count = operation.target_pages.len();
+            pdf.global_edits
+                .push(crate::core::document::PdfGlobalEdit::Clear(operation));
+            pdf.global_edits_redo.clear();
             doc.rebuild_pdf_global_overlay();
             page_count
         };
         self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
         self.shell.status_msg =
-            format!("Đã xóa vùng chọn tại cùng vị trí trên {page_count} trang PDF");
+            format!("Đã xóa vùng chọn tại cùng vị trí trên {page_count} trang PDF đã chọn");
     }
 
     pub(crate) fn undo_pdf_global_clear(&mut self) {
@@ -65,13 +132,20 @@ impl App {
         let Some(pdf) = doc.pdf_document.as_mut() else {
             return;
         };
-        let Some(operation) = pdf.global_clears.pop() else {
+        let Some(operation) = pdf.global_edits.pop() else {
             return;
         };
-        pdf.global_clears_redo.push(operation);
+        let source = match &operation {
+            crate::core::document::PdfGlobalEdit::Stamp(stamp) => Some(stamp.clone()),
+            crate::core::document::PdfGlobalEdit::Clear(_) => None,
+        };
+        pdf.global_edits_redo.push(operation);
         doc.rebuild_pdf_global_overlay();
+        if let Some(stamp) = source {
+            self.set_pdf_global_stamp_source_visible(&stamp, true);
+        }
         self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
-        self.shell.status_msg = "Đã hoàn tác lần xóa vùng trên mọi trang PDF".into();
+        self.shell.status_msg = "Đã hoàn tác thao tác trên mọi trang PDF".into();
     }
 
     pub(crate) fn redo_pdf_global_clear(&mut self) {
@@ -79,16 +153,114 @@ impl App {
         let Some(pdf) = doc.pdf_document.as_mut() else {
             return;
         };
-        let Some(operation) = pdf.global_clears_redo.pop() else {
+        let Some(operation) = pdf.global_edits_redo.pop() else {
             return;
         };
-        pdf.global_clears.push(operation);
+        let source = match &operation {
+            crate::core::document::PdfGlobalEdit::Stamp(stamp) => Some(stamp.clone()),
+            crate::core::document::PdfGlobalEdit::Clear(_) => None,
+        };
+        pdf.global_edits.push(operation);
         doc.rebuild_pdf_global_overlay();
+        if let Some(stamp) = source {
+            self.set_pdf_global_stamp_source_visible(&stamp, false);
+        }
         self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
-        self.shell.status_msg = "Đã làm lại lần xóa vùng trên mọi trang PDF".into();
+        self.shell.status_msg = "Đã làm lại thao tác trên mọi trang PDF".into();
+    }
+
+    pub(crate) fn stamp_active_layer_on_all_pdf_pages(
+        &mut self,
+        kind: crate::core::document::PdfGlobalStampKind,
+        target_pages: Vec<usize>,
+    ) {
+        if self.edit.text_edit.is_some() {
+            self.commit_text_edit();
+        }
+        let doc_idx = self.docs.active_doc_idx;
+        let result = {
+            let doc = &self.docs.documents[doc_idx];
+            let Some(pdf) = doc.pdf_document.as_ref() else {
+                self.shell.status_msg =
+                    "Tính năng này chỉ dùng cho tài liệu PDF nhiều trang".into();
+                return;
+            };
+            let layer = doc.canvas.layer_stack.active_layer();
+            crate::core::document::PdfGlobalStamp::from_layer(
+                layer,
+                doc.canvas.width,
+                doc.canvas.height,
+                pdf.active_page,
+                kind,
+            )
+        };
+        let mut stamp = match result {
+            Ok(stamp) => stamp,
+            Err(message) => {
+                self.shell.status_msg = message;
+                return;
+            }
+        };
+        stamp.target_pages = target_pages;
+        let page_count = {
+            let doc = &mut self.docs.documents[doc_idx];
+            let pdf = doc.pdf_document.as_mut().expect("checked above");
+            let source_layer_id = stamp.source_layer_id;
+            let page_count = if stamp.target_pages.is_empty() {
+                pdf.selected_pages.len()
+            } else {
+                stamp.target_pages.len()
+            };
+            pdf.global_edits
+                .push(crate::core::document::PdfGlobalEdit::Stamp(stamp));
+            pdf.global_edits_redo.clear();
+            if let Some(layer_id) = source_layer_id {
+                if let Some(layer) = doc
+                    .canvas
+                    .layer_stack
+                    .layers
+                    .iter_mut()
+                    .find(|layer| layer.id == layer_id)
+                {
+                    layer.visible = false;
+                    doc.canvas.layer_revision = doc.canvas.layer_revision.wrapping_add(1);
+                }
+            }
+            doc.rebuild_pdf_global_overlay();
+            page_count
+        };
+        self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+        let label = match kind {
+            crate::core::document::PdfGlobalStampKind::Text => "văn bản",
+            crate::core::document::PdfGlobalStampKind::Image => "hình ảnh",
+        };
+        self.shell.status_msg =
+            format!("Đã thêm {label} tại cùng vị trí trên {page_count} trang PDF");
     }
 
     pub(super) fn handle_selection_refine_actions(&mut self, actions: &mut UiActions) {
+        if let Some(count) = actions.sel.set_pdf_batch_page_count.take() {
+            let max_pages = self.pdf_batch_target_pages(usize::MAX).len().max(1);
+            self.shell.ui.pdf_batch_page_count = count.clamp(1, max_pages);
+        }
+        if std::mem::take(&mut actions.sel.cancel_pdf_batch) {
+            self.shell.ui.pdf_batch_operation = None;
+        }
+        if std::mem::take(&mut actions.sel.apply_pdf_batch) {
+            if let Some(operation) = self.shell.ui.pdf_batch_operation.take() {
+                let target_pages = self.pdf_batch_target_pages(self.shell.ui.pdf_batch_page_count);
+                match operation {
+                    crate::ui::intent::PdfBatchOperation::Clear => {
+                        self.clear_selection_on_pdf_pages(target_pages)
+                    }
+                    crate::ui::intent::PdfBatchOperation::Text => self
+                        .stamp_active_layer_on_all_pdf_pages(
+                            crate::core::document::PdfGlobalStampKind::Text,
+                            target_pages,
+                        ),
+                }
+            }
+        }
         if let Some(mode) = actions.sel.set_selection_mode.take() {
             self.edit.selection_mode = mode;
         }
@@ -275,7 +447,16 @@ impl App {
             }
         }
         if actions.sel.clear_selection_all_pdf_pages {
-            self.clear_selection_on_all_pdf_pages();
+            self.open_pdf_batch_dialog(crate::ui::intent::PdfBatchOperation::Clear);
+        }
+        if actions.sel.add_text_all_pdf_pages {
+            self.open_pdf_batch_dialog(crate::ui::intent::PdfBatchOperation::Text);
+        }
+        if actions.sel.add_image_all_pdf_pages {
+            self.stamp_active_layer_on_all_pdf_pages(
+                crate::core::document::PdfGlobalStampKind::Image,
+                Vec::new(),
+            );
         }
         if actions.sel.undo_pdf_global_clear {
             self.undo_pdf_global_clear();
@@ -309,5 +490,20 @@ impl App {
             self.upload_selection_mask();
             self.push_selection_uniforms();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consecutive_pdf_pages;
+
+    #[test]
+    fn pdf_batch_range_starts_at_current_display_page_and_keeps_stable_ids() {
+        let reordered_pages = [9, 3, 7, 4, 11];
+        assert_eq!(consecutive_pdf_pages(&reordered_pages, 7, 2), vec![7, 4]);
+        assert_eq!(
+            consecutive_pdf_pages(&reordered_pages, 7, usize::MAX),
+            vec![7, 4, 11]
+        );
     }
 }

@@ -44,9 +44,10 @@ serde_json = "1"
 flate2 = "1"
 rawloader = "0.37"
 # Fallback RAW decoder: CR3 support and a much larger camera database than
-# rawloader. Same LGPL-2.1 license as rawloader, so no new license obligation.
+# rawloader. Both declare LGPL-2.1; binary distribution obligations and the
+# complete license text are documented in THIRD_PARTY.md and licenses/.
 rawler = "0.7"
-ort = "2.0.0-rc.12"
+ort = { version = "2.0.0-rc.12", features = ["directml"] }
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json", "multipart"], default-features = false }
 ab_glyph = "0.2"
 egui-phosphor = "0.12.0"

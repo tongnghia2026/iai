@@ -7,6 +7,7 @@
 // `Arc<Mutex<Status>>` + a background thread + an mpsc channel polled per-frame.
 
 pub mod edit;
+pub mod retouch;
 pub mod settings;
 
 pub use settings::AiProvider;
@@ -107,6 +108,10 @@ pub struct AiPanelState {
     // ---- "Xếp ảnh in" sheet composer ----
     /// Cutting gap between placed photos, in pixels at sheet DPI.
     pub impose_gap_px: u32,
+
+    /// Offline CPU/ONNX Auto Retouch controls. Kept with the existing AI panel
+    /// state so the settings persist in the same UI snapshot contract.
+    pub retouch: retouch::RetouchConfig,
 }
 
 impl Default for AiPanelState {
@@ -142,6 +147,7 @@ impl Default for AiPanelState {
             id_tie_pattern: 0,
             id_tidy_hair: false,
             impose_gap_px: 10,
+            retouch: retouch::RetouchConfig::default(),
         }
     }
 }

@@ -359,6 +359,9 @@ pub struct UiState {
     pub show_new_dialog: bool,
     /// Batch "Change font" dialog (Layer ▸ Change Font of All Text…).
     pub show_font_change_dialog: bool,
+    /// Page-count dialog for a pending PDF bulk clear/text operation.
+    pub pdf_batch_operation: Option<crate::ui::intent::PdfBatchOperation>,
+    pub pdf_batch_page_count: usize,
     /// Batch vector fill/outline dialog (Object ▸ Format All Vectors…).
     pub show_vector_style_dialog: bool,
     /// "Làm sạch bản scan" dialog (Image ▸ Làm sạch bản scan…).
@@ -1354,6 +1357,7 @@ impl App {
                 display_bake_next: None,
                 select_subject: crate::core::select_subject::SelectSubjectEngine::new(),
                 ai_engine: crate::core::ai::edit::AiEditEngine::new(),
+                retouch_engine: crate::core::ai::retouch::RetouchEngine::default(),
                 ext: crate::app::ext_bridge::ExtBridge::new(),
             },
             dev: DevelopShell {
@@ -1394,6 +1398,8 @@ impl App {
                     show_library: false,
                     show_new_dialog: false,
                     show_font_change_dialog: false,
+                    pdf_batch_operation: None,
+                    pdf_batch_page_count: 1,
                     show_vector_style_dialog: false,
                     show_scan_cleanup_dialog: false,
                     vector_style_target: crate::ui::intent::VectorStyleTarget::Document,
@@ -2227,6 +2233,7 @@ impl App {
         self.shell.ui.show_welcome
             || self.shell.ui.show_new_dialog
             || self.shell.ui.show_font_change_dialog
+            || self.shell.ui.pdf_batch_operation.is_some()
             || self.shell.ui.show_vector_style_dialog
             || self.shell.ui.show_resize_dialog
             || self.shell.ui.show_image_size_dialog
@@ -2472,6 +2479,27 @@ impl App {
     }
 
     pub fn sync_cursor(&mut self, event_loop: &ActiveEventLoop) {
+        // Keep the GPU fallback in lockstep with every cursor-policy change.
+        // Several callers (brush presets, keyboard size changes, tool switches)
+        // do not produce a CursorMoved event, so updating this only from pointer
+        // motion can leave a large brush with both the native cursor hidden and
+        // the GPU ring still disabled until the next click or zoom.
+        self.push_cursor_uniforms();
+
+        // A printer driver's property sheet is a native child of our main HWND.
+        // Some drivers do not install their own cursor immediately, so the last
+        // app-owned tool cursor can otherwise leak onto the Windows dialog.  Keep
+        // the owner on the system arrow for the whole lifetime of the sheet; the
+        // normal tool cursor is restored by the next redraw/input event once the
+        // worker clears this pending state.
+        if self.jobs.pending_printer_settings.is_some() {
+            if let Some(w) = &self.win.window {
+                w.set_cursor_visible(true);
+                w.set_cursor(CursorIcon::Default);
+            }
+            return;
+        }
+
         if self.edit.input.alt_right_dragging {
             return;
         }

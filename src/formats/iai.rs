@@ -26,8 +26,9 @@ use std::path::{Path, PathBuf};
 /// these projects rather than silently dropping an edit that affects every page.
 /// v7 adds custom tab names for source PDF pages.
 /// v8 adds materialized blank/image/PDF pages whose ids are outside the source
-/// PDF's physical page range.
-const IAI_FORMAT_VERSION: u64 = 9;
+/// PDF's physical page range. v10 adds ordered, compact text/image stamps shared
+/// by all pages of a PDF project.
+const IAI_FORMAT_VERSION: u64 = 10;
 
 pub struct IaiImporter;
 pub struct IaiExporter;
@@ -55,7 +56,7 @@ pub struct IaiPdfProject {
     pub page_names: std::collections::BTreeMap<usize, String>,
     pub requested_dpi: f32,
     pub active_page: usize,
-    pub global_clears: Vec<crate::core::document::PdfGlobalClear>,
+    pub global_edits: Vec<crate::core::document::PdfGlobalEdit>,
     pub pages: Vec<IaiProjectPage>,
 }
 
@@ -522,42 +523,146 @@ fn read_pdf_project<R: Read + Seek>(
                 .collect()
         })
         .unwrap_or_default();
-    let global_clears = project["global_clears"]
-        .as_array()
-        .map(|operations| {
-            operations
-                .iter()
-                .filter_map(|operation| {
-                    let rect = operation["rect"].as_array()?;
-                    let color = operation["color"].as_array()?;
-                    if rect.len() != 4 || color.len() != 4 {
-                        return None;
+    let parse_target_pages = |operation: &serde_json::Value| {
+        operation["target_pages"]
+            .as_array()
+            .map(|pages| {
+                let mut result = Vec::new();
+                for page in pages.iter().filter_map(|value| value.as_u64()) {
+                    let page = page as usize;
+                    if !result.contains(&page) {
+                        result.push(page);
                     }
-                    let read_f32 = |index: usize| rect[index].as_f64().map(|v| v as f32);
-                    let read_u8 =
-                        |index: usize| color[index].as_u64().and_then(|v| u8::try_from(v).ok());
-                    let clear = crate::core::document::PdfGlobalClear {
-                        x0: read_f32(0)?,
-                        y0: read_f32(1)?,
-                        x1: read_f32(2)?,
-                        y1: read_f32(3)?,
-                        color: [read_u8(0)?, read_u8(1)?, read_u8(2)?, read_u8(3)?],
+                }
+                result
+            })
+            .unwrap_or_default()
+    };
+    let parse_clear = |operation: &serde_json::Value| {
+        let rect = operation["rect"].as_array()?;
+        let color = operation["color"].as_array()?;
+        if rect.len() != 4 || color.len() != 4 {
+            return None;
+        }
+        let read_f32 = |index: usize| rect[index].as_f64().map(|v| v as f32);
+        let read_u8 = |index: usize| color[index].as_u64().and_then(|v| u8::try_from(v).ok());
+        let clear = crate::core::document::PdfGlobalClear {
+            x0: read_f32(0)?,
+            y0: read_f32(1)?,
+            x1: read_f32(2)?,
+            y1: read_f32(3)?,
+            color: [read_u8(0)?, read_u8(1)?, read_u8(2)?, read_u8(3)?],
+            target_pages: parse_target_pages(operation),
+        };
+        (clear.x0.is_finite()
+            && clear.y0.is_finite()
+            && clear.x1.is_finite()
+            && clear.y1.is_finite()
+            && clear.x0 >= 0.0
+            && clear.y0 >= 0.0
+            && clear.x1 <= 1.0
+            && clear.y1 <= 1.0
+            && clear.x1 > clear.x0
+            && clear.y1 > clear.y0)
+            .then_some(clear)
+    };
+    let valid_rect = |rect: &[serde_json::Value]| -> Option<(f32, f32, f32, f32)> {
+        if rect.len() != 4 {
+            return None;
+        }
+        let values = [
+            rect[0].as_f64()? as f32,
+            rect[1].as_f64()? as f32,
+            rect[2].as_f64()? as f32,
+            rect[3].as_f64()? as f32,
+        ];
+        (values.iter().all(|value| value.is_finite())
+            && values[0] >= 0.0
+            && values[1] >= 0.0
+            && values[2] <= 1.0
+            && values[3] <= 1.0
+            && values[2] > values[0]
+            && values[3] > values[1])
+            .then_some((values[0], values[1], values[2], values[3]))
+    };
+    let mut global_edits = Vec::new();
+    if let Some(edits) = project["global_edits"].as_array() {
+        for (index, edit) in edits.iter().enumerate() {
+            match edit["kind"].as_str() {
+                Some("clear") => {
+                    if let Some(clear) = parse_clear(edit) {
+                        global_edits.push(crate::core::document::PdfGlobalEdit::Clear(clear));
+                    }
+                }
+                Some(kind @ ("text" | "image")) => {
+                    let Some(rect) = edit["rect"].as_array().and_then(|rect| valid_rect(rect))
+                    else {
+                        continue;
                     };
-                    (clear.x0.is_finite()
-                        && clear.y0.is_finite()
-                        && clear.x1.is_finite()
-                        && clear.y1.is_finite()
-                        && clear.x0 >= 0.0
-                        && clear.y0 >= 0.0
-                        && clear.x1 <= 1.0
-                        && clear.y1 <= 1.0
-                        && clear.x1 > clear.x0
-                        && clear.y1 > clear.y0)
-                        .then_some(clear)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                    let width = edit["width"]
+                        .as_u64()
+                        .and_then(|v| u32::try_from(v).ok())
+                        .unwrap_or(0);
+                    let height = edit["height"]
+                        .as_u64()
+                        .and_then(|v| u32::try_from(v).ok())
+                        .unwrap_or(0);
+                    if width == 0
+                        || height == 0
+                        || crate::core::canvas::Canvas::checked_rgba_len(width, height).is_none()
+                    {
+                        continue;
+                    }
+                    let entry = edit["entry"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("global_edit_{index}.png"));
+                    let rgba = match archive.by_name(&entry) {
+                        Ok(mut file) => {
+                            let mut bytes = Vec::new();
+                            file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                            let image = image::load_from_memory(&bytes)
+                                .map_err(|e| e.to_string())?
+                                .to_rgba8();
+                            if image.dimensions() != (width, height) {
+                                continue;
+                            }
+                            image.into_raw()
+                        }
+                        Err(_) => continue,
+                    };
+                    global_edits.push(crate::core::document::PdfGlobalEdit::Stamp(
+                        crate::core::document::PdfGlobalStamp {
+                            x0: rect.0,
+                            y0: rect.1,
+                            x1: rect.2,
+                            y1: rect.3,
+                            width,
+                            height,
+                            rgba,
+                            kind: if kind == "text" {
+                                crate::core::document::PdfGlobalStampKind::Text
+                            } else {
+                                crate::core::document::PdfGlobalStampKind::Image
+                            },
+                            name: edit["name"].as_str().unwrap_or("Layer").to_string(),
+                            source_page: edit["source_page"].as_u64().map(|v| v as usize),
+                            source_layer_id: edit["source_layer_id"].as_u64().map(|v| v as u32),
+                            target_pages: parse_target_pages(edit),
+                        },
+                    ));
+                }
+                _ => {}
+            }
+        }
+    } else if let Some(clears) = project["global_clears"].as_array() {
+        global_edits.extend(
+            clears
+                .iter()
+                .filter_map(parse_clear)
+                .map(crate::core::document::PdfGlobalEdit::Clear),
+        );
+    }
 
     let mut pages = Vec::new();
     if let Some(arr) = manifest["pages"].as_array() {
@@ -602,7 +707,7 @@ fn read_pdf_project<R: Read + Seek>(
         page_names,
         requested_dpi,
         active_page,
-        global_clears,
+        global_edits,
         pages,
     })
 }
@@ -1156,7 +1261,7 @@ pub struct IaiProjectMeta {
     pub page_names: std::collections::BTreeMap<usize, String>,
     pub requested_dpi: f32,
     pub active_page: usize,
-    pub global_clears: Vec<crate::core::document::PdfGlobalClear>,
+    pub global_edits: Vec<crate::core::document::PdfGlobalEdit>,
 }
 
 /// Write a multi-page PDF project `.iai` (format v2) atomically. Stores the link
@@ -1193,11 +1298,18 @@ pub fn save_pdf_project(
             .selected_pages
             .iter()
             .any(|&index| index >= meta.page_count);
-        let version = if has_inserted_pages {
+        let has_global_stamps = meta
+            .global_edits
+            .iter()
+            .any(|edit| matches!(edit, crate::core::document::PdfGlobalEdit::Stamp(_)));
+        let has_scoped_global_edits = meta.global_edits.iter().any(|edit| edit.is_scoped());
+        let version = if has_global_stamps || has_scoped_global_edits {
+            10u64
+        } else if has_inserted_pages {
             8u64
         } else if !meta.page_names.is_empty() {
             7u64
-        } else if !meta.global_clears.is_empty() {
+        } else if !meta.global_edits.is_empty() {
             6u64
         } else if has_v4_model {
             4u64
@@ -1206,14 +1318,41 @@ pub fn save_pdf_project(
         } else {
             2u64
         };
-        let global_clears: Vec<serde_json::Value> = meta
-            .global_clears
+        let global_edits: Vec<serde_json::Value> = meta
+            .global_edits
             .iter()
-            .map(|clear| {
-                serde_json::json!({
-                    "rect": [clear.x0, clear.y0, clear.x1, clear.y1],
-                    "color": clear.color,
-                })
+            .enumerate()
+            .map(|(index, edit)| match edit {
+                crate::core::document::PdfGlobalEdit::Clear(clear) => serde_json::json!({
+                    "kind": "clear", "rect": [clear.x0, clear.y0, clear.x1, clear.y1], "color": clear.color,
+                    "target_pages": clear.target_pages,
+                }),
+                crate::core::document::PdfGlobalEdit::Stamp(stamp) => serde_json::json!({
+                    "kind": match stamp.kind { crate::core::document::PdfGlobalStampKind::Text => "text", crate::core::document::PdfGlobalStampKind::Image => "image" },
+                    "rect": [stamp.x0, stamp.y0, stamp.x1, stamp.y1],
+                    "width": stamp.width, "height": stamp.height,
+                    "name": stamp.name, "source_page": stamp.source_page,
+                    "source_layer_id": stamp.source_layer_id,
+                    "target_pages": stamp.target_pages,
+                    "entry": format!("global_edit_{index}.png"),
+                }),
+            })
+            .collect();
+        // Keep clear-only projects readable by v6-v9 builds. A stamp forces v10,
+        // so older builds reject it instead of silently dropping repeated art.
+        let global_clears: Vec<serde_json::Value> = meta
+            .global_edits
+            .iter()
+            .filter_map(|edit| match edit {
+                crate::core::document::PdfGlobalEdit::Clear(clear)
+                    if clear.target_pages.is_empty() =>
+                {
+                    Some(serde_json::json!({
+                        "rect": [clear.x0, clear.y0, clear.x1, clear.y1], "color": clear.color,
+                    }))
+                }
+                crate::core::document::PdfGlobalEdit::Clear(_)
+                | crate::core::document::PdfGlobalEdit::Stamp(_) => None,
             })
             .collect();
         let manifest = serde_json::json!({
@@ -1228,6 +1367,7 @@ pub fn save_pdf_project(
                 "page_names": meta.page_names,
                 "requested_dpi": meta.requested_dpi,
                 "active_page": meta.active_page,
+                "global_edits": global_edits,
                 "global_clears": global_clears,
                 "embedded": source_pdf.is_some(),
             },
@@ -1243,6 +1383,16 @@ pub fn save_pdf_project(
             zip.start_file("source.pdf", stored_options())
                 .map_err(|e| e.to_string())?;
             zip.write_all(bytes).map_err(|e| e.to_string())?;
+        }
+
+        for (index, edit) in meta.global_edits.iter().enumerate() {
+            let crate::core::document::PdfGlobalEdit::Stamp(stamp) = edit else {
+                continue;
+            };
+            let png = encode_png(&stamp.rgba, stamp.width, stamp.height)?;
+            zip.start_file(format!("global_edit_{index}.png"), stored_options())
+                .map_err(|e| e.to_string())?;
+            zip.write_all(&png).map_err(|e| e.to_string())?;
         }
 
         // Thumbnail from the active page when it is stored, else the first page.
@@ -3093,7 +3243,7 @@ mod tests {
             page_names: std::collections::BTreeMap::new(),
             requested_dpi: 144.0,
             active_page: 0,
-            global_clears: Vec::new(),
+            global_edits: Vec::new(),
         };
         let pages = vec![IaiProjectPageOut {
             index: 0,
@@ -3132,7 +3282,7 @@ mod tests {
             page_names: std::collections::BTreeMap::new(),
             requested_dpi: 300.0,
             active_page: 0,
-            global_clears: Vec::new(),
+            global_edits: Vec::new(),
         };
         let pages = vec![IaiProjectPageOut {
             index: 0,
@@ -3175,7 +3325,7 @@ mod tests {
             page_names: [(1, "Ảnh chèn".to_string())].into_iter().collect(),
             requested_dpi: 144.0,
             active_page: 1,
-            global_clears: Vec::new(),
+            global_edits: Vec::new(),
         };
         save_pdf_project(
             &path,
@@ -3235,13 +3385,34 @@ mod tests {
             page_names: [(2, "Trang minh họa".to_string())].into_iter().collect(),
             requested_dpi: 300.0,
             active_page: 2,
-            global_clears: vec![crate::core::document::PdfGlobalClear {
-                x0: 0.0,
-                y0: 0.0,
-                x1: 0.2,
-                y1: 0.25,
-                color: [255, 255, 255, 255],
-            }],
+            global_edits: vec![
+                crate::core::document::PdfGlobalEdit::Clear(
+                    crate::core::document::PdfGlobalClear {
+                        x0: 0.0,
+                        y0: 0.0,
+                        x1: 0.2,
+                        y1: 0.25,
+                        color: [255, 255, 255, 255],
+                        target_pages: vec![2, 4],
+                    },
+                ),
+                crate::core::document::PdfGlobalEdit::Stamp(
+                    crate::core::document::PdfGlobalStamp {
+                        x0: 0.25,
+                        y0: 0.5,
+                        x1: 0.75,
+                        y1: 0.75,
+                        width: 2,
+                        height: 1,
+                        rgba: vec![255, 0, 0, 255, 0, 0, 255, 128],
+                        kind: crate::core::document::PdfGlobalStampKind::Image,
+                        name: "Dấu ảnh".to_string(),
+                        source_page: Some(2),
+                        source_layer_id: Some(7),
+                        target_pages: vec![2, 4],
+                    },
+                ),
+            ],
         };
         let pages = vec![
             IaiProjectPageOut {
@@ -3272,7 +3443,7 @@ mod tests {
                 assert_eq!(project.page_names, meta.page_names);
                 assert_eq!(project.requested_dpi, 300.0);
                 assert_eq!(project.active_page, 2);
-                assert_eq!(project.global_clears, meta.global_clears);
+                assert_eq!(project.global_edits, meta.global_edits);
                 assert_eq!(project.pages.len(), 2);
 
                 let p0 = project.pages.iter().find(|p| p.index == 0).unwrap();

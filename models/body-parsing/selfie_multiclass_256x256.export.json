@@ -1,0 +1,15 @@
+{
+  "model": "MediaPipe SelfieMulticlass 256x256",
+  "source": "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
+  "sourceSha256": "c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0",
+  "onnxSha256": "d6757008a8f46b54da751d2b8bf4277d5dd5d011573f3f9c5caa29aa8bfcbffa",
+  "conversion": "python -m tf2onnx.convert --tflite selfie_multiclass_256x256.tflite --output selfie_multiclass_256x256.onnx --opset 18",
+  "verified": {
+    "input": "input_29 float32 NHWC 1x256x256x3 RGB/255",
+    "output": "Identity float32 NHWC 1x256x256x6 logits",
+    "tfliteVsOnnxMaxAbs": 0.000040650368,
+    "tfliteVsOnnxMeanAbs": 0.000000604093
+  },
+  "classes": ["background", "hair", "body-skin", "face-skin", "clothes", "other"],
+  "license": "Apache-2.0"
+}

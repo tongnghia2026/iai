@@ -89,9 +89,9 @@ mod tests {
             active_page: 0,
             active_page_modified: true,
             edited_pages: edited,
-            global_clears: Vec::new(),
-            global_clears_saved: Vec::new(),
-            global_clears_redo: Vec::new(),
+            global_edits: Vec::new(),
+            global_edits_saved: Vec::new(),
+            global_edits_redo: Vec::new(),
             global_overlay_cache: None,
         });
 

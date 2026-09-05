@@ -14,6 +14,12 @@ use std::{
 use unicode_normalization::char::canonical_combining_class;
 use unicode_normalization::UnicodeNormalization;
 
+/// Shared range for editable Type layers. Poster-sized text can legitimately
+/// exceed the old 1600 px ceiling after Free Transform; every writer and size
+/// control must use the same limit or reopening Type clamps the layer smaller.
+pub const MIN_EDITABLE_FONT_PX: f32 = 4.0;
+pub const MAX_EDITABLE_FONT_PX: f32 = 4096.0;
+
 /// Normalize `content` to NFC (precomposed), returning the resulting chars plus,
 /// for each output char, the index of the source character whose per-glyph style
 /// it should inherit.

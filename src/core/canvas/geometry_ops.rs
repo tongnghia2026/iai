@@ -384,11 +384,17 @@ fn apply_affine_to_text_layer(
 
     let mut next = td.clone();
     next.rotation_deg = ((ny0 * fx).atan2(nx0 * fx).to_degrees()).rem_euclid(360.0);
-    next.font_px = (next.font_px * sy).clamp(4.0, 1600.0);
+    next.font_px = (next.font_px * sy).clamp(
+        crate::core::text::MIN_EDITABLE_FONT_PX,
+        crate::core::text::MAX_EDITABLE_FONT_PX,
+    );
     next.tracking_px = (next.tracking_px * sy).clamp(-200.0, 500.0);
     next.stretch_x = (sx / sy).clamp(0.01, 100.0);
     for glyph in &mut next.glyph_styles {
-        glyph.font_px = (glyph.font_px * sy).clamp(4.0, 1600.0);
+        glyph.font_px = (glyph.font_px * sy).clamp(
+            crate::core::text::MIN_EDITABLE_FONT_PX,
+            crate::core::text::MAX_EDITABLE_FONT_PX,
+        );
     }
 
     let origin = text_origin_for_layer(td, source);

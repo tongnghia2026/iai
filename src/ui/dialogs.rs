@@ -152,6 +152,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     if data.dialogs.show_font_change_dialog {
         text_format_dialog(ctx, data, actions);
     }
+    if data.dialogs.pdf_batch_operation.is_some() {
+        pdf_batch_scope_dialog(ctx, data, actions);
+    }
     if data.dialogs.show_vector_style_dialog {
         vector_style_dialog(ctx, data, actions);
     }

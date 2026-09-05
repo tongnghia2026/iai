@@ -195,7 +195,14 @@ pub(crate) fn text_format_dialog(ctx: &egui::Context, data: &UiData, actions: &m
                     // ---- Size ----
                     ui.checkbox(&mut size_on, "Cỡ chữ (px)");
                     ui.add_enabled_ui(size_on, |ui| {
-                        ui.add(egui::DragValue::new(&mut size).range(4.0..=1600.0).speed(1.0));
+                        ui.add(
+                            egui::DragValue::new(&mut size)
+                                .range(
+                                    crate::core::text::MIN_EDITABLE_FONT_PX
+                                        ..=crate::core::text::MAX_EDITABLE_FONT_PX,
+                                )
+                                .speed(1.0),
+                        );
                     });
                     ui.end_row();
 

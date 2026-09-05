@@ -1,0 +1,726 @@
+iAi OFFLINE AI RETOUCH — KẾ HOẠCH TRIỂN KHAI CHO CODEX
+
+MỤC TIÊU
+Xây dựng pipeline AI retouch hoàn toàn offline cho iAi, ưu tiên máy phổ thông, không bắt buộc GPU rời, không cần Internet. Chấp nhận thời gian xử lý lâu hơn để đổi lấy khả năng chạy local.
+
+Bộ model chốt cho bản thử nghiệm đầu tiên:
+1. Face detector + landmarks/alignment, sau đó BiSeNet Face Parsing — tìm mặt, căn crop và tạo mask vùng mặt.
+2. NAFNet width32 — khử nhiễu.
+3. IAT — chỉnh màu + exposure/gamma.
+4. GFPGAN v1.4 — phục hồi chi tiết khuôn mặt/da.
+5. Real-ESRGAN General x4v3 — tăng detail cục bộ cho tóc, mắt, lông mày, quần áo.
+6. Optional: Real-ESRGAN x2/x4 RRDB — upscale ảnh cuối pipeline.
+
+TRẠNG THÁI SAU KHI TRIỂN KHAI VÀ AUDIT (05/09/2026)
+- Chỉ đặt file .onnx đúng tên chưa có nghĩa là model đã được tích hợp. Mỗi model phải có tensor contract đã kiểm thử: tên input/output, NCHW/NHWC, kích thước động/tĩnh, RGB/BGR, normalization, miền giá trị output và cách resize/căn lại.
+- BiSeNet Face Parsing không phải face detector. Pipeline bắt buộc cần detector + landmarks/alignment trước khi parsing nếu muốn hỗ trợ mặt lệch tâm hoặc nhiều khuôn mặt.
+- Không được gọi bộ lọc blur/sharpen/auto-tone thông thường là output của NAFNet/IAT/GFPGAN/Real-ESRGAN. UI và log phải ghi rõ đang chạy model ONNX hay đang dùng bộ retouch CPU local.
+- Bản Release hiện đã có adapter tensor và model thật cho YuNet, BiSeNet, NAFNet, IAT, GFPGAN, Real-ESRGAN General cùng RRDB x2/x4. App kiểm SHA-256 trước khi dùng, kiểm tensor contract khi inference và chỉ ghi tên model vào provider sau khi chạy thành công.
+- Đường chạy CPU local phải tạo thay đổi pixel nhìn thấy được ngay cả khi chưa cài model; strength chỉ được áp dụng một lần cho mỗi stage và output phải có thống kê changed pixels/mean delta để phát hiện no-op.
+- Preset và slider có trần an toàn theo stage để hạn chế IAT làm lệch màu/exposure và NAFNet/skin smoothing làm mất texture khi đặt 100%.
+
+AUDIT BỔ SUNG SAU TEST THỰC TẾ (05/09/2026 — V2)
+- Đã sửa mask Skin Extended: class skin + tai + mũi + cổ; thêm expand/contract theo vùng, feather theo độ phân giải và edge refine theo màu ảnh gốc.
+- Đã thêm local color match cho từng ROI Real-ESRGAN trước composite; giữ nguyên pixel ngoài mask.
+- Đã tăng dải texture GFPGAN và strength Face/Eyes/Lips/Detail, đồng thời hạ trần NAFNet/IAT để mức 100 không chủ yếu làm ảnh mờ hoặc quá đậm màu.
+- Đã thêm nút Before/After và Ẩn/Hiện Preview Masks trực tiếp trong panel.
+- Đã thêm thống kê riêng vùng mặt: face-changed và face-mean-delta.
+- Đã benchmark đủ 1024px, 12MP và 24MP trên CPU với toàn bộ model ONNX, không fallback: 37 giây / 1.466 MB; 272 giây / 2.506 MB; 516 giây / 3.429 MB.
+- Giới hạn đã xác định: BiSeNet face parsing chỉ bắt quần áo gần crop mặt. Mask quần áo toàn thân cần Body Parsing ở Phase 2; bộ test chất lượng nội bộ 20–30 ảnh thật vẫn cần ảnh đa dạng và đánh giá thị giác của người dùng.
+
+CHỐT PHASE 1 (05/09/2026 — V3)
+- Đã thêm Auto noise estimate: ước lượng noise trên ảnh gốc, tự giảm hoặc bỏ qua NAFNet khi ảnh đã sạch; log ghi noise-sigma và denoise-effective. Có thể tắt tùy chọn này để ép NAFNet chạy đúng mức Denoise đã chọn.
+- Progress chi tiết theo từng face/tile đã có cho BiSeNet, NAFNet, GFPGAN, Real-ESRGAN Detail và RRDB Upscale; Cancel được kiểm tra tuần tự giữa các face/tile.
+- Multi-face cache giờ giữ riêng affine transform và sáu mask nén cho từng khuôn mặt, ngoài các mask float đã union đúng tọa độ ảnh gốc. Cache đổi version và bị giới hạn 384 MB; mask rất lớn chỉ dùng cho lượt hiện tại, không giữ lại sau khi chạy.
+- UI cảnh báo thời gian CPU ước tính từ 8MP trở lên. Upscale được preflight: output trên 150 triệu pixel bị bỏ qua và giữ nguyên kích thước, tránh rơi sang Lanczos full-frame gây hết RAM.
+- Adapter model được đánh dấu Phase1-3. Test tập trung đã khóa hành vi auto-denoise, callback tiến trình, multi-face alignment/cache, checksum/tensor contract và giới hạn upscale.
+- Phase 1 kết thúc ở pipeline chân dung/mặt. Những mục Body Parsing quần áo toàn thân, Skin Beautification chuyên dụng, DirectML/CUDA và bộ đánh giá thị giác 20–30 ảnh là Phase 2, không được giả là đã hoàn tất trong bản này.
+
+QUY TẮC CỐT LÕI
+- Không cho GFPGAN hoặc bất kỳ model nào thay toàn bộ khuôn mặt.
+- Mọi output AI phải đi qua mask và được blend với ảnh gốc.
+- Ưu tiên giữ identity, biểu cảm, hình dáng mặt và màu da tự nhiên.
+- Máy yếu vẫn phải chạy được bằng CPU.
+- Không load tất cả model cùng lúc.
+- Xử lý tuần tự: load → chạy → unload.
+- Ưu tiên ONNX Runtime.
+- Ảnh lớn phải hỗ trợ tile.
+- Có progress và cancel.
+- Chất lượng quan trọng hơn tốc độ.
+
+==================================================
+1. KIẾN TRÚC PIPELINE
+==================================================
+
+Original Image
+    ↓
+Face Detection + Landmark Alignment
+    ↓
+Face Parsing / Mask Engine
+    ↓
+Denoise Engine
+    ↓
+Color & Exposure Engine
+    ↓
+Face Restore Engine
+    ↓
+Selective Detail Engine
+    ↓
+Composite Engine
+    ↓
+Optional Upscale
+    ↓
+Final Image
+
+Thứ tự chốt để benchmark:
+1. Face Detection + Landmark Alignment
+2. Face Parsing / Mask
+3. Denoise bằng NAFNet
+4. Color + Exposure bằng IAT
+5. Face Restore bằng GFPGAN
+6. Selective Detail bằng Real-ESRGAN General x4v3
+7. Composite
+8. Optional Upscale bằng Real-ESRGAN RRDB
+
+Lý do:
+- Denoise trước để không sharpen noise.
+- Màu/sáng xử lý khi ảnh còn ở kích thước gốc.
+- Face restore sau đó.
+- Detail gần cuối.
+- Upscale cuối cùng để tránh làm các model khác phải xử lý ảnh quá lớn.
+
+==================================================
+2. FACE PARSING / MASK ENGINE
+==================================================
+
+Model:
+- Face detector/landmarks để tìm và căn từng khuôn mặt.
+- BiSeNet Face Parsing để phân vùng trên crop mặt đã căn.
+
+Mục đích:
+- nhận diện và tạo mask cho:
+  + Skin
+  + Hair
+  + Eyes
+  + Eyebrows
+  + Nose
+  + Lips
+  + Ears
+  + Neck
+  + Clothes
+  + Background
+  + Face
+
+Yêu cầu:
+- Không chạy segmentation trên ảnh 24MP trực tiếp.
+- Dùng input nhỏ khoảng 512x512 hoặc crop khuôn mặt.
+- Không giả định khuôn mặt luôn nằm giữa ảnh.
+- Với nhiều khuôn mặt, lưu riêng affine transform và mask của từng face.
+- Sau inference phải đưa mask về đúng tọa độ ảnh gốc.
+- Mask dạng float 0..1.
+- Cache mask để dùng lại cho nhiều bước.
+- Có Preview Masks.
+- Có thể union nhiều class để tạo:
+  + Face
+  + Skin Extended
+  + Eyes Combined
+  + Lips Combined
+
+Mask phải pixel-aligned với ảnh gốc.
+
+==================================================
+3. NAFNet WIDTH32 — DENOISE
+==================================================
+
+Mục đích:
+- khử noise ảnh thật;
+- tránh sharpen noise ở các bước sau.
+
+Yêu cầu:
+- dùng width32 trước để giảm RAM và thời gian CPU;
+- ảnh nhỏ xử lý trực tiếp;
+- ảnh lớn dùng tile;
+- tile có overlap;
+- blend overlap mềm, không seam;
+- có strength 0..100 bằng cách blend ảnh gốc với output AI.
+
+Default thử nghiệm:
+- Denoise Strength = 20–35.
+
+Không bắt buộc chạy nếu ảnh sạch.
+Nếu có thể, thêm auto noise estimate để skip bước này khi không cần.
+
+==================================================
+4. IAT — COLOR + EXPOSURE
+==================================================
+
+Mục đích:
+- Auto Exposure
+- Gamma
+- Color Correction
+- Global Tone
+
+Yêu cầu:
+- chạy sau NAFNet;
+- không được làm màu quá mạnh;
+- output phải blend được với ảnh trước đó;
+- có Amount 0..100.
+
+UI thử nghiệm:
+- Auto Color Amount
+- Auto Exposure Amount
+
+Nếu model chỉ trả một output chung thì chưa cần tách hai engine riêng.
+Có thể dùng một Amount chung ở MVP.
+
+Default thử nghiệm:
+- Amount = 35–50.
+
+==================================================
+5. GFPGAN V1.4 — FACE RESTORE
+==================================================
+
+Mục đích:
+- phục hồi texture da;
+- tăng chi tiết mắt;
+- tăng chi tiết môi;
+- giảm cảm giác ảnh nén/mờ ở khuôn mặt.
+
+QUY TẮC BẮT BUỘC:
+KHÔNG paste toàn bộ khuôn mặt GFPGAN lên ảnh gốc.
+
+Chỉ dùng output thông qua mask.
+
+Default blend thử nghiệm:
+- Skin: 30–40%
+- Eyes: 10–20%
+- Lips: 5–15%
+- Brows: 10–20%
+- Nose skin: 10–20%
+- Hair near face: 0–10%
+
+Mục tiêu:
+- giữ identity;
+- giữ biểu cảm;
+- không đổi cấu trúc mặt;
+- chỉ dùng GFPGAN như nguồn texture/detail đẹp hơn.
+
+UI:
+- Face Restore Amount 0..100
+- Protect Identity = ON mặc định
+
+Protect Identity:
+- chỉ cho phép blend thông qua mask;
+- giới hạn strength;
+- không thay toàn bộ face ROI.
+
+==================================================
+6. REAL-ESRGAN GENERAL X4V3 — SELECTIVE DETAIL
+==================================================
+
+Mục đích:
+- tăng detail cục bộ;
+- tóc;
+- mắt;
+- lông mày;
+- quần áo;
+- trang sức;
+- texture vật thể.
+
+Không dùng như upscale toàn ảnh ở bước này.
+
+Workflow:
+1. Lấy ROI theo mask.
+2. Chạy Real-ESRGAN x4v3.
+3. Resize output về kích thước ROI gốc.
+4. Blend lại bằng mask.
+5. Feather biên để tránh halo.
+
+Default:
+- Hair: 20–30%
+- Eyes: 10–20%
+- Brows: 10–20%
+- Clothes: 15–25%
+- Lips: 5–10%
+
+Phải kiểm tra:
+- không halo;
+- không quá sắc;
+- không tạo sợi tóc giả quá mạnh;
+- không sharpen da.
+
+==================================================
+7. OPTIONAL UPSCALE
+==================================================
+
+Model:
+- Real-ESRGAN x2 / x4 RRDB.
+
+Mục đích:
+- upscale ảnh cuối pipeline.
+
+Yêu cầu:
+- tile 256/512 hoặc phù hợp model;
+- có overlap;
+- xử lý tuần tự để máy yếu không hết RAM;
+- progress;
+- cancel;
+- x2 và x4;
+- không bật mặc định trong Auto Retouch.
+
+Nếu ảnh quá lớn:
+- cảnh báo thời gian dự kiến;
+- không crash.
+
+==================================================
+8. COMPOSITE ENGINE
+==================================================
+
+Đây là phần rất quan trọng.
+
+Phải có:
+- feather mask;
+- expand / contract mask;
+- edge refine;
+- blur mask nhỏ theo độ phân giải;
+- preserve original outside mask;
+- opacity blend;
+- color match cục bộ nếu ROI lệch màu;
+- undo / redo;
+- before / after.
+
+Không được xuất hiện:
+- đường viền quanh tóc;
+- halo quanh mắt/môi;
+- ranh giới da AI / da gốc;
+- lệch màu vùng AI;
+- seam do tile.
+
+Mọi mask phải giữ đúng alignment với ảnh gốc.
+
+==================================================
+9. TỐI ƯU MÁY YẾU
+==================================================
+
+9.1 Lazy Load / Unload
+
+Ví dụ:
+Load BiSeNet
+→ Run
+→ Unload
+
+Load NAFNet
+→ Run
+→ Unload
+
+Load IAT
+→ Run
+→ Unload
+
+...
+
+Không giữ 5 model cùng lúc nếu không cần.
+
+9.2 Provider ưu tiên
+
+Ưu tiên:
+1. CUDA nếu có
+2. DirectML nếu phù hợp codebase
+3. CPU ONNX Runtime
+
+CPU phải luôn có fallback.
+
+9.3 Segmentation input nhỏ
+
+Ảnh 6000x4000:
+- không inference trực tiếp full resolution;
+- dùng preview/crop 512 hoặc 1024;
+- upscale mask về ảnh gốc.
+
+9.4 Tile
+
+Với ảnh lớn:
+- tile 256 / 512 / 768 tùy model;
+- overlap 32–128 px;
+- dùng weight map để blend;
+- không seam.
+
+9.5 RAM
+
+Mục tiêu:
+- RAM 8 GB vẫn chạy được;
+- tránh peak memory quá cao;
+- unload model ngay sau khi xong nếu cần.
+
+==================================================
+10. UI BẢN THỬ NGHIỆM
+==================================================
+
+Thêm section:
+AI AUTO RETOUCH
+
+Control:
+- Run Auto Retouch
+- Overall Amount
+- Denoise
+- Color / Exposure
+- Skin / Face Restore
+- Hair & Detail
+- Protect Identity
+- Upscale: Off / x2 / x4
+
+Advanced:
+- Skin Amount
+- Eyes Amount
+- Hair Amount
+- Lips Amount
+- Clothes Detail
+- Preview Masks
+
+Button:
+- Before / After
+- Cancel
+
+Bản đầu không cần UI cầu kỳ.
+Ưu tiên pipeline chạy đúng và ổn định.
+
+==================================================
+11. MODEL MANAGEMENT
+==================================================
+
+Không hard-code model vào UI.
+
+Tạo abstraction kiểu:
+- IModelRunner
+- IMaskProvider
+- IRestorationModel
+- IEnhancementModel
+- IUpscaleModel
+
+Mỗi model có metadata:
+- id
+- displayName
+- modelPath
+- inputSize
+- provider
+- supportsCPU
+- tileSize
+- overlap
+- version
+- license
+
+Mục tiêu:
+Sau này thay GFPGAN bằng model Skin Beauty tốt hơn mà không phải sửa lại UI/pipeline lớn.
+
+==================================================
+12. MODEL FILES
+==================================================
+
+Tạo cấu trúc:
+
+models/
+  bisenet/
+  nafnet/
+  iat/
+  gfpgan/
+  realesrgan/
+
+Kèm manifest JSON cho từng model:
+
+{
+  "id": "gfpgan-v1.4",
+  "file": "GFPGANv1.4.onnx",
+  "sha256": "...",
+  "source": "...",
+  "license": "...",
+  "required": true,
+  "inputName": "input",
+  "outputName": "output",
+  "layout": "NCHW",
+  "colorOrder": "RGB",
+  "normalization": "imagenet",
+  "inputRange": "0..1",
+  "outputRange": "model-specific"
+}
+
+Yêu cầu:
+- app tìm model local;
+- app chỉ báo model sẵn sàng sau khi validate tensor contract, không chỉ kiểm tra file tồn tại;
+- báo model missing rõ ràng;
+- không crash;
+- có thể thêm model downloader sau.
+
+Trong giai đoạn dev:
+- có thể dùng script tải model;
+- sau khi model đã có local thì app phải chạy offline.
+
+==================================================
+13. BENCHMARK BẮT BUỘC
+==================================================
+
+Tạo debug benchmark hoặc logging.
+
+Test ít nhất:
+- chân dung 1024px;
+- 12MP;
+- 24MP.
+
+Ghi:
+- model load time;
+- inference time;
+- composite time;
+- total time;
+- peak RAM;
+- output resolution;
+- provider đang dùng.
+
+Ví dụ log:
+
+BiSeNet: 280 ms
+NAFNet: 8.4 s
+IAT: 0.2 s
+GFPGAN: 4.1 s
+Real-ESRGAN Detail: 5.8 s
+Composite: 0.4 s
+Total: 19.2 s
+Peak RAM: 2.7 GB
+
+Không tối ưu mù.
+Benchmark trước, sau đó mới tinh chỉnh.
+
+==================================================
+14. TIÊU CHÍ CHẤT LƯỢNG
+==================================================
+
+Bản test đạt khi:
+1. Da đẹp hơn retouch hiện tại của iAi.
+2. Không đổi identity rõ rệt.
+3. Mắt, môi, mũi không bị giả.
+4. Tóc rõ hơn nhưng không halo.
+5. Không sharpen noise.
+6. Màu không lệch mạnh.
+7. Ánh sáng không cháy da.
+8. Không có seam tile.
+9. CPU-only chạy được.
+10. Ảnh lớn không crash vì RAM.
+
+==================================================
+15. TEST DATASET NỘI BỘ
+==================================================
+
+Chuẩn bị khoảng 20–30 ảnh:
+- da đẹp sẵn;
+- da mụn / không đều màu;
+- ảnh điện thoại noise;
+- ảnh Facebook nén;
+- ảnh hơi out-focus;
+- ảnh thiếu sáng;
+- ảnh sáng gắt;
+- tóc nhiều chi tiết;
+- người đeo kính;
+- makeup mạnh;
+- nhiều người trong ảnh.
+
+Không benchmark chỉ trên một ảnh đẹp.
+
+==================================================
+16. NHIỀU KHUÔN MẶT
+==================================================
+
+Bản đầu:
+- detect tất cả face;
+- xử lý từng face tuần tự;
+- cache mask theo face;
+- không chạy nhiều face song song trên máy yếu.
+
+UI sau này:
+- All Faces
+- Selected Face
+
+Nếu MVP quá phức tạp:
+- xử lý face lớn nhất trước;
+- nhưng kiến trúc phải sẵn sàng cho multi-face.
+
+==================================================
+17. FALLBACK
+==================================================
+
+Nếu model lỗi hoặc thiếu:
+- không crash pipeline;
+- skip bước lỗi;
+- báo rõ;
+- vẫn tiếp tục các bước còn lại.
+
+Ví dụ:
+GFPGAN unavailable
+→ skip Face Restore
+→ continue Real-ESRGAN detail
+
+==================================================
+18. BUILD CHO USER TEST
+==================================================
+
+Sau khi implementation xong:
+
+1. Build Release Windows x64.
+2. CPU fallback phải hoạt động.
+3. Đóng gói model hoặc chuẩn bị model bundle/script rõ ràng.
+4. Nếu kiến trúc hiện tại cho phép, tạo bản portable.
+5. Tạo output folder riêng.
+6. Kèm README_TEST.txt.
+
+README_TEST.txt tối giản:
+
+1. Mở iAi.
+2. Mở ảnh chân dung.
+3. Vào AI Auto Retouch.
+4. Bấm Run Auto Retouch.
+5. So Before/After.
+6. Nếu lỗi, gửi log trong thư mục logs/.
+
+==================================================
+19. DELIVERABLES BẮT BUỘC
+==================================================
+
+Codex chỉ được báo hoàn thành khi có:
+
+[x] Pipeline abstraction
+[x] BiSeNet integration
+[x] NAFNet integration
+[x] IAT integration
+[x] GFPGAN integration
+[x] Real-ESRGAN General x4v3 integration
+[x] Mask cache
+[x] Composite/blend theo vùng
+[x] CPU fallback
+[x] Tile processing
+[x] Progress
+[x] Cancel
+[x] Error handling
+[x] Minimal UI
+[x] Benchmark log
+[x] Unit/integration tests tối thiểu
+[x] Windows Release build
+[x] README_TEST.txt
+[x] Model source/license docs
+
+Optional:
+[x] Real-ESRGAN x2/x4 upscale
+
+==================================================
+20. PHẠM VI THAY ĐỔI CODE
+==================================================
+
+Trước khi code:
+1. Đọc kiến trúc iAi hiện tại.
+2. Xác định image buffer/pixel format.
+3. Xác định threading/task system.
+4. Xác định undo/redo.
+5. Xác định nơi phù hợp để đặt AI module.
+
+Không được:
+- đại phẫu editor;
+- đổi UI không cần thiết;
+- đổi color pipeline ngoài phạm vi;
+- phá compatibility project/file;
+- sửa module không liên quan nếu không thật sự cần.
+
+Mọi thay đổi tập trung vào:
+AI Retouch + abstraction tối thiểu cần thiết.
+
+==================================================
+21. QUY TẮC CHẤT LƯỢNG
+==================================================
+
+Ưu tiên chất lượng hơn tốc độ.
+
+Máy yếu có thể mất:
+- 30 giây,
+- 1 phút,
+- hoặc lâu hơn.
+
+Điều đó chấp nhận được.
+
+Không được hy sinh:
+- identity;
+- màu da tự nhiên;
+- texture;
+- chất lượng mask;
+
+chỉ để nhanh hơn.
+
+Nếu phải chọn:
+- 5 giây nhưng mặt giả;
+- 40 giây nhưng tự nhiên;
+
+hãy chọn phương án 40 giây.
+
+==================================================
+22. PHASE 2 — CHƯA LÀM NGAY
+==================================================
+
+Kiến trúc phải chừa chỗ cho:
+- model Skin Beautification chuyên dụng thay GFPGAN;
+- Body Parsing; [x] MediaPipe SelfieMulticlass full-image, Phase 2 (2026-09-05)
+- Relighting model;
+- Background enhancement;
+- Face geometry / landmarks retouch;
+- Object masks;
+- Fast / Quality model selector;
+- INT8 quantized;
+- DirectML / CUDA tối ưu riêng. [x] DirectML auto GPU + CPU fallback (2026-09-05)
+
+PHASE 2 BỔ SUNG ĐÃ TÍCH HỢP (2026-09-05):
+- [x] Checkbox bật/tắt độc lập từng stage/vùng.
+- [x] Mức mặc định UI = 100; vẫn giữ safety ceiling/Protect Identity.
+- [x] Đọc adapter GPU thực tế từ wgpu, ưu tiên card hiệu năng cao.
+- [x] ONNX Runtime DirectML; fallback CPU theo từng model.
+- [x] Body Parsing toàn ảnh cho background/hair/body-skin/clothes/other.
+- [x] Cache key phân biệt mask mặt và mask toàn thân để chạy riêng không dùng nhầm cache.
+- [x] Color Fix: không dùng chroma sai lệch của IAT; chỉ giữ learned luminance.
+- [x] Tự nhận diện ám green/blue/red/yellow/mixed và tính WB gains R/G/B trong linear RGB.
+- [x] Look màu Fresh mặc định (tươi sáng, trẻ trung) + Natural/Warm/Cool.
+- [x] Log color-cast, wb-gains và confidence để kiểm tra model/màu có thật sự chạy.
+
+==================================================
+23. DEFINITION OF DONE
+==================================================
+
+Task chỉ được coi là xong khi:
+
+1. Code compile sạch.
+2. App mở được.
+3. Load được ảnh.
+4. AI Auto Retouch chạy end-to-end.
+5. Có output nhìn thấy được.
+6. CPU-only không crash.
+7. Có Before/After.
+8. Có log timing từng stage.
+9. Có Windows Release build để user test.
+10. Báo rõ đường dẫn build artifact.
+
+Khi hoàn thành, Codex phải báo:
+- branch / commit;
+- file build;
+- model đang dùng;
+- thời gian benchmark;
+- lỗi còn tồn tại;
+- bước nào optional/fallback;
+- cách chạy bản test.
+
+==================================================
+24. YÊU CẦU CUỐI CÙNG CHO CODEX
+==================================================
+
+Hãy triển khai trực tiếp trên codebase iAi hiện tại.
+
+Không chỉ viết prototype rời nếu có thể tích hợp an toàn vào app.
+
+Sau khi code xong:
+- chạy test;
+- sửa lỗi compile/runtime;
+- build Windows Release;
+- cung cấp bản build để user test.
+
+Không dừng ở mức "đã viết code".
+Mục tiêu cuối cùng là một bản iAi chạy được để thử thực tế.

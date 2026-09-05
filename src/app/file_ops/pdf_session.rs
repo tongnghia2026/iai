@@ -113,7 +113,7 @@ impl App {
             page_names: pdf.page_names.clone(),
             requested_dpi: pdf.requested_dpi,
             active_page: pdf.active_page,
-            global_clears: pdf.global_clears.clone(),
+            global_edits: pdf.global_edits.clone(),
         };
         let source_pdf = std::fs::read(pdf.effective_source()).ok();
 
@@ -343,9 +343,9 @@ impl App {
                     active_page: page_index,
                     active_page_modified: false,
                     edited_pages: std::collections::HashMap::new(),
-                    global_clears: Vec::new(),
-                    global_clears_saved: Vec::new(),
-                    global_clears_redo: Vec::new(),
+                    global_edits: Vec::new(),
+                    global_edits_saved: Vec::new(),
+                    global_edits_redo: Vec::new(),
                     global_overlay_cache: None,
                 });
                 doc.rebuild_pdf_global_overlay();
@@ -868,9 +868,9 @@ impl App {
             active_page: active_index,
             active_page_modified: active_differs,
             edited_pages: edited,
-            global_clears: project.global_clears.clone(),
-            global_clears_saved: project.global_clears,
-            global_clears_redo: Vec::new(),
+            global_edits: project.global_edits.clone(),
+            global_edits_saved: project.global_edits,
+            global_edits_redo: Vec::new(),
             global_overlay_cache: None,
         });
         doc.rebuild_pdf_global_overlay();

@@ -3008,9 +3008,10 @@ impl LayerStack {
         }
     }
 
-    /// Build a render-only stack with `overlay` drawn above this editable stack.
-    /// Used by document-level PDF clears: the shared cover is never exposed as a
-    /// per-page layer and therefore does not multiply memory by page count.
+    /// Build a render-only stack with `overlay` directly above the Background
+    /// and below editable foreground layers. Used by document-level PDF edits:
+    /// a shared clear behaves like erasing the imported page, while text/images
+    /// added afterward remain visible above it.
     pub fn with_overlay(&self, overlay: &LayerStack) -> LayerStack {
         let offset = self
             .layers
@@ -3018,15 +3019,22 @@ impl LayerStack {
             .map(|layer| layer.id)
             .max()
             .map_or(0, |id| id.saturating_add(1));
-        let mut layers = self.layers.clone();
-        layers.reserve(overlay.layers.len());
+        let insert_at = self
+            .layers
+            .iter()
+            .position(|layer| layer.is_background)
+            .map_or(0, |index| index + 1);
+        let mut overlay_layers = Vec::with_capacity(overlay.layers.len());
         for layer in &overlay.layers {
             let mut layer = layer.clone();
             layer.id = layer.id.saturating_add(offset);
             layer.parent_id = layer.parent_id.map(|id| id.saturating_add(offset));
             layer.clip_parent_id = layer.clip_parent_id.map(|id| id.saturating_add(offset));
-            layers.push(layer);
+            overlay_layers.push(layer);
         }
+        let overlay_len = overlay_layers.len();
+        let mut layers = self.layers.clone();
+        layers.splice(insert_at..insert_at, overlay_layers);
         let next_id = layers
             .iter()
             .map(|layer| layer.id)
@@ -3035,7 +3043,7 @@ impl LayerStack {
             .saturating_add(1);
         LayerStack {
             layers,
-            active_idx: self.active_idx,
+            active_idx: self.active_idx + usize::from(self.active_idx >= insert_at) * overlay_len,
             next_id,
         }
     }
@@ -3546,19 +3554,39 @@ mod tests {
     }
 
     #[test]
-    fn render_overlay_is_above_page_and_keeps_active_layer() {
+    fn render_overlay_sits_above_background_below_page_content() {
         let mut page = stack_of(2);
+        page.layers[0].is_background = true;
         page.active_idx = 1;
         let overlay = stack_of(1);
         let combined = page.with_overlay(&overlay);
         assert_eq!(combined.layers.len(), 3);
-        assert_eq!(combined.active_idx, 1);
+        assert_eq!(combined.active_idx, 2);
         assert_eq!(combined.layers[0].name, "L0");
-        assert_eq!(combined.layers[1].name, "L1");
-        assert_eq!(combined.layers[2].name, "L0");
+        assert_eq!(combined.layers[1].name, "L0");
+        assert_eq!(combined.layers[2].name, "L1");
         let ids: std::collections::HashSet<_> =
             combined.layers.iter().map(|layer| layer.id).collect();
         assert_eq!(ids.len(), combined.layers.len());
+    }
+
+    #[test]
+    fn foreground_text_like_layer_is_not_hidden_by_virtual_clear() {
+        let mut page = LayerStack::new(1, 1);
+        page.layers
+            .push(Layer::from_rgba(1, "Text", vec![220, 20, 30, 255], 1, 1));
+        page.active_idx = 1;
+        let mut clear = LayerStack::new(1, 1);
+        clear.layers = vec![Layer::from_rgba(
+            0,
+            "Xóa vùng hàng loạt PDF",
+            vec![255, 255, 255, 255],
+            1,
+            1,
+        )];
+        let combined = page.with_overlay(&clear);
+        assert_eq!(combined.flatten(1, 1), vec![220, 20, 30, 255]);
+        assert_eq!(combined.active_idx, 2);
     }
 
     #[test]

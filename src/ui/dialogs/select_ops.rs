@@ -2,6 +2,80 @@
 
 use super::*;
 
+pub(crate) fn pdf_batch_scope_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    let Some(operation) = data.dialogs.pdf_batch_operation else {
+        return;
+    };
+    let Some(nav) = data.doc.pdf_nav.as_ref() else {
+        actions.sel.cancel_pdf_batch = true;
+        return;
+    };
+    let max_pages = nav.count.saturating_sub(nav.index).max(1);
+    let mut page_count = data.dialogs.pdf_batch_page_count.clamp(1, max_pages);
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut apply = enter_pressed;
+    let mut cancel = esc_pressed;
+    let title = match operation {
+        crate::ui::intent::PdfBatchOperation::Clear => "Xóa vùng hàng loạt",
+        crate::ui::intent::PdfBatchOperation::Text => "Thêm văn bản hàng loạt",
+    };
+
+    modal_overlay(ctx, "pdf_batch_scope_dialog_overlay");
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .movable(true)
+        .default_pos(document_side_dialog_pos(ctx, data, 390.0, 96.0))
+        .default_width(390.0)
+        .min_width(390.0)
+        .order(DIALOG_ORDER)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(format!("Bắt đầu từ trang hiện tại: {}", nav.index + 1))
+                    .strong(),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("Số trang áp dụng:");
+                let response = ui.add(
+                    egui::DragValue::new(&mut page_count)
+                        .range(1..=max_pages)
+                        .speed(1.0),
+                );
+                ui.label(format!("/ {max_pages} trang còn lại"));
+                if response.changed() {
+                    actions.sel.set_pdf_batch_page_count = Some(page_count);
+                }
+            });
+            let end_page = nav.index + page_count;
+            ui.label(
+                egui::RichText::new(format!(
+                    "Phạm vi: trang {} đến trang {}. Các trang trước và sau phạm vi được giữ nguyên.",
+                    nav.index + 1,
+                    end_page
+                ))
+                .color(egui::Color32::GRAY)
+                .size(11.0),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Áp dụng").clicked() {
+                    apply = true;
+                }
+                if ui.button("Hủy").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if apply {
+        actions.sel.set_pdf_batch_page_count = Some(page_count);
+        actions.sel.apply_pdf_batch = true;
+    } else if cancel {
+        actions.sel.cancel_pdf_batch = true;
+    }
+}
+
 pub(crate) fn feather_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut UiActions) {
     let mut open = true;
     let mut do_feather = false;

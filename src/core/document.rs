@@ -175,6 +175,149 @@ pub struct PdfGlobalClear {
     pub x1: f32,
     pub y1: f32,
     pub color: [u8; 4],
+    /// Stable physical page ids affected by this edit. Empty means every page
+    /// for backward compatibility with projects created before scoped edits.
+    pub target_pages: Vec<usize>,
+}
+
+/// The source of a compact image stamp repeated on every PDF page. Text is
+/// rasterized from its editable source layer once, so previews/exports do not
+/// need to keep one text layout (or one full page canvas) per PDF page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfGlobalStampKind {
+    Text,
+    Image,
+}
+
+/// One non-destructive text/image stamp repeated at the same normalized page
+/// position. The source layer stays in its original page but is hidden while
+/// the stamp is active, preserving an editable source without drawing twice.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfGlobalStamp {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub kind: PdfGlobalStampKind,
+    pub name: String,
+    pub source_page: Option<usize>,
+    pub source_layer_id: Option<u32>,
+    /// Stable physical page ids affected by this edit. Empty means every page.
+    pub target_pages: Vec<usize>,
+}
+
+impl PdfGlobalStamp {
+    pub fn from_layer(
+        layer: &crate::core::layer::Layer,
+        canvas_width: u32,
+        canvas_height: u32,
+        source_page: usize,
+        kind: PdfGlobalStampKind,
+    ) -> Result<Self, String> {
+        use crate::core::layer::{BlendMode, LayerType};
+
+        if canvas_width == 0 || canvas_height == 0 || !layer.visible {
+            return Err("Layer hiện tại không có nội dung hiển thị".to_string());
+        }
+        let type_matches = matches!(
+            (kind, &layer.layer_type),
+            (PdfGlobalStampKind::Text, LayerType::Text(_))
+                | (
+                    PdfGlobalStampKind::Image,
+                    LayerType::Raster | LayerType::SmartObject
+                )
+        );
+        if !type_matches || layer.is_background {
+            return Err(match kind {
+                PdfGlobalStampKind::Text => "Hãy chọn một layer văn bản".to_string(),
+                PdfGlobalStampKind::Image => {
+                    "Hãy chọn một layer ảnh không phải Background".to_string()
+                }
+            });
+        }
+        if layer.blend_mode != BlendMode::Normal
+            || layer.parent_id.is_some()
+            || layer.clip_parent_id.is_some()
+        {
+            return Err(
+                "Layer dùng cho mọi trang phải ở cấp cao nhất, chế độ hòa trộn Normal".to_string(),
+            );
+        }
+
+        let (lx0, ly0, lx1, ly1) = layer
+            .tiles
+            .content_bounds()
+            .ok_or_else(|| "Layer hiện tại không có nội dung hiển thị".to_string())?;
+        let x0 = (layer.offset.0 + lx0 as i32).clamp(0, canvas_width as i32) as u32;
+        let y0 = (layer.offset.1 + ly0 as i32).clamp(0, canvas_height as i32) as u32;
+        let x1 = (layer.offset.0 + lx1 as i32).clamp(0, canvas_width as i32) as u32;
+        let y1 = (layer.offset.1 + ly1 as i32).clamp(0, canvas_height as i32) as u32;
+        if x1 <= x0 || y1 <= y0 {
+            return Err("Nội dung layer nằm ngoài trang".to_string());
+        }
+        let width = x1 - x0;
+        let height = y1 - y0;
+        let Some(len) = crate::core::canvas::Canvas::checked_rgba_len(width, height) else {
+            return Err("Layer quá lớn để áp dụng cho mọi trang".to_string());
+        };
+        let mut rgba = vec![0u8; len];
+        let mut render = layer.clone();
+        render.offset.0 -= x0 as i32;
+        render.offset.1 -= y0 as i32;
+        render.blend_onto(&mut rgba, width);
+        if !rgba.chunks_exact(4).any(|pixel| pixel[3] != 0) {
+            return Err("Layer hiện tại không có nội dung hiển thị".to_string());
+        }
+
+        Ok(Self {
+            x0: x0 as f32 / canvas_width as f32,
+            y0: y0 as f32 / canvas_height as f32,
+            x1: x1 as f32 / canvas_width as f32,
+            y1: y1 as f32 / canvas_height as f32,
+            width,
+            height,
+            rgba,
+            kind,
+            name: layer.name.clone(),
+            source_page: Some(source_page),
+            source_layer_id: Some(layer.id),
+            target_pages: Vec::new(),
+        })
+    }
+
+    pub fn pixel_rect(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let x0 = (self.x0.clamp(0.0, 1.0) * width as f32).floor() as u32;
+        let y0 = (self.y0.clamp(0.0, 1.0) * height as f32).floor() as u32;
+        let x1 = (self.x1.clamp(0.0, 1.0) * width as f32).ceil() as u32;
+        let y1 = (self.y1.clamp(0.0, 1.0) * height as f32).ceil() as u32;
+        (x0.min(width), y0.min(height), x1.min(width), y1.min(height))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PdfGlobalEdit {
+    Clear(PdfGlobalClear),
+    Stamp(PdfGlobalStamp),
+}
+
+impl PdfGlobalEdit {
+    pub fn applies_to_page(&self, page: usize) -> bool {
+        let target_pages = match self {
+            Self::Clear(clear) => &clear.target_pages,
+            Self::Stamp(stamp) => &stamp.target_pages,
+        };
+        target_pages.is_empty() || target_pages.contains(&page)
+    }
+
+    pub fn is_scoped(&self) -> bool {
+        match self {
+            Self::Clear(clear) => !clear.target_pages.is_empty(),
+            Self::Stamp(stamp) => !stamp.target_pages.is_empty(),
+        }
+    }
 }
 
 impl PdfGlobalClear {
@@ -216,6 +359,7 @@ impl PdfGlobalClear {
             x1: x1 as f32 / canvas_width as f32,
             y1: y1 as f32 / canvas_height as f32,
             color,
+            target_pages: Vec::new(),
         })
     }
 
@@ -228,10 +372,105 @@ impl PdfGlobalClear {
     }
 }
 
+/// Build the virtual PDF edit stack for one physical page. The returned stack
+/// is inserted directly above the imported Background and below editable page
+/// content, so later text/image layers can never be hidden by a clear rectangle.
+pub fn build_pdf_global_overlay_stack(
+    global_edits: &[PdfGlobalEdit],
+    page: usize,
+    width: u32,
+    height: u32,
+) -> Option<crate::core::layer::LayerStack> {
+    if global_edits.is_empty() || width == 0 || height == 0 {
+        return None;
+    }
+    let mut stack = crate::core::layer::LayerStack::new(width, height);
+    stack.layers.clear();
+    // Clears always belong immediately above the imported background. Stamps
+    // are user content and therefore always sit above every clear, regardless
+    // of the order in which the commands were created.
+    for stamps_pass in [false, true] {
+        for (index, edit) in global_edits.iter().enumerate() {
+            if !edit.applies_to_page(page) || matches!(edit, PdfGlobalEdit::Stamp(_)) != stamps_pass
+            {
+                continue;
+            }
+            let mut layer = match edit {
+                PdfGlobalEdit::Clear(operation) => {
+                    let (x0, y0, x1, y1) = operation.pixel_rect(width, height);
+                    if x1 <= x0 || y1 <= y0 {
+                        continue;
+                    }
+                    let w = x1 - x0;
+                    let h = y1 - y0;
+                    let Some(len) = crate::core::canvas::Canvas::checked_rgba_len(w, h) else {
+                        continue;
+                    };
+                    let mut rgba = vec![0u8; len];
+                    for pixel in rgba.chunks_exact_mut(4) {
+                        pixel.copy_from_slice(&operation.color);
+                    }
+                    let mut layer = crate::core::layer::Layer::new(
+                        index as u32,
+                        "Xóa vùng hàng loạt PDF",
+                        width,
+                        height,
+                    );
+                    layer.tiles.write_region(x0, y0, w, h, &rgba);
+                    layer
+                }
+                PdfGlobalEdit::Stamp(stamp) => {
+                    let (x0, y0, x1, y1) = stamp.pixel_rect(width, height);
+                    if x1 <= x0 || y1 <= y0 {
+                        continue;
+                    }
+                    let (w, h) = (x1 - x0, y1 - y0);
+                    let Some(source) =
+                        image::RgbaImage::from_raw(stamp.width, stamp.height, stamp.rgba.clone())
+                    else {
+                        continue;
+                    };
+                    let rgba = if (w, h) == (stamp.width, stamp.height) {
+                        source.into_raw()
+                    } else {
+                        image::imageops::resize(
+                            &source,
+                            w,
+                            h,
+                            image::imageops::FilterType::Lanczos3,
+                        )
+                        .into_raw()
+                    };
+                    let label = match stamp.kind {
+                        PdfGlobalStampKind::Text => "Văn bản",
+                        PdfGlobalStampKind::Image => "Hình ảnh",
+                    };
+                    let mut layer = crate::core::layer::Layer::from_rgba(
+                        index as u32,
+                        &format!("{label} · hàng loạt: {}", stamp.name),
+                        rgba,
+                        w,
+                        h,
+                    );
+                    layer.offset = (x0 as i32, y0 as i32);
+                    layer
+                }
+            };
+            layer.locked = true;
+            layer.selected = false;
+            stack.layers.push(layer);
+        }
+    }
+    stack.active_idx = 0;
+    stack.set_next_id(stack.layers.len() as u32);
+    (!stack.layers.is_empty()).then_some(stack)
+}
+
 pub struct PdfGlobalOverlayCache {
     pub width: u32,
     pub height: u32,
-    pub operation_count: usize,
+    pub source_page: usize,
+    pub edit_count: usize,
     pub stack: crate::core::layer::LayerStack,
 }
 
@@ -261,9 +500,9 @@ pub struct PdfDocumentState {
     pub edited_pages: std::collections::HashMap<usize, PdfCachedPage>,
     /// Compact, document-level covers applied to every source page. Unlike
     /// `edited_pages`, this stays O(number of operations), not O(page count).
-    pub global_clears: Vec<PdfGlobalClear>,
-    pub global_clears_saved: Vec<PdfGlobalClear>,
-    pub global_clears_redo: Vec<PdfGlobalClear>,
+    pub global_edits: Vec<PdfGlobalEdit>,
+    pub global_edits_saved: Vec<PdfGlobalEdit>,
+    pub global_edits_redo: Vec<PdfGlobalEdit>,
     pub global_overlay_cache: Option<PdfGlobalOverlayCache>,
 }
 
@@ -278,7 +517,7 @@ impl PdfDocumentState {
     pub fn cached_pages_dirty(&self) -> bool {
         self.selected_pages != self.selected_pages_saved
             || self.page_names != self.page_names_saved
-            || self.global_clears != self.global_clears_saved
+            || self.global_edits != self.global_edits_saved
             || self
                 .edited_pages
                 .values()
@@ -349,53 +588,28 @@ impl PdfDocumentState {
     }
 
     pub fn rebuild_global_overlay(&mut self, width: u32, height: u32) {
-        if self.global_clears.is_empty() || width == 0 || height == 0 {
+        if self.global_edits.is_empty() || width == 0 || height == 0 {
             self.global_overlay_cache = None;
             return;
         }
         if self.global_overlay_cache.as_ref().is_some_and(|cache| {
             cache.width == width
                 && cache.height == height
-                && cache.operation_count == self.global_clears.len()
+                && cache.source_page == self.active_page
+                && cache.edit_count == self.global_edits.len()
         }) {
             return;
         }
 
-        let mut stack = crate::core::layer::LayerStack::new(width, height);
-        stack.layers.clear();
-        for (index, operation) in self.global_clears.iter().enumerate() {
-            let (x0, y0, x1, y1) = operation.pixel_rect(width, height);
-            if x1 <= x0 || y1 <= y0 {
-                continue;
-            }
-            let w = x1 - x0;
-            let h = y1 - y0;
-            let Some(len) = crate::core::canvas::Canvas::checked_rgba_len(w, h) else {
-                continue;
-            };
-            let mut rgba = vec![0u8; len];
-            for pixel in rgba.chunks_exact_mut(4) {
-                pixel.copy_from_slice(&operation.color);
-            }
-            let mut layer = crate::core::layer::Layer::new(
-                index as u32,
-                "Xóa vùng trên mọi trang PDF",
-                width,
-                height,
-            );
-            layer.tiles.write_region(x0, y0, w, h, &rgba);
-            layer.locked = true;
-            layer.selected = false;
-            stack.layers.push(layer);
-        }
-        stack.active_idx = 0;
-        stack.set_next_id(stack.layers.len() as u32);
-        self.global_overlay_cache = (!stack.layers.is_empty()).then_some(PdfGlobalOverlayCache {
-            width,
-            height,
-            operation_count: self.global_clears.len(),
-            stack,
-        });
+        self.global_overlay_cache =
+            build_pdf_global_overlay_stack(&self.global_edits, self.active_page, width, height)
+                .map(|stack| PdfGlobalOverlayCache {
+                    width,
+                    height,
+                    source_page: self.active_page,
+                    edit_count: self.global_edits.len(),
+                    stack,
+                });
     }
 }
 
@@ -712,7 +926,7 @@ impl Document {
         if let Some(pdf) = self.pdf_document.as_mut() {
             pdf.selected_pages_saved = pdf.selected_pages.clone();
             pdf.page_names_saved = pdf.page_names.clone();
-            pdf.global_clears_saved = pdf.global_clears.clone();
+            pdf.global_edits_saved = pdf.global_edits.clone();
             for page in pdf.edited_pages.values_mut() {
                 page.canvas.mark_saved();
             }
@@ -1121,8 +1335,9 @@ pub fn disambiguated_tab_titles(docs: &[Document]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        disambiguated_tab_titles, Document, DocumentId, DocumentKind, PdfDocumentState,
-        PdfGlobalClear, PdfPageRef,
+        build_pdf_global_overlay_stack, disambiguated_tab_titles, Document, DocumentId,
+        DocumentKind, PdfDocumentState, PdfGlobalClear, PdfGlobalEdit, PdfGlobalStamp,
+        PdfGlobalStampKind, PdfPageRef,
     };
     use crate::core::canvas::Canvas;
     use std::path::PathBuf;
@@ -1220,9 +1435,9 @@ mod tests {
             active_page: 1,
             active_page_modified: false,
             edited_pages: std::collections::HashMap::new(),
-            global_clears: Vec::new(),
-            global_clears_saved: Vec::new(),
-            global_clears_redo: Vec::new(),
+            global_edits: Vec::new(),
+            global_edits_saved: Vec::new(),
+            global_edits_redo: Vec::new(),
             global_overlay_cache: None,
         };
 
@@ -1243,6 +1458,86 @@ mod tests {
             None,
             "the final visible page is retained"
         );
+    }
+
+    #[test]
+    fn pdf_global_image_stamp_uses_layer_content_bounds_on_every_page() {
+        let mut pixels = vec![0u8; 4 * 3 * 4];
+        for y in 1..3 {
+            for x in 1..4 {
+                let i = (y * 4 + x) * 4;
+                pixels[i..i + 4].copy_from_slice(&[220, 30, 40, 255]);
+            }
+        }
+        let mut layer = crate::core::layer::Layer::from_rgba(3, "Logo", pixels, 4, 3);
+        layer.offset = (2, 1);
+        let stamp =
+            PdfGlobalStamp::from_layer(&layer, 10, 10, 4, PdfGlobalStampKind::Image).unwrap();
+        assert_eq!((stamp.width, stamp.height), (3, 2));
+        assert_eq!(stamp.pixel_rect(10, 10), (3, 2, 6, 4));
+        assert!(stamp.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255));
+
+        let mut pdf = PdfDocumentState {
+            source: PathBuf::from("book.pdf"),
+            embedded_source: None,
+            page_count: 5,
+            selected_pages: (0..5).collect(),
+            selected_pages_saved: (0..5).collect(),
+            page_names: std::collections::BTreeMap::new(),
+            page_names_saved: std::collections::BTreeMap::new(),
+            requested_dpi: 72.0,
+            active_page: 4,
+            active_page_modified: true,
+            edited_pages: std::collections::HashMap::new(),
+            global_edits: vec![PdfGlobalEdit::Stamp(stamp)],
+            global_edits_saved: Vec::new(),
+            global_edits_redo: Vec::new(),
+            global_overlay_cache: None,
+        };
+        pdf.rebuild_global_overlay(10, 10);
+        let source_overlay = &pdf.global_overlay_cache.as_ref().unwrap().stack.layers[0];
+        assert_eq!(source_overlay.offset, (3, 2));
+        assert_eq!((source_overlay.width, source_overlay.height), (3, 2));
+
+        pdf.active_page = 2;
+        pdf.rebuild_global_overlay(20, 20);
+        let overlay = &pdf.global_overlay_cache.as_ref().unwrap().stack.layers[0];
+        assert_eq!(overlay.offset, (6, 4));
+        assert_eq!((overlay.width, overlay.height), (6, 4));
+    }
+
+    #[test]
+    fn pdf_global_stamps_always_render_above_clear_rectangles() {
+        let stamp = PdfGlobalStamp {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1.0,
+            y1: 1.0,
+            width: 1,
+            height: 1,
+            rgba: vec![220, 20, 30, 255],
+            kind: PdfGlobalStampKind::Text,
+            name: "Chữ".to_string(),
+            source_page: None,
+            source_layer_id: None,
+            target_pages: Vec::new(),
+        };
+        let clear = PdfGlobalClear {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1.0,
+            y1: 1.0,
+            color: [255; 4],
+            target_pages: Vec::new(),
+        };
+        let stack = build_pdf_global_overlay_stack(
+            &[PdfGlobalEdit::Stamp(stamp), PdfGlobalEdit::Clear(clear)],
+            0,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(stack.flatten(1, 1), vec![220, 20, 30, 255]);
     }
 
     #[test]
@@ -1370,7 +1665,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(clear.color, [250, 249, 248, 255]);
+        assert!(clear.target_pages.is_empty());
         assert_eq!(clear.pixel_rect(200, 160), (0, 0, 40, 32));
+    }
+
+    #[test]
+    fn scoped_pdf_edit_only_applies_to_its_stable_page_ids() {
+        let edit = PdfGlobalEdit::Clear(PdfGlobalClear {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 0.5,
+            y1: 0.5,
+            color: [255; 4],
+            target_pages: vec![4, 7],
+        });
+        assert!(!edit.applies_to_page(3));
+        assert!(edit.applies_to_page(4));
+        assert!(edit.applies_to_page(7));
+        assert!(edit.is_scoped());
     }
 
     #[test]

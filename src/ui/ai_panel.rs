@@ -11,7 +11,9 @@ use crate::core::ai::AiPanelState;
 
 use super::{UiActions, UiData};
 
-const PANEL_W: f32 = 386.0;
+const PANEL_W: f32 = 420.0;
+const MAX_PANEL_W: f32 = 560.0;
+const DEFAULT_PANEL_H: f32 = 720.0;
 const MIN_PANEL_W: f32 = 340.0;
 const MIN_PANEL_H: f32 = 220.0;
 const MIN_STABLE_VIEWPORT_H: f32 = 320.0;
@@ -242,8 +244,23 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         return;
     }
     let pos_x = (panel_bounds.max.x - PANEL_W - 12.0).max(panel_bounds.min.x + 12.0);
-    let default_h = panel_bounds.height();
-    let panel_id = egui::Id::new("ai_gemini_panel");
+    let default_h = panel_bounds.height().min(DEFAULT_PANEL_H).max(MIN_PANEL_H);
+    // Bump the geometry id once so installations that remembered the old
+    // nearly-full-screen panel start with the compact layout below.
+    let panel_id = egui::Id::new("ai_gemini_panel_v2");
+
+    // egui's default side grab radius is only a few logical pixels.  On a
+    // dense Windows display that makes the resize cursor flash for one frame
+    // and then disappear.  Keep the hit zone generous and make the corner
+    // visibly draggable; this is a global egui interaction setting, but it
+    // improves every floating tool window in the editor consistently.
+    ctx.global_style_mut(|style| {
+        style.interaction.resize_grab_radius_side =
+            style.interaction.resize_grab_radius_side.max(10.0);
+        style.interaction.resize_grab_radius_corner =
+            style.interaction.resize_grab_radius_corner.max(18.0);
+        style.visuals.resize_corner_size = style.visuals.resize_corner_size.max(18.0);
+    });
 
     let mut collapsing = egui::collapsing_header::CollapsingState::load_with_default_open(
         ctx,
@@ -261,17 +278,16 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         .default_pos(egui::pos2(pos_x, panel_bounds.top()))
         .default_size(egui::vec2(PANEL_W, default_h))
         .min_size(egui::vec2(MIN_PANEL_W, MIN_PANEL_H))
-        .max_size(panel_bounds.size())
+        .max_size(egui::vec2(
+            panel_bounds.width().min(MAX_PANEL_W),
+            panel_bounds.height(),
+        ))
         // Keep the floating panel inside the canvas workspace. In particular,
         // its title bar can no longer be dragged above the horizontal ruler.
-        .constrain_to(panel_bounds)
+        .constrain_to(panel_bounds.shrink2(egui::vec2(10.0, 8.0)))
         .resizable(true)
         .collapsible(false)
         .show(ctx, |ui| {
-            // Fill the user-selected window size. The ScrollArea then becomes the
-            // flexible content viewport instead of forcing the window back to its
-            // old fixed dimensions after an edge/corner drag.
-            ui.set_min_size(ui.available_size());
             ui.spacing_mut().item_spacing.y = 6.0;
 
             egui::ScrollArea::vertical()
@@ -305,6 +321,24 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     } else {
                         data.doc.has_doc && !active_busy
                     };
+                    let offline_can_run = data.doc.has_doc && !active_busy;
+
+                    section(
+                        ui,
+                        "AI Auto Retouch",
+                        "Model AI chạy hoàn toàn offline bằng ONNX Runtime; stage thiếu model mới dùng CPU fallback.",
+                        true,
+                        |ui| {
+                            offline_retouch_section(
+                                ui,
+                                data,
+                                &mut st,
+                                offline_can_run,
+                                &mut changed,
+                                actions,
+                            );
+                        },
+                    );
 
                     section(
                         ui,
@@ -668,6 +702,288 @@ fn ai_live_status(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             actions.ai.ai_cancel_active = true;
         }
     });
+    if let Some(progress) = &data.ai.retouch_progress {
+        ui.add(egui::ProgressBar::new(progress.fraction).text(format!(
+            "{} — {}",
+            progress.stage.label(),
+            progress.message
+        )));
+    }
+}
+
+fn offline_retouch_section(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    st: &mut AiPanelState,
+    can_run: bool,
+    changed: &mut bool,
+    actions: &mut UiActions,
+) {
+    let r = &mut st.retouch;
+    let slider = |ui: &mut egui::Ui, value: &mut u8, label: &str, changed: &mut bool| {
+        if ui
+            .add(egui::Slider::new(value, 0..=100).text(label))
+            .changed()
+        {
+            *changed = true;
+        }
+    };
+    slider(ui, &mut r.overall_amount, "Overall", changed);
+    ui.horizontal(|ui| {
+        if ui.checkbox(&mut r.enable_denoise, "").changed() {
+            *changed = true;
+        }
+        ui.add_enabled_ui(r.enable_denoise, |ui| {
+            slider(ui, &mut r.denoise_amount, "Denoise", changed)
+        });
+    });
+    if ui
+        .add_enabled(
+            r.enable_denoise,
+            egui::Checkbox::new(&mut r.auto_denoise, "Auto noise estimate"),
+        )
+        .changed()
+    {
+        *changed = true;
+    }
+    for (enabled, amount, label) in [
+        (&mut r.enable_color, &mut r.color_amount, "Color / Exposure"),
+        (
+            &mut r.enable_face_restore,
+            &mut r.face_restore_amount,
+            "Face Restore",
+        ),
+        (&mut r.enable_hair, &mut r.hair_detail_amount, "Hair"),
+        (&mut r.enable_skin, &mut r.skin_amount, "Skin (face + body)"),
+        (&mut r.enable_eyes, &mut r.eyes_amount, "Eyes"),
+        (&mut r.enable_lips, &mut r.lips_amount, "Lips"),
+        (&mut r.enable_clothes, &mut r.clothes_amount, "Clothes"),
+    ] {
+        ui.horizontal(|ui| {
+            if ui.checkbox(enabled, "").changed() {
+                *changed = true;
+            }
+            ui.add_enabled_ui(*enabled, |ui| slider(ui, amount, label, changed));
+        });
+    }
+    ui.add_enabled_ui(r.enable_color, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Look màu").small().weak());
+            for (look, label) in [
+                (crate::core::ai::retouch::ColorLook::Fresh, "Tươi sáng"),
+                (crate::core::ai::retouch::ColorLook::Natural, "Tự nhiên"),
+                (crate::core::ai::retouch::ColorLook::Warm, "Ấm trẻ"),
+                (crate::core::ai::retouch::ColorLook::Cool, "Mát trong"),
+            ] {
+                if ui.selectable_label(r.color_look == look, label).clicked() {
+                    r.color_look = look;
+                    *changed = true;
+                }
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        if ui.small_button("Bật tất cả").clicked() {
+            r.enable_denoise = true;
+            r.enable_color = true;
+            r.enable_face_restore = true;
+            r.enable_hair = true;
+            r.enable_skin = true;
+            r.enable_eyes = true;
+            r.enable_lips = true;
+            r.enable_clothes = true;
+            *changed = true;
+        }
+        if ui.small_button("Tắt tất cả").clicked() {
+            r.enable_denoise = false;
+            r.enable_color = false;
+            r.enable_face_restore = false;
+            r.enable_hair = false;
+            r.enable_skin = false;
+            r.enable_eyes = false;
+            r.enable_lips = false;
+            r.enable_clothes = false;
+            *changed = true;
+        }
+    });
+    if ui
+        .checkbox(&mut r.protect_identity, "Protect Identity (khuyến nghị)")
+        .changed()
+    {
+        *changed = true;
+    }
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Upscale").small().weak());
+        for (mode, label) in [
+            (crate::core::ai::retouch::UpscaleMode::Off, "Off"),
+            (crate::core::ai::retouch::UpscaleMode::X2, "x2"),
+            (crate::core::ai::retouch::UpscaleMode::X4, "x4"),
+        ] {
+            if ui.selectable_label(r.upscale == mode, label).clicked() {
+                r.upscale = mode;
+                *changed = true;
+            }
+        }
+    });
+    if ui
+        .checkbox(&mut r.preview_masks, "Tạo layer Preview Masks")
+        .changed()
+    {
+        *changed = true;
+    }
+    if ui
+        .checkbox(&mut r.prefer_gpu, "Tự động dùng GPU mạnh (DirectML)")
+        .changed()
+    {
+        *changed = true;
+    }
+    let gpu_text = if let Some(gpu) = crate::core::hw::gpu() {
+        if gpu.ai_candidate {
+            format!(
+                "GPU: {} ({}/{}) — AI ưu tiên GPU",
+                gpu.name, gpu.device_type, gpu.backend
+            )
+        } else {
+            format!("GPU: {} — adapter phần mềm, AI dùng CPU", gpu.name)
+        }
+    } else {
+        "GPU: chưa nhận diện — AI dùng CPU an toàn".to_string()
+    };
+    ui.label(egui::RichText::new(gpu_text).small().weak());
+    if r.preview_masks {
+        ui.label(
+            egui::RichText::new(
+                "Mask: nền xanh đậm • tóc xanh • da đỏ • quần áo vàng • vùng khác tím",
+            )
+            .small()
+            .weak(),
+        );
+    }
+    let pixels = data.doc.canvas_w as u64 * data.doc.canvas_h as u64;
+    if pixels >= 8_000_000 {
+        let seconds =
+            crate::core::ai::retouch::estimated_cpu_seconds(data.doc.canvas_w, data.doc.canvas_h);
+        ui.label(
+            egui::RichText::new(format!(
+                "Ảnh {:.1}MP: CPU tham chiếu khoảng {} phút {} giây.",
+                pixels as f64 / 1_000_000.0,
+                seconds / 60,
+                seconds % 60
+            ))
+            .small()
+            .color(egui::Color32::from_rgb(210, 170, 90)),
+        );
+    }
+    let upscale_factor = r.upscale.factor();
+    if upscale_factor > 1
+        && !crate::core::ai::retouch::upscale_within_budget(
+            data.doc.canvas_w,
+            data.doc.canvas_h,
+            upscale_factor,
+        )
+    {
+        ui.label(
+            egui::RichText::new(format!(
+                "Upscale x{upscale_factor} vượt ngân sách RAM; kết quả sẽ giữ kích thước gốc."
+            ))
+            .small()
+            .color(egui::Color32::from_rgb(220, 130, 90)),
+        );
+    }
+    let metadata = crate::core::ai::retouch::model_metadata();
+    let required = metadata.iter().filter(|model| model.required).count();
+    let missing = crate::core::ai::retouch::missing_required_models().len();
+    let ready = required.saturating_sub(missing);
+    let model_status = if missing == 0 {
+        format!(
+            "File model AI local: {ready}/{required} đã tìm thấy — checksum và tensor được xác nhận khi chạy."
+        )
+    } else {
+        format!(
+            "File model AI local: {ready}/{required} đã tìm thấy; thiếu {missing}, stage tương ứng sẽ dùng CPU fallback."
+        )
+    };
+    ui.label(egui::RichText::new(model_status).small().weak());
+    if missing > 0 {
+        ui.label(
+            egui::RichText::new("CPU mode: nên giữ Denoise ≤ 15 để bảo toàn chi tiết.")
+                .small()
+                .color(egui::Color32::from_rgb(210, 170, 90)),
+        );
+    }
+    let run = egui::Button::new(egui::RichText::new("Run Auto Retouch").strong())
+        .min_size(egui::vec2(ui.available_width(), 32.0))
+        .fill(egui::Color32::from_rgb(48, 86, 120));
+    let has_work = r.any_effect_enabled() || r.preview_masks;
+    if ui.add_enabled(can_run && has_work, run).clicked() {
+        actions.ai.retouch_run = true;
+    }
+    if can_run && !has_work {
+        ui.label(
+            egui::RichText::new("Hãy bật ít nhất một vùng/stage.")
+                .small()
+                .weak(),
+        );
+    }
+    if !can_run && data.doc.has_doc {
+        ui.label(
+            egui::RichText::new("Ảnh đang có tác vụ AI khác hoặc chưa sẵn sàng.")
+                .small()
+                .weak(),
+        );
+    }
+    if let Some(retouch_layer) = data
+        .layers
+        .layer_names
+        .iter()
+        .rposition(|name| name == "AI Auto Retouch")
+    {
+        let result_visible = data
+            .layers
+            .layer_visibles
+            .get(retouch_layer)
+            .copied()
+            .unwrap_or(true);
+        let label = if result_visible {
+            "Xem ảnh gốc (Before)"
+        } else {
+            "Xem kết quả (After)"
+        };
+        if ui
+            .add_sized([ui.available_width(), 26.0], egui::Button::new(label))
+            .clicked()
+        {
+            actions.layers.toggle_visible = Some(retouch_layer);
+        }
+    }
+    if let Some(preview_layer) = data
+        .layers
+        .layer_names
+        .iter()
+        .rposition(|name| name == "AI Retouch Mask Preview")
+    {
+        let preview_visible = data
+            .layers
+            .layer_visibles
+            .get(preview_layer)
+            .copied()
+            .unwrap_or(true);
+        let label = if preview_visible {
+            "Ẩn Preview Masks"
+        } else {
+            "Hiện Preview Masks"
+        };
+        if ui.small_button(label).clicked() {
+            actions.layers.toggle_visible = Some(preview_layer);
+        }
+    }
+    ui.label(
+        egui::RichText::new(
+            "Mức 100 là cường độ an toàn tối đa của từng stage; Protect Identity vẫn giữ hình dáng khuôn mặt.",
+        )
+        .small()
+        .weak(),
+    );
 }
 
 fn output_selector(ui: &mut egui::Ui, st: &mut AiPanelState, changed: &mut bool) {
