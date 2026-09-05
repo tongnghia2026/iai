@@ -137,9 +137,18 @@ fn develop3_locked_recipe_bitmap_golden_is_stable() {
             (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3)
         })
     });
-    assert_eq!(
-        fingerprint, 0x44be_2c9d_ca48_1750,
-        "Develop3 locked recipe bitmap changed; review the visual delta before accepting a new golden"
+    // The synthetic texture and Develop3 pipeline use platform libm/SIMD
+    // operations. Their sub-code-value rounding differs across the three
+    // supported targets, so freeze each reviewed 16-bit result rather than
+    // pretending one byte-exact hash is portable.
+    const REVIEWED_FINGERPRINTS: [u64; 3] = [
+        0x44be_2c9d_ca48_1750, // Windows
+        0x5c8a_dad2_f407_d3ae, // Linux
+        0x1b2c_b05b_4e9f_3d8e, // macOS
+    ];
+    assert!(
+        REVIEWED_FINGERPRINTS.contains(&fingerprint),
+        "Develop3 locked recipe bitmap changed (fingerprint {fingerprint:#018x}); review the visual delta before accepting a new golden"
     );
 }
 
