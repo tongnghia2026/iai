@@ -116,7 +116,16 @@ fn headless_gpu_preview_matches_committed_scene() {
     stack.layers[0] = Layer::from_rgba(0, "Background", neutral8, width, height);
 
     let max_texture = device.limits().max_texture_dimension_2d;
+    // A software adapter may exist but still use an old shader compiler (for
+    // example FXC on a GitHub Windows runner) that cannot compile the full
+    // compositor. Treat that exactly like an unavailable compatible adapter;
+    // the WGSL parser test above remains the platform-independent CI gate.
+    let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut compositor = CompositorState::new(&device, width, height, max_texture);
+    if let Some(error) = pollster::block_on(validation_scope.pop()) {
+        eprintln!("headless adapter cannot compile compositor; skipped: {error}");
+        return;
+    }
     compositor.develop_preview = Some(DevelopGpuPreview {
         layer_id: 0,
         settings: settings.clone(),
