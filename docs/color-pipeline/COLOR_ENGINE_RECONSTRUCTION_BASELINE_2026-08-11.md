@@ -94,8 +94,8 @@ render transform.
 
 A deterministic 4096-sample linear-neutral ramp rendered through the current
 16-bit default-look path produces 3073 distinct luma codes, zero reversals, a
-longest equal-code plateau of 2 samples, output endpoints 0 and 59401, and a
-maximum normalized step of `0.001129169`. The CI test freezes this measured
+longest equal-code plateau of 2 samples, output endpoints 0 and 59576, and a
+maximum normalized step of `0.001120474`. The CI test freezes this measured
 behavior; it is a regression baseline, not a claim that 3073 levels are ideal.
 
 ## Realtime and parity baseline

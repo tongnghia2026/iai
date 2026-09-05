@@ -80,6 +80,12 @@ winresource = "0.1"
 [dev-dependencies]
 naga = { version = "29", features = ["wgsl-in"] }
 
+# This crate has a large GUI/image-processing dependency graph. Test debug info
+# makes the Unix linker use substantially more memory and disk while adding
+# little value to ordinary test failures (file/line panic locations remain).
+[profile.test]
+debug = 0
+
 # Optimized release builds — an image editor is CPU/GPU bound, so the extra
 # build time is worth it for noticeably faster compositing, filters and I/O.
 [profile.release]

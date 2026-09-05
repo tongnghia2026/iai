@@ -17,7 +17,7 @@ jobs:
     name: Build & test (Windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
@@ -40,7 +40,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux system deps
@@ -72,7 +72,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux system deps
@@ -91,7 +91,9 @@ jobs:
       # macOS, which has a display server available to the runner.
       - name: Test (Linux, headless)
         if: matrix.os == 'ubuntu-latest'
-        run: xvfb-run -a cargo test --locked
+        # This is a large test graph. One linker at a time avoids rust-lld being
+        # killed by resource pressure on shared GitHub-hosted Linux runners.
+        run: xvfb-run -a cargo test --locked --jobs 1
       - name: Test (macOS)
         if: matrix.os == 'macos-latest'
         run: cargo test --locked
@@ -103,7 +105,7 @@ jobs:
     # down, then flip to blocking with `-- -D warnings`.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
