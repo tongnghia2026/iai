@@ -2,6 +2,7 @@ pub mod actions;
 pub mod arrow_ops;
 pub mod autosave;
 pub mod background_jobs;
+mod cursor;
 pub mod develop_shell;
 pub mod develop_window;
 pub mod docmgr;

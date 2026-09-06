@@ -1078,6 +1078,16 @@ impl App {
         self.edit.input.mouse_x = position.x as f32;
         self.edit.input.mouse_y = position.y as f32;
 
+        if !self.win.cursor_ownership.can_control(
+            self.win.window_focused,
+            self.jobs.pending_printer_settings.is_some() || self.jobs.pending_file_dialog.is_some(),
+        ) {
+            self.sync_cursor(event_loop);
+            self.edit.input.last_mouse_x = position.x;
+            self.edit.input.last_mouse_y = position.y;
+            return;
+        }
+
         // Show the resize cursor while idle-hovering the borderless window's
         // edge border, so the resize affordance is discoverable.
         if !self.edit.input.painting
@@ -1088,6 +1098,7 @@ impl App {
         {
             if let Some(dir) = self.resize_direction() {
                 if let Some(w) = &self.win.window {
+                    w.set_cursor_visible(true);
                     w.set_cursor(Self::resize_cursor(dir));
                 }
                 self.edit.input.last_mouse_x = position.x;

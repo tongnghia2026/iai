@@ -325,23 +325,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
                     section(
                         ui,
-                        "AI Auto Retouch",
-                        "Model AI chạy hoàn toàn offline bằng ONNX Runtime; stage thiếu model mới dùng CPU fallback.",
-                        true,
-                        |ui| {
-                            offline_retouch_section(
-                                ui,
-                                data,
-                                &mut st,
-                                offline_can_run,
-                                &mut changed,
-                                actions,
-                            );
-                        },
-                    );
-
-                    section(
-                        ui,
                         "Ảnh thẻ (1 chạm)",
                         "Thay nền + sửa sáng + màu + da tự nhiên — giữ nguyên nét mặt.",
                         true,
@@ -352,6 +335,23 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 &mut st,
                                 can_run,
                                 use_bridge,
+                                &mut changed,
+                                actions,
+                            );
+                        },
+                    );
+
+                    section(
+                        ui,
+                        "AI Auto Retouch",
+                        "Model AI chạy hoàn toàn offline bằng ONNX Runtime; stage thiếu model mới dùng CPU fallback.",
+                        true,
+                        |ui| {
+                            offline_retouch_section(
+                                ui,
+                                data,
+                                &mut st,
+                                offline_can_run,
                                 &mut changed,
                                 actions,
                             );
@@ -720,52 +720,53 @@ fn offline_retouch_section(
     actions: &mut UiActions,
 ) {
     let r = &mut st.retouch;
-    let slider = |ui: &mut egui::Ui, value: &mut u8, label: &str, changed: &mut bool| {
-        if ui
-            .add(egui::Slider::new(value, 0..=100).text(label))
-            .changed()
-        {
+    // This panel now exposes stage toggles only. Normalize old session values
+    // too, so a hidden amount cannot silently weaken a checked stage.
+    for amount in [
+        &mut r.overall_amount,
+        &mut r.denoise_amount,
+        &mut r.color_amount,
+        &mut r.face_restore_amount,
+        &mut r.hair_detail_amount,
+        &mut r.skin_amount,
+        &mut r.eyes_amount,
+        &mut r.lips_amount,
+        &mut r.clothes_amount,
+    ] {
+        if *amount != 100 {
+            *amount = 100;
             *changed = true;
         }
-    };
-    slider(ui, &mut r.overall_amount, "Overall", changed);
-    ui.horizontal(|ui| {
-        if ui.checkbox(&mut r.enable_denoise, "").changed() {
-            *changed = true;
-        }
-        ui.add_enabled_ui(r.enable_denoise, |ui| {
-            slider(ui, &mut r.denoise_amount, "Denoise", changed)
+    }
+    egui::Grid::new("offline_retouch_stages")
+        .num_columns(2)
+        .spacing(egui::vec2(12.0, 4.0))
+        .show(ui, |ui| {
+            for (index, (enabled, label)) in [
+                (&mut r.enable_denoise, "Denoise"),
+                (&mut r.enable_color, "Color / Exposure"),
+                (&mut r.enable_face_restore, "Face Restore"),
+                (&mut r.enable_hair, "Hair"),
+                (&mut r.enable_skin, "Skin (face + body)"),
+                (&mut r.enable_eyes, "Eyes"),
+                (&mut r.enable_lips, "Lips"),
+                (&mut r.enable_clothes, "Clothes"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                *changed |= ui.checkbox(enabled, label).changed();
+                if index % 2 == 1 {
+                    ui.end_row();
+                }
+            }
         });
-    });
-    if ui
+    *changed |= ui
         .add_enabled(
             r.enable_denoise,
             egui::Checkbox::new(&mut r.auto_denoise, "Auto noise estimate"),
         )
-        .changed()
-    {
-        *changed = true;
-    }
-    for (enabled, amount, label) in [
-        (&mut r.enable_color, &mut r.color_amount, "Color / Exposure"),
-        (
-            &mut r.enable_face_restore,
-            &mut r.face_restore_amount,
-            "Face Restore",
-        ),
-        (&mut r.enable_hair, &mut r.hair_detail_amount, "Hair"),
-        (&mut r.enable_skin, &mut r.skin_amount, "Skin (face + body)"),
-        (&mut r.enable_eyes, &mut r.eyes_amount, "Eyes"),
-        (&mut r.enable_lips, &mut r.lips_amount, "Lips"),
-        (&mut r.enable_clothes, &mut r.clothes_amount, "Clothes"),
-    ] {
-        ui.horizontal(|ui| {
-            if ui.checkbox(enabled, "").changed() {
-                *changed = true;
-            }
-            ui.add_enabled_ui(*enabled, |ui| slider(ui, amount, label, changed));
-        });
-    }
+        .changed();
     ui.add_enabled_ui(r.enable_color, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("Look màu").small().weak());
@@ -904,13 +905,6 @@ fn offline_retouch_section(
         )
     };
     ui.label(egui::RichText::new(model_status).small().weak());
-    if missing > 0 {
-        ui.label(
-            egui::RichText::new("CPU mode: nên giữ Denoise ≤ 15 để bảo toàn chi tiết.")
-                .small()
-                .color(egui::Color32::from_rgb(210, 170, 90)),
-        );
-    }
     let run = egui::Button::new(egui::RichText::new("Run Auto Retouch").strong())
         .min_size(egui::vec2(ui.available_width(), 32.0))
         .fill(egui::Color32::from_rgb(48, 86, 120));
@@ -979,7 +973,7 @@ fn offline_retouch_section(
     }
     ui.label(
         egui::RichText::new(
-            "Mức 100 là cường độ an toàn tối đa của từng stage; Protect Identity vẫn giữ hình dáng khuôn mặt.",
+            "Các mục được tích chạy ở mức 100%; Protect Identity giữ hình dáng khuôn mặt.",
         )
         .small()
         .weak(),

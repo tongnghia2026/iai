@@ -329,8 +329,7 @@ pub struct InputState {
     /// True while an Alt-hold temporary eyedropper drag is in progress (paint
     /// tools): each pointer move samples the canvas colour into the foreground.
     pub eyedropping: bool,
-    /// True when the pointer is hovering the floating paint-colour dialog window
-    /// (used to shrink the brush ring cursor while choosing a colour).
+    /// True when the pointer is hovering the floating paint-colour dialog window.
     pub paint_dialog_hovered: bool,
     pub alt_right_dragging: bool,
     pub alt_drag_start_x: f32,
@@ -1153,6 +1152,8 @@ impl App {
                 window: None,
                 window_visible: false,
                 window_focused: false,
+                cursor_ownership: super::cursor::CursorOwnership::default(),
+                ui_cursor_icon: egui::CursorIcon::Default,
                 startup_focus_until: None,
                 window_occluded: false,
                 text_input_quiet_until: None,
@@ -1178,7 +1179,6 @@ impl App {
                 cursor_gradient: None,
                 cursor_hand: None,
                 cursor_pen: None,
-                cursor_small_ring: None,
                 cursor_zoom_in: None,
                 cursor_zoom_out: None,
                 last_cursor_radius: 0,
@@ -2486,16 +2486,49 @@ impl App {
         // the GPU ring still disabled until the next click or zoom.
         self.push_cursor_uniforms();
 
-        // A printer driver's property sheet is a native child of our main HWND.
-        // Some drivers do not install their own cursor immediately, so the last
-        // app-owned tool cursor can otherwise leak onto the Windows dialog.  Keep
-        // the owner on the system arrow for the whole lifetime of the sheet; the
-        // normal tool cursor is restored by the next redraw/input event once the
-        // worker clears this pending state.
-        if self.jobs.pending_printer_settings.is_some() {
+        match self.win.cursor_ownership.update(
+            self.win.window_focused,
+            self.jobs.pending_printer_settings.is_some() || self.jobs.pending_file_dialog.is_some(),
+        ) {
+            super::cursor::CursorUpdate::Release => {
+                if let Some(w) = &self.win.window {
+                    if let Some(state) = &mut self.win.egui_state {
+                        let _ = state.on_window_event(
+                            w,
+                            &winit::event::WindowEvent::CursorLeft {
+                                device_id: winit::event::DeviceId::dummy(),
+                            },
+                        );
+                    }
+                    w.set_cursor_visible(true);
+                    w.set_cursor(CursorIcon::Default);
+                }
+                return;
+            }
+            super::cursor::CursorUpdate::Ignore => return,
+            super::cursor::CursorUpdate::Apply => {}
+        }
+
+        // Resolve UI ownership before any tool special case (Warp, text, Alt
+        // resize, colour picker). Explicitly restore egui's requested icon:
+        // egui-winit caches it and cannot see our custom native cursor writes.
+        if self.edit.input.was_over_ui
+            || self
+                .ui_chrome_hit(self.edit.input.mouse_x, self.edit.input.mouse_y)
+                .0
+        {
             if let Some(w) = &self.win.window {
-                w.set_cursor_visible(true);
-                w.set_cursor(CursorIcon::Default);
+                let resizing_window = !self.edit.input.painting
+                    && !self.edit.input.mid_dragging
+                    && !self.edit.input.space_dragging
+                    && self.edit.guide_op.is_none()
+                    && self.edit.transform_state.is_none();
+                if let Some(dir) = self.resize_direction().filter(|_| resizing_window) {
+                    w.set_cursor_visible(true);
+                    w.set_cursor(Self::resize_cursor(dir));
+                } else {
+                    super::cursor::apply_ui_cursor(w, self.win.ui_cursor_icon);
+                }
             }
             return;
         }
@@ -2511,10 +2544,7 @@ impl App {
                 let panning = self.edit.input.space_dragging
                     || self.edit.input.space_held
                     || self.edit.input.mid_dragging;
-                if self.edit.input.was_over_ui {
-                    w.set_cursor_visible(true);
-                    w.set_cursor(CursorIcon::Default);
-                } else if panning {
+                if panning {
                     w.set_cursor_visible(true);
                     w.set_cursor(CursorIcon::Grab);
                 } else {
@@ -2528,28 +2558,11 @@ impl App {
             || (self.shell.ui.show_paint_color_dialog && !self.edit.input.was_over_ui)
             || (self.edit.input.alt_held
                 && matches!(self.edit.tools.active_id(), ToolId::Brush | ToolId::Pencil));
-        let small_ring_over_dialog = self.shell.ui.show_paint_color_dialog
-            && self.edit.input.paint_dialog_hovered
-            && matches!(
-                self.edit.tools.active_id(),
-                ToolId::Brush
-                    | ToolId::Eraser
-                    | ToolId::Pencil
-                    | ToolId::Clone
-                    | ToolId::Repair
-                    | ToolId::SmartSelect
-                    | ToolId::RefineBrush
-                    | ToolId::Smudge
-                    | ToolId::Dodge
-                    | ToolId::Burn
-            );
-
         let needs_native_ring = !self.edit.input.was_over_ui
             && !self.edit.input.space_dragging
             && !self.edit.input.space_held
             && !self.edit.input.mid_dragging
             && !eyedrop_cursor
-            && !small_ring_over_dialog
             && matches!(
                 self.edit.tools.active_id(),
                 ToolId::Brush
@@ -2579,10 +2592,6 @@ impl App {
         if needs_fill_cursor && self.win.cursor_fill.is_none() {
             self.win.cursor_fill = Some(Self::make_fill_cursor(event_loop));
         }
-        if small_ring_over_dialog && self.win.cursor_small_ring.is_none() {
-            self.win.cursor_small_ring = Some(Self::make_ring_cursor(event_loop, 6));
-        }
-
         let needs_selection_cursor = !self.edit.input.was_over_ui
             && !self.edit.input.space_dragging
             && !self.edit.input.space_held
@@ -2677,15 +2686,6 @@ impl App {
         }
 
         if let Some(w) = &self.win.window {
-            let over_fixed_chrome = self
-                .ui_chrome_hit(self.edit.input.mouse_x, self.edit.input.mouse_y)
-                .0;
-            if over_fixed_chrome {
-                w.set_cursor_visible(true);
-                w.set_cursor(CursorIcon::Default);
-                return;
-            }
-
             // I-beam over the canvas/overlay while editing text, but not over
             // the window chrome — panels keep the normal arrow.
             if self.edit.text_edit.is_some()
@@ -2702,20 +2702,6 @@ impl App {
                 } else {
                     w.set_cursor(CursorIcon::Text);
                 }
-                return;
-            }
-
-            if small_ring_over_dialog {
-                if let Some(sr) = &self.win.cursor_small_ring {
-                    w.set_cursor_visible(true);
-                    w.set_cursor(sr.clone());
-                    return;
-                }
-            }
-
-            if self.edit.input.was_over_ui {
-                w.set_cursor_visible(true);
-                w.set_cursor(CursorIcon::Default);
                 return;
             }
 

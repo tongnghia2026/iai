@@ -13,6 +13,8 @@ pub struct WindowRuntime {
     pub(in crate::app) window: Option<Arc<Window>>,
     pub(in crate::app) window_visible: bool,
     pub(in crate::app) window_focused: bool,
+    pub(in crate::app) cursor_ownership: super::cursor::CursorOwnership,
+    pub(in crate::app) ui_cursor_icon: egui::CursorIcon,
     /// Short first-reveal retry window for activating the hidden-created main
     /// window. Windows can ignore the first `focus_window()` when it is issued
     /// in the same turn as `set_visible(true)`; retry until WM_SETFOCUS arrives.
@@ -65,8 +67,6 @@ pub struct WindowRuntime {
     pub(in crate::app) cursor_hand: Option<winit::window::CustomCursor>,
     /// Pen-nib cursor for the Pen tool.
     pub(in crate::app) cursor_pen: Option<winit::window::CustomCursor>,
-    /// Small fixed ring shown over the paint-colour dialog (peer of cursor_ring).
-    pub(in crate::app) cursor_small_ring: Option<winit::window::CustomCursor>,
     /// Magnifier cursors for the Zoom tool (Windows has no native zoom cursor, so
     /// `CursorIcon::ZoomIn/Out` falls back to an arrow — use a glyph instead).
     pub(in crate::app) cursor_zoom_in: Option<winit::window::CustomCursor>,

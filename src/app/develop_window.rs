@@ -779,8 +779,6 @@ impl App {
         self.develop_resolve_fit();
         self.develop_ensure_thumbs(&ctx);
         let zoom_pct = self.dev.develop_view_zoom * 100.0;
-        let win_logical_h = window.inner_size().height as f32 / window.scale_factor() as f32;
-        let max_scroll_h = (win_logical_h - 150.0).max(240.0);
         let local_overlay = self.develop_local_overlay_for_view(
             self.dev.develop_view_off.0,
             self.dev.develop_view_off.1,
@@ -958,11 +956,12 @@ impl App {
                         ui.label("· scroll=zoom, mid-drag=pan");
                     });
                     ui.separator();
+                    let panel_h = ui.available_height();
                     let (a, c) = crate::ui::develop::develop_panel_contents(
                         ui,
                         &ui_data,
                         &mut actions,
-                        max_scroll_h,
+                        panel_h,
                     );
                     apply_dev = a;
                     cancel_dev = c;

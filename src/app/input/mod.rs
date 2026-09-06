@@ -11,7 +11,7 @@ use winit::{
     event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow},
     keyboard::{KeyCode, PhysicalKey},
-    window::{CursorIcon, Window, WindowId},
+    window::{Window, WindowId},
 };
 
 fn flow_text_zoom_from_wheel(current: f32, vertical_delta: f64) -> f32 {
@@ -100,6 +100,56 @@ impl App {
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
+    }
+
+    /// Recompute after input and after building egui, so newly opened floating
+    /// windows take ownership without waiting for another mouse movement.
+    pub(in crate::app) fn refresh_pointer_ui_state(&mut self, mx: f32, my: f32) {
+        let (is_in_ui_bounds, is_outside_canvas) = self.ui_chrome_hit(mx, my);
+        self.edit.input.is_over_ui = self.win.egui_ctx.egui_wants_pointer_input()
+            || self.win.egui_ctx.is_pointer_over_egui()
+            || self.win.egui_ctx.egui_wants_keyboard_input();
+        let modal_ui = self.is_modal_open() && !self.shell.ui.show_paint_color_dialog;
+        // Tools/states that legitimately act on the gray pasteboard outside the
+        // page. Brush-like tools need their center to cross the page edge so they
+        // can paint cleanly up to it; the actual pixel writes remain canvas-clipped.
+        // The vector tools (Pen/Shape/Node/Gradient/Text) work in canvas space —
+        // their anchors, geometry, handles and layers may legitimately sit off the
+        // page — so they must keep receiving pointer events there too.
+        // For these tools, only the surrounding chrome counts as UI.
+        let pasteboard_ok = self.edit.transform_state.is_some()
+            || matches!(
+                self.edit.tools.active_id(),
+                ToolId::Brush
+                    | ToolId::Eraser
+                    | ToolId::Pencil
+                    | ToolId::Clone
+                    | ToolId::Repair
+                    | ToolId::RefineBrush
+                    | ToolId::Smudge
+                    | ToolId::Dodge
+                    | ToolId::Burn
+                    | ToolId::Crop
+                    | ToolId::PerspectiveCrop
+                    | ToolId::Move
+                    | ToolId::Pen
+                    | ToolId::Shape
+                    | ToolId::Node
+                    | ToolId::Gradient
+                    | ToolId::Text
+                    | ToolId::SelectionRect
+                    | ToolId::SelectionEllipse
+                    | ToolId::Lasso
+                    | ToolId::PolygonLasso
+                    | ToolId::SmartSelect
+            );
+        self.edit.input.in_ui_chrome = is_in_ui_bounds;
+        let current_ui_state = self.edit.input.is_over_ui
+            || modal_ui
+            || is_in_ui_bounds
+            || (is_outside_canvas && !pasteboard_ok);
+
+        self.edit.input.was_over_ui = !self.win.cursor_ownership.pointer_inside || current_ui_state;
     }
 
     /// Whether `tool` may act on the active document while it is in CMYK mode.
@@ -506,6 +556,31 @@ impl ApplicationHandler for App {
             return;
         }
 
+        // Track ownership before egui/modal handlers can consume the event.
+        // Entered has no position; wait for CursorMoved rather than reusing the
+        // previous canvas coordinates (possibly underneath a new dialog).
+        match &event {
+            WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
+                self.win.cursor_ownership.pointer_inside = false;
+                if matches!(event, WindowEvent::Focused(false)) {
+                    self.win.window_focused = false;
+                }
+                self.sync_cursor(event_loop);
+            }
+            WindowEvent::Focused(true) => self.win.window_focused = true,
+            WindowEvent::CursorMoved { position, .. } => {
+                self.win.cursor_ownership.pointer_inside =
+                    self.win.window.as_ref().is_some_and(|w| {
+                        let size = w.inner_size();
+                        position.x >= 0.0
+                            && position.y >= 0.0
+                            && position.x < size.width as f64
+                            && position.y < size.height as f64
+                    });
+            }
+            _ => {}
+        }
+
         // Numpad Enter commits the text overlay. egui-winit maps both the main
         // and numpad Enter to the same `Key::Enter`, so it must be caught here
         // (before egui sees it) to keep the main Enter as a newline.
@@ -796,56 +871,13 @@ impl ApplicationHandler for App {
             }
         }
 
-        let (is_in_ui_bounds, is_outside_canvas) = {
-            let (mx, my) = match &event {
-                WindowEvent::CursorMoved { position, .. } => (position.x as f32, position.y as f32),
-                _ => (self.edit.input.mouse_x, self.edit.input.mouse_y),
-            };
-            self.ui_chrome_hit(mx, my)
+        let was_over_ui = self.edit.input.was_over_ui;
+        let (mx, my) = match &event {
+            WindowEvent::CursorMoved { position, .. } => (position.x as f32, position.y as f32),
+            _ => (self.edit.input.mouse_x, self.edit.input.mouse_y),
         };
-
-        let modal_ui = self.is_modal_open() && !self.shell.ui.show_paint_color_dialog;
-        // Tools/states that legitimately act on the gray pasteboard outside the
-        // page. Brush-like tools need their center to cross the page edge so they
-        // can paint cleanly up to it; the actual pixel writes remain canvas-clipped.
-        // The vector tools (Pen/Shape/Node/Gradient/Text) work in canvas space —
-        // their anchors, geometry, handles and layers may legitimately sit off the
-        // page — so they must keep receiving pointer events there too.
-        // For these tools, only the surrounding chrome counts as UI.
-        let pasteboard_ok = self.edit.transform_state.is_some()
-            || matches!(
-                self.edit.tools.active_id(),
-                ToolId::Brush
-                    | ToolId::Eraser
-                    | ToolId::Pencil
-                    | ToolId::Clone
-                    | ToolId::Repair
-                    | ToolId::RefineBrush
-                    | ToolId::Smudge
-                    | ToolId::Dodge
-                    | ToolId::Burn
-                    | ToolId::Crop
-                    | ToolId::PerspectiveCrop
-                    | ToolId::Move
-                    | ToolId::Pen
-                    | ToolId::Shape
-                    | ToolId::Node
-                    | ToolId::Gradient
-                    | ToolId::Text
-                    | ToolId::SelectionRect
-                    | ToolId::SelectionEllipse
-                    | ToolId::Lasso
-                    | ToolId::PolygonLasso
-                    | ToolId::SmartSelect
-            );
-        self.edit.input.in_ui_chrome = is_in_ui_bounds;
-        let current_ui_state = self.edit.input.is_over_ui
-            || modal_ui
-            || is_in_ui_bounds
-            || (is_outside_canvas && !pasteboard_ok);
-
-        if self.edit.input.was_over_ui != current_ui_state {
-            self.edit.input.was_over_ui = current_ui_state;
+        self.refresh_pointer_ui_state(mx, my);
+        if was_over_ui != self.edit.input.was_over_ui {
             self.sync_cursor(event_loop);
         }
 
@@ -864,10 +896,7 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::CursorLeft { .. } => {
-                if let Some(w) = &self.win.window {
-                    w.set_cursor_visible(true);
-                    w.set_cursor(CursorIcon::Default);
-                }
+                self.push_cursor_uniforms();
             }
 
             WindowEvent::CursorEntered { .. } => {
@@ -897,7 +926,14 @@ impl ApplicationHandler for App {
                     self.edit.input.alt_right_dragging = false;
                     self.edit.input.zoom_dragging = false;
                     self.edit.input.zoom_drag_moved = false;
+                    self.edit.input.space_held = false;
+                    self.edit.input.alt_held = false;
+                    self.edit.input.ctrl_held = false;
+                    self.edit.input.shift_held = false;
+                    self.edit.input.eyedropping = false;
+                    self.edit.input.warp_resizing = false;
                 }
+                self.sync_cursor(event_loop);
             }
 
             WindowEvent::Occluded(occluded) => {
