@@ -1,7 +1,6 @@
 use super::state::App;
 use crate::ui::UiActions;
 use winit::event_loop::ActiveEventLoop;
-use winit::window::CursorIcon;
 
 mod adjustments;
 mod ai;
@@ -188,13 +187,8 @@ impl App {
         self.handle_channel_actions(&mut actions);
         self.handle_selection_refine_actions(&mut actions);
 
-        if actions.chrome.cursor_left {
-            if let Some(w) = &self.win.window {
-                w.set_cursor_visible(true);
-                w.set_cursor(CursorIcon::Default);
-            }
-        }
-        if actions.chrome.cursor_entered {
+        if actions.chrome.cursor_left || actions.chrome.cursor_entered {
+            self.refresh_pointer_ui_state(self.edit.input.mouse_x, self.edit.input.mouse_y);
             self.sync_cursor(event_loop);
         }
 

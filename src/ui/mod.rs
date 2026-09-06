@@ -732,6 +732,7 @@ pub fn build(
     egui::TexturesDelta,
     UiActions,
     std::time::Duration,
+    egui::CursorIcon,
 ) {
     let raw_input = if let Some(state) = egui_state {
         state.take_egui_input(window)
@@ -2153,13 +2154,11 @@ pub fn build(
                 _ => {}
             }
 
+            // Native Crop cursors are resolved by App::sync_cursor. Writing
+            // them into egui's output here would leak a canvas resize hint onto
+            // floating windows whose widgets request the default cursor.
             match data.tool.crop_cursor_hint {
-                1 => ctx.set_cursor_icon(egui::CursorIcon::Move),
-                2 => ctx.set_cursor_icon(egui::CursorIcon::ResizeNwSe),
-                3 => ctx.set_cursor_icon(egui::CursorIcon::ResizeNeSw),
-                4 => ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical),
-                5 => ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal),
-                0 => {
+                0 if ctx.input(|i| i.focused) && !ctx.is_pointer_over_egui() => {
                     if let Some(mouse_pos) = ctx.pointer_hover_pos() {
                         let rotate_icon_pos = egui::pos2(mouse_pos.x + 14.0, mouse_pos.y - 14.0);
                         let font = egui::FontId::proportional(16.0);
@@ -3706,6 +3705,7 @@ pub fn build(
         }
     });
 
+    let cursor_icon = full_output.platform_output.cursor_icon;
     if let Some(state) = egui_state {
         state.handle_platform_output(window, full_output.platform_output);
     }
@@ -3733,6 +3733,7 @@ pub fn build(
         full_output.textures_delta,
         actions,
         repaint_delay,
+        cursor_icon,
     )
 }
 

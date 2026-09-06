@@ -120,7 +120,7 @@ pub(crate) fn develop_panel_contents(
     ui: &mut egui::Ui,
     data: &UiData,
     actions: &mut UiActions,
-    max_scroll_h: f32,
+    max_panel_h: f32,
 ) -> (bool, bool) {
     // True only while the primary button is actively driving an egui control
     // (e.g. a slider drag). `is_using_pointer()` is false for clicks on the
@@ -138,96 +138,104 @@ pub(crate) fn develop_panel_contents(
     let mut cancel = false;
     ui.spacing_mut().slider_width = 142.0;
 
-    ui.horizontal(|ui| {
-        ui.label("Preview");
-        let (text, color) = if data.develop.develop_preview_settled {
-            ("Full quality", egui::Color32::from_rgb(74, 180, 110))
-        } else if data.develop.develop_preview_refining {
-            ("Refining…", egui::Color32::from_rgb(220, 165, 65))
-        } else {
-            ("Interactive", egui::Color32::from_rgb(95, 155, 220))
-        };
-        ui.colored_label(color, text);
-    });
-    let engine_color = if settings.develop_engine_version
-        == crate::core::develop::DevelopEngineVersion::Develop3
-    {
-        egui::Color32::from_rgb(104, 190, 132)
-    } else {
-        egui::Color32::from_gray(150)
-    };
-    let source_kind = if data.develop.develop_mode {
-        "RAW"
-    } else {
-        "Raster"
-    };
-    let engine_badge = ui.colored_label(
-        engine_color,
-        egui::RichText::new(format!(
-            "Engine: {} · {source_kind}",
-            settings.develop_engine_version.label()
-        ))
-        .monospace()
-        .size(10.5),
-    );
-    let mut engine_tooltip = format!(
-        "Renderer: {}\nSession: {source_kind}",
-        settings.develop_engine_version.label()
-    );
-    if let Some(diagnostic) = data.develop.develop_pipeline_diagnostic.as_deref() {
-        engine_tooltip.push('\n');
-        engine_tooltip.push_str(diagnostic);
-    }
-    engine_badge.on_hover_text(engine_tooltip);
-
-    // ── D4 header: RGB histogram + cursor readout + EXIF + Auto/B&W ─────────
-    let header_top = ui.cursor().top();
-    if let Some(hist) = data.develop.develop_histogram.as_deref() {
-        histogram_overlay(ui, hist);
-        let readout = match data.develop.develop_readout {
-            Some([r, g, b]) => format!("R {r:>3}   G {g:>3}   B {b:>3}"),
-            None => "R  ---   G  ---   B  ---".to_string(),
-        };
-        ui.label(egui::RichText::new(readout).monospace().size(11.0));
-        if let Some(exif) = &data.develop.develop_exif {
-            ui.label(
-                egui::RichText::new(exif)
-                    .size(11.0)
-                    .color(egui::Color32::GRAY),
-            );
-        }
-        ui.add_space(2.0);
-    }
-    // Auto fits Exposure to a fixed target brightness (scene sessions); B&W
-    // toggles Saturation −100.
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(
-                data.develop.develop_auto_available,
-                egui::Button::new("Auto"),
-            )
-            .on_hover_text("Auto exposure")
-            .clicked()
-        {
-            actions.develop.develop_auto = true;
-        }
-        let bw = settings.saturation <= -99.5;
-        if ui
-            .selectable_label(bw, "B&W")
-            .on_hover_text("Black & white (Saturation −100)")
-            .clicked()
-        {
-            settings.saturation = if bw { 0.0 } else { -100.0 };
-            changed = true;
-        }
-    });
-    ui.add_space(4.0);
-    // The header eats into the fixed budget the caller sized for the sections.
-    let max_scroll_h = (max_scroll_h - (ui.cursor().top() - header_top)).max(160.0);
-
+    // Reserve the action row from the actual remaining UI rectangle. Fixed
+    // window-height offsets miss wrapped metadata, font sizes and DPI changes.
+    // Keep all controls (including the histogram/header) inside this scroll
+    // area, so they cannot push the action buttons below a short viewport.
+    let footer_h = 24.0_f32
+        .max(ui.spacing().interact_size.y)
+        .max(ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y);
+    let scroll_h =
+        (ui.available_height().min(max_panel_h) - footer_h - 6.0 - ui.spacing().item_spacing.y)
+            .max(0.0);
     egui::ScrollArea::vertical()
-        .max_height(max_scroll_h)
+        .max_height(scroll_h)
+        .min_scrolled_height(0.0)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Preview");
+                let (text, color) = if data.develop.develop_preview_settled {
+                    ("Full quality", egui::Color32::from_rgb(74, 180, 110))
+                } else if data.develop.develop_preview_refining {
+                    ("Refining…", egui::Color32::from_rgb(220, 165, 65))
+                } else {
+                    ("Interactive", egui::Color32::from_rgb(95, 155, 220))
+                };
+                ui.colored_label(color, text);
+            });
+            let engine_color = if settings.develop_engine_version
+                == crate::core::develop::DevelopEngineVersion::Develop3
+            {
+                egui::Color32::from_rgb(104, 190, 132)
+            } else {
+                egui::Color32::from_gray(150)
+            };
+            let source_kind = if data.develop.develop_mode {
+                "RAW"
+            } else {
+                "Raster"
+            };
+            let engine_badge = ui.colored_label(
+                engine_color,
+                egui::RichText::new(format!(
+                    "Engine: {} · {source_kind}",
+                    settings.develop_engine_version.label()
+                ))
+                .monospace()
+                .size(10.5),
+            );
+            let mut engine_tooltip = format!(
+                "Renderer: {}\nSession: {source_kind}",
+                settings.develop_engine_version.label()
+            );
+            if let Some(diagnostic) = data.develop.develop_pipeline_diagnostic.as_deref() {
+                engine_tooltip.push('\n');
+                engine_tooltip.push_str(diagnostic);
+            }
+            engine_badge.on_hover_text(engine_tooltip);
+
+            // ── D4 header: RGB histogram + cursor readout + EXIF + Auto/B&W ─────────
+            if let Some(hist) = data.develop.develop_histogram.as_deref() {
+                histogram_overlay(ui, hist);
+                let readout = match data.develop.develop_readout {
+                    Some([r, g, b]) => format!("R {r:>3}   G {g:>3}   B {b:>3}"),
+                    None => "R  ---   G  ---   B  ---".to_string(),
+                };
+                ui.label(egui::RichText::new(readout).monospace().size(11.0));
+                if let Some(exif) = &data.develop.develop_exif {
+                    ui.label(
+                        egui::RichText::new(exif)
+                            .size(11.0)
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+                ui.add_space(2.0);
+            }
+            // Auto fits Exposure to a fixed target brightness (scene sessions); B&W
+            // toggles Saturation −100.
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        data.develop.develop_auto_available,
+                        egui::Button::new("Auto"),
+                    )
+                    .on_hover_text("Auto exposure")
+                    .clicked()
+                {
+                    actions.develop.develop_auto = true;
+                }
+                let bw = settings.saturation <= -99.5;
+                if ui
+                    .selectable_label(bw, "B&W")
+                    .on_hover_text("Black & white (Saturation −100)")
+                    .clicked()
+                {
+                    settings.saturation = if bw { 0.0 } else { -100.0 };
+                    changed = true;
+                }
+            });
+            ui.add_space(4.0);
             let out = section(ui, data, SEC_SCOPES, "Scopes", |ui| {
                 scopes_ui(
                     ui,
@@ -626,9 +634,12 @@ pub(crate) fn develop_panel_contents(
         });
 
     ui.add_space(6.0);
-    let footer_w = (ui.clip_rect().right() - ui.cursor().left()).max(1.0);
+    let footer_w = ui
+        .available_width()
+        .min(ui.clip_rect().right() - ui.cursor().left())
+        .max(1.0);
     ui.allocate_ui_with_layout(
-        egui::vec2(footer_w, 24.0),
+        egui::vec2(footer_w, footer_h),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             if ui
@@ -667,6 +678,152 @@ pub(crate) fn develop_panel_contents(
 
 fn stable_viewport_for_panel(screen: egui::Rect) -> bool {
     screen.width() >= PANEL_W + 80.0 && screen.height() >= MIN_STABLE_VIEWPORT_H
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[allow(deprecated)] // Exercise the same panel host as the Develop window.
+    fn frame(
+        ctx: &egui::Context,
+        height: f32,
+        data: &UiData,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, UiActions, (bool, bool)) {
+        let mut actions = UiActions::default();
+        let mut clicked = (false, false);
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, height),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::SidePanel::right("develop_layout_test")
+                    .exact_width(360.0)
+                    .show(ctx, |ui| {
+                        // Space occupied by the host's Profile and view controls.
+                        ui.add_space(88.0);
+                        let remaining = ui.available_height();
+                        clicked = develop_panel_contents(ui, data, &mut actions, remaining);
+                    });
+            },
+        );
+        (output, actions, clicked)
+    }
+
+    fn footer_button(output: &egui::FullOutput, label: &str) -> egui::Rect {
+        let (text_rect, clip) = output
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape {
+                    (text.galley.text() == label)
+                        .then(|| (text.visual_bounding_rect(), shape.clip_rect))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("Missing footer label: {label}"));
+        assert!(
+            clip.contains_rect(text_rect),
+            "{label} text is clipped: {text_rect:?} / {clip:?}"
+        );
+        let rect = output
+            .shapes
+            .iter()
+            .filter_map(|shape| {
+                if let egui::Shape::Rect(button) = &shape.shape {
+                    (button.rect.contains_rect(text_rect) && button.rect.height() < 60.0)
+                        .then_some(button.rect)
+                } else {
+                    None
+                }
+            })
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .unwrap_or_else(|| panic!("Missing footer button: {label}"));
+        assert!(
+            clip.contains_rect(rect),
+            "{label} button is clipped: {rect:?} / {clip:?}"
+        );
+        rect
+    }
+
+    fn raw_data() -> UiData {
+        let mut data = UiData::default();
+        data.develop.develop_mode = true;
+        data.develop.develop_histogram = Some(std::sync::Arc::new([[0.5; 256]; 4]));
+        data.develop.develop_exif = Some("Camera model · 100 mm · f/8 · 1/250 s · ISO 200 — metadata that wraps onto another line".into());
+        data.develop.develop_sections_open = [true; DEV_PANEL_SECTIONS];
+        data
+    }
+
+    #[test]
+    fn footer_stays_fully_visible_when_resizing_and_scaling() {
+        let data = raw_data();
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(scale);
+            for height in [720.0, 480.0, 360.0, 240.0, 720.0] {
+                let _ = frame(&ctx, height, &data, vec![]);
+                let (output, _, _) = frame(&ctx, height, &data, vec![]);
+                for label in ["Reset", "Open Image", "Cancel"] {
+                    let rect = footer_button(&output, label);
+                    assert!(rect.bottom() <= height, "{label} is outside the viewport");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn footer_buttons_remain_clickable_in_a_short_panel() {
+        let mut data = raw_data();
+        data.develop.develop_settings.exposure = 1.0;
+        for label in ["Reset", "Open Image", "Cancel"] {
+            let ctx = egui::Context::default();
+            let _ = frame(&ctx, 360.0, &data, vec![]);
+            let (output, _, _) = frame(&ctx, 360.0, &data, vec![]);
+            let rect = footer_button(&output, label);
+            // Hit near the bottom, where the original clipped row lost input.
+            let pos = egui::pos2(rect.center().x, rect.bottom() - 2.0);
+            let _ = frame(
+                &ctx,
+                360.0,
+                &data,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            let (_, actions, (apply, cancel)) = frame(
+                &ctx,
+                360.0,
+                &data,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            match label {
+                "Reset" => assert_eq!(actions.develop.set_develop_settings.unwrap().exposure, 0.0),
+                "Open Image" => assert!(apply),
+                "Cancel" => assert!(cancel),
+                _ => unreachable!(),
+            }
+        }
+    }
 }
 
 /// Camera-Raw-style RGB histogram: the three channel curves drawn as

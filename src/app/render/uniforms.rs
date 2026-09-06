@@ -402,7 +402,12 @@ impl App {
             let over_color_dialog = self.shell.ui.show_paint_color_dialog;
             // Warp draws its own egui brush ring; suppress the tool's GPU ring so
             // the two don't stack (the active tool is still "a brush" underneath).
-            let use_gpu_ring = self.edit.warp_state.is_none()
+            let use_gpu_ring = self.win.cursor_ownership.can_control(
+                self.win.window_focused,
+                self.jobs.pending_printer_settings.is_some()
+                    || self.jobs.pending_file_dialog.is_some(),
+            ) && self.edit.warp_state.is_none()
+                && !self.edit.input.was_over_ui
                 && (self.edit.input.alt_right_dragging
                     || (!eyedrop_cursor
                         && !over_color_dialog

@@ -232,30 +232,27 @@ impl App {
                     self.win.theme_applied = Some(self.shell.ui.theme_mode);
                 }
                 let ui_data = self.collect_ui_data();
-                let (primitives, textures_delta, actions, repaint_delay) = crate::ui::build(
-                    &self.win.egui_ctx,
-                    &mut self.win.egui_state,
-                    &*window,
-                    &ui_data,
-                );
+                let (primitives, textures_delta, actions, repaint_delay, cursor_icon) =
+                    crate::ui::build(
+                        &self.win.egui_ctx,
+                        &mut self.win.egui_state,
+                        &*window,
+                        &ui_data,
+                    );
                 self.win.egui_repaint_deadline = if repaint_delay == std::time::Duration::MAX {
                     None
                 } else {
                     Some(std::time::Instant::now() + repaint_delay)
                 };
+                self.win.ui_cursor_icon = cursor_icon;
                 self.apply_ui_actions(actions, event_loop);
                 self.flush_pending_adjustment_preview();
 
-                // `ui::build` has just passed egui's platform output to winit.
-                // When egui changes its cursor while the pointer crosses from a
-                // widget back onto the canvas, that native cursor can overwrite
-                // the brush ring installed by the input handler. Re-assert the
-                // app-owned canvas cursor after UI actions so the ring cannot
-                // remain missing/stale until another click or zoom. Do not do
-                // this over UI: egui must retain ownership of widget cursors.
-                if !self.edit.input.was_over_ui {
-                    self.sync_cursor(event_loop);
-                }
+                // Hover/layer ownership is authoritative only after this UI
+                // frame: a popup can appear without any pointer motion. Resolve
+                // both sides of the handoff, including egui's cached UI cursor.
+                self.refresh_pointer_ui_state(self.edit.input.mouse_x, self.edit.input.mouse_y);
+                self.sync_cursor(event_loop);
 
                 if self.docs.documents[self.docs.active_doc_idx]
                     .canvas
