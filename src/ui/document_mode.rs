@@ -210,6 +210,9 @@ struct DocRuntime {
     image_tex: HashMap<usize, egui::TextureHandle>,
     /// The image id currently being dragged on the page (realign / reorder).
     dragging_image: Option<usize>,
+    /// A block image being resized from a corner. Stores the id, corner
+    /// (0=TL, 1=TR, 2=BR, 3=BL) and the opposite horizontal edge in layout px.
+    resizing_block_image: Option<(usize, u8, f32)>,
     /// Floating images (Word-style wrapping), in document order. Not part of the
     /// text buffer; drawn as overlays and round-tripped via `floating_images`.
     floating: Vec<ImageBlock>,
@@ -247,6 +250,7 @@ impl Default for DocRuntime {
             next_image_id: 1,
             image_tex: HashMap::new(),
             dragging_image: None,
+            resizing_block_image: None,
             floating: Vec::new(),
             selected_floating: None,
             float_drag: None,
@@ -352,19 +356,24 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
         return;
     }
 
+    // Retired inline anchors are projected as Top-and-Bottom blocks even when
+    // the model came from an in-memory caller rather than the `.iai` loader.
+    let mut model = (*view.document).clone();
+    model.migrate_inline_images_to_top_bottom();
+
     // An update emitted by this editor comes back through UiData on the next
     // frame. If content is already identical, acknowledge the model revision
     // without rebuilding and losing caret/selection.
-    if d.editor.is_some() && editor_document(d) == *view.document {
+    if d.editor.is_some() && editor_document(d) == model {
         d.bound_model_revision = view.revision;
         d.page_index = view.active_page.min(view.page_count.saturating_sub(1));
         return;
     }
-    d.setup = view.document.page;
-    d.font = view.document.default_char.font.clone();
-    d.font_pt = view.document.default_char.size_pt;
-    d.line_spacing = if view.document.default_para.line_spacing > 0.0 {
-        view.document.default_para.line_spacing
+    d.setup = model.page;
+    d.font = model.default_char.font.clone();
+    d.font_pt = model.default_char.size_pt;
+    d.line_spacing = if model.default_para.line_spacing > 0.0 {
+        model.default_para.line_spacing
     } else {
         DEFAULT_LINE_SPACING
     };
@@ -373,16 +382,15 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
     d.image_tex.clear();
     d.next_image_id = 1;
     // Floating images come straight from the model (no line references).
-    d.floating = view.document.floating_images.clone();
+    d.floating = model.floating_images.clone();
     if d.selected_floating.is_some_and(|i| i >= d.floating.len()) {
         d.selected_floating = None;
     }
-    let mut block_image_ids: Vec<Option<usize>> =
-        Vec::with_capacity(view.document.paragraphs.len());
+    let mut block_image_ids: Vec<Option<usize>> = Vec::with_capacity(model.paragraphs.len());
     let mut inline_spans: Vec<Vec<(usize, usize, usize)>> =
-        Vec::with_capacity(view.document.paragraphs.len());
-    let mut line_texts = Vec::with_capacity(view.document.paragraphs.len());
-    for paragraph in &view.document.paragraphs {
+        Vec::with_capacity(model.paragraphs.len());
+    let mut line_texts = Vec::with_capacity(model.paragraphs.len());
+    for paragraph in &model.paragraphs {
         if let Some(block) = &paragraph.image {
             let id = d.next_image_id;
             d.next_image_id += 1;
@@ -427,12 +435,7 @@ fn sync_runtime(d: &mut DocRuntime, fs: &mut FontSystem, view: &FlowTextViewMode
     let font_name = d.font.name().to_string();
     let attrs = Attrs::new().family(Family::Name(font_name.as_str()));
     buffer.set_text(&joined, &attrs, Shaping::Advanced, None);
-    for (i, (line, paragraph)) in buffer
-        .lines
-        .iter_mut()
-        .zip(&view.document.paragraphs)
-        .enumerate()
-    {
+    for (i, (line, paragraph)) in buffer.lines.iter_mut().zip(&model.paragraphs).enumerate() {
         line.set_align(Some(match paragraph.style.align {
             ParagraphAlign::Left => Align::Left,
             ParagraphAlign::Center => Align::Center,
@@ -724,11 +727,18 @@ fn window_ui(
             .unwrap_or((ParagraphAlign::Center, DEFAULT_IMAGE_WIDTH_MM));
         ui.horizontal_wrapped(|ui| {
             ui.label(ph::IMAGE).on_hover_text("Ảnh đang chọn");
-            // Word-style layout mode: in line with text vs floating on top.
+            // Word-style layout mode. True inline images are retained only so
+            // older v11 files can be opened and converted without data loss.
             egui::ComboBox::from_id_salt("doc_img_wrap_inline")
-                .selected_text("Cùng dòng chữ")
+                .selected_text("Trên và dưới")
                 .show_ui(ui, |ui| {
-                    let _ = ui.selectable_label(true, "Cùng dòng chữ");
+                    if ui
+                        .selectable_label(active_image_is_block, "Trên và dưới")
+                        .clicked()
+                        && !active_image_is_block
+                    {
+                        img_to_floating = Some(ImageWrap::TopBottom);
+                    }
                     if ui.selectable_label(false, "Nổi trên chữ").clicked() {
                         img_to_floating = Some(ImageWrap::InFrontOfText);
                     }
@@ -803,6 +813,7 @@ fn window_ui(
             let wrap_label = match cur_wrap {
                 ImageWrap::BehindText => "Nổi sau chữ",
                 ImageWrap::Square => "Bao quanh ảnh",
+                ImageWrap::TopBottom => "Trên và dưới",
                 _ => "Nổi trên chữ",
             };
             ui.horizontal_wrapped(|ui| {
@@ -810,8 +821,8 @@ fn window_ui(
                 egui::ComboBox::from_id_salt("doc_img_wrap_float")
                     .selected_text(wrap_label)
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(false, "Cùng dòng chữ").clicked() {
-                            float_set_wrap = Some(ImageWrap::Inline);
+                        if ui.selectable_label(false, "Trên và dưới").clicked() {
+                            float_set_wrap = Some(ImageWrap::TopBottom);
                         }
                         if ui
                             .selectable_label(cur_wrap == ImageWrap::InFrontOfText, "Nổi trên chữ")
@@ -893,8 +904,8 @@ fn window_ui(
     }
     if let Some(fi) = d.selected_floating {
         if let Some(wrap) = float_set_wrap {
-            if wrap == ImageWrap::Inline {
-                convert_floating_to_inline(d, fs, fi);
+            if wrap == ImageWrap::TopBottom {
+                convert_floating_to_top_bottom(d, fs, fi);
             } else if let Some(block) = d.floating.get_mut(fi) {
                 if block.wrap != wrap {
                     block.wrap = wrap;
@@ -1021,8 +1032,32 @@ fn window_ui(
                 });
                 if response.drag_started() {
                     if let Some((bx, by)) = pointer {
-                        if let Some((id, line, byte)) = image_at(d, cw, bx, by) {
-                            d.dragging_image = Some(id);
+                        if let Some((id, line, byte, left, top, width, height)) =
+                            image_at(d, cw, bx, by)
+                        {
+                            let handle_r = 7.0;
+                            let corners = [
+                                (left, top),
+                                (left + width, top),
+                                (left + width, top + height),
+                                (left, top + height),
+                            ];
+                            let corner = corners.iter().enumerate().find_map(|(i, (x, y))| {
+                                ((bx - x).abs() <= handle_r && (by - y).abs() <= handle_r)
+                                    .then_some(i as u8)
+                            });
+                            if let Some(corner) = corner.filter(|_| {
+                                line_is_block_image(d.editor.as_ref().expect("editor"), line)
+                            }) {
+                                let opposite_x = if matches!(corner, 0 | 3) {
+                                    left + width
+                                } else {
+                                    left
+                                };
+                                d.resizing_block_image = Some((id, corner, opposite_x));
+                            } else {
+                                d.dragging_image = Some(id);
+                            }
                             if let Some(e) = d.editor.as_mut() {
                                 e.set_selection(Selection::None);
                                 e.set_cursor(Cursor::new(line, byte));
@@ -1031,7 +1066,18 @@ fn window_ui(
                         }
                     }
                 } else if response.dragged() {
-                    if let (Some(id), Some((bx, by))) = (d.dragging_image, pointer) {
+                    if let (Some((id, corner, opposite_x)), Some((bx, _))) =
+                        (d.resizing_block_image, pointer)
+                    {
+                        image_drag = true;
+                        let width_px = if matches!(corner, 0 | 3) {
+                            opposite_x - bx
+                        } else {
+                            bx - opposite_x
+                        };
+                        let width_mm = width_px.max(8.0) * 25.4 / DPI;
+                        apply_image_width(d, fs, id, width_mm);
+                    } else if let (Some(id), Some((bx, by))) = (d.dragging_image, pointer) {
                         image_drag = true;
                         let third = cw / 3.0;
                         let align = if bx < third {
@@ -1062,6 +1108,7 @@ fn window_ui(
                 }
                 if response.drag_stopped() {
                     d.dragging_image = None;
+                    d.resizing_block_image = None;
                 }
             }
 
@@ -1411,13 +1458,42 @@ fn window_ui(
                     painter.image(tex.id(), img_rect, uv, egui::Color32::WHITE);
                     // Outline the selected / dragged image so it reads as picked
                     // up and its contextual controls make sense.
-                    if active_image == Some(id) || d.dragging_image == Some(id) {
+                    if active_image == Some(id)
+                        || d.dragging_image == Some(id)
+                        || d.resizing_block_image
+                            .is_some_and(|(drag_id, _, _)| drag_id == id)
+                    {
                         painter.rect_stroke(
                             img_rect.expand(2.0),
                             2.0,
                             egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(60, 120, 240)),
                             egui::StrokeKind::Outside,
                         );
+                        if line_is_block_image(d.editor.as_ref().expect("editor"), {
+                            find_image_anchor(d.editor.as_ref().expect("editor"), id)
+                                .map(|(line, _)| line)
+                                .unwrap_or(usize::MAX)
+                        }) {
+                            for corner in [
+                                img_rect.left_top(),
+                                img_rect.right_top(),
+                                img_rect.right_bottom(),
+                                img_rect.left_bottom(),
+                            ] {
+                                let handle =
+                                    egui::Rect::from_center_size(corner, egui::vec2(8.0, 8.0));
+                                painter.rect_filled(handle, 1.0, egui::Color32::WHITE);
+                                painter.rect_stroke(
+                                    handle,
+                                    1.0,
+                                    egui::Stroke::new(
+                                        1.5_f32,
+                                        egui::Color32::from_rgb(60, 120, 240),
+                                    ),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1998,9 +2074,14 @@ fn active_image_id(editor: &Editor<'static>) -> Option<usize> {
     })
 }
 
-/// The image `(id, line)` whose displayed rectangle contains the content-space
-/// point `(bx, by)` (buffer pixels, `by` continuous across pages), if any.
-fn image_at(d: &DocRuntime, cw: f32, bx: f32, by: f32) -> Option<(usize, usize, usize)> {
+/// The image whose displayed rectangle contains `(bx, by)`. Returns its id,
+/// line, byte anchor and content-space rectangle `(left, top, width, height)`.
+fn image_at(
+    d: &DocRuntime,
+    cw: f32,
+    bx: f32,
+    by: f32,
+) -> Option<(usize, usize, usize, f32, f32, f32, f32)> {
     let editor = d.editor.as_ref()?;
     let (cx, cy, _, ch) = d.setup.content_rect_px(DPI);
     editor.with_buffer(|b| {
@@ -2027,7 +2108,7 @@ fn image_at(d: &DocRuntime, cw: f32, bx: f32, by: f32) -> Option<(usize, usize, 
                 let ox = offset + g.x;
                 let top = run.line_y - h_px;
                 if bx >= ox && bx <= ox + w_px && by >= top && by <= top + h_px {
-                    return Some((id, run.line_i, g.start));
+                    return Some((id, run.line_i, g.start, ox, top, w_px, h_px));
                 }
             }
         }
@@ -2587,8 +2668,9 @@ fn line_is_block_image(editor: &Editor<'static>, line_i: usize) -> bool {
     editor.with_buffer(|b| b.lines.get(line_i).is_some_and(is_legacy_block_image_line))
 }
 
-/// Insert a picture at the caret as one object character. Text immediately
-/// before and after the caret remains in the same paragraph.
+/// Insert a picture at the caret using Word's "Top and Bottom" behaviour: the
+/// current paragraph is split and the image occupies a movable block between
+/// the text above and below it.
 fn insert_image_at_caret(d: &mut DocRuntime, fs: &mut FontSystem, image: PendingImage) {
     let cw_mm = d.setup.content_width_mm();
     let block = ImageBlock::inline(
@@ -2598,12 +2680,14 @@ fn insert_image_at_caret(d: &mut DocRuntime, fs: &mut FontSystem, image: Pending
         DEFAULT_IMAGE_WIDTH_MM.min(cw_mm),
         ParagraphAlign::Center,
     );
-    insert_inline_image_block(d, fs, block);
+    insert_top_bottom_image_block(d, fs, block);
 }
 
-/// Insert an existing image at the caret as one inline object character.
-fn insert_inline_image_block(d: &mut DocRuntime, fs: &mut FontSystem, mut block: ImageBlock) {
-    block.wrap = ImageWrap::Inline;
+/// Insert an image-only paragraph at the caret. Its tall transparent placeholder
+/// reserves the picture height; the text before and after becomes two normal
+/// paragraphs, so no text can remain beside the image.
+fn insert_top_bottom_image_block(d: &mut DocRuntime, fs: &mut FontSystem, mut block: ImageBlock) {
+    block.wrap = ImageWrap::TopBottom;
     let id = d.next_image_id;
     d.next_image_id += 1;
     let (w_px, h_px) = image_display_px(&block, &d.setup);
@@ -2612,7 +2696,23 @@ fn insert_inline_image_block(d: &mut DocRuntime, fs: &mut FontSystem, mut block:
     let font_name = d.font.name().to_string();
     let editor = d.editor.as_mut().expect("editor");
     let ph_attrs = placeholder_attrs(&font_name, id, w_px, h_px);
+    // Split at the caret, put the placeholder before the tail, then split once
+    // more so that the image is the only object on its buffer line.
+    editor.insert_string("\n", None);
+    let image_line = editor.cursor().line;
     editor.insert_string(IMAGE_PLACEHOLDER, Some(AttrsList::new(&ph_attrs)));
+    editor.insert_string("\n", None);
+    editor.with_buffer_mut(|b| {
+        if let Some(line) = b.lines.get_mut(image_line) {
+            let defaults = Attrs::new()
+                .family(Family::Name(&font_name))
+                .metadata(BLOCK_IMAGE_LINE_BIT);
+            let mut attrs = AttrsList::new(&defaults);
+            attrs.add_span(0..IMAGE_PLACEHOLDER.len(), &ph_attrs);
+            line.set_attrs_list(attrs);
+            line.set_align(Some(Align::Center));
+        }
+    });
     editor.shape_as_needed(fs, false);
     d.revision = d.revision.wrapping_add(1);
 }
@@ -2982,6 +3082,10 @@ fn convert_inline_to_floating(d: &mut DocRuntime, fs: &mut FontSystem, id: usize
         editor.shape_as_needed(fs, false);
     }
     d.images.remove(&id);
+    if wrap == ImageWrap::TopBottom {
+        insert_top_bottom_image_block(d, fs, block);
+        return;
+    }
     let mut fb = block;
     fb.wrap = if wrap == ImageWrap::Inline {
         ImageWrap::InFrontOfText
@@ -2996,20 +3100,19 @@ fn convert_inline_to_floating(d: &mut DocRuntime, fs: &mut FontSystem, id: usize
     d.revision = d.revision.wrapping_add(1);
 }
 
-/// Convert the floating image at `idx` back into an inline object at the caret.
-fn convert_floating_to_inline(d: &mut DocRuntime, fs: &mut FontSystem, idx: usize) {
+/// Convert a floating image into a Top-and-Bottom block at the text caret.
+fn convert_floating_to_top_bottom(d: &mut DocRuntime, fs: &mut FontSystem, idx: usize) {
     if idx >= d.floating.len() {
         return;
     }
     let mut block = d.floating.remove(idx);
     d.selected_floating = None;
     clear_floating_textures(d);
-    block.wrap = ImageWrap::Inline;
     let cw_mm = d.setup.content_width_mm();
     if block.width_mm > cw_mm {
         block.width_mm = cw_mm;
     }
-    insert_inline_image_block(d, fs, block);
+    insert_top_bottom_image_block(d, fs, block);
 }
 
 /// Rasterise one page of the editor buffer to opaque white RGBA at
@@ -3626,7 +3729,9 @@ mod tests {
     fn image_paragraph_round_trips_through_the_editor() {
         let mut fs = FontSystem::new();
         let mut d = DocRuntime::default();
-        let block = ImageBlock::inline(vec![9, 8, 7, 6], 200, 100, 40.0, ParagraphAlign::Center);
+        let mut block =
+            ImageBlock::inline(vec![9, 8, 7, 6], 200, 100, 40.0, ParagraphAlign::Center);
+        block.wrap = ImageWrap::TopBottom;
         let mut doc = TextDocument::from_plain_text("Trước ảnh");
         doc.paragraphs.push(Paragraph::image(block.clone()));
         doc.paragraphs
@@ -3652,7 +3757,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_image_round_trips_between_text_and_reserves_its_width() {
+    fn retired_inline_image_projects_as_top_bottom_without_losing_text() {
         let mut fs = FontSystem::new();
         let mut d = DocRuntime::default();
         let block = ImageBlock::inline(vec![9, 8, 7, 6], 200, 100, 40.0, ParagraphAlign::Center);
@@ -3673,92 +3778,17 @@ mod tests {
         };
         sync_runtime(&mut d, &mut fs, &view);
 
-        let editor = d.editor.as_ref().unwrap();
-        let anchor = find_image_anchor(editor, 1).expect("inline anchor");
-        let glyph_w = editor.with_buffer(|b| {
-            let line = &b.lines[0];
-            assert_eq!(line.text(), "Trước \u{FFFC}sau");
-            b.layout_runs()
-                .flat_map(|run| run.glyphs.iter().map(move |glyph| (run.text, glyph)))
-                .find(|(text, glyph)| text.get(glyph.start..glyph.end) == Some(IMAGE_PLACEHOLDER))
-                .map(|(_, glyph)| glyph.w)
-                .expect("placeholder glyph")
-        });
-        assert_eq!(anchor, (0, "Trước ".len()));
-        assert!(
-            glyph_w > 130.0,
-            "40 mm inline image should reserve about 151 px, got {glyph_w}"
-        );
-
         let back = editor_document(&d);
-        assert_eq!(back.paragraphs.len(), 1);
-        assert_eq!(back.paragraphs[0].text(), "Trước sau");
-        assert_eq!(back.paragraphs[0].inline_images.len(), 1);
-        assert_eq!(
-            back.paragraphs[0].inline_images[0].byte_offset,
-            "Trước ".len()
-        );
-        assert_eq!(back.paragraphs[0].inline_images[0].image, block);
+        assert_eq!(back.paragraphs.len(), 3);
+        assert_eq!(back.paragraphs[0].text(), "Trước ");
+        assert_eq!(back.paragraphs[2].text(), "sau");
+        let migrated = back.paragraphs[1].image.as_ref().unwrap();
+        assert_eq!(migrated.data, block.data);
+        assert_eq!(migrated.wrap, ImageWrap::TopBottom);
     }
 
     #[test]
-    fn inserting_inline_image_keeps_surrounding_text_on_the_same_paragraph() {
-        let mut fs = FontSystem::new();
-        let mut d = DocRuntime::default();
-        let view = FlowTextViewModel {
-            document: std::sync::Arc::new(TextDocument::from_plain_text("Trước sau")),
-            revision: 1,
-            active_page: 0,
-            page_count: 1,
-        };
-        sync_runtime(&mut d, &mut fs, &view);
-        d.editor
-            .as_mut()
-            .unwrap()
-            .set_cursor(Cursor::new(0, "Trước ".len()));
-        let block = ImageBlock::inline(vec![4, 3, 2, 1], 200, 100, 30.0, ParagraphAlign::Left);
-        insert_inline_image_block(&mut d, &mut fs, block);
-
-        let id = active_image_id(d.editor.as_ref().unwrap()).expect("inserted image selected");
-        let (line, at) = find_image_anchor(d.editor.as_ref().unwrap(), id).unwrap();
-        assert_eq!((line, at), (0, "Trước ".len()));
-        assert!(!line_is_block_image(d.editor.as_ref().unwrap(), line));
-        let inserted = editor_document(&d);
-        assert_eq!(inserted.paragraphs.len(), 1);
-        assert_eq!(inserted.paragraphs[0].text(), "Trước sau");
-        assert_eq!(inserted.paragraphs[0].inline_images.len(), 1);
-
-        apply_image_width(&mut d, &mut fs, id, 45.0);
-        assert_eq!(editor_document(&d).paragraphs[0].text(), "Trước sau");
-        assert_eq!(d.images[&id].width_mm, 45.0);
-
-        let line_len = d
-            .editor
-            .as_ref()
-            .unwrap()
-            .with_buffer(|b| b.lines[0].text().len());
-        {
-            let editor = d.editor.as_mut().unwrap();
-            editor.set_selection(Selection::Normal(Cursor::new(0, 0)));
-            editor.set_cursor(Cursor::new(0, line_len));
-        }
-        apply_char_style(&mut d, &mut fs, CharToggle::Bold);
-        apply_line_spacing(&mut d, &mut fs, 1.5);
-        let formatted = editor_document(&d);
-        assert_eq!(formatted.paragraphs[0].inline_images.len(), 1);
-        assert_eq!(
-            formatted.paragraphs[0].inline_images[0].image.width_mm,
-            45.0
-        );
-
-        apply_image_delete(&mut d, &mut fs, id);
-        let deleted = editor_document(&d);
-        assert_eq!(deleted.paragraphs[0].text(), "Trước sau");
-        assert!(deleted.paragraphs[0].inline_images.is_empty());
-    }
-
-    #[test]
-    fn changing_a_floating_image_to_inline_inserts_it_at_the_text_caret() {
+    fn changing_a_floating_image_to_top_bottom_splits_at_the_text_caret() {
         let mut fs = FontSystem::new();
         let mut d = DocRuntime::default();
         let view = FlowTextViewModel {
@@ -3777,21 +3807,73 @@ mod tests {
         d.floating.push(block);
         d.selected_floating = Some(0);
 
-        convert_floating_to_inline(&mut d, &mut fs, 0);
+        convert_floating_to_top_bottom(&mut d, &mut fs, 0);
 
         assert!(d.floating.is_empty());
         assert!(d.selected_floating.is_none());
         let converted = editor_document(&d);
-        assert_eq!(converted.paragraphs.len(), 1);
-        assert_eq!(converted.paragraphs[0].text(), "Trước sau");
-        assert_eq!(converted.paragraphs[0].inline_images.len(), 1);
+        assert_eq!(converted.paragraphs.len(), 3);
+        assert_eq!(converted.paragraphs[0].text(), "Trước ");
+        assert_eq!(converted.paragraphs[2].text(), "sau");
+        let top_bottom = converted.paragraphs[1]
+            .image
+            .as_ref()
+            .expect("top-and-bottom image paragraph");
         assert_eq!(
-            converted.paragraphs[0].inline_images[0].byte_offset,
-            "Trước ".len()
+            top_bottom.wrap,
+            ImageWrap::TopBottom,
+            "text must flow only above and below the image"
         );
+
+        let id = d.next_image_id - 1;
+        apply_image_width(&mut d, &mut fs, id, 45.0);
+        apply_image_align(&mut d, &mut fs, id, ParagraphAlign::Right);
+        let resized = editor_document(&d);
+        assert_eq!(resized.paragraphs[1].image.as_ref().unwrap().width_mm, 45.0);
+        assert_eq!(resized.paragraphs[1].style.align, ParagraphAlign::Right);
+
+        apply_image_move(&mut d, &mut fs, id, -1);
+        let moved = editor_document(&d);
         assert_eq!(
-            converted.paragraphs[0].inline_images[0].image.wrap,
-            ImageWrap::Inline
+            moved.paragraphs[0].image.as_ref().unwrap().wrap,
+            ImageWrap::TopBottom
+        );
+        assert_eq!(moved.paragraphs[1].text(), "Trước ");
+    }
+
+    #[test]
+    fn newly_inserted_image_defaults_to_top_bottom_block() {
+        let mut fs = FontSystem::new();
+        let mut d = DocRuntime::default();
+        let view = FlowTextViewModel {
+            document: std::sync::Arc::new(TextDocument::from_plain_text("Trước sau")),
+            revision: 1,
+            active_page: 0,
+            page_count: 1,
+        };
+        sync_runtime(&mut d, &mut fs, &view);
+        d.editor
+            .as_mut()
+            .unwrap()
+            .set_cursor(Cursor::new(0, "Trước ".len()));
+
+        insert_image_at_caret(
+            &mut d,
+            &mut fs,
+            PendingImage {
+                data: vec![1, 2, 3],
+                natural_w: 200,
+                natural_h: 100,
+            },
+        );
+
+        let inserted = editor_document(&d);
+        assert_eq!(inserted.paragraphs.len(), 3);
+        assert_eq!(inserted.paragraphs[0].text(), "Trước ");
+        assert_eq!(inserted.paragraphs[2].text(), "sau");
+        assert_eq!(
+            inserted.paragraphs[1].image.as_ref().unwrap().wrap,
+            ImageWrap::TopBottom
         );
     }
 

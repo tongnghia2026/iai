@@ -27,8 +27,9 @@ use std::path::{Path, PathBuf};
 /// v7 adds custom tab names for source PDF pages.
 /// v8 adds materialized blank/image/PDF pages whose ids are outside the source
 /// PDF's physical page range. v10 adds ordered, compact text/image stamps shared
-/// by all pages of a PDF project. v11 anchors inline images between characters
-/// in flowing-text paragraphs; older builds must not silently drop them.
+/// by all pages of a PDF project. v11 introduced inline image anchors in
+/// flowing-text paragraphs; this build reads them and migrates them to the
+/// replacement Top-and-Bottom blocks.
 const IAI_FORMAT_VERSION: u64 = 11;
 
 pub struct IaiImporter;
@@ -161,11 +162,7 @@ pub fn load(path: &Path) -> Result<IaiLoad, String> {
     if manifest["kind"].as_str() == Some("flow_text_document") {
         let mut document: crate::core::text_document::TextDocument =
             serde_json::from_value(manifest["document"].clone()).map_err(|e| e.to_string())?;
-        if version <= 10 {
-            document.migrate_legacy_inline_blocks();
-        } else {
-            document.normalize();
-        }
+        document.migrate_inline_images_to_top_bottom();
         document.validate()?;
         return Ok(IaiLoad::FlowTextDocument(document));
     }
@@ -180,13 +177,15 @@ pub fn write_flow_text_doc(
     path: &Path,
     document: &crate::core::text_document::TextDocument,
 ) -> Result<(), String> {
+    let mut document = document.clone();
+    document.migrate_inline_images_to_top_bottom();
     document.validate()?;
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(file);
     let manifest = serde_json::json!({
         "version": IAI_FORMAT_VERSION,
         "kind": "flow_text_document",
-        "document": document,
+        "document": &document,
     });
     zip.start_file("manifest.json", deflated_options())
         .map_err(|e| e.to_string())?;
@@ -2080,18 +2079,17 @@ mod tests {
             "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM\nĐộc lập – Tự do – Hạnh phúc",
         );
         document.paragraphs[0].style.align = crate::core::text_document::ParagraphAlign::Center;
-        document.paragraphs[0]
-            .inline_images
-            .push(crate::core::text_document::InlineImage {
-                byte_offset: "CỘNG HÒA ".len(),
-                image: crate::core::text_document::ImageBlock::inline(
-                    vec![1, 2, 3],
-                    20,
-                    10,
-                    15.0,
-                    crate::core::text_document::ParagraphAlign::Left,
-                ),
-            });
+        let mut image = crate::core::text_document::ImageBlock::inline(
+            vec![1, 2, 3],
+            20,
+            10,
+            15.0,
+            crate::core::text_document::ParagraphAlign::Left,
+        );
+        image.wrap = crate::core::text_document::ImageWrap::TopBottom;
+        document
+            .paragraphs
+            .insert(1, crate::core::text_document::Paragraph::image(image));
         document.page.margins.left_mm = 32.0;
         document.page.margins.right_mm = 18.0;
 
@@ -2113,7 +2111,7 @@ mod tests {
     }
 
     #[test]
-    fn flow_text_v10_migrates_standalone_inline_image_to_character_anchor() {
+    fn flow_text_v10_migrates_standalone_inline_image_to_top_bottom() {
         let dir = tmp_dir("flow-text-v10-inline-image");
         let path = dir.join("legacy.iai");
         let block = crate::core::text_document::ImageBlock::inline(
@@ -2143,10 +2141,15 @@ mod tests {
         let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("load legacy document") else {
             panic!("expected flowing-text document");
         };
-        assert!(reopened.paragraphs[0].image.is_none());
-        assert_eq!(reopened.paragraphs[0].inline_images.len(), 1);
-        assert_eq!(reopened.paragraphs[0].inline_images[0].byte_offset, 0);
-        assert_eq!(reopened.paragraphs[0].inline_images[0].image, block);
+        let migrated = reopened.paragraphs[0]
+            .image
+            .as_ref()
+            .expect("top-and-bottom image block");
+        assert_eq!(migrated.data, block.data);
+        assert_eq!(
+            migrated.wrap,
+            crate::core::text_document::ImageWrap::TopBottom
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

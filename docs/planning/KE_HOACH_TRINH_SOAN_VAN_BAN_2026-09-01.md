@@ -2,9 +2,9 @@
 
 > Trạng thái (2026-09-03): **MVP + Trộn thư + nhiều bản vá editor + REDESIGN ẢNH
 > kiểu Word — TẤT CẢ ĐÃ PUSH** (nhánh `feat/vector-core-foundation`, tới `3be6eb4`).
-> **Cập nhật 2026-09-08: BAO CHỮ đã sửa lỗi đoạn dưới ảnh bị thụt; CÙNG DÒNG
-> CHỮ đã đổi sang ảnh-ký-tự thật trong đoạn. Code + test đã qua, chờ chủ
-> GUI-test bản release mới** — xem mục 0.4–0.5 bên dưới.
+> **Cập nhật 2026-09-08: BAO CHỮ đã sửa lỗi đoạn dưới ảnh bị thụt; chế độ CÙNG
+> DÒNG được thay bằng TRÊN VÀ DƯỚI theo phản hồi GUI-test. Chờ chủ GUI-test bản
+> release mới** — xem mục 0.4–0.5 bên dưới.
 > Chủ dự án (end-user) muốn trình soạn thảo kiểu Word cơ bản, nhấn mạnh **nhẹ máy**.
 
 ---
@@ -53,8 +53,9 @@ memory `project_iai_wordprocessor_plan`.
   & nổi) 1 dòng, bấm để focus (`flow_text_objects_panel` trong `panels.rs`;
   `DocumentIntent.flow_text_focus` → `document_mode::request_focus`). Cửa sổ "Bố
   cục" cũ đã bỏ.
-- **3 chế độ vị trí ảnh** (combo "Kiểu ảnh"): **Cùng dòng / Nổi trên chữ / Nổi sau
-  chữ**. Model: `ImageBlock.wrap: ImageWrap{Inline,BehindText,InFrontOfText,
+- **Các chế độ vị trí ảnh** (combo "Kiểu ảnh"): **Trên và dưới / Nổi trên chữ /
+  Nổi sau chữ / Bao quanh ảnh**. Model: `ImageBlock.wrap: ImageWrap{Inline,
+  BehindText,InFrontOfText,
   Square,TopBottom}` + `page,x_mm,y_mm` (serde default); `TextDocument.
   floating_images: Vec<ImageBlock>`. Editor: `d.floating`/`selected_floating`/
   `float_drag`; `handle_floating_pointer` (chọn/kéo-move/kéo-góc-resize, chạy
@@ -77,7 +78,7 @@ khai một contract hình học dùng chung cho editor/PDF, reflow nhiều lư�
   `text_offset_at_y` (hit-test click); (5) caret; (6) `text_layout` và PDF flow.
 - **GATE đã khóa bằng code/test:** khi tài liệu KHÔNG có ảnh `Square`, mọi hàm
   trả về như cũ → 0 thay đổi cho tài liệu hiện có. Test bao phủ hình học, reflow
-  editor, hit-test/caret và PDF hợp lệ. `TopBottom` vẫn để sau.
+  editor, hit-test/caret và PDF hợp lệ.
 - **Bản vá sau GUI-test 2026-09-07:** cosmic-text chỉ cho một độ rộng trên mỗi
   `BufferLine`, nên bản đầu lấy cột hẹp cho cả đoạn và làm các dòng dưới ảnh vẫn
   bị thụt. Nay layout tách đoạn thành các phân đoạn **chỉ trong runtime** tại nơi
@@ -86,17 +87,16 @@ khai một contract hình học dùng chung cho editor/PDF, reflow nhiều lư�
   contract. Regression test kiểm trực tiếp độ rộng dòng ngang ảnh/dưới ảnh và
   round-trip không đổi nội dung.
 
-### 0.5 CÙNG DÒNG CHỮ — ✅ code/test, chờ GUI (2026-09-08)
-- Ảnh mới được chèn đúng tại caret dưới dạng **một object character U+FFFC**,
-  không tự tạo paragraph riêng. Có thể gõ chữ ngay trước/sau ảnh; ảnh chạy theo
-  chữ và chiếm đúng bề rộng/cao trong layout.
-- Model `.iai` v11 lưu `Paragraph.inline_images` với neo byte UTF-8. Editor,
-  preview, PDF chữ-vector, Layer panel, định dạng vùng chọn và trộn thư cùng dùng
-  neo này; resize/xóa/chuyển nổi không làm mất chữ xung quanh.
-- Khi mở file v10 trở xuống, image-paragraph `Inline` cũ tự nâng cấp thành neo
-  ký tự (vẫn ở đúng vị trí đoạn cũ) để có thể tiếp tục gõ cùng dòng.
-- Test khóa round-trip model/editor/.iai, độ rộng glyph ảnh, render PDF, UTF-8,
-  mail-merge và tương thích tài liệu cũ.
+### 0.5 TRÊN VÀ DƯỚI (Top and Bottom) — 🔧 thay Cùng dòng (2026-09-08)
+- Theo GUI-test, bỏ **Cùng dòng chữ** khỏi UI vì khó di chuyển/resize và ít giá
+  trị thực tế. Ảnh mới mặc định là khối **Trên và dưới**: chữ không nằm hai bên.
+- Khối ảnh kéo ngang để căn trái/giữa/phải, kéo dọc để đổi vị trí giữa các đoạn;
+  kéo góc hoặc ô **Rộng** để phóng to/thu nhỏ đúng tỉ lệ.
+- `.iai` cũ có ảnh inline vẫn mở không mất dữ liệu: loader tách nguyên văn + rich
+  style hai phía và nâng ảnh thành khối Trên và dưới. Kiểu inline chỉ còn là
+  đường tương thích nội bộ, không còn là lựa chọn tạo mới.
+- Preview, PDF chữ-vector, Layer panel và round-trip editor dùng image paragraph
+  hiện có nên chữ luôn nằm trên/dưới ảnh một cách xác định.
 
 ### 0.6 CÒN LẠI khác (tùy chọn, KHÔNG gấp)
 1. **Đầu/chân trang + số trang.** 2. **Bảng (tables)** — Pha 4. 3. **Xuất `.docx`**
