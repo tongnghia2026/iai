@@ -30,7 +30,7 @@ use crate::core::text_document::{
     CharStyle, ImageBlock, ImageWrap, ListKind, PageSetup, PaperSize, Paragraph, ParagraphAlign,
     ParagraphStyle, Run, TextDocument,
 };
-use crate::core::text_layout::{line_layout, square_wrap};
+use crate::core::text_layout::{flow_line_around_square, line_layout, square_wrap};
 use crate::ui::intent::FlowTextFocus;
 use crate::ui::{FlowTextViewModel, UiActions, UiData};
 
@@ -67,6 +67,10 @@ fn list_kind_from_code(code: usize) -> ListKind {
 // either property.
 const LIST_CODE_MASK: usize = 0xFF;
 const SPACING_SHIFT: usize = 8;
+const SPACING_CODE_MASK: usize = 0xFFFF;
+/// Runtime-only marker for parts created by Square reflow. It lives outside the
+/// persisted list/spacing fields and is removed when the editor is snapshotted.
+const FLOW_CONTINUATION_BIT: usize = 1usize << (usize::BITS - 1);
 
 /// Encode a line-spacing multiplier for the metadata high bits.
 fn spacing_to_code(mult: f32) -> usize {
@@ -83,7 +87,7 @@ fn line_spacing_override(line: &cosmic_text::BufferLine) -> Option<f32> {
     if line.text() == IMAGE_PLACEHOLDER {
         return None;
     }
-    code_to_spacing(line.attrs_list().defaults().metadata >> SPACING_SHIFT)
+    code_to_spacing((line.attrs_list().defaults().metadata >> SPACING_SHIFT) & SPACING_CODE_MASK)
 }
 
 /// The Unicode object-replacement character marks a line that holds one block
@@ -1046,6 +1050,9 @@ fn window_ui(
 
                 // Keyboard / text / IME / clipboard.
                 if focused {
+                    // Work on canonical logical paragraphs, never on the
+                    // runtime-only pieces created to vary width around images.
+                    collapse_flow_lines(editor, fs);
                     let events = ui.input(|i| i.events.clone());
                     for ev in events {
                         // An image line is an atomic block: typing is ignored,
@@ -2077,7 +2084,37 @@ fn set_line_list_code(line: &mut cosmic_text::BufferLine, code: usize) {
 fn set_line_spacing_code(line: &mut cosmic_text::BufferLine, code: usize) {
     let new_list = {
         let old = line.attrs_list();
-        let meta = (old.defaults().metadata & LIST_CODE_MASK) | ((code & 0xFFFF) << SPACING_SHIFT);
+        let spacing_bits = SPACING_CODE_MASK << SPACING_SHIFT;
+        let meta = (old.defaults().metadata & !spacing_bits)
+            | ((code & SPACING_CODE_MASK) << SPACING_SHIFT);
+        let new_defaults = old.defaults().metadata(meta);
+        let mut nl = AttrsList::new(&new_defaults);
+        for (range, attrs) in old.spans() {
+            nl.add_span(range.clone(), &attrs.as_attrs());
+        }
+        nl
+    };
+    line.set_attrs_list(new_list);
+}
+
+fn is_flow_continuation(line: &cosmic_text::BufferLine) -> bool {
+    line.text() != IMAGE_PLACEHOLDER
+        && line.attrs_list().defaults().metadata & FLOW_CONTINUATION_BIT != 0
+}
+
+/// Set or clear the internal Square-flow continuation marker while preserving
+/// paragraph metadata and character spans.
+fn set_flow_continuation(line: &mut cosmic_text::BufferLine, continuation: bool) {
+    if line.text() == IMAGE_PLACEHOLDER {
+        return;
+    }
+    let new_list = {
+        let old = line.attrs_list();
+        let meta = if continuation {
+            old.defaults().metadata | FLOW_CONTINUATION_BIT
+        } else {
+            old.defaults().metadata & !FLOW_CONTINUATION_BIT
+        };
         let new_defaults = old.defaults().metadata(meta);
         let mut nl = AttrsList::new(&new_defaults);
         for (range, attrs) in old.spans() {
@@ -2148,9 +2185,126 @@ fn relayout_list_lines(editor: &mut Editor<'static>, fs: &mut FontSystem, conten
     });
 }
 
-/// Reflow each logical paragraph at the narrowest measure required by the
-/// Square images crossed by its visual lines. Repeating after layout lets newly
-/// wrapped visual lines discover exclusions below the paragraph's first line.
+/// Convert a cursor in the internally split buffer to `(logical paragraph,
+/// byte offset)`, so rebuilding Square-flow segments never moves the caret or
+/// selection from the user's point of view.
+fn logical_cursor(buffer: &Buffer, cursor: Cursor) -> (usize, usize) {
+    if buffer.lines.is_empty() {
+        return (0, 0);
+    }
+    let line_i = cursor.line.min(buffer.lines.len() - 1);
+    let mut base = line_i;
+    while base > 0 && is_flow_continuation(&buffer.lines[base]) {
+        base -= 1;
+    }
+    let paragraph = buffer.lines[..base]
+        .iter()
+        .filter(|line| !is_flow_continuation(line))
+        .count();
+    let prefix = buffer.lines[base..line_i]
+        .iter()
+        .map(|line| line.text().len())
+        .sum::<usize>();
+    (
+        paragraph,
+        prefix + cursor.index.min(buffer.lines[line_i].text().len()),
+    )
+}
+
+fn cursor_from_logical(buffer: &Buffer, paragraph: usize, byte: usize) -> Cursor {
+    let Some(mut line_i) = buffer
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !is_flow_continuation(line))
+        .nth(paragraph)
+        .map(|(i, _)| i)
+    else {
+        let last = buffer.lines.len().saturating_sub(1);
+        return Cursor::new(
+            last,
+            buffer.lines.get(last).map_or(0, |line| line.text().len()),
+        );
+    };
+    let mut remaining = byte;
+    loop {
+        let len = buffer.lines[line_i].text().len();
+        let has_continuation = buffer
+            .lines
+            .get(line_i + 1)
+            .is_some_and(is_flow_continuation);
+        if remaining < len || !has_continuation {
+            return Cursor::new(line_i, remaining.min(len));
+        }
+        remaining -= len;
+        line_i += 1;
+    }
+}
+
+fn map_selection_from_logical(
+    buffer: &Buffer,
+    selection: Selection,
+    logical: Option<(usize, usize)>,
+) -> Selection {
+    let Some((paragraph, byte)) = logical else {
+        return Selection::None;
+    };
+    let cursor = cursor_from_logical(buffer, paragraph, byte);
+    match selection {
+        Selection::None => Selection::None,
+        Selection::Normal(_) => Selection::Normal(cursor),
+        Selection::Line(_) => Selection::Line(cursor),
+        Selection::Word(_) => Selection::Word(cursor),
+    }
+}
+
+/// Join runtime Square-flow pieces back into their logical paragraphs. This is
+/// done before edits, so Enter/Backspace and formatting keep normal paragraph
+/// semantics even though display uses several cosmic buffer lines.
+fn collapse_flow_lines(editor: &mut Editor<'static>, fs: &mut FontSystem) {
+    let cursor = editor.cursor();
+    let selection = editor.selection();
+    let (logical_cursor_pos, logical_selection_pos, has_continuations) = editor.with_buffer(|b| {
+        let has = b.lines.iter().any(is_flow_continuation);
+        (
+            logical_cursor(b, cursor),
+            match selection {
+                Selection::None => None,
+                Selection::Normal(c) | Selection::Line(c) | Selection::Word(c) => {
+                    Some(logical_cursor(b, c))
+                }
+            },
+            has,
+        )
+    });
+    if !has_continuations {
+        return;
+    }
+
+    editor.with_buffer_mut(|b| {
+        let mut i = 0;
+        while i + 1 < b.lines.len() {
+            if is_flow_continuation(&b.lines[i + 1]) {
+                let continuation = b.lines.remove(i + 1);
+                b.lines[i].append(&continuation);
+                set_flow_continuation(&mut b.lines[i], false);
+            } else {
+                i += 1;
+            }
+        }
+    });
+    let restored_cursor =
+        editor.with_buffer(|b| cursor_from_logical(b, logical_cursor_pos.0, logical_cursor_pos.1));
+    let restored_selection =
+        editor.with_buffer(|b| map_selection_from_logical(b, selection, logical_selection_pos));
+    editor.set_cursor(restored_cursor);
+    editor.set_selection(restored_selection);
+    editor.shape_as_needed(fs, false);
+}
+
+/// Reflow logical paragraphs into internal segments whose measures follow the
+/// Square exclusion line by line. Unlike the earlier paragraph-wide minimum,
+/// this restores the full text width as soon as a line passes the image bottom.
 fn relayout_flow_lines(
     editor: &mut Editor<'static>,
     fs: &mut FontSystem,
@@ -2161,54 +2315,68 @@ fn relayout_flow_lines(
     content_h: f32,
 ) {
     if !floating.iter().any(|image| image.wrap == ImageWrap::Square) {
+        collapse_flow_lines(editor, fs);
         relayout_list_lines(editor, fs, content_w);
         return;
     }
+    collapse_flow_lines(editor, fs);
+    let cursor = editor.cursor();
+    let selection = editor.selection();
+    let logical_selection_pos = match selection {
+        Selection::None => None,
+        Selection::Normal(c) | Selection::Line(c) | Selection::Word(c) => Some((c.line, c.index)),
+    };
 
-    for _ in 0..3 {
-        let widths = editor.with_buffer(|b| {
-            let mut widths: Vec<f32> = b
-                .lines
-                .iter()
-                .map(|line| line_layout(line_list_code(line) != 0, content_w, None, DPI).1)
-                .collect();
-            for run in b.layout_runs() {
-                let page = (run.line_top / content_h).floor() as usize;
-                let page_y = cy + run.line_top - page as f32 * content_h;
-                let wrap = square_wrap(
-                    floating,
-                    page,
-                    cx,
-                    cy,
-                    content_w,
-                    page_y,
-                    run.line_height,
-                    DPI,
+    editor.with_buffer_mut(|b| {
+        let fss = b.metrics().font_size;
+        let default_lh = b.metrics().line_height;
+        let wrap_mode = b.wrap();
+        let ell = b.ellipsize();
+        let mono = b.monospace_width();
+        let tab = b.tab_width();
+        let hint = b.hinting();
+        let source = std::mem::take(&mut b.lines);
+        let mut rebuilt = Vec::with_capacity(source.len());
+        let mut page = 0usize;
+        let mut y = 0.0f32;
+
+        for mut line in source {
+            set_flow_continuation(&mut line, false);
+            let is_list = line_list_code(&line) != 0;
+            let exclusions = if line.text() == IMAGE_PLACEHOLDER {
+                &[][..]
+            } else {
+                floating
+            };
+            let (segments, end_page, end_y) = flow_line_around_square(
+                line, fs, fss, default_lh, wrap_mode, ell, mono, tab, hint, exclusions, cx, cy,
+                content_w, content_h, DPI, is_list, page, y,
+            );
+            page = end_page;
+            y = end_y;
+            for (segment_i, mut segment) in segments.into_iter().enumerate() {
+                set_flow_continuation(&mut segment.line, segment_i != 0);
+                segment.line.layout(
+                    fs,
+                    fss,
+                    Some(segment.width.max(1.0)),
+                    wrap_mode,
+                    ell,
+                    mono,
+                    tab,
+                    hint,
                 );
-                let wanted = line_layout(
-                    line_list_code(&b.lines[run.line_i]) != 0,
-                    content_w,
-                    wrap,
-                    DPI,
-                )
-                .1;
-                widths[run.line_i] = widths[run.line_i].min(wanted);
+                rebuilt.push(segment.line);
             }
-            widths
-        });
-        editor.with_buffer_mut(|b| {
-            let fss = b.metrics().font_size;
-            let wrap = b.wrap();
-            let ell = b.ellipsize();
-            let mono = b.monospace_width();
-            let tab = b.tab_width();
-            let hint = b.hinting();
-            for (line, width) in b.lines.iter_mut().zip(widths) {
-                line.reset_layout();
-                line.layout(fs, fss, Some(width.max(1.0)), wrap, ell, mono, tab, hint);
-            }
-        });
-    }
+        }
+        b.lines = rebuilt;
+    });
+
+    let restored_cursor = editor.with_buffer(|b| cursor_from_logical(b, cursor.line, cursor.index));
+    let restored_selection =
+        editor.with_buffer(|b| map_selection_from_logical(b, selection, logical_selection_pos));
+    editor.set_cursor(restored_cursor);
+    editor.set_selection(restored_selection);
 }
 
 /// Combined Square-wrap and list offset for one shaped visual run.
@@ -2756,6 +2924,10 @@ fn render_page(
         let mut out = Vec::with_capacity(b.lines.len());
         let mut num = 0usize;
         for line in &b.lines {
+            if is_flow_continuation(line) {
+                out.push(None);
+                continue;
+            }
             out.push(match list_kind_from_code(line_list_code(line)) {
                 ListKind::None => {
                     num = 0;
@@ -2946,41 +3118,55 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
     };
 
     let paragraphs = editor.with_buffer(|buffer| {
-        buffer
-            .lines
-            .iter()
-            .map(|line| {
-                let align = match line.align().unwrap_or(Align::Left) {
-                    Align::Center => ParagraphAlign::Center,
-                    Align::Right | Align::End => ParagraphAlign::Right,
-                    Align::Justified => ParagraphAlign::Justify,
-                    _ => ParagraphAlign::Left,
-                };
-                let style = ParagraphStyle {
-                    align,
-                    line_spacing: line_spacing_override(line).unwrap_or(d.line_spacing),
-                    list: list_kind_from_code(line_list_code(line)),
-                    ..ParagraphStyle::default()
-                };
-                // An image line carries the picture id in the placeholder's
-                // metadata; look the block up in the runtime store.
-                if line.text() == IMAGE_PLACEHOLDER {
-                    let id = line.attrs_list().get_span(0).metadata;
-                    if let Some(block) = d.images.get(&id) {
-                        return Paragraph {
-                            image: Some(block.clone()),
-                            style,
-                            runs: Vec::new(),
-                        };
+        let mut paragraphs: Vec<Paragraph> = Vec::new();
+        for line in &buffer.lines {
+            let continuation = is_flow_continuation(line);
+            let align = match line.align().unwrap_or(Align::Left) {
+                Align::Center => ParagraphAlign::Center,
+                Align::Right | Align::End => ParagraphAlign::Right,
+                Align::Justified => ParagraphAlign::Justify,
+                _ => ParagraphAlign::Left,
+            };
+            let style = ParagraphStyle {
+                align,
+                line_spacing: line_spacing_override(line).unwrap_or(d.line_spacing),
+                list: list_kind_from_code(line_list_code(line)),
+                ..ParagraphStyle::default()
+            };
+            // An image line carries the picture id in the placeholder's
+            // metadata; look the block up in the runtime store.
+            let paragraph = if line.text() == IMAGE_PLACEHOLDER {
+                let id = line.attrs_list().get_span(0).metadata;
+                if let Some(block) = d.images.get(&id) {
+                    Paragraph {
+                        image: Some(block.clone()),
+                        style,
+                        runs: Vec::new(),
+                    }
+                } else {
+                    Paragraph {
+                        runs: Vec::new(),
+                        style,
+                        image: None,
                     }
                 }
+            } else {
                 Paragraph {
                     runs: runs_from_line(line, &base_char),
                     style,
                     image: None,
                 }
-            })
-            .collect()
+            };
+
+            if continuation {
+                if let Some(previous) = paragraphs.last_mut() {
+                    previous.runs.extend(paragraph.runs);
+                    continue;
+                }
+            }
+            paragraphs.push(paragraph);
+        }
+        paragraphs
     });
 
     TextDocument {
@@ -3455,7 +3641,6 @@ mod tests {
             None,
         );
         buffer.shape_until_scroll(&mut fs, false);
-        let wide_lines = buffer.layout_runs().count();
         let mut editor = Editor::new(buffer);
 
         let mut image = ImageBlock::inline(Vec::new(), 300, 300, 65.0, ParagraphAlign::Left);
@@ -3465,16 +3650,92 @@ mod tests {
         image.y_mm = setup.margins.top_mm;
         relayout_flow_lines(&mut editor, &mut fs, &[image.clone()], cx, cy, cw, ch);
 
+        let (segment_count, joined, widths) = editor.with_buffer(|b| {
+            (
+                b.lines.len(),
+                b.lines.iter().map(|line| line.text()).collect::<String>(),
+                b.layout_runs()
+                    .map(|run| (run.line_i, run.line_top, run.line_w))
+                    .collect::<Vec<_>>(),
+            )
+        });
         assert!(
-            editor.with_buffer(|b| b.layout_runs().count()) > wide_lines,
-            "Square exclusion should narrow and reflow the editor paragraph"
+            segment_count > 1,
+            "Square flow should split the display line"
+        );
+        assert_eq!(
+            joined, long,
+            "runtime splitting must not change paragraph text"
+        );
+        assert!(
+            editor.with_buffer(|b| is_flow_continuation(&b.lines[1])),
+            "the second display segment must be marked as a continuation"
         );
         let first_y = editor
             .with_buffer(|b| b.layout_runs().next().map(|run| run.line_top as i32))
             .unwrap();
         assert!(
-            text_offset_at_y(&editor, first_y, &[image], cx, cy, cw, ch) > 0,
+            text_offset_at_y(&editor, first_y, &[image.clone()], cx, cy, cw, ch) > 0,
             "paint, caret and pointer mapping should move right of a left image"
+        );
+        let beside_width = widths.first().unwrap().2;
+        let below_width = widths
+            .iter()
+            .find(|(line_i, _, _)| *line_i > 0)
+            .map(|(_, _, width)| *width)
+            .unwrap_or_else(|| panic!("continuation was not exposed as a layout run: {widths:?}"));
+        assert!(
+            below_width > beside_width * 1.4,
+            "text below the image must return to the full measure: {below_width} vs {beside_width}"
+        );
+
+        let mut runtime = DocRuntime {
+            editor: Some(editor),
+            setup,
+            floating: vec![image],
+            ..DocRuntime::default()
+        };
+        let saved = editor_document(&runtime);
+        assert_eq!(
+            saved.paragraphs.len(),
+            1,
+            "display segments must save as one paragraph"
+        );
+        assert_eq!(
+            saved.paragraphs[0]
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            long
+        );
+
+        // A fresh reflow must keep the caret at the same logical byte even when
+        // the runtime segment boundaries are rebuilt.
+        let caret_byte = long.len() * 3 / 4;
+        let caret_before = runtime
+            .editor
+            .as_ref()
+            .unwrap()
+            .with_buffer(|b| cursor_from_logical(b, 0, caret_byte));
+        runtime.editor.as_mut().unwrap().set_cursor(caret_before);
+        relayout_flow_lines(
+            runtime.editor.as_mut().unwrap(),
+            &mut fs,
+            &runtime.floating,
+            cx,
+            cy,
+            cw,
+            ch,
+        );
+        let caret = runtime.editor.as_ref().unwrap().cursor();
+        assert_eq!(
+            runtime
+                .editor
+                .as_ref()
+                .unwrap()
+                .with_buffer(|b| logical_cursor(b, caret)),
+            (0, caret_byte)
         );
     }
 

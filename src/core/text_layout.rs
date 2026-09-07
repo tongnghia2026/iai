@@ -17,8 +17,8 @@ use std::io::Write;
 use std::path::Path;
 
 use cosmic_text::{
-    Align, Attrs, Buffer, Color as CtColor, Family, FontSystem, Metrics, Shaping, Style,
-    SwashCache, UnderlineStyle, Weight,
+    Align, Attrs, Buffer, BufferLine, Color as CtColor, Ellipsize, Family, FontSystem, Hinting,
+    LineEnding, Metrics, Shaping, Style, SwashCache, UnderlineStyle, Weight, Wrap,
 };
 use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
 
@@ -188,6 +188,8 @@ enum Block {
         line_offsets: Vec<f32>,
         /// A shaped single-line list marker drawn in the indent gutter.
         marker: Option<Buffer>,
+        /// True for an internal continuation of the same model paragraph.
+        continuation: bool,
     },
     Image {
         block: ImageBlock,
@@ -219,6 +221,171 @@ fn place_text_lines(
         y += line_h;
     }
     (placed, page, y)
+}
+
+/// One internally-split part of a logical paragraph. cosmic-text accepts one
+/// measure per `BufferLine`, so a paragraph whose first lines sit beside a
+/// Square image and whose later lines sit below it must be represented by more
+/// than one line while it is laid out. The document model remains unchanged.
+pub(crate) struct FlowLineSegment {
+    pub line: BufferLine,
+    pub width: f32,
+    pub line_pages: Vec<(usize, f32)>,
+}
+
+/// Split one logical buffer line whenever the available Square-wrap width
+/// changes. This is shared by the canonical/PDF layout and the live editor, so
+/// both return to the full column immediately below a floating image.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn flow_line_around_square(
+    mut remaining: BufferLine,
+    font_system: &mut FontSystem,
+    font_size: f32,
+    default_line_height: f32,
+    wrap_mode: Wrap,
+    ellipsize: Ellipsize,
+    monospace_width: Option<f32>,
+    tab_width: u16,
+    hinting: Hinting,
+    floating: &[ImageBlock],
+    cx: f32,
+    cy: f32,
+    content_w: f32,
+    content_h: f32,
+    dpi: f32,
+    is_list: bool,
+    mut page: usize,
+    mut y: f32,
+) -> (Vec<FlowLineSegment>, usize, f32) {
+    let mut out = Vec::new();
+
+    loop {
+        // Pick the measure for the next visual line. A second pass below uses
+        // its actual shaped height, which matters for per-run font sizes.
+        let mut probe_page = page;
+        let mut probe_y = y;
+        if probe_y > 0.0 && probe_y + default_line_height > content_h {
+            probe_page += 1;
+            probe_y = 0.0;
+        }
+        let probe_wrap = square_wrap(
+            floating,
+            probe_page,
+            cx,
+            cy,
+            content_w,
+            cy + probe_y,
+            default_line_height,
+            dpi,
+        );
+        let mut width = line_layout(is_list, content_w, probe_wrap, dpi).1.max(1.0);
+
+        // Usually one pass. Repeat only when the actual first-line height puts
+        // it in a different exclusion band than the default metric predicted.
+        let mut retry = 0;
+        let (split_at, placed) = loop {
+            remaining.reset_layout();
+            let layouts = remaining.layout(
+                font_system,
+                font_size,
+                Some(width),
+                wrap_mode,
+                ellipsize,
+                monospace_width,
+                tab_width,
+                hinting,
+            );
+
+            let mut lp = page;
+            let mut ly = y;
+            let mut placed = Vec::with_capacity(layouts.len());
+            let mut split_at = None;
+            for (idx, visual) in layouts.iter().enumerate() {
+                let line_h = visual.line_height_opt.unwrap_or(default_line_height);
+                if ly > 0.0 && ly + line_h > content_h {
+                    lp += 1;
+                    ly = 0.0;
+                }
+                let wanted = line_layout(
+                    is_list,
+                    content_w,
+                    square_wrap(floating, lp, cx, cy, content_w, cy + ly, line_h, dpi),
+                    dpi,
+                )
+                .1
+                .max(1.0);
+
+                if (wanted - width).abs() >= 0.25 {
+                    if idx == 0 && retry < 2 {
+                        width = wanted;
+                        retry += 1;
+                        split_at = Some(0);
+                    } else {
+                        split_at = visual.glyphs.iter().map(|g| g.start).min();
+                    }
+                    break;
+                }
+                placed.push((lp, ly));
+                ly += line_h;
+            }
+
+            if split_at == Some(0) {
+                continue;
+            }
+            break (split_at, placed);
+        };
+
+        if let Some(index) = split_at.filter(|&i| i > 0 && i < remaining.text().len()) {
+            let tail = remaining.split_off(index);
+            // Buffer iteration uses line endings to reach following entries.
+            // The live editor later joins this runtime-only boundary again.
+            remaining.set_ending(LineEnding::Lf);
+            // Splitting resets the head's cached layout; restore it at the
+            // measure used to compute `placed` before handing it to renderers.
+            remaining.layout(
+                font_system,
+                font_size,
+                Some(width),
+                wrap_mode,
+                ellipsize,
+                monospace_width,
+                tab_width,
+                hinting,
+            );
+            if let Some(&(last_page, last_y)) = placed.last() {
+                let last_h = remaining
+                    .layout_opt()
+                    .and_then(|lines| lines.last())
+                    .and_then(|line| line.line_height_opt)
+                    .unwrap_or(default_line_height);
+                page = last_page;
+                y = last_y + last_h;
+            }
+            out.push(FlowLineSegment {
+                line: remaining,
+                width,
+                line_pages: placed,
+            });
+            remaining = tail;
+            continue;
+        }
+
+        if let Some(&(last_page, last_y)) = placed.last() {
+            let last_h = remaining
+                .layout_opt()
+                .and_then(|lines| lines.last())
+                .and_then(|line| line.line_height_opt)
+                .unwrap_or(default_line_height);
+            page = last_page;
+            y = last_y + last_h;
+        }
+        out.push(FlowLineSegment {
+            line: remaining,
+            width,
+            line_pages: placed,
+        });
+        return (out, page, y);
+    }
 }
 
 /// A fully flowed document: every visual line / image assigned to a page and
@@ -294,7 +461,7 @@ impl DocumentLayout {
 
             // List paragraphs hang: the text column is narrowed by the indent and
             // shifted right; the marker is shaped separately for the gutter.
-            let (indent, marker) = if para.style.list != ListKind::None {
+            let (indent, mut marker) = if para.style.list != ListKind::None {
                 let indent = LIST_INDENT_MM / 25.4 * dpi;
                 let number = if para.style.list == ListKind::Numbered {
                     list_number += 1;
@@ -335,15 +502,45 @@ impl DocumentLayout {
             let start_y = y;
             let is_list = para.style.list != ListKind::None;
 
-            // Two-pass reflow: place at the current measure, find every Square
-            // exclusion the paragraph crosses, then re-shape at the narrowest
-            // required measure. A final repeat handles lines created by reflow.
-            let mut layout_width = base_width;
-            for _ in 0..3 {
-                let (placed, _, _) = place_text_lines(&buffer, start_page, start_y, ch);
-                let wanted = buffer
+            let fss = buffer.metrics().font_size;
+            let default_lh = buffer.metrics().line_height;
+            let wrap_mode = buffer.wrap();
+            let ellipsize = buffer.ellipsize();
+            let monospace = buffer.monospace_width();
+            let tab = buffer.tab_width();
+            let hinting = buffer.hinting();
+            let logical_line = buffer.lines.remove(0);
+            let (segments, end_page, end_y) = flow_line_around_square(
+                logical_line,
+                font_system,
+                fss,
+                default_lh,
+                wrap_mode,
+                ellipsize,
+                monospace,
+                tab,
+                hinting,
+                &doc.floating_images,
+                cx,
+                cy,
+                cw,
+                ch,
+                dpi,
+                is_list,
+                start_page,
+                start_y,
+            );
+            page = end_page;
+            y = end_y;
+
+            for (segment_index, segment) in segments.into_iter().enumerate() {
+                let mut segment_buffer = Buffer::new(font_system, metrics);
+                segment_buffer.set_size(Some(segment.width), None);
+                segment_buffer.lines = vec![segment.line];
+                segment_buffer.shape_until_scroll(font_system, false);
+                let line_offsets = segment_buffer
                     .layout_runs()
-                    .zip(placed.iter())
+                    .zip(segment.line_pages.iter())
                     .map(|(run, (lp, top))| {
                         let wrap = square_wrap(
                             &doc.floating_images,
@@ -355,47 +552,23 @@ impl DocumentLayout {
                             run.line_height,
                             dpi,
                         );
-                        line_layout(is_list, cw, wrap, dpi).1
+                        line_layout(is_list, cw, wrap, dpi).0
                     })
-                    .fold(base_width, f32::min)
-                    .max(1.0);
-                if (wanted - layout_width).abs() < 0.25 {
-                    break;
-                }
-                layout_width = wanted;
-                buffer.set_size(Some(layout_width), None);
-                buffer.shape_until_scroll(font_system, false);
+                    .collect();
+                blocks.push(Block::Text {
+                    buffer: segment_buffer,
+                    line_pages: segment.line_pages,
+                    indent,
+                    line_offsets,
+                    marker: if segment_index == 0 {
+                        marker.take()
+                    } else {
+                        None
+                    },
+                    continuation: segment_index != 0,
+                });
             }
-
-            let (line_pages, end_page, end_y) = place_text_lines(&buffer, start_page, start_y, ch);
-            page = end_page;
-            y = end_y;
-            let line_offsets = buffer
-                .layout_runs()
-                .zip(line_pages.iter())
-                .map(|(run, (lp, top))| {
-                    let wrap = square_wrap(
-                        &doc.floating_images,
-                        *lp,
-                        cx,
-                        cy,
-                        cw,
-                        cy + *top,
-                        run.line_height,
-                        dpi,
-                    );
-                    line_layout(is_list, cw, wrap, dpi).0
-                })
-                .collect();
-
             y += para.style.space_after_pt * px_per_pt;
-            blocks.push(Block::Text {
-                buffer,
-                line_pages,
-                indent,
-                line_offsets,
-                marker,
-            });
         }
 
         Self {
@@ -419,7 +592,13 @@ impl DocumentLayout {
         self.blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Text { indent, marker, .. } => Some((*indent, marker.is_some())),
+                Block::Text {
+                    indent,
+                    marker,
+                    continuation,
+                    ..
+                } if !continuation => Some((*indent, marker.is_some())),
+                Block::Text { .. } => None,
                 Block::Image { .. } => None,
             })
             .collect()
@@ -452,6 +631,33 @@ impl DocumentLayout {
                 for (li, run) in buffer.layout_runs().enumerate() {
                     let (page, top) = line_pages[li];
                     out.push((page, top, run.line_height));
+                }
+            }
+        }
+        out
+    }
+
+    /// `(page, top, text width, horizontal offset)` for regression tests that
+    /// verify a paragraph expands again after a Square exclusion ends.
+    #[cfg(test)]
+    fn placed_line_geometry(&self) -> Vec<(usize, f32, f32, f32)> {
+        let mut out = Vec::new();
+        for block in &self.blocks {
+            if let Block::Text {
+                buffer,
+                line_pages,
+                line_offsets,
+                ..
+            } = block
+            {
+                for (li, run) in buffer.layout_runs().enumerate() {
+                    let (page, top) = line_pages[li];
+                    out.push((
+                        page,
+                        top,
+                        run.line_w,
+                        line_offsets.get(li).copied().unwrap_or(0.0),
+                    ));
                 }
             }
         }
@@ -690,6 +896,7 @@ impl DocumentLayout {
                         line_offsets,
                         indent,
                         marker,
+                        ..
                     } => (buffer, line_pages, line_offsets, *indent, marker),
                     Block::Image {
                         block,
@@ -1388,6 +1595,21 @@ mod tests {
         assert!(
             layout.line_count() > plain_lines,
             "the exclusion should narrow the paragraph and create more lines"
+        );
+        let geometry = layout.placed_line_geometry();
+        let beside = geometry
+            .iter()
+            .find(|(_, _, _, offset)| *offset > 0.0)
+            .expect("text beside the left image");
+        let below = geometry
+            .iter()
+            .find(|(_, top, _, offset)| *offset == 0.0 && *top > 68.0 / 25.4 * DPI)
+            .expect("text below the image");
+        assert!(
+            below.2 > beside.2 * 1.4,
+            "lines below the image must expand to the full column: {} vs {}",
+            below.2,
+            beside.2
         );
 
         let path = std::env::temp_dir().join(format!(

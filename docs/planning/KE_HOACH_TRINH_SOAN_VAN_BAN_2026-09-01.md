@@ -2,8 +2,9 @@
 
 > Trạng thái (2026-09-03): **MVP + Trộn thư + nhiều bản vá editor + REDESIGN ẢNH
 > kiểu Word — TẤT CẢ ĐÃ PUSH** (nhánh `feat/vector-core-foundation`, tới `3be6eb4`).
-> **Cập nhật 2026-09-07: BAO CHỮ (Square wrap) đã có code + test, chờ chủ
-> GUI-test bản release** — xem mục 0.4 bên dưới.
+> **Cập nhật 2026-09-07: BAO CHỮ (Square wrap) đã sửa lỗi đoạn dài bị giữ cột
+> hẹp dưới đáy ảnh; code + toàn bộ test đã qua, chờ chủ GUI-test lại bản release**
+> — xem mục 0.4 bên dưới.
 > Chủ dự án (end-user) muốn trình soạn thảo kiểu Word cơ bản, nhấn mạnh **nhẹ máy**.
 
 ---
@@ -77,6 +78,13 @@ khai một contract hình học dùng chung cho editor/PDF, reflow nhiều lư�
 - **GATE đã khóa bằng code/test:** khi tài liệu KHÔNG có ảnh `Square`, mọi hàm
   trả về như cũ → 0 thay đổi cho tài liệu hiện có. Test bao phủ hình học, reflow
   editor, hit-test/caret và PDF hợp lệ. `TopBottom` vẫn để sau.
+- **Bản vá sau GUI-test 2026-09-07:** cosmic-text chỉ cho một độ rộng trên mỗi
+  `BufferLine`, nên bản đầu lấy cột hẹp cho cả đoạn và làm các dòng dưới ảnh vẫn
+  bị thụt. Nay layout tách đoạn thành các phân đoạn **chỉ trong runtime** tại nơi
+  exclusion đổi độ rộng; dòng dưới ảnh trở lại toàn khổ. Khi sửa/lưu, các phân
+  đoạn được ghép về đúng một paragraph; caret/selection, list và PDF dùng cùng
+  contract. Regression test kiểm trực tiếp độ rộng dòng ngang ảnh/dưới ảnh và
+  round-trip không đổi nội dung.
 
 ### 0.5 CÒN LẠI khác (tùy chọn, KHÔNG gấp)
 1. **Đầu/chân trang + số trang.** 2. **Bảng (tables)** — Pha 4. 3. **Xuất `.docx`**
