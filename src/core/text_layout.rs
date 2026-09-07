@@ -12,19 +12,21 @@
 //! shaped buffers plus the shared glyph cache (see the phase-0 measurements in
 //! `src/bin/text_spike.rs`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::Path;
 
 use cosmic_text::{
-    Align, Attrs, Buffer, BufferLine, Color as CtColor, Ellipsize, Family, FontSystem, Hinting,
-    LineEnding, Metrics, Shaping, Style, SwashCache, UnderlineStyle, Weight, Wrap,
+    Align, Attrs, AttrsList, Buffer, BufferLine, Color as CtColor, Ellipsize, Family, FontSystem,
+    Hinting, LineEnding, Metrics, Shaping, Style, SwashCache, UnderlineStyle, Weight, Wrap,
 };
 use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
 
 use crate::core::text_document::{
-    CharStyle, ImageBlock, ImageWrap, ListKind, ParagraphAlign, TextDocument,
+    CharStyle, ImageBlock, ImageWrap, InlineImage, ListKind, ParagraphAlign, TextDocument,
 };
+
+const INLINE_PLACEHOLDER: &str = "\u{FFFC}";
 
 /// Standard hanging indent for a list item, in millimetres: the marker sits in
 /// this gutter and wrapped lines align at the indent.
@@ -401,6 +403,8 @@ pub struct DocumentLayout {
     blocks: Vec<Block>,
     /// Floating images (Word-style), drawn on top of the text at a page position.
     floating_images: Vec<crate::core::text_document::ImageBlock>,
+    /// Inline image ids stored on transparent placeholder glyphs.
+    inline_images: HashMap<usize, ImageBlock>,
 }
 
 impl DocumentLayout {
@@ -414,6 +418,8 @@ impl DocumentLayout {
         let default_attrs = attrs_for(&doc.default_char, px_per_pt, doc.default_para.line_spacing);
 
         let mut blocks = Vec::with_capacity(doc.paragraphs.len());
+        let mut inline_images = HashMap::new();
+        let mut next_inline_id = 1usize;
         let mut page = 0usize;
         let mut y = 0.0f32; // running top within the current page's content area
         let mut list_number = 0usize; // running counter for numbered lists
@@ -485,15 +491,66 @@ impl DocumentLayout {
             let base_width = (cw - indent).max(1.0);
             buffer.set_size(Some(base_width), None); // narrowed for lists
             let align = align_for(para.style.align);
-            if para.runs.is_empty() {
-                buffer.set_text("", &default_attrs, Shaping::Advanced, align);
-            } else {
-                let spans: Vec<(&str, Attrs)> = para
-                    .runs
-                    .iter()
-                    .map(|r| (r.text.as_str(), attrs_for(&r.style, px_per_pt, ls)))
-                    .collect();
-                buffer.set_rich_text(spans, &default_attrs, Shaping::Advanced, align);
+            let source_text = para.text();
+            let mut anchors: Vec<&InlineImage> = para.inline_images.iter().collect();
+            anchors.sort_by_key(|inline| inline.byte_offset);
+            let mut layout_text =
+                String::with_capacity(source_text.len() + anchors.len() * INLINE_PLACEHOLDER.len());
+            let mut image_spans = Vec::with_capacity(anchors.len());
+            let mut source_at = 0usize;
+            for inline in &anchors {
+                let mut at = inline.byte_offset.min(source_text.len());
+                while !source_text.is_char_boundary(at) {
+                    at -= 1;
+                }
+                layout_text.push_str(&source_text[source_at..at]);
+                let editor_at = layout_text.len();
+                layout_text.push_str(INLINE_PLACEHOLDER);
+                let id = next_inline_id;
+                next_inline_id += 1;
+                inline_images.insert(id, inline.image.clone());
+                image_spans.push((at, editor_at, id));
+                source_at = at;
+            }
+            layout_text.push_str(&source_text[source_at..]);
+            buffer.set_text(&layout_text, &default_attrs, Shaping::Advanced, align);
+
+            if !para.runs.is_empty() || !image_spans.is_empty() {
+                let mut attrs_list = AttrsList::new(&default_attrs);
+                let mut byte = 0usize;
+                for run in &para.runs {
+                    let end_source = byte + run.text.len();
+                    let start = byte
+                        + image_spans
+                            .iter()
+                            .filter(|(source, _, _)| *source <= byte)
+                            .count()
+                            * INLINE_PLACEHOLDER.len();
+                    let end = end_source
+                        + image_spans
+                            .iter()
+                            .filter(|(source, _, _)| *source < end_source)
+                            .count()
+                            * INLINE_PLACEHOLDER.len();
+                    if start < end {
+                        attrs_list.add_span(start..end, &attrs_for(&run.style, px_per_pt, ls));
+                    }
+                    byte = end_source;
+                }
+                for (_, editor_at, id) in image_spans {
+                    if let Some(image) = inline_images.get(&id) {
+                        let (w_px, h_px) = inline_image_size_px(image, cw, dpi);
+                        let attrs = Attrs::new()
+                            .family(Family::Name(doc.default_char.font.name()))
+                            .metadata(id)
+                            .color(CtColor::rgba(0, 0, 0, 0))
+                            .metrics(Metrics::new(1.0, h_px))
+                            .letter_spacing(w_px);
+                        attrs_list
+                            .add_span(editor_at..editor_at + INLINE_PLACEHOLDER.len(), &attrs);
+                    }
+                }
+                buffer.lines[0].set_attrs_list(attrs_list);
             }
             buffer.shape_until_scroll(font_system, false);
 
@@ -578,6 +635,7 @@ impl DocumentLayout {
             pages: page + 1,
             blocks,
             floating_images: doc.floating_images.clone(),
+            inline_images,
         }
     }
 
@@ -696,6 +754,22 @@ impl DocumentLayout {
                         let base_y = cy + top + (run.line_y - run.line_top);
                         let ox = cx + line_offsets.get(li).copied().unwrap_or(0.0);
                         for glyph in run.glyphs {
+                            if run.text.get(glyph.start..glyph.end) == Some(INLINE_PLACEHOLDER) {
+                                if let Some(image) = self.inline_images.get(&glyph.metadata) {
+                                    let (w_px, h_px) = inline_image_size_px(image, cw, self.dpi);
+                                    blit_image(
+                                        &mut buf,
+                                        pw,
+                                        ph,
+                                        image,
+                                        ox + glyph.x,
+                                        base_y - h_px,
+                                        w_px,
+                                        h_px,
+                                    );
+                                    continue;
+                                }
+                            }
                             let color = glyph.color_opt.unwrap_or(default_ink);
                             let phys = glyph.physical((ox, base_y), 1.0);
                             cache.with_pixels(font_system, phys.cache_key, color, |gx, gy, col| {
@@ -756,6 +830,17 @@ fn align_offset(align: ParagraphAlign, cw: f32, w: f32) -> f32 {
         ParagraphAlign::Center => ((cw - w) * 0.5).max(0.0),
         ParagraphAlign::Right | ParagraphAlign::Justify => (cw - w).max(0.0),
     }
+}
+
+fn inline_image_size_px(block: &ImageBlock, content_w: f32, dpi: f32) -> (f32, f32) {
+    let mut w = block.width_mm / 25.4 * dpi;
+    let mut h = block.height_mm() / 25.4 * dpi;
+    if w > content_w && w > 0.0 {
+        let scale = content_w / w;
+        w = content_w;
+        h *= scale;
+    }
+    (w.max(1.0), h.max(1.0))
 }
 
 /// Decode, scale (over white) and blit an image block into the RGBA page buffer.
@@ -933,6 +1018,20 @@ impl DocumentLayout {
                         first_baseline = Some(baseline);
                     }
                     for g in run.glyphs {
+                        if run.text.get(g.start..g.end) == Some(INLINE_PLACEHOLDER) {
+                            if let Some(image) = self.inline_images.get(&g.metadata) {
+                                let (w_px, h_px) = inline_image_size_px(image, cw, self.dpi);
+                                images.push(ImgPlace {
+                                    block: image,
+                                    x: (ox + g.x) * s,
+                                    y: page_h - baseline,
+                                    w: w_px * s,
+                                    h: h_px * s,
+                                    behind: false,
+                                });
+                                continue;
+                            }
+                        }
                         let fi = match font_ids.iter().position(|id| *id == g.font_id) {
                             Some(i) => i,
                             None => {
@@ -1489,6 +1588,51 @@ mod tests {
     }
 
     #[test]
+    fn inline_image_flows_between_text_and_exports_to_pdf() {
+        let mut fs = FontSystem::new();
+        let mut paragraph = para("Trước sau");
+        paragraph.inline_images.push(InlineImage {
+            byte_offset: "Trước ".len(),
+            image: ImageBlock::inline(tiny_png(200, 100), 200, 100, 40.0, ParagraphAlign::Center),
+        });
+        let doc = TextDocument {
+            paragraphs: vec![paragraph],
+            ..TextDocument::default()
+        };
+        let layout = DocumentLayout::build(&doc, DPI, &mut fs);
+        assert_eq!(layout.inline_images.len(), 1);
+        assert_eq!(layout.line_count(), 1);
+
+        let mut cache = SwashCache::new();
+        let page = layout.render_page(0, &mut fs, &mut cache);
+        assert!(
+            page.chunks_exact(4)
+                .filter(|px| px[0] > 180 && px[1] < 80 && px[2] < 80)
+                .count()
+                > 1_000,
+            "the red inline bitmap should be visible in the rendered text line"
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "iai_inline_image_pdf_{}_test.pdf",
+            std::process::id()
+        ));
+        layout.write_text_pdf(&mut fs, &path).unwrap();
+        let pdf = lopdf::Document::load(&path).expect("re-parse inline-image PDF");
+        let (_, page_id) = pdf.get_pages().into_iter().next().unwrap();
+        let content = String::from_utf8_lossy(&pdf.get_page_content(page_id).unwrap()).to_string();
+        assert!(
+            content.contains("Do"),
+            "PDF must draw the inline image XObject"
+        );
+        assert!(
+            content.contains("Tj"),
+            "PDF must retain selectable surrounding text"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn floating_image_embeds_in_pdf_without_reserving_text_space() {
         let mut fs = FontSystem::new();
         let mut fb = ImageBlock::inline(tiny_png(300, 300), 300, 300, 40.0, ParagraphAlign::Left);
@@ -1688,6 +1832,7 @@ mod tests {
                     ..Default::default()
                 },
                 image: None,
+                inline_images: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1706,6 +1851,7 @@ mod tests {
                 runs: vec![Run::new("Chữ ký bên A", ul)],
                 style: ParagraphStyle::default(),
                 image: None,
+                inline_images: Vec::new(),
             }],
             ..Default::default()
         };

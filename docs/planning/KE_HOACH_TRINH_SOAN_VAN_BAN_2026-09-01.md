@@ -2,9 +2,9 @@
 
 > Trạng thái (2026-09-03): **MVP + Trộn thư + nhiều bản vá editor + REDESIGN ẢNH
 > kiểu Word — TẤT CẢ ĐÃ PUSH** (nhánh `feat/vector-core-foundation`, tới `3be6eb4`).
-> **Cập nhật 2026-09-07: BAO CHỮ (Square wrap) đã sửa lỗi đoạn dài bị giữ cột
-> hẹp dưới đáy ảnh; code + toàn bộ test đã qua, chờ chủ GUI-test lại bản release**
-> — xem mục 0.4 bên dưới.
+> **Cập nhật 2026-09-08: BAO CHỮ đã sửa lỗi đoạn dưới ảnh bị thụt; CÙNG DÒNG
+> CHỮ đã đổi sang ảnh-ký-tự thật trong đoạn. Code + test đã qua, chờ chủ
+> GUI-test bản release mới** — xem mục 0.4–0.5 bên dưới.
 > Chủ dự án (end-user) muốn trình soạn thảo kiểu Word cơ bản, nhấn mạnh **nhẹ máy**.
 
 ---
@@ -86,7 +86,19 @@ khai một contract hình học dùng chung cho editor/PDF, reflow nhiều lư�
   contract. Regression test kiểm trực tiếp độ rộng dòng ngang ảnh/dưới ảnh và
   round-trip không đổi nội dung.
 
-### 0.5 CÒN LẠI khác (tùy chọn, KHÔNG gấp)
+### 0.5 CÙNG DÒNG CHỮ — ✅ code/test, chờ GUI (2026-09-08)
+- Ảnh mới được chèn đúng tại caret dưới dạng **một object character U+FFFC**,
+  không tự tạo paragraph riêng. Có thể gõ chữ ngay trước/sau ảnh; ảnh chạy theo
+  chữ và chiếm đúng bề rộng/cao trong layout.
+- Model `.iai` v11 lưu `Paragraph.inline_images` với neo byte UTF-8. Editor,
+  preview, PDF chữ-vector, Layer panel, định dạng vùng chọn và trộn thư cùng dùng
+  neo này; resize/xóa/chuyển nổi không làm mất chữ xung quanh.
+- Khi mở file v10 trở xuống, image-paragraph `Inline` cũ tự nâng cấp thành neo
+  ký tự (vẫn ở đúng vị trí đoạn cũ) để có thể tiếp tục gõ cùng dòng.
+- Test khóa round-trip model/editor/.iai, độ rộng glyph ảnh, render PDF, UTF-8,
+  mail-merge và tương thích tài liệu cũ.
+
+### 0.6 CÒN LẠI khác (tùy chọn, KHÔNG gấp)
 1. **Đầu/chân trang + số trang.** 2. **Bảng (tables)** — Pha 4. 3. **Xuất `.docx`**
    (`docx-rs` + `zip`). 4. per-run font/cỡ; subset font nhúng PDF; đo RAM/CPU.
 5. Mail-merge nâng cao: gộp 1 PDF; lọc/chọn dòng.

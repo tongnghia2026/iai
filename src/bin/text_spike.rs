@@ -167,6 +167,7 @@ fn main() {
             ..Default::default()
         },
         image: None,
+        inline_images: Vec::new(),
     };
     let justified = |text: String| Paragraph {
         runs: vec![Run::new(text, body.clone())],
@@ -176,6 +177,7 @@ fn main() {
             ..Default::default()
         },
         image: None,
+        inline_images: Vec::new(),
     };
 
     let mut paras = vec![

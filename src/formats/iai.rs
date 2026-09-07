@@ -27,8 +27,9 @@ use std::path::{Path, PathBuf};
 /// v7 adds custom tab names for source PDF pages.
 /// v8 adds materialized blank/image/PDF pages whose ids are outside the source
 /// PDF's physical page range. v10 adds ordered, compact text/image stamps shared
-/// by all pages of a PDF project.
-const IAI_FORMAT_VERSION: u64 = 10;
+/// by all pages of a PDF project. v11 anchors inline images between characters
+/// in flowing-text paragraphs; older builds must not silently drop them.
+const IAI_FORMAT_VERSION: u64 = 11;
 
 pub struct IaiImporter;
 pub struct IaiExporter;
@@ -158,8 +159,13 @@ pub fn load(path: &Path) -> Result<IaiLoad, String> {
         return read_artboard_doc(&mut archive, &manifest).map(IaiLoad::ArtboardDoc);
     }
     if manifest["kind"].as_str() == Some("flow_text_document") {
-        let document: crate::core::text_document::TextDocument =
+        let mut document: crate::core::text_document::TextDocument =
             serde_json::from_value(manifest["document"].clone()).map_err(|e| e.to_string())?;
+        if version <= 10 {
+            document.migrate_legacy_inline_blocks();
+        } else {
+            document.normalize();
+        }
         document.validate()?;
         return Ok(IaiLoad::FlowTextDocument(document));
     }
@@ -2074,6 +2080,18 @@ mod tests {
             "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM\nĐộc lập – Tự do – Hạnh phúc",
         );
         document.paragraphs[0].style.align = crate::core::text_document::ParagraphAlign::Center;
+        document.paragraphs[0]
+            .inline_images
+            .push(crate::core::text_document::InlineImage {
+                byte_offset: "CỘNG HÒA ".len(),
+                image: crate::core::text_document::ImageBlock::inline(
+                    vec![1, 2, 3],
+                    20,
+                    10,
+                    15.0,
+                    crate::core::text_document::ParagraphAlign::Left,
+                ),
+            });
         document.page.margins.left_mm = 32.0;
         document.page.margins.right_mm = 18.0;
 
@@ -2091,6 +2109,44 @@ mod tests {
         let mut archive = zip::ZipArchive::new(file).expect("read zip");
         assert_eq!(archive.len(), 1, "text files must not carry raster pages");
         assert_eq!(archive.by_index(0).unwrap().name(), "manifest.json");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flow_text_v10_migrates_standalone_inline_image_to_character_anchor() {
+        let dir = tmp_dir("flow-text-v10-inline-image");
+        let path = dir.join("legacy.iai");
+        let block = crate::core::text_document::ImageBlock::inline(
+            vec![1, 2, 3],
+            20,
+            10,
+            15.0,
+            crate::core::text_document::ParagraphAlign::Center,
+        );
+        let document = crate::core::text_document::TextDocument {
+            paragraphs: vec![crate::core::text_document::Paragraph::image(block.clone())],
+            ..crate::core::text_document::TextDocument::default()
+        };
+        let file = std::fs::File::create(&path).expect("create legacy file");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("manifest.json", deflated_options())
+            .expect("start manifest");
+        let manifest = serde_json::json!({
+            "version": 10,
+            "kind": "flow_text_document",
+            "document": document,
+        });
+        zip.write_all(manifest.to_string().as_bytes())
+            .expect("write manifest");
+        zip.finish().expect("finish legacy file");
+
+        let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("load legacy document") else {
+            panic!("expected flowing-text document");
+        };
+        assert!(reopened.paragraphs[0].image.is_none());
+        assert_eq!(reopened.paragraphs[0].inline_images.len(), 1);
+        assert_eq!(reopened.paragraphs[0].inline_images[0].byte_offset, 0);
+        assert_eq!(reopened.paragraphs[0].inline_images[0].image, block);
         std::fs::remove_dir_all(dir).ok();
     }
 
