@@ -2,7 +2,8 @@
 
 > Trạng thái (2026-09-03): **MVP + Trộn thư + nhiều bản vá editor + REDESIGN ẢNH
 > kiểu Word — TẤT CẢ ĐÃ PUSH** (nhánh `feat/vector-core-foundation`, tới `3be6eb4`).
-> **Việc kế tiếp cho hội thoại MỚI: BAO CHỮ (Square wrap)** — xem mục 0.4 bên dưới.
+> **Cập nhật 2026-09-07: BAO CHỮ (Square wrap) đã có code + test, chờ chủ
+> GUI-test bản release** — xem mục 0.4 bên dưới.
 > Chủ dự án (end-user) muốn trình soạn thảo kiểu Word cơ bản, nhấn mạnh **nhẹ máy**.
 
 ---
@@ -60,21 +61,22 @@ memory `project_iai_wordprocessor_plan`.
   vẽ giấy trắng riêng + thứ tự vẽ (paper→behind→chữ→inline→front). PDF:
   `ImgPlace.behind`, vẽ behind trước BT/in-front sau ET.
 
-### 0.4 ➜ VIỆC KẾ TIẾP: BAO CHỮ (Square wrap) — chưa làm
-Chủ đã chốt muốn **chữ chạy vòng quanh ảnh** (Square/tight của Word). Đây là phần
-NẶNG & rủi ro nhất; làm ở hội thoại mới, **chủ test bản trung gian**.
-- **Cách:** `ImageWrap::Square` áp exclusion-rect. Mẹo per-line như list: lấy
+### 0.4 BAO CHỮ (Square wrap) — ✅ code/test, chờ GUI (2026-09-07)
+Chủ đã chốt muốn **chữ chạy vòng quanh ảnh** (Square/tight của Word). Đã triển
+khai một contract hình học dùng chung cho editor/PDF, reflow nhiều lượt và
+**chủ test bản trung gian** trước khi chốt UX.
+- **Đã làm:** `ImageWrap::Square` áp exclusion-rect. Mẹo per-line như list: lấy
   hàm thuần `square_wrap(floating, page, cx, cy, cw, ly, line_h) -> Option<(x_off,
-  width)>` (ảnh bên trái→đẩy text sang phải+hẹp; bên phải→hẹp; giữa/hẹp quá→None).
-  Gộp với list qua `line_layout(is_list, cw, wrap) -> (offset,width)`.
-- **Điểm cắm (mỗi chỗ đang xử lý list_indent, thêm wrap_offset song song):**
-  (1) relayout mới `relayout_wrap_lines` (2-pass reflow, GATE no-op khi ko có ảnh
-  Square) — chạy cạnh `relayout_list_lines`; (2) `render_page` thêm param
+  width)>` (ảnh bên trái→đẩy text sang phải; bên phải→hẹp cột bên trái; nhiều
+  ảnh→chọn khoảng trống rộng nhất). Gộp với list qua `line_layout`.
+- **Điểm cắm đã nối (wrap_offset chạy song song list_indent):**
+  (1) `relayout_flow_lines` reflow lặp, GATE no-op khi không có ảnh Square;
+  (2) `render_page` thêm param
   `floating` + offset per-dòng; (3) selection rect trong `window_ui`; (4)
-  `list_indent_at_y` (hit-test click); (5) caret; (6) `text_layout` (PDF flow
-  per-para — khác editor, khó hơn, làm sau cùng).
-- **GATE bắt buộc:** khi tài liệu KHÔNG có ảnh `Square`, mọi hàm trả về như cũ →
-  0 thay đổi cho tài liệu hiện có (rào rủi ro). `TopBottom` có thể bỏ/để sau.
+  `text_offset_at_y` (hit-test click); (5) caret; (6) `text_layout` và PDF flow.
+- **GATE đã khóa bằng code/test:** khi tài liệu KHÔNG có ảnh `Square`, mọi hàm
+  trả về như cũ → 0 thay đổi cho tài liệu hiện có. Test bao phủ hình học, reflow
+  editor, hit-test/caret và PDF hợp lệ. `TopBottom` vẫn để sau.
 
 ### 0.5 CÒN LẠI khác (tùy chọn, KHÔNG gấp)
 1. **Đầu/chân trang + số trang.** 2. **Bảng (tables)** — Pha 4. 3. **Xuất `.docx`**

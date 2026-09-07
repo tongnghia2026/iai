@@ -22,11 +22,108 @@ use cosmic_text::{
 };
 use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
 
-use crate::core::text_document::{CharStyle, ImageBlock, ListKind, ParagraphAlign, TextDocument};
+use crate::core::text_document::{
+    CharStyle, ImageBlock, ImageWrap, ListKind, ParagraphAlign, TextDocument,
+};
 
 /// Standard hanging indent for a list item, in millimetres: the marker sits in
 /// this gutter and wrapped lines align at the indent.
 const LIST_INDENT_MM: f32 = 8.0;
+
+/// Breathing room between a square-wrapped image and the surrounding text.
+const SQUARE_WRAP_PAD_MM: f32 = 3.0;
+
+/// Keep a useful measure beside an image. If both sides are narrower than this,
+/// the widest side still wins so text never overlaps or disappears.
+const MIN_SQUARE_TEXT_MM: f32 = 24.0;
+
+/// Return the widest horizontal text segment not occupied by a square-wrapped
+/// image for one visual line. Coordinates are page-local pixels at `dpi`; the
+/// returned `(offset, width)` is relative to the content column's left edge.
+/// `None` is the important no-op gate for documents without an overlapping
+/// `Square` image.
+pub(crate) fn square_wrap(
+    floating: &[ImageBlock],
+    page: usize,
+    cx: f32,
+    _cy: f32,
+    cw: f32,
+    line_y: f32,
+    line_h: f32,
+    dpi: f32,
+) -> Option<(f32, f32)> {
+    let px_per_mm = dpi / 25.4;
+    let pad = SQUARE_WRAP_PAD_MM * px_per_mm;
+    let mut blocked: Vec<(f32, f32)> = floating
+        .iter()
+        .filter(|image| image.page == page && image.wrap == ImageWrap::Square)
+        .filter_map(|image| {
+            let top = image.y_mm * px_per_mm - pad;
+            let bottom = (image.y_mm + image.height_mm()) * px_per_mm + pad;
+            if line_y + line_h <= top || line_y >= bottom {
+                return None;
+            }
+            let left = (image.x_mm * px_per_mm - pad - cx).clamp(0.0, cw);
+            let right = ((image.x_mm + image.width_mm) * px_per_mm + pad - cx).clamp(0.0, cw);
+            (right > left).then_some((left, right))
+        })
+        .collect();
+    if blocked.is_empty() {
+        return None;
+    }
+
+    blocked.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f32, f32)> = Vec::with_capacity(blocked.len());
+    for (left, right) in blocked {
+        if let Some(last) = merged.last_mut() {
+            if left <= last.1 {
+                last.1 = last.1.max(right);
+                continue;
+            }
+        }
+        merged.push((left, right));
+    }
+
+    let mut free = Vec::with_capacity(merged.len() + 1);
+    let mut cursor = 0.0;
+    for (left, right) in merged {
+        if left > cursor {
+            free.push((cursor, left - cursor));
+        }
+        cursor = cursor.max(right);
+    }
+    if cursor < cw {
+        free.push((cursor, cw - cursor));
+    }
+    let widest = free
+        .into_iter()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap_or((0.0, 1.0));
+    let minimum = MIN_SQUARE_TEXT_MM * px_per_mm;
+    if widest.1 < minimum {
+        // A centred/very wide image leaves no pleasant column. Cosmic-text's
+        // paragraph model cannot skip an arbitrary visual line vertically, so
+        // retain the widest non-overlapping sliver rather than draw over it.
+        return Some((widest.0, widest.1.max(1.0)));
+    }
+    Some(widest)
+}
+
+/// Combine a list hanging indent with an optional square-wrap segment.
+pub(crate) fn line_layout(
+    is_list: bool,
+    content_w: f32,
+    wrap: Option<(f32, f32)>,
+    dpi: f32,
+) -> (f32, f32) {
+    let (segment_x, segment_w) = wrap.unwrap_or((0.0, content_w));
+    let indent = if is_list {
+        LIST_INDENT_MM / 25.4 * dpi
+    } else {
+        0.0
+    };
+    (segment_x + indent, (segment_w - indent).max(1.0))
+}
 
 /// The marker text for a list paragraph at position `number` (1-based, used for
 /// numbered lists). Returns `None` for a non-list paragraph.
@@ -87,6 +184,8 @@ enum Block {
         line_pages: Vec<(usize, f32)>,
         /// Left indent in px (list hanging indent); 0 for a normal paragraph.
         indent: f32,
+        /// Per visual line text offset, combining list indent and Square wrap.
+        line_offsets: Vec<f32>,
         /// A shaped single-line list marker drawn in the indent gutter.
         marker: Option<Buffer>,
     },
@@ -98,6 +197,28 @@ enum Block {
         w_px: f32,
         h_px: f32,
     },
+}
+
+/// Paginate the current visual lines without mutating document state. Keeping
+/// this calculation shared by every reflow pass prevents a paragraph from
+/// choosing wrap geometry from stale page positions.
+fn place_text_lines(
+    buffer: &Buffer,
+    mut page: usize,
+    mut y: f32,
+    content_h: f32,
+) -> (Vec<(usize, f32)>, usize, f32) {
+    let mut placed = Vec::new();
+    for run in buffer.layout_runs() {
+        let line_h = run.line_height;
+        if y > 0.0 && y + line_h > content_h {
+            page += 1;
+            y = 0.0;
+        }
+        placed.push((page, y));
+        y += line_h;
+    }
+    (placed, page, y)
 }
 
 /// A fully flowed document: every visual line / image assigned to a page and
@@ -194,7 +315,8 @@ impl DocumentLayout {
             };
 
             let mut buffer = Buffer::new(font_system, metrics);
-            buffer.set_size(Some((cw - indent).max(1.0)), None); // narrowed for lists
+            let base_width = (cw - indent).max(1.0);
+            buffer.set_size(Some(base_width), None); // narrowed for lists
             let align = align_for(para.style.align);
             if para.runs.is_empty() {
                 buffer.set_text("", &default_attrs, Shaping::Advanced, align);
@@ -209,25 +331,69 @@ impl DocumentLayout {
             buffer.shape_until_scroll(font_system, false);
 
             y += para.style.space_before_pt * px_per_pt;
+            let start_page = page;
+            let start_y = y;
+            let is_list = para.style.list != ListKind::None;
 
-            let mut line_pages = Vec::new();
-            for run in buffer.layout_runs() {
-                let lh = run.line_height;
-                // Break to a new page when the line won't fit, unless the page is
-                // already empty (a single over-tall line still has to go somewhere).
-                if y > 0.0 && y + lh > ch {
-                    page += 1;
-                    y = 0.0;
+            // Two-pass reflow: place at the current measure, find every Square
+            // exclusion the paragraph crosses, then re-shape at the narrowest
+            // required measure. A final repeat handles lines created by reflow.
+            let mut layout_width = base_width;
+            for _ in 0..3 {
+                let (placed, _, _) = place_text_lines(&buffer, start_page, start_y, ch);
+                let wanted = buffer
+                    .layout_runs()
+                    .zip(placed.iter())
+                    .map(|(run, (lp, top))| {
+                        let wrap = square_wrap(
+                            &doc.floating_images,
+                            *lp,
+                            cx,
+                            cy,
+                            cw,
+                            cy + *top,
+                            run.line_height,
+                            dpi,
+                        );
+                        line_layout(is_list, cw, wrap, dpi).1
+                    })
+                    .fold(base_width, f32::min)
+                    .max(1.0);
+                if (wanted - layout_width).abs() < 0.25 {
+                    break;
                 }
-                line_pages.push((page, y));
-                y += lh;
+                layout_width = wanted;
+                buffer.set_size(Some(layout_width), None);
+                buffer.shape_until_scroll(font_system, false);
             }
+
+            let (line_pages, end_page, end_y) = place_text_lines(&buffer, start_page, start_y, ch);
+            page = end_page;
+            y = end_y;
+            let line_offsets = buffer
+                .layout_runs()
+                .zip(line_pages.iter())
+                .map(|(run, (lp, top))| {
+                    let wrap = square_wrap(
+                        &doc.floating_images,
+                        *lp,
+                        cx,
+                        cy,
+                        cw,
+                        cy + *top,
+                        run.line_height,
+                        dpi,
+                    );
+                    line_layout(is_list, cw, wrap, dpi).0
+                })
+                .collect();
 
             y += para.style.space_after_pt * px_per_pt;
             blocks.push(Block::Text {
                 buffer,
                 line_pages,
                 indent,
+                line_offsets,
                 marker,
             });
         }
@@ -310,10 +476,10 @@ impl DocumentLayout {
                 Block::Text {
                     buffer,
                     line_pages,
-                    indent,
+                    line_offsets,
                     marker,
+                    ..
                 } => {
-                    let ox = cx + indent;
                     for (li, run) in buffer.layout_runs().enumerate() {
                         let (lp, top) = line_pages[li];
                         if lp != page {
@@ -322,6 +488,7 @@ impl DocumentLayout {
                         // Move the line so its top sits at `cy + top`; the engine
                         // places glyphs relative to the baseline `run.line_y`.
                         let base_y = cy + top + (run.line_y - run.line_top);
+                        let ox = cx + line_offsets.get(li).copied().unwrap_or(0.0);
                         for glyph in run.glyphs {
                             let color = glyph.color_opt.unwrap_or(default_ink);
                             let phys = glyph.physical((ox, base_y), 1.0);
@@ -332,10 +499,11 @@ impl DocumentLayout {
                         // Draw the list marker in the gutter on the first line.
                         if li == 0 {
                             if let Some(mb) = marker {
+                                let marker_x = ox - LIST_INDENT_MM / 25.4 * self.dpi;
                                 for mrun in mb.layout_runs() {
                                     for glyph in mrun.glyphs {
                                         let color = glyph.color_opt.unwrap_or(default_ink);
-                                        let phys = glyph.physical((cx, base_y), 1.0);
+                                        let phys = glyph.physical((marker_x, base_y), 1.0);
                                         cache.with_pixels(
                                             font_system,
                                             phys.cache_key,
@@ -515,13 +683,14 @@ impl DocumentLayout {
             let mut rects = Vec::new();
             let mut images: Vec<ImgPlace> = Vec::new();
             for block in &self.blocks {
-                let (buffer, line_pages, indent, marker) = match block {
+                let (buffer, line_pages, line_offsets, indent, marker) = match block {
                     Block::Text {
                         buffer,
                         line_pages,
+                        line_offsets,
                         indent,
                         marker,
-                    } => (buffer, line_pages, *indent, marker),
+                    } => (buffer, line_pages, line_offsets, *indent, marker),
                     Block::Image {
                         block,
                         page: bp,
@@ -545,7 +714,6 @@ impl DocumentLayout {
                         continue;
                     }
                 };
-                let ox = cx + indent;
                 let mut first_baseline: Option<f32> = None;
                 for (li, run) in buffer.layout_runs().enumerate() {
                     let (lp, top) = line_pages[li];
@@ -553,6 +721,7 @@ impl DocumentLayout {
                         continue;
                     }
                     let baseline = (cy + top + (run.line_y - run.line_top)) * s;
+                    let ox = cx + line_offsets.get(li).copied().unwrap_or(indent);
                     if li == 0 {
                         first_baseline = Some(baseline);
                     }
@@ -637,6 +806,8 @@ impl DocumentLayout {
                 }
                 // List marker in the gutter, on the paragraph's first-line baseline.
                 if let (Some(mb), Some(baseline)) = (marker, first_baseline) {
+                    let marker_x = cx + line_offsets.first().copied().unwrap_or(indent)
+                        - LIST_INDENT_MM / 25.4 * self.dpi;
                     for mrun in mb.layout_runs() {
                         for g in mrun.glyphs {
                             let fi = match font_ids.iter().position(|id| *id == g.font_id) {
@@ -658,7 +829,7 @@ impl DocumentLayout {
                             glyphs.push(Glyph {
                                 font: fi,
                                 gid: g.glyph_id,
-                                x: (cx + g.x) * s,
+                                x: (marker_x + g.x) * s,
                                 y: page_h - baseline,
                                 size: g.font_size * s,
                                 color: [26, 26, 26, 255],
@@ -1165,6 +1336,66 @@ mod tests {
             do_pos < tj_pos,
             "behind image must be drawn before the text"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn square_wrap_chooses_the_open_side_and_respects_vertical_band() {
+        let mut left = ImageBlock::inline(tiny_png(200, 200), 200, 200, 50.0, ParagraphAlign::Left);
+        left.wrap = ImageWrap::Square;
+        left.page = 0;
+        left.x_mm = 20.0;
+        left.y_mm = 30.0;
+        let cx = 30.0 / 25.4 * DPI;
+        let cy = 20.0 / 25.4 * DPI;
+        let cw = 160.0 / 25.4 * DPI;
+
+        let (offset, width) =
+            square_wrap(&[left.clone()], 0, cx, cy, cw, 40.0 / 25.4 * DPI, 16.0, DPI)
+                .expect("line crosses the image");
+        assert!(offset > 0.0, "left image should move text to its right");
+        assert!(width < cw);
+
+        assert_eq!(
+            square_wrap(&[left], 0, cx, cy, cw, 120.0 / 25.4 * DPI, 16.0, DPI),
+            None,
+            "a line below the image keeps the original layout"
+        );
+    }
+
+    #[test]
+    fn square_image_reflows_text_and_exports_a_valid_pdf() {
+        let mut fs = FontSystem::new();
+        let body = "Văn bản chạy vòng quanh ảnh và tiếp tục thành nhiều dòng. ".repeat(16);
+        let mut floating =
+            ImageBlock::inline(tiny_png(300, 300), 300, 300, 65.0, ParagraphAlign::Left);
+        floating.wrap = ImageWrap::Square;
+        floating.page = 0;
+        floating.x_mm = 30.0;
+        floating.y_mm = 20.0;
+
+        let plain = TextDocument {
+            paragraphs: vec![para(&body)],
+            ..Default::default()
+        };
+        let wrapped = TextDocument {
+            paragraphs: vec![para(&body)],
+            floating_images: vec![floating],
+            ..Default::default()
+        };
+        let plain_lines = DocumentLayout::build(&plain, DPI, &mut fs).line_count();
+        let layout = DocumentLayout::build(&wrapped, DPI, &mut fs);
+        assert!(
+            layout.line_count() > plain_lines,
+            "the exclusion should narrow the paragraph and create more lines"
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "iai_square_wrap_pdf_{}_test.pdf",
+            std::process::id()
+        ));
+        layout.write_text_pdf(&mut fs, &path).unwrap();
+        assert!(lopdf::Document::load(&path).is_ok());
         let _ = std::fs::remove_file(&path);
     }
 

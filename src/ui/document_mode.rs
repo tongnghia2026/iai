@@ -30,6 +30,7 @@ use crate::core::text_document::{
     CharStyle, ImageBlock, ImageWrap, ListKind, PageSetup, PaperSize, Paragraph, ParagraphAlign,
     ParagraphStyle, Run, TextDocument,
 };
+use crate::core::text_layout::{line_layout, square_wrap};
 use crate::ui::intent::FlowTextFocus;
 use crate::ui::{FlowTextViewModel, UiActions, UiData};
 
@@ -683,6 +684,9 @@ fn window_ui(
                     if ui.selectable_label(false, "Nổi sau chữ").clicked() {
                         img_to_floating = Some(ImageWrap::BehindText);
                     }
+                    if ui.selectable_label(false, "Bao quanh ảnh").clicked() {
+                        img_to_floating = Some(ImageWrap::Square);
+                    }
                 });
             ui.separator();
             for (icon, a, tip) in [
@@ -741,10 +745,10 @@ fn window_ui(
     // Contextual row for a selected floating image (Word "in front of text").
     if let Some(fi) = d.selected_floating {
         if let Some((cur_width, cur_wrap)) = d.floating.get(fi).map(|b| (b.width_mm, b.wrap)) {
-            let wrap_label = if cur_wrap == ImageWrap::BehindText {
-                "Nổi sau chữ"
-            } else {
-                "Nổi trên chữ"
+            let wrap_label = match cur_wrap {
+                ImageWrap::BehindText => "Nổi sau chữ",
+                ImageWrap::Square => "Bao quanh ảnh",
+                _ => "Nổi trên chữ",
             };
             ui.horizontal_wrapped(|ui| {
                 ui.label(ph::IMAGE).on_hover_text("Ảnh nổi đang chọn");
@@ -765,6 +769,12 @@ fn window_ui(
                             .clicked()
                         {
                             float_set_wrap = Some(ImageWrap::BehindText);
+                        }
+                        if ui
+                            .selectable_label(cur_wrap == ImageWrap::Square, "Bao quanh ảnh")
+                            .clicked()
+                        {
+                            float_set_wrap = Some(ImageWrap::Square);
                         }
                     });
                 ui.separator();
@@ -993,16 +1003,7 @@ fn window_ui(
                 }
             }
 
-            let (
-                image,
-                sel_rects,
-                caret,
-                page_count,
-                page_index,
-                revision,
-                image_lines,
-                caret_on_list,
-            ) = {
+            let (image, sel_rects, caret, page_count, page_index, revision, image_lines) = {
                 let editor = d.editor.as_mut().expect("editor");
                 let page_index = d.page_index;
                 let mut dirty = false;
@@ -1016,14 +1017,14 @@ fn window_ui(
                     if response.drag_started() {
                         if let Some(p) = response.interact_pointer_pos() {
                             let (mut x, y) = map(p, page_index);
-                            x -= list_indent_at_y(editor, y); // list lines are shifted right
+                            x -= text_offset_at_y(editor, y, &d.floating, cx, cy, cw, ch);
                             editor.action(fs, Action::Click { x, y });
                         }
                         d.drag_active = true;
                     } else if response.dragged() {
                         if let Some(p) = response.interact_pointer_pos() {
                             let (mut x, y) = map(p, page_index);
-                            x -= list_indent_at_y(editor, y); // list lines are shifted right
+                            x -= text_offset_at_y(editor, y, &d.floating, cx, cy, cw, ch);
                             if d.drag_active {
                                 editor.action(fs, Action::Drag { x, y });
                             } else {
@@ -1034,7 +1035,7 @@ fn window_ui(
                     } else if response.clicked() {
                         if let Some(p) = response.interact_pointer_pos() {
                             let (mut x, y) = map(p, page_index);
-                            x -= list_indent_at_y(editor, y); // list lines are shifted right
+                            x -= text_offset_at_y(editor, y, &d.floating, cx, cy, cw, ch);
                             editor.action(fs, Action::Click { x, y });
                         }
                     }
@@ -1150,9 +1151,9 @@ fn window_ui(
                 // Give paragraphs with a custom line spacing their per-line line
                 // height (via metrics_opt), recomputed against the current size.
                 refresh_line_spacing(editor, fs, font_pt * DPI / 72.0);
-                // Edits re-lay list lines at the global width; narrow them again
-                // so the hanging indent and pagination stay correct.
-                relayout_list_lines(editor, fs, cw);
+                // Re-apply per-paragraph measures after edits. The no-Square
+                // path is exactly the original list-only layout.
+                relayout_flow_lines(editor, fs, &d.floating, cx, cy, cw, ch);
                 let revision = if dirty {
                     d.revision.wrapping_add(1)
                 } else {
@@ -1184,6 +1185,8 @@ fn window_ui(
                         &font_name,
                         font_pt,
                         doc_line_spacing,
+                        &d.floating,
+                        cw,
                     );
                     Some((
                         egui::ColorImage::from_rgba_unmultiplied([tw, th], &px),
@@ -1208,13 +1211,17 @@ fn window_ui(
                                 continue;
                             }
                             let top = cy + run.line_top - page_index as f32 * ch;
-                            // List lines are shifted right; match the highlight.
                             let ox = cx
-                                + if line_list_code(&b.lines[run.line_i]) != 0 {
-                                    list_indent_px()
-                                } else {
-                                    0.0
-                                };
+                                + text_offset_for_run(
+                                    &b.lines[run.line_i],
+                                    run.line_top,
+                                    run.line_height,
+                                    &d.floating,
+                                    cx,
+                                    cy,
+                                    cw,
+                                    ch,
+                                );
                             for (hx, hw) in run.highlight(start, end) {
                                 let min = rect.min + egui::vec2((ox + hx) * scale, top * scale);
                                 let max = min + egui::vec2(hw.max(2.0) * scale, lh * scale);
@@ -1239,15 +1246,6 @@ fn window_ui(
                     }
                 });
                 let caret = editor.cursor_position();
-                let caret_on_list = {
-                    let cl = editor.cursor().line;
-                    editor.with_buffer(|b| {
-                        b.lines
-                            .get(cl)
-                            .map(|l| line_list_code(l) != 0)
-                            .unwrap_or(false)
-                    })
-                };
                 (
                     image,
                     sel_rects,
@@ -1256,7 +1254,6 @@ fn window_ui(
                     page_index,
                     revision,
                     image_lines,
-                    caret_on_list,
                 )
             };
 
@@ -1326,7 +1323,7 @@ fn window_ui(
                         painter.rect_stroke(
                             img_rect.expand(2.0),
                             2.0,
-                            egui::Stroke::new(2.0, egui::Color32::from_rgb(60, 120, 240)),
+                            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(60, 120, 240)),
                             egui::StrokeKind::Outside,
                         );
                     }
@@ -1340,11 +1337,19 @@ fn window_ui(
                     paint_floating_image(&painter, d, i, rect, scale);
                 }
             }
-            let caret_indent = if caret_on_list { list_indent_px() } else { 0.0 };
             if focused {
                 if let Some((qx, qy)) = caret {
                     if (qy as f32 / ch).floor() as usize == page_index {
-                        let x = rect.min.x + (cx + caret_indent + qx as f32) * scale;
+                        let caret_offset = text_offset_at_y(
+                            d.editor.as_ref().expect("editor"),
+                            qy,
+                            &d.floating,
+                            cx,
+                            cy,
+                            cw,
+                            ch,
+                        ) as f32;
+                        let x = rect.min.x + (cx + caret_offset + qx as f32) * scale;
                         let y0 = rect.min.y + (cy + qy as f32 - page_index as f32 * ch) * scale;
                         let blink = ui.input(|i| (i.time * 1.5) as i64 % 2 == 0);
                         if blink {
@@ -2143,18 +2148,114 @@ fn relayout_list_lines(editor: &mut Editor<'static>, fs: &mut FontSystem, conten
     });
 }
 
-/// The list indent (px, rounded) applied to the line at buffer-y `by`, so a
-/// click on a list line can be mapped back into the narrowed layout.
-fn list_indent_at_y(editor: &Editor<'static>, by: i32) -> i32 {
+/// Reflow each logical paragraph at the narrowest measure required by the
+/// Square images crossed by its visual lines. Repeating after layout lets newly
+/// wrapped visual lines discover exclusions below the paragraph's first line.
+fn relayout_flow_lines(
+    editor: &mut Editor<'static>,
+    fs: &mut FontSystem,
+    floating: &[ImageBlock],
+    cx: f32,
+    cy: f32,
+    content_w: f32,
+    content_h: f32,
+) {
+    if !floating.iter().any(|image| image.wrap == ImageWrap::Square) {
+        relayout_list_lines(editor, fs, content_w);
+        return;
+    }
+
+    for _ in 0..3 {
+        let widths = editor.with_buffer(|b| {
+            let mut widths: Vec<f32> = b
+                .lines
+                .iter()
+                .map(|line| line_layout(line_list_code(line) != 0, content_w, None, DPI).1)
+                .collect();
+            for run in b.layout_runs() {
+                let page = (run.line_top / content_h).floor() as usize;
+                let page_y = cy + run.line_top - page as f32 * content_h;
+                let wrap = square_wrap(
+                    floating,
+                    page,
+                    cx,
+                    cy,
+                    content_w,
+                    page_y,
+                    run.line_height,
+                    DPI,
+                );
+                let wanted = line_layout(
+                    line_list_code(&b.lines[run.line_i]) != 0,
+                    content_w,
+                    wrap,
+                    DPI,
+                )
+                .1;
+                widths[run.line_i] = widths[run.line_i].min(wanted);
+            }
+            widths
+        });
+        editor.with_buffer_mut(|b| {
+            let fss = b.metrics().font_size;
+            let wrap = b.wrap();
+            let ell = b.ellipsize();
+            let mono = b.monospace_width();
+            let tab = b.tab_width();
+            let hint = b.hinting();
+            for (line, width) in b.lines.iter_mut().zip(widths) {
+                line.reset_layout();
+                line.layout(fs, fss, Some(width.max(1.0)), wrap, ell, mono, tab, hint);
+            }
+        });
+    }
+}
+
+/// Combined Square-wrap and list offset for one shaped visual run.
+#[allow(clippy::too_many_arguments)]
+fn text_offset_for_run(
+    line: &cosmic_text::BufferLine,
+    line_top: f32,
+    line_h: f32,
+    floating: &[ImageBlock],
+    cx: f32,
+    cy: f32,
+    content_w: f32,
+    content_h: f32,
+) -> f32 {
+    let page = (line_top / content_h).floor() as usize;
+    let page_y = cy + line_top - page as f32 * content_h;
+    let wrap = square_wrap(floating, page, cx, cy, content_w, page_y, line_h, DPI);
+    line_layout(line_list_code(line) != 0, content_w, wrap, DPI).0
+}
+
+/// Offset (rounded layout pixels) applied to the visual line at buffer-y `by`,
+/// used to map pointer and caret coordinates through the same geometry as paint.
+#[allow(clippy::too_many_arguments)]
+fn text_offset_at_y(
+    editor: &Editor<'static>,
+    by: i32,
+    floating: &[ImageBlock],
+    cx: f32,
+    cy: f32,
+    content_w: f32,
+    content_h: f32,
+) -> i32 {
     let y = by as f32;
     editor.with_buffer(|b| {
         for run in b.layout_runs() {
             if y >= run.line_top && y < run.line_top + run.line_height {
-                return if line_list_code(&b.lines[run.line_i]) != 0 {
-                    list_indent_px().round() as i32
-                } else {
-                    0
-                };
+                return text_offset_for_run(
+                    &b.lines[run.line_i],
+                    run.line_top,
+                    run.line_height,
+                    floating,
+                    cx,
+                    cy,
+                    content_w,
+                    content_h,
+                )
+                .round() as i32;
             }
         }
         0
@@ -2418,7 +2519,7 @@ fn paint_floating_image(
         painter.rect_stroke(
             img_rect,
             0.0,
-            egui::Stroke::new(1.5, accent),
+            egui::Stroke::new(1.5_f32, accent),
             egui::StrokeKind::Outside,
         );
         for c in [
@@ -2432,7 +2533,7 @@ fn paint_floating_image(
             painter.rect_stroke(
                 handle,
                 1.0,
-                egui::Stroke::new(1.5, accent),
+                egui::Stroke::new(1.5_f32, accent),
                 egui::StrokeKind::Outside,
             );
         }
@@ -2556,6 +2657,11 @@ fn handle_floating_pointer(
                     }
                     FloatDrag::Resize { corner } => resize_floating(block, corner, pmm),
                 }
+                // Square wrap must follow the image continuously while it is
+                // moved/resized, not jump only after mouse release.
+                if block.wrap == ImageWrap::Square {
+                    d.revision = d.revision.wrapping_add(1);
+                }
                 return true;
             }
         }
@@ -2621,7 +2727,6 @@ fn convert_floating_to_inline(d: &mut DocRuntime, fs: &mut FontSystem, idx: usiz
 /// (rather than a fixed 96 dpi bitmap that egui then upsamples) is what keeps
 /// the on-page text crisp.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn render_page(
     editor: &Editor<'static>,
     fs: &mut FontSystem,
@@ -2636,6 +2741,8 @@ fn render_page(
     font_name: &str,
     font_pt: f32,
     line_spacing: f32,
+    floating: &[ImageBlock],
+    content_w: f32,
 ) -> (Vec<u8>, usize, usize) {
     let pw = (page_w * render_scale).ceil().max(1.0) as usize;
     let ph = (page_h * render_scale).ceil().max(1.0) as usize;
@@ -2675,9 +2782,19 @@ fn render_page(
             if p != page {
                 continue;
             }
-            // List lines are shifted right by the hanging indent.
+            // Square-wrapped and list lines share one text offset contract.
             let is_list = line_list_code(&b.lines[run.line_i]) != 0;
-            let ox = cx + if is_list { list_indent } else { 0.0 };
+            let ox = cx
+                + text_offset_for_run(
+                    &b.lines[run.line_i],
+                    run.line_top,
+                    run.line_height,
+                    floating,
+                    cx,
+                    cy,
+                    content_w,
+                    ch,
+                );
             let base_y = cy + run.line_y - page as f32 * ch;
             // Draw the list marker (same font + baseline as the body) in the gutter.
             if is_list && first_visual {
@@ -2693,8 +2810,11 @@ fn render_page(
                     mb.shape_until_scroll(fs, false);
                     for mr in mb.layout_runs() {
                         for glyph in mr.glyphs {
-                            let phys = glyph
-                                .physical((cx * render_scale, base_y * render_scale), render_scale);
+                            let marker_x = ox - list_indent;
+                            let phys = glyph.physical(
+                                (marker_x * render_scale, base_y * render_scale),
+                                render_scale,
+                            );
                             cache.with_pixels(fs, phys.cache_key, ink, |gx, gy, col| {
                                 blend_px(&mut buf, pw, ph, phys.x + gx, phys.y + gy, col);
                             });
@@ -3321,6 +3441,44 @@ mod tests {
     }
 
     #[test]
+    fn square_wrap_reflows_editor_and_offsets_hit_testing() {
+        let mut fs = FontSystem::new();
+        let setup = PageSetup::default();
+        let (cx, cy, cw, ch) = setup.content_rect_px(DPI);
+        let mut buffer = Buffer::new(&mut fs, base_metrics(13.0, DEFAULT_LINE_SPACING));
+        buffer.set_size(Some(cw), None);
+        let long = "Văn bản chạy vòng quanh ảnh trong trình soạn thảo. ".repeat(24);
+        buffer.set_text(
+            &long,
+            &Attrs::new().family(Family::Name("Times New Roman")),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut fs, false);
+        let wide_lines = buffer.layout_runs().count();
+        let mut editor = Editor::new(buffer);
+
+        let mut image = ImageBlock::inline(Vec::new(), 300, 300, 65.0, ParagraphAlign::Left);
+        image.wrap = ImageWrap::Square;
+        image.page = 0;
+        image.x_mm = setup.margins.left_mm;
+        image.y_mm = setup.margins.top_mm;
+        relayout_flow_lines(&mut editor, &mut fs, &[image.clone()], cx, cy, cw, ch);
+
+        assert!(
+            editor.with_buffer(|b| b.layout_runs().count()) > wide_lines,
+            "Square exclusion should narrow and reflow the editor paragraph"
+        );
+        let first_y = editor
+            .with_buffer(|b| b.layout_runs().next().map(|run| run.line_top as i32))
+            .unwrap();
+        assert!(
+            text_offset_at_y(&editor, first_y, &[image], cx, cy, cw, ch) > 0,
+            "paint, caret and pointer mapping should move right of a left image"
+        );
+    }
+
+    #[test]
     fn caret_with_no_selection_does_not_toggle() {
         let mut fs = FontSystem::new();
         let buffer = buffer_with("plain", &mut fs);
@@ -3372,6 +3530,8 @@ mod tests {
             "Times New Roman",
             13.0,
             DEFAULT_LINE_SPACING,
+            &[],
+            setup.content_width_px(DPI),
         );
         assert_eq!(tw, (page_w * render_scale).ceil() as usize);
         assert_eq!(th, (page_h * render_scale).ceil() as usize);
