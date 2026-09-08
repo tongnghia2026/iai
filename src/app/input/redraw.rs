@@ -266,6 +266,7 @@ impl App {
                     self.docs.documents[self.docs.active_doc_idx]
                         .canvas
                         .fill_solid_color(fill_color);
+                    self.apply_canvas_event(crate::app::render::CanvasEvent::LayerPixelsChanged);
                 }
 
                 if let Some(stroke) = self.edit.pending_stroke.take() {

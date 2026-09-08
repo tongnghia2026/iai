@@ -1730,7 +1730,7 @@ pub fn pdf_raster_base(
     selection: &PdfVectorSelection,
 ) -> Vec<u8> {
     if selection.promoted_layer_ids.is_empty() && selection.above_layer_ids.is_empty() {
-        return canvas.export_flat();
+        return canvas.layer_stack.flatten(canvas.width, canvas.height);
     }
     let hidden: std::collections::HashSet<u32> = selection
         .promoted_layer_ids

@@ -200,7 +200,9 @@ impl Exporter for TiffExporter {
         }
 
         let pixels = if opts.flatten {
-            canvas.export_flat()
+            canvas
+                .materialize_flat_for_export()
+                .ok_or_else(|| "Could not materialize the canvas for TIFF export".to_string())?
         } else {
             canvas.pixels.clone()
         };

@@ -1444,7 +1444,9 @@ impl Exporter for PdfExporter {
             // Not ink-exact (group / adjustment / mask / ink-less pixel): fall back
             // to a colour-managed RGB raster of the on-screen mirror (no vectors, so
             // no CMYK operators leak onto an RGB page). Still matches the preview.
-            let rgba = canvas.export_flat();
+            let rgba = canvas
+                .materialize_flat_for_export()
+                .ok_or_else(|| "Could not materialize the canvas for PDF export".to_string())?;
             let icc = super::export_icc_bytes(canvas);
             let pdf = crate::core::print::build_pdf_with_vectors(
                 &rgba,

@@ -61,17 +61,50 @@ impl EyedropperTool {
 
     pub fn sample(&self, canvas: &Canvas, cx: u32, cy: u32) -> [u8; 4] {
         let r = self.sample_size.radius();
+        let x0 = cx.saturating_sub(r).min(canvas.width);
+        let y0 = cy.saturating_sub(r).min(canvas.height);
+        let x1 = cx.saturating_add(r).saturating_add(1).min(canvas.width);
+        let y1 = cy.saturating_add(r).saturating_add(1).min(canvas.height);
+        let region_w = x1.saturating_sub(x0);
+        let region_h = y1.saturating_sub(y0);
+
+        // Viewport-streamed canvases deliberately have no always-resident flat
+        // `pixels` buffer. Composite only the eyedropper's 1x1..11x11 footprint
+        // in that case instead of returning transparent black (or flattening the
+        // entire document for every pointer move).
+        let merged_region = if self.sample_merged
+            && Canvas::checked_rgba_len(canvas.width, canvas.height)
+                .is_none_or(|expected| canvas.pixels.len() != expected)
+        {
+            Some(canvas.layer_stack.flatten_compact_region(
+                canvas.width,
+                canvas.height,
+                x0,
+                y0,
+                region_w,
+                region_h,
+            ))
+        } else {
+            None
+        };
 
         let get_px = |x: u32, y: u32| -> [u8; 4] {
             if self.sample_merged {
-                let i = ((y * canvas.width + x) * 4) as usize;
-                if i + 3 < canvas.pixels.len() {
-                    [
-                        canvas.pixels[i],
-                        canvas.pixels[i + 1],
-                        canvas.pixels[i + 2],
-                        canvas.pixels[i + 3],
-                    ]
+                let (pixels, i) = if let Some(region) = merged_region.as_ref() {
+                    let local_x = x.saturating_sub(x0) as usize;
+                    let local_y = y.saturating_sub(y0) as usize;
+                    (
+                        region.as_slice(),
+                        (local_y * region_w as usize + local_x) * 4,
+                    )
+                } else {
+                    (
+                        canvas.pixels.as_slice(),
+                        (y as usize * canvas.width as usize + x as usize) * 4,
+                    )
+                };
+                if i + 3 < pixels.len() {
+                    [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
                 } else {
                     [0, 0, 0, 0]
                 }
@@ -100,10 +133,6 @@ impl EyedropperTool {
 
         let mut sum = [0u32; 4];
         let mut count = 0u32;
-        let x0 = cx.saturating_sub(r);
-        let y0 = cy.saturating_sub(r);
-        let x1 = (cx + r + 1).min(canvas.width);
-        let y1 = (cy + r + 1).min(canvas.height);
 
         for y in y0..y1 {
             for x in x0..x1 {
@@ -179,6 +208,7 @@ impl Tool for EyedropperTool {
 #[cfg(test)]
 mod tests {
     use super::EyedropperTool;
+    use crate::core::canvas::Canvas;
 
     #[test]
     fn picked_palette_accumulates_and_skips_consecutive_duplicates() {
@@ -190,5 +220,23 @@ mod tests {
         tool.remember_color(blue);
         assert_eq!(tool.picked_colors, vec![red, blue]);
         assert_eq!(tool.picked_color, Some(blue));
+    }
+
+    #[test]
+    fn sample_merged_composites_a_compact_region_without_flat_canvas_pixels() {
+        let mut pixels = vec![[20u8, 40, 60, 255]; 9]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        pixels[16..20].copy_from_slice(&[210, 80, 30, 255]);
+        let mut canvas = Canvas::from_rgba(pixels, 3, 3);
+        canvas.pixels.clear(); // same storage mode as a >25 MP canvas
+
+        let tool = EyedropperTool::new();
+        assert_eq!(tool.sample(&canvas, 1, 1), [210, 80, 30, 255]);
+        assert!(
+            canvas.pixels.is_empty(),
+            "sampling must not retain a flat frame"
+        );
     }
 }

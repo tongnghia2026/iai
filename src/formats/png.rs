@@ -35,7 +35,9 @@ impl Exporter for PngExporter {
             Some(bytes) => (bytes, png::BitDepth::Sixteen),
             None => {
                 let p = if opts.flatten {
-                    canvas.export_flat()
+                    canvas.materialize_flat_for_export().ok_or_else(|| {
+                        "Could not materialize the canvas for PNG export".to_string()
+                    })?
                 } else {
                     canvas.pixels.clone()
                 };

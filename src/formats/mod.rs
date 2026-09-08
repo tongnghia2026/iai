@@ -445,10 +445,10 @@ fn prepare_output_canvas(canvas: &Canvas, path: &Path, opts: &ExportOptions) -> 
         return None;
     }
     let (w, h) = (canvas.width, canvas.height);
-    if w == 0 || h == 0 || !Canvas::fits_flat_buffer(w, h) {
+    if w == 0 || h == 0 {
         return None;
     }
-    let mut rgba = canvas.export_flat();
+    let mut rgba = canvas.materialize_flat_for_export()?;
     if rgba.len() != (w as usize) * (h as usize) * 4 {
         return None;
     }
@@ -487,6 +487,59 @@ fn prepare_output_canvas(canvas: &Canvas, path: &Path, opts: &ExportOptions) -> 
     derived.icc_profile = canvas.icc_profile.clone();
     derived.metadata = canvas.metadata.clone();
     Some(derived)
+}
+
+#[cfg(test)]
+mod large_canvas_export_tests {
+    use super::*;
+
+    fn temp_path(extension: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "iai_large_canvas_export_{}_{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            extension
+        ))
+    }
+
+    /// Crosses the 25 MP resident-flat-buffer boundary and exercises the real
+    /// encoders. Kept out of the default suite because each encoder must briefly
+    /// materialize a ~100 MiB RGBA frame.
+    #[test]
+    #[ignore = "allocates a >100 MiB export frame"]
+    fn png_jpeg_and_pdf_export_above_resident_flat_limit() {
+        let (width, height) = (5_001, 5_000);
+        let canvas = Canvas::new(width, height);
+        assert!(
+            !Canvas::fits_flat_buffer(width, height),
+            "test must remain above the resident flat-buffer limit"
+        );
+        assert!(canvas.pixels.is_empty());
+
+        let registry = FormatRegistry::new();
+        for extension in ["png", "jpg"] {
+            let path = temp_path(extension);
+            registry
+                .export(&canvas, &path, &ExportOptions::default())
+                .unwrap_or_else(|error| panic!("{extension} export failed: {error}"));
+            assert_eq!(image::image_dimensions(&path).unwrap(), (width, height));
+            let _ = std::fs::remove_file(path);
+        }
+        let pdf_path = temp_path("pdf");
+        registry
+            .export(&canvas, &pdf_path, &ExportOptions::default())
+            .unwrap_or_else(|error| panic!("pdf export failed: {error}"));
+        let pdf = std::fs::read(&pdf_path).unwrap();
+        assert!(pdf.starts_with(b"%PDF-"));
+        let _ = std::fs::remove_file(pdf_path);
+        assert!(
+            canvas.pixels.is_empty(),
+            "export must not retain the flat frame"
+        );
+    }
 }
 
 #[cfg(test)]

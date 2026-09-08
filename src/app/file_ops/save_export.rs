@@ -396,32 +396,7 @@ impl App {
             return;
         }
 
-        let (cw, ch) = {
-            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
-            (canvas.width, canvas.height)
-        };
-        if !crate::core::canvas::Canvas::fits_flat_buffer(cw, ch) {
-            self.shell.status_msg =
-                "Loi: canvas qua lon de luu dang anh phang - hay dung .iai".to_string();
-            return;
-        }
-
-        if is_large {
-            self.docs.documents[self.docs.active_doc_idx].canvas.pixels = self.docs.documents
-                [self.docs.active_doc_idx]
-                .canvas
-                .layer_stack
-                .flatten(cw, ch);
-            if self.docs.documents[self.docs.active_doc_idx]
-                .canvas
-                .pixels
-                .is_empty()
-            {
-                self.shell.status_msg =
-                    "Lỗi: canvas quá lớn để xuất ảnh — dùng .iai để lưu".to_string();
-                return;
-            }
-        } else {
+        if !is_large {
             self.docs.documents[self.docs.active_doc_idx]
                 .canvas
                 .ensure_pixels();
@@ -515,34 +490,18 @@ impl App {
 
         self.sync_brush_gpu_to_cpu();
 
-        let is_large = self.win.gpu.as_ref().map_or(false, |g| g.is_large_canvas);
         let is_iai = matches!(format, crate::formats::ExportFormat::Iai);
-        let (cw, ch) = {
-            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
-            (canvas.width, canvas.height)
-        };
-        if !is_iai && !crate::core::canvas::Canvas::fits_flat_buffer(cw, ch) {
-            self.shell.status_msg =
-                "Loi: canvas qua lon de export dang anh phang - hay dung .iai".to_string();
-            return;
-        }
         // Raster export of a page that shows the shared master: build a throwaway
         // canvas with the master composited beneath and export THAT. `.iai` keeps
         // the master stored separately (via the artboard-document save), so it is
         // never merged here.
-        let mut merged = if is_iai {
+        let merged = if is_iai {
             None
         } else {
             let active = self.docs.documents[self.docs.active_doc_idx].active_artboard;
             self.docs.documents[self.docs.active_doc_idx].page_render_canvas(active)
         };
-        if let Some(m) = merged.as_mut() {
-            m.pixels = m.layer_stack.flatten(cw, ch);
-            if m.pixels.is_empty() {
-                self.shell.status_msg = "Lỗi: không dựng được ảnh có trang nền".to_string();
-                return;
-            }
-            m.pixels_stale = false;
+        if let Some(m) = merged.as_ref() {
             match self.jobs.format_registry.export(
                 m,
                 std::path::Path::new(path_str),
@@ -571,21 +530,12 @@ impl App {
             }
             return;
         }
-        if is_large && !is_iai {
-            self.docs.documents[self.docs.active_doc_idx].canvas.pixels = self.docs.documents
-                [self.docs.active_doc_idx]
-                .canvas
-                .layer_stack
-                .flatten(cw, ch);
-            if self.docs.documents[self.docs.active_doc_idx]
-                .canvas
-                .pixels
-                .is_empty()
-            {
-                self.shell.status_msg = "Lỗi: canvas quá lớn để export ảnh".to_string();
-                return;
-            }
-        } else if !is_large {
+        if !is_iai
+            && crate::core::canvas::Canvas::fits_flat_buffer(
+                self.docs.documents[self.docs.active_doc_idx].canvas.width,
+                self.docs.documents[self.docs.active_doc_idx].canvas.height,
+            )
+        {
             self.docs.documents[self.docs.active_doc_idx]
                 .canvas
                 .ensure_pixels();
