@@ -50,7 +50,11 @@ impl App {
             self.shell.status_msg = "Trộn thư chỉ dùng cho tài liệu văn bản".to_string();
             return;
         };
-        let template = flow.document_arc();
+        let Some(template) = flow.document_arc() else {
+            self.shell.status_msg =
+                "Trộn thư cho tài liệu Canvas Editor sẽ được nối ở pha DOCX".to_string();
+            return;
+        };
         if mail_merge::find_fields(template.as_ref()).is_empty() {
             self.shell.status_msg =
                 "Mẫu chưa có trường trộn nào. Thêm chỗ giữ chỗ dạng {{Tên trường}} rồi thử lại."
@@ -127,7 +131,11 @@ impl App {
             self.shell.status_msg = "Tài liệu hiện tại không phải văn bản".to_string();
             return;
         };
-        let template = flow.document_arc();
+        let Some(template) = flow.document_arc() else {
+            self.shell.status_msg =
+                "Trộn thư cho tài liệu Canvas Editor sẽ được nối ở pha DOCX".to_string();
+            return;
+        };
         if table.is_empty() {
             self.shell.status_msg = "Nguồn dữ liệu không có dòng nào để trộn".to_string();
             return;

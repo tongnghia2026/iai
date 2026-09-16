@@ -61,8 +61,50 @@ pub struct EditOrigin {
     pub output_new_file: bool,
 }
 
-pub struct QueuedEdit {
+/// Upload image prepared off the UI thread: the downscaled RGBA for the OS
+/// clipboard plus its PNG encoding for the socket.
+pub struct PreparedUpload {
     png: Vec<u8>,
+    small: image::RgbaImage,
+}
+
+impl PreparedUpload {
+    /// Downscale + PNG-encode. CPU-heavy on large canvases; run it off the UI thread.
+    pub fn from_rgba(rgba: Vec<u8>, w: u32, h: u32) -> Result<Self, String> {
+        let img = image::RgbaImage::from_raw(w, h, rgba)
+            .ok_or_else(|| "Không mã hoá được ảnh đầu vào".to_string())?;
+        let small = downscale(image::DynamicImage::ImageRgba8(img), MAX_UPLOAD_EDGE).into_rgba8();
+        let mut png = Vec::new();
+        small
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| format!("Không mã hoá được PNG: {e}"))?;
+        Ok(Self { png, small })
+    }
+}
+
+/// An extension edit whose upload is still being prepared on a worker.
+pub struct PendingUpload {
+    pub doc_id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub site: String,
+    pub prompt: String,
+    pub output_new_file: bool,
+    pub rx: Receiver<Result<PreparedUpload, String>>,
+}
+
+/// A dispatched edit whose clipboard write and base64 payload were produced off
+/// the UI thread; `drain` sends it only if the request is still current.
+struct ReadyEdit {
+    id: u64,
+    site: String,
+    prompt: String,
+    image_b64: String,
+    clipboard_hash: Option<u64>,
+}
+
+pub struct QueuedEdit {
+    upload: PreparedUpload,
     pub doc_id: u32,
     pub width: u32,
     pub height: u32,
@@ -118,6 +160,8 @@ pub struct ExtBridge {
     next_id: u64,
     pub origin: Option<EditOrigin>,
     queue: VecDeque<QueuedEdit>,
+    ready_tx: Sender<ReadyEdit>,
+    ready_rx: Receiver<ReadyEdit>,
 }
 
 impl Default for ExtBridge {
@@ -131,9 +175,12 @@ impl ExtBridge {
         let token = load_or_create_token();
         let (in_tx, in_rx) = mpsc::channel();
         let (out_tx, out_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
         let server_token = token.clone();
         std::thread::spawn(move || server_loop(in_tx, out_rx, server_token));
         Self {
+            ready_tx,
+            ready_rx,
             inbound: in_rx,
             outbound: out_tx,
             token,
@@ -163,8 +210,9 @@ impl ExtBridge {
         }
     }
 
-    /// Encode once at enqueue time. Clipboard ownership is deliberately deferred
-    /// until this job actually reaches the single browser slot.
+    /// Prepare the upload inline, then queue/send it. The app prepares uploads
+    /// on a worker and calls [`Self::enqueue_prepared`] instead.
+    #[cfg(test)]
     pub fn enqueue_edit(
         &mut self,
         rgba: Vec<u8>,
@@ -178,15 +226,28 @@ impl ExtBridge {
         if !self.connected {
             return Err("Extension chưa kết nối".to_string());
         }
-        let img = image::RgbaImage::from_raw(w, h, rgba)
-            .ok_or_else(|| "Không mã hoá được ảnh đầu vào".to_string())?;
-        let dynimg = downscale(image::DynamicImage::ImageRgba8(img), MAX_UPLOAD_EDGE);
-        let mut png = Vec::new();
-        dynimg
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .map_err(|e| format!("Không mã hoá được PNG: {e}"))?;
+        let upload = PreparedUpload::from_rgba(rgba, w, h)?;
+        self.enqueue_prepared(upload, w, h, site, prompt, doc_id, output_new_file)
+    }
+
+    /// Queue or send a prepared upload. Clipboard ownership is deliberately
+    /// deferred until this job actually reaches the single browser slot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_prepared(
+        &mut self,
+        upload: PreparedUpload,
+        w: u32,
+        h: u32,
+        site: &str,
+        prompt: String,
+        doc_id: u32,
+        output_new_file: bool,
+    ) -> Result<EnqueueOutcome, String> {
+        if !self.connected {
+            return Err("Extension chưa kết nối".to_string());
+        }
         let job = QueuedEdit {
-            png,
+            upload,
             doc_id,
             width: w,
             height: h,
@@ -208,49 +269,85 @@ impl ExtBridge {
         }
     }
 
+    /// Claim the browser slot for `job`. The clipboard write and base64 encode
+    /// run on a worker; `drain` sends the request once they are ready.
     fn dispatch(&mut self, job: QueuedEdit) -> Result<(), String> {
-        let small = image::load_from_memory(&job.png)
-            .map_err(|e| format!("Không đọc được PNG trong hàng chờ: {e}"))?
-            .to_rgba8();
-        #[cfg(not(test))]
-        {
-            self.last_clipboard_write = crate::app::os_clipboard::write_image(
-                small.width(),
-                small.height(),
-                small.as_raw(),
-            )
-            .ok();
-        }
-        #[cfg(test)]
-        {
-            let _ = small;
-            self.last_clipboard_write = None;
-        }
-        let clipboard = self.last_clipboard_write.is_some();
-        let image_b64 = base64::engine::general_purpose::STANDARD.encode(&job.png);
         let id = self.next_id;
         self.next_id += 1;
-        self.outbound
-            .send(ExtOutbound::Edit {
-                id,
-                site: job.site.clone(),
-                prompt: job.prompt,
-                image_b64,
-                clipboard,
-            })
-            .map_err(|_| "Bridge extension đã dừng".to_string())?;
         self.awaiting = true;
         self.awaiting_id = Some(id);
         self.awaiting_started = Some(Instant::now());
         self.awaiting_progress = false;
-        self.awaiting_site = Some(job.site);
+        self.awaiting_site = Some(job.site.clone());
         self.origin = Some(EditOrigin {
             doc_id: job.doc_id,
             width: job.width,
             height: job.height,
             output_new_file: job.output_new_file,
         });
+        let QueuedEdit {
+            upload,
+            site,
+            prompt,
+            ..
+        } = job;
+        let ready_tx = self.ready_tx.clone();
+        let prepare = move || {
+            let clipboard_hash = write_upload_to_clipboard(&upload.small);
+            let image_b64 = base64::engine::general_purpose::STANDARD.encode(&upload.png);
+            let _ = ready_tx.send(ReadyEdit {
+                id,
+                site,
+                prompt,
+                image_b64,
+                clipboard_hash,
+            });
+        };
+        #[cfg(not(test))]
+        std::thread::spawn(prepare);
+        #[cfg(test)]
+        {
+            // Deterministic in tests: prepare and send inline.
+            prepare();
+            if let Some(ExtInbound::Failed { message, .. }) = self.flush_ready().into_iter().next()
+            {
+                return Err(message);
+            }
+        }
         Ok(())
+    }
+
+    /// Send prepared requests that are still current; report send failures.
+    fn flush_ready(&mut self) -> Vec<ExtInbound> {
+        let mut failed = Vec::new();
+        while let Ok(ready) = self.ready_rx.try_recv() {
+            // iai owns the clipboard content even if the request was cancelled.
+            if ready.clipboard_hash.is_some() {
+                self.last_clipboard_write = ready.clipboard_hash;
+            }
+            if self.awaiting_id != Some(ready.id) {
+                continue;
+            }
+            let sent = self.outbound.send(ExtOutbound::Edit {
+                id: ready.id,
+                site: ready.site,
+                prompt: ready.prompt,
+                image_b64: ready.image_b64,
+                clipboard: ready.clipboard_hash.is_some(),
+            });
+            if sent.is_err() {
+                let origin = self.clear_awaiting();
+                let message = "Bridge extension đã dừng".to_string();
+                self.status = message.clone();
+                self.push_log(&message);
+                failed.push(ExtInbound::Failed {
+                    id: ready.id,
+                    message,
+                    origin,
+                });
+            }
+        }
+        failed
     }
 
     fn clear_awaiting(&mut self) -> Option<EditOrigin> {
@@ -326,7 +423,7 @@ impl ExtBridge {
 
     /// Drain all pending events from the extension (called once per frame).
     pub fn drain(&mut self) -> Vec<ExtInbound> {
-        let mut out = Vec::new();
+        let mut out = self.flush_ready();
         loop {
             match self.inbound.try_recv() {
                 Ok(ev) => match ev {
@@ -625,6 +722,20 @@ fn handle_text(
     ControlFlow::Continue(())
 }
 
+/// Put the upload on the OS clipboard so the extension can paste it natively.
+/// Returns the read-back content hash (paste uses it to recognise iai's write).
+fn write_upload_to_clipboard(small: &image::RgbaImage) -> Option<u64> {
+    #[cfg(not(test))]
+    {
+        crate::app::os_clipboard::write_image(small.width(), small.height(), small.as_raw()).ok()
+    }
+    #[cfg(test)]
+    {
+        let _ = small;
+        None
+    }
+}
+
 fn downscale(img: image::DynamicImage, max_edge: u32) -> image::DynamicImage {
     let longest = img.width().max(img.height());
     if longest <= max_edge {
@@ -703,8 +814,11 @@ mod tests {
     fn test_bridge() -> (ExtBridge, Sender<ExtInbound>, Receiver<ExtOutbound>) {
         let (in_tx, in_rx) = mpsc::channel();
         let (out_tx, out_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
         (
             ExtBridge {
+                ready_tx,
+                ready_rx,
                 inbound: in_rx,
                 outbound: out_tx,
                 token: "good".to_string(),
@@ -989,6 +1103,28 @@ mod tests {
             out_rx.try_recv(),
             Ok(ExtOutbound::Edit { id: 2, .. })
         ));
+    }
+
+    #[test]
+    fn stale_ready_edit_is_dropped_but_keeps_clipboard_ownership() {
+        let (mut bridge, _in_tx, out_rx) = test_bridge();
+        // A worker finishes preparing request 5 after it was cancelled.
+        bridge
+            .ready_tx
+            .send(ReadyEdit {
+                id: 5,
+                site: "gemini".to_string(),
+                prompt: "edit".to_string(),
+                image_b64: "x".to_string(),
+                clipboard_hash: Some(7),
+            })
+            .unwrap();
+        bridge.drain();
+        assert!(
+            out_rx.try_recv().is_err(),
+            "a cancelled request must not reach the socket"
+        );
+        assert_eq!(bridge.last_clipboard_write, Some(7));
     }
 
     #[test]

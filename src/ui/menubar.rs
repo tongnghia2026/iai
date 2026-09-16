@@ -1128,7 +1128,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     });
 
                     // Everything that acts on type, gathered in one place.
-                    ui.menu_button("Soạn thảo văn bản", |ui| {
+                    ui.menu_button("Text", |ui| {
                         if ui
                             .add(menu_item_enabled(
                                 "Format All Text…",

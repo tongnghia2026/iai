@@ -522,7 +522,13 @@ impl App {
         let id = crate::core::document::DocumentId(self.docs.next_doc_id);
         self.docs.next_doc_id += 1;
         let mut doc = crate::core::document::Document::new_flow_text(id);
-        doc.flow_text = Some(crate::core::document::FlowTextDocumentState::new(loaded));
+        let mut flow_text = crate::core::document::FlowTextDocumentState::from_backing(loaded);
+        flow_text.set_read_only(
+            std::fs::metadata(&path)
+                .map(|metadata| metadata.permissions().readonly())
+                .unwrap_or(false),
+        );
+        doc.flow_text = Some(flow_text);
         doc.path = Some(path.clone());
         doc.file_modified_at = file_modified_at(&path);
         doc.title = path
@@ -979,16 +985,27 @@ impl App {
                         self.start_pdf_page_insert(document_id, position, paths);
                     }
                 }
-                if self.shell.close_requested {
-                    self.shell.close_requested = false;
-                    self.execute_close();
-                }
-                if self.shell.exit_save_pending {
-                    self.shell.exit_save_pending = false;
-                    if !self.docs.documents[self.docs.active_doc_idx].is_modified() {
-                        self.docs.pending_exit_docs.pop_front();
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                self.finish_document_webview_save_continuation();
+                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                {
+                    if self.shell.close_requested {
+                        self.shell.close_requested = false;
+                        if !self.docs.documents[self.docs.active_doc_idx].is_modified() {
+                            self.execute_close();
+                        } else {
+                            self.shell.ui.show_close_dialog = true;
+                        }
                     }
-                    self.present_next_exit_document();
+                    if self.shell.exit_save_pending {
+                        self.shell.exit_save_pending = false;
+                        if !self.docs.documents[self.docs.active_doc_idx].is_modified() {
+                            self.docs.pending_exit_docs.pop_front();
+                            self.present_next_exit_document();
+                        } else {
+                            self.shell.ui.show_exit_dialog = true;
+                        }
+                    }
                 }
                 if self.shell.exit_requested {
                     self.shell.exit_requested = false;
@@ -1008,7 +1025,10 @@ impl App {
                     self.shell.ui.show_exit_dialog = true;
                 }
                 self.shell.exit_requested = false;
-                self.shell.close_requested = false;
+                if self.shell.close_requested {
+                    self.shell.close_requested = false;
+                    self.shell.ui.show_close_dialog = true;
+                }
             }
         }
     }

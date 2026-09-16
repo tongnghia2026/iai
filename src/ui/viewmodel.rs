@@ -499,6 +499,8 @@ pub struct DialogViewModel {
     pub lama_status_msg: String,
     pub show_exit_dialog: bool,
     pub show_close_dialog: bool,
+    /// Canvas Editor bridge/runtime error awaiting acknowledgement.
+    pub document_editor_error: Option<String>,
     pub show_reload_file_dialog: bool,
     pub reload_file_name: String,
     pub reload_will_discard_changes: bool,
@@ -1004,6 +1006,7 @@ impl Default for UiData {
                 lama_status_msg: String::new(),
                 show_exit_dialog: false,
                 show_close_dialog: false,
+                document_editor_error: None,
                 show_reload_file_dialog: false,
                 reload_file_name: String::new(),
                 reload_will_discard_changes: false,

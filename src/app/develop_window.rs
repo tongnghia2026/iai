@@ -680,6 +680,26 @@ impl App {
                     }
                 }
             }
+            // Enter commits the active RAW with the same safeguards as the
+            // "Open Image" button. A focused editor retains Enter for itself.
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                let typing = self
+                    .win
+                    .develop_egui_ctx
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.egui_wants_keyboard_input());
+                if !typing {
+                    self.commit_develop_window();
+                }
+            }
             // Escape from the Develop window is the Cancel path (like the X
             // button) — so it can be closed while it holds keyboard focus, where
             // the main window's Ctrl+Alt+D toggle never arrives. A focused text

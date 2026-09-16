@@ -800,6 +800,8 @@ pub struct DialogIntent {
     pub show_adjustment_dialog: Option<bool>,
     pub show_exit_dialog: Option<bool>,
     pub show_close_dialog: Option<bool>,
+    /// Acknowledge the Canvas Editor bridge/runtime error modal.
+    pub dismiss_document_editor_error: bool,
     pub save_preset: Option<(String, f32, f32, String, f32)>,
     pub delete_preset: Option<usize>,
     pub open_delete_preset_dialog: bool,
@@ -849,6 +851,9 @@ pub struct ChromeIntent {
     pub window_minimize: bool,
     pub window_maximize_toggle: bool,
     pub window_drag: bool,
+    /// Logical egui bounds reserved for the optional child document WebView.
+    /// `None` leaves the legacy cosmic-text editor as the visible implementation.
+    pub document_webview_rect: Option<egui::Rect>,
 }
 /// How a Library grid click changes the selection.
 #[derive(Clone, Copy, PartialEq)]

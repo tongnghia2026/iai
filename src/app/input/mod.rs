@@ -26,9 +26,14 @@ fn flow_text_zoom_from_wheel(current: f32, vertical_delta: f64) -> f32 {
     (current * factor).clamp(0.3, 4.0)
 }
 
+fn is_close_document_shortcut(physical_key: &PhysicalKey, pressed: bool, ctrl_held: bool) -> bool {
+    pressed && ctrl_held && matches!(physical_key, PhysicalKey::Code(KeyCode::KeyW))
+}
+
 #[cfg(test)]
 mod flow_text_zoom_tests {
-    use super::flow_text_zoom_from_wheel;
+    use super::{flow_text_zoom_from_wheel, is_close_document_shortcut};
+    use winit::keyboard::{KeyCode, PhysicalKey};
 
     #[test]
     fn alt_wheel_zoom_has_stable_direction_and_bounds() {
@@ -37,6 +42,19 @@ mod flow_text_zoom_tests {
         assert_eq!(flow_text_zoom_from_wheel(4.0, 1.0), 4.0);
         assert_eq!(flow_text_zoom_from_wheel(0.3, -1.0), 0.3);
         assert_eq!(flow_text_zoom_from_wheel(1.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn ctrl_w_bypasses_egui_for_every_document_kind() {
+        let w = PhysicalKey::Code(KeyCode::KeyW);
+        assert!(is_close_document_shortcut(&w, true, true));
+        assert!(!is_close_document_shortcut(&w, false, true));
+        assert!(!is_close_document_shortcut(&w, true, false));
+        assert!(!is_close_document_shortcut(
+            &PhysicalKey::Code(KeyCode::KeyQ),
+            true,
+            true
+        ));
     }
 }
 
@@ -567,8 +585,13 @@ impl ApplicationHandler for App {
                 }
                 self.sync_cursor(event_loop);
             }
-            WindowEvent::Focused(true) => self.win.window_focused = true,
+            WindowEvent::Focused(true) => {
+                self.win.window_focused = true;
+                // Likely visible again: retry a stalled present right away.
+                self.win.surface_retry_at = None;
+            }
             WindowEvent::CursorMoved { position, .. } => {
+                self.win.surface_retry_at = None;
                 self.win.cursor_ownership.pointer_inside =
                     self.win.window.as_ref().is_some_and(|w| {
                         let size = w.inner_size();
@@ -714,7 +737,7 @@ impl ApplicationHandler for App {
                         WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_)
                     )
                 {
-                    let mut view_key = false;
+                    let mut app_key = false;
                     if let WindowEvent::KeyboardInput {
                         event:
                             KeyEvent {
@@ -746,7 +769,7 @@ impl ApplicationHandler for App {
                         }
                         // View shortcuts (zoom/fit) stay live while editing;
                         // everything else belongs to the TextEdit.
-                        view_key = pressed
+                        app_key = (pressed
                             && self.edit.input.ctrl_held
                             && matches!(
                                 physical_key,
@@ -758,9 +781,14 @@ impl ApplicationHandler for App {
                                     | PhysicalKey::Code(KeyCode::Minus)
                                     | PhysicalKey::Code(KeyCode::NumpadAdd)
                                     | PhysicalKey::Code(KeyCode::NumpadSubtract)
+                            ))
+                            || is_close_document_shortcut(
+                                physical_key,
+                                pressed,
+                                self.edit.input.ctrl_held,
                             );
                     }
-                    if !view_key {
+                    if !app_key {
                         // Keep the bell quiet for a short window, not just this
                         // frame: the incidental denial can land a frame or two
                         // later (caret-blink redraw / IME preedit→commit).
@@ -818,6 +846,15 @@ impl ApplicationHandler for App {
                             event:
                                 KeyEvent {
                                     physical_key: PhysicalKey::Code(KeyCode::KeyO),
+                                    state: ElementState::Pressed,
+                                    ..
+                                },
+                            ..
+                        } if self.edit.input.ctrl_held => {}
+                        WindowEvent::KeyboardInput {
+                            event:
+                                KeyEvent {
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyW),
                                     state: ElementState::Pressed,
                                     ..
                                 },
@@ -938,6 +975,10 @@ impl ApplicationHandler for App {
 
             WindowEvent::Occluded(occluded) => {
                 self.win.window_occluded = occluded;
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                if occluded {
+                    self.hide_document_webview();
+                }
                 if !occluded {
                     self.win.egui_repaint_deadline = None;
                     if let Some(w) = &self.win.window {
@@ -1235,7 +1276,8 @@ impl ApplicationHandler for App {
                 || self.dev.develop_preview.as_ref().is_some_and(|preview| {
                     preview.processing || preview.detail_refine_at.is_some()
                 })
-                || self.jobs.ext.busy();
+                || self.jobs.ext.busy()
+                || self.ext_workers_busy();
             if background_busy {
                 // Poll real background work slowly, without rebuilding or
                 // presenting the hidden window.
@@ -1279,6 +1321,7 @@ impl ApplicationHandler for App {
                 .as_ref()
                 .is_some_and(|p| p.processing || p.detail_refine_at.is_some())
             || self.jobs.ext.busy()
+            || self.ext_workers_busy()
         {
             // Both windows: the main window's RedrawRequested is what pumps the
             // extension bridge / PDF probes, but its paints can be coalesced

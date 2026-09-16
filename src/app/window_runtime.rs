@@ -11,6 +11,10 @@ use super::state::*;
 /// which is what makes device-lost recovery possible.
 pub struct WindowRuntime {
     pub(in crate::app) window: Option<Arc<Window>>,
+    #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+    pub(in crate::app) document_webview: Option<super::document_webview::DocumentWebView>,
+    #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+    pub(in crate::app) document_webview_failed: bool,
     pub(in crate::app) window_visible: bool,
     pub(in crate::app) window_focused: bool,
     pub(in crate::app) cursor_ownership: super::cursor::CursorOwnership,
@@ -57,9 +61,12 @@ pub struct WindowRuntime {
     pub(in crate::app) cursor_crosshair: Option<winit::window::CustomCursor>,
     pub(in crate::app) cursor_selection_crosshair: Option<winit::window::CustomCursor>,
     /// Tiny high-contrast crosshair used while placing Perspective Crop points.
-    pub(in crate::app) cursor_perspective_crosshair: Option<winit::window::CustomCursor>,
     pub(in crate::app) cursor_lasso: Option<winit::window::CustomCursor>,
     pub(in crate::app) cursor_crop: Option<winit::window::CustomCursor>,
+    pub(in crate::app) cursor_perspective_crop: Option<winit::window::CustomCursor>,
+    /// Earliest time to retry presenting after the surface stalled (acquire
+    /// timeout / occluded window); `None` retries on the next frame.
+    pub(in crate::app) surface_retry_at: Option<std::time::Instant>,
     /// Pipette cursor for the Alt-hold temporary eyedropper (paint tools).
     pub(in crate::app) cursor_eyedropper: Option<winit::window::CustomCursor>,
     pub(in crate::app) cursor_fill: Option<winit::window::CustomCursor>,

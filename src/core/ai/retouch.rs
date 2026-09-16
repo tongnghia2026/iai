@@ -2103,6 +2103,9 @@ fn model_path(id: ModelId) -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             roots.push(parent.join("models"));
+            // Dev/test builds live in target/<dir>/release, so also accept a
+            // `models` folder in the workspace above them.
+            roots.extend(parent.ancestors().skip(1).take(4).map(|a| a.join("models")));
         }
     }
     roots.push(models_dir());

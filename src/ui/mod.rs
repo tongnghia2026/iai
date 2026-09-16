@@ -831,6 +831,13 @@ pub fn build(
         };
 
         if data.doc.kind == crate::core::document::DocumentKind::FlowText {
+            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+            {
+                actions.chrome.document_webview_rect = Some(ctx.available_rect());
+            }
+            // Keep rendering the legacy editor underneath the child WebView. It is
+            // the immediate fallback when the Cargo feature is disabled or when
+            // WebView2 cannot be created on this machine.
             document_mode::build(ctx, data, &mut actions, ctx.available_rect());
             return;
         }
@@ -1943,9 +1950,8 @@ pub fn build(
         }
 
         if data.dialogs.show_delete_preset_dialog {
-            let esc_pressed =
-                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-            if esc_pressed {
+            let (enter_pressed, esc_pressed) = dialogs::consume_dialog_enter_escape(ctx);
+            if enter_pressed || esc_pressed {
                 actions.dialogs.close_delete_preset_dialog = true;
             }
 

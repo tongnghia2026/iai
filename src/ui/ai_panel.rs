@@ -904,7 +904,15 @@ fn offline_retouch_section(
             "File model AI local: {ready}/{required} đã tìm thấy; thiếu {missing}, stage tương ứng sẽ dùng CPU fallback."
         )
     };
-    ui.label(egui::RichText::new(model_status).small().weak());
+    // A missing model silently degrades the result, so make it visible.
+    let model_label = if missing == 0 {
+        egui::RichText::new(model_status).small().weak()
+    } else {
+        egui::RichText::new(model_status)
+            .small()
+            .color(egui::Color32::from_rgb(220, 130, 90))
+    };
+    ui.label(model_label);
     let run = egui::Button::new(egui::RichText::new("Run Auto Retouch").strong())
         .min_size(egui::vec2(ui.available_width(), 32.0))
         .fill(egui::Color32::from_rgb(48, 86, 120));

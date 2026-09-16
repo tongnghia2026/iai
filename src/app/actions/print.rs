@@ -141,10 +141,17 @@ impl App {
                         w.request_redraw();
                     }
                 }
+                return;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.shell.status_msg = "Printer refresh stopped".to_string();
             }
+        }
+
+        // A selection or settings change that arrived mid-query ran against the
+        // old printer; re-read the printer that is selected now.
+        if std::mem::take(&mut self.jobs.printer_refresh_queued) {
+            self.refresh_selected_printer();
         }
     }
 
@@ -177,6 +184,7 @@ impl App {
                 return;
             }
             if self.jobs.pending_printer_refresh.is_some() {
+                self.jobs.printer_refresh_queued = true;
                 return;
             }
             let name = self.shell.print_selected_printer.clone();
@@ -206,11 +214,13 @@ impl App {
 
     pub(crate) fn open_print_dialog(&mut self) {
         self.shell.ui.show_print_dialog = true;
-        // Enumerating printers (+ their paper sizes) via PowerShell takes ~2-3s, so
-        // cache the list for the session: only auto-query when we have none yet. The
-        // dialog's Refresh button re-queries on demand (e.g. after plugging in a printer).
+        // The printer list is cached for the session (Refresh re-enumerates, e.g.
+        // after plugging in a printer), but the selected printer's paper is re-read
+        // on every open: its driver defaults may have changed outside iAi.
         if self.shell.print_printers.is_empty() {
             self.refresh_printer_list();
+        } else {
+            self.refresh_selected_printer();
         }
         if let Some(w) = &self.win.window {
             w.request_redraw();

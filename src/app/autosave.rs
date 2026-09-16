@@ -59,21 +59,40 @@ fn read_sidecar_project_path(autosave: &Path) -> Option<PathBuf> {
 }
 
 impl App {
-    /// Periodically mirror the active dirty multi-page document (imported PDF or
-    /// artboard document) to the autosave dir. Throttled to [`AUTOSAVE_INTERVAL`];
-    /// a no-op for clean documents and for plain single-page images.
+    /// Periodically capture the active dirty document. Imported PDF and artboard
+    /// projects are mirrored to disk; Canvas Editor FlowText first performs its
+    /// asynchronous snapshot handshake and will gain disk recovery with `.iai`
+    /// v12. Throttled to [`AUTOSAVE_INTERVAL`].
     pub fn maybe_autosave(&mut self) {
         if self.docs.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
             return;
         }
-        // Reset the timer even when nothing is written, so a clean/idle document
-        // does not re-check the clock every frame.
-        self.docs.last_autosave = Instant::now();
 
         let idx = self.docs.active_doc_idx;
         let Some(doc) = self.docs.documents.get(idx) else {
             return;
         };
+        if doc.is_flow_text() {
+            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+            if !self.document_webview_active_is_dirty() {
+                self.docs.last_autosave = Instant::now();
+                return;
+            }
+            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+            if self.request_document_webview_autosave_snapshot() {
+                self.docs.last_autosave = Instant::now();
+            }
+            #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+            {
+                // The legacy FlowText editor remains outside the recovery scope.
+                self.docs.last_autosave = Instant::now();
+            }
+            return;
+        }
+
+        // Reset the timer even when nothing is written, so a clean/idle document
+        // does not re-check the clock every frame.
+        self.docs.last_autosave = Instant::now();
         // Only multi-page sessions carry recovery value: an imported PDF or a
         // multi-page artboard document. Plain single-image edits are not mirrored.
         if doc.pdf_document.is_none() && doc.pages.is_empty() {

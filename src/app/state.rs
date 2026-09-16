@@ -402,6 +402,9 @@ pub struct UiState {
     pub show_exit_dialog: bool,
     pub theme_mode: crate::ui::theme::ThemeMode,
     pub show_close_dialog: bool,
+    /// Latest Canvas Editor bridge/runtime failure. Kept as a modal until the
+    /// user acknowledges it so snapshot failures cannot be missed in status.
+    pub document_editor_error: Option<String>,
     pub show_feather_dialog: bool,
     pub show_modify_dialog: Option<crate::ui::SelectionModifyKind>,
     pub show_stroke_dialog: bool,
@@ -480,6 +483,208 @@ pub struct UiState {
     /// The `.icc` picked for CMYK conversion: `(display name, raw bytes)`.
     /// Pre-loaded from the prefs' remembered path when the dialog opens.
     pub cmyk_convert_icc: Option<(String, Vec<u8>)>,
+}
+
+/// Pixels for [`App::make_perspective_crop_cursor`]: `(rgba, w, h, hot_x, hot_y)`.
+/// A rounded "pointer" arrow (dark fill, white outline, faint dark rim so it
+/// reads on white paper) with the Phosphor crop glyph in its notch.
+fn perspective_crop_cursor_rgba() -> Option<(Vec<u8>, u16, u16, u16, u16)> {
+    use ab_glyph::Font;
+
+    const SIZE: usize = 32;
+    // Pointer with the tip at the origin: tip, right wing, inner notch, lower wing.
+    const POINTER: [(f32, f32); 4] = [(0.0, 0.0), (21.0, 8.0), (11.5, 11.5), (8.0, 21.0)];
+    // Fillet radius per vertex; the concave notch stays sharp.
+    const RADII: [f32; 4] = [1.6, 2.4, 0.0, 2.4];
+    // Room for the outline and rim around the tip.
+    const OFFSET: f32 = 3.0;
+    const OUTLINE: f32 = 1.6;
+    const RIM: f32 = 2.6;
+    const SUPERSAMPLE: usize = 4;
+    const RING_STEPS: usize = 16;
+
+    let in_polygon = |x: f32, y: f32| {
+        let mut hit = false;
+        let mut j = POINTER.len() - 1;
+        for i in 0..POINTER.len() {
+            let ((xi, yi), (xj, yj)) = (POINTER[i], POINTER[j]);
+            if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+                hit = !hit;
+            }
+            j = i;
+        }
+        hit
+    };
+    let unit = |(x, y): (f32, f32)| {
+        let len = (x * x + y * y).sqrt();
+        (x / len, y / len)
+    };
+    // Each rounded corner: (vertex, tangent point 1, tangent point 2, centre, radius).
+    type Fillet = ((f32, f32), (f32, f32), (f32, f32), (f32, f32), f32);
+    let fillets: Vec<Fillet> = (0..POINTER.len())
+        .filter(|&i| RADII[i] > 0.0)
+        .map(|i| {
+            let r = RADII[i];
+            let v = POINTER[i];
+            let prev = POINTER[(i + POINTER.len() - 1) % POINTER.len()];
+            let next = POINTER[(i + 1) % POINTER.len()];
+            let a = unit((prev.0 - v.0, prev.1 - v.1));
+            let b = unit((next.0 - v.0, next.1 - v.1));
+            let half = (a.0 * b.0 + a.1 * b.1).clamp(-1.0, 1.0).acos() / 2.0;
+            let (along, centre) = (r / half.tan(), r / half.sin());
+            let bis = unit((a.0 + b.0, a.1 + b.1));
+            (
+                v,
+                (v.0 + a.0 * along, v.1 + a.1 * along),
+                (v.0 + b.0 * along, v.1 + b.1 * along),
+                (v.0 + bis.0 * centre, v.1 + bis.1 * centre),
+                r,
+            )
+        })
+        .collect();
+    let in_triangle = |p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
+        let side = |p1: (f32, f32), p2: (f32, f32), p3: (f32, f32)| {
+            (p1.0 - p3.0) * (p2.1 - p3.1) - (p2.0 - p3.0) * (p1.1 - p3.1)
+        };
+        let (d1, d2, d3) = (side(p, a, b), side(p, b, c), side(p, c, a));
+        let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+        !(has_neg && has_pos)
+    };
+    let inside = |x: f32, y: f32| {
+        in_polygon(x, y)
+            && fillets.iter().all(|&(v, t1, t2, c, r)| {
+                !in_triangle((x, y), v, t1, t2) || (x - c.0).powi(2) + (y - c.1).powi(2) <= r * r
+            })
+    };
+    let within = |x: f32, y: f32, radius: f32| {
+        (0..RING_STEPS).any(|k| {
+            let angle = k as f32 * std::f32::consts::TAU / RING_STEPS as f32;
+            inside(x + radius * angle.cos(), y + radius * angle.sin())
+        })
+    };
+
+    let mut rgba = vec![0u8; SIZE * SIZE * 4];
+    let samples = (SUPERSAMPLE * SUPERSAMPLE) as f32;
+    for py in 0..SIZE {
+        for px in 0..SIZE {
+            let (mut fill, mut outline, mut rim) = (0f32, 0f32, 0f32);
+            for sy in 0..SUPERSAMPLE {
+                for sx in 0..SUPERSAMPLE {
+                    let x = px as f32 + (sx as f32 + 0.5) / SUPERSAMPLE as f32 - OFFSET;
+                    let y = py as f32 + (sy as f32 + 0.5) / SUPERSAMPLE as f32 - OFFSET;
+                    if inside(x, y) {
+                        fill += 1.0;
+                        outline += 1.0;
+                        rim += 1.0;
+                    } else if within(x, y, OUTLINE) {
+                        outline += 1.0;
+                        rim += 1.0;
+                    } else if within(x, y, RIM) {
+                        rim += 1.0;
+                    }
+                }
+            }
+            // Back to front, premultiplied "over": faint rim, white outline, dark body.
+            let (mut color, mut alpha) = ([0f32; 3], 0f32);
+            for (layer, coverage) in [
+                ([0.0f32; 3], rim / samples * 0.35),
+                ([1.0; 3], outline / samples),
+                ([0.15; 3], fill / samples),
+            ] {
+                for k in 0..3 {
+                    color[k] = layer[k] * coverage + color[k] * (1.0 - coverage);
+                }
+                alpha = coverage + alpha * (1.0 - coverage);
+            }
+            if alpha > 0.0 {
+                let i = (py * SIZE + px) * 4;
+                for k in 0..3 {
+                    rgba[i + k] = ((color[k] / alpha).clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+                rgba[i + 3] = (alpha * 255.0).round() as u8;
+            }
+        }
+    }
+
+    let near = |cov: &dyn Fn(usize, usize) -> f32, x: usize, y: usize| {
+        let mut best = 0f32;
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                if nx >= 0 && ny >= 0 && (nx as usize) < SIZE && (ny as usize) < SIZE {
+                    best = best.max(cov(nx as usize, ny as usize));
+                }
+            }
+        }
+        best
+    };
+
+    let font =
+        ab_glyph::FontRef::try_from_slice(egui_phosphor::Variant::Regular.font_bytes()).ok()?;
+    let ch = egui_phosphor::regular::CROP.chars().next()?;
+    let glyph = font.outline_glyph(font.glyph_id(ch).with_scale(ab_glyph::PxScale::from(15.0)))?;
+    let bounds = glyph.px_bounds();
+    let gw = bounds.width().ceil() as usize;
+    let gh = bounds.height().ceil() as usize;
+    if gw == 0 || gh == 0 || gw + 2 > SIZE || gh + 2 > SIZE {
+        return None;
+    }
+    let (ox, oy) = (SIZE - gw - 2, SIZE - gh - 2);
+    let mut glyph_cov = vec![0f32; SIZE * SIZE];
+    glyph.draw(|gx, gy, c| {
+        let (x, y) = (gx as usize + ox, gy as usize + oy);
+        if x < SIZE && y < SIZE {
+            glyph_cov[y * SIZE + x] = c;
+        }
+    });
+    let badge_cov = |x: usize, y: usize| glyph_cov[y * SIZE + x];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let core = glyph_cov[y * SIZE + x];
+            let total = near(&badge_cov, x, y).max(core);
+            if total <= 0.0 {
+                continue;
+            }
+            // White core over a dark halo, composited "over" the arrow.
+            let src = core / total;
+            let i = (y * SIZE + x) * 4;
+            let dst_a = rgba[i + 3] as f32 / 255.0;
+            let out_a = total + dst_a * (1.0 - total);
+            for c in 0..3 {
+                let dst = rgba[i + c] as f32 / 255.0;
+                let v = (src * total + dst * dst_a * (1.0 - total)) / out_a.max(1e-6);
+                rgba[i + c] = (v * 255.0).round() as u8;
+            }
+            rgba[i + 3] = (out_a * 255.0).round() as u8;
+        }
+    }
+
+    // The fillet pulls the visible tip about a pixel inward from the vertex.
+    let hot = (OFFSET + 1.0) as u16;
+    Some((rgba, SIZE as u16, SIZE as u16, hot, hot))
+}
+
+#[cfg(test)]
+#[test]
+fn perspective_crop_cursor_has_tip_hotspot_and_crop_badge() {
+    let (rgba, w, h, hot_x, hot_y) = perspective_crop_cursor_rgba().expect("cursor pixels");
+    assert_eq!((w, h), (32, 32));
+    assert_eq!(rgba.len(), 32 * 32 * 4);
+    let alpha = |x: usize, y: usize| rgba[(y * 32 + x) * 4 + 3];
+    // The hotspot sits on the arrow tip and is visible.
+    assert!(alpha(hot_x as usize, hot_y as usize) > 0);
+    // The pointer body is opaque dark grey a few pixels along the tip bisector.
+    let body = (9 * 32 + 9) * 4;
+    assert_eq!(rgba[body + 3], 255);
+    assert!(rgba[body] < 60, "body must be dark");
+    // The white outline surrounds the body: just outside the tip is bright.
+    assert!(alpha(3, 3) > 0);
+    // The crop badge draws bright pixels in the bottom-right quadrant.
+    let badge_bright = (16..32)
+        .flat_map(|y| (16..32).map(move |x| (x, y)))
+        .any(|(x, y)| alpha(x, y) > 200 && rgba[(y * 32 + x) * 4] > 200);
+    assert!(badge_bright, "crop glyph must be drawn");
 }
 
 /// Audible attention chime for blocked modal actions (Windows system sound;
@@ -1150,6 +1355,10 @@ impl App {
             },
             win: WindowRuntime {
                 window: None,
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                document_webview: None,
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                document_webview_failed: false,
                 window_visible: false,
                 window_focused: false,
                 cursor_ownership: super::cursor::CursorOwnership::default(),
@@ -1171,9 +1380,10 @@ impl App {
                 cursor_ring: None,
                 cursor_crosshair: None,
                 cursor_selection_crosshair: None,
-                cursor_perspective_crosshair: None,
                 cursor_lasso: None,
                 cursor_crop: None,
+                cursor_perspective_crop: None,
+                surface_retry_at: None,
                 cursor_eyedropper: None,
                 cursor_fill: None,
                 cursor_gradient: None,
@@ -1349,6 +1559,9 @@ impl App {
                 pending_reload_job: None,
                 pending_iai_projects: Vec::new(),
                 pending_printer_refresh: None,
+                printer_refresh_queued: false,
+                ext_uploads: Vec::new(),
+                ext_decodes: Vec::new(),
                 pending_printer_settings: None,
                 shape_bake: None,
                 path_bake: None,
@@ -1433,6 +1646,7 @@ impl App {
                     show_exit_dialog: false,
                     theme_mode: crate::ui::theme::load_theme_mode(),
                     show_close_dialog: false,
+                    document_editor_error: None,
                     show_feather_dialog: false,
                     show_modify_dialog: None,
                     show_stroke_dialog: false,
@@ -1781,38 +1995,6 @@ impl App {
         event_loop.create_custom_cursor(src)
     }
 
-    /// A 15×15, one-pixel crosshair. Alternating dark/light pixels keep the
-    /// single thin stroke visible over both bright and dark image regions.
-    pub fn make_perspective_cursor(event_loop: &ActiveEventLoop) -> winit::window::CustomCursor {
-        let size = 15usize;
-        let center = size / 2;
-        let mut rgba = vec![0u8; size * size * 4];
-
-        for i in 0..size {
-            if i.abs_diff(center) <= 1 {
-                continue;
-            }
-            let value = if i % 2 == 0 { 20 } else { 245 };
-            for (x, y) in [(i, center), (center, i)] {
-                let idx = (y * size + x) * 4;
-                rgba[idx] = value;
-                rgba[idx + 1] = value;
-                rgba[idx + 2] = value;
-                rgba[idx + 3] = 255;
-            }
-        }
-
-        let src = winit::window::CustomCursor::from_rgba(
-            rgba,
-            size as u16,
-            size as u16,
-            center as u16,
-            center as u16,
-        )
-        .expect("perspective cursor: always valid");
-        event_loop.create_custom_cursor(src)
-    }
-
     /// Tiny crosshair for the gradient tool (identical to selection cursor for now, but decoupled).
     pub fn make_gradient_cursor(event_loop: &ActiveEventLoop) -> winit::window::CustomCursor {
         let size = 19usize;
@@ -1989,6 +2171,19 @@ impl App {
             rgba[i + c] = (((sc * sa + dc * da * (1.0 - sa)) / out_a) * 255.0).round() as u8;
         }
         rgba[i + 3] = (out_a * 255.0).round() as u8;
+    }
+
+    /// Perspective Crop cursor: an OS-style arrow (hotspot on the tip, so corners
+    /// can be placed precisely) carrying the toolbar's crop glyph as a badge.
+    pub fn make_perspective_crop_cursor(
+        event_loop: &ActiveEventLoop,
+    ) -> winit::window::CustomCursor {
+        perspective_crop_cursor_rgba()
+            .and_then(|(rgba, w, h, hot_x, hot_y)| {
+                winit::window::CustomCursor::from_rgba(rgba, w, h, hot_x, hot_y).ok()
+            })
+            .map(|src| event_loop.create_custom_cursor(src))
+            .unwrap_or_else(|| Self::make_crosshair_cursor(event_loop))
     }
 
     /// Crop cursor rasterized from the same Phosphor glyph used in the toolbar.
@@ -2244,6 +2439,8 @@ impl App {
             || self.shell.ui.show_export_dialog
             || self.shell.ui.show_preferences
             || self.shell.ui.show_exit_dialog
+            || self.shell.ui.show_close_dialog
+            || self.shell.ui.document_editor_error.is_some()
             || self.jobs.pending_reload_prompt.is_some()
             || self.jobs.pending_pdf_prompt.is_some()
             || self.jobs.pending_pdf_page_render.is_some()
@@ -2300,6 +2497,20 @@ impl App {
     /// ring the system bell, flash the modal's Commit/Cancel controls and
     /// explain in the status bar.
     pub(crate) fn deny_modal_action(&mut self) {
+        // Diagnostic: which lock rang the bell.
+        eprintln!(
+            "iai[bell]: denied — transform={} commit_pending={} warp={} crop_sel={} text_edit={} refine={} develop_window={} pdf_export={} preview_dialog={} blocking_modal={}",
+            self.edit.transform_state.is_some(),
+            self.edit.pending_transform_commit.is_some(),
+            self.edit.warp_state.is_some(),
+            self.edit.tools.active_id() == ToolId::Crop && self.edit.tools.crop().has_selection(),
+            self.edit.text_edit.is_some(),
+            self.edit.show_refine_panel,
+            self.win.develop_window.is_some(),
+            self.jobs.pending_pdf_export.is_some(),
+            self.is_preview_dialog_open(),
+            self.is_blocking_modal(),
+        );
         self.shell.status_msg =
             "Finish or cancel the current operation first (✓ / ✗ / Esc)".to_string();
         self.shell.ui.modal_flash_until =
@@ -2314,6 +2525,9 @@ impl App {
     /// Plain tool selection is not enough to block exit; this is only for states
     /// with live edits, overlays, or modal previews that would otherwise be dropped.
     pub fn exit_blocking_operation(&self) -> Option<&'static str> {
+        if self.shell.ui.document_editor_error.is_some() {
+            return Some("the Canvas Editor error dialog");
+        }
         if self.jobs.pending_pdf_export.is_some() {
             return Some("PDF export");
         }
@@ -2414,11 +2628,37 @@ impl App {
         self.path_style_commit();
         self.docs.documents[self.docs.active_doc_idx].reconcile_pdf_page_modified();
 
+        #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+        if self.request_document_webview_exit_snapshot() {
+            return false;
+        }
+
+        self.continue_app_exit_after_webview_snapshot()
+    }
+
+    /// Finish the dirty-tab sweep after Canvas Editor has returned the active
+    /// document snapshot. Kept separate so the completion path does not request
+    /// a second snapshot and loop forever.
+    pub(crate) fn continue_app_exit_after_webview_snapshot(&mut self) -> bool {
+        #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+        let webview_dirty_ids = self.document_webview_dirty_document_ids();
+
         self.docs.pending_exit_docs = self
             .docs
             .documents
             .iter()
-            .filter(|document| document.is_modified())
+            .filter(|document| {
+                document.is_modified() || {
+                    #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                    {
+                        webview_dirty_ids.contains(&document.id)
+                    }
+                    #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                    {
+                        false
+                    }
+                }
+            })
             .map(|document| document.id)
             .collect();
         if self.docs.pending_exit_docs.is_empty() {
@@ -2435,12 +2675,25 @@ impl App {
                 self.docs.pending_exit_docs.pop_front();
                 continue;
             };
-            if !self.docs.documents[idx].is_modified() {
+            let webview_dirty = {
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                {
+                    self.document_webview_document_is_dirty(id)
+                }
+                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                {
+                    false
+                }
+            };
+            if !self.docs.documents[idx].is_modified() && !webview_dirty {
                 self.docs.pending_exit_docs.pop_front();
                 continue;
             }
             if idx != self.docs.active_doc_idx {
-                self.switch_to_doc(idx);
+                // The exit sweep starts only after the active Canvas Editor
+                // snapshot has completed. Re-entering the public switch gate
+                // here would request another snapshot and stall the dialog.
+                self.switch_to_doc_confirmed(idx);
             }
             self.shell.ui.show_exit_dialog = true;
             if let Some(w) = &self.win.window {
@@ -2608,8 +2861,8 @@ impl App {
             && !self.edit.input.space_held
             && !self.edit.input.mid_dragging
             && self.edit.tools.active_id() == ToolId::PerspectiveCrop;
-        if needs_perspective_cursor && self.win.cursor_perspective_crosshair.is_none() {
-            self.win.cursor_perspective_crosshair = Some(Self::make_perspective_cursor(event_loop));
+        if needs_perspective_cursor && self.win.cursor_perspective_crop.is_none() {
+            self.win.cursor_perspective_crop = Some(Self::make_perspective_crop_cursor(event_loop));
         }
         let needs_gradient_cursor = !self.edit.input.was_over_ui
             && !self.edit.input.space_dragging
@@ -2833,13 +3086,15 @@ impl App {
                             3 => w.set_cursor(CursorIcon::EwResize),
                             4 => w.set_cursor(CursorIcon::NwseResize),
                             5 => w.set_cursor(CursorIcon::NeswResize),
-                            // Corner handles use the compact native OS arrow.
-                            6 => w.set_cursor(CursorIcon::Default),
+                            // Outside an existing quad the tool steps aside.
+                            7 => w.set_cursor(CursorIcon::Default),
+                            // No quad yet, or on a corner: OS-style arrow with a
+                            // crop badge (the thin crosshair was too small to aim).
                             _ => {
-                                if let Some(cursor) = &self.win.cursor_perspective_crosshair {
+                                if let Some(cursor) = &self.win.cursor_perspective_crop {
                                     w.set_cursor(cursor.clone());
                                 } else {
-                                    w.set_cursor(CursorIcon::Crosshair);
+                                    w.set_cursor(CursorIcon::Default);
                                 }
                             }
                         }
@@ -2997,7 +3252,8 @@ impl App {
     }
 
     /// Cursor hint for the editable Perspective Crop quad.
-    /// 0=crosshair, 1=move, 2=NS, 3=EW, 4=NW-SE, 5=NE-SW, 6=OS arrow.
+    /// 0=no quad yet (tool cursor), 1=move, 2=NS, 3=EW, 4=NW-SE, 5=NE-SW,
+    /// 6=corner (tool cursor), 7=outside the quad (OS arrow).
     pub fn perspective_crop_cursor_hint(&self) -> u8 {
         use crate::tools::perspective_crop::PerspHandle;
 
@@ -3031,7 +3287,7 @@ impl App {
                     5
                 }
             }
-            PerspHandle::None => 0,
+            PerspHandle::None => 7,
         }
     }
 }

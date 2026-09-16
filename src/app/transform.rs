@@ -917,7 +917,13 @@ impl App {
     }
 
     pub fn begin_transform(&mut self) {
+        let t0 = std::time::Instant::now();
         self.begin_transform_for_tool(true);
+        // Diagnostic: Ctrl+T setup runs on the UI thread.
+        let ms = t0.elapsed().as_millis();
+        if ms >= 30 {
+            eprintln!("iai[perf]: begin_transform {ms} ms");
+        }
     }
 
     /// Start the existing transform engine without leaving Move.  This is used
@@ -1231,7 +1237,14 @@ impl App {
         self.edit.tools.select(crate::tools::ToolId::Move);
         self.shell.status_msg = "Applying transform...".to_string();
         rayon::spawn(move || {
+            let t0 = std::time::Instant::now();
             let result = bake_transform_commit(doc_id, ts, interpolation);
+            // Diagnostic: the modal lock holds until this bake lands.
+            eprintln!(
+                "iai[perf]: transform bake {} ms (ok={})",
+                t0.elapsed().as_millis(),
+                result.is_ok()
+            );
             let _ = tx.send(result);
         });
         if let Some(w) = &self.win.window {

@@ -502,9 +502,30 @@ impl App {
         if actions.doc.exit_save_current {
             self.shell.ui.show_exit_dialog = false;
             self.do_save_project();
-            if self.jobs.pending_file_dialog.is_some() {
+            let webview_persistence_pending = {
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                {
+                    self.document_webview_save_is_pending()
+                }
+                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                {
+                    false
+                }
+            };
+            if webview_persistence_pending {
                 self.shell.exit_save_pending = true;
-            } else if !self.docs.documents[self.docs.active_doc_idx].is_modified() {
+            } else if self.jobs.pending_file_dialog.is_some() {
+                self.shell.exit_save_pending = true;
+            } else if !self.docs.documents[self.docs.active_doc_idx].is_modified() && {
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                {
+                    !self.document_webview_active_is_dirty()
+                }
+                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                {
+                    true
+                }
+            } {
                 self.docs.pending_exit_docs.pop_front();
                 self.present_next_exit_document();
             } else {
@@ -519,6 +540,9 @@ impl App {
         }
         if let Some(v) = actions.dialogs.show_close_dialog.take() {
             self.shell.ui.show_close_dialog = v;
+        }
+        if std::mem::take(&mut actions.dialogs.dismiss_document_editor_error) {
+            self.shell.ui.document_editor_error = None;
         }
         if actions.doc.reload_open_file_confirm {
             self.confirm_reload_open_file();
@@ -546,10 +570,43 @@ impl App {
         }
 
         if let Some(true) = actions.doc.close_file_without_saving.take() {
-            // Save & Close runs the save first (handled earlier); if that opened a
-            // dialog (e.g. first project save), defer the close until it finishes.
-            if self.jobs.pending_file_dialog.is_some() {
+            // This dialog handler runs before the general file-action handler.
+            // Consume and execute Save & Close here so the tab can never be
+            // removed before its save snapshot/write has actually started.
+            let save_before_close = actions.doc.save_project;
+            if save_before_close {
+                actions.doc.save_project = false;
+                self.do_save_project();
+            }
+            let webview_persistence_pending = {
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                {
+                    self.document_webview_save_is_pending()
+                }
+                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                {
+                    false
+                }
+            };
+            let persistence_dirty = self.docs.documents[self.docs.active_doc_idx].is_modified()
+                || {
+                    #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                    {
+                        self.document_webview_active_is_dirty()
+                    }
+                    #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                    {
+                        false
+                    }
+                };
+            if webview_persistence_pending {
                 self.shell.close_requested = true;
+            } else if self.jobs.pending_file_dialog.is_some() {
+                self.shell.close_requested = true;
+            } else if save_before_close && persistence_dirty {
+                // A synchronous save failed (or Canvas Editor could not start
+                // its snapshot). Keep the tab and let the user retry/discard.
+                self.shell.ui.show_close_dialog = true;
             } else {
                 self.execute_close();
             }

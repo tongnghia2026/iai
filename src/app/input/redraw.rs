@@ -13,6 +13,11 @@ impl App {
             return;
         }
         self.win.rendering = true;
+        // Diagnostic: slow-frame breakdown, logged at the end of this frame.
+        let frame_t0 = std::time::Instant::now();
+        let mut t_ui: Option<std::time::Duration> = None;
+        let mut t_actions: Option<std::time::Duration> = None;
+        let mut t_render: Option<std::time::Duration> = None;
 
         // A lost GPU device (driver reset / TDR — typically after a
         // heavy AI inference or an idle power cycle) invalidates every
@@ -138,8 +143,20 @@ impl App {
             .as_ref()
             .is_some_and(|window| super::window_is_minimized(window));
         if self.win.window_occluded || degenerate_size || minimized {
+            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+            self.hide_document_webview();
             self.win.rendering = false;
             return;
+        }
+
+        // A stalled surface (acquire timeout / occluded window) blocks up to a
+        // second per attempt, so only retry when due (see `defer_stalled_present`).
+        {
+            let now = std::time::Instant::now();
+            let retry_due = self.win.surface_retry_at.is_none_or(|at| now >= at);
+            if let Some(gpu) = &mut self.win.gpu {
+                gpu.skip_present = gpu.surface_stalled && !retry_due;
+            }
         }
 
         if let Some(window) = self.win.window.as_ref().cloned() {
@@ -209,7 +226,7 @@ impl App {
                     // A dropped frame (surface Outdated/Lost, now
                     // reconfigured) must retry, or the window shows its
                     // stale last frame until an external repaint.
-                    if !presented {
+                    if !presented && !gpu.surface_stalled {
                         window.request_redraw();
                     }
                 }
@@ -239,6 +256,11 @@ impl App {
                         &*window,
                         &ui_data,
                     );
+                t_ui = Some(frame_t0.elapsed());
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                let document_webview_rect = actions.chrome.document_webview_rect;
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                let popup_open = self.win.egui_ctx.any_popup_open();
                 self.win.egui_repaint_deadline = if repaint_delay == std::time::Duration::MAX {
                     None
                 } else {
@@ -246,6 +268,9 @@ impl App {
                 };
                 self.win.ui_cursor_icon = cursor_icon;
                 self.apply_ui_actions(actions, event_loop);
+                t_actions = Some(frame_t0.elapsed());
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                self.sync_document_webview(&window, document_webview_rect, popup_open);
                 self.flush_pending_adjustment_preview();
 
                 // Hover/layer ownership is authoritative only after this UI
@@ -306,11 +331,12 @@ impl App {
                         canvas_clip,
                         draw_canvas,
                     );
+                    t_render = Some(frame_t0.elapsed());
                     main_frame_presented = presented;
                     // A dropped frame (surface Outdated/Lost, now
                     // reconfigured) must retry, or the window shows its
                     // stale last frame until an external repaint.
-                    if !presented {
+                    if !presented && !gpu.surface_stalled {
                         window.request_redraw();
                     }
                 }
@@ -327,6 +353,8 @@ impl App {
             }
             if main_frame_presented {
                 self.retire_develop_window_after_main_present();
+            } else {
+                self.defer_stalled_present();
             }
         }
         // The Develop window samples the shared compositor, so it must
@@ -335,6 +363,47 @@ impl App {
         if let Some(dev) = &self.win.develop_window {
             dev.request_redraw();
         }
+        let frame_ms = frame_t0.elapsed().as_millis();
+        if frame_ms >= 200 {
+            let ms = |t: Option<std::time::Duration>| t.map_or(-1, |d| d.as_millis() as i64);
+            eprintln!(
+                "iai[perf]: slow frame {frame_ms} ms (ui@{} actions@{} render@{}) transform={} commit_pending={} canvas={}x{}",
+                ms(t_ui),
+                ms(t_actions),
+                ms(t_render),
+                self.edit.transform_state.is_some(),
+                self.edit.pending_transform_commit.is_some(),
+                self.docs.documents[self.docs.active_doc_idx].canvas.width,
+                self.docs.documents[self.docs.active_doc_idx].canvas.height,
+            );
+        }
         self.win.rendering = false;
+    }
+
+    /// After a frame that could not present because the surface stalled, wait
+    /// before acquiring again instead of re-requesting a redraw at once: each
+    /// attempt can block the UI thread for wgpu's full one-second timeout.
+    /// Focus or pointer motion clears the wait (see `window_event`).
+    fn defer_stalled_present(&mut self) {
+        if !self.win.gpu.as_ref().is_some_and(|gpu| gpu.surface_stalled) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let delay = if self.win.window_focused {
+            std::time::Duration::from_millis(250)
+        } else {
+            std::time::Duration::from_secs(2)
+        };
+        // Keep a retry that is still pending; a skipped frame must not push it out.
+        let at = match self.win.surface_retry_at {
+            Some(at) if at > now => at,
+            _ => now + delay,
+        };
+        self.win.surface_retry_at = Some(at);
+        self.win.egui_repaint_deadline = Some(
+            self.win
+                .egui_repaint_deadline
+                .map_or(at, |deadline| deadline.min(at)),
+        );
     }
 }

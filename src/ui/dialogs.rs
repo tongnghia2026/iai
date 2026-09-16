@@ -215,6 +215,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     if data.dialogs.show_close_dialog {
         close_dialog(ctx, data, actions);
     }
+    if data.dialogs.document_editor_error.is_some() {
+        document_editor_error_dialog(ctx, data, actions);
+    }
     if data.dialogs.show_reload_file_dialog {
         reload_file_dialog(ctx, data, actions);
     }

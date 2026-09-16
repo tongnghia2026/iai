@@ -40,6 +40,7 @@ pub mod vector;
 pub mod warp;
 pub mod working_color;
 
+pub mod canvas_editor_conversion;
 pub mod document;
 pub mod filters;
 pub mod gamut_map;

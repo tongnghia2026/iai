@@ -1,5 +1,12 @@
 # Kế hoạch: "Document mode" — trình soạn thảo văn bản nhẹ trong iAi
 
+> **TÀI LIỆU LỊCH SỬ — KHÔNG DÙNG ĐỂ TRIỂN KHAI TIẾP.** Từ ngày 2026-09-08,
+> kiến trúc `cosmic-text` tự xây đã được thay bằng hướng **Canvas Editor +
+> `docx-rs`**. Kế hoạch chuẩn đang dùng là
+> [`KE_HOACH_CANVAS_EDITOR_DOCX_2026-09-08.md`](KE_HOACH_CANVAS_EDITOR_DOCX_2026-09-08.md).
+> Giữ file này để tra cứu tính năng cũ và phục vụ migration, không tiếp tục các
+> pha 4–5 được mô tả bên dưới.
+
 > Trạng thái (2026-09-03): **MVP + Trộn thư + nhiều bản vá editor + REDESIGN ẢNH
 > kiểu Word — TẤT CẢ ĐÃ PUSH** (nhánh `feat/vector-core-foundation`, tới `3be6eb4`).
 > **Cập nhật 2026-09-08: BAO CHỮ đã sửa lỗi đoạn dưới ảnh bị thụt; chế độ CÙNG
