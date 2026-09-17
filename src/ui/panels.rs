@@ -183,66 +183,119 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             .size(10.5)
             .color(pal.text_secondary),
     );
-    // Hovering a row live-previews the font; the pre-open family is
-    // stashed in temp memory and restored if the popup closes without
-    // a click, so browsing can't silently change the font.
-    let font_combo_open_id = egui::Id::new("text_panel_font_family_preview_open");
-    let font_search_id = egui::Id::new("text_panel_font_family_search");
-    let font_combo = egui::ComboBox::from_id_salt("text_panel_font_family")
-        .selected_text(data.tool.text_font_family.name())
-        .width(ui.available_width().min(250.0))
-        .height(420.0)
-        .show_ui(ui, |ui| {
-            ui.set_min_width(320.0);
+    // Editable, searchable font field: the box itself is the search input, so the
+    // current font name stays copy/paste-able and typing filters a dropdown list
+    // below — instead of a read-only combo with a separate search box inside.
+    // Hovering a row still live-previews the font; dismissing without a pick
+    // restores the committed font.
+    let field_id = egui::Id::new("text_panel_font_field");
+    let buf_id = egui::Id::new("text_panel_font_buf");
+    let editing_id = egui::Id::new("text_panel_font_editing");
+    let current_name = data.tool.text_font_family.name().to_string();
 
-            let had_search_state = ui.data(|d| d.get_temp::<String>(font_search_id).is_some());
-            let mut search = ui
-                .data(|d| d.get_temp::<String>(font_search_id))
-                .unwrap_or_default();
-            let search_response = ui.add(
-                egui::TextEdit::singleline(&mut search)
-                    .hint_text("Search fonts…")
-                    .desired_width(f32::INFINITY),
-            );
-            if !had_search_state {
-                search_response.request_focus();
-            }
-            ui.data_mut(|d| d.insert_temp(font_search_id, search.clone()));
-            ui.separator();
+    let editing = ui.data(|d| d.get_temp::<bool>(editing_id).unwrap_or(false));
+    let mut buf = if editing {
+        ui.data(|d| d.get_temp::<String>(buf_id))
+            .unwrap_or_else(|| current_name.clone())
+    } else {
+        current_name.clone()
+    };
 
-            let search = search.trim().to_lowercase();
-            let mut committed = false;
-            let mut match_count = 0;
+    let field_width = ui.available_width().min(250.0);
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut buf)
+            .id(field_id)
+            .desired_width(field_width)
+            .hint_text("Search fonts…"),
+    );
+
+    if resp.gained_focus() {
+        // Show the committed font, selected, so the first keystroke replaces it
+        // while the name is still there to copy.
+        ui.data_mut(|d| {
+            d.insert_temp(editing_id, true);
+            d.insert_temp(buf_id, current_name.clone());
+        });
+        crate::ui::widgets::focus_field_select_all(ui, &resp);
+    }
+    if resp.changed() {
+        ui.data_mut(|d| {
+            d.insert_temp(editing_id, true);
+            d.insert_temp(buf_id, buf.clone());
+        });
+    }
+
+    let popup_id = egui::Popup::default_response_id(&resp);
+    let open_cmd =
+        (resp.gained_focus() || resp.changed()).then_some(egui::SetOpenCommand::Bool(true));
+
+    // While the field still shows the (selected) current name, browse all fonts;
+    // once the user types, filter by the query.
+    let typed = buf.trim();
+    let needle = if typed.eq_ignore_ascii_case(&current_name) {
+        String::new()
+    } else {
+        typed.to_lowercase()
+    };
+
+    let mut chosen: Option<TextFontFamily> = None;
+    let mut hovered: Option<TextFontFamily> = None;
+
+    let popup = egui::Popup::from_response(&resp)
+        .open_memory(open_cmd)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(field_width.max(280.0))
+        .show(|ui| {
+            let mut shown = 0;
             egui::ScrollArea::vertical()
                 .id_salt("text_panel_font_family_list")
                 .max_height(370.0)
                 .show(ui, |ui| {
                     for family in TextFontFamily::all() {
-                        if !search.is_empty() && !family.name().to_lowercase().contains(&search) {
+                        if !needle.is_empty() && !family.name().to_lowercase().contains(&needle) {
                             continue;
                         }
-                        match_count += 1;
+                        shown += 1;
                         let row = ui
                             .selectable_label(&data.tool.text_font_family == family, family.name());
                         if row.clicked() {
-                            committed = true;
-                            actions.tool.set_text_font_family = Some(family.clone());
+                            chosen = Some(family.clone());
                         } else if row.hovered() && &data.tool.text_font_family != family {
-                            actions.tool.preview_text_font_family = Some(family.clone());
+                            hovered = Some(family.clone());
                         }
                     }
-                    if match_count == 0 {
+                    if shown == 0 {
                         ui.weak("No matching fonts");
                     }
                 });
-            committed
         });
-    let family_rect = font_combo.response.rect;
-    let style_left = family_rect.right() + 6.0;
+
+    if let Some(family) = chosen {
+        actions.tool.set_text_font_family = Some(family);
+        ui.data_mut(|d| {
+            d.insert_temp(editing_id, false);
+            d.remove::<String>(buf_id);
+        });
+        egui::Popup::close_id(ui.ctx(), popup_id);
+    } else if let Some(family) = hovered {
+        actions.tool.preview_text_font_family = Some(family);
+    } else if popup.is_none() && editing {
+        // Dismissed without a pick (click-away / Escape): drop the live preview
+        // and let the field snap back to the committed font next frame.
+        ui.data_mut(|d| {
+            d.insert_temp(editing_id, false);
+            d.remove::<String>(buf_id);
+        });
+        actions.tool.cancel_text_font_family_preview = true;
+    }
+
+    // Face / style (Regular, Bold, …) picker, to the right of the font field.
+    let field_rect = resp.rect;
+    let style_left = field_rect.right() + 6.0;
     let style_width = (ui.max_rect().right() - style_left).max(90.0);
     let style_rect = egui::Rect::from_min_size(
-        egui::pos2(style_left, family_rect.top()),
-        egui::vec2(style_width, family_rect.height()),
+        egui::pos2(style_left, field_rect.top()),
+        egui::vec2(style_width, field_rect.height()),
     );
     #[allow(deprecated)]
     ui.allocate_ui_at_rect(style_rect, |ui| {
@@ -262,26 +315,6 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 }
             });
     });
-    match font_combo.inner {
-        Some(committed) => {
-            if committed {
-                ui.data_mut(|d| d.remove::<bool>(font_combo_open_id));
-                ui.data_mut(|d| d.remove::<String>(font_search_id));
-            } else {
-                ui.data_mut(|d| d.insert_temp(font_combo_open_id, true));
-            }
-        }
-        None => {
-            if ui
-                .data(|d| d.get_temp::<bool>(font_combo_open_id))
-                .unwrap_or(false)
-            {
-                ui.data_mut(|d| d.remove::<bool>(font_combo_open_id));
-                ui.data_mut(|d| d.remove::<String>(font_search_id));
-                actions.tool.cancel_text_font_family_preview = true;
-            }
-        }
-    }
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {

@@ -2552,14 +2552,17 @@ impl LayerStack {
     /// If only one layer is selected → merge_down at active_idx.
     /// Returns true if the merge succeeded.
     pub fn merge_selected(&mut self, canvas_width: u32, canvas_height: u32) -> bool {
+        // The Background counts as a valid *bottom* merge target: selecting a
+        // layer together with the Background and merging composites the layer
+        // down into it (the result stays the Background). It is locked by design,
+        // so it is exempted from the `!locked` gate that blocks ordinary layers.
         let selected_idxs: Vec<usize> = self
             .layers
             .iter()
             .enumerate()
             .filter(|(_, l)| {
                 l.selected
-                    && !l.locked
-                    && !l.is_background
+                    && (l.is_background || !l.locked)
                     && matches!(l.layer_type, LayerType::Raster)
             })
             .map(|(i, _)| i)
@@ -2650,6 +2653,9 @@ impl LayerStack {
         let merged_tiles = crate::core::tile::TileMap::from_rgba(&merged_pixels, w, h);
 
         let bottom_idx = selected_idxs[0];
+        // Merging into the Background keeps it a proper Background: same name, it
+        // stays visible, and its `is_background` flag is left untouched below.
+        let bottom_is_bg = self.layers[bottom_idx].is_background;
         self.layers[bottom_idx].tiles = merged_tiles;
         self.layers[bottom_idx].width = w;
         self.layers[bottom_idx].height = h;
@@ -2657,10 +2663,14 @@ impl LayerStack {
         self.layers[bottom_idx].blend_mode = BlendMode::Normal;
         self.layers[bottom_idx].opacity = 1.0;
         self.layers[bottom_idx].selected = false;
-        self.layers[bottom_idx].name = "Merged".to_string();
+        self.layers[bottom_idx].name = if bottom_is_bg {
+            "Background".to_string()
+        } else {
+            "Merged".to_string()
+        };
         self.layers[bottom_idx].layer_type = LayerType::Raster;
         self.layers[bottom_idx].mask = None;
-        self.layers[bottom_idx].visible = any_visible;
+        self.layers[bottom_idx].visible = bottom_is_bg || any_visible;
 
         for &idx in selected_idxs[1..].iter().rev() {
             self.layers.remove(idx);
@@ -3484,6 +3494,30 @@ mod tests {
             (0, 255, 0, 255),
             "masked-out top did not paint"
         );
+    }
+
+    #[test]
+    fn merge_selected_folds_a_layer_into_the_background() {
+        // Regression: selecting a layer together with the (locked) Background and
+        // merging must composite the layer down into the Background and keep it a
+        // proper Background — previously the Background was filtered out so the
+        // merge silently did nothing when the Background was the active layer.
+        let mut stack = LayerStack::new(2, 2);
+        assert!(stack.layers[0].is_background);
+        stack.layers[0].selected = true;
+        let upper = stack.add_layer(2, 2);
+        stack.layers[upper].tiles.set_pixel(0, 0, 0, 0, 255, 255); // blue
+        stack.layers[upper].selected = true;
+        // Make the Background the active layer: the failing case in the report.
+        stack.active_idx = 0;
+
+        assert!(stack.merge_selected(2, 2), "layer + background must merge");
+        assert_eq!(stack.layers.len(), 1, "collapsed to a single layer");
+        assert!(stack.layers[0].is_background, "result is still the Background");
+        assert_eq!(stack.layers[0].name, "Background");
+        assert!(stack.layers[0].visible, "Background stays visible");
+        // The blue layer painted onto the white Background.
+        assert_eq!(stack.layers[0].tiles.get_pixel(0, 0), (0, 0, 255, 255));
     }
 
     #[test]

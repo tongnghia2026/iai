@@ -736,6 +736,15 @@ impl App {
                     }
                     return;
                 }
+                // Warp (Liquify) owns Ctrl+Z while its modal is open: step back
+                // one warp stroke instead of ringing the modal-lock bell.
+                if self.edit.warp_state.is_some() {
+                    self.warp_undo_stroke();
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 if self.modal_lock_active() {
                     self.deny_modal_action();
                     return;

@@ -641,6 +641,7 @@ pub(crate) fn modal_flash_btn<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_text_caret_overlay(
     painter: &egui::Painter,
     origin: egui::Pos2,
@@ -651,6 +652,7 @@ fn paint_text_caret_overlay(
     flip_y: bool,
     stretch_x: f32,
     screen_font: f32,
+    text_color: egui::Color32,
     time: f64,
 ) {
     let blink_on = ((time * 2.0).floor() as i64).rem_euclid(2) == 0;
@@ -658,11 +660,12 @@ fn paint_text_caret_overlay(
         return;
     }
 
+    // Height tracks the glyph size, not the line box: a caret spanning the full
+    // line height (1.2em with default leading) reads as "taller than the text".
+    // ~0.84em brackets the caps/ascenders while staying visibly shorter than the
+    // line, centred on the line's vertical middle.
     let center_y = rect.y + rect.h * 0.5;
-    let caret_h = (rect.h * scale)
-        .min(screen_font * 0.98)
-        .max(screen_font * 0.72)
-        .max(6.0);
+    let caret_h = (screen_font * 0.84).max(6.0);
     let caret_h_local = caret_h / scale;
     let top = text_local_to_screen(
         origin,
@@ -682,18 +685,19 @@ fn paint_text_caret_overlay(
         flip_x,
         flip_y,
     );
-    // Two-tone caret (dark halo + light core) stays visible over any text or
-    // background colour — the text colour itself would vanish on same-colour
-    // backgrounds.
-    let core_w = (screen_font / 42.0).clamp(1.0, 2.2);
-    painter.line_segment(
-        [top, bottom],
-        egui::Stroke::new(core_w + 2.0, egui::Color32::from_black_alpha(150)),
-    );
-    painter.line_segment(
-        [top, bottom],
-        egui::Stroke::new(core_w, egui::Color32::WHITE),
-    );
+    // A single clean caret in the text colour, with a hairline luminance-contrast
+    // edge (~0.5px each side) so it stays visible over same-colour backgrounds
+    // without the old two-tone halo reading as a pair of parallel bars.
+    let core_w = (screen_font / 26.0).clamp(1.2, 2.0);
+    let core = egui::Color32::from_rgb(text_color.r(), text_color.g(), text_color.b());
+    let lum = 0.299 * core.r() as f32 + 0.587 * core.g() as f32 + 0.114 * core.b() as f32;
+    let edge = if lum > 140.0 {
+        egui::Color32::from_black_alpha(120)
+    } else {
+        egui::Color32::from_white_alpha(150)
+    };
+    painter.line_segment([top, bottom], egui::Stroke::new(core_w + 1.0, edge));
+    painter.line_segment([top, bottom], egui::Stroke::new(core_w, core));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3569,6 +3573,7 @@ pub fn build(
                                 data.tool.text_flip_y,
                                 data.tool.text_stretch_x,
                                 screen_font,
+                                color,
                                 ctx.input(|i| i.time),
                             );
                         }

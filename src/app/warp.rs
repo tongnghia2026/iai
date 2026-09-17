@@ -15,6 +15,11 @@ use super::state::{App, WarpState};
 use crate::core::tile::TileMap;
 use crate::core::warp::{WarpMesh, WarpMode, DEFAULT_CELL};
 
+/// How many warp strokes Ctrl+Z can step back inside the modal. Each snapshot is
+/// the full displacement mesh (a few MB on a large layer), so the depth is
+/// bounded; the whole stack is freed the moment the session applies or cancels.
+const WARP_UNDO_DEPTH: usize = 16;
+
 impl App {
     /// Enter Warp on the active raster layer. Returns false (with no state
     /// change) when the layer is locked / non-raster / missing.
@@ -59,6 +64,9 @@ impl App {
                 dragging: false,
                 last_lx: 0.0,
                 last_ly: 0.0,
+                undo_stack: std::collections::VecDeque::new(),
+                stroke_snapshot: None,
+                stroke_dirty: false,
             }
         };
 
@@ -97,6 +105,10 @@ impl App {
             state.dragging = true;
             state.last_lx = lx;
             state.last_ly = ly;
+            // Snapshot the pre-stroke mesh so Ctrl+Z can step this stroke back.
+            // Promoted to the undo stack on pointer-up only if a dab changed it.
+            state.stroke_snapshot = Some(state.mesh.clone());
+            state.stroke_dirty = false;
         }
         // Radial / rotational / mask brushes act on a stationary press; Forward Warp
         // and Push Left need a drag delta, so a bare click is a no-op for them.
@@ -134,7 +146,51 @@ impl App {
     pub(crate) fn warp_pointer_up(&mut self) {
         if let Some(state) = self.edit.warp_state.as_mut() {
             state.dragging = false;
+            // Commit the stroke's pre-image to the undo stack, but only if the
+            // stroke actually warped something — a bare click leaves no step.
+            if let Some(snapshot) = state.stroke_snapshot.take() {
+                if state.stroke_dirty {
+                    if state.undo_stack.len() >= WARP_UNDO_DEPTH {
+                        state.undo_stack.pop_front();
+                    }
+                    state.undo_stack.push_back(snapshot);
+                }
+            }
+            state.stroke_dirty = false;
         }
+    }
+
+    /// Ctrl+Z inside the Warp modal: step back one stroke (like Photoshop
+    /// Liquify) instead of ringing the modal-lock bell. Returns true when the
+    /// warp session consumed the undo (always, while a session is open).
+    pub(crate) fn warp_undo_stroke(&mut self) -> bool {
+        let Some(state) = self.edit.warp_state.as_mut() else {
+            return false;
+        };
+        let Some(prev_mesh) = state.undo_stack.pop_back() else {
+            self.shell.status_msg = "Warp: nothing to undo".to_string();
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return true;
+        };
+        // Restore the mesh and rebuild the whole working buffer from the
+        // untouched original through it, then refresh the live preview.
+        state.mesh = prev_mesh;
+        state.stroke_snapshot = None;
+        state.stroke_dirty = false;
+        let (lw, lh) = (state.layer_w, state.layer_h);
+        state.mesh.warp_region_into(
+            &state.original_flat,
+            &mut state.working_flat,
+            0,
+            0,
+            lw as u32,
+            lh as u32,
+        );
+        self.warp_push_preview();
+        self.shell.status_msg = "Warp: undid one stroke".to_string();
+        true
     }
 
     /// Apply one brush dab at layer pixel `(lx, ly)` with pointer delta `(mvx, mvy)`,
@@ -158,6 +214,9 @@ impl App {
                 WarpMode::Thaw => state.mesh.paint_freeze(lx, ly, radius, p, true),
             }
             if params.mode.is_mask() {
+                // Mask brushes change no pixels but do mutate the freeze field —
+                // count them as a stroke so Ctrl+Z can undo a freeze/thaw pass.
+                state.stroke_dirty = true;
                 // Mask brushes change no pixels; the red overlay refreshes on redraw.
                 None
             } else {
@@ -165,6 +224,7 @@ impl App {
                 if rw == 0 || rh == 0 {
                     None
                 } else {
+                    state.stroke_dirty = true;
                     state.mesh.warp_region_into(
                         &state.original_flat,
                         &mut state.working_flat,
@@ -360,6 +420,14 @@ impl App {
         let Some(state) = self.edit.warp_state.as_mut() else {
             return;
         };
+        // Make Restore All a single undoable step: snapshot the field first, so
+        // Ctrl+Z brings the whole warp back rather than losing it silently.
+        if state.mesh.touched || state.mesh.any_frozen {
+            if state.undo_stack.len() >= WARP_UNDO_DEPTH {
+                state.undo_stack.pop_front();
+            }
+            state.undo_stack.push_back(state.mesh.clone());
+        }
         state.mesh.clear();
         state.working_flat.copy_from_slice(&state.original_flat);
         self.warp_push_preview();

@@ -850,6 +850,16 @@ pub struct WarpState {
     /// Previous pointer position in layer-local pixels, for the per-dab delta.
     pub last_lx: f32,
     pub last_ly: f32,
+    /// Per-stroke undo (Ctrl+Z inside the modal, like Photoshop Liquify). Each
+    /// entry is the mesh *before* one drag stroke; popping it and re-warping the
+    /// layer steps the session back one stroke. Bounded so a long session on a
+    /// large layer can't grow the snapshot memory without limit.
+    pub undo_stack: std::collections::VecDeque<crate::core::warp::WarpMesh>,
+    /// Mesh captured at the last pointer-down, promoted to `undo_stack` on
+    /// pointer-up only if the stroke actually changed the field.
+    pub stroke_snapshot: Option<crate::core::warp::WarpMesh>,
+    /// Set by a dab that changed pixels or the freeze mask this stroke.
+    pub stroke_dirty: bool,
 }
 
 /// Cached region proxies for the GPU Develop preview. BOTH the colour `region` base

@@ -236,7 +236,7 @@ impl App {
 
         let moved_count = {
             let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
-            let can_align = |layer: &crate::core::layer::Layer| {
+            let is_alignable_leaf = |layer: &crate::core::layer::Layer| {
                 !layer.locked
                     && !layer.is_background
                     && matches!(
@@ -247,115 +247,186 @@ impl App {
                             | LayerType::SmartObject
                     )
             };
+            // Union of the given members' content bounds, in canvas coordinates.
+            let member_bounds = |stack: &crate::core::layer::LayerStack,
+                                 members: &[usize]|
+             -> Option<(i32, i32, i32, i32)> {
+                let mut u = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+                let mut has = false;
+                for &m in members {
+                    let ml = &stack.layers[m];
+                    if let Some((x0, y0, x1, y1)) = ml.tiles.content_bounds() {
+                        u.0 = u.0.min(x0 + ml.offset.0);
+                        u.1 = u.1.min(y0 + ml.offset.1);
+                        u.2 = u.2.max(x1 + ml.offset.0);
+                        u.3 = u.3.max(y1 + ml.offset.1);
+                        has = true;
+                    }
+                }
+                has.then_some(u)
+            };
 
-            let mut indices: Vec<usize> = canvas
-                .layer_stack
-                .layers
-                .iter()
-                .enumerate()
-                .filter(|(_, layer)| layer.selected && can_align(layer))
-                .map(|(idx, _)| idx)
-                .collect();
+            // Build align targets. A selected group folds all its members into a
+            // single target moved together (its whole contents shift as one); a
+            // selected leaf is its own target. Members of a selected group are
+            // never aligned a second time on their own.
+            let n = canvas.layer_stack.layers.len();
+            let mut consumed = vec![false; n];
+            // (x0, y0, x1, y1, member indices to move together)
+            let mut targets: Vec<(i32, i32, i32, i32, Vec<usize>)> = Vec::new();
 
-            if indices.is_empty() {
-                let idx = canvas.layer_stack.active_idx;
-                if canvas.layer_stack.layers.get(idx).is_some_and(can_align) {
-                    indices.push(idx);
+            // Outermost group first (a header sits above its members, so higher
+            // index = more enclosing): an outer group consumes all descendants,
+            // and an inner selected group is then skipped rather than moved twice.
+            for idx in (0..n).rev() {
+                if consumed[idx] {
+                    continue;
+                }
+                let is_selected_group = {
+                    let l = &canvas.layer_stack.layers[idx];
+                    l.is_group() && l.selected
+                };
+                if !is_selected_group {
+                    continue;
+                }
+                let members: Vec<usize> = canvas.layer_stack.group_member_range(idx).collect();
+                for &m in &members {
+                    consumed[m] = true;
+                }
+                consumed[idx] = true;
+                if !members.is_empty() {
+                    if let Some((x0, y0, x1, y1)) = member_bounds(&canvas.layer_stack, &members) {
+                        targets.push((x0, y0, x1, y1, members));
+                    }
                 }
             }
 
-            if indices.is_empty() {
+            for idx in 0..n {
+                if consumed[idx] {
+                    continue;
+                }
+                let layer = &canvas.layer_stack.layers[idx];
+                if layer.selected && is_alignable_leaf(layer) {
+                    if let Some((x0, y0, x1, y1)) = layer.tiles.content_bounds() {
+                        targets.push((
+                            x0 + layer.offset.0,
+                            y0 + layer.offset.1,
+                            x1 + layer.offset.0,
+                            y1 + layer.offset.1,
+                            vec![idx],
+                        ));
+                    }
+                }
+            }
+
+            // Nothing selected → align the active object (its group, or the leaf).
+            if targets.is_empty() {
+                let idx = canvas.layer_stack.active_idx;
+                let is_group = canvas
+                    .layer_stack
+                    .layers
+                    .get(idx)
+                    .is_some_and(|l| l.is_group());
+                if is_group {
+                    let members: Vec<usize> = canvas.layer_stack.group_member_range(idx).collect();
+                    if !members.is_empty() {
+                        if let Some((x0, y0, x1, y1)) = member_bounds(&canvas.layer_stack, &members)
+                        {
+                            targets.push((x0, y0, x1, y1, members));
+                        }
+                    }
+                } else if canvas
+                    .layer_stack
+                    .layers
+                    .get(idx)
+                    .is_some_and(is_alignable_leaf)
+                {
+                    let layer = &canvas.layer_stack.layers[idx];
+                    if let Some((x0, y0, x1, y1)) = layer.tiles.content_bounds() {
+                        targets.push((
+                            x0 + layer.offset.0,
+                            y0 + layer.offset.1,
+                            x1 + layer.offset.0,
+                            y1 + layer.offset.1,
+                            vec![idx],
+                        ));
+                    }
+                }
+            }
+
+            if targets.is_empty() {
                 0
             } else {
-                let bounds: Vec<(usize, i32, i32, i32, i32)> = indices
-                    .iter()
-                    .filter_map(|&idx| {
-                        canvas.layer_stack.layers[idx].tiles.content_bounds().map(
-                            |(x0, y0, x1, y1)| {
-                                let layer = &canvas.layer_stack.layers[idx];
-                                (
-                                    idx,
-                                    x0 + layer.offset.0,
-                                    y0 + layer.offset.1,
-                                    x1 + layer.offset.0,
-                                    y1 + layer.offset.1,
-                                )
-                            },
-                        )
-                    })
-                    .collect();
+                let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
+                    "Align Layers",
+                    &canvas.layer_stack,
+                    canvas.width,
+                    canvas.height,
+                );
 
-                if bounds.is_empty() {
-                    0
+                let reference = if targets.len() > 1 {
+                    targets.iter().fold(
+                        (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+                        |(rx0, ry0, rx1, ry1), &(x0, y0, x1, y1, _)| {
+                            (rx0.min(x0), ry0.min(y0), rx1.max(x1), ry1.max(y1))
+                        },
+                    )
                 } else {
-                    let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
-                        "Align Layers",
-                        &canvas.layer_stack,
-                        canvas.width,
-                        canvas.height,
-                    );
+                    (0, 0, canvas.width as i32, canvas.height as i32)
+                };
+                let (rx0, ry0, rx1, ry1) = reference;
+                let mut moved = 0usize;
+                let mut moved_members: Vec<usize> = Vec::new();
 
-                    let reference = if bounds.len() > 1 {
-                        bounds.iter().fold(
-                            (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
-                            |(rx0, ry0, rx1, ry1), &(_, x0, y0, x1, y1)| {
-                                (rx0.min(x0), ry0.min(y0), rx1.max(x1), ry1.max(y1))
-                            },
-                        )
-                    } else {
-                        (0, 0, canvas.width as i32, canvas.height as i32)
-                    };
-                    let (rx0, ry0, rx1, ry1) = reference;
-                    let mut moved = 0usize;
-
-                    for (idx, x0, y0, x1, y1) in bounds {
-                        let (dx, dy) = match align {
-                            LayerAlign::Left => (rx0 - x0, 0),
-                            LayerAlign::HorizontalCenter => {
-                                let canvas_center = (rx0 + rx1) as f32 * 0.5;
-                                let layer_center = (x0 + x1) as f32 * 0.5;
-                                ((canvas_center - layer_center).round() as i32, 0)
-                            }
-                            LayerAlign::Right => (rx1 - x1, 0),
-                            LayerAlign::Top => (0, ry0 - y0),
-                            LayerAlign::VerticalCenter => {
-                                let canvas_center = (ry0 + ry1) as f32 * 0.5;
-                                let layer_center = (y0 + y1) as f32 * 0.5;
-                                (0, (canvas_center - layer_center).round() as i32)
-                            }
-                            LayerAlign::Bottom => (0, ry1 - y1),
-                        };
-
-                        if dx == 0 && dy == 0 {
-                            continue;
+                for (x0, y0, x1, y1, members) in &targets {
+                    let (dx, dy) = match align {
+                        LayerAlign::Left => (rx0 - x0, 0),
+                        LayerAlign::HorizontalCenter => {
+                            let ref_center = (rx0 + rx1) as f32 * 0.5;
+                            let obj_center = (x0 + x1) as f32 * 0.5;
+                            ((ref_center - obj_center).round() as i32, 0)
                         }
+                        LayerAlign::Right => (rx1 - x1, 0),
+                        LayerAlign::Top => (0, ry0 - y0),
+                        LayerAlign::VerticalCenter => {
+                            let ref_center = (ry0 + ry1) as f32 * 0.5;
+                            let obj_center = (y0 + y1) as f32 * 0.5;
+                            (0, (ref_center - obj_center).round() as i32)
+                        }
+                        LayerAlign::Bottom => (0, ry1 - y1),
+                    };
 
-                        let layer = &mut canvas.layer_stack.layers[idx];
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    for &m in members {
+                        let layer = &mut canvas.layer_stack.layers[m];
                         layer.offset.0 += dx;
                         layer.offset.1 += dy;
-                        moved += 1;
+                        moved_members.push(m);
                     }
-
-                    if moved > 0 {
-                        // Path position belongs to its affine model; Layer::offset
-                        // is only the derived raster origin. Fold alignment deltas
-                        // back into the model before the history snapshot so save/
-                        // reload and later transforms keep the same placement.
-                        for &idx in &indices {
-                            if matches!(
-                                canvas.layer_stack.layers[idx].layer_type,
-                                LayerType::Vector(VectorGeometry::Path(_))
-                            ) {
-                                crate::core::command_vector::fold_offset_into_model(
-                                    &mut canvas.layer_stack.layers[idx],
-                                );
-                            }
-                        }
-                        cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
-                        canvas.record(Box::new(cmd));
-                    }
-                    moved
+                    moved += 1;
                 }
+
+                if moved > 0 {
+                    // Path position belongs to its affine model; Layer::offset is
+                    // only the derived raster origin. Fold alignment deltas back
+                    // into the model (separate pass to avoid overlapping &mut
+                    // borrows) so save/reload and later transforms keep placement.
+                    for &m in &moved_members {
+                        if matches!(
+                            canvas.layer_stack.layers[m].layer_type,
+                            LayerType::Vector(VectorGeometry::Path(_))
+                        ) {
+                            crate::core::command_vector::fold_offset_into_model(
+                                &mut canvas.layer_stack.layers[m],
+                            );
+                        }
+                    }
+                    cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
+                    canvas.record(Box::new(cmd));
+                }
+                moved
             }
         };
 
@@ -1399,6 +1470,50 @@ mod tests {
             _ => panic!("Path must stay editable"),
         };
         assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn align_moves_a_whole_group_together() {
+        // Regression: selecting a group (its header) and aligning must shift all
+        // of the group's members by the same delta — previously a group had no
+        // tiles of its own, so it was skipped and alignment did nothing.
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(200, 160);
+        let (id_a, id_b) = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            canvas.layer_stack.layers[0].selected = false;
+
+            let a = canvas.layer_stack.add_layer(20, 20);
+            canvas.layer_stack.layers[a].tiles.set_pixel(0, 0, 255, 0, 0, 255);
+            canvas.layer_stack.layers[a].offset = (60, 40);
+            canvas.layer_stack.layers[a].selected = true;
+            let id_a = canvas.layer_stack.layers[a].id;
+
+            let b = canvas.layer_stack.add_layer(20, 20);
+            canvas.layer_stack.layers[b].tiles.set_pixel(0, 0, 0, 0, 255, 255);
+            canvas.layer_stack.layers[b].offset = (100, 90);
+            canvas.layer_stack.layers[b].selected = true;
+            let id_b = canvas.layer_stack.layers[b].id;
+
+            let header = canvas
+                .layer_stack
+                .create_group_from_selected(200, 160)
+                .expect("group created");
+            // Select only the group header, as the panel does on a folder click.
+            for l in canvas.layer_stack.layers.iter_mut() {
+                l.selected = false;
+            }
+            canvas.layer_stack.layers[header].selected = true;
+            canvas.layer_stack.active_idx = header;
+            (id_a, id_b)
+        };
+
+        assert!(app.align_selected_layers_to_canvas(LayerAlign::Left));
+
+        // The union's left edge (min content x = 60) snaps to canvas x=0, so both
+        // members shift by -60 and keep their relative placement and their y.
+        assert_eq!(find_layer(&app, id_a).offset, (0, 40));
+        assert_eq!(find_layer(&app, id_b).offset, (40, 90));
     }
 
     #[test]
