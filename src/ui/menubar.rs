@@ -1539,10 +1539,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             );
                             ui.separator();
                             ui.label(egui::RichText::new("Support / Donate").strong().size(11.0));
-                            ui.label(
-                                egui::RichText::new("PayPal: minhnghia718@gmail.com")
-                                    .color(pal.text_secondary)
-                                    .size(11.0),
+                            ui.hyperlink_to(
+                                "PayPal: paypal.me/TongNghia3999",
+                                "https://paypal.me/TongNghia3999",
                             );
                             ui.label(
                                 egui::RichText::new("ACB 18278961 — TONG VAN NGHIA")
