@@ -1,6 +1,7 @@
 # Third-party software and model notices
 
-iAi source code is licensed under the MIT License in [`LICENSE`](LICENSE).
+iAi source code is licensed under the GNU Affero General Public License v3.0
+(or later) in [`LICENSE`](LICENSE).
 Dependencies, runtime binaries, browser/API services, and AI model artifacts
 remain under their own licenses and are not relicensed by iAi.
 
