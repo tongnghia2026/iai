@@ -35,6 +35,27 @@ checked by the adapter during inference. The runner is lazy and stages are
 unloaded before the next stage, so CPU-only machines do not keep every model in
 memory.
 
+## Custom / user-supplied models (open slots)
+
+Two quality slots accept a user-supplied ONNX in addition to the verified
+default, so a build can ship the framework only and let users bring their own
+model: **face restore** (`gfpgan/`) and **detail / upscale** (`realesrgan/`).
+Drop any `*.onnx` into the feature folder — no renaming needed — and the app
+runs it in an *unverified custom* mode: the checksum lock is skipped, but the
+adapter still validates tensor shapes and falls back to CPU on a mismatch, and
+the AI panel plus the result warnings flag that a custom model is in use and
+that its licensing/quality are the user's responsibility. The face-restore
+adapter auto-detects `[0,1]` vs `[-1,1]` output, so both GFPGAN and
+RestoreFormer++ (Apache-2.0) decode correctly. All other slots stay
+checksum-locked. On first use the app creates the per-feature folders under the
+models directory and writes a short Vietnamese guide (`README.txt`) into each;
+the repo copies live in `models/README.txt`, `models/gfpgan/README.txt` and
+`models/realesrgan/README.txt`.
+
+The app never downloads or bundles these models. Non-commercial weights
+(CodeFormer, GPEN, BRIA RMBG) remain unsuitable for redistributable builds; the
+AGPL relicensing does not change that.
+
 ## Current integration status
 
 The current build has these active ONNX adapters. On Windows it first tries

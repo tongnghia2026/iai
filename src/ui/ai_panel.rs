@@ -891,6 +891,7 @@ fn offline_retouch_section(
             .color(egui::Color32::from_rgb(220, 130, 90)),
         );
     }
+    crate::core::ai::retouch::ensure_model_folders_with_readme();
     let metadata = crate::core::ai::retouch::model_metadata();
     let required = metadata.iter().filter(|model| model.required).count();
     let missing = crate::core::ai::retouch::missing_required_models().len();
@@ -913,6 +914,22 @@ fn offline_retouch_section(
             .color(egui::Color32::from_rgb(220, 130, 90))
     };
     ui.label(model_label);
+    let mut custom_features: Vec<&str> = crate::core::ai::retouch::unverified_models()
+        .iter()
+        .map(|m| m.id.feature_label())
+        .collect();
+    custom_features.sort();
+    custom_features.dedup();
+    if !custom_features.is_empty() {
+        let names = custom_features.join(", ");
+        ui.label(
+            egui::RichText::new(format!(
+                "Model tùy chỉnh (chưa kiểm định): {names} — bạn tự chịu trách nhiệm giấy phép & chất lượng."
+            ))
+            .small()
+            .color(egui::Color32::from_rgb(220, 130, 90)),
+        );
+    }
     let run = egui::Button::new(egui::RichText::new("Run Auto Retouch").strong())
         .min_size(egui::vec2(ui.available_width(), 32.0))
         .fill(egui::Color32::from_rgb(48, 86, 120));

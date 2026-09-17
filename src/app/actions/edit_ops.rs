@@ -1484,13 +1484,17 @@ mod tests {
             canvas.layer_stack.layers[0].selected = false;
 
             let a = canvas.layer_stack.add_layer(20, 20);
-            canvas.layer_stack.layers[a].tiles.set_pixel(0, 0, 255, 0, 0, 255);
+            canvas.layer_stack.layers[a]
+                .tiles
+                .set_pixel(0, 0, 255, 0, 0, 255);
             canvas.layer_stack.layers[a].offset = (60, 40);
             canvas.layer_stack.layers[a].selected = true;
             let id_a = canvas.layer_stack.layers[a].id;
 
             let b = canvas.layer_stack.add_layer(20, 20);
-            canvas.layer_stack.layers[b].tiles.set_pixel(0, 0, 0, 0, 255, 255);
+            canvas.layer_stack.layers[b]
+                .tiles
+                .set_pixel(0, 0, 0, 0, 255, 255);
             canvas.layer_stack.layers[b].offset = (100, 90);
             canvas.layer_stack.layers[b].selected = true;
             let id_b = canvas.layer_stack.layers[b].id;

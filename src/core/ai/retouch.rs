@@ -135,6 +135,30 @@ impl ModelId {
             }
         }
     }
+
+    /// Whether the user may drop a non-default (unverified) ONNX into this
+    /// model's folder and have the app run it. Only the two quality slots are
+    /// open: face restore (GFPGAN family) and detail/upscale (Real-ESRGAN
+    /// family). Core detection/parsing/denoise/colour stays checksum-locked so
+    /// an incompatible file cannot silently break them.
+    pub const fn allows_custom(self) -> bool {
+        matches!(
+            self,
+            Self::Gfpgan | Self::RealesrganGeneral | Self::RealesrganRrdbX2 | Self::RealesrganRrdb
+        )
+    }
+
+    /// Short Vietnamese label of the feature this slot powers, for the "custom
+    /// model" notice in the AI panel.
+    pub const fn feature_label(self) -> &'static str {
+        match self {
+            Self::Gfpgan => "Phục hồi khuôn mặt",
+            Self::RealesrganGeneral | Self::RealesrganRrdbX2 | Self::RealesrganRrdb => {
+                "Tăng nét / Phóng to"
+            }
+            _ => "Model lõi",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -776,6 +800,42 @@ fn model_artifact_is_valid(id: ModelId, path: &Path) -> bool {
     valid
 }
 
+/// How a model slot's file resolved: none present, the exact verified default,
+/// or a user-supplied "custom" ONNX (only possible on slots that allow it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelFileStatus {
+    Missing,
+    Verified,
+    Custom,
+}
+
+fn model_file_status_at(id: ModelId, path: &Path) -> ModelFileStatus {
+    if !path.is_file() {
+        return ModelFileStatus::Missing;
+    }
+    if model_artifact_is_valid(id, path) {
+        ModelFileStatus::Verified
+    } else if id.allows_custom() {
+        // Present but not the checksummed default: on an open slot this is a
+        // user's own model, run unverified; on a locked slot it is unusable.
+        ModelFileStatus::Custom
+    } else {
+        ModelFileStatus::Missing
+    }
+}
+
+/// Public status of the file currently resolved for a model slot.
+pub fn model_file_status(id: ModelId) -> ModelFileStatus {
+    model_file_status_at(id, &model_path(id))
+}
+
+fn custom_model_notice(id: ModelId) -> String {
+    format!(
+        "{}: đang dùng model tùy chỉnh (chưa kiểm định) — bạn tự chịu trách nhiệm giấy phép & chất lượng",
+        id.feature_label()
+    )
+}
+
 /// Lazy local ONNX runner. Each model has an explicit tensor adapter below;
 /// incompatible or missing artifacts fall back safely instead of blocking the
 /// editor.
@@ -784,6 +844,7 @@ pub struct LocalOnnxRunner {
     path: PathBuf,
     prefer_gpu: bool,
     provider: AtomicU8,
+    custom: bool,
 }
 
 impl LocalOnnxRunner {
@@ -794,16 +855,24 @@ impl LocalOnnxRunner {
     fn with_gpu_preference(id: ModelId, prefer_gpu: bool) -> Self {
         let metadata = ModelMetadata::for_id(id);
         let path = model_path(id);
+        let custom = model_file_status_at(id, &path) == ModelFileStatus::Custom;
         Self {
             metadata,
             path,
             prefer_gpu,
             provider: AtomicU8::new(0),
+            custom,
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// True when the resolved file is a user-supplied model, not the verified
+    /// default (only possible on slots where `ModelId::allows_custom`).
+    pub fn is_custom(&self) -> bool {
+        self.custom
     }
 
     fn used_directml(&self) -> bool {
@@ -1450,15 +1519,27 @@ impl LocalOnnxRunner {
                 ));
             }
 
+            // GFPGAN outputs [0,1]; some drop-in aligned-face models such as
+            // RestoreFormer++ output [-1,1]. Detect the signed range once and
+            // map it back to [0,1] so a custom face model decodes correctly.
+            let signed_output = data.iter().copied().fold(f32::INFINITY, f32::min) < -0.1;
+            let decode = |value: f32| {
+                let value = if signed_output {
+                    (value + 1.0) * 0.5
+                } else {
+                    value
+                };
+                (value.clamp(0.0, 1.0) * 255.0).round() as u8
+            };
             let mut restored = RgbaImage::new(FACE_ALIGNMENT_SIDE, FACE_ALIGNMENT_SIDE);
             for index in 0..aligned_pixels {
                 restored.put_pixel(
                     (index % FACE_ALIGNMENT_SIDE as usize) as u32,
                     (index / FACE_ALIGNMENT_SIDE as usize) as u32,
                     image::Rgba([
-                        (data[index].clamp(0.0, 1.0) * 255.0).round() as u8,
-                        (data[aligned_pixels + index].clamp(0.0, 1.0) * 255.0).round() as u8,
-                        (data[aligned_pixels * 2 + index].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        decode(data[index]),
+                        decode(data[aligned_pixels + index]),
+                        decode(data[aligned_pixels * 2 + index]),
                         255,
                     ]),
                 );
@@ -1901,7 +1982,11 @@ impl IModelRunner for LocalOnnxRunner {
     }
 
     fn available(&self) -> bool {
-        model_artifact_is_valid(self.metadata.id, &self.path)
+        // Verified default OR a user-supplied custom model on an open slot.
+        !matches!(
+            model_file_status_at(self.metadata.id, &self.path),
+            ModelFileStatus::Missing
+        )
     }
 
     fn run_image(&mut self, _rgba: &[u8], _width: u32, _height: u32) -> Result<Vec<u8>, String> {
@@ -2094,6 +2179,107 @@ pub fn models_dir() -> PathBuf {
     }
 }
 
+const README_MODELS_TOP: &str = r#"iAi — Thư mục model AI cho Auto Retouch
+=======================================
+
+Mỗi tính năng có MỘT thư mục riêng ở đây. Muốn dùng model nào, tải file .onnx
+đúng chuẩn của tính năng đó rồi BỎ VÀO đúng thư mục là chạy — không cài gì thêm.
+
+QUAN TRỌNG:
+- App KHÔNG kèm sẵn model và KHÔNG tự tải. Bạn tự tải model và tự chịu trách
+  nhiệm về giấy phép sử dụng của model (nhất là khi dùng cho mục đích thương
+  mại). Nhiều model chỉ cho phép dùng phi thương mại.
+- Model "chuẩn" (đúng checksum) sẽ hiện tên và được tin cậy. Model bạn tự thả
+  vào chạy ở chế độ "tùy chỉnh (chưa kiểm định)": nếu sai định dạng, app không
+  hỏng — chỉ báo lỗi và quay về xử lý CPU.
+
+Các thư mục mở cho model tùy chỉnh:
+- gfpgan/      -> Phục hồi khuôn mặt   (xem gfpgan/README.txt)
+- realesrgan/  -> Tăng nét & phóng to  (xem realesrgan/README.txt)
+
+Các thư mục model lõi (nên giữ đúng bản chuẩn, không nên thay):
+- face-detector/, bisenet/, body-parsing/, nafnet/, iat/
+"#;
+
+const README_MODELS_GFPGAN: &str = r#"Thư mục: PHỤC HỒI KHUÔN MẶT (Face Restore)
+==========================================
+
+Bỏ 1 file .onnx phục hồi khuôn mặt vào đây.
+
+Chuẩn kỹ thuật (contract) model phải đạt:
+- Input : float32 NCHW [1,3,512,512], ảnh mặt đã căn (RGB), chuẩn hoá về [-1,1].
+- Output: float32 [1,3,512,512] RGB. App tự nhận cả model xuất [0,1] (như
+          GFPGAN) lẫn [-1,1] (như RestoreFormer++).
+
+Model đã kiểm nghiệm tương thích:
+- GFPGAN v1.4  — giấy phép Apache-2.0 (dùng thương mại được).
+    Nguồn: https://github.com/TencentARC/GFPGAN
+- RestoreFormer++  — giấy phép Apache-2.0 (thương mại được), nét hơn GFPGAN.
+    Bản .onnx (~294 MB):
+    https://huggingface.co/datasets/Gourieff/ReActor
+      -> models/facerestore_models/RestoreFormer_PP.onnx
+
+KHÔNG khuyến nghị cho bản thương mại (chỉ phi thương mại):
+- CodeFormer (S-Lab License 1.0), GPEN (chỉ học thuật/phi thương mại).
+
+Lưu ý: hầu hết model phục hồi mặt huấn luyện trên FFHQ — cân nhắc điều khoản
+dữ liệu gốc trước khi dùng thương mại. Bạn tự chịu trách nhiệm giấy phép.
+"#;
+
+const README_MODELS_REALESRGAN: &str = r#"Thư mục: TĂNG NÉT & PHÓNG TO (Upscale / Detail)
+===============================================
+
+Bỏ file .onnx họ ESRGAN / Real-ESRGAN (kiến trúc RRDBNet) vào đây.
+
+Chuẩn kỹ thuật (contract):
+- Input : float32 NCHW [1,3,H,W] RGB, giá trị [0,1].
+- Output: float32 [1,3,H*scale,W*scale] RGB [0,1]  (scale x2 hoặc x4).
+
+Model đã kiểm nghiệm tương thích:
+- Real-ESRGAN (general x4v3, x2plus, x4plus) — BSD-3-Clause (thương mại được).
+    Nguồn: https://github.com/xinntao/Real-ESRGAN
+- Model cộng đồng cùng kiến trúc RRDBNet (OpenModelDB) cũng chạy được, NHƯNG
+  giấy phép mỗi model mỗi khác — tự kiểm tra trước khi dùng thương mại.
+
+Model transformer (SwinIR/HAT, Apache-2.0) chất lượng cao hơn nhưng ĐỊNH DẠNG
+KHÁC, hiện chưa cắm thẳng vào ô này được.
+
+Bạn tự tải model và tự chịu trách nhiệm về giấy phép.
+"#;
+
+fn write_readme_if_absent(path: &Path, contents: &str) {
+    if !path.exists() {
+        let _ = std::fs::write(path, contents);
+    }
+}
+
+/// Create the per-feature model folders under `models_dir()` and drop a short
+/// Vietnamese guide into each, so a user can find where to place a downloaded
+/// model before ever running the pipeline. Runs at most once per process and
+/// never overwrites an existing README. Failures are ignored: a read-only
+/// models directory must not break the editor.
+pub fn ensure_model_folders_with_readme() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let root = models_dir();
+        if std::fs::create_dir_all(&root).is_err() {
+            return;
+        }
+        for id in ModelId::ALL {
+            let _ = std::fs::create_dir_all(root.join(id.directory()));
+        }
+        write_readme_if_absent(&root.join("README.txt"), README_MODELS_TOP);
+        write_readme_if_absent(
+            &root.join("gfpgan").join("README.txt"),
+            README_MODELS_GFPGAN,
+        );
+        write_readme_if_absent(
+            &root.join("realesrgan").join("README.txt"),
+            README_MODELS_REALESRGAN,
+        );
+    });
+}
+
 fn model_path(id: ModelId) -> PathBuf {
     let relative = PathBuf::from(id.directory()).join(id.default_file());
     let mut roots = Vec::new();
@@ -2112,11 +2298,42 @@ fn model_path(id: ModelId) -> PathBuf {
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd.join("models"));
     }
-    roots
+    if let Some(exact) = roots
         .iter()
         .map(|root| root.join(&relative))
         .find(|path| path.is_file())
-        .unwrap_or_else(|| models_dir().join(relative))
+    {
+        return exact;
+    }
+    // Open slots (face restore / upscale) also accept any *.onnx a user drops
+    // into the feature folder, so they don't have to rename the file to match
+    // the default. Verified defaults above always win.
+    if id.allows_custom() {
+        for root in &roots {
+            if let Some(found) = first_onnx_in(&root.join(id.directory())) {
+                return found;
+            }
+        }
+    }
+    models_dir().join(relative)
+}
+
+/// First `*.onnx` file (lexicographically) directly inside `dir`, if any.
+fn first_onnx_in(dir: &Path) -> Option<PathBuf> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("onnx"))
+        })
+        .collect();
+    entries.sort();
+    entries.into_iter().next()
 }
 
 pub fn model_metadata() -> Vec<ModelMetadata> {
@@ -2131,6 +2348,15 @@ pub fn missing_required_models() -> Vec<ModelMetadata> {
     model_metadata()
         .into_iter()
         .filter(|m| m.required && !model_path(m.id).is_file())
+        .collect()
+}
+
+/// Slots currently backed by a user-supplied (unverified) custom model, so the
+/// UI can flag that the result and its licensing are the user's responsibility.
+pub fn unverified_models() -> Vec<ModelMetadata> {
+    model_metadata()
+        .into_iter()
+        .filter(|m| model_file_status(m.id) == ModelFileStatus::Custom)
         .collect()
 }
 
@@ -3537,7 +3763,12 @@ fn run_pipeline(
             ) {
                 Ok(output) => {
                     used_directml |= gfpgan.used_directml();
-                    used_models.push("GFPGAN v1.4 texture transfer");
+                    if gfpgan.is_custom() {
+                        used_models.push("Face restore (model tùy chỉnh)");
+                        warnings.push(custom_model_notice(ModelId::Gfpgan));
+                    } else {
+                        used_models.push("GFPGAN v1.4 texture transfer");
+                    }
                     output
                 }
                 Err(error) => {
@@ -3639,7 +3870,12 @@ fn run_pipeline(
             ) {
                 Ok(output) => {
                     used_directml |= realesrgan.used_directml();
-                    used_models.push("Real-ESRGAN General x4v3 ROI");
+                    if realesrgan.is_custom() {
+                        used_models.push("Tăng nét (model tùy chỉnh)");
+                        warnings.push(custom_model_notice(ModelId::RealesrganGeneral));
+                    } else {
+                        used_models.push("Real-ESRGAN General x4v3 ROI");
+                    }
                     output
                 }
                 Err(error) => {

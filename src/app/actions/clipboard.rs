@@ -106,14 +106,21 @@ fn os_clipboard_block_image(
         }
     }
     let (bx0, by0, bx1, by1) = bbox?;
-    // What-you-see semantics: clip to the canvas like every other output path.
-    let x0 = bx0.max(0);
-    let y0 = by0.max(0);
-    let x1 = bx1.min(canvas_w as i32);
-    let y1 = by1.min(canvas_h as i32);
+    // Carry the whole copied block, including content that extends past the
+    // canvas. An Auto Retouch upscale places a layer LARGER than the canvas
+    // (centred with a negative offset), so clamping the mirror to the canvas
+    // used to drop everything outside the original frame — copying that layer
+    // and pasting it into a new page then lost the upscaled border. The block's
+    // own content bbox keeps it whole; `crop_to_alpha` below still trims empty
+    // margins, so layers that sit within the canvas are unaffected.
+    let x0 = bx0;
+    let y0 = by0;
+    let x1 = bx1;
+    let y1 = by1;
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
+    let _ = (canvas_w, canvas_h);
     let (bw, bh) = ((x1 - x0) as u32, (y1 - y0) as u32);
     if bw as u64 * bh as u64 > 64_000_000 {
         return None; // keep OS clipboard writes bounded (~256MB RGBA)
@@ -702,6 +709,28 @@ mod tests {
         assert_eq!((w, h), (10, 10));
         assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
         assert_eq!(&rgba[rgba.len() - 4..], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn block_image_keeps_content_past_the_canvas() {
+        // An upscaled Auto Retouch layer is LARGER than the canvas and centred
+        // with a negative offset. The OS-clipboard mirror must carry the whole
+        // layer, not just the part inside the original 100x100 frame.
+        let mut layer = Layer::from_rgba(
+            1,
+            "upscaled",
+            [7u8, 7, 7, 255].repeat((300 * 300) as usize),
+            300,
+            300,
+        );
+        layer.offset = (-100, -100);
+        let (w, h, rgba) = os_clipboard_block_image(&[layer], 100, 100).expect("has content");
+        assert_eq!(
+            (w, h),
+            (300, 300),
+            "full layer survives, not clipped to canvas"
+        );
+        assert_eq!(&rgba[..4], &[7, 7, 7, 255]);
     }
 
     #[test]

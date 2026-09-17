@@ -3513,7 +3513,10 @@ mod tests {
 
         assert!(stack.merge_selected(2, 2), "layer + background must merge");
         assert_eq!(stack.layers.len(), 1, "collapsed to a single layer");
-        assert!(stack.layers[0].is_background, "result is still the Background");
+        assert!(
+            stack.layers[0].is_background,
+            "result is still the Background"
+        );
         assert_eq!(stack.layers[0].name, "Background");
         assert!(stack.layers[0].visible, "Background stays visible");
         // The blue layer painted onto the white Background.
