@@ -3,7 +3,7 @@ name = "iai"
 version = "0.1.0"
 edition = "2021"
 description = "A high-performance, GPU-accelerated image editor written in Rust."
-license = "MIT"
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/tongnghia2026/iai"
 readme = "README.md"
 

@@ -8,7 +8,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
 [![wgpu](https://img.shields.io/badge/wgpu-29-blue.svg)](https://wgpu.rs/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 
 </div>
 
@@ -223,7 +223,12 @@ Contributions are welcome. The codebase is organized around a stable rendering c
 
 ## License
 
-The iAi source code is released under the [MIT License](LICENSE). © 2026
-tongnghia2026. Linked dependencies, runtime binaries and AI models retain
-their own terms; see [third-party notices](THIRD_PARTY.md) before distributing
-a binary or model bundle.
+The iAi source code is released under the [GNU Affero General Public License
+v3.0 or later](LICENSE). © 2026 tongnghia2026. You are free to use, modify,
+sell and distribute it, provided that recipients — and users who interact with
+a modified version over a network — can obtain the complete corresponding
+source under the same license.
+
+Linked dependencies, runtime binaries and AI models retain their own terms;
+see [third-party notices](THIRD_PARTY.md) before distributing a binary or model
+bundle.
