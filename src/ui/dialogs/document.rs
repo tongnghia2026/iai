@@ -6,9 +6,9 @@ use super::*;
 /// Image ▸ Mode ▸ CMYK Color…: pick the conversion space (built-in naive GCR or
 /// a browsed ICC device profile) and confirm the destructive parts.
 pub(crate) fn cmyk_convert_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-        actions.doc.show_cmyk_convert_dialog = Some(false);
-    }
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_convert = enter_pressed;
+    let mut do_cancel = esc_pressed;
     modal_overlay(ctx, "cmyk_convert_dialog_overlay");
     egui::Window::new("Convert to CMYK")
         .order(DIALOG_ORDER)
@@ -62,17 +62,21 @@ pub(crate) fn cmyk_convert_dialog(ctx: &egui::Context, data: &UiData, actions: &
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let ready = !data.dialogs.cmyk_convert_use_icc || data.dialogs.cmyk_convert_icc_name.is_some();
-                if ui
-                    .add_enabled(ready, egui::Button::new("Convert"))
-                    .clicked()
-                {
-                    actions.doc.convert_cmyk = true;
+                if ui.add_enabled(ready, egui::Button::new("Convert")).clicked() {
+                    do_convert = true;
                 }
                 if ui.button("Cancel").clicked() {
-                    actions.doc.show_cmyk_convert_dialog = Some(false);
+                    do_cancel = true;
                 }
             });
         });
+    let ready = !data.dialogs.cmyk_convert_use_icc || data.dialogs.cmyk_convert_icc_name.is_some();
+    if do_convert && ready {
+        actions.doc.convert_cmyk = true;
+    }
+    if do_cancel {
+        actions.doc.show_cmyk_convert_dialog = Some(false);
+    }
 }
 
 pub(crate) fn new_canvas_pixels(value: f32, unit: crate::core::units::Unit, dpi: f32) -> u32 {
@@ -115,8 +119,9 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
         d.get_temp::<bool>(egui::Id::new("nd_cmyk"))
             .unwrap_or(false)
     });
-    let mut do_create = false;
-    let mut do_cancel = false;
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_create = enter_pressed;
+    let mut do_cancel = esc_pressed;
 
     modal_overlay(ctx, "new_canvas_dialog_overlay");
 
@@ -393,13 +398,6 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
 
             ui.add_space(12.0);
 
-            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                do_create = true;
-            }
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                do_cancel = true;
-            }
-
             ui.horizontal(|ui| {
                 if ui.button("  Create  ").clicked() {
                     do_create = true;
@@ -429,6 +427,7 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
 }
 
 pub(crate) fn resize_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut new_w_px = ctx.data_mut(|d| {
         d.get_temp::<f32>(egui::Id::new("res_w"))
             .unwrap_or(data.doc.canvas_w as f32)
@@ -447,8 +446,8 @@ pub(crate) fn resize_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
         d.get_temp::<f32>(egui::Id::new("res_dpi"))
             .unwrap_or(data.doc.canvas_dpi)
     });
-    let mut do_resize = false;
-    let mut do_cancel = false;
+    let mut do_resize = enter_pressed;
+    let mut do_cancel = esc_pressed;
 
     let mut w_disp = crate::core::units::from_pixels(new_w_px, res_unit, res_dpi, 0.0);
     let mut h_disp = crate::core::units::from_pixels(new_h_px, res_unit, res_dpi, 0.0);
@@ -591,6 +590,7 @@ pub(crate) fn resize_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
 }
 
 pub(crate) fn image_size_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut new_w_px = ctx.data_mut(|d| {
         d.get_temp::<f32>(egui::Id::new("img_size_w"))
             .unwrap_or(data.doc.canvas_w as f32)
@@ -614,8 +614,8 @@ pub(crate) fn image_size_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
     if res_unit == crate::core::units::Unit::Percent {
         res_unit = crate::core::units::Unit::Pixels;
     }
-    let mut do_resize = false;
-    let mut do_cancel = false;
+    let mut do_resize = enter_pressed;
+    let mut do_cancel = esc_pressed;
 
     let aspect = data.doc.canvas_w.max(1) as f32 / data.doc.canvas_h.max(1) as f32;
     let mut w_disp = crate::core::units::from_pixels(new_w_px, res_unit, res_dpi, 0.0);
@@ -779,10 +779,11 @@ pub(crate) fn image_size_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
 }
 
 pub(crate) fn rename_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut text = data.dialogs.rename_text.clone();
     let idx = data.dialogs.rename_idx;
-    let mut do_rename = false;
-    let mut do_cancel = false;
+    let mut do_rename = enter_pressed;
+    let mut do_cancel = esc_pressed;
 
     modal_overlay(ctx, "rename_dialog_overlay");
 
@@ -836,8 +837,9 @@ pub(crate) fn page_rename_dialog(ctx: &egui::Context, data: &UiData, actions: &m
     let Some((index, mut text)) = data.dialogs.page_rename.clone() else {
         return;
     };
-    let mut do_rename = false;
-    let mut do_cancel = false;
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_rename = enter_pressed;
+    let mut do_cancel = esc_pressed;
 
     modal_overlay(ctx, "page_rename_dialog_overlay");
 

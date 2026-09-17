@@ -706,8 +706,9 @@ impl App {
                 flow_text: self.docs.documents[self.docs.active_doc_idx]
                     .flow_text
                     .as_ref()
-                    .map(|text| crate::ui::FlowTextViewModel {
-                        document: text.document_arc(),
+                    .and_then(|text| text.document_arc().map(|document| (text, document)))
+                    .map(|(text, document)| crate::ui::FlowTextViewModel {
+                        document,
                         revision: text.revision(),
                         active_page: text.active_page(),
                         page_count: text.page_count(),
@@ -774,7 +775,16 @@ impl App {
                     .as_ref()
                     .and_then(|p| p.to_str())
                     .map(|s| s.to_string()),
-                is_modified: self.is_modified(),
+                is_modified: self.is_modified() || {
+                    #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                    {
+                        self.document_webview_active_is_dirty()
+                    }
+                    #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                    {
+                        false
+                    }
+                },
                 has_doc: !self.has_only_welcome_placeholder(),
                 doc_ids: std::sync::Arc::new(
                     self.docs.documents.iter().map(|doc| doc.id).collect(),
@@ -877,7 +887,24 @@ impl App {
                     self.docs
                         .documents
                         .iter()
-                        .map(|d| d.is_modified())
+                        .map(|d| {
+                            d.is_modified() || {
+                                #[cfg(all(
+                                    target_os = "windows",
+                                    feature = "canvas-editor-webview"
+                                ))]
+                                {
+                                    self.document_webview_document_is_dirty(d.id)
+                                }
+                                #[cfg(not(all(
+                                    target_os = "windows",
+                                    feature = "canvas-editor-webview"
+                                )))]
+                                {
+                                    false
+                                }
+                            }
+                        })
                         .collect(),
                 ),
                 doc_ai_busy,
@@ -1630,6 +1657,7 @@ impl App {
                 lama_status_msg: crate::core::lama::status_text().unwrap_or_default(),
                 show_exit_dialog: self.shell.ui.show_exit_dialog,
                 show_close_dialog: self.shell.ui.show_close_dialog,
+                document_editor_error: self.shell.ui.document_editor_error.clone(),
                 show_reload_file_dialog: self.jobs.pending_reload_prompt.is_some(),
                 reload_file_name: self
                     .jobs

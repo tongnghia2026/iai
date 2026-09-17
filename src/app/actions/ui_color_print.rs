@@ -141,8 +141,11 @@ impl App {
         if let Some(printer) = actions.print.set_print_printer.take() {
             if printer != self.shell.print_selected_printer {
                 self.shell.print_driver_settings = None;
+                self.shell.print_selected_printer = printer;
+                // The cached geometry may be stale (driver defaults changed, or a
+                // slot still carries an earlier app-local paper), so re-read it.
+                self.refresh_selected_printer();
             }
-            self.shell.print_selected_printer = printer;
         }
         if let Some(copies) = actions.print.set_print_copies.take() {
             self.shell.print_copies = copies.clamp(1, 999);

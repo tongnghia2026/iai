@@ -122,13 +122,19 @@ impl App {
             .get(self.docs.active_doc_idx)
             .is_some_and(|doc| doc.is_flow_text())
         {
+            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+            if self.request_document_webview_save_snapshot(false) {
+                return;
+            }
             let existing_iai = self.docs.current_file.clone().filter(|p| {
                 p.extension()
                     .and_then(|e| e.to_str())
                     .is_some_and(|e| e.eq_ignore_ascii_case("iai"))
             });
             match existing_iai {
-                Some(path) => self.save_flow_text_doc_to(&path),
+                Some(path) => {
+                    self.save_flow_text_doc_to(&path);
+                }
                 None => self.do_save_project_as(),
             }
             return;
@@ -185,6 +191,10 @@ impl App {
             .get(self.docs.active_doc_idx)
             .is_some_and(|doc| doc.is_flow_text())
         {
+            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+            if self.request_document_webview_save_snapshot(true) {
+                return;
+            }
             self.do_save_project_as();
             return;
         }
@@ -194,7 +204,7 @@ impl App {
     /// Save the canonical flowing-text model. Layout pages, glyph caches and the
     /// 1x1 compatibility canvas are derived/session state and are intentionally
     /// excluded from the file.
-    pub fn save_flow_text_doc_to(&mut self, path: &std::path::Path) {
+    pub fn save_flow_text_doc_to(&mut self, path: &std::path::Path) -> bool {
         let idx = self.docs.active_doc_idx;
         let result = self
             .docs
@@ -202,22 +212,39 @@ impl App {
             .get(idx)
             .and_then(|doc| doc.flow_text.as_ref())
             .ok_or_else(|| "Không có tài liệu văn bản đang hoạt động".to_string())
-            .and_then(|flow| crate::formats::iai::write_flow_text_doc(path, flow.document()));
+            .and_then(|flow| match flow.backing() {
+                crate::core::document::FlowTextBacking::Legacy(document) => {
+                    crate::formats::iai::write_flow_text_doc(path, document.as_ref())
+                }
+                crate::core::document::FlowTextBacking::CanvasEditor(document) => {
+                    crate::formats::iai::write_canvas_editor_doc(path, document)
+                }
+            });
         match result {
             Ok(()) => {
-                let doc = &mut self.docs.documents[idx];
-                doc.path = Some(path.to_path_buf());
-                doc.file_modified_at = file_modified_at(path);
-                doc.mark_saved();
+                let (_document_id, _revision) = {
+                    let doc = &mut self.docs.documents[idx];
+                    doc.path = Some(path.to_path_buf());
+                    doc.file_modified_at = file_modified_at(path);
+                    doc.mark_saved();
+                    (
+                        doc.id,
+                        doc.flow_text.as_ref().map_or(0, |flow| flow.revision()),
+                    )
+                };
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                self.mark_document_webview_saved(_document_id, _revision);
                 self.docs.current_file = Some(path.to_path_buf());
                 self.shell.status_msg = format!(
                     "Đã lưu văn bản: {}",
                     path.file_name().unwrap_or_default().to_string_lossy()
                 );
                 self.clear_autosave(idx);
+                true
             }
             Err(error) => {
                 self.shell.status_msg = format!("Lỗi lưu văn bản: {error}");
+                false
             }
         }
     }
@@ -261,7 +288,7 @@ impl App {
         }
     }
 
-    fn do_save_project_as(&mut self) {
+    pub(in crate::app) fn do_save_project_as(&mut self) {
         let suggestion = self.docs.current_file.clone().or_else(|| {
             self.docs
                 .documents
@@ -396,32 +423,7 @@ impl App {
             return;
         }
 
-        let (cw, ch) = {
-            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
-            (canvas.width, canvas.height)
-        };
-        if !crate::core::canvas::Canvas::fits_flat_buffer(cw, ch) {
-            self.shell.status_msg =
-                "Loi: canvas qua lon de luu dang anh phang - hay dung .iai".to_string();
-            return;
-        }
-
-        if is_large {
-            self.docs.documents[self.docs.active_doc_idx].canvas.pixels = self.docs.documents
-                [self.docs.active_doc_idx]
-                .canvas
-                .layer_stack
-                .flatten(cw, ch);
-            if self.docs.documents[self.docs.active_doc_idx]
-                .canvas
-                .pixels
-                .is_empty()
-            {
-                self.shell.status_msg =
-                    "Lỗi: canvas quá lớn để xuất ảnh — dùng .iai để lưu".to_string();
-                return;
-            }
-        } else {
+        if !is_large {
             self.docs.documents[self.docs.active_doc_idx]
                 .canvas
                 .ensure_pixels();
@@ -515,34 +517,18 @@ impl App {
 
         self.sync_brush_gpu_to_cpu();
 
-        let is_large = self.win.gpu.as_ref().map_or(false, |g| g.is_large_canvas);
         let is_iai = matches!(format, crate::formats::ExportFormat::Iai);
-        let (cw, ch) = {
-            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
-            (canvas.width, canvas.height)
-        };
-        if !is_iai && !crate::core::canvas::Canvas::fits_flat_buffer(cw, ch) {
-            self.shell.status_msg =
-                "Loi: canvas qua lon de export dang anh phang - hay dung .iai".to_string();
-            return;
-        }
         // Raster export of a page that shows the shared master: build a throwaway
         // canvas with the master composited beneath and export THAT. `.iai` keeps
         // the master stored separately (via the artboard-document save), so it is
         // never merged here.
-        let mut merged = if is_iai {
+        let merged = if is_iai {
             None
         } else {
             let active = self.docs.documents[self.docs.active_doc_idx].active_artboard;
             self.docs.documents[self.docs.active_doc_idx].page_render_canvas(active)
         };
-        if let Some(m) = merged.as_mut() {
-            m.pixels = m.layer_stack.flatten(cw, ch);
-            if m.pixels.is_empty() {
-                self.shell.status_msg = "Lỗi: không dựng được ảnh có trang nền".to_string();
-                return;
-            }
-            m.pixels_stale = false;
+        if let Some(m) = merged.as_ref() {
             match self.jobs.format_registry.export(
                 m,
                 std::path::Path::new(path_str),
@@ -571,21 +557,12 @@ impl App {
             }
             return;
         }
-        if is_large && !is_iai {
-            self.docs.documents[self.docs.active_doc_idx].canvas.pixels = self.docs.documents
-                [self.docs.active_doc_idx]
-                .canvas
-                .layer_stack
-                .flatten(cw, ch);
-            if self.docs.documents[self.docs.active_doc_idx]
-                .canvas
-                .pixels
-                .is_empty()
-            {
-                self.shell.status_msg = "Lỗi: canvas quá lớn để export ảnh".to_string();
-                return;
-            }
-        } else if !is_large {
+        if !is_iai
+            && crate::core::canvas::Canvas::fits_flat_buffer(
+                self.docs.documents[self.docs.active_doc_idx].canvas.width,
+                self.docs.documents[self.docs.active_doc_idx].canvas.height,
+            )
+        {
             self.docs.documents[self.docs.active_doc_idx]
                 .canvas
                 .ensure_pixels();
@@ -884,7 +861,7 @@ impl App {
             return;
         };
         let is_pdf = doc.pdf_document.is_some();
-        let flow_text_document = doc.flow_text.as_ref().map(|flow| flow.document_arc());
+        let flow_text_document = doc.flow_text.as_ref().and_then(|flow| flow.document_arc());
         let page_count = if let Some(pdf) = doc.pdf_document.as_ref() {
             pdf.selected_pages.len().max(1)
         } else {

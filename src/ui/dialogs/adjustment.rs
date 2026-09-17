@@ -918,7 +918,8 @@ pub(crate) fn gradient_editor(
 pub(crate) fn gradient_editor_window(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let mut stops = data.tool.gradient_stops.clone();
     let mut changed = false;
-    let mut open = true;
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut open = !esc_pressed;
     egui::Window::new("Gradient Editor")
         .collapsible(false)
         .resizable(false)
@@ -937,7 +938,7 @@ pub(crate) fn gradient_editor_window(ctx: &egui::Context, data: &UiData, actions
                     changed = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Done").clicked() {
+                    if ui.button("Done").clicked() || enter_pressed {
                         actions.tool.toggle_gradient_editor = Some(false);
                     }
                 });

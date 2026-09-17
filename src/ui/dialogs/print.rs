@@ -2,13 +2,23 @@
 
 use super::*;
 
+const PRINTER_PICKER_OPEN_ID: &str = "print_printer_picker_open";
+
 pub(crate) fn print_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
-    let enter_pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+    let picker_id = egui::Id::new(PRINTER_PICKER_OPEN_ID);
+    // While the printer list is open, Esc/Enter belong to the list.
+    let picker_open = ctx.data(|d| d.get_temp::<bool>(picker_id).unwrap_or(false));
+    let (enter_pressed, esc_pressed) = if picker_open {
+        ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        (false, false)
+    } else {
+        consume_dialog_enter_escape(ctx)
+    };
     let mut layout = data.print.print_layout;
     let mut changed = false;
     let mut do_print = false;
     let mut do_done = false;
-    let mut do_cancel = false;
+    let mut do_cancel = esc_pressed;
     let print_layout = print_layout_for_selected_printer(data, layout);
     let can_print = !data.print.print_refreshing
         && !data.print.print_settings_open
@@ -72,6 +82,8 @@ pub(crate) fn print_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
     }
     if do_done || do_cancel {
         actions.print.show_print_dialog = Some(false);
+        // Never reopen the dialog with the printer list already dropped down.
+        ctx.data_mut(|d| d.insert_temp(picker_id, false));
     }
 }
 
@@ -268,7 +280,7 @@ pub(crate) fn printer_picker(
     const PICKER_W: f32 = 320.0;
     const PICKER_ROW_H: f32 = 26.0;
 
-    let picker_id = egui::Id::new("print_printer_picker_open");
+    let picker_id = egui::Id::new(PRINTER_PICKER_OPEN_ID);
     let mut open = ui
         .ctx()
         .data_mut(|d| d.get_temp::<bool>(picker_id).unwrap_or(false));
@@ -306,7 +318,8 @@ pub(crate) fn printer_picker(
     if response.clicked() {
         open = !open;
     }
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+    // Consume Esc so closing the list cannot also cancel the dialog or reach the canvas.
+    if open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         open = false;
     }
 

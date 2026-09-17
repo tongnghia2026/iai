@@ -873,14 +873,9 @@ impl App {
             let ch = self.docs.documents[self.docs.active_doc_idx].canvas.height as f32;
             let c = self.edit.tools.crop_mut();
             let had_selection = c.has_selection();
-            c.fixed_w = value.max(0.0);
-            if had_selection && c.mode == crate::tools::crop::CropMode::FixedSize {
+            c.set_typed_width(value);
+            if had_selection {
                 c.init_bounds(cw as u32, ch as u32);
-            } else if had_selection {
-                let w_px = crate::core::units::to_pixels(value, c.unit, c.dpi, cw).max(1.0);
-                let x0 = c.crop_x0.min(c.crop_x1);
-                c.crop_x0 = x0;
-                c.crop_x1 = x0 + w_px;
             }
             if let Some(win) = &self.win.window {
                 win.request_redraw();
@@ -891,14 +886,9 @@ impl App {
             let ch = self.docs.documents[self.docs.active_doc_idx].canvas.height as f32;
             let c = self.edit.tools.crop_mut();
             let had_selection = c.has_selection();
-            c.fixed_h = value.max(0.0);
-            if had_selection && c.mode == crate::tools::crop::CropMode::FixedSize {
+            c.set_typed_height(value);
+            if had_selection {
                 c.init_bounds(cw as u32, ch as u32);
-            } else if had_selection {
-                let h_px = crate::core::units::to_pixels(value, c.unit, c.dpi, ch).max(1.0);
-                let y0 = c.crop_y0.min(c.crop_y1);
-                c.crop_y0 = y0;
-                c.crop_y1 = y0 + h_px;
             }
             if let Some(win) = &self.win.window {
                 win.request_redraw();

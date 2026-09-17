@@ -28,10 +28,18 @@ impl Exporter for JpegExporter {
 
     fn export(&self, canvas: &Canvas, path: &Path, opts: &ExportOptions) -> Result<(), String> {
         let pixels = if opts.flatten {
-            canvas.export_flat()
+            canvas
+                .materialize_flat_for_export()
+                .ok_or_else(|| "Could not materialize the canvas for JPEG export".to_string())?
         } else {
             canvas.pixels.clone()
         };
+
+        let expected = Canvas::checked_rgba_len(canvas.width, canvas.height)
+            .ok_or_else(|| "JPEG dimensions are too large".to_string())?;
+        if pixels.len() != expected {
+            return Err("JPEG export has no complete RGBA frame".to_string());
+        }
 
         let w = canvas.width as usize;
         let h = canvas.height as usize;

@@ -11,6 +11,30 @@ fn api_provider_label(provider: crate::core::ai::settings::AiProvider) -> &'stat
     }
 }
 
+/// Worker side of the "Copy image" wait: poll the OS clipboard until it holds
+/// an image other than what iai wrote (`written`), or give up after 6 s. The
+/// source-hash compare keeps a not-yet-updated clipboard from being taken as
+/// the result; reading natively avoids the browser's CORS/canvas limits.
+fn wait_for_clipboard_result(
+    written: Option<u64>,
+) -> Result<crate::app::os_clipboard::OsClipboardImage, String> {
+    let started = std::time::Instant::now();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if let Ok(Some(img)) = crate::app::os_clipboard::read_image() {
+            let hash = crate::app::os_clipboard::image_hash(img.width, img.height, &img.pixels);
+            if written != Some(hash) {
+                return Ok(img);
+            }
+        }
+        if started.elapsed() >= std::time::Duration::from_secs(6) {
+            return Err(
+                "Trang không chép được ảnh vào clipboard sau khi bấm Copy — thử lại".to_string(),
+            );
+        }
+    }
+}
+
 fn ai_placement_succeeded(status: &str) -> bool {
     status.starts_with("Xong") || status.starts_with("Ảnh đã vào")
 }
@@ -304,7 +328,10 @@ impl App {
         }
 
         let doc_id = self.docs.documents[self.docs.active_doc_idx].id.0;
-        if self.jobs.ai_engine.doc_running(doc_id) || self.jobs.ext.doc_busy(doc_id) {
+        if self.jobs.ai_engine.doc_running(doc_id)
+            || self.jobs.ext.doc_busy(doc_id)
+            || self.jobs.ext_uploads.iter().any(|u| u.doc_id == doc_id)
+        {
             self.jobs.ext.status =
                 "Tài liệu này đang có lệnh AI — đợi xong hoặc bấm Hủy".to_string();
             return;
@@ -319,34 +346,79 @@ impl App {
             .to_string();
         let w = self.docs.documents[self.docs.active_doc_idx].canvas.width;
         let h = self.docs.documents[self.docs.active_doc_idx].canvas.height;
-        let rgba = self.docs.documents[self.docs.active_doc_idx]
+        // Flatten + downscale + PNG-encode on a worker; on a large canvas this
+        // was a visible pause on the UI thread.
+        let stack = self.docs.documents[self.docs.active_doc_idx]
             .canvas
-            .flatten_for_export();
-        let guarded = crate::core::ai::guarded_edit_prompt(&prompt);
-        let output_new_file = self.shell.ui.ai.output_new_file;
-        self.jobs.ext.status =
-            match self
-                .jobs
-                .ext
-                .enqueue_edit(rgba, w, h, &site, guarded, doc_id, output_new_file)
-            {
-                Ok(crate::app::ext_bridge::EnqueueOutcome::Sent) => {
-                    format!("Đã gửi sang {site} (extension)…")
+            .layer_stack
+            .clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rgba = stack.flatten(w, h);
+            let _ = tx.send(crate::app::ext_bridge::PreparedUpload::from_rgba(
+                rgba, w, h,
+            ));
+        });
+        self.jobs
+            .ext_uploads
+            .push(crate::app::ext_bridge::PendingUpload {
+                doc_id,
+                width: w,
+                height: h,
+                site: site.clone(),
+                prompt: crate::core::ai::guarded_edit_prompt(&prompt),
+                output_new_file: self.shell.ui.ai.output_new_file,
+                rx,
+            });
+        let line = format!("Đang chuẩn bị ảnh gửi sang {site}…");
+        self.jobs.ext.status = line.clone();
+        self.jobs.ext.push_log(&line);
+        if let Some(win) = &self.win.window {
+            win.request_redraw();
+        }
+    }
+
+    /// Hand finished upload preparations to the bridge (send now or queue).
+    fn poll_ext_uploads(&mut self) {
+        use crate::app::ext_bridge::EnqueueOutcome;
+        let mut i = 0;
+        while i < self.jobs.ext_uploads.len() {
+            let result = match self.jobs.ext_uploads[i].rx.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    i += 1;
+                    continue;
                 }
-                Ok(crate::app::ext_bridge::EnqueueOutcome::Queued(pos)) => {
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err("worker dừng bất thường".to_string())
+                }
+            };
+            let job = self.jobs.ext_uploads.remove(i);
+            let site = job.site.clone();
+            let outcome = match result {
+                Ok(upload) => self.jobs.ext.enqueue_prepared(
+                    upload,
+                    job.width,
+                    job.height,
+                    &job.site,
+                    job.prompt,
+                    job.doc_id,
+                    job.output_new_file,
+                ),
+                Err(e) => Err(e),
+            };
+            let line = match outcome {
+                Ok(EnqueueOutcome::Sent) => format!("Đã gửi sang {site} (extension)…"),
+                Ok(EnqueueOutcome::Queued(pos)) => {
                     format!("Đã thêm vào hàng chờ (vị trí {pos})…")
                 }
                 Err(e) => format!("Không gửi được: {e}"),
             };
-        let line = self.jobs.ext.status.clone();
-        self.jobs.ext.push_log(&line);
-        // Immediate dispatch may have written the clipboard already. Queued
-        // dispatches are picked up from poll_ext_bridge below.
-        if let Some(h) = self.jobs.ext.last_clipboard_write.take() {
-            self.edit.os_clipboard_written = Some(h);
-        }
-        if let Some(win) = &self.win.window {
-            win.request_redraw();
+            self.jobs.ext.status = line.clone();
+            self.jobs.ext.push_log(&line);
+            if let Some(win) = &self.win.window {
+                win.request_redraw();
+            }
         }
     }
 
@@ -357,7 +429,10 @@ impl App {
         let doc_id = self.docs.documents[self.docs.active_doc_idx].id.0;
         let api = self.jobs.ai_engine.abandon_doc_job(doc_id);
         let retouch = self.jobs.retouch_engine.cancel_doc(doc_id);
-        let bridge = self.jobs.ext.cancel_for_doc(doc_id);
+        let preparing = self.jobs.ext_uploads.len();
+        self.jobs.ext_uploads.retain(|job| job.doc_id != doc_id);
+        let bridge =
+            self.jobs.ext.cancel_for_doc(doc_id) || self.jobs.ext_uploads.len() != preparing;
         if api {
             self.shell.ui.ai_status = "Đã hủy lệnh API của ảnh này".to_string();
         }
@@ -374,7 +449,17 @@ impl App {
 
     /// Drain extension-bridge events each frame: status lines land in `ext.status`
     /// (via `drain`), and a finished result is decoded + placed like a Gemini edit.
+    /// Background extension work (upload prep, result decode, clipboard wait)
+    /// that must keep the frame loop ticking until it lands.
+    pub(crate) fn ext_workers_busy(&self) -> bool {
+        !self.jobs.ext_uploads.is_empty()
+            || !self.jobs.ext_decodes.is_empty()
+            || self.edit.pending_ext_clipboard.is_some()
+    }
+
     pub fn poll_ext_bridge(&mut self) {
+        self.poll_ext_uploads();
+        self.poll_ext_decodes();
         for ev in self.jobs.ext.drain() {
             match ev {
                 crate::app::ext_bridge::ExtInbound::Failed { origin, .. } => {
@@ -391,31 +476,12 @@ impl App {
                     origin: Some(origin),
                     ..
                 } => {
-                    let success = match crate::app::ext_bridge::decode_result(&image_b64) {
-                        Ok((rgba, rw, rh)) => {
-                            // Keep the model's native resolution (rw×rh) — placing it
-                            // instead of upscaling to the source canvas is what stops
-                            // web results coming in blurrier than the browser showed.
-                            let s = self.place_gemini_result(
-                                Some(origin.doc_id),
-                                rgba,
-                                rw,
-                                rh,
-                                origin.output_new_file,
-                            );
-                            let success = ai_placement_succeeded(&s);
-                            self.jobs.ext.push_log(&s);
-                            self.jobs.ext.status = s;
-                            success
-                        }
-                        Err(e) => {
-                            let s = format!("Lỗi ảnh extension: {e}");
-                            self.jobs.ext.push_log(&s);
-                            self.jobs.ext.status = s;
-                            false
-                        }
-                    };
-                    self.notify_done(success);
+                    // Base64 + PNG decode on a worker; placed by poll_ext_decodes.
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(crate::app::ext_bridge::decode_result(&image_b64));
+                    });
+                    self.jobs.ext_decodes.push((origin, rx));
                     if let Some(win) = &self.win.window {
                         win.request_redraw();
                     }
@@ -425,9 +491,18 @@ impl App {
                     ..
                 } => {
                     // The site writes the clipboard asynchronously after the Copy
-                    // click; begin polling for it (handled below, every frame).
-                    let now = std::time::Instant::now();
-                    self.edit.pending_ext_clipboard = Some((origin, now, now));
+                    // click. A worker waits for it: a clipboard read can block
+                    // while the browser renders the image.
+                    let written = self
+                        .jobs
+                        .ext
+                        .last_clipboard_write
+                        .or(self.edit.os_clipboard_written);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(wait_for_clipboard_result(written));
+                    });
+                    self.edit.pending_ext_clipboard = Some((origin, rx));
                     let s = "Da bam Copy — dang cho trang chep anh vao clipboard...".to_string();
                     self.jobs.ext.push_log(&s);
                     self.jobs.ext.status = s;
@@ -570,56 +645,74 @@ impl App {
         }
     }
 
-    /// Poll the OS clipboard for a browser "Copy image" result (called each frame
-    /// while `pending_ext_clipboard` is set). The site writes the clipboard
-    /// asynchronously after the Copy click, so retry ~every 300ms until an image
-    /// that differs from what iai wrote (the result) appears, or the wait times out.
-    /// Reads natively — no CORS/canvas limits — and the source-hash compare keeps a
-    /// not-yet-updated clipboard from being mistaken for the result.
+    /// Collect a browser "Copy image" result from the clipboard worker.
     pub(crate) fn poll_pending_ext_clipboard(&mut self) {
-        let Some((origin, started, last)) = self.edit.pending_ext_clipboard else {
+        let Some((origin, rx)) = self.edit.pending_ext_clipboard.take() else {
             return;
         };
-        let now = std::time::Instant::now();
-        // Throttle reads to ~300ms; keep the frame loop alive while waiting.
-        if now.duration_since(last) < std::time::Duration::from_millis(300) {
-            if let Some(win) = &self.win.window {
-                win.request_redraw();
-            }
-            return;
-        }
-        self.edit.pending_ext_clipboard = Some((origin, started, now));
-
-        if let Ok(Some(img)) = crate::app::os_clipboard::read_image() {
-            let hash = crate::app::os_clipboard::image_hash(img.width, img.height, &img.pixels);
-            if self.edit.os_clipboard_written != Some(hash) {
-                self.edit.pending_ext_clipboard = None;
-                let s = self.place_gemini_result(
-                    Some(origin.doc_id),
-                    img.pixels,
-                    img.width,
-                    img.height,
-                    origin.output_new_file,
-                );
-                let success = ai_placement_succeeded(&s);
-                self.jobs.ext.push_log(&s);
-                self.jobs.ext.status = s;
-                self.notify_done(success);
-                if let Some(win) = &self.win.window {
-                    win.request_redraw();
-                }
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.edit.pending_ext_clipboard = Some((origin, rx));
                 return;
             }
-        }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("Không đọc được clipboard (worker dừng bất thường)".to_string())
+            }
+        };
+        self.finish_ext_result(
+            origin,
+            result.map(|img| (img.pixels, img.width, img.height)),
+        );
+    }
 
-        if now.duration_since(started) >= std::time::Duration::from_secs(6) {
-            self.edit.pending_ext_clipboard = None;
-            let s =
-                "Trang không chép được ảnh vào clipboard sau khi bấm Copy — thử lại".to_string();
-            self.jobs.ext.push_log(&s);
-            self.jobs.ext.status = s;
-            self.notify_done(false);
+    /// Place extension results decoded by workers.
+    fn poll_ext_decodes(&mut self) {
+        let mut i = 0;
+        while i < self.jobs.ext_decodes.len() {
+            let result = match self.jobs.ext_decodes[i].1.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    i += 1;
+                    continue;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err("worker dừng bất thường".to_string())
+                }
+            };
+            let (origin, _) = self.jobs.ext_decodes.remove(i);
+            self.finish_ext_result(
+                origin,
+                result.map_err(|e| format!("Lỗi ảnh extension: {e}")),
+            );
         }
+    }
+
+    /// Place a finished extension image at the model's native resolution
+    /// (upscaling to the source canvas made web results blurrier than the
+    /// browser showed) and report it.
+    fn finish_ext_result(
+        &mut self,
+        origin: crate::app::ext_bridge::EditOrigin,
+        result: Result<(Vec<u8>, u32, u32), String>,
+    ) {
+        let (line, success) = match result {
+            Ok((rgba, w, h)) => {
+                let s = self.place_gemini_result(
+                    Some(origin.doc_id),
+                    rgba,
+                    w,
+                    h,
+                    origin.output_new_file,
+                );
+                let ok = ai_placement_succeeded(&s);
+                (s, ok)
+            }
+            Err(e) => (e, false),
+        };
+        self.jobs.ext.push_log(&line);
+        self.jobs.ext.status = line;
+        self.notify_done(success);
         if let Some(win) = &self.win.window {
             win.request_redraw();
         }

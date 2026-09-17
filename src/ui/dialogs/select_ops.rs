@@ -78,7 +78,9 @@ pub(crate) fn pdf_batch_scope_dialog(ctx: &egui::Context, data: &UiData, actions
 
 pub(crate) fn feather_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut UiActions) {
     let mut open = true;
-    let mut do_feather = false;
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_feather = enter_pressed;
+    let mut do_cancel = esc_pressed;
 
     let mut current_radius =
         ctx.data_mut(|d| *d.get_temp_mut_or_default::<f32>(egui::Id::new("feather_radius")));
@@ -104,7 +106,7 @@ pub(crate) fn feather_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut 
                     do_feather = true;
                 }
                 if ui.button("Cancel").clicked() {
-                    actions.sel.show_feather_dialog = Some(false);
+                    do_cancel = true;
                 }
             });
         });
@@ -117,7 +119,7 @@ pub(crate) fn feather_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut 
         actions.sel.selection_feather = Some(current_radius);
         actions.sel.show_feather_dialog = Some(false);
     }
-    if !open {
+    if do_cancel || !open {
         actions.sel.show_feather_dialog = Some(false);
     }
 }
@@ -132,7 +134,9 @@ pub(crate) fn modify_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
         None => return,
     };
     let mut open = true;
-    let mut apply = false;
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut apply = enter_pressed;
+    let mut cancel = esc_pressed;
 
     let mut amount =
         ctx.data_mut(|d| *d.get_temp_mut_or_default::<f32>(egui::Id::new("modify_amount")));
@@ -163,7 +167,7 @@ pub(crate) fn modify_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                     apply = true;
                 }
                 if ui.button("Cancel").clicked() {
-                    actions.sel.close_modify_dialog = true;
+                    cancel = true;
                 }
             });
         });
@@ -183,7 +187,7 @@ pub(crate) fn modify_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
         }
         actions.sel.close_modify_dialog = true;
     }
-    if !open {
+    if cancel || !open {
         actions.sel.close_modify_dialog = true;
     }
 }
@@ -192,7 +196,9 @@ pub(crate) fn stroke_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
     use crate::core::canvas::{StrokeLocation, StrokeParams};
 
     let mut open = true;
-    let mut do_apply = false;
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_apply = enter_pressed && data.sel.has_selection;
+    let mut do_cancel = esc_pressed;
 
     let width_id = egui::Id::new("stroke_width");
     let loc_id = egui::Id::new("stroke_location");
@@ -277,7 +283,7 @@ pub(crate) fn stroke_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                     do_apply = true;
                 }
                 if ui.button("Cancel").clicked() {
-                    actions.sel.show_stroke_dialog = Some(false);
+                    do_cancel = true;
                 }
             });
             if !data.sel.has_selection {
@@ -309,7 +315,7 @@ pub(crate) fn stroke_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
         });
         actions.sel.show_stroke_dialog = Some(false);
     }
-    if !open {
+    if do_cancel || !open {
         actions.sel.show_stroke_dialog = Some(false);
     }
 }

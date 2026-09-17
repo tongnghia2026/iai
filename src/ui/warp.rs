@@ -140,6 +140,10 @@ fn draw_freeze_overlay(ctx: &egui::Context, data: &UiData) {
 
 /// Brush-size ring around the cursor (red for the Freeze/Thaw mask brushes).
 fn draw_brush_ring(ctx: &egui::Context, data: &UiData, params: crate::core::warp::WarpParams) {
+    if !ctx.input(|i| i.focused) || ctx.pointer_hover_pos().is_none() || ctx.is_pointer_over_egui()
+    {
+        return;
+    }
     // While resizing (Alt+right drag) the cursor is moving but the ring must stay
     // pinned at the press point — like the Brush/Eraser tools.
     let pos = if data.dialogs.warp_resizing {
@@ -148,9 +152,6 @@ fn draw_brush_ring(ctx: &egui::Context, data: &UiData, params: crate::core::warp
             data.dialogs.warp_resize_anchor.1,
         )
     } else {
-        if ctx.is_pointer_over_egui() {
-            return; // Over the panel / menus — don't draw the canvas ring.
-        }
         let Some(p) = ctx.pointer_latest_pos() else {
             return;
         };

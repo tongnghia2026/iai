@@ -144,6 +144,17 @@ pub struct BackgroundJobs {
     >,
     pub(in crate::app) pending_printer_refresh:
         Option<std::sync::mpsc::Receiver<Result<Vec<crate::core::print::PrinterInfo>, String>>>,
+    /// A selected-printer re-read requested while another query was in flight;
+    /// run once that query lands so the preview never keeps stale paper.
+    pub(in crate::app) printer_refresh_queued: bool,
+    /// Extension uploads being flattened + encoded off the UI thread.
+    pub(in crate::app) ext_uploads: Vec<crate::app::ext_bridge::PendingUpload>,
+    /// Extension result images being decoded off the UI thread.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::app) ext_decodes: Vec<(
+        crate::app::ext_bridge::EditOrigin,
+        std::sync::mpsc::Receiver<Result<(Vec<u8>, u32, u32), String>>,
+    )>,
     /// The native printer-driver property sheet runs on a worker thread.  Calling
     /// `DocumentPropertiesW(DM_IN_PROMPT)` from inside winit's event handler can
     /// re-enter the Windows message loop and leave the borderless main window in

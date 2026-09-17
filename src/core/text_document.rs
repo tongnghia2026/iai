@@ -164,7 +164,7 @@ mod image_b64 {
 /// options. `Inline` flows in the paragraph; the rest float at a page position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ImageWrap {
-    /// In line with text: the image sits in the flow on its own line.
+    /// In line with text: the image behaves like one character in a paragraph.
     #[default]
     Inline,
     /// Floating, drawn behind the text; the text is not moved.
@@ -173,7 +173,8 @@ pub enum ImageWrap {
     InFrontOfText,
     /// Floating; text wraps around the image's box (square).
     Square,
-    /// Floating full width; text keeps clear above and below the image.
+    /// Top and Bottom: the image occupies its own movable flow block, so text
+    /// appears only above and below it.
     TopBottom,
 }
 
@@ -190,10 +191,10 @@ impl ImageWrap {
     }
 }
 
-/// A block image (letterhead, signature, stamp). When `wrap` is `Inline` it sits
-/// in the paragraph flow on its own line; otherwise it floats at `(page, x_mm,
-/// y_mm)` from that page's top-left corner. The encoded bytes travel with the
-/// document so it embeds directly into PDF and needs no external file.
+/// An image (letterhead, signature, stamp). When `wrap` is `Inline` it can be
+/// anchored inside a paragraph; otherwise it floats at `(page, x_mm, y_mm)`
+/// from that page's top-left corner. The encoded bytes travel with the document
+/// so it embeds directly into PDF and needs no external file.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImageBlock {
     /// Encoded image bytes (PNG or JPEG), base64 in the manifest.
@@ -204,9 +205,10 @@ pub struct ImageBlock {
     pub natural_h: u32,
     /// Displayed width in millimetres; height follows the aspect ratio.
     pub width_mm: f32,
-    /// Horizontal placement of an inline image within the text column.
+    /// Horizontal placement retained for legacy standalone image paragraphs.
+    /// A true inline image follows the surrounding glyphs instead.
     pub align: ParagraphAlign,
-    /// Relationship to the text. `Inline` (default) keeps the pre-v10 behaviour.
+    /// Relationship to the text. `Inline` (default) behaves like one character.
     #[serde(default)]
     pub wrap: ImageWrap,
     /// Floating anchor: 0-based page and offset (mm) from its top-left corner.
@@ -216,6 +218,15 @@ pub struct ImageBlock {
     pub x_mm: f32,
     #[serde(default)]
     pub y_mm: f32,
+}
+
+/// One image that behaves like a character inside a text paragraph. The byte
+/// offset is measured in the paragraph's UTF-8 text (which excludes the image
+/// itself), allowing text before and after the image to retain rich styles.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InlineImage {
+    pub byte_offset: usize,
+    pub image: ImageBlock,
 }
 
 impl ImageBlock {
@@ -259,6 +270,10 @@ pub struct Paragraph {
     /// When set, this paragraph is an image block; `runs` are ignored.
     #[serde(default)]
     pub image: Option<ImageBlock>,
+    /// Images embedded between characters in this paragraph. Legacy block
+    /// images remain supported through `image` for backward compatibility.
+    #[serde(default)]
+    pub inline_images: Vec<InlineImage>,
 }
 
 impl Paragraph {
@@ -280,6 +295,7 @@ impl Paragraph {
             runs,
             style: ParagraphStyle::default(),
             image: None,
+            inline_images: Vec::new(),
         }
     }
 
@@ -289,6 +305,7 @@ impl Paragraph {
             runs: Vec::new(),
             style: ParagraphStyle::default(),
             image: Some(block),
+            inline_images: Vec::new(),
         }
     }
 
@@ -309,7 +326,9 @@ impl Paragraph {
 
     /// True when the paragraph carries no visible text and no image.
     pub fn is_empty(&self) -> bool {
-        self.image.is_none() && self.runs.iter().all(|r| r.text.is_empty())
+        self.image.is_none()
+            && self.inline_images.is_empty()
+            && self.runs.iter().all(|r| r.text.is_empty())
     }
 
     /// Canonicalise: drop empty runs and merge adjacent runs with identical
@@ -326,6 +345,15 @@ impl Paragraph {
             }
         }
         self.runs = merged;
+        let text = self.text();
+        for inline in &mut self.inline_images {
+            inline.byte_offset = inline.byte_offset.min(text.len());
+            while !text.is_char_boundary(inline.byte_offset) {
+                inline.byte_offset -= 1;
+            }
+            inline.image.wrap = ImageWrap::Inline;
+        }
+        self.inline_images.sort_by_key(|inline| inline.byte_offset);
     }
 }
 
@@ -501,7 +529,7 @@ pub struct TextDocument {
     pub default_char: CharStyle,
     pub default_para: ParagraphStyle,
     /// Floating images (Word-style wrapping): anchored to a page position rather
-    /// than the text flow. Inline images stay in `paragraphs` as `Paragraph::image`.
+    /// than the text flow. Inline images stay on their owning paragraph.
     #[serde(default)]
     pub floating_images: Vec<ImageBlock>,
 }
@@ -568,13 +596,113 @@ impl TextDocument {
         }
     }
 
+    /// Replace the retired inline-image mode with Word-style Top and Bottom
+    /// blocks. Text on either side of an object-character anchor becomes two
+    /// paragraphs with the original rich runs preserved. Legacy image-only
+    /// paragraphs keep their position and are simply relabelled.
+    ///
+    /// Returns the number of converted images.
+    pub fn migrate_inline_images_to_top_bottom(&mut self) -> usize {
+        self.normalize();
+        let mut migrated = 0;
+        let mut paragraphs = Vec::with_capacity(self.paragraphs.len());
+        for mut paragraph in self.paragraphs.drain(..) {
+            if let Some(image) = paragraph.image.as_mut() {
+                if image.wrap == ImageWrap::Inline {
+                    image.wrap = ImageWrap::TopBottom;
+                    paragraph.style.align = image.align;
+                    migrated += 1;
+                }
+                paragraphs.push(paragraph);
+                continue;
+            }
+            if paragraph.inline_images.is_empty() {
+                paragraphs.push(paragraph);
+                continue;
+            }
+
+            let source_text = paragraph.text();
+            let anchors = std::mem::take(&mut paragraph.inline_images);
+            let mut start = 0usize;
+            for mut inline in anchors {
+                let at = inline.byte_offset.min(source_text.len());
+                if at > start {
+                    paragraphs.push(Paragraph {
+                        runs: slice_runs(&paragraph.runs, start, at),
+                        style: paragraph.style.clone(),
+                        image: None,
+                        inline_images: Vec::new(),
+                    });
+                }
+                inline.image.wrap = ImageWrap::TopBottom;
+                let mut image_paragraph = Paragraph::image(inline.image);
+                image_paragraph.style = paragraph.style.clone();
+                image_paragraph.style.align = image_paragraph
+                    .image
+                    .as_ref()
+                    .map_or(ParagraphAlign::Center, |image| image.align);
+                paragraphs.push(image_paragraph);
+                migrated += 1;
+                start = at;
+            }
+            if start < source_text.len() {
+                paragraphs.push(Paragraph {
+                    runs: slice_runs(&paragraph.runs, start, source_text.len()),
+                    style: paragraph.style,
+                    image: None,
+                    inline_images: Vec::new(),
+                });
+            }
+        }
+        self.paragraphs = paragraphs;
+        self.normalize();
+        migrated
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.page.validate()?;
         if self.paragraphs.is_empty() {
             return Err("document must have at least one paragraph".into());
         }
+        for (paragraph_index, paragraph) in self.paragraphs.iter().enumerate() {
+            let text = paragraph.text();
+            for inline in &paragraph.inline_images {
+                if inline.byte_offset > text.len() || !text.is_char_boundary(inline.byte_offset) {
+                    return Err(format!(
+                        "paragraph {paragraph_index} has an invalid inline-image anchor"
+                    ));
+                }
+                if inline.image.wrap != ImageWrap::Inline {
+                    return Err(format!(
+                        "paragraph {paragraph_index} has a non-inline image in inline_images"
+                    ));
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// Copy a UTF-8 byte range from rich runs without flattening their styles.
+fn slice_runs(runs: &[Run], start: usize, end: usize) -> Vec<Run> {
+    let mut out = Vec::new();
+    let mut run_start = 0usize;
+    for run in runs {
+        let run_end = run_start + run.text.len();
+        let overlap_start = start.max(run_start);
+        let overlap_end = end.min(run_end);
+        if overlap_start < overlap_end {
+            out.push(Run::new(
+                &run.text[overlap_start - run_start..overlap_end - run_start],
+                run.style.clone(),
+            ));
+        }
+        run_start = run_end;
+        if run_start >= end {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -622,6 +750,23 @@ mod tests {
     }
 
     #[test]
+    fn inline_image_anchor_round_trips_and_normalizes_to_utf8_boundary() {
+        let mut p = Paragraph::plain("a Việt", CharStyle::default());
+        p.inline_images.push(InlineImage {
+            byte_offset: 5, // inside the multi-byte 'ệ' scalar
+            image: ImageBlock::inline(vec![1, 2, 3], 20, 10, 12.0, ParagraphAlign::Left),
+        });
+        p.normalize();
+        assert!(p.text().is_char_boundary(p.inline_images[0].byte_offset));
+        assert_eq!(p.inline_images[0].image.wrap, ImageWrap::Inline);
+
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Paragraph = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+        assert!(!back.is_empty());
+    }
+
+    #[test]
     fn normalize_merges_same_style_and_drops_empties() {
         let s = CharStyle::default();
         let mut bold = s.clone();
@@ -635,6 +780,7 @@ mod tests {
             ],
             style: ParagraphStyle::default(),
             image: None,
+            inline_images: Vec::new(),
         };
         p.normalize();
         assert_eq!(p.runs.len(), 2, "same-style runs merge, empties drop");
@@ -763,6 +909,72 @@ mod tests {
         assert!(!p.is_empty());
         assert_eq!(p.text(), "");
         assert_eq!(p.char_len(), 0);
+    }
+
+    #[test]
+    fn legacy_inline_image_paragraph_migrates_to_top_bottom() {
+        let block = ImageBlock::inline(vec![1, 2, 3], 10, 5, 30.0, ParagraphAlign::Center);
+        let mut doc = TextDocument {
+            paragraphs: vec![Paragraph::image(block.clone())],
+            ..TextDocument::default()
+        };
+
+        assert_eq!(doc.migrate_inline_images_to_top_bottom(), 1);
+        assert!(doc.paragraphs[0].image.is_some());
+        assert_eq!(doc.paragraphs[0].style.align, ParagraphAlign::Center);
+        let migrated = doc.paragraphs[0].image.as_ref().unwrap();
+        assert_eq!(migrated.data, block.data);
+        assert_eq!(migrated.wrap, ImageWrap::TopBottom);
+        assert!(doc.validate().is_ok());
+    }
+
+    #[test]
+    fn inline_anchor_migrates_between_rich_text_without_losing_styles() {
+        let mut bold = CharStyle::default();
+        bold.bold = true;
+        let plain = CharStyle::default();
+        let block = ImageBlock::inline(vec![4, 5, 6], 20, 10, 15.0, ParagraphAlign::Right);
+        let paragraph = Paragraph {
+            runs: vec![
+                Run::new("Trước ", bold.clone()),
+                Run::new("sau", plain.clone()),
+            ],
+            style: ParagraphStyle::default(),
+            image: None,
+            inline_images: vec![InlineImage {
+                byte_offset: "Trước ".len(),
+                image: block,
+            }],
+        };
+        let mut doc = TextDocument {
+            paragraphs: vec![paragraph],
+            ..TextDocument::default()
+        };
+
+        assert_eq!(doc.migrate_inline_images_to_top_bottom(), 1);
+        assert_eq!(doc.paragraphs.len(), 3);
+        assert_eq!(doc.paragraphs[0].text(), "Trước ");
+        assert!(doc.paragraphs[0].runs[0].style.bold);
+        assert_eq!(
+            doc.paragraphs[1].image.as_ref().unwrap().wrap,
+            ImageWrap::TopBottom
+        );
+        assert_eq!(doc.paragraphs[1].style.align, ParagraphAlign::Right);
+        assert_eq!(doc.paragraphs[2].text(), "sau");
+        assert_eq!(doc.paragraphs[2].runs[0].style, plain);
+    }
+
+    #[test]
+    fn validation_rejects_broken_inline_image_anchors() {
+        let mut doc = TextDocument::from_plain_text("Việt");
+        doc.paragraphs[0].inline_images.push(InlineImage {
+            byte_offset: 3, // inside a multi-byte scalar
+            image: ImageBlock::inline(vec![1], 1, 1, 10.0, ParagraphAlign::Left),
+        });
+        assert!(doc.validate().is_err());
+
+        doc.normalize();
+        assert!(doc.validate().is_ok());
     }
 
     #[test]

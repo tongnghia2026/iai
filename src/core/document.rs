@@ -25,18 +25,108 @@ pub enum DocumentKind {
     FlowText,
 }
 
+pub const MAX_CANVAS_EDITOR_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CANVAS_EDITOR_JSON_DEPTH: usize = 64;
+const MAX_CANVAS_EDITOR_JSON_NODES: usize = 200_000;
+
+/// Opaque canonical Canvas Editor payload. Validation deliberately checks only
+/// the stable root-zone contract and resource limits; unknown fields stay in
+/// the JSON value so newer editor data survives a v12 save/reopen unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanvasEditorDocument {
+    payload: std::sync::Arc<serde_json::Value>,
+}
+
+impl CanvasEditorDocument {
+    pub fn try_new(payload: serde_json::Value) -> Result<Self, String> {
+        validate_canvas_editor_payload(&payload)?;
+        let encoded_len = serde_json::to_vec(&payload)
+            .map_err(|error| format!("Cannot encode Canvas Editor document: {error}"))?
+            .len();
+        if encoded_len > MAX_CANVAS_EDITOR_DOCUMENT_BYTES {
+            return Err(format!(
+                "Canvas Editor document exceeds the {} MiB limit",
+                MAX_CANVAS_EDITOR_DOCUMENT_BYTES / (1024 * 1024)
+            ));
+        }
+        Ok(Self {
+            payload: std::sync::Arc::new(payload),
+        })
+    }
+
+    pub fn payload(&self) -> &serde_json::Value {
+        self.payload.as_ref()
+    }
+}
+
+fn validate_canvas_editor_payload(payload: &serde_json::Value) -> Result<(), String> {
+    let root = payload
+        .as_object()
+        .ok_or_else(|| "Canvas Editor document must be an object".to_string())?;
+    if !root.get("main").is_some_and(serde_json::Value::is_array) {
+        return Err("Canvas Editor document.main must be an array".to_string());
+    }
+    for zone in ["header", "footer"] {
+        if root.get(zone).is_some_and(|value| !value.is_array()) {
+            return Err(format!("Canvas Editor document.{zone} must be an array"));
+        }
+    }
+
+    let mut nodes = 0usize;
+    let mut stack = vec![(payload, 1usize)];
+    while let Some((value, depth)) = stack.pop() {
+        nodes += 1;
+        if nodes > MAX_CANVAS_EDITOR_JSON_NODES {
+            return Err("Canvas Editor document has too many JSON values".to_string());
+        }
+        if depth > MAX_CANVAS_EDITOR_JSON_DEPTH {
+            return Err(format!(
+                "Canvas Editor document exceeds the JSON depth limit of {MAX_CANVAS_EDITOR_JSON_DEPTH}"
+            ));
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                stack.extend(values.iter().map(|value| (value, depth + 1)));
+            }
+            serde_json::Value::Object(values) => {
+                stack.extend(values.values().map(|value| (value, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Canonical content backing for a flowing-text tab during the v11 → v12
+/// migration. Legacy content remains readable until its one-way converter is
+/// complete; v12 payloads never pass through that lossy legacy model.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FlowTextBacking {
+    Legacy(std::sync::Arc<crate::core::text_document::TextDocument>),
+    CanvasEditor(CanvasEditorDocument),
+}
+
+impl FlowTextBacking {
+    pub fn legacy(document: crate::core::text_document::TextDocument) -> Self {
+        Self::Legacy(std::sync::Arc::new(document))
+    }
+}
+
 /// Persistent, lightweight state for a flowing-text document. Layout/editor
 /// caches live outside this core type; this is the canonical content used by
 /// dirty tracking, save/open and export.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlowTextDocumentState {
-    document: std::sync::Arc<crate::core::text_document::TextDocument>,
+    backing: FlowTextBacking,
     revision: u64,
     saved_revision: u64,
     /// Session-only page selected in the shared page bar.
     active_page: usize,
     /// Derived by layout; never causes the document to become dirty.
     layout_page_count: usize,
+    /// Session permission inherited from the opened file. This is host state,
+    /// not document content, so changing it must never advance the revision.
+    read_only: bool,
 }
 
 impl Default for FlowTextDocumentState {
@@ -47,37 +137,76 @@ impl Default for FlowTextDocumentState {
 
 impl FlowTextDocumentState {
     pub fn new(document: crate::core::text_document::TextDocument) -> Self {
+        Self::from_backing(FlowTextBacking::legacy(document))
+    }
+
+    pub fn from_canvas_editor(document: CanvasEditorDocument) -> Self {
+        Self::from_backing(FlowTextBacking::CanvasEditor(document))
+    }
+
+    pub fn from_backing(backing: FlowTextBacking) -> Self {
         Self {
-            document: std::sync::Arc::new(document),
+            backing,
             revision: 0,
             saved_revision: 0,
             active_page: 0,
             layout_page_count: 1,
+            read_only: false,
         }
     }
 
-    pub fn document(&self) -> &crate::core::text_document::TextDocument {
-        &self.document
+    pub fn backing(&self) -> &FlowTextBacking {
+        &self.backing
     }
 
     /// Cheap immutable snapshot for the UI read contract. Long documents are
     /// not cloned every frame; mutation uses `Arc::make_mut` below.
-    pub fn document_arc(&self) -> std::sync::Arc<crate::core::text_document::TextDocument> {
-        self.document.clone()
+    pub fn document_arc(&self) -> Option<std::sync::Arc<crate::core::text_document::TextDocument>> {
+        match &self.backing {
+            FlowTextBacking::Legacy(document) => Some(document.clone()),
+            FlowTextBacking::CanvasEditor(_) => None,
+        }
+    }
+
+    pub fn canvas_editor_document(&self) -> Option<&CanvasEditorDocument> {
+        match &self.backing {
+            FlowTextBacking::Legacy(_) => None,
+            FlowTextBacking::CanvasEditor(document) => Some(document),
+        }
     }
 
     /// Mutate canonical text content and mark the document dirty. Callers that
     /// only change caret, selection, view or derived layout must use the
     /// dedicated session-state methods instead.
-    pub fn document_mut(&mut self) -> &mut crate::core::text_document::TextDocument {
-        self.revision = self.revision.wrapping_add(1);
-        std::sync::Arc::make_mut(&mut self.document)
+    pub fn document_mut(&mut self) -> Option<&mut crate::core::text_document::TextDocument> {
+        match &mut self.backing {
+            FlowTextBacking::Legacy(document) => {
+                self.revision = self.revision.wrapping_add(1);
+                Some(std::sync::Arc::make_mut(document))
+            }
+            FlowTextBacking::CanvasEditor(_) => None,
+        }
     }
 
     pub fn replace_document(&mut self, document: crate::core::text_document::TextDocument) {
-        if self.document.as_ref() != &document {
-            self.document = std::sync::Arc::new(document);
+        let changed = match &self.backing {
+            FlowTextBacking::Legacy(current) => current.as_ref() != &document,
+            FlowTextBacking::CanvasEditor(_) => true,
+        };
+        if changed {
+            self.backing = FlowTextBacking::legacy(document);
             self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    pub fn replace_canvas_editor_document(
+        &mut self,
+        document: CanvasEditorDocument,
+        revision: u64,
+    ) {
+        if self.canvas_editor_document() != Some(&document) || self.revision != revision {
+            self.backing = FlowTextBacking::CanvasEditor(document);
+            self.revision = revision;
         }
     }
 
@@ -109,6 +238,14 @@ impl FlowTextDocumentState {
     pub fn set_layout_page_count(&mut self, count: usize) {
         self.layout_page_count = count.max(1);
         self.active_page = self.active_page.min(self.layout_page_count - 1);
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
     }
 }
 
@@ -1335,9 +1472,10 @@ pub fn disambiguated_tab_titles(docs: &[Document]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_pdf_global_overlay_stack, disambiguated_tab_titles, Document, DocumentId,
-        DocumentKind, PdfDocumentState, PdfGlobalClear, PdfGlobalEdit, PdfGlobalStamp,
-        PdfGlobalStampKind, PdfPageRef,
+        build_pdf_global_overlay_stack, disambiguated_tab_titles, CanvasEditorDocument, Document,
+        DocumentId, DocumentKind, FlowTextDocumentState, PdfDocumentState, PdfGlobalClear,
+        PdfGlobalEdit, PdfGlobalStamp, PdfGlobalStampKind, PdfPageRef,
+        MAX_CANVAS_EDITOR_JSON_DEPTH,
     };
     use crate::core::canvas::Canvas;
     use std::path::PathBuf;
@@ -1372,6 +1510,7 @@ mod tests {
             .as_mut()
             .expect("flow text state")
             .document_mut()
+            .expect("legacy text backing")
             .page
             .margins
             .left_mm = 35.0;
@@ -1392,6 +1531,54 @@ mod tests {
         text.set_layout_page_count(3);
         assert_eq!(text.active_page(), 2);
         assert_eq!(doc.page_count(), 3);
+        assert!(!doc.is_modified());
+    }
+
+    #[test]
+    fn canvas_editor_backing_does_not_project_through_the_legacy_model() {
+        let payload = serde_json::json!({
+            "main": [{ "value": "Nội dung v12", "unknown": 42 }],
+            "future": { "preserved": true }
+        });
+        let canvas = CanvasEditorDocument::try_new(payload.clone()).expect("valid payload");
+        let mut state = FlowTextDocumentState::from_canvas_editor(canvas);
+
+        assert!(state.document_arc().is_none());
+        assert_eq!(
+            state
+                .canvas_editor_document()
+                .expect("canvas backing")
+                .payload(),
+            &payload
+        );
+        assert!(state.document_mut().is_none());
+        assert_eq!(state.revision(), 0);
+
+        let replacement = CanvasEditorDocument::try_new(serde_json::json!({
+            "main": [{ "value": "Đã sửa" }]
+        }))
+        .expect("replacement payload");
+        state.replace_canvas_editor_document(replacement, 7);
+        assert_eq!(state.revision(), 7);
+        assert!(state.is_dirty());
+
+        let mut too_deep = serde_json::json!({ "main": [] });
+        for _ in 0..MAX_CANVAS_EDITOR_JSON_DEPTH {
+            too_deep = serde_json::json!({ "main": [], "nested": too_deep });
+        }
+        assert!(CanvasEditorDocument::try_new(too_deep).is_err());
+    }
+
+    #[test]
+    fn flow_text_read_only_is_session_state_and_does_not_dirty_content() {
+        let mut doc = Document::new_flow_text(DocumentId(10));
+        let text = doc.flow_text.as_mut().expect("flow text state");
+        assert!(!text.is_read_only());
+
+        text.set_read_only(true);
+
+        assert!(text.is_read_only());
+        assert_eq!(text.revision(), 0);
         assert!(!doc.is_modified());
     }
 

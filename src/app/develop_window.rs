@@ -680,6 +680,26 @@ impl App {
                     }
                 }
             }
+            // Enter commits the active RAW with the same safeguards as the
+            // "Open Image" button. A focused editor retains Enter for itself.
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                let typing = self
+                    .win
+                    .develop_egui_ctx
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.egui_wants_keyboard_input());
+                if !typing {
+                    self.commit_develop_window();
+                }
+            }
             // Escape from the Develop window is the Cancel path (like the X
             // button) — so it can be closed while it holds keyboard focus, where
             // the main window's Ctrl+Alt+D toggle never arrives. A focused text
@@ -779,8 +799,6 @@ impl App {
         self.develop_resolve_fit();
         self.develop_ensure_thumbs(&ctx);
         let zoom_pct = self.dev.develop_view_zoom * 100.0;
-        let win_logical_h = window.inner_size().height as f32 / window.scale_factor() as f32;
-        let max_scroll_h = (win_logical_h - 150.0).max(240.0);
         let local_overlay = self.develop_local_overlay_for_view(
             self.dev.develop_view_off.0,
             self.dev.develop_view_off.1,
@@ -958,11 +976,12 @@ impl App {
                         ui.label("· scroll=zoom, mid-drag=pan");
                     });
                     ui.separator();
+                    let panel_h = ui.available_height();
                     let (a, c) = crate::ui::develop::develop_panel_contents(
                         ui,
                         &ui_data,
                         &mut actions,
-                        max_scroll_h,
+                        panel_h,
                     );
                     apply_dev = a;
                     cancel_dev = c;

@@ -86,6 +86,12 @@ pub struct GpuState {
     /// device/queue/pipelines; only the surface + config + egui_renderer are
     /// its own. `None` whenever the Develop window is closed.
     pub develop: Option<WindowSurface>,
+    /// The last main-surface acquire timed out or reported the window occluded.
+    /// wgpu blocks up to a second per attempt in that state, so the app backs off.
+    pub surface_stalled: bool,
+    /// Set by the app to skip acquiring the main surface this frame; egui
+    /// texture updates are still applied.
+    pub skip_present: bool,
     canvas_texture: wgpu::Texture,
     canvas_view: wgpu::TextureView,
     canvas_override_active: bool,
@@ -760,6 +766,8 @@ impl GpuState {
             queue,
             main,
             develop: None,
+            surface_stalled: false,
+            skip_present: false,
             canvas_texture,
             canvas_view,
             canvas_override_active: false,
@@ -1558,9 +1566,26 @@ impl GpuState {
             }
         }
 
+        if self.skip_present {
+            // Skipped frame: honour frees now, like any frame that draws nothing.
+            for id in &textures_delta.free {
+                self.main.egui_renderer.free_texture(id);
+            }
+            return false;
+        }
         let surface_texture = match self.main.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                self.surface_stalled = false;
+                t
+            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.surface_stalled = true;
+                for id in &textures_delta.free {
+                    self.main.egui_renderer.free_texture(id);
+                }
+                return false;
+            }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.main.surface.configure(&self.device, &self.main.config);
                 // Nothing gets drawn this frame, so the frees (textures egui no

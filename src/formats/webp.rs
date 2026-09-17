@@ -26,7 +26,9 @@ impl Exporter for WebpExporter {
 
     fn export(&self, canvas: &Canvas, path: &Path, opts: &ExportOptions) -> Result<(), String> {
         let pixels = if opts.flatten {
-            canvas.export_flat()
+            canvas
+                .materialize_flat_for_export()
+                .ok_or_else(|| "Could not materialize the canvas for WebP export".to_string())?
         } else {
             canvas.pixels.clone()
         };

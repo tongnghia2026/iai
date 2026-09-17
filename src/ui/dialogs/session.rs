@@ -4,7 +4,8 @@
 use super::*;
 
 pub(crate) fn preferences_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut UiActions) {
-    let mut do_close = false;
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_close = enter_pressed || esc_pressed;
 
     modal_overlay(ctx, "preferences_dialog_overlay");
 
@@ -198,9 +199,50 @@ pub(crate) fn close_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut Ui
     }
 }
 
+pub(crate) fn document_editor_error_dialog(
+    ctx: &egui::Context,
+    data: &UiData,
+    actions: &mut UiActions,
+) {
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut dismiss = enter_pressed || esc_pressed;
+
+    modal_overlay(ctx, "document_editor_error_dialog_overlay");
+
+    egui::Window::new("Canvas Editor Error")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .min_width(440.0)
+        .order(DIALOG_ORDER)
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label("Canvas Editor could not complete the operation.");
+            ui.add_space(8.0);
+            if let Some(message) = data.dialogs.document_editor_error.as_deref() {
+                ui.label(egui::RichText::new(message).color(egui::Color32::from_rgb(
+                    235, 170, 100,
+                )));
+            }
+            ui.add_space(8.0);
+            ui.label(
+                "iAi kept the document open and did not overwrite a file. Dismiss this message, then retry the action.",
+            );
+            ui.add_space(16.0);
+            if ui.button("  OK  ").clicked() {
+                dismiss = true;
+            }
+        });
+
+    if dismiss {
+        actions.dialogs.dismiss_document_editor_error = true;
+    }
+}
+
 pub(crate) fn reload_file_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
-    let mut do_reload = false;
-    let mut do_keep = false;
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_reload = enter_pressed;
+    let mut do_keep = esc_pressed;
 
     modal_overlay(ctx, "reload_file_dialog_overlay");
 
@@ -305,8 +347,9 @@ pub(crate) fn pdf_import_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
         .unwrap_or(0)
         .min(dpi_labels.len() - 1);
 
-    let mut confirm = false;
-    let mut cancel = false;
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut confirm = enter_pressed;
+    let mut cancel = esc_pressed;
     let mut open = true;
 
     modal_overlay(ctx, "pdf_import_dialog_overlay");
@@ -416,7 +459,7 @@ pub(crate) fn pdf_import_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
         cancel = true;
     }
 
-    if confirm {
+    if confirm && selection.iter().any(|&selected| selected) {
         let indices: Vec<usize> = selection
             .iter()
             .enumerate()

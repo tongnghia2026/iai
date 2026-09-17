@@ -1128,7 +1128,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     });
 
                     // Everything that acts on type, gathered in one place.
-                    ui.menu_button("Soạn thảo văn bản", |ui| {
+                    ui.menu_button("Text", |ui| {
                         if ui
                             .add(menu_item_enabled(
                                 "Format All Text…",
@@ -1485,9 +1485,28 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     });
 
                     ui.menu_button("Help", |ui| {
+                        const IAI_REPO_URL: &str = "https://github.com/tongnghia2026/iai";
+                        const IAI_LICENSE_URL: &str =
+                            "https://github.com/tongnghia2026/iai/blob/main/LICENSE";
+                        const IAI_FACEBOOK_URL: &str = "https://www.facebook.com/minhnghia7189/";
+                        const IAI_YOUTUBE_URL: &str = "https://www.youtube.com/@TongNghia3999";
+
                         ui.menu_button("Keyboard Shortcuts", |ui| {
                             keyboard_shortcuts_list(ui, pal);
                         });
+                        ui.separator();
+                        // AGPL asks that users can reach the program's source; expose
+                        // the repository and the license text directly from the app.
+                        if ui.button("Source Code").on_hover_text(IAI_REPO_URL).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(IAI_REPO_URL));
+                        }
+                        if ui
+                            .button("License (AGPL-3.0)")
+                            .on_hover_text(IAI_LICENSE_URL)
+                            .clicked()
+                        {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(IAI_LICENSE_URL));
+                        }
                         ui.separator();
                         ui.menu_button("About iAi", |ui| {
                             ui.label(egui::RichText::new("iAi").strong());
@@ -1498,6 +1517,34 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             );
                             ui.label(
                                 egui::RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
+                                    .color(pal.text_secondary)
+                                    .size(11.0),
+                            );
+                            ui.label(
+                                egui::RichText::new("© 2026 Tong Van Nghia")
+                                    .color(pal.text_secondary)
+                                    .size(11.0),
+                            );
+                            ui.label(
+                                egui::RichText::new("Licensed under AGPL-3.0-or-later")
+                                    .color(pal.text_secondary)
+                                    .size(11.0),
+                            );
+                            ui.separator();
+                            ui.hyperlink_to("Facebook", IAI_FACEBOOK_URL);
+                            ui.hyperlink_to("YouTube", IAI_YOUTUBE_URL);
+                            ui.hyperlink_to(
+                                "minhnghia718@gmail.com",
+                                "mailto:minhnghia718@gmail.com",
+                            );
+                            ui.separator();
+                            ui.label(egui::RichText::new("Support / Donate").strong().size(11.0));
+                            ui.hyperlink_to(
+                                "PayPal: paypal.me/TongNghia3999",
+                                "https://paypal.me/TongNghia3999",
+                            );
+                            ui.label(
+                                egui::RichText::new("ACB 18278961 — TONG VAN NGHIA")
                                     .color(pal.text_secondary)
                                     .size(11.0),
                             );

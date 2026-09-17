@@ -331,6 +331,18 @@ pub fn merge_document(template: &TextDocument, row: &MergeRow) -> TextDocument {
 /// Rewrite one text paragraph's runs, substituting placeholders while keeping
 /// per-character style. `lookup` returns `None` for unknown fields (left raw).
 fn substitute_paragraph(para: &mut Paragraph, lookup: &dyn Fn(&str) -> Option<String>) {
+    let original_text = para.text();
+    let anchor_chars: Vec<usize> = para
+        .inline_images
+        .iter()
+        .map(|inline| {
+            let mut at = inline.byte_offset.min(original_text.len());
+            while !original_text.is_char_boundary(at) {
+                at -= 1;
+            }
+            original_text[..at].chars().count()
+        })
+        .collect();
     // Flatten to per-char (glyph, style) so the replacement can inherit the
     // style at the placeholder's opening brace even across run boundaries.
     let mut chars: Vec<(char, usize)> = Vec::new();
@@ -348,24 +360,50 @@ fn substitute_paragraph(para: &mut Paragraph, lookup: &dyn Fn(&str) -> Option<St
     }
 
     let mut out: Vec<(char, usize)> = Vec::with_capacity(chars.len());
+    let mut transforms: Vec<(usize, usize, usize)> = Vec::with_capacity(placeholders.len());
     let mut cursor = 0;
     for ph in &placeholders {
         out.extend_from_slice(&chars[cursor..ph.start]);
         let style_run = chars[ph.start].1;
         match lookup(&ph.name) {
             Some(value) => {
+                let before = out.len();
                 for ch in value.chars() {
                     // Collapse hard line breaks in a cell into spaces so a
                     // multi-line address does not break the paragraph model.
                     let ch = if ch == '\n' || ch == '\r' { ' ' } else { ch };
                     out.push((ch, style_run));
                 }
+                transforms.push((ph.start, ph.end, out.len() - before));
             }
-            None => out.extend_from_slice(&chars[ph.start..ph.end]),
+            None => {
+                out.extend_from_slice(&chars[ph.start..ph.end]);
+                transforms.push((ph.start, ph.end, ph.end - ph.start));
+            }
         }
         cursor = ph.end;
     }
     out.extend_from_slice(&chars[cursor..]);
+
+    // Keep inline images attached to the same surrounding text when a merge
+    // field before them grows/shrinks. An anchor inside a replaced field moves
+    // to the field's opening boundary.
+    for (inline, original_pos) in para.inline_images.iter_mut().zip(anchor_chars) {
+        let mut delta = 0isize;
+        let mut mapped = None;
+        for &(start, end, replacement_len) in &transforms {
+            if original_pos <= start {
+                break;
+            }
+            if original_pos < end {
+                mapped = Some((start as isize + delta).max(0) as usize);
+                break;
+            }
+            delta += replacement_len as isize - (end - start) as isize;
+        }
+        let pos = mapped.unwrap_or_else(|| (original_pos as isize + delta).max(0) as usize);
+        inline.byte_offset = out.iter().take(pos).map(|(ch, _)| ch.len_utf8()).sum();
+    }
 
     // Coalesce adjacent characters that share a run's style back into runs.
     let mut runs: Vec<Run> = Vec::new();
@@ -523,6 +561,29 @@ mod tests {
     }
 
     #[test]
+    fn merge_keeps_inline_image_attached_after_a_resized_field() {
+        let mut doc = TextDocument::from_plain_text("{{Họ tên}} ký.");
+        doc.paragraphs[0]
+            .inline_images
+            .push(crate::core::text_document::InlineImage {
+                byte_offset: "{{Họ tên}}".len(),
+                image: crate::core::text_document::ImageBlock::inline(
+                    vec![1],
+                    10,
+                    10,
+                    12.0,
+                    crate::core::text_document::ParagraphAlign::Left,
+                ),
+            });
+        let merged = merge_document(&doc, &table().row(0).unwrap());
+        assert_eq!(merged.plain_text(), "Nguyễn Văn A ký.");
+        assert_eq!(
+            merged.paragraphs[0].inline_images[0].byte_offset,
+            "Nguyễn Văn A".len()
+        );
+    }
+
+    #[test]
     fn merge_blank_cell_becomes_empty() {
         let doc = TextDocument::from_plain_text("{{Họ tên}}: {{Số tiền}}");
         let merged = merge_document(&doc, &table().row(1).unwrap());
@@ -543,6 +604,7 @@ mod tests {
             ],
             style: ParagraphStyle::default(),
             image: None,
+            inline_images: Vec::new(),
         };
         let doc = TextDocument {
             paragraphs: vec![para],
@@ -571,6 +633,7 @@ mod tests {
             ],
             style: ParagraphStyle::default(),
             image: None,
+            inline_images: Vec::new(),
         };
         let doc = TextDocument {
             paragraphs: vec![para],

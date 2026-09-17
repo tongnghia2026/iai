@@ -2355,6 +2355,34 @@ impl LayerStack {
         self.flatten_chunk(&eff, &targets, 0, y0, width, bh)
     }
 
+    /// Composite a canvas-space rectangle into a compact `rw * rh * 4` buffer.
+    ///
+    /// Unlike [`Self::flatten_region`], the returned buffer starts at `(0, 0)`;
+    /// callers therefore pay only for the requested pixels. This is the sampling
+    /// path for large canvases, whose always-resident flat composite is omitted.
+    /// The clone is cheap because tile payloads are shared through `Arc` and the
+    /// chunk compositor only changes temporary layer offsets.
+    pub fn flatten_compact_region(
+        &self,
+        width: u32,
+        height: u32,
+        rx: u32,
+        ry: u32,
+        rw: u32,
+        rh: u32,
+    ) -> Vec<u8> {
+        let rx = rx.min(width);
+        let ry = ry.min(height);
+        let rw = rw.min(width.saturating_sub(rx));
+        let rh = rh.min(height.saturating_sub(ry));
+        if rw == 0 || rh == 0 {
+            return Vec::new();
+        }
+        let mut stack = self.clone();
+        let (eff, targets) = stack.flatten_chunk_plan();
+        stack.flatten_chunk(&eff, &targets, rx, ry, rw, rh)
+    }
+
     /// Tile-native counterpart of [`Self::flatten`]: composite the whole visible
     /// stack (isolated groups included) into a fresh TileMap in 256-px chunks with
     /// no canvas-sized buffer, so Stamp Visible runs under Viewport Streaming. Used

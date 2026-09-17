@@ -281,6 +281,24 @@ impl CropTool {
         self.dpi_user_set = true;
     }
 
+    /// Store an exact output width typed in the Crop options bar.
+    ///
+    /// W/H fields edit the fixed-size output model. Moving focus away from a
+    /// field rebuilds the UI from that model, so leaving the tool in Free or
+    /// Ratio mode would immediately replace the typed value with the live
+    /// selection size (or zero before a selection exists).
+    pub fn set_typed_width(&mut self, width: f32) {
+        self.fixed_w = width.max(0.0);
+        self.mode = CropMode::FixedSize;
+    }
+
+    /// Store an exact output height typed in the Crop options bar. See
+    /// [`Self::set_typed_width`] for why manual dimensions own FixedSize mode.
+    pub fn set_typed_height(&mut self, height: f32) {
+        self.fixed_h = height.max(0.0);
+        self.mode = CropMode::FixedSize;
+    }
+
     /// Refresh resolution from the active image only when Crop has no fixed
     /// output preset AND the user has not typed a resolution themselves. A
     /// fixed-size preset owns its DPI (for example an ID-photo preset at
@@ -1014,6 +1032,23 @@ mod tests {
         assert!(w <= 400.0);
         assert!(h <= 300.0);
         assert!((w / h - 2480.0 / 3508.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn typed_dimensions_switch_to_fixed_size_and_survive_focus_loss() {
+        let mut crop = CropTool::new();
+        crop.mode = CropMode::Free;
+
+        crop.set_typed_width(1234.0);
+        assert_eq!(crop.mode, CropMode::FixedSize);
+        assert_eq!(crop.fixed_w, 1234.0);
+
+        // Ratio mode also reports the live selection through the UI model. A
+        // manually typed H must therefore take ownership of the output size.
+        crop.mode = CropMode::Ratio;
+        crop.set_typed_height(567.0);
+        assert_eq!(crop.mode, CropMode::FixedSize);
+        assert_eq!(crop.fixed_h, 567.0);
     }
 
     #[test]

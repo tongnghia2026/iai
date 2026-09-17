@@ -688,9 +688,11 @@ pub(crate) fn filter_line_slider(
 
 pub(crate) fn smart_fill_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let mut open = true;
-    // Shift+F5 opens this modal; Enter confirms it just like clicking Apply.
-    // Consume the key here so it cannot leak through to the canvas/tool session.
-    let mut do_apply = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+    // Shift+F5 opens this modal. Keep Enter/Esc local to it so they cannot
+    // leak through to the canvas/tool session.
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_apply = enter_pressed;
+    let mut do_cancel = esc_pressed;
 
     let id = egui::Id::new("smart_fill_use_ai");
     // Default to Classic (PatchMatch) — instant, no model download.
@@ -743,7 +745,7 @@ pub(crate) fn smart_fill_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                     do_apply = true;
                 }
                 if ui.button("Cancel").clicked() {
-                    actions.dialogs.cancel_smart_fill_dialog = true;
+                    do_cancel = true;
                 }
             });
         });
@@ -753,7 +755,7 @@ pub(crate) fn smart_fill_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
     if do_apply {
         actions.dialogs.apply_smart_fill_fill = Some(use_ai);
     }
-    if !open {
+    if do_cancel || !open {
         actions.dialogs.cancel_smart_fill_dialog = true;
     }
 }

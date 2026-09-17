@@ -275,6 +275,16 @@ impl Canvas {
         }
     }
 
+    /// Materialize the visible RGBA8 composite specifically for a file export.
+    /// Large canvases intentionally do not retain `Canvas::pixels`, but an image
+    /// encoder still needs a temporary contiguous frame. The returned allocation
+    /// belongs to the exporter and is dropped as soon as encoding finishes.
+    pub fn materialize_flat_for_export(&self) -> Option<Vec<u8>> {
+        let expected = Self::checked_rgba_len(self.width, self.height)?;
+        let flat = self.layer_stack.flatten(self.width, self.height);
+        (flat.len() == expected).then_some(flat)
+    }
+
     /// Flatten for an explicit output operation with a caller-provided safety
     /// limit. Large canvases intentionally keep no always-resident flat buffer,
     /// but PDF export still needs to materialize one page at a time.
@@ -283,7 +293,7 @@ impl Canvas {
         if pixels == 0 || pixels > max_pixels {
             return None;
         }
-        Some(self.layer_stack.flatten(self.width, self.height))
+        self.materialize_flat_for_export()
     }
 
     /// After a subset merge (Merge Down / Merge Selected) on a 16-bit document,

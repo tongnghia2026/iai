@@ -1,6 +1,8 @@
 /target/
 /.target-*/
 /dist/
+/web/document-editor/node_modules/
+/.pnpm-store/
 /output/
 /tmp/
 /_photo_plan/

@@ -388,9 +388,16 @@ impl App {
     /// copied position, properties and group structure. Undoable. Works across
     /// documents — the clipboard is app-level.
     pub fn do_paste(&mut self) {
+        let t0 = std::time::Instant::now();
         match read_os_clipboard_image() {
             Ok(Some(image)) if self.should_paste_os_clipboard_image(&image) => {
+                let t_read = t0.elapsed().as_millis();
                 self.paste_os_clipboard_image(image);
+                // Diagnostic: clipboard read + layer insert + upload on the UI thread.
+                let ms = t0.elapsed().as_millis();
+                if ms >= 30 {
+                    eprintln!("iai[perf]: paste clipboard image {ms} ms (read {t_read} ms)");
+                }
                 return;
             }
             Ok(_) => {}

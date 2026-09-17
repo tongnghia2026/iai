@@ -1,8 +1,17 @@
 # Kế hoạch: "Document mode" — trình soạn thảo văn bản nhẹ trong iAi
 
+> **TÀI LIỆU LỊCH SỬ — KHÔNG DÙNG ĐỂ TRIỂN KHAI TIẾP.** Từ ngày 2026-09-08,
+> kiến trúc `cosmic-text` tự xây đã được thay bằng hướng **Canvas Editor +
+> `docx-rs`**. Kế hoạch chuẩn đang dùng là
+> [`KE_HOACH_CANVAS_EDITOR_DOCX_2026-09-08.md`](KE_HOACH_CANVAS_EDITOR_DOCX_2026-09-08.md).
+> Giữ file này để tra cứu tính năng cũ và phục vụ migration, không tiếp tục các
+> pha 4–5 được mô tả bên dưới.
+
 > Trạng thái (2026-09-03): **MVP + Trộn thư + nhiều bản vá editor + REDESIGN ẢNH
 > kiểu Word — TẤT CẢ ĐÃ PUSH** (nhánh `feat/vector-core-foundation`, tới `3be6eb4`).
-> **Việc kế tiếp cho hội thoại MỚI: BAO CHỮ (Square wrap)** — xem mục 0.4 bên dưới.
+> **Cập nhật 2026-09-08: BAO CHỮ đã sửa lỗi đoạn dưới ảnh bị thụt; chế độ CÙNG
+> DÒNG được thay bằng TRÊN VÀ DƯỚI theo phản hồi GUI-test. Chờ chủ GUI-test bản
+> release mới** — xem mục 0.4–0.5 bên dưới.
 > Chủ dự án (end-user) muốn trình soạn thảo kiểu Word cơ bản, nhấn mạnh **nhẹ máy**.
 
 ---
@@ -51,8 +60,9 @@ memory `project_iai_wordprocessor_plan`.
   & nổi) 1 dòng, bấm để focus (`flow_text_objects_panel` trong `panels.rs`;
   `DocumentIntent.flow_text_focus` → `document_mode::request_focus`). Cửa sổ "Bố
   cục" cũ đã bỏ.
-- **3 chế độ vị trí ảnh** (combo "Kiểu ảnh"): **Cùng dòng / Nổi trên chữ / Nổi sau
-  chữ**. Model: `ImageBlock.wrap: ImageWrap{Inline,BehindText,InFrontOfText,
+- **Các chế độ vị trí ảnh** (combo "Kiểu ảnh"): **Trên và dưới / Nổi trên chữ /
+  Nổi sau chữ / Bao quanh ảnh**. Model: `ImageBlock.wrap: ImageWrap{Inline,
+  BehindText,InFrontOfText,
   Square,TopBottom}` + `page,x_mm,y_mm` (serde default); `TextDocument.
   floating_images: Vec<ImageBlock>`. Editor: `d.floating`/`selected_floating`/
   `float_drag`; `handle_floating_pointer` (chọn/kéo-move/kéo-góc-resize, chạy
@@ -60,23 +70,42 @@ memory `project_iai_wordprocessor_plan`.
   vẽ giấy trắng riêng + thứ tự vẽ (paper→behind→chữ→inline→front). PDF:
   `ImgPlace.behind`, vẽ behind trước BT/in-front sau ET.
 
-### 0.4 ➜ VIỆC KẾ TIẾP: BAO CHỮ (Square wrap) — chưa làm
-Chủ đã chốt muốn **chữ chạy vòng quanh ảnh** (Square/tight của Word). Đây là phần
-NẶNG & rủi ro nhất; làm ở hội thoại mới, **chủ test bản trung gian**.
-- **Cách:** `ImageWrap::Square` áp exclusion-rect. Mẹo per-line như list: lấy
+### 0.4 BAO CHỮ (Square wrap) — ✅ code/test, chờ GUI (2026-09-07)
+Chủ đã chốt muốn **chữ chạy vòng quanh ảnh** (Square/tight của Word). Đã triển
+khai một contract hình học dùng chung cho editor/PDF, reflow nhiều lượt và
+**chủ test bản trung gian** trước khi chốt UX.
+- **Đã làm:** `ImageWrap::Square` áp exclusion-rect. Mẹo per-line như list: lấy
   hàm thuần `square_wrap(floating, page, cx, cy, cw, ly, line_h) -> Option<(x_off,
-  width)>` (ảnh bên trái→đẩy text sang phải+hẹp; bên phải→hẹp; giữa/hẹp quá→None).
-  Gộp với list qua `line_layout(is_list, cw, wrap) -> (offset,width)`.
-- **Điểm cắm (mỗi chỗ đang xử lý list_indent, thêm wrap_offset song song):**
-  (1) relayout mới `relayout_wrap_lines` (2-pass reflow, GATE no-op khi ko có ảnh
-  Square) — chạy cạnh `relayout_list_lines`; (2) `render_page` thêm param
+  width)>` (ảnh bên trái→đẩy text sang phải; bên phải→hẹp cột bên trái; nhiều
+  ảnh→chọn khoảng trống rộng nhất). Gộp với list qua `line_layout`.
+- **Điểm cắm đã nối (wrap_offset chạy song song list_indent):**
+  (1) `relayout_flow_lines` reflow lặp, GATE no-op khi không có ảnh Square;
+  (2) `render_page` thêm param
   `floating` + offset per-dòng; (3) selection rect trong `window_ui`; (4)
-  `list_indent_at_y` (hit-test click); (5) caret; (6) `text_layout` (PDF flow
-  per-para — khác editor, khó hơn, làm sau cùng).
-- **GATE bắt buộc:** khi tài liệu KHÔNG có ảnh `Square`, mọi hàm trả về như cũ →
-  0 thay đổi cho tài liệu hiện có (rào rủi ro). `TopBottom` có thể bỏ/để sau.
+  `text_offset_at_y` (hit-test click); (5) caret; (6) `text_layout` và PDF flow.
+- **GATE đã khóa bằng code/test:** khi tài liệu KHÔNG có ảnh `Square`, mọi hàm
+  trả về như cũ → 0 thay đổi cho tài liệu hiện có. Test bao phủ hình học, reflow
+  editor, hit-test/caret và PDF hợp lệ.
+- **Bản vá sau GUI-test 2026-09-07:** cosmic-text chỉ cho một độ rộng trên mỗi
+  `BufferLine`, nên bản đầu lấy cột hẹp cho cả đoạn và làm các dòng dưới ảnh vẫn
+  bị thụt. Nay layout tách đoạn thành các phân đoạn **chỉ trong runtime** tại nơi
+  exclusion đổi độ rộng; dòng dưới ảnh trở lại toàn khổ. Khi sửa/lưu, các phân
+  đoạn được ghép về đúng một paragraph; caret/selection, list và PDF dùng cùng
+  contract. Regression test kiểm trực tiếp độ rộng dòng ngang ảnh/dưới ảnh và
+  round-trip không đổi nội dung.
 
-### 0.5 CÒN LẠI khác (tùy chọn, KHÔNG gấp)
+### 0.5 TRÊN VÀ DƯỚI (Top and Bottom) — 🔧 thay Cùng dòng (2026-09-08)
+- Theo GUI-test, bỏ **Cùng dòng chữ** khỏi UI vì khó di chuyển/resize và ít giá
+  trị thực tế. Ảnh mới mặc định là khối **Trên và dưới**: chữ không nằm hai bên.
+- Khối ảnh kéo ngang để căn trái/giữa/phải, kéo dọc để đổi vị trí giữa các đoạn;
+  kéo góc hoặc ô **Rộng** để phóng to/thu nhỏ đúng tỉ lệ.
+- `.iai` cũ có ảnh inline vẫn mở không mất dữ liệu: loader tách nguyên văn + rich
+  style hai phía và nâng ảnh thành khối Trên và dưới. Kiểu inline chỉ còn là
+  đường tương thích nội bộ, không còn là lựa chọn tạo mới.
+- Preview, PDF chữ-vector, Layer panel và round-trip editor dùng image paragraph
+  hiện có nên chữ luôn nằm trên/dưới ảnh một cách xác định.
+
+### 0.6 CÒN LẠI khác (tùy chọn, KHÔNG gấp)
 1. **Đầu/chân trang + số trang.** 2. **Bảng (tables)** — Pha 4. 3. **Xuất `.docx`**
    (`docx-rs` + `zip`). 4. per-run font/cỡ; subset font nhúng PDF; đo RAM/CPU.
 5. Mail-merge nâng cao: gộp 1 PDF; lọc/chọn dòng.

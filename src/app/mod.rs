@@ -2,10 +2,13 @@ pub mod actions;
 pub mod arrow_ops;
 pub mod autosave;
 pub mod background_jobs;
+mod cursor;
 pub mod develop_shell;
 pub mod develop_window;
 pub mod docmgr;
 pub mod document_session;
+#[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+pub mod document_webview;
 pub mod editor_interaction;
 pub mod ext_bridge;
 pub mod file_ops;

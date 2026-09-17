@@ -27,8 +27,14 @@ use std::path::{Path, PathBuf};
 /// v7 adds custom tab names for source PDF pages.
 /// v8 adds materialized blank/image/PDF pages whose ids are outside the source
 /// PDF's physical page range. v10 adds ordered, compact text/image stamps shared
-/// by all pages of a PDF project.
-const IAI_FORMAT_VERSION: u64 = 10;
+/// by all pages of a PDF project. v11 introduced inline image anchors in
+/// flowing-text paragraphs; this build reads them and migrates them to the
+/// replacement Top-and-Bottom blocks. v12 stores the canonical Canvas Editor
+/// JSON in a separate bounded `document.json` entry and preserves unknown JSON
+/// fields verbatim at the value level.
+const IAI_FORMAT_VERSION: u64 = 12;
+const LEGACY_FLOW_TEXT_VERSION: u64 = 11;
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 pub struct IaiImporter;
 pub struct IaiExporter;
@@ -78,7 +84,7 @@ pub enum IaiLoad {
     Canvas(Canvas),
     PdfProject(IaiPdfProject),
     ArtboardDoc(IaiArtboardDoc),
-    FlowTextDocument(crate::core::text_document::TextDocument),
+    FlowTextDocument(crate::core::document::FlowTextBacking),
 }
 
 fn read_manifest<R: Read + Seek>(
@@ -87,9 +93,46 @@ fn read_manifest<R: Read + Seek>(
     let mut f = archive
         .by_name("manifest.json")
         .map_err(|_| "Missing manifest.json")?;
+    if f.size() > MAX_MANIFEST_BYTES {
+        return Err("manifest.json exceeds the 1 MiB limit".to_string());
+    }
     let mut s = String::new();
-    f.read_to_string(&mut s).map_err(|e| e.to_string())?;
+    (&mut f)
+        .take(MAX_MANIFEST_BYTES + 1)
+        .read_to_string(&mut s)
+        .map_err(|e| e.to_string())?;
+    if s.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err("manifest.json exceeds the 1 MiB limit".to_string());
+    }
     serde_json::from_str(&s).map_err(|e| e.to_string())
+}
+
+fn read_bounded_entry<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let mut file = archive
+        .by_name(name)
+        .map_err(|_| format!("Missing {name}"))?;
+    if file.size() > max_bytes as u64 {
+        return Err(format!(
+            "{name} exceeds the {} MiB limit",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    let mut bytes = Vec::with_capacity(file.size() as usize);
+    (&mut file)
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > max_bytes {
+        return Err(format!(
+            "{name} exceeds the {} MiB limit",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Peek a `.iai` and report whether it is a multi-page PDF project (v2). Best
@@ -150,6 +193,11 @@ pub fn load(path: &Path) -> Result<IaiLoad, String> {
             version
         ));
     }
+    if version >= 12 && manifest["kind"].as_str() != Some("flow_text_document") {
+        return Err(format!(
+            "Unsupported IAI v{version} document kind; v12 is reserved for Canvas Editor documents"
+        ));
+    }
 
     if manifest["kind"].as_str() == Some("pdf_project") {
         return read_pdf_project(&mut archive, &manifest).map(IaiLoad::PdfProject);
@@ -158,10 +206,31 @@ pub fn load(path: &Path) -> Result<IaiLoad, String> {
         return read_artboard_doc(&mut archive, &manifest).map(IaiLoad::ArtboardDoc);
     }
     if manifest["kind"].as_str() == Some("flow_text_document") {
-        let document: crate::core::text_document::TextDocument =
+        if version >= 12 {
+            if manifest["editor"].as_str() != Some("canvas-editor")
+                || manifest["document_entry"].as_str() != Some("document.json")
+            {
+                return Err("Invalid Canvas Editor v12 manifest".to_string());
+            }
+            let bytes = read_bounded_entry(
+                &mut archive,
+                "document.json",
+                crate::core::document::MAX_CANVAS_EDITOR_DOCUMENT_BYTES,
+            )?;
+            let payload = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("Invalid Canvas Editor document.json: {error}"))?;
+            let document = crate::core::document::CanvasEditorDocument::try_new(payload)?;
+            return Ok(IaiLoad::FlowTextDocument(
+                crate::core::document::FlowTextBacking::CanvasEditor(document),
+            ));
+        }
+        let mut document: crate::core::text_document::TextDocument =
             serde_json::from_value(manifest["document"].clone()).map_err(|e| e.to_string())?;
+        document.migrate_inline_images_to_top_bottom();
         document.validate()?;
-        return Ok(IaiLoad::FlowTextDocument(document));
+        return Ok(IaiLoad::FlowTextDocument(
+            crate::core::document::FlowTextBacking::legacy(document),
+        ));
     }
     // v1 (and v2 single-image) store the canvas fields at the manifest root, with
     // layer pixels at the archive root (no prefix).
@@ -174,20 +243,50 @@ pub fn write_flow_text_doc(
     path: &Path,
     document: &crate::core::text_document::TextDocument,
 ) -> Result<(), String> {
+    let mut document = document.clone();
+    document.migrate_inline_images_to_top_bottom();
     document.validate()?;
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipWriter::new(file);
-    let manifest = serde_json::json!({
-        "version": IAI_FORMAT_VERSION,
-        "kind": "flow_text_document",
-        "document": document,
-    });
-    zip.start_file("manifest.json", deflated_options())
-        .map_err(|e| e.to_string())?;
-    zip.write_all(manifest.to_string().as_bytes())
-        .map_err(|e| e.to_string())?;
-    zip.finish().map_err(|e| e.to_string())?;
-    Ok(())
+    write_iai_archive(path, |zip| {
+        let manifest = serde_json::json!({
+            "version": LEGACY_FLOW_TEXT_VERSION,
+            "kind": "flow_text_document",
+            "document": &document,
+        });
+        zip.start_file("manifest.json", deflated_options())
+            .map_err(|e| e.to_string())?;
+        zip.write_all(manifest.to_string().as_bytes())
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Store the canonical Canvas Editor payload in the v12 `.iai` ZIP envelope.
+/// The payload is a separate bounded entry so the small manifest can be safely
+/// inspected without allocating the complete document.
+pub fn write_canvas_editor_doc(
+    path: &Path,
+    document: &crate::core::document::CanvasEditorDocument,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec(document.payload())
+        .map_err(|error| format!("Cannot encode Canvas Editor document: {error}"))?;
+    if bytes.len() > crate::core::document::MAX_CANVAS_EDITOR_DOCUMENT_BYTES {
+        return Err("Canvas Editor document exceeds the 8 MiB limit".to_string());
+    }
+    write_iai_archive(path, |zip| {
+        let manifest = serde_json::json!({
+            "version": IAI_FORMAT_VERSION,
+            "kind": "flow_text_document",
+            "editor": "canvas-editor",
+            "editor_version": "1.0.2",
+            "document_entry": "document.json",
+        });
+        zip.start_file("manifest.json", deflated_options())
+            .map_err(|error| error.to_string())?;
+        zip.write_all(manifest.to_string().as_bytes())
+            .map_err(|error| error.to_string())?;
+        zip.start_file("document.json", deflated_options())
+            .map_err(|error| error.to_string())?;
+        zip.write_all(&bytes).map_err(|error| error.to_string())
+    })
 }
 
 /// Rebuild a [`Canvas`] from its manifest metadata object and prefixed layer
@@ -867,6 +966,38 @@ fn stored_options() -> zip::write::SimpleFileOptions {
     zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)
 }
 
+#[cfg(target_os = "windows")]
+fn replace_file_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let ok = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_file_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
 /// Open a `.iai` temp file, run `body` against the zip writer, then finish and
 /// atomically rename into place. A failure removes the temp file so a partial
 /// write never replaces the user's project.
@@ -883,7 +1014,7 @@ fn write_iai_archive(
         Ok(())
     })();
     match result {
-        Ok(()) => std::fs::rename(&tmp_path, path).map_err(|e| {
+        Ok(()) => replace_file_atomically(&tmp_path, path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp_path);
             e.to_string()
         }),
@@ -2074,6 +2205,17 @@ mod tests {
             "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM\nĐộc lập – Tự do – Hạnh phúc",
         );
         document.paragraphs[0].style.align = crate::core::text_document::ParagraphAlign::Center;
+        let mut image = crate::core::text_document::ImageBlock::inline(
+            vec![1, 2, 3],
+            20,
+            10,
+            15.0,
+            crate::core::text_document::ParagraphAlign::Left,
+        );
+        image.wrap = crate::core::text_document::ImageWrap::TopBottom;
+        document
+            .paragraphs
+            .insert(1, crate::core::text_document::Paragraph::image(image));
         document.page.margins.left_mm = 32.0;
         document.page.margins.right_mm = 18.0;
 
@@ -2085,13 +2227,131 @@ mod tests {
         let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("reopen flowing text") else {
             panic!("expected flowing-text document");
         };
-        assert_eq!(reopened, document);
+        let crate::core::document::FlowTextBacking::Legacy(reopened) = reopened else {
+            panic!("expected legacy flowing-text backing");
+        };
+        assert_eq!(reopened.as_ref(), &document);
 
         let file = std::fs::File::open(&path).expect("open zip");
         let mut archive = zip::ZipArchive::new(file).expect("read zip");
         assert_eq!(archive.len(), 1, "text files must not carry raster pages");
         assert_eq!(archive.by_index(0).unwrap().name(), "manifest.json");
+        let manifest = read_manifest(&mut archive).expect("read legacy manifest");
+        assert_eq!(manifest["version"], LEGACY_FLOW_TEXT_VERSION);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flow_text_v10_migrates_standalone_inline_image_to_top_bottom() {
+        let dir = tmp_dir("flow-text-v10-inline-image");
+        let path = dir.join("legacy.iai");
+        let block = crate::core::text_document::ImageBlock::inline(
+            vec![1, 2, 3],
+            20,
+            10,
+            15.0,
+            crate::core::text_document::ParagraphAlign::Center,
+        );
+        let document = crate::core::text_document::TextDocument {
+            paragraphs: vec![crate::core::text_document::Paragraph::image(block.clone())],
+            ..crate::core::text_document::TextDocument::default()
+        };
+        let file = std::fs::File::create(&path).expect("create legacy file");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("manifest.json", deflated_options())
+            .expect("start manifest");
+        let manifest = serde_json::json!({
+            "version": 10,
+            "kind": "flow_text_document",
+            "document": document,
+        });
+        zip.write_all(manifest.to_string().as_bytes())
+            .expect("write manifest");
+        zip.finish().expect("finish legacy file");
+
+        let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("load legacy document") else {
+            panic!("expected flowing-text document");
+        };
+        let crate::core::document::FlowTextBacking::Legacy(reopened) = reopened else {
+            panic!("expected legacy flowing-text backing");
+        };
+        let migrated = reopened.paragraphs[0]
+            .image
+            .as_ref()
+            .expect("top-and-bottom image block");
+        assert_eq!(migrated.data, block.data);
+        assert_eq!(
+            migrated.wrap,
+            crate::core::text_document::ImageWrap::TopBottom
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn canvas_editor_v12_round_trip_preserves_unknown_fields() {
+        let dir = tmp_dir("canvas-editor-v12");
+        let path = dir.join("canvas-editor.iai");
+        let payload = serde_json::json!({
+            "header": [],
+            "main": [{
+                "value": "Tiếng Việt — Nguyễn Thị Thu",
+                "size": 16,
+                "future_inline_field": { "kept": true }
+            }],
+            "footer": [],
+            "future_root_field": [1, 2, { "nested": "preserved" }]
+        });
+        let document = crate::core::document::CanvasEditorDocument::try_new(payload.clone())
+            .expect("valid Canvas Editor payload");
+
+        write_canvas_editor_doc(&path, &document).expect("write v12 document");
+
+        let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("reopen v12 document") else {
+            panic!("expected flowing-text document");
+        };
+        let crate::core::document::FlowTextBacking::CanvasEditor(reopened) = reopened else {
+            panic!("expected Canvas Editor backing");
+        };
+        assert_eq!(reopened.payload(), &payload);
+
+        let file = std::fs::File::open(&path).expect("open v12 zip");
+        let mut archive = zip::ZipArchive::new(file).expect("read v12 zip");
+        assert_eq!(archive.len(), 2);
+        let manifest = read_manifest(&mut archive).expect("read v12 manifest");
+        assert_eq!(manifest["version"], 12);
+        assert_eq!(manifest["document_entry"], "document.json");
+        drop(archive);
+
+        let replacement_payload = serde_json::json!({
+            "main": [{ "value": "Đã lưu đè an toàn" }],
+            "future_root_field": { "revision": 2 }
+        });
+        let replacement =
+            crate::core::document::CanvasEditorDocument::try_new(replacement_payload.clone())
+                .expect("valid replacement payload");
+        write_canvas_editor_doc(&path, &replacement).expect("atomically replace v12 document");
+        let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("reopen replaced v12") else {
+            panic!("expected replaced flowing-text document");
+        };
+        let crate::core::document::FlowTextBacking::CanvasEditor(reopened) = reopened else {
+            panic!("expected replaced Canvas Editor backing");
+        };
+        assert_eq!(reopened.payload(), &replacement_payload);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn canvas_editor_v12_rejects_invalid_or_oversized_payloads() {
+        assert!(crate::core::document::CanvasEditorDocument::try_new(
+            serde_json::json!({ "main": "not-an-array" })
+        )
+        .is_err());
+
+        let oversized = "x".repeat(crate::core::document::MAX_CANVAS_EDITOR_DOCUMENT_BYTES);
+        assert!(crate::core::document::CanvasEditorDocument::try_new(
+            serde_json::json!({ "main": [{ "value": oversized }] })
+        )
+        .is_err());
     }
 
     #[test]

@@ -15,6 +15,21 @@ impl App {
             self.shell.status_msg = "Wait for the PDF page to finish rendering".to_string();
             return;
         }
+        #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+        if self.request_document_webview_switch_snapshot(idx) {
+            return;
+        }
+
+        self.switch_to_doc_confirmed(idx);
+    }
+
+    /// Complete a tab switch whose asynchronous Canvas Editor snapshot has
+    /// already succeeded. This must not call `switch_to_doc`: doing so would
+    /// re-enter the snapshot gate and keep the switch pending forever.
+    pub(crate) fn switch_to_doc_confirmed(&mut self, idx: usize) {
+        if idx == self.docs.active_doc_idx || idx >= self.docs.documents.len() {
+            return;
+        }
         // Finalize an open text session while its document is still active —
         // leaving it dangling across a switch would strand the layer as the
         // blank editing placeholder.
@@ -152,6 +167,11 @@ impl App {
             self.path_style_commit();
         }
 
+        #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+        if self.request_document_webview_close_snapshot(idx) {
+            return;
+        }
+
         if self.docs.documents[idx].is_modified() {
             self.docs.pending_close_doc_idx = Some(idx);
             self.shell.ui.show_close_dialog = true;
@@ -166,8 +186,11 @@ impl App {
     pub fn close_doc_confirmed(&mut self, idx: usize) {
         if self.docs.documents.len() == 1 {
             let id = self.docs.documents[idx].id;
+            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+            self.forget_document_webview_state(id);
             self.jobs.ai_engine.abandon_doc_job(id.0);
             self.jobs.ext.remove_doc_jobs(id.0);
+            self.jobs.ext_uploads.retain(|job| job.doc_id != id.0);
             self.docs.pdf_render_services.remove(&id);
             self.clear_autosave_for(id);
             self.clear_embedded_pdf_for(id);
@@ -179,9 +202,17 @@ impl App {
             return;
         }
 
+        #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+        {
+            let removed_id = self.docs.documents[idx].id;
+            self.forget_document_webview_state(removed_id);
+        }
         let removed = self.docs.documents.remove(idx);
         self.jobs.ai_engine.abandon_doc_job(removed.id.0);
         self.jobs.ext.remove_doc_jobs(removed.id.0);
+        self.jobs
+            .ext_uploads
+            .retain(|job| job.doc_id != removed.id.0);
         self.docs.pdf_render_services.remove(&removed.id);
         self.clear_autosave_for(removed.id);
         self.clear_embedded_pdf_for(removed.id);
@@ -400,6 +431,62 @@ mod tests {
         assert_eq!((doc.canvas.width, doc.canvas.height), (1, 1));
         assert!(doc.pages.is_empty());
         assert!(!app.shell.ui.show_welcome);
+    }
+
+    #[test]
+    fn confirmed_switch_moves_directly_to_the_snapshotted_target() {
+        let mut app = App::new();
+        app.open_new_flow_text_doc_tab();
+        let first_flow_id = app.docs.documents[app.docs.active_doc_idx].id;
+        app.open_new_flow_text_doc_tab();
+        let second_flow_id = app.docs.documents[app.docs.active_doc_idx].id;
+
+        let first_idx = app
+            .docs
+            .documents
+            .iter()
+            .position(|document| document.id == first_flow_id)
+            .unwrap();
+        app.switch_to_doc_confirmed(first_idx);
+
+        assert_eq!(
+            app.docs.documents[app.docs.active_doc_idx].id,
+            first_flow_id
+        );
+        assert_ne!(first_flow_id, second_flow_id);
+    }
+
+    #[test]
+    fn close_confirmation_is_a_visible_but_non_locking_modal() {
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        assert!(!app.is_modal_open());
+
+        app.shell.ui.show_close_dialog = true;
+
+        // The WebView host uses is_modal_open() to hide its child HWND. Without
+        // this, the egui confirmation is rendered behind WebView2 and cannot be
+        // seen or clicked.
+        assert!(app.is_blocking_modal());
+        assert!(app.is_modal_open());
+        // The confirmation itself must remain interactive; only unrelated
+        // blocking dialogs participate in the global modal action lock.
+        assert!(!app.modal_lock_active());
+    }
+
+    #[test]
+    fn document_editor_error_hides_the_webview_and_locks_other_actions() {
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.shell.ui.document_editor_error = Some("snapshot failed".to_string());
+
+        assert!(app.is_blocking_modal());
+        assert!(app.is_modal_open());
+        assert!(app.modal_lock_active());
+        assert_eq!(
+            app.exit_blocking_operation(),
+            Some("the Canvas Editor error dialog")
+        );
     }
 
     #[test]
