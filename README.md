@@ -243,3 +243,19 @@ copyright holder; open an issue on the repository to ask about terms.
 Contributions are accepted under [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [Contributor License Agreement](CLA.md), which keep this dual-licensing option
 available.
+
+## Support the project
+
+If iAi is useful to you, you can support its development:
+
+- **PayPal** — `minhnghia718@gmail.com`
+  ([donate](https://www.paypal.com/donate/?business=minhnghia718@gmail.com&item_name=iAi&currency_code=USD))
+- **Bank transfer (ACB, Vietnam)** — account `18278961`, TONG VAN NGHIA
+
+Buying a packaged build or a commercial license also directly supports the work.
+
+## Contact
+
+- **Email** — minhnghia718@gmail.com
+- **Facebook** — https://www.facebook.com/minhnghia7189/
+- **YouTube** — https://www.youtube.com/@TongNghia3999
