@@ -75,10 +75,6 @@ Exact sources, commits, tensor contracts, and SHA-256 values are documented in
 | Model | License / restriction | Use |
 |---|---|---|
 | LaMa / big-lama | Apache-2.0 upstream; verify the selected host's model card | Smart Fill / inpainting |
-| CodeFormer | NTU S-Lab License 1.0; redistribution and commercial use require checking its terms | Face restoration |
-
-CodeFormer is not covered by iAi's MIT license. Do not bundle it in a
-commercial distribution without permission or a documented license review.
 
 ## Services and user credentials
 
