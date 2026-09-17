@@ -232,3 +232,14 @@ source under the same license.
 Linked dependencies, runtime binaries and AI models retain their own terms;
 see [third-party notices](THIRD_PARTY.md) before distributing a binary or model
 bundle.
+
+### Commercial license
+
+iAi is also available under a separate **commercial license** for organizations
+that cannot meet the AGPL's source-sharing requirements — for example, shipping
+iAi inside a closed-source product. The commercial license is offered by the
+copyright holder; open an issue on the repository to ask about terms.
+
+Contributions are accepted under [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Contributor License Agreement](CLA.md), which keep this dual-licensing option
+available.
