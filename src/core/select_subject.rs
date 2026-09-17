@@ -110,6 +110,8 @@ pub struct SelectSubjectEngine {
     result_rx: Option<Receiver<InferencePayload>>,
     session: Option<Arc<Mutex<OrtSession>>>,
     selected_model: SelectSubjectModel,
+    /// YOLO only: restrict the selection to the COCO "person" class.
+    people_only: bool,
 }
 
 impl SelectSubjectEngine {
@@ -127,7 +129,16 @@ impl SelectSubjectEngine {
             result_rx: None,
             session: None,
             selected_model,
+            people_only: false,
         }
+    }
+
+    pub fn people_only(&self) -> bool {
+        self.people_only
+    }
+
+    pub fn set_people_only(&mut self, value: bool) {
+        self.people_only = value;
     }
 
     fn models_dir() -> PathBuf {
@@ -379,6 +390,7 @@ impl SelectSubjectEngine {
             SubjectStatus::Running
         };
         let status = self.status.clone();
+        let people_only = self.people_only;
 
         let (tx, rx): (Sender<InferencePayload>, Receiver<InferencePayload>) = mpsc::channel();
         self.result_rx = Some(rx);
@@ -406,7 +418,7 @@ impl SelectSubjectEngine {
                 None
             };
 
-            let result = run_inference(spec, &sess_arc, &pixels, canvas_w, canvas_h);
+            let result = run_inference(spec, &sess_arc, &pixels, canvas_w, canvas_h, people_only);
             match &result {
                 Ok(_) => *status.lock().unwrap() = SubjectStatus::Ready,
                 Err(e) => *status.lock().unwrap() = SubjectStatus::Error(e.clone()),
@@ -442,9 +454,10 @@ fn run_inference(
     pixels: &[u8],
     canvas_w: u32,
     canvas_h: u32,
+    people_only: bool,
 ) -> Result<Vec<u8>, String> {
     if spec.kind == SubjectKind::YoloSeg {
-        return run_yolo_seg(session, pixels, canvas_w, canvas_h);
+        return run_yolo_seg(session, pixels, canvas_w, canvas_h, people_only);
     }
     const MODEL_W: u32 = 1024;
     const MODEL_H: u32 = 1024;
@@ -546,6 +559,7 @@ fn run_yolo_seg(
     pixels: &[u8],
     canvas_w: u32,
     canvas_h: u32,
+    people_only: bool,
 ) -> Result<Vec<u8>, String> {
     const S: u32 = 640; // model input side
     const PROTO: usize = 160; // mask prototype side (S / 4)
@@ -632,13 +646,19 @@ fn run_yolo_seg(
     let at = |f: usize, a: usize| det[f * ANCHORS + a];
     let mut dets: Vec<Det> = Vec::new();
     for a in 0..ANCHORS {
-        let mut best = 0.0f32;
-        for c in 0..NUM_CLASSES {
-            let s = at(4 + c, a);
-            if s > best {
-                best = s;
+        // COCO class 0 is "person"; features 0..4 are the box, 4.. are class scores.
+        let best = if people_only {
+            at(4, a)
+        } else {
+            let mut m = 0.0f32;
+            for c in 0..NUM_CLASSES {
+                let s = at(4 + c, a);
+                if s > m {
+                    m = s;
+                }
             }
-        }
+            m
+        };
         if best < CONF {
             continue;
         }

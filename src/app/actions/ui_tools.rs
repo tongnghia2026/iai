@@ -984,6 +984,9 @@ impl App {
                     "Cannot switch Select Subject model while it is busy".to_string();
             }
         }
+        if let Some(v) = actions.sel.set_yolo_people_only.take() {
+            self.jobs.select_subject.set_people_only(v);
+        }
         if let Some(t) = actions.tool.set_fill_tolerance.take() {
             self.edit.tools.fill_mut().tolerance = t;
         }

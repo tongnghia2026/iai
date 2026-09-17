@@ -570,6 +570,7 @@ pub struct SelectionIntent {
     pub close_modify_dialog: bool,
     pub trigger_select_subject: bool,
     pub set_select_subject_model: Option<crate::core::select_subject::SelectSubjectModel>,
+    pub set_yolo_people_only: Option<bool>,
     pub open_refine_panel: bool,
     pub set_refine_feather: Option<f32>,
     pub set_refine_smooth: Option<u32>,

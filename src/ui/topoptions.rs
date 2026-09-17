@@ -2544,6 +2544,16 @@ fn smart_select_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
                 }
             }
         });
+    if selected_model == crate::core::select_subject::SelectSubjectModel::Yolo11Seg {
+        let mut people_only = data.sel.yolo_people_only;
+        if ui
+            .add_enabled(!busy, egui::Checkbox::new(&mut people_only, "People only"))
+            .on_hover_text("YOLO: select only people instead of every detected object")
+            .changed()
+        {
+            actions.sel.set_yolo_people_only = Some(people_only);
+        }
+    }
     let btn_label = if busy {
         format!("{} Running…", ph::HOURGLASS)
     } else {

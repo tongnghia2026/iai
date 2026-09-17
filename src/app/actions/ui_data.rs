@@ -1429,6 +1429,7 @@ impl App {
                 select_subject_busy: self.jobs.select_subject.is_busy(),
                 select_subject_status_msg: self.jobs.select_subject.status_text(),
                 select_subject_model: self.jobs.select_subject.selected_model(),
+                yolo_people_only: self.jobs.select_subject.people_only(),
                 show_refine_panel: self.edit.show_refine_panel,
                 refine_feather: self.edit.refine_feather,
                 refine_smooth: self.edit.refine_smooth,
