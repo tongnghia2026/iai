@@ -76,13 +76,11 @@ Exact sources, commits, tensor contracts, and SHA-256 values are documented in
 | Model | License / restriction | Use |
 |---|---|---|
 | LaMa / big-lama | Apache-2.0 upstream; verify the selected host's model card | Smart Fill / inpainting |
-| BiRefNet (Tiny/Full) | MIT | Select Subject (default) — foreground matte |
+| BiRefNet Tiny | MIT | Select Subject (default) — foreground matte |
 | YOLO11-seg | AGPL-3.0 (Ultralytics) — compatible with iAi's AGPL | Select Subject — object instance masks |
-| RMBG-1.4 | **Non-commercial** (Bria license) | Select Subject (optional, not default) |
 
-BiRefNet (MIT) is the commercial-safe default for Select Subject. RMBG-1.4 is a
-non-commercial model kept as an optional choice only — do NOT bundle or rely on
-it in a paid build. YOLO11-seg is AGPL, matching iAi's own license.
+Both Select Subject models are commercial-safe: BiRefNet is MIT and YOLO11-seg is
+AGPL (matching iAi's own license).
 
 ## Services and user credentials
 

@@ -8,9 +8,7 @@ type OrtSession = ort::session::Session;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectSubjectModel {
-    Rmbg14,
     BiRefNetTiny,
-    BiRefNetFull,
     Yolo11Seg,
 }
 
@@ -43,47 +41,19 @@ enum SubjectKind {
 }
 
 impl SelectSubjectModel {
-    pub const ALL: [SelectSubjectModel; 4] = [
+    pub const ALL: [SelectSubjectModel; 2] = [
         SelectSubjectModel::BiRefNetTiny,
-        SelectSubjectModel::BiRefNetFull,
         SelectSubjectModel::Yolo11Seg,
-        SelectSubjectModel::Rmbg14,
     ];
 
     fn spec(self) -> ModelSpec {
         match self {
-            // NOTE: RMBG-1.4 is released for NON-COMMERCIAL use only (Bria license).
-            // Kept as an option but not the default; do not ship it in a paid build.
-            SelectSubjectModel::Rmbg14 => ModelSpec {
-                label: "RMBG-1.4 (non-commercial)",
-                short_label: "RMBG-1.4",
-                file_name: "rmbg_fp16.onnx",
-                url: "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_fp16.onnx",
-                size_hint: "~88 MB",
-                normalization: Normalization::MinusHalf,
-                apply_sigmoid: false,
-                soft_mask: false,
-                cache_session: true,
-                kind: SubjectKind::BgRemoval,
-            },
             SelectSubjectModel::BiRefNetTiny => ModelSpec {
                 label: "BiRefNet Tiny (Quality)",
                 short_label: "BiRefNet",
                 file_name: "birefnet-general-tiny-epoch_232.onnx",
                 url: "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx",
                 size_hint: "~214 MB",
-                normalization: Normalization::ImageNet,
-                apply_sigmoid: true,
-                soft_mask: true,
-                cache_session: false,
-                kind: SubjectKind::BgRemoval,
-            },
-            SelectSubjectModel::BiRefNetFull => ModelSpec {
-                label: "BiRefNet Full (Max Quality)",
-                short_label: "BiRefNet Full",
-                file_name: "birefnet-general-epoch_244.onnx",
-                url: "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-epoch_244.onnx",
-                size_hint: "~928 MB",
                 normalization: Normalization::ImageNet,
                 apply_sigmoid: true,
                 soft_mask: true,
