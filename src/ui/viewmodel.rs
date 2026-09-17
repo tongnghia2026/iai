@@ -900,7 +900,7 @@ impl Default for UiData {
                 has_selection: false,
                 select_subject_busy: false,
                 select_subject_status_msg: String::new(),
-                select_subject_model: crate::core::select_subject::SelectSubjectModel::Rmbg14,
+                select_subject_model: crate::core::select_subject::SelectSubjectModel::BiRefNetTiny,
                 show_refine_panel: false,
                 refine_feather: 0.0,
                 refine_smooth: 0,
