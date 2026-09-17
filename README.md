@@ -248,8 +248,7 @@ available.
 
 If iAi is useful to you, you can support its development:
 
-- **PayPal** — `minhnghia718@gmail.com`
-  ([donate](https://www.paypal.com/donate/?business=minhnghia718@gmail.com&item_name=iAi&currency_code=USD))
+- **PayPal** — [paypal.me/TongNghia3999](https://paypal.me/TongNghia3999)
 - **Bank transfer (ACB, Vietnam)** — account `18278961`, TONG VAN NGHIA
 
 Buying a packaged build or a commercial license also directly supports the work.
