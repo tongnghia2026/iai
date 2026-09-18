@@ -240,9 +240,13 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         });
     }
 
-    let popup_id = egui::Popup::default_response_id(&resp);
-    let open_cmd =
-        (resp.gained_focus() || resp.changed()).then_some(egui::SetOpenCommand::Bool(true));
+    // Keep the font list open while the field has keyboard focus. Opening it from
+    // the one-shot `gained_focus` command used to race with CloseOnClickOutside —
+    // the very click that focused the field counted as a click "outside", so the
+    // list flashed open then shut with nothing to scroll. Driving `open` from
+    // focus (and ignoring clicks) keeps the list up to scroll and pick: selectable
+    // rows don't steal focus, and clicking the canvas drops focus to dismiss.
+    let want_open = resp.has_focus() || resp.gained_focus();
 
     // While the field still shows the (selected) current name, browse all fonts;
     // once the user types, filter by the query.
@@ -257,8 +261,8 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let mut hovered: Option<TextFontFamily> = None;
 
     let popup = egui::Popup::from_response(&resp)
-        .open_memory(open_cmd)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .open_memory(Some(egui::SetOpenCommand::Bool(want_open)))
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
         .width(field_width.max(280.0))
         .show(|ui| {
             let mut shown = 0;
@@ -291,7 +295,8 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             d.insert_temp(editing_id, false);
             d.remove::<String>(buf_id);
         });
-        egui::Popup::close_id(ui.ctx(), popup_id);
+        // Drop focus so the list closes next frame (open follows focus).
+        resp.surrender_focus();
     } else if let Some(family) = hovered {
         actions.tool.preview_text_font_family = Some(family);
     } else if popup.is_none() && editing {
