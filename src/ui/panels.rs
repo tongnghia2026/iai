@@ -239,6 +239,10 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         },
     );
 
+    // Track opening THIS frame: the click/keystroke that opens the list must not
+    // also be read as a "click outside" that closes it on the same frame — that
+    // was the one-frame flash.
+    let mut just_opened = false;
     if resp.gained_focus() {
         // Show the committed font, selected, so the first keystroke replaces it
         // while the name is still there to copy.
@@ -248,13 +252,16 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         });
         crate::ui::widgets::focus_field_select_all(ui, &resp);
         open = true;
+        just_opened = true;
     }
     if resp.clicked() {
         open = true;
+        just_opened = true;
     }
     if caret_resp.clicked() {
         open = !open;
         if open {
+            just_opened = true;
             resp.request_focus();
         }
     }
@@ -264,6 +271,7 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             d.insert_temp(buf_id, buf.clone());
         });
         open = true;
+        just_opened = true;
     }
 
     // While the field still shows the (selected) current name, browse all fonts;
@@ -321,9 +329,10 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
 
     // Close on Escape, or a click that lands outside the field, caret and list.
+    // Never on the frame we just opened (that click IS the open action).
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         open = false;
-    } else if open {
+    } else if open && !just_opened {
         let clicked_outside = ui.input(|i| {
             i.pointer.any_pressed()
                 && i.pointer.interact_pos().is_some_and(|p| {
