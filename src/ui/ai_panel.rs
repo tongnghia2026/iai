@@ -711,6 +711,53 @@ fn ai_live_status(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
 }
 
+/// ComfyUI-style dropdown to pick which model file an open slot runs, from the
+/// `*.onnx` files found in its folder. "Tự động" (None) uses the verified
+/// default, else the dropped custom model. Hidden when the folder is empty.
+fn model_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    id: crate::core::ai::retouch::ModelId,
+    selection: &mut Option<String>,
+    changed: &mut bool,
+) {
+    let files = crate::core::ai::retouch::available_model_files(id);
+    if files.is_empty() {
+        return;
+    }
+    // Drop a stale pick (file removed) back to auto so the label isn't a lie.
+    if selection
+        .as_deref()
+        .is_some_and(|name| !files.iter().any(|file| file == name))
+    {
+        *selection = None;
+        *changed = true;
+    }
+    let selected_text = selection.clone().unwrap_or_else(|| "Tự động".to_string());
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).small().weak());
+        egui::ComboBox::from_id_salt(("ai_model_pick", label))
+            .selected_text(selected_text)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(selection.is_none(), "Tự động")
+                    .clicked()
+                    && selection.is_some()
+                {
+                    *selection = None;
+                    *changed = true;
+                }
+                for file in &files {
+                    let is_selected = selection.as_deref() == Some(file.as_str());
+                    if ui.selectable_label(is_selected, file).clicked() && !is_selected {
+                        *selection = Some(file.clone());
+                        *changed = true;
+                    }
+                }
+            });
+    });
+}
+
 fn offline_retouch_section(
     ui: &mut egui::Ui,
     data: &UiData,
@@ -826,6 +873,20 @@ fn offline_retouch_section(
             }
         }
     });
+    model_picker(
+        ui,
+        "Model phục hồi mặt",
+        crate::core::ai::retouch::ModelId::Gfpgan,
+        &mut r.face_model_file,
+        changed,
+    );
+    model_picker(
+        ui,
+        "Model tăng nét (Real-ESRGAN)",
+        crate::core::ai::retouch::ModelId::RealesrganGeneral,
+        &mut r.upscale_model_file,
+        changed,
+    );
     if ui
         .checkbox(&mut r.preview_masks, "Tạo layer Preview Masks")
         .changed()

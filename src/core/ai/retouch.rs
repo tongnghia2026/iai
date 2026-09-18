@@ -279,6 +279,13 @@ pub struct RetouchConfig {
     pub protect_identity: bool,
     pub upscale: UpscaleMode,
     pub preview_masks: bool,
+    /// Explicit face-restore model filename picked in the AI panel (open slot).
+    /// `None` = auto (verified default, else the dropped custom model).
+    #[serde(default)]
+    pub face_model_file: Option<String>,
+    /// Explicit detail/upscale (Real-ESRGAN) model filename; `None` = auto.
+    #[serde(default)]
+    pub upscale_model_file: Option<String>,
 }
 
 impl Default for RetouchConfig {
@@ -309,6 +316,8 @@ impl Default for RetouchConfig {
             protect_identity: true,
             upscale: UpscaleMode::Off,
             preview_masks: false,
+            face_model_file: None,
+            upscale_model_file: None,
         }
     }
 }
@@ -853,8 +862,14 @@ impl LocalOnnxRunner {
     }
 
     fn with_gpu_preference(id: ModelId, prefer_gpu: bool) -> Self {
+        Self::with_selection(id, prefer_gpu, None)
+    }
+
+    /// Like [`with_gpu_preference`] but resolves an explicit model file the user
+    /// picked in the AI panel's dropdown (open slots only; `None` = auto).
+    fn with_selection(id: ModelId, prefer_gpu: bool, selected: Option<&str>) -> Self {
         let metadata = ModelMetadata::for_id(id);
-        let path = model_path(id);
+        let path = model_path_selected(id, selected);
         let custom = model_file_status_at(id, &path) == ModelFileStatus::Custom;
         Self {
             metadata,
@@ -2280,12 +2295,11 @@ pub fn ensure_model_folders_with_readme() {
     });
 }
 
-fn model_path(id: ModelId) -> PathBuf {
-    let relative = PathBuf::from(id.directory()).join(id.default_file());
+/// Search roots for model folders, most authoritative first. A release-local
+/// bundle beside the executable wins; user model directories remain a
+/// development/override fallback but cannot silently shadow shipped artifacts.
+fn model_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    // A release-local bundle is authoritative. User model directories remain
-    // a development/override fallback, but cannot silently shadow the exact
-    // artifacts shipped beside the executable.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             roots.push(parent.join("models"));
@@ -2298,6 +2312,28 @@ fn model_path(id: ModelId) -> PathBuf {
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd.join("models"));
     }
+    roots
+}
+
+fn model_path(id: ModelId) -> PathBuf {
+    model_path_selected(id, None)
+}
+
+/// Resolve the file for a slot, honouring an explicit filename the user picked
+/// in the model dropdown. The named file must live in the slot's folder; if it
+/// is absent, fall back to the verified default, then any dropped `*.onnx` on
+/// an open slot.
+fn model_path_selected(id: ModelId, selected: Option<&str>) -> PathBuf {
+    let roots = model_roots();
+    if let Some(name) = selected.map(str::trim).filter(|name| !name.is_empty()) {
+        for root in &roots {
+            let candidate = root.join(id.directory()).join(name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    let relative = PathBuf::from(id.directory()).join(id.default_file());
     if let Some(exact) = roots
         .iter()
         .map(|root| root.join(&relative))
@@ -2316,6 +2352,37 @@ fn model_path(id: ModelId) -> PathBuf {
         }
     }
     models_dir().join(relative)
+}
+
+/// Distinct `*.onnx` filenames available in a slot's folder (verified default
+/// first when present), for the AI panel's model picker.
+pub fn available_model_files(id: ModelId) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for root in model_roots() {
+        if let Ok(entries) = std::fs::read_dir(root.join(id.directory())) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_onnx = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("onnx"));
+                if path.is_file() && is_onnx {
+                    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                        if seen.insert(name.to_string()) {
+                            names.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    names.sort();
+    if let Some(pos) = names.iter().position(|name| name == id.default_file()) {
+        let default = names.remove(pos);
+        names.insert(0, default);
+    }
+    names
 }
 
 /// First `*.onnx` file (lexicographically) directly inside `dir`, if any.
@@ -3742,7 +3809,11 @@ fn run_pipeline(
         .map(|face| face.transform)
         .collect::<Vec<_>>();
     let face_effect = if face_amount > 0.0 || eye_face_amount > 0.0 || lip_face_amount > 0.0 {
-        let gfpgan = LocalOnnxRunner::with_gpu_preference(ModelId::Gfpgan, prefer_gpu);
+        let gfpgan = LocalOnnxRunner::with_selection(
+            ModelId::Gfpgan,
+            prefer_gpu,
+            config.face_model_file.as_deref(),
+        );
         if gfpgan.available() && !face_transforms.is_empty() {
             let face_progress = |completed: usize, total: usize| {
                 let ratio = completed as f32 / total.max(1) as f32;
@@ -3848,8 +3919,11 @@ fn run_pipeline(
     let detail_amount = clamp_amount(selected_detail_max, config.overall_amount);
     let has_detail_roi = detail_mask.iter().any(|value| *value > 0.015);
     let mut detail = if detail_amount > 0.0 && has_detail_roi {
-        let realesrgan =
-            LocalOnnxRunner::with_gpu_preference(ModelId::RealesrganGeneral, prefer_gpu);
+        let realesrgan = LocalOnnxRunner::with_selection(
+            ModelId::RealesrganGeneral,
+            prefer_gpu,
+            config.upscale_model_file.as_deref(),
+        );
         if realesrgan.available() {
             let tile_progress = |completed: usize, total: usize| {
                 let ratio = completed as f32 / total.max(1) as f32;
