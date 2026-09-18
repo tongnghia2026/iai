@@ -317,17 +317,22 @@ impl App {
                 } else if self.edit.input.ctrl_held {
                     self.edit.pending_fill = Some(self.edit.bg_color);
                 } else {
-                    // Plain Delete: with an active selection, clear ONLY that
-                    // region — transparent on a normal layer, or bg-filled on the
-                    // opaque Background (it can't hold transparency). Only with no
-                    // selection does Delete remove the whole layer.
+                    // Plain Delete. Over the CANVAS with an active selection,
+                    // clear only that region (transparent on a normal layer, or
+                    // bg-filled on the opaque Background). Over a PANEL — the user
+                    // is on the Layers panel — or with no selection at all, Delete
+                    // removes the whole layer, matching the right-click "Delete
+                    // layer". This is Photoshop's split: canvas Delete clears
+                    // pixels, Layers-panel Delete removes the layer, so an active
+                    // marquee no longer blocks deleting a layer from the panel.
+                    let over_panel = self.edit.input.is_over_ui;
                     let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
                     let has_sel = canvas.selection.active;
                     let is_bg = !canvas.layer_stack.layers.is_empty()
                         && canvas.active_layer().is_background;
-                    if has_sel && is_bg {
+                    if has_sel && !over_panel && is_bg {
                         self.edit.pending_fill = Some(self.edit.bg_color);
-                    } else if has_sel {
+                    } else if has_sel && !over_panel {
                         if self.docs.documents[self.docs.active_doc_idx]
                             .canvas
                             .clear_selection()
