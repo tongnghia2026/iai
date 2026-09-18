@@ -42,10 +42,16 @@ impl App {
                     let d = &self.docs.documents[self.docs.active_doc_idx];
                     (d.canvas.width, d.canvas.height)
                 };
-                self.docs.documents[self.docs.active_doc_idx]
+                let ls = &mut self.docs.documents[self.docs.active_doc_idx]
                     .canvas
-                    .layer_stack
-                    .add_layer(cw, ch);
+                    .layer_stack;
+                // Select ONLY the new layer so the next copy/merge/group acts on
+                // it, not on a stale prior selection (e.g. a group folder that
+                // was left selected and hidden).
+                let new_idx = ls.add_layer(cw, ch);
+                for (i, l) in ls.layers.iter_mut().enumerate() {
+                    l.selected = i == new_idx;
+                }
             });
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         }
@@ -66,10 +72,13 @@ impl App {
                         let d = &self.docs.documents[self.docs.active_doc_idx];
                         (d.canvas.width, d.canvas.height)
                     };
-                    self.docs.documents[self.docs.active_doc_idx]
+                    let ls = &mut self.docs.documents[self.docs.active_doc_idx]
                         .canvas
-                        .layer_stack
-                        .add_adjustment_layer(adj, cw, ch);
+                        .layer_stack;
+                    let new_idx = ls.add_adjustment_layer(adj, cw, ch);
+                    for (i, l) in ls.layers.iter_mut().enumerate() {
+                        l.selected = i == new_idx;
+                    }
                 });
                 self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
             }
@@ -213,30 +222,24 @@ impl App {
                     }
                 }
             } else if shift {
-                let current_idx = self.docs.documents[self.docs.active_doc_idx]
+                let ls = &mut self.docs.documents[self.docs.active_doc_idx]
                     .canvas
-                    .layer_stack
-                    .active_idx;
+                    .layer_stack;
+                let current_idx = ls.active_idx;
+                let last = ls.layers.len().saturating_sub(1);
                 let min_idx = current_idx.min(idx);
-                let max_idx = current_idx.max(idx).min(
-                    self.docs.documents[self.docs.active_doc_idx]
-                        .canvas
-                        .layer_stack
-                        .layers
-                        .len()
-                        - 1,
-                );
-                for i in min_idx..=max_idx {
-                    self.docs.documents[self.docs.active_doc_idx]
-                        .canvas
-                        .layer_stack
-                        .layers[i]
-                        .selected = true;
+                let max_idx = current_idx.max(idx).min(last);
+                // Shift selects a contiguous range, but never a layer hidden
+                // inside a collapsed group folder: the user can't see it in the
+                // panel, and pulling it into a later merge would corrupt the
+                // group.
+                let picks: Vec<usize> = (min_idx..=max_idx)
+                    .filter(|&i| !ls.is_collapsed_hidden(i))
+                    .collect();
+                for i in picks {
+                    ls.layers[i].selected = true;
                 }
-                self.docs.documents[self.docs.active_doc_idx]
-                    .canvas
-                    .layer_stack
-                    .active_idx = idx;
+                ls.active_idx = idx;
             } else {
                 for l in &mut self.docs.documents[self.docs.active_doc_idx]
                     .canvas

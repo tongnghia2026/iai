@@ -1954,6 +1954,17 @@ impl LayerStack {
         if idx == 0 || idx >= self.layers.len() {
             return false;
         }
+        // Never merge across a group boundary. Merging a layer down onto a
+        // group header used to bake the header into a raster layer — dissolving
+        // the (often collapsed, hidden) group and swallowing the layer into it.
+        // Refuse when either side is a group header, or when the two layers live
+        // at different nesting levels (different parent folder).
+        if self.layers[idx].is_group()
+            || self.layers[idx - 1].is_group()
+            || self.layers[idx].parent_id != self.layers[idx - 1].parent_id
+        {
+            return false;
+        }
         let mut top = self.layers[idx].clone();
         // Visibility priority: a hidden layer contributes nothing to the merge,
         // and the result is visible when either input was — so merging a visible
@@ -3444,6 +3455,45 @@ mod tests {
         );
         // The visible top survives.
         assert_eq!(merged.tiles.get_pixel(1, 1), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn merge_down_refuses_to_dissolve_a_group_below() {
+        // Reproduces the report: group some layers, collapse+hide it, add a new
+        // layer directly above, then Ctrl+E. Merging the top layer down onto the
+        // group header must NOT bake the header into a raster layer and swallow
+        // the new layer into the group.
+        let mut stack = LayerStack::new(10, 10);
+        let a = stack.add_layer(10, 10);
+        let b = stack.add_layer(10, 10);
+        stack.layers[a].selected = true;
+        stack.layers[b].selected = true;
+        let header = stack
+            .create_group_from_selected(10, 10)
+            .expect("group created");
+        stack.layers[header].expanded = false;
+        stack.layers[header].visible = false;
+        let group_id = stack.layers[header].id;
+        let members_before = stack
+            .layers
+            .iter()
+            .filter(|l| l.parent_id == Some(group_id))
+            .count();
+
+        let top = stack.add_layer(10, 10);
+        assert_eq!(top, header + 1, "new layer sits above the group header");
+
+        assert!(
+            !stack.merge_down(top),
+            "must refuse to merge a layer into a group header"
+        );
+        assert!(stack.layers[header].is_group(), "group header survives");
+        let members_after = stack
+            .layers
+            .iter()
+            .filter(|l| l.parent_id == Some(group_id))
+            .count();
+        assert_eq!(members_before, members_after, "group keeps its members");
     }
 
     #[test]
