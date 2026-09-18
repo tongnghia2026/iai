@@ -309,6 +309,7 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let mut list_rect = egui::Rect::NOTHING;
 
     if open {
+        const LIST_HEIGHT: f32 = 370.0;
         let list_width = field_width.max(280.0);
         let area = egui::Area::new(egui::Id::new("text_panel_font_area"))
             .order(egui::Order::Foreground)
@@ -318,35 +319,49 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_min_width(list_width);
                     ui.set_max_width(list_width);
-                    egui::ScrollArea::vertical()
-                        .id_salt("text_panel_font_family_list")
-                        .max_height(370.0)
-                        .show(ui, |ui| {
-                            let mut shown = 0;
-                            for family in TextFontFamily::all() {
-                                if !needle.is_empty()
-                                    && !family.name().to_lowercase().contains(&needle)
-                                {
-                                    continue;
+                    // An Area hands its contents a max_rect equal to what it
+                    // measured LAST frame, and a ScrollArea never grows past the
+                    // space it is offered. So once a search had narrowed the list
+                    // to a couple of rows, the popup stayed that tall for good —
+                    // clearing the search gave back a 3-row window you could
+                    // barely scroll. Lay the list out in a rect of its own, sized
+                    // here rather than inherited from the previous frame.
+                    let list_bounds = egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(list_width, LIST_HEIGHT),
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(list_bounds), |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("text_panel_font_family_list")
+                            .max_height(LIST_HEIGHT)
+                            .show(ui, |ui| {
+                                let mut shown = 0;
+                                for family in TextFontFamily::all() {
+                                    if !needle.is_empty()
+                                        && !family.name().to_lowercase().contains(&needle)
+                                    {
+                                        continue;
+                                    }
+                                    shown += 1;
+                                    if first_match.is_none() {
+                                        first_match = Some(family.clone());
+                                    }
+                                    let row = ui.selectable_label(
+                                        &data.tool.text_font_family == family,
+                                        family.name(),
+                                    );
+                                    if row.clicked() {
+                                        chosen = Some(family.clone());
+                                    } else if row.hovered() && &data.tool.text_font_family != family
+                                    {
+                                        hovered = Some(family.clone());
+                                    }
                                 }
-                                shown += 1;
-                                if first_match.is_none() {
-                                    first_match = Some(family.clone());
+                                if shown == 0 {
+                                    ui.weak("No matching fonts");
                                 }
-                                let row = ui.selectable_label(
-                                    &data.tool.text_font_family == family,
-                                    family.name(),
-                                );
-                                if row.clicked() {
-                                    chosen = Some(family.clone());
-                                } else if row.hovered() && &data.tool.text_font_family != family {
-                                    hovered = Some(family.clone());
-                                }
-                            }
-                            if shown == 0 {
-                                ui.weak("No matching fonts");
-                            }
-                        });
+                            });
+                    });
                 });
             });
         list_rect = area.response.rect;
