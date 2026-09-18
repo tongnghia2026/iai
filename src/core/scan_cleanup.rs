@@ -52,6 +52,9 @@ pub enum ScanCleanScope {
     Range { from: usize, to: usize },
     /// Every page of the PDF.
     AllPages,
+    /// Every open image tab/document (batch-clean each document's layer). Not a
+    /// page scope — handled per document, not via `resolve_pages`.
+    AllDocuments,
 }
 
 /// A full cleanup request from the dialog: how to clean, and what to clean.
@@ -280,7 +283,9 @@ fn box_blur_grid(src: &[f32], gw: usize, gh: usize, radius: usize) -> Vec<f32> {
 /// ascending order. `active_page` is 0-based.
 pub fn resolve_pages(scope: ScanCleanScope, page_count: usize, active_page: usize) -> Vec<usize> {
     match scope {
-        ScanCleanScope::CurrentPage => {
+        // AllDocuments cleans each open document's current page, so within one
+        // document it resolves to the current page.
+        ScanCleanScope::CurrentPage | ScanCleanScope::AllDocuments => {
             if active_page < page_count {
                 vec![active_page]
             } else {
@@ -405,6 +410,8 @@ mod tests {
     #[test]
     fn resolve_pages_covers_scopes() {
         assert_eq!(resolve_pages(ScanCleanScope::CurrentPage, 10, 3), vec![3]);
+        // AllDocuments resolves to the current page within one document.
+        assert_eq!(resolve_pages(ScanCleanScope::AllDocuments, 10, 3), vec![3]);
         assert_eq!(resolve_pages(ScanCleanScope::AllPages, 3, 0), vec![0, 1, 2]);
         // 1-based inclusive range, clamped.
         assert_eq!(

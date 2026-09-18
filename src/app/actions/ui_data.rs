@@ -1548,6 +1548,7 @@ impl App {
                     .get(self.docs.active_doc_idx)
                     .and_then(|d| d.pdf_document.as_ref())
                     .map_or(0, |p| p.active_page),
+                scan_open_doc_count: self.docs.documents.len(),
                 vector_style_target: self.shell.ui.vector_style_target,
                 // Only scan the layer stack for fonts-in-use while the dialog is
                 // open, so the common (closed) frame stays cheap.

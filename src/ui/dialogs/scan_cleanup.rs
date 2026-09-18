@@ -71,6 +71,12 @@ pub(crate) fn scan_cleanup_dialog(ctx: &egui::Context, data: &UiData, actions: &
 
             ui.separator();
             ui.add_space(6.0);
+            let open_docs = data.dialogs.scan_open_doc_count;
+            let multi_tabs = open_docs > 1;
+            // A remembered "all tabs" pick is meaningless once tabs are closed.
+            if scope == 3 && !multi_tabs {
+                scope = 0;
+            }
             ui.label("Phạm vi:");
             if is_pdf {
                 ui.radio_value(
@@ -94,9 +100,28 @@ pub(crate) fn scan_cleanup_dialog(ctx: &egui::Context, data: &UiData, actions: &
                         format!("Lưu ý: xử lý {page_count} trang có thể chậm và tốn bộ nhớ."),
                     );
                 }
+            } else if multi_tabs {
+                ui.radio_value(&mut scope, 0, "Chỉ ảnh hiện tại (tab này)");
             } else {
                 scope = 0;
                 ui.weak("Ảnh đơn — áp dụng cho ảnh hiện tại.");
+            }
+            // Batch-clean every open image tab, regardless of PDF or single image.
+            if multi_tabs {
+                ui.radio_value(
+                    &mut scope,
+                    3,
+                    format!("Tất cả tab đang mở ({open_docs} tab)"),
+                );
+                if scope == 3 {
+                    ui.weak("(Áp cho ảnh của từng tab; xem trực tiếp chỉ ở tab hiện tại.)");
+                    if open_docs > 30 {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 150, 60),
+                            format!("Lưu ý: xử lý {open_docs} tab có thể chậm và tốn bộ nhớ."),
+                        );
+                    }
+                }
             }
 
             ui.add_space(12.0);
@@ -140,7 +165,9 @@ pub(crate) fn scan_cleanup_dialog(ctx: &egui::Context, data: &UiData, actions: &
     };
 
     if do_apply {
-        let scope = if is_pdf {
+        let scope = if scope == 3 {
+            ScanCleanScope::AllDocuments
+        } else if is_pdf {
             match scope {
                 2 => ScanCleanScope::AllPages,
                 1 => ScanCleanScope::Range {

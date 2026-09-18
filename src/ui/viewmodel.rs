@@ -454,6 +454,8 @@ pub struct DialogViewModel {
     pub scan_page_count: usize,
     /// Active PDF page (0-based), for the scan-cleanup "current page" label.
     pub scan_active_page: usize,
+    /// Number of open image tabs/documents, for the scan-cleanup "all tabs" scope.
+    pub scan_open_doc_count: usize,
     pub vector_style_target: crate::ui::intent::VectorStyleTarget,
     /// Distinct fonts used by the active document's text layers, as
     /// `(storage_name, display_label)`. Only filled while the font dialog is
@@ -973,6 +975,7 @@ impl Default for UiData {
                 scan_is_pdf: false,
                 scan_page_count: 1,
                 scan_active_page: 0,
+                scan_open_doc_count: 1,
                 vector_style_target: crate::ui::intent::VectorStyleTarget::Document,
                 text_fonts_in_use: Vec::new(),
                 show_resize_dialog: false,

@@ -112,6 +112,13 @@ impl App {
     /// Dialog entry point. Routes to the single-canvas path (a plain image or the
     /// current PDF page) or the multi-page PDF batch.
     pub(crate) fn apply_scan_cleanup(&mut self, req: ScanCleanupRequest) {
+        if matches!(req.scope, ScanCleanScope::AllDocuments) {
+            self.clean_scan_all_documents(req.params);
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
         let idx = self.docs.active_doc_idx;
         let is_pdf = self.docs.documents[idx].pdf_document.is_some();
         // A page range/all only means something for a PDF; otherwise collapse to
@@ -130,6 +137,32 @@ impl App {
         }
     }
 
+    /// Batch-clean every open image tab/document in one shot. Each document is
+    /// cleaned on its own canvas as its own undo step (so undo is per-tab); the
+    /// active tab is refreshed on screen, inactive tabs re-upload on switch.
+    fn clean_scan_all_documents(&mut self, params: ScanCleanupParams) {
+        let count = self.docs.documents.len();
+        let active = self.docs.active_doc_idx;
+        let mut cleaned = 0usize;
+        let mut skipped = 0usize;
+        for idx in 0..count {
+            match self.clean_scan_doc_layer(idx, params) {
+                Ok(()) => cleaned += 1,
+                // A locked/non-raster/CMYK tab (or the empty welcome tab) is
+                // simply left alone rather than aborting the whole batch.
+                Err(_) => skipped += 1,
+            }
+        }
+        if active < self.docs.documents.len() {
+            self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+        }
+        self.shell.status_msg = if skipped == 0 {
+            format!("{CLEAN_LABEL}: đã làm sạch {cleaned} tab")
+        } else {
+            format!("{CLEAN_LABEL}: {cleaned} tab xong, bỏ qua {skipped} tab")
+        };
+    }
+
     /// Clean the active document's active raster layer in place, as one undo
     /// step. Returns a localized error when the active layer can't be cleaned.
     pub(crate) fn clean_scan_active_layer(
@@ -137,34 +170,48 @@ impl App {
         params: ScanCleanupParams,
     ) -> Result<(), String> {
         let idx = self.docs.active_doc_idx;
-        let ok = {
-            let canvas = &mut self.docs.documents[idx].canvas;
-            if canvas.is_cmyk() {
-                return Err("Làm sạch bản scan chưa hỗ trợ chế độ CMYK".to_string());
-            }
-            canvas.layer_stack.normalize_active_idx();
-            let (layer_id, w, h, before, rgba) = {
-                let Some(layer) = canvas.layer_stack.layers.get(canvas.layer_stack.active_idx)
-                else {
-                    return Err("Không có layer để làm sạch".to_string());
-                };
-                if (!layer.is_background && layer.locked) || !layer.is_raster() {
-                    return Err("Cần chọn một layer ảnh (raster) đang mở khoá".to_string());
-                }
-                (
-                    layer.id,
-                    layer.width,
-                    layer.height,
-                    layer.tiles.clone(),
-                    layer.flatten_tiles(),
-                )
-            };
-            let cleaned = clean_scan_rgba(&rgba, w, h, params);
-            let after = TileMap::from_rgba(&cleaned, w, h);
-            canvas.commit_layer_tiles_change(layer_id, before, after, CLEAN_LABEL)
-        };
-        if ok {
+        let result = self.clean_scan_doc_layer(idx, params);
+        if result.is_ok() {
             self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+        }
+        result
+    }
+
+    /// Clean one document's active raster layer in place, as one undo step on
+    /// that document's own canvas. Does not refresh the on-screen view (the
+    /// caller does that when `idx` is the active document). Localized error when
+    /// the layer can't be cleaned.
+    fn clean_scan_doc_layer(
+        &mut self,
+        idx: usize,
+        params: ScanCleanupParams,
+    ) -> Result<(), String> {
+        if idx >= self.docs.documents.len() {
+            return Err("Tab không hợp lệ".to_string());
+        }
+        let canvas = &mut self.docs.documents[idx].canvas;
+        if canvas.is_cmyk() {
+            return Err("Làm sạch bản scan chưa hỗ trợ chế độ CMYK".to_string());
+        }
+        canvas.layer_stack.normalize_active_idx();
+        let (layer_id, w, h, before, rgba) = {
+            let Some(layer) = canvas.layer_stack.layers.get(canvas.layer_stack.active_idx) else {
+                return Err("Không có layer để làm sạch".to_string());
+            };
+            if (!layer.is_background && layer.locked) || !layer.is_raster() {
+                return Err("Cần chọn một layer ảnh (raster) đang mở khoá".to_string());
+            }
+            (
+                layer.id,
+                layer.width,
+                layer.height,
+                layer.tiles.clone(),
+                layer.flatten_tiles(),
+            )
+        };
+        let cleaned = clean_scan_rgba(&rgba, w, h, params);
+        let after = TileMap::from_rgba(&cleaned, w, h);
+        if canvas.commit_layer_tiles_change(layer_id, before, after, CLEAN_LABEL) {
             Ok(())
         } else {
             Err("Không thể làm sạch layer này".to_string())
