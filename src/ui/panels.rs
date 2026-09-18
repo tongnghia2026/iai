@@ -1,4 +1,4 @@
-use super::{modal_flash_btn, UiActions, UiData};
+use super::{UiActions, UiData};
 use crate::core::layer::{BlendMode, PaintTarget};
 use crate::core::text::{TextAlign, TextFontFamily};
 use egui;
@@ -207,6 +207,21 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             .id(field_id)
             .desired_width(field_width)
             .hint_text("Search fonts…"),
+    );
+
+    // Combo-style dropdown affordance: the field opens a searchable font list on
+    // focus/typing, so show a ▾ caret like a normal dropdown so it reads as a
+    // font picker, not a plain text box.
+    ui.painter().text(
+        egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        ph::CARET_DOWN,
+        egui::FontId::proportional(11.0),
+        if resp.hovered() {
+            pal.icon
+        } else {
+            pal.text_secondary
+        },
     );
 
     if resp.gained_focus() {
@@ -557,45 +572,8 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         );
     });
 
-    if data.tool.text_editing {
-        ui.add_space(10.0);
-        ui.separator();
-        ui.horizontal(|ui| {
-            let text_color_dialog_open =
-                data.dialogs.show_paint_color_dialog && data.dialogs.paint_color_dialog_target == 2;
-            let commit_btn = modal_flash_btn(
-                egui::Button::new(
-                    egui::RichText::new(format!("{} Commit", ph::CHECK)).color(pal.success),
-                )
-                .min_size(egui::vec2(92.0, 24.0)),
-                ui,
-                data,
-            );
-            let commit_tip = if text_color_dialog_open {
-                "Finish the text color picker first"
-            } else {
-                "Finalize text (Esc)"
-            };
-            if ui
-                .add_enabled(!text_color_dialog_open, commit_btn)
-                .on_hover_text(commit_tip)
-                .clicked()
-            {
-                actions.tool.text_commit = true;
-            }
-            let cancel_btn = modal_flash_btn(
-                egui::Button::new(
-                    egui::RichText::new(format!("{} Cancel", ph::X)).color(pal.danger),
-                )
-                .min_size(egui::vec2(86.0, 24.0)),
-                ui,
-                data,
-            );
-            if ui.add(cancel_btn).clicked() {
-                actions.tool.text_cancel = true;
-            }
-        });
-    }
+    // Commit / Cancel live only on the top options bar now — the duplicate
+    // pair that used to sit here in the Text panel was redundant.
 }
 
 /// Small ▾ button next to a value field; opens a preset list (callers order it
