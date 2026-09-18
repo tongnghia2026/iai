@@ -102,7 +102,8 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
             &mut open,
             |ui| text_panel(ui, data, actions),
         );
-        actions.tool.text_panel_hovered = response.is_some_and(|r| r.contains_pointer());
+        // `|=`: the font dropdown hangs outside the window and sets this itself.
+        actions.tool.text_panel_hovered |= response.is_some_and(|r| r.contains_pointer());
         if !open {
             actions.chrome.show_text_panel = Some(false);
         }
@@ -191,9 +192,18 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let field_id = egui::Id::new("text_panel_font_field");
     let buf_id = egui::Id::new("text_panel_font_buf");
     let editing_id = egui::Id::new("text_panel_font_editing");
+    // "The buffer holds a search query", tracked explicitly instead of being
+    // derived by comparing the buffer with the current font name: hovering a row
+    // live-previews that font, so the current name moves under the pointer and
+    // would have turned the browse list into a filter for the *previous* name —
+    // the list collapsed to a row or two the moment the pointer entered it.
+    let query_id = egui::Id::new("text_panel_font_query");
+    // egui's invisible TextEdit that owns keystrokes for the text on canvas.
+    let canvas_text_id = egui::Id::new("text_overlay_te");
     let current_name = data.tool.text_font_family.name().to_string();
 
     let editing = ui.data(|d| d.get_temp::<bool>(editing_id).unwrap_or(false));
+    let mut querying = editing && ui.data(|d| d.get_temp::<bool>(query_id).unwrap_or(false));
     let mut buf = if editing {
         ui.data(|d| d.get_temp::<String>(buf_id))
             .unwrap_or_else(|| current_name.clone())
@@ -249,12 +259,21 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ui.data_mut(|d| {
             d.insert_temp(editing_id, true);
             d.insert_temp(buf_id, current_name.clone());
+            d.insert_temp(query_id, false);
         });
+        querying = false;
         crate::ui::widgets::focus_field_select_all(ui, &resp);
         open = true;
         just_opened = true;
     }
     if resp.clicked() {
+        // Re-arm select-all on a plain click: egui's own press handling drops a
+        // caret wherever the pointer landed, so without this the first keystroke
+        // would be inserted in the middle of the font name and the search would
+        // match nothing. A real drag-select isn't a click, so it is left alone.
+        if !querying {
+            crate::ui::widgets::focus_field_select_all(ui, &resp);
+        }
         open = true;
         just_opened = true;
     }
@@ -269,22 +288,24 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ui.data_mut(|d| {
             d.insert_temp(editing_id, true);
             d.insert_temp(buf_id, buf.clone());
+            d.insert_temp(query_id, true);
         });
+        querying = true;
         open = true;
         just_opened = true;
     }
 
-    // While the field still shows the (selected) current name, browse all fonts;
-    // once the user types, filter by the query.
-    let typed = buf.trim();
-    let needle = if typed.eq_ignore_ascii_case(&current_name) {
-        String::new()
+    // Browse every font while the field still shows the current name; filter only
+    // once the user has actually typed into it.
+    let needle = if querying {
+        buf.trim().to_lowercase()
     } else {
-        typed.to_lowercase()
+        String::new()
     };
 
     let mut chosen: Option<TextFontFamily> = None;
     let mut hovered: Option<TextFontFamily> = None;
+    let mut first_match: Option<TextFontFamily> = None;
     let mut list_rect = egui::Rect::NOTHING;
 
     if open {
@@ -309,6 +330,9 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                                     continue;
                                 }
                                 shown += 1;
+                                if first_match.is_none() {
+                                    first_match = Some(family.clone());
+                                }
                                 let row = ui.selectable_label(
                                     &data.tool.text_font_family == family,
                                     family.name(),
@@ -326,11 +350,31 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 });
             });
         list_rect = area.response.rect;
+        // A click anywhere in the panel window lifts that window to the top of the
+        // layer order, which would bury the list behind the panel — it looked like
+        // the list had vanished and no further click could bring it back. Keep the
+        // list above everything for as long as it is open.
+        ui.ctx().move_to_top(area.response.layer_id);
+        // The list hangs outside the panel window, so claim the wheel while the
+        // pointer is over it: otherwise scrolling the fonts also zoomed the canvas.
+        if ui
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|p| list_rect.contains(p))
+        {
+            actions.tool.text_panel_hovered = true;
+        }
+    }
+
+    // Enter takes the top match of a typed query — the keyboard path for someone
+    // who knows the font's name.
+    if open && querying && chosen.is_none() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        chosen = first_match.clone();
     }
 
     // Close on Escape, or a click that lands outside the field, caret and list.
     // Never on the frame we just opened (that click IS the open action).
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    if escape {
         open = false;
     } else if open && !just_opened {
         let clicked_outside = ui.input(|i| {
@@ -348,9 +392,16 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.tool.set_text_font_family = Some(family);
         ui.data_mut(|d| {
             d.insert_temp(editing_id, false);
+            d.insert_temp(query_id, false);
             d.remove::<String>(buf_id);
         });
         open = false;
+        // Hand the keyboard back to the text on canvas: the search field keeps
+        // egui's focus after a pick, so the next keystroke would have filtered
+        // fonts instead of typing into the artwork.
+        if data.tool.text_editing {
+            ui.ctx().memory_mut(|m| m.request_focus(canvas_text_id));
+        }
     } else if let Some(family) = hovered {
         actions.tool.preview_text_font_family = Some(family);
     } else if !open && editing {
@@ -358,9 +409,13 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         // and let the field snap back to the committed font next frame.
         ui.data_mut(|d| {
             d.insert_temp(editing_id, false);
+            d.insert_temp(query_id, false);
             d.remove::<String>(buf_id);
         });
         actions.tool.cancel_text_font_family_preview = true;
+        if escape && data.tool.text_editing {
+            ui.ctx().memory_mut(|m| m.request_focus(canvas_text_id));
+        }
     }
 
     ui.data_mut(|d| d.insert_temp(open_id, open));
