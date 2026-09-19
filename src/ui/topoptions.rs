@@ -175,6 +175,33 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         {
                             actions.chrome.show_library = Some(true);
                         }
+
+                        // Snapping changes how every drag behaves (guides, Move,
+                        // Free Transform), so its switch sits on the bar for all
+                        // tools rather than only under View.
+                        let snap_on = data.chrome.snap_enabled;
+                        let snap_btn = egui::Button::new(
+                            egui::RichText::new(ph::MAGNET)
+                                .size(TOP_OPTIONS_NAV_ICON_SIZE)
+                                .color(if snap_on { pal.icon } else { pal.text_dim }),
+                        )
+                        .fill(if snap_on {
+                            pal.accent_selected_bg
+                        } else {
+                            pal.button_bg
+                        })
+                        .min_size(egui::vec2(26.0, 24.0));
+                        if ui
+                            .add(snap_btn)
+                            .on_hover_text(if snap_on {
+                                "Snap: on — edges and centres pull to guides, other layers and the page"
+                            } else {
+                                "Snap: off — drag and scale freely"
+                            })
+                            .clicked()
+                        {
+                            actions.chrome.toggle_snap = true;
+                        }
                         ui.separator();
 
                         match data.tool.active_tool {
@@ -2851,21 +2878,10 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         }
     }
 
-    ui.separator();
-    // Opacity.
-    ui.label("Opacity:");
-    let mut opacity = data.tool.text_opacity * 100.0;
-    if ui
-        .add(
-            egui::DragValue::new(&mut opacity)
-                .range(0.0..=100.0)
-                .suffix("%")
-                .speed(0.5),
-        )
-        .changed()
-    {
-        actions.tool.set_text_opacity = Some(opacity / 100.0);
-    }
+    // No opacity control here: the Layers panel already fades the whole type
+    // layer, and two sliders that look the same but act on different things is
+    // worse than one. A document that already carries a per-text opacity keeps
+    // it — editing simply leaves it alone.
 
     if data.tool.text_editing {
         ui.separator();

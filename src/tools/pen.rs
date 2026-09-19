@@ -192,7 +192,7 @@ impl PenTool {
             anti_alias: true,
             mode: PenMode::Selection,
             stroke_width: 3.0,
-            snap_enabled: true,
+            snap_enabled: false,
             anchors: Vec::new(),
             closed: false,
             dragging: None,

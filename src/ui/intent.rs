@@ -346,7 +346,6 @@ pub struct ToolIntent {
     pub set_text_underline: Option<bool>,
     pub set_text_line_height: Option<f32>,
     pub set_text_tracking_px: Option<f32>,
-    pub set_text_opacity: Option<f32>,
     /// Double-click a text layer in the Layers panel → re-edit.
     pub edit_text_layer: Option<usize>,
     /// Canvas click outside the text being edited. Under the strict modal

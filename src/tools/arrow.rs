@@ -45,7 +45,7 @@ impl ArrowTool {
             width: 3.0,
             end_arrow: ArrowHead::Triangle.to_u8(),
             route: 0,
-            snap_enabled: true,
+            snap_enabled: false,
             mode: MODE_SINGLE,
             tree_count: 5,
             start: None,
@@ -375,6 +375,9 @@ mod tests {
     fn endpoint_snaps_to_an_existing_line_end() {
         let mut document = doc_with_line();
         let mut tool = ArrowTool::new();
+        // Snapping is off until the user turns it on, and this covers what it
+        // does once they have.
+        tool.snap_enabled = true;
         // Press far from the line: no snap, start stays put.
         tool.on_press(PointerEvent::new(20.0, 20.0), &mut ctx(&mut document));
         // Drag near the line's (300,100) endpoint: it snaps there.
@@ -393,6 +396,7 @@ mod tests {
     fn snap_overrides_shift_constraint() {
         let mut document = doc_with_line();
         let mut tool = ArrowTool::new();
+        tool.snap_enabled = true;
         tool.on_press(PointerEvent::new(300.0, 20.0), &mut ctx(&mut document));
         // Shift would normally lock to the vertical axis (x=300), but a snap target
         // is in range, so the endpoint lands on the corner instead.

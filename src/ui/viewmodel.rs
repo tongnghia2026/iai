@@ -1063,7 +1063,7 @@ impl Default for UiData {
                 show_rulers: true,
                 show_guides: true,
                 lock_guides: false,
-                snap_enabled: true,
+                snap_enabled: false,
                 guides: Vec::new(),
                 guide_preview: None,
                 hovered_guide: None,

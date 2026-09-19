@@ -457,7 +457,9 @@ pub struct UiState {
     pub show_guides: bool,
     /// When locked, guides can't be moved or deleted by dragging.
     pub lock_guides: bool,
-    /// Master snapping toggle (guides ②, layer move ③, transform ④).
+    /// Master snapping toggle (guides ②, layer move ③, transform ④). Off by
+    /// default and switched from the magnet on the options bar: the pull made
+    /// dragging a layer or a transform box past the page edge fight back.
     pub snap_enabled: bool,
     pub show_preset_dialog: bool,
     pub show_delete_preset_dialog: bool,
@@ -1696,7 +1698,7 @@ impl App {
                     show_rulers: true,
                     show_guides: true,
                     lock_guides: false,
-                    snap_enabled: true,
+                    snap_enabled: false,
                     show_preset_dialog: false,
                     show_delete_preset_dialog: false,
                     preset_dialog_name: String::new(),

@@ -94,12 +94,6 @@ impl App {
                 w.request_redraw();
             }
         }
-        if let Some(v) = actions.tool.set_text_opacity.take() {
-            self.edit.text_opacity = v.clamp(0.0, 1.0);
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
-        }
         if let Some(origin) = actions.tool.text_move_origin.take() {
             if let Some(session) = &mut self.edit.text_edit {
                 session.origin = origin;

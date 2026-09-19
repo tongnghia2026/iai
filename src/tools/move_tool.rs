@@ -86,7 +86,7 @@ impl MoveTool {
             took_duplicate: false,
             toggle_vector_transform_requested: false,
             click_selected_vector: false,
-            snap_enabled: true,
+            snap_enabled: false,
             press_cx: 0.0,
             press_cy: 0.0,
             start_bbox: None,
