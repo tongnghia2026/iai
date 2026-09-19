@@ -255,22 +255,21 @@ pub(super) fn font_family_field(
     let open_id = egui::Id::new("text_panel_font_open");
     let mut open = ui.data(|d| d.get_temp::<bool>(open_id).unwrap_or(false));
 
-    // Combo-style ▾ caret at the right of the field; clicking it toggles the list.
+    // Combo-style ▾ caret at the right of the field. It is purely decorative:
+    // it sits inside the field's own rect, so a click there lands on the text
+    // field and opens the list through the normal `resp.clicked()` path. A
+    // separate clickable caret used to fight the field for the same press and
+    // made the list flash open then shut.
     let caret_rect = egui::Rect::from_center_size(
         egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y),
         egui::vec2(22.0, resp.rect.height()),
-    );
-    let caret_resp = ui.interact(
-        caret_rect,
-        field_id.with("font_caret"),
-        egui::Sense::click(),
     );
     ui.painter().text(
         caret_rect.center(),
         egui::Align2::CENTER_CENTER,
         ph::CARET_DOWN,
         egui::FontId::proportional(11.0),
-        if caret_resp.hovered() || resp.hovered() {
+        if resp.hovered() {
             pal.icon
         } else {
             pal.text_secondary
@@ -304,13 +303,6 @@ pub(super) fn font_family_field(
         }
         open = true;
         just_opened = true;
-    }
-    if caret_resp.clicked() {
-        open = !open;
-        if open {
-            just_opened = true;
-            resp.request_focus();
-        }
     }
     if resp.changed() {
         ui.data_mut(|d| {
