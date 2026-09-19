@@ -2030,7 +2030,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if (slx < 0.0 || sly < 0.0 || slx >= u.layer_w || sly >= u.layer_h) {
             return dst;
         }
-        src = sample_tile_bilinear(slx, sly);
+        // `slx/sly` are pixel-EDGE coordinates, while the bilinear samplers below
+        // index texel CENTRES. Without this half-texel shift the preview sits half
+        // a source pixel up-left of the CPU bake (which subtracts the same 0.5),
+        // so an identity transform already blurs the layer and committing snaps it
+        // back — the more it is scaled up, the bigger that jump.
+        let sclx = slx - 0.5;
+        let scly = sly - 0.5;
+        src = sample_tile_bilinear(sclx, scly);
         // A clip child's frame stays fixed in canvas space while the image is
         // transformed, so sample the clip mask at the UN-transformed canvas
         // position (layer origin is packed in xform_orig_oy/xform_orig_w here), not
@@ -2042,11 +2049,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 i32(canvas_y - u.xform_orig_w) + sh.y,
                 u.layer_w, u.layer_h);
         } else {
-            mask_a = sample_mask_bilinear(slx, sly);
+            mask_a = sample_mask_bilinear(sclx, scly);
         }
         dev_local = vec2<f32>(slx / max(u.layer_w, 1.0), sly / max(u.layer_h, 1.0));
-        filter_lx = slx;
-        filter_ly = sly;
+        filter_lx = sclx;
+        filter_ly = scly;
     } else if (u.xform_active == 1u) {
         // ── Free-transform preview path ────────────────────────────────────
         // Inverse affine transform: output canvas pos to original layer-local pos.

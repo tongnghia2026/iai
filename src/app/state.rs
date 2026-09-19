@@ -143,6 +143,11 @@ pub struct TransformCommitResult {
     pub doc_id: crate::core::document::DocumentId,
     pub command: crate::core::command::FreeTransformCommand,
     pub layers: Vec<TransformCommitLayer>,
+    /// A Text layer had to give up its editable type because the gesture (skew,
+    /// a distort on rotated text, a size past the font limits) cannot be
+    /// described by `TextData`. The status bar says so instead of letting the
+    /// user discover it when the Type tool refuses to reopen the layer.
+    pub rasterized_text: bool,
 }
 
 impl TransformState {

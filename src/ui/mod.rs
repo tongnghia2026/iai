@@ -3286,8 +3286,14 @@ pub fn build(
                 paint_text_preview_texture(&preview_painter, *texture_id, *corners);
             }
 
+            // Rotation pivots around the upright raster's corner, which for a
+            // turned block sits well away from the glyphs. Park the grab handle
+            // beside what is actually drawn instead.
+            let handle_anchor = preview_image
+                .as_ref()
+                .map_or(egui::pos2(mx, my), |(_, _, _, _, bounds)| bounds.min);
             let handle_resp = egui::Area::new(egui::Id::new("text_overlay_drag_handle"))
-                .fixed_pos(egui::pos2(mx - 24.0, my - 4.0))
+                .fixed_pos(egui::pos2(handle_anchor.x - 24.0, handle_anchor.y - 4.0))
                 .order(egui::Order::Middle)
                 .show(ctx, |ui| {
                     let (rect, response) = ui
@@ -3525,6 +3531,26 @@ pub fn build(
                             });
                         }
                     }
+
+                    // The invisible TextEdit is an axis-aligned box parked at
+                    // the block's upright origin, so for rotated text it covers
+                    // canvas nowhere near the glyphs. A press there still
+                    // reached egui's own galley hit-test and threw the caret to
+                    // an unrelated character (and a drag rewrote the selection);
+                    // outside the drawn glyphs the cursor simply stays put.
+                    if override_range.is_none()
+                        && primary_down
+                        && !pointer_in_text
+                        && !continuing_drag
+                    {
+                        override_range = saved_text_range.or(cached_text_range).or_else(|| {
+                            data.tool.text_caret.map(|caret| {
+                                egui::text::CCursorRange::one(egui::text::CCursor::new(
+                                    caret.min(buf.chars().count()),
+                                ))
+                            })
+                        });
+                    }
                 }
                 if let Some(range) = override_range {
                     let mut state = text_output.state.clone();
@@ -3646,9 +3672,14 @@ pub fn build(
                             && l.id != egui::Id::new("text_overlay")
                             && l.id != egui::Id::new("text_overlay_drag_handle")
                     });
+                    // With a raster preview up, `text_preview_hit` is the exact
+                    // extent of the drawn (possibly rotated) block. The
+                    // TextEdit's own rect is an axis-aligned box at the upright
+                    // origin and would swallow clicks on empty canvas.
+                    let over_edit_box = !preview_drawn && resp.rect.contains(pos);
                     if canvas_rect.contains(pos)
                         && !over_floating_ui
-                        && !resp.rect.contains(pos)
+                        && !over_edit_box
                         && !text_preview_hit
                         && !handle_resp.rect.contains(pos)
                     {

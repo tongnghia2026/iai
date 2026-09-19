@@ -288,7 +288,18 @@ fn text_scales_are_uniform(sx: f32, sy: f32) -> bool {
     (sx - sy).abs() <= sx.max(sy).max(1.0) * 0.02
 }
 
-fn scaled_text_data(td: &TextData, sx: f32, sy: f32) -> TextData {
+/// A value the transform wanted, and the value the editable-text limits allow.
+/// Any real difference means the committed type can no longer describe what the
+/// preview showed, so the caller must keep the resampled pixels instead.
+fn clamped_or_bail(value: f32, lo: f32, hi: f32) -> Option<f32> {
+    let clamped = value.clamp(lo, hi);
+    ((clamped - value).abs() <= value.abs().max(1.0) * 1.0e-3).then_some(clamped)
+}
+
+/// Scale a `TextData` by the factors expressed in ITS OWN axes. `None` when a
+/// limit (font size, tracking, stretch) would silently cut the result short —
+/// the layer then stays the resampled raster, which still matches the preview.
+fn scaled_text_data(td: &TextData, sx: f32, sy: f32) -> Option<TextData> {
     let mut out = td.clone();
     let sx = sx.abs();
     let sy = sy.abs();
@@ -297,21 +308,36 @@ fn scaled_text_data(td: &TextData, sx: f32, sy: f32) -> TextData {
     } else {
         sy
     };
-    out.font_px = (out.font_px * font_scale).clamp(
+    out.font_px = clamped_or_bail(
+        out.font_px * font_scale,
         crate::core::text::MIN_EDITABLE_FONT_PX,
         crate::core::text::MAX_EDITABLE_FONT_PX,
-    );
+    )?;
     // Font size carries the vertical scale; retain the independent horizontal
     // component so reopening the Type tool reproduces the transformed glyphs.
-    out.stretch_x = (out.stretch_x * sx / font_scale.max(TRANSFORM_EPS)).clamp(0.01, 100.0);
-    out.tracking_px = (out.tracking_px * font_scale).clamp(-200.0, 500.0);
+    out.stretch_x = clamped_or_bail(
+        out.stretch_x * sx / font_scale.max(TRANSFORM_EPS),
+        0.01,
+        100.0,
+    )?;
+    out.tracking_px = clamped_or_bail(out.tracking_px * font_scale, -200.0, 500.0)?;
     for gs in &mut out.glyph_styles {
-        gs.font_px = (gs.font_px * font_scale).clamp(
+        gs.font_px = clamped_or_bail(
+            gs.font_px * font_scale,
             crate::core::text::MIN_EDITABLE_FONT_PX,
             crate::core::text::MAX_EDITABLE_FONT_PX,
-        );
+        )?;
     }
-    out
+    Some(out)
+}
+
+/// Whether the text's own axes are parallel to the canvas axes, so a
+/// non-uniform canvas scale can be split into font size (vertical) and
+/// `stretch_x` (horizontal). 180° counts: it negates both axes, which the flip
+/// flags absorb.
+fn text_axes_are_canvas_aligned(rotation_deg: f32) -> bool {
+    let a = rotation_deg.rem_euclid(180.0);
+    a <= TRANSFORM_EPS || (180.0 - a) <= TRANSFORM_EPS
 }
 
 fn transformed_text_data(td: &TextData, ts: &TransformState) -> Option<TextData> {
@@ -327,7 +353,17 @@ fn transformed_text_data(td: &TextData, ts: &TransformState) -> Option<TextData>
         return None;
     }
 
-    let mut out = scaled_text_data(td, ts.scale_x.abs(), ts.scale_y.abs());
+    // A non-uniform scale acts along the CANVAS axes, but font size and
+    // stretch_x act along the text's own baseline. Those only agree while the
+    // text is upright, so distorting already-rotated type would reshape the
+    // glyphs along the wrong axis — keep the resampled pixels instead.
+    if !text_scales_are_uniform(ts.scale_x.abs(), ts.scale_y.abs())
+        && !text_axes_are_canvas_aligned(td.rotation_deg)
+    {
+        return None;
+    }
+
+    let mut out = scaled_text_data(td, ts.scale_x.abs(), ts.scale_y.abs())?;
     let sx_neg = ts.scale_x < 0.0;
     let sy_neg = ts.scale_y < 0.0;
     if sx_neg == sy_neg {
@@ -344,31 +380,41 @@ fn transformed_text_data(td: &TextData, ts: &TransformState) -> Option<TextData>
     Some(out)
 }
 
-fn rasterized_text_layer_centered_in(
-    td: &TextData,
-    target_ink_bounds: (i32, i32, u32, u32),
-) -> Option<(TileMap, u32, u32, (i32, i32))> {
-    let (raster, _delta) = rasterize_placed(td)?;
-    let tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
-    let (min_x, min_y, max_x, max_y) = tiles.content_bounds()?;
+/// Canvas position of a Text layer's upright raster origin — the single point
+/// its rotation, flips and stretch pivot around. Recovered from the layer's own
+/// pixels (like `text_edit_origin_for_layer` does when Type reopens), so a
+/// bitmap that drifted from its `TextData` still anchors where it is drawn.
+fn text_layer_origin(td: &TextData, tiles: &TileMap, offset: (i32, i32)) -> Option<(f32, f32)> {
+    let (placed, delta) = rasterize_placed(td)?;
+    let placed_tiles = TileMap::from_rgba(&placed.rgba, placed.width, placed.height);
+    let (placed_min_x, placed_min_y, _, _) = placed_tiles.content_bounds()?;
+    let (layer_min_x, layer_min_y, _, _) = tiles.content_bounds()?;
+    Some((
+        (offset.0 + layer_min_x - delta.0 - placed_min_x) as f32,
+        (offset.1 + layer_min_y - delta.1 - placed_min_y) as f32,
+    ))
+}
 
-    // Font hinting and raster padding mean that re-laying editable text after
-    // a scale is not always pixel-for-pixel the same size as scaling its old
-    // bitmap.  Preserve the transform pivot by aligning ink centres, not the
-    // top-left corner; otherwise a large scale/rotation visibly jumps when the
-    // worker swaps the preview for the committed text or Type reopens it.
-    let target_cx = target_ink_bounds.0 as f64 + target_ink_bounds.2 as f64 * 0.5;
-    let target_cy = target_ink_bounds.1 as f64 + target_ink_bounds.3 as f64 * 0.5;
-    let local_cx = (min_x as f64 + max_x as f64) * 0.5;
-    let local_cy = (min_y as f64 + max_y as f64) * 0.5;
-    let offset = (
-        (target_cx - local_cx)
-            .round()
-            .clamp(i32::MIN as f64, i32::MAX as f64) as i32,
-        (target_cy - local_cy)
-            .round()
-            .clamp(i32::MIN as f64, i32::MAX as f64) as i32,
-    );
+/// Re-render transformed type crisply from its outlines and place it at the
+/// transform's image of the old raster origin.
+///
+/// The gesture maps the text's whole local frame, so its origin simply travels
+/// with it — `M(origin)`. Centring the fresh ink inside the transformed
+/// bounding box instead (what this used to do) only agrees for ink that fills
+/// that box: rotate a ragged or centred block and the committed text landed
+/// several pixels off the preview.
+fn rasterized_text_layer_at_origin(
+    td: &TextData,
+    origin: (f32, f32),
+) -> Option<(TileMap, u32, u32, (i32, i32))> {
+    if !origin.0.is_finite() || !origin.1.is_finite() {
+        return None;
+    }
+    let (raster, delta) = rasterize_placed(td)?;
+    let tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+    let ox = origin.0.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32;
+    let oy = origin.1.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32;
+    let offset = (ox.saturating_add(delta.0), oy.saturating_add(delta.1));
     Some((tiles, raster.width, raster.height, offset))
 }
 
@@ -537,6 +583,7 @@ fn bake_transform_commit(
 
     let mut cmd = crate::core::command::FreeTransformCommand::new("Free Transform");
     let mut updates = Vec::with_capacity(ts.layer_states.len());
+    let mut rasterized_text = false;
 
     for ls in &ts.layer_states {
         let Some((new_ox, new_oy, new_w, new_h)) = transformed_content_bounds(&ts, ls) else {
@@ -545,19 +592,30 @@ fn bake_transform_commit(
         let mut after_layer_type = ls.layer_type.clone();
         let mut crisp_vector_layer = None;
         if let LayerType::Text(td) = &ls.layer_type {
-            if let Some(next_td) = transformed_text_data(td, &ts) {
-                after_layer_type = LayerType::Text(next_td.clone());
-                if ls.mask.is_none() {
-                    // Always rebuild an affine-transformed Text layer from its
-                    // updated metadata.  Keeping a resampled bitmap only for
-                    // non-uniform positive scales made the pixels disagree with
-                    // TextData, so reopening Type reconstructed a different,
-                    // usually smaller object.
-                    crisp_vector_layer =
-                        rasterized_text_layer_centered_in(&next_td, (new_ox, new_oy, new_w, new_h));
+            match transformed_text_data(td, &ts) {
+                Some(next_td) => {
+                    // Masked type keeps the resampled raster (its mask follows
+                    // the same affine), so only the metadata is carried over.
+                    if ls.mask.is_none() {
+                        crisp_vector_layer = text_layer_origin(td, &ls.tiles, ls.offset)
+                            .zip(transform_forward_homography(&ts))
+                            .and_then(|(origin, forward)| {
+                                let moved = crate::core::geometry::Homography {
+                                    m: mat3_mul(forward, ls.source_to_current),
+                                }
+                                .apply(origin.0, origin.1);
+                                rasterized_text_layer_at_origin(&next_td, (moved.x, moved.y))
+                            });
+                    }
+                    after_layer_type = LayerType::Text(next_td);
                 }
-            } else {
-                after_layer_type = LayerType::Raster;
+                None => {
+                    // The gesture cannot be described by editable type (skew, a
+                    // distort on rotated text, a size past the font limits).
+                    // Keep the exact pixels the preview showed and say so.
+                    after_layer_type = LayerType::Raster;
+                    rasterized_text = true;
+                }
             }
         }
         if let LayerType::Vector(VectorGeometry::Primitive(sd)) = &ls.layer_type {
@@ -617,7 +675,17 @@ fn bake_transform_commit(
         let Some(pixel_len) = Canvas::checked_rgba_len(new_w, new_h) else {
             continue;
         };
-        let mut pixels = vec![0u8; pixel_len];
+        // Type and shapes that re-render crisply from their own geometry throw
+        // this resample away; skipping it is the bulk of the wait between Enter
+        // and the committed layer appearing.
+        let mut pixels = vec![
+            0u8;
+            if crisp_vector_layer.is_some() {
+                0
+            } else {
+                pixel_len
+            }
+        ];
         let src_tiles = &ls.tiles;
         // A rotated/projective raster needs one bilinear coverage ramp at its
         // boundary. Do not add a second supersampling filter: that widens a
@@ -745,7 +813,11 @@ fn bake_transform_commit(
             }
         });
 
-        let mut new_tiles = crate::core::tile::TileMap::from_rgba(&pixels, new_w, new_h);
+        let mut new_tiles = if pixels.is_empty() {
+            crate::core::tile::TileMap::new(new_w, new_h)
+        } else {
+            crate::core::tile::TileMap::from_rgba(&pixels, new_w, new_h)
+        };
         let mut out_w = new_w;
         let mut out_h = new_h;
         let mut out_offset = (new_ox, new_oy);
@@ -795,6 +867,7 @@ fn bake_transform_commit(
         doc_id,
         command: cmd,
         layers: updates,
+        rasterized_text,
     })
 }
 
@@ -1288,7 +1361,12 @@ impl App {
                         .canvas
                         .record(Box::new(result.command));
                     self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-                    self.shell.status_msg = "Transform applied".to_string();
+                    self.shell.status_msg = if result.rasterized_text {
+                        "Transform applied — chu da chuyen thanh anh (khong sua lai duoc bang Type)"
+                            .to_string()
+                    } else {
+                        "Transform applied".to_string()
+                    };
                     if self.edit.warp_after_transform_commit {
                         self.edit.warp_after_transform_commit = false;
                         self.begin_warp();
@@ -2502,6 +2580,7 @@ mod tests {
 
         let target_bounds =
             transformed_content_bounds(&ts, &ts.layer_states[0]).expect("scaled bounds are valid");
+        let gesture = ts.clone();
         let result = bake_transform_commit(
             DocumentId(1),
             ts,
@@ -2528,8 +2607,11 @@ mod tests {
             tile_content_fingerprint(&rebuilt_tiles)
         );
 
-        // Re-layout can differ from scaled bitmap bounds by a pixel because of
-        // font hinting; it must remain centred on the transform's destination.
+        assert_text_placed_at_mapped_origin(&td, &tiles, offset, &gesture, &result.layers[0]);
+
+        // An axis-aligned scale maps the ink box onto the destination box, so
+        // the committed ink must land there too — only font hinting separates
+        // the re-laid glyphs from a plain resample of the old bitmap.
         let (min_x, min_y, max_x, max_y) = result.layers[0]
             .tiles
             .content_bounds()
@@ -2538,8 +2620,8 @@ mod tests {
         let actual_cy = result.layers[0].offset.1 as f64 + (min_y + max_y) as f64 * 0.5;
         let target_cx = target_bounds.0 as f64 + target_bounds.2 as f64 * 0.5;
         let target_cy = target_bounds.1 as f64 + target_bounds.3 as f64 * 0.5;
-        assert!((actual_cx - target_cx).abs() <= 0.5);
-        assert!((actual_cy - target_cy).abs() <= 0.5);
+        assert!((actual_cx - target_cx).abs() <= 2.0);
+        assert!((actual_cy - target_cy).abs() <= 2.0);
 
         let mut stack = LayerStack::new(160, 120);
         let idx = stack.add_layer(160, 120);
@@ -2576,9 +2658,111 @@ mod tests {
             font_px: 32.0,
             ..TextData::default()
         };
-        let scaled = scaled_text_data(&td, 64.0, 64.0);
+        let scaled = scaled_text_data(&td, 64.0, 64.0).expect("2048px is within the font limits");
         assert!((scaled.font_px - 2048.0).abs() < 0.01);
         assert!((scaled.stretch_x - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_scale_past_the_font_limit_gives_up_the_editable_metadata() {
+        let td = TextData {
+            content: "A".to_string(),
+            font_px: 32.0,
+            ..TextData::default()
+        };
+        // 32 × 200 is far past MAX_EDITABLE_FONT_PX. Silently clamping used to
+        // commit type much smaller than the preview showed.
+        assert!(scaled_text_data(&td, 200.0, 200.0).is_none());
+        // ...and the same below the minimum size.
+        assert!(scaled_text_data(&td, 0.05, 0.05).is_none());
+    }
+
+    #[test]
+    fn distorting_rotated_text_gives_up_the_editable_metadata() {
+        let td = TextData {
+            content: "Skew".to_string(),
+            font_px: 24.0,
+            rotation_deg: 30.0,
+            ..TextData::default()
+        };
+        let mut ts = identity_text_transform_state();
+        // A non-uniform scale runs along the canvas axes; font size and
+        // stretch_x run along the text's baseline. They only agree upright.
+        ts.scale_x = 2.0;
+        ts.scale_y = 1.0;
+        assert!(transformed_text_data(&td, &ts).is_none());
+
+        // The same distort on upright text stays editable.
+        let upright = TextData {
+            rotation_deg: 0.0,
+            ..td.clone()
+        };
+        assert!(transformed_text_data(&upright, &ts).is_some());
+
+        // So does a uniform scale on the rotated block.
+        ts.scale_y = 2.0;
+        assert!(transformed_text_data(&td, &ts).is_some());
+    }
+
+    /// A do-nothing `TransformState` for the text-metadata unit tests above
+    /// (they exercise `transformed_text_data`, never the bake).
+    fn identity_text_transform_state() -> TransformState {
+        TransformState {
+            layer_states: Vec::new(),
+            preview_layer_states: Vec::new(),
+            layer_idx: 0,
+            layer_id: 1,
+            orig_offset: (0, 0),
+            orig_w: 1,
+            orig_h: 1,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            angle_deg: 0.0,
+            translate_x: 0.0,
+            translate_y: 0.0,
+            pivot_cx: 0.0,
+            pivot_cy: 0.0,
+            drag_handle: None,
+            drag_start_cx: 0.0,
+            drag_start_cy: 0.0,
+            drag_start_sx: 1.0,
+            drag_start_sy: 1.0,
+            drag_start_angle: 0.0,
+            drag_start_tx: 0.0,
+            drag_start_ty: 0.0,
+            quad: None,
+            drag_start_quad: [(0.0, 0.0); 4],
+            mode: crate::app::state::TransformMode::Free,
+        }
+    }
+
+    /// The committed type must sit at the transform's image of the block's old
+    /// origin — the point its rotation, flips and stretch pivot around.
+    /// Centring the fresh ink inside the transformed bounding box instead
+    /// drifts whenever the ink does not fill that box (ragged or centred
+    /// paragraphs, tall descenders), which is the visible jump on Enter.
+    fn assert_text_placed_at_mapped_origin(
+        before: &TextData,
+        before_tiles: &TileMap,
+        before_offset: (i32, i32),
+        gesture: &TransformState,
+        committed: &crate::app::state::TransformCommitLayer,
+    ) {
+        let LayerType::Text(after_td) = &committed.layer_type else {
+            panic!("committed layer is no longer editable type");
+        };
+        let origin =
+            text_layer_origin(before, before_tiles, before_offset).expect("origin recovers");
+        let forward = transform_forward_homography(gesture).expect("affine gesture");
+        let moved = crate::core::geometry::Homography { m: forward }.apply(origin.0, origin.1);
+        let (_, delta) = rasterize_placed(after_td).expect("committed type rerasterizes");
+        assert_eq!(
+            committed.offset,
+            (
+                moved.x.round() as i32 + delta.0,
+                moved.y.round() as i32 + delta.1,
+            )
+        );
     }
 
     #[test]
@@ -2642,8 +2826,8 @@ mod tests {
             mode: crate::app::state::TransformMode::Free,
         };
 
-        let target_bounds =
-            transformed_content_bounds(&ts, &ts.layer_states[0]).expect("rotated bounds are valid");
+        let source_tiles = ts.layer_states[0].tiles.clone();
+        let gesture = ts.clone();
         let result = bake_transform_commit(
             DocumentId(1),
             ts,
@@ -2655,16 +2839,13 @@ mod tests {
             panic!("rotated text stays editable");
         };
         assert!((after_td.rotation_deg - 30.0).abs() < 0.01);
-        let (min_x, min_y, max_x, max_y) = result.layers[0]
-            .tiles
-            .content_bounds()
-            .expect("committed text has ink");
-        let actual_cx = result.layers[0].offset.0 as f64 + (min_x + max_x) as f64 * 0.5;
-        let actual_cy = result.layers[0].offset.1 as f64 + (min_y + max_y) as f64 * 0.5;
-        let target_cx = target_bounds.0 as f64 + target_bounds.2 as f64 * 0.5;
-        let target_cy = target_bounds.1 as f64 + target_bounds.3 as f64 * 0.5;
-        assert!((actual_cx - target_cx).abs() <= 0.5);
-        assert!((actual_cy - target_cy).abs() <= 0.5);
+        assert_text_placed_at_mapped_origin(
+            &td,
+            &source_tiles,
+            offset,
+            &gesture,
+            &result.layers[0],
+        );
     }
 
     #[test]
