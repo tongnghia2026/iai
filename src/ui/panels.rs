@@ -164,6 +164,60 @@ fn floating_panel(
         .map(|inner| inner.response)
 }
 
+/// Per-font preview texture for the font dropdown: rasterize the word "Sample"
+/// in the font's own typeface (white glyphs, straight alpha) once and cache the
+/// handle per font, tinting to the row's text colour at draw time. `None` when
+/// the font can't be loaded or has no glyphs for the sample. The cache lives in
+/// egui memory so each face is rasterized only the first time it scrolls into
+/// view — the list holds hundreds of system fonts.
+type FontPreviewCache = std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<String, Option<egui::TextureHandle>>>,
+>;
+
+fn font_preview_texture(
+    ctx: &egui::Context,
+    family: &crate::core::text::TextFontFamily,
+) -> Option<egui::TextureHandle> {
+    let cache_id = egui::Id::new("text_panel_font_preview_cache");
+    let cache: FontPreviewCache = ctx
+        .data_mut(|d| d.get_temp::<FontPreviewCache>(cache_id))
+        .unwrap_or_default();
+
+    let key = family.storage_name();
+    let mut guard = cache.lock().ok()?;
+    if let Some(hit) = guard.get(&key) {
+        return hit.clone();
+    }
+
+    let td = crate::core::text::TextData {
+        content: "Sample".to_string(),
+        font_family: family.clone(),
+        font_px: 18.0,
+        // White glyphs so the same texture serves both light and dark themes;
+        // the row tints it to the theme text colour when drawing.
+        color: [255, 255, 255, 255],
+        ..Default::default()
+    };
+    let tex = crate::core::text::rasterize(&td).and_then(|r| {
+        if r.width == 0 || r.height == 0 {
+            return None;
+        }
+        let img = egui::ColorImage::from_rgba_unmultiplied(
+            [r.width as usize, r.height as usize],
+            &r.rgba,
+        );
+        Some(ctx.load_texture(
+            format!("font_preview_{key}"),
+            img,
+            egui::TextureOptions::LINEAR,
+        ))
+    });
+    guard.insert(key, tex.clone());
+    drop(guard);
+    ctx.data_mut(|d| d.insert_temp(cache_id, cache));
+    tex
+}
+
 fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
     ui.add_space(4.0);
@@ -330,35 +384,95 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                         ui.cursor().min,
                         egui::vec2(list_width, LIST_HEIGHT),
                     );
+                    // The set of fonts to show, filtered by the query. Collected
+                    // up front so the ScrollArea can render only the visible rows
+                    // (`show_rows`): each row previews the sample in its OWN
+                    // typeface via a cached texture, so drawing every font every
+                    // frame would be far too costly.
+                    let matches: Vec<&TextFontFamily> = TextFontFamily::all()
+                        .iter()
+                        .filter(|family| {
+                            needle.is_empty() || family.name().to_lowercase().contains(&needle)
+                        })
+                        .collect();
+                    first_match = matches.first().map(|f| (*f).clone());
+
                     ui.scope_builder(egui::UiBuilder::new().max_rect(list_bounds), |ui| {
+                        if matches.is_empty() {
+                            ui.weak("No matching fonts");
+                            return;
+                        }
+                        const ROW_H: f32 = 26.0;
+                        ui.spacing_mut().item_spacing.y = 0.0;
                         egui::ScrollArea::vertical()
                             .id_salt("text_panel_font_family_list")
                             .max_height(LIST_HEIGHT)
-                            .show(ui, |ui| {
-                                let mut shown = 0;
-                                for family in TextFontFamily::all() {
-                                    if !needle.is_empty()
-                                        && !family.name().to_lowercase().contains(&needle)
-                                    {
+                            .show_rows(ui, ROW_H, matches.len(), |ui, range| {
+                                for i in range {
+                                    let Some(family) = matches.get(i).copied() else {
                                         continue;
-                                    }
-                                    shown += 1;
-                                    if first_match.is_none() {
-                                        first_match = Some(family.clone());
-                                    }
-                                    let row = ui.selectable_label(
-                                        &data.tool.text_font_family == family,
-                                        family.name(),
+                                    };
+                                    let is_sel = &data.tool.text_font_family == family;
+                                    let (rect, row) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), ROW_H),
+                                        egui::Sense::click(),
                                     );
                                     if row.clicked() {
                                         chosen = Some(family.clone());
-                                    } else if row.hovered() && &data.tool.text_font_family != family
-                                    {
+                                    } else if row.hovered() && !is_sel {
                                         hovered = Some(family.clone());
                                     }
-                                }
-                                if shown == 0 {
-                                    ui.weak("No matching fonts");
+                                    let vis = ui.style().interact_selectable(&row, is_sel);
+                                    if is_sel || row.hovered() {
+                                        ui.painter().rect_filled(
+                                            rect.shrink2(egui::vec2(1.0, 0.0)),
+                                            3.0,
+                                            vis.bg_fill,
+                                        );
+                                    }
+                                    let text_col = vis.text_color();
+                                    // Font name on the left, in the readable UI
+                                    // font so symbol/dingbat faces stay legible.
+                                    ui.painter().text(
+                                        rect.left_center() + egui::vec2(9.0, 0.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        family.name(),
+                                        egui::FontId::proportional(13.0),
+                                        text_col,
+                                    );
+                                    // "Sample" on the right, rendered in the font
+                                    // itself (Photoshop-style preview).
+                                    if let Some(tex) = font_preview_texture(ui.ctx(), family) {
+                                        let size = tex.size_vec2();
+                                        if size.x > 0.0 && size.y > 0.0 {
+                                            let h = (ROW_H - 9.0).min(size.y);
+                                            let w = size.x * (h / size.y);
+                                            let right = rect.right() - 12.0;
+                                            let col_left = rect.center().x + 4.0;
+                                            let img = egui::Rect::from_min_size(
+                                                egui::pos2(
+                                                    (right - w).max(col_left),
+                                                    rect.center().y - h / 2.0,
+                                                ),
+                                                egui::vec2(w, h),
+                                            );
+                                            // Clip to the preview column so a wide
+                                            // sample can't run under the name.
+                                            let clip = egui::Rect::from_min_max(
+                                                egui::pos2(col_left, rect.top()),
+                                                rect.right_bottom(),
+                                            );
+                                            ui.painter().with_clip_rect(clip).image(
+                                                tex.id(),
+                                                img,
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(0.0, 0.0),
+                                                    egui::pos2(1.0, 1.0),
+                                                ),
+                                                text_col,
+                                            );
+                                        }
+                                    }
                                 }
                             });
                     });
