@@ -192,7 +192,8 @@ fn font_preview_texture(
     let td = crate::core::text::TextData {
         content: "Sample".to_string(),
         font_family: family.clone(),
-        font_px: 18.0,
+        // Rasterize larger than it is drawn so the bigger preview stays crisp.
+        font_px: 30.0,
         // White glyphs so the same texture serves both light and dark themes;
         // the row tints it to the theme text colour when drawing.
         color: [255, 255, 255, 255],
@@ -363,8 +364,8 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let mut list_rect = egui::Rect::NOTHING;
 
     if open {
-        const LIST_HEIGHT: f32 = 370.0;
-        let list_width = field_width.max(280.0);
+        const LIST_HEIGHT: f32 = 480.0;
+        let list_width = field_width.max(380.0);
         let area = egui::Area::new(egui::Id::new("text_panel_font_area"))
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(resp.rect.left(), resp.rect.bottom() + 2.0))
@@ -402,7 +403,7 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                             ui.weak("No matching fonts");
                             return;
                         }
-                        const ROW_H: f32 = 26.0;
+                        const ROW_H: f32 = 34.0;
                         ui.spacing_mut().item_spacing.y = 0.0;
                         egui::ScrollArea::vertical()
                             .id_salt("text_panel_font_family_list")
@@ -430,14 +431,21 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                                             vis.bg_fill,
                                         );
                                     }
-                                    let text_col = vis.text_color();
+                                    // High contrast: the strongest text colour on
+                                    // a plain row, the selection's own text colour
+                                    // over the highlight so it stays readable.
+                                    let text_col = if is_sel || row.hovered() {
+                                        vis.text_color()
+                                    } else {
+                                        pal.text_primary
+                                    };
                                     // Font name on the left, in the readable UI
                                     // font so symbol/dingbat faces stay legible.
                                     ui.painter().text(
-                                        rect.left_center() + egui::vec2(9.0, 0.0),
+                                        rect.left_center() + egui::vec2(10.0, 0.0),
                                         egui::Align2::LEFT_CENTER,
                                         family.name(),
-                                        egui::FontId::proportional(13.0),
+                                        egui::FontId::proportional(15.0),
                                         text_col,
                                     );
                                     // "Sample" on the right, rendered in the font
@@ -445,10 +453,10 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                                     if let Some(tex) = font_preview_texture(ui.ctx(), family) {
                                         let size = tex.size_vec2();
                                         if size.x > 0.0 && size.y > 0.0 {
-                                            let h = (ROW_H - 9.0).min(size.y);
+                                            let h = (ROW_H - 10.0).min(size.y);
                                             let w = size.x * (h / size.y);
-                                            let right = rect.right() - 12.0;
-                                            let col_left = rect.center().x + 4.0;
+                                            let right = rect.right() - 14.0;
+                                            let col_left = rect.center().x + 6.0;
                                             let img = egui::Rect::from_min_size(
                                                 egui::pos2(
                                                     (right - w).max(col_left),
