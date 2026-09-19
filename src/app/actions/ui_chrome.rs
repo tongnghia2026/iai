@@ -22,12 +22,6 @@ impl App {
         if actions.chrome.toggle_color_panel {
             self.shell.ui.show_color_panel = !self.shell.ui.show_color_panel;
         }
-        if actions.chrome.toggle_text_panel {
-            self.shell.ui.show_text_panel = !self.shell.ui.show_text_panel;
-        }
-        if let Some(show) = actions.chrome.show_text_panel.take() {
-            self.shell.ui.show_text_panel = show;
-        }
         if actions.chrome.toggle_layer_panel {
             if self.shell.ui.show_layer_panel {
                 self.shell.ui.show_layer_panel = false;

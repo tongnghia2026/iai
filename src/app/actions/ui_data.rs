@@ -1743,7 +1743,6 @@ impl App {
                 show_library: self.shell.ui.show_library,
                 theme_mode: self.shell.ui.theme_mode,
                 show_color_panel: self.shell.ui.show_color_panel,
-                show_text_panel: self.shell.ui.show_text_panel,
                 show_layer_panel: self.shell.ui.show_layer_panel,
                 show_history_panel: self.shell.ui.show_history_panel,
                 show_info_panel: self.shell.ui.show_info_panel,

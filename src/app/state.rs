@@ -443,7 +443,6 @@ pub struct UiState {
     pub mail_merge_pattern: String,
     pub transform_interpolation: InterpolationMode,
     pub show_color_panel: bool,
-    pub show_text_panel: bool,
     pub show_layer_panel: bool,
     pub show_history_panel: bool,
     pub show_info_panel: bool,
@@ -1685,7 +1684,6 @@ impl App {
                     // (Window ▸ Color Panel), like the Levels dialog. Quick
                     // colours are always available in the right-edge strip.
                     show_color_panel: false,
-                    show_text_panel: false,
                     show_layer_panel: true,
                     show_history_panel: false,
                     show_info_panel: false,

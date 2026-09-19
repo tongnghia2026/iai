@@ -630,7 +630,6 @@ impl App {
             }
             PhysicalKey::Code(KeyCode::KeyT) if pressed && !self.edit.input.ctrl_held => {
                 self.edit.tools.select(ToolId::Text);
-                self.shell.ui.show_text_panel = true;
                 self.sync_cursor(event_loop);
                 if let Some(w) = &self.win.window {
                     w.request_redraw();

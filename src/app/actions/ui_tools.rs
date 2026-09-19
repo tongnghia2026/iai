@@ -332,9 +332,6 @@ impl App {
                 // Entering (or re-entering) a tool ends any Arrow branch group in
                 // progress, so the next trunk drag starts a fresh multi-arrow.
                 self.edit.arrow_multi_layer = None;
-                if id == crate::tools::ToolId::Text {
-                    self.shell.ui.show_text_panel = true;
-                }
                 if id == crate::tools::ToolId::Crop {
                     let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
                     let dpi = canvas.metadata.resolution_ppi;

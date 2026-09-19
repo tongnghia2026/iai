@@ -1,6 +1,6 @@
 use super::{UiActions, UiData};
 use crate::core::layer::{BlendMode, PaintTarget};
-use crate::core::text::{TextAlign, TextFontFamily};
+use crate::core::text::TextFontFamily;
 use egui;
 use egui_phosphor::regular as ph;
 
@@ -89,23 +89,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         );
         if !open {
             actions.chrome.toggle_color_panel = true;
-        }
-    }
-
-    if data.chrome.show_text_panel {
-        let mut open = true;
-        let response = floating_panel(
-            ctx,
-            "Text",
-            egui::pos2(default_x(420.0), 128.0),
-            420.0,
-            &mut open,
-            |ui| text_panel(ui, data, actions),
-        );
-        // `|=`: the font dropdown hangs outside the window and sets this itself.
-        actions.tool.text_panel_hovered |= response.is_some_and(|r| r.contains_pointer());
-        if !open {
-            actions.chrome.show_text_panel = Some(false);
         }
     }
 
@@ -219,26 +202,17 @@ fn font_preview_texture(
     tex
 }
 
-fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+/// The searchable font-family field plus its Photoshop-style preview dropdown.
+/// Lives here so the top options bar can host it inline (the old floating Text
+/// panel is gone). `field_width` sizes the text field; the dropdown sizes and
+/// positions itself below the field and stretches to the bottom bar.
+pub(super) fn font_family_field(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    actions: &mut UiActions,
+    field_width: f32,
+) {
     let pal = data.chrome.theme_mode.palette();
-    ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new("Type Tool")
-            .strong()
-            .color(pal.text_primary),
-    );
-
-    if !data.tool.text_font_available {
-        ui.colored_label(pal.warning, "No system font found");
-        return;
-    }
-
-    ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new("Font")
-            .size(10.5)
-            .color(pal.text_secondary),
-    );
     // Editable, searchable font field: the box itself is the search input, so the
     // current font name stays copy/paste-able and typing filters a dropdown list
     // below — instead of a read-only combo with a separate search box inside.
@@ -266,7 +240,6 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         current_name.clone()
     };
 
-    let field_width = ui.available_width().min(250.0);
     let resp = ui.add(
         egui::TextEdit::singleline(&mut buf)
             .id(field_id)
@@ -563,282 +536,11 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
 
     ui.data_mut(|d| d.insert_temp(open_id, open));
-
-    // Face / style (Regular, Bold, …) picker, to the right of the font field.
-    let field_rect = resp.rect;
-    let style_left = field_rect.right() + 6.0;
-    let style_width = (ui.max_rect().right() - style_left).max(90.0);
-    let style_rect = egui::Rect::from_min_size(
-        egui::pos2(style_left, field_rect.top()),
-        egui::vec2(style_width, field_rect.height()),
-    );
-    #[allow(deprecated)]
-    ui.allocate_ui_at_rect(style_rect, |ui| {
-        egui::ComboBox::from_id_salt("text_panel_font_face")
-            .selected_text(data.tool.text_font_family.style_name())
-            .width(style_width)
-            .show_ui(ui, |ui| {
-                for face in data.tool.text_font_family.faces() {
-                    let selected = face.style_name() == data.tool.text_font_family.style_name();
-                    if ui.selectable_label(selected, face.style_name()).clicked() {
-                        actions.tool.set_text_font_family = Some(face);
-                        // The chosen face already carries its real weight/slant;
-                        // avoid stacking the legacy faux Bold/Italic on top.
-                        actions.tool.set_text_bold = Some(false);
-                        actions.tool.set_text_italic = Some(false);
-                    }
-                }
-            });
-    });
-
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Size")
-                .size(10.5)
-                .color(pal.text_secondary),
-        );
-        let mut px = data.tool.text_font_px;
-        if ui
-            .add(
-                egui::DragValue::new(&mut px)
-                    .range(
-                        crate::core::text::MIN_EDITABLE_FONT_PX
-                            ..=crate::core::text::MAX_EDITABLE_FONT_PX,
-                    )
-                    .suffix(" px")
-                    .speed(0.5),
-            )
-            .changed()
-        {
-            actions.tool.set_text_font_px = Some(px);
-        }
-    });
-
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Style")
-                .size(10.5)
-                .color(pal.text_secondary),
-        );
-        for (selected, icon, tip, target) in [
-            (data.tool.text_bold, ph::TEXT_B, "Bold", 0u8),
-            (data.tool.text_italic, ph::TEXT_ITALIC, "Italic", 1),
-            (data.tool.text_underline, ph::TEXT_UNDERLINE, "Underline", 2),
-        ] {
-            let btn = egui::Button::new(egui::RichText::new(icon).size(14.0))
-                .fill(if selected {
-                    pal.accent_selected_bg
-                } else {
-                    pal.button_bg
-                })
-                .min_size(egui::vec2(28.0, 22.0));
-            if ui.add(btn).on_hover_text(tip).clicked() {
-                match target {
-                    0 => actions.tool.set_text_bold = Some(!data.tool.text_bold),
-                    1 => actions.tool.set_text_italic = Some(!data.tool.text_italic),
-                    _ => actions.tool.set_text_underline = Some(!data.tool.text_underline),
-                }
-            }
-        }
-    });
-
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Align")
-                .size(10.5)
-                .color(pal.text_secondary),
-        );
-        for (align, icon, tip) in [
-            (TextAlign::Left, ph::TEXT_ALIGN_LEFT, "Left align"),
-            (TextAlign::Center, ph::TEXT_ALIGN_CENTER, "Center align"),
-            (TextAlign::Right, ph::TEXT_ALIGN_RIGHT, "Right align"),
-        ] {
-            let selected = data.tool.text_align == align;
-            let btn = egui::Button::new(egui::RichText::new(icon).size(14.0))
-                .fill(if selected {
-                    pal.accent_selected_bg
-                } else {
-                    pal.button_bg
-                })
-                .min_size(egui::vec2(28.0, 22.0));
-            if ui.add(btn).on_hover_text(tip).clicked() {
-                actions.tool.set_text_align = Some(align);
-            }
-        }
-    });
-
-    // Change-case buttons — the discoverable form of the Shift+F3 shortcut.
-    // Only meaningful while a text session is open (recases the selection, or
-    // the whole text when nothing is selected), so they're disabled otherwise.
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Case")
-                .size(10.5)
-                .color(pal.text_secondary),
-        );
-        for (case, label, tip) in [
-            (crate::core::text::TextCase::Lower, "aa", "lowercase"),
-            (crate::core::text::TextCase::Upper, "AA", "UPPERCASE"),
-            (
-                crate::core::text::TextCase::Title,
-                "Aa",
-                "Capitalize Each Word",
-            ),
-        ] {
-            let btn = egui::Button::new(egui::RichText::new(label).size(12.5))
-                .fill(pal.button_bg)
-                .min_size(egui::vec2(30.0, 22.0));
-            if ui
-                .add_enabled(data.tool.text_editing, btn)
-                .on_hover_text(format!("{tip} (Shift+F3 cycles)"))
-                .clicked()
-            {
-                actions.tool.set_text_case = Some(case);
-            }
-        }
-    });
-
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Type")
-                .size(10.5)
-                .color(pal.text_secondary),
-        );
-        ui.label(
-            egui::RichText::new(ph::ARROWS_OUT_LINE_VERTICAL)
-                .size(13.0)
-                .color(pal.text_secondary),
-        )
-        .on_hover_text("Line height");
-        let mut line_height = data.tool.text_line_height;
-        if ui
-            .add(
-                egui::DragValue::new(&mut line_height)
-                    .range(0.5..=4.0)
-                    .speed(0.02),
-            )
-            .on_hover_text("Line height")
-            .changed()
-        {
-            actions.tool.set_text_line_height = Some(line_height);
-        }
-        if let Some(v) = text_preset_menu(
-            ui,
-            "text_line_height_presets",
-            data.tool.text_line_height,
-            &[3.0, 2.5, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6, 0.5],
-            |v| format!("{v:.2}"),
-        ) {
-            actions.tool.set_text_line_height = Some(v);
-        }
-
-        ui.label(
-            egui::RichText::new(ph::TEXT_INDENT)
-                .size(13.0)
-                .color(pal.text_secondary),
-        )
-        .on_hover_text("Tracking");
-        let mut tracking = data.tool.text_tracking_px;
-        if ui
-            .add(
-                egui::DragValue::new(&mut tracking)
-                    .range(-200.0..=500.0)
-                    .suffix(" px")
-                    .speed(0.2),
-            )
-            .on_hover_text("Tracking")
-            .changed()
-        {
-            actions.tool.set_text_tracking_px = Some(tracking);
-        }
-        // Positive values on top, 0 in the middle, negatives below.
-        if let Some(v) = text_preset_menu(
-            ui,
-            "text_tracking_presets",
-            data.tool.text_tracking_px,
-            &[
-                200.0, 100.0, 75.0, 50.0, 25.0, 10.0, 5.0, 0.0, -5.0, -10.0, -25.0, -50.0, -75.0,
-                -100.0,
-            ],
-            |v| {
-                if v == 0.0 {
-                    "0 px".to_string()
-                } else {
-                    format!("{v:+.0} px")
-                }
-            },
-        ) {
-            actions.tool.set_text_tracking_px = Some(v);
-        }
-    });
-
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Opacity")
-                .size(10.5)
-                .color(pal.text_secondary),
-        );
-        let mut opacity = data.tool.text_opacity * 100.0;
-        if ui
-            .add(
-                egui::DragValue::new(&mut opacity)
-                    .range(0.0..=100.0)
-                    .suffix("%")
-                    .speed(0.5),
-            )
-            .changed()
-        {
-            actions.tool.set_text_opacity = Some(opacity / 100.0);
-        }
-    });
-
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Color")
-                .size(10.5)
-                .color(pal.text_secondary),
-        );
-        let fill = egui::Color32::from_rgb(
-            data.tool.text_color[0],
-            data.tool.text_color[1],
-            data.tool.text_color[2],
-        );
-        if ui
-            .add(
-                egui::Button::new("")
-                    .fill(fill)
-                    .stroke(egui::Stroke::new(1.0_f32, pal.border_subtle))
-                    .min_size(egui::vec2(42.0, 22.0))
-                    .corner_radius(2.0),
-            )
-            .on_hover_text("Text color")
-            .clicked()
-        {
-            actions.dialogs.open_paint_color_dialog = Some(2);
-        }
-        let [r, g, b, _] = data.tool.text_color;
-        ui.label(
-            egui::RichText::new(format!("#{r:02X}{g:02X}{b:02X}"))
-                .monospace()
-                .small()
-                .color(pal.text_secondary),
-        );
-    });
-
-    // Commit / Cancel live only on the top options bar now — the duplicate
-    // pair that used to sit here in the Text panel was redundant.
 }
 
 /// Small ▾ button next to a value field; opens a preset list (callers order it
 /// positives-first / 0 / negatives). Returns the picked value.
-fn text_preset_menu(
+pub(super) fn text_preset_menu(
     ui: &mut egui::Ui,
     id: &str,
     current: f32,

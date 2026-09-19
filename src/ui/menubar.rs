@@ -1407,12 +1407,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.chrome.toggle_color_panel = true;
                         }
                         if ui
-                            .checkbox(&mut data.chrome.show_text_panel.clone(), "Text Panel")
-                            .clicked()
-                        {
-                            actions.chrome.toggle_text_panel = true;
-                        }
-                        if ui
                             .checkbox(&mut data.chrome.show_layer_panel.clone(), "Layer Panel")
                             .clicked()
                         {

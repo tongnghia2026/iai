@@ -810,7 +810,6 @@ impl App {
         let caret = Some(nfc_chars.len());
 
         self.edit.tools.select(ToolId::Text);
-        self.shell.ui.show_text_panel = true;
         self.edit.text_edit = Some(TextEditState {
             doc_id,
             layer_id,

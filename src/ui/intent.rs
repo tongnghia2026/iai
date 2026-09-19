@@ -829,7 +829,6 @@ pub struct ChromeIntent {
     /// screen; `false` returns to the editor.
     pub show_library: Option<bool>,
     pub toggle_color_panel: bool,
-    pub toggle_text_panel: bool,
     pub toggle_layer_panel: bool,
     pub show_layer_panel: Option<bool>,
     pub toggle_history_panel: bool,
@@ -846,7 +845,6 @@ pub struct ChromeIntent {
     pub toggle_lock_guides: bool,
     pub toggle_snap: bool,
     pub clear_guides: bool,
-    pub show_text_panel: Option<bool>,
     pub cursor_left: bool,
     pub cursor_entered: bool,
     pub window_minimize: bool,
