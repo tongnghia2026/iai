@@ -364,11 +364,18 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let mut list_rect = egui::Rect::NOTHING;
 
     if open {
-        const LIST_HEIGHT: f32 = 480.0;
         let list_width = field_width.max(380.0);
+        // Stretch the list from just under the field down to just above the
+        // bottom chrome (status strip + page-tabs bar), so it fills the window
+        // height instead of stopping at a fixed size.
+        let list_top = resp.rect.bottom() + 2.0;
+        // statusbar (22) + artboard tabs bar (42) + a gap that also covers the
+        // popup frame's own padding.
+        const BOTTOM_CHROME: f32 = super::statusbar::HEIGHT + 42.0 + 18.0;
+        let list_height = (ui.ctx().viewport_rect().bottom() - BOTTOM_CHROME - list_top).max(220.0);
         let area = egui::Area::new(egui::Id::new("text_panel_font_area"))
             .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(resp.rect.left(), resp.rect.bottom() + 2.0))
+            .fixed_pos(egui::pos2(resp.rect.left(), list_top))
             .constrain(true)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -383,7 +390,7 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                     // here rather than inherited from the previous frame.
                     let list_bounds = egui::Rect::from_min_size(
                         ui.cursor().min,
-                        egui::vec2(list_width, LIST_HEIGHT),
+                        egui::vec2(list_width, list_height),
                     );
                     // The set of fonts to show, filtered by the query. Collected
                     // up front so the ScrollArea can render only the visible rows
@@ -407,7 +414,7 @@ fn text_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         egui::ScrollArea::vertical()
                             .id_salt("text_panel_font_family_list")
-                            .max_height(LIST_HEIGHT)
+                            .max_height(list_height)
                             .show_rows(ui, ROW_H, matches.len(), |ui, range| {
                                 for i in range {
                                     let Some(family) = matches.get(i).copied() else {
