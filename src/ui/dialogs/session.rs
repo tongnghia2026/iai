@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// Fixed inner width for the exit/close confirmation dialogs, so they keep a
+/// constant size and centred position regardless of the document behind them.
+const EXIT_DIALOG_WIDTH: f32 = 384.0;
+
 pub(crate) fn preferences_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut UiActions) {
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut do_close = enter_pressed || esc_pressed;
@@ -122,6 +126,10 @@ pub(crate) fn exit_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiAc
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .order(DIALOG_ORDER)
         .show(ctx, |ui| {
+            // Pin the width so the dialog is the same size and stays dead-centre
+            // no matter which document (or how long its title) triggers it — the
+            // title is truncated to one line so it can't stretch the window.
+            ui.set_width(EXIT_DIALOG_WIDTH);
             ui.add_space(8.0);
             let title = data
                 .doc
@@ -129,7 +137,9 @@ pub(crate) fn exit_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiAc
                 .get(data.doc.active_doc_idx)
                 .map(String::as_str)
                 .unwrap_or("Untitled");
-            ui.label(format!("Save changes to “{title}” before exiting?"));
+            ui.add(
+                egui::Label::new(format!("Save changes to “{title}” before exiting?")).truncate(),
+            );
             ui.add_space(16.0);
             ui.horizontal(|ui| {
                 if ui.button("Save & Exit").clicked() {
@@ -169,6 +179,7 @@ pub(crate) fn close_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut Ui
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .order(DIALOG_ORDER)
         .show(ctx, |ui| {
+            ui.set_width(EXIT_DIALOG_WIDTH);
             ui.add_space(8.0);
             ui.label("You have unsaved changes. Do you want to save before closing?");
             ui.add_space(16.0);
