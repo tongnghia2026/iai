@@ -2766,9 +2766,106 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
 
     ui.separator();
-    // Secondary typography (case, line height, tracking, opacity) tucked behind a
-    // compact "Character" popup so the bar stays lean.
-    text_character_popup(ui, data, actions, &pal);
+    // Line height: icon + value + a ▾ list of common presets.
+    ui.label(top_options_icon(ph::ARROWS_OUT_LINE_VERTICAL).color(pal.text_secondary))
+        .on_hover_text("Line height");
+    let mut line_height = data.tool.text_line_height;
+    if ui
+        .add(
+            egui::DragValue::new(&mut line_height)
+                .range(0.5..=4.0)
+                .speed(0.02),
+        )
+        .on_hover_text("Line height")
+        .changed()
+    {
+        actions.tool.set_text_line_height = Some(line_height);
+    }
+    if let Some(v) = crate::ui::panels::text_preset_menu(
+        ui,
+        "text_line_height_presets",
+        data.tool.text_line_height,
+        &[3.0, 2.5, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6, 0.5],
+        |v| format!("{v:.2}"),
+    ) {
+        actions.tool.set_text_line_height = Some(v);
+    }
+
+    ui.separator();
+    // Tracking (letter spacing): icon + value + presets.
+    ui.label(top_options_icon(ph::TEXT_INDENT).color(pal.text_secondary))
+        .on_hover_text("Tracking (letter spacing)");
+    let mut tracking = data.tool.text_tracking_px;
+    if ui
+        .add(
+            egui::DragValue::new(&mut tracking)
+                .range(-200.0..=500.0)
+                .suffix(" px")
+                .speed(0.2),
+        )
+        .on_hover_text("Tracking (letter spacing)")
+        .changed()
+    {
+        actions.tool.set_text_tracking_px = Some(tracking);
+    }
+    if let Some(v) = crate::ui::panels::text_preset_menu(
+        ui,
+        "text_tracking_presets",
+        data.tool.text_tracking_px,
+        &[
+            200.0, 100.0, 75.0, 50.0, 25.0, 10.0, 5.0, 0.0, -5.0, -10.0, -25.0, -50.0, -75.0,
+            -100.0,
+        ],
+        |v| {
+            if v == 0.0 {
+                "0 px".to_string()
+            } else {
+                format!("{v:+.0} px")
+            }
+        },
+    ) {
+        actions.tool.set_text_tracking_px = Some(v);
+    }
+
+    ui.separator();
+    // Change case (aa / AA / Aa) — recases the selection, or the whole text when
+    // nothing is selected, so it only works while a text session is open.
+    for (case, label, tip) in [
+        (crate::core::text::TextCase::Lower, "aa", "lowercase"),
+        (crate::core::text::TextCase::Upper, "AA", "UPPERCASE"),
+        (
+            crate::core::text::TextCase::Title,
+            "Aa",
+            "Capitalize Each Word",
+        ),
+    ] {
+        let b = egui::Button::new(egui::RichText::new(label).size(12.5))
+            .fill(pal.button_bg)
+            .min_size(egui::vec2(26.0, 22.0));
+        if ui
+            .add_enabled(data.tool.text_editing, b)
+            .on_hover_text(format!("{tip} (Shift+F3 cycles)"))
+            .clicked()
+        {
+            actions.tool.set_text_case = Some(case);
+        }
+    }
+
+    ui.separator();
+    // Opacity.
+    ui.label("Opacity:");
+    let mut opacity = data.tool.text_opacity * 100.0;
+    if ui
+        .add(
+            egui::DragValue::new(&mut opacity)
+                .range(0.0..=100.0)
+                .suffix("%")
+                .speed(0.5),
+        )
+        .changed()
+    {
+        actions.tool.set_text_opacity = Some(opacity / 100.0);
+    }
 
     if data.tool.text_editing {
         ui.separator();
@@ -2808,155 +2905,6 @@ fn text_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 .color(pal.text_disabled),
         );
     }
-}
-
-/// The "Character" popup on the text options bar: case, line height, tracking
-/// and opacity — the controls that used to fill the floating Text panel, now
-/// one click away without cluttering the bar.
-fn text_character_popup(
-    ui: &mut egui::Ui,
-    data: &UiData,
-    actions: &mut UiActions,
-    pal: &crate::ui::theme::Palette,
-) {
-    ui.menu_button(top_options_icon(ph::TEXT_AA).color(pal.icon), |ui| {
-        ui.set_min_width(220.0);
-
-        // Change case — only meaningful while a text session is open (recases the
-        // selection, or the whole text when nothing is selected).
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Case")
-                    .size(10.5)
-                    .color(pal.text_secondary),
-            );
-            for (case, label, tip) in [
-                (crate::core::text::TextCase::Lower, "aa", "lowercase"),
-                (crate::core::text::TextCase::Upper, "AA", "UPPERCASE"),
-                (
-                    crate::core::text::TextCase::Title,
-                    "Aa",
-                    "Capitalize Each Word",
-                ),
-            ] {
-                let b = egui::Button::new(egui::RichText::new(label).size(12.5))
-                    .fill(pal.button_bg)
-                    .min_size(egui::vec2(30.0, 22.0));
-                if ui
-                    .add_enabled(data.tool.text_editing, b)
-                    .on_hover_text(format!("{tip} (Shift+F3 cycles)"))
-                    .clicked()
-                {
-                    actions.tool.set_text_case = Some(case);
-                }
-            }
-        });
-
-        ui.separator();
-        // Line height.
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(ph::ARROWS_OUT_LINE_VERTICAL)
-                    .size(13.0)
-                    .color(pal.text_secondary),
-            )
-            .on_hover_text("Line height");
-            ui.label(
-                egui::RichText::new("Line")
-                    .size(10.5)
-                    .color(pal.text_secondary),
-            );
-            let mut line_height = data.tool.text_line_height;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut line_height)
-                        .range(0.5..=4.0)
-                        .speed(0.02),
-                )
-                .changed()
-            {
-                actions.tool.set_text_line_height = Some(line_height);
-            }
-            if let Some(v) = crate::ui::panels::text_preset_menu(
-                ui,
-                "text_line_height_presets",
-                data.tool.text_line_height,
-                &[3.0, 2.5, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6, 0.5],
-                |v| format!("{v:.2}"),
-            ) {
-                actions.tool.set_text_line_height = Some(v);
-            }
-        });
-
-        // Tracking.
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(ph::TEXT_INDENT)
-                    .size(13.0)
-                    .color(pal.text_secondary),
-            )
-            .on_hover_text("Tracking");
-            ui.label(
-                egui::RichText::new("Track")
-                    .size(10.5)
-                    .color(pal.text_secondary),
-            );
-            let mut tracking = data.tool.text_tracking_px;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut tracking)
-                        .range(-200.0..=500.0)
-                        .suffix(" px")
-                        .speed(0.2),
-                )
-                .changed()
-            {
-                actions.tool.set_text_tracking_px = Some(tracking);
-            }
-            if let Some(v) = crate::ui::panels::text_preset_menu(
-                ui,
-                "text_tracking_presets",
-                data.tool.text_tracking_px,
-                &[
-                    200.0, 100.0, 75.0, 50.0, 25.0, 10.0, 5.0, 0.0, -5.0, -10.0, -25.0, -50.0,
-                    -75.0, -100.0,
-                ],
-                |v| {
-                    if v == 0.0 {
-                        "0 px".to_string()
-                    } else {
-                        format!("{v:+.0} px")
-                    }
-                },
-            ) {
-                actions.tool.set_text_tracking_px = Some(v);
-            }
-        });
-
-        ui.separator();
-        // Opacity.
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Opacity")
-                    .size(10.5)
-                    .color(pal.text_secondary),
-            );
-            let mut opacity = data.tool.text_opacity * 100.0;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut opacity)
-                        .range(0.0..=100.0)
-                        .suffix("%")
-                        .speed(0.5),
-                )
-                .changed()
-            {
-                actions.tool.set_text_opacity = Some(opacity / 100.0);
-            }
-        });
-    })
-    .response
-    .on_hover_text("Character — case, line height, tracking, opacity");
 }
 
 fn transform_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
