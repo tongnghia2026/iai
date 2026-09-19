@@ -343,6 +343,16 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
                     section(
                         ui,
+                        "Xếp ảnh in",
+                        "Nhân bản ảnh đang mở thành trang in 600dpi — mỗi tấm một layer.",
+                        true,
+                        |ui| {
+                            impose_section(ui, data, &mut st, &mut changed, actions);
+                        },
+                    );
+
+                    section(
+                        ui,
                         "AI Auto Retouch",
                         "Model AI chạy hoàn toàn offline bằng ONNX Runtime; stage thiếu model mới dùng CPU fallback.",
                         true,
@@ -355,16 +365,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 &mut changed,
                                 actions,
                             );
-                        },
-                    );
-
-                    section(
-                        ui,
-                        "Xếp ảnh in",
-                        "Nhân bản ảnh đang mở thành trang in 600dpi — mỗi tấm một layer.",
-                        true,
-                        |ui| {
-                            impose_section(ui, data, &mut st, &mut changed, actions);
                         },
                     );
 
