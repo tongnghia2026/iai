@@ -71,6 +71,40 @@ fn prepare_pdf_pixels(
     Ok((output.into_raw(), output_w, output_h, target_dpi as f32))
 }
 
+/// Encode a set of page snapshots into one multi-page PDF with native vector
+/// overlays, optional downsampling, press marks and an embedded ICC profile.
+/// Runs on the export worker thread (no `App` access), so both the single-doc
+/// page export and the "combine all tabs" export share one encoding path.
+fn build_snapshots_pdf(
+    snapshots: Vec<Canvas>,
+    target_dpi: u32,
+    marks: crate::core::print::PrintMarks,
+    icc: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    let count = snapshots.len();
+    let mut encoded = Vec::with_capacity(count);
+    let mut vectors = Vec::with_capacity(count);
+    for canvas in snapshots {
+        let selection = crate::core::print::collect_pdf_vectors(&canvas);
+        let rgba = crate::core::print::pdf_raster_base(&canvas, &selection);
+        let (rgba, width, height, dpi) = prepare_pdf_pixels(
+            rgba,
+            canvas.width,
+            canvas.height,
+            canvas.metadata.resolution_ppi,
+            target_dpi,
+        )
+        .map_err(|e| format!("Lỗi chuẩn bị trang PDF: {e}"))?;
+        let page = crate::core::print::encode_pdf_page(&rgba, width, height, dpi)
+            .map_err(|e| format!("Lỗi mã hoá trang PDF: {e}"))?
+            .with_vector_space(canvas.width, canvas.height);
+        encoded.push(page);
+        vectors.push(selection.objects);
+    }
+    crate::core::print::build_pdf_multipage_encoded(&encoded, &vectors, marks, icc.as_deref())
+        .map_err(|e| format!("Lỗi tạo PDF: {e}"))
+}
+
 impl App {
     /// Save requested by an exit/close confirmation. A document with multiple
     /// layers defaults to an editable `.iai` project. A flat, single-layer
@@ -857,6 +891,14 @@ impl App {
         if !flow_text_active && idx < self.docs.documents.len() {
             self.docs.documents[idx].reconcile_pdf_page_modified();
         }
+        // Batch: combine every open tab into a single PDF (each tab's page(s) →
+        // PDF pages, in tab order). Handled before the per-document page scope,
+        // which only describes the active document.
+        if self.shell.ui.pdf_export_scope == PdfExportScope::AllOpenDocuments {
+            let target_dpi = self.shell.ui.pdf_export_dpi;
+            self.export_all_open_documents_pdf(target_dpi);
+            return;
+        }
         let Some(doc) = self.docs.documents.get(idx) else {
             return;
         };
@@ -882,6 +924,10 @@ impl App {
             PdfExportScope::CurrentPage => Ok(vec![current]),
             PdfExportScope::Range => {
                 crate::ui::intent::parse_pdf_page_range(&self.shell.ui.pdf_export_range, page_count)
+            }
+            // Combining all tabs is dispatched above with an early return.
+            PdfExportScope::AllOpenDocuments => {
+                unreachable!("AllOpenDocuments is handled before the page-scope match")
             }
         };
         let pages = match pages {
@@ -995,38 +1041,90 @@ impl App {
             .then(crate::core::cms::srgb_icc_bytes);
         let n = snapshots.len();
         let rx = spawn_pdf_export(parent, stem, move |path| {
-            let mut encoded = Vec::with_capacity(n);
-            let mut vectors = Vec::with_capacity(n);
-            for canvas in snapshots {
-                let selection = crate::core::print::collect_pdf_vectors(&canvas);
-                let rgba = crate::core::print::pdf_raster_base(&canvas, &selection);
-                let (rgba, width, height, dpi) = prepare_pdf_pixels(
-                    rgba,
-                    canvas.width,
-                    canvas.height,
-                    canvas.metadata.resolution_ppi,
-                    target_dpi,
-                )
-                .map_err(|e| format!("Lỗi chuẩn bị trang PDF: {e}"))?;
-                let page = crate::core::print::encode_pdf_page(&rgba, width, height, dpi)
-                    .map_err(|e| format!("Lỗi mã hoá trang PDF: {e}"))?
-                    .with_vector_space(canvas.width, canvas.height);
-                encoded.push(page);
-                vectors.push(selection.objects);
-            }
-            let bytes = crate::core::print::build_pdf_multipage_encoded(
-                &encoded,
-                &vectors,
-                marks,
-                icc.as_deref(),
-            )
-            .map_err(|e| format!("Lỗi tạo PDF: {e}"))?;
+            let bytes = build_snapshots_pdf(snapshots, target_dpi, marks, icc)?;
             std::fs::write(&path, bytes).map_err(|e| format!("Lỗi ghi PDF: {e}"))?;
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             Ok(format!("Đã xuất PDF {n} trang: {name}"))
         });
         self.jobs.pending_pdf_export = Some(rx);
         self.shell.status_msg = format!("Đang xuất PDF {n} trang…");
+        if let Some(window) = &self.win.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Combine every open document tab into one PDF — each tab contributes all of
+    /// its page canvases, in tab order — for the "many scanned photos → one PDF"
+    /// workflow. Flowing-text tabs (whose canvas is only a placeholder) are
+    /// skipped. The active tab's pending edits are already committed by
+    /// [`Self::run_pdf_export`] before this runs; inactive tabs are exported from
+    /// their CPU-resident canvases.
+    fn export_all_open_documents_pdf(&mut self, target_dpi: u32) {
+        let mut snapshots: Vec<Canvas> = Vec::new();
+        let mut included_docs = 0usize;
+        for doc in &self.docs.documents {
+            // A flowing-text tab has no raster page to place; leave it out rather
+            // than inserting its 1×1 compatibility canvas as a blank page.
+            if doc.is_flow_text() {
+                continue;
+            }
+            let canvases = doc.all_page_canvases();
+            let mut added_page = false;
+            for page_index in 0..canvases.len() {
+                let snapshot = if let Some(merged) = doc.page_render_canvas(page_index) {
+                    merged
+                } else if let Some(&canvas) = canvases.get(page_index) {
+                    canvas.export_snapshot()
+                } else {
+                    continue;
+                };
+                snapshots.push(snapshot);
+                added_page = true;
+            }
+            if added_page {
+                included_docs += 1;
+            }
+        }
+        if snapshots.is_empty() {
+            self.shell.status_msg = "Không có tài liệu nào để gộp PDF".to_string();
+            return;
+        }
+
+        // Suggest a filename from the active tab's folder/name, defaulting to a
+        // neutral batch name.
+        let idx = self.docs.active_doc_idx;
+        let stem = self
+            .docs
+            .documents
+            .get(idx)
+            .and_then(|doc| doc.path.as_deref().or(self.docs.current_file.as_deref()))
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("tai-lieu")
+            .to_string();
+
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let parent = file_io::dialog_parent(window);
+        let marks = self.shell.ui.export_pdf_marks;
+        let icc = self
+            .shell
+            .ui
+            .export_embed_icc
+            .then(crate::core::cms::srgb_icc_bytes);
+        let page_total = snapshots.len();
+        let doc_total = included_docs;
+        let rx = spawn_pdf_export(parent, stem, move |path| {
+            let bytes = build_snapshots_pdf(snapshots, target_dpi, marks, icc)?;
+            std::fs::write(&path, bytes).map_err(|e| format!("Lỗi ghi PDF: {e}"))?;
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            Ok(format!(
+                "Đã gộp {doc_total} tài liệu ({page_total} trang) thành PDF: {name}"
+            ))
+        });
+        self.jobs.pending_pdf_export = Some(rx);
+        self.shell.status_msg = format!("Đang gộp {doc_total} tài liệu thành PDF…");
         if let Some(window) = &self.win.window {
             window.request_redraw();
         }

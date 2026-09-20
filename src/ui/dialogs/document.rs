@@ -904,7 +904,18 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
     } else {
         data.doc.page_count.max(1)
     };
-    let scope = data.dialogs.pdf_export_scope;
+    // Batch export (combine every open tab into one PDF) only makes sense for a
+    // plain image/artboard document with several tabs open — the scanned-photo
+    // workflow. It is hidden for imported-PDF and flowing-text documents.
+    let open_doc_count = data.doc.doc_count;
+    let can_batch_docs = !is_pdf_import && !is_flow_text && open_doc_count > 1;
+    let mut scope = data.dialogs.pdf_export_scope;
+    // A remembered "all tabs" pick is meaningless once the extra tabs are closed
+    // (or when the active document can't batch); fall back to "all pages".
+    if scope == PdfExportScope::AllOpenDocuments && !can_batch_docs {
+        scope = PdfExportScope::AllPages;
+        actions.doc.set_pdf_export_scope = Some(PdfExportScope::AllPages);
+    }
     let range_error = if scope == PdfExportScope::Range {
         crate::ui::intent::parse_pdf_page_range(&data.dialogs.pdf_export_range, page_count).err()
     } else {
@@ -918,6 +929,7 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
             crate::ui::intent::parse_pdf_page_range(&data.dialogs.pdf_export_range, page_count)
                 .map_or(0, |pages| pages.len())
         }
+        PdfExportScope::AllOpenDocuments => open_doc_count,
     };
 
     modal_overlay(ctx, "pdf_export_dialog_overlay");
@@ -1021,7 +1033,27 @@ pub(crate) fn pdf_export_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                         .size(10.0),
                 );
             }
-            if range_valid {
+            // Batch: combine every open tab into one PDF (each photo → a page).
+            if can_batch_docs {
+                if ui
+                    .radio(
+                        scope == PdfExportScope::AllOpenDocuments,
+                        format!("Gộp tất cả tài liệu đang mở ({open_doc_count} tab)"),
+                    )
+                    .clicked()
+                {
+                    actions.doc.set_pdf_export_scope = Some(PdfExportScope::AllOpenDocuments);
+                }
+            }
+            if scope == PdfExportScope::AllOpenDocuments {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Sẽ gộp {open_doc_count} tài liệu đang mở thành một PDF, mỗi tab một trang theo thứ tự trên thanh tab."
+                    ))
+                    .color(egui::Color32::GRAY)
+                    .size(10.0),
+                );
+            } else if range_valid {
                 ui.label(
                     egui::RichText::new(format!("Sẽ xuất {selected_count} trang theo thứ tự tài liệu."))
                         .color(egui::Color32::GRAY)

@@ -16,6 +16,10 @@ pub enum PdfExportScope {
     CurrentPage,
     /// The pages named by the range text (e.g. "1-3,5").
     Range,
+    /// Every open document tab, combined into one PDF — each document's page(s)
+    /// become PDF pages, in tab order. Batches many scanned-photo tabs into a
+    /// single document. Only offered when several tabs are open.
+    AllOpenDocuments,
 }
 
 /// Parse a 1-based page range such as `1-3, 5, 8-10` into unique, ascending
