@@ -110,6 +110,11 @@ impl App {
                         return;
                     };
                     let active = self.docs.active_doc_idx;
+                    let engine = if self.jobs.select_subject.used_gpu() {
+                        "GPU"
+                    } else {
+                        "CPU"
+                    };
                     let n = {
                         let c = &self.docs.documents[idx].canvas;
                         (c.width * c.height) as usize
@@ -134,7 +139,7 @@ impl App {
                         }
                         if idx == active {
                             self.apply_canvas_event(CanvasEvent::SelectionChanged);
-                            self.shell.status_msg = "Select Subject done".to_string();
+                            self.shell.status_msg = format!("Select Subject xong ({engine})");
                         } else {
                             // Non-active tab: refresh its bbox now so the mask is
                             // correct when the user switches to it (switch_to_doc
@@ -142,7 +147,7 @@ impl App {
                             self.docs.documents[idx].canvas.selection.refresh_bbox();
                             let title = self.docs.documents[idx].title.clone();
                             self.shell.status_msg = format!(
-                                "Select Subject xong ở tab \"{title}\" — chuyển qua tab đó để xem"
+                                "Select Subject xong ({engine}) ở tab \"{title}\" — chuyển qua tab đó để xem"
                             );
                         }
                     }

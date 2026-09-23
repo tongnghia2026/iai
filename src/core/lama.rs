@@ -290,13 +290,11 @@ pub fn inpaint(rgba: &mut [u8], w: usize, h: usize, hole: &[bool]) -> bool {
         };
         if guard.is_none() {
             let path = model_path();
-            let built = (|| -> Result<OrtSession, String> {
-                let mut b = OrtSession::builder().map_err(|e| format!("ORT builder: {e}"))?;
-                b.commit_from_file(&path)
-                    .map_err(|e| format!("ORT load: {e}"))
-            })();
-            match built {
-                Ok(s) => *guard = Some(s),
+            // Run on the GPU (DirectML) when a real adapter is present; the helper
+            // falls back to CPU on its own when DirectML can't be used.
+            let prefer_gpu = crate::core::ai::ort_ep::prefer_gpu();
+            match crate::core::ai::ort_ep::build_session(&path, prefer_gpu) {
+                Ok((s, _used_gpu)) => *guard = Some(s),
                 Err(e) => {
                     set_status(LamaStatus::Error(e));
                     return false;

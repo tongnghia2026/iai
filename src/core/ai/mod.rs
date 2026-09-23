@@ -7,6 +7,7 @@
 // `Arc<Mutex<Status>>` + a background thread + an mpsc channel polled per-frame.
 
 pub mod edit;
+pub mod ort_ep;
 pub mod retouch;
 pub mod settings;
 

@@ -1,6 +1,7 @@
 // AI-based "Select Subject" using local ONNX background-removal models.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -113,6 +114,10 @@ pub struct SelectSubjectEngine {
     /// resolves it by id instead of applying to whatever tab is active now.
     pending_doc_id: Option<u32>,
     session: Option<Arc<Mutex<OrtSession>>>,
+    /// Whether the current session runs on the GPU (DirectML) rather than CPU.
+    /// Set by the worker when a session is built; reported to the user so a
+    /// strong GPU that is actually being used is visible.
+    used_gpu: Arc<AtomicBool>,
     selected_model: SelectSubjectModel,
     /// YOLO only: restrict the selection to the COCO "person" class.
     people_only: bool,
@@ -133,6 +138,7 @@ impl SelectSubjectEngine {
             result_rx: None,
             pending_doc_id: None,
             session: None,
+            used_gpu: Arc::new(AtomicBool::new(false)),
             selected_model,
             people_only: false,
         }
@@ -231,12 +237,17 @@ impl SelectSubjectEngine {
         }
     }
 
-    fn load_session_from_path(path: &Path) -> Result<Arc<Mutex<OrtSession>>, String> {
-        let session = OrtSession::builder()
-            .map_err(|e| format!("ORT builder: {e}"))?
-            .commit_from_file(path)
-            .map_err(|e| format!("ORT load model: {e}"))?;
-        Ok(Arc::new(Mutex::new(session)))
+    /// True when the last-built session runs on the GPU (DirectML).
+    pub fn used_gpu(&self) -> bool {
+        self.used_gpu.load(Ordering::Relaxed)
+    }
+
+    fn load_session_from_path(
+        path: &Path,
+        prefer_gpu: bool,
+    ) -> Result<(Arc<Mutex<OrtSession>>, bool), String> {
+        let (session, used_gpu) = crate::core::ai::ort_ep::build_session(path, prefer_gpu)?;
+        Ok((Arc::new(Mutex::new(session)), used_gpu))
     }
 
     pub fn download_model_async(&self) {
@@ -403,6 +414,10 @@ impl SelectSubjectEngine {
         };
         let status = self.status.clone();
         let people_only = self.people_only;
+        // Decide GPU vs CPU on the main thread (reads the cached wgpu adapter
+        // decision) and let the worker record which path the session took.
+        let prefer_gpu = crate::core::ai::ort_ep::prefer_gpu();
+        let used_gpu = self.used_gpu.clone();
 
         let (tx, rx): (Sender<InferencePayload>, Receiver<InferencePayload>) = mpsc::channel();
         self.result_rx = Some(rx);
@@ -412,8 +427,9 @@ impl SelectSubjectEngine {
             let sess_arc = if let Some(s) = existing_session {
                 s
             } else {
-                match Self::load_session_from_path(&model_path) {
-                    Ok(s) => {
+                match Self::load_session_from_path(&model_path, prefer_gpu) {
+                    Ok((s, gpu)) => {
+                        used_gpu.store(gpu, Ordering::Relaxed);
                         *status.lock().unwrap() = SubjectStatus::Running;
                         s
                     }
