@@ -1,9 +1,32 @@
 // AI-based "Select Subject" using local ONNX background-removal models.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Models whose GPU (DirectML) inference has failed this session (e.g. a large
+/// model that OOMs on the GPU while it runs fine on the CPU). Keyed by the
+/// model file name. Once a model is here, `run_async` skips the GPU for it and
+/// goes straight to CPU, so the user does not pay the failed-GPU cost twice.
+fn gpu_blocklist() -> &'static Mutex<HashSet<&'static str>> {
+    static S: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn gpu_blocked(file_name: &str) -> bool {
+    gpu_blocklist()
+        .lock()
+        .map(|s| s.contains(file_name))
+        .unwrap_or(false)
+}
+
+fn block_gpu_for(file_name: &'static str) {
+    if let Ok(mut s) = gpu_blocklist().lock() {
+        s.insert(file_name);
+    }
+}
 
 type OrtSession = ort::session::Session;
 
@@ -415,8 +438,9 @@ impl SelectSubjectEngine {
         let status = self.status.clone();
         let people_only = self.people_only;
         // Decide GPU vs CPU on the main thread (reads the cached wgpu adapter
-        // decision) and let the worker record which path the session took.
-        let prefer_gpu = crate::core::ai::ort_ep::prefer_gpu();
+        // decision) and let the worker record which path the session took. Skip
+        // the GPU for a model that already failed on it this session.
+        let prefer_gpu = crate::core::ai::ort_ep::prefer_gpu() && !gpu_blocked(spec.file_name);
         let used_gpu = self.used_gpu.clone();
 
         let (tx, rx): (Sender<InferencePayload>, Receiver<InferencePayload>) = mpsc::channel();
@@ -424,14 +448,16 @@ impl SelectSubjectEngine {
         self.pending_doc_id = Some(doc_id);
 
         std::thread::spawn(move || {
-            let sess_arc = if let Some(s) = existing_session {
-                s
+            // Build the session (GPU when preferred). `on_gpu` is only true for a
+            // freshly built GPU session, which is the only case we retry on CPU.
+            let (mut sess_arc, on_gpu) = if let Some(s) = existing_session {
+                (s, false)
             } else {
                 match Self::load_session_from_path(&model_path, prefer_gpu) {
                     Ok((s, gpu)) => {
                         used_gpu.store(gpu, Ordering::Relaxed);
                         *status.lock().unwrap() = SubjectStatus::Running;
-                        s
+                        (s, gpu)
                     }
                     Err(e) => {
                         *status.lock().unwrap() = SubjectStatus::Error(e.clone());
@@ -441,13 +467,28 @@ impl SelectSubjectEngine {
                 }
             };
 
-            let new_session = if is_first_load && spec.cache_session {
+            let mut result =
+                run_inference(spec, &sess_arc, &pixels, canvas_w, canvas_h, people_only);
+
+            // GPU inference failed (e.g. DirectML OOM on a big model) — rebuild on
+            // CPU, remember to skip the GPU for this model from now on, and retry.
+            if result.is_err() && on_gpu {
+                block_gpu_for(spec.file_name);
+                if let Ok((cpu_sess, _)) = Self::load_session_from_path(&model_path, false) {
+                    used_gpu.store(false, Ordering::Relaxed);
+                    result =
+                        run_inference(spec, &cpu_sess, &pixels, canvas_w, canvas_h, people_only);
+                    sess_arc = cpu_sess;
+                }
+            }
+
+            // Cache the working session (YOLO reuses it) only when it succeeded.
+            let new_session = if is_first_load && spec.cache_session && result.is_ok() {
                 Some(sess_arc.clone())
             } else {
                 None
             };
 
-            let result = run_inference(spec, &sess_arc, &pixels, canvas_w, canvas_h, people_only);
             match &result {
                 Ok(_) => *status.lock().unwrap() = SubjectStatus::Ready,
                 Err(e) => *status.lock().unwrap() = SubjectStatus::Error(e.clone()),

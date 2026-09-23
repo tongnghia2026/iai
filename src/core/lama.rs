@@ -15,10 +15,18 @@
 // background thread with a shared progress status the UI can poll.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 type OrtSession = ort::session::Session;
+
+/// Whether the cached LaMa session currently runs on the GPU (DirectML).
+static LAMA_ON_GPU: AtomicBool = AtomicBool::new(false);
+/// Set once DirectML inference has failed for LaMa this session (some ops, e.g.
+/// the FFC blocks, are unsupported / OOM on DirectML). Future loads then go
+/// straight to CPU instead of paying the failed-GPU cost again.
+static LAMA_GPU_DISABLED: AtomicBool = AtomicBool::new(false);
 
 const MODEL_FILE: &str = "lama_fp32.onnx";
 const MODEL_URL: &str = "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx";
@@ -272,16 +280,27 @@ pub fn inpaint(rgba: &mut [u8], w: usize, h: usize, hole: &[bool]) -> bool {
         mbuf[i] = if px.0[0] > 0 { 1.0 } else { 0.0 };
     }
 
-    let img_tensor =
-        match ort::value::Tensor::<f32>::from_array(([1i64, 3i64, DIM as i64, DIM as i64], chw)) {
-            Ok(t) => t,
-            Err(_) => return false,
-        };
-    let mask_tensor =
-        match ort::value::Tensor::<f32>::from_array(([1i64, 1i64, DIM as i64, DIM as i64], mbuf)) {
-            Ok(t) => t,
-            Err(_) => return false,
-        };
+    // One inference on a given session. Input tensors are rebuilt from the pixel
+    // buffers each attempt so a GPU failure can be retried on a fresh CPU session.
+    let run_on = |sess: &mut OrtSession| -> Result<Vec<f32>, String> {
+        let img = ort::value::Tensor::<f32>::from_array((
+            [1i64, 3i64, DIM as i64, DIM as i64],
+            chw.clone(),
+        ))
+        .map_err(|e| format!("input tensor: {e}"))?;
+        let msk = ort::value::Tensor::<f32>::from_array((
+            [1i64, 1i64, DIM as i64, DIM as i64],
+            mbuf.clone(),
+        ))
+        .map_err(|e| format!("mask tensor: {e}"))?;
+        let outputs = sess
+            .run(ort::inputs!["image" => img, "mask" => msk])
+            .map_err(|e| format!("inference: {e}"))?;
+        let (_, data) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| format!("extract: {e}"))?;
+        Ok(data.to_vec())
+    };
 
     let out_data: Vec<f32> = {
         let mut guard = match session_cell().lock() {
@@ -290,28 +309,52 @@ pub fn inpaint(rgba: &mut [u8], w: usize, h: usize, hole: &[bool]) -> bool {
         };
         if guard.is_none() {
             let path = model_path();
-            // Run on the GPU (DirectML) when a real adapter is present; the helper
-            // falls back to CPU on its own when DirectML can't be used.
-            let prefer_gpu = crate::core::ai::ort_ep::prefer_gpu();
+            // GPU (DirectML) when a real adapter is present and DirectML has not
+            // already failed for LaMa this session; the helper handles build-time
+            // fallback, and the run below handles run-time fallback.
+            let prefer_gpu =
+                crate::core::ai::ort_ep::prefer_gpu() && !LAMA_GPU_DISABLED.load(Ordering::Relaxed);
             match crate::core::ai::ort_ep::build_session(&path, prefer_gpu) {
-                Ok((s, _used_gpu)) => *guard = Some(s),
+                Ok((s, gpu)) => {
+                    *guard = Some(s);
+                    LAMA_ON_GPU.store(gpu, Ordering::Relaxed);
+                }
                 Err(e) => {
                     set_status(LamaStatus::Error(e));
                     return false;
                 }
             }
         }
-        let sess = guard.as_mut().unwrap();
-        let outputs = match sess.run(ort::inputs!["image" => img_tensor, "mask" => mask_tensor]) {
-            Ok(o) => o,
+        match run_on(guard.as_mut().unwrap()) {
+            Ok(data) => data,
             Err(e) => {
-                set_status(LamaStatus::Error(format!("inference: {e}")));
-                return false;
+                // A GPU run failed (unsupported op / OOM). Disable the GPU for
+                // LaMa, rebuild a clean CPU session, and retry once.
+                if LAMA_ON_GPU.load(Ordering::Relaxed) {
+                    LAMA_GPU_DISABLED.store(true, Ordering::Relaxed);
+                    let path = model_path();
+                    match crate::core::ai::ort_ep::build_session(&path, false) {
+                        Ok((s, _)) => {
+                            *guard = Some(s);
+                            LAMA_ON_GPU.store(false, Ordering::Relaxed);
+                        }
+                        Err(be) => {
+                            set_status(LamaStatus::Error(be));
+                            return false;
+                        }
+                    }
+                    match run_on(guard.as_mut().unwrap()) {
+                        Ok(data) => data,
+                        Err(e2) => {
+                            set_status(LamaStatus::Error(format!("inference: {e2}")));
+                            return false;
+                        }
+                    }
+                } else {
+                    set_status(LamaStatus::Error(format!("inference: {e}")));
+                    return false;
+                }
             }
-        };
-        match outputs[0].try_extract_tensor::<f32>() {
-            Ok((_, data)) => data.to_vec(),
-            Err(_) => return false,
         }
     };
     if out_data.len() < 3 * n {
