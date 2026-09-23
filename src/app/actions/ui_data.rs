@@ -1817,6 +1817,7 @@ impl App {
                 recent: welcome_recent,
             },
             library,
+            settings: self.shell.settings.clone(),
         }
     }
 

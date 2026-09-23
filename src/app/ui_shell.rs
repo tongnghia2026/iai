@@ -9,6 +9,9 @@ use super::state::*;
 /// this struct must never lose document content.
 pub struct UiShell {
     pub(in crate::app) ui: UiState,
+    /// Persisted Preferences (prefs.json): UI scale, default unit, autosave,
+    /// snap default, AI GPU. Loaded once at startup and applied live on change.
+    pub(in crate::app) settings: crate::core::settings::AppSettings,
     pub(in crate::app) ui_data_cache: UiDataCache,
     pub(in crate::app) status_msg: String,
     /// Exit the app after the Save (Save & Exit) dialog finishes writing. Cancelled

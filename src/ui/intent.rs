@@ -929,6 +929,13 @@ pub struct AiIntent {
     pub retouch_cancel: bool,
 }
 
+/// Preferences edits. The dialog emits the whole updated [`AppSettings`] on any
+/// change; the app clamps, applies it live, and persists it.
+#[derive(Default)]
+pub struct SettingsIntent {
+    pub updated: Option<crate::core::settings::AppSettings>,
+}
+
 #[derive(Default)]
 pub struct UiActions {
     /// File/document commands: open/save/export, undo/redo, resize, tabs,
@@ -953,6 +960,8 @@ pub struct UiActions {
     pub channels: ChannelsIntent,
     /// AI panel commands and extension-bridge runs.
     pub ai: AiIntent,
+    /// Preferences edits, applied + persisted by the app.
+    pub settings: SettingsIntent,
 }
 
 #[cfg(test)]

@@ -679,6 +679,8 @@ pub struct UiData {
     pub welcome: WelcomeViewModel,
     /// The Library grid browser: the chosen folder and its images.
     pub library: LibraryViewModel,
+    /// A snapshot of the persisted Preferences, for the Preferences dialog.
+    pub settings: crate::core::settings::AppSettings,
 }
 
 impl Default for UiData {
@@ -1105,6 +1107,7 @@ impl Default for UiData {
             },
             welcome: WelcomeViewModel::default(),
             library: LibraryViewModel::default(),
+            settings: crate::core::settings::AppSettings::default(),
         }
     }
 }

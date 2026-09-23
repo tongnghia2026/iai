@@ -32,6 +32,7 @@ pub mod palette;
 pub mod perceptual_color;
 pub mod scan_cleanup;
 pub mod selection;
+pub mod settings;
 pub mod shape;
 pub mod smart_fill;
 pub mod ucs;

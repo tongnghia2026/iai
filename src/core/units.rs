@@ -1,7 +1,7 @@
 // Unit conversion — used by the Crop tool, Canvas Size, Image Size.
 // To add a unit: add a Unit variant and a case in to_pixels/from_pixels.
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Unit {
     Pixels,
     Centimeters,

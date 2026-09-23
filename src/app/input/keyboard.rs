@@ -709,6 +709,15 @@ impl App {
             PhysicalKey::Code(KeyCode::KeyN) if pressed && self.edit.input.ctrl_held => {
                 self.open_new_canvas_dialog_with_clipboard_hint();
             }
+            // Preferences: Ctrl+K (Photoshop) with Ctrl+, kept as an alias.
+            PhysicalKey::Code(KeyCode::KeyK) | PhysicalKey::Code(KeyCode::Comma)
+                if pressed && self.edit.input.ctrl_held =>
+            {
+                self.shell.ui.show_preferences = true;
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
             PhysicalKey::Code(KeyCode::Digit0) if pressed && self.edit.input.ctrl_held => {
                 self.fit_canvas_to_screen();
                 if let Some(w) = &self.win.window {

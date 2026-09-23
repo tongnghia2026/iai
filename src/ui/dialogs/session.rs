@@ -7,109 +7,340 @@ use super::*;
 /// constant size and centred position regardless of the document behind them.
 const EXIT_DIALOG_WIDTH: f32 = 384.0;
 
-pub(crate) fn preferences_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut UiActions) {
-    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
-    let mut do_close = enter_pressed || esc_pressed;
+/// The category tabs down the left edge, Photoshop-style.
+const PREFERENCES_CATEGORIES: [&str; 7] = [
+    "Tổng quát",
+    "Giao diện",
+    "Hiệu năng",
+    "Tệp & Tự lưu",
+    "Công cụ & Con trỏ",
+    "AI",
+    "Phím tắt",
+];
+
+pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    // Esc = cancel (revert). Enter is swallowed so finishing a typed value never
+    // dismisses the dialog by accident.
+    let (_enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_ok = false;
+    let mut do_cancel = esc_pressed;
+
+    // Which category is shown, remembered across frames in egui temp state.
+    let cat_id = egui::Id::new("preferences_active_category");
+    let orig_id = egui::Id::new("preferences_original_settings");
+    let mut category: usize = ctx.data(|d| d.get_temp::<usize>(cat_id)).unwrap_or(0);
+
+    // Baseline captured the first frame the dialog is shown; "Hoàn tác" / Esc
+    // restores it, so changes previewed live can still be undone.
+    let original = ctx
+        .data_mut(|d| d.get_temp::<crate::core::settings::AppSettings>(orig_id))
+        .unwrap_or_else(|| data.settings.clone());
+    ctx.data_mut(|d| d.insert_temp(orig_id, original.clone()));
+
+    // Edit a working copy; emit it only if it actually differs from the live
+    // settings, so the app applies + persists exactly the changed values.
+    let mut settings = data.settings.clone();
 
     modal_overlay(ctx, "preferences_dialog_overlay");
+
+    // Never let the window grow taller than the screen: cap the scrolling
+    // content area, and keep the header, footer and buttons always on-screen.
+    let screen = ctx.screen_rect();
+    let max_content_h = (screen.height() - 170.0).clamp(220.0, 520.0);
 
     egui::Window::new("Preferences")
         .collapsible(false)
         .resizable(true)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .min_width(400.0)
-        .min_height(300.0)
+        // Centre on first open but stay draggable (an anchored window can't move).
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(screen.center())
+        .default_width(600.0)
+        .min_width(520.0)
         .order(DIALOG_ORDER)
         .show(ctx, |ui| {
-            ui.add_space(8.0);
-
-            egui::CollapsingHeader::new("Performance")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.label("Undo history: 100 steps");
-                    ui.label("GPU: Auto");
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new("More performance settings coming soon")
-                            .color(egui::Color32::GRAY)
-                            .size(11.0),
-                    );
+            ui.add_space(6.0);
+            ui.horizontal_top(|ui| {
+                // Left: category list.
+                ui.vertical(|ui| {
+                    ui.set_width(150.0);
+                    for (idx, name) in PREFERENCES_CATEGORIES.iter().enumerate() {
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 24.0],
+                                egui::Button::selectable(category == idx, *name),
+                            )
+                            .clicked()
+                        {
+                            category = idx;
+                        }
+                    }
                 });
 
-            egui::CollapsingHeader::new("Appearance")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.label("Theme: Dark");
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new("More appearance settings coming soon")
-                            .color(egui::Color32::GRAY)
-                            .size(11.0),
-                    );
-                });
+                // A gap, NOT ui.separator(): a vertical separator in a horizontal
+                // layout greedily grows to the full available height, which pushed
+                // the whole window (and the OK button) off-screen.
+                ui.add_space(12.0);
 
-            egui::CollapsingHeader::new("Shortcuts")
-                .default_open(false)
-                .show(ui, |ui| {
-                    let shortcuts = [
-                        ("Brush", "B"),
-                        ("Eraser", "E"),
-                        ("Move", "V"),
-                        ("Eyedropper", "I"),
-                        ("Fill", "G"),
-                        ("Crop", "C"),
-                        ("Zoom", "Z"),
-                        ("Hand", "H"),
-                        ("Undo", "Ctrl+Z"),
-                        ("Redo", "Ctrl+Shift+Z"),
-                        ("Save", "Ctrl+S"),
-                        ("Open", "Ctrl+O"),
-                        ("New", "Ctrl+N"),
-                        ("Close", "Ctrl+W"),
-                        ("Fit Screen", "Ctrl+0"),
-                        ("Zoom 100%", "Ctrl+1"),
-                        ("Levels", "Ctrl+L"),
-                        ("Auto Levels", "Ctrl+Shift+L"),
-                        ("Color Balance", "Ctrl+B"),
-                        ("Hue/Saturation", "Ctrl+U"),
-                        ("Desaturate", "Ctrl+Shift+U"),
-                        ("Invert", "Ctrl+I"),
-                        ("Free Transform", "Ctrl+T"),
-                        ("Layer via Copy", "Ctrl+J"),
-                        ("Smart Fill", "Shift+F5"),
-                        ("Rulers", "Ctrl+R"),
-                        ("Swap Colors", "X"),
-                        ("Brush Size -", "["),
-                        ("Brush Size +", "]"),
-                    ];
-
-                    egui::Grid::new("shortcuts_grid")
-                        .num_columns(2)
-                        .striped(true)
-                        .spacing([20.0, 4.0])
-                        .show(ui, |ui| {
-                            for (action, key) in &shortcuts {
-                                ui.label(*action);
-                                ui.label(
-                                    egui::RichText::new(*key)
-                                        .monospace()
-                                        .color(egui::Color32::from_rgb(180, 180, 255)),
-                                );
-                                ui.end_row();
-                            }
+                // Right: the selected category's content, scrolling when tall.
+                ui.vertical(|ui| {
+                    ui.set_min_width(340.0);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, true])
+                        .max_height(max_content_h)
+                        .show(ui, |ui| match category {
+                            0 => preferences_general(ui, &mut settings),
+                            1 => preferences_appearance(ui),
+                            2 => preferences_performance(ui),
+                            3 => preferences_files(ui, &mut settings),
+                            4 => preferences_tools(ui, &mut settings),
+                            5 => preferences_ai(ui, &mut settings),
+                            _ => preferences_shortcuts(ui),
                         });
                 });
+            });
 
-            ui.add_space(12.0);
-            if ui.button("  Close  ").clicked() {
-                do_close = true;
-            }
-            ui.add_space(4.0);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Lưu tại {}",
+                        crate::ui::theme::prefs_path().display()
+                    ))
+                    .color(egui::Color32::GRAY)
+                    .size(11.0),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("  OK  ").clicked() {
+                        do_ok = true;
+                    }
+                    if ui.button("Hoàn tác").clicked() {
+                        do_cancel = true;
+                    }
+                });
+            });
+            ui.add_space(2.0);
         });
 
-    if do_close {
+    ctx.data_mut(|d| d.insert_temp(cat_id, category));
+
+    if do_cancel {
+        // Restore the baseline (the app applies + persists it) and close.
+        if original != data.settings {
+            actions.settings.updated = Some(original);
+        }
+        ctx.data_mut(|d| d.remove::<crate::core::settings::AppSettings>(orig_id));
         actions.dialogs.show_preferences = Some(false);
+    } else if do_ok {
+        // Keep the (already-applied) changes and close.
+        if settings != data.settings {
+            actions.settings.updated = Some(settings);
+        }
+        ctx.data_mut(|d| d.remove::<crate::core::settings::AppSettings>(orig_id));
+        actions.dialogs.show_preferences = Some(false);
+    } else if settings != data.settings {
+        // Preview edits live while the dialog stays open.
+        actions.settings.updated = Some(settings);
     }
+}
+
+fn preferences_section_title(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(2.0);
+    ui.label(egui::RichText::new(text).strong());
+    ui.add_space(4.0);
+}
+
+fn preferences_general(ui: &mut egui::Ui, settings: &mut crate::core::settings::AppSettings) {
+    preferences_section_title(ui, "Đơn vị mặc định");
+    ui.horizontal(|ui| {
+        ui.label("Thước & hộp thoại kích thước:");
+        egui::ComboBox::from_id_salt("pref_default_unit")
+            .selected_text(settings.default_unit.name())
+            .show_ui(ui, |ui| {
+                for unit in ruler_unit_choices() {
+                    ui.selectable_value(&mut settings.default_unit, unit, unit.name());
+                }
+            });
+    });
+    ui.label(
+        egui::RichText::new("Áp dụng cho thước và các hộp thoại kích thước; đổi là dùng ngay.")
+            .color(egui::Color32::GRAY)
+            .size(11.0),
+    );
+}
+
+fn preferences_appearance(ui: &mut egui::Ui) {
+    preferences_section_title(ui, "Giao diện");
+    ui.horizontal(|ui| {
+        ui.label("Chủ đề:");
+        ui.label(egui::RichText::new("Tối").strong());
+    });
+    ui.label(
+        egui::RichText::new("iAi hiện dùng một chủ đề tối duy nhất.")
+            .color(egui::Color32::GRAY)
+            .size(11.0),
+    );
+}
+
+fn preferences_performance(ui: &mut egui::Ui) {
+    preferences_section_title(ui, "Bộ nhớ Hoàn tác (Undo)");
+    let budget_mb = crate::core::hw::history_budget_bytes() / (1024 * 1024);
+    ui.label(format!("Ngân sách hiện tại: {budget_mb} MB"));
+    ui.label(
+        egui::RichText::new(
+            "Tự tính theo RAM máy; chỉ lưu phần ảnh thay đổi nên đủ cho hàng chục bước.",
+        )
+        .color(egui::Color32::GRAY)
+        .size(11.0),
+    );
+
+    ui.add_space(12.0);
+    preferences_section_title(ui, "Card đồ họa (GPU)");
+    match crate::core::hw::gpu() {
+        Some(info) => {
+            ui.label(&info.name);
+            ui.label(
+                egui::RichText::new(format!("{} · {}", info.device_type, info.backend))
+                    .color(egui::Color32::GRAY)
+                    .size(11.0),
+            );
+        }
+        None => {
+            ui.label(egui::RichText::new("Đang dò tìm…").color(egui::Color32::GRAY));
+        }
+    }
+}
+
+fn preferences_files(ui: &mut egui::Ui, settings: &mut crate::core::settings::AppSettings) {
+    use crate::core::settings::{AUTOSAVE_MAX_SECS, AUTOSAVE_MIN_SECS};
+
+    preferences_section_title(ui, "Tự lưu & khôi phục");
+    ui.checkbox(
+        &mut settings.autosave_enabled,
+        "Tự lưu bản khôi phục khi đang làm việc",
+    );
+    ui.add_enabled_ui(settings.autosave_enabled, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Chu kỳ:");
+            ui.add(
+                egui::DragValue::new(&mut settings.autosave_interval_secs)
+                    .speed(5.0)
+                    .range(AUTOSAVE_MIN_SECS..=AUTOSAVE_MAX_SECS)
+                    .suffix(" giây"),
+            );
+        });
+    });
+    ui.label(
+        egui::RichText::new(
+            "Bản khôi phục lưu ở thư mục dữ liệu của iAi và tự xóa khi bạn lưu/đóng bình thường.",
+        )
+        .color(egui::Color32::GRAY)
+        .size(11.0),
+    );
+}
+
+fn preferences_tools(ui: &mut egui::Ui, settings: &mut crate::core::settings::AppSettings) {
+    preferences_section_title(ui, "Bắt dính (Snap)");
+    ui.checkbox(
+        &mut settings.snap_default,
+        "Bật bắt dính mặc định khi mở iAi",
+    );
+    ui.label(
+        egui::RichText::new(
+            "Vẫn có thể bật/tắt nhanh bằng nút nam châm trên thanh công cụ cho phiên hiện tại.",
+        )
+        .color(egui::Color32::GRAY)
+        .size(11.0),
+    );
+}
+
+fn preferences_ai(ui: &mut egui::Ui, settings: &mut crate::core::settings::AppSettings) {
+    preferences_section_title(ui, "Tăng tốc AI");
+    ui.checkbox(
+        &mut settings.ai_use_gpu,
+        "Dùng GPU (DirectML) cho Select Subject & Smart Fill",
+    );
+    let status = if crate::core::hw::ai_gpu_candidate() {
+        "Máy có GPU phù hợp. Nếu một mô hình lỗi trên GPU, iAi tự lùi về CPU."
+    } else {
+        "Chưa phát hiện GPU phù hợp — các tính năng này sẽ chạy trên CPU."
+    };
+    ui.label(
+        egui::RichText::new(status)
+            .color(egui::Color32::GRAY)
+            .size(11.0),
+    );
+}
+
+fn preferences_shortcuts(ui: &mut egui::Ui) {
+    preferences_section_title(ui, "Phím tắt hiện tại");
+    ui.label(
+        egui::RichText::new("Danh sách chỉ để xem. Đổi phím tắt sẽ mở ở bước kế tiếp.")
+            .color(egui::Color32::GRAY)
+            .size(11.0),
+    );
+    ui.add_space(6.0);
+    let shortcuts = [
+        ("Preferences", "Ctrl+K"),
+        ("Brush", "B"),
+        ("Eraser", "E"),
+        ("Move", "V"),
+        ("Eyedropper", "I"),
+        ("Fill", "G"),
+        ("Crop", "C"),
+        ("Zoom", "Z"),
+        ("Hand", "H"),
+        ("Undo", "Ctrl+Z"),
+        ("Redo", "Ctrl+Shift+Z"),
+        ("Save", "Ctrl+S"),
+        ("Open", "Ctrl+O"),
+        ("New", "Ctrl+N"),
+        ("Close", "Ctrl+W"),
+        ("Fit Screen", "Ctrl+0"),
+        ("Zoom 100%", "Ctrl+1"),
+        ("Levels", "Ctrl+L"),
+        ("Auto Levels", "Ctrl+Shift+L"),
+        ("Color Balance", "Ctrl+B"),
+        ("Hue/Saturation", "Ctrl+U"),
+        ("Desaturate", "Ctrl+Shift+U"),
+        ("Invert", "Ctrl+I"),
+        ("Free Transform", "Ctrl+T"),
+        ("Layer via Copy", "Ctrl+J"),
+        ("Smart Fill", "Shift+F5"),
+        ("Rulers", "Ctrl+R"),
+        ("Swap Colors", "X"),
+        ("Brush Size -", "["),
+        ("Brush Size +", "]"),
+    ];
+    egui::Grid::new("shortcuts_grid")
+        .num_columns(2)
+        .striped(true)
+        .spacing([20.0, 4.0])
+        .show(ui, |ui| {
+            for (action, key) in &shortcuts {
+                ui.label(*action);
+                ui.label(
+                    egui::RichText::new(*key)
+                        .monospace()
+                        .color(egui::Color32::from_rgb(180, 180, 255)),
+                );
+                ui.end_row();
+            }
+        });
+}
+
+/// Units offered as a default for rulers / size dialogs. Percent is excluded —
+/// it is meaningless as a standalone default measurement.
+fn ruler_unit_choices() -> [crate::core::units::Unit; 6] {
+    use crate::core::units::Unit;
+    [
+        Unit::Pixels,
+        Unit::Centimeters,
+        Unit::Millimeters,
+        Unit::Inches,
+        Unit::Points,
+        Unit::Picas,
+    ]
 }
 
 pub(crate) fn exit_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {

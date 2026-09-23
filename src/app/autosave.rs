@@ -11,9 +11,6 @@ use crate::core::document::DocumentId;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-/// How often the active dirty project is mirrored to disk.
-const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(90);
-
 pub(in crate::app) fn iai_data_dir() -> Option<PathBuf> {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).or_else(|| {
         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
@@ -64,7 +61,14 @@ impl App {
     /// asynchronous snapshot handshake and will gain disk recovery with `.iai`
     /// v12. Throttled to [`AUTOSAVE_INTERVAL`].
     pub fn maybe_autosave(&mut self) {
-        if self.docs.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
+        // Preferences ▸ Files & Autosave can turn recovery off, or change the
+        // period. When off, do nothing (and leave the timer alone so re-enabling
+        // resumes on the next tick).
+        if !self.shell.settings.autosave_enabled {
+            return;
+        }
+        let interval = Duration::from_secs(self.shell.settings.autosave_interval_secs as u64);
+        if self.docs.last_autosave.elapsed() < interval {
             return;
         }
 

@@ -651,7 +651,7 @@ impl App {
         self.edit.input.painting = false;
         self.edit.transform_state = None;
         self.edit.pending_stroke_inputs.clear();
-        self.shell.canvas_unit = crate::core::units::Unit::Pixels;
+        self.shell.canvas_unit = self.shell.settings.default_unit;
         self.docs.active_doc_idx = new_idx;
         // Syncs view + ALL GPU state (texture size, uniforms, recomposite, mask).
         self.refresh_active_document();

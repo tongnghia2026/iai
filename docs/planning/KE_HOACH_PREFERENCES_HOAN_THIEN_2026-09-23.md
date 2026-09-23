@@ -143,16 +143,26 @@ Quy ước trạng thái checklist:
 
 ## 6. Các giai đoạn
 
-### Phase 1 — Nền cài đặt + khung UI kiểu PTS + Ctrl+K
+### Phase 1 — Nền cài đặt + khung UI kiểu PTS + Ctrl+K ✅ **XONG (chủ test OK 23/09)**
 
-- [ ] `AppSettings` + mở rộng `prefs.json` (load/save, `#[serde(default)]`).
-- [ ] Mở Preferences bằng `Ctrl+K` (giữ `Ctrl+,`); cập nhật nhãn menu 2 chỗ.
-- [ ] Viết lại dialog thành cột danh mục + nội dung.
-- [ ] Nối cài đặt thật rủi ro thấp, lưu + áp dụng ngay: UI scale, đơn vị mặc
-      định, bật/tắt + chu kỳ autosave, snap mặc định (persist), GPU cho AI.
-- [ ] Thay nhãn giả bằng số liệu thật (ngân sách undo từ `hw.rs`, GPU, theme).
-- **Cổng nghiệm thu:** đổi mỗi mục → đóng/mở app vẫn còn; `Ctrl+K` mở đúng;
-  không hồi quy phím cũ. Build Release OK.
+- [x] `AppSettings` + mở rộng `prefs.json` (load/save merge, `#[serde(default)]`,
+      `sanitize()` kẹp khoảng; unit test xanh). File `src/core/settings.rs`.
+- [x] Mở Preferences bằng `Ctrl+K` (giữ `Ctrl+,`) — nối cả đường raw
+      `keyboard.rs` lẫn `consume_shortcut` trong `ui/mod.rs`; nhãn menu 2 chỗ đổi
+      sang `Ctrl+K`.
+- [x] Viết lại dialog thành cột danh mục trái (7 mục) + nội dung phải
+      (`src/ui/dialogs/session.rs`). Cửa sổ kéo được + giới hạn chiều cao theo màn
+      hình + nút OK/Hoàn tác (baseline egui temp). LƯU Ý: KHÔNG dùng `ui.separator()`
+      dọc trong layout ngang — nó giãn hết chiều cao, đẩy cửa sổ tràn màn hình.
+- [x] Nối cài đặt thật rủi ro thấp, lưu + áp dụng ngay: ~~UI scale~~ (CHỦ YÊU CẦU
+      BỎ sau test lần 1 — đã gỡ hoàn toàn), đơn vị mặc định (thước + New/Open/PDF),
+      bật/tắt + chu kỳ autosave, snap mặc định (persist + áp dụng phiên), GPU cho
+      AI (`ort_ep::set_ai_use_gpu`).
+- [x] Thay nhãn giả bằng số liệu thật (ngân sách undo từ `hw::history_budget_bytes`,
+      tên/loại/back-end GPU từ `hw::gpu`, theme "Tối"). Bỏ mọi "coming soon".
+- **Cổng nghiệm thu:** ✅ chủ test OK 23/09 (đóng/mở giữ cài đặt, Ctrl+K đúng, cửa
+  sổ nằm gọn màn hình, không hồi quy phím cũ). Build Release OK. **Commit local
+  (chưa push).**
 
 ### Phase 2 — Engine keymap (KHÔNG đổi hành vi)
 
@@ -199,3 +209,20 @@ Quy ước trạng thái checklist:
 
 - 2026-09-23: Lập kế hoạch. Chủ chốt phạm vi phím tắt "thực dụng" + yêu cầu nút
   reset phím tắt về mặc định. Chưa viết code.
+- 2026-09-23 (bản sửa sau test lần 1): Chủ test bản đầu → **BỎ hẳn "Tỉ lệ giao diện"**
+  (gỡ field `ui_scale` + hoàn nguyên mọi hiệu chỉnh ppp ở render/hit-test/fit/pan/warp,
+  các file này trở lại y nguyên bản gốc). Sửa cửa sổ Preferences: **di chuyển được**
+  (bỏ anchor, dùng pivot + default_pos để canh giữa lần đầu), **giới hạn chiều cao**
+  theo màn hình (ScrollArea `auto_shrink([false,true])` + `max_height` co theo screen)
+  nên không tràn khỏi màn hình, **thêm nút OK + Hoàn tác** luôn hiện ở đáy (Hoàn tác/Esc
+  khôi phục về mốc lúc mở). Trang Phím tắt ghi rõ "chỉ để xem, đổi phím tắt ở bước kế
+  tiếp" (đó là Phase 3). Còn 4 cài đặt thật: đơn vị mặc định, autosave, snap, AI GPU.
+- 2026-09-23: **Phase 1 code xong (chờ chủ test).** Thêm `core::settings::AppSettings`
+  (prefs.json merge-write, serde default + sanitize, 4 unit test xanh). Preferences
+  mở bằng `Ctrl+K`/`Ctrl+,`; dialog dựng lại kiểu PTS (7 mục). Nối 5 cài đặt thật
+  áp dụng ngay + persist: UI scale, đơn vị mặc định, autosave (bật/tắt + chu kỳ),
+  snap mặc định, GPU cho AI. Số liệu thật thay nhãn giả (undo budget, GPU, theme).
+  UI scale làm qua egui `zoom_factor`, đồng thời hiệu chỉnh ppp ở render + ui_chrome_hit
+  + fit/constrain_pan + warp anchor để không lệch canvas/panel; **no-op tuyệt đối khi
+  scale = 1.0** (mặc định) nên không đụng trải nghiệm cũ. Build Release OK; `cargo fmt`
+  + `cargo test --lib settings` xanh. **Chưa push** (chờ chủ duyệt). Phase 2/3 chưa làm.

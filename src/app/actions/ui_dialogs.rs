@@ -402,6 +402,34 @@ impl App {
         }
     }
 
+    /// Apply an edit from the Preferences dialog: clamp it, apply the live
+    /// effects (AI GPU, snap, default unit; UI scale is re-read each frame in the
+    /// redraw loop), store it, and persist to prefs.json.
+    fn apply_settings_change(&mut self, mut new: crate::core::settings::AppSettings) {
+        new.sanitize();
+        let old = self.shell.settings.clone();
+        if new == old {
+            return;
+        }
+        if new.ai_use_gpu != old.ai_use_gpu {
+            crate::core::ai::ort_ep::set_ai_use_gpu(new.ai_use_gpu);
+        }
+        if new.snap_default != old.snap_default {
+            // Reflect the new default in the running session too, so the change
+            // is visible immediately (the magnet still toggles it per-session).
+            self.shell.ui.snap_enabled = new.snap_default;
+        }
+        if new.default_unit != old.default_unit {
+            self.shell.canvas_unit = new.default_unit;
+            self.shell.ui.new_unit = new.default_unit;
+        }
+        self.shell.settings = new;
+        self.shell.settings.save();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
     pub(super) fn handle_misc_dialog_actions(&mut self, actions: &mut UiActions) {
         let created_new_canvas = if let Some((name, w, h, dpi, bg, unit, cmyk)) =
             actions.doc.new_canvas_confirmed.take()
@@ -490,6 +518,9 @@ impl App {
         }
         if let Some(v) = actions.dialogs.show_preferences.take() {
             self.shell.ui.show_preferences = v;
+        }
+        if let Some(new_settings) = actions.settings.updated.take() {
+            self.apply_settings_change(new_settings);
         }
         if let Some(v) = actions.dialogs.show_adjustment_dialog.take() {
             self.shell.ui.show_adjustment_dialog = v;

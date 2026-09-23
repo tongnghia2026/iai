@@ -190,7 +190,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 ui.close();
                             }
                             ui.separator();
-                            if ui.add(menu_item("Preferences", "Ctrl+,")).clicked() {
+                            if ui.add(menu_item("Preferences", "Ctrl+K")).clicked() {
                                 actions.dialogs.show_preferences = Some(true);
                                 ui.close();
                             }
@@ -345,7 +345,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             ui.close();
                         }
                         ui.separator();
-                        if ui.add(menu_item("Preferences", "Ctrl+,")).clicked() {
+                        if ui.add(menu_item("Preferences", "Ctrl+K")).clicked() {
                             actions.dialogs.show_preferences = Some(true);
                             ui.close();
                         }

@@ -1357,6 +1357,13 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        // Persisted Preferences drive a few startup values (snap default, default
+        // unit) and one global (AI GPU), so load them before building the state.
+        let settings = crate::core::settings::AppSettings::load();
+        crate::core::ai::ort_ep::set_ai_use_gpu(settings.ai_use_gpu);
+        // `settings` is moved into `shell.settings`; copy out the one value a
+        // later field (`canvas_unit`) needs so we don't read it after the move.
+        let settings_default_unit = settings.default_unit;
         Self {
             docs: DocumentSession {
                 documents: vec![Document::new(
@@ -1683,7 +1690,7 @@ impl App {
                     new_dpi: 72.0,
                     new_bg_color: 0,
                     new_name: "Untitled".to_string(),
-                    new_unit: crate::core::units::Unit::Pixels,
+                    new_unit: settings.default_unit,
                     rename_idx: 0,
                     rename_text: String::new(),
                     export_format: crate::formats::ExportFormat::Png { compression: 6 },
@@ -1710,7 +1717,7 @@ impl App {
                     show_rulers: true,
                     show_guides: true,
                     lock_guides: false,
-                    snap_enabled: false,
+                    snap_enabled: settings.snap_default,
                     show_preset_dialog: false,
                     show_delete_preset_dialog: false,
                     preset_dialog_name: String::new(),
@@ -1734,11 +1741,12 @@ impl App {
                     cmyk_convert_use_icc: false,
                     cmyk_convert_icc: None,
                 },
+                settings,
                 status_msg: String::new(),
                 exit_requested: false,
                 exit_save_pending: false,
                 close_requested: false,
-                canvas_unit: crate::core::units::Unit::Pixels,
+                canvas_unit: settings_default_unit,
                 toolbar_w: 48.0,
                 // Layer/Channels width (260) plus the Corel-style vertical
                 // colour strip (VECTOR_PALETTE_STRIP_W = 40) that lives at the

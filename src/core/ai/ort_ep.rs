@@ -7,15 +7,29 @@
 //! it tracks the chosen provider per model slot.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 type OrtSession = ort::session::Session;
 
-/// Whether AI inference should try the GPU. Only true when wgpu selected a real
-/// GPU adapter (a software rasteriser is excluded, since DirectML would only add
-/// overhead there). Detected once by `GpuState` and cached, so this is cheap and
-/// safe to call from a worker thread.
+/// User preference (Preferences ▸ AI): allow AI inference to use the GPU. Gates
+/// [`prefer_gpu`] on top of the hardware check, so the user can force CPU even on
+/// a capable adapter. Defaults to on; set once at startup from `AppSettings` and
+/// updated live when the toggle changes. A plain atomic keeps it cheap and safe
+/// to read from the inference worker threads.
+static AI_USE_GPU: AtomicBool = AtomicBool::new(true);
+
+/// Update the "use GPU for AI" preference. Takes effect on the next inference
+/// run (each run builds a fresh session).
+pub fn set_ai_use_gpu(on: bool) {
+    AI_USE_GPU.store(on, Ordering::Relaxed);
+}
+
+/// Whether AI inference should try the GPU. True only when the user allows it
+/// AND wgpu selected a real GPU adapter (a software rasteriser is excluded,
+/// since DirectML would only add overhead there). Detected once by `GpuState`
+/// and cached, so this is cheap and safe to call from a worker thread.
 pub fn prefer_gpu() -> bool {
-    crate::core::hw::ai_gpu_candidate()
+    AI_USE_GPU.load(Ordering::Relaxed) && crate::core::hw::ai_gpu_candidate()
 }
 
 /// Build an ONNX session for `path`. When `prefer_gpu` is true and DirectML can
