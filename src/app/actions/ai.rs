@@ -66,6 +66,7 @@ impl App {
             }
         }
 
+        let doc_id = self.docs.documents[self.docs.active_doc_idx].id.0;
         let w = self.docs.documents[self.docs.active_doc_idx].canvas.width;
         let h = self.docs.documents[self.docs.active_doc_idx].canvas.height;
         let pixels = {
@@ -78,7 +79,7 @@ impl App {
                 .clone()
         };
 
-        if self.jobs.select_subject.run_async(pixels, w, h) {
+        if self.jobs.select_subject.run_async(doc_id, pixels, w, h) {
             self.shell.status_msg = self.jobs.select_subject.status_text();
         }
         if let Some(win) = &self.win.window {
@@ -89,25 +90,61 @@ impl App {
     /// Poll for a completed Select Subject result and apply it to the selection.
     /// Called every frame from the render loop.
     pub fn poll_select_subject(&mut self) {
-        if let Some(result) = self.jobs.select_subject.poll_result() {
+        if let Some((doc_id, result)) = self.jobs.select_subject.poll_result() {
             match result {
                 Ok(mask) => {
-                    let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
-                    let n = (canvas.width * canvas.height) as usize;
-                    if mask.len() == n {
-                        let mut cmd = crate::core::command::SelectionCommand::capture_before(
-                            "Select Subject",
-                            &canvas.selection,
-                        );
-                        canvas.selection.mask.copy_from_slice(&mask);
-                        canvas.selection.active = mask.iter().any(|&v| v > 0);
-                        canvas.selection.mask_revision += 1;
-                        canvas.selection.mark_bbox_dirty();
-                        cmd.capture_after(&canvas.selection);
-                        canvas.record(Box::new(cmd));
-
-                        self.apply_canvas_event(CanvasEvent::SelectionChanged);
-                        self.shell.status_msg = "Select Subject done".to_string();
+                    // Apply to the document the job was started on, not whatever
+                    // tab is active now — the user may have switched tabs while
+                    // inference ran. Falling back to the active doc for a legacy
+                    // job with no id keeps old behaviour.
+                    let idx = match doc_id {
+                        Some(id) => self.docs.documents.iter().position(|d| d.id.0 == id),
+                        None => Some(self.docs.active_doc_idx),
+                    };
+                    let Some(idx) = idx else {
+                        self.shell.status_msg =
+                            "Select Subject: tab gốc đã đóng — bỏ kết quả".to_string();
+                        if let Some(w) = &self.win.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    };
+                    let active = self.docs.active_doc_idx;
+                    let n = {
+                        let c = &self.docs.documents[idx].canvas;
+                        (c.width * c.height) as usize
+                    };
+                    if mask.len() != n {
+                        // Canvas was resized (e.g. cropped) while inference ran.
+                        self.shell.status_msg =
+                            "Select Subject: kích thước ảnh đã đổi — thử lại".to_string();
+                    } else {
+                        {
+                            let canvas = &mut self.docs.documents[idx].canvas;
+                            let mut cmd = crate::core::command::SelectionCommand::capture_before(
+                                "Select Subject",
+                                &canvas.selection,
+                            );
+                            canvas.selection.mask.copy_from_slice(&mask);
+                            canvas.selection.active = mask.iter().any(|&v| v > 0);
+                            canvas.selection.mask_revision += 1;
+                            canvas.selection.mark_bbox_dirty();
+                            cmd.capture_after(&canvas.selection);
+                            canvas.record(Box::new(cmd));
+                        }
+                        if idx == active {
+                            self.apply_canvas_event(CanvasEvent::SelectionChanged);
+                            self.shell.status_msg = "Select Subject done".to_string();
+                        } else {
+                            // Non-active tab: refresh its bbox now so the mask is
+                            // correct when the user switches to it (switch_to_doc
+                            // re-uploads the selection on activation).
+                            self.docs.documents[idx].canvas.selection.refresh_bbox();
+                            let title = self.docs.documents[idx].title.clone();
+                            self.shell.status_msg = format!(
+                                "Select Subject xong ở tab \"{title}\" — chuyển qua tab đó để xem"
+                            );
+                        }
                     }
                 }
                 Err(e) => {

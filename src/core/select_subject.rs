@@ -108,6 +108,10 @@ type InferencePayload = (Option<Arc<Mutex<OrtSession>>>, Result<Vec<u8>, String>
 pub struct SelectSubjectEngine {
     pub status: Arc<Mutex<SubjectStatus>>,
     result_rx: Option<Receiver<InferencePayload>>,
+    /// Document the in-flight job was started on. The result must land on this
+    /// document even if the user switched tabs while inference ran, so the poll
+    /// resolves it by id instead of applying to whatever tab is active now.
+    pending_doc_id: Option<u32>,
     session: Option<Arc<Mutex<OrtSession>>>,
     selected_model: SelectSubjectModel,
     /// YOLO only: restrict the selection to the COCO "person" class.
@@ -127,6 +131,7 @@ impl SelectSubjectEngine {
         Self {
             status: Arc::new(Mutex::new(status)),
             result_rx: None,
+            pending_doc_id: None,
             session: None,
             selected_model,
             people_only: false,
@@ -177,6 +182,7 @@ impl SelectSubjectEngine {
         self.selected_model = model;
         self.session = None;
         self.result_rx = None;
+        self.pending_doc_id = None;
         self.refresh_status_from_disk();
         true
     }
@@ -370,7 +376,13 @@ impl SelectSubjectEngine {
         });
     }
 
-    pub fn run_async(&mut self, pixels: Vec<u8>, canvas_w: u32, canvas_h: u32) -> bool {
+    pub fn run_async(
+        &mut self,
+        doc_id: u32,
+        pixels: Vec<u8>,
+        canvas_w: u32,
+        canvas_h: u32,
+    ) -> bool {
         if self.is_busy() {
             return false;
         }
@@ -394,6 +406,7 @@ impl SelectSubjectEngine {
 
         let (tx, rx): (Sender<InferencePayload>, Receiver<InferencePayload>) = mpsc::channel();
         self.result_rx = Some(rx);
+        self.pending_doc_id = Some(doc_id);
 
         std::thread::spawn(move || {
             let sess_arc = if let Some(s) = existing_session {
@@ -429,7 +442,10 @@ impl SelectSubjectEngine {
         true
     }
 
-    pub fn poll_result(&mut self) -> Option<Result<Vec<u8>, String>> {
+    /// Poll for a finished job. Returns the document id the job was started on
+    /// (so the caller applies the mask to that tab, not the one active now)
+    /// alongside the inference result.
+    pub fn poll_result(&mut self) -> Option<(Option<u32>, Result<Vec<u8>, String>)> {
         let rx = self.result_rx.as_ref()?;
         match rx.try_recv() {
             Ok((new_sess, result)) => {
@@ -437,12 +453,15 @@ impl SelectSubjectEngine {
                 if let Some(s) = new_sess {
                     self.session = Some(s);
                 }
-                Some(result)
+                Some((self.pending_doc_id.take(), result))
             }
             Err(mpsc::TryRecvError::Empty) => None,
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.result_rx = None;
-                Some(Err("inference thread disconnected unexpectedly".into()))
+                Some((
+                    self.pending_doc_id.take(),
+                    Err("inference thread disconnected unexpectedly".into()),
+                ))
             }
         }
     }
