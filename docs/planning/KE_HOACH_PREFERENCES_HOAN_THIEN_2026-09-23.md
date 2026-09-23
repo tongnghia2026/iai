@@ -166,12 +166,22 @@ Quy ước trạng thái checklist:
 
 ### Phase 2 — Engine keymap (KHÔNG đổi hành vi)
 
-- [ ] `Command` + `KeyMap` + `run_command`.
-- [ ] Định tuyến phím chọn công cụ + phím lệnh menu qua keymap (mặc định = hôm
-      nay); giữ chốt ngữ cảnh + phím cố định.
-- [ ] Menu + bảng Help đọc chord từ keymap.
-- **Cổng nghiệm thu:** thử tay toàn bộ phím tool + lệnh menu → **giống hệt**
-  trước; `cargo test --lib` xanh; Build Release OK.
+- [x] `Command` + `KeyChord`/`KeyName` + `KeyMap` (default) — `src/app/commands.rs`.
+      Bảng TABLE là nguồn sự thật duy nhất; 5 unit test xanh (không trùng chord,
+      id ổn định, round-trip). Serde-ready cho Phase 3.
+- [x] Bảng Help (`menubar.rs::keyboard_shortcuts_list`) + trang Phím tắt trong
+      Preferences (`session.rs`) đọc chord/tên từ engine. Sửa luôn nhãn Help cũ
+      "Ctrl+," → "Ctrl+K". (Nhãn từng menu item trong menu bar để Phase 3 nối
+      keymap ĐỘNG cùng lúc bật rebinding, tránh sửa 2 lần.)
+- [~] **Định tuyến DISPATCH + `run_command`: CỐ Ý HOÃN sang Phase 3.** Lý do:
+      viết lại `keyboard.rs` (1200 dòng, đầy chốt ngữ cảnh) là thay đổi RỦI RO
+      hồi quy nhưng KHÔNG có lợi ích nhìn thấy được ở Phase 2 (hành vi phải giống
+      hệt). Làm chung với trình sửa phím tắt Phase 3 thì mới test được đầu-cuối
+      (đổi phím → thấy hiệu lực). Theo luật của chủ: "làm fix an toàn, hỏi trước
+      khi đổi rủi ro".
+- **Cổng nghiệm thu Phase 2:** KHÔNG đụng dispatch nên toàn bộ phím **giống hệt**
+  trước (bảo đảm theo cấu trúc); `cargo test --lib` xanh (1654); Build Release OK.
+  → **CHỜ CHỦ TEST + quyết định có làm tiếp dispatch/editor ở Phase 3.**
 
 ### Phase 3 — Trình sửa phím tắt + RESET
 

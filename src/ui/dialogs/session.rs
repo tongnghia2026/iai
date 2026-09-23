@@ -273,60 +273,37 @@ fn preferences_ai(ui: &mut egui::Ui, settings: &mut crate::core::settings::AppSe
 }
 
 fn preferences_shortcuts(ui: &mut egui::Ui) {
-    preferences_section_title(ui, "Phím tắt hiện tại");
+    use crate::app::commands::{Command, CommandGroup};
+
+    preferences_section_title(ui, "Phím tắt");
     ui.label(
         egui::RichText::new("Danh sách chỉ để xem. Đổi phím tắt sẽ mở ở bước kế tiếp.")
             .color(egui::Color32::GRAY)
             .size(11.0),
     );
     ui.add_space(6.0);
-    let shortcuts = [
-        ("Preferences", "Ctrl+K"),
-        ("Brush", "B"),
-        ("Eraser", "E"),
-        ("Move", "V"),
-        ("Eyedropper", "I"),
-        ("Fill", "G"),
-        ("Crop", "C"),
-        ("Zoom", "Z"),
-        ("Hand", "H"),
-        ("Undo", "Ctrl+Z"),
-        ("Redo", "Ctrl+Shift+Z"),
-        ("Save", "Ctrl+S"),
-        ("Open", "Ctrl+O"),
-        ("New", "Ctrl+N"),
-        ("Close", "Ctrl+W"),
-        ("Fit Screen", "Ctrl+0"),
-        ("Zoom 100%", "Ctrl+1"),
-        ("Levels", "Ctrl+L"),
-        ("Auto Levels", "Ctrl+Shift+L"),
-        ("Color Balance", "Ctrl+B"),
-        ("Hue/Saturation", "Ctrl+U"),
-        ("Desaturate", "Ctrl+Shift+U"),
-        ("Invert", "Ctrl+I"),
-        ("Free Transform", "Ctrl+T"),
-        ("Layer via Copy", "Ctrl+J"),
-        ("Smart Fill", "Shift+F5"),
-        ("Rulers", "Ctrl+R"),
-        ("Swap Colors", "X"),
-        ("Brush Size -", "["),
-        ("Brush Size +", "]"),
-    ];
-    egui::Grid::new("shortcuts_grid")
-        .num_columns(2)
-        .striped(true)
-        .spacing([20.0, 4.0])
-        .show(ui, |ui| {
-            for (action, key) in &shortcuts {
-                ui.label(*action);
-                ui.label(
-                    egui::RichText::new(*key)
-                        .monospace()
-                        .color(egui::Color32::from_rgb(180, 180, 255)),
-                );
-                ui.end_row();
-            }
-        });
+
+    // Every row is read from the keymap engine, so the menu, the Help list and
+    // this page can never drift out of sync.
+    for group in CommandGroup::all() {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(group.title()).strong().size(12.0));
+        egui::Grid::new(("shortcuts_grid", group.title()))
+            .num_columns(2)
+            .striped(true)
+            .spacing([20.0, 4.0])
+            .show(ui, |ui| {
+                for cmd in Command::in_group(group) {
+                    ui.label(cmd.display_name());
+                    ui.label(
+                        egui::RichText::new(cmd.default_label())
+                            .monospace()
+                            .color(egui::Color32::from_rgb(180, 180, 255)),
+                    );
+                    ui.end_row();
+                }
+            });
+    }
 }
 
 /// Units offered as a default for rulers / size dialogs. Percent is excluded —

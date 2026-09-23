@@ -1692,104 +1692,63 @@ fn menu_item_enabled<'a>(
 /// Shortcuts submenu (the app has no other shortcut reference). Keys mirror the
 /// bindings in `app/input/keyboard.rs` and the menu accelerators.
 fn keyboard_shortcuts_list(ui: &mut egui::Ui, pal: crate::ui::theme::Palette) {
+    use crate::app::commands::{Command, CommandGroup};
+
     ui.set_max_width(300.0);
     egui::ScrollArea::vertical()
         .max_height(460.0)
         .show(ui, |ui| {
-            let sections: &[(&str, &[(&str, &str)])] = &[
-                (
-                    "Tools",
-                    &[
-                        ("V", "Move / select"),
-                        ("M", "Marquee selection"),
-                        ("L", "Lasso"),
-                        ("W", "Smart Select"),
-                        ("C", "Crop"),
-                        ("I", "Eyedropper"),
-                        ("B", "Brush / Pencil"),
-                        ("E", "Eraser"),
-                        ("G", "Fill / Gradient"),
-                        ("S", "Clone"),
-                        ("J", "Repair / Patch"),
-                        ("O", "Dodge / Burn"),
-                        ("P", "Pen"),
-                        ("A", "Node — edit points"),
-                        ("U", "Shapes / Arrow (cycle)"),
-                        ("T", "Type"),
-                        ("Z", "Zoom"),
-                        ("H", "Hand"),
+            let row = |ui: &mut egui::Ui, keys: &str, action: &str| {
+                ui.label(
+                    egui::RichText::new(keys)
+                        .monospace()
+                        .size(11.0)
+                        .color(pal.text_primary),
+                );
+                ui.label(
+                    egui::RichText::new(action)
+                        .size(11.0)
+                        .color(pal.text_secondary),
+                );
+                ui.end_row();
+            };
+
+            // Re-bindable commands come straight from the keymap engine, so this
+            // list, the menu bar and the Preferences page share one source.
+            for group in CommandGroup::all() {
+                ui.add_space(3.0);
+                ui.label(egui::RichText::new(group.title()).strong().size(11.0));
+                egui::Grid::new(("help_shortcuts", group.title()))
+                    .num_columns(2)
+                    .spacing(egui::vec2(12.0, 2.0))
+                    .show(ui, |ui| {
+                        for cmd in Command::in_group(group) {
+                            row(ui, &cmd.default_label(), cmd.display_name());
+                        }
+                    });
+            }
+
+            // Context / fixed keys that are intentionally not re-bindable.
+            ui.add_space(3.0);
+            ui.label(egui::RichText::new("Other").strong().size(11.0));
+            egui::Grid::new("help_shortcuts_other")
+                .num_columns(2)
+                .spacing(egui::vec2(12.0, 2.0))
+                .show(ui, |ui| {
+                    for (keys, action) in [
                         ("X", "Swap colours"),
                         ("D", "Reset colours"),
-                    ],
-                ),
-                (
-                    "File",
-                    &[
-                        ("Ctrl+N", "New"),
-                        ("Ctrl+O", "Open"),
-                        ("Ctrl+S", "Save"),
-                        ("Ctrl+Shift+S", "Save As"),
-                        ("Ctrl+W", "Close"),
-                        ("Ctrl+P", "Print"),
-                        ("Ctrl+,", "Preferences"),
-                    ],
-                ),
-                (
-                    "Edit",
-                    &[
-                        ("Ctrl+Z", "Undo"),
-                        ("Ctrl+Shift+Z", "Redo"),
-                        ("Ctrl+X", "Cut"),
-                        ("Ctrl+C", "Copy"),
-                        ("Ctrl+V", "Paste"),
-                        ("Ctrl+A", "Select All"),
                         ("Ctrl+D", "Deselect / Repeat"),
-                        ("Ctrl+T", "Free Transform"),
-                    ],
-                ),
-                (
-                    "Layers & objects",
-                    &[
                         ("Ctrl+G", "Group"),
                         ("Ctrl+Shift+G", "Ungroup"),
                         ("Ctrl+E", "Merge Down"),
                         ("Ctrl+Shift+E", "Stamp Visible"),
                         ("Ctrl+Q", "Convert to Curves"),
-                    ],
-                ),
-                (
-                    "View",
-                    &[
-                        ("Ctrl+0", "Fit to window"),
-                        ("Ctrl+1", "100%"),
-                        ("Ctrl+R", "Rulers"),
                         ("[  ]", "Brush size"),
                         ("Space+Drag", "Pan"),
-                    ],
-                ),
-            ];
-            for (title, rows) in sections {
-                ui.add_space(3.0);
-                ui.label(egui::RichText::new(*title).strong().size(11.0));
-                egui::Grid::new(*title)
-                    .num_columns(2)
-                    .spacing(egui::vec2(12.0, 2.0))
-                    .show(ui, |ui| {
-                        for (keys, action) in *rows {
-                            ui.label(
-                                egui::RichText::new(*keys)
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(pal.text_primary),
-                            );
-                            ui.label(
-                                egui::RichText::new(*action)
-                                    .size(11.0)
-                                    .color(pal.text_secondary),
-                            );
-                            ui.end_row();
-                        }
-                    });
-            }
+                    ] {
+                        row(ui, keys, action);
+                    }
+                });
         });
 }
