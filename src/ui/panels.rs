@@ -3057,6 +3057,17 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
             actions.layers.merge_visible = true;
             ui.close();
         }
+        if ui
+            .add_enabled(
+                data.layers.layer_count > 1,
+                egui::Button::new("Flatten Image"),
+            )
+            .on_hover_text("Gộp tất cả layer thành một (bỏ layer đang ẩn)")
+            .clicked()
+        {
+            actions.layers.merge_all = true;
+            ui.close();
+        }
         ui.separator();
         if ui
             .add(egui::Button::new(
