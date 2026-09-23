@@ -214,25 +214,31 @@ pub(crate) fn color_range_dialog(ctx: &egui::Context, data: &UiData, actions: &m
         .default_width(width)
         .min_width(width)
         .show(ctx, |ui| {
-            ui.label(
-                egui::RichText::new("Bấm vào ảnh để lấy màu, hoặc chỉnh màu bên dưới.")
-                    .color(egui::Color32::GRAY)
-                    .size(11.0),
-            );
-            ui.add_space(6.0);
-
-            // Target colour — editable via the picker or by clicking the canvas.
-            let mut color = egui::Color32::from_rgb(
-                data.dialogs.color_range_color[0],
-                data.dialogs.color_range_color[1],
-                data.dialogs.color_range_color[2],
-            );
-            ui.scope(|ui| {
-                ui.spacing_mut().slider_width = width - 30.0;
-                if crate::ui::color_picker::color_picker_compact(ui, &mut color) {
-                    actions.sel.set_color_range_color =
-                        Some([color.r(), color.g(), color.b(), 255]);
-                }
+            // Sampled colour read-out — a small chip, not a full picker panel.
+            let c = data.dialogs.color_range_color;
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Bấm vào ảnh để lấy màu")
+                        .color(egui::Color32::GRAY)
+                        .size(11.0),
+                );
+                ui.add_space(6.0);
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(22.0, 16.0), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, 2.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
+                ui.painter().rect_stroke(
+                    rect,
+                    2.0,
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)),
+                    egui::StrokeKind::Inside,
+                );
+                ui.label(
+                    egui::RichText::new(format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]))
+                        .monospace()
+                        .size(11.0)
+                        .color(egui::Color32::GRAY),
+                );
             });
 
             ui.add_space(8.0);

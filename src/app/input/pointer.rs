@@ -1192,6 +1192,16 @@ impl App {
             return;
         }
 
+        if self.edit.input.eyedropping && self.shell.ui.show_color_range_dialog {
+            let ev = self.tool_event();
+            self.pick_color_range_at(ev.canvas_x, ev.canvas_y);
+            self.edit.input.last_mouse_x = position.x;
+            self.edit.input.last_mouse_y = position.y;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
         if self.edit.input.eyedropping
             && (self.shell.ui.show_paint_color_dialog || !self.is_blocking_modal())
         {
@@ -1232,6 +1242,33 @@ impl App {
             self.edit.input.last_mouse_x = position.x;
             self.edit.input.last_mouse_y = position.y;
             self.push_cursor_uniforms();
+            return;
+        }
+
+        // A marquee / lasso drag, once begun on the canvas, must keep tracking the
+        // cursor even when it crosses the page edge onto the gray pasteboard or
+        // over a panel — the selection itself clamps to the canvas. Otherwise
+        // `was_over_ui` freezes the drag the instant the pointer leaves the page,
+        // which is trivial to hit on a PDF page that fits tightly inside the view.
+        // The button-up handler commits from the final cursor position wherever it
+        // lands, so this only needs to keep feeding drag samples.
+        if self.edit.input.painting
+            && !self.is_blocking_modal()
+            && !self.edit.input.space_dragging
+            && !self.edit.input.mid_dragging
+            && self.edit.transform_state.is_none()
+            && matches!(
+                self.edit.tools.active_id(),
+                ToolId::SelectionRect | ToolId::SelectionEllipse | ToolId::Lasso
+            )
+        {
+            let event = self.tool_event();
+            self.edit.pending_stroke_inputs.push(event);
+            self.edit.input.last_mouse_x = position.x;
+            self.edit.input.last_mouse_y = position.y;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
             return;
         }
 

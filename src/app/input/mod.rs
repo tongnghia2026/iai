@@ -127,7 +127,12 @@ impl App {
         self.edit.input.is_over_ui = self.win.egui_ctx.egui_wants_pointer_input()
             || self.win.egui_ctx.is_pointer_over_egui()
             || self.win.egui_ctx.egui_wants_keyboard_input();
-        let modal_ui = self.is_modal_open() && !self.shell.ui.show_paint_color_dialog;
+        // The paint-colour and Color Range dialogs own the canvas as an
+        // eyedropper surface: the pointer over the canvas must NOT read as UI,
+        // or the eyedropper cursor and hover sampling are suppressed.
+        let modal_ui = self.is_modal_open()
+            && !self.shell.ui.show_paint_color_dialog
+            && !self.shell.ui.show_color_range_dialog;
         // Tools/states that legitimately act on the gray pasteboard outside the
         // page. Brush-like tools need their center to cross the page edge so they
         // can paint cleanly up to it; the actual pixel writes remain canvas-clipped.
