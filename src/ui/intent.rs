@@ -571,6 +571,14 @@ pub struct SelectionIntent {
     pub open_modify_dialog: Option<SelectionModifyKind>,
     /// Close the Select ▸ Modify dialog.
     pub close_modify_dialog: bool,
+    /// Select ▸ Color Range: open (Some(true)) / close (Some(false)) the dialog.
+    pub show_color_range_dialog: Option<bool>,
+    /// Color Range dialog: set the sampled target colour (picker widget).
+    pub set_color_range_color: Option<[u8; 4]>,
+    /// Color Range dialog: set the fuzziness (0..=200).
+    pub set_color_range_fuzziness: Option<u8>,
+    /// Color Range dialog: apply the current colour + fuzziness as a selection.
+    pub apply_color_range: bool,
     pub trigger_select_subject: bool,
     pub set_select_subject_model: Option<crate::core::select_subject::SelectSubjectModel>,
     pub set_yolo_people_only: Option<bool>,

@@ -203,6 +203,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     if data.dialogs.show_stroke_dialog {
         stroke_dialog(ctx, data, actions);
     }
+    if data.dialogs.show_color_range_dialog {
+        color_range_dialog(ctx, data, actions);
+    }
     if data.dialogs.show_smart_fill_dialog {
         smart_fill_dialog(ctx, data, actions);
     }

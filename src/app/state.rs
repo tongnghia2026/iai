@@ -413,6 +413,14 @@ pub struct UiState {
     pub show_feather_dialog: bool,
     pub show_modify_dialog: Option<crate::ui::SelectionModifyKind>,
     pub show_stroke_dialog: bool,
+    /// Select ▸ Color Range dialog: open state, sampled target colour, fuzziness
+    /// (0..=200) and a grayscale thumbnail of the resulting mask (white =
+    /// selected). The thumbnail is rebuilt only when the colour or fuzziness
+    /// changes, not every frame.
+    pub show_color_range_dialog: bool,
+    pub color_range_color: [u8; 4],
+    pub color_range_fuzziness: u8,
+    pub color_range_preview: Option<std::sync::Arc<egui::ColorImage>>,
     /// Editable New Canvas dimensions in `new_unit`. Keep these separate from
     /// the rounded pixel dimensions so physical values such as 10 cm remain
     /// exactly 10 while the user changes focus, unit, or DPI.
@@ -1666,6 +1674,10 @@ impl App {
                     show_feather_dialog: false,
                     show_modify_dialog: None,
                     show_stroke_dialog: false,
+                    show_color_range_dialog: false,
+                    color_range_color: [128, 128, 128, 255],
+                    color_range_fuzziness: 40,
+                    color_range_preview: None,
                     new_w_input: 800.0,
                     new_h_input: 600.0,
                     new_dpi: 72.0,
@@ -2462,6 +2474,7 @@ impl App {
             || self.jobs.pending_pdf_page_insert.is_some()
             || self.shell.ui.show_refine_color_dialog
             || self.shell.ui.show_paint_color_dialog
+            || self.shell.ui.show_color_range_dialog
     }
 
     /// True while an adjustment or filter dialog with a live canvas preview is
@@ -2824,6 +2837,7 @@ impl App {
 
         let eyedrop_cursor = self.edit.tools.active_id() == ToolId::Eyedropper
             || (self.shell.ui.show_paint_color_dialog && !self.edit.input.was_over_ui)
+            || (self.shell.ui.show_color_range_dialog && !self.edit.input.was_over_ui)
             || (self.edit.input.alt_held
                 && matches!(self.edit.tools.active_id(), ToolId::Brush | ToolId::Pencil));
         let needs_native_ring = !self.edit.input.was_over_ui

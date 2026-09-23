@@ -45,6 +45,21 @@ impl App {
             }
             return;
         }
+        if self.shell.ui.show_color_range_dialog {
+            if button == MouseButton::Left {
+                if pressed && !self.edit.input.is_over_ui {
+                    let ev = self.tool_event();
+                    self.pick_color_range_at(ev.canvas_x, ev.canvas_y);
+                    self.edit.input.eyedropping = true;
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
+                } else if !pressed {
+                    self.edit.input.eyedropping = false;
+                }
+            }
+            return;
+        }
         if self.shell.ui.show_adjustment_dialog && self.shell.ui.adj_eyedropper.is_some() {
             if button == MouseButton::Left {
                 if pressed && !self.edit.input.is_over_ui {

@@ -2,6 +2,7 @@
 //! filters, Smart Fill, AI panels, plus the New/preset/show_* dialog
 //! bookkeeping. Split out of actions.rs (phase 2).
 
+use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 use crate::ui::UiActions;
 
@@ -568,6 +569,25 @@ impl App {
         if let Some(params) = actions.sel.apply_stroke.take() {
             self.edit.pending_stroke = Some(params);
         }
+        if let Some(v) = actions.sel.show_color_range_dialog.take() {
+            if v {
+                self.open_color_range_dialog();
+            } else {
+                self.shell.ui.show_color_range_dialog = false;
+                self.shell.ui.color_range_preview = None;
+            }
+        }
+        if let Some(c) = actions.sel.set_color_range_color.take() {
+            self.shell.ui.color_range_color = c;
+            self.rebuild_color_range_preview();
+        }
+        if let Some(f) = actions.sel.set_color_range_fuzziness.take() {
+            self.shell.ui.color_range_fuzziness = f;
+            self.rebuild_color_range_preview();
+        }
+        if std::mem::take(&mut actions.sel.apply_color_range) {
+            self.apply_color_range();
+        }
 
         if let Some(true) = actions.doc.close_file_without_saving.take() {
             // This dialog handler runs before the general file-action handler.
@@ -747,5 +767,152 @@ impl App {
                 presets.save();
             }
         }
+    }
+
+    /// Open Select ▸ Color Range: seed the target colour from the foreground so
+    /// the dialog previews something at once, then build the first thumbnail.
+    pub(crate) fn open_color_range_dialog(&mut self) {
+        if self.has_only_welcome_placeholder() {
+            self.shell.status_msg = "Hãy mở một ảnh trước".to_string();
+            return;
+        }
+        let fg = self.edit.tools.brush().settings.color;
+        self.shell.ui.color_range_color = [fg[0], fg[1], fg[2], 255];
+        self.shell.ui.show_color_range_dialog = true;
+        self.rebuild_color_range_preview();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Canvas eyedropper for the Color Range dialog: sample the composited pixel
+    /// under the cursor as the new target colour and refresh the preview.
+    pub(crate) fn pick_color_range_at(&mut self, cx: f32, cy: f32) {
+        let idx = self.docs.active_doc_idx;
+        let (w, h) = {
+            let c = &self.docs.documents[idx].canvas;
+            (c.width, c.height)
+        };
+        if cx < 0.0 || cy < 0.0 || cx >= w as f32 || cy >= h as f32 {
+            return;
+        }
+        self.docs.documents[idx].canvas.ensure_pixels();
+        let (sx, sy) = (cx as u32, cy as u32);
+        let color = {
+            let pixels = &self.docs.documents[idx].canvas.pixels;
+            let i = ((sy * w + sx) * 4) as usize;
+            if i + 2 >= pixels.len() {
+                return;
+            }
+            [pixels[i], pixels[i + 1], pixels[i + 2], 255]
+        };
+        self.shell.ui.color_range_color = color;
+        self.shell.status_msg = format!(
+            "Color Range: #{:02X}{:02X}{:02X}",
+            color[0], color[1], color[2]
+        );
+        self.rebuild_color_range_preview();
+    }
+
+    /// Rebuild the grayscale mask thumbnail (white = selected) from the
+    /// composited image with the current target colour + fuzziness. Only called
+    /// when an input changes, and downsampled so it stays cheap on large images.
+    pub(crate) fn rebuild_color_range_preview(&mut self) {
+        if !self.shell.ui.show_color_range_dialog {
+            return;
+        }
+        let idx = self.docs.active_doc_idx;
+        let (w, h) = {
+            let c = &self.docs.documents[idx].canvas;
+            (c.width, c.height)
+        };
+        if w == 0 || h == 0 {
+            self.shell.ui.color_range_preview = None;
+            return;
+        }
+        self.docs.documents[idx].canvas.ensure_pixels();
+        let target = {
+            let c = self.shell.ui.color_range_color;
+            [c[0], c[1], c[2]]
+        };
+        let fuzz = self.shell.ui.color_range_fuzziness as f32;
+
+        // Fit the preview within a small box; sample the composite by a stride.
+        const MAX_EDGE: u32 = 260;
+        let step = (w.max(h).div_ceil(MAX_EDGE)).max(1);
+        let pw = w.div_ceil(step).max(1);
+        let ph = h.div_ceil(step).max(1);
+        let pixels = &self.docs.documents[idx].canvas.pixels;
+        if pixels.len() < (w as usize) * (h as usize) * 4 {
+            self.shell.ui.color_range_preview = None;
+            return;
+        }
+        let mut rgba = vec![0u8; (pw as usize) * (ph as usize) * 4];
+        for py in 0..ph {
+            let sy = (py * step).min(h - 1);
+            for px in 0..pw {
+                let sx = (px * step).min(w - 1);
+                let si = ((sy * w + sx) * 4) as usize;
+                let rgb = [pixels[si], pixels[si + 1], pixels[si + 2]];
+                let a = crate::core::selection::color_range_alpha(rgb, target, fuzz);
+                let di = ((py * pw + px) * 4) as usize;
+                rgba[di] = a;
+                rgba[di + 1] = a;
+                rgba[di + 2] = a;
+                rgba[di + 3] = 255;
+            }
+        }
+        let img = egui::ColorImage::from_rgba_unmultiplied([pw as usize, ph as usize], &rgba);
+        self.shell.ui.color_range_preview = Some(std::sync::Arc::new(img));
+    }
+
+    /// Apply the Color Range dialog's colour + fuzziness as a NEW selection over
+    /// the whole composited image (one undoable step), then close the dialog.
+    pub(crate) fn apply_color_range(&mut self) {
+        let idx = self.docs.active_doc_idx;
+        let (w, h) = {
+            let c = &self.docs.documents[idx].canvas;
+            (c.width, c.height)
+        };
+        if w == 0 || h == 0 {
+            self.shell.ui.show_color_range_dialog = false;
+            self.shell.ui.color_range_preview = None;
+            return;
+        }
+        self.docs.documents[idx].canvas.ensure_pixels();
+        let target = {
+            let c = self.shell.ui.color_range_color;
+            [c[0], c[1], c[2]]
+        };
+        let fuzz = self.shell.ui.color_range_fuzziness;
+        let mask = {
+            let pixels = &self.docs.documents[idx].canvas.pixels;
+            crate::core::selection::color_range_mask(pixels, w, h, target, fuzz)
+        };
+
+        {
+            let canvas = &mut self.docs.documents[idx].canvas;
+            if mask.len() == canvas.selection.mask.len() {
+                let mut cmd = crate::core::command::SelectionCommand::capture_before(
+                    "Color Range",
+                    &canvas.selection,
+                );
+                canvas
+                    .selection
+                    .apply_with_mode(mask, crate::core::selection::SelectionMode::New);
+                cmd.capture_after(&canvas.selection);
+                canvas.record_as(Box::new(cmd), crate::core::gateway::ChangeKind::Selection);
+            }
+        }
+
+        self.shell.ui.show_color_range_dialog = false;
+        self.shell.ui.color_range_preview = None;
+        self.apply_canvas_event(CanvasEvent::SelectionChanged);
+        let selected = self.docs.documents[idx].canvas.selection.active;
+        self.shell.status_msg = if selected {
+            "Color Range: đã tạo vùng chọn theo màu".to_string()
+        } else {
+            "Color Range: không có điểm ảnh nào khớp màu".to_string()
+        };
     }
 }

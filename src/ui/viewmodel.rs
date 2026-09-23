@@ -523,6 +523,11 @@ pub struct DialogViewModel {
     pub show_feather_dialog: bool,
     pub show_modify_dialog: Option<SelectionModifyKind>,
     pub show_stroke_dialog: bool,
+    /// Select ▸ Color Range dialog state mirrored for the UI.
+    pub show_color_range_dialog: bool,
+    pub color_range_color: [u8; 4],
+    pub color_range_fuzziness: u8,
+    pub color_range_preview: Option<std::sync::Arc<egui::ColorImage>>,
     /// Editable values in `new_unit`, before conversion to integer pixels.
     pub new_w_input: f32,
     pub new_h_input: f32,
@@ -1025,6 +1030,10 @@ impl Default for UiData {
                 show_feather_dialog: false,
                 show_modify_dialog: None,
                 show_stroke_dialog: false,
+                show_color_range_dialog: false,
+                color_range_color: [128, 128, 128, 255],
+                color_range_fuzziness: 40,
+                color_range_preview: None,
                 new_w_input: 800.0,
                 new_h_input: 600.0,
                 new_dpi: 72.0,

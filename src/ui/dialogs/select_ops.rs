@@ -192,6 +192,153 @@ pub(crate) fn modify_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
     }
 }
 
+/// Select ▸ Color Range. A side-docked, non-modal window (like the paint-colour
+/// dialog) so the canvas stays visible and clickable: clicking the image samples
+/// the target colour. A Fuzziness slider widens the colour family and a
+/// grayscale thumbnail previews the resulting selection (white = selected).
+pub(crate) fn color_range_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    let mut do_apply = enter_pressed && data.doc.has_doc;
+    let mut do_cancel = esc_pressed;
+
+    let mut open = true;
+    let width = 300.0_f32;
+    egui::Window::new("Color Range")
+        .id(egui::Id::new("color_range_dialog"))
+        .collapsible(false)
+        .resizable(false)
+        .movable(true)
+        .order(DIALOG_ORDER)
+        .open(&mut open)
+        .default_pos(document_side_dialog_pos(ctx, data, width, 96.0))
+        .default_width(width)
+        .min_width(width)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("Bấm vào ảnh để lấy màu, hoặc chỉnh màu bên dưới.")
+                    .color(egui::Color32::GRAY)
+                    .size(11.0),
+            );
+            ui.add_space(6.0);
+
+            // Target colour — editable via the picker or by clicking the canvas.
+            let mut color = egui::Color32::from_rgb(
+                data.dialogs.color_range_color[0],
+                data.dialogs.color_range_color[1],
+                data.dialogs.color_range_color[2],
+            );
+            ui.scope(|ui| {
+                ui.spacing_mut().slider_width = width - 30.0;
+                if crate::ui::color_picker::color_picker_compact(ui, &mut color) {
+                    actions.sel.set_color_range_color =
+                        Some([color.r(), color.g(), color.b(), 255]);
+                }
+            });
+
+            ui.add_space(8.0);
+            let mut fuzz = data.dialogs.color_range_fuzziness as f32;
+            if ui
+                .add(egui::Slider::new(&mut fuzz, 0.0..=200.0).text("Fuzziness"))
+                .changed()
+            {
+                actions.sel.set_color_range_fuzziness = Some(fuzz.round().clamp(0.0, 200.0) as u8);
+            }
+
+            ui.add_space(8.0);
+            color_range_preview_ui(ui, data);
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        data.doc.has_doc,
+                        egui::Button::new("OK").min_size(egui::vec2(72.0, 24.0)),
+                    )
+                    .clicked()
+                {
+                    do_apply = true;
+                }
+                if ui
+                    .add(egui::Button::new("Cancel").min_size(egui::vec2(72.0, 24.0)))
+                    .clicked()
+                {
+                    do_cancel = true;
+                }
+            });
+        });
+
+    if do_apply {
+        actions.sel.apply_color_range = true;
+        actions.sel.show_color_range_dialog = Some(false);
+    } else if do_cancel || !open {
+        actions.sel.show_color_range_dialog = Some(false);
+    }
+}
+
+/// Grayscale thumbnail of the pending Color Range mask (white = selected). The
+/// texture is cached and only re-uploaded when the mask image changes.
+fn color_range_preview_ui(ui: &mut egui::Ui, data: &UiData) {
+    let slot_size = egui::vec2(268.0, 168.0);
+    let (slot, _) = ui.allocate_exact_size(slot_size, egui::Sense::hover());
+    let painter = ui.painter_at(slot);
+    painter.rect_filled(slot, 0.0, egui::Color32::from_gray(24));
+
+    if let Some(image) = &data.dialogs.color_range_preview {
+        let cache_id = egui::Id::new("color_range_preview_texture");
+        let image_key = std::sync::Arc::as_ptr(image) as usize;
+        let texture = ui
+            .ctx()
+            .data(|d| d.get_temp::<(usize, egui::TextureHandle)>(cache_id))
+            .map(|(cached_key, mut texture)| {
+                if cached_key != image_key {
+                    texture.set((**image).clone(), egui::TextureOptions::LINEAR);
+                    ui.ctx().data_mut(|store| {
+                        store.insert_temp(cache_id, (image_key, texture.clone()))
+                    });
+                }
+                texture
+            })
+            .unwrap_or_else(|| {
+                let texture = ui.ctx().load_texture(
+                    "color_range_preview",
+                    (**image).clone(),
+                    egui::TextureOptions::LINEAR,
+                );
+                ui.ctx()
+                    .data_mut(|store| store.insert_temp(cache_id, (image_key, texture.clone())));
+                texture
+            });
+
+        let iw = image.size[0].max(1) as f32;
+        let ih = image.size[1].max(1) as f32;
+        let scale = (slot.width() / iw).min(slot.height() / ih).min(1.0);
+        let draw_size = egui::vec2(iw * scale, ih * scale);
+        let rect = egui::Rect::from_center_size(slot.center(), draw_size);
+        painter.image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    } else {
+        painter.text(
+            slot.center(),
+            egui::Align2::CENTER_CENTER,
+            "Xem trước vùng chọn",
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_gray(150),
+        );
+    }
+
+    painter.rect_stroke(
+        slot,
+        0.0,
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(92)),
+        egui::StrokeKind::Inside,
+    );
+}
+
 pub(crate) fn stroke_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     use crate::core::canvas::{StrokeLocation, StrokeParams};
 

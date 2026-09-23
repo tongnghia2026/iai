@@ -501,9 +501,88 @@ pub fn flood_fill_mask(
     mask
 }
 
+/// Luminance-weighted RGB distance between two colours (0 = identical,
+/// ~255 = opposite). Shared by [`color_range_mask`] and the dialog preview so
+/// both grade a pixel identically.
+#[inline]
+pub fn color_range_distance(a: [u8; 3], b: [u8; 3]) -> f32 {
+    let r = a[0] as f32 - b[0] as f32;
+    let g = a[1] as f32 - b[1] as f32;
+    let bl = a[2] as f32 - b[2] as f32;
+    (0.30 * r * r + 0.59 * g * g + 0.11 * bl * bl).sqrt()
+}
+
+/// Soft selection alpha (0..=255) for a pixel, given the sampled `target` colour
+/// and a `tolerance` in distance units. Fully selected at distance 0, fading
+/// linearly to 0 at `tolerance` — the feathered edge that makes Color Range read
+/// like Photoshop's Fuzziness.
+#[inline]
+pub fn color_range_alpha(px: [u8; 3], target: [u8; 3], tolerance: f32) -> u8 {
+    let tol = tolerance.max(1.0);
+    let d = color_range_distance(px, target);
+    let a = (1.0 - d / tol).clamp(0.0, 1.0);
+    (a * 255.0).round() as u8
+}
+
+/// Build a soft selection mask from colour similarity to `target`
+/// (Select ▸ Color Range). `fuzziness` (0..=200) is the luminance-weighted RGB
+/// distance at which a pixel fades from fully selected to unselected. Alpha is
+/// `1 - d / fuzziness`, so a small fuzziness picks only near-identical colours
+/// and a large one grabs a broad family with a feathered edge. `pixels` is the
+/// canvas-space RGBA buffer (the composited image when sampling merged).
+pub fn color_range_mask(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    target: [u8; 3],
+    fuzziness: u8,
+) -> Vec<u8> {
+    let Some(n) = mask_len(width, height) else {
+        return Vec::new();
+    };
+    let mut mask = vec![0u8; n];
+    if pixels.len() < n * 4 {
+        return mask;
+    }
+    let tol = fuzziness as f32;
+    mask.par_iter_mut().enumerate().for_each(|(i, out)| {
+        let p = i * 4;
+        let px = [pixels[p], pixels[p + 1], pixels[p + 2]];
+        *out = color_range_alpha(px, target, tol);
+    });
+    mask
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_range_selects_matching_colours_and_fades_with_distance() {
+        // 3 pixels: exact match, a near colour, and a far colour.
+        let target = [200u8, 50, 50];
+        let pixels: Vec<u8> = vec![
+            200, 50, 50, 255, // exact
+            190, 60, 55, 255, // close
+            10, 220, 30, 255, // far (green)
+        ];
+        let mask = color_range_mask(&pixels, 3, 1, target, 40);
+        assert_eq!(mask[0], 255, "exact match fully selected");
+        assert!(
+            mask[1] > 0 && mask[1] < 255,
+            "near colour partially selected"
+        );
+        assert_eq!(mask[2], 0, "far colour not selected");
+    }
+
+    #[test]
+    fn color_range_zero_fuzziness_keeps_only_exact() {
+        let target = [120u8, 120, 120];
+        let pixels: Vec<u8> = vec![120, 120, 120, 255, 122, 120, 120, 255];
+        let mask = color_range_mask(&pixels, 2, 1, target, 0);
+        assert_eq!(mask[0], 255);
+        assert_eq!(mask[1], 0);
+    }
 
     #[test]
     fn bbox_is_cached() {

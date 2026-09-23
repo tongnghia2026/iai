@@ -1197,6 +1197,17 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         }
                         ui.separator();
                         if ui
+                            .add(menu_item_enabled("Color Range...", "", data.doc.has_doc))
+                            .on_hover_text(
+                                "Chọn theo màu: bấm vào ảnh để lấy màu, chỉnh Fuzziness",
+                            )
+                            .clicked()
+                        {
+                            actions.sel.show_color_range_dialog = Some(true);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
                             .add(menu_item_enabled(
                                 "Feather...",
                                 "Shift+F6",
