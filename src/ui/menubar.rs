@@ -1,4 +1,5 @@
 use super::{UiActions, UiData};
+use crate::app::commands::Command;
 use crate::formats::ExportFormat;
 use egui;
 use egui_phosphor::regular as ph;
@@ -97,11 +98,11 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             egui::Stroke::new(1.0_f32, pal.text_primary);
 
                         ui.menu_button("File", |ui| {
-                            if ui.add(menu_item("New", "Ctrl+N")).clicked() {
+                            if ui.add(menu_item("New", &data.keymap.label_for(Command::FileNew))).clicked() {
                                 actions.dialogs.show_new_dialog = Some(true);
                                 ui.close();
                             }
-                            if ui.add(menu_item("Open...", "Ctrl+O")).clicked() {
+                            if ui.add(menu_item("Open...", &data.keymap.label_for(Command::FileOpen))).clicked() {
                                 actions.doc.open_file = true;
                                 ui.close();
                             }
@@ -126,18 +127,18 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 }
                             });
                             if ui
-                                .add(menu_item_enabled("Close", "Ctrl+W", data.doc.has_doc))
+                                .add(menu_item_enabled("Close", &data.keymap.label_for(Command::FileClose), data.doc.has_doc))
                                 .clicked()
                             {
                                 actions.doc.close_doc_tab = Some(data.doc.active_doc_idx);
                                 ui.close();
                             }
                             ui.separator();
-                            if ui.add(menu_item("Save", "Ctrl+S")).clicked() {
+                            if ui.add(menu_item("Save", &data.keymap.label_for(Command::FileSave))).clicked() {
                                 actions.doc.save = true;
                                 ui.close();
                             }
-                            if ui.add(menu_item("Save As...", "Ctrl+Shift+S")).clicked() {
+                            if ui.add(menu_item("Save As...", &data.keymap.label_for(Command::FileSaveAs))).clicked() {
                                 actions.doc.save_as = true;
                                 ui.close();
                             }
@@ -172,7 +173,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             });
                             ui.separator();
                             if ui
-                                .add(menu_item_enabled("Print...", "Ctrl+P", data.doc.has_doc))
+                                .add(menu_item_enabled("Print...", &data.keymap.label_for(Command::FilePrint), data.doc.has_doc))
                                 .clicked()
                             {
                                 actions.print.show_print_dialog = Some(true);
@@ -190,7 +191,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 ui.close();
                             }
                             ui.separator();
-                            if ui.add(menu_item("Preferences", "Ctrl+K")).clicked() {
+                            if ui.add(menu_item("Preferences", &data.keymap.label_for(Command::Preferences))).clicked() {
                                 actions.dialogs.show_preferences = Some(true);
                                 ui.close();
                             }
@@ -204,7 +205,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
                     ui.menu_button("Edit", |ui| {
                         if ui
-                            .add(menu_item_enabled("Undo", "Ctrl+Z", data.doc.undo_count > 0))
+                            .add(menu_item_enabled("Undo", &data.keymap.label_for(Command::EditUndo), data.doc.undo_count > 0))
                             .clicked()
                         {
                             actions.doc.undo = true;
@@ -213,7 +214,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         if ui
                             .add(menu_item_enabled(
                                 "Redo",
-                                "Ctrl+Shift+Z",
+                                &data.keymap.label_for(Command::EditRedo),
                                 data.doc.redo_count > 0,
                             ))
                             .clicked()
@@ -223,24 +224,24 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         }
                         ui.separator();
                         if ui
-                            .add(menu_item_enabled("Cut", "Ctrl+X", data.sel.has_selection))
+                            .add(menu_item_enabled("Cut", &data.keymap.label_for(Command::EditCut), data.sel.has_selection))
                             .clicked()
                         {
                             actions.doc.cut = true;
                             ui.close();
                         }
-                        if ui.add(menu_item("Copy", "Ctrl+C")).clicked() {
+                        if ui.add(menu_item("Copy", &data.keymap.label_for(Command::EditCopy))).clicked() {
                             actions.doc.copy = true;
                             ui.close();
                         }
-                        if ui.add(menu_item("Paste", "Ctrl+V")).clicked() {
+                        if ui.add(menu_item("Paste", &data.keymap.label_for(Command::EditPaste))).clicked() {
                             actions.doc.paste = true;
                             ui.close();
                         }
                         if ui
                             .add(menu_item_enabled(
                                 "Free Transform",
-                                "Ctrl+T",
+                                &data.keymap.label_for(Command::FreeTransform),
                                 data.doc.has_doc && !data.doc.is_cmyk,
                             ))
                             .clicked()
@@ -345,7 +346,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             ui.close();
                         }
                         ui.separator();
-                        if ui.add(menu_item("Preferences", "Ctrl+K")).clicked() {
+                        if ui.add(menu_item("Preferences", &data.keymap.label_for(Command::Preferences))).clicked() {
                             actions.dialogs.show_preferences = Some(true);
                             ui.close();
                         }
@@ -540,7 +541,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             }
                         });
                         ui.separator();
-                        if ui.add(menu_item("Develop...", "Ctrl+Shift+A")).clicked() {
+                        if ui.add(menu_item("Develop...", &data.keymap.label_for(Command::OpenDevelop))).clicked() {
                             actions.develop.open_develop_dialog = true;
                             ui.close();
                         }
@@ -558,7 +559,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         ui.separator();
                         ui.menu_button("Adjustments", |ui| {
                             use crate::core::layer::AdjustmentType;
-                            if ui.add(menu_item("Levels...", "Ctrl+L")).clicked() {
+                            if ui.add(menu_item("Levels...", &data.keymap.label_for(Command::Levels))).clicked() {
                                 actions.dialogs.open_adjustment_dialog =
                                     Some(AdjustmentType::default_levels());
                                 ui.close();
@@ -566,7 +567,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             if ui
                                 .add(menu_item_enabled(
                                     "Auto Levels",
-                                    "Ctrl+Shift+L",
+                                    &data.keymap.label_for(Command::AutoLevels),
                                     data.doc.has_doc,
                                 ))
                                 .clicked()
@@ -574,12 +575,12 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 actions.dialogs.auto_levels = true;
                                 ui.close();
                             }
-                            if ui.add(menu_item("Curves...", "Ctrl+M")).clicked() {
+                            if ui.add(menu_item("Curves...", &data.keymap.label_for(Command::Curves))).clicked() {
                                 actions.dialogs.open_adjustment_dialog =
                                     Some(AdjustmentType::default_curves());
                                 ui.close();
                             }
-                            if ui.add(menu_item("Color Balance...", "Ctrl+B")).clicked() {
+                            if ui.add(menu_item("Color Balance...", &data.keymap.label_for(Command::ColorBalance))).clicked() {
                                 actions.dialogs.open_adjustment_dialog =
                                     Some(AdjustmentType::ColorBalance {
                                         shadows: [0.0; 3],
@@ -589,7 +590,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                     });
                                 ui.close();
                             }
-                            if ui.add(menu_item("Hue/Saturation...", "Ctrl+U")).clicked() {
+                            if ui.add(menu_item("Hue/Saturation...", &data.keymap.label_for(Command::HueSaturation))).clicked() {
                                 actions.dialogs.open_adjustment_dialog =
                                     Some(AdjustmentType::HueSaturation {
                                         hue: 0.0,
@@ -601,7 +602,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             if ui
                                 .add(menu_item_enabled(
                                     "Desaturate",
-                                    "Ctrl+Shift+U",
+                                    &data.keymap.label_for(Command::Desaturate),
                                     data.doc.has_doc,
                                 ))
                                 .clicked()
@@ -611,7 +612,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 ui.close();
                             }
                             if ui
-                                .add(menu_item_enabled("Invert", "Ctrl+I", data.doc.has_doc))
+                                .add(menu_item_enabled("Invert", &data.keymap.label_for(Command::Invert), data.doc.has_doc))
                                 .clicked()
                             {
                                 actions.layers.invert_active = Some(data.layers.active_layer_idx);
@@ -713,7 +714,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         if ui
                             .add(menu_item_enabled(
                                 "Layer via Copy",
-                                "Ctrl+J",
+                                &data.keymap.label_for(Command::LayerViaCopy),
                                 data.layers.layer_count > 0,
                             ))
                             .clicked()
@@ -1167,7 +1168,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
                     ui.menu_button("Select", |ui| {
                         if ui
-                            .add(menu_item_enabled("Select All", "Ctrl+A", data.doc.has_doc))
+                            .add(menu_item_enabled("Select All", &data.keymap.label_for(Command::SelectAll), data.doc.has_doc))
                             .clicked()
                         {
                             actions.sel.select_all = true;
@@ -1320,11 +1321,11 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.doc.zoom_out = true;
                             ui.close();
                         }
-                        if ui.add(menu_item("Fit to Screen", "Ctrl+0")).clicked() {
+                        if ui.add(menu_item("Fit to Screen", &data.keymap.label_for(Command::FitScreen))).clicked() {
                             actions.doc.fit_to_screen = true;
                             ui.close();
                         }
-                        if ui.add(menu_item("100%", "Ctrl+1")).clicked() {
+                        if ui.add(menu_item("100%", &data.keymap.label_for(Command::ZoomActual))).clicked() {
                             actions.doc.zoom_100 = true;
                             ui.close();
                         }
@@ -1446,7 +1447,10 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         }
                         ui.separator();
                         if ui
-                            .checkbox(&mut data.chrome.show_rulers.clone(), "Rulers  (Ctrl+R)")
+                            .checkbox(
+                                &mut data.chrome.show_rulers.clone(),
+                                with_shortcut("Rulers", &data.keymap.label_for(Command::ToggleRulers)),
+                            )
                             .clicked()
                         {
                             actions.chrome.toggle_rulers = true;
@@ -1497,7 +1501,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         const IAI_YOUTUBE_URL: &str = "https://www.youtube.com/@TongNghia3999";
 
                         ui.menu_button("Keyboard Shortcuts", |ui| {
-                            keyboard_shortcuts_list(ui, pal);
+                            keyboard_shortcuts_list(ui, pal, &data.keymap);
                         });
                         ui.separator();
                         // AGPL asks that users can reach the program's source; expose
@@ -1669,6 +1673,15 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
         });
 }
 
+/// `"Rulers  (Ctrl+R)"`, or just the name when the command has no key.
+fn with_shortcut(name: &str, shortcut: &str) -> String {
+    if shortcut.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}  ({shortcut})")
+    }
+}
+
 fn menu_item<'a>(label: &'a str, shortcut: &'a str) -> egui::Button<'a> {
     let mut btn = egui::Button::new(label).wrap_mode(egui::TextWrapMode::Extend);
     if !shortcut.is_empty() {
@@ -1688,11 +1701,14 @@ fn menu_item_enabled<'a>(
     }
 }
 
-/// Static keyboard-shortcut reference rendered inside the Help ▸ Keyboard
-/// Shortcuts submenu (the app has no other shortcut reference). Keys mirror the
-/// bindings in `app/input/keyboard.rs` and the menu accelerators.
-fn keyboard_shortcuts_list(ui: &mut egui::Ui, pal: crate::ui::theme::Palette) {
-    use crate::app::commands::{Command, CommandGroup};
+/// Keyboard-shortcut reference rendered inside the Help ▸ Keyboard Shortcuts
+/// submenu. Re-bindable rows show the keys currently in effect.
+fn keyboard_shortcuts_list(
+    ui: &mut egui::Ui,
+    pal: crate::ui::theme::Palette,
+    keymap: &crate::app::commands::KeyMap,
+) {
+    use crate::app::commands::CommandGroup;
 
     ui.set_max_width(300.0);
     egui::ScrollArea::vertical()
@@ -1723,7 +1739,13 @@ fn keyboard_shortcuts_list(ui: &mut egui::Ui, pal: crate::ui::theme::Palette) {
                     .spacing(egui::vec2(12.0, 2.0))
                     .show(ui, |ui| {
                         for cmd in Command::in_group(group) {
-                            row(ui, &cmd.default_label(), cmd.display_name());
+                            let keys = keymap.label_for(cmd);
+                            let keys = if keys.is_empty() {
+                                "—".to_string()
+                            } else {
+                                keys
+                            };
+                            row(ui, &keys, cmd.display_name());
                         }
                     });
             }
@@ -1735,18 +1757,7 @@ fn keyboard_shortcuts_list(ui: &mut egui::Ui, pal: crate::ui::theme::Palette) {
                 .num_columns(2)
                 .spacing(egui::vec2(12.0, 2.0))
                 .show(ui, |ui| {
-                    for (keys, action) in [
-                        ("X", "Swap colours"),
-                        ("D", "Reset colours"),
-                        ("Ctrl+D", "Deselect / Repeat"),
-                        ("Ctrl+G", "Group"),
-                        ("Ctrl+Shift+G", "Ungroup"),
-                        ("Ctrl+E", "Merge Down"),
-                        ("Ctrl+Shift+E", "Stamp Visible"),
-                        ("Ctrl+Q", "Convert to Curves"),
-                        ("[  ]", "Brush size"),
-                        ("Space+Drag", "Pan"),
-                    ] {
+                    for (keys, action) in crate::app::commands::FIXED_SHORTCUTS {
                         row(ui, keys, action);
                     }
                 });

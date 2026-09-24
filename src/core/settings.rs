@@ -44,6 +44,11 @@ pub struct AppSettings {
     /// DirectML when a capable adapter is present.
     #[serde(default = "default_true")]
     pub ai_use_gpu: bool,
+    /// Customised shortcuts only: command id → chord label (`""` = no key).
+    /// Commands not listed keep their built-in key. Interpreted and repaired by
+    /// `app::commands::KeyMap::from_overrides`.
+    #[serde(default)]
+    pub shortcuts: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for AppSettings {
@@ -54,6 +59,7 @@ impl Default for AppSettings {
             autosave_interval_secs: default_autosave_secs(),
             snap_default: false,
             ai_use_gpu: default_true(),
+            shortcuts: Default::default(),
         }
     }
 }
@@ -69,9 +75,30 @@ impl AppSettings {
 
     /// Load from `prefs.json`, falling back to defaults on any read/parse error.
     pub fn load() -> Self {
-        let mut settings = std::fs::read_to_string(crate::ui::theme::prefs_path())
+        let text = std::fs::read_to_string(crate::ui::theme::prefs_path()).unwrap_or_default();
+        Self::load_from_str(&text)
+    }
+
+    /// Parse `prefs.json` text. A malformed `shortcuts` entry (wrong shape or
+    /// non-text values) is dropped on its own — the shortcuts fall back to their
+    /// defaults — instead of discarding every other preference with it.
+    fn load_from_str(text: &str) -> Self {
+        let mut settings = serde_json::from_str::<serde_json::Value>(text)
             .ok()
-            .and_then(|s| serde_json::from_str::<AppSettings>(&s).ok())
+            .map(|mut value| {
+                if let Some(obj) = value.as_object_mut() {
+                    let shortcuts: serde_json::Map<String, serde_json::Value> =
+                        match obj.remove("shortcuts") {
+                            Some(serde_json::Value::Object(map)) => {
+                                map.into_iter().filter(|(_, v)| v.is_string()).collect()
+                            }
+                            _ => serde_json::Map::new(),
+                        };
+                    obj.insert("shortcuts".into(), serde_json::Value::Object(shortcuts));
+                }
+                value
+            })
+            .and_then(|value| serde_json::from_value::<AppSettings>(value).ok())
             .unwrap_or_default();
         settings.sanitize();
         settings
@@ -144,5 +171,42 @@ mod tests {
         assert_eq!(s.default_unit, Unit::Centimeters);
         assert_eq!(s.autosave_interval_secs, 90);
         assert!(s.autosave_enabled);
+        assert!(s.shortcuts.is_empty());
+    }
+
+    #[test]
+    fn shortcut_overrides_round_trip_through_json() {
+        let mut s = AppSettings::default();
+        s.shortcuts.insert("tool.brush".into(), "Q".into());
+        s.shortcuts.insert("file.save".into(), String::new());
+        let json = serde_json::to_string(&s).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn a_malformed_shortcuts_entry_keeps_the_rest_of_the_settings() {
+        // `shortcuts` must be an object of strings; a wrong shape must not wipe
+        // every other preference.
+        let json = r#"{ "default_unit": "Centimeters", "shortcuts": 42 }"#;
+        let s = AppSettings::load_from_str(json);
+        assert_eq!(s.default_unit, Unit::Centimeters);
+        assert!(s.shortcuts.is_empty());
+
+        let json = r#"{ "autosave_interval_secs": 120,
+                        "shortcuts": { "tool.brush": "Q", "tool.eraser": 5 } }"#;
+        let s = AppSettings::load_from_str(json);
+        assert_eq!(s.autosave_interval_secs, 120);
+        assert_eq!(s.shortcuts.len(), 1);
+        assert_eq!(s.shortcuts["tool.brush"], "Q");
+    }
+
+    #[test]
+    fn unreadable_file_gives_defaults() {
+        assert_eq!(AppSettings::load_from_str(""), AppSettings::default());
+        assert_eq!(
+            AppSettings::load_from_str("{ not json"),
+            AppSettings::default()
+        );
     }
 }

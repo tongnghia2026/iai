@@ -12,6 +12,9 @@ pub struct UiShell {
     /// Persisted Preferences (prefs.json): UI scale, default unit, autosave,
     /// snap default, AI GPU. Loaded once at startup and applied live on change.
     pub(in crate::app) settings: crate::core::settings::AppSettings,
+    /// The shortcuts compiled from `settings.shortcuts`; rebuilt whenever the
+    /// settings change so key handling never re-parses them.
+    pub(in crate::app) keymap: crate::app::commands::KeyMap,
     pub(in crate::app) ui_data_cache: UiDataCache,
     pub(in crate::app) status_msg: String,
     /// Exit the app after the Save (Save & Exit) dialog finishes writing. Cancelled

@@ -934,6 +934,11 @@ pub struct AiIntent {
 #[derive(Default)]
 pub struct SettingsIntent {
     pub updated: Option<crate::core::settings::AppSettings>,
+    /// Start waiting for a key press for a command (`Some(Some)`) or stop
+    /// waiting (`Some(None)`).
+    pub capture: Option<Option<crate::app::commands::Command>>,
+    /// The dialog has taken the caught key; drop it.
+    pub captured_taken: bool,
 }
 
 #[derive(Default)]

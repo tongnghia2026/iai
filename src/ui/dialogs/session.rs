@@ -41,6 +41,23 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
     // settings, so the app applies + persists exactly the changed values.
     let mut settings = data.settings.clone();
 
+    // A key caught for Preferences ▸ Shortcuts (the app catches it before egui).
+    if let Some((cmd, outcome)) = data.shortcut_captured {
+        actions.settings.captured_taken = true;
+        let mut keymap = crate::app::commands::KeyMap::from_overrides(&settings.shortcuts);
+        match outcome {
+            crate::ui::ShortcutCapture::Cancel => {}
+            crate::ui::ShortcutCapture::Clear => {
+                keymap.assign(cmd, None);
+                shortcut_notice(ctx, format!("Đã bỏ phím của “{}”.", cmd.display_name()));
+            }
+            crate::ui::ShortcutCapture::Chord(chord) => {
+                request_shortcut(ctx, &mut keymap, cmd, chord);
+            }
+        }
+        settings.shortcuts = keymap.to_overrides();
+    }
+
     modal_overlay(ctx, "preferences_dialog_overlay");
 
     // Never let the window grow taller than the screen: cap the scrolling
@@ -94,7 +111,7 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
                             3 => preferences_files(ui, &mut settings),
                             4 => preferences_tools(ui, &mut settings),
                             5 => preferences_ai(ui, &mut settings),
-                            _ => preferences_shortcuts(ui),
+                            _ => preferences_shortcuts(ui, &mut settings, data, actions),
                         });
                 });
             });
@@ -130,6 +147,7 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
             actions.settings.updated = Some(original);
         }
         ctx.data_mut(|d| d.remove::<crate::core::settings::AppSettings>(orig_id));
+        clear_preferences_page_state(ctx);
         actions.dialogs.show_preferences = Some(false);
     } else if do_ok {
         // Keep the (already-applied) changes and close.
@@ -137,6 +155,7 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
             actions.settings.updated = Some(settings);
         }
         ctx.data_mut(|d| d.remove::<crate::core::settings::AppSettings>(orig_id));
+        clear_preferences_page_state(ctx);
         actions.dialogs.show_preferences = Some(false);
     } else if settings != data.settings {
         // Preview edits live while the dialog stays open.
@@ -167,6 +186,110 @@ fn preferences_general(ui: &mut egui::Ui, settings: &mut crate::core::settings::
             .color(egui::Color32::GRAY)
             .size(11.0),
     );
+
+    ui.add_space(14.0);
+    preferences_section_title(ui, "Khôi phục");
+    let is_default = *settings == crate::core::settings::AppSettings::default();
+    if confirm_row(
+        ui,
+        PREFS_CONFIRM_RESET_ALL_ID,
+        "Khôi phục toàn bộ cài đặt mặc định…",
+        "Đưa TẤT CẢ cài đặt (kể cả phím tắt) về mặc định?",
+        !is_default,
+    ) {
+        *settings = crate::core::settings::AppSettings::default();
+    }
+    if is_default {
+        ui.label(
+            egui::RichText::new("Mọi cài đặt đang ở mặc định.")
+                .color(egui::Color32::GRAY)
+                .size(11.0),
+        );
+    }
+}
+
+const PREFS_CONFIRM_RESET_ALL_ID: &str = "preferences_confirm_reset_all";
+const PREFS_CONFIRM_RESET_KEYS_ID: &str = "preferences_confirm_reset_shortcuts";
+const PREFS_SHORTCUT_NOTICE_ID: &str = "preferences_shortcut_notice";
+const PREFS_SHORTCUT_CONFLICT_ID: &str = "preferences_shortcut_conflict";
+const PREFS_SHORTCUT_SEARCH_ID: &str = "preferences_shortcut_search";
+
+/// Forget the per-open page state (pending confirmations, notices, search).
+fn clear_preferences_page_state(ctx: &egui::Context) {
+    use crate::app::commands::{Command, KeyChord};
+    ctx.data_mut(|d| {
+        d.remove::<bool>(egui::Id::new(PREFS_CONFIRM_RESET_ALL_ID));
+        d.remove::<bool>(egui::Id::new(PREFS_CONFIRM_RESET_KEYS_ID));
+        d.remove::<String>(egui::Id::new(PREFS_SHORTCUT_NOTICE_ID));
+        d.remove::<(Command, KeyChord, Command)>(egui::Id::new(PREFS_SHORTCUT_CONFLICT_ID));
+        d.remove::<String>(egui::Id::new(PREFS_SHORTCUT_SEARCH_ID));
+    });
+}
+
+/// A destructive button that asks once inline before acting. Returns `true`
+/// on the frame the user confirms.
+fn confirm_row(ui: &mut egui::Ui, id: &str, button: &str, question: &str, enabled: bool) -> bool {
+    let id = egui::Id::new(id);
+    let mut asking = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let mut confirmed = false;
+    if asking {
+        ui.label(egui::RichText::new(question).color(egui::Color32::from_rgb(230, 180, 90)));
+        ui.horizontal(|ui| {
+            if ui.button("Khôi phục").clicked() {
+                confirmed = true;
+                asking = false;
+            }
+            if ui.button("Hủy").clicked() {
+                asking = false;
+            }
+        });
+    } else if ui.add_enabled(enabled, egui::Button::new(button)).clicked() {
+        asking = true;
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(id, asking));
+    confirmed
+}
+
+/// Show a one-line result on the Shortcuts page.
+fn shortcut_notice(ctx: &egui::Context, text: String) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(PREFS_SHORTCUT_NOTICE_ID), text));
+}
+
+/// Try to give `chord` to `cmd`: a fixed key is refused with a notice, a key
+/// another command holds waits for the user to confirm the takeover, and
+/// anything else is assigned at once.
+fn request_shortcut(
+    ctx: &egui::Context,
+    keymap: &mut crate::app::commands::KeyMap,
+    cmd: crate::app::commands::Command,
+    chord: crate::app::commands::KeyChord,
+) {
+    use crate::app::commands::ChordConflict;
+    match keymap.conflict(cmd, chord) {
+        Some(ChordConflict::Reserved(action)) => shortcut_notice(
+            ctx,
+            format!(
+                "{} là phím cố định cho “{action}” — hãy chọn phím khác.",
+                chord.label()
+            ),
+        ),
+        Some(ChordConflict::Command(other)) => {
+            ctx.data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::new(PREFS_SHORTCUT_CONFLICT_ID),
+                    (cmd, chord, other),
+                )
+            });
+            ctx.data_mut(|d| d.remove::<String>(egui::Id::new(PREFS_SHORTCUT_NOTICE_ID)));
+        }
+        None => {
+            keymap.assign(cmd, Some(chord));
+            shortcut_notice(
+                ctx,
+                format!("Đã gán {} cho “{}”.", chord.label(), cmd.display_name()),
+            );
+        }
+    }
 }
 
 fn preferences_appearance(ui: &mut egui::Ui) {
@@ -272,37 +395,210 @@ fn preferences_ai(ui: &mut egui::Ui, settings: &mut crate::core::settings::AppSe
     );
 }
 
-fn preferences_shortcuts(ui: &mut egui::Ui) {
-    use crate::app::commands::{Command, CommandGroup};
+fn preferences_shortcuts(
+    ui: &mut egui::Ui,
+    settings: &mut crate::core::settings::AppSettings,
+    data: &UiData,
+    actions: &mut UiActions,
+) {
+    use crate::app::commands::{Command, CommandGroup, KeyChord, KeyMap};
+
+    const KEY_COLOR: egui::Color32 = egui::Color32::from_rgb(180, 180, 255);
+    const CHANGED_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 180, 90);
+    let ctx = ui.ctx().clone();
+    let mut keymap = KeyMap::from_overrides(&settings.shortcuts);
+    let before = keymap.clone();
 
     preferences_section_title(ui, "Phím tắt");
     ui.label(
-        egui::RichText::new("Danh sách chỉ để xem. Đổi phím tắt sẽ mở ở bước kế tiếp.")
-            .color(egui::Color32::GRAY)
-            .size(11.0),
+        egui::RichText::new(
+            "Bấm vào ô phím của một lệnh rồi nhấn tổ hợp phím mới. \
+             Esc = hủy, Backspace = bỏ phím của lệnh đó.",
+        )
+        .color(egui::Color32::GRAY)
+        .size(11.0),
     );
     ui.add_space(6.0);
 
-    // Every row is read from the keymap engine, so the menu, the Help list and
-    // this page can never drift out of sync.
+    // A key another command already holds: take it over only on request.
+    let conflict_id = egui::Id::new(PREFS_SHORTCUT_CONFLICT_ID);
+    if let Some((cmd, chord, other)) =
+        ctx.data(|d| d.get_temp::<(Command, KeyChord, Command)>(conflict_id))
+    {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} đang là phím của “{}”.",
+                    chord.label(),
+                    other.display_name()
+                ))
+                .color(CHANGED_COLOR),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button(format!(
+                        "Gán cho “{}”, bỏ phím của “{}”",
+                        cmd.display_name(),
+                        other.display_name()
+                    ))
+                    .clicked()
+                {
+                    keymap.assign(cmd, Some(chord));
+                    shortcut_notice(
+                        &ctx,
+                        format!(
+                            "Đã gán {} cho “{}”; “{}” hiện không có phím.",
+                            chord.label(),
+                            cmd.display_name(),
+                            other.display_name()
+                        ),
+                    );
+                    ctx.data_mut(|d| d.remove::<(Command, KeyChord, Command)>(conflict_id));
+                }
+                if ui.button("Hủy").clicked() {
+                    ctx.data_mut(|d| d.remove::<(Command, KeyChord, Command)>(conflict_id));
+                }
+            });
+        });
+        ui.add_space(4.0);
+    }
+    if let Some(notice) =
+        ctx.data(|d| d.get_temp::<String>(egui::Id::new(PREFS_SHORTCUT_NOTICE_ID)))
+    {
+        ui.label(egui::RichText::new(notice).size(11.5));
+        ui.add_space(4.0);
+    }
+
+    let search_id = egui::Id::new(PREFS_SHORTCUT_SEARCH_ID);
+    let mut query = ctx
+        .data(|d| d.get_temp::<String>(search_id))
+        .unwrap_or_default();
+    ui.add(
+        egui::TextEdit::singleline(&mut query)
+            .hint_text("Tìm lệnh hoặc phím…")
+            .desired_width(220.0),
+    );
+    ctx.data_mut(|d| d.insert_temp(search_id, query.clone()));
+    let needle = query.trim().to_lowercase();
+
+    let mut any_row = false;
     for group in CommandGroup::all() {
+        let rows: Vec<Command> = Command::in_group(group)
+            .filter(|cmd| {
+                needle.is_empty()
+                    || cmd.display_name().to_lowercase().contains(&needle)
+                    || keymap.label_for(*cmd).to_lowercase().contains(&needle)
+            })
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        any_row = true;
         ui.add_space(6.0);
         ui.label(egui::RichText::new(group.title()).strong().size(12.0));
         egui::Grid::new(("shortcuts_grid", group.title()))
-            .num_columns(2)
+            .num_columns(3)
             .striped(true)
-            .spacing([20.0, 4.0])
+            .spacing([12.0, 4.0])
             .show(ui, |ui| {
-                for cmd in Command::in_group(group) {
-                    ui.label(cmd.display_name());
-                    ui.label(
-                        egui::RichText::new(cmd.default_label())
-                            .monospace()
-                            .color(egui::Color32::from_rgb(180, 180, 255)),
-                    );
+                for cmd in rows {
+                    let changed = !keymap.is_default(cmd);
+                    let name = egui::RichText::new(cmd.display_name());
+                    ui.horizontal(|ui| {
+                        if changed {
+                            ui.label(name.strong());
+                            ui.label(
+                                egui::RichText::new("đã đổi")
+                                    .size(10.5)
+                                    .color(CHANGED_COLOR),
+                            );
+                        } else {
+                            ui.label(name);
+                        }
+                    });
+
+                    let capturing = data.shortcut_capture == Some(cmd);
+                    let label = keymap.label_for(cmd);
+                    let text = if capturing {
+                        egui::RichText::new("Nhấn phím…").color(CHANGED_COLOR)
+                    } else if label.is_empty() {
+                        egui::RichText::new("—").color(egui::Color32::GRAY)
+                    } else {
+                        egui::RichText::new(label).color(KEY_COLOR)
+                    };
+                    let key_button = egui::Button::new(text.monospace())
+                        .min_size(egui::vec2(130.0, 0.0))
+                        .selected(capturing);
+                    if ui
+                        .add(key_button)
+                        .on_hover_text("Bấm rồi nhấn tổ hợp phím mới")
+                        .clicked()
+                    {
+                        actions.settings.capture = Some((!capturing).then_some(cmd));
+                        ctx.data_mut(|d| {
+                            d.remove::<String>(egui::Id::new(PREFS_SHORTCUT_NOTICE_ID));
+                            d.remove::<(Command, KeyChord, Command)>(conflict_id);
+                        });
+                    }
+
+                    let reset = egui::Button::new(egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE);
+                    if ui
+                        .add_enabled(changed, reset)
+                        .on_hover_text(format!("Về mặc định ({})", cmd.default_label()))
+                        .clicked()
+                    {
+                        request_shortcut(&ctx, &mut keymap, cmd, cmd.default_chord());
+                    }
                     ui.end_row();
                 }
             });
+    }
+    if !any_row {
+        ui.label(
+            egui::RichText::new("Không có lệnh nào khớp.")
+                .color(egui::Color32::GRAY)
+                .size(11.0),
+        );
+    }
+
+    ui.add_space(10.0);
+    ui.label(
+        egui::RichText::new("Phím cố định (không đổi được)")
+            .strong()
+            .size(12.0),
+    );
+    egui::Grid::new("shortcuts_fixed_grid")
+        .num_columns(2)
+        .striped(true)
+        .spacing([12.0, 3.0])
+        .show(ui, |ui| {
+            for (keys, action) in crate::app::commands::FIXED_SHORTCUTS {
+                ui.label(egui::RichText::new(*action).color(egui::Color32::GRAY));
+                ui.label(
+                    egui::RichText::new(*keys)
+                        .monospace()
+                        .color(egui::Color32::GRAY),
+                );
+                ui.end_row();
+            }
+        });
+
+    ui.add_space(10.0);
+    ui.separator();
+    if confirm_row(
+        ui,
+        PREFS_CONFIRM_RESET_KEYS_ID,
+        "Khôi phục phím tắt mặc định",
+        "Đưa TẤT CẢ phím tắt về mặc định?",
+        !settings.shortcuts.is_empty(),
+    ) {
+        keymap = KeyMap::default();
+        shortcut_notice(&ctx, "Đã khôi phục toàn bộ phím tắt mặc định.".to_string());
+        ctx.data_mut(|d| d.remove::<(Command, KeyChord, Command)>(conflict_id));
+    }
+
+    if keymap != before {
+        settings.shortcuts = keymap.to_overrides();
     }
 }
 
@@ -764,5 +1060,82 @@ mod reload_dialog_tests {
             assert!(!actions.doc.reload_open_file_confirm);
             assert!(actions.doc.reload_open_file_cancel);
         }
+    }
+}
+
+#[cfg(test)]
+mod shortcut_editor_tests {
+    use super::*;
+    use crate::app::commands::{Command, KeyChord, KeyName};
+
+    /// One Preferences frame with `captured` delivered, as the app would.
+    fn deliver(captured: (Command, crate::ui::ShortcutCapture)) -> (UiActions, egui::Context) {
+        let mut data = UiData::default();
+        data.shortcut_captured = Some(captured);
+        let mut actions = UiActions::default();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            preferences_dialog(ui.ctx(), &data, &mut actions)
+        });
+        (actions, ctx)
+    }
+
+    fn saved(actions: &UiActions) -> Option<std::collections::BTreeMap<String, String>> {
+        actions
+            .settings
+            .updated
+            .as_ref()
+            .map(|s| s.shortcuts.clone())
+    }
+
+    #[test]
+    fn a_free_key_is_assigned_and_saved() {
+        let chord = KeyChord::plain(KeyName::Q);
+        let (actions, _) = deliver((Command::ToolBrush, crate::ui::ShortcutCapture::Chord(chord)));
+        assert!(actions.settings.captured_taken);
+        let saved = saved(&actions).expect("settings updated");
+        assert_eq!(saved.get("tool.brush").map(String::as_str), Some("Q"));
+    }
+
+    #[test]
+    fn a_key_held_by_another_command_waits_for_confirmation() {
+        let chord = KeyChord::plain(KeyName::E);
+        let (actions, ctx) =
+            deliver((Command::ToolBrush, crate::ui::ShortcutCapture::Chord(chord)));
+        assert!(actions.settings.captured_taken);
+        assert_eq!(
+            saved(&actions),
+            None,
+            "nothing may change before the user agrees"
+        );
+        let pending = ctx.data(|d| {
+            d.get_temp::<(Command, KeyChord, Command)>(egui::Id::new(PREFS_SHORTCUT_CONFLICT_ID))
+        });
+        assert_eq!(
+            pending,
+            Some((Command::ToolBrush, chord, Command::ToolEraser))
+        );
+    }
+
+    #[test]
+    fn a_fixed_key_is_refused() {
+        let (actions, ctx) = deliver((
+            Command::ToolBrush,
+            crate::ui::ShortcutCapture::Chord(KeyChord::plain(KeyName::X)),
+        ));
+        assert_eq!(saved(&actions), None);
+        let notice = ctx.data(|d| d.get_temp::<String>(egui::Id::new(PREFS_SHORTCUT_NOTICE_ID)));
+        assert!(notice.unwrap_or_default().contains("Swap colours"));
+    }
+
+    #[test]
+    fn backspace_removes_the_key_and_esc_changes_nothing() {
+        let (actions, _) = deliver((Command::FileSave, crate::ui::ShortcutCapture::Clear));
+        let saved = saved(&actions).expect("settings updated");
+        assert_eq!(saved.get("file.save").map(String::as_str), Some(""));
+
+        let (actions, _) = deliver((Command::FileSave, crate::ui::ShortcutCapture::Cancel));
+        assert!(actions.settings.captured_taken);
+        assert_eq!(super::shortcut_editor_tests::saved(&actions), None);
     }
 }

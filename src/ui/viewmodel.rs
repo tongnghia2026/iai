@@ -681,6 +681,23 @@ pub struct UiData {
     pub library: LibraryViewModel,
     /// A snapshot of the persisted Preferences, for the Preferences dialog.
     pub settings: crate::core::settings::AppSettings,
+    /// The shortcuts in effect, for menu labels, Help and Preferences.
+    pub keymap: crate::app::commands::KeyMap,
+    /// Preferences ▸ Shortcuts: the command waiting for a key press, if any.
+    pub shortcut_capture: Option<crate::app::commands::Command>,
+    /// The key press caught for `shortcut_capture`, handed to the dialog once.
+    pub shortcut_captured: Option<(crate::app::commands::Command, ShortcutCapture)>,
+}
+
+/// What the user pressed while Preferences was waiting for a new shortcut.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ShortcutCapture {
+    /// A usable key combination.
+    Chord(crate::app::commands::KeyChord),
+    /// Backspace/Delete: remove the command's key.
+    Clear,
+    /// Esc: leave the binding as it was.
+    Cancel,
 }
 
 impl Default for UiData {
@@ -1108,6 +1125,9 @@ impl Default for UiData {
             welcome: WelcomeViewModel::default(),
             library: LibraryViewModel::default(),
             settings: crate::core::settings::AppSettings::default(),
+            keymap: crate::app::commands::KeyMap::default(),
+            shortcut_capture: None,
+            shortcut_captured: None,
         }
     }
 }

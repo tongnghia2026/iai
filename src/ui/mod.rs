@@ -725,6 +725,95 @@ pub enum MoveTransformAction {
     FlipVertical,
 }
 
+/// egui's key for a bindable shortcut key.
+fn egui_key(key: crate::app::commands::KeyName) -> egui::Key {
+    use crate::app::commands::KeyName as K;
+    use egui::Key as E;
+    match key {
+        K::A => E::A,
+        K::B => E::B,
+        K::C => E::C,
+        K::D => E::D,
+        K::E => E::E,
+        K::F => E::F,
+        K::G => E::G,
+        K::H => E::H,
+        K::I => E::I,
+        K::J => E::J,
+        K::K => E::K,
+        K::L => E::L,
+        K::M => E::M,
+        K::N => E::N,
+        K::O => E::O,
+        K::P => E::P,
+        K::Q => E::Q,
+        K::R => E::R,
+        K::S => E::S,
+        K::T => E::T,
+        K::U => E::U,
+        K::V => E::V,
+        K::W => E::W,
+        K::X => E::X,
+        K::Y => E::Y,
+        K::Z => E::Z,
+        K::Digit0 => E::Num0,
+        K::Digit1 => E::Num1,
+        K::Digit2 => E::Num2,
+        K::Digit3 => E::Num3,
+        K::Digit4 => E::Num4,
+        K::Digit5 => E::Num5,
+        K::Digit6 => E::Num6,
+        K::Digit7 => E::Num7,
+        K::Digit8 => E::Num8,
+        K::Digit9 => E::Num9,
+        K::F1 => E::F1,
+        K::F2 => E::F2,
+        K::F3 => E::F3,
+        K::F4 => E::F4,
+        K::F5 => E::F5,
+        K::F6 => E::F6,
+        K::F7 => E::F7,
+        K::F8 => E::F8,
+        K::F9 => E::F9,
+        K::F10 => E::F10,
+        K::F11 => E::F11,
+        K::F12 => E::F12,
+        K::Comma => E::Comma,
+        K::Period => E::Period,
+        K::Slash => E::Slash,
+        K::Semicolon => E::Semicolon,
+        K::Quote => E::Quote,
+        K::Backquote => E::Backtick,
+        K::Backslash => E::Backslash,
+    }
+}
+
+/// Consume one press of exactly `chord` (same Ctrl/Shift/Alt, physical key
+/// where known), unlike egui's shortcut match which lets extra Shift through.
+fn consume_chord(input: &mut egui::InputState, chord: crate::app::commands::KeyChord) -> bool {
+    let want = egui_key(chord.key);
+    let mut hit = false;
+    input.events.retain(|event| {
+        let matched = !hit
+            && matches!(
+                event,
+                egui::Event::Key {
+                    key,
+                    physical_key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if physical_key.unwrap_or(*key) == want
+                    && modifiers.ctrl == chord.ctrl
+                    && modifiers.shift == chord.shift
+                    && modifiers.alt == chord.alt
+            );
+        hit |= matched;
+        !matched
+    });
+    hit
+}
+
 #[allow(deprecated)]
 pub fn build(
     egui_ctx: &egui::Context,
@@ -750,12 +839,24 @@ pub fn build(
         // Theme is applied on-change from the app loop (see RedrawRequested), not
         // every frame — the custom chrome reads `theme_mode.palette()` directly.
 
-        if ctx.input_mut(|i| {
-            i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::CTRL,
-                egui::Key::N,
-            ))
-        }) {
+        use crate::app::commands::Command;
+        // New and Preferences also fire from egui (when a widget holds keyboard
+        // focus). Built-in keys keep their original match; a key re-bound in
+        // Preferences must match exactly.
+        let keymap = &data.keymap;
+        let new_hit = if keymap.is_default(Command::FileNew) {
+            ctx.input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::CTRL,
+                    egui::Key::N,
+                ))
+            })
+        } else {
+            keymap
+                .chord_for(Command::FileNew)
+                .is_some_and(|chord| ctx.input_mut(|i| consume_chord(i, chord)))
+        };
+        if new_hit {
             actions.dialogs.show_new_dialog = Some(true);
         }
         if ctx.input_mut(|i| {
@@ -772,15 +873,22 @@ pub fn build(
         }
         // Preferences: Ctrl+K (primary) and Ctrl+, (alias). Handled here as well
         // as in the raw keyboard path so it fires whether or not egui has focus.
-        if ctx.input_mut(|i| {
-            i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::CTRL,
-                egui::Key::K,
-            )) || i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::CTRL,
-                egui::Key::Comma,
-            ))
-        }) {
+        let preferences_hit = if keymap.is_default(Command::Preferences) {
+            ctx.input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::CTRL,
+                    egui::Key::K,
+                )) || i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::CTRL,
+                    egui::Key::Comma,
+                ))
+            })
+        } else {
+            keymap
+                .chord_for(Command::Preferences)
+                .is_some_and(|chord| ctx.input_mut(|i| consume_chord(i, chord)))
+        };
+        if preferences_hit {
             actions.dialogs.show_preferences = Some(true);
         }
 

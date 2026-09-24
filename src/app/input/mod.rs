@@ -609,6 +609,26 @@ impl ApplicationHandler for App {
             _ => {}
         }
 
+        // Preferences ▸ Shortcuts is waiting for a key: take it here, before egui
+        // (which turns Ctrl+C/X/V into clipboard events) and before any shortcut
+        // handling can act on it.
+        if self.shell.ui.shortcut_capture.is_some() {
+            if let WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key,
+                        state,
+                        ..
+                    },
+                ..
+            } = &event
+            {
+                if self.capture_shortcut_key(*physical_key, *state == ElementState::Pressed) {
+                    return;
+                }
+            }
+        }
+
         // Numpad Enter commits the text overlay. egui-winit maps both the main
         // and numpad Enter to the same `Key::Enter`, so it must be caught here
         // (before egui sees it) to keep the main Enter as a newline.
@@ -667,7 +687,7 @@ impl ApplicationHandler for App {
         if let WindowEvent::KeyboardInput {
             event:
                 KeyEvent {
-                    physical_key: PhysicalKey::Code(KeyCode::KeyN),
+                    physical_key,
                     state,
                     repeat,
                     ..
@@ -675,7 +695,19 @@ impl ApplicationHandler for App {
             ..
         } = &event
         {
-            if self.edit.input.ctrl_held {
+            // The New shortcut: Ctrl+N while it keeps its built-in key, else the
+            // key the user gave it in Preferences.
+            let new_key = match self.custom_command_for(*physical_key) {
+                Some(cmd) => cmd == crate::app::commands::Command::FileNew,
+                None => {
+                    self.shell
+                        .keymap
+                        .is_default(crate::app::commands::Command::FileNew)
+                        && matches!(physical_key, PhysicalKey::Code(KeyCode::KeyN))
+                        && self.edit.input.ctrl_held
+                }
+            };
+            if new_key {
                 if *state == ElementState::Pressed && !repeat && !self.shell.ui.show_new_dialog {
                     if self.modal_lock_active() {
                         self.deny_modal_action();

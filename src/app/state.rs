@@ -381,6 +381,11 @@ pub struct UiState {
     pub show_export_dialog: bool,
     pub show_print_dialog: bool,
     pub show_preferences: bool,
+    /// Preferences ▸ Shortcuts is waiting for a key press for this command; the
+    /// next key is caught before egui and any shortcut handling.
+    pub shortcut_capture: Option<crate::app::commands::Command>,
+    /// The caught key, until the Preferences dialog has taken it.
+    pub shortcut_captured: Option<(crate::app::commands::Command, crate::ui::ShortcutCapture)>,
     pub show_adjustment_dialog: bool,
     pub adjustment_dialog: crate::core::layer::AdjustmentType,
     pub adjustment_preview_enabled: bool,
@@ -1359,8 +1364,12 @@ impl App {
     pub fn new() -> Self {
         // Persisted Preferences drive a few startup values (snap default, default
         // unit) and one global (AI GPU), so load them before building the state.
-        let settings = crate::core::settings::AppSettings::load();
+        let mut settings = crate::core::settings::AppSettings::load();
         crate::core::ai::ort_ep::set_ai_use_gpu(settings.ai_use_gpu);
+        // Repair the saved shortcuts once and keep the stored overrides in step
+        // with what is actually in effect.
+        let keymap = crate::app::commands::KeyMap::from_overrides(&settings.shortcuts);
+        settings.shortcuts = keymap.to_overrides();
         // `settings` is moved into `shell.settings`; copy out the one value a
         // later field (`canvas_unit`) needs so we don't read it after the move.
         let settings_default_unit = settings.default_unit;
@@ -1655,6 +1664,8 @@ impl App {
                     show_export_dialog: false,
                     show_print_dialog: false,
                     show_preferences: false,
+                    shortcut_capture: None,
+                    shortcut_captured: None,
                     show_adjustment_dialog: false,
                     adjustment_dialog: crate::core::layer::AdjustmentType::default_levels(),
                     adjustment_preview_enabled: true,
@@ -1742,6 +1753,7 @@ impl App {
                     cmyk_convert_icc: None,
                 },
                 settings,
+                keymap,
                 status_msg: String::new(),
                 exit_requested: false,
                 exit_save_pending: false,

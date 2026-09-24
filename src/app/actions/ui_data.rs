@@ -1818,6 +1818,9 @@ impl App {
             },
             library,
             settings: self.shell.settings.clone(),
+            keymap: self.shell.keymap.clone(),
+            shortcut_capture: self.shell.ui.shortcut_capture,
+            shortcut_captured: self.shell.ui.shortcut_captured,
         }
     }
 

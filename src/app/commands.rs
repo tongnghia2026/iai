@@ -10,10 +10,14 @@
 //! Delete, proof/merge/group/convert, colour swap/reset…) are deliberately NOT
 //! here — they stay hard-wired in `keyboard.rs`.
 //!
-//! Phase 2 wires only the *display* of these bindings to this module. Routing
-//! key *dispatch* through a mutable keymap, plus the rebinding editor and reset,
-//! is Phase 3; the `KeyChord`/`KeyMap`/`KeyName` types below are built now so
-//! that step is additive.
+//! The user's changes are stored as *overrides* only (command id → chord label,
+//! `""` = no key) in `prefs.json`; [`KeyMap::from_overrides`] rebuilds the full
+//! map and repairs anything unreadable, reserved or clashing, so a bad file can
+//! never leave the app without working shortcuts. A command whose binding is
+//! still the built-in default keeps running through the original key arms in
+//! `keyboard.rs`, so an untouched keymap behaves exactly as before.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -110,15 +114,18 @@ impl CommandGroup {
     }
 }
 
-/// A physical key that a chord can name. Only the keys the re-bindable commands
-/// actually use are listed. Kept separate from winit's `KeyCode` so this module
-/// stays dependency-free and serialisable.
+/// A physical key that a chord can name: letters, digits, F-keys and a few
+/// punctuation keys. Context keys (Space, Enter, Esc, arrows, Delete, brackets,
+/// `+`/`-`) are absent on purpose — they stay hard-wired. Kept separate from
+/// winit's `KeyCode` so this module stays dependency-free and serialisable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 pub enum KeyName {
     A,
     B,
     C,
+    D,
     E,
+    F,
     G,
     H,
     I,
@@ -129,6 +136,7 @@ pub enum KeyName {
     N,
     O,
     P,
+    Q,
     R,
     S,
     T,
@@ -136,20 +144,108 @@ pub enum KeyName {
     V,
     W,
     X,
+    Y,
     Z,
     Digit0,
     Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
     Comma,
+    Period,
+    Slash,
+    Semicolon,
+    Quote,
+    Backquote,
+    Backslash,
 }
 
 impl KeyName {
-    /// How the key reads in a shortcut label (e.g. `S`, `0`, `,`).
+    /// Every nameable key, in display order.
+    pub const ALL: [KeyName; 55] = [
+        KeyName::A,
+        KeyName::B,
+        KeyName::C,
+        KeyName::D,
+        KeyName::E,
+        KeyName::F,
+        KeyName::G,
+        KeyName::H,
+        KeyName::I,
+        KeyName::J,
+        KeyName::K,
+        KeyName::L,
+        KeyName::M,
+        KeyName::N,
+        KeyName::O,
+        KeyName::P,
+        KeyName::Q,
+        KeyName::R,
+        KeyName::S,
+        KeyName::T,
+        KeyName::U,
+        KeyName::V,
+        KeyName::W,
+        KeyName::X,
+        KeyName::Y,
+        KeyName::Z,
+        KeyName::Digit0,
+        KeyName::Digit1,
+        KeyName::Digit2,
+        KeyName::Digit3,
+        KeyName::Digit4,
+        KeyName::Digit5,
+        KeyName::Digit6,
+        KeyName::Digit7,
+        KeyName::Digit8,
+        KeyName::Digit9,
+        KeyName::F1,
+        KeyName::F2,
+        KeyName::F3,
+        KeyName::F4,
+        KeyName::F5,
+        KeyName::F6,
+        KeyName::F7,
+        KeyName::F8,
+        KeyName::F9,
+        KeyName::F10,
+        KeyName::F11,
+        KeyName::F12,
+        KeyName::Comma,
+        KeyName::Period,
+        KeyName::Slash,
+        KeyName::Semicolon,
+        KeyName::Quote,
+        KeyName::Backquote,
+        KeyName::Backslash,
+    ];
+
+    /// How the key reads in a shortcut label (e.g. `S`, `0`, `F5`, `,`).
     pub fn label(self) -> &'static str {
         match self {
             KeyName::A => "A",
             KeyName::B => "B",
             KeyName::C => "C",
+            KeyName::D => "D",
             KeyName::E => "E",
+            KeyName::F => "F",
             KeyName::G => "G",
             KeyName::H => "H",
             KeyName::I => "I",
@@ -160,6 +256,7 @@ impl KeyName {
             KeyName::N => "N",
             KeyName::O => "O",
             KeyName::P => "P",
+            KeyName::Q => "Q",
             KeyName::R => "R",
             KeyName::S => "S",
             KeyName::T => "T",
@@ -167,11 +264,45 @@ impl KeyName {
             KeyName::V => "V",
             KeyName::W => "W",
             KeyName::X => "X",
+            KeyName::Y => "Y",
             KeyName::Z => "Z",
             KeyName::Digit0 => "0",
             KeyName::Digit1 => "1",
+            KeyName::Digit2 => "2",
+            KeyName::Digit3 => "3",
+            KeyName::Digit4 => "4",
+            KeyName::Digit5 => "5",
+            KeyName::Digit6 => "6",
+            KeyName::Digit7 => "7",
+            KeyName::Digit8 => "8",
+            KeyName::Digit9 => "9",
+            KeyName::F1 => "F1",
+            KeyName::F2 => "F2",
+            KeyName::F3 => "F3",
+            KeyName::F4 => "F4",
+            KeyName::F5 => "F5",
+            KeyName::F6 => "F6",
+            KeyName::F7 => "F7",
+            KeyName::F8 => "F8",
+            KeyName::F9 => "F9",
+            KeyName::F10 => "F10",
+            KeyName::F11 => "F11",
+            KeyName::F12 => "F12",
             KeyName::Comma => ",",
+            KeyName::Period => ".",
+            KeyName::Slash => "/",
+            KeyName::Semicolon => ";",
+            KeyName::Quote => "'",
+            KeyName::Backquote => "`",
+            KeyName::Backslash => "\\",
         }
+    }
+
+    /// Inverse of [`Self::label`]; letters and F-keys ignore case.
+    pub fn from_label(text: &str) -> Option<KeyName> {
+        KeyName::ALL
+            .into_iter()
+            .find(|key| key.label().eq_ignore_ascii_case(text))
     }
 }
 
@@ -224,6 +355,91 @@ impl KeyChord {
         out.push_str(self.key.label());
         out
     }
+
+    /// Inverse of [`Self::label`]: `"Ctrl+Shift+K"`, `"B"`, `"Alt+F5"`.
+    /// Modifier names ignore case; `None` for anything unreadable.
+    pub fn parse(text: &str) -> Option<KeyChord> {
+        let mut parts: Vec<&str> = text.trim().split('+').map(str::trim).collect();
+        let key = KeyName::from_label(parts.pop()?)?;
+        let mut chord = KeyChord::plain(key);
+        for part in parts {
+            let flag = match part.to_ascii_lowercase().as_str() {
+                "ctrl" => &mut chord.ctrl,
+                "shift" => &mut chord.shift,
+                "alt" => &mut chord.alt,
+                _ => return None,
+            };
+            if *flag {
+                return None;
+            }
+            *flag = true;
+        }
+        Some(chord)
+    }
+}
+
+/// The fixed (non-rebindable) keys, as shown read-only in Help and Preferences.
+pub const FIXED_SHORTCUTS: &[(&str, &str)] = &[
+    ("X", "Swap colours"),
+    ("D", "Reset colours"),
+    ("Ctrl+D", "Deselect / Repeat"),
+    ("Ctrl+Shift+D", "Repeat"),
+    ("Ctrl+G", "Group"),
+    ("Ctrl+Shift+G", "Ungroup"),
+    ("Ctrl+Alt+G", "Clipping Mask"),
+    ("Ctrl+E", "Merge Down"),
+    ("Ctrl+Shift+E", "Stamp Visible"),
+    ("Ctrl+Q", "Convert to Curves"),
+    ("Ctrl+Y", "Proof Colors"),
+    ("Ctrl+Shift+Y", "Gamut Warning"),
+    ("Ctrl+Shift+X", "Warp"),
+    ("Ctrl+Alt+I", "Image Size"),
+    ("Shift+F5", "Smart Fill"),
+    ("Shift+F6", "Feather"),
+    ("Shift+F7", "Invert Selection"),
+    ("Ctrl++ / Ctrl+-", "Zoom in / out"),
+    ("[  ]", "Brush size"),
+    ("Shift+[  ]", "Brush hardness"),
+    ("Space+Drag", "Pan"),
+    ("Enter / Esc", "Commit / Cancel"),
+    ("Delete", "Clear selection / Delete layer"),
+    ("Arrows", "Nudge"),
+];
+
+/// Fixed shortcuts that stay hard-wired in `keyboard.rs` (and one Windows
+/// system key). A command may not be bound onto one of these; returns the name
+/// of what the chord already does.
+pub fn reserved_action(chord: KeyChord) -> Option<&'static str> {
+    use KeyName as K;
+    let KeyChord {
+        ctrl,
+        shift,
+        alt,
+        key,
+    } = chord;
+    let name = match (ctrl, shift, alt, key) {
+        (false, false, false, K::X) => "Swap colours",
+        (false, false, false, K::D) => "Reset colours",
+        (true, false, false, K::D) => "Deselect / Repeat",
+        (true, true, false, K::D) => "Repeat",
+        (true, false, false, K::E) => "Merge Down",
+        (true, true, false, K::E) => "Stamp Visible",
+        (true, false, false, K::G) => "Group",
+        (true, true, false, K::G) => "Ungroup",
+        (true, false, true, K::G) => "Clipping Mask",
+        (true, false, false, K::Q) => "Convert to Curves",
+        (true, false, false, K::Y) => "Proof Colors",
+        (true, true, false, K::Y) => "Gamut Warning",
+        (true, true, false, K::X) => "Warp",
+        (true, false, true, K::I) => "Image Size",
+        (false, true, false, K::F3) => "Change Case",
+        (false, true, false, K::F5) => "Smart Fill",
+        (false, true, false, K::F6) => "Feather",
+        (false, true, false, K::F7) => "Invert Selection",
+        (false, false, true, K::F4) => "Close window (Windows)",
+        _ => return None,
+    };
+    Some(name)
 }
 
 /// One default binding row: the command, its default chord, its group and the
@@ -593,11 +809,20 @@ impl Command {
     }
 }
 
-/// The active bindings. In Phase 2 this only ever holds the defaults; Phase 3
-/// lets the user override rows and persists them.
+/// Why a chord cannot simply be given to a command.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChordConflict {
+    /// A fixed, non-rebindable shortcut already uses it (see [`reserved_action`]).
+    Reserved(&'static str),
+    /// Another re-bindable command holds it; it can be taken over.
+    Command(Command),
+}
+
+/// The active bindings: every command in table order, with its chord or `None`
+/// when the user removed its key. Chords are unique across the map.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyMap {
-    bindings: Vec<(Command, KeyChord)>,
+    bindings: Vec<(Command, Option<KeyChord>)>,
 }
 
 impl Default for KeyMap {
@@ -605,32 +830,117 @@ impl Default for KeyMap {
         Self {
             bindings: TABLE
                 .iter()
-                .map(|(cmd, chord, _, _)| (*cmd, *chord))
+                .map(|(cmd, chord, _, _)| (*cmd, Some(*chord)))
                 .collect(),
         }
     }
 }
 
 impl KeyMap {
+    /// Rebuild the map from the saved overrides (command id → chord label, `""`
+    /// = no key). Self-healing: unknown ids are ignored, and an unreadable or
+    /// reserved chord keeps that command's default. If two commands end up on
+    /// one chord, a user-set binding beats a default one (the default loses its
+    /// key); between two user-set ones the earlier row wins.
+    pub fn from_overrides(overrides: &BTreeMap<String, String>) -> KeyMap {
+        let mut map = KeyMap::default();
+        let mut user_set = vec![false; map.bindings.len()];
+        for (i, (cmd, slot)) in map.bindings.iter_mut().enumerate() {
+            let Some(text) = overrides.get(cmd.id()) else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                *slot = None;
+                user_set[i] = true;
+            } else if let Some(chord) =
+                KeyChord::parse(text).filter(|c| reserved_action(*c).is_none())
+            {
+                *slot = Some(chord);
+                user_set[i] = true;
+            }
+        }
+        for i in 0..map.bindings.len() {
+            for j in (i + 1)..map.bindings.len() {
+                let Some(chord) = map.bindings[i].1 else {
+                    break;
+                };
+                if map.bindings[j].1 == Some(chord) {
+                    let loser = if user_set[j] && !user_set[i] { i } else { j };
+                    map.bindings[loser].1 = None;
+                }
+            }
+        }
+        map
+    }
+
+    /// The overrides to persist: only rows that differ from their default.
+    pub fn to_overrides(&self) -> BTreeMap<String, String> {
+        self.bindings
+            .iter()
+            .filter(|(cmd, chord)| *chord != Some(cmd.default_chord()))
+            .map(|(cmd, chord)| {
+                (
+                    cmd.id().to_string(),
+                    chord.map(KeyChord::label).unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
     /// The chord currently bound to `cmd`, if any.
     pub fn chord_for(&self, cmd: Command) -> Option<KeyChord> {
         self.bindings
             .iter()
             .find(|(c, _)| *c == cmd)
-            .map(|(_, chord)| *chord)
+            .and_then(|(_, chord)| *chord)
     }
 
     /// The command a chord triggers, if any.
     pub fn command_for(&self, chord: KeyChord) -> Option<Command> {
         self.bindings
             .iter()
-            .find(|(_, c)| *c == chord)
+            .find(|(_, c)| *c == Some(chord))
             .map(|(cmd, _)| *cmd)
     }
 
-    /// Label for `cmd`'s current binding (empty if somehow unbound).
+    /// The command `chord` triggers only when that binding is the user's own —
+    /// default bindings keep running through the original key arms.
+    pub fn custom_command_for(&self, chord: KeyChord) -> Option<Command> {
+        self.command_for(chord).filter(|cmd| !self.is_default(*cmd))
+    }
+
+    /// Label for `cmd`'s current binding (empty when it has no key).
     pub fn label_for(&self, cmd: Command) -> String {
         self.chord_for(cmd).map(KeyChord::label).unwrap_or_default()
+    }
+
+    /// `cmd` still has its built-in chord.
+    pub fn is_default(&self, cmd: Command) -> bool {
+        self.chord_for(cmd) == Some(cmd.default_chord())
+    }
+
+    /// Why `chord` cannot go to `cmd` as-is, if anything stands in the way.
+    pub fn conflict(&self, cmd: Command, chord: KeyChord) -> Option<ChordConflict> {
+        if let Some(name) = reserved_action(chord) {
+            return Some(ChordConflict::Reserved(name));
+        }
+        self.command_for(chord)
+            .filter(|other| *other != cmd)
+            .map(ChordConflict::Command)
+    }
+
+    /// Give `chord` (or no key) to `cmd`. Any other command holding that chord
+    /// loses it, so chords stay unique. Callers check [`Self::conflict`] first
+    /// and never pass a reserved chord.
+    pub fn assign(&mut self, cmd: Command, chord: Option<KeyChord>) {
+        for (other, slot) in &mut self.bindings {
+            if *other != cmd && chord.is_some() && *slot == chord {
+                *slot = None;
+            }
+        }
+        if let Some((_, slot)) = self.bindings.iter_mut().find(|(c, _)| *c == cmd) {
+            *slot = chord;
+        }
     }
 }
 
@@ -678,6 +988,157 @@ mod tests {
         assert_eq!(Command::ToolBrush.default_label(), "B");
         assert_eq!(Command::FitScreen.default_label(), "Ctrl+0");
         assert_eq!(Command::Preferences.default_label(), "Ctrl+K");
+    }
+
+    fn overrides(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn chord_labels_parse_back_for_every_key_and_modifier() {
+        for key in KeyName::ALL {
+            for bits in 0..8u8 {
+                let chord = KeyChord::new(bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, key);
+                assert_eq!(
+                    KeyChord::parse(&chord.label()),
+                    Some(chord),
+                    "{}",
+                    chord.label()
+                );
+            }
+        }
+        assert_eq!(
+            KeyChord::parse("ctrl + shift + k"),
+            Some(KeyChord::ctrl_shift(KeyName::K))
+        );
+        for bad in ["", "Ctrl+", "Ctrl+Ctrl+K", "Hyper+K", "Ctrl+Enter", "KK"] {
+            assert_eq!(KeyChord::parse(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn fixed_key_list_matches_the_reserved_chords() {
+        for (keys, action) in FIXED_SHORTCUTS {
+            if let Some(chord) = KeyChord::parse(keys) {
+                assert_eq!(reserved_action(chord), Some(*action), "{keys}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_default_binding_is_a_reserved_chord() {
+        for cmd in Command::all() {
+            assert_eq!(reserved_action(cmd.default_chord()), None, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn untouched_keymap_saves_no_overrides_and_has_no_custom_commands() {
+        let km = KeyMap::from_overrides(&BTreeMap::new());
+        assert_eq!(km, KeyMap::default());
+        assert!(km.to_overrides().is_empty());
+        for cmd in Command::all() {
+            assert!(km.is_default(cmd));
+            assert_eq!(km.custom_command_for(cmd.default_chord()), None);
+        }
+    }
+
+    #[test]
+    fn overrides_round_trip_including_a_removed_key() {
+        let mut km = KeyMap::default();
+        km.assign(Command::ToolBrush, Some(KeyChord::plain(KeyName::Q)));
+        km.assign(Command::FileSave, None);
+        let saved = km.to_overrides();
+        assert_eq!(saved, overrides(&[("file.save", ""), ("tool.brush", "Q")]));
+        let loaded = KeyMap::from_overrides(&saved);
+        assert_eq!(loaded, km);
+        assert_eq!(
+            loaded.custom_command_for(KeyChord::plain(KeyName::Q)),
+            Some(Command::ToolBrush)
+        );
+        assert_eq!(loaded.chord_for(Command::FileSave), None);
+        assert_eq!(loaded.command_for(KeyChord::plain(KeyName::B)), None);
+    }
+
+    #[test]
+    fn a_damaged_file_falls_back_to_defaults() {
+        let km = KeyMap::from_overrides(&overrides(&[
+            ("tool.nonexistent", "Q"),
+            ("tool.brush", "Ctrl+Hyper+?"),
+            ("file.save", "Ctrl+G"), // reserved: Group
+        ]));
+        assert_eq!(km, KeyMap::default());
+    }
+
+    #[test]
+    fn a_user_binding_takes_the_key_from_a_default_one() {
+        // Brush was moved onto E without the file recording Eraser losing it.
+        let km = KeyMap::from_overrides(&overrides(&[("tool.brush", "E")]));
+        assert_eq!(
+            km.chord_for(Command::ToolBrush),
+            Some(KeyChord::plain(KeyName::E))
+        );
+        assert_eq!(km.chord_for(Command::ToolEraser), None);
+    }
+
+    #[test]
+    fn two_user_bindings_on_one_key_keep_the_first_row() {
+        let km = KeyMap::from_overrides(&overrides(&[("tool.brush", "Q"), ("tool.eraser", "Q")]));
+        assert_eq!(
+            km.chord_for(Command::ToolBrush),
+            Some(KeyChord::plain(KeyName::Q))
+        );
+        assert_eq!(km.chord_for(Command::ToolEraser), None);
+    }
+
+    #[test]
+    fn swapped_keys_survive_a_reload() {
+        let mut km = KeyMap::default();
+        km.assign(Command::ToolBrush, Some(KeyChord::plain(KeyName::E)));
+        km.assign(Command::ToolEraser, Some(KeyChord::plain(KeyName::B)));
+        assert_eq!(KeyMap::from_overrides(&km.to_overrides()), km);
+    }
+
+    #[test]
+    fn conflicts_name_the_reserved_action_or_the_other_command() {
+        let km = KeyMap::default();
+        assert_eq!(
+            km.conflict(Command::ToolBrush, KeyChord::plain(KeyName::X)),
+            Some(ChordConflict::Reserved("Swap colours"))
+        );
+        assert_eq!(
+            km.conflict(Command::ToolBrush, KeyChord::plain(KeyName::E)),
+            Some(ChordConflict::Command(Command::ToolEraser))
+        );
+        assert_eq!(
+            km.conflict(Command::ToolBrush, KeyChord::plain(KeyName::B)),
+            None
+        );
+        assert_eq!(
+            km.conflict(Command::ToolBrush, KeyChord::plain(KeyName::Q)),
+            None
+        );
+    }
+
+    #[test]
+    fn assigning_a_taken_key_moves_it() {
+        let mut km = KeyMap::default();
+        km.assign(Command::ToolBrush, Some(KeyChord::plain(KeyName::E)));
+        assert_eq!(km.chord_for(Command::ToolEraser), None);
+        assert_eq!(
+            km.command_for(KeyChord::plain(KeyName::E)),
+            Some(Command::ToolBrush)
+        );
+        // Resetting Eraser to its default then takes E back from Brush.
+        km.assign(
+            Command::ToolEraser,
+            Some(Command::ToolEraser.default_chord()),
+        );
+        assert_eq!(km.chord_for(Command::ToolBrush), None);
+        assert!(km.is_default(Command::ToolEraser));
     }
 
     #[test]

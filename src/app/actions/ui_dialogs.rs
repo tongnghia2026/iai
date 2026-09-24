@@ -407,6 +407,8 @@ impl App {
     /// redraw loop), store it, and persist to prefs.json.
     fn apply_settings_change(&mut self, mut new: crate::core::settings::AppSettings) {
         new.sanitize();
+        let keymap = crate::app::commands::KeyMap::from_overrides(&new.shortcuts);
+        new.shortcuts = keymap.to_overrides();
         let old = self.shell.settings.clone();
         if new == old {
             return;
@@ -424,6 +426,7 @@ impl App {
             self.shell.ui.new_unit = new.default_unit;
         }
         self.shell.settings = new;
+        self.shell.keymap = keymap;
         self.shell.settings.save();
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -521,6 +524,17 @@ impl App {
         }
         if let Some(new_settings) = actions.settings.updated.take() {
             self.apply_settings_change(new_settings);
+        }
+        if actions.settings.captured_taken {
+            self.shell.ui.shortcut_captured = None;
+        }
+        if let Some(target) = actions.settings.capture.take() {
+            self.shell.ui.shortcut_capture = target;
+            self.shell.ui.shortcut_captured = None;
+        }
+        if !self.shell.ui.show_preferences {
+            self.shell.ui.shortcut_capture = None;
+            self.shell.ui.shortcut_captured = None;
         }
         if let Some(v) = actions.dialogs.show_adjustment_dialog.take() {
             self.shell.ui.show_adjustment_dialog = v;
