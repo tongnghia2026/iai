@@ -1188,59 +1188,73 @@ impl Canvas {
         self.composite_solid_coverage("Stroke Path", color, bx0, by0, bw, bh, &cov);
     }
 
-    /// Repair Brush (content-aware): heal blemishes inside the soft brush
-    /// `mask` (layer-local coverage, len == active layer `w*h`).
-    pub fn heal_skin(&mut self, mask: Vec<f32>) -> bool {
+    /// Repair Brush (Smart): replace a painted stroke with content synthesised
+    /// from its surroundings (`smart_fill::fill_spot`). `cover` is the tip
+    /// coverage over the layer-local box `(x0, y0, w, h)`. Only a crop around
+    /// the stroke (plus the context the patch search borrows from) is read and
+    /// rewritten, so a heal costs what the stroke covers, not the whole photo.
+    /// Undoable; false when the layer is unsuitable or nothing changed.
+    pub fn spot_heal(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        w: u32,
+        h: u32,
+        cover: &[f32],
+        opacity: f32,
+    ) -> bool {
         self.layer_stack.normalize_active_idx();
         if self.layer_stack.layers.is_empty() {
             return false;
         }
         let idx = self.layer_stack.active_idx;
-        {
+        let (layer_id, lw, lh) = {
             let layer = &self.layer_stack.layers[idx];
             if (!layer.is_background && layer.locked) || !layer.is_raster() {
                 return false;
             }
-        }
-        let layer_id = self.layer_stack.layers[idx].id;
-        let (lw, lh) = {
-            let l = &self.layer_stack.layers[idx];
-            (l.width as usize, l.height as usize)
+            (layer.id, layer.width, layer.height)
         };
-        if lw == 0 || lh == 0 || mask.len() < lw * lh {
+        if w == 0 || h == 0 || cover.len() < (w as usize) * (h as usize) || x0 >= lw || y0 >= lh {
             return false;
         }
 
-        let (mut x0, mut y0, mut x1, mut y1) = (lw, lh, 0usize, 0usize);
-        let mut any = false;
-        for y in 0..lh {
-            for x in 0..lw {
-                if mask[y * lw + x] > 0.004 {
-                    any = true;
-                    x0 = x0.min(x);
-                    y0 = y0.min(y);
-                    x1 = x1.max(x);
-                    y1 = y1.max(y);
-                }
-            }
-        }
-        if !any {
-            return false;
-        }
+        // Context around the stroke for the patch search (fill() borrows from
+        // up to 400 px away).
+        let margin = (w.max(h) / 2 + 48).min(420);
+        let cx0 = x0.saturating_sub(margin);
+        let cy0 = y0.saturating_sub(margin);
+        let cx1 = (x0 + w + margin).min(lw);
+        let cy1 = (y0 + h + margin).min(lh);
+        let (cw, ch) = (cx1 - cx0, cy1 - cy0);
 
         let before_tiles = self.layer_stack.layers[idx].tiles.clone();
-        let mut buf = before_tiles.flatten();
-        if buf.len() < lw * lh * 4 {
+        let mut buf = before_tiles.extract_region(cx0, cy0, cw, ch);
+        let mut crop_cover = vec![0f32; (cw as usize) * (ch as usize)];
+        for y in 0..h {
+            let py = y0 + y;
+            if py >= cy1 {
+                break;
+            }
+            for x in 0..w {
+                let px = x0 + x;
+                if px >= cx1 {
+                    break;
+                }
+                crop_cover[((py - cy0) * cw + (px - cx0)) as usize] = cover[(y * w + x) as usize];
+            }
+        }
+        if !crate::core::smart_fill::fill_spot(
+            &mut buf,
+            cw as usize,
+            ch as usize,
+            &crop_cover,
+            opacity,
+        ) {
             return false;
         }
-
-        let changed = crate::core::smart_fill::fill_soft(&mut buf, lw, lh, &mask);
-
-        if !changed {
-            return false;
-        }
-
-        let after_tiles = crate::core::tile::TileMap::from_rgba(&buf, lw as u32, lh as u32);
+        let mut after_tiles = before_tiles.clone();
+        after_tiles.write_region(cx0, cy0, cw, ch, &buf);
         self.commit_layer_tiles_change(layer_id, before_tiles, after_tiles, "Smart Heal")
     }
 }

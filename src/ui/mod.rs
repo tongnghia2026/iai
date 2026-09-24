@@ -2568,7 +2568,22 @@ pub fn build(
 
         if matches!(data.tool.active_tool, ToolId::Clone | ToolId::Repair) {
             if let Some(thumb) = data.tool.clone_source_thumbnail.as_ref() {
-                paint_clone_source_thumbnail(ctx, data, canvas_viewport, thumb);
+                paint_clone_source_thumbnail(
+                    ctx,
+                    data,
+                    canvas_viewport,
+                    thumb,
+                    "clone_source_thumbnail",
+                );
+            }
+            if let Some(wash) = data.tool.repair_stroke_overlay.as_ref() {
+                paint_clone_source_thumbnail(
+                    ctx,
+                    data,
+                    canvas_viewport,
+                    wash,
+                    "repair_stroke_overlay",
+                );
             }
             if let Some((sx, sy)) = data.tool.clone_source_marker {
                 paint_clone_source_marker(
@@ -4009,6 +4024,7 @@ fn paint_clone_source_thumbnail(
     data: &UiData,
     clip: egui::Rect,
     preview: &CloneSourcePreview,
+    name: &str,
 ) {
     if preview.width == 0
         || preview.height == 0
@@ -4043,14 +4059,14 @@ fn paint_clone_source_thumbnail(
         mipmap_mode: None,
     };
     // One texture reused across frames instead of a new one per mouse move.
-    let id = egui::Id::new("clone_source_thumbnail");
+    let id = egui::Id::new(name);
     let texture = match ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(id)) {
         Some(mut handle) => {
             handle.set(image, options);
             handle
         }
         None => {
-            let handle = ctx.load_texture("clone_source_thumbnail", image, options);
+            let handle = ctx.load_texture(name, image, options);
             ctx.data_mut(|d| d.insert_temp(id, handle.clone()));
             handle
         }

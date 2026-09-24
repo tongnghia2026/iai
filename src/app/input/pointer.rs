@@ -942,12 +942,12 @@ impl App {
                                 }
 
                                 if self.edit.tools.active_id() == crate::tools::ToolId::Repair {
-                                    if let Some((mask, _lw, _lh)) =
+                                    if let Some(s) =
                                         self.edit.tools.healing_mut().0.take_pending_ca()
                                     {
                                         let ok = self.docs.documents[self.docs.active_doc_idx]
                                             .canvas
-                                            .heal_skin(mask);
+                                            .spot_heal(s.x0, s.y0, s.w, s.h, &s.cover, s.opacity);
                                         if ok {
                                             self.apply_canvas_event(
                                                 crate::app::render::CanvasEvent::LayerPixelsChanged,

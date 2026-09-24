@@ -4,6 +4,20 @@ use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::canvas::Canvas;
 use crate::core::tile::TileMap;
 
+/// Side of the sparse tiles a Smart Repair stroke records its coverage in.
+const CA_TILE: u32 = 128;
+
+/// A finished Smart (content-aware) Repair stroke, ready for
+/// `Canvas::spot_heal`: tip coverage over the stroke's layer-local box.
+pub struct SmartHealStroke {
+    pub x0: u32,
+    pub y0: u32,
+    pub w: u32,
+    pub h: u32,
+    pub cover: Vec<f32>,
+    pub opacity: f32,
+}
+
 pub struct CloneTool {
     /// Tip diameter in canvas px (same meaning as the Brush size).
     pub size: f32,
@@ -46,10 +60,12 @@ pub struct CloneTool {
     walk_residual: f32,
 
     ca_recording: bool,
-    ca_dirty: bool,
-    /// Soft brush coverage (0..1, size/hardness/opacity baked in), max-accumulated
-    /// over the stroke. Drained on release for the blemish-aware skin heal.
-    ca_mask: Vec<f32>,
+    /// Smart stroke tip coverage (0..1, opacity not baked in), layer-local,
+    /// max-accumulated, kept in sparse tiles so a stroke costs memory for
+    /// what it touches rather than the whole layer.
+    ca_tiles: std::collections::HashMap<(u32, u32), Box<[f32]>>,
+    /// Layer-local `[x0, y0, x1, y1)` the stroke has touched.
+    ca_bbox: Option<(u32, u32, u32, u32)>,
     ca_lw: u32,
     ca_lh: u32,
     ca_ox: i32,
@@ -83,8 +99,8 @@ impl CloneTool {
             stroke: None,
             walk_residual: 0.0,
             ca_recording: false,
-            ca_dirty: false,
-            ca_mask: Vec::new(),
+            ca_tiles: std::collections::HashMap::new(),
+            ca_bbox: None,
             ca_lw: 0,
             ca_lh: 0,
             ca_ox: 0,
@@ -110,48 +126,90 @@ impl CloneTool {
         self.ca_lh = l.height;
         self.ca_ox = l.offset.0;
         self.ca_oy = l.offset.1;
-        self.ca_mask = vec![0.0; (l.width as usize) * (l.height as usize)];
+        self.ca_tiles.clear();
+        self.ca_bbox = None;
         self.ca_recording = true;
-        self.ca_dirty = false;
         true
     }
 
-    /// Stamp a soft brush disc (size/hardness/opacity, pixel-center sampled) into
-    /// the content-aware coverage mask, max-accumulated so overlapping dabs in one
-    /// stroke don't harden the soft edge. Canvas coords.
+    /// Stamp the tip disc (size/hardness, pixel-centre sampled) into the Smart
+    /// stroke coverage, max-accumulated so overlapping dabs keep the footprint
+    /// the tip draws. Canvas coords.
     fn ca_dab(&mut self, cx: f32, cy: f32) {
         if !self.ca_recording {
             return;
         }
         let r = self.radius();
         let r2 = r * r;
-        let opacity = self.opacity.clamp(0.0, 1.0);
-        let lw = self.ca_lw as i32;
-        let lh = self.ca_lh as i32;
         let lcx = cx - self.ca_ox as f32;
         let lcy = cy - self.ca_oy as f32;
-        let x0 = ((lcx - r).floor() as i32).max(0);
-        let y0 = ((lcy - r).floor() as i32).max(0);
-        let x1 = ((lcx + r).ceil() as i32).min(lw);
-        let y1 = ((lcy + r).ceil() as i32).min(lh);
-        for y in y0..y1 {
-            let dy = y as f32 + 0.5 - lcy;
-            let dy2 = dy * dy;
-            for x in x0..x1 {
-                let dx = x as f32 + 0.5 - lcx;
-                let d2 = dx * dx + dy2;
-                if d2 > r2 {
-                    continue;
-                }
-                let cov = soft_round_alpha(d2, r, self.hardness);
-                let v = cov * opacity;
-                let idx = (y as usize) * (self.ca_lw as usize) + x as usize;
-                if v > self.ca_mask[idx] {
-                    self.ca_mask[idx] = v;
-                    self.ca_dirty = true;
+        let x0 = ((lcx - r).floor().max(0.0) as u32).min(self.ca_lw);
+        let y0 = ((lcy - r).floor().max(0.0) as u32).min(self.ca_lh);
+        let x1 = ((lcx + r).ceil().max(0.0) as u32).min(self.ca_lw);
+        let y1 = ((lcy + r).ceil().max(0.0) as u32).min(self.ca_lh);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let hardness = self.hardness;
+        for ty in (y0 / CA_TILE)..=((y1 - 1) / CA_TILE) {
+            for tx in (x0 / CA_TILE)..=((x1 - 1) / CA_TILE) {
+                let (tx0, ty0) = (tx * CA_TILE, ty * CA_TILE);
+                let tile = self
+                    .ca_tiles
+                    .entry((tx, ty))
+                    .or_insert_with(|| vec![0.0; (CA_TILE * CA_TILE) as usize].into_boxed_slice());
+                for y in y0.max(ty0)..y1.min(ty0 + CA_TILE) {
+                    let dy = y as f32 + 0.5 - lcy;
+                    for x in x0.max(tx0)..x1.min(tx0 + CA_TILE) {
+                        let dx = x as f32 + 0.5 - lcx;
+                        let d2 = dx * dx + dy * dy;
+                        if d2 > r2 {
+                            continue;
+                        }
+                        let v = soft_round_alpha(d2, r, hardness);
+                        let slot = &mut tile[((y - ty0) * CA_TILE + (x - tx0)) as usize];
+                        if v > *slot {
+                            *slot = v;
+                        }
+                    }
                 }
             }
         }
+        self.ca_bbox = Some(match self.ca_bbox {
+            Some((a, b, c, d)) => (a.min(x0), b.min(y0), c.max(x1), d.max(y1)),
+            None => (x0, y0, x1, y1),
+        });
+    }
+
+    /// Recorded Smart-stroke coverage at a layer-local pixel.
+    fn ca_cover(&self, x: u32, y: u32) -> f32 {
+        self.ca_tiles
+            .get(&(x / CA_TILE, y / CA_TILE))
+            .map_or(0.0, |t| t[((y % CA_TILE) * CA_TILE + x % CA_TILE) as usize])
+    }
+
+    /// Canvas-space `[x0, y0, x1, y1)` of the Smart stroke being painted, for
+    /// its on-canvas overlay.
+    pub fn smart_stroke_bounds(&self) -> Option<(i32, i32, i32, i32)> {
+        if !self.ca_recording {
+            return None;
+        }
+        let (x0, y0, x1, y1) = self.ca_bbox?;
+        let (ox, oy) = (self.ca_ox, self.ca_oy);
+        Some((
+            x0 as i32 + ox,
+            y0 as i32 + oy,
+            x1 as i32 + ox,
+            y1 as i32 + oy,
+        ))
+    }
+
+    /// Whether the Smart stroke being painted will heal canvas pixel `(x, y)`.
+    pub fn smart_stroke_covers(&self, x: i32, y: i32) -> bool {
+        let (lx, ly) = (x - self.ca_ox, y - self.ca_oy);
+        lx >= 0
+            && ly >= 0
+            && self.ca_cover(lx as u32, ly as u32) >= crate::core::smart_fill::SPOT_HEAL_COVER
     }
 
     fn ca_segment(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
@@ -164,19 +222,30 @@ impl CloneTool {
         }
     }
 
-    /// Drain the recorded content-aware stroke. Returns the layer-local hole mask
-    /// (with its dimensions) if anything was painted; `None` otherwise. The App
-    /// calls this after `on_release` to run the actual synthesis + undo commit.
-    pub fn take_pending_ca(&mut self) -> Option<(Vec<f32>, u32, u32)> {
+    /// Drain the recorded Smart stroke (None if nothing was painted). The App
+    /// calls this after `on_release` and hands it to `Canvas::spot_heal`.
+    pub fn take_pending_ca(&mut self) -> Option<SmartHealStroke> {
         self.ca_recording = false;
-        if self.ca_dirty && self.ca_mask.len() == (self.ca_lw as usize) * (self.ca_lh as usize) {
-            self.ca_dirty = false;
-            Some((std::mem::take(&mut self.ca_mask), self.ca_lw, self.ca_lh))
-        } else {
-            self.ca_mask = Vec::new();
-            self.ca_dirty = false;
-            None
-        }
+        let bbox = self.ca_bbox.take();
+        let stroke = bbox.map(|(x0, y0, x1, y1)| {
+            let (w, h) = (x1 - x0, y1 - y0);
+            let mut cover = vec![0f32; (w as usize) * (h as usize)];
+            for y in 0..h {
+                for x in 0..w {
+                    cover[(y * w + x) as usize] = self.ca_cover(x0 + x, y0 + y);
+                }
+            }
+            SmartHealStroke {
+                x0,
+                y0,
+                w,
+                h,
+                cover,
+                opacity: self.opacity.clamp(0.0, 1.0),
+            }
+        });
+        self.ca_tiles.clear();
+        stroke
     }
 
     #[inline]
@@ -1048,6 +1117,9 @@ impl Tool for CloneTool {
             if event.alt {
                 return ToolResponse::none();
             }
+            if let Some(msg) = self.paint_block_reason(ctx.canvas()) {
+                return ToolResponse::blocked(msg);
+            }
             if !self.ca_begin(ctx.canvas()) {
                 return ToolResponse::none();
             }
@@ -1428,5 +1500,70 @@ mod tests {
         let mut ctx = ToolCtx::new(&mut doc, [0, 0, 0, 255], [255; 4], 1.0, 0.0, 0.0);
         let resp = tool.on_press(PointerEvent::new(300.0, 128.0), &mut ctx);
         assert!(resp.status.is_some());
+    }
+
+    #[test]
+    fn smart_repair_stroke_removes_the_spot_and_undoes() {
+        // A dark streak that crosses the 128 px coverage tiles and the 256 px
+        // layer tiles, on a gently shaded background.
+        let (w, h) = (700u32, 500u32);
+        let bg = |x: u32, y: u32| [150 + (x / 20) as u8, 120 + (y / 25) as u8, 110, 255];
+        let mut doc = doc_filled(w, h, |x, y| {
+            if (240..290).contains(&x) && (250..262).contains(&y) {
+                [30, 20, 20, 255]
+            } else {
+                bg(x, y)
+            }
+        });
+        let mut tool = crate::tools::repair_brush::RepairBrushTool::new().0;
+        assert!(tool.smart_fill, "Repair heals the whole stroke by default");
+        tool.size = 24.0;
+        {
+            let mut ctx = ToolCtx::new(&mut doc, [0, 0, 0, 255], [255; 4], 1.0, 0.0, 0.0);
+            let mut prev = PointerEvent::new(236.0, 256.0);
+            tool.on_press(prev, &mut ctx);
+            for x in (240..=294).step_by(3) {
+                let ev = PointerEvent::new(x as f32, 256.0);
+                tool.on_drag(ev, &prev, &mut ctx);
+                prev = ev;
+            }
+            assert!(tool.smart_stroke_covers(260, 256));
+            assert!(!tool.smart_stroke_covers(400, 256));
+            tool.on_release(prev, &mut ctx);
+        }
+        let s = tool.take_pending_ca().expect("a recorded stroke");
+        assert!(
+            s.x0 <= 225 && s.x0 + s.w >= 305,
+            "stroke box {s:?}",
+            s = (s.x0, s.w)
+        );
+        assert!(doc
+            .canvas
+            .spot_heal(s.x0, s.y0, s.w, s.h, &s.cover, s.opacity));
+
+        let px = |doc: &Document, x: u32, y: u32| doc.canvas.active_layer().tiles.get_pixel(x, y);
+        for x in (240..290).step_by(7) {
+            for y in 250..262 {
+                let (r, g, b, _) = px(&doc, x, y);
+                let want = bg(x, y);
+                for (got, want) in [r, g, b].iter().zip(want) {
+                    assert!(
+                        (*got as i32 - want as i32).abs() <= 12,
+                        "({x},{y}) still dark: {:?} vs {want:?}",
+                        (r, g, b)
+                    );
+                }
+            }
+        }
+        // Far from the stroke nothing moves.
+        let far = bg(600, 450);
+        assert_eq!(px(&doc, 600, 450), (far[0], far[1], far[2], far[3]));
+
+        doc.canvas.undo();
+        assert_eq!(
+            px(&doc, 260, 256),
+            (30, 20, 20, 255),
+            "undo restores the spot"
+        );
     }
 }

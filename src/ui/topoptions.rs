@@ -828,7 +828,7 @@ fn clone_tool_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions,
         let ca = data.tool.clone_smart_fill;
         if ui
             .selectable_label(ca, "Smart")
-            .on_hover_text("Synthesise the fill from surrounding texture (PatchMatch)")
+            .on_hover_text("Paint over a spot or object; on release the whole stroke is rebuilt from its surroundings (default)")
             .clicked()
             && !ca
         {
@@ -836,7 +836,7 @@ fn clone_tool_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions,
         }
         if ui
             .selectable_label(!ca, "Proximity")
-            .on_hover_text("Heal by cloning a clean nearby patch (default)")
+            .on_hover_text("Heal each dab from a clean nearby patch while you paint")
             .clicked()
             && ca
         {

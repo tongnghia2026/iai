@@ -420,6 +420,51 @@ impl App {
         }))
     }
 
+    /// Smart Repair stroke being painted, shown like a spot-healing stroke: a
+    /// translucent dark wash over exactly the pixels that heal on release.
+    fn build_repair_stroke_overlay(&self) -> Option<std::sync::Arc<crate::ui::CloneSourcePreview>> {
+        if self.edit.tools.active_id() != crate::tools::ToolId::Repair {
+            return None;
+        }
+        let tool = self.edit.tools.clone_like();
+        let (bx0, by0, bx1, by1) = tool.smart_stroke_bounds()?;
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let (w, h) = (canvas.width as i32, canvas.height as i32);
+        let (fx0, fy0) = (bx0.max(0), by0.max(0));
+        let (fx1, fy1) = (bx1.min(w), by1.min(h));
+        if fx1 <= fx0 || fy1 <= fy0 {
+            return None;
+        }
+        let zoom = self.edit.view.zoom.max(0.0001);
+        let max_side = crate::ui::CLONE_SOURCE_PREVIEW_MAX_SIZE as i32;
+        let span = (fx1 - fx0).max(fy1 - fy0);
+        let texel = ((span + max_side - 1) / max_side)
+            .max((1.0 / zoom).floor() as i32)
+            .max(1);
+        let tw = ((fx1 - fx0 + texel - 1) / texel) as usize;
+        let th = ((fy1 - fy0 + texel - 1) / texel) as usize;
+        let wash = premultiply_for_linear_target([0, 0, 0], 0.45);
+        let mut out = vec![0_u8; tw * th * 4];
+        for ty in 0..th {
+            let py = (fy0 + ty as i32 * texel + texel / 2).min(fy1 - 1);
+            for tx in 0..tw {
+                let px = (fx0 + tx as i32 * texel + texel / 2).min(fx1 - 1);
+                if tool.smart_stroke_covers(px, py) {
+                    let i = (ty * tw + tx) * 4;
+                    out[i..i + 4].copy_from_slice(&wash);
+                }
+            }
+        }
+        Some(std::sync::Arc::new(crate::ui::CloneSourcePreview {
+            width: tw,
+            height: th,
+            pixels: out,
+            canvas_x0: fx0,
+            canvas_y0: fy0,
+            texel: texel as u32,
+        }))
+    }
+
     pub fn collect_ui_data(&mut self) -> UiData {
         self.poll_printer_settings();
         self.poll_printer_refresh();
@@ -711,6 +756,7 @@ impl App {
         };
 
         let clone_source_thumbnail = self.build_clone_source_thumbnail();
+        let repair_stroke_overlay = self.build_repair_stroke_overlay();
         let clone_source_marker = if matches!(
             self.edit.tools.active_id(),
             crate::tools::ToolId::Clone | crate::tools::ToolId::Repair
@@ -1187,6 +1233,7 @@ impl App {
                 clone_smart_fill: self.edit.tools.clone_like().smart_fill,
                 clone_source_thumbnail,
                 clone_source_marker,
+                repair_stroke_overlay,
                 smudge_size: self.edit.tools.smudge().size,
                 smudge_hardness: self.edit.tools.smudge().hardness,
                 smudge_strength: self.edit.tools.smudge().strength,

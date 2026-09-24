@@ -16,6 +16,11 @@ impl RepairBrushTool {
         let mut core = CloneTool::new();
         core.heal_mode = true;
         core.spot_mode = true;
+        // Like a spot-healing brush: paint over the spot or object and the
+        // whole stroke is filled from its surroundings on release, with a hard
+        // tip so the healed area is exactly what was painted.
+        core.smart_fill = true;
+        core.hardness = 1.0;
         Self(core)
     }
 }

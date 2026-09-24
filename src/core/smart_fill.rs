@@ -137,6 +137,13 @@ pub fn fill_with(rgba: &mut [u8], w: usize, h: usize, hole: &[bool], params: &CA
         }
         levels[li].solve(params.iters, &mut rng);
     }
+    // Finish with a few search + copy rounds: once the hole carries real
+    // texture, the search stops preferring bland patches that merely match a
+    // smoothed estimate.
+    for it in 0..3 {
+        levels[0].patchmatch_pass_biased(params.iters + it, &mut rng, 0.8);
+        levels[0].take_best_match_pixels();
+    }
 
     let finest = &levels[0];
     if scale > 1 {
@@ -299,22 +306,29 @@ pub fn fill_seamless(rgba: &mut [u8], w: usize, h: usize, hole: &[bool]) -> bool
     true
 }
 
-/// Soft-masked content-aware fill — the Repair Brush's "Smart" type
-/// (mirrors the standard Spot Repair Brush, which synthesises a fill from the
-/// surrounding content for ANY subject, not just skin, then blends it in).
-///
-/// `mask` is the soft brush coverage (0..1, size/hardness/opacity baked in). The
-/// solid core (coverage above a small threshold) is synthesised with PatchMatch
-/// and seamlessly Poisson-blended into its surroundings, then the result is
-/// feathered back into the original *through the soft mask* so the brush's soft
-/// edge and reduced opacity are respected — no hard seam at the stroke boundary.
-/// Returns `true` if anything changed.
-pub fn fill_soft(rgba: &mut [u8], w: usize, h: usize, mask: &[f32]) -> bool {
-    if w == 0 || h == 0 || rgba.len() < w * h * 4 || mask.len() < w * h {
+/// Tip coverage at or above which a Smart Repair stroke replaces a pixel —
+/// the painted footprint its on-canvas overlay shows.
+pub const SPOT_HEAL_COVER: f32 = 0.1;
+/// Ring (px) healed around the painted footprint, so the soft halo around a
+/// blemish or object does not become the fill's boundary colour.
+const SPOT_HEAL_GROW: usize = 2;
+
+/// The Repair Brush's Smart (content-aware) heal, like a spot-healing brush:
+/// the whole painted footprint (`cover` ≥ [`SPOT_HEAL_COVER`], grown by a
+/// small ring) is synthesised from its surroundings with PatchMatch and
+/// Poisson-blended in. The tip's softness only shapes the footprint — it no
+/// longer fades the fill, which used to leave half of a blemish showing near
+/// the stroke edge. `opacity` mixes the result with the original. Returns
+/// `true` if anything changed.
+pub fn fill_spot(rgba: &mut [u8], w: usize, h: usize, cover: &[f32], opacity: f32) -> bool {
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 || cover.len() < w * h {
         return false;
     }
-    const CORE: f32 = 0.12;
-    let hole: Vec<bool> = mask.iter().map(|&v| v >= CORE).collect();
+    let mut hole: Vec<bool> = cover[..w * h]
+        .iter()
+        .map(|&v| v >= SPOT_HEAL_COVER)
+        .collect();
+    grow_mask(&mut hole, w, h, SPOT_HEAL_GROW);
     if !hole.iter().any(|&b| b) {
         return false;
     }
@@ -324,24 +338,40 @@ pub fn fill_soft(rgba: &mut [u8], w: usize, h: usize, mask: &[f32]) -> bool {
     }
     seamless_blend(&orig, rgba, w, h, &hole);
 
+    let op = opacity.clamp(0.0, 1.0);
     let mut changed = false;
     for i in 0..w * h {
         if !hole[i] {
             continue;
         }
-        let m = mask[i].clamp(0.0, 1.0);
         for c in 0..3 {
             let o = orig[i * 4 + c] as f32;
             let s = rgba[i * 4 + c] as f32;
-            let v = (o * (1.0 - m) + s * m).round().clamp(0.0, 255.0) as u8;
-            if v != rgba[i * 4 + c] {
-                changed = true;
-            }
+            let v = (o + (s - o) * op).round().clamp(0.0, 255.0) as u8;
+            changed |= v != orig[i * 4 + c];
             rgba[i * 4 + c] = v;
         }
-        rgba[i * 4 + 3] = 255;
     }
     changed
+}
+
+/// Dilate a mask by `r` pixels (8-neighbourhood, `r` passes).
+fn grow_mask(mask: &mut [bool], w: usize, h: usize, r: usize) {
+    for _ in 0..r {
+        let src = mask.to_vec();
+        for y in 0..h {
+            for x in 0..w {
+                if src[y * w + x] {
+                    continue;
+                }
+                let hit = (y.saturating_sub(1)..(y + 2).min(h))
+                    .any(|ny| (x.saturating_sub(1)..(x + 2).min(w)).any(|nx| src[ny * w + nx]));
+                if hit {
+                    mask[y * w + x] = true;
+                }
+            }
+        }
+    }
 }
 
 /// Seamless-clone a source region into a destination region of the SAME image —
@@ -516,6 +546,8 @@ struct Level {
     holes: Vec<(i32, i32)>,
     /// For each hole pixel: absolute source-centre it currently maps to.
     nnf: Vec<(i32, i32)>,
+    /// Patch distance of each hole pixel's current match (weights its vote).
+    dist: Vec<f32>,
 }
 
 impl Level {
@@ -536,6 +568,7 @@ impl Level {
             }
         }
         let nnf = vec![(0i32, 0i32); w * h];
+        let dist = vec![0f32; w * h];
         Self {
             w,
             h,
@@ -546,6 +579,7 @@ impl Level {
             valid_centers,
             holes,
             nnf,
+            dist,
         }
     }
 
@@ -585,12 +619,44 @@ impl Level {
         ]
     }
 
-    /// Seed the coarsest level: flat average colour in the hole + random NNF.
+    /// Seed the coarsest level: a smooth (harmonic) interpolation of the colours
+    /// around the hole, so each part of the hole starts near the content that
+    /// borders it (sky above, grass below) instead of one flat average that
+    /// steers the search toward bland patches. Random NNF.
     fn init_coarsest(&mut self) {
         let avg = self.source_average();
+        let (w, h) = (self.w, self.h);
+        let n = w * h;
+        let mut rgb = vec![0f32; n * 3];
+        let mut active = vec![false; n];
+        let mut fixed = vec![false; n];
         for &(hx, hy) in &self.holes {
-            let p = (hy as usize * self.w + hx as usize) * 4;
-            self.color[p..p + 4].copy_from_slice(&avg);
+            let i = hy as usize * w + hx as usize;
+            active[i] = true;
+            rgb[i * 3..i * 3 + 3].copy_from_slice(&avg[..3]);
+            let (x, y) = (hx as usize, hy as usize);
+            let neigh = [
+                (x > 0).then(|| i - 1),
+                (x + 1 < w).then(|| i + 1),
+                (y > 0).then(|| i - w),
+                (y + 1 < h).then(|| i + w),
+            ];
+            for ni in neigh.into_iter().flatten() {
+                if !self.hole[ni] && !fixed[ni] {
+                    fixed[ni] = true;
+                    active[ni] = true;
+                    for c in 0..3 {
+                        rgb[ni * 3 + c] = self.color[ni * 4 + c];
+                    }
+                }
+            }
+        }
+        solve_harmonic_rgb(&mut rgb, &active, &fixed, w, h, 255.0);
+        for &(hx, hy) in &self.holes {
+            let i = hy as usize * w + hx as usize;
+            let p = i * 4;
+            self.color[p..p + 3].copy_from_slice(&rgb[i * 3..i * 3 + 3]);
+            self.color[p + 3] = avg[3];
         }
         self.random_nnf();
     }
@@ -662,6 +728,26 @@ impl Level {
         }
     }
 
+    /// Final reconstruction: every hole pixel copies the source pixel its own
+    /// best patch is centred on. The averaged vote converges on structure but
+    /// smooths away grain-like texture (pores, noise, foliage), which is what
+    /// makes a fill look painted; copying real pixels keeps it. Neighbours
+    /// map coherently after the EM passes, so structure stays continuous.
+    fn take_best_match_pixels(&mut self) {
+        for &(hx, hy) in &self.holes {
+            let q = hy as usize * self.w + hx as usize;
+            let (sx, sy) = self.nnf[q];
+            if !self.valid_at(sx, sy) {
+                continue;
+            }
+            let si = (sy as usize * self.w + sx as usize) * 4;
+            let di = q * 4;
+            for c in 0..4 {
+                self.color[di + c] = self.color[si + c];
+            }
+        }
+    }
+
     /// Patch SSD over RGB between a (possibly clamped) target patch centred at
     /// `(tx,ty)` and a *valid* source patch centred at `(sx,sy)`. Early-exits once
     /// the running cost passes `cutoff`.
@@ -692,6 +778,12 @@ impl Level {
     }
 
     fn patchmatch_pass(&mut self, iter: usize, rng: &mut Rng) {
+        self.patchmatch_pass_biased(iter, rng, 1.0);
+    }
+
+    /// `coherence` < 1 lets a neighbour's shifted match win when it is within
+    /// that factor of the best distance, growing larger coherent copies.
+    fn patchmatch_pass_biased(&mut self, iter: usize, rng: &mut Rng, coherence: f64) {
         let n = self.holes.len();
         let forward = iter % 2 == 0;
         let dir: i32 = if forward { 1 } else { -1 };
@@ -712,8 +804,8 @@ impl Level {
                 let (nsx, nsy) = self.nnf[hy as usize * self.w + nx as usize];
                 let cand = (nsx + dir, nsy);
                 if self.valid_at(cand.0, cand.1) {
-                    let d = self.patch_dist(hx, hy, cand.0, cand.1, bd);
-                    if d < bd {
+                    let d = self.patch_dist(hx, hy, cand.0, cand.1, bd / coherence);
+                    if d * coherence < bd {
                         bd = d;
                         bsx = cand.0;
                         bsy = cand.1;
@@ -725,8 +817,8 @@ impl Level {
                 let (nsx, nsy) = self.nnf[ny as usize * self.w + hx as usize];
                 let cand = (nsx, nsy + dir);
                 if self.valid_at(cand.0, cand.1) {
-                    let d = self.patch_dist(hx, hy, cand.0, cand.1, bd);
-                    if d < bd {
+                    let d = self.patch_dist(hx, hy, cand.0, cand.1, bd / coherence);
+                    if d * coherence < bd {
                         bd = d;
                         bsx = cand.0;
                         bsy = cand.1;
@@ -750,12 +842,16 @@ impl Level {
             }
 
             self.nnf[pidx] = (bsx, bsy);
+            self.dist[pidx] = bd as f32;
         }
     }
 
-    /// Reconstruct every hole pixel as the average of the source pixels predicted
-    /// by all overlapping hole-patch matches. Reads only fixed source colours, so
-    /// it is order-independent and runs in parallel.
+    /// Reconstruct every hole pixel from the source pixels predicted by all
+    /// overlapping hole-patch matches, each weighted by how well its patch
+    /// matched (Wexler et al. 2007: w = exp(-d / 2σ²), σ² = 75th percentile of
+    /// the match distances). A plain average blends good and poor matches and
+    /// washes out fine texture (skin pores, grain); weighting keeps it. Reads
+    /// only fixed source colours, so it is order-independent and parallel.
     fn vote(&mut self) {
         let w = self.w;
         let h = self.h;
@@ -763,6 +859,17 @@ impl Level {
         let color = &self.color;
         let hole = &self.hole;
         let nnf = &self.nnf;
+        let dist = &self.dist;
+        let sigma2 = {
+            let mut d: Vec<f32> = self
+                .holes
+                .iter()
+                .map(|&(x, y)| dist[y as usize * w + x as usize])
+                .collect();
+            let k = (d.len() * 3 / 4).min(d.len().saturating_sub(1));
+            let (_, v, _) = d.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
+            v.max(1.0)
+        };
 
         let updates: Vec<((i32, i32), [f32; 4])> = self
             .holes
@@ -786,11 +893,12 @@ impl Level {
                         let srcx = sx + (qx - px);
                         let srcy = sy + (qy - py);
                         let si = (srcy as usize * w + srcx as usize) * 4;
-                        acc[0] += color[si];
-                        acc[1] += color[si + 1];
-                        acc[2] += color[si + 2];
-                        acc[3] += color[si + 3];
-                        n += 1.0;
+                        let wt = (-dist[pi] / (2.0 * sigma2)).exp().max(1e-6);
+                        acc[0] += color[si] * wt;
+                        acc[1] += color[si + 1] * wt;
+                        acc[2] += color[si + 2] * wt;
+                        acc[3] += color[si + 3] * wt;
+                        n += wt;
                     }
                 }
                 let col = if n > 0.0 {
@@ -1195,5 +1303,194 @@ mod tests {
             }
         }
         (e / ((w * w) as f64)).sqrt()
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    //! Quality floors for the content-aware fill, on synthetic scenes with a
+    //! known ground truth: an object straddling two different backgrounds, and
+    //! a blemish on pore-textured skin.
+    use super::*;
+
+    fn noise(i: usize, seed: u32) -> f32 {
+        let mut x = (i as u32).wrapping_mul(2654435761) ^ seed;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        (x % 1000) as f32 / 1000.0 - 0.5
+    }
+
+    /// Sky-blue top half, grass-green bottom half, both with fine noise.
+    fn two_backgrounds(w: usize, h: usize) -> Vec<u8> {
+        let mut v = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let n = noise(i, 7) * 18.0 + noise(i / 3, 9) * 10.0;
+                let c = if y < h / 2 {
+                    [110.0 + n, 160.0 + n, 220.0 + n * 0.5]
+                } else {
+                    [60.0 + n * 1.5, 140.0 + n * 1.5, 50.0 + n]
+                };
+                for k in 0..3 {
+                    v[i * 4 + k] = c[k].clamp(0.0, 255.0) as u8;
+                }
+                v[i * 4 + 3] = 255;
+            }
+        }
+        v
+    }
+
+    /// Skin tone with a gentle gradient, fine noise and 2-3 px pores.
+    fn skin(w: usize, h: usize) -> Vec<u8> {
+        let mut v = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let (gx, gy) = (x / 5, y / 5);
+                let cell = gy * 97 + gx;
+                let (px, py) = (
+                    gx * 5 + 1 + ((noise(cell, 21) + 0.5) * 3.0) as usize,
+                    gy * 5 + 1 + ((noise(cell, 23) + 0.5) * 3.0) as usize,
+                );
+                let d2 = (x as f32 - px as f32).powi(2) + (y as f32 - py as f32).powi(2);
+                let pore = if noise(cell, 25) > 0.1 {
+                    -20.0 * (-d2 / 1.2).exp()
+                } else {
+                    0.0
+                };
+                let n = noise(i, 11) * 6.0 + pore + (x as f32 / w as f32) * 20.0;
+                let c = [225.0 + n, 180.0 + n, 160.0 + n];
+                for k in 0..3 {
+                    v[i * 4 + k] = c[k].clamp(0.0, 255.0) as u8;
+                }
+                v[i * 4 + 3] = 255;
+            }
+        }
+        v
+    }
+
+    /// Paint a red disc of radius `r` and return the hole (disc + 3 px).
+    fn paint_disc(img: &mut [u8], w: usize, h: usize, c: (f32, f32), r: f32) -> Vec<bool> {
+        let mut hole = vec![false; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f32 + 0.5 - c.0).powi(2) + (y as f32 + 0.5 - c.1).powi(2)).sqrt();
+                if d < r + 3.0 {
+                    hole[y * w + x] = true;
+                }
+                if d < r {
+                    img[(y * w + x) * 4..][..3].copy_from_slice(&[200, 40, 40]);
+                }
+            }
+        }
+        hole
+    }
+
+    fn rms(img: &[u8], truth: &[u8], hole: &[bool]) -> f64 {
+        let (mut e, mut n) = (0f64, 0f64);
+        for (i, _) in hole.iter().enumerate().filter(|(_, &h)| h) {
+            for c in 0..3 {
+                let d = img[i * 4 + c] as f64 - truth[i * 4 + c] as f64;
+                e += d * d;
+                n += 1.0;
+            }
+        }
+        (e / n).sqrt()
+    }
+
+    /// Mean |Laplacian| of luma inside the hole: fine-detail energy.
+    fn detail(img: &[u8], hole: &[bool], w: usize) -> f64 {
+        let l =
+            |i: usize| (img[i * 4] as f64 + img[i * 4 + 1] as f64 + img[i * 4 + 2] as f64) / 3.0;
+        let (mut acc, mut n) = (0f64, 0f64);
+        for (i, &hh) in hole.iter().enumerate() {
+            let (x, y) = (i % w, i / w);
+            if !hh || x == 0 || y == 0 || x + 1 >= w || i + w >= hole.len() {
+                continue;
+            }
+            acc += (4.0 * l(i) - l(i - 1) - l(i + 1) - l(i - w) - l(i + w)).abs();
+            n += 1.0;
+        }
+        acc / n
+    }
+
+    #[test]
+    fn object_removal_follows_both_backgrounds_and_keeps_detail() {
+        let (w, h) = (240usize, 200usize);
+        let truth = two_backgrounds(w, h);
+        let mut img = truth.clone();
+        let hole = paint_disc(&mut img, w, h, (120.0, 100.0), 34.0);
+        assert!(fill_seamless(&mut img, w, h, &hole));
+        // A flat-average start used to smear the two halves together (rms ≈ 17).
+        let e = rms(&img, &truth, &hole);
+        assert!(
+            e < 11.0,
+            "fill strays from the true backgrounds: rms {e:.1}"
+        );
+        // Averaged votes used to keep only ~63 % of the fine detail.
+        let (got, want) = (detail(&img, &hole, w), detail(&truth, &hole, w));
+        assert!(
+            got > 0.85 * want,
+            "fill too smooth: detail {got:.1} vs {want:.1}"
+        );
+    }
+
+    #[test]
+    fn blemish_fill_keeps_skin_texture() {
+        let (w, h) = (240usize, 200usize);
+        let truth = skin(w, h);
+        let mut img = truth.clone();
+        let hole = paint_disc(&mut img, w, h, (120.0, 100.0), 12.0);
+        assert!(fill_seamless(&mut img, w, h, &hole));
+        // The old fill kept about half of the pores (a plastic-looking patch).
+        let (got, want) = (detail(&img, &hole, w), detail(&truth, &hole, w));
+        assert!(
+            got > 0.7 * want,
+            "skin texture lost: detail {got:.1} vs {want:.1}"
+        );
+    }
+
+    #[test]
+    fn spot_fill_heals_the_whole_soft_footprint() {
+        let (w, h) = (96usize, 96usize);
+        let bg = [180u8, 140, 120, 255];
+        let mut img: Vec<u8> = (0..w * h).flat_map(|_| bg).collect();
+        let (c, r) = (48.0f32, 16.0f32);
+        let mut cover = vec![0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt();
+                // A fully soft tip: coverage fades to 0 at the rim.
+                cover[y * w + x] = (1.0 - d / r).max(0.0);
+                if d < r * 0.8 {
+                    img[(y * w + x) * 4..][..3].copy_from_slice(&[90, 30, 30]);
+                }
+            }
+        }
+        let before = img.clone();
+        assert!(fill_spot(&mut img, w, h, &cover, 1.0));
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                if cover[y * w + x] >= SPOT_HEAL_COVER {
+                    // The blemish reaches 80 % of the radius, where a soft tip's
+                    // coverage is only 0.2: it must still be healed completely.
+                    for k in 0..3 {
+                        assert!(
+                            (img[i + k] as i32 - bg[k] as i32).abs() <= 6,
+                            "({x},{y}) still shows the blemish: {:?}",
+                            &img[i..i + 3]
+                        );
+                    }
+                } else {
+                    let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt();
+                    if d > r * 0.9 + 4.0 {
+                        assert_eq!(&img[i..i + 4], &before[i..i + 4], "({x},{y}) changed");
+                    }
+                }
+            }
+        }
     }
 }

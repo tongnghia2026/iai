@@ -225,6 +225,8 @@ pub struct ToolViewModel {
     pub clone_source_thumbnail: Option<std::sync::Arc<CloneSourcePreview>>,
     /// Canvas point being sampled during a Clone / Repair stroke.
     pub clone_source_marker: Option<(f32, f32)>,
+    /// Smart Repair stroke being painted: the pixels that will heal on release.
+    pub repair_stroke_overlay: Option<std::sync::Arc<CloneSourcePreview>>,
     // Smudge tool.
     pub smudge_size: f32,
     pub smudge_hardness: f32,
@@ -845,6 +847,7 @@ impl Default for UiData {
                 clone_smart_fill: false,
                 clone_source_thumbnail: None,
                 clone_source_marker: None,
+                repair_stroke_overlay: None,
                 smudge_size: 40.0,
                 smudge_hardness: 0.0,
                 smudge_strength: 0.5,
