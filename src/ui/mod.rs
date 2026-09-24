@@ -130,8 +130,8 @@ fn flat_context_menu_separator(ui: &mut egui::Ui, width: f32) {
     );
 }
 
-/// Clone / Repair source overlay: the pixels a stroke at the cursor would copy,
-/// on the canvas pixel grid. `pixels` are premultiplied for this app's linear-light egui
+/// Clone / Repair preview: the result of one dab at the cursor, on the canvas
+/// pixel grid. `pixels` are premultiplied for this app's linear-light egui
 /// target (see `premultiply_for_linear_target`).
 pub struct CloneSourcePreview {
     pub width: usize,
