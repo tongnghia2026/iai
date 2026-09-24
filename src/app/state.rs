@@ -1366,6 +1366,8 @@ impl App {
         // unit) and one global (AI GPU), so load them before building the state.
         let mut settings = crate::core::settings::AppSettings::load();
         crate::core::ai::ort_ep::set_ai_use_gpu(settings.ai_use_gpu);
+        // Before any document (and so any undo history) exists.
+        crate::core::command::set_default_max_entries(settings.history_steps as usize);
         // Repair the saved shortcuts once and keep the stored overrides in step
         // with what is actually in effect.
         let keymap = crate::app::commands::KeyMap::from_overrides(&settings.shortcuts);
@@ -1895,6 +1897,7 @@ impl App {
     pub fn make_ring_cursor(
         event_loop: &ActiveEventLoop,
         radius: u32,
+        crosshair: bool,
     ) -> winit::window::CustomCursor {
         let r = radius.max(2);
         let size = (r * 2 + 6) as usize;
@@ -1924,6 +1927,28 @@ impl App {
                     rgba[i + 2] = 0;
                     rgba[i + 3] = a;
                 }
+            }
+        }
+        if crosshair {
+            // Centre crosshair: a white 1px cross with a dark outline, same
+            // look as the GPU ring's (see CURSOR_SHADER).
+            let c = (size / 2) as i32;
+            let arm = (rf - 3.0).clamp(2.0, 6.0) as i32;
+            let mut put = |x: i32, y: i32, v: u8, a: u8| {
+                if x >= 0 && y >= 0 && (x as usize) < size && (y as usize) < size {
+                    let i = (y as usize * size + x as usize) * 4;
+                    rgba[i..i + 4].copy_from_slice(&[v, v, v, a]);
+                }
+            };
+            for t in -(arm + 1)..=(arm + 1) {
+                for s in -1..=1 {
+                    put(c + t, c + s, 0, 200);
+                    put(c + s, c + t, 0, 200);
+                }
+            }
+            for t in -arm..=arm {
+                put(c + t, c, 255, 245);
+                put(c, c + t, 255, 245);
             }
         }
         let src = winit::window::CustomCursor::from_rgba(
@@ -2451,6 +2476,17 @@ impl App {
     }
 
     pub fn update_ring_cursor(&mut self, event_loop: &ActiveEventLoop) {
+        use crate::core::settings::BrushCursorStyle;
+        let style = self.shell.settings.brush_cursor;
+        if style == BrushCursorStyle::Precise {
+            // Precise: a fixed crosshair whatever the brush size (the cache is
+            // cleared when the style changes, see apply_settings_change).
+            if self.win.cursor_ring.is_none() {
+                self.win.cursor_ring = Some(Self::make_crosshair_cursor(event_loop));
+            }
+            return;
+        }
+        let crosshair = style == BrushCursorStyle::RingCrosshair;
         let radius = (self.edit.tools.cursor_size() * self.edit.view.zoom)
             .round()
             .clamp(2.0, 400.0) as u32;
@@ -2460,7 +2496,7 @@ impl App {
             return;
         }
         if radius != self.win.last_cursor_radius || self.win.cursor_ring.is_none() {
-            self.win.cursor_ring = Some(Self::make_ring_cursor(event_loop, radius));
+            self.win.cursor_ring = Some(Self::make_ring_cursor(event_loop, radius, crosshair));
             self.win.last_cursor_radius = radius;
         }
     }

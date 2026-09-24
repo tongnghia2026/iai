@@ -23,14 +23,35 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
     // dismisses the dialog by accident.
     let (_enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut do_ok = false;
-    let mut do_cancel = esc_pressed;
+    // Esc first dismisses an open "take this key over?" prompt; only a second
+    // Esc cancels the whole dialog.
+    let conflict_id = egui::Id::new(PREFS_SHORTCUT_CONFLICT_ID);
+    let conflict_open = ctx.data(|d| {
+        d.get_temp::<(
+            crate::app::commands::Command,
+            crate::app::commands::KeyChord,
+            crate::app::commands::Command,
+        )>(conflict_id)
+            .is_some()
+    });
+    if esc_pressed && conflict_open {
+        ctx.data_mut(|d| {
+            d.remove::<(
+                crate::app::commands::Command,
+                crate::app::commands::KeyChord,
+                crate::app::commands::Command,
+            )>(conflict_id)
+        });
+    }
+    let mut do_cancel = esc_pressed && !conflict_open;
+    let accent = data.chrome.theme_mode.palette().accent_primary;
 
     // Which category is shown, remembered across frames in egui temp state.
     let cat_id = egui::Id::new("preferences_active_category");
     let orig_id = egui::Id::new("preferences_original_settings");
     let mut category: usize = ctx.data(|d| d.get_temp::<usize>(cat_id)).unwrap_or(0);
 
-    // Baseline captured the first frame the dialog is shown; "Hoàn tác" / Esc
+    // Baseline captured the first frame the dialog is shown; "Cancel" / Esc
     // restores it, so changes previewed live can still be undone.
     let original = ctx
         .data_mut(|d| d.get_temp::<crate::core::settings::AppSettings>(orig_id))
@@ -105,13 +126,13 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
                         .auto_shrink([false, true])
                         .max_height(max_content_h)
                         .show(ui, |ui| match category {
-                            0 => preferences_general(ui, &mut settings),
+                            0 => preferences_general(ui, &mut settings, accent),
                             1 => preferences_appearance(ui),
-                            2 => preferences_performance(ui),
+                            2 => preferences_performance(ui, &mut settings),
                             3 => preferences_files(ui, &mut settings),
                             4 => preferences_tools(ui, &mut settings),
                             5 => preferences_ai(ui, &mut settings),
-                            _ => preferences_shortcuts(ui, &mut settings, data, actions),
+                            _ => preferences_shortcuts(ui, &mut settings, data, actions, accent),
                         });
                 });
             });
@@ -131,13 +152,15 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
                     if ui.button("  OK  ").clicked() {
                         do_ok = true;
                     }
-                    if ui.button("Hoàn tác").clicked() {
+                    if ui.button("Cancel").clicked() {
                         do_cancel = true;
                     }
                 });
             });
             ui.add_space(2.0);
         });
+
+    shortcut_conflict_window(ctx, &mut settings, accent);
 
     ctx.data_mut(|d| d.insert_temp(cat_id, category));
 
@@ -169,7 +192,11 @@ fn preferences_section_title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
 }
 
-fn preferences_general(ui: &mut egui::Ui, settings: &mut crate::core::settings::AppSettings) {
+fn preferences_general(
+    ui: &mut egui::Ui,
+    settings: &mut crate::core::settings::AppSettings,
+    accent: egui::Color32,
+) {
     preferences_section_title(ui, "Đơn vị mặc định");
     ui.horizontal(|ui| {
         ui.label("Thước & hộp thoại kích thước:");
@@ -196,6 +223,7 @@ fn preferences_general(ui: &mut egui::Ui, settings: &mut crate::core::settings::
         "Khôi phục toàn bộ cài đặt mặc định…",
         "Đưa TẤT CẢ cài đặt (kể cả phím tắt) về mặc định?",
         !is_default,
+        accent,
     ) {
         *settings = crate::core::settings::AppSettings::default();
     }
@@ -228,20 +256,34 @@ fn clear_preferences_page_state(ctx: &egui::Context) {
 
 /// A destructive button that asks once inline before acting. Returns `true`
 /// on the frame the user confirms.
-fn confirm_row(ui: &mut egui::Ui, id: &str, button: &str, question: &str, enabled: bool) -> bool {
+fn confirm_row(
+    ui: &mut egui::Ui,
+    id: &str,
+    button: &str,
+    question: &str,
+    enabled: bool,
+    accent: egui::Color32,
+) -> bool {
     let id = egui::Id::new(id);
     let mut asking = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
     let mut confirmed = false;
     if asking {
-        ui.label(egui::RichText::new(question).color(egui::Color32::from_rgb(230, 180, 90)));
-        ui.horizontal(|ui| {
-            if ui.button("Khôi phục").clicked() {
-                confirmed = true;
-                asking = false;
-            }
-            if ui.button("Hủy").clicked() {
-                asking = false;
-            }
+        warning_frame().show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(question)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.add(primary_button("Khôi phục", accent)).clicked() {
+                    confirmed = true;
+                    asking = false;
+                }
+                if ui.add(secondary_button("Hủy")).clicked() {
+                    asking = false;
+                }
+            });
         });
     } else if ui.add_enabled(enabled, egui::Button::new(button)).clicked() {
         asking = true;
@@ -250,8 +292,107 @@ fn confirm_row(ui: &mut egui::Ui, id: &str, button: &str, question: &str, enable
     confirmed
 }
 
+/// Amber box that makes a pending question stand out from the page.
+fn warning_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(74, 54, 18))
+        .stroke(egui::Stroke::new(
+            1.5_f32,
+            egui::Color32::from_rgb(230, 180, 90),
+        ))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::same(10))
+}
+
+/// The action a question is asking for: filled with the accent colour.
+fn primary_button(text: impl Into<String>, accent: egui::Color32) -> egui::Button<'static> {
+    egui::Button::new(
+        egui::RichText::new(text.into())
+            .strong()
+            .color(egui::Color32::WHITE),
+    )
+    .fill(accent)
+    .min_size(egui::vec2(0.0, 28.0))
+}
+
+fn secondary_button(text: &str) -> egui::Button<'static> {
+    egui::Button::new(text.to_string()).min_size(egui::vec2(72.0, 28.0))
+}
+
+/// "This key belongs to another command — take it over?" as a small window
+/// over Preferences, so it cannot scroll out of sight behind the list.
+fn shortcut_conflict_window(
+    ctx: &egui::Context,
+    settings: &mut crate::core::settings::AppSettings,
+    accent: egui::Color32,
+) {
+    use crate::app::commands::{Command, KeyChord, KeyMap};
+    let conflict_id = egui::Id::new(PREFS_SHORTCUT_CONFLICT_ID);
+    let Some((cmd, chord, other)) =
+        ctx.data(|d| d.get_temp::<(Command, KeyChord, Command)>(conflict_id))
+    else {
+        return;
+    };
+    let mut close = false;
+    egui::Window::new("Phím đang được dùng")
+        .id(egui::Id::new("preferences_shortcut_conflict_window"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .order(egui::Order::Tooltip)
+        .frame(warning_frame())
+        .show(ctx, |ui| {
+            ui.set_max_width(380.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "{}  {} đang là phím của “{}”.",
+                    egui_phosphor::regular::WARNING,
+                    chord.label(),
+                    other.display_name()
+                ))
+                .strong()
+                .size(14.0)
+                .color(egui::Color32::WHITE),
+            );
+            ui.add_space(2.0);
+            ui.label(format!(
+                "Gán cho “{}” thì “{}” sẽ không còn phím tắt.",
+                cmd.display_name(),
+                other.display_name()
+            ));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let take = primary_button(
+                    format!("Gán {} cho “{}”", chord.label(), cmd.display_name()),
+                    accent,
+                );
+                if ui.add(take).clicked() {
+                    let mut keymap = KeyMap::from_overrides(&settings.shortcuts);
+                    keymap.assign(cmd, Some(chord));
+                    settings.shortcuts = keymap.to_overrides();
+                    shortcut_notice(
+                        ctx,
+                        format!(
+                            "Đã gán {} cho “{}”; “{}” hiện không có phím.",
+                            chord.label(),
+                            cmd.display_name(),
+                            other.display_name()
+                        ),
+                    );
+                    close = true;
+                }
+                if ui.add(secondary_button("Hủy")).clicked() {
+                    close = true;
+                }
+            });
+        });
+    if close {
+        ctx.data_mut(|d| d.remove::<(Command, KeyChord, Command)>(conflict_id));
+    }
+}
+
 /// Show a one-line result on the Shortcuts page.
-fn shortcut_notice(ctx: &egui::Context, text: String) {
+pub(crate) fn shortcut_notice(ctx: &egui::Context, text: String) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(PREFS_SHORTCUT_NOTICE_ID), text));
 }
 
@@ -305,14 +446,25 @@ fn preferences_appearance(ui: &mut egui::Ui) {
     );
 }
 
-fn preferences_performance(ui: &mut egui::Ui) {
-    preferences_section_title(ui, "Bộ nhớ Hoàn tác (Undo)");
+fn preferences_performance(ui: &mut egui::Ui, settings: &mut crate::core::settings::AppSettings) {
+    use crate::core::settings::{HISTORY_STEPS_MAX, HISTORY_STEPS_MIN};
+
+    preferences_section_title(ui, "Hoàn tác (Undo)");
+    ui.horizontal(|ui| {
+        ui.label("Số bước Undo tối đa:");
+        ui.add(
+            egui::DragValue::new(&mut settings.history_steps)
+                .speed(1.0)
+                .range(HISTORY_STEPS_MIN..=HISTORY_STEPS_MAX)
+                .suffix(" bước"),
+        );
+    });
     let budget_mb = crate::core::hw::history_budget_bytes() / (1024 * 1024);
-    ui.label(format!("Ngân sách hiện tại: {budget_mb} MB"));
     ui.label(
-        egui::RichText::new(
-            "Tự tính theo RAM máy; chỉ lưu phần ảnh thay đổi nên đủ cho hàng chục bước.",
-        )
+        egui::RichText::new(format!(
+            "Áp dụng ngay cho mọi tab; giảm số bước sẽ bỏ các bước cũ nhất. \
+             Bộ nhớ dành cho Undo tự tính theo RAM máy: {budget_mb} MB."
+        ))
         .color(egui::Color32::GRAY)
         .size(11.0),
     );
@@ -375,6 +527,37 @@ fn preferences_tools(ui: &mut egui::Ui, settings: &mut crate::core::settings::Ap
         .color(egui::Color32::GRAY)
         .size(11.0),
     );
+
+    use crate::core::settings::BrushCursorStyle;
+    ui.add_space(14.0);
+    preferences_section_title(ui, "Con trỏ cọ vẽ");
+    for (style, label, hint) in [
+        (
+            BrushCursorStyle::Ring,
+            "Vòng tròn theo cỡ cọ",
+            "Thấy đúng vùng cọ sẽ tô (mặc định).",
+        ),
+        (
+            BrushCursorStyle::RingCrosshair,
+            "Vòng tròn + chữ thập ở tâm",
+            "Thêm dấu chữ thập nhỏ để đặt cọ chính xác.",
+        ),
+        (
+            BrushCursorStyle::Precise,
+            "Chữ thập chính xác",
+            "Chỉ hiện chữ thập, không vẽ vòng cỡ cọ.",
+        ),
+    ] {
+        ui.radio_value(&mut settings.brush_cursor, style, label)
+            .on_hover_text(hint);
+    }
+    ui.label(
+        egui::RichText::new(
+            "Áp dụng cho Brush, Eraser, Clone, Repair, Dodge/Burn, Smudge, Smart Select.",
+        )
+        .color(egui::Color32::GRAY)
+        .size(11.0),
+    );
 }
 
 fn preferences_ai(ui: &mut egui::Ui, settings: &mut crate::core::settings::AppSettings) {
@@ -400,6 +583,7 @@ fn preferences_shortcuts(
     settings: &mut crate::core::settings::AppSettings,
     data: &UiData,
     actions: &mut UiActions,
+    accent: egui::Color32,
 ) {
     use crate::app::commands::{Command, CommandGroup, KeyChord, KeyMap};
 
@@ -420,52 +604,11 @@ fn preferences_shortcuts(
     );
     ui.add_space(6.0);
 
-    // A key another command already holds: take it over only on request.
     let conflict_id = egui::Id::new(PREFS_SHORTCUT_CONFLICT_ID);
-    if let Some((cmd, chord, other)) =
-        ctx.data(|d| d.get_temp::<(Command, KeyChord, Command)>(conflict_id))
-    {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} đang là phím của “{}”.",
-                    chord.label(),
-                    other.display_name()
-                ))
-                .color(CHANGED_COLOR),
-            );
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button(format!(
-                        "Gán cho “{}”, bỏ phím của “{}”",
-                        cmd.display_name(),
-                        other.display_name()
-                    ))
-                    .clicked()
-                {
-                    keymap.assign(cmd, Some(chord));
-                    shortcut_notice(
-                        &ctx,
-                        format!(
-                            "Đã gán {} cho “{}”; “{}” hiện không có phím.",
-                            chord.label(),
-                            cmd.display_name(),
-                            other.display_name()
-                        ),
-                    );
-                    ctx.data_mut(|d| d.remove::<(Command, KeyChord, Command)>(conflict_id));
-                }
-                if ui.button("Hủy").clicked() {
-                    ctx.data_mut(|d| d.remove::<(Command, KeyChord, Command)>(conflict_id));
-                }
-            });
-        });
-        ui.add_space(4.0);
-    }
     if let Some(notice) =
         ctx.data(|d| d.get_temp::<String>(egui::Id::new(PREFS_SHORTCUT_NOTICE_ID)))
     {
-        ui.label(egui::RichText::new(notice).size(11.5));
+        ui.label(egui::RichText::new(notice).size(11.5).color(CHANGED_COLOR));
         ui.add_space(4.0);
     }
 
@@ -585,12 +728,33 @@ fn preferences_shortcuts(
 
     ui.add_space(10.0);
     ui.separator();
+    ui.horizontal(|ui| {
+        if ui
+            .button(format!("{}  Xuất ra file…", egui_phosphor::regular::EXPORT))
+            .on_hover_text("Lưu bộ phím tắt hiện tại để dùng lại hoặc chép sang máy khác")
+            .clicked()
+        {
+            actions.settings.export_shortcuts = true;
+        }
+        if ui
+            .button(format!(
+                "{}  Nhập từ file…",
+                egui_phosphor::regular::DOWNLOAD_SIMPLE
+            ))
+            .on_hover_text("Thay toàn bộ phím tắt bằng bộ đã xuất trước đó")
+            .clicked()
+        {
+            actions.settings.import_shortcuts = true;
+        }
+    });
+    ui.add_space(4.0);
     if confirm_row(
         ui,
         PREFS_CONFIRM_RESET_KEYS_ID,
         "Khôi phục phím tắt mặc định",
         "Đưa TẤT CẢ phím tắt về mặc định?",
         !settings.shortcuts.is_empty(),
+        accent,
     ) {
         keymap = KeyMap::default();
         shortcut_notice(&ctx, "Đã khôi phục toàn bộ phím tắt mặc định.".to_string());
@@ -1115,6 +1279,48 @@ mod shortcut_editor_tests {
             pending,
             Some((Command::ToolBrush, chord, Command::ToolEraser))
         );
+    }
+
+    #[test]
+    fn esc_first_closes_the_takeover_prompt_then_the_dialog() {
+        let (_, ctx) = deliver((
+            Command::ToolBrush,
+            crate::ui::ShortcutCapture::Chord(KeyChord::plain(KeyName::E)),
+        ));
+        let esc = || egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let data = UiData::default();
+        let conflict = |ctx: &egui::Context| {
+            ctx.data(|d| {
+                d.get_temp::<(Command, KeyChord, Command)>(egui::Id::new(
+                    PREFS_SHORTCUT_CONFLICT_ID,
+                ))
+            })
+        };
+
+        let mut actions = UiActions::default();
+        let _ = ctx.run_ui(esc(), |ui| {
+            preferences_dialog(ui.ctx(), &data, &mut actions)
+        });
+        assert_eq!(conflict(&ctx), None, "Esc dismisses the prompt");
+        assert_eq!(
+            actions.dialogs.show_preferences, None,
+            "…but keeps Preferences open"
+        );
+
+        let mut actions = UiActions::default();
+        let _ = ctx.run_ui(esc(), |ui| {
+            preferences_dialog(ui.ctx(), &data, &mut actions)
+        });
+        assert_eq!(actions.dialogs.show_preferences, Some(false));
     }
 
     #[test]

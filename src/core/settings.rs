@@ -13,6 +13,32 @@ use crate::core::units::Unit;
 /// Autosave period limits, in seconds.
 pub const AUTOSAVE_MIN_SECS: u32 = 30;
 pub const AUTOSAVE_MAX_SECS: u32 = 600;
+/// Undo step limits (Preferences ▸ Performance).
+pub const HISTORY_STEPS_MIN: u32 = 20;
+pub const HISTORY_STEPS_MAX: u32 = 1000;
+
+/// How the painting tools draw their pointer (Preferences ▸ Tools & Cursors).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrushCursorStyle {
+    /// A ring the size of the brush tip.
+    #[default]
+    Ring,
+    /// The ring plus a small crosshair marking its centre.
+    RingCrosshair,
+    /// Only a precise crosshair, whatever the brush size.
+    Precise,
+}
+
+/// Read a value, falling back to its default when it is unreadable (e.g. an
+/// option name written by a newer build) instead of failing the whole file.
+fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
 
 fn default_true() -> bool {
     true
@@ -22,6 +48,9 @@ fn default_autosave_secs() -> u32 {
 }
 fn default_unit() -> Unit {
     Unit::Pixels
+}
+fn default_history_steps() -> u32 {
+    100
 }
 
 /// Everything the Preferences dialog reads and writes. Extended over time; each
@@ -49,6 +78,12 @@ pub struct AppSettings {
     /// `app::commands::KeyMap::from_overrides`.
     #[serde(default)]
     pub shortcuts: std::collections::BTreeMap<String, String>,
+    /// Pointer shape of the painting tools.
+    #[serde(default, deserialize_with = "lenient")]
+    pub brush_cursor: BrushCursorStyle,
+    /// Most undo steps each document keeps (the RAM budget still applies).
+    #[serde(default = "default_history_steps")]
+    pub history_steps: u32,
 }
 
 impl Default for AppSettings {
@@ -60,6 +95,8 @@ impl Default for AppSettings {
             snap_default: false,
             ai_use_gpu: default_true(),
             shortcuts: Default::default(),
+            brush_cursor: BrushCursorStyle::default(),
+            history_steps: default_history_steps(),
         }
     }
 }
@@ -71,6 +108,9 @@ impl AppSettings {
         self.autosave_interval_secs = self
             .autosave_interval_secs
             .clamp(AUTOSAVE_MIN_SECS, AUTOSAVE_MAX_SECS);
+        self.history_steps = self
+            .history_steps
+            .clamp(HISTORY_STEPS_MIN, HISTORY_STEPS_MAX);
     }
 
     /// Load from `prefs.json`, falling back to defaults on any read/parse error.
@@ -199,6 +239,24 @@ mod tests {
         assert_eq!(s.autosave_interval_secs, 120);
         assert_eq!(s.shortcuts.len(), 1);
         assert_eq!(s.shortcuts["tool.brush"], "Q");
+    }
+
+    #[test]
+    fn phase4_fields_default_clamp_and_survive_unknown_values() {
+        let s = AppSettings::default();
+        assert_eq!(s.brush_cursor, BrushCursorStyle::Ring);
+        assert_eq!(s.history_steps, 100);
+
+        let json = r#"{ "history_steps": 5, "brush_cursor": "RingCrosshair" }"#;
+        let s = AppSettings::load_from_str(json);
+        assert_eq!(s.history_steps, HISTORY_STEPS_MIN);
+        assert_eq!(s.brush_cursor, BrushCursorStyle::RingCrosshair);
+
+        // A cursor style this build does not know keeps every other setting.
+        let json = r#"{ "autosave_interval_secs": 120, "brush_cursor": "Hologram" }"#;
+        let s = AppSettings::load_from_str(json);
+        assert_eq!(s.autosave_interval_secs, 120);
+        assert_eq!(s.brush_cursor, BrushCursorStyle::Ring);
     }
 
     #[test]

@@ -769,6 +769,11 @@ impl Command {
         }
     }
 
+    /// The command saved under `id`, if this build knows it.
+    pub fn from_id(id: &str) -> Option<Command> {
+        Command::all().find(|cmd| cmd.id() == id)
+    }
+
     fn row(self) -> &'static (Command, KeyChord, CommandGroup, &'static str) {
         TABLE
             .iter()
@@ -808,6 +813,9 @@ impl Command {
             .map(|(cmd, _, _, _)| *cmd)
     }
 }
+
+/// Tag written into exported shortcuts files.
+const SHORTCUTS_FILE_FORMAT: &str = "iai-shortcuts";
 
 /// Why a chord cannot simply be given to a command.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -927,6 +935,49 @@ impl KeyMap {
         self.command_for(chord)
             .filter(|other| *other != cmd)
             .map(ChordConflict::Command)
+    }
+
+    /// The shortcuts file written by Preferences ▸ Shortcuts ▸ Export: only
+    /// the changed bindings, like `prefs.json`, tagged so it can be recognised.
+    pub fn export_json(&self) -> String {
+        let value = serde_json::json!({
+            "format": SHORTCUTS_FILE_FORMAT,
+            "version": 1,
+            "shortcuts": self.to_overrides(),
+        });
+        serde_json::to_string_pretty(&value).unwrap_or_default()
+    }
+
+    /// Read a shortcuts file. The result replaces the whole keymap (commands the
+    /// file does not mention keep their built-in key) and is repaired like
+    /// `prefs.json`; also returns how many entries could not be used. Errors
+    /// only when the text is not a shortcuts file at all.
+    pub fn import_json(text: &str) -> Result<(KeyMap, usize), String> {
+        let value: serde_json::Value =
+            serde_json::from_str(text).map_err(|_| "File không phải JSON hợp lệ.".to_string())?;
+        let entries = match value.get("shortcuts") {
+            Some(serde_json::Value::Object(map)) => map,
+            _ => return Err("File không phải bộ phím tắt của iAi.".to_string()),
+        };
+        let overrides: BTreeMap<String, String> = entries
+            .iter()
+            .filter_map(|(id, v)| v.as_str().map(|s| (id.clone(), s.to_string())))
+            .collect();
+        let keymap = KeyMap::from_overrides(&overrides);
+        let used = overrides
+            .iter()
+            .filter(|(id, text)| {
+                Command::from_id(id).is_some_and(|cmd| {
+                    let wanted = if text.trim().is_empty() {
+                        Some(String::new())
+                    } else {
+                        KeyChord::parse(text).map(KeyChord::label)
+                    };
+                    wanted == Some(keymap.label_for(cmd))
+                })
+            })
+            .count();
+        Ok((keymap, entries.len() - used))
     }
 
     /// Give `chord` (or no key) to `cmd`. Any other command holding that chord
@@ -1139,6 +1190,45 @@ mod tests {
         );
         assert_eq!(km.chord_for(Command::ToolBrush), None);
         assert!(km.is_default(Command::ToolEraser));
+    }
+
+    #[test]
+    fn exported_shortcuts_import_back_exactly() {
+        let mut km = KeyMap::default();
+        km.assign(Command::ToolBrush, Some(KeyChord::plain(KeyName::Q)));
+        km.assign(Command::FileSave, Some(KeyName::F2).map(KeyChord::plain));
+        km.assign(Command::Invert, None);
+        let (back, ignored) = KeyMap::import_json(&km.export_json()).unwrap();
+        assert_eq!(back, km);
+        assert_eq!(ignored, 0);
+        // An untouched keymap exports as "all defaults" and imports as such.
+        let (fresh, _) = KeyMap::import_json(&KeyMap::default().export_json()).unwrap();
+        assert_eq!(fresh, KeyMap::default());
+    }
+
+    #[test]
+    fn importing_reports_unusable_entries_and_rejects_foreign_files() {
+        let text = r#"{ "format": "iai-shortcuts", "version": 1, "shortcuts": {
+            "tool.brush": "Q",
+            "tool.eraser": "E",
+            "tool.teleport": "T",
+            "file.save": "Ctrl+G",
+            "file.open": 7
+        } }"#;
+        let (km, ignored) = KeyMap::import_json(text).unwrap();
+        assert_eq!(
+            km.chord_for(Command::ToolBrush),
+            Some(KeyChord::plain(KeyName::Q))
+        );
+        assert!(km.is_default(Command::ToolEraser));
+        assert!(
+            km.is_default(Command::FileSave),
+            "a fixed key keeps the default"
+        );
+        assert_eq!(ignored, 3, "unknown id, fixed key and non-text value");
+
+        assert!(KeyMap::import_json("not json").is_err());
+        assert!(KeyMap::import_json(r#"{ "theme_mode": "Dark" }"#).is_err());
     }
 
     #[test]

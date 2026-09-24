@@ -791,6 +791,18 @@ impl Command for CompoundCommand {
 /// this many undo steps (see `evict_if_needed`).
 const MIN_KEPT_ENTRIES: usize = 6;
 
+/// Undo steps a newly created history keeps (Preferences ▸ Performance).
+static DEFAULT_MAX_ENTRIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(100);
+
+/// Set the undo-step limit for histories created from now on.
+pub fn set_default_max_entries(steps: usize) {
+    DEFAULT_MAX_ENTRIES.store(
+        steps.max(MIN_KEPT_ENTRIES),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 /// Identity of one edit on the undo stack, unique for the life of a history.
 ///
 /// Distinct from [`CommandHistory::revision`], which is a monotonic *change
@@ -855,7 +867,7 @@ impl CommandHistory {
             // RAM/16 clamped to [128 MB, 1 GB] — a weak laptop keeps a smaller
             // undo footprint, a workstation keeps more history.
             memory_budget_bytes: crate::core::hw::history_budget_bytes(),
-            max_entries: 100,
+            max_entries: DEFAULT_MAX_ENTRIES.load(std::sync::atomic::Ordering::Relaxed),
             revision: 1,
             next_edit_id: 1,
             // A brand-new document matches "no file" trivially; opening a file
@@ -1044,6 +1056,12 @@ impl CommandHistory {
                 self.note_evicted(old.id);
             }
         }
+    }
+
+    /// Change the undo-step limit; a lower limit drops the oldest steps now.
+    pub fn set_max_entries(&mut self, steps: usize) {
+        self.max_entries = steps.max(MIN_KEPT_ENTRIES);
+        self.evict_if_needed();
     }
 
     pub fn undo_count(&self) -> usize {
@@ -1820,6 +1838,22 @@ mod tests {
             history.is_dirty(),
             "the saved state was destroyed; it must never read clean again"
         );
+    }
+
+    #[test]
+    fn lowering_the_step_limit_drops_the_oldest_steps_at_once() {
+        let mut history = CommandHistory::new();
+        for _ in 0..30 {
+            edit(&mut history, "Step");
+        }
+        assert_eq!(history.undo_count(), 30);
+        history.set_max_entries(20);
+        assert_eq!(history.undo_count(), 20);
+        // Never below the safety floor, whatever is asked.
+        history.set_max_entries(1);
+        assert_eq!(history.undo_count(), MIN_KEPT_ENTRIES);
+        edit(&mut history, "One more");
+        assert_eq!(history.undo_count(), MIN_KEPT_ENTRIES);
     }
 
     #[test]

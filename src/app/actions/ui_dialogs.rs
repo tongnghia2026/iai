@@ -425,12 +425,86 @@ impl App {
             self.shell.canvas_unit = new.default_unit;
             self.shell.ui.new_unit = new.default_unit;
         }
+        if new.brush_cursor != old.brush_cursor {
+            // Rebuilt in the new style on the next pointer update.
+            self.win.cursor_ring = None;
+            self.win.last_cursor_radius = 0;
+        }
+        if new.history_steps != old.history_steps {
+            let steps = new.history_steps as usize;
+            crate::core::command::set_default_max_entries(steps);
+            for doc in &mut self.docs.documents {
+                doc.canvas.set_history_steps(steps);
+                for page in doc.pages.iter_mut().flatten() {
+                    page.set_history_steps(steps);
+                }
+                if let Some(master) = doc.master.as_deref_mut() {
+                    master.set_history_steps(steps);
+                }
+            }
+        }
         self.shell.settings = new;
         self.shell.keymap = keymap;
         self.shell.settings.save();
+        self.push_cursor_uniforms();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
+    }
+
+    /// Preferences ▸ Shortcuts ▸ Export: save the current shortcuts to a file.
+    fn export_shortcuts_file(&mut self) {
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Xuất bộ phím tắt")
+            .add_filter("Phím tắt iAi", &["json"])
+            .set_file_name("iai-phim-tat.json");
+        if let Some(parent) = crate::file_io::dialog_parent(window) {
+            dialog = dialog.set_parent(&parent);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        let notice = match std::fs::write(&path, self.shell.keymap.export_json()) {
+            Ok(()) => format!("Đã xuất bộ phím tắt ra {}.", path.display()),
+            Err(e) => format!("Không ghi được file phím tắt: {e}"),
+        };
+        crate::ui::dialogs::shortcut_notice(&self.win.egui_ctx, notice);
+    }
+
+    /// Preferences ▸ Shortcuts ▸ Import: replace the shortcuts with a file's.
+    fn import_shortcuts_file(&mut self) {
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Nhập bộ phím tắt")
+            .add_filter("Phím tắt iAi", &["json"]);
+        if let Some(parent) = crate::file_io::dialog_parent(window) {
+            dialog = dialog.set_parent(&parent);
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        let loaded = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Không đọc được file: {e}"))
+            .and_then(|text| crate::app::commands::KeyMap::import_json(&text));
+        let notice = match loaded {
+            Ok((keymap, ignored)) => {
+                let mut settings = self.shell.settings.clone();
+                settings.shortcuts = keymap.to_overrides();
+                self.apply_settings_change(settings);
+                if ignored == 0 {
+                    "Đã nhập bộ phím tắt.".to_string()
+                } else {
+                    format!("Đã nhập bộ phím tắt; bỏ qua {ignored} mục không dùng được.")
+                }
+            }
+            Err(e) => format!("Không nhập được: {e} Phím tắt hiện tại giữ nguyên."),
+        };
+        crate::ui::dialogs::shortcut_notice(&self.win.egui_ctx, notice);
     }
 
     pub(super) fn handle_misc_dialog_actions(&mut self, actions: &mut UiActions) {
@@ -527,6 +601,12 @@ impl App {
         }
         if actions.settings.captured_taken {
             self.shell.ui.shortcut_captured = None;
+        }
+        if actions.settings.export_shortcuts {
+            self.export_shortcuts_file();
+        }
+        if actions.settings.import_shortcuts {
+            self.import_shortcuts_file();
         }
         if let Some(target) = actions.settings.capture.take() {
             self.shell.ui.shortcut_capture = target;

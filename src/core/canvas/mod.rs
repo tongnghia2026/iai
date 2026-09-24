@@ -895,6 +895,11 @@ impl Canvas {
         self.cmd_history.redo_count() > 0
     }
 
+    /// Change how many undo steps this canvas keeps (oldest dropped first).
+    pub fn set_history_steps(&mut self, steps: usize) {
+        self.cmd_history.set_max_entries(steps);
+    }
+
     /// Record an already-applied change in history — the single door for
     /// persistent document mutation.
     ///

@@ -939,6 +939,9 @@ pub struct SettingsIntent {
     pub capture: Option<Option<crate::app::commands::Command>>,
     /// The dialog has taken the caught key; drop it.
     pub captured_taken: bool,
+    /// Preferences ▸ Shortcuts: save the shortcuts to a file / load them from one.
+    pub export_shortcuts: bool,
+    pub import_shortcuts: bool,
 }
 
 #[derive(Default)]

@@ -390,7 +390,10 @@ impl App {
                     | crate::tools::ToolId::VectorBrush
             );
             let ring_screen_radius = self.edit.tools.cursor_size() * self.edit.view.zoom;
+            let cursor_style = self.shell.settings.brush_cursor;
+            // Precise keeps the native crosshair at any size, so no GPU ring.
             let os_ring_too_big = uses_os_ring
+                && cursor_style != crate::core::settings::BrushCursorStyle::Precise
                 && ring_screen_radius.round() > crate::app::state::MAX_NATIVE_RING_RADIUS as f32;
             let eyedrop_cursor = self.edit.tools.active_id() == crate::tools::ToolId::Eyedropper
                 || (self.edit.input.alt_held
@@ -436,7 +439,12 @@ impl App {
             gpu.write_cursor_uniforms(&CursorUniforms {
                 cursor_pos: [cx, cy],
                 brush_size: radius,
-                _pad: 0.0,
+                crosshair: if cursor_style == crate::core::settings::BrushCursorStyle::RingCrosshair
+                {
+                    1.0
+                } else {
+                    0.0
+                },
                 screen_size: [sz.width as f32, sz.height as f32],
                 _pad2: [0.0, 0.0],
             });

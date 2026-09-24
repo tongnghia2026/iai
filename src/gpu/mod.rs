@@ -32,7 +32,8 @@ pub struct CanvasUniforms {
 pub struct CursorUniforms {
     pub cursor_pos: [f32; 2],
     pub brush_size: f32,
-    pub _pad: f32,
+    /// 1.0 draws a small crosshair at the ring's centre.
+    pub crosshair: f32,
     pub screen_size: [f32; 2],
     pub _pad2: [f32; 2],
 }
@@ -2060,7 +2061,7 @@ const CURSOR_SHADER: &str = r#"
 struct CursorUniforms {
     cursor_pos: vec2<f32>,
     brush_size: f32,
-    _pad: f32,
+    crosshair: f32,
     screen_size: vec2<f32>,
     _pad2: vec2<f32>,
 };
@@ -2090,6 +2091,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if u.brush_size < 0.5 { discard; }
     let dist = length(in.local) * (u.brush_size + 2.0);
     let r = u.brush_size;
+    if u.crosshair > 0.5 {
+        // Centre crosshair: a white 1px cross with a dark outline.
+        let p = abs(in.local * (u.brush_size + 2.0));
+        let arm = min(6.0, max(r - 3.0, 2.0));
+        if (p.y < 0.6 && p.x < arm) || (p.x < 0.6 && p.y < arm) {
+            return vec4<f32>(1.0, 1.0, 1.0, 0.95);
+        }
+        if (p.y < 1.6 && p.x < arm + 1.0) || (p.x < 1.6 && p.y < arm + 1.0) {
+            return vec4<f32>(0.0, 0.0, 0.0, 0.8);
+        }
+    }
     let black_diff = abs(dist - r);
     if black_diff < 1.5 {
         let a = 1.0 - black_diff / 1.5;

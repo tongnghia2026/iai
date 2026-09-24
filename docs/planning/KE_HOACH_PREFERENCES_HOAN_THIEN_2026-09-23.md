@@ -8,9 +8,9 @@
 
 - Ngày chốt kế hoạch: **2026-09-23**.
 - Nhánh hiện tại: `feat/vector-core-foundation`.
-- Trạng thái tổng thể: **HOÀN TẤT phạm vi chính (Phase 1–3), chủ test OK
-  24/09.** Phase 4 là tùy chọn, chưa làm và chỉ làm khi chủ yêu cầu.
-- Việc kế tiếp: không còn việc bắt buộc. Chờ chủ quyết push và có làm Phase 4.
+- Trạng thái tổng thể: Phase 1–3 **HOÀN TẤT** (chủ test OK 24/09). **Phase 4
+  (chủ yêu cầu 24/09) đã code xong, chờ chủ GUI-test.**
+- Việc kế tiếp: chủ test Phase 4 theo cổng nghiệm thu ở mục 6.
 - Không push nếu chủ dự án chưa yêu cầu. Sau mỗi phase: build Release + đưa
   đường dẫn `.exe` thật rồi mới mời chủ test (quy ước dự án).
 
@@ -23,9 +23,9 @@ Quy ước trạng thái checklist:
 
 ## 1. Quyết định đã khóa
 
-1. **Phím mở Preferences = `Ctrl+K`** (giống Photoshop). Giữ `Ctrl+,` chạy
-   song song để không phá thói quen cũ. `Ctrl+K` hiện đang trống trong
-   `keyboard.rs` nên không đụng phím nào khác.
+1. **Phím mở Preferences = `Ctrl+K`** (giống Photoshop). ~~Giữ `Ctrl+,` chạy
+   song song~~ — **chủ yêu cầu BỎ `Ctrl+,` ngày 24/09** (Phase 4); `,` giờ là phím
+   tự do có thể gán.
 2. **Phạm vi phím tắt tùy biến = "thực dụng":**
    - Cho đổi: **phím CHỌN CÔNG CỤ** (B, E, V, I, G, C, Z, H, P, A, U, T, S, J,
      O, M, L, W…) và **phím LỆNH MENU** (Ctrl+N/O/S, Ctrl+Shift+S, Ctrl+W,
@@ -202,9 +202,27 @@ Quy ước trạng thái checklist:
   trùng → cảnh báo; bấm reset → về mặc định; làm hỏng file → app tự lùi mặc
   định. Build Release OK.
 
-### Phase 4 (tùy chọn, sau khi chủ duyệt)
+### Phase 4 — chủ yêu cầu làm 2026-09-24 `[~]`
 
-- [ ] Import/Export keymap; thêm tùy chọn con trỏ chuột; các cài đặt khác.
+Chỉnh sửa theo phản hồi sau test Phase 3:
+
+- [~] Nút xác nhận "lấy phím của lệnh khác" nổi bật hơn (khung cảnh báo + nút
+      chính tô màu); nút xác nhận khôi phục cũng vậy.
+- [~] Bỏ phím phụ `Ctrl+,` (Preferences chỉ còn `Ctrl+K`); `,` thành phím tự do.
+- [~] Nút "Hoàn tác" ở đáy Preferences đổi chữ thành "Cancel".
+
+Tính năng mới:
+
+- [~] **Xuất / Nhập bộ phím tắt** ra file `.json` (trang Phím tắt). Nhập qua
+      `KeyMap::from_overrides` nên file lỗi/lạ tự được sửa; báo số mục bỏ qua.
+- [~] **Con trỏ cọ vẽ** (trang Công cụ & Con trỏ), 3 kiểu như PTS: vòng tròn theo
+      cỡ cọ (mặc định) · vòng tròn + chữ thập ở tâm · chữ thập chính xác. Áp dụng
+      cho cả vòng cọ OS lẫn vòng GPU (cọ rất lớn).
+- [~] **Số bước Undo tối đa** (trang Hiệu năng, mặc định 100, 20–1000), áp dụng
+      ngay cho mọi tab đang mở; ngân sách RAM giữ nguyên như cũ.
+- **Cổng nghiệm thu:** xuất → đổi phím → nhập lại về đúng bộ đã xuất; nhập file
+  hỏng không làm mất phím; 3 kiểu con trỏ hiển thị đúng (cả cọ rất lớn); giảm số
+  bước Undo thì lịch sử cắt đúng; build Release OK.
 
 ## 7. Rủi ro & giảm thiểu
 
@@ -259,3 +277,15 @@ Quy ước trạng thái checklist:
   `cargo test --lib` 1682 xanh (+20), fmt/clippy/check --all-targets đạt.
 - 2026-09-24: **Chủ test Phase 3 OK → kế hoạch HOÀN TẤT phạm vi chính.** Phase 4
   (import/export keymap, tùy chọn con trỏ, cài đặt khác) để ngỏ, chỉ làm khi chủ yêu cầu.
+- 2026-09-24: **Phase 4 code xong (chờ chủ test).** Chỉnh theo phản hồi: hỏi "lấy
+  phím của lệnh khác" thành cửa sổ nổi giữa màn hình (khung vàng, nút chính tô màu
+  nhấn; Esc lần 1 chỉ đóng hộp hỏi), nút xác nhận khôi phục cũng tô màu; bỏ
+  `Ctrl+,`; "Hoàn tác" → "Cancel". Mới: Xuất/Nhập bộ phím tắt (`KeyMap::export_json`
+  / `import_json`, file `.json` gắn `"format": "iai-shortcuts"`, nhập thay toàn bộ
+  keymap, tự sửa + báo số mục bỏ qua, file lạ bị từ chối và giữ nguyên phím); kiểu
+  con trỏ cọ `BrushCursorStyle` (vòng tròn / + chữ thập / chữ thập chính xác) cho
+  cả vòng OS (`make_ring_cursor`) lẫn vòng GPU (`CURSOR_SHADER`, cờ `crosshair`);
+  số bước Undo `history_steps` (20–1000, mặc định 100) qua
+  `set_default_max_entries` + `Canvas::set_history_steps` cho mọi tab/trang/master.
+  `cargo test --lib` 1687 xanh; fmt/clippy (không cảnh báo mới)/check all-targets +
+  feature webview đạt.

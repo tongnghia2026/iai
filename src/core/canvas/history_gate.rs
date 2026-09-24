@@ -60,6 +60,10 @@ impl HistoryGate {
         self.history.mark_saved_state_unreachable();
     }
 
+    pub fn set_max_entries(&mut self, steps: usize) {
+        self.history.set_max_entries(steps);
+    }
+
     pub fn undo_count(&self) -> usize {
         self.history.undo_count()
     }

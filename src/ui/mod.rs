@@ -871,16 +871,13 @@ pub fn build(
         }) {
             actions.dialogs.show_image_size_dialog = Some(true);
         }
-        // Preferences: Ctrl+K (primary) and Ctrl+, (alias). Handled here as well
-        // as in the raw keyboard path so it fires whether or not egui has focus.
+        // Preferences (Ctrl+K). Handled here as well as in the raw keyboard
+        // path so it fires whether or not egui has focus.
         let preferences_hit = if keymap.is_default(Command::Preferences) {
             ctx.input_mut(|i| {
                 i.consume_shortcut(&egui::KeyboardShortcut::new(
                     egui::Modifiers::CTRL,
                     egui::Key::K,
-                )) || i.consume_shortcut(&egui::KeyboardShortcut::new(
-                    egui::Modifiers::CTRL,
-                    egui::Key::Comma,
                 ))
             })
         } else {

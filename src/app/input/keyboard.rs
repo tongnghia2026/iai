@@ -644,10 +644,8 @@ impl App {
             PhysicalKey::Code(KeyCode::KeyN) if pressed && self.edit.input.ctrl_held => {
                 self.run_default(Command::FileNew, event_loop, repeat);
             }
-            // Preferences: Ctrl+K (Photoshop) with Ctrl+, kept as an alias.
-            PhysicalKey::Code(KeyCode::KeyK) | PhysicalKey::Code(KeyCode::Comma)
-                if pressed && self.edit.input.ctrl_held =>
-            {
+            // Preferences: Ctrl+K (Photoshop).
+            PhysicalKey::Code(KeyCode::KeyK) if pressed && self.edit.input.ctrl_held => {
                 self.run_default(Command::Preferences, event_loop, repeat);
             }
             PhysicalKey::Code(KeyCode::Digit0) | PhysicalKey::Code(KeyCode::Numpad0)
