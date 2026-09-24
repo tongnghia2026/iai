@@ -287,16 +287,44 @@ impl CropTool {
     /// field rebuilds the UI from that model, so leaving the tool in Free or
     /// Ratio mode would immediately replace the typed value with the live
     /// selection size (or zero before a selection exists).
-    pub fn set_typed_width(&mut self, width: f32) {
+    ///
+    /// Entering FixedSize this way takes the other side from what Free/Ratio
+    /// was showing (see [`Self::free_size_in_unit`]), never from a stale
+    /// `fixed_h` left by an earlier preset, possibly in another unit.
+    pub fn set_typed_width(&mut self, width: f32, canvas_w: f32, canvas_h: f32) {
+        if self.mode != CropMode::FixedSize {
+            self.fixed_h = self.free_size_in_unit(canvas_w, canvas_h).1;
+        }
         self.fixed_w = width.max(0.0);
         self.mode = CropMode::FixedSize;
     }
 
     /// Store an exact output height typed in the Crop options bar. See
     /// [`Self::set_typed_width`] for why manual dimensions own FixedSize mode.
-    pub fn set_typed_height(&mut self, height: f32) {
+    pub fn set_typed_height(&mut self, height: f32, canvas_w: f32, canvas_h: f32) {
+        if self.mode != CropMode::FixedSize {
+            self.fixed_w = self.free_size_in_unit(canvas_w, canvas_h).0;
+        }
         self.fixed_h = height.max(0.0);
         self.mode = CropMode::FixedSize;
+    }
+
+    /// Free/Ratio size in the display unit: the live selection, or the whole
+    /// image when there is none (what a plain click on the image would crop).
+    fn free_size_in_unit(&self, canvas_w: f32, canvas_h: f32) -> (f32, f32) {
+        use crate::core::units::from_pixels;
+        let (w_px, h_px) = if self.has_selection() {
+            (
+                (self.crop_x1 - self.crop_x0).abs(),
+                (self.crop_y1 - self.crop_y0).abs(),
+            )
+        } else {
+            (canvas_w, canvas_h)
+        };
+        (
+            from_pixels(w_px, self.unit, self.dpi, canvas_w),
+            from_pixels(h_px, self.unit, self.dpi, canvas_h),
+        )
     }
 
     /// Refresh resolution from the active image only when Crop has no fixed
@@ -1039,16 +1067,81 @@ mod tests {
         let mut crop = CropTool::new();
         crop.mode = CropMode::Free;
 
-        crop.set_typed_width(1234.0);
+        crop.set_typed_width(1234.0, 4000.0, 3000.0);
         assert_eq!(crop.mode, CropMode::FixedSize);
         assert_eq!(crop.fixed_w, 1234.0);
 
         // Ratio mode also reports the live selection through the UI model. A
         // manually typed H must therefore take ownership of the output size.
         crop.mode = CropMode::Ratio;
-        crop.set_typed_height(567.0);
+        crop.set_typed_height(567.0, 4000.0, 3000.0);
         assert_eq!(crop.mode, CropMode::FixedSize);
         assert_eq!(crop.fixed_h, 567.0);
+    }
+
+    #[test]
+    fn typing_one_side_in_free_mode_keeps_the_selection_other_side() {
+        // A stale preset size in another unit must not leak into the new size.
+        let mut crop = CropTool::new();
+        crop.fixed_w = 800.0;
+        crop.fixed_h = 600.0;
+        crop.mode = CropMode::Free;
+        crop.unit = Unit::Centimeters;
+        crop.dpi = 300.0;
+        crop.crop_x0 = 100.0;
+        crop.crop_y0 = 50.0;
+        crop.crop_x1 = 700.0; // 600 px wide
+        crop.crop_y1 = 350.0; // 300 px = 2.54 cm tall at 300 ppi
+
+        crop.set_typed_width(10.0, 4000.0, 3000.0);
+        assert_eq!(crop.mode, CropMode::FixedSize);
+        assert!((crop.fixed_h - 2.54).abs() < 0.001, "h = {}", crop.fixed_h);
+
+        crop.init_bounds(4000, 3000);
+        let (out_w, out_h) = crop.prospective_output_size(4000, 3000).unwrap();
+        assert_eq!((out_w, out_h), (1181, 300));
+        let box_ratio = (crop.crop_x1 - crop.crop_x0) / (crop.crop_y1 - crop.crop_y0);
+        assert!((box_ratio - 1181.1024 / 300.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn typing_height_in_ratio_mode_keeps_the_selection_width() {
+        let mut crop = CropTool::new();
+        crop.mode = CropMode::Ratio;
+        crop.unit = Unit::Pixels;
+        crop.crop_x0 = 0.0;
+        crop.crop_y0 = 0.0;
+        crop.crop_x1 = 400.0;
+        crop.crop_y1 = 300.0;
+
+        crop.set_typed_height(500.0, 1000.0, 1000.0);
+        assert_eq!((crop.fixed_w, crop.fixed_h), (400.0, 500.0));
+    }
+
+    #[test]
+    fn typing_one_side_without_a_selection_uses_the_whole_image() {
+        let mut crop = CropTool::new();
+        crop.fixed_h = 600.0;
+        crop.mode = CropMode::Free;
+        crop.unit = Unit::Pixels;
+
+        crop.set_typed_width(1000.0, 4000.0, 3000.0);
+        assert_eq!((crop.fixed_w, crop.fixed_h), (1000.0, 3000.0));
+    }
+
+    #[test]
+    fn typing_in_fixed_size_mode_keeps_the_other_typed_side() {
+        let mut crop = CropTool::new();
+        crop.mode = CropMode::FixedSize;
+        crop.unit = Unit::Pixels;
+        crop.crop_x0 = 0.0;
+        crop.crop_y0 = 0.0;
+        crop.crop_x1 = 400.0;
+        crop.crop_y1 = 300.0;
+
+        crop.set_typed_width(1200.0, 4000.0, 3000.0);
+        crop.set_typed_height(1600.0, 4000.0, 3000.0);
+        assert_eq!((crop.fixed_w, crop.fixed_h), (1200.0, 1600.0));
     }
 
     #[test]

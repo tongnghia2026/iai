@@ -311,16 +311,19 @@ Nhóm A — mất dữ liệu hoặc kẹt ứng dụng:
   không thoát được; renderer WebView2 treo cũng kẹt tương tự. Cần ngân sách tổng
   khi chèn/dán ảnh (hoặc nén lại) và lối thoát khi snapshot lỗi lặp lại trên bridge
   đã verified (hủy WebView, dùng nội dung đã commit, hỏi lưu/bỏ như bình thường).
-- [ ] A4. Giới hạn `manifest.json` 1 MiB (`read_manifest`) áp cả cho v10/v11, nơi
+- [~] A4. Giới hạn `manifest.json` 1 MiB (`read_manifest`) áp cả cho v10/v11, nơi
   ảnh FlowText legacy nằm base64 trong manifest → file văn bản cũ có ảnh lớn không
   mở được, kể cả file do chính bản này ghi. Bản `target/release` ngày 2026-09-12
-  đã dính. Chỉ áp cap cho v12.
+  đã dính. Chỉ áp cap cho v12. **Đã sửa 2026-09-24** (xem Changelog): lỗi rộng
+  hơn — chạm cả file ẢNH có nhiều vector/chữ; cap nâng lên 256 MiB cho mọi phiên
+  bản và writer từ chối trước khi ghi. Chờ GUI-test.
 - [ ] A5. Save trong vòng hỏi-khi-thoát không ghi tab văn bản khi WebView chưa tồn
   tại (`request_document_webview_save_snapshot` nhánh `None` trả `true`) → chỉ
   còn Cancel hoặc bỏ thay đổi. Khi không có WebView phải ghi nội dung đã commit
   trong core.
-- [ ] A6. Enter trong hộp "File đã thay đổi trên đĩa" chọn Reload, xóa chỉnh sửa
+- [~] A6. Enter trong hộp "File đã thay đổi trên đĩa" chọn Reload, xóa chỉnh sửa
   chưa lưu và lịch sử undo. Khi `reload_will_discard_changes` Enter phải là Giữ.
+  **Đã sửa 2026-09-24** + test hồi quy; chờ GUI-test.
 
 Nhóm B — tính năng đã nghiệm thu bị hỏng với tài liệu Canvas Editor:
 
@@ -339,9 +342,10 @@ Nhóm B — tính năng đã nghiệm thu bị hỏng với tài liệu Canvas E
   tab Canvas khác cũng trống. Phải hiện thông báo rõ, không tuyên bố fallback legacy.
 - [ ] B5. Bảng Layer trống và thanh trang (số trang, ◀/▶) không tác dụng với tài
   liệu Canvas; lấy thông tin từ snapshot/IPC hoặc ẩn các bề mặt này.
-- [ ] B6. Crop: nhập W/H khi đang Free/Ratio ép sang FixedSize với cạnh còn lại cũ
+- [~] B6. Crop: nhập W/H khi đang Free/Ratio ép sang FixedSize với cạnh còn lại cũ
   (800/600 mặc định hoặc sai đơn vị) và gọi `init_bounds` → khung nhảy, kích thước
   xuất sai. Khi chuyển mode phải lấy cạnh còn lại từ vùng chọn hiện tại.
+  **Đã sửa 2026-09-24** + test hồi quy; chờ GUI-test.
 
 Nhóm C — trải nghiệm editor web:
 
@@ -1250,3 +1254,24 @@ sung `pnpm lint`, `pnpm typecheck` và `pnpm test` đúng theo scripts đã pin.
   án GUI-test: đổi qua lại vài máy in (ví dụ EPSON L8050 (A4) 10×15 cm → EPSON
   L18050 (A3) 13×18 cm → Microsoft Print to PDF A4), khung giấy và dòng "Paper"
   phải đổi theo; Esc khi đang mở danh sách máy in chỉ đóng danh sách.
+
+### 2026-09-24 — Sửa A4, A6, B6 (ảnh hưởng cả bản sửa ảnh thường) `[~]`
+
+> Phát hiện lại trong audit 2026-09-24: ba lỗi này không chỉ thuộc Canvas Editor mà
+> chạm cả bản build mặc định (không feature), nên sửa trước dù Pha 3.6 đang tạm dừng.
+
+- A4 (rộng hơn mô tả cũ): đường vector, chữ và ảnh FlowText legacy đều nằm trong
+  `manifest.json`; đo thực tế ~140 byte/điểm neo → khoảng 7.500 điểm neo trên toàn
+  tài liệu là file LƯU được nhưng KHÔNG mở lại được. Sửa: `MAX_MANIFEST_BYTES`
+  nâng lên 256 MiB (chỉ còn là chốt an toàn chống file hỏng) cho mọi phiên bản, và
+  mọi writer đi qua `write_manifest()` — từ chối trước khi ghi nếu vượt, để iAi
+  không bao giờ ghi ra file chính nó không mở được. Test
+  `detailed_vector_document_over_one_mib_manifest_reopens` (12.000 điểm neo, đã
+  kiểm chứng test thất bại với cap 1 MiB cũ).
+- A6: `reload_file_dialog` — khi `reload_will_discard_changes`, Enter = Giữ bản
+  đang mở; Esc luôn Giữ; khôi phục dấu tiếng Việt cho chữ trong hộp. 3 test egui.
+- B6: `CropTool::set_typed_width/height(value, canvas_w, canvas_h)` — khi chuyển
+  từ Free/Ratio sang FixedSize, cạnh còn lại lấy từ vùng chọn hiện tại (đúng đơn
+  vị/ppi đang hiển thị), không có vùng chọn thì lấy cả ảnh. Khung vẫn căn giữa
+  theo tỉ lệ mới như hành vi FixedSize đã nghiệm thu. 4 test mới.
+- `cargo fmt --check` đạt; `cargo test --lib` → `1662 passed; 0 failed; 10 ignored`.

@@ -864,7 +864,7 @@ impl App {
             let ch = self.docs.documents[self.docs.active_doc_idx].canvas.height as f32;
             let c = self.edit.tools.crop_mut();
             let had_selection = c.has_selection();
-            c.set_typed_width(value);
+            c.set_typed_width(value, cw, ch);
             if had_selection {
                 c.init_bounds(cw as u32, ch as u32);
             }
@@ -877,7 +877,7 @@ impl App {
             let ch = self.docs.documents[self.docs.active_doc_idx].canvas.height as f32;
             let c = self.edit.tools.crop_mut();
             let had_selection = c.has_selection();
-            c.set_typed_height(value);
+            c.set_typed_height(value, cw, ch);
             if had_selection {
                 c.init_bounds(cw as u32, ch as u32);
             }
