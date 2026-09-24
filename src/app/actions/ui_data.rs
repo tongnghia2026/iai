@@ -127,6 +127,27 @@ where
     ]
 }
 
+/// Premultiply an sRGB-encoded colour for egui on this app's sRGB (linear-
+/// light) swapchain. egui decodes the texel and blends in linear light, so a
+/// gamma-space premultiply (egui's default) darkens every soft edge — the dark
+/// halo the Clone preview used to show. Premultiplying in linear light makes
+/// the blend come out right.
+fn premultiply_for_linear_target(rgb: [u8; 3], alpha: f32) -> [u8; 4] {
+    let a = alpha.clamp(0.0, 1.0);
+    if a >= 0.999 {
+        return [rgb[0], rgb[1], rgb[2], 255];
+    }
+    let enc = |v: u8| {
+        egui::ecolor::gamma_u8_from_linear_f32(egui::ecolor::linear_f32_from_gamma_u8(v) * a)
+    };
+    [
+        enc(rgb[0]),
+        enc(rgb[1]),
+        enc(rgb[2]),
+        (a * 255.0).round() as u8,
+    ]
+}
+
 impl App {
     fn build_print_preview_thumbnail(&mut self) -> Option<std::sync::Arc<egui::ColorImage>> {
         if !self.shell.ui.show_print_dialog {
@@ -214,6 +235,11 @@ impl App {
         Some(image)
     }
 
+    /// Clone / Repair preview: exactly what one dab at the cursor would leave
+    /// on the canvas, built on the canvas pixel grid (the stroke copies whole
+    /// source pixels, so no resampling blur or half-pixel shift). Hidden while
+    /// Alt picks a source, while resizing, over panels and during a stroke —
+    /// the canvas itself shows the live result then.
     fn build_clone_source_thumbnail(
         &mut self,
     ) -> Option<std::sync::Arc<crate::ui::CloneSourcePreview>> {
@@ -226,122 +252,171 @@ impl App {
         if self.edit.input.alt_held
             || self.edit.input.alt_right_dragging
             || self.edit.input.was_over_ui
+            || self.edit.input.painting
         {
             return None;
         }
 
         let zoom = self.edit.view.zoom.max(0.0001);
-        let dst_x = (self.edit.input.mouse_x - self.edit.view.offset_x) / zoom;
-        let dst_y = (self.edit.input.mouse_y - self.edit.view.offset_y) / zoom;
-        let canvas_w = self.docs.documents[self.docs.active_doc_idx].canvas.width as f32;
-        let canvas_h = self.docs.documents[self.docs.active_doc_idx].canvas.height as f32;
-        if dst_x < 0.0 || dst_y < 0.0 || dst_x >= canvas_w || dst_y >= canvas_h {
-            return None;
-        }
-
-        let (source_x, source_y, brush_size, hardness, opacity, sample_merged) = {
+        let cx = (self.edit.input.mouse_x - self.edit.view.offset_x) / zoom;
+        let cy = (self.edit.input.mouse_y - self.edit.view.offset_y) / zoom;
+        let (radius, hardness, opacity, sample_merged, (off_x, off_y)) = {
             let tool = self.edit.tools.clone_like();
-            let (source_x, source_y) = tool.preview_source_center(dst_x, dst_y)?;
             (
-                source_x,
-                source_y,
-                tool.size,
+                (tool.size * 0.5).max(0.5),
                 tool.hardness,
-                tool.opacity,
+                tool.opacity.clamp(0.0, 1.0),
                 tool.sample_merged,
+                tool.preview_offset(cx, cy)?,
             )
         };
+        let display_lut = self.shell.display_lut.clone();
 
-        let radius = (brush_size * 0.5).max(0.5);
-        let diameter = radius * 2.0;
-        let preview_size =
-            (diameter.round() as usize).clamp(1, crate::ui::CLONE_SOURCE_PREVIEW_MAX_SIZE);
-        let sample_scale = diameter / preview_size as f32;
-        let opacity = opacity.clamp(0.0, 1.0);
-        let mut out = vec![0_u8; preview_size * preview_size * 4];
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
-        if canvas.width == 0 || canvas.height == 0 {
+        let (w, h) = (canvas.width as i32, canvas.height as i32);
+        if cx < 0.0 || cy < 0.0 || cx >= w as f32 || cy >= h as f32 {
             return None;
         }
-
-        if sample_merged {
-            canvas.ensure_pixels();
-        } else if canvas.layer_stack.layers.is_empty() {
+        if canvas.layer_stack.layers.is_empty()
+            || !matches!(
+                canvas.channels.view,
+                crate::core::channels::ChannelView::Composite
+            )
+        {
             return None;
         }
+        {
+            let layer = canvas.active_layer();
+            if layer.paint_target != crate::core::layer::PaintTarget::Pixels
+                || layer.get_paint_tiles().is_none()
+            {
+                return None;
+            }
+        }
 
-        for y in 0..preview_size {
-            for x in 0..preview_size {
-                let dx = (x as f32 + 0.5) * sample_scale - radius;
-                let dy = (y as f32 + 0.5) * sample_scale - radius;
-                let d2 = dx * dx + dy * dy;
-                // Same falloff as the real dab, so the preview edge matches.
-                let coverage = if d2 > radius * radius {
-                    0.0
-                } else {
-                    crate::tools::brush::soft_round_alpha(d2, radius, hardness)
-                };
-                let sx = source_x + dx;
-                let sy = source_y + dy;
-                let rgba = if sample_merged {
-                    bilinear_rgba_sample(sx, sy, |px, py| {
-                        if px < 0 || py < 0 {
-                            return [0, 0, 0, 0];
-                        }
-                        let px = px as u32;
-                        let py = py as u32;
-                        if px >= canvas.width || py >= canvas.height {
-                            [0, 0, 0, 0]
-                        } else {
-                            let i = ((py * canvas.width + px) * 4) as usize;
-                            if i + 3 < canvas.pixels.len() {
-                                [
-                                    canvas.pixels[i],
-                                    canvas.pixels[i + 1],
-                                    canvas.pixels[i + 2],
-                                    canvas.pixels[i + 3],
-                                ]
-                            } else {
-                                [0, 0, 0, 0]
-                            }
-                        }
-                    })
-                } else {
-                    let idx = canvas
-                        .layer_stack
-                        .active_idx
-                        .min(canvas.layer_stack.layers.len().saturating_sub(1));
-                    let layer = &canvas.layer_stack.layers[idx];
-                    if let Some(tiles) = layer.get_paint_tiles() {
-                        bilinear_rgba_sample(sx, sy, |px, py| {
-                            let lx = px - layer.offset.0;
-                            let ly = py - layer.offset.1;
-                            if lx < 0 || ly < 0 {
-                                [0, 0, 0, 0]
-                            } else {
-                                let (r, g, b, a) = tiles.get_pixel(lx as u32, ly as u32);
-                                [r, g, b, a]
-                            }
-                        })
-                    } else {
-                        [0, 0, 0, 0]
+        // Dab footprint in canvas pixels, clipped to the page.
+        let fx0 = ((cx - radius).floor() as i32).max(0);
+        let fy0 = ((cy - radius).floor() as i32).max(0);
+        let fx1 = ((cx + radius).ceil() as i32).min(w);
+        let fy1 = ((cy + radius).ceil() as i32).min(h);
+        if fx1 <= fx0 || fy1 <= fy0 {
+            return None;
+        }
+        // Canvas pixels per texel: 1 (exact) unless the tip is huge or the
+        // view is zoomed out far enough that a texel would be sub-pixel.
+        let max_side = crate::ui::CLONE_SOURCE_PREVIEW_MAX_SIZE as i32;
+        let span = (fx1 - fx0).max(fy1 - fy0);
+        let texel = ((span + max_side - 1) / max_side)
+            .max((1.0 / zoom).floor() as i32)
+            .max(1);
+        let tw = ((fx1 - fx0 + texel - 1) / texel) as usize;
+        let th = ((fy1 - fy0 + texel - 1) / texel) as usize;
+        let taps: Vec<(i32, i32)> = if texel == 1 {
+            vec![(0, 0)]
+        } else {
+            let (a, b) = (texel / 4, texel * 3 / 4);
+            vec![(a, a), (b, a), (a, b), (b, b)]
+        };
+
+        canvas.ensure_pixels();
+        let canvas = &*canvas;
+        // The display composite, when it is current: the preview then shows
+        // the dab over everything visible, exactly as the canvas will.
+        let flat = (!canvas.pixels_stale && canvas.pixels.len() == (w * h * 4) as usize)
+            .then_some(canvas.pixels.as_slice());
+        let layer = canvas.active_layer();
+        let tiles = layer.get_paint_tiles()?;
+        let (lox, loy) = layer.offset;
+        let layer_px = |x: i32, y: i32| -> [u8; 4] {
+            let (lx, ly) = (x - lox, y - loy);
+            if lx < 0 || ly < 0 {
+                return [0; 4];
+            }
+            let (r, g, b, a) = tiles.get_pixel(lx as u32, ly as u32);
+            [r, g, b, a]
+        };
+        let flat_px = |buf: &[u8], x: i32, y: i32| -> [u8; 4] {
+            if x < 0 || y < 0 || x >= w || y >= h {
+                return [0; 4];
+            }
+            let i = ((y * w + x) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+        };
+        let selection = &canvas.selection;
+        let r2 = radius * radius;
+
+        let mut out = vec![0_u8; tw * th * 4];
+        for ty in 0..th {
+            for tx in 0..tw {
+                let bx = fx0 + tx as i32 * texel;
+                let by = fy0 + ty as i32 * texel;
+                // Premultiplied RGB + alpha, averaged over the texel's taps.
+                let mut acc = [0.0_f32; 4];
+                for &(dx, dy) in &taps {
+                    let (px, py) = (bx + dx, by + dy);
+                    if px >= fx1 || py >= fy1 {
+                        continue;
                     }
-                };
-
-                let i = (y * preview_size + x) * 4;
-                out[i] = rgba[0];
-                out[i + 1] = rgba[1];
-                out[i + 2] = rgba[2];
-                out[i + 3] = ((rgba[3] as f32 * coverage * opacity)
-                    .round()
-                    .clamp(0.0, 255.0)) as u8;
+                    let ex = px as f32 + 0.5 - cx;
+                    let ey = py as f32 + 0.5 - cy;
+                    let d2 = ex * ex + ey * ey;
+                    if d2 > r2 {
+                        continue;
+                    }
+                    let mut a =
+                        crate::tools::brush::soft_round_alpha(d2, radius, hardness) * opacity;
+                    if selection.active {
+                        a *= selection.sample(px as u32, py as u32);
+                    }
+                    let (sx, sy) = (px - off_x, py - off_y);
+                    let s = match flat {
+                        Some(buf) if sample_merged => flat_px(buf, sx, sy),
+                        _ => layer_px(sx, sy),
+                    };
+                    let d = match flat {
+                        Some(buf) => flat_px(buf, px, py),
+                        None => layer_px(px, py),
+                    };
+                    // Same source-over as the stroke.
+                    let eff = a * s[3] as f32 / 255.0;
+                    let dw = d[3] as f32 / 255.0 * (1.0 - eff);
+                    let out_a = eff + dw;
+                    if out_a < 0.001 {
+                        continue;
+                    }
+                    for c in 0..3 {
+                        acc[c] += s[c] as f32 * eff + d[c] as f32 * dw;
+                    }
+                    acc[3] += out_a;
+                }
+                if acc[3] <= 0.0 {
+                    continue;
+                }
+                let alpha = acc[3] / taps.len() as f32;
+                let mut rgb = [0_u8; 3];
+                for c in 0..3 {
+                    rgb[c] = (acc[c] / acc[3]).round().clamp(0.0, 255.0) as u8;
+                }
+                // Match the colour-managed canvas (document → monitor / proof).
+                if let Some(lut) = display_lut.as_deref() {
+                    rgb = crate::core::cms::sample_lut_rgb(
+                        lut,
+                        crate::core::cms::PROOF_LUT_SIZE,
+                        rgb,
+                    );
+                }
+                let i = (ty * tw + tx) * 4;
+                out[i..i + 4].copy_from_slice(&premultiply_for_linear_target(rgb, alpha));
             }
         }
 
         Some(std::sync::Arc::new(crate::ui::CloneSourcePreview {
-            width: preview_size,
-            height: preview_size,
+            width: tw,
+            height: th,
             pixels: out,
+            canvas_x0: fx0,
+            canvas_y0: fy0,
+            texel: texel as u32,
         }))
     }
 
@@ -2063,6 +2138,93 @@ mod tests {
         assert_eq!(alpha_at(16, 32), 255);
         assert_eq!(alpha_at(47, 32), 255);
         assert_eq!(alpha_at(48, 32), 0);
+    }
+
+    #[test]
+    fn clone_preview_matches_the_real_dab_pixel_for_pixel() {
+        use crate::extension::tool::{PointerEvent, ToolCtx};
+        let (w, h) = (200u32, 120u32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&[
+                    (x * 37 % 256) as u8,
+                    (y * 53 % 256) as u8,
+                    ((x + y) * 11 % 256) as u8,
+                    255,
+                ]);
+            }
+        }
+        let mut app = App::new();
+        app.docs.documents[0].canvas = crate::core::canvas::Canvas::from_rgba(px, w, h);
+        app.edit.tools.select(crate::tools::ToolId::Clone);
+        {
+            let t = app.edit.tools.clone_like_mut();
+            t.size = 21.0;
+            t.hardness = 0.3;
+            t.opacity = 0.8;
+        }
+        app.edit.view.zoom = 1.0;
+        app.edit.view.offset_x = 0.0;
+        app.edit.view.offset_y = 0.0;
+        let (fg, bg) = ([0, 0, 0, 255], [255; 4]);
+        {
+            let mut ctx = ToolCtx::new(&mut app.docs.documents[0], fg, bg, 1.0, 0.0, 0.0);
+            let mut alt = PointerEvent::new(40.3, 50.6);
+            alt.alt = true;
+            app.edit.tools.on_press(alt, &mut ctx);
+        }
+
+        let (cx, cy) = (130.7, 60.2);
+        app.edit.input.mouse_x = cx;
+        app.edit.input.mouse_y = cy;
+        let preview = app.build_clone_source_thumbnail().expect("preview");
+        assert_eq!(preview.texel, 1);
+
+        {
+            let mut ctx = ToolCtx::new(&mut app.docs.documents[0], fg, bg, 1.0, 0.0, 0.0);
+            app.edit.tools.on_press(PointerEvent::new(cx, cy), &mut ctx);
+            app.edit
+                .tools
+                .on_release(PointerEvent::new(cx, cy), &mut ctx);
+            ctx.canvas_mut().end_stroke();
+        }
+        let tiles = &app.docs.documents[0].canvas.active_layer().tiles;
+        let mut checked = 0;
+        for ty in 0..preview.height {
+            for tx in 0..preview.width {
+                let p = &preview.pixels[(ty * preview.width + tx) * 4..][..4];
+                if p[3] == 0 {
+                    continue;
+                }
+                assert_eq!(p[3], 255, "opaque document → opaque preview");
+                let x = (preview.canvas_x0 + tx as i32) as u32;
+                let y = (preview.canvas_y0 + ty as i32) as u32;
+                let (r, g, b, _) = tiles.get_pixel(x, y);
+                for (got, want) in p[..3].iter().zip([r, g, b]) {
+                    assert!(
+                        (*got as i32 - want as i32).abs() <= 1,
+                        "({x},{y}): preview {p:?} vs dab {:?}",
+                        (r, g, b)
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 250, "only {checked} preview pixels compared");
+    }
+
+    #[test]
+    fn soft_preview_edges_are_premultiplied_in_linear_light() {
+        assert_eq!(
+            premultiply_for_linear_target([10, 20, 30], 1.0),
+            [10, 20, 30, 255]
+        );
+        // Half-covered white must read as half the light, not a dark 128.
+        let half = premultiply_for_linear_target([255, 255, 255], 0.5);
+        assert!((half[0] as i32 - 188).abs() <= 1, "{half:?}");
+        assert_eq!(half[3], 128);
     }
 
     #[test]

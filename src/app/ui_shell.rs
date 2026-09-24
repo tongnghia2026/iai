@@ -44,6 +44,9 @@ pub struct UiShell {
     /// owns a separate monitor profile while sharing proof/document settings.
     pub(in crate::app) develop_display_profile: Option<Vec<u8>>,
     pub(in crate::app) develop_display_profile_name: String,
+    /// CPU copy of the main window's display 3D LUT while it is active, so
+    /// overlays drawn by egui (Clone preview) match the managed canvas.
+    pub(in crate::app) display_lut: Option<std::sync::Arc<Vec<u8>>>,
     /// Page setup for File ▸ Print (persists across the dialog opening).
     pub(in crate::app) print_layout: crate::core::print::PrintLayout,
     pub(in crate::app) print_printers: Vec<crate::core::print::PrinterInfo>,

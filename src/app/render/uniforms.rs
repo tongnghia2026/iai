@@ -253,6 +253,7 @@ impl App {
             .unwrap_or_else(|| crate::core::cms::identity_lut(crate::core::cms::PROOF_LUT_SIZE))
         };
         let main_lut = build_lut(main_monitor);
+        self.shell.display_lut = active.then(|| std::sync::Arc::new(main_lut.clone()));
         let develop_lut = build_lut(develop_monitor);
         if let Some(gpu) = &self.win.gpu {
             gpu.upload_proof_lut(&main_lut);

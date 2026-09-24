@@ -240,19 +240,20 @@ impl CloneTool {
         }
     }
 
-    /// Canvas-space centre of the source region that WOULD be sampled if the user
-    /// painted at destination `(dst_x, dst_y)` right now — used to render the
-    /// clone-source preview under the cursor. Before the offset is locked (just
-    /// after Alt+click) the brush samples around the source point itself.
-    pub fn preview_source_center(&self, dst_x: f32, dst_y: f32) -> Option<(f32, f32)> {
-        if !self.has_source {
+    /// Whole-pixel offset (destination − source) a stroke starting at
+    /// `(dst_x, dst_y)` would use right now — drives the clone preview. Before
+    /// the offset is locked (just after Alt+click) the stroke would start at the
+    /// source point itself.
+    pub fn preview_offset(&self, dst_x: f32, dst_y: f32) -> Option<(i32, i32)> {
+        if !self.has_source || self.smart_fill {
             return None;
         }
-        if self.offset_set || self.stroke_source.is_some() {
-            Some((dst_x - self.offset_x, dst_y - self.offset_y))
+        let (ox, oy) = if self.offset_set || self.stroke_source.is_some() {
+            (self.offset_x, self.offset_y)
         } else {
-            Some((self.source_canvas_x, self.source_canvas_y))
-        }
+            (dst_x - self.source_canvas_x, dst_y - self.source_canvas_y)
+        };
+        Some((ox.round() as i32, oy.round() as i32))
     }
 
     /// Canvas-space point being sampled while a stroke is in progress (the
@@ -1098,6 +1099,12 @@ impl Tool for CloneTool {
         if !self.aligned || !self.offset_set {
             self.offset_x = event.canvas_x - self.source_canvas_x;
             self.offset_y = event.canvas_y - self.source_canvas_y;
+            if self.uses_stroke_model() {
+                // Whole pixels: every source pixel is copied as-is (no
+                // half-pixel ambiguity), which the preview reproduces exactly.
+                self.offset_x = self.offset_x.round();
+                self.offset_y = self.offset_y.round();
+            }
             if !self.aligned {
                 self.offset_set = false;
             } else {

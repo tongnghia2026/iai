@@ -547,6 +547,39 @@ pub fn identity_lut(size: usize) -> Vec<u8> {
     out
 }
 
+/// Trilinear lookup of an encoded RGB value in a display LUT laid out like
+/// [`identity_lut`] — the CPU twin of the canvas blit shader's 3D-texture
+/// sample, for overlays that must match the colour-managed canvas.
+pub fn sample_lut_rgb(lut: &[u8], size: usize, rgb: [u8; 3]) -> [u8; 3] {
+    if size < 2 || lut.len() < size * size * size * 4 {
+        return rgb;
+    }
+    let n = (size - 1) as f32;
+    let axis = |v: u8| {
+        let p = v as f32 / 255.0 * n;
+        let i0 = (p.floor() as usize).min(size - 2);
+        (i0, p - i0 as f32)
+    };
+    let (r0, fr) = axis(rgb[0]);
+    let (g0, fg) = axis(rgb[1]);
+    let (b0, fb) = axis(rgb[2]);
+    let at =
+        |r: usize, g: usize, b: usize, c: usize| lut[((b * size + g) * size + r) * 4 + c] as f32;
+    let mut out = [0u8; 3];
+    for (c, o) in out.iter_mut().enumerate() {
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let plane = |b: usize| {
+            lerp(
+                lerp(at(r0, g0, b, c), at(r0 + 1, g0, b, c), fr),
+                lerp(at(r0, g0 + 1, b, c), at(r0 + 1, g0 + 1, b, c), fr),
+                fg,
+            )
+        };
+        *o = lerp(plane(b0), plane(b0 + 1), fb).round().clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
 /// Identity sRGB sample grid (R fastest, then G, then B) for LUT building.
 fn identity_grid(size: usize) -> Vec<[u8; 3]> {
     let n = (size - 1).max(1) as f32;
@@ -811,6 +844,24 @@ mod tests {
         assert_eq!(&lut[0..4], &[0, 0, 0, 255]);
         let last = lut.len() - 4;
         assert_eq!(&lut[last..], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn cpu_lut_sample_matches_identity_and_interpolates() {
+        let size = PROOF_LUT_SIZE;
+        let lut = identity_lut(size);
+        for v in [0u8, 1, 17, 100, 128, 200, 254, 255] {
+            let out = sample_lut_rgb(&lut, size, [v, 255 - v, v / 2]);
+            for (o, e) in out.iter().zip([v, 255 - v, v / 2]) {
+                assert!((*o as i32 - e as i32).abs() <= 1, "{v}: {out:?}");
+            }
+        }
+        // A LUT that inverts red must invert it between grid points too.
+        let mut inv = lut.clone();
+        for px in inv.chunks_exact_mut(4) {
+            px[0] = 255 - px[0];
+        }
+        assert!((sample_lut_rgb(&inv, size, [100, 0, 0])[0] as i32 - 155).abs() <= 1);
     }
 
     #[test]

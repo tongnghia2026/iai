@@ -130,10 +130,18 @@ fn flat_context_menu_separator(ui: &mut egui::Ui, width: f32) {
     );
 }
 
+/// Clone / Repair preview: the result of one dab at the cursor, on the canvas
+/// pixel grid. `pixels` are premultiplied for this app's linear-light egui
+/// target (see `premultiply_for_linear_target`).
 pub struct CloneSourcePreview {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<u8>,
+    /// Canvas pixel under the top-left corner of texel (0, 0).
+    pub canvas_x0: i32,
+    pub canvas_y0: i32,
+    /// Canvas pixels per texel side (1 = exact pixels).
+    pub texel: u32,
 }
 
 /// On-canvas editing overlay for a Shape layer. `span` is the bounding box
@@ -2559,19 +2567,16 @@ pub fn build(
         }
 
         if matches!(data.tool.active_tool, ToolId::Clone | ToolId::Repair) {
-            if let (Some(cursor_pos), Some(thumb)) = (
-                ctx.pointer_hover_pos(),
-                data.tool.clone_source_thumbnail.as_ref(),
-            ) {
-                paint_clone_source_thumbnail(ctx, data, cursor_pos, thumb);
+            if let Some(thumb) = data.tool.clone_source_thumbnail.as_ref() {
+                paint_clone_source_thumbnail(ctx, data, canvas_viewport, thumb);
             }
             if let Some((sx, sy)) = data.tool.clone_source_marker {
                 paint_clone_source_marker(
                     ctx,
                     canvas_viewport,
                     egui::pos2(
-                        sx * data.doc.zoom + data.doc.offset_x,
-                        sy * data.doc.zoom + data.doc.offset_y,
+                        (sx * data.doc.zoom + data.doc.offset_x) / ctx.pixels_per_point(),
+                        (sy * data.doc.zoom + data.doc.offset_y) / ctx.pixels_per_point(),
                     ),
                 );
             }
@@ -3978,7 +3983,7 @@ fn draw_brush_preview(painter: &egui::Painter, rect: egui::Rect, hardness: f32, 
 fn paint_clone_source_marker(ctx: &egui::Context, clip: egui::Rect, at: egui::Pos2) {
     let painter = ctx
         .layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
+            CANVAS_TOOL_OVERLAY_ORDER,
             egui::Id::new("clone_source_marker"),
         ))
         .with_clip_rect(clip);
@@ -3999,12 +4004,10 @@ fn paint_clone_source_marker(ctx: &egui::Context, clip: egui::Rect, at: egui::Po
     }
 }
 
-/// Rulers use TopBottomPanel + SidePanel — placed right after menu/topoptions,
-/// NOT covering any panel.
 fn paint_clone_source_thumbnail(
     ctx: &egui::Context,
     data: &UiData,
-    cursor_pos: egui::Pos2,
+    clip: egui::Rect,
     preview: &CloneSourcePreview,
 ) {
     if preview.width == 0
@@ -4014,19 +4017,47 @@ fn paint_clone_source_thumbnail(
         return;
     }
 
-    let side = (data.tool.clone_size * data.doc.zoom).max(1.0);
-    let rect = egui::Rect::from_center_size(cursor_pos, egui::vec2(side, side));
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("clone_source_thumbnail"),
-    ));
-    let image =
-        egui::ColorImage::from_rgba_unmultiplied([preview.width, preview.height], &preview.pixels);
-    let texture = ctx.load_texture(
-        "clone_source_thumbnail",
-        image,
-        egui::TextureOptions::LINEAR,
+    // View zoom / offset are in physical pixels; egui paints in points.
+    let ppp = ctx.pixels_per_point();
+    let zoom = data.doc.zoom;
+    let min = egui::pos2(
+        (preview.canvas_x0 as f32 * zoom + data.doc.offset_x) / ppp,
+        (preview.canvas_y0 as f32 * zoom + data.doc.offset_y) / ppp,
     );
+    let texel = preview.texel as f32 * zoom / ppp;
+    let rect = egui::Rect::from_min_size(
+        min,
+        egui::vec2(preview.width as f32 * texel, preview.height as f32 * texel),
+    );
+    let image =
+        egui::ColorImage::from_rgba_premultiplied([preview.width, preview.height], &preview.pixels);
+    // Crisp pixels when magnified, like the canvas itself.
+    let options = egui::TextureOptions {
+        magnification: if preview.texel as f32 * zoom >= 1.0 {
+            egui::TextureFilter::Nearest
+        } else {
+            egui::TextureFilter::Linear
+        },
+        minification: egui::TextureFilter::Linear,
+        wrap_mode: egui::TextureWrapMode::ClampToEdge,
+        mipmap_mode: None,
+    };
+    // One texture reused across frames instead of a new one per mouse move.
+    let id = egui::Id::new("clone_source_thumbnail");
+    let texture = match ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        Some(mut handle) => {
+            handle.set(image, options);
+            handle
+        }
+        None => {
+            let handle = ctx.load_texture("clone_source_thumbnail", image, options);
+            ctx.data_mut(|d| d.insert_temp(id, handle.clone()));
+            handle
+        }
+    };
+    let painter = ctx
+        .layer_painter(egui::LayerId::new(CANVAS_TOOL_OVERLAY_ORDER, id))
+        .with_clip_rect(clip);
     painter.image(
         texture.id(),
         rect,
@@ -4035,6 +4066,8 @@ fn paint_clone_source_thumbnail(
     );
 }
 
+/// Rulers use TopBottomPanel + SidePanel — placed right after menu/topoptions,
+/// NOT covering any panel.
 #[allow(deprecated)]
 fn draw_rulers(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();

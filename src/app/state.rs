@@ -1778,6 +1778,7 @@ impl App {
                 display_profile_name: String::new(),
                 develop_display_profile: None,
                 develop_display_profile_name: String::new(),
+                display_lut: None,
                 print_layout: crate::core::print::PrintLayout::default(),
                 print_printers: Vec::new(),
                 print_selected_printer: String::new(),
