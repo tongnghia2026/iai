@@ -44,7 +44,6 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
         });
     }
     let mut do_cancel = esc_pressed && !conflict_open;
-    let accent = data.chrome.theme_mode.palette().accent_primary;
 
     // Which category is shown, remembered across frames in egui temp state.
     let cat_id = egui::Id::new("preferences_active_category");
@@ -126,13 +125,13 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
                         .auto_shrink([false, true])
                         .max_height(max_content_h)
                         .show(ui, |ui| match category {
-                            0 => preferences_general(ui, &mut settings, accent),
+                            0 => preferences_general(ui, &mut settings),
                             1 => preferences_appearance(ui),
                             2 => preferences_performance(ui, &mut settings),
                             3 => preferences_files(ui, &mut settings),
                             4 => preferences_tools(ui, &mut settings),
                             5 => preferences_ai(ui, &mut settings),
-                            _ => preferences_shortcuts(ui, &mut settings, data, actions, accent),
+                            _ => preferences_shortcuts(ui, &mut settings, data, actions),
                         });
                 });
             });
@@ -160,7 +159,7 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
             ui.add_space(2.0);
         });
 
-    shortcut_conflict_window(ctx, &mut settings, accent);
+    shortcut_conflict_window(ctx, &mut settings);
 
     ctx.data_mut(|d| d.insert_temp(cat_id, category));
 
@@ -192,11 +191,7 @@ fn preferences_section_title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
 }
 
-fn preferences_general(
-    ui: &mut egui::Ui,
-    settings: &mut crate::core::settings::AppSettings,
-    accent: egui::Color32,
-) {
+fn preferences_general(ui: &mut egui::Ui, settings: &mut crate::core::settings::AppSettings) {
     preferences_section_title(ui, "Đơn vị mặc định");
     ui.horizontal(|ui| {
         ui.label("Thước & hộp thoại kích thước:");
@@ -223,7 +218,6 @@ fn preferences_general(
         "Khôi phục toàn bộ cài đặt mặc định…",
         "Đưa TẤT CẢ cài đặt (kể cả phím tắt) về mặc định?",
         !is_default,
-        accent,
     ) {
         *settings = crate::core::settings::AppSettings::default();
     }
@@ -256,14 +250,7 @@ fn clear_preferences_page_state(ctx: &egui::Context) {
 
 /// A destructive button that asks once inline before acting. Returns `true`
 /// on the frame the user confirms.
-fn confirm_row(
-    ui: &mut egui::Ui,
-    id: &str,
-    button: &str,
-    question: &str,
-    enabled: bool,
-    accent: egui::Color32,
-) -> bool {
+fn confirm_row(ui: &mut egui::Ui, id: &str, button: &str, question: &str, enabled: bool) -> bool {
     let id = egui::Id::new(id);
     let mut asking = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
     let mut confirmed = false;
@@ -276,11 +263,11 @@ fn confirm_row(
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.add(primary_button("Khôi phục", accent)).clicked() {
+                if ui.add(dialog_button("Khôi phục")).clicked() {
                     confirmed = true;
                     asking = false;
                 }
-                if ui.add(secondary_button("Hủy")).clicked() {
+                if ui.add(dialog_button("Hủy")).clicked() {
                     asking = false;
                 }
             });
@@ -304,18 +291,9 @@ fn warning_frame() -> egui::Frame {
         .inner_margin(egui::Margin::same(10))
 }
 
-/// The action a question is asking for: filled with the accent colour.
-fn primary_button(text: impl Into<String>, accent: egui::Color32) -> egui::Button<'static> {
-    egui::Button::new(
-        egui::RichText::new(text.into())
-            .strong()
-            .color(egui::Color32::WHITE),
-    )
-    .fill(accent)
-    .min_size(egui::vec2(0.0, 28.0))
-}
-
-fn secondary_button(text: &str) -> egui::Button<'static> {
+/// A roomy button for the answers in a question box. Uses the normal dark
+/// button fill: the theme accent is light grey, which washed out white text.
+fn dialog_button(text: &str) -> egui::Button<'static> {
     egui::Button::new(text.to_string()).min_size(egui::vec2(72.0, 28.0))
 }
 
@@ -324,7 +302,6 @@ fn secondary_button(text: &str) -> egui::Button<'static> {
 fn shortcut_conflict_window(
     ctx: &egui::Context,
     settings: &mut crate::core::settings::AppSettings,
-    accent: egui::Color32,
 ) {
     use crate::app::commands::{Command, KeyChord, KeyMap};
     let conflict_id = egui::Id::new(PREFS_SHORTCUT_CONFLICT_ID);
@@ -362,11 +339,7 @@ fn shortcut_conflict_window(
             ));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                let take = primary_button(
-                    format!("Gán {} cho “{}”", chord.label(), cmd.display_name()),
-                    accent,
-                );
-                if ui.add(take).clicked() {
+                if ui.add(dialog_button("OK")).clicked() {
                     let mut keymap = KeyMap::from_overrides(&settings.shortcuts);
                     keymap.assign(cmd, Some(chord));
                     settings.shortcuts = keymap.to_overrides();
@@ -381,7 +354,7 @@ fn shortcut_conflict_window(
                     );
                     close = true;
                 }
-                if ui.add(secondary_button("Hủy")).clicked() {
+                if ui.add(dialog_button("Hủy")).clicked() {
                     close = true;
                 }
             });
@@ -583,7 +556,6 @@ fn preferences_shortcuts(
     settings: &mut crate::core::settings::AppSettings,
     data: &UiData,
     actions: &mut UiActions,
-    accent: egui::Color32,
 ) {
     use crate::app::commands::{Command, CommandGroup, KeyChord, KeyMap};
 
@@ -754,7 +726,6 @@ fn preferences_shortcuts(
         "Khôi phục phím tắt mặc định",
         "Đưa TẤT CẢ phím tắt về mặc định?",
         !settings.shortcuts.is_empty(),
-        accent,
     ) {
         keymap = KeyMap::default();
         shortcut_notice(&ctx, "Đã khôi phục toàn bộ phím tắt mặc định.".to_string());

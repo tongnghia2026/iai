@@ -289,3 +289,7 @@ Tính năng mới:
   `set_default_max_entries` + `Canvas::set_history_steps` cho mọi tab/trang/master.
   `cargo test --lib` 1687 xanh; fmt/clippy (không cảnh báo mới)/check all-targets +
   feature webview đạt.
+- 2026-09-24: Chủ test Phase 4 OK, chỉ nút xác nhận lấy phím khó đọc (màu nhấn của
+  theme là xám sáng nên chữ trắng bị chìm). Đổi thành nút **"OK" nền tối như nút
+  "Hủy"**; nút "Khôi phục" trong hộp xác nhận khôi phục cũng về nền tối. Bỏ hẳn
+  tham số màu nhấn khỏi các hàm trang Preferences.
