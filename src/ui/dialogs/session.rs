@@ -460,8 +460,11 @@ pub(crate) fn document_editor_error_dialog(
 
 pub(crate) fn reload_file_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
-    let mut do_reload = enter_pressed;
-    let mut do_keep = esc_pressed;
+    // Enter takes the safe choice: it reloads only when that cannot throw away
+    // unsaved edits (and their undo history); otherwise it keeps the open tab.
+    let discards = data.dialogs.reload_will_discard_changes;
+    let mut do_reload = enter_pressed && !discards;
+    let mut do_keep = esc_pressed || (enter_pressed && discards);
 
     modal_overlay(ctx, "reload_file_dialog_overlay");
 
@@ -473,22 +476,25 @@ pub(crate) fn reload_file_dialog(ctx: &egui::Context, data: &UiData, actions: &m
         .show(ctx, |ui| {
             ui.add_space(8.0);
             ui.label(format!(
-                "{} da duoc cap nhat ben ngoai. Ban co muon cap nhat tab dang mo tu file nay khong?",
+                "{} đã được cập nhật bên ngoài. Bạn có muốn cập nhật tab đang mở từ file này không?",
                 data.dialogs.reload_file_name
             ));
-            if data.dialogs.reload_will_discard_changes {
+            if discards {
                 ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new("Canh bao: reload se ghi de nhung thay doi chua luu trong iAi.")
-                        .color(egui::Color32::from_rgb(220, 170, 80)),
+                    egui::RichText::new(
+                        "Cảnh báo: cập nhật sẽ ghi đè những thay đổi chưa lưu trong iAi \
+                         (nhấn Enter = giữ bản đang mở).",
+                    )
+                    .color(egui::Color32::from_rgb(220, 170, 80)),
                 );
             }
             ui.add_space(16.0);
             ui.horizontal(|ui| {
-                if ui.button("Cap nhat tu file").clicked() {
+                if ui.button("Cập nhật từ file").clicked() {
                     do_reload = true;
                 }
-                if ui.button("Giu ban dang mo").clicked() {
+                if ui.button("Giữ bản đang mở").clicked() {
                     do_keep = true;
                 }
             });
@@ -704,5 +710,59 @@ pub(crate) fn pdf_import_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
             d.insert_temp(range_id, range_text);
             d.insert_temp(dpi_id, dpi_idx);
         });
+    }
+}
+
+#[cfg(test)]
+mod reload_dialog_tests {
+    use super::*;
+
+    fn press(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn run_reload_dialog(will_discard: bool, key: egui::Key) -> UiActions {
+        let mut data = UiData::default();
+        data.dialogs.reload_file_name = "photo.iai".to_string();
+        data.dialogs.reload_will_discard_changes = will_discard;
+        let mut actions = UiActions::default();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![press(key)],
+                ..Default::default()
+            },
+            |ui| reload_file_dialog(ui.ctx(), &data, &mut actions),
+        );
+        actions
+    }
+
+    #[test]
+    fn enter_keeps_the_open_tab_when_reload_would_discard_edits() {
+        let actions = run_reload_dialog(true, egui::Key::Enter);
+        assert!(!actions.doc.reload_open_file_confirm);
+        assert!(actions.doc.reload_open_file_cancel);
+    }
+
+    #[test]
+    fn enter_reloads_a_clean_tab() {
+        let actions = run_reload_dialog(false, egui::Key::Enter);
+        assert!(actions.doc.reload_open_file_confirm);
+        assert!(!actions.doc.reload_open_file_cancel);
+    }
+
+    #[test]
+    fn escape_always_keeps_the_open_tab() {
+        for will_discard in [false, true] {
+            let actions = run_reload_dialog(will_discard, egui::Key::Escape);
+            assert!(!actions.doc.reload_open_file_confirm);
+            assert!(actions.doc.reload_open_file_cancel);
+        }
     }
 }
