@@ -2491,7 +2491,9 @@ impl App {
             return;
         }
         let crosshair = style == BrushCursorStyle::RingCrosshair;
-        let radius = (self.edit.tools.cursor_size() * self.edit.view.zoom)
+        let normal_tip =
+            self.shell.settings.brush_tip_outline == crate::core::settings::BrushTipOutline::Normal;
+        let radius = (self.edit.tools.cursor_ring_radius(normal_tip) * self.edit.view.zoom)
             .round()
             .clamp(2.0, 400.0) as u32;
         if radius > MAX_NATIVE_RING_RADIUS {

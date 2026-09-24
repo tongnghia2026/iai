@@ -408,6 +408,18 @@ impl ToolManager {
         self.tool_dyn(self.active).cursor_size()
     }
 
+    /// Radius of the brush ring in canvas px. With `normal_tip` a soft tip's
+    /// ring sits on its 50 % contour (Photoshop's Normal Brush Tip), so the
+    /// faint outer part of a dab paints past it.
+    pub fn cursor_ring_radius(&self, normal_tip: bool) -> f32 {
+        let tool = self.tool_dyn(self.active);
+        let r = tool.cursor_size();
+        match tool.tip_hardness() {
+            Some(h) if normal_tip => r * brush::soft_round_half_radius(h),
+            _ => r,
+        }
+    }
+
     pub fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         let id = self.active;
         let resp = self.tool_dyn_mut(id).on_press(event, ctx);
@@ -684,5 +696,21 @@ mod tests {
                 t.name()
             );
         }
+    }
+
+    #[test]
+    fn normal_tip_ring_sits_on_the_soft_tips_half_contour() {
+        let mut tools = ToolManager::new();
+        tools.select(ToolId::Clone);
+        tools.clone_like_mut().size = 100.0;
+        tools.clone_like_mut().hardness = 0.0;
+        assert!((tools.cursor_ring_radius(true) - 25.0).abs() < 0.5);
+        assert_eq!(tools.cursor_ring_radius(false), 50.0);
+        tools.clone_like_mut().hardness = 1.0;
+        assert!(tools.cursor_ring_radius(true) > 49.5);
+
+        // A tool without a soft tip keeps its full ring.
+        tools.select(ToolId::Pencil);
+        assert_eq!(tools.cursor_ring_radius(true), tools.cursor_size());
     }
 }

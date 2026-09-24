@@ -1039,6 +1039,9 @@ impl Tool for CloneTool {
     fn cursor_size(&self) -> f32 {
         self.radius()
     }
+    fn tip_hardness(&self) -> Option<f32> {
+        Some(self.hardness)
+    }
 
     fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         if self.smart_fill {

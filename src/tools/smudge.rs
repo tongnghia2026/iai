@@ -189,6 +189,9 @@ impl Tool for SmudgeTool {
     fn cursor_size(&self) -> f32 {
         self.size * 0.5
     }
+    fn tip_hardness(&self) -> Option<f32> {
+        Some(self.hardness)
+    }
 
     fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         ctx.canvas_mut().begin_stroke("Smudge");

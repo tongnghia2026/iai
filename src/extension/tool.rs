@@ -257,6 +257,11 @@ pub trait Tool: Send {
     fn cursor_size(&self) -> f32 {
         0.0
     }
+    /// Hardness of a soft round tip, for placing the ring on its 50 % contour
+    /// (Normal Brush Tip). None = hard or not a tip: the ring stays full size.
+    fn tip_hardness(&self) -> Option<f32> {
+        None
+    }
 
     fn activate(&mut self, _ctx: &mut ToolCtx) {}
     fn deactivate(&mut self, _ctx: &mut ToolCtx) {}

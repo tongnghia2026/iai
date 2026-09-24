@@ -390,7 +390,10 @@ impl App {
                     | crate::tools::ToolId::Burn
                     | crate::tools::ToolId::VectorBrush
             );
-            let ring_screen_radius = self.edit.tools.cursor_size() * self.edit.view.zoom;
+            let normal_tip = self.shell.settings.brush_tip_outline
+                == crate::core::settings::BrushTipOutline::Normal;
+            let ring_screen_radius =
+                self.edit.tools.cursor_ring_radius(normal_tip) * self.edit.view.zoom;
             let cursor_style = self.shell.settings.brush_cursor;
             // Precise keeps the native crosshair at any size, so no GPU ring.
             let os_ring_too_big = uses_os_ring

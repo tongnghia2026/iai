@@ -29,6 +29,17 @@ pub enum BrushCursorStyle {
     Precise,
 }
 
+/// Where the brush ring sits on a soft tip (Photoshop's "Normal / Full Size
+/// Brush Tip"). Hard tips look the same either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrushTipOutline {
+    /// On the 50 % contour: a soft tip still paints faintly past the ring.
+    #[default]
+    Normal,
+    /// Around everything the tip can touch.
+    FullSize,
+}
+
 /// Read a value, falling back to its default when it is unreadable (e.g. an
 /// option name written by a newer build) instead of failing the whole file.
 fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -81,6 +92,9 @@ pub struct AppSettings {
     /// Pointer shape of the painting tools.
     #[serde(default, deserialize_with = "lenient")]
     pub brush_cursor: BrushCursorStyle,
+    /// Soft-tip ring placement for the painting tools.
+    #[serde(default, deserialize_with = "lenient")]
+    pub brush_tip_outline: BrushTipOutline,
     /// Most undo steps each document keeps (the RAM budget still applies).
     #[serde(default = "default_history_steps")]
     pub history_steps: u32,
@@ -96,6 +110,7 @@ impl Default for AppSettings {
             ai_use_gpu: default_true(),
             shortcuts: Default::default(),
             brush_cursor: BrushCursorStyle::default(),
+            brush_tip_outline: BrushTipOutline::default(),
             history_steps: default_history_steps(),
         }
     }
@@ -245,6 +260,7 @@ mod tests {
     fn phase4_fields_default_clamp_and_survive_unknown_values() {
         let s = AppSettings::default();
         assert_eq!(s.brush_cursor, BrushCursorStyle::Ring);
+        assert_eq!(s.brush_tip_outline, BrushTipOutline::Normal);
         assert_eq!(s.history_steps, 100);
 
         let json = r#"{ "history_steps": 5, "brush_cursor": "RingCrosshair" }"#;
@@ -257,6 +273,16 @@ mod tests {
         let s = AppSettings::load_from_str(json);
         assert_eq!(s.autosave_interval_secs, 120);
         assert_eq!(s.brush_cursor, BrushCursorStyle::Ring);
+
+        let json = r#"{ "brush_tip_outline": "FullSize" }"#;
+        assert_eq!(
+            AppSettings::load_from_str(json).brush_tip_outline,
+            BrushTipOutline::FullSize
+        );
+        let json = r#"{ "brush_tip_outline": "Sparkly", "history_steps": 40 }"#;
+        let s = AppSettings::load_from_str(json);
+        assert_eq!(s.brush_tip_outline, BrushTipOutline::Normal);
+        assert_eq!(s.history_steps, 40);
     }
 
     #[test]

@@ -425,7 +425,7 @@ impl App {
             self.shell.canvas_unit = new.default_unit;
             self.shell.ui.new_unit = new.default_unit;
         }
-        if new.brush_cursor != old.brush_cursor {
+        if new.brush_cursor != old.brush_cursor || new.brush_tip_outline != old.brush_tip_outline {
             // Rebuilt in the new style on the next pointer update.
             self.win.cursor_ring = None;
             self.win.last_cursor_radius = 0;

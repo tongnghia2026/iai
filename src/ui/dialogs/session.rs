@@ -518,7 +518,7 @@ fn preferences_tools(ui: &mut egui::Ui, settings: &mut crate::core::settings::Ap
         (
             BrushCursorStyle::Ring,
             "Vòng tròn theo cỡ cọ",
-            "Thấy đúng vùng cọ sẽ tô (mặc định).",
+            "Thấy vùng cọ sẽ tô (mặc định).",
         ),
         (
             BrushCursorStyle::RingCrosshair,
@@ -532,6 +532,24 @@ fn preferences_tools(ui: &mut egui::Ui, settings: &mut crate::core::settings::Ap
         ),
     ] {
         ui.radio_value(&mut settings.brush_cursor, style, label)
+            .on_hover_text(hint);
+    }
+    use crate::core::settings::BrushTipOutline;
+    ui.add_space(6.0);
+    ui.label("Vòng tròn với cọ mềm:");
+    for (outline, label, hint) in [
+        (
+            BrushTipOutline::Normal,
+            "Normal Brush Tip — như Photoshop (mặc định)",
+            "Vòng nằm ở mức nét còn 50%; phần mờ của cọ mềm tô lan ra ngoài vòng.",
+        ),
+        (
+            BrushTipOutline::FullSize,
+            "Full Size Brush Tip",
+            "Vòng bao hết vùng cọ chạm tới, kể cả phần mờ nhất.",
+        ),
+    ] {
+        ui.radio_value(&mut settings.brush_tip_outline, outline, label)
             .on_hover_text(hint);
     }
     ui.label(

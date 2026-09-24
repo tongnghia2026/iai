@@ -122,6 +122,24 @@ pub(crate) fn soft_round_alpha(dist2: f32, radius: f32, hardness: f32) -> f32 {
     }
 }
 
+/// Fraction of the tip radius where [`soft_round_alpha`] falls to 50 % — the
+/// ring Photoshop's "Normal Brush Tip" cursor draws. 0.5 for a fully soft
+/// tip, ~1 for a hard one.
+pub(crate) fn soft_round_half_radius(hardness: f32) -> f32 {
+    const R: f32 = 1000.0;
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        let d = mid * R;
+        if soft_round_alpha(d * d, R, hardness) > 0.5 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
 impl BrushSettings {
     /// Distance between dab centres along the stroke path, in canvas px.
     #[inline]
@@ -1168,6 +1186,9 @@ impl Tool for BrushTool {
     fn cursor_size(&self) -> f32 {
         self.settings.size * 0.5
     }
+    fn tip_hardness(&self) -> Option<f32> {
+        Some(self.settings.hardness)
+    }
 
     fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         ctx.canvas_mut().begin_stroke("Brush Stroke");
@@ -1631,6 +1652,26 @@ mod tests {
             max_diff <= 2,
             "chopping the stroke into events changed the paint (max byte diff {max_diff})"
         );
+    }
+
+    #[test]
+    fn half_radius_marks_the_fifty_percent_contour() {
+        assert!((soft_round_half_radius(0.0) - 0.5).abs() < 0.01);
+        assert!(soft_round_half_radius(1.0) > 0.99);
+        let mut prev = 0.0;
+        for i in 0..=10 {
+            let h = i as f32 / 10.0;
+            let t = soft_round_half_radius(h);
+            assert!(t >= prev, "ring must grow with hardness");
+            // A hard tip's 50 % point sits in its fixed-width AA edge,
+            // which depends on the tip size; its ring is full size anyway.
+            if h < 1.0 {
+                let r = 200.0;
+                let d = t * r;
+                assert!((soft_round_alpha(d * d, r, h) - 0.5).abs() < 0.02);
+            }
+            prev = t;
+        }
     }
 
     #[test]

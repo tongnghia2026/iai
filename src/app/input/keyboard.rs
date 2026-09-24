@@ -835,6 +835,9 @@ impl App {
                     self.edit.tools.brush_mut().settings.hardness =
                         (self.edit.tools.brush().settings.hardness - 0.1).max(0.0);
                 }
+                // A soft tip's ring follows its hardness (Normal Brush Tip).
+                self.win.last_cursor_radius = 0;
+                self.sync_cursor(event_loop);
             }
             PhysicalKey::Code(KeyCode::BracketRight) if pressed && self.edit.input.shift_held => {
                 if self.edit.show_refine_panel {
@@ -850,6 +853,9 @@ impl App {
                     self.edit.tools.brush_mut().settings.hardness =
                         (self.edit.tools.brush().settings.hardness + 0.1).min(1.0);
                 }
+                // A soft tip's ring follows its hardness (Normal Brush Tip).
+                self.win.last_cursor_radius = 0;
+                self.sync_cursor(event_loop);
             }
             PhysicalKey::Code(KeyCode::ArrowUp)
                 if pressed
