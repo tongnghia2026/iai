@@ -34,7 +34,11 @@ use std::path::{Path, PathBuf};
 /// fields verbatim at the value level.
 const IAI_FORMAT_VERSION: u64 = 12;
 const LEGACY_FLOW_TEXT_VERSION: u64 = 11;
-const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+/// Sanity bound against corrupt or hostile archives, not a format limit: vector
+/// paths, text layers and legacy (v10/v11) inline images all live in the
+/// manifest, so real documents reach tens of MiB. Writers enforce the same
+/// bound so iAi never saves a file it cannot open again.
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
 
 pub struct IaiImporter;
 pub struct IaiExporter;
@@ -94,7 +98,7 @@ fn read_manifest<R: Read + Seek>(
         .by_name("manifest.json")
         .map_err(|_| "Missing manifest.json")?;
     if f.size() > MAX_MANIFEST_BYTES {
-        return Err("manifest.json exceeds the 1 MiB limit".to_string());
+        return Err(manifest_too_large_error());
     }
     let mut s = String::new();
     (&mut f)
@@ -102,9 +106,33 @@ fn read_manifest<R: Read + Seek>(
         .read_to_string(&mut s)
         .map_err(|e| e.to_string())?;
     if s.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err("manifest.json exceeds the 1 MiB limit".to_string());
+        return Err(manifest_too_large_error());
     }
     serde_json::from_str(&s).map_err(|e| e.to_string())
+}
+
+fn manifest_too_large_error() -> String {
+    format!(
+        "Phần mô tả tài liệu (manifest.json) vượt giới hạn {} MB",
+        MAX_MANIFEST_BYTES / (1024 * 1024)
+    )
+}
+
+/// Write `manifest.json`, refusing (before anything reaches disk) a manifest
+/// that [`read_manifest`] would reject, so a save can never produce a file
+/// that fails to reopen.
+fn write_manifest<W: Write + Seek>(
+    zip: &mut zip::ZipWriter<W>,
+    manifest: &serde_json::Value,
+    options: zip::write::SimpleFileOptions,
+) -> Result<(), String> {
+    let text = manifest.to_string();
+    if text.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(manifest_too_large_error());
+    }
+    zip.start_file("manifest.json", options)
+        .map_err(|e| e.to_string())?;
+    zip.write_all(text.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn read_bounded_entry<R: Read + Seek>(
@@ -252,10 +280,7 @@ pub fn write_flow_text_doc(
             "kind": "flow_text_document",
             "document": &document,
         });
-        zip.start_file("manifest.json", deflated_options())
-            .map_err(|e| e.to_string())?;
-        zip.write_all(manifest.to_string().as_bytes())
-            .map_err(|e| e.to_string())
+        write_manifest(zip, &manifest, deflated_options())
     })
 }
 
@@ -279,10 +304,7 @@ pub fn write_canvas_editor_doc(
             "editor_version": "1.0.2",
             "document_entry": "document.json",
         });
-        zip.start_file("manifest.json", deflated_options())
-            .map_err(|error| error.to_string())?;
-        zip.write_all(manifest.to_string().as_bytes())
-            .map_err(|error| error.to_string())?;
+        write_manifest(zip, &manifest, deflated_options())?;
         zip.start_file("document.json", deflated_options())
             .map_err(|error| error.to_string())?;
         zip.write_all(&bytes).map_err(|error| error.to_string())
@@ -880,10 +902,7 @@ pub fn write_artboard_doc(
             manifest["master"] = canvas_meta_json(master);
             write_canvas_layers(zip, master, "master/")?;
         }
-        zip.start_file("manifest.json", options)
-            .map_err(|e| e.to_string())?;
-        zip.write_all(manifest.to_string().as_bytes())
-            .map_err(|e| e.to_string())?;
+        write_manifest(zip, &manifest, options)?;
         write_thumbnail(zip, pages[active])
     })
 }
@@ -947,10 +966,7 @@ impl Exporter for IaiExporter {
                 2u64
             });
 
-            zip.start_file("manifest.json", options)
-                .map_err(|e| e.to_string())?;
-            zip.write_all(manifest.to_string().as_bytes())
-                .map_err(|e| e.to_string())?;
+            write_manifest(zip, &manifest, options)?;
 
             write_thumbnail(zip, canvas)?;
             write_canvas_layers(zip, canvas, "")
@@ -1505,10 +1521,7 @@ pub fn save_pdf_project(
             "pages": pages_json,
         });
 
-        zip.start_file("manifest.json", deflated_options())
-            .map_err(|e| e.to_string())?;
-        zip.write_all(manifest.to_string().as_bytes())
-            .map_err(|e| e.to_string())?;
+        write_manifest(zip, &manifest, deflated_options())?;
 
         if let Some(bytes) = source_pdf {
             zip.start_file("source.pdf", stored_options())
@@ -3084,6 +3097,59 @@ mod tests {
         assert!(loaded.is_cmyk(), "CMYK mode lost");
         // The model (incl. the CMYK fill colour) is the source of truth and must
         // survive verbatim even though the baked fallback is a mirror.
+        assert_eq!(loaded_path_model(&loaded), obj);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn detailed_vector_document_over_one_mib_manifest_reopens() {
+        // Vector paths live in manifest.json (~140 bytes per node), so a
+        // detailed drawing easily passes 1 MiB; it must still reopen.
+        use crate::core::geometry::Point;
+        let dir = tmp_dir("path-large-manifest");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        let nodes: Vec<Node> = (0..12_000)
+            .map(|i| {
+                let t = i as f32 * 0.013;
+                let (x, y) = (40.0 + 35.0 * t.cos(), 40.0 + 35.0 * t.sin());
+                Node::with_handles(
+                    Point::new(x, y),
+                    Point::new(x - 0.123, y - 0.456),
+                    Point::new(x + 0.123, y + 0.456),
+                    crate::core::vector::path::NodeKind::Smooth,
+                )
+            })
+            .collect();
+        let obj = VectorObjectData::new(
+            PathData::new(vec![Contour::new(nodes, true)], FillRule::NonZero),
+            VectorStyle::filled(ColorValue::rgb(0.2, 0.3, 0.4)),
+            AffineTransform::translate(0.0, 0.0),
+        );
+        canvas
+            .execute(
+                Box::new(crate::core::command_vector::CreatePathLayer::new(
+                    obj.clone(),
+                    "Detailed path",
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let manifest_bytes = {
+            let f = std::fs::File::open(&path).unwrap();
+            let mut zip = zip::ZipArchive::new(f).unwrap();
+            let size = zip.by_name("manifest.json").unwrap().size();
+            size
+        };
+        assert!(manifest_bytes > 1024 * 1024, "manifest = {manifest_bytes}");
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("large manifest must reopen") else {
+            panic!("expected a plain canvas");
+        };
         assert_eq!(loaded_path_model(&loaded), obj);
         std::fs::remove_dir_all(&dir).ok();
     }
