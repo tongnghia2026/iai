@@ -155,12 +155,12 @@ pub struct StrokeBuffer {
     pub residual: f32,
     /// Whether this stroke paints the layer mask (captured at stroke start —
     /// the target can't change mid-stroke).
-    paint_mask: bool,
+    pub(crate) paint_mask: bool,
     /// Target tiles (layer pixels or mask) as they were when the stroke began.
     /// Arc clones: costs memory only for tiles the stroke actually touches.
-    base: crate::core::tile::TileMap,
+    pub(crate) base: crate::core::tile::TileMap,
     /// Accumulated flow coverage per layer-local pixel, tile-keyed.
-    cov: std::collections::HashMap<crate::core::tile::TilePos, Box<[f32]>>,
+    pub(crate) cov: std::collections::HashMap<crate::core::tile::TilePos, Box<[f32]>>,
 }
 
 impl StrokeBuffer {
@@ -1051,7 +1051,7 @@ impl BrushTool {
     /// dab and carries the leftover walk into the following event, so dab
     /// density does not depend on how the OS chops the stroke into mouse
     /// events and segment joints are never stamped twice.
-    fn walk_dabs(
+    pub(crate) fn walk_dabs(
         spacing_base: f32,
         x0: f32,
         y0: f32,

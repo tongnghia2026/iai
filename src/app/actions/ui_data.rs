@@ -252,13 +252,11 @@ impl App {
             )
         };
 
-        let radius = brush_size.max(0.5);
+        let radius = (brush_size * 0.5).max(0.5);
         let diameter = radius * 2.0;
         let preview_size =
             (diameter.round() as usize).clamp(1, crate::ui::CLONE_SOURCE_PREVIEW_MAX_SIZE);
         let sample_scale = diameter / preview_size as f32;
-        let hard_r = (radius * hardness.clamp(0.0, 1.0)).min(radius);
-        let feather = (radius - hard_r).max(0.001);
         let opacity = opacity.clamp(0.0, 1.0);
         let mut out = vec![0_u8; preview_size * preview_size * 4];
         let canvas = &mut self.docs.documents[self.docs.active_doc_idx].canvas;
@@ -277,16 +275,11 @@ impl App {
                 let dx = (x as f32 + 0.5) * sample_scale - radius;
                 let dy = (y as f32 + 0.5) * sample_scale - radius;
                 let d2 = dx * dx + dy * dy;
+                // Same falloff as the real dab, so the preview edge matches.
                 let coverage = if d2 > radius * radius {
                     0.0
                 } else {
-                    let d = d2.sqrt();
-                    if d <= hard_r {
-                        1.0
-                    } else {
-                        let t = ((d - hard_r) / feather).clamp(0.0, 1.0);
-                        1.0 - t * t * (3.0 - 2.0 * t)
-                    }
+                    crate::tools::brush::soft_round_alpha(d2, radius, hardness)
                 };
                 let sx = source_x + dx;
                 let sy = source_y + dy;
@@ -643,6 +636,19 @@ impl App {
         };
 
         let clone_source_thumbnail = self.build_clone_source_thumbnail();
+        let clone_source_marker = if matches!(
+            self.edit.tools.active_id(),
+            crate::tools::ToolId::Clone | crate::tools::ToolId::Repair
+        ) && self.edit.input.painting
+        {
+            let zoom = self.edit.view.zoom.max(0.0001);
+            self.edit.tools.clone_like().stroke_source_center(
+                (self.edit.input.mouse_x - self.edit.view.offset_x) / zoom,
+                (self.edit.input.mouse_y - self.edit.view.offset_y) / zoom,
+            )
+        } else {
+            None
+        };
         let print_preview_image = self.build_print_preview_thumbnail();
         let doc_ai_busy = std::sync::Arc::new(
             self.docs
@@ -1105,6 +1111,7 @@ impl App {
                 clone_sample_merged: self.edit.tools.clone_like().sample_merged,
                 clone_smart_fill: self.edit.tools.clone_like().smart_fill,
                 clone_source_thumbnail,
+                clone_source_marker,
                 smudge_size: self.edit.tools.smudge().size,
                 smudge_hardness: self.edit.tools.smudge().hardness,
                 smudge_strength: self.edit.tools.smudge().strength,

@@ -1,9 +1,11 @@
 #![allow(dead_code)]
+use super::brush::{soft_round_alpha, BrushTool, StrokeBuffer};
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::canvas::Canvas;
 use crate::core::tile::TileMap;
 
 pub struct CloneTool {
+    /// Tip diameter in canvas px (same meaning as the Brush size).
     pub size: f32,
     pub hardness: f32,
     pub opacity: f32,
@@ -24,6 +26,8 @@ pub struct CloneTool {
     source_canvas_x: f32,
     source_canvas_y: f32,
     has_source: bool,
+    /// The current source was auto-picked by spot healing (no Alt+click).
+    spot_auto: bool,
 
     offset_x: f32,
     offset_y: f32,
@@ -35,6 +39,11 @@ pub struct CloneTool {
     flat_cache: Option<(u64, TileMap)>,
     stroke_source: Option<TileMap>,
     stroke_source_merged: bool,
+    /// Per-stroke coverage + stroke-start snapshot for the plain Clone
+    /// (opacity caps the stroke, like the Brush). None for healing / CMYK.
+    stroke: Option<StrokeBuffer>,
+    /// Distance to the next dab along the stroke path (plain Clone).
+    walk_residual: f32,
 
     ca_recording: bool,
     ca_dirty: bool,
@@ -50,7 +59,7 @@ pub struct CloneTool {
 impl CloneTool {
     pub fn new() -> Self {
         Self {
-            size: 30.0,
+            size: 60.0,
             hardness: 0.0,
             opacity: 1.0,
             spacing: 0.25,
@@ -62,6 +71,7 @@ impl CloneTool {
             source_canvas_x: 0.0,
             source_canvas_y: 0.0,
             has_source: false,
+            spot_auto: false,
             offset_x: 0.0,
             offset_y: 0.0,
             offset_set: false,
@@ -70,6 +80,8 @@ impl CloneTool {
             flat_cache: None,
             stroke_source: None,
             stroke_source_merged: false,
+            stroke: None,
+            walk_residual: 0.0,
             ca_recording: false,
             ca_dirty: false,
             ca_mask: Vec::new(),
@@ -111,7 +123,7 @@ impl CloneTool {
         if !self.ca_recording {
             return;
         }
-        let r = self.size.max(0.5);
+        let r = self.radius();
         let r2 = r * r;
         let opacity = self.opacity.clamp(0.0, 1.0);
         let lw = self.ca_lw as i32;
@@ -131,7 +143,7 @@ impl CloneTool {
                 if d2 > r2 {
                     continue;
                 }
-                let cov = super::brush::soft_round_alpha(d2, r, self.hardness);
+                let cov = soft_round_alpha(d2, r, self.hardness);
                 let v = cov * opacity;
                 let idx = (y as usize) * (self.ca_lw as usize) + x as usize;
                 if v > self.ca_mask[idx] {
@@ -144,7 +156,7 @@ impl CloneTool {
 
     fn ca_segment(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
         let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-        let spacing = (self.size * 0.25).max(0.5);
+        let spacing = (self.radius() * 0.25).max(0.5);
         let steps = ((dist / spacing).ceil() as u32).clamp(1, 4000);
         for i in 0..=steps {
             let t = i as f32 / steps as f32;
@@ -167,6 +179,59 @@ impl CloneTool {
         }
     }
 
+    #[inline]
+    fn radius(&self) -> f32 {
+        (self.size * 0.5).max(0.5)
+    }
+
+    /// Distance between dab centres for the plain Clone, as a fraction of the
+    /// tip diameter (Photoshop's Spacing).
+    #[inline]
+    fn dab_spacing(&self) -> f32 {
+        (self.size * self.spacing).max(0.5)
+    }
+
+    /// The plain Clone follows the Brush's stroke model. Healing keeps per-dab
+    /// compositing: each membrane dab must blend against what earlier dabs in
+    /// the same stroke already healed.
+    #[inline]
+    fn uses_stroke_model(&self) -> bool {
+        !self.heal_mode && !self.spot_mode
+    }
+
+    /// Why a stroke can't start on the active layer, if it can't.
+    fn paint_block_reason(&self, canvas: &Canvas) -> Option<&'static str> {
+        if canvas.layer_stack.layers.is_empty() {
+            return Some("Chưa có layer để Clone");
+        }
+        if matches!(
+            canvas.channels.view,
+            crate::core::channels::ChannelView::Alpha(_)
+        ) {
+            return Some("Clone không vẽ lên kênh Alpha — chọn lại kênh RGB");
+        }
+        let layer = canvas.active_layer();
+        if layer.locked && !layer.is_background {
+            return Some("Layer đang khoá");
+        }
+        if layer.get_paint_tiles().is_none() {
+            return Some("Cần chọn một layer ảnh (raster) để Clone");
+        }
+        if !self.uses_stroke_model() && layer.paint_target == crate::core::layer::PaintTarget::Mask
+        {
+            return Some("Repair Brush không vẽ lên mask — bấm vào ảnh của layer");
+        }
+        None
+    }
+
+    fn stamp(&mut self, canvas: &mut Canvas, x: f32, y: f32) {
+        if self.stroke.is_some() {
+            self.stamp_dab_stroked(canvas, x, y);
+        } else {
+            self.stamp_dab(canvas, x, y);
+        }
+    }
+
     pub fn source(&self) -> Option<(f32, f32)> {
         if self.has_source {
             Some((self.source_canvas_x, self.source_canvas_y))
@@ -183,11 +248,18 @@ impl CloneTool {
         if !self.has_source {
             return None;
         }
-        if self.offset_set {
+        if self.offset_set || self.stroke_source.is_some() {
             Some((dst_x - self.offset_x, dst_y - self.offset_y))
         } else {
             Some((self.source_canvas_x, self.source_canvas_y))
         }
+    }
+
+    /// Canvas-space point being sampled while a stroke is in progress (the
+    /// source crosshair Photoshop shows during painting).
+    pub fn stroke_source_center(&self, dst_x: f32, dst_y: f32) -> Option<(f32, f32)> {
+        (self.has_source && !self.spot_auto && self.stroke_source.is_some())
+            .then(|| (dst_x - self.offset_x, dst_y - self.offset_y))
     }
 
     fn stamp_dab(&mut self, canvas: &mut Canvas, dst_cx: f32, dst_cy: f32) {
@@ -199,7 +271,7 @@ impl CloneTool {
         }
         canvas.layer_stack.normalize_active_idx();
 
-        let r = self.size.max(0.5).min(2000.0);
+        let r = self.radius().min(2000.0);
         let r2 = r * r;
         let opacity = self.opacity.clamp(0.0, 1.0);
 
@@ -289,7 +361,7 @@ impl CloneTool {
                             continue;
                         }
 
-                        let alpha = super::brush::soft_round_alpha(d2, r, self.hardness);
+                        let alpha = soft_round_alpha(d2, r, self.hardness);
                         let mut src_a_factor = alpha * opacity;
                         if src_a_factor < 0.001 {
                             continue;
@@ -385,7 +457,8 @@ impl CloneTool {
                             // Plate/lock-alpha edits keep alpha; a full ink clone
                             // updates it with the source-over result.
                             if channel_wm.is_none() {
-                                dst_tile.pixels[i + 3] = (out_a * 255.0).round() as u8;
+                                dst_tile.pixels[i + 3] =
+                                    (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
                             }
                             continue;
                         }
@@ -407,13 +480,15 @@ impl CloneTool {
                         if denom < 0.001 {
                             continue;
                         }
-                        dst_tile.pixels[i] =
-                            ((src_r * src_alpha + dst_r * dst_a * inv) / denom * 255.0) as u8;
+                        // .round(): truncation drifts every overlapping dab
+                        // toward black / transparent (dark blotches).
+                        let to8 = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                        dst_tile.pixels[i] = to8((src_r * src_alpha + dst_r * dst_a * inv) / denom);
                         dst_tile.pixels[i + 1] =
-                            ((src_g * src_alpha + dst_g * dst_a * inv) / denom * 255.0) as u8;
+                            to8((src_g * src_alpha + dst_g * dst_a * inv) / denom);
                         dst_tile.pixels[i + 2] =
-                            ((src_b * src_alpha + dst_b * dst_a * inv) / denom * 255.0) as u8;
-                        dst_tile.pixels[i + 3] = (out_a * 255.0) as u8;
+                            to8((src_b * src_alpha + dst_b * dst_a * inv) / denom);
+                        dst_tile.pixels[i + 3] = to8(out_a);
                     }
                 }
             }
@@ -431,7 +506,7 @@ impl CloneTool {
             return;
         }
         let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-        let spacing = (self.size * self.spacing).max(0.5);
+        let spacing = (self.radius() * self.spacing).max(0.5);
         let steps = ((dist / spacing).ceil() as u32).clamp(1, 1000);
         for i in 0..=steps {
             let t = i as f32 / steps as f32;
@@ -439,26 +514,228 @@ impl CloneTool {
         }
     }
 
-    fn capture_source_for_stroke(&mut self, canvas: &Canvas) {
+    /// Plain Clone dab (Photoshop Clone Stamp model): brush coverage
+    /// accumulates in the stroke buffer and each touched pixel is recomposited
+    /// from its stroke-start value, so Opacity caps the whole stroke and dab
+    /// overlap never builds past it. Writes the active paint target — a layer
+    /// mask receives the source's gray value.
+    fn stamp_dab_stroked(&mut self, canvas: &mut Canvas, dst_cx: f32, dst_cy: f32) {
+        let r = self.radius().min(2500.0);
+        let r2 = r * r;
+        let opacity = self.opacity.clamp(0.0, 1.0);
+        let hardness = self.hardness;
+        let (off_x, off_y) = (self.offset_x, self.offset_y);
+        let merged = self.stroke_source_merged;
+        let (Some(stroke), Some(src)) = (self.stroke.as_mut(), self.stroke_source.as_ref()) else {
+            return;
+        };
+        let idx = canvas.layer_stack.active_idx;
+        let Some(layer) = canvas.layer_stack.layers.get(idx) else {
+            return;
+        };
+        let (ox, oy) = layer.offset;
+        let (lw, lh) = (layer.width, layer.height);
+        let paint_mask = stroke.paint_mask;
+        let lock_alpha = !paint_mask && layer.lock_alpha;
+        let channel_wm = if paint_mask {
+            None
+        } else {
+            canvas.channels.write_gate()
+        };
+
+        let lcx = dst_cx - ox as f32;
+        let lcy = dst_cy - oy as f32;
+        let lx0 = ((lcx - r).floor().max(0.0) as u32).min(lw);
+        let ly0 = ((lcy - r).floor().max(0.0) as u32).min(lh);
+        let lx1 = ((lcx + r).ceil().max(0.0) as u32).min(lw);
+        let ly1 = ((lcy + r).ceil().max(0.0) as u32).min(lh);
+        if lx1 <= lx0 || ly1 <= ly0 {
+            return;
+        }
+
+        let selection = &canvas.selection;
+        let has_sel = selection.active;
+        let Some(tiles) = canvas.layer_stack.layers[idx].get_paint_tiles_mut() else {
+            return;
+        };
+        let ts = crate::core::tile::TILE_SIZE;
+        let tile_px = (ts * ts) as usize;
+        let to8 = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+
+        for ty in (ly0 / ts)..=((ly1 - 1) / ts) {
+            for tx in (lx0 / ts)..=((lx1 - 1) / ts) {
+                let tile_x0 = tx * ts;
+                let tile_y0 = ty * ts;
+                let px_min = tile_x0.max(lx0);
+                let py_min = tile_y0.max(ly0);
+                let px_max = (tile_x0 + ts).min(lx1);
+                let py_max = (tile_y0 + ts).min(ly1);
+                if px_max <= px_min || py_max <= py_min {
+                    continue;
+                }
+                let pos = crate::core::tile::TilePos {
+                    x: tx as i32,
+                    y: ty as i32,
+                };
+                let base = stroke.base.tiles.get(&pos).cloned();
+                let cov = stroke
+                    .cov
+                    .entry(pos)
+                    .or_insert_with(|| vec![0.0f32; tile_px].into_boxed_slice());
+                let dst = tiles.get_tile_mut(pos);
+
+                for py in py_min..py_max {
+                    let dy = py as f32 + 0.5 - lcy;
+                    let dy2 = dy * dy;
+                    let canvas_y = py as i32 + oy;
+                    for px in px_min..px_max {
+                        let dx = px as f32 + 0.5 - lcx;
+                        let d2 = dx * dx + dy2;
+                        if d2 > r2 {
+                            continue;
+                        }
+                        let canvas_x = px as i32 + ox;
+                        let mut a = soft_round_alpha(d2, r, hardness);
+                        if has_sel {
+                            if canvas_x < 0 || canvas_y < 0 {
+                                continue;
+                            }
+                            a *= selection.sample(canvas_x as u32, canvas_y as u32);
+                        }
+                        if a < 0.001 {
+                            continue;
+                        }
+
+                        // The offset is fixed for the whole stroke and the source
+                        // is a stroke-start snapshot, so every dab over a pixel
+                        // reads the same source colour — recompositing from the
+                        // base is idempotent.
+                        let (sr, sg, sb, sa) = if merged {
+                            let sx = (canvas_x as f32 - off_x).floor();
+                            let sy = (canvas_y as f32 - off_y).floor();
+                            if sx < 0.0 || sy < 0.0 {
+                                continue;
+                            }
+                            src.get_pixel(sx as u32, sy as u32)
+                        } else {
+                            let sx = (px as f32 - off_x).floor();
+                            let sy = (py as f32 - off_y).floor();
+                            if sx < 0.0 || sy < 0.0 {
+                                continue;
+                            }
+                            src.get_pixel(sx as u32, sy as u32)
+                        };
+
+                        let local = ((py - tile_y0) * ts + (px - tile_x0)) as usize;
+                        let c = &mut cov[local];
+                        *c += a * (1.0 - *c);
+                        let s = (*c * opacity).min(1.0);
+                        let (br, bg, bb, ba) = base
+                            .as_ref()
+                            .map_or((0, 0, 0, 0), |t| t.get_pixel(px - tile_x0, py - tile_y0));
+                        let i = local * 4;
+
+                        if paint_mask {
+                            // Masks store gray in RGB; an absent tile reads as
+                            // black, which is a real mask value, not "no source".
+                            let (v, eff) = if merged {
+                                if sa == 0 {
+                                    continue;
+                                }
+                                let l = (0.299 * sr as f32 + 0.587 * sg as f32 + 0.114 * sb as f32)
+                                    / 255.0;
+                                (l, s * sa as f32 / 255.0)
+                            } else {
+                                (sr as f32 / 255.0, s)
+                            };
+                            let b = br as f32 / 255.0;
+                            let out = to8(b + (v - b) * eff);
+                            dst.pixels[i] = out;
+                            dst.pixels[i + 1] = out;
+                            dst.pixels[i + 2] = out;
+                            dst.pixels[i + 3] = 255;
+                            continue;
+                        }
+                        if sa == 0 {
+                            continue;
+                        }
+
+                        let eff = s * sa as f32 / 255.0;
+                        if let Some(wm) = channel_wm {
+                            let base_rgb = [br, bg, bb];
+                            let src_rgb = [sr, sg, sb];
+                            for ch in 0..3 {
+                                dst.pixels[i + ch] = if wm[ch] {
+                                    let b = base_rgb[ch] as f32 / 255.0;
+                                    to8(b + (src_rgb[ch] as f32 / 255.0 - b) * eff)
+                                } else {
+                                    base_rgb[ch]
+                                };
+                            }
+                            dst.pixels[i + 3] = ba;
+                            continue;
+                        }
+
+                        let base_a = ba as f32 / 255.0;
+                        if lock_alpha && base_a < 0.001 {
+                            continue;
+                        }
+                        let dst_w = base_a * (1.0 - eff);
+                        let out_a = eff + dst_w;
+                        if out_a < 0.001 {
+                            continue;
+                        }
+                        let mix = |s8: u8, b8: u8| {
+                            to8((s8 as f32 / 255.0 * eff + b8 as f32 / 255.0 * dst_w) / out_a)
+                        };
+                        dst.pixels[i] = mix(sr, br);
+                        dst.pixels[i + 1] = mix(sg, bg);
+                        dst.pixels[i + 2] = mix(sb, bb);
+                        dst.pixels[i + 3] = if lock_alpha { ba } else { to8(out_a) };
+                    }
+                }
+            }
+        }
+
+        let cx0 = (lx0 as i32 + ox).max(0) as u32;
+        let cy0 = (ly0 as i32 + oy).max(0) as u32;
+        let cx1 = ((lx1 as i32 + ox).max(0) as u32).min(canvas.width);
+        let cy1 = ((ly1 as i32 + oy).max(0) as u32).min(canvas.height);
+        if cx1 > cx0 && cy1 > cy0 {
+            canvas.mark_dirty(cx0, cy0, cx1, cy1);
+        }
+    }
+
+    fn capture_source_for_stroke(&mut self, canvas: &mut Canvas) {
         if self.sample_merged {
             let rev = canvas.layer_revision;
             let needs_rebuild = self.flat_cache.as_ref().map_or(true, |(r, _)| *r != rev);
             if needs_rebuild {
-                let flat = canvas.layer_stack.flatten(canvas.width, canvas.height);
-                self.flat_cache =
-                    Some((rev, TileMap::from_rgba(&flat, canvas.width, canvas.height)));
+                // Reuse the display composite when it is current instead of
+                // re-flattening every layer at each stroke start.
+                canvas.ensure_pixels();
+                let (w, h) = (canvas.width, canvas.height);
+                let tiles = if !canvas.pixels_stale
+                    && canvas.pixels.len() == (w as usize) * (h as usize) * 4
+                {
+                    TileMap::from_rgba(&canvas.pixels, w, h)
+                } else {
+                    TileMap::from_rgba(&canvas.layer_stack.flatten(w, h), w, h)
+                };
+                self.flat_cache = Some((rev, tiles));
             }
             self.stroke_source = self.flat_cache.as_ref().map(|(_, tiles)| tiles.clone());
             self.stroke_source_merged = true;
         } else {
-            let idx = canvas
+            // Sample what the stroke paints: the layer mask when it is the
+            // paint target, else the layer pixels.
+            let idx = canvas.layer_stack.active_idx;
+            self.stroke_source = canvas
                 .layer_stack
-                .active_idx
-                .min(canvas.layer_stack.layers.len().saturating_sub(1));
-            if canvas.layer_stack.layers.is_empty() {
-                return;
-            }
-            self.stroke_source = Some(canvas.layer_stack.layers[idx].tiles.clone());
+                .layers
+                .get(idx)
+                .and_then(|l| l.get_paint_tiles())
+                .cloned();
             self.stroke_source_merged = false;
         }
     }
@@ -470,7 +747,7 @@ impl CloneTool {
     /// earlier dabs in the same stroke cannot feed back into later samples.
     fn spot_pick_offset(&self, canvas: &Canvas, dst_cx: f32, dst_cy: f32) -> Option<(f32, f32)> {
         let src = self.stroke_source.as_ref()?;
-        let r = self.size.max(1.0).min(2000.0);
+        let r = (self.size * 0.5).max(1.0).min(2000.0);
         let merged = self.stroke_source_merged;
 
         let (ox, oy, lw, lh) = if canvas.layer_stack.layers.is_empty() {
@@ -759,7 +1036,7 @@ impl Tool for CloneTool {
         true
     }
     fn cursor_size(&self) -> f32 {
-        self.size
+        self.radius()
     }
 
     fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
@@ -778,16 +1055,22 @@ impl Tool for CloneTool {
             self.source_canvas_x = event.canvas_x;
             self.source_canvas_y = event.canvas_y;
             self.has_source = true;
+            self.spot_auto = false;
             self.offset_set = false;
             self.stroke_source = None;
             return ToolResponse::none();
         }
 
+        self.stroke = None;
+        if !self.spot_mode && !self.has_source {
+            return ToolResponse::blocked("Alt+click để chọn điểm lấy mẫu trước khi Clone");
+        }
+        if let Some(msg) = self.paint_block_reason(ctx.canvas()) {
+            return ToolResponse::blocked(msg);
+        }
+
         if self.spot_mode && !self.has_source {
-            if ctx.canvas().active_layer().locked && !ctx.canvas().active_layer().is_background {
-                return ToolResponse::none();
-            }
-            self.capture_source_for_stroke(ctx.canvas());
+            self.capture_source_for_stroke(ctx.canvas_mut());
             let Some((ox, oy)) =
                 self.spot_pick_offset(ctx.canvas(), event.canvas_x, event.canvas_y)
             else {
@@ -798,6 +1081,7 @@ impl Tool for CloneTool {
             self.offset_y = oy;
             self.offset_set = true;
             self.has_source = true;
+            self.spot_auto = true;
             ctx.canvas_mut().begin_stroke("Spot Heal");
             self.stroke_start_x = event.canvas_x;
             self.stroke_start_y = event.canvas_y;
@@ -805,14 +1089,10 @@ impl Tool for CloneTool {
             return ToolResponse::repaint();
         }
 
-        if !self.has_source {
+        self.capture_source_for_stroke(ctx.canvas_mut());
+        if self.stroke_source.is_none() {
             return ToolResponse::none();
         }
-        if ctx.canvas().active_layer().locked && !ctx.canvas().active_layer().is_background {
-            return ToolResponse::none();
-        }
-
-        self.capture_source_for_stroke(ctx.canvas());
         ctx.canvas_mut().begin_stroke("Clone");
 
         if !self.aligned || !self.offset_set {
@@ -828,7 +1108,18 @@ impl Tool for CloneTool {
         self.stroke_start_x = event.canvas_x;
         self.stroke_start_y = event.canvas_y;
 
-        self.stamp_dab(ctx.canvas_mut(), event.canvas_x, event.canvas_y);
+        if self.uses_stroke_model() {
+            // CMYK layer pixels go through the direct ink dab (like the Brush);
+            // everything else uses the stroke buffer.
+            let canvas = ctx.canvas();
+            let ink_pixels = canvas.is_cmyk()
+                && canvas.active_layer().paint_target == crate::core::layer::PaintTarget::Pixels;
+            if !ink_pixels {
+                self.stroke = StrokeBuffer::begin(canvas);
+            }
+            self.walk_residual = self.dab_spacing();
+        }
+        self.stamp(ctx.canvas_mut(), event.canvas_x, event.canvas_y);
         ToolResponse::repaint()
     }
 
@@ -842,8 +1133,26 @@ impl Tool for CloneTool {
             self.ca_segment(prev.canvas_x, prev.canvas_y, event.canvas_x, event.canvas_y);
             return ToolResponse::none();
         }
-        if !self.has_source {
+        if !self.has_source || self.stroke_source.is_none() {
             return ToolResponse::none();
+        }
+        if self.uses_stroke_model() {
+            // Walk the path at a fixed spacing, carrying the leftover distance
+            // between events: dab density (and so the soft edge) no longer
+            // depends on how fast the mouse moves.
+            let mut residual = self.walk_residual;
+            let canvas = ctx.canvas_mut();
+            BrushTool::walk_dabs(
+                self.dab_spacing(),
+                prev.canvas_x,
+                prev.canvas_y,
+                event.canvas_x,
+                event.canvas_y,
+                &mut residual,
+                |x, y| self.stamp(canvas, x, y),
+            );
+            self.walk_residual = residual;
+            return ToolResponse::repaint();
         }
         if self.spot_mode {
             if let Some((ox, oy)) =
@@ -868,8 +1177,10 @@ impl Tool for CloneTool {
             return ToolResponse::none();
         }
         self.stroke_source = None;
+        self.stroke = None;
         if self.spot_mode {
             self.has_source = false;
+            self.spot_auto = false;
         }
         ToolResponse::none()
     }
@@ -883,7 +1194,7 @@ mod tests {
     fn spot_heal_finds_source_when_half_the_brush_crosses_page_edge() {
         let canvas = Canvas::new(128, 128);
         let mut tool = CloneTool::new();
-        tool.size = 16.0;
+        tool.size = 32.0;
         tool.stroke_source = Some(canvas.active_layer().tiles.clone());
 
         assert!(
@@ -903,12 +1214,209 @@ mod tests {
         // and an offset along the tall axis provides a complete source for it.
         let canvas = Canvas::new(64, 256);
         let mut tool = CloneTool::new();
-        tool.size = 40.0;
+        tool.size = 80.0;
         tool.stroke_source = Some(canvas.active_layer().tiles.clone());
 
         assert!(
             tool.spot_pick_offset(&canvas, 0.0, 128.0).is_some(),
             "clipped destination footprint must not require a full source circle"
         );
+    }
+
+    use crate::core::document::{Document, DocumentId};
+
+    fn doc_filled(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> Document {
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&f(x, y));
+            }
+        }
+        Document::from_canvas(DocumentId(1), Canvas::from_rgba(px, w, h), None)
+    }
+
+    /// Alt+click `src`, then drag horizontally from `from` to `to_x` with a
+    /// mouse event every `step` px, then release and close the undo step.
+    fn clone_stroke(
+        tool: &mut CloneTool,
+        doc: &mut Document,
+        src: (f32, f32),
+        from: (f32, f32),
+        to_x: f32,
+        step: f32,
+    ) {
+        let mut ctx = ToolCtx::new(doc, [0, 0, 0, 255], [255; 4], 1.0, 0.0, 0.0);
+        let mut alt = PointerEvent::new(src.0, src.1);
+        alt.alt = true;
+        tool.on_press(alt, &mut ctx);
+        let mut prev = PointerEvent::new(from.0, from.1);
+        tool.on_press(prev, &mut ctx);
+        let mut x = from.0 + step;
+        while x <= to_x {
+            let ev = PointerEvent::new(x, from.1);
+            tool.on_drag(ev, &prev, &mut ctx);
+            prev = ev;
+            x += step;
+        }
+        tool.on_release(prev, &mut ctx);
+        ctx.canvas_mut().end_stroke();
+    }
+
+    fn red_left_white_right() -> Document {
+        doc_filled(400, 256, |x, _| {
+            if x < 200 {
+                [255, 0, 0, 255]
+            } else {
+                [255, 255, 255, 255]
+            }
+        })
+    }
+
+    fn red_coverage(doc: &Document, x: u32, y: u32) -> f32 {
+        let (_, g, _, _) = doc.canvas.active_layer().tiles.get_pixel(x, y);
+        1.0 - g as f32 / 255.0
+    }
+
+    #[test]
+    fn opacity_caps_one_stroke_and_stacks_across_strokes() {
+        let mut doc = red_left_white_right();
+        let mut tool = CloneTool::new();
+        tool.hardness = 1.0;
+        tool.opacity = 0.3;
+        // A slow stroke (1 px per event) must still stop at 30 %.
+        clone_stroke(
+            &mut tool,
+            &mut doc,
+            (100.0, 128.0),
+            (250.0, 128.0),
+            340.0,
+            1.0,
+        );
+        let one = red_coverage(&doc, 300, 128);
+        assert!((one - 0.3).abs() < 0.02, "one stroke at 30% gave {one}");
+        clone_stroke(
+            &mut tool,
+            &mut doc,
+            (100.0, 128.0),
+            (250.0, 128.0),
+            340.0,
+            1.0,
+        );
+        let two = red_coverage(&doc, 300, 128);
+        assert!(
+            (two - 0.51).abs() < 0.02,
+            "second stroke should stack: {two}"
+        );
+    }
+
+    #[test]
+    fn soft_edge_does_not_depend_on_mouse_speed() {
+        let edge_at = |step: f32| {
+            let mut doc = red_left_white_right();
+            let mut tool = CloneTool::new();
+            tool.hardness = 0.0;
+            clone_stroke(
+                &mut tool,
+                &mut doc,
+                (100.0, 128.0),
+                (250.0, 128.0),
+                340.0,
+                step,
+            );
+            red_coverage(&doc, 300, 128 + 24)
+        };
+        let (slow, fast) = (edge_at(1.0), edge_at(12.0));
+        assert!(
+            (slow - fast).abs() < 0.06,
+            "soft edge changed with mouse speed: slow {slow}, fast {fast}"
+        );
+    }
+
+    #[test]
+    fn cloning_a_colour_over_itself_never_drifts() {
+        let mut doc = doc_filled(400, 256, |_, _| [201, 147, 99, 255]);
+        let mut tool = CloneTool::new();
+        tool.opacity = 0.7;
+        for y in [120.0, 124.0, 128.0, 132.0, 136.0] {
+            clone_stroke(&mut tool, &mut doc, (100.0, y), (200.0, y), 350.0, 2.0);
+        }
+        for y in 80..180 {
+            for x in 150..390 {
+                assert_eq!(
+                    doc.canvas.active_layer().tiles.get_pixel(x, y),
+                    (201, 147, 99, 255),
+                    "pixel ({x},{y}) drifted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sample_merged_clones_the_composite() {
+        let mut doc = red_left_white_right();
+        let mut tool = CloneTool::new();
+        tool.hardness = 1.0;
+        tool.sample_merged = true;
+        clone_stroke(
+            &mut tool,
+            &mut doc,
+            (100.0, 128.0),
+            (250.0, 128.0),
+            340.0,
+            3.0,
+        );
+        assert!(red_coverage(&doc, 300, 128) > 0.99);
+    }
+
+    #[test]
+    fn clone_on_layer_mask_edits_the_mask_and_undoes() {
+        let mut doc = red_left_white_right();
+        {
+            let layer = &mut doc.canvas.layer_stack.layers[0];
+            layer.add_mask(true);
+            let mask = layer.mask.as_mut().unwrap();
+            for y in 0..256 {
+                for x in 0..200 {
+                    mask.tiles.set_pixel(x, y, 0, 0, 0, 255);
+                }
+            }
+        }
+        let pixel_before = doc.canvas.active_layer().tiles.get_pixel(300, 128);
+        let mut tool = CloneTool::new();
+        tool.hardness = 1.0;
+        clone_stroke(
+            &mut tool,
+            &mut doc,
+            (100.0, 128.0),
+            (250.0, 128.0),
+            340.0,
+            3.0,
+        );
+
+        let layer = doc.canvas.active_layer();
+        assert_eq!(layer.mask.as_ref().unwrap().tiles.get_pixel(300, 128).0, 0);
+        assert_eq!(
+            layer.tiles.get_pixel(300, 128),
+            pixel_before,
+            "pixels must not change"
+        );
+
+        doc.canvas.undo();
+        let mask = doc.canvas.active_layer().mask.as_ref().unwrap();
+        assert_eq!(
+            mask.tiles.get_pixel(300, 128).0,
+            255,
+            "undo must restore the mask"
+        );
+    }
+
+    #[test]
+    fn clone_without_source_explains_alt_click() {
+        let mut doc = red_left_white_right();
+        let mut tool = CloneTool::new();
+        let mut ctx = ToolCtx::new(&mut doc, [0, 0, 0, 255], [255; 4], 1.0, 0.0, 0.0);
+        let resp = tool.on_press(PointerEvent::new(300.0, 128.0), &mut ctx);
+        assert!(resp.status.is_some());
     }
 }

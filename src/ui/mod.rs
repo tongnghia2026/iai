@@ -2565,6 +2565,16 @@ pub fn build(
             ) {
                 paint_clone_source_thumbnail(ctx, data, cursor_pos, thumb);
             }
+            if let Some((sx, sy)) = data.tool.clone_source_marker {
+                paint_clone_source_marker(
+                    ctx,
+                    canvas_viewport,
+                    egui::pos2(
+                        sx * data.doc.zoom + data.doc.offset_x,
+                        sy * data.doc.zoom + data.doc.offset_y,
+                    ),
+                );
+            }
         }
 
         if let Some((mx, my)) = data.tool.transform_ctx_menu_pos {
@@ -3137,7 +3147,7 @@ pub fn build(
                             });
                             ui.separator();
                             let mut size = data.tool.clone_size;
-                            if widgets::dev_slider(ui, "Size", &mut size, 1.0..=1000.0) {
+                            if widgets::dev_slider(ui, "Size", &mut size, 1.0..=2000.0) {
                                 actions.tool.set_clone_size = Some(size);
                             }
                             let mut hard = data.tool.clone_hardness * 100.0;
@@ -3964,6 +3974,31 @@ fn draw_brush_preview(painter: &egui::Painter, rect: egui::Rect, hardness: f32, 
     }
 }
 
+/// Small "+" at the point a Clone / Repair stroke is sampling from.
+fn paint_clone_source_marker(ctx: &egui::Context, clip: egui::Rect, at: egui::Pos2) {
+    let painter = ctx
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("clone_source_marker"),
+        ))
+        .with_clip_rect(clip);
+    let arm = 7.0;
+    for (stroke_w, color) in [
+        (3.0_f32, egui::Color32::from_black_alpha(170)),
+        (1.0_f32, egui::Color32::WHITE),
+    ] {
+        let stroke = egui::Stroke::new(stroke_w, color);
+        painter.line_segment(
+            [at - egui::vec2(arm, 0.0), at + egui::vec2(arm, 0.0)],
+            stroke,
+        );
+        painter.line_segment(
+            [at - egui::vec2(0.0, arm), at + egui::vec2(0.0, arm)],
+            stroke,
+        );
+    }
+}
+
 /// Rulers use TopBottomPanel + SidePanel — placed right after menu/topoptions,
 /// NOT covering any panel.
 fn paint_clone_source_thumbnail(
@@ -3979,7 +4014,7 @@ fn paint_clone_source_thumbnail(
         return;
     }
 
-    let side = (data.tool.clone_size * 2.0 * data.doc.zoom).max(1.0);
+    let side = (data.tool.clone_size * data.doc.zoom).max(1.0);
     let rect = egui::Rect::from_center_size(cursor_pos, egui::vec2(side, side));
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,

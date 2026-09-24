@@ -17,6 +17,23 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
 };
 
+/// `[` / `]` step for the Clone / Repair tip, coarser as the tip grows
+/// (Photoshop's brush-size stepping).
+fn clone_bracket_step(size: f32, grow: bool) -> f32 {
+    let s = if grow { size } else { size - 0.5 };
+    if s < 10.0 {
+        1.0
+    } else if s < 100.0 {
+        5.0
+    } else if s < 200.0 {
+        10.0
+    } else if s < 500.0 {
+        25.0
+    } else {
+        50.0
+    }
+}
+
 impl App {
     /// The main window's KeyboardInput arm, verbatim. Shortcuts, tool keys,
     /// nudges, undo/redo — everything the keyboard drives outside egui.
@@ -775,6 +792,10 @@ impl App {
                 } else if self.edit.tools.active_id() == ToolId::Eraser {
                     self.edit.tools.eraser_mut().size =
                         (self.edit.tools.eraser().size - 2.0).max(1.0);
+                } else if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair) {
+                    let size = self.edit.tools.clone_like().size;
+                    self.edit.tools.clone_like_mut().size =
+                        (size - clone_bracket_step(size, false)).max(1.0);
                 } else {
                     self.edit.tools.brush_mut().settings.size =
                         (self.edit.tools.brush().settings.size - 2.0).max(1.0);
@@ -789,6 +810,10 @@ impl App {
                 } else if self.edit.tools.active_id() == ToolId::Eraser {
                     self.edit.tools.eraser_mut().size =
                         (self.edit.tools.eraser().size + 2.0).min(5000.0);
+                } else if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair) {
+                    let size = self.edit.tools.clone_like().size;
+                    self.edit.tools.clone_like_mut().size =
+                        (size + clone_bracket_step(size, true)).min(5000.0);
                 } else {
                     self.edit.tools.brush_mut().settings.size =
                         (self.edit.tools.brush().settings.size + 2.0).min(300.0);
@@ -803,6 +828,9 @@ impl App {
                 } else if self.edit.tools.active_id() == ToolId::Eraser {
                     self.edit.tools.eraser_mut().hardness =
                         (self.edit.tools.eraser().hardness - 0.1).max(0.0);
+                } else if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair) {
+                    let t = self.edit.tools.clone_like_mut();
+                    t.hardness = (t.hardness - 0.25).max(0.0);
                 } else {
                     self.edit.tools.brush_mut().settings.hardness =
                         (self.edit.tools.brush().settings.hardness - 0.1).max(0.0);
@@ -815,6 +843,9 @@ impl App {
                 } else if self.edit.tools.active_id() == ToolId::Eraser {
                     self.edit.tools.eraser_mut().hardness =
                         (self.edit.tools.eraser().hardness + 0.1).min(1.0);
+                } else if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair) {
+                    let t = self.edit.tools.clone_like_mut();
+                    t.hardness = (t.hardness + 0.25).min(1.0);
                 } else {
                     self.edit.tools.brush_mut().settings.hardness =
                         (self.edit.tools.brush().settings.hardness + 0.1).min(1.0);

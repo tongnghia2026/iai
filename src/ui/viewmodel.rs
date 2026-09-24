@@ -223,6 +223,8 @@ pub struct ToolViewModel {
     pub clone_smart_fill: bool,
     /// RGBA preview of the current Clone source patch, including brush softness.
     pub clone_source_thumbnail: Option<std::sync::Arc<CloneSourcePreview>>,
+    /// Canvas point being sampled during a Clone / Repair stroke.
+    pub clone_source_marker: Option<(f32, f32)>,
     // Smudge tool.
     pub smudge_size: f32,
     pub smudge_hardness: f32,
@@ -834,7 +836,7 @@ impl Default for UiData {
                 eyedropper_picked_colors: Vec::new(),
                 move_auto_select: false,
                 move_show_transform: false,
-                clone_size: 30.0,
+                clone_size: 60.0,
                 clone_hardness: 0.0,
                 clone_opacity: 1.0,
                 clone_spacing: 0.25,
@@ -842,6 +844,7 @@ impl Default for UiData {
                 clone_sample_merged: false,
                 clone_smart_fill: false,
                 clone_source_thumbnail: None,
+                clone_source_marker: None,
                 smudge_size: 40.0,
                 smudge_hardness: 0.0,
                 smudge_strength: 0.5,

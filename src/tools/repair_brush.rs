@@ -43,7 +43,7 @@ impl Tool for RepairBrushTool {
         true
     }
     fn cursor_size(&self) -> f32 {
-        self.0.size
+        self.0.size * 0.5
     }
 
     fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
