@@ -38,6 +38,15 @@ pub struct DocumentSession {
     /// save/close and on a clean exit; a file left behind marks an unclean shutdown.
     pub(in crate::app) autosave_files:
         std::collections::HashMap<crate::core::document::DocumentId, std::path::PathBuf>,
+    /// Single-image recovery write running on a worker thread (at most one).
+    pub(in crate::app) autosave_job: Option<super::autosave::AutosaveJob>,
+    /// Content fingerprint last mirrored for each single-image document, so an
+    /// unchanged document is not re-encoded every period.
+    pub(in crate::app) autosave_fingerprints:
+        std::collections::HashMap<crate::core::document::DocumentId, u64>,
+    /// Exclusive lock marking this process alive to other iAi instances, so
+    /// their crash recovery never adopts this session's autosave files.
+    pub(in crate::app) instance_lock: Option<std::fs::File>,
     /// Runtime materialized embedded PDFs for self-contained `.iai` projects.
     pub(in crate::app) embedded_pdf_files:
         std::collections::HashMap<crate::core::document::DocumentId, std::path::PathBuf>,

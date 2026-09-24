@@ -597,6 +597,40 @@ impl App {
         self.docs.autosave_files.insert(id, autosave_path);
     }
 
+    /// Install a crash-recovered single image the same way: pointed back at the
+    /// file it was edited from (or its old tab title when it never had one),
+    /// latched dirty, and still mirrored to the recovery file until saved.
+    pub(crate) fn install_canvas_recovered(
+        &mut self,
+        autosave_path: PathBuf,
+        canvas: Canvas,
+        project_path: Option<PathBuf>,
+        title: Option<String>,
+    ) {
+        self.jobs.load_activate_pending = true;
+        let Some(id) = self.attach_loaded_doc(autosave_path.clone(), canvas, None, None) else {
+            return;
+        };
+        if let Some(doc) = self.docs.documents.iter_mut().find(|d| d.id == id) {
+            doc.path = project_path.clone();
+            doc.file_modified_at = project_path
+                .as_deref()
+                .and_then(crate::core::document::file_modified_at);
+            doc.title = title
+                .filter(|t| !t.trim().is_empty())
+                .or_else(|| {
+                    project_path
+                        .as_deref()
+                        .and_then(|p| p.file_stem())
+                        .map(|s| s.to_string_lossy().to_string())
+                })
+                .unwrap_or_else(|| "Untitled".to_string());
+            doc.canvas.mark_dirty_unconditionally();
+        }
+        self.docs.current_file = project_path;
+        self.docs.autosave_files.insert(id, autosave_path);
+    }
+
     /// Attach any finished `.iai` project loads.
     pub fn poll_iai_projects(&mut self) {
         if self.jobs.pending_iai_projects.is_empty() {

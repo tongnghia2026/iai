@@ -449,6 +449,7 @@ impl App {
                     self.docs.documents[self.docs.active_doc_idx].file_modified_at =
                         file_modified_at(path);
                     self.mark_active_saved();
+                    self.clear_autosave(self.docs.active_doc_idx);
                 }
                 Err(e) => {
                     self.shell.status_msg = format!("Error: {}", e);
@@ -496,6 +497,7 @@ impl App {
                     file_modified_at(&saved);
                 self.docs.current_file = Some(saved);
                 self.mark_active_saved();
+                self.clear_autosave(self.docs.active_doc_idx);
             }
             Err(e) => {
                 self.shell.status_msg = format!("Error: {}", e);

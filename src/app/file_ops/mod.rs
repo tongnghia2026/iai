@@ -266,6 +266,7 @@ impl App {
         self.shell.canvas_unit = self.shell.ui.new_unit;
         let old_id = self.docs.documents[self.docs.active_doc_idx].id;
         self.docs.pdf_render_services.remove(&old_id);
+        self.clear_autosave_for(old_id);
         self.clear_embedded_pdf_for(old_id);
         self.docs.documents[self.docs.active_doc_idx].pdf_page = None;
         self.docs.documents[self.docs.active_doc_idx].pdf_document = None;
