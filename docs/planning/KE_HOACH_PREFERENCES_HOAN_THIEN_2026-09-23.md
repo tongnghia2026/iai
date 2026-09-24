@@ -8,9 +8,10 @@
 
 - Ngày chốt kế hoạch: **2026-09-23**.
 - Nhánh hiện tại: `feat/vector-core-foundation`.
-- Trạng thái tổng thể: Phase 1–3 **HOÀN TẤT** (chủ test OK 24/09). **Phase 4
-  (chủ yêu cầu 24/09) đã code xong, chờ chủ GUI-test.**
-- Việc kế tiếp: chủ test Phase 4 theo cổng nghiệm thu ở mục 6.
+- Trạng thái tổng thể: **HOÀN TẤT Phase 1–4** (chủ test OK 24/09; lần sửa cuối —
+  kéo giãn cửa sổ theo chiều dọc — đã có test tự động, chờ chủ xem lại).
+  Đã push 24/09.
+- Việc kế tiếp: không còn việc trong kế hoạch này.
 - Không push nếu chủ dự án chưa yêu cầu. Sau mỗi phase: build Release + đưa
   đường dẫn `.exe` thật rồi mới mời chủ test (quy ước dự án).
 
@@ -202,23 +203,23 @@ Quy ước trạng thái checklist:
   trùng → cảnh báo; bấm reset → về mặc định; làm hỏng file → app tự lùi mặc
   định. Build Release OK.
 
-### Phase 4 — chủ yêu cầu làm 2026-09-24 `[~]`
+### Phase 4 — chủ yêu cầu làm 2026-09-24 ✅ **XONG (chủ test OK 24/09)**
 
 Chỉnh sửa theo phản hồi sau test Phase 3:
 
-- [~] Nút xác nhận "lấy phím của lệnh khác" nổi bật hơn (khung cảnh báo + nút
+- [x] Nút xác nhận "lấy phím của lệnh khác" nổi bật hơn (khung cảnh báo + nút
       chính tô màu); nút xác nhận khôi phục cũng vậy.
-- [~] Bỏ phím phụ `Ctrl+,` (Preferences chỉ còn `Ctrl+K`); `,` thành phím tự do.
-- [~] Nút "Hoàn tác" ở đáy Preferences đổi chữ thành "Cancel".
+- [x] Bỏ phím phụ `Ctrl+,` (Preferences chỉ còn `Ctrl+K`); `,` thành phím tự do.
+- [x] Nút "Hoàn tác" ở đáy Preferences đổi chữ thành "Cancel".
 
 Tính năng mới:
 
-- [~] **Xuất / Nhập bộ phím tắt** ra file `.json` (trang Phím tắt). Nhập qua
+- [x] **Xuất / Nhập bộ phím tắt** ra file `.json` (trang Phím tắt). Nhập qua
       `KeyMap::from_overrides` nên file lỗi/lạ tự được sửa; báo số mục bỏ qua.
-- [~] **Con trỏ cọ vẽ** (trang Công cụ & Con trỏ), 3 kiểu như PTS: vòng tròn theo
+- [x] **Con trỏ cọ vẽ** (trang Công cụ & Con trỏ), 3 kiểu như PTS: vòng tròn theo
       cỡ cọ (mặc định) · vòng tròn + chữ thập ở tâm · chữ thập chính xác. Áp dụng
       cho cả vòng cọ OS lẫn vòng GPU (cọ rất lớn).
-- [~] **Số bước Undo tối đa** (trang Hiệu năng, mặc định 100, 20–1000), áp dụng
+- [x] **Số bước Undo tối đa** (trang Hiệu năng, mặc định 100, 20–1000), áp dụng
       ngay cho mọi tab đang mở; ngân sách RAM giữ nguyên như cũ.
 - **Cổng nghiệm thu:** xuất → đổi phím → nhập lại về đúng bộ đã xuất; nhập file
   hỏng không làm mất phím; 3 kiểu con trỏ hiển thị đúng (cả cọ rất lớn); giảm số
@@ -293,3 +294,9 @@ Tính năng mới:
   theme là xám sáng nên chữ trắng bị chìm). Đổi thành nút **"OK" nền tối như nút
   "Hủy"**; nút "Khôi phục" trong hộp xác nhận khôi phục cũng về nền tối. Bỏ hẳn
   tham số màu nhấn khỏi các hàm trang Preferences.
+- 2026-09-24: Chủ báo cửa sổ Preferences chỉ kéo giãn được chiều ngang. Nguyên nhân:
+  ScrollArea nội dung `auto_shrink` theo chiều dọc + `max_height` cố định nên cửa
+  sổ luôn co theo nội dung. Sửa: `default_size`/`min_height`/`max_height` cho
+  Window (trừ chỗ thanh tiêu đề để không cao quá màn hình), nội dung lấp đầy chiều
+  cao còn lại (`auto_shrink([false,false])`, trừ dải footer). Test egui kéo góc cửa
+  sổ: co, giãn, kéo ngang, không vượt màn hình (đã kiểm chứng test FAIL trước khi sửa).

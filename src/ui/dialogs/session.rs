@@ -80,10 +80,14 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
 
     modal_overlay(ctx, "preferences_dialog_overlay");
 
-    // Never let the window grow taller than the screen: cap the scrolling
-    // content area, and keep the header, footer and buttons always on-screen.
+    // Resizable both ways but never taller than the screen, so the footer and
+    // its buttons always stay reachable. The limit is on the content, so leave
+    // room for the title bar and frame too.
     let screen = ctx.screen_rect();
-    let max_content_h = (screen.height() - 170.0).clamp(220.0, 520.0);
+    let max_window_h = (screen.height() - 90.0).max(300.0);
+    let default_window_h = (screen.height() - 170.0)
+        .clamp(380.0, 640.0)
+        .min(max_window_h);
 
     egui::Window::new("Preferences")
         .collapsible(false)
@@ -91,11 +95,17 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
         // Centre on first open but stay draggable (an anchored window can't move).
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(screen.center())
-        .default_width(600.0)
+        .default_size([600.0, default_window_h])
         .min_width(520.0)
+        .min_height(300.0)
+        .max_height(max_window_h)
         .order(DIALOG_ORDER)
         .show(ctx, |ui| {
             ui.add_space(6.0);
+            // The body fills whatever height the window is dragged to (it scrolls
+            // when the page is taller); the footer keeps its own strip below.
+            const FOOTER_H: f32 = 40.0;
+            let body_h = (ui.available_height() - FOOTER_H).max(120.0);
             ui.horizontal_top(|ui| {
                 // Left: category list.
                 ui.vertical(|ui| {
@@ -122,8 +132,8 @@ pub(crate) fn preferences_dialog(ctx: &egui::Context, data: &UiData, actions: &m
                 ui.vertical(|ui| {
                     ui.set_min_width(340.0);
                     egui::ScrollArea::vertical()
-                        .auto_shrink([false, true])
-                        .max_height(max_content_h)
+                        .auto_shrink([false, false])
+                        .max_height(body_h)
                         .show(ui, |ui| match category {
                             0 => preferences_general(ui, &mut settings),
                             1 => preferences_appearance(ui),
@@ -1314,5 +1324,93 @@ mod shortcut_editor_tests {
         let (actions, _) = deliver((Command::FileSave, crate::ui::ShortcutCapture::Cancel));
         assert!(actions.settings.captured_taken);
         assert_eq!(super::shortcut_editor_tests::saved(&actions), None);
+    }
+}
+
+#[cfg(test)]
+mod preferences_window_tests {
+    use super::*;
+
+    const SCREEN: egui::Vec2 = egui::vec2(1280.0, 900.0);
+
+    fn frame(ctx: &egui::Context, events: Vec<egui::Event>) {
+        let data = UiData::default();
+        let mut actions = UiActions::default();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+                events,
+                ..Default::default()
+            },
+            |ui| preferences_dialog(ui.ctx(), &data, &mut actions),
+        );
+    }
+
+    fn window_rect(ctx: &egui::Context) -> egui::Rect {
+        ctx.memory(|m| m.area_rect(egui::Id::new("Preferences")))
+            .expect("Preferences window shown")
+    }
+
+    /// Drag the window's bottom-right corner by `delta`, in small steps.
+    fn drag_corner(ctx: &egui::Context, delta: egui::Vec2) {
+        let start = window_rect(ctx).right_bottom() - egui::vec2(2.0, 2.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(ctx, vec![egui::Event::PointerMoved(start)]);
+        frame(ctx, vec![button(start, true)]);
+        for step in 1..=8 {
+            frame(
+                ctx,
+                vec![egui::Event::PointerMoved(
+                    start + delta * (step as f32 / 8.0),
+                )],
+            );
+        }
+        frame(ctx, vec![button(start + delta, false)]);
+        for _ in 0..3 {
+            frame(ctx, vec![]);
+        }
+    }
+
+    #[test]
+    fn the_window_resizes_vertically_both_ways_and_stays_on_screen() {
+        let ctx = egui::Context::default();
+        for _ in 0..4 {
+            frame(&ctx, vec![]);
+        }
+        let start = window_rect(&ctx);
+        assert!(start.height() <= SCREEN.y, "starts on screen: {start:?}");
+
+        drag_corner(&ctx, egui::vec2(0.0, -150.0));
+        let shorter = window_rect(&ctx);
+        assert!(
+            shorter.height() < start.height() - 100.0,
+            "dragging up must shrink it: {start:?} -> {shorter:?}"
+        );
+
+        drag_corner(&ctx, egui::vec2(0.0, 250.0));
+        let taller = window_rect(&ctx);
+        assert!(
+            taller.height() > shorter.height() + 200.0,
+            "dragging down must grow it: {shorter:?} -> {taller:?}"
+        );
+
+        drag_corner(&ctx, egui::vec2(120.0, 0.0));
+        let wider = window_rect(&ctx);
+        assert!(
+            wider.width() > taller.width() + 80.0,
+            "horizontal resizing still works: {taller:?} -> {wider:?}"
+        );
+
+        drag_corner(&ctx, egui::vec2(0.0, 2000.0));
+        let huge = window_rect(&ctx);
+        assert!(
+            huge.height() <= SCREEN.y,
+            "never taller than the screen: {huge:?}"
+        );
     }
 }
