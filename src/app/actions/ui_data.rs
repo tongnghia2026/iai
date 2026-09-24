@@ -235,11 +235,13 @@ impl App {
         Some(image)
     }
 
-    /// Clone / Repair preview: exactly what one dab at the cursor would leave
-    /// on the canvas, built on the canvas pixel grid (the stroke copies whole
-    /// source pixels, so no resampling blur or half-pixel shift). Hidden while
-    /// Alt picks a source, while resizing, over panels and during a stroke —
-    /// the canvas itself shows the live result then.
+    /// Clone / Repair source overlay (Photoshop's clipped overlay): the pixels
+    /// the stroke would copy, at full strength across the whole tip circle —
+    /// tip softness and opacity are left out so every sampled detail stays
+    /// readable. Built on the canvas pixel grid with the stroke's whole-pixel
+    /// offset, so each texel is exactly the source pixel that lands there.
+    /// Hidden while Alt picks a source, while resizing, over panels and during
+    /// a stroke — the canvas itself shows the live result then.
     fn build_clone_source_thumbnail(
         &mut self,
     ) -> Option<std::sync::Arc<crate::ui::CloneSourcePreview>> {
@@ -260,12 +262,10 @@ impl App {
         let zoom = self.edit.view.zoom.max(0.0001);
         let cx = (self.edit.input.mouse_x - self.edit.view.offset_x) / zoom;
         let cy = (self.edit.input.mouse_y - self.edit.view.offset_y) / zoom;
-        let (radius, hardness, opacity, sample_merged, (off_x, off_y)) = {
+        let (radius, sample_merged, (off_x, off_y)) = {
             let tool = self.edit.tools.clone_like();
             (
                 (tool.size * 0.5).max(0.5),
-                tool.hardness,
-                tool.opacity.clamp(0.0, 1.0),
                 tool.sample_merged,
                 tool.preview_offset(cx, cy)?,
             )
@@ -318,12 +318,14 @@ impl App {
             vec![(a, a), (b, a), (a, b), (b, b)]
         };
 
-        canvas.ensure_pixels();
+        if sample_merged {
+            canvas.ensure_pixels();
+        }
         let canvas = &*canvas;
-        // The display composite, when it is current: the preview then shows
-        // the dab over everything visible, exactly as the canvas will.
-        let flat = (!canvas.pixels_stale && canvas.pixels.len() == (w * h * 4) as usize)
-            .then_some(canvas.pixels.as_slice());
+        // Sample Merged reads the display composite, like the stroke does.
+        let flat =
+            (sample_merged && !canvas.pixels_stale && canvas.pixels.len() == (w * h * 4) as usize)
+                .then_some(canvas.pixels.as_slice());
         let layer = canvas.active_layer();
         let tiles = layer.get_paint_tiles()?;
         let (lox, loy) = layer.offset;
@@ -342,8 +344,10 @@ impl App {
             let i = ((y * w + x) * 4) as usize;
             [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
         };
-        let selection = &canvas.selection;
-        let r2 = radius * radius;
+        // Pixel centres up to half a pixel past the rim get partial cover
+        // (an anti-aliased circle edge).
+        let rim = radius + 0.5;
+        let rim2 = rim * rim;
 
         let mut out = vec![0_u8; tw * th * 4];
         for ty in 0..th {
@@ -360,34 +364,20 @@ impl App {
                     let ex = px as f32 + 0.5 - cx;
                     let ey = py as f32 + 0.5 - cy;
                     let d2 = ex * ex + ey * ey;
-                    if d2 > r2 {
+                    if d2 >= rim2 {
                         continue;
                     }
-                    let mut a =
-                        crate::tools::brush::soft_round_alpha(d2, radius, hardness) * opacity;
-                    if selection.active {
-                        a *= selection.sample(px as u32, py as u32);
-                    }
+                    let cover = (rim - d2.sqrt()).min(1.0);
                     let (sx, sy) = (px - off_x, py - off_y);
                     let s = match flat {
-                        Some(buf) if sample_merged => flat_px(buf, sx, sy),
-                        _ => layer_px(sx, sy),
+                        Some(buf) => flat_px(buf, sx, sy),
+                        None => layer_px(sx, sy),
                     };
-                    let d = match flat {
-                        Some(buf) => flat_px(buf, px, py),
-                        None => layer_px(px, py),
-                    };
-                    // Same source-over as the stroke.
-                    let eff = a * s[3] as f32 / 255.0;
-                    let dw = d[3] as f32 / 255.0 * (1.0 - eff);
-                    let out_a = eff + dw;
-                    if out_a < 0.001 {
-                        continue;
-                    }
+                    let a = cover * s[3] as f32 / 255.0;
                     for c in 0..3 {
-                        acc[c] += s[c] as f32 * eff + d[c] as f32 * dw;
+                        acc[c] += s[c] as f32 * a;
                     }
-                    acc[3] += out_a;
+                    acc[3] += a;
                 }
                 if acc[3] <= 0.0 {
                     continue;
@@ -2141,47 +2131,51 @@ mod tests {
     }
 
     #[test]
-    fn clone_preview_matches_the_real_dab_pixel_for_pixel() {
+    fn clone_preview_shows_the_sampled_pixels_exactly() {
         use crate::extension::tool::{PointerEvent, ToolCtx};
         let (w, h) = (200u32, 120u32);
+        let pattern = |x: u32, y: u32| {
+            [
+                (x * 37 % 256) as u8,
+                (y * 53 % 256) as u8,
+                ((x + y) * 11 % 256) as u8,
+                255,
+            ]
+        };
         let mut px = vec![0u8; (w * h * 4) as usize];
         for y in 0..h {
             for x in 0..w {
                 let i = ((y * w + x) * 4) as usize;
-                px[i..i + 4].copy_from_slice(&[
-                    (x * 37 % 256) as u8,
-                    (y * 53 % 256) as u8,
-                    ((x + y) * 11 % 256) as u8,
-                    255,
-                ]);
+                px[i..i + 4].copy_from_slice(&pattern(x, y));
             }
         }
         let mut app = App::new();
         app.docs.documents[0].canvas = crate::core::canvas::Canvas::from_rgba(px, w, h);
         app.edit.tools.select(crate::tools::ToolId::Clone);
         {
+            // Softness and opacity shape the stroke, not the overlay.
             let t = app.edit.tools.clone_like_mut();
             t.size = 21.0;
-            t.hardness = 0.3;
-            t.opacity = 0.8;
+            t.hardness = 0.0;
+            t.opacity = 0.3;
         }
         app.edit.view.zoom = 1.0;
         app.edit.view.offset_x = 0.0;
         app.edit.view.offset_y = 0.0;
         let (fg, bg) = ([0, 0, 0, 255], [255; 4]);
+        let (cx, cy) = (130.7, 60.2);
         {
             let mut ctx = ToolCtx::new(&mut app.docs.documents[0], fg, bg, 1.0, 0.0, 0.0);
             let mut alt = PointerEvent::new(40.3, 50.6);
             alt.alt = true;
             app.edit.tools.on_press(alt, &mut ctx);
         }
-
-        let (cx, cy) = (130.7, 60.2);
         app.edit.input.mouse_x = cx;
         app.edit.input.mouse_y = cy;
         let preview = app.build_clone_source_thumbnail().expect("preview");
         assert_eq!(preview.texel, 1);
 
+        // The stroke from here uses the same whole-pixel offset.
         {
             let mut ctx = ToolCtx::new(&mut app.docs.documents[0], fg, bg, 1.0, 0.0, 0.0);
             app.edit.tools.on_press(PointerEvent::new(cx, cy), &mut ctx);
@@ -2190,29 +2184,32 @@ mod tests {
                 .on_release(PointerEvent::new(cx, cy), &mut ctx);
             ctx.canvas_mut().end_stroke();
         }
-        let tiles = &app.docs.documents[0].canvas.active_layer().tiles;
-        let mut checked = 0;
+        let (off_x, off_y) = (90, 10);
+        let mut opaque = 0;
         for ty in 0..preview.height {
             for tx in 0..preview.width {
                 let p = &preview.pixels[(ty * preview.width + tx) * 4..][..4];
-                if p[3] == 0 {
+                if p[3] != 255 {
                     continue;
                 }
-                assert_eq!(p[3], 255, "opaque document → opaque preview");
-                let x = (preview.canvas_x0 + tx as i32) as u32;
-                let y = (preview.canvas_y0 + ty as i32) as u32;
-                let (r, g, b, _) = tiles.get_pixel(x, y);
-                for (got, want) in p[..3].iter().zip([r, g, b]) {
-                    assert!(
-                        (*got as i32 - want as i32).abs() <= 1,
-                        "({x},{y}): preview {p:?} vs dab {:?}",
-                        (r, g, b)
-                    );
-                }
-                checked += 1;
+                let x = preview.canvas_x0 + tx as i32;
+                let y = preview.canvas_y0 + ty as i32;
+                let src = pattern((x - off_x) as u32, (y - off_y) as u32);
+                assert_eq!(&p[..3], &src[..3], "texel at ({x},{y})");
+                opaque += 1;
             }
         }
-        assert!(checked > 250, "only {checked} preview pixels compared");
+        // The whole tip circle (r = 10.5 → ~346 px) shows the source.
+        assert!(opaque > 300, "only {opaque} full-strength texels");
+        // And the real dab's centre pixel is that same source pixel.
+        let centre = app.docs.documents[0]
+            .canvas
+            .active_layer()
+            .tiles
+            .get_pixel(130, 60);
+        let src = pattern(130 - 90, 60 - 10);
+        let blended = (src[0] as f32 * 0.3 + pattern(130, 60)[0] as f32 * 0.7).round();
+        assert!((centre.0 as f32 - blended).abs() <= 1.0);
     }
 
     #[test]
