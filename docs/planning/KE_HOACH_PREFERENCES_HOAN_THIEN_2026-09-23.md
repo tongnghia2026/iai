@@ -8,9 +8,9 @@
 
 - Ngày chốt kế hoạch: **2026-09-23**.
 - Nhánh hiện tại: `feat/vector-core-foundation`.
-- Trạng thái tổng thể: **Phase 1 + 2 đạt (chủ test OK); Phase 3 đã code xong
-  2026-09-24, chờ chủ GUI-test.** Phase 4 (tùy chọn) chưa làm.
-- Việc kế tiếp: chủ test Phase 3 theo cổng nghiệm thu ở mục 6.
+- Trạng thái tổng thể: **HOÀN TẤT phạm vi chính (Phase 1–3), chủ test OK
+  24/09.** Phase 4 là tùy chọn, chưa làm và chỉ làm khi chủ yêu cầu.
+- Việc kế tiếp: không còn việc bắt buộc. Chờ chủ quyết push và có làm Phase 4.
 - Không push nếu chủ dự án chưa yêu cầu. Sau mỗi phase: build Release + đưa
   đường dẫn `.exe` thật rồi mới mời chủ test (quy ước dự án).
 
@@ -164,7 +164,7 @@ Quy ước trạng thái checklist:
   sổ nằm gọn màn hình, không hồi quy phím cũ). Build Release OK. **Commit local
   (chưa push).**
 
-### Phase 2 — Engine keymap (KHÔNG đổi hành vi)
+### Phase 2 — Engine keymap (KHÔNG đổi hành vi) ✅ **XONG (chủ test OK)**
 
 - [x] `Command` + `KeyChord`/`KeyName` + `KeyMap` (default) — `src/app/commands.rs`.
       Bảng TABLE là nguồn sự thật duy nhất; 5 unit test xanh (không trùng chord,
@@ -183,22 +183,22 @@ Quy ước trạng thái checklist:
   trước (bảo đảm theo cấu trúc); `cargo test --lib` xanh (1654); Build Release OK.
   → **CHỜ CHỦ TEST + quyết định có làm tiếp dispatch/editor ở Phase 3.**
 
-### Phase 3 — Trình sửa phím tắt + RESET `[~]` (code xong 2026-09-24, chờ GUI-test)
+### Phase 3 — Trình sửa phím tắt + RESET ✅ **XONG (chủ test OK 24/09)**
 
-- [~] Bảng phím tắt: tìm kiếm, gom nhóm, bắt phím (bắt ở tầng winit trước egui —
+- [x] Bảng phím tắt: tìm kiếm, gom nhóm, bắt phím (bắt ở tầng winit trước egui —
       egui đổi Ctrl+C/X/V thành sự kiện clipboard nên không bắt được qua egui),
       phát hiện trùng (hỏi trước khi lấy phím của lệnh khác), chặn phím cố định.
-- [~] **Nút "Khôi phục phím tắt mặc định"** (reset toàn bộ, có xác nhận inline).
-- [~] **Reset từng dòng** (nút ↺) + đánh dấu dòng "đã đổi".
-- [~] Lưu keymap vào `prefs.json` (chỉ lưu phần đã đổi: id → phím, `""` = bỏ
+- [x] **Nút "Khôi phục phím tắt mặc định"** (reset toàn bộ, có xác nhận inline).
+- [x] **Reset từng dòng** (nút ↺) + đánh dấu dòng "đã đổi".
+- [x] Lưu keymap vào `prefs.json` (chỉ lưu phần đã đổi: id → phím, `""` = bỏ
       phím); tự phục hồi: id lạ/phím hỏng/phím cố định → về mặc định, trùng →
       phím người dùng đặt thắng; mục `shortcuts` sai kiểu không làm mất cài đặt khác.
-- [~] (Khuyến nghị) nút "Khôi phục toàn bộ cài đặt mặc định" (trang Tổng quát).
-- [~] Dispatch: GIỮ NGUYÊN mọi nhánh phím cũ, mỗi nhánh của lệnh gán được chỉ
+- [x] (Khuyến nghị) nút "Khôi phục toàn bộ cài đặt mặc định" (trang Tổng quát).
+- [x] Dispatch: GIỮ NGUYÊN mọi nhánh phím cũ, mỗi nhánh của lệnh gán được chỉ
       chạy khi lệnh còn phím gốc (`run_default`); phím người dùng đổi đi qua lớp
       `custom_command_for` → `run_command` đặt trước. Keymap chưa đổi ⇒ hành vi y
       hệt trước (theo cấu trúc). Nhãn menu + Help đọc keymap động.
-- **Cổng nghiệm thu:** đổi 1 phím tool + 1 phím lệnh → có hiệu lực + lưu; tạo
+- **Cổng nghiệm thu:** ✅ chủ test OK 24/09 — đổi 1 phím tool + 1 phím lệnh → có hiệu lực + lưu; tạo
   trùng → cảnh báo; bấm reset → về mặc định; làm hỏng file → app tự lùi mặc
   định. Build Release OK.
 
@@ -257,3 +257,5 @@ Quy ước trạng thái checklist:
   trang Tổng quát: khôi phục toàn bộ cài đặt. Giới hạn đã biết: khi đang gõ chữ
   (ô nhập hoặc chữ trên canvas) chỉ các phím gốc được phép như cũ mới đi qua.
   `cargo test --lib` 1682 xanh (+20), fmt/clippy/check --all-targets đạt.
+- 2026-09-24: **Chủ test Phase 3 OK → kế hoạch HOÀN TẤT phạm vi chính.** Phase 4
+  (import/export keymap, tùy chọn con trỏ, cài đặt khác) để ngỏ, chỉ làm khi chủ yêu cầu.
