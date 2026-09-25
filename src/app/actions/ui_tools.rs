@@ -952,12 +952,6 @@ impl App {
             self.win.last_cursor_radius = 0;
             self.sync_cursor(event_loop);
         }
-        if let Some(t) = actions.tool.set_wand_tolerance.take() {
-            self.edit.tools.wand_mut().tolerance = t;
-        }
-        if let Some(e) = actions.tool.set_wand_edge_sensitivity.take() {
-            self.edit.tools.wand_mut().edge_sensitivity = e;
-        }
         if let Some(c) = actions.tool.set_wand_contiguous.take() {
             self.edit.tools.wand_mut().contiguous = c;
         }

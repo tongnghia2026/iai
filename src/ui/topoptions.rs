@@ -2527,28 +2527,6 @@ fn smart_select_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
     }
 
     ui.separator();
-
-    ui.label("Tolerance:").on_hover_text("Colour distance allowed when expanding. 0 = colour-blind (pure brush), 255 = flood entire region.");
-    let mut tol = data.tool.wand_tolerance;
-    if ui
-        .add(egui::DragValue::new(&mut tol).range(0..=255).speed(1.0))
-        .changed()
-    {
-        actions.tool.set_wand_tolerance = Some(tol);
-    }
-
-    ui.separator();
-
-    ui.label("Edge:").on_hover_text("Edge sensitivity: stop expanding at luminance edges.\n0 = off (pure brush)  |  50 = portrait/person  |  100 = hard edges only");
-    let mut edge = data.tool.wand_edge_sensitivity;
-    if ui
-        .add(egui::Slider::new(&mut edge, 0u8..=100u8).show_value(true))
-        .changed()
-    {
-        actions.tool.set_wand_edge_sensitivity = Some(edge);
-    }
-
-    ui.separator();
     let mut merged = data.tool.wand_sample_merged;
     if ui.checkbox(&mut merged, "Sample All Layers").changed() {
         actions.tool.set_wand_sample_merged = Some(merged);

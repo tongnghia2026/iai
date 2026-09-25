@@ -300,8 +300,6 @@ pub struct ToolViewModel {
     /// Gradient tool drag guide: [start_x, start_y, end_x, end_y] in canvas space.
     pub gradient_preview: Option<[f32; 4]>,
     pub wand_brush_size: f32,
-    pub wand_tolerance: u8,
-    pub wand_edge_sensitivity: u8,
     #[allow(dead_code)]
     pub wand_contiguous: bool,
     #[allow(dead_code)]
@@ -893,8 +891,6 @@ impl Default for UiData {
                 arrow_snap_marker: None,
                 gradient_preview: None,
                 wand_brush_size: 30.0,
-                wand_tolerance: 32,
-                wand_edge_sensitivity: 65,
                 wand_contiguous: true,
                 wand_anti_alias: true,
                 wand_sample_merged: true,

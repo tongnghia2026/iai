@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::command::SelectionCommand;
+use crate::core::quick_select::{QuickSelectOp, QuickSelectStroke};
 use crate::core::selection::SelectionMode;
 
+/// Smart Select (W) — Photoshop's Quick Selection: paint over an object and the
+/// selection grows out to its edges. See [`crate::core::quick_select`].
 pub struct SmartSelectTool {
     pub brush_size: f32,
-    pub tolerance: u8,
-    pub edge_sensitivity: u8,
     pub sample_merged: bool,
     pub anti_alias: bool,
     pub feather: f32,
@@ -14,8 +15,12 @@ pub struct SmartSelectTool {
 
     dragging: bool,
     drag_mode: SelectionMode,
-    last_x: f32,
-    last_y: f32,
+    stroke: Option<QuickSelectStroke>,
+    /// Cursor positions not yet applied; cut once per frame.
+    pending: Vec<(f32, f32)>,
+    /// Intersect: the selection before the stroke, and the scratch mask the
+    /// stroke paints.
+    intersect: Option<(Vec<u8>, Vec<u8>)>,
     undo_cmd: Option<SelectionCommand>,
     snapshot_before: Vec<u8>,
 }
@@ -24,44 +29,55 @@ impl SmartSelectTool {
     pub fn new() -> Self {
         Self {
             brush_size: 30.0,
-            tolerance: 32,
-            edge_sensitivity: 65,
             sample_merged: true,
             anti_alias: true,
             feather: 0.0,
             contiguous: true,
             dragging: false,
             drag_mode: SelectionMode::New,
-            last_x: 0.0,
-            last_y: 0.0,
+            stroke: None,
+            pending: Vec::new(),
+            intersect: None,
             undo_cmd: None,
             snapshot_before: Vec::new(),
         }
     }
 
-    fn paint_segment(
-        &self,
-        canvas: &mut crate::core::canvas::Canvas,
-        x0: f32,
-        y0: f32,
-        x1: f32,
-        y1: f32,
-    ) {
-        let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-        let spacing = (self.brush_size * 0.40).max(1.0);
-        let steps = ((dist / spacing).ceil() as u32).clamp(1, 2000);
-        for i in 0..=steps {
-            let t = i as f32 / steps as f32;
-            canvas.smart_select_brush_stamp(
-                x0 + (x1 - x0) * t,
-                y0 + (y1 - y0) * t,
-                self.brush_size,
-                self.tolerance,
-                self.edge_sensitivity,
-                self.drag_mode,
-                self.sample_merged,
-            );
+    /// Apply the pending cursor path to the selection.
+    fn flush(&mut self, canvas: &mut crate::core::canvas::Canvas) {
+        if self.pending.is_empty() {
+            return;
         }
+        let Some(stroke) = self.stroke.as_mut() else {
+            self.pending.clear();
+            return;
+        };
+        let points = std::mem::take(&mut self.pending);
+        if let Some((base, scratch)) = self.intersect.as_mut() {
+            if let Some((x0, y0, x1, y1)) =
+                canvas.quick_select_extend_into(stroke, scratch, &points)
+            {
+                let w = canvas.width as usize;
+                let sel = &mut canvas.selection;
+                let mut any = false;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let i = y * w + x;
+                        if scratch[i] >= 128 {
+                            sel.mask[i] = base[i];
+                            any |= base[i] > 0;
+                        }
+                    }
+                }
+                sel.active |= any;
+                sel.mask_revision += 1;
+                sel.mark_bbox_dirty();
+            }
+        } else {
+            canvas.quick_select_extend(stroke, &points);
+        }
+        self.pending = points;
+        self.pending.clear();
     }
 }
 
@@ -103,18 +119,38 @@ impl Tool for SmartSelectTool {
             self.drag_mode = SelectionMode::Add;
         }
 
-        canvas.smart_select_brush_stamp(
-            event.canvas_x,
-            event.canvas_y,
-            self.brush_size,
-            self.tolerance,
-            self.edge_sensitivity,
-            self.drag_mode,
-            self.sample_merged,
-        );
+        let at = (event.canvas_x, event.canvas_y);
+        let op = if self.drag_mode == SelectionMode::Subtract {
+            QuickSelectOp::Subtract
+        } else {
+            QuickSelectOp::Add
+        };
+        self.intersect = None;
+        if self.drag_mode == SelectionMode::Intersect {
+            // The result is the old selection limited to what this stroke
+            // picks, so it starts empty and fills in as the stroke grows.
+            let n = canvas.selection.mask.len();
+            let base = std::mem::replace(&mut canvas.selection.mask, vec![0; n]);
+            canvas.selection.active = false;
+            canvas.selection.mask_revision += 1;
+            canvas.selection.mark_bbox_dirty();
+            let scratch = vec![0u8; n];
+            self.stroke = canvas.quick_select_begin(
+                op,
+                self.brush_size,
+                at,
+                self.sample_merged,
+                Some(&scratch),
+            );
+            self.intersect = Some((base, scratch));
+        } else {
+            self.stroke =
+                canvas.quick_select_begin(op, self.brush_size, at, self.sample_merged, None);
+        }
 
-        self.last_x = event.canvas_x;
-        self.last_y = event.canvas_y;
+        self.pending.clear();
+        self.pending.push(at);
+        self.flush(canvas);
         self.dragging = true;
         ToolResponse::repaint()
     }
@@ -123,21 +159,20 @@ impl Tool for SmartSelectTool {
         &mut self,
         event: PointerEvent,
         _prev: &PointerEvent,
-        ctx: &mut ToolCtx,
+        _ctx: &mut ToolCtx,
     ) -> ToolResponse {
         if !self.dragging {
             return ToolResponse::none();
         }
-        let canvas = ctx.canvas_mut();
-        self.paint_segment(
-            canvas,
-            self.last_x,
-            self.last_y,
-            event.canvas_x,
-            event.canvas_y,
-        );
-        self.last_x = event.canvas_x;
-        self.last_y = event.canvas_y;
+        self.pending.push((event.canvas_x, event.canvas_y));
+        ToolResponse::none()
+    }
+
+    fn on_frame(&mut self, ctx: &mut ToolCtx) -> ToolResponse {
+        if !self.dragging || self.pending.is_empty() {
+            return ToolResponse::none();
+        }
+        self.flush(ctx.canvas_mut());
         ToolResponse::repaint()
     }
 
@@ -145,9 +180,12 @@ impl Tool for SmartSelectTool {
         if !self.dragging {
             return ToolResponse::none();
         }
-        self.dragging = false;
-
         let canvas = ctx.canvas_mut();
+        self.flush(canvas);
+        self.dragging = false;
+        self.stroke = None;
+        self.intersect = None;
+
         if let Some(mut cmd) = self.undo_cmd.take() {
             if canvas.selection.mask != self.snapshot_before {
                 cmd.capture_after(&canvas.selection);
@@ -160,6 +198,9 @@ impl Tool for SmartSelectTool {
 
     fn on_cancel(&mut self) {
         self.dragging = false;
+        self.stroke = None;
+        self.intersect = None;
+        self.pending.clear();
         self.undo_cmd = None;
         self.snapshot_before.clear();
     }

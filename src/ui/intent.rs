@@ -399,8 +399,6 @@ pub struct ToolIntent {
     pub set_persp_dpi: Option<f32>,
     pub swap_crop_wh: bool,
     pub set_wand_brush_size: Option<f32>,
-    pub set_wand_tolerance: Option<u8>,
-    pub set_wand_edge_sensitivity: Option<u8>,
     pub set_wand_contiguous: Option<bool>,
     pub set_wand_anti_alias: Option<bool>,
     pub set_wand_sample_merged: Option<bool>,

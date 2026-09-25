@@ -1253,8 +1253,6 @@ impl App {
                 patch_mode: self.edit.tools.patch().mode.to_u8(),
                 transform_interpolation: self.shell.ui.transform_interpolation,
                 wand_brush_size: self.edit.tools.wand().brush_size,
-                wand_tolerance: self.edit.tools.wand().tolerance,
-                wand_edge_sensitivity: self.edit.tools.wand().edge_sensitivity,
                 wand_contiguous: self.edit.tools.wand().contiguous,
                 wand_anti_alias: self.edit.tools.wand().anti_alias,
                 wand_sample_merged: self.edit.tools.wand().sample_merged,

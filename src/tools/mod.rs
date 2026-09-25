@@ -442,6 +442,11 @@ impl ToolManager {
         resp
     }
 
+    pub fn on_frame(&mut self, ctx: &mut ToolCtx) -> ToolResponse {
+        let id = self.active;
+        self.tool_dyn_mut(id).on_frame(ctx)
+    }
+
     pub fn active_on_cancel(&mut self) {
         let id = self.active;
         self.tool_dyn_mut(id).on_cancel();

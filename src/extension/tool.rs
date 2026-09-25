@@ -280,6 +280,11 @@ pub trait Tool: Send {
     fn on_release(&mut self, _event: PointerEvent, _ctx: &mut ToolCtx) -> ToolResponse {
         ToolResponse::none()
     }
+    /// Called once per frame after that frame's drag events, so a tool can do
+    /// expensive work once instead of per pointer event.
+    fn on_frame(&mut self, _ctx: &mut ToolCtx) -> ToolResponse {
+        ToolResponse::none()
+    }
 
     fn on_cancel(&mut self) {}
     fn on_confirm(&mut self, _ctx: &mut ToolCtx) {}

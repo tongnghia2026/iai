@@ -347,51 +347,27 @@ impl Canvas {
         self.record_as(Box::new(cmd), ChangeKind::Selection);
     }
 
-    /// Smart Select stamp — SLIC superpixel BFS with Lab color + Sobel edge stop.
-    ///
-    /// Subtract mode: fast circle erase (no edge cache needed).
-    /// Add/New: lazy-compute EdgeCache (Lab + Sobel, ~15-30ms, once per layer revision),
-    ///          then pixel BFS per stamp (<5ms).
-    /// Cache is invalidated automatically when layer_revision changes.
-    pub fn smart_select_brush_stamp(
-        &mut self,
-        cx: f32,
-        cy: f32,
-        brush_radius: f32,
-        tolerance: u8,
-        edge_sensitivity: u8,
-        mode: crate::core::selection::SelectionMode,
-        sample_merged: bool,
-    ) {
-        use crate::core::selection::{
-            compute_sobel, pixels_to_lab, smart_select_stamp_region, EdgeCache,
-        };
+    /// Build (or reuse) the Lab + Sobel cache of the pixels Quick Select and
+    /// the Refine Brush read. Returns `false` when there is nothing to sample.
+    fn ensure_edge_cache(&mut self, sample_merged: bool) -> bool {
+        use crate::core::selection::{compute_sobel, pixels_to_lab, EdgeCache};
 
         let w = self.width;
         let h = self.height;
-        if w == 0 || h == 0 {
-            return;
-        }
-
-        if matches!(mode, crate::core::selection::SelectionMode::Subtract) {
-            self.paint_selection_brush(cx, cy, brush_radius, mode);
-            return;
-        }
-
-        if self.layer_stack.layers.is_empty() {
-            return;
+        if w == 0 || h == 0 || self.layer_stack.layers.is_empty() {
+            return false;
         }
         self.layer_stack.normalize_active_idx();
         let active_idx = self.layer_stack.active_idx;
         let curr_rev = self.layer_revision;
-
-        let needs_recompute = self.edge_cache.as_ref().map_or(true, |c| {
-            c.layer_idx != active_idx
-                || c.layer_revision != curr_rev
-                || c.sample_merged != sample_merged
+        let fresh = self.edge_cache.as_ref().is_some_and(|c| {
+            c.layer_idx == active_idx
+                && c.layer_revision == curr_rev
+                && c.sample_merged == sample_merged
+                && c.width == w
+                && c.height == h
         });
-
-        if needs_recompute {
+        if !fresh {
             let pixels: Vec<u8> = if sample_merged {
                 self.ensure_pixels();
                 self.pixels.clone()
@@ -400,10 +376,8 @@ impl Canvas {
                     .tiles
                     .extract_region(0, 0, w, h)
             };
-
             let lab = pixels_to_lab(&pixels, w, h);
             let sobel = compute_sobel(&pixels, w, h);
-
             self.edge_cache = Some(Box::new(EdgeCache {
                 lab,
                 sobel,
@@ -414,113 +388,71 @@ impl Canvas {
                 sample_merged,
             }));
         }
-
-        let sx = cx.round().clamp(0.0, (w - 1) as f32) as u32;
-        let sy = cy.round().clamp(0.0, (h - 1) as f32) as u32;
-
-        let stamp = smart_select_stamp_region(
-            self.edge_cache.as_ref().unwrap(),
-            sx,
-            sy,
-            brush_radius,
-            tolerance,
-            edge_sensitivity,
-        );
-
-        let mask = &mut self.selection.mask;
-        let canvas_w = w as usize;
-        let stamp_has_any = stamp.mask.iter().any(|&v| v > 0);
-        match mode {
-            crate::core::selection::SelectionMode::Subtract => unreachable!(),
-            crate::core::selection::SelectionMode::Intersect => {
-                for (i, v) in mask.iter_mut().enumerate() {
-                    let x = i % canvas_w;
-                    let y = i / canvas_w;
-                    if x < stamp.x0
-                        || y < stamp.y0
-                        || x >= stamp.x0 + stamp.width
-                        || y >= stamp.y0 + stamp.height
-                    {
-                        *v = 0;
-                        continue;
-                    }
-                    let sx = x - stamp.x0;
-                    let sy = y - stamp.y0;
-                    if stamp.mask[sy * stamp.width + sx] == 0 {
-                        *v = 0;
-                    }
-                }
-                self.selection.active = crate::core::selection::mask_has_any(mask);
-            }
-            _ => {
-                for y in 0..stamp.height {
-                    let src = y * stamp.width;
-                    let dst = (stamp.y0 + y) * canvas_w + stamp.x0;
-                    for x in 0..stamp.width {
-                        if stamp.mask[src + x] > 0 {
-                            mask[dst + x] = 255;
-                        }
-                    }
-                }
-                if stamp_has_any {
-                    self.selection.active = true;
-                } else {
-                    self.selection.active = crate::core::selection::mask_has_any(mask);
-                }
-            }
-        }
-        self.selection.mask_revision += 1;
-        self.selection.mark_bbox_dirty();
+        true
     }
 
-    /// Paint the selection with a solid circular brush (color-agnostic).
-    /// Add: paint 255; Subtract: paint 0.
-    /// Doesn't push undo — the caller manages it.
-    pub fn paint_selection_brush(
+    /// Start a Quick Select (Smart Select, W) stroke at `at`. `scratch` replaces
+    /// the selection as the mask being painted (Intersect paints a scratch mask).
+    pub fn quick_select_begin(
         &mut self,
-        cx: f32,
-        cy: f32,
+        op: crate::core::quick_select::QuickSelectOp,
         radius: f32,
-        mode: crate::core::selection::SelectionMode,
-    ) {
-        let w = self.width;
-        let h = self.height;
-        if w == 0 || h == 0 {
-            return;
+        at: (f32, f32),
+        sample_merged: bool,
+        scratch: Option<&[u8]>,
+    ) -> Option<crate::core::quick_select::QuickSelectStroke> {
+        if !self.ensure_edge_cache(sample_merged) {
+            return None;
         }
+        let cache = self.edge_cache.as_deref()?;
+        let mask = scratch.unwrap_or(&self.selection.mask);
+        Some(crate::core::quick_select::QuickSelectStroke::begin(
+            cache, mask, op, radius, at,
+        ))
+    }
 
-        let x0 = ((cx - radius).floor() as i32).max(0) as u32;
-        let y0 = ((cy - radius).floor() as i32).max(0) as u32;
-        let x1 = ((cx + radius).ceil() as i32 + 1).min(w as i32) as u32;
-        let y1 = ((cy + radius).ceil() as i32 + 1).min(h as i32) as u32;
-
-        let mask = &mut self.selection.mask;
-        let r2 = radius * radius;
-        let subtract = matches!(mode, crate::core::selection::SelectionMode::Subtract);
-
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let dx = x as f32 - cx;
-                let dy = y as f32 - cy;
-                if dx * dx + dy * dy > r2 {
-                    continue;
-                }
-                let i = (y * w + x) as usize;
-                if subtract {
-                    mask[i] = 0;
-                } else {
-                    mask[i] = 255;
-                }
+    /// Continue a Quick Select stroke on the selection. Returns `true` when the
+    /// selection changed.
+    pub fn quick_select_extend(
+        &mut self,
+        stroke: &mut crate::core::quick_select::QuickSelectStroke,
+        points: &[(f32, f32)],
+    ) -> bool {
+        let Some(cache) = self.edge_cache.as_deref() else {
+            return false;
+        };
+        if stroke
+            .extend(cache, &mut self.selection.mask, points)
+            .is_none()
+        {
+            return false;
+        }
+        self.selection.active = match stroke.op() {
+            crate::core::quick_select::QuickSelectOp::Add => true,
+            crate::core::quick_select::QuickSelectOp::Subtract => {
+                crate::core::selection::mask_has_any(&self.selection.mask)
             }
-        }
-        self.selection.active = crate::core::selection::mask_has_any(mask);
+        };
         self.selection.mask_revision += 1;
         self.selection.mark_bbox_dirty();
+        true
+    }
+
+    /// Continue a Quick Select stroke on a scratch mask; returns the changed
+    /// bounds `(x0, y0, x1, y1)`.
+    pub fn quick_select_extend_into(
+        &self,
+        stroke: &mut crate::core::quick_select::QuickSelectStroke,
+        mask: &mut [u8],
+        points: &[(f32, f32)],
+    ) -> Option<(usize, usize, usize, usize)> {
+        let cache = self.edge_cache.as_deref()?;
+        stroke.extend(cache, mask, points)
     }
 
     /// Refine Brush stamp — intelligent alpha matting for selection edges.
     ///
-    /// Uses the EdgeCache (Lab + Sobel) from Quick Select; recomputes when stale.
+    /// Uses the EdgeCache (Lab + Sobel) shared with Quick Select; recomputes when stale.
     /// Smart mode: color-based alpha matting — pixels similar to FG get alpha ≈ 1,
     ///             pixels similar to BG get alpha ≈ 0. Great for hair/fur detail.
     /// Add / Subtract: soft-edge brush that force-includes / force-excludes pixels.
@@ -533,7 +465,7 @@ impl Canvas {
         mode: crate::core::selection::RefineBrushMode,
         sample_merged: bool,
     ) {
-        use crate::core::selection::{compute_sobel, pixels_to_lab, refine_edge_stamp, EdgeCache};
+        use crate::core::selection::refine_edge_stamp;
 
         let w = self.width;
         let h = self.height;
@@ -599,39 +531,8 @@ impl Canvas {
             return;
         }
 
-        if self.layer_stack.layers.is_empty() {
+        if !self.ensure_edge_cache(sample_merged) {
             return;
-        }
-        self.layer_stack.normalize_active_idx();
-        let active_idx = self.layer_stack.active_idx;
-        let curr_rev = self.layer_revision;
-
-        let needs_recompute = self.edge_cache.as_ref().map_or(true, |c| {
-            c.layer_idx != active_idx
-                || c.layer_revision != curr_rev
-                || c.sample_merged != sample_merged
-        });
-
-        if needs_recompute {
-            let pixels: Vec<u8> = if sample_merged {
-                self.ensure_pixels();
-                self.pixels.clone()
-            } else {
-                self.layer_stack.layers[active_idx]
-                    .tiles
-                    .extract_region(0, 0, w, h)
-            };
-            let lab = pixels_to_lab(&pixels, w, h);
-            let sobel = compute_sobel(&pixels, w, h);
-            self.edge_cache = Some(Box::new(EdgeCache {
-                lab,
-                sobel,
-                width: w,
-                height: h,
-                layer_idx: active_idx,
-                layer_revision: curr_rev,
-                sample_merged,
-            }));
         }
 
         let cache = self.edge_cache.as_ref().unwrap();

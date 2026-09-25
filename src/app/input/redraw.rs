@@ -89,6 +89,15 @@ impl App {
                 did_paint = true;
             }
             if did_paint {
+                let mut ctx = ToolCtx::new(
+                    &mut self.docs.documents[self.docs.active_doc_idx],
+                    self.edit.fg_color,
+                    self.edit.bg_color,
+                    self.edit.view.zoom,
+                    self.edit.view.offset_x,
+                    self.edit.view.offset_y,
+                );
+                let _ = self.edit.tools.on_frame(&mut ctx);
                 self.flush_canvas();
                 self.docs.documents[self.docs.active_doc_idx]
                     .canvas
