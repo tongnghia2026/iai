@@ -1614,6 +1614,7 @@ impl App {
                 display_bake: None,
                 display_bake_next: None,
                 select_subject: crate::core::select_subject::SelectSubjectEngine::new(),
+                repair_ai: None,
                 ai_engine: crate::core::ai::edit::AiEditEngine::new(),
                 retouch_engine: crate::core::ai::retouch::RetouchEngine::default(),
                 ext: crate::app::ext_bridge::ExtBridge::new(),

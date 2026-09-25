@@ -1566,4 +1566,67 @@ mod tests {
             "undo restores the spot"
         );
     }
+
+    fn spot_doc() -> (Document, Vec<f32>) {
+        let doc = doc_filled(400, 300, |x, y| {
+            if (190..210).contains(&x) && (140..160).contains(&y) {
+                [20, 20, 20, 255]
+            } else {
+                [160, 130, 110, 255]
+            }
+        });
+        // A 40x40 painted box around the spot, as a stroke would record it.
+        (doc, vec![1.0; 40 * 40])
+    }
+
+    #[test]
+    fn background_spot_heal_commits_when_nothing_else_changed() {
+        let (mut doc, cover) = spot_doc();
+        let mut work = doc
+            .canvas
+            .spot_heal_begin(180, 130, 40, 40, &cover, 1.0)
+            .expect("work");
+        // What the worker thread does with the detached pixels.
+        let (mut pixels, cover, w, h, opacity) = work.take_job();
+        assert!(crate::core::smart_fill::fill_spot_with(
+            &mut pixels,
+            w,
+            h,
+            &cover,
+            opacity,
+            false
+        ));
+        work.set_pixels(pixels);
+        assert_eq!(
+            doc.canvas.spot_heal_finish(work, "Smart Heal (AI)"),
+            Ok(true)
+        );
+        let (r, ..) = doc.canvas.active_layer().tiles.get_pixel(200, 150);
+        assert!((r as i32 - 160).abs() <= 10, "spot still there: r={r}");
+        doc.canvas.undo();
+        assert_eq!(doc.canvas.active_layer().tiles.get_pixel(200, 150).0, 20);
+    }
+
+    #[test]
+    fn background_spot_heal_is_dropped_if_the_pixels_changed_meanwhile() {
+        let (mut doc, cover) = spot_doc();
+        let mut work = doc
+            .canvas
+            .spot_heal_begin(180, 130, 40, 40, &cover, 1.0)
+            .expect("work");
+        assert!(work.run(false));
+        // Another edit lands on the same area while the AI is still working.
+        doc.canvas.layer_stack.layers[0]
+            .tiles
+            .set_pixel(205, 145, 0, 0, 255, 255);
+        assert!(doc
+            .canvas
+            .spot_heal_finish(work, "Smart Heal (AI)")
+            .is_err());
+        assert_eq!(
+            doc.canvas.active_layer().tiles.get_pixel(205, 145),
+            (0, 0, 255, 255),
+            "the newer edit must survive"
+        );
+    }
 }

@@ -422,7 +422,9 @@ impl App {
 
     /// Smart Repair stroke being painted, shown like a spot-healing stroke: a
     /// translucent dark wash over exactly the pixels that heal on release.
-    fn build_repair_stroke_overlay(&self) -> Option<std::sync::Arc<crate::ui::CloneSourcePreview>> {
+    pub(in crate::app) fn build_repair_stroke_overlay(
+        &self,
+    ) -> Option<std::sync::Arc<crate::ui::CloneSourcePreview>> {
         if self.edit.tools.active_id() != crate::tools::ToolId::Repair {
             return None;
         }
@@ -756,7 +758,12 @@ impl App {
         };
 
         let clone_source_thumbnail = self.build_clone_source_thumbnail();
-        let repair_stroke_overlay = self.build_repair_stroke_overlay();
+        let repair_stroke_overlay = self.build_repair_stroke_overlay().or_else(|| {
+            let job = self.jobs.repair_ai.as_ref()?;
+            (self.docs.documents[self.docs.active_doc_idx].id.0 == job.doc_id)
+                .then(|| job.overlay.clone())
+                .flatten()
+        });
         let clone_source_marker = if matches!(
             self.edit.tools.active_id(),
             crate::tools::ToolId::Clone | crate::tools::ToolId::Repair

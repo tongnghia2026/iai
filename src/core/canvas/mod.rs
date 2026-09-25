@@ -18,6 +18,7 @@ use super::layer::{Layer, LayerStack};
 pub use super::selection::Selection;
 
 pub use super::layer::BlendMode;
+pub use raster_ops::SpotHealWork;
 
 pub const DEFAULT_W: u32 = 1920;
 pub const DEFAULT_H: u32 = 1080;

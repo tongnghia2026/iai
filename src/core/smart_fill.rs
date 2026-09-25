@@ -178,6 +178,67 @@ pub fn fill_with(rgba: &mut [u8], w: usize, h: usize, hole: &[bool], params: &CA
     true
 }
 
+/// Rebuild the `hole` of an already-filled buffer at full resolution from the
+/// photo's own patches, guided by the fill already there (e.g. an AI result
+/// made at a lower resolution): the structure follows the guide, the grain is
+/// the photo's. Returns false (buffer untouched) when there is nothing to do or
+/// the work region is too large to refine at full resolution.
+pub fn refine_fill(rgba: &mut [u8], w: usize, h: usize, hole: &[bool]) -> bool {
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 || hole.len() < w * h {
+        return false;
+    }
+    let params = CAParams::default();
+    let patch = (params.patch | 1).max(3);
+    let Some((hx0, hy0, hx1, hy1)) = hole_bbox(hole, w, h) else {
+        return false;
+    };
+    let band = ((hx1 - hx0).max(hy1 - hy0) / 2 + 4 * patch).clamp(2 * patch + 4, 400);
+    let rx0 = hx0.saturating_sub(band);
+    let ry0 = hy0.saturating_sub(band);
+    let rx1 = (hx1 + band).min(w);
+    let ry1 = (hy1 + band).min(h);
+    let (rw, rh) = (rx1 - rx0, ry1 - ry0);
+    if rw * rh > params.budget {
+        return false;
+    }
+    let mut region = vec![0f32; rw * rh * 4];
+    let mut region_hole = vec![false; rw * rh];
+    for y in 0..rh {
+        for x in 0..rw {
+            let si = ((ry0 + y) * w + (rx0 + x)) * 4;
+            for c in 0..4 {
+                region[(y * rw + x) * 4 + c] = rgba[si + c] as f32;
+            }
+            region_hole[y * rw + x] = hole[(ry0 + y) * w + (rx0 + x)];
+        }
+    }
+    let mut level = Level::new(region, region_hole, rw, rh, patch);
+    if level.valid_centers.is_empty() || level.holes.is_empty() {
+        return false;
+    }
+    level.random_nnf();
+    let mut rng = Rng::new(0x51F1_ED00);
+    // Match against the guide first, then settle into coherent real copies.
+    for it in 0..4 {
+        let coherence = if it == 0 { 1.0 } else { 0.8 };
+        level.patchmatch_pass_biased(it, &mut rng, coherence);
+        level.take_best_match_pixels();
+    }
+    for y in 0..rh {
+        for x in 0..rw {
+            if !level.hole[y * rw + x] {
+                continue;
+            }
+            let fi = (y * rw + x) * 4;
+            let si = ((ry0 + y) * w + (rx0 + x)) * 4;
+            for c in 0..4 {
+                rgba[si + c] = level.color[fi + c].round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    true
+}
+
 /// Relax an RGB correction field inside `active` until it becomes harmonic.
 /// `fixed` pixels are Dirichlet anchors; free active pixels are solved by a
 /// red/black SOR pass. `value_scale` is 1.0 for normalized colors and 255.0 for
@@ -309,6 +370,9 @@ pub fn fill_seamless(rgba: &mut [u8], w: usize, h: usize, hole: &[bool]) -> bool
 /// Tip coverage at or above which a Smart Repair stroke replaces a pixel —
 /// the painted footprint its on-canvas overlay shows.
 pub const SPOT_HEAL_COVER: f32 = 0.1;
+/// Painted footprint (px) from which a Smart Repair stroke is rebuilt by the
+/// AI inpainter when its model is available: whole objects rather than spots.
+pub const SPOT_HEAL_AI_MIN_AREA: usize = 10_000;
 /// Ring (px) healed around the painted footprint, so the soft halo around a
 /// blemish or object does not become the fill's boundary colour.
 const SPOT_HEAL_GROW: usize = 2;
@@ -321,6 +385,22 @@ const SPOT_HEAL_GROW: usize = 2;
 /// the stroke edge. `opacity` mixes the result with the original. Returns
 /// `true` if anything changed.
 pub fn fill_spot(rgba: &mut [u8], w: usize, h: usize, cover: &[f32], opacity: f32) -> bool {
+    fill_spot_with(rgba, w, h, cover, opacity, false)
+}
+
+/// [`fill_spot`], optionally letting the LaMa model rebuild the footprint
+/// first (large areas: whole objects), then restoring the photo's own texture
+/// on top at full resolution ([`refine_fill`]) — LaMa works at 512 px and
+/// smooths grain. Falls back to PatchMatch when the model is missing or
+/// fails. Takes seconds on a CPU with AI: run it off the UI thread.
+pub fn fill_spot_with(
+    rgba: &mut [u8],
+    w: usize,
+    h: usize,
+    cover: &[f32],
+    opacity: f32,
+    use_ai: bool,
+) -> bool {
     if w == 0 || h == 0 || rgba.len() < w * h * 4 || cover.len() < w * h {
         return false;
     }
@@ -333,7 +413,10 @@ pub fn fill_spot(rgba: &mut [u8], w: usize, h: usize, cover: &[f32], opacity: f3
         return false;
     }
     let orig = rgba.to_vec();
-    if !fill(rgba, w, h, &hole) {
+    let by_ai = use_ai && crate::core::lama::inpaint(rgba, w, h, &hole);
+    if by_ai {
+        refine_fill(rgba, w, h, &hole);
+    } else if !fill(rgba, w, h, &hole) {
         return false;
     }
     seamless_blend(&orig, rgba, w, h, &hole);
@@ -1450,6 +1533,73 @@ mod quality_tests {
             got > 0.7 * want,
             "skin texture lost: detail {got:.1} vs {want:.1}"
         );
+    }
+
+    #[test]
+    fn refine_restores_real_texture_under_a_blurry_guide() {
+        let (w, h) = (240usize, 200usize);
+        let truth = two_backgrounds(w, h);
+        let mut img = truth.clone();
+        let hole = paint_disc(&mut img, w, h, (120.0, 100.0), 34.0);
+        // A 7x7 box blur of the truth in the hole: what a low-resolution AI
+        // fill looks like — right structure, no grain.
+        let mut guide = truth.clone();
+        for y in 0..h {
+            for x in 0..w {
+                if !hole[y * w + x] {
+                    continue;
+                }
+                for c in 0..3 {
+                    let (mut acc, mut n) = (0u32, 0u32);
+                    for yy in y.saturating_sub(3)..(y + 4).min(h) {
+                        for xx in x.saturating_sub(3)..(x + 4).min(w) {
+                            acc += truth[(yy * w + xx) * 4 + c] as u32;
+                            n += 1;
+                        }
+                    }
+                    guide[(y * w + x) * 4 + c] = (acc / n) as u8;
+                }
+            }
+        }
+        let before = rms(&guide, &truth, &hole);
+        assert!(refine_fill(&mut guide, w, h, &hole));
+        let (got, want) = (detail(&guide, &hole, w), detail(&truth, &hole, w));
+        assert!(
+            got > 0.8 * want,
+            "grain not restored: detail {got:.1} vs {want:.1}"
+        );
+        let after = rms(&guide, &truth, &hole);
+        assert!(
+            after < before,
+            "refine drifted from the guide: {before:.1} -> {after:.1}"
+        );
+    }
+
+    /// Needs the local LaMa model; run with `--ignored` to compare the AI
+    /// path with PatchMatch on the object scene.
+    #[test]
+    #[ignore]
+    fn ai_spot_fill_on_object_scene() {
+        if !crate::core::lama::is_available() {
+            return;
+        }
+        let (w, h) = (480usize, 400usize);
+        let truth = two_backgrounds(w, h);
+        let mut img = truth.clone();
+        let hole = paint_disc(&mut img, w, h, (240.0, 200.0), 70.0);
+        let cover: Vec<f32> = hole.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect();
+        for use_ai in [false, true] {
+            let mut a = img.clone();
+            let t = std::time::Instant::now();
+            assert!(fill_spot_with(&mut a, w, h, &cover, 1.0, use_ai));
+            println!(
+                "ai={use_ai} rms={:.1} detail={:.1} (truth {:.1}) {:?}",
+                rms(&a, &truth, &hole),
+                detail(&a, &hole, w),
+                detail(&truth, &hole, w),
+                t.elapsed()
+            );
+        }
     }
 
     #[test]

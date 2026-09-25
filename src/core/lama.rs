@@ -110,6 +110,22 @@ pub fn model_path() -> PathBuf {
     models_dir().join(MODEL_FILE)
 }
 
+/// Marker left next to the model once LaMa has failed on this machine's GPU,
+/// so later sessions go straight to the CPU instead of paying the failed
+/// DirectML attempt (seconds) again. It holds the adapter name: a different
+/// GPU gets tried afresh.
+fn gpu_failed_marker() -> PathBuf {
+    models_dir().join("lama_fp32.gpu-failed")
+}
+
+fn adapter_name() -> String {
+    crate::core::hw::gpu().map_or_else(String::new, |g| g.name.clone())
+}
+
+fn gpu_known_to_fail() -> bool {
+    std::fs::read_to_string(gpu_failed_marker()).is_ok_and(|s| s.trim() == adapter_name())
+}
+
 /// Kick off a background download if the model is absent (or a previous attempt
 /// errored). No-op if it's already downloading or ready.
 pub fn ensure_downloading() {
@@ -195,6 +211,45 @@ fn download_blocking() -> Result<(), String> {
 fn session_cell() -> &'static Mutex<Option<OrtSession>> {
     static SESS: OnceLock<Mutex<Option<OrtSession>>> = OnceLock::new();
     SESS.get_or_init(|| Mutex::new(None))
+}
+
+/// Build the cached session: GPU (DirectML) when a real adapter is present
+/// and DirectML is not known to fail for LaMa here; the helper handles
+/// build-time fallback, and `inpaint` handles run-time fallback.
+fn load_session(slot: &mut Option<OrtSession>) -> bool {
+    let prefer_gpu = crate::core::ai::ort_ep::prefer_gpu()
+        && !LAMA_GPU_DISABLED.load(Ordering::Relaxed)
+        && !gpu_known_to_fail();
+    match crate::core::ai::ort_ep::build_session(&model_path(), prefer_gpu) {
+        Ok((s, gpu)) => {
+            *slot = Some(s);
+            LAMA_ON_GPU.store(gpu, Ordering::Relaxed);
+            true
+        }
+        Err(e) => {
+            set_status(LamaStatus::Error(e));
+            false
+        }
+    }
+}
+
+/// Load the model in the background ahead of the first inpaint (the Repair
+/// Brush asks for this when it is picked), so the first AI heal waits only
+/// for the inference. No-op when the model is absent or already loading.
+pub fn preload() {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if !is_available() || STARTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("lama-preload".into())
+        .spawn(|| {
+            if let Ok(mut guard) = session_cell().lock() {
+                if guard.is_none() {
+                    load_session(&mut guard);
+                }
+            }
+        });
 }
 
 fn hole_bbox(hole: &[bool], w: usize, h: usize) -> Option<(usize, usize, usize, usize)> {
@@ -307,23 +362,8 @@ pub fn inpaint(rgba: &mut [u8], w: usize, h: usize, hole: &[bool]) -> bool {
             Ok(g) => g,
             Err(_) => return false,
         };
-        if guard.is_none() {
-            let path = model_path();
-            // GPU (DirectML) when a real adapter is present and DirectML has not
-            // already failed for LaMa this session; the helper handles build-time
-            // fallback, and the run below handles run-time fallback.
-            let prefer_gpu =
-                crate::core::ai::ort_ep::prefer_gpu() && !LAMA_GPU_DISABLED.load(Ordering::Relaxed);
-            match crate::core::ai::ort_ep::build_session(&path, prefer_gpu) {
-                Ok((s, gpu)) => {
-                    *guard = Some(s);
-                    LAMA_ON_GPU.store(gpu, Ordering::Relaxed);
-                }
-                Err(e) => {
-                    set_status(LamaStatus::Error(e));
-                    return false;
-                }
-            }
+        if guard.is_none() && !load_session(&mut guard) {
+            return false;
         }
         match run_on(guard.as_mut().unwrap()) {
             Ok(data) => data,
@@ -332,6 +372,7 @@ pub fn inpaint(rgba: &mut [u8], w: usize, h: usize, hole: &[bool]) -> bool {
                 // LaMa, rebuild a clean CPU session, and retry once.
                 if LAMA_ON_GPU.load(Ordering::Relaxed) {
                     LAMA_GPU_DISABLED.store(true, Ordering::Relaxed);
+                    let _ = std::fs::write(gpu_failed_marker(), adapter_name());
                     let path = model_path();
                     match crate::core::ai::ort_ep::build_session(&path, false) {
                         Ok((s, _)) => {

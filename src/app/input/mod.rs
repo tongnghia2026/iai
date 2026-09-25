@@ -1195,6 +1195,7 @@ impl ApplicationHandler for App {
             || self.edit.transform_state.is_some()
             || self.edit.pending_transform_commit.is_some()
             || self.jobs.select_subject.is_busy()
+            || self.jobs.repair_ai.is_some()
             || self.jobs.ai_engine.has_jobs()
             || lama_downloading
             || self.jobs.pending_file_dialog.is_some()
@@ -1303,6 +1304,7 @@ impl ApplicationHandler for App {
                 || !self.jobs.pending_loads.is_empty()
                 || self.edit.pending_transform_commit.is_some()
                 || self.jobs.select_subject.is_busy()
+                || self.jobs.repair_ai.is_some()
                 || self.jobs.ai_engine.has_jobs()
                 || crate::core::lama::is_downloading()
                 || self
@@ -1344,6 +1346,7 @@ impl ApplicationHandler for App {
             || !self.jobs.pending_loads.is_empty()
             || self.edit.pending_transform_commit.is_some()
             || self.jobs.select_subject.is_busy()
+            || self.jobs.repair_ai.is_some()
             || self.jobs.ai_engine.has_jobs()
             || crate::core::lama::is_downloading()
             || self.win.pending_view_change

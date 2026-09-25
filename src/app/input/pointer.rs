@@ -552,6 +552,18 @@ impl App {
                                 return;
                             }
 
+                            if self.edit.tools.active_id() == ToolId::Repair
+                                && self.jobs.repair_ai.is_some()
+                                && self.edit.transform_state.is_none()
+                            {
+                                self.shell.status_msg =
+                                    "AI đang xoá vùng vừa tô — đợi vài giây".to_string();
+                                if let Some(w) = &self.win.window {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+
                             if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair)
                                 && self.edit.input.alt_held
                                 && self.edit.transform_state.is_none()
@@ -942,9 +954,17 @@ impl App {
                                 }
 
                                 if self.edit.tools.active_id() == crate::tools::ToolId::Repair {
-                                    if let Some(s) =
-                                        self.edit.tools.healing_mut().0.take_pending_ca()
-                                    {
+                                    // Large strokes go to the AI in the background;
+                                    // the rest heal right here.
+                                    let wash = self.build_repair_stroke_overlay();
+                                    let heal_now = self
+                                        .edit
+                                        .tools
+                                        .healing_mut()
+                                        .0
+                                        .take_pending_ca()
+                                        .and_then(|s| self.start_repair_ai(s, wash));
+                                    if let Some(s) = heal_now {
                                         let ok = self.docs.documents[self.docs.active_doc_idx]
                                             .canvas
                                             .spot_heal(s.x0, s.y0, s.w, s.h, &s.cover, s.opacity);

@@ -118,6 +118,10 @@ impl App {
         }
 
         self.poll_select_subject();
+        self.poll_repair_ai();
+        if self.edit.tools.active_id() == crate::tools::ToolId::Repair {
+            crate::core::lama::preload();
+        }
         self.poll_ai_edits();
         self.poll_offline_retouch();
         self.poll_ext_bridge();
@@ -186,6 +190,7 @@ impl App {
                 && !self.dev.develop_gpu_preview_dirty
                 && self.shell.adjustment_preview_pending.is_none()
                 && !self.jobs.select_subject.is_busy()
+                && self.jobs.repair_ai.is_none()
                 && !self.jobs.ai_engine.has_jobs()
                 && self.jobs.pending_file_dialog.is_none()
                 && self.jobs.pending_pdf_export.is_none()

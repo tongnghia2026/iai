@@ -1203,20 +1203,37 @@ impl Canvas {
         cover: &[f32],
         opacity: f32,
     ) -> bool {
-        self.layer_stack.normalize_active_idx();
-        if self.layer_stack.layers.is_empty() {
+        let Some(mut work) = self.spot_heal_begin(x0, y0, w, h, cover, opacity) else {
+            return false;
+        };
+        if !work.run(false) {
             return false;
         }
+        self.spot_heal_finish(work, "Smart Heal") == Ok(true)
+    }
+
+    /// Cut a Smart Repair heal out of the active layer so the fill can run
+    /// elsewhere (the AI path takes seconds and runs off the UI thread).
+    /// Commit it with [`Self::spot_heal_finish`]. None when the layer is
+    /// unsuitable or the stroke is empty.
+    pub fn spot_heal_begin(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        w: u32,
+        h: u32,
+        cover: &[f32],
+        opacity: f32,
+    ) -> Option<SpotHealWork> {
+        self.layer_stack.normalize_active_idx();
         let idx = self.layer_stack.active_idx;
-        let (layer_id, lw, lh) = {
-            let layer = &self.layer_stack.layers[idx];
-            if (!layer.is_background && layer.locked) || !layer.is_raster() {
-                return false;
-            }
-            (layer.id, layer.width, layer.height)
-        };
+        let layer = self.layer_stack.layers.get(idx)?;
+        if (!layer.is_background && layer.locked) || !layer.is_raster() {
+            return None;
+        }
+        let (lw, lh) = (layer.width, layer.height);
         if w == 0 || h == 0 || cover.len() < (w as usize) * (h as usize) || x0 >= lw || y0 >= lh {
-            return false;
+            return None;
         }
 
         // Context around the stroke for the patch search (fill() borrows from
@@ -1228,8 +1245,8 @@ impl Canvas {
         let cy1 = (y0 + h + margin).min(lh);
         let (cw, ch) = (cx1 - cx0, cy1 - cy0);
 
-        let before_tiles = self.layer_stack.layers[idx].tiles.clone();
-        let mut buf = before_tiles.extract_region(cx0, cy0, cw, ch);
+        let before_tiles = layer.tiles.clone();
+        let pixels = before_tiles.extract_region(cx0, cy0, cw, ch);
         let mut crop_cover = vec![0f32; (cw as usize) * (ch as usize)];
         for y in 0..h {
             let py = y0 + y;
@@ -1244,17 +1261,117 @@ impl Canvas {
                 crop_cover[((py - cy0) * cw + (px - cx0)) as usize] = cover[(y * w + x) as usize];
             }
         }
-        if !crate::core::smart_fill::fill_spot(
-            &mut buf,
-            cw as usize,
-            ch as usize,
-            &crop_cover,
+        Some(SpotHealWork {
+            layer_id: layer.id,
+            layer_size: (lw, lh),
+            before_tiles,
+            x0: cx0,
+            y0: cy0,
+            w: cw,
+            h: ch,
+            pixels,
+            cover: crop_cover,
             opacity,
-        ) {
-            return false;
+        })
+    }
+
+    /// Commit a heal prepared by [`Self::spot_heal_begin`] (after
+    /// [`SpotHealWork::run`]). `Ok(false)` if its layer is gone; `Err` if the
+    /// pixels under the crop changed since it began (another edit or an undo
+    /// landed while it ran) — the result is dropped rather than painted over
+    /// that edit.
+    pub fn spot_heal_finish(
+        &mut self,
+        work: SpotHealWork,
+        label: &str,
+    ) -> Result<bool, &'static str> {
+        let Some(idx) = self
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == work.layer_id)
+        else {
+            return Ok(false);
+        };
+        let current = &self.layer_stack.layers[idx];
+        if (current.width, current.height) != work.layer_size
+            || !work.crop_unchanged(&current.tiles)
+        {
+            return Err("ảnh đã thay đổi trong lúc xử lý");
         }
+        let before_tiles = current.tiles.clone();
         let mut after_tiles = before_tiles.clone();
-        after_tiles.write_region(cx0, cy0, cw, ch, &buf);
-        self.commit_layer_tiles_change(layer_id, before_tiles, after_tiles, "Smart Heal")
+        after_tiles.write_region(work.x0, work.y0, work.w, work.h, &work.pixels);
+        Ok(self.commit_layer_tiles_change(work.layer_id, before_tiles, after_tiles, label))
+    }
+}
+
+/// A Smart Repair heal cut out of a layer: the crop's pixels and stroke
+/// coverage, plus what is needed to commit the result safely later.
+pub struct SpotHealWork {
+    layer_id: u32,
+    layer_size: (u32, u32),
+    /// The layer's tiles when the work began (cheap Arc clone).
+    before_tiles: crate::core::tile::TileMap,
+    x0: u32,
+    y0: u32,
+    w: u32,
+    h: u32,
+    pixels: Vec<u8>,
+    cover: Vec<f32>,
+    opacity: f32,
+}
+
+impl SpotHealWork {
+    /// Rebuild the painted footprint inside the crop; `use_ai` lets the LaMa
+    /// inpainter do it first (seconds on a CPU). False when nothing changed.
+    pub fn run(&mut self, use_ai: bool) -> bool {
+        crate::core::smart_fill::fill_spot_with(
+            &mut self.pixels,
+            self.w as usize,
+            self.h as usize,
+            &self.cover,
+            self.opacity,
+            use_ai,
+        )
+    }
+
+    /// Detach the pixel work so it can run on another thread; hand the
+    /// result back with [`Self::set_pixels`].
+    pub fn take_job(&mut self) -> (Vec<u8>, Vec<f32>, usize, usize, f32) {
+        (
+            std::mem::take(&mut self.pixels),
+            std::mem::take(&mut self.cover),
+            self.w as usize,
+            self.h as usize,
+            self.opacity,
+        )
+    }
+
+    pub fn set_pixels(&mut self, pixels: Vec<u8>) {
+        self.pixels = pixels;
+    }
+
+    /// Whether every tile under the crop is still the one the work began
+    /// from (tiles are copy-on-write, so any edit replaces the Arc).
+    fn crop_unchanged(&self, current: &crate::core::tile::TileMap) -> bool {
+        let ts = crate::core::tile::TILE_SIZE;
+        for ty in (self.y0 / ts)..=((self.y0 + self.h - 1) / ts) {
+            for tx in (self.x0 / ts)..=((self.x0 + self.w - 1) / ts) {
+                let pos = crate::core::tile::TilePos {
+                    x: tx as i32,
+                    y: ty as i32,
+                };
+                let same = match (self.before_tiles.tiles.get(&pos), current.tiles.get(&pos)) {
+                    (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !same {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }

@@ -760,6 +760,106 @@ impl App {
         }
     }
 
+    /// Hand a large Smart Repair stroke to the AI inpainter on a worker
+    /// thread (seconds on a CPU); the painted wash stays until
+    /// [`Self::poll_repair_ai`] commits it. Returns the stroke back when it
+    /// should be healed right away instead (small, no model, or no thread).
+    pub(in crate::app) fn start_repair_ai(
+        &mut self,
+        stroke: crate::tools::clone_tool::SmartHealStroke,
+        wash: Option<std::sync::Arc<crate::ui::CloneSourcePreview>>,
+    ) -> Option<crate::tools::clone_tool::SmartHealStroke> {
+        use crate::core::smart_fill::{SPOT_HEAL_AI_MIN_AREA, SPOT_HEAL_COVER};
+        let area = stroke
+            .cover
+            .iter()
+            .filter(|&&v| v >= SPOT_HEAL_COVER)
+            .count();
+        if area < SPOT_HEAL_AI_MIN_AREA
+            || self.jobs.repair_ai.is_some()
+            || !crate::core::lama::is_available()
+        {
+            return Some(stroke);
+        }
+        let doc = &mut self.docs.documents[self.docs.active_doc_idx];
+        let doc_id = doc.id.0;
+        let Some(mut work) = doc.canvas.spot_heal_begin(
+            stroke.x0,
+            stroke.y0,
+            stroke.w,
+            stroke.h,
+            &stroke.cover,
+            stroke.opacity,
+        ) else {
+            return Some(stroke);
+        };
+        let (mut pixels, cover, w, h, opacity) = work.take_job();
+        let spawned = std::thread::Builder::new()
+            .name("repair-ai".into())
+            .spawn(move || {
+                crate::core::smart_fill::fill_spot_with(&mut pixels, w, h, &cover, opacity, true)
+                    .then_some(pixels)
+            });
+        match spawned {
+            Ok(handle) => {
+                self.jobs.repair_ai = Some(crate::app::background_jobs::RepairAiJob {
+                    doc_id,
+                    work,
+                    overlay: wash,
+                    handle,
+                });
+                self.shell.status_msg = "AI đang xoá vùng vừa tô… (vài giây)".to_string();
+                None
+            }
+            Err(_) => Some(stroke),
+        }
+    }
+
+    /// Commit a finished AI Repair heal into the document it was painted on.
+    pub(crate) fn poll_repair_ai(&mut self) {
+        if !self
+            .jobs
+            .repair_ai
+            .as_ref()
+            .is_some_and(|job| job.handle.is_finished())
+        {
+            return;
+        }
+        let Some(job) = self.jobs.repair_ai.take() else {
+            return;
+        };
+        let pixels = job.handle.join().ok().flatten();
+        let idx = self
+            .docs
+            .documents
+            .iter()
+            .position(|d| d.id.0 == job.doc_id);
+        self.shell.status_msg = match (pixels, idx) {
+            (None, _) => "Smart Heal (AI): không có gì thay đổi".to_string(),
+            (_, None) => "Smart Heal (AI): tab gốc đã đóng — bỏ kết quả".to_string(),
+            (Some(pixels), Some(idx)) => {
+                let mut work = job.work;
+                work.set_pixels(pixels);
+                match self.docs.documents[idx]
+                    .canvas
+                    .spot_heal_finish(work, "Smart Heal (AI)")
+                {
+                    Ok(true) => {
+                        if idx == self.docs.active_doc_idx {
+                            self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+                        }
+                        "Smart Heal (AI)".to_string()
+                    }
+                    Ok(false) => "Smart Heal (AI): layer đã bị xoá — bỏ kết quả".to_string(),
+                    Err(why) => format!("Smart Heal (AI): {why} — bỏ kết quả"),
+                }
+            }
+        };
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
     /// Open the Smart Fill dialog (method picker). Requires a selection.
     pub(crate) fn request_smart_fill_fill(&mut self) {
         if !self.docs.documents[self.docs.active_doc_idx]

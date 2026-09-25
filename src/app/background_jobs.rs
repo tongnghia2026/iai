@@ -183,10 +183,21 @@ pub struct BackgroundJobs {
     /// Newest per-object display batch requested while a batch ran (latest wins).
     pub(in crate::app) display_bake_next: Option<Vec<crate::app::state::PathDisplayCacheKey>>,
     pub(in crate::app) select_subject: crate::core::select_subject::SelectSubjectEngine,
+    /// Smart Repair stroke being rebuilt by the AI inpainter off the UI thread.
+    pub(in crate::app) repair_ai: Option<RepairAiJob>,
     /// Gemini AI image-edit engine (see core/ai/edit.rs).
     pub(in crate::app) ai_engine: crate::core::ai::edit::AiEditEngine,
     /// Offline sequential AI retouch pipeline (see core/ai/retouch.rs).
     pub(in crate::app) retouch_engine: crate::core::ai::retouch::RetouchEngine,
     /// Browser-extension bridge: localhost WS server (see app/ext_bridge.rs).
     pub(in crate::app) ext: crate::app::ext_bridge::ExtBridge,
+}
+
+/// A large Smart Repair stroke handed to the AI inpainter (seconds on a CPU).
+/// The painted wash stays on screen until `poll_repair_ai` commits the result.
+pub(in crate::app) struct RepairAiJob {
+    pub(in crate::app) doc_id: u32,
+    pub(in crate::app) work: crate::core::canvas::SpotHealWork,
+    pub(in crate::app) overlay: Option<std::sync::Arc<crate::ui::CloneSourcePreview>>,
+    pub(in crate::app) handle: std::thread::JoinHandle<Option<Vec<u8>>>,
 }
