@@ -24,7 +24,7 @@ fn centered_layer_offset(canvas_w: u32, canvas_h: u32, layer_w: u32, layer_h: u3
 /// mirror and the 16-bit master when present. Tiles left fully transparent
 /// are dropped, so the copied block's tile bounding box tracks the selected
 /// content instead of the source layer's full extent.
-fn mask_copied_layer_by_selection(
+pub(super) fn mask_copied_layer_by_selection(
     layer: &mut Layer,
     selection: &crate::core::selection::Selection,
     canvas_w: u32,

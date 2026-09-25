@@ -132,7 +132,7 @@ where
 /// gamma-space premultiply (egui's default) darkens every soft edge — the dark
 /// halo the Clone preview used to show. Premultiplying in linear light makes
 /// the blend come out right.
-fn premultiply_for_linear_target(rgb: [u8; 3], alpha: f32) -> [u8; 4] {
+pub(super) fn premultiply_for_linear_target(rgb: [u8; 3], alpha: f32) -> [u8; 4] {
     let a = alpha.clamp(0.0, 1.0);
     if a >= 0.999 {
         return [rgb[0], rgb[1], rgb[2], 255];
@@ -1567,11 +1567,19 @@ impl App {
                 select_subject_model: self.jobs.select_subject.selected_model(),
                 yolo_people_only: self.jobs.select_subject.people_only(),
                 show_refine_panel: self.edit.show_refine_panel,
-                refine_feather: self.edit.refine_feather,
-                refine_smooth: self.edit.refine_smooth,
-                refine_smart_radius: self.edit.refine_smart_radius,
-                refine_shift_edge: self.edit.refine_shift_edge,
-                refine_contrast: self.edit.refine_contrast,
+                refine_params: self.refine_params(),
+                refine_can_undo: self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .refine
+                    .as_ref()
+                    .is_some_and(|s| s.can_undo()),
+                refine_can_redo: self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .refine
+                    .as_ref()
+                    .is_some_and(|s| s.can_redo()),
+                refine_view_opacity: self.edit.refine_view_opacity,
+                refine_show_original: self.edit.refine_show_original,
                 refine_decontaminate: self.edit.refine_decontaminate,
                 refine_decontaminate_amount: self.edit.refine_decontaminate_amount,
                 refine_brush_size: self.edit.tools.refine_brush().size,

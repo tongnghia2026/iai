@@ -311,33 +311,38 @@ impl App {
         if actions.sel.refine_cancel {
             self.cancel_refine_panel();
         }
-        if actions.sel.refine_apply {
-            self.commit_refine_panel();
-        }
-
-        if let Some(v) = actions.sel.set_refine_feather.take() {
-            self.edit.refine_feather = v;
-        }
-        if let Some(v) = actions.sel.set_refine_smooth.take() {
-            self.edit.refine_smooth = v;
-        }
-        if let Some(v) = actions.sel.set_refine_smart_radius.take() {
-            self.edit.refine_smart_radius = v;
-        }
-        if let Some(v) = actions.sel.set_refine_shift_edge.take() {
-            self.edit.refine_shift_edge = v;
-        }
-        if let Some(v) = actions.sel.set_refine_contrast.take() {
-            self.edit.refine_contrast = v;
-        }
         if let Some(v) = actions.sel.set_refine_decontaminate.take() {
             self.edit.refine_decontaminate = v;
+            // Photoshop: decontaminated colours only go to a new layer.
+            if v && matches!(
+                self.edit.refine_output_mode,
+                crate::ui::refine_select::RefineOutputMode::Selection
+                    | crate::ui::refine_select::RefineOutputMode::LayerMask
+            ) {
+                self.edit.refine_output_mode =
+                    crate::ui::refine_select::RefineOutputMode::NewLayerWithMask;
+            }
         }
         if let Some(v) = actions.sel.set_refine_decontaminate_amount.take() {
             self.edit.refine_decontaminate_amount = v;
         }
-        if actions.sel.trigger_refine_apply && self.edit.show_refine_panel {
-            self.apply_refine_preview();
+        if self.edit.show_refine_panel {
+            let params = actions.sel.set_refine_params.take();
+            if params.is_some() || actions.sel.trigger_refine_apply {
+                self.set_refine_params(params, actions.sel.trigger_refine_apply);
+            }
+            if actions.sel.refine_undo {
+                self.refine_history_step(false);
+            }
+            if actions.sel.refine_redo {
+                self.refine_history_step(true);
+            }
+            if actions.sel.refine_clear || actions.sel.refine_invert {
+                self.refine_edit_base(actions.sel.refine_invert);
+            }
+        }
+        if actions.sel.refine_apply {
+            self.commit_refine_panel();
         }
 
         if let Some(v) = actions.sel.set_refine_brush_size.take() {
@@ -351,11 +356,16 @@ impl App {
         }
         if let Some(v) = actions.sel.set_refine_view_mode.take() {
             self.edit.refine_view_mode = v;
-            self.edit.refine_overlay_tex = None;
-            self.edit.refine_overlay_mask_rev = u64::MAX;
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
+            self.edit.refine_show_original = false;
+            self.invalidate_refine_overlay();
+        }
+        if let Some(v) = actions.sel.set_refine_view_opacity.take() {
+            self.edit.refine_view_opacity = v.clamp(0.0, 1.0);
+            self.invalidate_refine_overlay();
+        }
+        if let Some(v) = actions.sel.set_refine_show_original.take() {
+            self.edit.refine_show_original = v;
+            self.invalidate_refine_overlay();
         }
         if actions.sel.open_refine_color_dialog {
             self.shell.ui.show_refine_color_dialog = true;
@@ -406,6 +416,13 @@ impl App {
         }
         if let Some(v) = actions.sel.set_refine_output_mode.take() {
             self.edit.refine_output_mode = v;
+            if matches!(
+                v,
+                crate::ui::refine_select::RefineOutputMode::Selection
+                    | crate::ui::refine_select::RefineOutputMode::LayerMask
+            ) {
+                self.edit.refine_decontaminate = false;
+            }
         }
 
         if actions.doc.copy {

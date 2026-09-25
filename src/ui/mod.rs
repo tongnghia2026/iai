@@ -972,9 +972,7 @@ pub fn build(
             return;
         }
 
-        if data.sel.show_refine_panel
-            && data.sel.refine_view_mode == crate::ui::refine_select::RefineViewMode::Overlay
-        {
+        if let (true, Some(tex_id)) = (data.sel.show_refine_panel, data.sel.refine_overlay_tex) {
             let canvas_rect = egui::Rect::from_min_size(
                 egui::pos2(data.doc.offset_x, data.doc.offset_y),
                 egui::vec2(
@@ -992,21 +990,12 @@ pub fn build(
                     ))
                     .with_clip_rect(clip_rect);
 
-                if let Some(tex_id) = data.sel.refine_overlay_tex {
-                    painter.image(
-                        tex_id,
-                        canvas_rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                } else {
-                    let [r, g, b, a] = data.sel.refine_overlay_color;
-                    painter.rect_filled(
-                        canvas_rect,
-                        0.0,
-                        egui::Color32::from_rgba_unmultiplied(r, g, b, a),
-                    );
-                }
+                painter.image(
+                    tex_id,
+                    canvas_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
             }
         }
 
@@ -2978,6 +2967,16 @@ pub fn build(
                                 Some("Shift+F6"),
                             ) {
                                 actions.sel.show_feather_dialog = Some(true);
+                                clicked = true;
+                            }
+                            if flat_context_menu_item(
+                                ui,
+                                menu_w,
+                                has_doc,
+                                "Refine Selection...",
+                                Some("Ctrl+Alt+R"),
+                            ) {
+                                actions.sel.open_refine_panel = true;
                                 clicked = true;
                             }
                             if flat_context_menu_item(ui, menu_w, has_sel, "Expand 1 px", None) {

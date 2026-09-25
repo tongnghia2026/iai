@@ -1,14 +1,9 @@
-// "Refine Selection" workspace — right side panel (replaces normal panels while open).
-//
-// Layout (top-to-bottom):
-//   ── Header: title + close (×)
-//   ── Overlay Tint: color and opacity
-//   ── Refine Brush: Mode buttons, Size, Hardness
-//   ── Global Refinements: Feather, Smooth, Contrast, Shift Edge
-//   ── Output Settings: Output To dropdown
-//   ── Footer: OK (commit) / Cancel (revert)
+// "Refine Selection" workspace — right side panel (replaces normal panels while
+// open), laid out like Photoshop's Select and Mask:
+//   View · Refine Brush · Edge Detection · Global Refinements · Output · OK/Cancel
 
 use super::{UiActions, UiData};
+use crate::core::refine::RefineParams;
 use crate::core::selection::RefineBrushMode;
 use egui;
 use egui_phosphor::regular as ph;
@@ -67,7 +62,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
                     ui.add_space(4.0);
-
                     let pad = egui::Margin {
                         left: 10,
                         right: 10,
@@ -75,266 +69,121 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         bottom: 0,
                     };
 
-                    section_header(ui, "Overlay Tint");
-
+                    section_header(ui, "View");
                     egui::Frame::new().inner_margin(pad).show(ui, |ui| {
-                        let color = egui::Color32::from_rgba_unmultiplied(
-                            data.sel.refine_overlay_color[0],
-                            data.sel.refine_overlay_color[1],
-                            data.sel.refine_overlay_color[2],
-                            data.sel.refine_overlay_color[3],
-                        );
-                        ui.horizontal(|ui| {
-                            ui.label("Color:");
-                            let swatch = egui::Button::new("")
-                                .fill(color)
-                                .min_size(egui::vec2(34.0, 20.0));
-                            if ui.add(swatch).on_hover_text("Edit overlay tint").clicked() {
-                                actions.sel.open_refine_color_dialog = true;
-                            }
-                            ui.label(
-                                egui::RichText::new("Overlay")
-                                    .small()
-                                    .color(egui::Color32::from_rgb(150, 180, 230)),
-                            );
-                        });
-                        ui.add_space(2.0);
-                        let mut opacity = data.sel.refine_overlay_color[3] as f32 / 255.0;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut opacity, 0.05..=0.95)
-                                    .text("Opacity")
-                                    .clamping(egui::SliderClamping::Always),
-                            )
-                            .changed()
-                        {
-                            let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
-                            actions.sel.set_refine_overlay_color = Some([
-                                data.sel.refine_overlay_color[0],
-                                data.sel.refine_overlay_color[1],
-                                data.sel.refine_overlay_color[2],
-                                alpha,
-                            ]);
-                        }
+                        view_section(ui, data, actions);
                     });
-
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(4.0);
+                    section_gap(ui);
 
                     section_header(ui, "Refine Brush");
-
                     egui::Frame::new().inner_margin(pad).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let modes = [
-                                (
-                                    RefineBrushMode::Smart,
-                                    "Smart",
-                                    "Auto edge matting (best for hair/fur)",
-                                ),
-                                (RefineBrushMode::Add, "+ Add", "Force-include pixels"),
-                                (RefineBrushMode::Subtract, "- Sub", "Force-exclude pixels"),
-                            ];
-                            for (mode, label, tip) in &modes {
-                                let selected = data.sel.refine_brush_mode == *mode;
-                                let btn = egui::Button::new(*label)
-                                    .fill(if selected {
-                                        egui::Color32::from_rgb(30, 90, 160)
-                                    } else {
-                                        egui::Color32::from_rgb(55, 55, 55)
-                                    })
-                                    .min_size(egui::vec2(60.0, 22.0));
-                                if ui.add(btn).on_hover_text(*tip).clicked() {
-                                    actions.sel.set_refine_brush_mode = Some(*mode);
-                                }
-                            }
-                        });
-                        ui.add_space(4.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("Size:");
-                            ui.add_space(8.0);
-                            let mut v = data.sel.refine_brush_size;
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut v, 1.0f32..=500.0)
-                                        .suffix(" px")
-                                        .clamping(egui::SliderClamping::Always),
-                                )
-                                .changed()
-                            {
-                                actions.sel.set_refine_brush_size = Some(v);
-                            }
-                        });
-                        ui.add_space(2.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("Hardness:");
-                            let mut v = data.sel.refine_brush_hardness;
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut v, 0.0f32..=1.0)
-                                        .clamping(egui::SliderClamping::Always),
-                                )
-                                .changed()
-                            {
-                                actions.sel.set_refine_brush_hardness = Some(v);
-                            }
-                        });
-
-                        if data.sel.refine_brush_mode == RefineBrushMode::Smart {
-                            ui.add_space(3.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} Paint over hair/fur edges",
-                                    ph::SPARKLE
-                                ))
-                                .small()
-                                .color(egui::Color32::from_rgb(140, 200, 140)),
-                            );
-                        }
-                        ui.label(
-                            egui::RichText::new("[ / ] resize  ·  Alt+drag resize")
-                                .small()
-                                .color(egui::Color32::from_rgb(110, 110, 110)),
-                        );
+                        brush_section(ui, data, actions);
                     });
+                    section_gap(ui);
 
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(4.0);
+                    let mut p = data.sel.refine_params;
+                    let mut changed = false;
+                    let mut release = false;
+                    let fire =
+                        |r: &egui::Response| r.drag_stopped() || (r.changed() && !r.dragged());
+
+                    section_header(ui, "Edge Detection");
+                    egui::Frame::new().inner_margin(pad).show(ui, |ui| {
+                        let r = slider_row(
+                            ui,
+                            "Radius:",
+                            &mut p.radius,
+                            0.0..=RefineParams::MAX_RADIUS,
+                            " px",
+                            1,
+                        )
+                        .on_hover_text(
+                            "Width of the edge band re-read from the photo colours (hair, fur)",
+                        );
+                        changed |= r.changed();
+                        release |= fire(&r);
+                        let r = ui
+                            .checkbox(&mut p.smart_radius, "Smart Radius")
+                            .on_hover_text("Keep the band tight on crisp edges, wide on soft ones");
+                        changed |= r.changed();
+                        release |= r.changed();
+                    });
+                    section_gap(ui);
 
                     section_header(ui, "Global Refinements");
-
                     egui::Frame::new().inner_margin(pad).show(ui, |ui| {
-                        let fire =
-                            |r: egui::Response| r.drag_stopped() || (r.changed() && !r.dragged());
-                        let r = slider_row(
-                            ui,
-                            "Smooth:",
-                            data.sel.refine_smooth as f32,
-                            0.0,
-                            100.0,
-                            "",
-                            |v| actions.sel.set_refine_smooth = Some(v as u32),
-                        );
-                        if fire(r) {
-                            actions.sel.trigger_refine_apply = true;
+                        let rows: [(
+                            &str,
+                            &mut f32,
+                            std::ops::RangeInclusive<f32>,
+                            &str,
+                            usize,
+                            &str,
+                        ); 4] = [
+                            (
+                                "Smooth:",
+                                &mut p.smooth,
+                                0.0..=100.0,
+                                "",
+                                0,
+                                "Round off jagged outlines",
+                            ),
+                            (
+                                "Feather:",
+                                &mut p.feather,
+                                0.0..=RefineParams::MAX_FEATHER,
+                                " px",
+                                1,
+                                "Blur the edge",
+                            ),
+                            (
+                                "Contrast:",
+                                &mut p.contrast,
+                                0.0..=100.0,
+                                "%",
+                                0,
+                                "Sharpen soft edges",
+                            ),
+                            (
+                                "Shift Edge:",
+                                &mut p.shift_edge,
+                                -100.0..=100.0,
+                                "%",
+                                0,
+                                "Move soft edges in (-) or out (+)",
+                            ),
+                        ];
+                        for (label, value, range, suffix, decimals, tip) in rows {
+                            let r = slider_row(ui, label, value, range, suffix, decimals)
+                                .on_hover_text(tip);
+                            changed |= r.changed();
+                            release |= fire(&r);
                         }
-
-                        let r = slider_row(
-                            ui,
-                            "Smart Radius:",
-                            data.sel.refine_smart_radius,
-                            0.0,
-                            64.0,
-                            " px",
-                            |v| actions.sel.set_refine_smart_radius = Some(v),
-                        );
-                        if fire(r) {
-                            actions.sel.trigger_refine_apply = true;
-                        }
-
-                        let r = slider_row(
-                            ui,
-                            "Feather:",
-                            data.sel.refine_feather,
-                            0.0,
-                            150.0,
-                            " px",
-                            |v| actions.sel.set_refine_feather = Some(v),
-                        );
-                        if fire(r) {
-                            actions.sel.trigger_refine_apply = true;
-                        }
-
-                        let r = slider_row(
-                            ui,
-                            "Contrast:",
-                            data.sel.refine_contrast,
-                            0.0,
-                            100.0,
-                            "%",
-                            |v| actions.sel.set_refine_contrast = Some(v),
-                        );
-                        if fire(r) {
-                            actions.sel.trigger_refine_apply = true;
-                        }
-
-                        let r = slider_row(
-                            ui,
-                            "Shift Edge:",
-                            data.sel.refine_shift_edge,
-                            -100.0,
-                            100.0,
-                            "%",
-                            |v| actions.sel.set_refine_shift_edge = Some(v),
-                        );
-                        if fire(r) {
-                            actions.sel.trigger_refine_apply = true;
-                        }
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("Clear Selection")
+                                .on_hover_text("Start the mask over from nothing")
+                                .clicked()
+                            {
+                                actions.sel.refine_clear = true;
+                            }
+                            if ui.button("Invert").clicked() {
+                                actions.sel.refine_invert = true;
+                            }
+                        });
                     });
-
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(4.0);
+                    if changed {
+                        actions.sel.set_refine_params = Some(p);
+                    }
+                    if release {
+                        actions.sel.trigger_refine_apply = true;
+                    }
+                    section_gap(ui);
 
                     section_header(ui, "Output Settings");
-
                     egui::Frame::new().inner_margin(pad).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Output To:");
-                            ui.add_space(4.0);
-                            egui::ComboBox::from_id_salt("sam_output")
-                                .selected_text(output_label(data.sel.refine_output_mode))
-                                .width(160.0)
-                                .show_ui(ui, |ui| {
-                                    let modes = [
-                                        (RefineOutputMode::Selection, "Selection"),
-                                        (RefineOutputMode::LayerMask, "Layer Mask"),
-                                        (RefineOutputMode::NewLayer, "New Layer"),
-                                        (RefineOutputMode::NewLayerWithMask, "New Layer with Mask"),
-                                    ];
-                                    for (mode, label) in &modes {
-                                        let selected = data.sel.refine_output_mode == *mode;
-                                        if ui.selectable_label(selected, *label).clicked() {
-                                            actions.sel.set_refine_output_mode = Some(*mode);
-                                        }
-                                    }
-                                });
-                        });
-                        ui.add_space(2.0);
-                        let desc = match data.sel.refine_output_mode {
-                            RefineOutputMode::Selection => "Keep as active selection",
-                            RefineOutputMode::LayerMask => "Add mask to active layer",
-                            RefineOutputMode::NewLayer => "Copy selection to new layer",
-                            RefineOutputMode::NewLayerWithMask => "New layer + apply as mask",
-                        };
-                        ui.label(
-                            egui::RichText::new(desc)
-                                .small()
-                                .color(egui::Color32::from_rgb(130, 130, 130)),
-                        );
-
-                        ui.add_space(6.0);
-                        let mut decontaminate = data.sel.refine_decontaminate;
-                        if ui
-                            .checkbox(&mut decontaminate, "Decontaminate Colors")
-                            .on_hover_text("Reduce background color spill on new-layer outputs")
-                            .changed()
-                        {
-                            actions.sel.set_refine_decontaminate = Some(decontaminate);
-                        }
-                        let mut amount = data.sel.refine_decontaminate_amount;
-                        let resp = ui.add_enabled(
-                            data.sel.refine_decontaminate,
-                            egui::Slider::new(&mut amount, 0.0f32..=1.0)
-                                .text("Amount")
-                                .clamping(egui::SliderClamping::Always),
-                        );
-                        if resp.changed() {
-                            actions.sel.set_refine_decontaminate_amount = Some(amount);
-                        }
+                        output_section(ui, data, actions);
                     });
 
                     ui.add_space(10.0);
@@ -348,30 +197,250 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             )
                             .fill(egui::Color32::from_rgb(30, 90, 160))
                             .min_size(egui::vec2(80.0, 28.0));
-                            if ui.add(ok).on_hover_text("Apply refinements").clicked() {
+                            if ui.add(ok).on_hover_text("Apply (Enter)").clicked() {
                                 actions.sel.refine_apply = true;
                             }
-
                             ui.add_space(8.0);
-
                             let cancel = egui::Button::new("Cancel")
                                 .fill(egui::Color32::from_rgb(60, 60, 60))
                                 .min_size(egui::vec2(80.0, 28.0));
                             if ui
                                 .add(cancel)
-                                .on_hover_text("Revert to original selection")
+                                .on_hover_text("Back to the selection you started with (Esc)")
                                 .clicked()
                             {
                                 actions.sel.refine_cancel = true;
                             }
                         });
                     });
-
                     ui.add_space(8.0);
                 });
         });
 
     draw_refine_color_dialog(ctx, data, actions);
+}
+
+fn section_gap(ui: &mut egui::Ui) {
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(4.0);
+}
+
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .small()
+            .color(egui::Color32::from_rgb(120, 120, 120)),
+    );
+}
+
+fn opacity_slider(ui: &mut egui::Ui, value: f32) -> Option<f32> {
+    let mut v = value;
+    ui.add(
+        egui::Slider::new(&mut v, 0.05..=1.0)
+            .text("Opacity")
+            .clamping(egui::SliderClamping::Always),
+    )
+    .changed()
+    .then_some(v)
+}
+
+fn view_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    let mode = data.sel.refine_view_mode;
+    ui.horizontal(|ui| {
+        ui.label("View:");
+        egui::ComboBox::from_id_salt("sam_view")
+            .selected_text(mode.label())
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                for m in RefineViewMode::ALL {
+                    if ui.selectable_label(m == mode, m.label()).clicked() {
+                        actions.sel.set_refine_view_mode = Some(m);
+                    }
+                }
+            });
+    });
+    let mut original = data.sel.refine_show_original;
+    if ui
+        .checkbox(&mut original, "Show Original (X)")
+        .on_hover_text("Hide the preview to compare with the photo")
+        .changed()
+    {
+        actions.sel.set_refine_show_original = Some(original);
+    }
+    match mode {
+        RefineViewMode::Overlay => {
+            let [r, g, b, a] = data.sel.refine_overlay_color;
+            ui.horizontal(|ui| {
+                ui.label("Color:");
+                let swatch = egui::Button::new("")
+                    .fill(egui::Color32::from_rgb(r, g, b))
+                    .min_size(egui::vec2(34.0, 20.0));
+                if ui
+                    .add(swatch)
+                    .on_hover_text("Edit overlay colour")
+                    .clicked()
+                {
+                    actions.sel.open_refine_color_dialog = true;
+                }
+            });
+            if let Some(v) = opacity_slider(ui, a as f32 / 255.0) {
+                let alpha = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+                actions.sel.set_refine_overlay_color = Some([r, g, b, alpha]);
+            }
+        }
+        RefineViewMode::OnBlack | RefineViewMode::OnWhite => {
+            if let Some(v) = opacity_slider(ui, data.sel.refine_view_opacity) {
+                actions.sel.set_refine_view_opacity = Some(v);
+            }
+        }
+        RefineViewMode::BlackWhite | RefineViewMode::MarchingAnts => {}
+    }
+    hint(ui, "F: next view  ·  X: show original");
+}
+
+fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    ui.horizontal(|ui| {
+        let modes = [
+            (
+                RefineBrushMode::Smart,
+                "Smart",
+                "Read the edge from the photo colours under the brush (hair, fur)",
+            ),
+            (RefineBrushMode::Add, "+ Add", "Paint into the selection"),
+            (
+                RefineBrushMode::Subtract,
+                "- Sub",
+                "Paint out of the selection",
+            ),
+        ];
+        for (mode, label, tip) in modes {
+            let selected = data.sel.refine_brush_mode == mode;
+            let btn = egui::Button::new(label)
+                .fill(if selected {
+                    egui::Color32::from_rgb(30, 90, 160)
+                } else {
+                    egui::Color32::from_rgb(55, 55, 55)
+                })
+                .min_size(egui::vec2(60.0, 22.0));
+            if ui.add(btn).on_hover_text(tip).clicked() {
+                actions.sel.set_refine_brush_mode = Some(mode);
+            }
+        }
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Size:");
+        ui.add_space(8.0);
+        let mut v = data.sel.refine_brush_size;
+        if ui
+            .add(
+                egui::Slider::new(&mut v, 1.0f32..=1000.0)
+                    .logarithmic(true)
+                    .suffix(" px")
+                    .clamping(egui::SliderClamping::Always),
+            )
+            .changed()
+        {
+            actions.sel.set_refine_brush_size = Some(v);
+        }
+    });
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.label("Hardness:");
+        let mut v = data.sel.refine_brush_hardness;
+        if ui
+            .add(egui::Slider::new(&mut v, 0.0f32..=1.0).clamping(egui::SliderClamping::Always))
+            .changed()
+        {
+            actions.sel.set_refine_brush_hardness = Some(v);
+        }
+    });
+    ui.horizontal(|ui| {
+        let undo = ui
+            .add_enabled(
+                data.sel.refine_can_undo,
+                egui::Button::new(ph::ARROW_COUNTER_CLOCKWISE),
+            )
+            .on_hover_text("Undo stroke (Ctrl+Z)");
+        if undo.clicked() {
+            actions.sel.refine_undo = true;
+        }
+        let redo = ui
+            .add_enabled(
+                data.sel.refine_can_redo,
+                egui::Button::new(ph::ARROW_CLOCKWISE),
+            )
+            .on_hover_text("Redo stroke (Ctrl+Shift+Z)");
+        if redo.clicked() {
+            actions.sel.refine_redo = true;
+        }
+    });
+    hint(ui, "Alt: reverse the brush (Smart puts the start back)");
+    hint(ui, "[ / ] size  ·  Alt+right-drag size");
+}
+
+fn output_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    let mut decontaminate = data.sel.refine_decontaminate;
+    if ui
+        .checkbox(&mut decontaminate, "Decontaminate Colors")
+        .on_hover_text(
+            "Replace background colour fringes with nearby subject colour (new layer outputs)",
+        )
+        .changed()
+    {
+        actions.sel.set_refine_decontaminate = Some(decontaminate);
+    }
+    let mut amount = data.sel.refine_decontaminate_amount;
+    let resp = ui.add_enabled(
+        data.sel.refine_decontaminate,
+        egui::Slider::new(&mut amount, 0.0f32..=1.0)
+            .text("Amount")
+            .clamping(egui::SliderClamping::Always),
+    );
+    if resp.changed() {
+        actions.sel.set_refine_decontaminate_amount = Some(amount);
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Output To:");
+        ui.add_space(4.0);
+        egui::ComboBox::from_id_salt("sam_output")
+            .selected_text(output_label(data.sel.refine_output_mode))
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                let modes = [
+                    RefineOutputMode::Selection,
+                    RefineOutputMode::LayerMask,
+                    RefineOutputMode::NewLayer,
+                    RefineOutputMode::NewLayerWithMask,
+                ];
+                for mode in modes {
+                    let allowed = !data.sel.refine_decontaminate
+                        || matches!(
+                            mode,
+                            RefineOutputMode::NewLayer | RefineOutputMode::NewLayerWithMask
+                        );
+                    let selected = data.sel.refine_output_mode == mode;
+                    if ui
+                        .add_enabled(
+                            allowed,
+                            egui::Button::selectable(selected, output_label(mode)),
+                        )
+                        .clicked()
+                    {
+                        actions.sel.set_refine_output_mode = Some(mode);
+                    }
+                }
+            });
+    });
+    let desc = match data.sel.refine_output_mode {
+        RefineOutputMode::Selection => "Keep as the active selection",
+        RefineOutputMode::LayerMask => "Mask the active layer",
+        RefineOutputMode::NewLayer => "Cut the subject to a new layer",
+        RefineOutputMode::NewLayerWithMask => "Copy the layer with this mask",
+    };
+    hint(ui, desc);
 }
 
 fn draw_refine_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
@@ -548,15 +617,14 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(3.0);
 }
 
-/// Returns the slider's egui Response so callers can check drag_released().
+/// Labelled slider row; the response tells a drag from its release.
 fn slider_row(
     ui: &mut egui::Ui,
     label: &str,
-    mut value: f32,
-    min: f32,
-    max: f32,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
     suffix: &str,
-    mut on_change: impl FnMut(f32),
+    decimals: usize,
 ) -> egui::Response {
     let inner = ui.horizontal(|ui| {
         ui.set_min_width(ui.available_width());
@@ -567,14 +635,12 @@ fn slider_row(
                 ui.label(label);
             },
         );
-        let slider = egui::Slider::new(&mut value, min..=max)
-            .suffix(suffix)
-            .clamping(egui::SliderClamping::Always);
-        let r = ui.add(slider);
-        if r.changed() {
-            on_change(value);
-        }
-        r
+        ui.add(
+            egui::Slider::new(value, range)
+                .suffix(suffix)
+                .fixed_decimals(decimals)
+                .clamping(egui::SliderClamping::Always),
+        )
     });
     ui.add_space(2.0);
     inner.inner
@@ -589,11 +655,41 @@ fn output_label(mode: RefineOutputMode) -> &'static str {
     }
 }
 
-/// How the refine overlay is drawn while the panel is open.
+/// How the Refine Selection panel previews the selection on the canvas.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum RefineViewMode {
     #[default]
     Overlay,
+    OnBlack,
+    OnWhite,
+    BlackWhite,
+    MarchingAnts,
+}
+
+impl RefineViewMode {
+    pub const ALL: [RefineViewMode; 5] = [
+        RefineViewMode::Overlay,
+        RefineViewMode::OnBlack,
+        RefineViewMode::OnWhite,
+        RefineViewMode::BlackWhite,
+        RefineViewMode::MarchingAnts,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RefineViewMode::Overlay => "Overlay",
+            RefineViewMode::OnBlack => "On Black",
+            RefineViewMode::OnWhite => "On White",
+            RefineViewMode::BlackWhite => "Black & White",
+            RefineViewMode::MarchingAnts => "Marching Ants",
+        }
+    }
+
+    /// The next view (F cycles, as in Photoshop).
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|&m| m == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]

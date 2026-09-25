@@ -1207,6 +1207,20 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.sel.show_color_range_dialog = Some(true);
                             ui.close();
                         }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Refine Selection...",
+                                "Ctrl+Alt+R",
+                                data.doc.has_doc,
+                            ))
+                            .on_hover_text(
+                                "Tinh chỉnh mép vùng chọn: tóc, lông, làm mềm, dời mép",
+                            )
+                            .clicked()
+                        {
+                            actions.sel.open_refine_panel = true;
+                            ui.close();
+                        }
                         ui.separator();
                         if ui
                             .add(menu_item_enabled(

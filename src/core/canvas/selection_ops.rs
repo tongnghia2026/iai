@@ -462,109 +462,89 @@ impl Canvas {
         stroke.extend(cache, mask, points)
     }
 
-    /// Refine Brush stamp — intelligent alpha matting for selection edges.
-    ///
-    /// Uses the EdgeCache (Lab + Sobel) shared with Quick Select; recomputes when stale.
-    /// Smart mode: color-based alpha matting — pixels similar to FG get alpha ≈ 1,
-    ///             pixels similar to BG get alpha ≈ 0. Great for hair/fur detail.
-    /// Add / Subtract: soft-edge brush that force-includes / force-excludes pixels.
-    pub fn refine_edge_stamp(
-        &mut self,
-        cx: f32,
-        cy: f32,
-        radius: f32,
-        hardness: f32,
-        mode: crate::core::selection::RefineBrushMode,
-        sample_merged: bool,
-    ) {
-        use crate::core::selection::refine_edge_stamp;
+    /// Open a Refine Selection session on the current selection (see
+    /// `core::refine`). The selection's move offset is baked in first.
+    pub fn refine_open(&mut self) {
+        let original = self.selection.clone();
+        self.selection.commit_offset();
+        let baked = self.selection.mask.clone();
+        self.refine = Some(Box::new(crate::core::refine::RefineSession::new(
+            original, baked,
+        )));
+    }
 
-        let w = self.width;
-        let h = self.height;
-        if w == 0 || h == 0 {
-            return;
+    /// Re-render the live selection from the session — everywhere, or what a
+    /// change of the session's base inside `dirty` can reach.
+    pub fn refine_render(&mut self, dirty: Option<crate::core::refine::Rect>) {
+        let needs_cache = self.refine.as_ref().is_some_and(|s| s.needs_edge_cache());
+        if needs_cache {
+            self.ensure_edge_cache(true);
         }
-
-        if !matches!(mode, crate::core::selection::RefineBrushMode::Smart) {
-            let mask = &mut self.selection.mask;
-            let icx = cx as i32;
-            let icy = cy as i32;
-            let ir = radius.ceil() as i32;
-
-            #[inline]
-            fn falloff(dist: f32, radius: f32, hardness: f32) -> f32 {
-                let t = (dist / radius).clamp(0.0, 1.0);
-                let soft_edge = 1.0 - hardness;
-                if soft_edge < 0.01 {
-                    if t < 1.0 {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                } else {
-                    let fs = 1.0 - soft_edge;
-                    if t <= fs {
-                        1.0
-                    } else {
-                        let ft = (t - fs) / soft_edge;
-                        1.0 - ft * ft
-                    }
-                }
-            }
-
-            for dy in -ir..=ir {
-                for dx in -ir..=ir {
-                    let px = icx + dx;
-                    let py = icy + dy;
-                    if px < 0 || py < 0 || px >= w as i32 || py >= h as i32 {
-                        continue;
-                    }
-                    let dist = ((dx * dx + dy * dy) as f32).sqrt();
-                    if dist > radius {
-                        continue;
-                    }
-                    let weight = falloff(dist, radius, hardness);
-                    let i = (py as u32 * w + px as u32) as usize;
-                    match mode {
-                        crate::core::selection::RefineBrushMode::Add => {
-                            let v = (weight * 255.0) as u8;
-                            mask[i] = mask[i].max(v);
-                        }
-                        crate::core::selection::RefineBrushMode::Subtract => {
-                            mask[i] = (mask[i] as f32 * (1.0 - weight)).round() as u8;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            self.selection.active = crate::core::selection::mask_has_any(mask);
-            self.selection.mask_revision += 1;
-            self.selection.mark_bbox_dirty();
+        let Some(session) = self.refine.as_deref_mut() else {
             return;
-        }
-
-        if !self.ensure_edge_cache(sample_merged) {
-            return;
-        }
-
-        let cache = self.edge_cache.as_ref().unwrap();
-        let lab = &cache.lab;
-        let sobel = &cache.sobel;
-        refine_edge_stamp(
-            lab,
-            sobel,
-            &mut self.selection.mask,
-            w,
-            h,
-            cx,
-            cy,
-            radius,
-            hardness,
-            mode,
-        );
+        };
+        let cache = if needs_cache {
+            self.edge_cache.as_deref()
+        } else {
+            None
+        };
+        session.render(cache, &mut self.selection.mask, dirty);
         self.selection.active = crate::core::selection::mask_has_any(&self.selection.mask);
         self.selection.mask_revision += 1;
         self.selection.mark_bbox_dirty();
+    }
+
+    pub fn refine_stroke_begin(&mut self, op: crate::core::refine::StampOp) {
+        if op == crate::core::refine::StampOp::Smart {
+            self.ensure_edge_cache(true);
+        }
+        if let Some(session) = self.refine.as_deref_mut() {
+            session.begin_stroke();
+        }
+    }
+
+    /// Refine Brush dabs at `points` on the session's base, then the live
+    /// selection is re-rendered around them.
+    pub fn refine_paint(
+        &mut self,
+        op: crate::core::refine::StampOp,
+        points: &[(f32, f32)],
+        radius: f32,
+        hardness: f32,
+    ) {
+        let cache = self
+            .edge_cache
+            .as_deref()
+            .filter(|c| (c.width, c.height) == (self.width, self.height));
+        let Some(session) = self.refine.as_deref_mut() else {
+            return;
+        };
+        if let Some(touched) = session.paint(cache, op, points, radius, hardness) {
+            self.refine_render(Some(touched));
+        }
+    }
+
+    /// Close the stroke as one in-panel undo step.
+    pub fn refine_stroke_end(&mut self) {
+        if let Some(session) = self.refine.as_deref_mut() {
+            session.end_stroke();
+        }
+    }
+
+    /// In-panel undo (`redo == false`) or redo of a Refine Brush stroke.
+    /// Returns whether a step was applied.
+    pub fn refine_step(&mut self, redo: bool) -> bool {
+        let Some(session) = self.refine.as_deref_mut() else {
+            return false;
+        };
+        let rect = if redo { session.redo() } else { session.undo() };
+        match rect {
+            Some(r) => {
+                self.refine_render(Some(r));
+                true
+            }
+            None => false,
+        }
     }
 
     /// Erase the active selection's pixels on the active raster layer (Edit → Cut).

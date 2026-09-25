@@ -362,6 +362,8 @@ pub struct Canvas {
     /// Pre-computed Lab + Sobel cache for Smart Select tool.
     /// Lazily computed once per layer revision; invalidated when layer content changes.
     pub edge_cache: Option<Box<super::selection::EdgeCache>>,
+    /// Open Refine Selection panel of this document, if any.
+    pub refine: Option<Box<super::refine::RefineSession>>,
     /// Linear scene-referred master from a RAW decode (unclamped f16). Present
     /// only while the document can still enter a scene-referred Develop
     /// session; dropped on Develop commit/cancel to free memory. Never
@@ -512,6 +514,7 @@ impl Canvas {
             pending_stroke_name: String::new(),
             cmd_history: HistoryGate::new(),
             edge_cache: None,
+            refine: None,
             develop_source: None,
             channels: super::channels::ChannelsState::default(),
             pending_alpha_stroke: None,
@@ -545,6 +548,7 @@ impl Canvas {
             pending_stroke_name: String::new(),
             cmd_history: HistoryGate::new(),
             edge_cache: None,
+            refine: None,
             develop_source: None,
             channels: super::channels::ChannelsState::default(),
             pending_alpha_stroke: None,
@@ -601,6 +605,7 @@ impl Canvas {
             pending_stroke_name: String::new(),
             cmd_history: HistoryGate::new(),
             edge_cache: None,
+            refine: None,
             develop_source: None,
             channels: super::channels::ChannelsState::default(),
             pending_alpha_stroke: None,
@@ -652,6 +657,7 @@ impl Canvas {
             pending_stroke_name: String::new(),
             cmd_history: HistoryGate::new(),
             edge_cache: None,
+            refine: None,
             develop_source: None,
             channels: super::channels::ChannelsState::default(),
             pending_alpha_stroke: None,

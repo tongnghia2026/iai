@@ -1545,89 +1545,14 @@ fn guided_filter(guide: &[f32], src: &[f32], w: usize, h: usize, r: usize, eps: 
         .collect()
 }
 
+/// Three passes of a box blur of radius `radius` (≈ Gaussian), windows clipped
+/// at the image edge.
 pub fn blur_mask(mask: &mut [u8], w: usize, h: usize, radius: f32) {
     if radius < 0.5 {
         return;
     }
     let r = (radius.round() as usize).max(1);
-
-    let mut scratch_row = vec![0u8; w];
-    let mut scratch_col = vec![0u8; h];
-
-    for _ in 0..3 {
-        for y in 0..h {
-            let base = y * w;
-            scratch_row.copy_from_slice(&mask[base..base + w]);
-            for x in 0..w {
-                let x0 = x.saturating_sub(r);
-                let x1 = (x + r + 1).min(w);
-                let sum: u32 = scratch_row[x0..x1].iter().map(|&v| v as u32).sum();
-                mask[base + x] = (sum / (x1 - x0) as u32) as u8;
-            }
-        }
-
-        for x in 0..w {
-            for y in 0..h {
-                scratch_col[y] = mask[y * w + x];
-            }
-            for y in 0..h {
-                let y0 = y.saturating_sub(r);
-                let y1 = (y + r + 1).min(h);
-                let sum: u32 = scratch_col[y0..y1].iter().map(|&v| v as u32).sum();
-                mask[y * w + x] = (sum / (y1 - y0) as u32) as u8;
-            }
-        }
-    }
-}
-
-/// Adaptive edge-only radius for Refine Selection.
-///
-/// This builds a band around existing mask transitions and blends in a blurred
-/// mask only inside that band. Solid foreground/background stays unchanged, so
-/// hard object edges remain crisp while hair/fur gets an adjustable soft region.
-pub fn smart_radius_mask(mask: &mut [u8], w: usize, h: usize, radius: f32) {
-    if radius < 0.5 || w == 0 || h == 0 || mask.len() < w.saturating_mul(h) {
-        return;
-    }
-
-    let original = mask.to_vec();
-    let mut blurred = original.clone();
-    blur_mask(&mut blurred, w, h, radius);
-
-    let mut edge_band = vec![0u8; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
-            let v = original[i];
-            let mut transition = v > 0 && v < 255;
-            if x > 0 && original[i - 1].abs_diff(v) > 8 {
-                transition = true;
-            }
-            if x + 1 < w && original[i + 1].abs_diff(v) > 8 {
-                transition = true;
-            }
-            if y > 0 && original[i - w].abs_diff(v) > 8 {
-                transition = true;
-            }
-            if y + 1 < h && original[i + w].abs_diff(v) > 8 {
-                transition = true;
-            }
-            if transition {
-                edge_band[i] = 255;
-            }
-        }
-    }
-
-    blur_mask(&mut edge_band, w, h, radius);
-    for i in 0..w * h {
-        let band = edge_band[i] as f32 / 255.0;
-        if band <= 0.001 {
-            continue;
-        }
-        let weight = band.sqrt();
-        let v = original[i] as f32 * (1.0 - weight) + blurred[i] as f32 * weight;
-        mask[i] = v.round().clamp(0.0, 255.0) as u8;
-    }
+    crate::core::refine::box_blur(mask, w, h, r, 3);
 }
 
 #[inline]

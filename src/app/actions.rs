@@ -36,8 +36,7 @@ fn within_text_input_window(until: Option<std::time::Instant>, now: std::time::I
 impl App {
     fn set_refine_overlay_tint(&mut self, color: [u8; 4]) {
         self.edit.refine_overlay_color = color;
-        self.edit.refine_overlay_tex = None;
-        self.edit.refine_overlay_mask_rev = u64::MAX;
+        self.invalidate_refine_overlay();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }

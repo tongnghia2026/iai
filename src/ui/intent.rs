@@ -583,15 +583,20 @@ pub struct SelectionIntent {
     pub set_select_subject_model: Option<crate::core::select_subject::SelectSubjectModel>,
     pub set_yolo_people_only: Option<bool>,
     pub open_refine_panel: bool,
-    pub set_refine_feather: Option<f32>,
-    pub set_refine_smooth: Option<u32>,
-    pub set_refine_smart_radius: Option<f32>,
-    pub set_refine_shift_edge: Option<f32>,
-    pub set_refine_contrast: Option<f32>,
+    /// New Refine Selection slider settings (rendered live when quick).
+    pub set_refine_params: Option<crate::core::refine::RefineParams>,
     pub set_refine_decontaminate: Option<bool>,
     pub set_refine_decontaminate_amount: Option<f32>,
-    /// Fire apply_refine_preview() — only set on drag-release or keyboard commit, not while dragging.
+    /// A refine slider was released (or typed into): render now.
     pub trigger_refine_apply: bool,
+    /// In-panel undo / redo of Refine Brush strokes.
+    pub refine_undo: bool,
+    pub refine_redo: bool,
+    /// Clear / Invert the mask being refined.
+    pub refine_clear: bool,
+    pub refine_invert: bool,
+    pub set_refine_view_opacity: Option<f32>,
+    pub set_refine_show_original: Option<bool>,
     pub refine_apply: bool,
     pub refine_cancel: bool,
     pub set_refine_brush_size: Option<f32>,

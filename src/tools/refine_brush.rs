@@ -1,59 +1,68 @@
-// Refine Brush — intelligent selection edge refinement for hair/fur/feathers.
+// Refine Brush — paints on the open Refine Selection session (see
+// `core::refine`), never on the selection or the document history directly.
 //
-// Used exclusively inside the "Refine Selection" workspace (show_refine_panel = true).
-// Three modes:
-//   Smart    — color-based alpha matting: pixels similar to FG → opaque, BG → transparent
-//   Add      — force-include pixels in selection (soft-edge brush painting selection)
-//   Subtract — force-exclude pixels (erase selection with soft edge)
+// Modes: Smart (colour-aware matting for hair / fur), Add, Subtract. Holding
+// Alt reverses the mode (Smart → put the opening selection back), as in
+// Photoshop. Strokes are undone inside the panel with Ctrl+Z.
 
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
-use crate::core::command::SelectionCommand;
+use crate::core::refine::StampOp;
 use crate::core::selection::RefineBrushMode;
 
 pub struct RefineBrushTool {
+    /// Tip diameter in canvas pixels.
     pub size: f32,
     pub hardness: f32,
     pub mode: RefineBrushMode,
 
     dragging: bool,
-    last_x: f32,
-    last_y: f32,
-    snapshot_before: Vec<u8>,
-    undo_cmd: Option<SelectionCommand>,
+    op: StampOp,
+    last: (f32, f32),
+    pending: Vec<(f32, f32)>,
 }
 
 impl RefineBrushTool {
     pub fn new() -> Self {
         Self {
-            size: 40.0,
+            size: 80.0,
             hardness: 0.5,
             mode: RefineBrushMode::Smart,
             dragging: false,
-            last_x: 0.0,
-            last_y: 0.0,
-            snapshot_before: Vec::new(),
-            undo_cmd: None,
+            op: StampOp::Smart,
+            last: (0.0, 0.0),
+            pending: Vec::new(),
         }
     }
 
-    fn stamp(&self, canvas: &mut crate::core::canvas::Canvas, cx: f32, cy: f32) {
-        canvas.refine_edge_stamp(cx, cy, self.size, self.hardness, self.mode, true);
+    fn radius(&self) -> f32 {
+        (self.size * 0.5).max(0.5)
     }
 
-    fn paint_segment(
-        &self,
-        canvas: &mut crate::core::canvas::Canvas,
-        x0: f32,
-        y0: f32,
-        x1: f32,
-        y1: f32,
-    ) {
-        let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-        let spacing = (self.size * 0.35).max(1.0);
-        let steps = ((dist / spacing).ceil() as u32).clamp(1, 1000);
-        for i in 0..=steps {
-            let t = i as f32 / steps as f32;
-            self.stamp(canvas, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+    /// Dab positions from the last dab along the pending cursor path.
+    fn walk(&mut self) -> Vec<(f32, f32)> {
+        let spacing = (self.radius() * 0.35).max(1.0);
+        let mut dabs = Vec::new();
+        for (x, y) in std::mem::take(&mut self.pending) {
+            let (x0, y0) = self.last;
+            let dist = ((x - x0).powi(2) + (y - y0).powi(2)).sqrt();
+            if dist < spacing {
+                continue;
+            }
+            let steps = ((dist / spacing).floor() as u32).clamp(1, 4000);
+            for i in 1..=steps {
+                let t = i as f32 * spacing / dist;
+                dabs.push((x0 + (x - x0) * t, y0 + (y - y0) * t));
+            }
+            self.last = *dabs.last().unwrap_or(&(x, y));
+        }
+        dabs
+    }
+
+    fn flush(&mut self, ctx: &mut ToolCtx) {
+        let dabs = self.walk();
+        if !dabs.is_empty() {
+            ctx.canvas_mut()
+                .refine_paint(self.op, &dabs, self.radius(), self.hardness);
         }
     }
 }
@@ -72,53 +81,41 @@ impl Tool for RefineBrushTool {
         crate::tools::ToolId::RefineBrush
     }
     fn cursor_size(&self) -> f32 {
-        self.size
+        self.radius()
     }
 
     fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         let canvas = ctx.canvas_mut();
-        if !canvas.selection.active {
+        if canvas.refine.is_none() {
             return ToolResponse::none();
         }
-
-        self.snapshot_before = canvas.selection.mask.clone();
-        self.undo_cmd = Some(SelectionCommand::capture_before(
-            "Refine",
-            &canvas.selection,
-        ));
-
+        self.op = StampOp::for_mode(self.mode, event.alt);
+        canvas.refine_stroke_begin(self.op);
+        let at = (event.canvas_x, event.canvas_y);
+        canvas.refine_paint(self.op, &[at], self.radius(), self.hardness);
+        self.last = at;
+        self.pending.clear();
         self.dragging = true;
-        self.last_x = event.canvas_x;
-        self.last_y = event.canvas_y;
-        self.stamp(canvas, event.canvas_x, event.canvas_y);
-
         ToolResponse::repaint()
     }
 
     fn on_drag(
         &mut self,
         event: PointerEvent,
-        prev: &PointerEvent,
-        ctx: &mut ToolCtx,
+        _prev: &PointerEvent,
+        _ctx: &mut ToolCtx,
     ) -> ToolResponse {
-        if !self.dragging {
+        if self.dragging {
+            self.pending.push((event.canvas_x, event.canvas_y));
+        }
+        ToolResponse::none()
+    }
+
+    fn on_frame(&mut self, ctx: &mut ToolCtx) -> ToolResponse {
+        if !self.dragging || self.pending.is_empty() {
             return ToolResponse::none();
         }
-
-        let canvas = ctx.canvas_mut();
-        if !canvas.selection.active {
-            return ToolResponse::none();
-        }
-
-        self.paint_segment(
-            canvas,
-            prev.canvas_x,
-            prev.canvas_y,
-            event.canvas_x,
-            event.canvas_y,
-        );
-        self.last_x = event.canvas_x;
-        self.last_y = event.canvas_y;
+        self.flush(ctx);
         ToolResponse::repaint()
     }
 
@@ -126,22 +123,14 @@ impl Tool for RefineBrushTool {
         if !self.dragging {
             return ToolResponse::none();
         }
+        self.flush(ctx);
         self.dragging = false;
-
-        let canvas = ctx.canvas_mut();
-        if let Some(mut cmd) = self.undo_cmd.take() {
-            if canvas.selection.mask != self.snapshot_before {
-                cmd.capture_after(&canvas.selection);
-                canvas.record(Box::new(cmd));
-            }
-        }
-        self.snapshot_before.clear();
+        ctx.canvas_mut().refine_stroke_end();
         ToolResponse::repaint()
     }
 
     fn on_cancel(&mut self) {
         self.dragging = false;
-        self.undo_cmd = None;
-        self.snapshot_before.clear();
+        self.pending.clear();
     }
 }

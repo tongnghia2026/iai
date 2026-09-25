@@ -1033,23 +1033,6 @@ impl App {
                                     self.push_selection_uniforms();
                                 }
 
-                                if self.edit.show_refine_panel
-                                    && self.edit.tools.active_id()
-                                        == crate::tools::ToolId::RefineBrush
-                                {
-                                    self.edit.refine_snapshot = self.docs.documents
-                                        [self.docs.active_doc_idx]
-                                        .canvas
-                                        .selection
-                                        .mask
-                                        .clone();
-                                    self.edit.refine_feather = 0.0;
-                                    self.edit.refine_smooth = 0;
-                                    self.edit.refine_smart_radius = 0.0;
-                                    self.edit.refine_shift_edge = 0.0;
-                                    self.edit.refine_contrast = 0.0;
-                                }
-
                                 if !move_layer_release {
                                     self.docs.documents[self.docs.active_doc_idx]
                                         .canvas

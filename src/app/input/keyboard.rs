@@ -136,6 +136,11 @@ impl App {
         if self.is_blocking_modal() {
             return;
         }
+        if self.edit.show_refine_panel
+            && self.refine_panel_key(event_loop, physical_key, pressed, repeat)
+        {
+            return;
+        }
         if pressed && self.is_preview_dialog_open() {
             let is_view_shortcut = matches!(
                 physical_key,
@@ -589,6 +594,17 @@ impl App {
             PhysicalKey::Code(KeyCode::KeyH) if pressed && !self.edit.input.ctrl_held => {
                 self.run_default(Command::ToolHand, event_loop, repeat);
             }
+            PhysicalKey::Code(KeyCode::KeyR)
+                if pressed
+                    && self.edit.input.ctrl_held
+                    && self.edit.input.alt_held
+                    && !self.edit.input.shift_held =>
+            {
+                if !repeat {
+                    self.open_refine_panel();
+                    self.sync_cursor(event_loop);
+                }
+            }
             PhysicalKey::Code(KeyCode::KeyR) if pressed && self.edit.input.ctrl_held => {
                 self.run_default(Command::ToggleRulers, event_loop, repeat);
             }
@@ -787,8 +803,9 @@ impl App {
             }
             PhysicalKey::Code(KeyCode::BracketLeft) if pressed && !self.edit.input.shift_held => {
                 if self.edit.show_refine_panel {
+                    let size = self.edit.tools.refine_brush().size;
                     self.edit.tools.refine_brush_mut().size =
-                        (self.edit.tools.refine_brush().size - 2.0).max(1.0);
+                        (size - clone_bracket_step(size, false)).max(1.0);
                 } else if self.edit.tools.active_id() == ToolId::Eraser {
                     self.edit.tools.eraser_mut().size =
                         (self.edit.tools.eraser().size - 2.0).max(1.0);
@@ -805,8 +822,9 @@ impl App {
             }
             PhysicalKey::Code(KeyCode::BracketRight) if pressed && !self.edit.input.shift_held => {
                 if self.edit.show_refine_panel {
+                    let size = self.edit.tools.refine_brush().size;
                     self.edit.tools.refine_brush_mut().size =
-                        (self.edit.tools.refine_brush().size + 2.0).min(500.0);
+                        (size + clone_bracket_step(size, true)).min(1000.0);
                 } else if self.edit.tools.active_id() == ToolId::Eraser {
                     self.edit.tools.eraser_mut().size =
                         (self.edit.tools.eraser().size + 2.0).min(5000.0);
@@ -1238,6 +1256,80 @@ impl App {
         };
         self.shell.ui.shortcut_capture = None;
         self.shell.ui.shortcut_captured = Some((cmd, outcome));
+        self.redraw_main();
+        true
+    }
+
+    /// Keys while the Refine Selection panel is open. Enter / Esc commit /
+    /// cancel, Ctrl+Z steps the brush strokes, F cycles the view and X shows
+    /// the original; modifiers, Space, Ctrl+zoom and `[ ]` go on to the normal
+    /// arms. Everything else is refused like any modal operation. Returns true
+    /// when the key was taken here.
+    fn refine_panel_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        physical_key: PhysicalKey,
+        pressed: bool,
+        repeat: bool,
+    ) -> bool {
+        let PhysicalKey::Code(code) = physical_key else {
+            return true;
+        };
+        let ctrl = self.edit.input.ctrl_held;
+        let plain = !ctrl && !self.edit.input.alt_held && !self.edit.input.shift_held;
+        let passes = match code {
+            KeyCode::ControlLeft
+            | KeyCode::ControlRight
+            | KeyCode::ShiftLeft
+            | KeyCode::ShiftRight
+            | KeyCode::AltLeft
+            | KeyCode::AltRight
+            | KeyCode::Space
+            | KeyCode::BracketLeft
+            | KeyCode::BracketRight => true,
+            KeyCode::Equal
+            | KeyCode::Minus
+            | KeyCode::NumpadAdd
+            | KeyCode::NumpadSubtract
+            | KeyCode::Digit0
+            | KeyCode::Numpad0
+            | KeyCode::Digit1
+            | KeyCode::Numpad1 => ctrl,
+            _ => false,
+        };
+        if passes {
+            return false;
+        }
+        if !pressed {
+            return true;
+        }
+        let command = self
+            .pressed_chord(physical_key)
+            .and_then(|c| self.shell.keymap.command_for(c));
+        match (code, command) {
+            (_, Some(Command::EditUndo)) => self.refine_history_step(false),
+            (_, Some(Command::EditRedo)) => self.refine_history_step(true),
+            (_, Some(Command::FitScreen | Command::ZoomActual)) => return false,
+            (KeyCode::Escape, _) if !repeat => {
+                self.cancel_refine_panel();
+                self.sync_cursor(event_loop);
+            }
+            (KeyCode::Enter | KeyCode::NumpadEnter, _) if !repeat => {
+                self.commit_refine_panel();
+                self.sync_cursor(event_loop);
+            }
+            (KeyCode::KeyF, _) if plain && !repeat => {
+                self.edit.refine_view_mode = self.edit.refine_view_mode.next();
+                self.edit.refine_show_original = false;
+                self.invalidate_refine_overlay();
+            }
+            (KeyCode::KeyX, _) if plain && !repeat => {
+                self.edit.refine_show_original = !self.edit.refine_show_original;
+                self.invalidate_refine_overlay();
+            }
+            (_, Some(_)) if !repeat => self.deny_modal_action(),
+            _ => {}
+        }
         self.redraw_main();
         true
     }

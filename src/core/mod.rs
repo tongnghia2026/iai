@@ -31,6 +31,7 @@ pub mod page;
 pub mod palette;
 pub mod perceptual_color;
 pub mod quick_select;
+pub mod refine;
 pub mod scan_cleanup;
 pub mod selection;
 pub mod settings;

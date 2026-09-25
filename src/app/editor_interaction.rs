@@ -172,19 +172,17 @@ pub struct EditorInteraction {
     pub(in crate::app) selection_ctx_menu_pos: Option<(f32, f32)>,
     pub(in crate::app) text_drag_hovered: bool,
     pub(in crate::app) text_panel_hovered: bool,
+    /// Refine Selection panel open (its session lives on the canvas).
     pub(in crate::app) show_refine_panel: bool,
-    pub(in crate::app) refine_feather: f32,
-    pub(in crate::app) refine_smooth: u32,
-    pub(in crate::app) refine_smart_radius: f32,
-    pub(in crate::app) refine_shift_edge: f32,
-    pub(in crate::app) refine_contrast: f32,
     pub(in crate::app) refine_decontaminate: bool,
     pub(in crate::app) refine_decontaminate_amount: f32,
-    /// Snapshot of selection mask taken when refine panel was opened.
-    /// Used to restore on Cancel, and as base for preview on each change.
-    pub(in crate::app) refine_snapshot: Vec<u8>,
-    /// Whether the refine preview is dirty and needs re-applying.
-    pub(in crate::app) refine_dirty: bool,
+    /// Slider settings changed but not rendered yet (slow full renders wait
+    /// for the slider to be released).
+    pub(in crate::app) refine_render_pending: bool,
+    /// Opacity of the On Black / On White views.
+    pub(in crate::app) refine_view_opacity: f32,
+    /// Show Original (X): preview switched off.
+    pub(in crate::app) refine_show_original: bool,
     /// Tool that was active before the refine panel was opened — restored on close.
     pub(in crate::app) refine_prev_tool: crate::tools::ToolId,
     /// Current view mode for the Refine Selection workspace.
@@ -193,9 +191,8 @@ pub struct EditorInteraction {
     pub(in crate::app) refine_overlay_color: [u8; 4],
     /// Output destination when user clicks OK in Refine Selection.
     pub(in crate::app) refine_output_mode: RefineOutputMode,
-    /// Per-pixel overlay texture for Overlay view mode.
-    /// RGBA image: selected pixels → transparent, unselected → red tint.
-    /// Rebuilt lazily whenever `selection.mask_revision` changes.
+    /// Preview texture of the live selection in the current view mode.
+    /// Patched with the area each render rewrote (see `update_refine_overlay_tex`).
     pub(in crate::app) refine_overlay_tex: Option<egui::TextureHandle>,
     pub(in crate::app) refine_overlay_mask_rev: u64,
 }

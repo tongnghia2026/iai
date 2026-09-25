@@ -214,8 +214,7 @@ impl App {
             let backdrop = self.shell.ui.theme_mode.palette().canvas_backdrop();
 
             if ants_only {
-                let hide_selection_outline = self.edit.show_refine_panel
-                    && self.edit.tools.active_id() == crate::tools::ToolId::RefineBrush;
+                let hide_selection_outline = self.refine_hides_ants();
                 let draw_selection = self.docs.documents[self.docs.active_doc_idx]
                     .canvas
                     .selection
@@ -322,8 +321,7 @@ impl App {
 
                 // Recompute after apply_ui_actions, which may have toggled
                 // the selection / refine panel or changed the view.
-                let hide_selection_outline = self.edit.show_refine_panel
-                    && self.edit.tools.active_id() == crate::tools::ToolId::RefineBrush;
+                let hide_selection_outline = self.refine_hides_ants();
                 let draw_selection = self.docs.documents[self.docs.active_doc_idx]
                     .canvas
                     .selection
