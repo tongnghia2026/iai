@@ -923,12 +923,10 @@ fn sharpen_radius_shifts_boost_to_coarser_scales() {
 }
 
 #[test]
-fn wavelet_sharpen_halos_less_than_usm_baseline() {
-    // A hard step edge. The edge-aware à-trous decomposition keeps the step in
-    // the residual, so boosting the detail coefficients cannot ring around it —
-    // unlike the old unsharp mask, whose Gaussian crosses the edge and paints a
-    // bright/dark halo band. Compare against the old USM formula (same amount /
-    // detail-knee / tanh-limit mapping) run on the same image.
+fn hard_edge_sharpen_halo_is_bounded_like_camera_raw() {
+    // A hard step edge sharpened at 100. Camera Raw paints a visible but
+    // bounded halo (≈0.07 of full scale on a 0.3 step); the tanh limit keeps
+    // the overshoot at or below that envelope and never lets it run away.
     let (w, h) = (48u32, 16u32);
     let mut px = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
@@ -944,37 +942,8 @@ fn wavelet_sharpen_halos_less_than_usm_baseline() {
     let src = TileMap::from_rgba(&px, w, h);
     let mut settings = DevelopSettings::default();
     settings.sharpening = 100.0;
-    settings.sharpen_radius = 1.0;
     let out = apply_to_tilemap_direct(&src, &settings, None);
-
-    // Old-engine USM baseline (amount 1.5, detail 0.25, σ = 1.0, tanh cap 0.35)
-    // on the same gray row.
-    let row: Vec<f32> = (0..w)
-        .map(|x| if x < 24 { 90.0 } else { 170.0 } / 255.0)
-        .collect();
-    let kernel = [0.054f32, 0.244, 0.403, 0.244, 0.054];
-    let usm: Vec<f32> = (0..w as usize)
-        .map(|x| {
-            let mut blur = 0.0f32;
-            for (t, k) in kernel.iter().enumerate() {
-                let sx = (x as i64 + t as i64 - 2).clamp(0, w as i64 - 1) as usize;
-                blur += row[sx] * k;
-            }
-            let high = row[x] - blur;
-            let weight = 0.25 + 0.75 * smootherstep(0.0, 0.04, high.abs());
-            let delta = 0.35f32 * (1.5 * high * weight / 0.35).tanh();
-            (row[x] + delta).clamp(0.0, 1.0)
-        })
-        .collect();
-
-    // Halo amplitude = worst deviation from the flat base on either side.
-    let halo_usm = (0..w as usize)
-        .map(|x| {
-            let base = if x < 24 { 90.0 } else { 170.0 };
-            (usm[x] * 255.0 - base).abs()
-        })
-        .fold(0.0f32, f32::max);
-    let halo_wavelet = (0..w)
+    let halo = (0..w)
         .map(|x| {
             let base = if x < 24 { 90.0 } else { 170.0 };
             let (r, _, _, _) = out.get_pixel(x, 8);
@@ -982,12 +951,12 @@ fn wavelet_sharpen_halos_less_than_usm_baseline() {
         })
         .fold(0.0f32, f32::max);
     assert!(
-        halo_usm > 10.0,
-        "baseline sanity: USM must actually halo ({halo_usm})"
+        halo > 8.0,
+        "sharpening at 100 should visibly crisp a hard edge ({halo})"
     );
     assert!(
-        halo_wavelet * 3.0 < halo_usm,
-        "wavelet sharpening should halo far less than USM: wavelet={halo_wavelet} usm={halo_usm}"
+        halo < 0.12 * 255.0 + 1.5,
+        "halo exceeds the limiter envelope ({halo})"
     );
 }
 

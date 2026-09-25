@@ -1,7 +1,7 @@
 # Kế hoạch hoàn thiện Develop iAI
 
 Ngày lập: 2026-08-27  
-Cập nhật gần nhất: 2026-08-29
+Cập nhật gần nhất: 2026-09-25
 Baseline code chức năng: `edc6816` (`feat(cms): follow per-window monitor profiles`)
 Baseline chạy thử: `dist/iAi-portable/iai.exe`; Develop3 là mặc định, không còn
 cần feature flag.
@@ -10,6 +10,25 @@ Trạng thái hiện tại: **phần code cốt lõi của Develop3 gần hoàn 
 0/1/3/4/5/6/7 và phần rollout chính của Phase 8 đã đóng bằng code/test; Develop2
 đã retire có migration. Các commit mới vẫn đang local, chưa push so với origin.
 Các hướng dẫn handoff cũ phía dưới chỉ giữ làm lịch sử, không được thực thi lại.
+
+## Cập nhật — 2026-09-25 (Detail theo chuẩn Camera Raw)
+
+Owner: "Detail chưa chuẩn như PTS". Đo thật bằng Camera Raw 16 trên máy (Photoshop
+2020 qua COM, bộ ảnh thử tổng hợp: cạnh, vân, nhiễu sáng/màu ở nhiều độ sáng và
+cỡ hạt; probe `tests/detail_pts_probe.rs`). Engine cũ lệch xa: Sharpening 100 còn
+yếu hơn Camera Raw 25 ở cạnh; Noise Reduction xoá vân mịn quá sớm, làm mờ cạnh và
+bệt vùng tối (chạy trên linear với ngưỡng thiết kế cho gamma); Color NR yếu với
+đốm/mảng loang nhưng lại làm phai màu thật.
+
+Engine mới `src/core/develop/detail_core.rs` (+ `gpu/detail.wgsl` khớp CPU ~1e-6):
+luma/chroma trên miền gamma (đường scene encode sRGB mở rộng); Sharpening = DoG USM
+(Radius, Detail <25 chặn quầng / >25 tăng vân mịn, Masking theo gradient, mờ dần ở
+vùng tối/gần trắng, tanh chặn quầng); NR = à-trous 5 tầng có guide, co tuyến tính
+theo thanh (không ngưỡng cứng), Detail = độ nhạy cạnh, Contrast = giữ tầng thô;
+Color NR = à-trous chroma chung 5 tầng + lọc chấm cô lập + bảo vệ màu thật, Detail
+= phần chroma mịn giữ lại, Smoothness = tầng thô. Tham số khớp số đo Camera Raw.
+UI: 3 thanh chính như PTS + mũi tên mở thanh phụ; Sharpening thang 0–150.
+Detail = 0 vẫn giữ nguyên đường cũ (look mặc định không đổi).
 
 ## Cập nhật tiến độ — 2026-08-27 (đợt Light/Mixer + rollout)
 

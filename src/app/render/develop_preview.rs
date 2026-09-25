@@ -16,14 +16,7 @@ fn run_native_gpu_detail(
     linear: bool,
     luma_coeff: [f32; 3],
 ) {
-    let params = crate::gpu::detail_gpu::DetailWorkingParams::from_sliders(
-        settings.sharpening,
-        settings.sharpen_radius,
-        settings.sharpen_detail,
-        settings.sharpen_masking,
-        settings.noise_reduction,
-        settings.color_noise_reduction,
-    );
+    let params = crate::gpu::detail_gpu::DetailWorkingParams::from_settings(settings);
     let mut rgb = Vec::with_capacity(pixels.len() * 3);
     for pixel in pixels.iter() {
         rgb.extend_from_slice(pixel);
@@ -35,7 +28,7 @@ fn run_native_gpu_detail(
         &rgb,
         w as u32,
         h as u32,
-        params,
+        &params,
         linear,
         luma_coeff,
     );
@@ -218,7 +211,8 @@ impl App {
                     })
                     .unwrap_or(0)
                     .min(4_000_000);
-                let padded_pixels = (rw as u64 + 128).saturating_mul(rh as u64 + 128);
+                let apron = 2 * develop::DETAIL_HALO as u64;
+                let padded_pixels = (rw as u64 + apron).saturating_mul(rh as u64 + apron);
                 if padded_pixels <= storage_pixels {
                     1
                 } else {
@@ -227,7 +221,14 @@ impl App {
             } else {
                 develop::fast_preview_downsample(rw, rh)
             } as u32;
-            let pad = downsample.saturating_mul(4).max(64);
+            // The apron must cover Detail's widest dependency so the viewport
+            // crop matches the whole-image commit up to its visible edge.
+            let min_pad = if settings.has_detail() {
+                develop::DETAIL_HALO as u32
+            } else {
+                64
+            };
+            let pad = downsample.saturating_mul(4).max(min_pad);
             let ox = lx0.saturating_sub(pad).min(src_w.saturating_sub(1));
             let oy = ly0.saturating_sub(pad).min(src_h.saturating_sub(1));
             let ex = lx1.saturating_add(pad).min(src_w).max(ox.saturating_add(1));

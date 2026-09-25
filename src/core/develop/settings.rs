@@ -332,17 +332,23 @@ pub struct DevelopSettings {
     pub grade_highlight_strength: f32,
     pub texture: f32,
     pub clarity: f32,
+    /// Sharpening amount on Camera Raw's 0–150 scale.
     pub sharpening: f32,
     /// Unsharp-mask radius in pixels (0.5–3.0). Modifier of `sharpening` — has
     /// no effect while the amount is 0, so it is excluded from `is_neutral`.
     pub sharpen_radius: f32,
-    /// 0–100: how much small-amplitude (fine texture) high-pass passes through.
-    /// Low values sharpen only real edges, protecting noise and skin.
+    /// 0–100: halo suppression (low) versus fine-texture emphasis (high).
     pub sharpen_detail: f32,
     /// 0–100: edge mask threshold — higher protects smooth areas entirely.
     pub sharpen_masking: f32,
     pub noise_reduction: f32,
     pub color_noise_reduction: f32,
+    /// Luminance NR modifiers (Camera Raw's Detail/Contrast, defaults 50/0).
+    pub noise_reduction_detail: f32,
+    pub noise_reduction_contrast: f32,
+    /// Colour NR modifiers (Camera Raw's Detail/Smoothness, defaults 50/50).
+    pub color_noise_detail: f32,
+    pub color_noise_smoothness: f32,
     /// 0–100: strength of edge chroma cleanup (lateral CA / purple fringing).
     /// Neutralises the thin green/magenta rim along high-contrast edges without
     /// touching uniform colour. A modifier of the Detail stage — inert at 0, so
@@ -406,6 +412,10 @@ impl Default for DevelopSettings {
             sharpen_masking: 0.0,
             noise_reduction: 0.0,
             color_noise_reduction: 0.0,
+            noise_reduction_detail: 50.0,
+            noise_reduction_contrast: 0.0,
+            color_noise_detail: 50.0,
+            color_noise_smoothness: 50.0,
             defringe: 0.0,
             dehaze: 0.0,
             vignette: 0.0,
@@ -520,6 +530,10 @@ impl DevelopSettings {
             && self.sharpen_masking == other.sharpen_masking
             && self.noise_reduction == other.noise_reduction
             && self.color_noise_reduction == other.color_noise_reduction
+            && self.noise_reduction_detail == other.noise_reduction_detail
+            && self.noise_reduction_contrast == other.noise_reduction_contrast
+            && self.color_noise_detail == other.color_noise_detail
+            && self.color_noise_smoothness == other.color_noise_smoothness
             && self.defringe == other.defringe
             && self.dehaze == other.dehaze
             && self.vignette == other.vignette
@@ -574,6 +588,10 @@ impl DevelopSettings {
             && self.sharpen_masking == other.sharpen_masking
             && self.noise_reduction == other.noise_reduction
             && self.color_noise_reduction == other.color_noise_reduction
+            && self.noise_reduction_detail == other.noise_reduction_detail
+            && self.noise_reduction_contrast == other.noise_reduction_contrast
+            && self.color_noise_detail == other.color_noise_detail
+            && self.color_noise_smoothness == other.color_noise_smoothness
             && self.defringe == other.defringe
             && self.dehaze == other.dehaze
             && self.vignette == other.vignette
@@ -636,6 +654,10 @@ impl DevelopSettings {
             && self.sharpen_masking == other.sharpen_masking
             && self.noise_reduction == other.noise_reduction
             && self.color_noise_reduction == other.color_noise_reduction
+            && self.noise_reduction_detail == other.noise_reduction_detail
+            && self.noise_reduction_contrast == other.noise_reduction_contrast
+            && self.color_noise_detail == other.color_noise_detail
+            && self.color_noise_smoothness == other.color_noise_smoothness
             && self.defringe == other.defringe
             && self.dehaze == other.dehaze
             && self.vignette == other.vignette

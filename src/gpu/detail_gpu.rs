@@ -1,47 +1,27 @@
-//! GPU port of `core::develop::detail::process_detail_plane` — the full
-//! three-slider Detail (Sharpening, Noise Reduction, Colour Noise Reduction) in
-//! both the display and linear/scene working domains, so the live preview runs
-//! the SAME Detail as the CPU commit and matches it pixel-for-pixel. Built as a
-//! sequence of compute dispatches over one pooled storage buffer; see
-//! `detail.wgsl`. Parity is locked by the headless tests below (max abs diff
-//! 0.000/255 display, 1e-6 linear).
+//! GPU port of `core::develop::detail_core` — Camera Raw–style Sharpening,
+//! Noise Reduction and Colour Noise Reduction on a gamma-encoded luma/chroma
+//! split, in both the display and linear/scene working domains, so the live
+//! preview runs the same Detail as the CPU commit. Built as a sequence of
+//! compute dispatches over one pooled storage buffer; see `detail.wgsl`.
+//! Parity is locked by the headless tests below.
 //!
 //! Shared core used by the live native-resolution compositor and parity probes.
 
-/// Slider values folded to working units — mirrors `detail::DetailParams::new`.
-#[derive(Clone, Copy, Debug)]
+use crate::core::develop::{DetailPlan, DevelopSettings, DETAIL_HALO, DETAIL_LEVELS};
+
+/// Detail sliders folded once on the CPU; the GPU consumes exactly these
+/// numbers, so preview and commit share one parameterisation.
+#[derive(Clone, Debug)]
 pub struct DetailWorkingParams {
-    pub amount: f32,
-    pub sigma: f32,
-    pub detail: f32,
-    pub masking: f32,
-    pub nr: f32,
-    pub color_nr: f32,
+    plan: DetailPlan,
 }
 
 impl DetailWorkingParams {
-    /// Fold raw slider values (0..=100, radius 0.5..=3) the same way the CPU does.
-    pub fn from_sliders(
-        sharpening: f32,
-        sharpen_radius: f32,
-        sharpen_detail: f32,
-        sharpen_masking: f32,
-        noise_reduction: f32,
-        color_noise_reduction: f32,
-    ) -> Self {
+    /// Full-resolution plan for the given Develop settings.
+    pub fn from_settings(settings: &DevelopSettings) -> Self {
         Self {
-            amount: (sharpening / 100.0).clamp(0.0, 1.0) * 1.5,
-            sigma: sharpen_radius.clamp(0.3, 3.0),
-            detail: (sharpen_detail / 100.0).clamp(0.0, 1.0),
-            masking: (sharpen_masking / 100.0).clamp(0.0, 1.0),
-            nr: (noise_reduction / 100.0).clamp(0.0, 1.0),
-            color_nr: (color_noise_reduction / 100.0).clamp(0.0, 1.0),
+            plan: DetailPlan::new(settings, 1.0),
         }
-    }
-
-    fn level_gain(&self) -> [f32; 3] {
-        let t = ((self.sigma - 0.3) / 2.7).clamp(0.0, 1.0);
-        [1.0, 0.35 + 0.65 * t, 0.9 * t]
     }
 }
 
@@ -54,59 +34,57 @@ struct PassParams {
     level: u32,
     flags: u32,
     linear: u32,
-    chan: u32,
     groups_x: u32,
+    radius: u32,
     src_off: u32,
     dst_off: u32,
     a_off: u32,
     b_off: u32,
+    gsrc_off: u32,
+    gdst_off: u32,
     img_off: u32,
     luma_off: u32,
     chroma_off: u32,
-    res_off: u32,
-    d0_off: u32,
-    d1_off: u32,
-    d2_off: u32,
-    cavg_off: u32,
-    cavgtmp_off: u32,
-    _pad2: u32,
-    _pad3: u32,
-    _pad4: u32,
-    amount: f32,
+    acc_off: u32,
+    ga_off: u32,
+    gb_off: u32,
+    gf_off: u32,
+    gm_off: u32,
+    lo_off: u32,
+    hi_off: u32,
     sigma: f32,
-    detail: f32,
-    masking: f32,
-    nr: f32,
-    color_nr: f32,
-    lg0: f32,
-    lg1: f32,
-    lg2: f32,
+    atten: f32,
+    tau: f32,
+    k: f32,
+    k_fine: f32,
+    mask_lo: f32,
+    mask_hi: f32,
+    halo_h: f32,
     lc0: f32,
     lc1: f32,
     lc2: f32,
+    _pad: f32,
     // pad the whole struct to the 256-byte dynamic-uniform stride
     _tail: [u32; 28],
 }
 
 const FLAG_H: u32 = 1;
-const FLAG_EA: u32 = 2;
+const FLAG_FIRST: u32 = 2;
+const FLAG_FINE: u32 = 4;
+const FLAG_MASK: u32 = 8;
+const FLAG_HALO: u32 = 16;
 const STRIDE: u64 = 256;
+/// f32 values per pixel in the pooled buffer (19 used, one spare).
+const POOL_PER_PIXEL: u64 = 20;
 
-/// Region base offsets (in f32 elements) inside the pooled buffer.
+/// Region base offsets (in f32 elements) inside the pooled buffer. The scratch
+/// region is reused by each stage in turn.
 struct Layout {
     n: u32,
     img: u32,
     luma: u32,
     chroma: u32,
-    cplane: u32,
-    r_a: u32,
-    r_b: u32,
-    tmp: u32,
-    d0: u32,
-    d1: u32,
-    d2: u32,
-    cavg: u32,
-    cavgtmp: u32,
+    scratch: u32,
     total: u32,
 }
 
@@ -118,32 +96,24 @@ impl Layout {
             img: 0,
             luma: 3 * n,
             chroma: 4 * n,
-            cplane: 7 * n,
-            r_a: 8 * n,
-            r_b: 9 * n,
-            tmp: 10 * n,
-            d0: 11 * n,
-            d1: 12 * n,
-            d2: 13 * n,
-            cavg: 14 * n,
-            cavgtmp: 17 * n,
-            total: 20 * n,
+            scratch: 7 * n,
+            total: 19 * n,
         }
+    }
+    /// Scratch plane `k` in single-channel units.
+    fn s(&self, k: u32) -> u32 {
+        self.scratch + k * self.n
     }
 }
 
 const ENTRIES: &[&str] = &[
-    "split",
-    "atrous",
-    "diff",
-    "nr_garrote",
-    "box_blur",
-    "reconstruct",
-    "sharpen",
-    "combine",
-    "extract_channel",
-    "chroma_recombine",
+    "split", "cspeck", "catrous", "caccum", "cfinish", "latrous", "laccum", "lfinish", "gauss",
+    "minmax", "sharpen", "combine",
 ];
+
+fn gauss_radius(sigma: f32) -> u32 {
+    crate::core::develop::gauss_taps(sigma).len() as u32 / 2
+}
 
 /// Display-domain convenience wrapper (Rec.709 luma, clamp at the ends), matching
 /// `apply_detail_to_display_buffer`.
@@ -153,7 +123,7 @@ pub fn run_detail_display(
     rgb: &[f32],
     w: u32,
     h: u32,
-    p: DetailWorkingParams,
+    p: &DetailWorkingParams,
 ) -> Vec<f32> {
     run_detail(device, queue, rgb, w, h, p, false, [0.2126, 0.7152, 0.0722])
 }
@@ -228,33 +198,199 @@ impl DetailGpuRuntime {
         rgb: &[f32],
         w: u32,
         h: u32,
-        p: DetailWorkingParams,
+        p: &DetailWorkingParams,
         linear: bool,
         luma_coeff: [f32; 3],
     ) -> Vec<f32> {
-        run_detail_impl(self, device, queue, rgb, w, h, p, linear, luma_coeff)
+        run_detail_impl(self, device, queue, rgb, w, h, &p.plan, linear, luma_coeff)
     }
 }
 
-/// Run the full Detail pipeline (Sharpening + Noise Reduction + Colour NR) on the
-/// GPU and return the RGB result (`3·w·h` f32). `linear` selects the scene/working
-/// domain (working-space `luma_coeff`, no upper clamp) vs the display domain
-/// (clamp at the ends); this is the exact `process_detail_plane` computation, so
-/// the result matches the CPU commit. This convenience entry point builds a
-/// runtime for one call. Live preview
-/// keeps a [`DetailGpuRuntime`] and uses [`run_detail_tiled_with_runtime`].
+/// Run the full Detail pipeline on the GPU and return the RGB result
+/// (`3·w·h` f32). `linear` selects the scene/working domain (encode on entry,
+/// decode on exit) vs the display domain (clamp at the ends). This convenience
+/// entry point builds a runtime for one call; live preview keeps a
+/// [`DetailGpuRuntime`] and uses [`run_detail_tiled_with_runtime`].
+#[allow(clippy::too_many_arguments)]
 pub fn run_detail(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     rgb: &[f32],
     w: u32,
     h: u32,
-    p: DetailWorkingParams,
+    p: &DetailWorkingParams,
     linear: bool,
     luma_coeff: [f32; 3],
 ) -> Vec<f32> {
     let runtime = DetailGpuRuntime::new(device);
     runtime.run(device, queue, rgb, w, h, p, linear, luma_coeff)
+}
+
+/// The dispatch list for one plane: (entry index, uniforms).
+fn build_passes(lay: &Layout, base: PassParams, p: &DetailPlan) -> Vec<(usize, PassParams)> {
+    let entry = |name: &str| ENTRIES.iter().position(|&e| e == name).unwrap();
+    let mut passes: Vec<(usize, PassParams)> = vec![(entry("split"), base)];
+    if p.cnr {
+        // 3-channel scratch planes: two ping-pong levels, a temp, the accumulator.
+        let (ca, cb, ct, cacc) = (lay.s(0), lay.s(3), lay.s(6), lay.s(9));
+        let mut cur = lay.chroma;
+        if p.cnr_speck > 0.0 {
+            let mut sp = base;
+            sp.src_off = lay.chroma;
+            sp.dst_off = cb;
+            sp.atten = p.cnr_speck;
+            passes.push((entry("cspeck"), sp));
+            cur = cb;
+        }
+        for lev in 0..DETAIL_LEVELS {
+            let dst = if lev % 2 == 0 { ca } else { cb };
+            let mut ph = base;
+            ph.level = lev as u32;
+            ph.flags = FLAG_H;
+            ph.sigma = p.cnr_sigma[lev];
+            ph.src_off = cur;
+            ph.dst_off = ct;
+            passes.push((entry("catrous"), ph));
+            let mut pv = ph;
+            pv.flags = 0;
+            pv.src_off = ct;
+            pv.dst_off = dst;
+            passes.push((entry("catrous"), pv));
+            let mut pa = base;
+            pa.flags = if lev == 0 { FLAG_FIRST } else { 0 };
+            pa.a_off = cur;
+            pa.b_off = dst;
+            pa.acc_off = cacc;
+            pa.atten = p.cnr_a[lev];
+            pa.tau = p.cnr_tau[lev].max(1e-6);
+            passes.push((entry("caccum"), pa));
+            cur = dst;
+        }
+        let mut pf = base;
+        pf.a_off = cur;
+        pf.acc_off = cacc;
+        passes.push((entry("cfinish"), pf));
+    }
+
+    if p.lnr {
+        let (la, lb, lt, ga, gb, gt, lacc) = (
+            lay.s(0),
+            lay.s(1),
+            lay.s(2),
+            lay.s(3),
+            lay.s(4),
+            lay.s(5),
+            lay.s(6),
+        );
+        let (mut cur, mut gcur) = (lay.luma, lay.luma);
+        for lev in 0..DETAIL_LEVELS {
+            let (dst, gdst) = if lev % 2 == 0 { (la, ga) } else { (lb, gb) };
+            let mut ph = base;
+            ph.level = lev as u32;
+            ph.flags = FLAG_H;
+            ph.sigma = p.lnr_sigma[lev].max(1e-6);
+            ph.src_off = cur;
+            ph.gsrc_off = gcur;
+            ph.dst_off = lt;
+            ph.gdst_off = gt;
+            passes.push((entry("latrous"), ph));
+            let mut pv = ph;
+            pv.flags = 0;
+            pv.src_off = lt;
+            pv.gsrc_off = gt;
+            pv.dst_off = dst;
+            pv.gdst_off = gdst;
+            passes.push((entry("latrous"), pv));
+            let mut pa = base;
+            pa.flags = if lev == 0 { FLAG_FIRST } else { 0 };
+            pa.a_off = cur;
+            pa.b_off = dst;
+            pa.acc_off = lacc;
+            pa.atten = p.lnr_w[lev] * p.lnr_alpha;
+            passes.push((entry("laccum"), pa));
+            cur = dst;
+            gcur = gdst;
+        }
+        let mut pf = base;
+        pf.a_off = cur;
+        pf.acc_off = lacc;
+        passes.push((entry("lfinish"), pf));
+    }
+
+    if p.sharpen {
+        let (gpa, gpb, gpf, gpm, lo, hi, t1, t2) = (
+            lay.s(0),
+            lay.s(1),
+            lay.s(2),
+            lay.s(3),
+            lay.s(4),
+            lay.s(5),
+            lay.s(6),
+            lay.s(7),
+        );
+        let blur = |passes: &mut Vec<(usize, PassParams)>, sigma: f32, dst: u32| {
+            let r = gauss_radius(sigma);
+            let mut pv = base;
+            pv.radius = r;
+            pv.sigma = sigma.max(1e-6);
+            pv.flags = 0;
+            pv.src_off = lay.luma;
+            pv.dst_off = if r == 0 { dst } else { t1 };
+            passes.push((entry("gauss"), pv));
+            if r > 0 {
+                let mut ph = pv;
+                ph.flags = FLAG_H;
+                ph.src_off = t1;
+                ph.dst_off = dst;
+                passes.push((entry("gauss"), ph));
+            }
+        };
+        blur(&mut passes, p.sigma_a, gpa);
+        blur(&mut passes, p.sigma_b, gpb);
+        let mut flags = 0;
+        if p.k_fine > 0.0 {
+            blur(&mut passes, p.sigma_fine, gpf);
+            flags |= FLAG_FINE;
+        }
+        if p.mask {
+            blur(&mut passes, p.mask_sigma, gpm);
+            flags |= FLAG_MASK;
+        }
+        if p.halo {
+            let mut mh = base;
+            mh.radius = p.halo_r;
+            mh.flags = FLAG_H;
+            mh.a_off = lay.luma;
+            mh.b_off = lay.luma;
+            mh.dst_off = t1;
+            mh.gdst_off = t2;
+            passes.push((entry("minmax"), mh));
+            let mut mv = mh;
+            mv.flags = 0;
+            mv.a_off = t1;
+            mv.b_off = t2;
+            mv.dst_off = lo;
+            mv.gdst_off = hi;
+            passes.push((entry("minmax"), mv));
+            flags |= FLAG_HALO;
+        }
+        let mut ps = base;
+        ps.flags = flags;
+        ps.ga_off = gpa;
+        ps.gb_off = gpb;
+        ps.gf_off = gpf;
+        ps.gm_off = gpm;
+        ps.lo_off = lo;
+        ps.hi_off = hi;
+        ps.k = p.k;
+        ps.k_fine = p.k_fine;
+        ps.mask_lo = p.mask_lo;
+        ps.mask_hi = p.mask_hi;
+        ps.halo_h = p.halo_h;
+        passes.push((entry("sharpen"), ps));
+    }
+    passes.push((entry("combine"), base));
+    passes
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -265,7 +401,7 @@ fn run_detail_impl(
     rgb: &[f32],
     w: u32,
     h: u32,
-    p: DetailWorkingParams,
+    p: &DetailPlan,
     linear: bool,
     luma_coeff: [f32; 3],
 ) -> Vec<f32> {
@@ -285,8 +421,7 @@ fn run_detail_impl(
     );
 
     // Every scratch plane is fully written before its first read. Allocate the
-    // pooled storage uninitialised and upload only the RGB image (3·N), rather
-    // than transferring a 20·N zero-filled host vector on every slider frame.
+    // pooled storage uninitialised and upload only the RGB image (3·N).
     let pool = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("detail_pool"),
         size: lay.total as u64 * std::mem::size_of::<f32>() as u64,
@@ -301,169 +436,51 @@ fn run_detail_impl(
         bytemuck::cast_slice(rgb),
     );
 
-    // Build the pass list (entry index into ENTRIES, PassParams).
-    let lg = p.level_gain();
     let base = PassParams {
         w,
         h,
         n: lay.n,
         level: 0,
         flags: 0,
-        linear: if linear { 1 } else { 0 },
-        chan: 0,
+        linear: u32::from(linear),
         groups_x,
+        radius: 0,
         src_off: 0,
         dst_off: 0,
         a_off: 0,
         b_off: 0,
+        gsrc_off: 0,
+        gdst_off: 0,
         img_off: lay.img,
         luma_off: lay.luma,
         chroma_off: lay.chroma,
-        res_off: lay.r_b,
-        d0_off: lay.d0,
-        d1_off: lay.d1,
-        d2_off: lay.d2,
-        cavg_off: lay.cavg,
-        cavgtmp_off: lay.cavgtmp,
-        _pad2: 0,
-        _pad3: 0,
-        _pad4: 0,
-        amount: p.amount,
-        sigma: p.sigma,
-        detail: p.detail,
-        masking: p.masking,
-        nr: p.nr,
-        color_nr: p.color_nr,
-        lg0: lg[0],
-        lg1: lg[1],
-        lg2: lg[2],
+        acc_off: 0,
+        ga_off: 0,
+        gb_off: 0,
+        gf_off: 0,
+        gm_off: 0,
+        lo_off: 0,
+        hi_off: 0,
+        sigma: 1.0,
+        atten: 0.0,
+        tau: 1.0,
+        k: 0.0,
+        k_fine: 0.0,
+        mask_lo: 0.0,
+        mask_hi: 1.0,
+        halo_h: 1.0,
         lc0: luma_coeff[0],
         lc1: luma_coeff[1],
         lc2: luma_coeff[2],
+        _pad: 0.0,
         _tail: [0; 28],
     };
-
-    let entry = |name: &str| ENTRIES.iter().position(|&e| e == name).unwrap();
-    let mut passes: Vec<(usize, PassParams)> = Vec::new();
-    // split
-    passes.push((entry("split"), base));
-
-    // Chroma NR (Colour Noise Reduction), before the luma path — per channel:
-    // decompose (level 0 plain, levels 1+ edge-aware, matching CHROMA_NR_EDGE_
-    // AWARE_FROM=1) then tone-adaptive recombine into the chroma plane.
-    if p.color_nr > 0.001 {
-        for ch in 0u32..3 {
-            let mut ex = base;
-            ex.chan = ch;
-            ex.dst_off = lay.cplane;
-            passes.push((entry("extract_channel"), ex));
-            // per-level smooth with explicit edge-aware flag
-            let smooth_ea = |passes: &mut Vec<(usize, PassParams)>,
-                             src: u32,
-                             mid: u32,
-                             dst: u32,
-                             level: u32,
-                             ea: bool| {
-                let eabit = if ea { FLAG_EA } else { 0 };
-                let mut ph = base;
-                ph.level = level;
-                ph.flags = FLAG_H | eabit;
-                ph.src_off = src;
-                ph.dst_off = mid;
-                passes.push((entry("atrous"), ph));
-                let mut pv = base;
-                pv.level = level;
-                pv.flags = eabit;
-                pv.src_off = mid;
-                pv.dst_off = dst;
-                passes.push((entry("atrous"), pv));
-            };
-            let diff = |passes: &mut Vec<(usize, PassParams)>, a: u32, b: u32, dst: u32| {
-                let mut pd = base;
-                pd.a_off = a;
-                pd.b_off = b;
-                pd.dst_off = dst;
-                passes.push((entry("diff"), pd));
-            };
-            // level 0 (plain): cplane -> rB, d0 = cplane - rB
-            smooth_ea(&mut passes, lay.cplane, lay.tmp, lay.r_b, 0, false);
-            diff(&mut passes, lay.cplane, lay.r_b, lay.d0);
-            // level 1 (edge-aware): rB -> rA, d1 = rB - rA
-            smooth_ea(&mut passes, lay.r_b, lay.tmp, lay.r_a, 1, true);
-            diff(&mut passes, lay.r_b, lay.r_a, lay.d1);
-            // level 2 (edge-aware): rA -> rB, d2 = rA - rB
-            smooth_ea(&mut passes, lay.r_a, lay.tmp, lay.r_b, 2, true);
-            diff(&mut passes, lay.r_a, lay.r_b, lay.d2);
-            // recombine into chroma[ch]; residual is rB (base.res_off = rB)
-            let mut rc = base;
-            rc.chan = ch;
-            passes.push((entry("chroma_recombine"), rc));
-        }
-    }
-
-    let do_luma = p.nr > 0.001 || p.amount > 0.001;
-    if do_luma {
-        // decompose: residual ping-pong luma -> rB -> rA -> rB, all edge-aware.
-        let smooth =
-            |passes: &mut Vec<(usize, PassParams)>, src: u32, mid: u32, dst: u32, level: u32| {
-                let mut ph = base;
-                ph.level = level;
-                ph.flags = FLAG_H | FLAG_EA;
-                ph.src_off = src;
-                ph.dst_off = mid;
-                passes.push((entry("atrous"), ph));
-                let mut pv = base;
-                pv.level = level;
-                pv.flags = FLAG_EA;
-                pv.src_off = mid;
-                pv.dst_off = dst;
-                passes.push((entry("atrous"), pv));
-            };
-        let diff = |passes: &mut Vec<(usize, PassParams)>, a: u32, b: u32, dst: u32| {
-            let mut pd = base;
-            pd.a_off = a;
-            pd.b_off = b;
-            pd.dst_off = dst;
-            passes.push((entry("diff"), pd));
-        };
-        // level 0: luma -> rB, d0 = luma - rB
-        smooth(&mut passes, lay.luma, lay.tmp, lay.r_b, 0);
-        diff(&mut passes, lay.luma, lay.r_b, lay.d0);
-        // level 1: rB -> rA, d1 = rB - rA
-        smooth(&mut passes, lay.r_b, lay.tmp, lay.r_a, 1);
-        diff(&mut passes, lay.r_b, lay.r_a, lay.d1);
-        // level 2: rA -> rB, d2 = rA - rB
-        smooth(&mut passes, lay.r_a, lay.tmp, lay.r_b, 2);
-        diff(&mut passes, lay.r_a, lay.r_b, lay.d2);
-        // residual is rB (base.res_off already = rB)
-
-        if p.nr > 0.001 {
-            passes.push((entry("nr_garrote"), base));
-        }
-        if p.amount > 0.001 {
-            let mut bh = base;
-            bh.flags = FLAG_H;
-            bh.src_off = lay.chroma;
-            bh.dst_off = lay.cavgtmp;
-            passes.push((entry("box_blur"), bh));
-            let mut bv = base;
-            bv.flags = 0;
-            bv.src_off = lay.cavgtmp;
-            bv.dst_off = lay.cavg;
-            passes.push((entry("box_blur"), bv));
-            passes.push((entry("sharpen"), base));
-        } else {
-            passes.push((entry("reconstruct"), base));
-        }
-    }
-    // combine
-    passes.push((entry("combine"), base));
+    let passes = build_passes(&lay, base, p);
 
     // Uniform buffer: one 256-byte-strided PassParams per pass.
-    let uniform_bytes = passes.len() as u64 * STRIDE;
     let uniform = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("detail_uniform"),
-        size: uniform_bytes,
+        size: passes.len() as u64 * STRIDE,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -530,18 +547,15 @@ fn run_detail_impl(
     out
 }
 
-const DETAIL_HALO: u32 = 16;
-// Large enough to use the adapter's storage-binding budget efficiently. A
-// typical 128 MiB limit yields a ~1196 px core after the apron (two tiles for
-// 1920×1080 instead of four); adapters with a larger limit stay capped so one
-// transient host/pool allocation cannot grow without bound.
+// Large enough to use the adapter's storage-binding budget efficiently while
+// keeping one transient host/pool allocation bounded.
 const PREFERRED_TILE_CORE: u32 = 2048;
 
 /// Full-resolution entry point used by live preview. The source is split into
 /// apron'd tiles so the pooled working storage remains bounded even for a
-/// 24–60 MP photograph. The 16-pixel apron covers the widest dependency chain
-/// in the three-level à-trous pass plus the sharpening chroma average; cropping
-/// it after each run therefore matches one monolithic pass without seams.
+/// 24–60 MP photograph. The apron covers the widest dependency chain of the
+/// Detail core, so cropping it after each run matches one monolithic pass
+/// without seams.
 #[allow(clippy::too_many_arguments)]
 pub fn run_detail_tiled_with_runtime(
     runtime: &DetailGpuRuntime,
@@ -550,7 +564,7 @@ pub fn run_detail_tiled_with_runtime(
     rgb: &[f32],
     w: u32,
     h: u32,
-    p: DetailWorkingParams,
+    p: &DetailWorkingParams,
     linear: bool,
     luma_coeff: [f32; 3],
 ) -> Vec<f32> {
@@ -558,11 +572,12 @@ pub fn run_detail_tiled_with_runtime(
         .limits()
         .max_buffer_size
         .min(device.limits().max_storage_buffer_binding_size as u64);
-    // Pool layout is exactly 20 f32 values per pixel. Leave a little room for
-    // alignment/driver bookkeeping and account for the apron on both sides.
-    let max_plane_pixels = (available_bytes.saturating_mul(9) / 10 / 80).max(1);
+    // Leave a little room for alignment/driver bookkeeping and account for the
+    // apron on both sides.
+    let max_plane_pixels = (available_bytes.saturating_mul(9) / 10 / (POOL_PER_PIXEL * 4)).max(1);
     let max_plane_edge = (max_plane_pixels as f64).sqrt().floor() as u32;
-    let core_edge = PREFERRED_TILE_CORE.min(max_plane_edge.saturating_sub(2 * DETAIL_HALO).max(1));
+    let halo = DETAIL_HALO as u32;
+    let core_edge = PREFERRED_TILE_CORE.min(max_plane_edge.saturating_sub(2 * halo).max(1));
     run_detail_tiled_with_core(
         runtime, device, queue, rgb, w, h, p, linear, luma_coeff, core_edge,
     )
@@ -576,7 +591,7 @@ fn run_detail_tiled_with_core(
     rgb: &[f32],
     w: u32,
     h: u32,
-    p: DetailWorkingParams,
+    p: &DetailWorkingParams,
     linear: bool,
     luma_coeff: [f32; 3],
     core_edge: u32,
@@ -586,6 +601,7 @@ fn run_detail_tiled_with_core(
     if w == 0 || h == 0 {
         return Vec::new();
     }
+    let halo = DETAIL_HALO as u32;
     let core_edge = core_edge.max(1);
     let mut out = vec![0.0f32; 3 * n];
     for core_y in (0..h).step_by(core_edge as usize) {
@@ -595,23 +611,20 @@ fn run_detail_tiled_with_core(
             // Do not synthesize padding outside the full image: every à-trous
             // level clamps its intermediate plane at the real image edge, and
             // pre-extending source pixels would not be mathematically equal.
-            let source_x0 = core_x.saturating_sub(DETAIL_HALO);
-            let source_y0 = core_y.saturating_sub(DETAIL_HALO);
-            let source_x1 = (core_x + core_w + DETAIL_HALO).min(w);
-            let source_y1 = (core_y + core_h + DETAIL_HALO).min(h);
+            let source_x0 = core_x.saturating_sub(halo);
+            let source_y0 = core_y.saturating_sub(halo);
+            let source_x1 = (core_x + core_w + halo).min(w);
+            let source_y1 = (core_y + core_h + halo).min(h);
             let tile_w = source_x1 - source_x0;
             let tile_h = source_y1 - source_y0;
             let crop_x = core_x - source_x0;
             let crop_y = core_y - source_y0;
             let mut tile = vec![0.0f32; 3 * (tile_w * tile_h) as usize];
             for tile_y in 0..tile_h {
-                for tile_x in 0..tile_w {
-                    let source_x = source_x0 + tile_x;
-                    let source_y = source_y0 + tile_y;
-                    let source_i = 3 * (source_y * w + source_x) as usize;
-                    let tile_i = 3 * (tile_y * tile_w + tile_x) as usize;
-                    tile[tile_i..tile_i + 3].copy_from_slice(&rgb[source_i..source_i + 3]);
-                }
+                let source_i = 3 * ((source_y0 + tile_y) * w + source_x0) as usize;
+                let tile_i = 3 * (tile_y * tile_w) as usize;
+                let len = 3 * tile_w as usize;
+                tile[tile_i..tile_i + len].copy_from_slice(&rgb[source_i..source_i + len]);
             }
 
             let detailed = runtime.run(device, queue, &tile, tile_w, tile_h, p, linear, luma_coeff);
@@ -633,12 +646,80 @@ mod tests {
 
     // Multiple WGPU adapters/devices mapping readbacks concurrently is flaky on
     // some Windows drivers. The production path is single-device; serialize
-    // these three headless parity probes so `cargo test --lib` is deterministic.
+    // these headless parity probes so `cargo test --lib` is deterministic.
     static GPU_DETAIL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Headless GPU Detail (Sharpening + Noise Reduction, display domain) must
-    /// match the CPU `apply_detail_to_display_buffer` within a tight tolerance,
-    /// so the future live preview equals the commit.
+    fn hash(i: usize, s: u32) -> f32 {
+        let mut x = (i as u32)
+            .wrapping_mul(2_654_435_761)
+            .wrapping_add(s)
+            .wrapping_add(2_463_534_242);
+        x ^= x >> 15;
+        x = x.wrapping_mul(2_246_822_519);
+        x ^= x >> 13;
+        (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+    }
+
+    /// Edges, texture and luma/chroma noise so every stage engages.
+    fn test_image(w: u32, h: u32, linear: bool) -> Vec<f32> {
+        let mut rgb = vec![0f32; (3 * w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) as usize;
+                let step = if x > w / 2 { 0.62 } else { 0.22 };
+                let tex = 0.02 * ((x as f32) * 2.1).sin();
+                let base = step + tex + 0.03 * hash(i, 7);
+                let px = [base + 0.03 * hash(i, 11), base, base + 0.025 * hash(i, 13)];
+                for c in 0..3 {
+                    rgb[i * 3 + c] = if linear {
+                        (px[c].max(0.0)).powf(2.2) * 1.4
+                    } else {
+                        px[c].clamp(0.0, 1.0)
+                    };
+                }
+            }
+        }
+        rgb
+    }
+
+    fn cases() -> Vec<DevelopSettings> {
+        let base = DevelopSettings::default();
+        vec![
+            DevelopSettings {
+                sharpening: 70.0,
+                noise_reduction: 40.0,
+                color_noise_reduction: 60.0,
+                ..base.clone()
+            },
+            DevelopSettings {
+                sharpening: 120.0,
+                sharpen_radius: 2.2,
+                sharpen_detail: 10.0,
+                sharpen_masking: 30.0,
+                noise_reduction: 20.0,
+                noise_reduction_detail: 80.0,
+                noise_reduction_contrast: 40.0,
+                ..base.clone()
+            },
+            DevelopSettings {
+                sharpening: 40.0,
+                sharpen_detail: 80.0,
+                color_noise_reduction: 25.0,
+                color_noise_detail: 20.0,
+                color_noise_smoothness: 90.0,
+                ..base
+            },
+        ]
+    }
+
+    fn max_diff(cpu: &[[f32; 3]], gpu: &[f32]) -> f32 {
+        cpu.iter()
+            .enumerate()
+            .flat_map(|(i, p)| (0..3).map(move |c| (p[c] - gpu[i * 3 + c]).abs()))
+            .fold(0.0, f32::max)
+    }
+
+    /// Display domain: GPU must match `apply_detail_to_display_buffer`.
     #[test]
     fn gpu_detail_matches_cpu_display() {
         let _guard = GPU_DETAIL_TEST_LOCK.lock().expect("GPU Detail test lock");
@@ -646,66 +727,22 @@ mod tests {
             eprintln!("no headless GPU adapter; skipped");
             return;
         };
-        let (w, h) = (40u32, 24u32);
-        // Edges + hashed noise so Sharpening, the masking gate and NR all engage.
-        let hash = |i: usize, s: u32| -> f32 {
-            let mut x = (i as u32)
-                .wrapping_mul(2_654_435_761)
-                .wrapping_add(s)
-                .wrapping_add(2_463_534_242);
-            x ^= x >> 15;
-            x = x.wrapping_mul(2_246_822_519);
-            x ^= x >> 13;
-            (x as f32 / u32::MAX as f32) * 2.0 - 1.0
-        };
-        let mut rgb = vec![0f32; (3 * w * h) as usize];
-        for y in 0..h {
-            for x in 0..w {
-                let i = (y * w + x) as usize;
-                let step = if x > w / 2 { 0.62 } else { 0.30 };
-                let base = (step + 0.03 * hash(i, 7)).clamp(0.0, 1.0);
-                rgb[i * 3] = base;
-                rgb[i * 3 + 1] = (base + 0.02 * hash(i, 11)).clamp(0.0, 1.0);
-                rgb[i * 3 + 2] = (base + 0.02 * hash(i, 13)).clamp(0.0, 1.0);
-            }
+        let (w, h) = (48u32, 40u32);
+        let rgb = test_image(w, h, false);
+        for settings in cases() {
+            let mut cpu: Vec<[f32; 3]> = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+            crate::core::develop::apply_detail_to_display_buffer(
+                &mut cpu, w as usize, h as usize, &settings, 1,
+            );
+            let params = DetailWorkingParams::from_settings(&settings);
+            let gpu = run_detail_display(&device, &queue, &rgb, w, h, &params);
+            let d = max_diff(&cpu, &gpu);
+            println!("GPU vs CPU display Detail max abs diff = {d:.7}");
+            assert!(d < 2e-4, "GPU Detail diverges from CPU: {d}");
         }
-
-        // CPU reference.
-        let mut settings = crate::core::develop::DevelopSettings::default();
-        settings.sharpening = 70.0;
-        settings.noise_reduction = 40.0;
-        settings.sharpen_masking = 30.0;
-        settings.color_noise_reduction = 60.0;
-        let mut cpu: Vec<[f32; 3]> = (0..(w * h) as usize)
-            .map(|i| [rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]])
-            .collect();
-        crate::core::develop::apply_detail_to_display_buffer(
-            &mut cpu, w as usize, h as usize, &settings, 1,
-        );
-
-        // GPU.
-        let params = DetailWorkingParams::from_sliders(70.0, 1.0, 25.0, 30.0, 40.0, 60.0);
-        let gpu = run_detail_display(&device, &queue, &rgb, w, h, params);
-
-        let mut max_diff = 0f32;
-        for i in 0..(w * h) as usize {
-            for c in 0..3 {
-                let d = (cpu[i][c] - gpu[i * 3 + c]).abs();
-                max_diff = max_diff.max(d);
-            }
-        }
-        println!(
-            "GPU vs CPU Detail max abs diff = {max_diff:.6} ({:.3}/255)",
-            max_diff * 255.0
-        );
-        assert!(
-            max_diff < 3e-3,
-            "GPU Detail diverges from CPU: max abs diff {max_diff} ({:.2}/255)",
-            max_diff * 255.0
-        );
     }
 
-    /// Linear/scene domain (RAW): GPU must match the CPU
+    /// Linear/scene domain (RAW): GPU must match
     /// `apply_detail_to_working_buffer_in_space` in the working colour space.
     #[test]
     fn gpu_detail_matches_cpu_linear_scene() {
@@ -717,52 +754,19 @@ mod tests {
         use crate::core::working_color::WorkingColorSpace;
         let space = WorkingColorSpace::AcesCg;
         let coeff = space.render_luminance_coefficients();
-        let (w, h) = (40u32, 24u32);
-        let hash = |i: usize, s: u32| -> f32 {
-            let mut x = (i as u32)
-                .wrapping_mul(2_654_435_761)
-                .wrapping_add(s)
-                .wrapping_add(2_463_534_242);
-            x ^= x >> 15;
-            x = x.wrapping_mul(2_246_822_519);
-            x ^= x >> 13;
-            (x as f32 / u32::MAX as f32) * 2.0 - 1.0
-        };
-        // Linear scene values, some above 1.0 (headroom) — no upper clamp applies.
-        let mut rgb = vec![0f32; (3 * w * h) as usize];
-        for y in 0..h {
-            for x in 0..w {
-                let i = (y * w + x) as usize;
-                let step = if x > w / 2 { 0.9 } else { 0.18 };
-                let base = (step + 0.04 * hash(i, 7)).max(0.0);
-                rgb[i * 3] = base * 1.3;
-                rgb[i * 3 + 1] = (base + 0.03 * hash(i, 11)).max(0.0);
-                rgb[i * 3 + 2] = (base * 0.7 + 0.03 * hash(i, 13)).max(0.0);
-            }
+        let (w, h) = (48u32, 40u32);
+        let rgb = test_image(w, h, true);
+        for settings in cases() {
+            let mut cpu: Vec<[f32; 3]> = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+            crate::core::develop::apply_detail_to_working_buffer_in_space(
+                &mut cpu, w as usize, h as usize, &settings, space, 1,
+            );
+            let params = DetailWorkingParams::from_settings(&settings);
+            let gpu = run_detail(&device, &queue, &rgb, w, h, &params, true, coeff);
+            let d = max_diff(&cpu, &gpu);
+            println!("GPU vs CPU linear Detail max abs diff = {d:.7}");
+            assert!(d < 5e-4, "GPU linear Detail diverges: {d}");
         }
-
-        let mut settings = crate::core::develop::DevelopSettings::default();
-        settings.sharpening = 65.0;
-        settings.noise_reduction = 35.0;
-        settings.color_noise_reduction = 50.0;
-        let mut cpu: Vec<[f32; 3]> = (0..(w * h) as usize)
-            .map(|i| [rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]])
-            .collect();
-        crate::core::develop::apply_detail_to_working_buffer_in_space(
-            &mut cpu, w as usize, h as usize, &settings, space, 1,
-        );
-
-        let params = DetailWorkingParams::from_sliders(65.0, 1.0, 25.0, 0.0, 35.0, 50.0);
-        let gpu = run_detail(&device, &queue, &rgb, w, h, params, true, coeff);
-
-        let mut max_diff = 0f32;
-        for i in 0..(w * h) as usize {
-            for c in 0..3 {
-                max_diff = max_diff.max((cpu[i][c] - gpu[i * 3 + c]).abs());
-            }
-        }
-        println!("GPU vs CPU linear Detail max abs diff = {max_diff:.6}");
-        assert!(max_diff < 3e-3, "GPU linear Detail diverges: {max_diff}");
     }
 
     #[test]
@@ -772,56 +776,24 @@ mod tests {
             eprintln!("no headless GPU adapter; skipped");
             return;
         };
-        let (w, h) = (73u32, 57u32);
-        let mut rgb = vec![0.0f32; (3 * w * h) as usize];
-        for y in 0..h {
-            for x in 0..w {
-                let i = (y * w + x) as usize;
-                let edge = if x >= 37 { 0.71 } else { 0.19 };
-                let noise = (((i as u32)
-                    .wrapping_mul(1_664_525)
-                    .wrapping_add(1_013_904_223)
-                    >> 8) as f32
-                    / 16_777_215.0
-                    - 0.5)
-                    * 0.07;
-                rgb[3 * i] = (edge + noise).clamp(0.0, 1.0);
-                rgb[3 * i + 1] = (edge * 0.91 - noise * 0.4).clamp(0.0, 1.0);
-                rgb[3 * i + 2] = (edge * 0.73 + noise * 0.7).clamp(0.0, 1.0);
-            }
-        }
-        let params = DetailWorkingParams::from_sliders(72.0, 1.0, 25.0, 0.0, 43.0, 58.0);
+        let (w, h) = (230u32, 190u32);
+        let rgb = test_image(w, h, false);
+        let settings = &cases()[0];
+        let params = DetailWorkingParams::from_settings(settings);
         let runtime = DetailGpuRuntime::new(&device);
-        let whole = runtime.run(
-            &device,
-            &queue,
-            &rgb,
-            w,
-            h,
-            params,
-            false,
-            [0.2126, 0.7152, 0.0722],
-        );
-        // A deliberately tiny core forces seams through both smooth and edge
-        // regions; the apron must make every cropped pixel identical.
+        let coeff = [0.2126, 0.7152, 0.0722];
+        let whole = runtime.run(&device, &queue, &rgb, w, h, &params, false, coeff);
+        // A small core forces seams through smooth and edge regions; the apron
+        // must make every cropped pixel identical.
         let tiled = run_detail_tiled_with_core(
-            &runtime,
-            &device,
-            &queue,
-            &rgb,
-            w,
-            h,
-            params,
-            false,
-            [0.2126, 0.7152, 0.0722],
-            29,
+            &runtime, &device, &queue, &rgb, w, h, &params, false, coeff, 60,
         );
-        let max_diff = whole
+        let d = whole
             .iter()
             .zip(&tiled)
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        println!("GPU tiled vs monolithic Detail max abs diff = {max_diff:.8}");
-        assert!(max_diff < 1e-6, "tiled GPU Detail has a seam: {max_diff}");
+        println!("GPU tiled vs monolithic Detail max abs diff = {d:.8}");
+        assert!(d < 1e-6, "tiled GPU Detail has a seam: {d}");
     }
 }

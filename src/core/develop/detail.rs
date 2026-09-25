@@ -1,7 +1,7 @@
-//! Detail and Effects stages. Detail: à-trous (stationary) wavelet sharpening
-//! and noise reduction on the luminance plane plus wavelet chroma NR.
-//! Effects: clarity (local contrast), defog (dark-channel veil removal), and
-//! vignette.
+//! Detail and Effects stages. Detail (Sharpening, Noise Reduction, Colour
+//! Noise Reduction, Defringe) runs the Camera Raw–style core in
+//! `detail_core` on a gamma-encoded luma/chroma split. Effects: clarity (local
+//! contrast), defog (dark-channel veil removal), and vignette.
 
 use super::*;
 use crate::core::color::luminance_f32;
@@ -9,49 +9,6 @@ use crate::core::tile::{dither16_to_u8, quantize_dither, TileMap, TILE_SIZE};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-/// Detail-stage tuning. `DETAIL_HALO` covers the widest neighbourhood any stage
-/// reads: the à-trous levels reach ±2·(1+2+4) = ±14 px cumulatively, plus the
-/// mask gradient. `SHARPEN_KNEE` is the wavelet-coefficient amplitude the
-/// Detail slider gates around; `MASK_GRAD_FULL` the residual-plane gradient a
-/// full Masking slider requires; `SHARPEN_LIMIT` the tanh overshoot ceiling.
-const DETAIL_HALO: usize = 16;
-const SHARPEN_KNEE: f32 = 0.04;
-const SHARPEN_LIMIT: f32 = 0.35;
-const MASK_GRAD_FULL: f32 = 0.035;
-
-/// À-trous decomposition depth: detail scales ≈ 1, 2, 4 px.
-const WAVELET_LEVELS: usize = 3;
-/// Range sigma of the edge-aware tap weights (luma units). Taps whose value
-/// differs from the centre by ≫ this contribute almost nothing, so the blur
-/// does not cross strong edges and coefficients hold texture, not edge steps.
-const WAVELET_RANGE_SIGMA: f32 = 0.12;
-/// Luminance-NR coefficient threshold (level 0) at a full slider, decaying per
-/// coarser level — matches noise energy concentrating at the finest scale.
-const NR_LUMA_THRESH: f32 = 0.08;
-const NR_LEVEL_DECAY: f32 = 0.5;
-/// Chroma-NR level attenuation at a full slider: kill fine colour speckle
-/// outright, keep progressively more of the coarser (real-colour) scales.
-const CHROMA_NR_ATTEN: [f32; WAVELET_LEVELS] = [1.0, 0.85, 0.6];
-/// First à-trous scale whose chroma smoothing is edge-aware (Q6). Level 0 (the
-/// finest, isolated-speckle scale) stays non-edge-aware so a strong colour speck
-/// is still captured and removed; levels 1+ are edge-aware so genuine colour
-/// boundaries stay in the residual and are not bled across. `WAVELET_LEVELS`
-/// would restore the pre-Q6 fully-non-edge-aware (edge-smearing) behaviour.
-const CHROMA_NR_EDGE_AWARE_FROM: usize = 1;
-
-/// Tone-adaptive noise reduction. The display tone curve stretches shadow noise
-/// (most visible) and compresses highlight noise, so both the luminance garrote
-/// threshold and the chroma attenuation are scaled up in the shadows and left at
-/// their baseline in the highlights. Highlight behaviour is therefore identical
-/// to the pre-upgrade engine; only the shadows are cleaned harder. The weight is
-/// a function of local BRIGHTNESS (the wavelet residual / pixel luma), not of a
-/// measured global noise level, so it is resolution-invariant and the reduced-
-/// resolution interactive preview matches the full-resolution commit. `MID` is
-/// the luminance at which the shadow boost has faded to none.
-const NR_SHADOW_MID: f32 = 0.5;
-const NR_LUMA_SHADOW_GAIN: f32 = 1.5;
-const NR_CHROMA_SHADOW_GAIN: f32 = 1.2;
 
 /// Defringe tuning. Lateral chromatic aberration and purple fringing paint a
 /// thin coloured rim (classically magenta/purple on one side, green on the
@@ -79,31 +36,6 @@ const DEFRINGE_SPIKE_HI: f32 = 0.05;
 /// Pure green is its negative, so `|cos angle|` ≈ 1 for both fringe hues and
 /// falls off for the other primaries/secondaries.
 const DEFRINGE_AXIS: [f32; 3] = [0.6807, -0.2710, 0.6807];
-
-/// Slider values folded to working units once per bake.
-struct DetailParams {
-    amount: f32,
-    sigma: f32,
-    detail: f32,
-    masking: f32,
-    nr: f32,
-    color_nr: f32,
-    defringe: f32,
-}
-
-impl DetailParams {
-    fn new(settings: &DevelopSettings) -> Self {
-        Self {
-            amount: (settings.sharpening / 100.0).clamp(0.0, 1.0) * 1.5,
-            sigma: settings.sharpen_radius.clamp(0.3, 3.0),
-            detail: (settings.sharpen_detail / 100.0).clamp(0.0, 1.0),
-            masking: (settings.sharpen_masking / 100.0).clamp(0.0, 1.0),
-            nr: (settings.noise_reduction / 100.0).clamp(0.0, 1.0),
-            color_nr: (settings.color_noise_reduction / 100.0).clamp(0.0, 1.0),
-            defringe: (settings.defringe / 100.0).clamp(0.0, 1.0),
-        }
-    }
-}
 
 /// Edge-gated green↔magenta chroma cleanup (lateral CA / purple fringing).
 ///
@@ -171,318 +103,133 @@ fn apply_defringe(chroma: &mut [[f32; 3]], luma: &[f32], w: usize, h: usize, amo
     chroma.copy_from_slice(&out);
 }
 
-/// One à-trous B3-spline smoothing pass at hole spacing `1 << level`,
-/// separable and edge-clamped. With `edge_aware`, each tap is additionally
-/// range-weighted `1 / (1 + (Δ/σ)²)` against the centre value, so the blur
-/// does not cross strong edges — the detail coefficient (src − smooth) then
-/// holds texture rather than the edge step, and boosting or shrinking it
-/// cannot ring around edges.
-fn atrous_smooth(src: &[f32], w: usize, h: usize, level: usize, edge_aware: bool) -> Vec<f32> {
-    const B3: [f32; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
-    let step = 1i64 << level;
-    let inv_s2 = 1.0 / (WAVELET_RANGE_SIGMA * WAVELET_RANGE_SIGMA);
-    let pass = |input: &[f32], horizontal: bool| -> Vec<f32> {
-        let mut out = vec![0.0f32; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                let centre = input[y * w + x];
-                let mut acc = 0.0f32;
-                let mut wsum = 0.0f32;
-                for (t, &kv) in B3.iter().enumerate() {
-                    let o = (t as i64 - 2) * step;
-                    let idx = if horizontal {
-                        let sx = (x as i64 + o).clamp(0, w as i64 - 1) as usize;
-                        y * w + sx
-                    } else {
-                        let sy = (y as i64 + o).clamp(0, h as i64 - 1) as usize;
-                        sy * w + x
-                    };
-                    let v = input[idx];
-                    let wt = if edge_aware {
-                        let d = v - centre;
-                        kv / (1.0 + d * d * inv_s2)
-                    } else {
-                        kv
-                    };
-                    acc += v * wt;
-                    wsum += wt;
-                }
-                out[y * w + x] = acc / wsum.max(1e-9);
-            }
-        }
-        out
-    };
-    let tmp = pass(src, true);
-    pass(&tmp, false)
-}
+const REC709: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
-/// À-trous decomposition into [`WAVELET_LEVELS`] detail planes plus the smooth
-/// residual: `src = residual + Σ details[j]` exactly (the transform is a plain
-/// difference pyramid at full resolution, so reconstruction is lossless).
+/// Colour NR → Luminance NR → Sharpening over one RGB plane.
 ///
-/// `edge_aware_from` is the first scale that uses edge-aware (range-weighted)
-/// smoothing: levels `< edge_aware_from` blur with plain B3 taps (so a strong
-/// isolated speck at that scale is captured into the detail plane and can be
-/// removed), while levels `>= edge_aware_from` keep true edges out of the detail
-/// planes. `0` = fully edge-aware; `WAVELET_LEVELS` = never.
-fn atrous_decompose(
-    src: &[f32],
-    w: usize,
-    h: usize,
-    edge_aware_from: usize,
-) -> (Vec<f32>, Vec<Vec<f32>>) {
-    let mut c = src.to_vec();
-    let mut details = Vec::with_capacity(WAVELET_LEVELS);
-    for level in 0..WAVELET_LEVELS {
-        let next = atrous_smooth(&c, w, h, level, level >= edge_aware_from);
-        for (d, &n) in c.iter_mut().zip(&next) {
-            *d -= n;
-        }
-        details.push(std::mem::replace(&mut c, next));
-    }
-    (c, details)
-}
-
-/// Tone-adaptive NR strength multiplier at a pixel of the given brightness: 1 in
-/// the highlights (no change vs the pre-upgrade engine), rising toward `1 + gain`
-/// in the shadows where display-domain noise is most visible.
-#[inline]
-fn nr_shadow_weight(brightness: f32, gain: f32) -> f32 {
-    1.0 + gain * (1.0 - smootherstep(0.0, NR_SHADOW_MID, brightness.clamp(0.0, 1.0)))
-}
-
-/// Per-à-trous-level weight that scales the Detail contribution down when the
-/// pass runs on a reduced-resolution live-preview proxy. `preview_scale` is the
-/// proxy downsample in SOURCE pixels per proxy pixel; it is `1` for every full-
-/// resolution path (per-tile commit, Apply, settled 100 % bake), which makes
-/// every weight exactly `1.0` and this a bit-exact no-op there.
-///
-/// Why scale at all (plan G6, "quy đổi bán kính về pixel nguồn"): level `l`
-/// sharpens/denoises structure at ≈ `2^l` PROXY px, i.e. `2^l · S` SOURCE px.
-/// The commit only ever touches 1–4 source px, so on the 8–48× live proxy the
-/// proxy's own levels sit at 8–192 source px — far coarser than anything the
-/// commit does. Running them at full strength paints a broad, wrong-scale
-/// halo/blur that then snaps to the fine commit result on pointer release (the
-/// "scale jump"). Weighting each level by the fraction of its intended source
-/// scale the proxy can still resolve, `min(2^l / S, 1)`, keeps the finest (most
-/// objectionable) false level the most suppressed and lets only a coarse hint
-/// through, so the drag preview does not exaggerate at proxy scale.
-///
-/// The raw fraction `min(2^l / S, 1)` is softened by a square root. The strict
-/// fraction was faithful to a full-resolution reference but suppressed so hard
-/// at moderate zoom (e.g. S≈4 → finest level at 25 %) that the live Detail
-/// preview read as almost off, and it made the on-release settled bake pop
-/// visibly sharper. `sqrt` keeps the finest, most objectionable false level the
-/// most suppressed (monotone, still →0 as S→∞, still exactly 1 at S=1) while
-/// letting enough real detail through that the drag preview looks like the
-/// result and the release transition is gentle. `preview_scale == 1` (every
-/// full-resolution path: per-tile commit, Apply) stays a bit-exact no-op.
-#[inline]
-fn preview_level_survive(preview_scale: u32) -> [f32; WAVELET_LEVELS] {
-    let s = preview_scale.max(1) as f32;
-    std::array::from_fn(|l| (((1u32 << l) as f32 / s).clamp(0.0, 1.0)).sqrt())
-}
-
-/// Colour NR → Luminance NR → Sharpen over one halo'd RGB plane.
-///
-/// The pixel is split into luminance + chroma offsets (luminance of the chroma
-/// part is 0 by linearity, so the chroma stages cannot shift brightness):
-///   • Colour NR: à-trous shrinkage of the chroma planes — the fine levels
-///     (colour speckle) are attenuated outright, the residual (real colour
-///     areas) kept. Plain B3 taps: a strong single-pixel colour speck must not
-///     be "protected" as an edge. The attenuation is tone-adaptive: shadows
-///     (worst colour blotches) are cleaned harder, highlights left at baseline.
-///   • Luminance NR: non-negative-garrote shrinkage of the edge-aware wavelet
-///     coefficients, with a shadow-boosted threshold (display-domain shadow
-///     grain is most visible). Real edges live in the residual (the range
-///     weights keep the blur from crossing them), so thresholding erodes grain,
-///     not structure.
-///   • Sharpening boosts the (denoised) coefficients per level: Radius shifts
-///     weight toward coarser levels, Detail gates small-amplitude coefficients
-///     (strong edges always sharpen), Masking gates on the residual's gradient
-///     (smooth areas drop out), the total lift is tanh-limited, and the chroma
-///     de-fringe pull is kept from the old engine (demosaic fringing guard).
-fn process_detail_plane(
+/// The pixel is gamma-encoded (the linear scene/working path encodes with the
+/// odd-extended sRGB curve; display data already is) and split into luma plus
+/// chroma offsets, so every stage acts on perceptual steps the same way in the
+/// shadows and the highlights. Defringe runs first on the raw chroma, then
+/// Colour NR on the chroma, Luminance NR and Sharpening on the luma.
+pub(crate) fn process_detail_plane_with_plan(
     rgb: &[[f32; 3]],
     w: usize,
     h: usize,
-    p: &DetailParams,
+    p: &DetailPlan,
     linear_space: Option<crate::core::working_color::WorkingColorSpace>,
-    preview_scale: u32,
+) -> Vec<[f32; 3]> {
+    process_detail_banded(rgb, w, h, p, linear_space, DETAIL_BAND_ROWS)
+}
+
+/// Rows per band when a plane is large enough to bound the scratch memory.
+const DETAIL_BAND_ROWS: usize = 768;
+const DETAIL_BAND_MIN_PIXELS: usize = 4_000_000;
+
+/// Large planes run as full-width horizontal bands with a `DETAIL_HALO` apron
+/// (clipped at the image edge), which reproduces the whole-plane result
+/// exactly while keeping the per-band scratch small.
+fn process_detail_banded(
+    rgb: &[[f32; 3]],
+    w: usize,
+    h: usize,
+    p: &DetailPlan,
+    linear_space: Option<crate::core::working_color::WorkingColorSpace>,
+    band_rows: usize,
+) -> Vec<[f32; 3]> {
+    if w * h < DETAIL_BAND_MIN_PIXELS && band_rows == DETAIL_BAND_ROWS
+        || h <= band_rows + 2 * DETAIL_HALO
+    {
+        return process_detail_band(rgb, w, h, p, linear_space);
+    }
+    let mut out = vec![[0.0f32; 3]; w * h];
+    for y0 in (0..h).step_by(band_rows) {
+        let y1 = (y0 + band_rows).min(h);
+        let a0 = y0.saturating_sub(DETAIL_HALO);
+        let a1 = (y1 + DETAIL_HALO).min(h);
+        let band = process_detail_band(&rgb[a0 * w..a1 * w], w, a1 - a0, p, linear_space);
+        out[y0 * w..y1 * w].copy_from_slice(&band[(y0 - a0) * w..(y1 - a0) * w]);
+    }
+    out
+}
+
+fn process_detail_band(
+    rgb: &[[f32; 3]],
+    w: usize,
+    h: usize,
+    p: &DetailPlan,
+    linear_space: Option<crate::core::working_color::WorkingColorSpace>,
 ) -> Vec<[f32; 3]> {
     let linear = linear_space.is_some();
-    // All-ones for every full-resolution path (`preview_scale == 1`), so the
-    // per-level multiplies below are bit-exact no-ops on the commit/Apply path.
-    let survive = preview_level_survive(preview_scale);
-    let mut luma: Vec<f32> = rgb
-        .iter()
-        .map(|c| {
-            let y = if let Some(space) = linear_space {
-                working_luma(space, *c)
-            } else {
-                luminance_f32(c[0], c[1], c[2])
-            };
-            if linear {
-                y.max(0.0)
-            } else {
-                y.clamp(0.0, 1.0)
-            }
-        })
+    let coeff = linear_space.map_or(REC709, |s| s.render_luminance_coefficients());
+    let encoded: Vec<[f32; 3]> = if linear {
+        rgb.par_iter()
+            .map(|c| {
+                [
+                    encode_channel(c[0]),
+                    encode_channel(c[1]),
+                    encode_channel(c[2]),
+                ]
+            })
+            .collect()
+    } else {
+        rgb.to_vec()
+    };
+    let mut luma: Vec<f32> = encoded
+        .par_iter()
+        .map(|c| coeff[0] * c[0] + coeff[1] * c[1] + coeff[2] * c[2])
         .collect();
-    let mut chroma: Vec<[f32; 3]> = rgb
-        .iter()
-        .zip(&luma)
+    let mut chroma: Vec<[f32; 3]> = encoded
+        .par_iter()
+        .zip(luma.par_iter())
         .map(|(c, &l)| [c[0] - l, c[1] - l, c[2] - l])
         .collect();
+    drop(encoded);
 
-    // Defringe runs first, on the raw chroma at the luminance edges — before
-    // Colour NR blurs the rim and before Sharpen re-emphasises it.
     if p.defringe > 0.001 {
         apply_defringe(&mut chroma, &luma, w, h, p.defringe);
     }
-
-    if p.color_nr > 0.001 {
-        for ch in 0..3 {
-            let plane: Vec<f32> = chroma.iter().map(|c| c[ch]).collect();
-            // Scale-aware, edge-aware chroma NR (Q6 §4 "không làm bệt màu thật"):
-            // the FINEST scale (level 0, where isolated colour speckle lives)
-            // smooths non-edge-aware so a strong speck is captured and removed
-            // even next to an edge; the COARSER scales smooth EDGE-AWARE so a
-            // genuine colour boundary stays in the edge-preserving residual and
-            // is not bled across ("bệt"). Pre-Q6 this ran fully non-edge-aware,
-            // which smeared real colour edges by ~14 px at strong settings.
-            let (res, details) = atrous_decompose(&plane, w, h, CHROMA_NR_EDGE_AWARE_FROM);
-            for (i, c) in chroma.iter_mut().enumerate() {
-                // Shadows carry the worst colour blotches — attenuate their chroma
-                // detail more; highlights keep the baseline (real-colour edges).
-                let shadow_w = nr_shadow_weight(luma[i], NR_CHROMA_SHADOW_GAIN);
-                let mut v = res[i];
-                for (j, d) in details.iter().enumerate() {
-                    // `survive[j]` folds Colour NR toward off on a coarse proxy:
-                    // the fine colour speckle it targets is already averaged out
-                    // by the downsample, so smoothing at proxy scale would only
-                    // bleed broad colour the settled bake keeps.
-                    let atten = (p.color_nr * CHROMA_NR_ATTEN[j] * shadow_w * survive[j]).min(1.0);
-                    v += d[i] * (1.0 - atten);
-                }
-                c[ch] = v;
-            }
-        }
+    if p.cnr {
+        colour_nr(&mut chroma, &luma, w, h, p);
+    }
+    if p.lnr {
+        luma_nr(&mut luma, w, h, p);
+    }
+    if p.sharpen {
+        luma = sharpen_luma(&luma, w, h, p);
     }
 
-    if p.nr > 0.001 || p.amount > 0.001 {
-        let (res, mut details) = atrous_decompose(&luma, w, h, 0);
-
-        if p.nr > 0.001 {
-            // Base threshold per level (finest strongest); a per-pixel shadow
-            // boost then cleans shadow grain harder while highlights stay at the
-            // pre-upgrade garrote exactly.
-            let mut base = p.nr * NR_LUMA_THRESH;
-            for (j, d) in details.iter_mut().enumerate() {
-                // On a coarse proxy the finest levels' grain is gone to the
-                // downsample; `survive[j]` shrinks their garrote threshold toward
-                // 0 (→ no shrink) so preview NR matches the settled result.
-                let level_base = base * survive[j];
-                for (i, v) in d.iter_mut().enumerate() {
-                    let t = level_base * nr_shadow_weight(res[i], NR_LUMA_SHADOW_GAIN);
-                    let a = v.abs();
-                    // Non-negative garrote: kills sub-threshold coefficients,
-                    // barely touches the large (edge/texture) ones.
-                    *v = if a <= t {
-                        0.0
-                    } else {
-                        *v * (1.0 - (t * t) / (a * a))
-                    };
-                }
-                base *= NR_LEVEL_DECAY;
-            }
-        }
-
-        if p.amount > 0.001 {
-            // Radius = level balance: small keeps it fine-scale, large adds the
-            // coarser scales on top (reaches farther, like a wide unsharp σ).
-            let t = ((p.sigma - 0.3) / 2.7).clamp(0.0, 1.0);
-            let level_gain = [1.0, 0.35 + 0.65 * t, 0.9 * t];
-            let cavg: [Vec<f32>; 3] = std::array::from_fn(|ch| {
-                let plane: Vec<f32> = chroma.iter().map(|c| c[ch]).collect();
-                box_blur_plane(&plane, w, h, 1)
-            });
-            for y in 0..h {
-                for x in 0..w {
-                    let i = y * w + x;
-                    let mut delta = 0.0f32;
-                    let mut edge_mag = 0.0f32;
-                    for (j, d) in details.iter().enumerate() {
-                        let dv = d[i];
-                        if j < 2 {
-                            edge_mag += dv.abs();
-                        }
-                        let weight =
-                            p.detail + (1.0 - p.detail) * smootherstep(0.0, SHARPEN_KNEE, dv.abs());
-                        // `survive[j]` folds the wrong-scale proxy boost down so
-                        // the drag preview does not paint a coarse false halo the
-                        // fine settled bake never produces.
-                        delta += p.amount * level_gain[j] * weight * dv * survive[j];
-                    }
-                    let mask = if p.masking > 0.001 {
-                        let xl = res[y * w + x.saturating_sub(1)];
-                        let xr = res[y * w + (x + 1).min(w - 1)];
-                        let yt = res[y.saturating_sub(1) * w + x];
-                        let yb = res[(y + 1).min(h - 1) * w + x];
-                        let gmag = ((xr - xl) * 0.5).hypot((yb - yt) * 0.5);
-                        let tm = p.masking * MASK_GRAD_FULL;
-                        smootherstep(tm * 0.5, tm * 1.5, gmag)
-                    } else {
-                        1.0
-                    };
-                    let delta = SHARPEN_LIMIT * (delta * mask / SHARPEN_LIMIT).tanh();
-                    let base = res[i] + details.iter().map(|d| d[i]).sum::<f32>();
-                    luma[i] = if linear {
-                        (base + delta).max(0.0)
-                    } else {
-                        (base + delta).clamp(0.0, 1.0)
-                    };
-
-                    let edge_gate = smootherstep(0.006, 0.055, edge_mag);
-                    // The chroma edge pull guards fine (level-0-scale) demosaic
-                    // fringing, which does not exist on the downsampled proxy;
-                    // `survive[0]` scales it out there and is 1.0 at full res.
-                    let fr = (p.amount * edge_gate * 0.4).min(0.6) * mask * survive[0];
-                    if fr > 0.001 {
-                        for ch in 0..3 {
-                            chroma[i][ch] += (cavg[ch][i] - chroma[i][ch]) * fr;
-                        }
-                    }
-                }
-            }
-        } else {
-            // NR only: lossless reconstruction of the shrunk coefficients.
-            for (i, l) in luma.iter_mut().enumerate() {
-                let d_sum = details.iter().map(|d| d[i]).sum::<f32>();
-                *l = if linear {
-                    (res[i] + d_sum).max(0.0)
-                } else {
-                    (res[i] + d_sum).clamp(0.0, 1.0)
-                };
-            }
-        }
-    }
-
-    (0..w * h)
-        .map(|i| {
-            let l = luma[i];
-            let out = [l + chroma[i][0], l + chroma[i][1], l + chroma[i][2]];
+    luma.par_iter()
+        .zip(chroma.par_iter())
+        .map(|(&l, c)| {
             if linear {
-                out
+                let l = l.max(0.0);
+                [
+                    decode_channel(l + c[0]),
+                    decode_channel(l + c[1]),
+                    decode_channel(l + c[2]),
+                ]
             } else {
                 [
-                    out[0].clamp(0.0, 1.0),
-                    out[1].clamp(0.0, 1.0),
-                    out[2].clamp(0.0, 1.0),
+                    (l + c[0]).clamp(0.0, 1.0),
+                    (l + c[1]).clamp(0.0, 1.0),
+                    (l + c[2]).clamp(0.0, 1.0),
                 ]
             }
         })
         .collect()
+}
+
+fn process_detail_plane(
+    rgb: &[[f32; 3]],
+    w: usize,
+    h: usize,
+    settings: &DevelopSettings,
+    linear_space: Option<crate::core::working_color::WorkingColorSpace>,
+    preview_scale: u32,
+) -> Vec<[f32; 3]> {
+    let plan = DetailPlan::new(settings, preview_scale.max(1) as f32);
+    process_detail_plane_with_plan(rgb, w, h, &plan, linear_space)
 }
 
 /// Full-resolution RAW Detail pass over the unclamped linear master. Unlike
@@ -506,9 +253,9 @@ pub(crate) fn apply_detail_to_working_buffer(
     );
 }
 
-/// `preview_scale` is the live-preview proxy downsample (source px per proxy px),
-/// or `1` for the full-resolution commit/settled render. See
-/// [`preview_level_survive`] — it is a bit-exact no-op at `1`.
+/// `preview_scale` is the live-preview proxy downsample (source px per proxy
+/// px), or `1` for the full-resolution commit/settled render; the plan
+/// re-expresses radii and wavelet scales in proxy pixels.
 pub(crate) fn apply_detail_to_working_buffer_in_space(
     working: &mut Vec<[f32; 3]>,
     width: usize,
@@ -520,24 +267,19 @@ pub(crate) fn apply_detail_to_working_buffer_in_space(
     if width == 0 || height == 0 || working.len() != width * height || !has_detail(settings) {
         return;
     }
-    let params = DetailParams::new(settings);
     *working = process_detail_plane(
         working,
         width,
         height,
-        &params,
+        settings,
         Some(working_space),
         preview_scale,
     );
 }
 
-/// Reduced-resolution twin of the display-domain Detail bake. Interactive
-/// preview feeds this an anti-aliased viewport proxy; the wavelet/NR model and
-/// slider constants stay identical to the commit path, only the pixel grid is
-/// smaller. `preview_scale` (source px per proxy px) rescales the wavelet radii
-/// back to source scale so the drag preview tracks the settled bake instead of
-/// exaggerating Detail at proxy scale (see [`preview_level_survive`]); pass `1`
-/// to run at native resolution.
+/// Display-domain Detail (gamma values in [0,1]). Interactive preview feeds an
+/// anti-aliased viewport proxy with its downsample as `preview_scale`; pass
+/// `1` to run at native resolution.
 pub(crate) fn apply_detail_to_display_buffer(
     display: &mut Vec<[f32; 3]>,
     width: usize,
@@ -548,36 +290,37 @@ pub(crate) fn apply_detail_to_display_buffer(
     if width == 0 || height == 0 || display.len() != width * height || !has_detail(settings) {
         return;
     }
-    let params = DetailParams::new(settings);
-    *display = process_detail_plane(display, width, height, &params, None, preview_scale);
+    *display = process_detail_plane(display, width, height, settings, None, preview_scale);
 }
 
-/// Gather a `DETAIL_HALO`-apron'd f32 RGB plane around one tile (edge-clamped,
-/// 16-bit reads — bit-identical for 8-bit tiles). Same conventions as
-/// `build_base_luma`'s gather.
+/// Gather a `DETAIL_HALO`-apron'd f32 RGB plane around one tile (apron clipped
+/// at the image edge, 16-bit reads — bit-identical for 8-bit tiles). Returns
+/// the plane, its size and the tile's offset inside it.
 fn gather_detail_plane(
     source: &TileMap,
     base_x: u32,
     base_y: u32,
     valid_w: u32,
     valid_h: u32,
-) -> (Vec<[f32; 3]>, usize, usize) {
-    let r = DETAIL_HALO;
-    let vw = valid_w as usize;
-    let vh = valid_h as usize;
-    let hw = vw + 2 * r;
-    let hh = vh + 2 * r;
-    let wmax = source.width.saturating_sub(1) as i64;
-    let hmax = source.height.saturating_sub(1) as i64;
+) -> (Vec<[f32; 3]>, usize, usize, usize, usize) {
+    // The apron stops at the image edge instead of replicating it, so every
+    // wavelet level clamps at the real border exactly as a whole-image pass.
+    let r = DETAIL_HALO as u32;
+    let x0 = base_x.saturating_sub(r);
+    let y0 = base_y.saturating_sub(r);
+    let x1 = (base_x + valid_w + r).min(source.width);
+    let y1 = (base_y + valid_h + r).min(source.height);
+    let hw = (x1 - x0) as usize;
+    let hh = (y1 - y0) as usize;
     let mut out = vec![[0.0f32; 3]; hw * hh];
     for hy in 0..hh {
-        let gy = ((base_y as i64) + hy as i64 - r as i64).clamp(0, hmax) as u32;
+        let gy = y0 + hy as u32;
         let ty_tile = (gy / TILE_SIZE) as i32;
         let ly = gy % TILE_SIZE;
         let mut cached_tx = i32::MIN;
         let mut cur_tile: Option<&Arc<crate::core::tile::Tile>> = None;
         for hx in 0..hw {
-            let gx = ((base_x as i64) + hx as i64 - r as i64).clamp(0, wmax) as u32;
+            let gx = x0 + hx as u32;
             let tx_tile = (gx / TILE_SIZE) as i32;
             if tx_tile != cached_tx {
                 cur_tile = source.tiles.get(&crate::core::tile::TilePos {
@@ -596,7 +339,7 @@ fn gather_detail_plane(
             }
         }
     }
-    (out, hw, hh)
+    (out, hw, hh, (base_x - x0) as usize, (base_y - y0) as usize)
 }
 
 /// Detail stage (Sharpening / Noise Reduction) as a separate full-resolution
@@ -608,7 +351,7 @@ pub(crate) fn apply_detail_to_tilemap(source: &TileMap, settings: &DevelopSettin
         return source.clone();
     }
 
-    let p = DetailParams::new(settings);
+    let p = DetailPlan::new(settings, 1.0);
     let tiles: HashMap<_, _> = source
         .tiles
         .par_iter()
@@ -622,9 +365,9 @@ pub(crate) fn apply_detail_to_tilemap(source: &TileMap, settings: &DevelopSettin
                 return (*pos, Arc::new(tile));
             }
 
-            let (plane, hw, _hh) = gather_detail_plane(source, base_x, base_y, valid_w, valid_h);
-            let out = process_detail_plane(&plane, hw, _hh, &p, None, 1);
-            let r = DETAIL_HALO;
+            let (plane, hw, hh, off_x, off_y) =
+                gather_detail_plane(source, base_x, base_y, valid_w, valid_h);
+            let out = process_detail_plane_with_plan(&plane, hw, hh, &p, None);
 
             for ty in 0..valid_h as usize {
                 for tx in 0..valid_w as usize {
@@ -632,7 +375,7 @@ pub(crate) fn apply_detail_to_tilemap(source: &TileMap, settings: &DevelopSettin
                     if tile.pixels[i + 3] == 0 {
                         continue;
                     }
-                    let v = out[(ty + r) * hw + (tx + r)];
+                    let v = out[(ty + off_y) * hw + (tx + off_x)];
                     let x = base_x + tx as u32;
                     let y = base_y + ty as u32;
                     if let Some(p16) = tile.pixels16.as_mut() {
@@ -955,100 +698,10 @@ mod defringe_tests {
 }
 
 #[cfg(test)]
-mod nr_tests {
-    use super::*;
-
-    /// Deterministic pseudo-noise in [-1, 1] (no rng dependency / stays stable
-    /// across runs so the assertions are reproducible).
-    fn hash_noise(i: usize) -> f32 {
-        let mut x = (i as u32)
-            .wrapping_mul(2_654_435_761)
-            .wrapping_add(2_463_534_242);
-        x ^= x >> 15;
-        x = x.wrapping_mul(2_246_822_519);
-        x ^= x >> 13;
-        x = x.wrapping_mul(3_266_489_917);
-        x ^= x >> 16;
-        (x as f32 / u32::MAX as f32) * 2.0 - 1.0
-    }
-
-    /// Tone-adaptive luminance NR: a dark and a bright noisy half both get
-    /// cleaner, the shadow half is cleaned harder, and the big luminance edge
-    /// between them is preserved.
-    #[test]
-    fn noise_reduction_cleans_shadows_harder_and_keeps_edges() {
-        let w = 48usize;
-        let h = 24usize;
-        let amp = 0.06f32;
-        let (dark, bright) = (0.12f32, 0.85f32);
-        let mut img = vec![[0.0f32; 3]; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                let base = if x < w / 2 { dark } else { bright };
-                let v = (base + amp * hash_noise(y * w + x)).clamp(0.0, 1.0);
-                img[y * w + x] = [v, v, v];
-            }
-        }
-
-        // Mean + std over a region's interior (away from the central edge/borders).
-        let stats = |img: &[[f32; 3]], x0: usize, x1: usize| -> (f32, f32) {
-            let (mut s, mut s2, mut n) = (0.0f64, 0.0f64, 0.0f64);
-            for y in 3..h - 3 {
-                for x in x0 + 3..x1 - 3 {
-                    let v = img[y * w + x][0] as f64;
-                    s += v;
-                    s2 += v * v;
-                    n += 1.0;
-                }
-            }
-            let mean = s / n;
-            (mean as f32, ((s2 / n - mean * mean).max(0.0)).sqrt() as f32)
-        };
-
-        let (_, dark_std0) = stats(&img, 0, w / 2);
-        let (_, bright_std0) = stats(&img, w / 2, w);
-
-        // A gentle setting: the baseline (highlight) threshold sits near the noise
-        // level, so highlights keep some grain while the shadow boost cleans the
-        // dark half harder — that gap is what the tone-adaptive upgrade adds.
-        let mut settings = DevelopSettings::default();
-        settings.noise_reduction = 25.0;
-        apply_detail_to_display_buffer(&mut img, w, h, &settings, 1);
-
-        let (dark_mean1, dark_std1) = stats(&img, 0, w / 2);
-        let (bright_mean1, bright_std1) = stats(&img, w / 2, w);
-
-        assert!(
-            dark_std1 < dark_std0 * 0.65,
-            "shadow noise should drop clearly: {dark_std0} -> {dark_std1}"
-        );
-        assert!(
-            bright_std1 < bright_std0,
-            "highlight noise should drop too: {bright_std0} -> {bright_std1}"
-        );
-        let dark_reduction = 1.0 - dark_std1 / dark_std0;
-        let bright_reduction = 1.0 - bright_std1 / bright_std0;
-        assert!(
-            dark_reduction > bright_reduction + 0.08,
-            "shadows must denoise harder than highlights: {dark_reduction} vs {bright_reduction}"
-        );
-        assert!(
-            (bright_mean1 - dark_mean1) > 0.68,
-            "the tonal edge must survive denoise: {}",
-            bright_mean1 - dark_mean1
-        );
-    }
-}
-
-/// Quality Milestone Q6 — Detail-stage contract and property guard.
-///
-/// Q6 (RAM/quality plan §"Quality Milestone Q6") separates capture/creative/
-/// output sharpen and asks that detail be sharpened without halo/waxy texture
-/// and that noise (esp. colour speckle) drop WITHOUT bleeding real colour edges.
-/// These hermetic property tests lock the invariants the plan lists and quantify
-/// where the current engine falls short, so any tuning has a golden guard.
-#[cfg(test)]
-mod q6_detail_contract {
+mod camera_raw_contract {
+    //! Behaviour locked against Camera Raw 16 measurements of a synthetic
+    //! chart (see `tests/detail_pts_probe.rs`): each assertion names the
+    //! Camera Raw figure it tracks and the old engine's figure it rejects.
     use super::*;
 
     fn hash_noise(i: usize, salt: u32) -> f32 {
@@ -1065,7 +718,7 @@ mod q6_detail_contract {
     }
 
     fn luma(px: [f32; 3]) -> f32 {
-        crate::core::color::luminance_f32(px[0], px[1], px[2])
+        luminance_f32(px[0], px[1], px[2])
     }
     fn chroma_vec(px: [f32; 3]) -> [f32; 3] {
         let y = luma(px);
@@ -1075,331 +728,454 @@ mod q6_detail_contract {
         let c = chroma_vec(px);
         (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()
     }
+    fn grey(v: f32) -> [f32; 3] {
+        [v, v, v]
+    }
+    fn run(img: &mut Vec<[f32; 3]>, w: usize, h: usize, s: &DevelopSettings) {
+        apply_detail_to_display_buffer(img, w, h, s, 1);
+    }
 
-    // ── Sharpening: acutance up, halo bounded, neutral stays neutral ──────────
+    fn erf(x: f32) -> f32 {
+        // Abramowitz–Stegun 7.1.26 — plenty for a test ramp.
+        let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
+        let poly = ((((1.061_405_4 * t - 1.453_152_1) * t + 1.421_413_7) * t - 0.284_496_74) * t
+            + 0.254_829_6)
+            * t;
+        (1.0 - poly * (-x * x).exp()).copysign(x)
+    }
+
+    /// Soft (Gaussian σ = 1) vertical step, like a lens-blurred edge.
+    fn soft_edge(w: usize, h: usize, lo: f32, hi: f32) -> Vec<[f32; 3]> {
+        (0..w * h)
+            .map(|i| {
+                let x = (i % w) as f32 + 0.5 - w as f32 / 2.0;
+                let t = 0.5 * (1.0 + erf(x / std::f32::consts::SQRT_2));
+                grey(lo + (hi - lo) * t)
+            })
+            .collect()
+    }
+
+    /// 10–90 % rise distance and the largest excursion past the plateaus.
+    fn edge_stats(img: &[[f32; 3]], w: usize, h: usize, lo: f32, hi: f32) -> (f32, f32) {
+        let row: Vec<f32> = (0..w).map(|x| img[(h / 2) * w + x][0]).collect();
+        let cross = |t: f32| -> f32 {
+            for x in 0..w - 1 {
+                if (row[x] - t) * (row[x + 1] - t) <= 0.0 && row[x] != row[x + 1] {
+                    return x as f32 + (t - row[x]) / (row[x + 1] - row[x]);
+                }
+            }
+            f32::NAN
+        };
+        let rise = cross(lo + 0.9 * (hi - lo)) - cross(lo + 0.1 * (hi - lo));
+        let over = row.iter().fold(0.0f32, |m, &v| m.max(v - hi).max(lo - v));
+        (rise, over)
+    }
+
+    fn grating(w: usize, h: usize, base: f32, period: f32, amp: f32) -> Vec<[f32; 3]> {
+        (0..w * h)
+            .map(|i| grey(base + amp * (std::f32::consts::TAU * (i % w) as f32 / period).sin()))
+            .collect()
+    }
+
+    /// Interior standard deviation of luma (8 px margin).
+    fn inner_std(img: &[[f32; 3]], w: usize, h: usize) -> f32 {
+        let (mut s, mut s2, mut n) = (0.0f64, 0.0f64, 0.0f64);
+        for y in 8..h - 8 {
+            for x in 8..w - 8 {
+                let v = luma(img[y * w + x]) as f64;
+                s += v;
+                s2 += v * v;
+                n += 1.0;
+            }
+        }
+        ((s2 / n - (s / n).powi(2)).max(0.0)).sqrt() as f32
+    }
+
+    fn chroma_std(img: &[[f32; 3]], w: usize, h: usize) -> f32 {
+        let (mut s2, mut n) = (0.0f64, 0.0f64);
+        for y in 8..h - 8 {
+            for x in 8..w - 8 {
+                let c = chroma_vec(img[y * w + x]);
+                s2 += (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) as f64;
+                n += 1.0;
+            }
+        }
+        (s2 / n).sqrt() as f32
+    }
 
     #[test]
-    fn sharpening_steepens_a_soft_edge_without_a_large_halo() {
-        // A soft (blurred) neutral step. Sharpening must steepen the transition
-        // (higher acutance) yet keep any overshoot beyond the two plateaus small
-        // (no ringing halo), and never tint the neutral.
-        let (w, h) = (48usize, 8usize);
-        let (lo, hi) = (0.30f32, 0.60f32);
-        let soft = |x: usize| -> f32 {
-            // A 6-px-wide smootherstep ramp centred at the middle.
-            let t = ((x as f32 - (w as f32 / 2.0 - 3.0)) / 6.0).clamp(0.0, 1.0);
-            let s = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
-            lo + (hi - lo) * s
-        };
-        let mut img: Vec<[f32; 3]> = (0..w * h)
-            .map(|i| {
-                let v = soft(i % w);
-                [v, v, v]
-            })
-            .collect();
-        let slope = |img: &[[f32; 3]]| -> f32 {
-            // Max adjacent step along the mid row = edge acutance.
-            let row = h / 2;
-            (0..w - 1)
-                .map(|x| (img[row * w + x + 1][0] - img[row * w + x][0]).abs())
-                .fold(0.0, f32::max)
-        };
-        let overshoot = |img: &[[f32; 3]]| -> f32 {
-            // How far any pixel exceeds the [lo,hi] plateau band = halo size.
-            img.iter()
-                .map(|p| (p[0] - hi).max(lo - p[0]).max(0.0))
-                .fold(0.0, f32::max)
-        };
-        let acut0 = slope(&img);
+    fn sharpening_crisps_edges_like_camera_raw() {
+        let (w, h) = (64usize, 8usize);
+        let (lo, hi) = (0.35f32, 0.65f32);
+        let (rise0, _) = edge_stats(&soft_edge(w, h, lo, hi), w, h, lo, hi);
+        // Camera Raw: rise 2.66 -> 2.03 (40) / 1.55 (70), overshoot 0.007 /
+        // 0.025; the old engine only reached 2.56 / 2.49.
+        for (amount, max_rise, over_lo, over_hi) in
+            [(40.0, 2.35, 0.002, 0.02), (70.0, 1.85, 0.015, 0.04)]
+        {
+            let mut img = soft_edge(w, h, lo, hi);
+            let s = DevelopSettings {
+                sharpening: amount,
+                ..Default::default()
+            };
+            run(&mut img, w, h, &s);
+            let (rise, over) = edge_stats(&img, w, h, lo, hi);
+            println!("sharpen {amount}: rise {rise0:.2} -> {rise:.2}, overshoot {over:.4}");
+            assert!(rise < max_rise, "edge not crisp enough at {amount}: {rise}");
+            assert!(
+                over > over_lo && over < over_hi,
+                "overshoot {over} outside Camera Raw's band at {amount}"
+            );
+            assert!(
+                img.iter().all(|p| chroma_mag(*p) < 1e-4),
+                "tinted a neutral edge"
+            );
+        }
+    }
 
-        let mut settings = DevelopSettings::default();
-        settings.sharpening = 70.0;
-        apply_detail_to_display_buffer(&mut img, w, h, &settings, 1);
-
-        let acut1 = slope(&img);
-        let halo = overshoot(&img);
-        let max_chroma = img.iter().map(|&p| chroma_mag(p)).fold(0.0, f32::max);
-        println!("Q6 sharpen: acutance {acut0:.4} -> {acut1:.4}, halo {halo:.4}, max_chroma {max_chroma:.5}");
-        assert!(img.iter().all(|p| p.iter().all(|c| c.is_finite())));
-        // The engine is deliberately halo-safe (Q2/Q4 band-pass capture-sharpen),
-        // so on a clean smooth ramp it acts gently: acutance must not DROP, a
-        // controlled edge overshoot must appear (it is doing something), and that
-        // overshoot must stay well below a ringing halo. Neutral stays neutral.
+    #[test]
+    fn low_sharpen_detail_suppresses_halos() {
+        let (w, h) = (64usize, 8usize);
+        let (lo, hi) = (0.35f32, 0.65f32);
+        let stats = |detail: f32| {
+            let mut img = soft_edge(w, h, lo, hi);
+            let s = DevelopSettings {
+                sharpening: 70.0,
+                sharpen_detail: detail,
+                ..Default::default()
+            };
+            run(&mut img, w, h, &s);
+            edge_stats(&img, w, h, lo, hi)
+        };
+        let (rise0, over0) = stats(0.0);
+        let (_, over25) = stats(25.0);
+        let (_, over100) = stats(100.0);
+        println!("halo: detail 0 {over0:.4} (rise {rise0:.2}), 25 {over25:.4}, 100 {over100:.4}");
+        // Camera Raw: 0.004 / 0.025 / 0.046, and Detail 0 still steepens (1.97).
+        assert!(over0 < over25 * 0.5);
+        assert!(over100 > over25);
         assert!(
-            acut1 >= acut0 - 1e-4,
-            "sharpening softened the edge: {acut0} -> {acut1}"
-        );
-        assert!(
-            halo > 1e-3,
-            "sharpening produced no edge enhancement: {halo}"
-        );
-        assert!(halo < (hi - lo) * 0.35, "sharpening halo too large: {halo}");
-        assert!(
-            max_chroma < 2e-3,
-            "sharpening tinted a neutral edge: {max_chroma}"
+            rise0 < 2.3,
+            "Detail 0 should still steepen the edge: {rise0}"
         );
     }
 
     #[test]
-    fn sharpen_masking_spares_flat_noise() {
-        // Masking should keep the sharpener off smooth (noisy-flat) areas while
-        // still working on real edges. With Masking high, the flat area's noise
-        // is amplified far less than with Masking off.
-        let (w, h) = (32usize, 32usize);
-        let base = 0.45f32;
-        let make = || -> Vec<[f32; 3]> {
-            (0..w * h)
-                .map(|i| {
-                    let v = (base + 0.02 * hash_noise(i, 1)).clamp(0.0, 1.0);
-                    [v, v, v]
-                })
+    fn sharpening_fades_in_deep_shadows() {
+        let (w, h) = (96usize, 24usize);
+        let gain = |base: f32| {
+            let src = grating(w, h, base, 3.0, 0.02);
+            let mut img = src.clone();
+            let s = DevelopSettings {
+                sharpening: 70.0,
+                ..Default::default()
+            };
+            run(&mut img, w, h, &s);
+            inner_std(&img, w, h) / inner_std(&src, w, h)
+        };
+        let (deep, shadow, mid) = (gain(0.06), gain(0.15), gain(0.50));
+        println!("sharpen gain: 0.06 {deep:.2}, 0.15 {shadow:.2}, 0.50 {mid:.2}");
+        // Camera Raw: 1.17 / 1.75 / 2.75.
+        assert!(mid > 2.4 && mid < 3.1, "mid-tone texture gain {mid}");
+        assert!(shadow < mid - 0.6 && deep < shadow);
+    }
+
+    #[test]
+    fn sharpen_masking_spares_flat_noise_but_keeps_edges() {
+        let (w, h) = (48usize, 48usize);
+        let flat = |masking: f32| {
+            let mut img: Vec<[f32; 3]> = (0..w * h)
+                .map(|i| grey((0.45 + 0.02 * hash_noise(i, 1)).clamp(0.0, 1.0)))
+                .collect();
+            let s = DevelopSettings {
+                sharpening: 90.0,
+                sharpen_masking: masking,
+                ..Default::default()
+            };
+            run(&mut img, w, h, &s);
+            inner_std(&img, w, h)
+        };
+        let (open, masked) = (flat(0.0), flat(60.0));
+        println!("masking: flat noise std {open:.4} -> {masked:.4}");
+        assert!(masked < open * 0.7);
+
+        let (ew, eh) = (64usize, 8usize);
+        let over = |masking: f32| {
+            let mut img = soft_edge(ew, eh, 0.35, 0.65);
+            let s = DevelopSettings {
+                sharpening: 70.0,
+                sharpen_masking: masking,
+                ..Default::default()
+            };
+            run(&mut img, ew, eh, &s);
+            edge_stats(&img, ew, eh, 0.35, 0.65).1
+        };
+        // Camera Raw keeps 0.021 of the 0.025 overshoot at Masking 50.
+        assert!(
+            over(50.0) > over(0.0) * 0.6,
+            "masking must not switch off real edges"
+        );
+    }
+
+    #[test]
+    fn noise_reduction_is_gradual_even_across_tones_and_keeps_edges() {
+        let (w, h) = (96usize, 24usize);
+        let keep = |amount: f32, base: f32| {
+            let src = grating(w, h, base, 3.0, 0.02);
+            let mut img = src.clone();
+            let s = DevelopSettings {
+                noise_reduction: amount,
+                ..Default::default()
+            };
+            run(&mut img, w, h, &s);
+            inner_std(&img, w, h) / inner_std(&src, w, h)
+        };
+        // Camera Raw keeps 0.80 / 0.50 / 0.335 of fine texture at 10 / 25 / 50,
+        // equally in the shadows; the old engine kept 0.19 at 25 and ~0 in the
+        // shadows.
+        for (amount, target) in [(10.0, 0.80), (25.0, 0.50), (50.0, 0.335)] {
+            let (mid, dark) = (keep(amount, 0.45), keep(amount, 0.12));
+            println!("NR {amount}: fine texture kept mid {mid:.3} shadow {dark:.3}");
+            assert!((mid - target).abs() < 0.06, "NR {amount} mid keep {mid}");
+            assert!(
+                (dark - mid).abs() < 0.06,
+                "NR {amount} shadows differ: {dark}"
+            );
+        }
+
+        let (ew, eh) = (64usize, 8usize);
+        let mut img = soft_edge(ew, eh, 0.35, 0.65);
+        let s = DevelopSettings {
+            noise_reduction: 100.0,
+            ..Default::default()
+        };
+        run(&mut img, ew, eh, &s);
+        let (rise, _) = edge_stats(&img, ew, eh, 0.35, 0.65);
+        // Camera Raw 2.79 at 100; the old engine smeared it to 6.5.
+        assert!(rise < 3.2, "NR blurred a real edge: rise {rise}");
+    }
+
+    #[test]
+    fn colour_nr_removes_speckle_early_and_widens_to_blotches() {
+        let (w, h) = (96usize, 96usize);
+        let offsets: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let (a, b) = (0.03 * hash_noise(i, 7), 0.03 * hash_noise(i, 13));
+                [a, -0.3 * (a + b), b]
+            })
+            .collect();
+        let field = |offs: &[[f32; 3]]| -> Vec<[f32; 3]> {
+            offs.iter()
+                .map(|o| [0.45 + o[0], 0.45 + o[1], 0.45 + o[2]])
                 .collect()
         };
-        let var = |img: &[[f32; 3]]| -> f32 {
-            let (mut s, mut s2) = (0.0f64, 0.0f64);
-            for p in img {
-                s += p[0] as f64;
-                s2 += (p[0] as f64) * (p[0] as f64);
-            }
-            let n = img.len() as f64;
-            ((s2 / n - (s / n) * (s / n)).max(0.0)) as f32
+        let speckle = field(&offsets);
+        let blotch = {
+            let planes: Vec<Vec<f32>> = (0..3)
+                .map(|c| {
+                    let p: Vec<f32> = offsets.iter().map(|v| v[c]).collect();
+                    box_blur_plane(&box_blur_plane(&p, w, h, 4), w, h, 4)
+                })
+                .collect();
+            let offs: Vec<[f32; 3]> = (0..w * h)
+                .map(|i| [planes[0][i], planes[1][i], planes[2][i]])
+                .collect();
+            let k = chroma_std(&speckle, w, h) / chroma_std(&field(&offs), w, h);
+            let scaled: Vec<[f32; 3]> = offs.iter().map(|o| o.map(|v| v * k)).collect();
+            field(&scaled)
         };
-
-        let mut no_mask = make();
-        let mut masked = make();
-        let mut s = DevelopSettings::default();
-        s.sharpening = 90.0;
-        apply_detail_to_display_buffer(&mut no_mask, w, h, &s, 1);
-        s.sharpen_masking = 90.0;
-        apply_detail_to_display_buffer(&mut masked, w, h, &s, 1);
-
-        let v_no = var(&no_mask);
-        let v_mask = var(&masked);
-        println!("Q6 masking: flat-noise variance no-mask {v_no:.6} vs masked {v_mask:.6}");
-        assert!(
-            v_mask < v_no * 0.7,
-            "Masking should suppress flat-area sharpening: {v_no} vs {v_mask}"
+        let kept = |src: &Vec<[f32; 3]>, amount: f32| {
+            let mut img = src.clone();
+            let s = DevelopSettings {
+                color_noise_reduction: amount,
+                ..Default::default()
+            };
+            run(&mut img, w, h, &s);
+            chroma_std(&img, w, h) / chroma_std(src, w, h)
+        };
+        let (s10, b10, b50) = (
+            kept(&speckle, 10.0),
+            kept(&blotch, 10.0),
+            kept(&blotch, 50.0),
         );
+        println!("colour NR: speckle@10 {s10:.2}, blotch@10 {b10:.2}, blotch@50 {b50:.2}");
+        // Camera Raw: 0.21 / 0.68 / 0.21; the old engine 0.90 / 0.97 / 0.87.
+        assert!(s10 < 0.35, "fine speckle should go at low amounts: {s10}");
+        assert!(b10 > b50 + 0.2, "amount should widen reach into blotches");
+        assert!(b50 < 0.4, "blotches should mostly go at 50: {b50}");
     }
 
-    // ── Colour NR: kills speckle, and how much it bleeds a real colour edge ────
-
     #[test]
-    fn colour_nr_reduces_chroma_speckle() {
-        // A flat colour field peppered with per-pixel chroma speckle. Colour NR
-        // must reduce the chroma variance markedly while barely moving luma.
-        let (w, h) = (32usize, 32usize);
-        let mut img: Vec<[f32; 3]> = (0..w * h)
-            .map(|i| {
-                let cr = 0.03 * hash_noise(i, 7);
-                let cb = 0.03 * hash_noise(i, 13);
-                [0.40 + cr, 0.40, 0.40 + cb]
-            })
+    fn colour_nr_keeps_real_colour_detail() {
+        // Thin iso-luminant red lines every 16 px on grey: Camera Raw keeps 97 %
+        // of their colour at 25; the old engine 83 %.
+        let (w, h) = (96usize, 32usize);
+        let red = {
+            let r = [0.70f32, 0.36, 0.36];
+            let d = luma(r) - 0.45;
+            [r[0] - d, r[1] - d, r[2] - d]
+        };
+        let src: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| if (i % w) % 16 < 2 { red } else { grey(0.45) })
             .collect();
-        let luma_mean = |img: &[[f32; 3]]| -> f32 {
-            img.iter().map(|&p| luma(p)).sum::<f32>() / img.len() as f32
+        let line_chroma = |img: &[[f32; 3]]| -> f32 {
+            (0..w)
+                .step_by(16)
+                .map(|x| chroma_mag(img[(h / 2) * w + x]))
+                .sum::<f32>()
         };
-        let chroma_var = |img: &[[f32; 3]]| -> f32 {
-            img.iter().map(|&p| chroma_mag(p).powi(2)).sum::<f32>() / img.len() as f32
+        let mut img = src.clone();
+        let s = DevelopSettings {
+            color_noise_reduction: 25.0,
+            ..Default::default()
         };
-        let cv0 = chroma_var(&img);
-        let ly0 = luma_mean(&img);
-
-        let mut s = DevelopSettings::default();
-        s.color_noise_reduction = 80.0;
-        apply_detail_to_display_buffer(&mut img, w, h, &s, 1);
-        let cv1 = chroma_var(&img);
-        let ly1 = luma_mean(&img);
-        println!(
-            "Q6 colour-NR speckle: chroma-var {cv0:.6} -> {cv1:.6}, luma mean {ly0:.4} -> {ly1:.4}"
-        );
+        run(&mut img, w, h, &s);
+        let kept = line_chroma(&img) / line_chroma(&src);
+        println!("colour NR keeps {kept:.2} of thin red lines");
         assert!(
-            cv1 < cv0 * 0.5,
-            "colour NR did not clean chroma speckle: {cv0} -> {cv1}"
-        );
-        assert!(
-            (ly1 - ly0).abs() < 2e-3,
-            "colour NR shifted luminance: {ly0} -> {ly1}"
+            kept > 0.85,
+            "colour NR washed out real colour detail: {kept}"
         );
     }
 
     #[test]
-    fn colour_nr_real_edge_bleed_is_measured() {
-        // Two solid colours that share the SAME luma (so the edge is purely
-        // chromatic and the luma-driven stages see nothing), a clean vertical
-        // boundary, strong Colour NR. Measures how much of the real colour STEP
-        // survives at the boundary. The pre-Q6 chroma NR runs its à-trous
-        // decomposition NON-edge-aware, so it blurs this step badly.
+    fn colour_nr_real_edge_does_not_bleed() {
         let (w, h) = (48usize, 16usize);
-        // Left magenta-ish, right green-ish. Colour NR works on the luma-
-        // independent chroma planes, so the luma levels are irrelevant here.
-        let left = [0.55f32, 0.30, 0.55];
-        let right = [0.34f32, 0.44, 0.34];
+        let (left, right) = ([0.55f32, 0.30, 0.55], [0.34f32, 0.44, 0.34]);
         let mid = w / 2;
         let mut img: Vec<[f32; 3]> = (0..w * h)
             .map(|i| if (i % w) < mid { left } else { right })
             .collect();
-
-        // Chroma step across the boundary before NR, measured a couple of px in
-        // (away from the exact seam) as the mean chroma-vector distance.
         let step = |img: &[[f32; 3]]| -> f32 {
-            let sample = |x: usize| -> [f32; 3] {
-                let mut acc = [0.0f32; 3];
-                for y in 2..h - 2 {
-                    let c = chroma_vec(img[y * w + x]);
-                    for k in 0..3 {
-                        acc[k] += c[k];
-                    }
-                }
-                let n = (h - 4) as f32;
-                [acc[0] / n, acc[1] / n, acc[2] / n]
-            };
-            let a = sample(mid - 3);
-            let b = sample(mid + 3);
+            let a = chroma_vec(img[(h / 2) * w + mid - 3]);
+            let b = chroma_vec(img[(h / 2) * w + mid + 3]);
             ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
         };
         let step0 = step(&img);
-
-        let mut s = DevelopSettings::default();
-        s.color_noise_reduction = 80.0;
-        apply_detail_to_display_buffer(&mut img, w, h, &s, 1);
-        let step1 = step(&img);
-        let kept = step1 / step0;
+        let s = DevelopSettings {
+            color_noise_reduction: 100.0,
+            ..Default::default()
+        };
+        run(&mut img, w, h, &s);
+        let kept = step(&img) / step0;
         println!(
-            "Q6 colour-NR real-edge: chroma step {step0:.4} -> {step1:.4} (kept {:.0}% at ±3px)",
+            "colour NR keeps {:.0}% of a real colour edge at ±3 px",
             kept * 100.0
         );
-        // Q6 fix (scale-aware, edge-aware chroma NR): the real colour edge keeps
-        // ~82% of its step at ±3px, up from ~68% under the pre-Q6 fully-non-edge-
-        // aware smoothing. Lock the floor above the old behaviour so a regression
-        // back toward edge-smearing ("bệt màu") fails; raise it further if the
-        // chroma range sigma is ever tuned tighter.
-        assert!(
-            kept > 0.78,
-            "colour NR bled the real colour edge to {:.0}% of its step (Q6 baseline ~82%)",
-            kept * 100.0
-        );
+        assert!(kept > 0.9, "colour NR bled a real colour edge: {kept}");
     }
-
-    // ── Cross-slider invariants ───────────────────────────────────────────────
 
     #[test]
     fn detail_sliders_keep_a_neutral_grey_neutral_and_finite() {
-        // Sharpen / NR / Colour-NR on a noisy neutral must not tint it or blow up.
-        let (w, h) = (24usize, 24usize);
-        let sliders: &[(&str, fn(&mut DevelopSettings, f32))] = &[
-            ("sharpening", |s, v| s.sharpening = v),
-            ("noise_reduction", |s, v| s.noise_reduction = v),
-            ("color_noise_reduction", |s, v| s.color_noise_reduction = v),
+        let (w, h) = (32usize, 32usize);
+        let sliders: &[(&str, fn(&mut DevelopSettings))] = &[
+            ("sharpening", |s| s.sharpening = 150.0),
+            ("sharpen_detail", |s| {
+                s.sharpening = 150.0;
+                s.sharpen_detail = 100.0;
+            }),
+            ("noise_reduction", |s| s.noise_reduction = 100.0),
+            ("color_noise_reduction", |s| s.color_noise_reduction = 100.0),
         ];
         for &(name, set) in sliders {
             let mut img: Vec<[f32; 3]> = (0..w * h)
-                .map(|i| {
-                    let v = (0.45 + 0.03 * hash_noise(i, 3)).clamp(0.0, 1.0);
-                    [v, v, v]
-                })
+                .map(|i| grey((0.45 + 0.03 * hash_noise(i, 3)).clamp(0.0, 1.0)))
                 .collect();
             let mut s = DevelopSettings::default();
-            set(&mut s, 100.0);
-            apply_detail_to_display_buffer(&mut img, w, h, &s, 1);
-            let max_chroma = img.iter().map(|&p| chroma_mag(p)).fold(0.0, f32::max);
+            set(&mut s);
+            run(&mut img, w, h, &s);
             assert!(
                 img.iter()
                     .all(|p| p.iter().all(|c| c.is_finite() && (0.0..=1.0).contains(c))),
                 "{name} produced out-of-range output"
             );
-            assert!(
-                max_chroma < 3e-3,
-                "{name} tinted a neutral: chroma {max_chroma}"
-            );
+            let max_chroma = img.iter().map(|&p| chroma_mag(p)).fold(0.0, f32::max);
+            assert!(max_chroma < 1e-4, "{name} tinted a neutral: {max_chroma}");
         }
     }
 
-    // ── G6: preview Detail is rescaled to source pixels ───────────────────────
+    #[test]
+    fn linear_working_path_matches_the_display_path() {
+        // The scene path encodes linear light before the split, so Detail on a
+        // linear buffer equals Detail on the same pixels in display gamma.
+        let (w, h) = (48usize, 24usize);
+        let display: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let base = if i % w > w / 2 { 0.62 } else { 0.18 };
+                let v = base + 0.03 * hash_noise(i, 5);
+                [v + 0.02 * hash_noise(i, 9), v, v - 0.02 * hash_noise(i, 11)]
+            })
+            .collect();
+        let s = DevelopSettings {
+            sharpening: 60.0,
+            noise_reduction: 30.0,
+            color_noise_reduction: 40.0,
+            ..Default::default()
+        };
+        let mut a = display.clone();
+        run(&mut a, w, h, &s);
+        let mut b: Vec<[f32; 3]> = display.iter().map(|p| p.map(decode_channel)).collect();
+        apply_detail_to_working_buffer_in_space(
+            &mut b,
+            w,
+            h,
+            &s,
+            crate::core::working_color::WorkingColorSpace::LinearSrgb,
+            1,
+        );
+        let d = a
+            .iter()
+            .zip(&b)
+            .flat_map(|(p, q)| {
+                (0..3).map(move |c| (p[c] - encode_channel(q[c]).clamp(0.0, 1.0)).abs())
+            })
+            .fold(0.0f32, f32::max);
+        assert!(d < 2e-3, "linear and display Detail disagree: {d}");
+    }
 
     #[test]
-    fn preview_scale_folds_detail_back_to_source_scale() {
-        // `preview_level_survive` is a bit-exact no-op at full resolution and
-        // folds each wavelet level toward off as the live proxy coarsens.
-        assert_eq!(preview_level_survive(1), [1.0, 1.0, 1.0]);
-        for s in [1u32, 2, 4, 8, 16, 48] {
-            let w = preview_level_survive(s);
-            assert!(
-                w.iter().all(|&v| (0.0..=1.0).contains(&v)),
-                "scale {s}: {w:?} outside [0,1]"
-            );
-        }
-        // Coarser proxy ⇒ never MORE survival at any level (monotone), and the
-        // finest level (worst false halo) folds at least as hard as the coarse.
-        let mut prev = preview_level_survive(1);
-        for s in [2u32, 4, 8, 16, 48] {
-            let cur = preview_level_survive(s);
-            for l in 0..WAVELET_LEVELS {
-                assert!(
-                    cur[l] <= prev[l] + 1e-6,
-                    "scale {s} level {l}: {} > {}",
-                    cur[l],
-                    prev[l]
-                );
-            }
-            prev = cur;
-        }
-        let w8 = preview_level_survive(8);
+    fn banded_processing_matches_the_whole_plane_exactly() {
+        let (w, h) = (40usize, 400usize);
+        let img: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let v = if (i / w) % 97 < 40 { 0.25 } else { 0.7 } + 0.03 * hash_noise(i, 4);
+                [v + 0.02 * hash_noise(i, 8), v, v - 0.02 * hash_noise(i, 12)]
+            })
+            .collect();
+        let s = DevelopSettings {
+            sharpening: 90.0,
+            sharpen_masking: 20.0,
+            sharpen_detail: 10.0,
+            noise_reduction: 40.0,
+            color_noise_reduction: 50.0,
+            ..Default::default()
+        };
+        let p = DetailPlan::new(&s, 1.0);
+        let whole = process_detail_band(&img, w, h, &p, None);
+        let banded = process_detail_banded(&img, w, h, &p, None, 50);
         assert!(
-            w8[0] <= w8[1] && w8[1] <= w8[2],
-            "finest must fold hardest: {w8:?}"
+            whole == banded,
+            "banded Detail differs from the whole plane"
         );
+    }
 
-        // On a soft neutral edge, the sharpen acutance the PREVIEW adds must
-        // shrink as the proxy coarsens: the drag preview stops exaggerating
-        // Detail at proxy scale and tracks the fine settled/commit bake.
-        let (w, h) = (48usize, 8usize);
-        let (lo, hi) = (0.30f32, 0.60f32);
-        let make = || -> Vec<[f32; 3]> {
-            (0..w * h)
-                .map(|i| {
-                    let x = i % w;
-                    let t = ((x as f32 - (w as f32 / 2.0 - 3.0)) / 6.0).clamp(0.0, 1.0);
-                    let s = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
-                    let v = lo + (hi - lo) * s;
-                    [v, v, v]
-                })
-                .collect()
+    #[test]
+    fn preview_scale_folds_sharpening_toward_the_settled_look() {
+        let (w, h) = (64usize, 8usize);
+        let a0 = edge_stats(&soft_edge(w, h, 0.30, 0.60), w, h, 0.30, 0.60).1;
+        let s = DevelopSettings {
+            sharpening: 80.0,
+            ..Default::default()
         };
-        let acut = |img: &[[f32; 3]]| -> f32 {
-            let row = h / 2;
-            (0..w - 1)
-                .map(|x| (img[row * w + x + 1][0] - img[row * w + x][0]).abs())
-                .fold(0.0, f32::max)
-        };
-        let a0 = acut(&make());
-        let mut settings = DevelopSettings::default();
-        settings.sharpening = 80.0;
-        let added = |scale: u32| -> f32 {
-            let mut img = make();
-            apply_detail_to_display_buffer(&mut img, w, h, &settings, scale);
+        let added = |scale: u32| {
+            let mut img = soft_edge(w, h, 0.30, 0.60);
+            apply_detail_to_display_buffer(&mut img, w, h, &s, scale);
             assert!(img.iter().all(|p| p.iter().all(|c| c.is_finite())));
-            acut(&img) - a0
+            edge_stats(&img, w, h, 0.30, 0.60).1 - a0
         };
-        let a_full = added(1);
-        let a_p2 = added(2);
-        let a_p8 = added(8);
-        println!("G6 preview sharpen add: full {a_full:.4}, 2x {a_p2:.4}, 8x {a_p8:.4}");
-        assert!(
-            a_full > 1e-3,
-            "full-res sharpen should add acutance: {a_full}"
-        );
-        assert!(
-            a_p2 <= a_full + 1e-4,
-            "2x proxy must not exceed full-res add: {a_p2} vs {a_full}"
-        );
-        assert!(
-            a_p8 < a_full - 1e-4,
-            "8x proxy must add clearly less than full res: {a_p8} vs {a_full}"
-        );
-        assert!(
-            a_p8 <= a_p2 + 1e-4,
-            "coarser proxy must not add more: {a_p8} vs {a_p2}"
-        );
+        let (full, p2, p8) = (added(1), added(2), added(8));
+        println!("preview sharpen overshoot: full {full:.4}, 2x {p2:.4}, 8x {p8:.4}");
+        assert!(full > 1e-3);
+        assert!(p2 <= full + 1e-4 && p8 <= p2 + 1e-4 && p8 < full);
     }
 }

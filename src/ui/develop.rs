@@ -438,25 +438,60 @@ pub(crate) fn develop_panel_contents(
             });
             note_section(out, SEC_COLOR, actions);
 
-            // Detail is intentionally three sliders, like Photoshop's simplified
-            // panel: Sharpening, Noise Reduction, Color Noise Reduction. The
-            // Sharpen Radius/Detail/Masking sub-controls stay at their defaults
-            // (1.0 / 25 / 0 — the Lightroom-standard combo) and Defringe is
-            // retired from the UI; their fields and passes remain in the engine
-            // for old projects and future re-exposure, just not shown here.
+            // Detail mirrors Camera Raw: three main sliders, each with a
+            // disclosure triangle for its modifiers (collapsed by default).
             let out = section(ui, data, SEC_DETAIL, "Detail", |ui| {
-                changed |= slider_row(ui, "Sharpening", &mut settings.sharpening, 0.0..=100.0);
-                changed |= slider_row(
+                changed |= detail_group(
                     ui,
-                    "Noise Reduction",
-                    &mut settings.noise_reduction,
-                    0.0..=100.0,
+                    "sharpen",
+                    "Sharpening",
+                    |s| &mut s.sharpening,
+                    0.0..=150.0,
+                    |ui, s| {
+                        let mut c = slider_row(ui, "Radius", &mut s.sharpen_radius, 0.5..=3.0);
+                        c |= slider_row(ui, "Detail", &mut s.sharpen_detail, 0.0..=100.0);
+                        c |= slider_row(ui, "Masking", &mut s.sharpen_masking, 0.0..=100.0);
+                        c
+                    },
+                    &mut settings,
                 );
-                changed |= slider_row(
+                changed |= detail_group(
                     ui,
-                    "Color Noise Reduction",
-                    &mut settings.color_noise_reduction,
+                    "nr",
+                    "Noise Reduction",
+                    |s| &mut s.noise_reduction,
                     0.0..=100.0,
+                    |ui, s| {
+                        let mut c =
+                            slider_row(ui, "Detail", &mut s.noise_reduction_detail, 0.0..=100.0);
+                        c |= slider_row(
+                            ui,
+                            "Contrast",
+                            &mut s.noise_reduction_contrast,
+                            0.0..=100.0,
+                        );
+                        c
+                    },
+                    &mut settings,
+                );
+                changed |= detail_group(
+                    ui,
+                    "cnr",
+                    "Color Noise Reduction",
+                    |s| &mut s.color_noise_reduction,
+                    0.0..=100.0,
+                    |ui, s| {
+                        let mut c =
+                            slider_row(ui, "Detail", &mut s.color_noise_detail, 0.0..=100.0);
+                        c |= slider_row(
+                            ui,
+                            "Smoothness",
+                            &mut s.color_noise_smoothness,
+                            0.0..=100.0,
+                        );
+                        c
+                    },
+                    &mut settings,
                 );
             });
             note_section(out, SEC_DETAIL, actions);
@@ -1206,6 +1241,55 @@ fn slider_row_fine(
     gradient_slider_row(ui, label, value, range, &tone_gradient(label), pos_power)
 }
 
+/// A main Detail slider with Camera Raw's disclosure triangle revealing its
+/// modifier sliders (open state persisted per group). The modifiers are greyed
+/// out while the main amount is 0, as in Camera Raw.
+fn detail_group(
+    ui: &mut egui::Ui,
+    key: &str,
+    label: &str,
+    amount: impl FnOnce(&mut DevelopSettings) -> &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    modifiers: impl FnOnce(&mut egui::Ui, &mut DevelopSettings) -> bool,
+    settings: &mut DevelopSettings,
+) -> bool {
+    let id = ui.make_persistent_id(("develop_detail_more", key));
+    let mut open = ui.ctx().data_mut(|d| *d.get_persisted_mut_or(id, false));
+    let mut changed = false;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let slider_w = (ui.available_width() - 18.0).max(60.0);
+        ui.allocate_ui(egui::vec2(slider_w, 33.0), |ui| {
+            changed |= slider_row(ui, label, amount(settings), range);
+        });
+        let icon = if open {
+            ph::CARET_DOWN
+        } else {
+            ph::CARET_RIGHT
+        };
+        let tip = if open { "Hide options" } else { "More options" };
+        if ui
+            .add(egui::Button::new(egui::RichText::new(icon).size(12.0)).frame(false))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            open = !open;
+            ui.ctx().data_mut(|d| d.insert_persisted(id, open));
+        }
+    });
+    if open {
+        let active = match key {
+            "sharpen" => settings.sharpening > 0.001,
+            "nr" => settings.noise_reduction > 0.001,
+            _ => settings.color_noise_reduction > 0.001,
+        };
+        ui.indent(id, |ui| {
+            ui.add_enabled_ui(active, |ui| changed |= modifiers(ui, settings));
+        });
+    }
+    changed
+}
+
 fn grade_row(ui: &mut egui::Ui, label: &str, hue: &mut f32, strength: &mut f32) -> bool {
     let (r, g, b) = hsl_to_rgb(hue.rem_euclid(360.0) / 360.0, 0.78, 0.52);
     let mut rgb = [
@@ -1650,12 +1734,12 @@ pub(crate) fn tone_gradient(label: &str) -> Vec<egui::Color32> {
             egui::Color32::from_rgb(154, 154, 154),
             egui::Color32::from_rgb(245, 245, 245),
         ],
-        "Sharpening" | "Sharpen Radius" | "Sharpen Detail" | "Sharpen Masking" => vec![
+        "Sharpening" | "Radius" | "Detail" | "Masking" => vec![
             egui::Color32::from_rgb(50, 50, 50),
             egui::Color32::from_rgb(138, 138, 138),
             egui::Color32::from_rgb(250, 250, 250),
         ],
-        "Noise Reduction" | "Color Noise Reduction" => vec![
+        "Noise Reduction" | "Color Noise Reduction" | "Smoothness" => vec![
             egui::Color32::from_rgb(46, 46, 46),
             egui::Color32::from_rgb(96, 126, 144),
             egui::Color32::from_rgb(184, 210, 218),

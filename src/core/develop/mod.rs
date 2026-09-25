@@ -10,6 +10,7 @@
 mod color;
 mod curves;
 mod detail;
+mod detail_core;
 mod math;
 mod mixer;
 mod pipeline;
@@ -20,6 +21,7 @@ mod tone;
 pub(crate) use self::color::*;
 pub(crate) use self::curves::*;
 pub(crate) use self::detail::*;
+pub(crate) use self::detail_core::*;
 pub(crate) use self::math::*;
 pub(crate) use self::mixer::*;
 pub(crate) use self::pipeline::*;

@@ -157,8 +157,14 @@ fn perf_headless_gpu_detail_native_frames() {
             rgb[3 * i + 2] = (0.08 + 0.48 * (1.0 - fx) + texture * 0.7).max(0.0);
         }
     }
-    let params =
-        iai::gpu::detail_gpu::DetailWorkingParams::from_sliders(60.0, 1.0, 25.0, 0.0, 25.0, 35.0);
+    let params = iai::gpu::detail_gpu::DetailWorkingParams::from_settings(
+        &iai::core::develop::DevelopSettings {
+            sharpening: 60.0,
+            noise_reduction: 25.0,
+            color_noise_reduction: 35.0,
+            ..Default::default()
+        },
+    );
     let runtime = iai::gpu::detail_gpu::DetailGpuRuntime::new(&device);
     let run = || {
         iai::gpu::detail_gpu::run_detail_tiled_with_runtime(
@@ -168,7 +174,7 @@ fn perf_headless_gpu_detail_native_frames() {
             &rgb,
             w,
             h,
-            params,
+            &params,
             true,
             [0.272_229, 0.674_082, 0.053_689],
         )

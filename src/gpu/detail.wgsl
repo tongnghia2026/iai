@@ -1,324 +1,400 @@
-// GPU Detail — à-trous sharpen / noise-reduction port of the CPU
-// `core::develop::detail::process_detail_plane`, so the live preview runs the
-// SAME Detail as the commit and matches it pixel-for-pixel.
+// GPU Detail — port of `core::develop::detail_core` (Camera Raw–style
+// Sharpening, Luminance NR and Colour NR on a gamma-encoded luma/chroma split),
+// so the live preview runs the same Detail as the commit.
 //
 // One pooled storage buffer `pool` holds every working plane at a fixed f32
 // offset (in elements); each pass reads/writes regions of it by offset carried
-// in the per-dispatch uniform `P`. Multi-tap / multi-scale work is done as a
-// sequence of dispatches in one compute pass (WebGPU inserts read-after-write
-// barriers between dispatches), mirroring the CPU's sequential planes exactly.
-//
-// Display-domain path only for now (linear==0): luma = Rec.709, chroma = rgb −
-// luma, both clamped to [0,1] at the ends — matching `apply_detail_to_display_buffer`.
+// in the per-dispatch uniform `P`. Multi-tap / multi-scale work is a sequence
+// of dispatches in one compute pass (read-after-write barriers between
+// dispatches), mirroring the CPU's sequential planes.
 
 struct PassParams {
     w: u32,
     h: u32,
     n: u32,
     level: u32,
-    flags: u32,      // bit0 = horizontal pass, bit1 = edge-aware
+    flags: u32,
     linear: u32,
-    chan: u32,       // chroma channel (0..2) for the chroma-NR passes
-    groups_x: u32,  // number of dispatched workgroups in X (for 2-D linearisation)
-    // generic buffer offsets (in f32 elements)
+    groups_x: u32,
+    radius: u32,
     src_off: u32,
     dst_off: u32,
     a_off: u32,
     b_off: u32,
-    // named region offsets
+    gsrc_off: u32,
+    gdst_off: u32,
     img_off: u32,
     luma_off: u32,
     chroma_off: u32,
-    res_off: u32,
-    d0_off: u32,
-    d1_off: u32,
-    d2_off: u32,
-    cavg_off: u32,
-    cavgtmp_off: u32,
-    _pad2: u32,
-    _pad3: u32,
-    _pad4: u32,
-    // detail params
-    amount: f32,
+    acc_off: u32,
+    ga_off: u32,
+    gb_off: u32,
+    gf_off: u32,
+    gm_off: u32,
+    lo_off: u32,
+    hi_off: u32,
     sigma: f32,
-    detail: f32,
-    masking: f32,
-    nr: f32,
-    color_nr: f32,
-    lg0: f32,
-    lg1: f32,
-    lg2: f32,
-    lc0: f32,     // working-space luma coefficients
+    atten: f32,
+    tau: f32,
+    k: f32,
+    k_fine: f32,
+    mask_lo: f32,
+    mask_hi: f32,
+    halo_h: f32,
+    lc0: f32,
     lc1: f32,
     lc2: f32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var<storage, read_write> pool: array<f32>;
 @group(0) @binding(1) var<uniform> P: PassParams;
 
-const RANGE_SIGMA: f32 = 0.12;
-const SHARPEN_KNEE: f32 = 0.04;
-const SHARPEN_LIMIT: f32 = 0.35;
-const MASK_GRAD_FULL: f32 = 0.035;
-const NR_LUMA_THRESH: f32 = 0.08;
-const NR_LEVEL_DECAY: f32 = 0.5;
-const NR_SHADOW_MID: f32 = 0.5;
-const NR_LUMA_SHADOW_GAIN: f32 = 1.5;
-const NR_CHROMA_SHADOW_GAIN: f32 = 1.2;
-// Chroma-NR per-level attenuation at a full slider (finest killed hardest).
-const CHROMA_NR_ATTEN: array<f32, 3> = array<f32, 3>(1.0, 0.85, 0.6);
+const FLAG_H: u32 = 1u;
+const FLAG_FIRST: u32 = 2u;
+const FLAG_FINE: u32 = 4u;
+const FLAG_MASK: u32 = 8u;
+const FLAG_HALO: u32 = 16u;
+
+// Mirrors of the `detail_core` constants used per pixel.
+const SH_LIMIT: f32 = 0.12;
+const SH_SHADOW_KNEE: f32 = 0.276;
+const SH_SHADOW_POW: f32 = 1.51;
+const SH_HIGHLIGHT_CUT: f32 = 0.505;
+const SH_HALO_MARGIN: f32 = 0.090;
+const NR_HIGHLIGHT_CUT: f32 = 0.5;
+const CNR_HIGHLIGHT_CUT: f32 = 0.25;
+const CNR_SPECK_SPREAD: f32 = 1.5;
+const CNR_SPECK_FLOOR: f32 = 0.01;
+const CNR_SPECK_WIDTH: f32 = 0.03;
 
 fn linear_index(gid: vec3<u32>) -> u32 {
     return gid.y * P.groups_x * 64u + gid.x;
 }
 
-fn luminance(r: f32, g: f32, b: f32) -> f32 {
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+fn smooth01(x: f32) -> f32 {
+    let t = clamp(x, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
 }
 
-fn smootherstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
-    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+fn b3(t: i32) -> f32 {
+    switch t {
+        case 0, 4: { return 1.0 / 16.0; }
+        case 1, 3: { return 4.0 / 16.0; }
+        default: { return 6.0 / 16.0; }
+    }
 }
 
-fn nr_shadow_weight(brightness: f32, gain: f32) -> f32 {
-    return 1.0 + gain * (1.0 - smootherstep(0.0, NR_SHADOW_MID, clamp(brightness, 0.0, 1.0)));
+fn encode_channel(v: f32) -> f32 {
+    let a = abs(v);
+    var e: f32;
+    if (a <= 0.0031308) {
+        e = 12.92 * a;
+    } else {
+        e = 1.055 * pow(a, 1.0 / 2.4) - 0.055;
+    }
+    return select(e, -e, v < 0.0);
 }
 
-// Split RGB into luminance + chroma offsets (display domain).
+fn decode_channel(e: f32) -> f32 {
+    let a = abs(e);
+    var v: f32;
+    if (a <= 0.04045) {
+        v = a / 12.92;
+    } else {
+        v = pow((a + 0.055) / 1.055, 2.4);
+    }
+    return select(v, -v, e < 0.0);
+}
+
+// Tap index along the pass axis at hole offset `o`, edge-clamped.
+fn tap(i: u32, o: i32, horizontal: bool) -> u32 {
+    let w = i32(P.w);
+    let h = i32(P.h);
+    let x = i32(i % P.w);
+    let y = i32(i / P.w);
+    if (horizontal) {
+        return u32(y * w + clamp(x + o, 0, w - 1));
+    }
+    return u32(clamp(y + o, 0, h - 1) * w + x);
+}
+
+// RGB → gamma-encoded luma + chroma offsets.
 @compute @workgroup_size(64)
 fn split(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = linear_index(gid);
     if (i >= P.n) { return; }
-    let r = pool[P.img_off + i * 3u];
-    let g = pool[P.img_off + i * 3u + 1u];
-    let b = pool[P.img_off + i * 3u + 2u];
-    let y = P.lc0 * r + P.lc1 * g + P.lc2 * b;
-    var l: f32;
-    if (P.linear == 0u) {
-        l = clamp(y, 0.0, 1.0);
-    } else {
-        l = max(y, 0.0);
+    var r = pool[P.img_off + i * 3u];
+    var g = pool[P.img_off + i * 3u + 1u];
+    var b = pool[P.img_off + i * 3u + 2u];
+    if (P.linear != 0u) {
+        r = encode_channel(r);
+        g = encode_channel(g);
+        b = encode_channel(b);
     }
+    let l = P.lc0 * r + P.lc1 * g + P.lc2 * b;
     pool[P.luma_off + i] = l;
     pool[P.chroma_off + i * 3u] = r - l;
     pool[P.chroma_off + i * 3u + 1u] = g - l;
     pool[P.chroma_off + i * 3u + 2u] = b - l;
 }
 
-// One separable à-trous B3-spline pass (horizontal or vertical) at hole spacing
-// 1<<level, edge-clamped, optionally range-weighted (edge-aware). src/dst are
-// single-plane offsets.
+fn chroma_at(off: u32, j: u32) -> vec3<f32> {
+    return vec3<f32>(pool[off + j * 3u], pool[off + j * 3u + 1u], pool[off + j * 3u + 2u]);
+}
+
+// Isolated chroma outlier → 8-neighbour mean, weighted by `atten` (src → dst).
 @compute @workgroup_size(64)
-fn atrous(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn cspeck(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = linear_index(gid);
     if (i >= P.n) { return; }
     let w = i32(P.w);
     let h = i32(P.h);
     let x = i32(i % P.w);
     let y = i32(i / P.w);
+    let c = chroma_at(P.src_off, i);
+    var mean = vec3<f32>(0.0);
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            if (dx == 0 && dy == 0) { continue; }
+            let j = u32(clamp(y + dy, 0, h - 1) * w + clamp(x + dx, 0, w - 1));
+            mean = mean + chroma_at(P.src_off, j) / 8.0;
+        }
+    }
+    var spread = 0.0;
+    var dmin = 3.4e38;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            if (dx == 0 && dy == 0) { continue; }
+            let j = u32(clamp(y + dy, 0, h - 1) * w + clamp(x + dx, 0, w - 1));
+            let v = chroma_at(P.src_off, j);
+            let dm = v - mean;
+            spread = spread + dot(dm, dm) / 8.0;
+            let dc = v - c;
+            dmin = min(dmin, dot(dc, dc));
+        }
+    }
+    let excess = sqrt(dmin) - CNR_SPECK_SPREAD * sqrt(spread) - CNR_SPECK_FLOOR;
+    let t = P.atten * smooth01(excess / CNR_SPECK_WIDTH);
+    let o = c + t * (mean - c);
+    pool[P.dst_off + i * 3u] = o.x;
+    pool[P.dst_off + i * 3u + 1u] = o.y;
+    pool[P.dst_off + i * 3u + 2u] = o.z;
+}
+
+// Joint-chroma à-trous pass (3-channel planes), range-weighted by the chroma
+// vector distance from the centre.
+@compute @workgroup_size(64)
+fn catrous(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = linear_index(gid);
+    if (i >= P.n) { return; }
+    let horizontal = (P.flags & FLAG_H) != 0u;
     let step = 1 << P.level;
-    let horizontal = (P.flags & 1u) != 0u;
-    let edge_aware = (P.flags & 2u) != 0u;
-    let centre = pool[P.src_off + i];
-    let inv_s2 = 1.0 / (RANGE_SIGMA * RANGE_SIGMA);
-    var kern = array<f32, 5>(1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0);
-    var acc = 0.0;
-    var wsum = 0.0;
+    let inv = -0.5 / (P.sigma * P.sigma);
+    let c = vec3<f32>(pool[P.src_off + i * 3u], pool[P.src_off + i * 3u + 1u], pool[P.src_off + i * 3u + 2u]);
+    var acc = vec3<f32>(0.0);
+    var ws = 0.0;
     for (var t = 0; t < 5; t = t + 1) {
-        let o = (t - 2) * step;
-        var idx: u32;
-        if (horizontal) {
-            let sx = clamp(x + o, 0, w - 1);
-            idx = u32(y * w + sx);
-        } else {
-            let sy = clamp(y + o, 0, h - 1);
-            idx = u32(sy * w + x);
-        }
-        let v = pool[P.src_off + idx];
-        var wt = kern[t];
-        if (edge_aware) {
-            let d = v - centre;
-            wt = kern[t] / (1.0 + d * d * inv_s2);
-        }
+        let j = tap(i, (t - 2) * step, horizontal);
+        let v = vec3<f32>(pool[P.src_off + j * 3u], pool[P.src_off + j * 3u + 1u], pool[P.src_off + j * 3u + 2u]);
+        let d = v - c;
+        let wt = b3(t) * exp(dot(d, d) * inv);
         acc = acc + v * wt;
-        wsum = wsum + wt;
+        ws = ws + wt;
     }
-    pool[P.dst_off + i] = acc / max(wsum, 1e-9);
+    let o = acc / max(ws, 1e-12);
+    pool[P.dst_off + i * 3u] = o.x;
+    pool[P.dst_off + i * 3u + 1u] = o.y;
+    pool[P.dst_off + i * 3u + 2u] = o.z;
 }
 
-// Detail coefficient dst = a − b.
+// Colour-NR level accumulate: acc (+)= d·keep, d = a − b (3-channel).
 @compute @workgroup_size(64)
-fn diff(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn caccum(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = linear_index(gid);
     if (i >= P.n) { return; }
-    pool[P.dst_off + i] = pool[P.a_off + i] - pool[P.b_off + i];
-}
-
-// Copy one chroma channel (P.chan) out to a contiguous scratch plane so the
-// à-trous kernels can decompose it.
-@compute @workgroup_size(64)
-fn extract_channel(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = linear_index(gid);
-    if (i >= P.n) { return; }
-    pool[P.dst_off + i] = pool[P.chroma_off + i * 3u + P.chan];
-}
-
-// Chroma NR recombine: chroma[chan] = residual + Σ detail_j·(1 − atten_j), with a
-// tone-adaptive (luma-shadow) attenuation. Mirrors the CPU chroma-NR recombine.
-@compute @workgroup_size(64)
-fn chroma_recombine(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = linear_index(gid);
-    if (i >= P.n) { return; }
-    let shadow_w = nr_shadow_weight(pool[P.luma_off + i], NR_CHROMA_SHADOW_GAIN);
-    var v = pool[P.res_off + i];
-    var dd = array<f32, 3>(pool[P.d0_off + i], pool[P.d1_off + i], pool[P.d2_off + i]);
-    for (var j = 0; j < 3; j = j + 1) {
-        let atten = min(P.color_nr * CHROMA_NR_ATTEN[j] * shadow_w, 1.0);
-        v = v + dd[j] * (1.0 - atten);
+    let d = vec3<f32>(
+        pool[P.a_off + i * 3u] - pool[P.b_off + i * 3u],
+        pool[P.a_off + i * 3u + 1u] - pool[P.b_off + i * 3u + 1u],
+        pool[P.a_off + i * 3u + 2u] - pool[P.b_off + i * 3u + 2u],
+    );
+    var keep = 1.0;
+    if (P.atten > 0.0) {
+        let m = sqrt(dot(d, d)) / P.tau;
+        let m2 = m * m;
+        let prot = 1.0 / (1.0 + m2 * m2);
+        let taper = 1.0 - CNR_HIGHLIGHT_CUT * smooth01((pool[P.luma_off + i] - 0.55) / 0.4);
+        keep = 1.0 - min(P.atten * prot * taper, 1.0);
     }
-    pool[P.chroma_off + i * 3u + P.chan] = v;
-}
-
-// Non-negative garrote luma NR over the three detail levels, shadow-boosted
-// threshold using the residual brightness.
-@compute @workgroup_size(64)
-fn nr_garrote(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = linear_index(gid);
-    if (i >= P.n) { return; }
-    let sw = nr_shadow_weight(pool[P.res_off + i], NR_LUMA_SHADOW_GAIN);
-    let base = P.nr * NR_LUMA_THRESH;
-    garrote_at(P.d0_off + i, base * sw);
-    garrote_at(P.d1_off + i, base * NR_LEVEL_DECAY * sw);
-    garrote_at(P.d2_off + i, base * NR_LEVEL_DECAY * NR_LEVEL_DECAY * sw);
-}
-
-fn garrote_at(idx: u32, t: f32) {
-    let v = pool[idx];
-    let a = abs(v);
-    if (a <= t) {
-        pool[idx] = 0.0;
-    } else {
-        pool[idx] = v * (1.0 - (t * t) / (a * a));
+    for (var ch = 0u; ch < 3u; ch = ch + 1u) {
+        let prev = select(pool[P.acc_off + i * 3u + ch], 0.0, (P.flags & FLAG_FIRST) != 0u);
+        pool[P.acc_off + i * 3u + ch] = prev + d[ch] * keep;
     }
 }
 
-// Box blur radius 1, edge-clamped window average — one separable pass over the
-// 3-channel chroma plane. flags bit0 = horizontal.
+// chroma = residual (a) + accumulated detail.
 @compute @workgroup_size(64)
-fn box_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn cfinish(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = linear_index(gid);
     if (i >= P.n) { return; }
-    let w = i32(P.w);
-    let h = i32(P.h);
-    let x = i32(i % P.w);
-    let y = i32(i / P.w);
-    let horizontal = (P.flags & 1u) != 0u;
-    for (var c = 0u; c < 3u; c = c + 1u) {
-        var lo: i32;
-        var hi: i32;
-        if (horizontal) {
-            lo = max(x - 1, 0);
-            hi = min(x + 1, w - 1);
-        } else {
-            lo = max(y - 1, 0);
-            hi = min(y + 1, h - 1);
-        }
-        var sum = 0.0;
-        for (var p = lo; p <= hi; p = p + 1) {
-            var idx: u32;
-            if (horizontal) {
-                idx = u32(y * w + p);
-            } else {
-                idx = u32(p * w + x);
-            }
-            sum = sum + pool[P.src_off + idx * 3u + c];
-        }
-        pool[P.dst_off + i * 3u + c] = sum / f32(hi - lo + 1);
+    for (var ch = 0u; ch < 3u; ch = ch + 1u) {
+        pool[P.chroma_off + i * 3u + ch] = pool[P.a_off + i * 3u + ch] + pool[P.acc_off + i * 3u + ch];
     }
 }
 
-// NR-only reconstruction: luma = residual + Σ (shrunk) details.
+// Guided à-trous pass: signal (src) range-weighted by the guide (gsrc); the
+// guide smooths plainly into gdst.
 @compute @workgroup_size(64)
-fn reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn latrous(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = linear_index(gid);
     if (i >= P.n) { return; }
-    let base = pool[P.res_off + i] + pool[P.d0_off + i] + pool[P.d1_off + i] + pool[P.d2_off + i];
-    if (P.linear == 0u) {
-        pool[P.luma_off + i] = clamp(base, 0.0, 1.0);
-    } else {
-        pool[P.luma_off + i] = max(base, 0.0);
+    let horizontal = (P.flags & FLAG_H) != 0u;
+    let step = 1 << P.level;
+    let inv = -0.5 / (P.sigma * P.sigma);
+    let gc = pool[P.gsrc_off + i];
+    var acc = 0.0;
+    var ws = 0.0;
+    var gacc = 0.0;
+    for (var t = 0; t < 5; t = t + 1) {
+        let j = tap(i, (t - 2) * step, horizontal);
+        let gv = pool[P.gsrc_off + j];
+        let d = gv - gc;
+        let kv = b3(t);
+        let wt = kv * exp(d * d * inv);
+        acc = acc + pool[P.src_off + j] * wt;
+        ws = ws + wt;
+        gacc = gacc + gv * kv;
     }
+    pool[P.dst_off + i] = acc / max(ws, 1e-12);
+    pool[P.gdst_off + i] = gacc;
 }
 
-// Sharpen: boost the (denoised) detail levels, tanh-limited, masking-gated, plus
-// the chroma de-fringe pull. Writes the new luma and the pulled chroma.
+// Luma-NR level accumulate: acc (+)= (a − b)·(1 − min(atten·taper, 1)).
+@compute @workgroup_size(64)
+fn laccum(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = linear_index(gid);
+    if (i >= P.n) { return; }
+    let taper = 1.0 - NR_HIGHLIGHT_CUT * smooth01((pool[P.luma_off + i] - 0.75) / 0.15);
+    let v = (pool[P.a_off + i] - pool[P.b_off + i]) * (1.0 - min(P.atten * taper, 1.0));
+    let prev = select(pool[P.acc_off + i], 0.0, (P.flags & FLAG_FIRST) != 0u);
+    pool[P.acc_off + i] = prev + v;
+}
+
+@compute @workgroup_size(64)
+fn lfinish(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = linear_index(gid);
+    if (i >= P.n) { return; }
+    pool[P.luma_off + i] = pool[P.a_off + i] + pool[P.acc_off + i];
+}
+
+// One separable Gaussian pass (vertical, or horizontal with FLAG_H), radius
+// `P.radius`, weights normalised in-shader exactly as the CPU taps.
+@compute @workgroup_size(64)
+fn gauss(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = linear_index(gid);
+    if (i >= P.n) { return; }
+    let horizontal = (P.flags & FLAG_H) != 0u;
+    let r = i32(P.radius);
+    var sum = 0.0;
+    for (var x = -r; x <= r; x = x + 1) {
+        sum = sum + exp(-0.5 * f32(x * x) / (P.sigma * P.sigma));
+    }
+    var acc = 0.0;
+    for (var x = -r; x <= r; x = x + 1) {
+        let k = exp(-0.5 * f32(x * x) / (P.sigma * P.sigma)) / sum;
+        acc = acc + pool[P.src_off + tap(i, x, horizontal)] * k;
+    }
+    pool[P.dst_off + i] = acc;
+}
+
+// Separable local min (a → dst) and max (b → gdst) over ±radius.
+@compute @workgroup_size(64)
+fn minmax(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = linear_index(gid);
+    if (i >= P.n) { return; }
+    let horizontal = (P.flags & FLAG_H) != 0u;
+    let r = i32(P.radius);
+    var lo = 3.4e38;
+    var hi = -3.4e38;
+    for (var x = -r; x <= r; x = x + 1) {
+        let j = tap(i, x, horizontal);
+        lo = min(lo, pool[P.a_off + j]);
+        hi = max(hi, pool[P.b_off + j]);
+    }
+    pool[P.dst_off + i] = lo;
+    pool[P.gdst_off + i] = hi;
+}
+
+// Final sharpening: DoG boost (+ fine band), tone fade, edge mask, tanh limit,
+// halo clamp. Writes the new luma in place (reads only this pixel of luma).
 @compute @workgroup_size(64)
 fn sharpen(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = linear_index(gid);
     if (i >= P.n) { return; }
-    let w = i32(P.w);
-    let h = i32(P.h);
-    let x = i32(i % P.w);
-    let y = i32(i / P.w);
-
-    let dv0 = pool[P.d0_off + i];
-    let dv1 = pool[P.d1_off + i];
-    let dv2 = pool[P.d2_off + i];
-    var lg = array<f32, 3>(P.lg0, P.lg1, P.lg2);
-    var dvs = array<f32, 3>(dv0, dv1, dv2);
-    var delta = 0.0;
-    var edge_mag = 0.0;
-    for (var j = 0; j < 3; j = j + 1) {
-        let dv = dvs[j];
-        if (j < 2) { edge_mag = edge_mag + abs(dv); }
-        let weight = P.detail + (1.0 - P.detail) * smootherstep(0.0, SHARPEN_KNEE, abs(dv));
-        delta = delta + P.amount * lg[j] * weight * dv;
+    let l = pool[P.luma_off + i];
+    var delta = P.k * (pool[P.ga_off + i] - pool[P.gb_off + i]);
+    if ((P.flags & FLAG_FINE) != 0u) {
+        delta = delta + P.k_fine * (l - pool[P.gf_off + i]);
     }
-
-    var mask = 1.0;
-    if (P.masking > 0.001) {
-        let xl = pool[P.res_off + u32(y * w + max(x - 1, 0))];
-        let xr = pool[P.res_off + u32(y * w + min(x + 1, w - 1))];
-        let yt = pool[P.res_off + u32(max(y - 1, 0) * w + x)];
-        let yb = pool[P.res_off + u32(min(y + 1, h - 1) * w + x)];
-        let gx = (xr - xl) * 0.5;
-        let gy = (yb - yt) * 0.5;
-        let gmag = sqrt(gx * gx + gy * gy);
-        let tm = P.masking * MASK_GRAD_FULL;
-        mask = smootherstep(tm * 0.5, tm * 1.5, gmag);
-    }
-
-    delta = SHARPEN_LIMIT * tanh(delta * mask / SHARPEN_LIMIT);
-    let base = pool[P.res_off + i] + dv0 + dv1 + dv2;
-    var lout = base + delta;
-    if (P.linear == 0u) {
-        lout = clamp(lout, 0.0, 1.0);
-    } else {
-        lout = max(lout, 0.0);
-    }
-    pool[P.luma_off + i] = lout;
-
-    let edge_gate = smootherstep(0.006, 0.055, edge_mag);
-    let fr = min(P.amount * edge_gate * 0.4, 0.6) * mask;
-    if (fr > 0.001) {
-        for (var c = 0u; c < 3u; c = c + 1u) {
-            let cur = pool[P.chroma_off + i * 3u + c];
-            let cav = pool[P.cavg_off + i * 3u + c];
-            pool[P.chroma_off + i * 3u + c] = cur + (cav - cur) * fr;
+    let tone = pow(clamp(l / SH_SHADOW_KNEE, 0.0, 1.0), SH_SHADOW_POW)
+        * (1.0 - SH_HIGHLIGHT_CUT * smooth01((l - 0.75) / 0.30));
+    delta = delta * tone;
+    if ((P.flags & FLAG_MASK) != 0u) {
+        let w = P.w;
+        let h = P.h;
+        let x = i % w;
+        let y = i / w;
+        let m = P.gm_off;
+        var gx = 0.0;
+        if (w >= 2u) {
+            if (x == 0u) {
+                gx = pool[m + i + 1u] - pool[m + i];
+            } else if (x == w - 1u) {
+                gx = pool[m + i] - pool[m + i - 1u];
+            } else {
+                gx = (pool[m + i + 1u] - pool[m + i - 1u]) * 0.5;
+            }
         }
+        var gy = 0.0;
+        if (h >= 2u) {
+            if (y == 0u) {
+                gy = pool[m + i + w] - pool[m + i];
+            } else if (y == h - 1u) {
+                gy = pool[m + i] - pool[m + i - w];
+            } else {
+                gy = (pool[m + i + w] - pool[m + i - w]) * 0.5;
+            }
+        }
+        let g = sqrt(gx * gx + gy * gy);
+        delta = delta * smooth01((g - P.mask_lo) / max(P.mask_hi - P.mask_lo, 1e-9));
     }
+    delta = SH_LIMIT * tanh(delta / SH_LIMIT);
+    var u = l + delta;
+    if ((P.flags & FLAG_HALO) != 0u) {
+        let lo = pool[P.lo_off + i];
+        let hi = pool[P.hi_off + i];
+        let mg = SH_HALO_MARGIN * (hi - lo);
+        let c = clamp(u, lo - mg, hi + mg);
+        u = c + P.halo_h * (u - c);
+    }
+    pool[P.luma_off + i] = u;
 }
 
-// Recombine luminance + chroma back to RGB (display clamp at the ends).
+// Luma + chroma → RGB (decoded to linear on the scene path, clamped on the
+// display path).
 @compute @workgroup_size(64)
 fn combine(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = linear_index(gid);
     if (i >= P.n) { return; }
-    let l = pool[P.luma_off + i];
+    var l = pool[P.luma_off + i];
+    if (P.linear != 0u) {
+        l = max(l, 0.0);
+    }
     for (var c = 0u; c < 3u; c = c + 1u) {
         var v = l + pool[P.chroma_off + i * 3u + c];
-        if (P.linear == 0u) {
+        if (P.linear != 0u) {
+            v = decode_channel(v);
+        } else {
             v = clamp(v, 0.0, 1.0);
         }
         pool[P.img_off + i * 3u + c] = v;
