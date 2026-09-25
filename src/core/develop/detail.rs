@@ -955,6 +955,82 @@ mod camera_raw_contract {
         assert!(rise < 3.2, "NR blurred a real edge: rise {rise}");
     }
 
+    /// Owner report 2026-09-25: Sharpening then Noise Reduction printed thin
+    /// concentric lines around eyes and nostrils. Per-tap range weights at the
+    /// coarse wavelet levels switched on/off as a tap crossed a strong edge,
+    /// leaving ripples parallel to it on shaded skin. A dark band on a curved
+    /// background must come out without ripples or a spread halo.
+    #[test]
+    fn noise_reduction_leaves_no_ripples_beside_strong_edges() {
+        let (w, h) = (160usize, 96usize);
+        let clean = |x: usize| -> f32 {
+            if (76..84).contains(&x) {
+                0.12
+            } else {
+                let t = (x as f32 - 80.0) / 80.0;
+                0.45 + 0.35 * (1.0 - t * t)
+            }
+        };
+        let src: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| grey(clean(i % w) + 0.015 * hash_noise(i, 21)))
+            .collect();
+        let profile = |settings: &DevelopSettings| -> Vec<f32> {
+            let mut img = src.clone();
+            run(&mut img, w, h, settings);
+            (0..w)
+                .map(|x| {
+                    (8..h - 8)
+                        .map(|y| luma(img[y * w + x]) - clean(x))
+                        .sum::<f32>()
+                        / (h - 16) as f32
+                })
+                .collect()
+        };
+        let ripple = |prof: &[f32]| -> f32 {
+            // Deviation from a 9-px running mean, away from the band itself.
+            let mut worst = 0.0f32;
+            for x in (24..66).chain(94..136) {
+                let mean = prof[x - 4..=x + 4].iter().sum::<f32>() / 9.0;
+                worst = worst.max((prof[x] - mean).abs());
+            }
+            worst
+        };
+        let nr = DevelopSettings {
+            noise_reduction: 100.0,
+            ..Default::default()
+        };
+        let both = DevelopSettings {
+            sharpening: 60.0,
+            noise_reduction: 100.0,
+            ..Default::default()
+        };
+        let p_nr = profile(&nr);
+        let p_both = profile(&both);
+        let halo = (20..70)
+            .chain(90..140)
+            .map(|x| p_nr[x].abs())
+            .fold(0.0f32, f32::max);
+        println!(
+            "ripple NR {:.2}/255, NR+sharpen {:.2}/255, halo {:.2}/255",
+            ripple(&p_nr) * 255.0,
+            ripple(&p_both) * 255.0,
+            halo * 255.0
+        );
+        // The ringing engine measured ~5/255 here; the edge-gated one ~1/255.
+        assert!(
+            ripple(&p_nr) < 2.0 / 255.0,
+            "NR ripples beside a strong edge"
+        );
+        assert!(
+            ripple(&p_both) < 2.5 / 255.0,
+            "sharpened NR ripples beside a strong edge"
+        );
+        assert!(
+            halo < 5.0 / 255.0,
+            "NR spread a halo around a thin dark band"
+        );
+    }
+
     #[test]
     fn colour_nr_removes_speckle_early_and_widens_to_blotches() {
         let (w, h) = (96usize, 96usize);

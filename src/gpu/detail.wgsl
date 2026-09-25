@@ -242,40 +242,46 @@ fn cfinish(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
-// Guided à-trous pass: signal (src) range-weighted by the guide (gsrc); the
-// guide smooths plainly into gdst.
+// Plain à-trous B3 pass on one plane (horizontal with FLAG_H).
 @compute @workgroup_size(64)
-fn latrous(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn patrous(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = linear_index(gid);
     if (i >= P.n) { return; }
     let horizontal = (P.flags & FLAG_H) != 0u;
     let step = 1 << P.level;
-    let inv = -0.5 / (P.sigma * P.sigma);
-    let gc = pool[P.gsrc_off + i];
     var acc = 0.0;
-    var ws = 0.0;
-    var gacc = 0.0;
     for (var t = 0; t < 5; t = t + 1) {
-        let j = tap(i, (t - 2) * step, horizontal);
-        let gv = pool[P.gsrc_off + j];
-        let d = gv - gc;
-        let kv = b3(t);
-        let wt = kv * exp(d * d * inv);
-        acc = acc + pool[P.src_off + j] * wt;
-        ws = ws + wt;
-        gacc = gacc + gv * kv;
+        acc = acc + pool[P.src_off + tap(i, (t - 2) * step, horizontal)] * b3(t);
     }
-    pool[P.dst_off + i] = acc / max(ws, 1e-12);
-    pool[P.gdst_off + i] = gacc;
+    pool[P.dst_off + i] = acc;
 }
 
-// Luma-NR level accumulate: acc (+)= (a − b)·(1 − min(atten·taper, 1)).
+// Luma-NR level accumulate: acc (+)= d·(1 − min(atten·taper·gate·prot, 1)),
+// d = a − b; the gate fades the shrink where the smoothed plane b has real
+// contrast, the protection where the coefficient itself is large.
 @compute @workgroup_size(64)
 fn laccum(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = linear_index(gid);
     if (i >= P.n) { return; }
+    let st = 1u << P.level;
+    let w = P.w;
+    let h = P.h;
+    let x = i % w;
+    let y = i / w;
+    let xp = y * w + min(x + st, w - 1u);
+    let xm = y * w + select(0u, x - st, x >= st);
+    let yp = min(y + st, h - 1u) * w + x;
+    let ym = select(0u, y - st, y >= st) * w + x;
+    let gx = (pool[P.b_off + xp] - pool[P.b_off + xm]) * 0.5;
+    let gy = (pool[P.b_off + yp] - pool[P.b_off + ym]) * 0.5;
+    let m = sqrt(gx * gx + gy * gy);
+    let gate = 1.0 - smooth01((m - P.mask_lo) / max(P.mask_hi - P.mask_lo, 1e-9));
+    let d = pool[P.a_off + i] - pool[P.b_off + i];
+    let r = abs(d) / P.tau;
+    let r2 = r * r;
+    let prot = 1.0 / (1.0 + r2 * r2);
     let taper = 1.0 - NR_HIGHLIGHT_CUT * smooth01((pool[P.luma_off + i] - 0.75) / 0.15);
-    let v = (pool[P.a_off + i] - pool[P.b_off + i]) * (1.0 - min(P.atten * taper, 1.0));
+    let v = d * (1.0 - min(P.atten * taper * gate * prot, 1.0));
     let prev = select(pool[P.acc_off + i], 0.0, (P.flags & FLAG_FIRST) != 0u);
     pool[P.acc_off + i] = prev + v;
 }

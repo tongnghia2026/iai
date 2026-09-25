@@ -107,7 +107,7 @@ impl Layout {
 }
 
 const ENTRIES: &[&str] = &[
-    "split", "cspeck", "catrous", "caccum", "cfinish", "latrous", "laccum", "lfinish", "gauss",
+    "split", "cspeck", "catrous", "caccum", "cfinish", "patrous", "laccum", "lfinish", "gauss",
     "minmax", "sharpen", "combine",
 ];
 
@@ -273,43 +273,33 @@ fn build_passes(lay: &Layout, base: PassParams, p: &DetailPlan) -> Vec<(usize, P
     }
 
     if p.lnr {
-        let (la, lb, lt, ga, gb, gt, lacc) = (
-            lay.s(0),
-            lay.s(1),
-            lay.s(2),
-            lay.s(3),
-            lay.s(4),
-            lay.s(5),
-            lay.s(6),
-        );
-        let (mut cur, mut gcur) = (lay.luma, lay.luma);
+        let (la, lb, lt, lacc) = (lay.s(0), lay.s(1), lay.s(2), lay.s(3));
+        let mut cur = lay.luma;
         for lev in 0..DETAIL_LEVELS {
-            let (dst, gdst) = if lev % 2 == 0 { (la, ga) } else { (lb, gb) };
+            let dst = if lev % 2 == 0 { la } else { lb };
             let mut ph = base;
             ph.level = lev as u32;
             ph.flags = FLAG_H;
-            ph.sigma = p.lnr_sigma[lev].max(1e-6);
             ph.src_off = cur;
-            ph.gsrc_off = gcur;
             ph.dst_off = lt;
-            ph.gdst_off = gt;
-            passes.push((entry("latrous"), ph));
+            passes.push((entry("patrous"), ph));
             let mut pv = ph;
             pv.flags = 0;
             pv.src_off = lt;
-            pv.gsrc_off = gt;
             pv.dst_off = dst;
-            pv.gdst_off = gdst;
-            passes.push((entry("latrous"), pv));
+            passes.push((entry("patrous"), pv));
             let mut pa = base;
+            pa.level = lev as u32;
             pa.flags = if lev == 0 { FLAG_FIRST } else { 0 };
             pa.a_off = cur;
             pa.b_off = dst;
             pa.acc_off = lacc;
             pa.atten = p.lnr_w[lev] * p.lnr_alpha;
+            pa.tau = p.lnr_tau[lev].max(1e-6);
+            pa.mask_lo = p.lnr_edge_lo;
+            pa.mask_hi = p.lnr_edge_hi;
             passes.push((entry("laccum"), pa));
             cur = dst;
-            gcur = gdst;
         }
         let mut pf = base;
         pf.a_off = cur;

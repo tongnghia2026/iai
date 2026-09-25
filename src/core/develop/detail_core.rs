@@ -54,12 +54,23 @@ const SH_MASK_SIGMA: f32 = 1.259;
 const SH_MASK_SOFT: f32 = 0.99;
 
 // Luminance noise reduction.
-const NR_W: [f32; DETAIL_LEVELS] = [1.0, 1.0, 0.448, 1.078, 0.641];
+const NR_W: [f32; DETAIL_LEVELS] = [1.0, 1.0, 0.7, 0.6, 0.1];
 const NR_GROW_POW: f32 = 0.855;
 const NR_CONTRAST: f32 = 0.776;
-const NR_RANGE50: f32 = 0.0263;
-const NR_RANGE_EXP: f32 = 5.14;
-const NR_RANGE_LEVEL: f32 = 0.5485;
+/// Edge gate: a level's shrink fades out where the local contrast of its
+/// smoothed plane (central difference at the level's hole spacing) exceeds
+/// `NR_EDGE50` (scaled by the Detail slider), over ±`NR_EDGE_SOFT` of it. The
+/// gate is a smooth function of a smooth plane, so it cannot print rings the
+/// way per-tap range weights do around strong edges.
+const NR_EDGE50: f32 = 0.025;
+const NR_EDGE_EXP: f32 = 2.0;
+const NR_EDGE_SOFT: f32 = 0.6;
+/// Amplitude protection: coefficients well above `NR_PROT50 · NR_PROT_LEVEL^j`
+/// (scaled by the Detail slider) are structure — thin lines and strong
+/// features, whose centres the gradient gate misses — and are kept.
+const NR_PROT50: f32 = 0.12;
+const NR_PROT_LEVEL: f32 = 0.55;
+const NR_PROT_EXP: f32 = 3.5;
 pub(crate) const NR_HIGHLIGHT_CUT: f32 = 0.5;
 
 // Colour noise reduction.
@@ -109,7 +120,9 @@ pub(crate) struct DetailPlan {
     pub lnr: bool,
     pub lnr_alpha: f32,
     pub lnr_w: [f32; DETAIL_LEVELS],
-    pub lnr_sigma: [f32; DETAIL_LEVELS],
+    pub lnr_edge_lo: f32,
+    pub lnr_edge_hi: f32,
+    pub lnr_tau: [f32; DETAIL_LEVELS],
 
     pub cnr: bool,
     pub cnr_speck: f32,
@@ -175,9 +188,10 @@ impl DetailPlan {
             }
         }
         let nr_detail = settings.noise_reduction_detail.clamp(0.0, 100.0) / 100.0;
-        let range = NR_RANGE50 * (NR_RANGE_EXP * (0.5 - nr_detail)).exp();
+        let edge = NR_EDGE50 * (NR_EDGE_EXP * (0.5 - nr_detail)).exp();
+        let prot = NR_PROT50 * (NR_PROT_EXP * (0.5 - nr_detail)).exp();
+        let lnr_tau = std::array::from_fn(|j| prot * NR_PROT_LEVEL.powf(j as f32 + shift));
         let lnr_w = std::array::from_fn(|j| level_lerp(&w_src, j as f32 + shift, 0.0));
-        let lnr_sigma = std::array::from_fn(|j| range * NR_RANGE_LEVEL.powf(j as f32 + shift));
 
         // Colour NR.
         let cn = settings.color_noise_reduction.clamp(0.0, 100.0);
@@ -229,7 +243,9 @@ impl DetailPlan {
             lnr,
             lnr_alpha,
             lnr_w,
-            lnr_sigma,
+            lnr_tau,
+            lnr_edge_lo: edge * (1.0 - NR_EDGE_SOFT),
+            lnr_edge_hi: edge * (1.0 + NR_EDGE_SOFT),
             cnr,
             // Specks are sub-pixel on a coarse proxy; despeckling there would
             // eat small real features instead.
@@ -332,52 +348,31 @@ fn local_min_max(src: &[f32], w: usize, h: usize, r: usize) -> (Vec<f32>, Vec<f3
     (lo, hi)
 }
 
-/// One guided à-trous pass at hole spacing `1 << level`: the signal is
-/// smoothed with B3 taps range-weighted by the guide's difference from the
-/// centre (Gaussian, `sigma`), while the guide itself smooths plainly so the
-/// next level compares like with like. Horizontal, then vertical.
-fn guided_atrous(
-    src: &[f32],
-    guide: &[f32],
-    w: usize,
-    h: usize,
-    level: usize,
-    sigma: f32,
-) -> (Vec<f32>, Vec<f32>) {
+/// One plain à-trous B3 pass at hole spacing `1 << level`, edge-clamped,
+/// horizontal then vertical.
+fn plain_atrous(src: &[f32], w: usize, h: usize, level: usize) -> Vec<f32> {
     let step = 1i64 << level;
-    let inv = -0.5 / (sigma * sigma);
-    let pass = |sig: &[f32], gd: &[f32], horizontal: bool| -> (Vec<f32>, Vec<f32>) {
+    let pass = |inp: &[f32], horizontal: bool| -> Vec<f32> {
         let mut out = vec![0.0f32; w * h];
-        let mut gout = vec![0.0f32; w * h];
-        out.par_chunks_mut(w)
-            .zip(gout.par_chunks_mut(w))
-            .enumerate()
-            .for_each(|(y, (orow, grow))| {
-                for x in 0..w {
-                    let i = y * w + x;
-                    let gc = gd[i];
-                    let (mut acc, mut ws, mut gacc) = (0.0f32, 0.0f32, 0.0f32);
-                    for (t, &kv) in B3.iter().enumerate() {
-                        let o = (t as i64 - 2) * step;
-                        let j = if horizontal {
-                            y * w + (x as i64 + o).clamp(0, w as i64 - 1) as usize
-                        } else {
-                            (y as i64 + o).clamp(0, h as i64 - 1) as usize * w + x
-                        };
-                        let d = gd[j] - gc;
-                        let wt = kv * (d * d * inv).exp();
-                        acc += sig[j] * wt;
-                        ws += wt;
-                        gacc += gd[j] * kv;
-                    }
-                    orow[x] = acc / ws.max(1e-12);
-                    grow[x] = gacc;
+        out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (x, o) in row.iter_mut().enumerate() {
+                let mut acc = 0.0f32;
+                for (t, &kv) in B3.iter().enumerate() {
+                    let off = (t as i64 - 2) * step;
+                    let j = if horizontal {
+                        y * w + (x as i64 + off).clamp(0, w as i64 - 1) as usize
+                    } else {
+                        (y as i64 + off).clamp(0, h as i64 - 1) as usize * w + x
+                    };
+                    acc += inp[j] * kv;
                 }
-            });
-        (out, gout)
+                *o = acc;
+            }
+        });
+        out
     };
-    let (s1, g1) = pass(src, guide, true);
-    pass(&s1, &g1, false)
+    let tmp = pass(src, true);
+    pass(&tmp, false)
 }
 
 /// One joint-chroma à-trous pass: taps are range-weighted by the Euclidean
@@ -505,21 +500,41 @@ pub(crate) fn colour_nr(chroma: &mut [[f32; 3]], luma: &[f32], w: usize, h: usiz
     });
 }
 
-/// Luminance noise reduction; `luma` is replaced in place.
+/// Luminance noise reduction; `luma` is replaced in place. Each plain à-trous
+/// level is shrunk toward its smoothed value by the amount, except where the
+/// edge gate (contrast of the level's smoothed plane) or the amplitude
+/// protection marks real structure. Both are smooth in position, so strong
+/// edges cannot print the concentric rings per-tap range weights leave.
 pub(crate) fn luma_nr(luma: &mut [f32], w: usize, h: usize, p: &DetailPlan) {
-    let orig = luma.to_vec();
     let mut cur = luma.to_vec();
-    let mut guide = luma.to_vec();
     let mut acc = vec![0.0f32; w * h];
     for lev in 0..DETAIL_LEVELS {
-        let (next, gnext) = guided_atrous(&cur, &guide, w, h, lev, p.lnr_sigma[lev].max(1e-6));
+        let next = plain_atrous(&cur, w, h, lev);
         let wl = p.lnr_w[lev] * p.lnr_alpha;
-        acc.par_iter_mut().enumerate().for_each(|(i, o)| {
-            let taper = 1.0 - NR_HIGHLIGHT_CUT * smooth01((orig[i] - 0.75) / 0.15);
-            *o += (cur[i] - next[i]) * (1.0 - (wl * taper).min(1.0));
+        let tau = p.lnr_tau[lev].max(1e-6);
+        let st = 1usize << lev;
+        let orig: &[f32] = luma;
+        acc.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (x, o) in row.iter_mut().enumerate() {
+                let i = y * w + x;
+                let xp = y * w + (x + st).min(w - 1);
+                let xm = y * w + x.saturating_sub(st);
+                let yp = (y + st).min(h - 1) * w + x;
+                let ym = y.saturating_sub(st) * w + x;
+                let gx = (next[xp] - next[xm]) * 0.5;
+                let gy = (next[yp] - next[ym]) * 0.5;
+                let m = (gx * gx + gy * gy).sqrt();
+                let gate =
+                    1.0 - smooth01((m - p.lnr_edge_lo) / (p.lnr_edge_hi - p.lnr_edge_lo).max(1e-9));
+                let d = cur[i] - next[i];
+                let r = d.abs() / tau;
+                let r2 = r * r;
+                let prot = 1.0 / (1.0 + r2 * r2);
+                let taper = 1.0 - NR_HIGHLIGHT_CUT * smooth01((orig[i] - 0.75) / 0.15);
+                *o += d * (1.0 - (wl * taper * gate * prot).min(1.0));
+            }
         });
         cur = next;
-        guide = gnext;
     }
     luma.par_iter_mut()
         .enumerate()
