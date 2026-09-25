@@ -411,28 +411,40 @@ impl Canvas {
         ))
     }
 
-    /// Continue a Quick Select stroke on the selection. Returns `true` when the
-    /// selection changed.
+    /// Continue a Quick Select stroke on the selection. Returns the changed
+    /// bounds `(x0, y0, x1, y1)`, or None when nothing changed.
     pub fn quick_select_extend(
         &mut self,
         stroke: &mut crate::core::quick_select::QuickSelectStroke,
         points: &[(f32, f32)],
-    ) -> bool {
-        let Some(cache) = self.edge_cache.as_deref() else {
-            return false;
-        };
-        if stroke
-            .extend(cache, &mut self.selection.mask, points)
-            .is_none()
-        {
-            return false;
-        }
+    ) -> Option<(usize, usize, usize, usize)> {
+        let cache = self.edge_cache.as_deref()?;
+        let changed = stroke.extend(cache, &mut self.selection.mask, points)?;
         self.selection.active = match stroke.op() {
             crate::core::quick_select::QuickSelectOp::Add => true,
             crate::core::quick_select::QuickSelectOp::Subtract => {
                 crate::core::selection::mask_has_any(&self.selection.mask)
             }
         };
+        self.selection.mask_revision += 1;
+        self.selection.mark_bbox_dirty();
+        Some(changed)
+    }
+
+    /// Auto-Enhance the selection rim a Quick Select stroke left inside
+    /// `bounds` (see `quick_select::auto_enhance`). Returns `true` when the
+    /// selection changed.
+    pub fn quick_select_auto_enhance(&mut self, bounds: (usize, usize, usize, usize)) -> bool {
+        let Some(cache) = self.edge_cache.as_deref() else {
+            return false;
+        };
+        if (cache.width, cache.height) != (self.width, self.height)
+            || crate::core::quick_select::auto_enhance(&mut self.selection.mask, cache, bounds)
+                .is_none()
+        {
+            return false;
+        }
+        self.selection.active = crate::core::selection::mask_has_any(&self.selection.mask);
         self.selection.mask_revision += 1;
         self.selection.mark_bbox_dirty();
         true

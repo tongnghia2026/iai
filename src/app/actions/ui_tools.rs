@@ -961,6 +961,12 @@ impl App {
         if let Some(m) = actions.tool.set_wand_sample_merged.take() {
             self.edit.tools.wand_mut().sample_merged = m;
         }
+        if let Some(m) = actions.tool.set_smart_select_mode.take() {
+            self.edit.tools.wand_mut().mode = m;
+        }
+        if let Some(on) = actions.tool.set_smart_select_auto_enhance.take() {
+            self.edit.tools.wand_mut().auto_enhance = on;
+        }
         if let Some(model) = actions.sel.set_select_subject_model.take() {
             if self.jobs.select_subject.set_selected_model(model) {
                 self.shell.status_msg = self.jobs.select_subject.status_text();

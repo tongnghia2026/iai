@@ -1256,6 +1256,8 @@ impl App {
                 wand_contiguous: self.edit.tools.wand().contiguous,
                 wand_anti_alias: self.edit.tools.wand().anti_alias,
                 wand_sample_merged: self.edit.tools.wand().sample_merged,
+                smart_select_mode: self.edit.tools.wand().mode,
+                smart_select_auto_enhance: self.edit.tools.wand().auto_enhance,
                 pen_mode: self.edit.tools.pen().mode.to_u8(),
                 pen_stroke_width: self.edit.tools.pen().stroke_width,
                 vector_brush_width: self.edit.tools.vector_brush().width,

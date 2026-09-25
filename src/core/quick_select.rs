@@ -1172,6 +1172,161 @@ impl QuickSelectStroke {
     }
 }
 
+/// Auto-Enhance (the Quick Selection option): tidy the boundary a stroke
+/// left — the cut's staircase steps and single-pixel jaggies are smoothed
+/// away, and the rim settles onto the image edge with a soft, anti-aliased
+/// falloff (an edge-aware guided filter on the luminance). Works on `bounds`
+/// (the pixels the stroke changed) plus a small margin and returns the box
+/// it rewrote, or None when nothing changed.
+pub fn auto_enhance(
+    mask: &mut [u8],
+    cache: &EdgeCache,
+    bounds: (usize, usize, usize, usize),
+) -> Option<(usize, usize, usize, usize)> {
+    /// Smoothing kernel radius (Gaussian, sigma 1.2).
+    const SMOOTH_R: usize = 3;
+    /// Guided-filter window radius and regulariser (luminance in 0..1).
+    const GUIDE_R: usize = 2;
+    const GUIDE_EPS: f32 = 0.0008;
+    /// Pixels outside the stroke's box that may still change (its rim).
+    const WRITE_PAD: usize = 4;
+    /// Work margin beyond that, so the filters see real neighbours.
+    const WORK_PAD: usize = WRITE_PAD + SMOOTH_R + 2 * GUIDE_R + 2;
+
+    let (w, h) = (cache.width as usize, cache.height as usize);
+    let (bx0, by0, bx1, by1) = bounds;
+    if w == 0 || h == 0 || bx1 <= bx0 || by1 <= by0 || mask.len() < w * h {
+        return None;
+    }
+    let (x0, y0) = (bx0.saturating_sub(WORK_PAD), by0.saturating_sub(WORK_PAD));
+    let (x1, y1) = ((bx1 + WORK_PAD).min(w), (by1 + WORK_PAD).min(h));
+    let (rw, rh) = (x1 - x0, y1 - y0);
+    let n = rw * rh;
+
+    // 1. Smooth the binary cut and re-threshold: rounds off steps and jaggies.
+    let binary: Vec<f32> = (0..n)
+        .map(|q| {
+            let i = (y0 + q / rw) * w + x0 + q % rw;
+            if mask[i] >= 128 {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let kernel: Vec<f32> = {
+        let k: Vec<f32> = (0..=2 * SMOOTH_R)
+            .map(|i| {
+                let d = i as f32 - SMOOTH_R as f32;
+                (-d * d / (2.0 * 1.2 * 1.2)).exp()
+            })
+            .collect();
+        let sum: f32 = k.iter().sum();
+        k.into_iter().map(|v| v / sum).collect()
+    };
+    let smoothed = separable_filter(&binary, rw, rh, &kernel);
+    let p: Vec<f32> = smoothed
+        .iter()
+        .map(|&v| if v >= 0.5 { 1.0 } else { 0.0 })
+        .collect();
+
+    // 2. Guided filter with the luminance as guide: the rim follows edges in
+    //    the photo and gets a natural anti-aliased falloff.
+    let guide: Vec<f32> = (0..n)
+        .map(|q| cache.lab[(y0 + q / rw) * w + x0 + q % rw][0] / 100.0)
+        .collect();
+    let mean_i = box_mean(&guide, rw, rh, GUIDE_R);
+    let mean_p = box_mean(&p, rw, rh, GUIDE_R);
+    let ii: Vec<f32> = guide.iter().map(|&v| v * v).collect();
+    let ip: Vec<f32> = guide.iter().zip(&p).map(|(&g, &v)| g * v).collect();
+    let corr_ii = box_mean(&ii, rw, rh, GUIDE_R);
+    let corr_ip = box_mean(&ip, rw, rh, GUIDE_R);
+    let mut a = vec![0f32; n];
+    let mut b = vec![0f32; n];
+    for q in 0..n {
+        let var = corr_ii[q] - mean_i[q] * mean_i[q];
+        let cov = corr_ip[q] - mean_i[q] * mean_p[q];
+        a[q] = cov / (var + GUIDE_EPS);
+        b[q] = mean_p[q] - a[q] * mean_i[q];
+    }
+    let mean_a = box_mean(&a, rw, rh, GUIDE_R);
+    let mean_b = box_mean(&b, rw, rh, GUIDE_R);
+
+    // 3. Firm the result up (Photoshop's Contrast) and write back the rim.
+    let (wx0, wy0) = (bx0.saturating_sub(WRITE_PAD), by0.saturating_sub(WRITE_PAD));
+    let (wx1, wy1) = ((bx1 + WRITE_PAD).min(w), (by1 + WRITE_PAD).min(h));
+    let mut changed: Option<(usize, usize, usize, usize)> = None;
+    for y in wy0..wy1 {
+        for x in wx0..wx1 {
+            let q = (y - y0) * rw + (x - x0);
+            let alpha = (mean_a[q] * guide[q] + mean_b[q]).clamp(0.0, 1.0);
+            let t = ((alpha - 0.15) / 0.7).clamp(0.0, 1.0);
+            let v = (t * t * (3.0 - 2.0 * t) * 255.0).round() as u8;
+            let i = y * w + x;
+            if mask[i] != v {
+                mask[i] = v;
+                changed = Some(match changed {
+                    None => (x, y, x + 1, y + 1),
+                    Some((a0, b0, a1, b1)) => (a0.min(x), b0.min(y), a1.max(x + 1), b1.max(y + 1)),
+                });
+            }
+        }
+    }
+    changed
+}
+
+/// Convolve rows then columns with a symmetric kernel (edges clamped).
+fn separable_filter(src: &[f32], w: usize, h: usize, kernel: &[f32]) -> Vec<f32> {
+    let r = kernel.len() / 2;
+    let mut tmp = vec![0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0;
+            for (k, &kv) in kernel.iter().enumerate() {
+                let xx = (x + k).saturating_sub(r).min(w - 1);
+                acc += src[y * w + xx] * kv;
+            }
+            tmp[y * w + x] = acc;
+        }
+    }
+    let mut out = vec![0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0;
+            for (k, &kv) in kernel.iter().enumerate() {
+                let yy = (y + k).saturating_sub(r).min(h - 1);
+                acc += tmp[yy * w + x] * kv;
+            }
+            out[y * w + x] = acc;
+        }
+    }
+    out
+}
+
+/// Mean over the `(2r+1)²` window around each pixel, windows clipped to the
+/// image (summed-area table).
+fn box_mean(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+    let iw = w + 1;
+    let mut sat = vec![0f64; iw * (h + 1)];
+    for y in 0..h {
+        let mut row = 0f64;
+        for x in 0..w {
+            row += src[y * w + x] as f64;
+            sat[(y + 1) * iw + x + 1] = sat[y * iw + x + 1] + row;
+        }
+    }
+    let mut out = vec![0f32; w * h];
+    for y in 0..h {
+        let (ya, yb) = (y.saturating_sub(r), (y + r + 1).min(h));
+        for x in 0..w {
+            let (xa, xb) = (x.saturating_sub(r), (x + r + 1).min(w));
+            let sum = sat[yb * iw + xb] - sat[ya * iw + xb] - sat[yb * iw + xa] + sat[ya * iw + xa];
+            out[y * w + x] = (sum / ((xb - xa) * (yb - ya)) as f64) as f32;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1459,5 +1614,68 @@ mod tests {
         for &(x, y) in &[(199, 350), (700, 350), (450, 149), (450, 550)] {
             assert!(!at(&mask, w, x, y), "outside edge at ({x},{y})");
         }
+    }
+    #[test]
+    fn auto_enhance_snaps_a_jagged_rim_onto_the_image_edge() {
+        // Dark left half, bright right half; the edge is at x = 60.
+        let (w, h) = (120u32, 80u32);
+        let cache = picture(w, h, |x, _| {
+            if x < 60 {
+                [40, 40, 40]
+            } else {
+                [220, 220, 220]
+            }
+        });
+        // A cut of the dark half with a ragged 2-3 px staircase rim.
+        let mut mask = vec![0u8; (w * h) as usize];
+        for y in 0..h {
+            let rim = 57 + (y % 5) as u32;
+            for x in 0..rim {
+                mask[(y * w + x) as usize] = 255;
+            }
+        }
+        let changed = auto_enhance(&mut mask, &cache, (0, 0, w as usize, h as usize));
+        assert!(changed.is_some());
+        for y in 10..h - 10 {
+            // Solidly inside and outside stay put…
+            assert_eq!(mask[(y * w + 50) as usize], 255, "row {y}");
+            assert_eq!(mask[(y * w + 70) as usize], 0, "row {y}");
+            // …and the 50 % contour now sits on the edge, straight.
+            let rim = (0..w).find(|&x| mask[(y * w + x) as usize] < 128).unwrap();
+            assert!((59..=61).contains(&rim), "row {y}: rim at {rim}");
+        }
+    }
+
+    #[test]
+    fn auto_enhance_is_stable_on_a_clean_selection() {
+        let (w, h) = (90u32, 90u32);
+        let cache = picture(w, h, |x, y| {
+            let d = ((x as f32 - 45.0).powi(2) + (y as f32 - 45.0).powi(2)).sqrt();
+            if d < 25.0 {
+                [200, 60, 60]
+            } else {
+                [40, 90, 160]
+            }
+        });
+        let mut mask = vec![0u8; (w * h) as usize];
+        stroke(
+            &cache,
+            &mut mask,
+            QuickSelectOp::Add,
+            6.0,
+            &[(45.0, 45.0), (50.0, 45.0)],
+        );
+        let bounds = (0, 0, w as usize, h as usize);
+        auto_enhance(&mut mask, &cache, bounds);
+        let once = mask.clone();
+        auto_enhance(&mut mask, &cache, bounds);
+        let drift = once
+            .iter()
+            .zip(&mask)
+            .filter(|(a, b)| (**a as i32 - **b as i32).abs() > 8)
+            .count();
+        assert!(drift < 10, "a second pass moved {drift} px");
+        // The disc is still selected and its surroundings are not.
+        assert!(at(&mask, w, 45, 45) && !at(&mask, w, 5, 5));
     }
 }

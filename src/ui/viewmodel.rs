@@ -305,6 +305,9 @@ pub struct ToolViewModel {
     #[allow(dead_code)]
     pub wand_anti_alias: bool,
     pub wand_sample_merged: bool,
+    /// Smart Select's own selection mode (auto-moves New → Add).
+    pub smart_select_mode: crate::core::selection::SelectionMode,
+    pub smart_select_auto_enhance: bool,
     pub crop_rect: Option<[f32; 4]>,
     pub crop_rotation: f32,
     /// Perspective Crop quad corners [TL, TR, BR, BL] in canvas space.
@@ -894,6 +897,8 @@ impl Default for UiData {
                 wand_contiguous: true,
                 wand_anti_alias: true,
                 wand_sample_merged: true,
+                smart_select_mode: crate::core::selection::SelectionMode::New,
+                smart_select_auto_enhance: true,
                 crop_rect: None,
                 crop_rotation: 0.0,
                 persp_crop_quad: None,

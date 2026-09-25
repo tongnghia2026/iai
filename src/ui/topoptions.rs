@@ -2492,7 +2492,7 @@ fn smart_select_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
         ),
     ];
     for (mode, label, tooltip) in &modes {
-        let selected = data.sel.selection_mode == *mode;
+        let selected = data.tool.smart_select_mode == *mode;
         let btn = if *mode == SelectionMode::New {
             egui::Button::new(*label)
         } else {
@@ -2505,7 +2505,7 @@ fn smart_select_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
         })
         .min_size(egui::vec2(24.0, 22.0));
         if ui.add(btn).on_hover_text(*tooltip).clicked() {
-            actions.sel.set_selection_mode = Some(*mode);
+            actions.tool.set_smart_select_mode = Some(*mode);
         }
     }
 
@@ -2530,6 +2530,14 @@ fn smart_select_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
     let mut merged = data.tool.wand_sample_merged;
     if ui.checkbox(&mut merged, "Sample All Layers").changed() {
         actions.tool.set_wand_sample_merged = Some(merged);
+    }
+    let mut enhance = data.tool.smart_select_auto_enhance;
+    if ui
+        .checkbox(&mut enhance, "Auto-Enhance")
+        .on_hover_text("Smooth the selection edge and settle it onto the object's edge")
+        .changed()
+    {
+        actions.tool.set_smart_select_auto_enhance = Some(enhance);
     }
 
     ui.separator();

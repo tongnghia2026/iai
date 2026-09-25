@@ -2530,10 +2530,13 @@ pub fn build(
         if data.tool.active_tool == ToolId::SmartSelect {
             if let Some(cursor_pos) = ctx.pointer_hover_pos() {
                 let (shift_held, alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
-                let symbol: &str = match (shift_held, alt_held) {
-                    (true, true) => "\u{00D7}",
-                    (true, false) => "+",
-                    (false, true) => "-",
+                // Modifiers win; otherwise the tool's own mode (Add after the
+                // first stroke) is shown, as Photoshop's cursor does.
+                use crate::core::selection::SelectionMode;
+                let symbol: &str = match (shift_held, alt_held, data.tool.smart_select_mode) {
+                    (true, true, _) | (false, false, SelectionMode::Intersect) => "\u{00D7}",
+                    (true, false, _) | (false, false, SelectionMode::Add) => "+",
+                    (false, true, _) | (false, false, SelectionMode::Subtract) => "-",
                     _ => "",
                 };
                 if !symbol.is_empty() {

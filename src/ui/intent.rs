@@ -402,6 +402,8 @@ pub struct ToolIntent {
     pub set_wand_contiguous: Option<bool>,
     pub set_wand_anti_alias: Option<bool>,
     pub set_wand_sample_merged: Option<bool>,
+    pub set_smart_select_mode: Option<crate::core::selection::SelectionMode>,
+    pub set_smart_select_auto_enhance: Option<bool>,
     pub set_fill_tolerance: Option<u8>,
     pub set_fill_contiguous: Option<bool>,
     pub set_fill_anti_alias: Option<bool>,
