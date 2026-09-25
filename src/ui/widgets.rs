@@ -222,6 +222,49 @@ pub fn dev_slider_stacked_resp(
     // Track-position ease exponent (1.0 = linear; > 1 = centre-fine).
     pos_power: f32,
 ) -> egui::Response {
+    let (min, max) = (*range.start(), *range.end());
+    stacked_slider(
+        ui,
+        label,
+        value,
+        range,
+        colors,
+        |t| pos_to_value(t, min, max, pos_power),
+        |v| value_to_pos(v, min, max, pos_power),
+    )
+}
+
+/// [`dev_slider_stacked_resp`] on a logarithmic track (`min` must be > 0), for
+/// sizes spanning several decades such as a brush diameter.
+pub fn dev_slider_stacked_log_resp(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    colors: &[Color32],
+) -> egui::Response {
+    let min = range.start().max(1e-3);
+    let span = (range.end().max(min * 1.001) / min).ln();
+    stacked_slider(
+        ui,
+        label,
+        value,
+        range,
+        colors,
+        |t| min * (span * t.clamp(0.0, 1.0)).exp(),
+        |v| ((v.max(min) / min).ln() / span).clamp(0.0, 1.0),
+    )
+}
+
+fn stacked_slider(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    colors: &[Color32],
+    to_value: impl Fn(f32) -> f32,
+    to_pos: impl Fn(f32) -> f32,
+) -> egui::Response {
     let min = *range.start();
     let max = *range.end();
     // A vertical ScrollArea may retain a wider virtual content width after a
@@ -272,7 +315,7 @@ pub fn dev_slider_stacked_resp(
         } else if !pressed_in_value_box {
             if let Some(pos) = response.interact_pointer_pos() {
                 let t = ((pos.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
-                let new_value = pos_to_value(t, min, max, pos_power);
+                let new_value = to_value(t);
                 if (*value - new_value).abs() > f32::EPSILON {
                     *value = new_value;
                     response.mark_changed();
@@ -281,14 +324,7 @@ pub fn dev_slider_stacked_resp(
         }
     }
 
-    paint_gradient_slider(
-        ui,
-        track_rect,
-        value_to_pos(*value, min, max, pos_power),
-        min,
-        max,
-        colors,
-    );
+    paint_gradient_slider(ui, track_rect, to_pos(*value), min, max, colors);
     let font = egui::FontId::proportional(12.5);
     let color = ui.visuals().text_color();
     ui.painter().text(

@@ -1636,7 +1636,7 @@ fn nearest_curve_point(
     best.map(|(i, _)| i)
 }
 
-fn tone_gradient(label: &str) -> Vec<egui::Color32> {
+pub(crate) fn tone_gradient(label: &str) -> Vec<egui::Color32> {
     let black = egui::Color32::from_rgb(24, 24, 24);
     let mid = egui::Color32::from_rgb(118, 118, 118);
     let light = egui::Color32::from_rgb(235, 235, 235);

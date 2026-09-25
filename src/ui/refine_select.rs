@@ -89,17 +89,10 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
                     section_header(ui, "Edge Detection");
                     egui::Frame::new().inner_margin(pad).show(ui, |ui| {
-                        let r = slider_row(
-                            ui,
-                            "Radius:",
-                            &mut p.radius,
-                            0.0..=RefineParams::MAX_RADIUS,
-                            " px",
-                            1,
-                        )
-                        .on_hover_text(
-                            "Width of the edge band re-read from the photo colours (hair, fur)",
-                        );
+                        let r = slider(ui, "Radius", &mut p.radius, 0.0..=RefineParams::MAX_RADIUS)
+                            .on_hover_text(
+                                "Width (px) of the edge band re-read from the photo colours (hair, fur)",
+                            );
                         changed |= r.changed();
                         release |= fire(&r);
                         let r = ui
@@ -112,63 +105,41 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
                     section_header(ui, "Global Refinements");
                     egui::Frame::new().inner_margin(pad).show(ui, |ui| {
-                        let rows: [(
-                            &str,
-                            &mut f32,
-                            std::ops::RangeInclusive<f32>,
-                            &str,
-                            usize,
-                            &str,
-                        ); 4] = [
+                        let rows: [(&str, &mut f32, std::ops::RangeInclusive<f32>, &str); 4] = [
+                            ("Smooth", &mut p.smooth, 0.0..=100.0, "Round off jagged outlines"),
                             (
-                                "Smooth:",
-                                &mut p.smooth,
-                                0.0..=100.0,
-                                "",
-                                0,
-                                "Round off jagged outlines",
-                            ),
-                            (
-                                "Feather:",
+                                "Feather",
                                 &mut p.feather,
                                 0.0..=RefineParams::MAX_FEATHER,
-                                " px",
-                                1,
-                                "Blur the edge",
+                                "Blur the edge (px)",
                             ),
+                            ("Contrast", &mut p.contrast, 0.0..=100.0, "Sharpen soft edges (%)"),
                             (
-                                "Contrast:",
-                                &mut p.contrast,
-                                0.0..=100.0,
-                                "%",
-                                0,
-                                "Sharpen soft edges",
-                            ),
-                            (
-                                "Shift Edge:",
+                                "Shift Edge",
                                 &mut p.shift_edge,
                                 -100.0..=100.0,
-                                "%",
-                                0,
-                                "Move soft edges in (-) or out (+)",
+                                "Move soft edges in (-) or out (+), in %",
                             ),
                         ];
-                        for (label, value, range, suffix, decimals, tip) in rows {
-                            let r = slider_row(ui, label, value, range, suffix, decimals)
-                                .on_hover_text(tip);
+                        for (label, value, range, tip) in rows {
+                            let r = slider(ui, label, value, range).on_hover_text(tip);
                             changed |= r.changed();
                             release |= fire(&r);
                         }
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
                             if ui
-                                .button("Clear Selection")
-                                .on_hover_text("Start the mask over from nothing")
+                                .button(format!("{} Clear", ph::SELECTION_SLASH))
+                                .on_hover_text("Clear Selection: start the mask over from nothing")
                                 .clicked()
                             {
                                 actions.sel.refine_clear = true;
                             }
-                            if ui.button("Invert").clicked() {
+                            if ui
+                                .button(format!("{} Invert", ph::SELECTION_INVERSE))
+                                .on_hover_text("Invert the mask")
+                                .clicked()
+                            {
                                 actions.sel.refine_invert = true;
                             }
                         });
@@ -234,15 +205,24 @@ fn hint(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-fn opacity_slider(ui: &mut egui::Ui, value: f32) -> Option<f32> {
-    let mut v = value;
-    ui.add(
-        egui::Slider::new(&mut v, 0.05..=1.0)
-            .text("Opacity")
-            .clamping(egui::SliderClamping::Always),
-    )
-    .changed()
-    .then_some(v)
+/// The Develop panel's slider: label above a gradient track, the value on the
+/// right (click it to type one).
+fn slider(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> egui::Response {
+    let colors = super::develop::tone_gradient(label);
+    crate::ui::widgets::dev_slider_stacked_resp(ui, label, value, range, &colors, 1.0)
+}
+
+/// A 0..1 setting shown as a percentage; returns the new 0..1 value.
+fn percent_slider(ui: &mut egui::Ui, label: &str, value: f32, min_pct: f32) -> Option<f32> {
+    let mut pct = value * 100.0;
+    slider(ui, label, &mut pct, min_pct..=100.0)
+        .changed()
+        .then_some(pct / 100.0)
 }
 
 fn view_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
@@ -284,13 +264,13 @@ fn view_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                     actions.sel.open_refine_color_dialog = true;
                 }
             });
-            if let Some(v) = opacity_slider(ui, a as f32 / 255.0) {
+            if let Some(v) = percent_slider(ui, "Opacity", a as f32 / 255.0, 5.0) {
                 let alpha = (v * 255.0).round().clamp(0.0, 255.0) as u8;
                 actions.sel.set_refine_overlay_color = Some([r, g, b, alpha]);
             }
         }
         RefineViewMode::OnBlack | RefineViewMode::OnWhite => {
-            if let Some(v) = opacity_slider(ui, data.sel.refine_view_opacity) {
+            if let Some(v) = percent_slider(ui, "Opacity", data.sel.refine_view_opacity, 5.0) {
                 actions.sel.set_refine_view_opacity = Some(v);
             }
         }
@@ -304,13 +284,17 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         let modes = [
             (
                 RefineBrushMode::Smart,
-                "Smart",
+                format!("{} Smart", ph::SPARKLE),
                 "Read the edge from the photo colours under the brush (hair, fur)",
             ),
-            (RefineBrushMode::Add, "+ Add", "Paint into the selection"),
+            (
+                RefineBrushMode::Add,
+                format!("{} Add", ph::PLUS),
+                "Paint into the selection",
+            ),
             (
                 RefineBrushMode::Subtract,
-                "- Sub",
+                format!("{} Subtract", ph::MINUS),
                 "Paint out of the selection",
             ),
         ];
@@ -322,45 +306,29 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 } else {
                     egui::Color32::from_rgb(55, 55, 55)
                 })
-                .min_size(egui::vec2(60.0, 22.0));
+                .min_size(egui::vec2(72.0, 22.0));
             if ui.add(btn).on_hover_text(tip).clicked() {
                 actions.sel.set_refine_brush_mode = Some(mode);
             }
         }
     });
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label("Size:");
-        ui.add_space(8.0);
-        let mut v = data.sel.refine_brush_size;
-        if ui
-            .add(
-                egui::Slider::new(&mut v, 1.0f32..=1000.0)
-                    .logarithmic(true)
-                    .suffix(" px")
-                    .clamping(egui::SliderClamping::Always),
-            )
-            .changed()
-        {
-            actions.sel.set_refine_brush_size = Some(v);
-        }
-    });
-    ui.add_space(2.0);
-    ui.horizontal(|ui| {
-        ui.label("Hardness:");
-        let mut v = data.sel.refine_brush_hardness;
-        if ui
-            .add(egui::Slider::new(&mut v, 0.0f32..=1.0).clamping(egui::SliderClamping::Always))
-            .changed()
-        {
-            actions.sel.set_refine_brush_hardness = Some(v);
-        }
-    });
+    let mut size = data.sel.refine_brush_size;
+    let colors = super::develop::tone_gradient("Size");
+    if crate::ui::widgets::dev_slider_stacked_log_resp(ui, "Size", &mut size, 1.0..=1000.0, &colors)
+        .on_hover_text("Brush diameter (px)")
+        .changed()
+    {
+        actions.sel.set_refine_brush_size = Some(size);
+    }
+    if let Some(v) = percent_slider(ui, "Hardness", data.sel.refine_brush_hardness, 0.0) {
+        actions.sel.set_refine_brush_hardness = Some(v);
+    }
     ui.horizontal(|ui| {
         let undo = ui
             .add_enabled(
                 data.sel.refine_can_undo,
-                egui::Button::new(ph::ARROW_COUNTER_CLOCKWISE),
+                egui::Button::new(ph::ARROW_U_UP_LEFT),
             )
             .on_hover_text("Undo stroke (Ctrl+Z)");
         if undo.clicked() {
@@ -369,7 +337,7 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         let redo = ui
             .add_enabled(
                 data.sel.refine_can_redo,
-                egui::Button::new(ph::ARROW_CLOCKWISE),
+                egui::Button::new(ph::ARROW_U_UP_RIGHT),
             )
             .on_hover_text("Redo stroke (Ctrl+Shift+Z)");
         if redo.clicked() {
@@ -391,16 +359,12 @@ fn output_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     {
         actions.sel.set_refine_decontaminate = Some(decontaminate);
     }
-    let mut amount = data.sel.refine_decontaminate_amount;
-    let resp = ui.add_enabled(
-        data.sel.refine_decontaminate,
-        egui::Slider::new(&mut amount, 0.0f32..=1.0)
-            .text("Amount")
-            .clamping(egui::SliderClamping::Always),
-    );
-    if resp.changed() {
-        actions.sel.set_refine_decontaminate_amount = Some(amount);
-    }
+    let amount = data.sel.refine_decontaminate_amount;
+    ui.add_enabled_ui(data.sel.refine_decontaminate, |ui| {
+        if let Some(v) = percent_slider(ui, "Amount", amount, 0.0) {
+            actions.sel.set_refine_decontaminate_amount = Some(v);
+        }
+    });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Output To:");
@@ -615,35 +579,6 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
         );
     });
     ui.add_space(3.0);
-}
-
-/// Labelled slider row; the response tells a drag from its release.
-fn slider_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    suffix: &str,
-    decimals: usize,
-) -> egui::Response {
-    let inner = ui.horizontal(|ui| {
-        ui.set_min_width(ui.available_width());
-        ui.allocate_ui_with_layout(
-            egui::vec2(80.0, 18.0),
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                ui.label(label);
-            },
-        );
-        ui.add(
-            egui::Slider::new(value, range)
-                .suffix(suffix)
-                .fixed_decimals(decimals)
-                .clamping(egui::SliderClamping::Always),
-        )
-    });
-    ui.add_space(2.0);
-    inner.inner
 }
 
 fn output_label(mode: RefineOutputMode) -> &'static str {
