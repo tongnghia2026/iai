@@ -2,9 +2,12 @@
 
 use crate::app::state::App;
 
+/// RAW colour runs per pixel in the scene shader, like its CPU commit. Its only
+/// colour proxy is Develop3's guided mixer control planes; the display-domain
+/// RGB proxies (mode 1) belong to Identity sessions and on RAW re-applied
+/// Saturation/Vibrance on top of the scene shader.
 fn raw_color_runs_per_pixel(settings: &crate::core::develop::DevelopSettings) -> bool {
-    settings.has_color()
-        && settings.develop_engine_version != crate::core::develop::DevelopEngineVersion::Develop3
+    settings.has_color() && !crate::core::develop::guided_mixer_active(settings)
 }
 
 fn run_native_gpu_detail(
@@ -517,7 +520,13 @@ impl App {
                 let color_region = cache.color_region.as_ref().unwrap();
                 // Apply the CURRENT tone to the cached raw base, then colour — so the
                 // preview's tone base tracks the shader's per-pixel tone every frame.
-                let toned_samples = scene_tone.as_ref().map(|st| {
+                // Only a RAW scene applies guided control planes per pixel; an
+                // Identity (JPEG/PNG) scene commits colour through the
+                // display-domain proxy bake, so it previews the same RGB proxies.
+                let raw_scene = scene
+                    .as_ref()
+                    .is_some_and(|sc| sc.look == crate::core::develop_scene::BaseLook::Raw);
+                let toned_samples = scene_tone.as_ref().filter(|_| raw_scene).map(|st| {
                     crate::core::develop_scene::tone_scene_color_samples(&color_region.region, st)
                 });
                 let region = std::sync::Arc::new(match &scene_tone {
@@ -718,5 +727,9 @@ mod phase6_native_interaction_tests {
         assert!(!raw_color_runs_per_pixel(&s));
         s.mixer_saturation = [0.0; crate::core::develop::MIXER_BANDS];
         assert!(!raw_color_runs_per_pixel(&s));
+        // Global Saturation alone has no guided planes: it must stay in the
+        // scene shader rather than fall back to the display-domain proxies.
+        s.saturation = 40.0;
+        assert!(raw_color_runs_per_pixel(&s));
     }
 }

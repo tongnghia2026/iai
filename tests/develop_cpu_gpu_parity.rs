@@ -67,6 +67,116 @@ fn compositor_shader_remains_valid_wgsl() {
     naga::front::wgsl::parse_str(source).expect("compositor.wgsl must parse");
 }
 
+/// Identity (JPEG/PNG) scenes commit colour through the display-domain proxy
+/// bake, so their live colour preview feeds the same region/adjusted RGB
+/// proxies (mode 1) and the scene shader must not colour on top. Before this
+/// gate the Develop3 preview applied RAW's per-pixel guided planes instead
+/// (lift bled onto the background) and older engines applied the mixer twice.
+#[test]
+fn headless_identity_colour_preview_matches_commit() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("headless GPU pixel parity is a local real-GPU test; skipped on CI");
+        return;
+    }
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no headless GPU adapter; skipped");
+        return;
+    };
+    let (width, height) = (96u32, 48u32);
+    let mut px = Vec::with_capacity((width * height * 4) as usize);
+    for _y in 0..height {
+        for x in 0..width {
+            let rgb = if x < width / 2 {
+                [220u8, 160, 120]
+            } else {
+                [30, 110, 210]
+            };
+            px.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+        }
+    }
+    let tiles = iai::core::tile::TileMap::from_rgba(&px, width, height);
+    let scene = Arc::new(SceneSource::from_display_tiles(&tiles));
+    let mut stack = LayerStack::new(width, height);
+    stack.layers[0] = Layer::from_rgba(0, "Background", px.clone(), width, height);
+    let max_texture = device.limits().max_texture_dimension_2d;
+    let mut compositor = CompositorState::new(&device, width, height, max_texture);
+
+    for engine in [DevelopEngineVersion::Develop3, DevelopEngineVersion::Scene1] {
+        let mut settings = DevelopSettings {
+            develop_engine_version: engine,
+            ..Default::default()
+        };
+        settings.mixer_hue[1] = -40.0;
+        settings.mixer_luminance[1] = 60.0;
+        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+
+        // The live colour path for an Identity scene (develop_preview.rs).
+        let s = 6; // the commit's COLOR_DOWNSAMPLE grid
+        let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
+        let (base, pw, ph) =
+            iai::core::develop_scene::build_scene_color_base_box(&scene, 0, 0, width, height, s);
+        let region = iai::core::develop_scene::tone_lowpass_scene_region(&base, pw, ph, &tone, s);
+        let adjusted = iai::core::develop::apply_color_to_region(&region, &settings, pw, ph);
+        compositor.develop_preview = Some(DevelopGpuPreview {
+            layer_id: 0,
+            settings: settings.clone(),
+            region_luma: None,
+            color: Some(ColorProxies {
+                region: Arc::new(region),
+                adjusted: Arc::new(adjusted),
+                w: pw,
+                h: ph,
+                origin_x: 0,
+                origin_y: 0,
+                downsample: s as u32,
+                fast_preview: false,
+                guided_controls: false,
+                exact_detail: false,
+            }),
+            scene: Some(scene.clone()),
+        });
+        let is_ping =
+            compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+        let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
+
+        // Interior of each patch: away from the edge where linear (preview)
+        // and display (commit) box averages legitimately differ. Scene1
+        // commits colour per pixel (no smoothing) while its preview tapers
+        // the edit toward a colour edge, so it is checked deeper inside —
+        // where a doubled mixer would still show in full.
+        let margin = if engine == DevelopEngineVersion::Scene1 {
+            24
+        } else {
+            8
+        };
+        let half = width as usize / 2;
+        let mut max_error = 0u8;
+        for y in 8..height as usize - 8 {
+            for x in (8..half - margin).chain(half + margin..width as usize - 8) {
+                let k = (y * width as usize + x) * 4;
+                for c in 0..3 {
+                    max_error = max_error.max(gpu[k + c].abs_diff(committed[k + c]));
+                }
+            }
+        }
+        let skin = (24 * width as usize + 20) * 4;
+        eprintln!(
+            "{engine:?} identity colour preview/commit max={max_error}/255 skin gpu={:?} cpu={:?} src={:?}",
+            &gpu[skin..skin + 3],
+            &committed[skin..skin + 3],
+            &px[skin..skin + 3]
+        );
+        assert!(
+            committed[skin + 1] > px[skin + 1],
+            "test setup: Orange Luminance must lift the skin"
+        );
+        assert!(
+            max_error <= 2,
+            "{engine:?} identity colour preview/commit max error {max_error}/255"
+        );
+    }
+}
+
 #[test]
 fn headless_gpu_preview_matches_committed_scene() {
     // Shared CI runners expose inconsistent software adapters/compiler stacks

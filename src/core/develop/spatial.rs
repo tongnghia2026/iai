@@ -9,15 +9,116 @@ use crate::core::tile::{TileMap, TILE_SIZE};
 use rayon::prelude::*;
 use std::sync::Arc;
 
+/// Whole-layer colour-stage proxies for the display-domain bake: the
+/// tone-mapped layer box-pooled on ONE `COLOR_DOWNSAMPLE` grid anchored at the
+/// layer origin, its edge-aware regional low-pass (`region`) and the
+/// colour-adjusted region (`adjusted`). Every tile samples this single field,
+/// so the neighbourhood filters of the colour stage (the guided low-pass and,
+/// in Develop3, the guided mixer control planes that reach 12 texels) see the
+/// same data on both sides of a tile boundary. Per-tile proxies with a 12 px
+/// halo truncated those windows at every tile edge and printed the 256 px tile
+/// grid into the photo after a band Luminance edit.
+pub(crate) struct ColorProxyField {
+    region: Vec<[f32; 3]>,
+    adjusted: Vec<[f32; 3]>,
+    pw: usize,
+    ph: usize,
+    s: usize,
+}
+
+/// Build the [`ColorProxyField`] for `source`. The expensive, smooth part — the
+/// guided filter plus the per-texel colour transform — runs once on the
+/// `COLOR_DOWNSAMPLE`× proxy; tiles bilinear-upsample it, so patch boundaries
+/// stay soft. Tone is GLOBAL here: only the region→adjusted DIFFERENCE is used,
+/// so the tone base cancels (see [`build_color_lowpass`]).
+pub(crate) fn build_color_proxy_field(
+    source: &TileMap,
+    tone: &Option<ToneData>,
+    settings: &DevelopSettings,
+    interp_tone: bool,
+) -> ColorProxyField {
+    let w = source.width as usize;
+    let h = source.height as usize;
+    let s = COLOR_DOWNSAMPLE.max(1);
+    let pw = w.div_ceil(s).max(1);
+    let ph = h.div_ceil(s).max(1);
+    let tsize = TILE_SIZE as usize;
+    let mut low = vec![[0.0f32; 3]; pw * ph];
+    low.par_chunks_mut(pw).enumerate().for_each(|(py, row)| {
+        let sy0 = py * s;
+        let sy1 = (sy0 + s).min(h);
+        for yy in sy0..sy1 {
+            let ty_tile = (yy / tsize) as i32;
+            let ly = (yy % tsize) as u32;
+            // xx grows monotonically, so the source tile changes only at tile
+            // boundaries — cache it across the span.
+            let mut cached_tx = i32::MIN;
+            let mut cur_tile: Option<&Arc<crate::core::tile::Tile>> = None;
+            for xx in 0..w {
+                let tx_tile = (xx / tsize) as i32;
+                if tx_tile != cached_tx {
+                    cur_tile = source.tiles.get(&crate::core::tile::TilePos {
+                        x: tx_tile,
+                        y: ty_tile,
+                    });
+                    cached_tx = tx_tile;
+                }
+                let [mut rf, mut gf, mut bf] = match cur_tile {
+                    Some(t) => {
+                        // get_pixel16/65535 == get_pixel/255 for 8-bit tiles;
+                        // preserves full precision for 16-bit masters.
+                        let (r16, g16, b16, _a) = t.get_pixel16((xx % tsize) as u32, ly);
+                        [
+                            r16 as f32 / 65535.0,
+                            g16 as f32 / 65535.0,
+                            b16 as f32 / 65535.0,
+                        ]
+                    }
+                    None => [0.0, 0.0, 0.0],
+                };
+                if let Some(t) = tone {
+                    if interp_tone {
+                        t.apply_interp(&mut rf, &mut gf, &mut bf);
+                    } else {
+                        t.apply(&mut rf, &mut gf, &mut bf);
+                    }
+                }
+                let acc = &mut row[xx / s];
+                acc[0] += rf.clamp(0.0, 1.0);
+                acc[1] += gf.clamp(0.0, 1.0);
+                acc[2] += bf.clamp(0.0, 1.0);
+            }
+        }
+        // Edge blocks pool what is available.
+        let rows = sy1.saturating_sub(sy0);
+        for (px, slot) in row.iter_mut().enumerate() {
+            let x0 = px * s;
+            let cols = (x0 + s).min(w).saturating_sub(x0);
+            let n = ((rows * cols) as f32).max(1.0);
+            *slot = [slot[0] / n, slot[1] / n, slot[2] / n];
+        }
+    });
+    let region = guided_lowpass(
+        &low,
+        pw,
+        ph,
+        (COLOR_REGION_RADIUS / s).max(1),
+        COLOR_GUIDED_EPS,
+    );
+    let adjusted = apply_color_to_region(&region, settings, pw, ph);
+    ColorProxyField {
+        region,
+        adjusted,
+        pw,
+        ph,
+        s,
+    }
+}
+
 /// Build, for one tile, the three buffers the colour stage needs (each
-/// `valid_w * valid_h`): the tone-mapped pixels (`toned`), their edge-aware
-/// regional low-pass (`region`), and the colour-adjusted region (`adjusted`).
-///
-/// The expensive, smooth part — the guided filter plus the per-pixel oklab/HSL
-/// colour transform — is computed on a `COLOR_DOWNSAMPLE`× proxy and bilinear
-/// upsampled, so the live preview is cheap and patch boundaries stay soft. A
-/// `COLOR_REGION_RADIUS` halo is read from the *source* tilemap (edge-clamped,
-/// tile lookups hoisted per span) so the result is seam-free across tiles.
+/// `valid_w * valid_h`): the tone-mapped pixels (`toned`), and the whole-layer
+/// `field`'s edge-aware regional low-pass (`region`) and colour-adjusted region
+/// (`adjusted`) bilinear-sampled at those pixels.
 ///
 /// `base_luma` (when the tone is local, i.e. H/S/W/B engaged) is the inner
 /// region's regional luminance from `build_base_luma`. The `region`/`adjusted`
@@ -30,7 +131,7 @@ use std::sync::Arc;
 pub(crate) fn build_color_lowpass(
     source: &TileMap,
     tone: &Option<ToneData>,
-    settings: &DevelopSettings,
+    field: &ColorProxyField,
     base_x: u32,
     base_y: u32,
     valid_w: u32,
@@ -38,25 +139,47 @@ pub(crate) fn build_color_lowpass(
     interp_tone: bool,
     base_luma: Option<&[f32]>,
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>) {
-    let r = COLOR_REGION_RADIUS;
     let vw = valid_w as usize;
     let vh = valid_h as usize;
-    let hw = vw + 2 * r;
-    let hh = vh + 2 * r;
-    let wmax = source.width.saturating_sub(1) as i64;
-    let hmax = source.height.saturating_sub(1) as i64;
+    let sf = field.s as f32;
+    // Pixel-centre aligned proxy coordinate, mirroring the shader's
+    // `dev_color_proxy_at`.
+    let axis = |g: u32, n: usize| -> (usize, usize, f32) {
+        let f = ((g as f32 + 0.5) / sf - 0.5).clamp(0.0, (n - 1) as f32);
+        let i0 = f.floor() as usize;
+        (i0, (i0 + 1).min(n - 1), f - i0 as f32)
+    };
+    let xs: Vec<(usize, usize, f32)> = (0..vw).map(|x| axis(base_x + x as u32, field.pw)).collect();
+    let bilinear = |buf: &[[f32; 3]], y0: usize, y1: usize, wy: f32, x: (usize, usize, f32)| {
+        let (x0, x1, wx) = x;
+        let pw = field.pw;
+        let (p00, p01) = (buf[y0 * pw + x0], buf[y0 * pw + x1]);
+        let (p10, p11) = (buf[y1 * pw + x0], buf[y1 * pw + x1]);
+        let mut out = [0.0f32; 3];
+        for c in 0..3 {
+            let top = p00[c] + (p01[c] - p00[c]) * wx;
+            let bot = p10[c] + (p11[c] - p10[c]) * wx;
+            out[c] = top + (bot - top) * wy;
+        }
+        out
+    };
 
-    let mut halo = vec![[0.0f32; 3]; hw * hh];
-    for hy in 0..hh {
-        let gy = ((base_y as i64) + hy as i64 - r as i64).clamp(0, hmax) as u32;
+    let n = vw * vh;
+    let mut toned_inner = Vec::with_capacity(n);
+    let mut region_inner = Vec::with_capacity(n);
+    let mut adjusted_inner = Vec::with_capacity(n);
+    // Regional local-adaptation applies to the per-pixel `toned` base when
+    // H/S/W/B are engaged (matches apply_pixel's local branch and the GPU
+    // shader's local tone stage); global tone otherwise.
+    let local = base_luma.filter(|_| tone.as_ref().is_some_and(|t| t.is_local));
+    for y in 0..vh {
+        let gy = base_y + y as u32;
+        let (y0, y1, wy) = axis(gy, field.ph);
         let ty_tile = (gy / TILE_SIZE) as i32;
-        let ly = gy % TILE_SIZE;
-        // gx grows monotonically across the row (clamped at both ends), so the
-        // overlapped source tile changes only a couple of times — cache it.
         let mut cached_tx = i32::MIN;
         let mut cur_tile: Option<&Arc<crate::core::tile::Tile>> = None;
-        for hx in 0..hw {
-            let gx = ((base_x as i64) + hx as i64 - r as i64).clamp(0, wmax) as u32;
+        for (x, &xw) in xs.iter().enumerate() {
+            let gx = base_x + x as u32;
             let tx_tile = (gx / TILE_SIZE) as i32;
             if tx_tile != cached_tx {
                 cur_tile = source.tiles.get(&crate::core::tile::TilePos {
@@ -65,11 +188,10 @@ pub(crate) fn build_color_lowpass(
                 });
                 cached_tx = tx_tile;
             }
+            let oi = y * vw + x;
             let [mut rf, mut gf, mut bf] = match cur_tile {
                 Some(t) => {
-                    // get_pixel16/65535 == get_pixel/255 for 8-bit tiles; preserves
-                    // full precision for 16-bit masters.
-                    let (r16, g16, b16, _a) = t.get_pixel16(gx % TILE_SIZE, ly);
+                    let (r16, g16, b16, _a) = t.get_pixel16(gx % TILE_SIZE, gy % TILE_SIZE);
                     [
                         r16 as f32 / 65535.0,
                         g16 as f32 / 65535.0,
@@ -78,54 +200,18 @@ pub(crate) fn build_color_lowpass(
                 }
                 None => [0.0, 0.0, 0.0],
             };
-            if let Some(t) = tone {
-                if interp_tone {
-                    t.apply_interp(&mut rf, &mut gf, &mut bf);
-                } else {
-                    t.apply(&mut rf, &mut gf, &mut bf);
+            match (local, tone.as_ref()) {
+                (Some(bl), Some(t)) if interp_tone => {
+                    t.apply_local_interp(&mut rf, &mut gf, &mut bf, bl[oi])
                 }
+                (Some(bl), Some(t)) => t.apply_local(&mut rf, &mut gf, &mut bf, bl[oi]),
+                (None, Some(t)) if interp_tone => t.apply_interp(&mut rf, &mut gf, &mut bf),
+                (None, Some(t)) => t.apply(&mut rf, &mut gf, &mut bf),
+                (_, None) => {}
             }
-            halo[hy * hw + hx] = [rf.clamp(0.0, 1.0), gf.clamp(0.0, 1.0), bf.clamp(0.0, 1.0)];
-        }
-    }
-
-    // Region-aware adjustment on a downscaled proxy: guided filter + apply_color.
-    let s = COLOR_DOWNSAMPLE.max(1);
-    let (low, lw, lh) = downsample_box(&halo, hw, hh, s);
-    let region_low = guided_lowpass(&low, lw, lh, (r / s).max(1), COLOR_GUIDED_EPS);
-    let adjusted_low = apply_color_to_region(&region_low, settings, lw, lh);
-    let region_full = upsample_bilinear(&region_low, lw, lh, hw, hh, s);
-    let adjusted_full = upsample_bilinear(&adjusted_low, lw, lh, hw, hh, s);
-
-    let mut toned_inner = vec![[0.0f32; 3]; vw * vh];
-    let mut region_inner = vec![[0.0f32; 3]; vw * vh];
-    let mut adjusted_inner = vec![[0.0f32; 3]; vw * vh];
-    // Regional local-adaptation applies to the per-pixel `toned` base when
-    // H/S/W/B are engaged (matches apply_pixel's local branch and the GPU
-    // shader's local tone stage). Falls back to the global-toned halo otherwise.
-    let local = base_luma.filter(|_| tone.as_ref().is_some_and(|t| t.is_local));
-    for y in 0..vh {
-        for x in 0..vw {
-            let hi = (y + r) * hw + (x + r);
-            let oi = y * vw + x;
-            toned_inner[oi] = match (local, tone.as_ref()) {
-                (Some(bl), Some(t)) => {
-                    let (r16, g16, b16, _a) =
-                        source.get_pixel16(base_x + x as u32, base_y + y as u32);
-                    let mut rf = r16 as f32 / 65535.0;
-                    let mut gf = g16 as f32 / 65535.0;
-                    let mut bf = b16 as f32 / 65535.0;
-                    if interp_tone {
-                        t.apply_local_interp(&mut rf, &mut gf, &mut bf, bl[oi]);
-                    } else {
-                        t.apply_local(&mut rf, &mut gf, &mut bf, bl[oi]);
-                    }
-                    [rf.clamp(0.0, 1.0), gf.clamp(0.0, 1.0), bf.clamp(0.0, 1.0)]
-                }
-                _ => halo[hi],
-            };
-            region_inner[oi] = region_full[hi];
-            adjusted_inner[oi] = adjusted_full[hi];
+            toned_inner.push([rf.clamp(0.0, 1.0), gf.clamp(0.0, 1.0), bf.clamp(0.0, 1.0)]);
+            region_inner.push(bilinear(&field.region, y0, y1, wy, xw));
+            adjusted_inner.push(bilinear(&field.adjusted, y0, y1, wy, xw));
         }
     }
     (toned_inner, region_inner, adjusted_inner)
@@ -206,7 +292,7 @@ pub(crate) fn build_base_luma(
 }
 
 /// Average-pool a scalar plane by factor `s` (edge blocks pool what is available).
-/// The single-channel sibling of `downsample_box`.
+/// Scalar twin of the RGB pooling in `build_color_proxy_field`.
 fn downsample_box_plane(buf: &[f32], w: usize, h: usize, s: usize) -> (Vec<f32>, usize, usize) {
     let lw = w.div_ceil(s);
     let lh = h.div_ceil(s);
@@ -230,7 +316,7 @@ fn downsample_box_plane(buf: &[f32], w: usize, h: usize, s: usize) -> (Vec<f32>,
 }
 
 /// Bilinear upsample a scalar proxy back to `out_w × out_h` (pixel-centre
-/// aligned). The single-channel sibling of `upsample_bilinear`.
+/// aligned).
 fn upsample_bilinear_plane(
     low: &[f32],
     lw: usize,
@@ -518,6 +604,19 @@ pub fn apply_color_to_region(
     adjusted
 }
 
+/// True when the Colour Mixer runs through guided control planes: Develop3's
+/// V2 mixer with at least one band slider engaged.
+pub fn guided_mixer_active(settings: &DevelopSettings) -> bool {
+    settings.develop_engine_version == DevelopEngineVersion::Develop3
+        && settings.mixer_algorithm == ColorMixerAlgorithm::V2
+        && settings
+            .mixer_hue
+            .iter()
+            .chain(&settings.mixer_saturation)
+            .chain(&settings.mixer_luminance)
+            .any(|v| v.abs() > 0.001)
+}
+
 /// Build the three spatially coherent V2 mixer control planes packed as RGB.
 /// `None` means the caller should retain the legacy/direct colour path.
 pub fn guided_mixer_controls(
@@ -526,15 +625,10 @@ pub fn guided_mixer_controls(
     pw: usize,
     ph: usize,
 ) -> Option<Vec<[f32; 3]>> {
-    let curves = build_mixer_curves_opt(settings)?;
-    if settings.develop_engine_version != DevelopEngineVersion::Develop3
-        || curves.algorithm != ColorMixerAlgorithm::V2
-        || pw <= 1
-        || ph <= 1
-        || samples.len() != pw * ph
-    {
+    if !guided_mixer_active(settings) || pw <= 1 || ph <= 1 || samples.len() != pw * ph {
         return None;
     }
+    let curves = build_mixer_curves_opt(settings)?;
     let guide: Vec<f32> = samples
         .par_iter()
         .map(|p| luminance_f32(p[0], p[1], p[2]).clamp(0.0, 1.0))
@@ -1097,72 +1191,6 @@ where
     // `sample_step` = proxy downsample, so Detail's wavelet radii are rescaled
     // back to source pixels and the drag preview matches the settled bake.
     apply_detail(&mut out);
-    out
-}
-
-/// Average-pool an RGB buffer by factor `s` (edge blocks pool what is available).
-/// Returns the proxy plus its dimensions.
-fn downsample_box(buf: &[[f32; 3]], w: usize, h: usize, s: usize) -> (Vec<[f32; 3]>, usize, usize) {
-    let lw = w.div_ceil(s);
-    let lh = h.div_ceil(s);
-    let mut out = vec![[0.0f32; 3]; lw * lh];
-    for ly in 0..lh {
-        let y0 = ly * s;
-        let y1 = (y0 + s).min(h);
-        for lx in 0..lw {
-            let x0 = lx * s;
-            let x1 = (x0 + s).min(w);
-            let mut acc = [0.0f32; 3];
-            let n = ((x1 - x0) * (y1 - y0)) as f32;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let p = buf[y * w + x];
-                    acc[0] += p[0];
-                    acc[1] += p[1];
-                    acc[2] += p[2];
-                }
-            }
-            out[ly * lw + lx] = [acc[0] / n, acc[1] / n, acc[2] / n];
-        }
-    }
-    (out, lw, lh)
-}
-
-/// Bilinear upsample an RGB proxy back to `out_w × out_h` (pixel-centre aligned),
-/// which smoothly feathers the adjustment so patch boundaries are not hard-edged.
-fn upsample_bilinear(
-    low: &[[f32; 3]],
-    lw: usize,
-    lh: usize,
-    out_w: usize,
-    out_h: usize,
-    s: usize,
-) -> Vec<[f32; 3]> {
-    let mut out = vec![[0.0f32; 3]; out_w * out_h];
-    let sf = s as f32;
-    for y in 0..out_h {
-        let fy = (((y as f32 + 0.5) / sf) - 0.5).clamp(0.0, (lh - 1) as f32);
-        let y0 = fy.floor() as usize;
-        let y1 = (y0 + 1).min(lh - 1);
-        let wy = fy - y0 as f32;
-        for x in 0..out_w {
-            let fx = (((x as f32 + 0.5) / sf) - 0.5).clamp(0.0, (lw - 1) as f32);
-            let x0 = fx.floor() as usize;
-            let x1 = (x0 + 1).min(lw - 1);
-            let wx = fx - x0 as f32;
-            let p00 = low[y0 * lw + x0];
-            let p01 = low[y0 * lw + x1];
-            let p10 = low[y1 * lw + x0];
-            let p11 = low[y1 * lw + x1];
-            let mut px = [0.0f32; 3];
-            for c in 0..3 {
-                let top = p00[c] + (p01[c] - p00[c]) * wx;
-                let bot = p10[c] + (p11[c] - p10[c]) * wx;
-                px[c] = top + (bot - top) * wy;
-            }
-            out[y * out_w + x] = px;
-        }
-    }
     out
 }
 

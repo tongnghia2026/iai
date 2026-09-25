@@ -824,8 +824,9 @@ fn color_path_toned_uses_regional_shadows() {
 
     let base = build_base_luma(&src, Some(&tone), 0, 0, w, h);
     let tone_opt = Some(tone);
+    let field = build_color_proxy_field(&src, &tone_opt, &settings, false);
     let (toned, _region, _adjusted) =
-        build_color_lowpass(&src, &tone_opt, &settings, 0, 0, w, h, false, Some(&base));
+        build_color_lowpass(&src, &tone_opt, &field, 0, 0, w, h, false, Some(&base));
     let t = tone_opt.as_ref().unwrap();
 
     // Reference: the regional local-adaptation on a dark pixel (col 2, row 8).
@@ -3062,6 +3063,56 @@ fn orange_luminance_does_not_carve_a_dark_rim_into_skin_proxy() {
 }
 
 #[test]
+fn band_luminance_bake_has_no_tile_seams() {
+    // Regression: every 256 px tile built its own colour proxy with a 12 px
+    // halo while Develop3's guided mixer planes reach 72 px, so an Orange
+    // Luminance edit jumped at each tile boundary (the owner's blocky neck).
+    // Skin meets a same-luma yellow-green 34 px right of the x=256 seam: the
+    // guided plane cannot key on luma there, so it varies across the seam and
+    // any truncated window shows up as a step (old bake: 4.5/255 at x=256).
+    let (w, h) = (512u32, 16u32);
+    let mut px16 = vec![0u16; (w * h * 4) as usize];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let rgb: [u16; 3] = if x < 290 {
+                [220, 160, 120]
+            } else {
+                [150, 180, 90]
+            };
+            let k = (y * w as usize + x) * 4;
+            for c in 0..3 {
+                px16[k + c] = rgb[c] * 257;
+            }
+            px16[k + 3] = 65535;
+        }
+    }
+    let source = TileMap::from_rgba16(&px16, w, h);
+    let mut settings = DevelopSettings::default();
+    assert_eq!(
+        settings.develop_engine_version,
+        DevelopEngineVersion::Develop3
+    );
+    settings.mixer_hue[O] = -40.0;
+    settings.mixer_luminance[O] = 60.0;
+    let out = apply_to_tilemap_direct(&source, &settings, None).flatten16();
+    let edit = |x: usize| {
+        let k = (8 * w as usize + x) * 4;
+        let l = |p: &[u16]| luminance_f32(p[0] as f32, p[1] as f32, p[2] as f32) / 65535.0;
+        l(&out[k..k + 3]) - l(&px16[k..k + 3])
+    };
+    assert!(edit(200) > 0.01, "test setup: Orange lift too weak");
+    let seam = (edit(256) - edit(255)).abs();
+    let neighbours = (240..272)
+        .filter(|&x| x != 256)
+        .map(|x| (edit(x) - edit(x - 1)).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        seam <= neighbours * 2.0 + 0.5 / 255.0,
+        "tile seam in the Luminance edit: step {seam} vs neighbours {neighbours}"
+    );
+}
+
+#[test]
 fn orange_luminance_tile_bake_keeps_unsuppressed_boundary_correction() {
     // Exercise the separate CPU tile/bake builder.  This path previously kept
     // calling suppress_edge_correction even after the live proxy was fixed.
@@ -3085,8 +3136,9 @@ fn orange_luminance_tile_bake_keeps_unsuppressed_boundary_correction() {
         ..Default::default()
     };
     settings.mixer_luminance[O] = CONTROL_LIMIT;
+    let field = build_color_proxy_field(&source, &None, &settings, false);
     let (_toned, region, adjusted) =
-        build_color_lowpass(&source, &None, &settings, 0, 0, w, h, false, None);
+        build_color_lowpass(&source, &None, &field, 0, 0, w, h, false, None);
 
     // At every sampled point the bake proxy must contain the direct Color Mixer
     // transform of that same regional colour, with no second spatial fade.

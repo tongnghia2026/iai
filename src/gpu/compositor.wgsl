@@ -1231,42 +1231,48 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     if (dev_effects[25] > 0.5) {
         outc = dev_restore_shadow_chroma(outc);
     }
-    let classification_linear = dev_gamut_clip_chroma(
-        dev_filmlike_clip(dev_working_to_linear_srgb(outc))
-    );
-    var classification = dev_linear_to_srgb(clamp(classification_linear, vec3(0.0), vec3(1.0)));
-    // Classification reads the same displayed stage as the CPU
-    // `working_to_display`, including the master curve before RGB tabs.
-    if (dev_effects[26] > 0.5) {
-        if (dev_effects[9] > 0.5) {
-            var class_lab = dev_linear_srgb_to_oklab(dev_srgb_to_linear(classification));
-            class_lab.x = dev_display_lum_at(clamp(class_lab.x, 0.0, 1.0));
-            let class_curved = dev_gamut_clip_chroma(dev_oklab_to_linear_srgb(class_lab));
-            classification = dev_linear_to_srgb(clamp(class_curved, vec3(0.0), vec3(1.0)));
-        } else {
-            let class_l = clamp(dev_luma(classification), 0.0, 1.0);
-            classification = dev_apply_luma_target(classification, dev_display_lum_at(class_l));
-        }
-    }
-    if (dev_rgb_curve[0] > 0.5) {
-        classification = vec3<f32>(
-            dev_rgb_curve_at(0u, classification.r),
-            dev_rgb_curve_at(1u, classification.g),
-            dev_rgb_curve_at(2u, classification.b),
+    // Colour stage inside the scene chain. Colour-proxy mode 1 hands colour to
+    // the display-domain proxies (dev_finish_colored in develop_apply), which
+    // is how an Identity scene commits it, so it must not colour here too.
+    let proxy_owns_color = u.adj_p[2].x > 0.5 && u.adj_p[2].x < 1.5;
+    if (!proxy_owns_color) {
+        let classification_linear = dev_gamut_clip_chroma(
+            dev_filmlike_clip(dev_working_to_linear_srgb(outc))
         );
+        var classification = dev_linear_to_srgb(clamp(classification_linear, vec3(0.0), vec3(1.0)));
+        // Classification reads the same displayed stage as the CPU
+        // `working_to_display`, including the master curve before RGB tabs.
+        if (dev_effects[26] > 0.5) {
+            if (dev_effects[9] > 0.5) {
+                var class_lab = dev_linear_srgb_to_oklab(dev_srgb_to_linear(classification));
+                class_lab.x = dev_display_lum_at(clamp(class_lab.x, 0.0, 1.0));
+                let class_curved = dev_gamut_clip_chroma(dev_oklab_to_linear_srgb(class_lab));
+                classification = dev_linear_to_srgb(clamp(class_curved, vec3(0.0), vec3(1.0)));
+            } else {
+                let class_l = clamp(dev_luma(classification), 0.0, 1.0);
+                classification = dev_apply_luma_target(classification, dev_display_lum_at(class_l));
+            }
+        }
+        if (dev_rgb_curve[0] > 0.5) {
+            classification = vec3<f32>(
+                dev_rgb_curve_at(0u, classification.r),
+                dev_rgb_curve_at(1u, classification.g),
+                dev_rgb_curve_at(2u, classification.b),
+            );
+        }
+        let use_guided = dev_effects[82] > 0.5 && u.adj_p[2].x > 2.5;
+        var guided = vec3<f32>(0.0);
+        if (use_guided) {
+            // Fragment UVs address pixel centres. Convert to the integer
+            // layer-pixel coordinate expected by dev_color_proxy_at so an s=1
+            // settled proxy samples its exact control, not a half-pixel blend.
+            guided = dev_color_proxy_at(
+                local.x * u.layer_w - 0.5,
+                local.y * u.layer_h - 0.5
+            ).adjusted;
+        }
+        outc = dev_scene_color(outc, classification, guided, use_guided);
     }
-    let use_guided = dev_effects[82] > 0.5 && u.adj_p[2].x > 2.5;
-    var guided = vec3<f32>(0.0);
-    if (use_guided) {
-        // Fragment UVs address pixel centres. Convert to the integer
-        // layer-pixel coordinate expected by dev_color_proxy_at so an s=1
-        // settled proxy samples its exact control, not a half-pixel blend.
-        guided = dev_color_proxy_at(
-            local.x * u.layer_w - 0.5,
-            local.y * u.layer_h - 0.5
-        ).adjusted;
-    }
-    outc = dev_scene_color(outc, classification, guided, use_guided);
     let output_linear = dev_gamut_clip_chroma(
         dev_filmlike_clip(dev_working_to_linear_srgb(outc))
     );
@@ -1293,7 +1299,7 @@ struct CrColorProxy {
 // Bilinear sample of the colour `region`/`adjusted` proxies at layer-local pixel
 // (lx, ly). adj_p[2] = (color_on, downsample s, proxy_w, proxy_h). Both proxies
 // share the same grid, so the weights are computed once. Mirrors the CPU
-// `upsample_bilinear` mapping so preview and bake read the same field.
+// `build_color_lowpass` mapping so preview and bake read the same field.
 fn dev_color_proxy_at(lx: f32, ly: f32) -> CrColorProxy {
     let pw = u32(u.adj_p[2].z);
     let ph = u32(u.adj_p[2].w);

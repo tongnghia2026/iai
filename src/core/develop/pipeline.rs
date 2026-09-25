@@ -120,7 +120,10 @@ pub fn apply_to_tilemap_direct(
     // local-adaptation Shadows/Highlights) — same structure as the 8-bit loop, but
     // reads the source at 16-bit, interpolates the tone LUTs and writes the 16-bit
     // master. Detail runs as a second 16-bit-aware pass at the end.
+    let color_proxies = plan.use_color && plan.settings.effective_color_smoothing() > 0.001;
     if source_tiles.has_hdr() {
+        let color_field = color_proxies
+            .then(|| build_color_proxy_field(source_tiles, &plan.tone, plan.settings, true));
         let tiles: HashMap<_, _> = source_tiles
             .tiles
             .par_iter()
@@ -146,24 +149,19 @@ pub fn apply_to_tilemap_direct(
                 } else {
                     None
                 };
-                let color_bufs = if plan.use_color
-                    && plan.settings.effective_color_smoothing() > 0.001
-                    && valid_w > 0
-                    && valid_h > 0
-                {
-                    Some(build_color_lowpass(
+                let color_bufs = match &color_field {
+                    Some(field) if valid_w > 0 && valid_h > 0 => Some(build_color_lowpass(
                         source_tiles,
                         &plan.tone,
-                        plan.settings,
+                        field,
                         base_x,
                         base_y,
                         valid_w,
                         valid_h,
                         true, // 16-bit: interpolated tone LUT
                         base_luma.as_deref(),
-                    ))
-                } else {
-                    None
+                    )),
+                    _ => None,
                 };
 
                 let p16 = tile
@@ -250,6 +248,8 @@ pub fn apply_to_tilemap_direct(
         return out;
     }
 
+    let color_field = color_proxies
+        .then(|| build_color_proxy_field(source_tiles, &plan.tone, plan.settings, false));
     let tiles: HashMap<_, _> = source_tiles
         .tiles
         .par_iter()
@@ -280,25 +280,20 @@ pub fn apply_to_tilemap_direct(
             // Detail-preserving colour stage: boost the low-frequency content and
             // re-add (attenuated) detail so a steep per-band saturation/luminance
             // push does not magnify the source JPEG's chroma blocks into patches.
-            // Built once per tile, reading a halo from the source for seam-free blur.
-            let color_bufs = if plan.use_color
-                && plan.settings.effective_color_smoothing() > 0.001
-                && valid_w > 0
-                && valid_h > 0
-            {
-                Some(build_color_lowpass(
+            // Tiles sample one whole-layer proxy field, so the blur is seam-free.
+            let color_bufs = match &color_field {
+                Some(field) if valid_w > 0 && valid_h > 0 => Some(build_color_lowpass(
                     source_tiles,
                     &plan.tone,
-                    plan.settings,
+                    field,
                     base_x,
                     base_y,
                     valid_w,
                     valid_h,
                     false, // 8-bit path: hard-indexed tone LUT (unchanged)
                     base_luma.as_deref(),
-                ))
-            } else {
-                None
+                )),
+                _ => None,
             };
 
             for ty in 0..valid_h {
