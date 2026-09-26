@@ -45,6 +45,7 @@ pub mod working_color;
 
 pub mod canvas_editor_conversion;
 pub mod document;
+pub mod fast_math;
 pub mod filters;
 pub mod gamut_map;
 pub mod imposition;

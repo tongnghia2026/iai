@@ -890,6 +890,38 @@ impl<'a> DevelopPlan<'a> {
         x: u32,
         y: u32,
     ) -> [f32; 3] {
+        let [mut rf, mut gf, mut bf] = self.recombine_color(toned, region, adjusted);
+        if self.use_effects {
+            // The colour region IS a post-tone edge-aware low-pass, so its
+            // luminance serves as the spatial effects' base on this path (the
+            // GPU mirror reads dev_luma of the same uploaded region buffer).
+            let eb = luminance_f32(region[0], region[1], region[2]).clamp(0.0, 1.0);
+            apply_effects(
+                self.settings,
+                &mut rf,
+                &mut gf,
+                &mut bf,
+                x,
+                y,
+                self.inv_w,
+                self.inv_h,
+                eb,
+            );
+            clamp_unit(&mut rf, &mut gf, &mut bf);
+        }
+        self.apply_locals(&mut rf, &mut gf, &mut bf, x, y);
+        [rf, gf, bf]
+    }
+
+    /// The colour half of [`Self::finish_colored_pixel_f32`]: the toned pixel
+    /// rebuilt from its colour-adjusted `region` plus re-added detail. Shared
+    /// with the fast live preview so both reconstruct colour identically.
+    pub(crate) fn recombine_color(
+        &self,
+        toned: [f32; 3],
+        region: [f32; 3],
+        adjusted: [f32; 3],
+    ) -> [f32; 3] {
         let dr = toned[0] - region[0];
         let dg = toned[1] - region[1];
         let db = toned[2] - region[2];
@@ -973,26 +1005,6 @@ impl<'a> DevelopPlan<'a> {
             bf = direct_b + (bf - direct_b) * smoothing;
             clamp_unit(&mut rf, &mut gf, &mut bf);
         }
-
-        if self.use_effects {
-            // The colour region IS a post-tone edge-aware low-pass, so its
-            // luminance serves as the spatial effects' base on this path (the
-            // GPU mirror reads dev_luma of the same uploaded region buffer).
-            let eb = luminance_f32(region[0], region[1], region[2]).clamp(0.0, 1.0);
-            apply_effects(
-                self.settings,
-                &mut rf,
-                &mut gf,
-                &mut bf,
-                x,
-                y,
-                self.inv_w,
-                self.inv_h,
-                eb,
-            );
-            clamp_unit(&mut rf, &mut gf, &mut bf);
-        }
-        self.apply_locals(&mut rf, &mut gf, &mut bf, x, y);
         [rf, gf, bf]
     }
 

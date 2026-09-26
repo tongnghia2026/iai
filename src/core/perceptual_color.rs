@@ -83,11 +83,18 @@ pub struct PerceptualColor {
 
 impl PerceptualColor {
     pub fn from_oklab(lab: Oklab) -> Self {
-        let chroma = lab.a.hypot(lab.b);
+        // sqrt / a single wrap instead of libm hypot / fmod: this runs per
+        // pixel in the colour chains, and atan2 already lies in [-PI, PI].
+        let chroma = (lab.a * lab.a + lab.b * lab.b).sqrt();
         let hue = if chroma <= ACHROMATIC_EPSILON {
             0.0
         } else {
-            lab.b.atan2(lab.a).rem_euclid(std::f32::consts::TAU)
+            let h = lab.b.atan2(lab.a);
+            if h < 0.0 {
+                h + std::f32::consts::TAU
+            } else {
+                h
+            }
         };
         Self {
             lightness: lab.l,

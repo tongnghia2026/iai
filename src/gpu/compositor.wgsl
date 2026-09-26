@@ -1231,11 +1231,11 @@ fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
     if (dev_effects[25] > 0.5) {
         outc = dev_restore_shadow_chroma(outc);
     }
-    // Colour stage inside the scene chain. Colour-proxy mode 1 hands colour to
-    // the display-domain proxies (dev_finish_colored in develop_apply), which
-    // is how an Identity scene commits it, so it must not colour here too.
+    // Colour stage inside the scene chain: RAW only (dev_effects[10]). An
+    // Identity scene commits colour in the display domain, so its proxies carry
+    // it in every mode; colour-proxy mode 1 always owns the colour stage.
     let proxy_owns_color = u.adj_p[2].x > 0.5 && u.adj_p[2].x < 1.5;
-    if (!proxy_owns_color) {
+    if (dev_effects[10] > 0.5 && !proxy_owns_color) {
         let classification_linear = dev_gamut_clip_chroma(
             dev_filmlike_clip(dev_working_to_linear_srgb(outc))
         );

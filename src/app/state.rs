@@ -909,6 +909,11 @@ pub struct DevelopProxyCache {
     /// tails on every view tick. Cleared whenever the bases are rebuilt.
     pub finished_color: Option<crate::gpu::compositor::ColorProxies>,
     pub finished_settings: Option<crate::core::develop::DevelopSettings>,
+    /// Identity fast-preview stage memo (see `IdentityFastStages`); reset with
+    /// the bases, so it never outlives the proxy geometry it was built for.
+    pub identity_fast: crate::core::develop_scene::IdentityFastStages,
+    /// RAW twin of `identity_fast` (see `RawFastStages`).
+    pub raw_fast: crate::core::develop_scene::RawFastStages,
 }
 
 #[derive(Clone)]

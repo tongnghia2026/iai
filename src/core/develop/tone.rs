@@ -131,7 +131,9 @@ pub(crate) fn curve_shadows_mask(luma: f32) -> f32 {
 /// between the bracketing entries (continuous output for high-bit-depth input).
 pub(crate) fn lut_lerp(lut: &[f32; 256], t: f32) -> f32 {
     let p = t.clamp(0.0, 1.0) * 255.0;
-    let i = p.floor() as usize;
+    // `p >= 0`, so truncation is floor — and `floor()` is a libm call on the
+    // baseline x86-64 target, hot in every per-pixel tone lookup.
+    let i = p as usize;
     let f = p - i as f32;
     let a = lut[i.min(255)];
     let b = lut[(i + 1).min(255)];

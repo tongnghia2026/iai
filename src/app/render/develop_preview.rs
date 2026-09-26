@@ -123,6 +123,12 @@ impl App {
         let scene_tone = scene
             .as_ref()
             .map(|sc| crate::core::develop_scene::build_scene_tone_for_scene(&settings, sc));
+        // RAW colours in the scene chain; an Identity (JPEG/PNG) scene commits
+        // Colour/Effects/Detail/Local through the display-domain bake, so its
+        // proxies follow that chain instead.
+        let raw_scene = scene
+            .as_ref()
+            .is_some_and(|sc| sc.look == crate::core::develop_scene::BaseLook::Raw);
         // Detail and Local reuse the same CPU kernels on a reduced-resolution
         // viewport proxy. They must not suppress the colour preview — the old
         // `&& !need_detail` gate made every Colour/Mixer edit vanish as soon as
@@ -131,10 +137,7 @@ impl App {
         // reduce the sampled scene texture's resolution, but must never swap
         // to the old chroma-reconstruction model while the pointer is held:
         // changing models on release was the visible brightness/chroma jump.
-        let linear_scene_color = scene.as_ref().is_some_and(|sc| {
-            sc.look == crate::core::develop_scene::BaseLook::Raw
-                && raw_color_runs_per_pixel(&settings)
-        });
+        let linear_scene_color = raw_scene && raw_color_runs_per_pixel(&settings);
         let needs_spatial_proxy = settings.texture.abs() > 0.001
             || settings.clarity.abs() > 0.001
             || settings.dehaze.abs() > 0.001
@@ -458,6 +461,8 @@ impl App {
                 fast_region,
                 finished_color: None,
                 finished_settings: None,
+                identity_fast: Default::default(),
+                raw_fast: Default::default(),
             });
             self.dev.develop_proxy_cost = start.elapsed();
             self.dev.develop_proxy_last = Some(std::time::Instant::now());
@@ -501,6 +506,13 @@ impl App {
             }
         }
 
+        let (mut identity_stages, mut raw_stages) = {
+            let cache = self.dev.develop_proxy_cache.as_mut().unwrap();
+            (
+                std::mem::take(&mut cache.identity_fast),
+                std::mem::take(&mut cache.raw_fast),
+            )
+        };
         let cache = self.dev.develop_proxy_cache.as_ref().unwrap();
         // A pure view recompose (zoom/pan — settings untouched) reuses the
         // finished proxies outright; the per-frame tails below only re-run when
@@ -520,12 +532,7 @@ impl App {
                 let color_region = cache.color_region.as_ref().unwrap();
                 // Apply the CURRENT tone to the cached raw base, then colour — so the
                 // preview's tone base tracks the shader's per-pixel tone every frame.
-                // Only a RAW scene applies guided control planes per pixel; an
-                // Identity (JPEG/PNG) scene commits colour through the
-                // display-domain proxy bake, so it previews the same RGB proxies.
-                let raw_scene = scene
-                    .as_ref()
-                    .is_some_and(|sc| sc.look == crate::core::develop_scene::BaseLook::Raw);
+                // Only a RAW scene applies guided control planes per pixel.
                 let toned_samples = scene_tone.as_ref().filter(|_| raw_scene).map(|st| {
                     crate::core::develop_scene::tone_scene_color_samples(&color_region.region, st)
                 });
@@ -582,22 +589,61 @@ impl App {
                     .as_ref()
                     .map(|r| (r.data.as_slice(), r.w, r.h, r.downsample));
                 let (region, adjusted) = match &scene_tone {
-                    Some(st) if exact_detail => {
+                    Some(st) if !raw_scene => {
                         let gpu = self.win.gpu.as_ref().expect("GPU preview checked above");
-                        let (region, adjusted) =
-                            crate::core::develop_scene::scene_fast_region_develop_with_detail(
-                                &fast.region,
-                                st,
-                                &settings,
-                                regional,
-                                fast.w,
-                                fast.h,
-                                fast.origin_x,
-                                fast.origin_y,
-                                fast.source_w,
-                                fast.source_h,
-                                fast.downsample,
-                                |working, working_space| {
+                        crate::core::develop_scene::identity_fast_region_develop_staged(
+                            &mut identity_stages,
+                            &fast.region,
+                            st,
+                            &settings,
+                            regional,
+                            fast.w,
+                            fast.h,
+                            fast.origin_x,
+                            fast.origin_y,
+                            fast.source_w,
+                            fast.source_h,
+                            fast.downsample,
+                            |pixels| {
+                                if exact_detail {
+                                    run_native_gpu_detail(
+                                        gpu,
+                                        pixels,
+                                        fast.w,
+                                        fast.h,
+                                        &settings,
+                                        false,
+                                        [0.2126, 0.7152, 0.0722],
+                                    );
+                                } else {
+                                    develop::apply_detail_to_display_buffer(
+                                        pixels,
+                                        fast.w,
+                                        fast.h,
+                                        &settings,
+                                        fast.downsample.max(1),
+                                    );
+                                }
+                            },
+                        )
+                    }
+                    Some(st) => {
+                        let gpu = self.win.gpu.as_ref().expect("GPU preview checked above");
+                        crate::core::develop_scene::scene_fast_region_develop_staged(
+                            &mut raw_stages,
+                            &fast.region,
+                            st,
+                            &settings,
+                            regional,
+                            fast.w,
+                            fast.h,
+                            fast.origin_x,
+                            fast.origin_y,
+                            fast.source_w,
+                            fast.source_h,
+                            fast.downsample,
+                            |working, working_space| {
+                                if exact_detail {
                                     run_native_gpu_detail(
                                         gpu,
                                         working,
@@ -607,26 +653,18 @@ impl App {
                                         true,
                                         working_space.render_luminance_coefficients(),
                                     );
-                                },
-                            );
-                        (std::sync::Arc::new(region), adjusted)
-                    }
-                    Some(st) => {
-                        let (region, adjusted) =
-                            crate::core::develop_scene::scene_fast_region_develop(
-                                &fast.region,
-                                st,
-                                &settings,
-                                regional,
-                                fast.w,
-                                fast.h,
-                                fast.origin_x,
-                                fast.origin_y,
-                                fast.source_w,
-                                fast.source_h,
-                                fast.downsample,
-                            );
-                        (std::sync::Arc::new(region), adjusted)
+                                } else {
+                                    develop::apply_detail_to_working_buffer_in_space(
+                                        working,
+                                        fast.w,
+                                        fast.h,
+                                        &settings,
+                                        working_space,
+                                        fast.downsample.max(1),
+                                    );
+                                }
+                            },
+                        )
                     }
                     None if exact_detail => {
                         let gpu = self.win.gpu.as_ref().expect("GPU preview checked above");
@@ -687,6 +725,8 @@ impl App {
                 }
             };
             let cache = self.dev.develop_proxy_cache.as_mut().unwrap();
+            cache.identity_fast = std::mem::take(&mut identity_stages);
+            cache.raw_fast = std::mem::take(&mut raw_stages);
             cache.finished_color = Some(built.clone());
             cache.finished_settings = Some(settings.clone());
             Some(built)

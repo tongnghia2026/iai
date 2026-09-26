@@ -23,7 +23,79 @@ pub(crate) struct ColorProxyField {
     adjusted: Vec<[f32; 3]>,
     pw: usize,
     ph: usize,
+    /// Cell size in texels of the buffer the field is sampled against.
     s: usize,
+    /// Offset of buffer texel 0 inside its cell, so a viewport buffer shares
+    /// the whole-layer bake's cell grid.
+    phase: (usize, usize),
+}
+
+impl ColorProxyField {
+    /// Guided low-pass + colour transform of the pooled cells. `cell_px` is the
+    /// cell size in source pixels, which sets the region filter radius.
+    fn finish(
+        low: Vec<[f32; 3]>,
+        pw: usize,
+        ph: usize,
+        s: usize,
+        phase: (usize, usize),
+        cell_px: usize,
+        settings: &DevelopSettings,
+    ) -> Self {
+        let region = guided_lowpass(
+            &low,
+            pw,
+            ph,
+            (COLOR_REGION_RADIUS / cell_px.max(1)).max(1),
+            COLOR_GUIDED_EPS,
+        );
+        let adjusted = apply_color_to_region(&region, settings, pw, ph);
+        Self {
+            region,
+            adjusted,
+            pw,
+            ph,
+            s,
+            phase,
+        }
+    }
+
+    /// Pixel-centre aligned cell coordinate of buffer texel `t` along one axis
+    /// (the mapping the shader's `dev_color_proxy_at` uses).
+    fn axis(&self, t: usize, phase: usize, n: usize) -> (usize, usize, f32) {
+        let f = (((t + phase) as f32 + 0.5) / self.s as f32 - 0.5).clamp(0.0, (n - 1) as f32);
+        let i0 = f as usize; // f >= 0: truncation is floor
+        (i0, (i0 + 1).min(n - 1), f - i0 as f32)
+    }
+
+    fn bilinear(
+        &self,
+        buf: &[[f32; 3]],
+        (y0, y1, wy): (usize, usize, f32),
+        (x0, x1, wx): (usize, usize, f32),
+    ) -> [f32; 3] {
+        let pw = self.pw;
+        let (p00, p01) = (buf[y0 * pw + x0], buf[y0 * pw + x1]);
+        let (p10, p11) = (buf[y1 * pw + x0], buf[y1 * pw + x1]);
+        let mut out = [0.0f32; 3];
+        for c in 0..3 {
+            let top = p00[c] + (p01[c] - p00[c]) * wx;
+            let bot = p10[c] + (p11[c] - p10[c]) * wx;
+            out[c] = top + (bot - top) * wy;
+        }
+        out
+    }
+
+    /// `(region, adjusted)` at texel `(x, y)` of the buffer the field was
+    /// built for.
+    pub(crate) fn sample(&self, x: usize, y: usize) -> ([f32; 3], [f32; 3]) {
+        let ya = self.axis(y, self.phase.1, self.ph);
+        let xa = self.axis(x, self.phase.0, self.pw);
+        (
+            self.bilinear(&self.region, ya, xa),
+            self.bilinear(&self.adjusted, ya, xa),
+        )
+    }
 }
 
 /// Build the [`ColorProxyField`] for `source`. The expensive, smooth part — the
@@ -98,21 +170,49 @@ pub(crate) fn build_color_proxy_field(
             *slot = [slot[0] / n, slot[1] / n, slot[2] / n];
         }
     });
-    let region = guided_lowpass(
-        &low,
-        pw,
-        ph,
-        (COLOR_REGION_RADIUS / s).max(1),
-        COLOR_GUIDED_EPS,
-    );
-    let adjusted = apply_color_to_region(&region, settings, pw, ph);
-    ColorProxyField {
-        region,
-        adjusted,
-        pw,
-        ph,
-        s,
-    }
+    ColorProxyField::finish(low, pw, ph, s, (0, 0), s, settings)
+}
+
+/// [`ColorProxyField`] for an in-memory display buffer — the fast live
+/// preview's proxy, `w × h` texels sampled every `downsample` source pixels
+/// from `(origin_x, origin_y)`. Cells span ~`COLOR_DOWNSAMPLE` source pixels
+/// and are phase-aligned with the whole-layer bake grid, so at downsample 1
+/// the preview pools exactly the cells its commit pools.
+pub(crate) fn build_color_proxy_field_from_buffer(
+    buf: &[[f32; 3]],
+    w: usize,
+    h: usize,
+    origin_x: u32,
+    origin_y: u32,
+    downsample: u32,
+    settings: &DevelopSettings,
+) -> ColorProxyField {
+    let ds = downsample.max(1) as usize;
+    let s = ((COLOR_DOWNSAMPLE as f32 / ds as f32).round() as usize).max(1);
+    let phase = ((origin_x as usize / ds) % s, (origin_y as usize / ds) % s);
+    let pw = (w + phase.0).div_ceil(s).max(1);
+    let ph = (h + phase.1).div_ceil(s).max(1);
+    let mut low = vec![[0.0f32; 3]; pw * ph];
+    low.par_chunks_mut(pw).enumerate().for_each(|(cy, row)| {
+        let y0 = (cy * s).saturating_sub(phase.1);
+        let y1 = ((cy + 1) * s).saturating_sub(phase.1).min(h);
+        let mut counts = vec![0u32; pw];
+        for y in y0..y1 {
+            for (x, p) in buf[y * w..(y + 1) * w].iter().enumerate() {
+                let cx = (x + phase.0) / s;
+                let acc = &mut row[cx];
+                acc[0] += p[0];
+                acc[1] += p[1];
+                acc[2] += p[2];
+                counts[cx] += 1;
+            }
+        }
+        for (slot, n) in row.iter_mut().zip(counts) {
+            let n = (n as f32).max(1.0);
+            *slot = [slot[0] / n, slot[1] / n, slot[2] / n];
+        }
+    });
+    ColorProxyField::finish(low, pw, ph, s, phase, s * ds, settings)
 }
 
 /// Build, for one tile, the three buffers the colour stage needs (each
@@ -141,28 +241,9 @@ pub(crate) fn build_color_lowpass(
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>) {
     let vw = valid_w as usize;
     let vh = valid_h as usize;
-    let sf = field.s as f32;
-    // Pixel-centre aligned proxy coordinate, mirroring the shader's
-    // `dev_color_proxy_at`.
-    let axis = |g: u32, n: usize| -> (usize, usize, f32) {
-        let f = ((g as f32 + 0.5) / sf - 0.5).clamp(0.0, (n - 1) as f32);
-        let i0 = f.floor() as usize;
-        (i0, (i0 + 1).min(n - 1), f - i0 as f32)
-    };
-    let xs: Vec<(usize, usize, f32)> = (0..vw).map(|x| axis(base_x + x as u32, field.pw)).collect();
-    let bilinear = |buf: &[[f32; 3]], y0: usize, y1: usize, wy: f32, x: (usize, usize, f32)| {
-        let (x0, x1, wx) = x;
-        let pw = field.pw;
-        let (p00, p01) = (buf[y0 * pw + x0], buf[y0 * pw + x1]);
-        let (p10, p11) = (buf[y1 * pw + x0], buf[y1 * pw + x1]);
-        let mut out = [0.0f32; 3];
-        for c in 0..3 {
-            let top = p00[c] + (p01[c] - p00[c]) * wx;
-            let bot = p10[c] + (p11[c] - p10[c]) * wx;
-            out[c] = top + (bot - top) * wy;
-        }
-        out
-    };
+    let xs: Vec<(usize, usize, f32)> = (0..vw)
+        .map(|x| field.axis(base_x as usize + x, 0, field.pw))
+        .collect();
 
     let n = vw * vh;
     let mut toned_inner = Vec::with_capacity(n);
@@ -174,7 +255,7 @@ pub(crate) fn build_color_lowpass(
     let local = base_luma.filter(|_| tone.as_ref().is_some_and(|t| t.is_local));
     for y in 0..vh {
         let gy = base_y + y as u32;
-        let (y0, y1, wy) = axis(gy, field.ph);
+        let ya = field.axis(gy as usize, 0, field.ph);
         let ty_tile = (gy / TILE_SIZE) as i32;
         let mut cached_tx = i32::MIN;
         let mut cur_tile: Option<&Arc<crate::core::tile::Tile>> = None;
@@ -210,8 +291,8 @@ pub(crate) fn build_color_lowpass(
                 (_, None) => {}
             }
             toned_inner.push([rf.clamp(0.0, 1.0), gf.clamp(0.0, 1.0), bf.clamp(0.0, 1.0)]);
-            region_inner.push(bilinear(&field.region, y0, y1, wy, xw));
-            adjusted_inner.push(bilinear(&field.adjusted, y0, y1, wy, xw));
+            region_inner.push(field.bilinear(&field.region, ya, xw));
+            adjusted_inner.push(field.bilinear(&field.adjusted, ya, xw));
         }
     }
     (toned_inner, region_inner, adjusted_inner)
@@ -329,12 +410,12 @@ fn upsample_bilinear_plane(
     let sf = s as f32;
     for y in 0..out_h {
         let fy = (((y as f32 + 0.5) / sf) - 0.5).clamp(0.0, (lh - 1) as f32);
-        let y0 = fy.floor() as usize;
+        let y0 = fy as usize;
         let y1 = (y0 + 1).min(lh - 1);
         let wy = fy - y0 as f32;
         for x in 0..out_w {
             let fx = (((x as f32 + 0.5) / sf) - 0.5).clamp(0.0, (lw - 1) as f32);
-            let x0 = fx.floor() as usize;
+            let x0 = fx as usize;
             let x1 = (x0 + 1).min(lw - 1);
             let wx = fx - x0 as f32;
             let top = low[y0 * lw + x0] + (low[y0 * lw + x1] - low[y0 * lw + x0]) * wx;
@@ -456,8 +537,9 @@ pub(crate) fn sample_plane_bilinear(plane: &[f32], pw: usize, ph: usize, fx: f32
     }
     let fx = fx.clamp(0.0, (pw - 1) as f32);
     let fy = fy.clamp(0.0, (ph - 1) as f32);
-    let x0 = fx.floor() as usize;
-    let y0 = fy.floor() as usize;
+    // Clamped non-negative: truncation is floor without the libm call.
+    let x0 = fx as usize;
+    let y0 = fy as usize;
     let x1 = (x0 + 1).min(pw - 1);
     let y1 = (y0 + 1).min(ph - 1);
     let wx = fx - x0 as f32;
@@ -1060,7 +1142,12 @@ where
 {
     let tone = tone_is_active(settings).then(|| build_tone_data(settings));
     let use_color = has_color(settings);
+    // With colour smoothing (every Develop3 mixer edit) the bake rebuilds
+    // colour from a regional proxy, so the preview must too; otherwise it
+    // colours each pixel directly, like `apply_pixel`.
+    let proxy_color = use_color && settings.effective_color_smoothing() > 0.001;
     let curves = build_mixer_curves_opt(settings);
+    let plan = DevelopPlan::new(settings, source_w, source_h);
     let inv_w = if source_w > 1 {
         1.0 / (source_w - 1) as f32
     } else {
@@ -1113,7 +1200,7 @@ where
                 }
                 clamp_unit(&mut r, &mut g, &mut b);
             }
-            if use_color {
+            if use_color && !proxy_color {
                 apply_color(settings, curves.as_ref(), &mut r, &mut g, &mut b);
                 clamp_unit(&mut r, &mut g, &mut b);
             }
@@ -1123,11 +1210,31 @@ where
     if w == 0 || h == 0 || toned.is_empty() {
         return toned;
     }
+    let mut toned = toned;
+
+    // Proxy colour: the bake's reconstruction on this buffer's own colour
+    // field. Its region luma is also the effects base, as in the bake.
+    let region_luma: Option<Vec<f32>> = proxy_color.then(|| {
+        let field = build_color_proxy_field_from_buffer(
+            &toned, w, h, origin_x, origin_y, downsample, settings,
+        );
+        toned
+            .par_iter_mut()
+            .enumerate()
+            .map(|(idx, p)| {
+                let (region, adjusted) = field.sample(idx % w, idx / w);
+                *p = plan.recombine_color(*p, region, adjusted);
+                luminance_f32(region[0], region[1], region[2]).clamp(0.0, 1.0)
+            })
+            .collect()
+    });
 
     // Regional base for Clarity/Defog on the proxy grid: the guided radius is
     // the bake's full-res radius divided by the proxy downsample, so preview
     // and commit look at (approximately) the same neighbourhood size.
-    let base_plane = if settings.has_spatial_effects() {
+    let base_plane = if let Some(region_luma) = region_luma {
+        Some(region_luma)
+    } else if settings.has_spatial_effects() {
         let h = toned.len() / w;
         let luma: Vec<f32> = toned
             .iter()
@@ -1172,7 +1279,6 @@ where
     // exact precomputed Local plans and evaluate masks in source-image space so
     // viewport origin/downsample cannot move a gradient or radial mask.
     if settings.has_locals() {
-        let plan = DevelopPlan::new(settings, source_w, source_h);
         out.par_iter_mut().enumerate().for_each(|(idx, p)| {
             let px = (idx % w) as u32;
             let py = (idx / w) as u32;

@@ -272,8 +272,15 @@ fn clamp_curve_to_node_span(curve: &mut [f32], nodes: &[f32; MIXER_BANDS]) {
 /// interpolation with wrap-around, mirrored by the WGSL gate-LUT sampler.
 pub(crate) fn curve_sample(lut: &[f32], h: f32) -> f32 {
     let n = lut.len();
-    let t = (h + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU
-        * n as f32;
+    // Hues arrive in [-PI, TAU); one conditional wrap avoids libm fmod.
+    let mut u = h + std::f32::consts::PI;
+    if u >= std::f32::consts::TAU {
+        u -= std::f32::consts::TAU;
+    }
+    if !(0.0..std::f32::consts::TAU).contains(&u) {
+        u = u.rem_euclid(std::f32::consts::TAU);
+    }
+    let t = u / std::f32::consts::TAU * n as f32;
     let i = (t as usize).min(n - 1);
     let f = t - i as f32;
     let a = lut[i];

@@ -351,3 +351,255 @@ fn perf_develop_stages() {
         vh,
     );
 }
+
+/// Settings for the multi-group fast-preview probe: `detail`, `light` and
+/// `mixer` switch the Detail / Light / Colour Mixer groups on.
+fn fast_combo(detail: bool, light: bool, mixer: bool) -> DevelopSettings {
+    let mut s = DevelopSettings::default();
+    if detail {
+        s.sharpening = 40.0;
+        s.noise_reduction = 20.0;
+    }
+    if light {
+        s.exposure = 15.0;
+        s.contrast = 15.0;
+        s.highlights = -30.0;
+        s.shadows = 40.0;
+    }
+    if mixer {
+        s.mixer_hue[1] = -30.0;
+        s.mixer_luminance[1] = 40.0;
+    }
+    s
+}
+
+/// Per-frame cost of the fast (Detail/Effects/Local) live preview on a
+/// display-referred photo when several Develop groups are engaged at once —
+/// the owner's "drag Light + Detail + Mixer together and it lags" report.
+/// Mirrors `build_develop_gpu_preview`'s native-Detail branch at a 100% zoom
+/// viewport (downsample 1).
+///
+/// IAI_PERF_IMAGE=<photo> cargo test --release --test perf_develop \
+///   perf_fast_preview_multi_group -- --ignored --nocapture
+#[test]
+#[ignore = "manual perf probe; needs a local photo and a GPU"]
+fn perf_fast_preview_multi_group() {
+    let Ok(path) = std::env::var("IAI_PERF_IMAGE") else {
+        eprintln!("IAI_PERF_IMAGE not set; skipping");
+        return;
+    };
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let img = image::open(&path).expect("open photo").to_rgba8();
+    let (w, h) = img.dimensions();
+    let tiles = iai::core::tile::TileMap::from_rgba(&img.into_raw(), w, h);
+    let scene = SceneSource::from_display_tiles(&tiles);
+    let runtime = iai::gpu::detail_gpu::DetailGpuRuntime::new(&device);
+    let pad = 72;
+    let (vw, vh) = (1600.min(w), 1000.min(h));
+    let ox = ((w - vw) / 2).saturating_sub(pad);
+    let oy = ((h - vh) / 2).saturating_sub(pad);
+    let rw = (vw + 2 * pad).min(w - ox);
+    let rh = (vh + 2 * pad).min(h - oy);
+    eprintln!("photo {w}x{h}; viewport region {rw}x{rh} @({ox},{oy}), downsample 1");
+    let (base, pw, ph) = develop_scene::build_scene_fast_base(&scene, ox, oy, rw, rh, 1, true);
+    let (rbase, rpw, rph) = develop_scene::build_scene_region_base(&scene, TONE_DOWNSAMPLE);
+
+    let combos = [
+        ("detail+light+mixer", true, true, true),
+        ("detail", true, false, false),
+        ("detail+light", true, true, false),
+        ("detail+mixer", true, false, true),
+    ];
+    let rounds: usize = std::env::var("IAI_PERF_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    for &(label, detail, light, mixer) in combos.iter().cycle().take(combos.len() * rounds) {
+        let settings = fast_combo(detail, light, mixer);
+        eprintln!("\n-- {label} --");
+        let tone = develop_scene::build_scene_tone_for_scene(&settings, &scene);
+        let regional = settings
+            .has_local_tone()
+            .then(|| develop_scene::finish_region_e(&rbase, rpw, rph, &tone, TONE_DOWNSAMPLE));
+        let regional_ref = regional
+            .as_ref()
+            .map(|p| (p.as_slice(), rpw, rph, TONE_DOWNSAMPLE as u32));
+        time("  scene tone only (scene_to_display)", 10, || {
+            develop_scene::scene_fast_region_display(&base, &tone)
+        });
+        let no_detail = DevelopSettings {
+            sharpening: 0.0,
+            noise_reduction: 0.0,
+            color_noise_reduction: 0.0,
+            ..settings.clone()
+        };
+        let (_, cpu_chain) = time("  RAW-model chain without Detail", 10, || {
+            develop_scene::scene_fast_region_develop(
+                &base,
+                &tone,
+                &no_detail,
+                regional_ref,
+                pw,
+                ph,
+                ox,
+                oy,
+                w,
+                h,
+                1,
+            )
+        });
+        time("  JPEG chain without Detail (display)", 10, || {
+            develop_scene::identity_fast_region_develop(
+                &base,
+                &tone,
+                &no_detail,
+                regional_ref,
+                pw,
+                ph,
+                ox,
+                oy,
+                w,
+                h,
+                1,
+            )
+        });
+        let params = iai::gpu::detail_gpu::DetailWorkingParams::from_settings(&settings);
+        let flat: Vec<f32> = cpu_chain.iter().flatten().copied().collect();
+        time("  GPU Detail (upload+compute+readback)", 10, || {
+            iai::gpu::detail_gpu::run_detail_tiled_with_runtime(
+                &runtime,
+                &device,
+                &queue,
+                &flat,
+                pw as u32,
+                ph as u32,
+                &params,
+                true,
+                [0.272_229, 0.674_082, 0.053_689],
+            )
+        });
+    }
+}
+
+/// Per-frame cost while dragging ONE slider with Detail + Light + Mixer all
+/// engaged — the staged Identity fast preview reuses the stages the dragged
+/// slider does not feed. Includes native GPU Detail (upload/compute/readback).
+///
+/// IAI_PERF_IMAGE=<photo> cargo test --release --test perf_develop \
+///   perf_fast_preview_drag -- --ignored --nocapture
+#[test]
+#[ignore = "manual perf probe; needs a local photo and a GPU"]
+fn perf_fast_preview_drag() {
+    let Ok(path) = std::env::var("IAI_PERF_IMAGE") else {
+        eprintln!("IAI_PERF_IMAGE not set; skipping");
+        return;
+    };
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let img = image::open(&path).expect("open photo").to_rgba8();
+    let (w, h) = img.dimensions();
+    let tiles = iai::core::tile::TileMap::from_rgba(&img.into_raw(), w, h);
+    let mut scene = SceneSource::from_display_tiles(&tiles);
+    let raw = std::env::var("IAI_PERF_LOOK").is_ok_and(|v| v == "raw");
+    if raw {
+        scene.look = develop_scene::BaseLook::Raw;
+    }
+    let runtime = iai::gpu::detail_gpu::DetailGpuRuntime::new(&device);
+    let pad = 72;
+    let (vw, vh) = (1600.min(w), 1000.min(h));
+    let ox = ((w - vw) / 2).saturating_sub(pad);
+    let oy = ((h - vh) / 2).saturating_sub(pad);
+    let rw = (vw + 2 * pad).min(w - ox);
+    let rh = (vh + 2 * pad).min(h - oy);
+    let (base, pw, ph) = develop_scene::build_scene_fast_base(&scene, ox, oy, rw, rh, 1, true);
+    let base = Arc::new(base);
+    let (rbase, rpw, rph) = develop_scene::build_scene_region_base(&scene, TONE_DOWNSAMPLE);
+    eprintln!("photo {w}x{h}; viewport region {rw}x{rh}, downsample 1");
+
+    // The app memoises the regional exposure plane on (temperature, tint,
+    // exposure), none of which these drags touch.
+    let regional = develop_scene::finish_region_e(
+        &rbase,
+        rpw,
+        rph,
+        &develop_scene::build_scene_tone_for_scene(&fast_combo(true, true, true), &scene),
+        TONE_DOWNSAMPLE,
+    );
+    for group in ["detail", "mixer", "light"] {
+        let mut stages = develop_scene::IdentityFastStages::default();
+        let mut raw_stages = develop_scene::RawFastStages::default();
+        let mut samples = Vec::new();
+        for frame in 0..12 {
+            let mut settings = fast_combo(true, true, true);
+            let step = frame as f32;
+            match group {
+                "detail" => settings.sharpening = 30.0 + step,
+                "mixer" => settings.mixer_luminance[1] = 30.0 + step,
+                _ => settings.shadows = 30.0 + step,
+            }
+            let started = Instant::now();
+            let tone = develop_scene::build_scene_tone_for_scene(&settings, &scene);
+            let params = iai::gpu::detail_gpu::DetailWorkingParams::from_settings(&settings);
+            let regional_ref = Some((regional.as_slice(), rpw, rph, TONE_DOWNSAMPLE as u32));
+            let gpu_detail = |pixels: &mut Vec<[f32; 3]>, linear: bool, luma: [f32; 3]| {
+                let flat: Vec<f32> = pixels.iter().flatten().copied().collect();
+                let out = iai::gpu::detail_gpu::run_detail_tiled_with_runtime(
+                    &runtime, &device, &queue, &flat, pw as u32, ph as u32, &params, linear, luma,
+                );
+                for (p, c) in pixels.iter_mut().zip(out.chunks_exact(3)) {
+                    *p = [c[0], c[1], c[2]];
+                }
+            };
+            let (_region, adjusted) = if raw {
+                develop_scene::scene_fast_region_develop_staged(
+                    &mut raw_stages,
+                    &base,
+                    &tone,
+                    &settings,
+                    regional_ref,
+                    pw,
+                    ph,
+                    ox,
+                    oy,
+                    w,
+                    h,
+                    1,
+                    |pixels, space| gpu_detail(pixels, true, space.render_luminance_coefficients()),
+                )
+            } else {
+                develop_scene::identity_fast_region_develop_staged(
+                    &mut stages,
+                    &base,
+                    &tone,
+                    &settings,
+                    regional_ref,
+                    pw,
+                    ph,
+                    ox,
+                    oy,
+                    w,
+                    h,
+                    1,
+                    |pixels| gpu_detail(pixels, false, [0.2126, 0.7152, 0.0722]),
+                )
+            };
+            std::hint::black_box(adjusted);
+            if frame >= 2 {
+                samples.push(started.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        eprintln!(
+            "{} drag {group:<7} with Detail+Light+Mixer on: best {:.1} ms  mean {mean:.1} ms  worst {:.1} ms",
+            if raw { "RAW " } else { "JPEG" },
+            samples[0],
+            samples[samples.len() - 1]
+        );
+    }
+}

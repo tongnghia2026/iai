@@ -1998,7 +1998,10 @@ struct VsOut {
                 effects[27..30].copy_from_slice(&tone.grade_shadow);
                 effects[30..33].copy_from_slice(&tone.grade_highlight);
                 effects[33] = tone.scene_contrast_gamma;
+                // Only RAW colours inside the scene chain; an Identity scene's
+                // colour comes from the display-domain proxies, like its commit.
                 if scene.look == crate::core::develop_scene::BaseLook::Raw {
+                    effects[10] = 1.0;
                     effects[34] = s.saturation;
                     effects[35] = s.vibrance;
                 }

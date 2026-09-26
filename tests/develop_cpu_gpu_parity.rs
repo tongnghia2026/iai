@@ -177,6 +177,117 @@ fn headless_identity_colour_preview_matches_commit() {
     }
 }
 
+/// Identity fast-proxy modes (Effects/Detail engaged): the proxies carry the
+/// display-domain Colour/Effects/Detail tail of the commit and the scene
+/// shader only tones. The preview used to recolour per pixel on top, which
+/// cancelled Saturation whenever Clarity or Detail was also on.
+#[test]
+fn headless_identity_fast_preview_matches_commit() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("headless GPU pixel parity is a local real-GPU test; skipped on CI");
+        return;
+    }
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no headless GPU adapter; skipped");
+        return;
+    };
+    let (width, height) = (96u32, 48u32);
+    let mut px = Vec::with_capacity((width * height * 4) as usize);
+    for _y in 0..height {
+        for x in 0..width {
+            let rgb = if x < width / 2 {
+                [210u8, 150, 115]
+            } else {
+                [60, 120, 180]
+            };
+            px.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+        }
+    }
+    let tiles = iai::core::tile::TileMap::from_rgba(&px, width, height);
+    let scene = Arc::new(SceneSource::from_display_tiles(&tiles));
+    let mut stack = LayerStack::new(width, height);
+    stack.layers[0] = Layer::from_rgba(0, "Background", px.clone(), width, height);
+    let max_texture = device.limits().max_texture_dimension_2d;
+    let mut compositor = CompositorState::new(&device, width, height, max_texture);
+
+    let sat_clarity = DevelopSettings {
+        saturation: 45.0,
+        clarity: 30.0,
+        ..Default::default()
+    };
+    let mut sat_mixer_sharp = DevelopSettings {
+        saturation: 30.0,
+        sharpening: 40.0,
+        ..Default::default()
+    };
+    sat_mixer_sharp.mixer_luminance[1] = 50.0;
+    for (label, settings) in [
+        ("sat+clarity", sat_clarity),
+        ("sat+mixer+sharp", sat_mixer_sharp),
+    ] {
+        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+        let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
+        let (base, pw, ph) = iai::core::develop_scene::build_scene_fast_base(
+            &scene,
+            0,
+            0,
+            width,
+            height,
+            1,
+            settings.has_detail(),
+        );
+        let (region, adjusted) = iai::core::develop_scene::identity_fast_region_develop(
+            &base, &tone, &settings, None, pw, ph, 0, 0, width, height, 1,
+        );
+        compositor.develop_preview = Some(DevelopGpuPreview {
+            layer_id: 0,
+            settings: settings.clone(),
+            region_luma: None,
+            color: Some(ColorProxies {
+                region: Arc::new(region),
+                adjusted: Arc::new(adjusted),
+                w: pw,
+                h: ph,
+                origin_x: 0,
+                origin_y: 0,
+                downsample: 1,
+                fast_preview: true,
+                guided_controls: false,
+                exact_detail: settings.has_detail(),
+            }),
+            scene: Some(scene.clone()),
+        });
+        let is_ping =
+            compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+        let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
+        let mut max_error = 0u8;
+        for y in 8..height as usize - 8 {
+            for x in (8..40).chain(56..88) {
+                let k = (y * width as usize + x) * 4;
+                for c in 0..3 {
+                    max_error = max_error.max(gpu[k + c].abs_diff(committed[k + c]));
+                }
+            }
+        }
+        let skin = (24 * width as usize + 20) * 4;
+        eprintln!(
+            "identity fast {label}: preview/commit max={max_error}/255 skin gpu={:?} cpu={:?} src={:?}",
+            &gpu[skin..skin + 3],
+            &committed[skin..skin + 3],
+            &px[skin..skin + 3]
+        );
+        let spread = |p: &[u8]| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
+        assert!(
+            spread(&committed[skin..skin + 3]) > spread(&px[skin..skin + 3]),
+            "test setup: Saturation must widen the skin's channel spread"
+        );
+        assert!(
+            max_error <= 2,
+            "identity fast {label} preview/commit max error {max_error}/255"
+        );
+    }
+}
+
 #[test]
 fn headless_gpu_preview_matches_committed_scene() {
     // Shared CI runners expose inconsistent software adapters/compiler stacks

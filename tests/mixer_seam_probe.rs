@@ -14,12 +14,13 @@
 use iai::core::develop::{DevelopEngineVersion, DevelopSettings, MIXER_BANDS};
 use iai::core::develop_scene::{
     apply_scene_to_tilemap, build_scene_color_base_box, build_scene_fast_base,
-    build_scene_tone_for_scene, render_default_look, scene_fast_region_develop,
-    tone_lowpass_scene_region, tone_scene_color_samples, BaseLook, SceneSource,
+    build_scene_tone_for_scene, identity_fast_region_develop, render_default_look,
+    scene_fast_region_develop, tone_lowpass_scene_region, tone_scene_color_samples, BaseLook,
+    SceneSource,
 };
 use iai::core::layer::{Layer, LayerStack};
 use iai::core::tile::TileMap;
-use iai::gpu::compositor::{ColorProxies, CompositorState, DevelopGpuPreview};
+use iai::gpu::compositor::{ColorProxies, CompositorState, DevelopGpuPreview, RegionLumaProxy};
 use std::sync::Arc;
 
 fn env_bands(key: &str) -> [f32; MIXER_BANDS] {
@@ -120,6 +121,9 @@ fn mixer_seam_probe() {
         vibrance: env_f32("IAI_MIXER_PROBE_VIBRANCE"),
         clarity: env_f32("IAI_MIXER_PROBE_CLARITY"),
         sharpening: env_f32("IAI_MIXER_PROBE_SHARPEN"),
+        exposure: env_f32("IAI_MIXER_PROBE_EXPOSURE"),
+        shadows: env_f32("IAI_MIXER_PROBE_SHADOWS"),
+        highlights: env_f32("IAI_MIXER_PROBE_HIGHLIGHTS"),
         ..Default::default()
     };
     if std::env::var("IAI_MIXER_PROBE_DEFAULT_MIXER").is_ok_and(|v| v == "1") {
@@ -159,6 +163,20 @@ fn mixer_seam_probe() {
         return;
     };
     let tone = build_scene_tone_for_scene(&settings, &scene);
+    let regional_e = settings.has_local_tone().then(|| {
+        let (rbase, rw, rh) = iai::core::develop_scene::build_scene_region_base(
+            &scene,
+            iai::core::develop::TONE_DOWNSAMPLE,
+        );
+        let plane = iai::core::develop_scene::finish_region_e(
+            &rbase,
+            rw,
+            rh,
+            &tone,
+            iai::core::develop::TONE_DOWNSAMPLE,
+        );
+        (plane, rw, rh)
+    });
     let need_fast = settings.texture.abs() > 0.001
         || settings.clarity.abs() > 0.001
         || settings.dehaze.abs() > 0.001
@@ -187,8 +205,23 @@ fn mixer_seam_probe() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1usize);
         let (base, pw, ph) = build_scene_fast_base(&scene, 0, 0, w, h, s, settings.has_detail());
-        let (region, adjusted) =
-            scene_fast_region_develop(&base, &tone, &settings, None, pw, ph, 0, 0, w, h, s as u32);
+        let regional = regional_e.as_ref().map(|(p, rw, rh)| {
+            (
+                p.as_slice(),
+                *rw,
+                *rh,
+                iai::core::develop::TONE_DOWNSAMPLE as u32,
+            )
+        });
+        let (region, adjusted) = if raw || old_model {
+            scene_fast_region_develop(
+                &base, &tone, &settings, regional, pw, ph, 0, 0, w, h, s as u32,
+            )
+        } else {
+            identity_fast_region_develop(
+                &base, &tone, &settings, regional, pw, ph, 0, 0, w, h, s as u32,
+            )
+        };
         eprintln!("preview: fast proxy s={s}");
         Some(ColorProxies {
             region: Arc::new(region),
@@ -243,7 +276,12 @@ fn mixer_seam_probe() {
     compositor.develop_preview = Some(DevelopGpuPreview {
         layer_id: 0,
         settings: settings.clone(),
-        region_luma: None,
+        region_luma: regional_e.as_ref().map(|(p, rw, rh)| RegionLumaProxy {
+            data: Arc::new(p.clone()),
+            w: *rw,
+            h: *rh,
+            downsample: iai::core::develop::TONE_DOWNSAMPLE as u32,
+        }),
         color,
         scene: Some(scene.clone()),
     });

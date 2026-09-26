@@ -583,7 +583,7 @@ pub fn sigmoid_eval(p: &SigmoidParams, v: f32) -> f32 {
 /// LUT index (0..1) for a linear scene value on the shared EV axis.
 #[inline]
 pub fn scene_lut_t(v: f32) -> f32 {
-    let ev = v.max(SCENE_EV_MIN.exp2()).log2();
+    let ev = crate::core::fast_math::fast_log2(v.max(SCENE_EV_MIN.exp2()));
     ((ev - SCENE_EV_MIN) / (SCENE_EV_MAX - SCENE_EV_MIN)).clamp(0.0, 1.0)
 }
 
@@ -1386,6 +1386,9 @@ fn compress_highlight_chroma(
         crate::core::develop::ToneMapMode::Neutral => 0.0,
     };
     let amount = compression * highlight * strength * if perceptual_recipe { 0.82 } else { 1.0 };
+    if amount <= 0.0 {
+        return c;
+    }
     if perceptual_recipe {
         // Develop3 attenuates highlight colourfulness in JzCzhz instead of
         // interpolating RGB toward grey. Scaling az/bz keeps Jz and hue fixed,
@@ -1462,9 +1465,9 @@ impl SceneToneData {
     /// tone-equalizer zones read, and what the regional-E proxy stores.
     #[inline]
     pub fn own_e(&self, rgb_after_wb_ev: [f32; 3]) -> f32 {
-        working_luma(self.working_space, rgb_after_wb_ev)
-            .max(SCENE_EV_MIN.exp2())
-            .log2()
+        crate::core::fast_math::fast_log2(
+            working_luma(self.working_space, rgb_after_wb_ev).max(SCENE_EV_MIN.exp2()),
+        )
     }
 
     /// Tone-equalizer offset (EV) at an absolute exposure `e`, via the LUT.
@@ -1494,7 +1497,7 @@ impl SceneToneData {
             // scene-linear regional multiply (ART runs its tone equalizer here too,
             // on linear luminance), so the pixel's own texture rides on top.
             let e = region_e.unwrap_or_else(|| self.own_e(v));
-            let gain = self.tone_eq_at(e).exp2();
+            let gain = crate::core::fast_math::fast_exp2(self.tone_eq_at(e));
             v = [v[0] * gain, v[1] * gain, v[2] * gain];
         }
         v = self.apply_scene_grade(v);
@@ -1574,12 +1577,12 @@ impl SceneToneData {
                 }
                 crate::core::develop::PointCurveMode::Perceptual => {
                     let linear = [srgb_to_linear(*r), srgb_to_linear(*g), srgb_to_linear(*b)];
-                    let mut p = crate::core::perceptual_color::PerceptualColor::from_oklab(
-                        crate::core::perceptual_color::linear_srgb_to_oklab(linear),
-                    );
-                    p.lightness = lut_lerp(lut, p.lightness.clamp(0.0, 1.0));
+                    // Only lightness moves, so edit OKLab L in place (no polar
+                    // round trip), exactly like the shader's display curve.
+                    let mut lab = crate::core::perceptual_color::linear_srgb_to_oklab(linear);
+                    lab.l = lut_lerp(lut, lab.l.clamp(0.0, 1.0));
                     let mapped = crate::core::gamut_map::map_to_output_gamut(
-                        crate::core::perceptual_color::oklab_to_linear_srgb(p.to_oklab()),
+                        crate::core::perceptual_color::oklab_to_linear_srgb(lab),
                         crate::core::working_color::OutputColorSpace::Srgb,
                     );
                     *r = linear_to_srgb(mapped[0]);
@@ -1911,104 +1914,200 @@ pub(crate) fn scene_fast_region_develop_with_detail<F>(
 where
     F: FnOnce(&mut Vec<[f32; 3]>, crate::core::working_color::WorkingColorSpace),
 {
-    let curves = crate::core::develop::build_mixer_curves_opt(settings);
-    let mut working: Vec<[f32; 3]> = base
-        .par_iter()
-        .enumerate()
-        .map(|(idx, p)| {
-            let px = (idx % w) as u32;
-            let py = (idx / w) as u32;
-            let x = origin_x
-                .saturating_add(px.saturating_mul(downsample.max(1)))
-                .saturating_add(downsample.max(1) / 2)
-                .min(source_w.saturating_sub(1));
-            let y = origin_y
-                .saturating_add(py.saturating_mul(downsample.max(1)))
-                .saturating_add(downsample.max(1) / 2)
-                .min(source_h.saturating_sub(1));
-            let e = regional_e.map(|(plane, pw, ph, plane_step)| {
-                let s = plane_step.max(1) as f32;
-                sample_plane_bilinear(
-                    plane,
-                    pw,
-                    ph,
-                    (x as f32 + 0.5) / s - 0.5,
-                    (y as f32 + 0.5) / s - 0.5,
-                )
-            });
-            let [mut r, mut g, mut b] = tone.scene_to_working(*p, e);
-            let classification = tone.working_to_display([r, g, b]);
-            apply_color_linear_classified_in_space(
-                settings,
-                curves.as_ref(),
-                Some(classification),
-                true,
-                tone.working_space,
-                &mut r,
-                &mut g,
-                &mut b,
-            );
-            [r, g, b]
-        })
-        .collect();
-    let region: Vec<[f32; 3]> = working
-        .par_iter()
-        .map(|p| tone.working_to_display(*p))
-        .collect();
-    if working.is_empty() {
-        return (region.clone(), region);
-    }
-    let luma: Vec<f32> = working
-        .par_iter()
-        .map(|p| working_luma(tone.working_space, *p).max(0.0))
-        .collect();
+    let (region, adjusted) = scene_fast_region_develop_staged(
+        &mut RawFastStages::default(),
+        &std::sync::Arc::new(base.to_vec()),
+        tone,
+        settings,
+        regional_e,
+        w,
+        h,
+        origin_x,
+        origin_y,
+        source_w,
+        source_h,
+        downsample,
+        apply_detail,
+    );
+    (region.as_ref().clone(), adjusted)
+}
+
+/// Stage memo for the RAW fast preview, the scene-chain twin of
+/// [`IdentityFastStages`]: scene tone, then Colour + Effects (+ the `region`
+/// the shader reads), then Detail + Local every frame.
+#[derive(Default)]
+pub struct RawFastStages {
+    base: Option<std::sync::Arc<Vec<[f32; 3]>>>,
+    regional: Option<(usize, usize)>,
+    tone_key: Option<DevelopSettings>,
+    toned: Option<Vec<[f32; 3]>>,
+    effects_key: Option<DevelopSettings>,
+    region: Option<std::sync::Arc<Vec<[f32; 3]>>>,
+    effected: Option<Vec<[f32; 3]>>,
+}
+
+/// [`scene_fast_region_develop_with_detail`] with its tone and colour/effects
+/// stages memoised in `stages`; `base` is the cached fast-proxy base.
+#[allow(clippy::too_many_arguments)]
+pub fn scene_fast_region_develop_staged<F>(
+    stages: &mut RawFastStages,
+    base: &std::sync::Arc<Vec<[f32; 3]>>,
+    tone: &SceneToneData,
+    settings: &DevelopSettings,
+    regional_e: Option<(&[f32], usize, usize, u32)>,
+    w: usize,
+    h: usize,
+    origin_x: u32,
+    origin_y: u32,
+    source_w: u32,
+    source_h: u32,
+    downsample: u32,
+    apply_detail: F,
+) -> (std::sync::Arc<Vec<[f32; 3]>>, Vec<[f32; 3]>)
+where
+    F: FnOnce(&mut Vec<[f32; 3]>, crate::core::working_color::WorkingColorSpace),
+{
     let step = downsample.max(1);
-    let spatial_base = if settings.has_spatial_effects() {
-        guided_lowpass_plane(
-            &luma,
-            w,
-            h,
-            (TONE_REGION_RADIUS / step as usize).max(1),
-            0.05,
-        )
-    } else {
-        luma
-    };
-    let inv_w = if source_w > 1 {
-        1.0 / (source_w - 1) as f32
-    } else {
-        0.0
-    };
-    let inv_h = if source_h > 1 {
-        1.0 / (source_h - 1) as f32
-    } else {
-        0.0
-    };
-    working.par_iter_mut().enumerate().for_each(|(i, p)| {
-        let px = (i % w) as u32;
-        let py = (i / w) as u32;
+    let source_xy = |i: usize| {
         let x = origin_x
-            .saturating_add(px.saturating_mul(step))
+            .saturating_add(((i % w) as u32).saturating_mul(step))
             .saturating_add(step / 2)
             .min(source_w.saturating_sub(1));
         let y = origin_y
-            .saturating_add(py.saturating_mul(step))
+            .saturating_add(((i / w) as u32).saturating_mul(step))
             .saturating_add(step / 2)
             .min(source_h.saturating_sub(1));
-        let [r, g, b] = p;
-        apply_effects_linear_in_space(
-            settings,
-            r,
-            g,
-            b,
-            x,
-            y,
-            inv_w,
-            inv_h,
-            spatial_base[i],
-            tone.working_space,
-        );
-    });
+        (x, y)
+    };
+
+    let regional = regional_e.map(|(plane, ..)| (plane.as_ptr() as usize, plane.len()));
+    let tone_key = scene_tone_key(settings);
+    let tone_hit = stages
+        .base
+        .as_ref()
+        .is_some_and(|b| std::sync::Arc::ptr_eq(b, base))
+        && stages.regional == regional
+        && stages.tone_key.as_ref() == Some(&tone_key)
+        && stages.toned.is_some();
+    if !tone_hit {
+        let toned = base
+            .par_iter()
+            .enumerate()
+            .map(|(idx, p)| {
+                let e = regional_e.map(|(plane, pw, ph, plane_step)| {
+                    let (x, y) = source_xy(idx);
+                    let s = plane_step.max(1) as f32;
+                    sample_plane_bilinear(
+                        plane,
+                        pw,
+                        ph,
+                        (x as f32 + 0.5) / s - 0.5,
+                        (y as f32 + 0.5) / s - 0.5,
+                    )
+                });
+                tone.scene_to_working(*p, e)
+            })
+            .collect();
+        *stages = RawFastStages {
+            base: Some(base.clone()),
+            regional,
+            tone_key: Some(tone_key),
+            toned: Some(toned),
+            ..Default::default()
+        };
+    }
+
+    // Local masks run after Detail on this path, so they stay per-frame.
+    let effects_key = DevelopSettings {
+        locals: Vec::new(),
+        ..without_detail(settings)
+    };
+    if stages.effects_key.as_ref() != Some(&effects_key) || stages.effected.is_none() {
+        let curves = crate::core::develop::build_mixer_curves_opt(settings);
+        // Only the Legacy mixer reads the bounded display classification; V2
+        // classifies the working value itself, so skip the extra encode.
+        let legacy_mixer = curves
+            .as_ref()
+            .is_some_and(|c| c.algorithm == crate::core::develop::ColorMixerAlgorithm::Legacy);
+        let mut working: Vec<[f32; 3]> = stages
+            .toned
+            .as_ref()
+            .expect("tone stage filled above")
+            .par_iter()
+            .map(|p| {
+                let [mut r, mut g, mut b] = *p;
+                let classification = legacy_mixer.then(|| tone.working_to_display([r, g, b]));
+                apply_color_linear_classified_in_space(
+                    settings,
+                    curves.as_ref(),
+                    classification,
+                    true,
+                    tone.working_space,
+                    &mut r,
+                    &mut g,
+                    &mut b,
+                );
+                [r, g, b]
+            })
+            .collect();
+        let region: Vec<[f32; 3]> = working
+            .par_iter()
+            .map(|p| tone.working_to_display(*p))
+            .collect();
+        if !working.is_empty() {
+            let luma: Vec<f32> = working
+                .par_iter()
+                .map(|p| working_luma(tone.working_space, *p).max(0.0))
+                .collect();
+            let spatial_base = if settings.has_spatial_effects() {
+                guided_lowpass_plane(
+                    &luma,
+                    w,
+                    h,
+                    (TONE_REGION_RADIUS / step as usize).max(1),
+                    0.05,
+                )
+            } else {
+                luma
+            };
+            let inv_w = if source_w > 1 {
+                1.0 / (source_w - 1) as f32
+            } else {
+                0.0
+            };
+            let inv_h = if source_h > 1 {
+                1.0 / (source_h - 1) as f32
+            } else {
+                0.0
+            };
+            working.par_iter_mut().enumerate().for_each(|(i, p)| {
+                let (x, y) = source_xy(i);
+                let [r, g, b] = p;
+                apply_effects_linear_in_space(
+                    settings,
+                    r,
+                    g,
+                    b,
+                    x,
+                    y,
+                    inv_w,
+                    inv_h,
+                    spatial_base[i],
+                    tone.working_space,
+                );
+            });
+        }
+        stages.region = Some(std::sync::Arc::new(region));
+        stages.effected = Some(working);
+        stages.effects_key = Some(effects_key);
+    }
+
+    let region = stages.region.clone().expect("colour stage filled above");
+    let mut working = stages.effected.clone().expect("colour stage filled above");
+    if working.is_empty() {
+        let empty = region.as_ref().clone();
+        return (region, empty);
+    }
     if settings.has_detail() {
         apply_detail(&mut working, tone.working_space);
     }
@@ -2030,6 +2129,255 @@ where
         .map(|p| tone.working_to_display(*p))
         .collect();
     (region, adjusted)
+}
+
+/// The scene chain (Light) per fast-proxy texel, in display units: the
+/// `region` an Identity fast preview hands the shader (no colour).
+#[allow(clippy::too_many_arguments)]
+fn identity_fast_region_tone(
+    base: &[[f32; 3]],
+    tone: &SceneToneData,
+    regional_e: Option<(&[f32], usize, usize, u32)>,
+    w: usize,
+    origin_x: u32,
+    origin_y: u32,
+    source_w: u32,
+    source_h: u32,
+    step: u32,
+) -> Vec<[f32; 3]> {
+    base.par_iter()
+        .enumerate()
+        .map(|(idx, p)| {
+            let e = regional_e.map(|(plane, pw, ph, plane_step)| {
+                let x = origin_x
+                    .saturating_add(((idx % w) as u32).saturating_mul(step))
+                    .saturating_add(step / 2)
+                    .min(source_w.saturating_sub(1));
+                let y = origin_y
+                    .saturating_add(((idx / w) as u32).saturating_mul(step))
+                    .saturating_add(step / 2)
+                    .min(source_h.saturating_sub(1));
+                let s = plane_step.max(1) as f32;
+                sample_plane_bilinear(
+                    plane,
+                    pw,
+                    ph,
+                    (x as f32 + 0.5) / s - 0.5,
+                    (y as f32 + 0.5) / s - 0.5,
+                )
+            });
+            tone.scene_to_display(*p, e)
+        })
+        .collect()
+}
+
+/// Identity (JPEG/PNG) twin of [`scene_fast_region_develop_with_detail`]: the
+/// scene chain (Light) per texel, then the display-domain Colour / Effects /
+/// Local / Detail tail its commit bakes through `apply_to_tilemap_direct`.
+/// `region` is the toned proxy the shader reproduces per pixel (no colour).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn identity_fast_region_develop_with_detail<F>(
+    base: &[[f32; 3]],
+    tone: &SceneToneData,
+    settings: &DevelopSettings,
+    regional_e: Option<(&[f32], usize, usize, u32)>,
+    w: usize,
+    h: usize,
+    origin_x: u32,
+    origin_y: u32,
+    source_w: u32,
+    source_h: u32,
+    downsample: u32,
+    apply_detail: F,
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>)
+where
+    F: FnOnce(&mut Vec<[f32; 3]>),
+{
+    let step = downsample.max(1);
+    let region = identity_fast_region_tone(
+        base, tone, regional_e, w, origin_x, origin_y, source_w, source_h, step,
+    );
+    let adjusted = crate::core::develop::apply_fast_preview_to_region_with_detail(
+        &region,
+        &strip_scene_handled(settings),
+        None,
+        w,
+        h,
+        origin_x,
+        origin_y,
+        source_w,
+        source_h,
+        step,
+        apply_detail,
+    );
+    (region, adjusted)
+}
+
+/// Stage memo for the Identity fast preview. A slider drag changes one group
+/// at a time, so the stages it does not feed are reused: a Detail drag re-runs
+/// only Detail, a Colour/Effects/Local drag skips the scene tone. Keys are the
+/// settings with the downstream groups neutralised, so any stage input change
+/// (including one this list forgets to neutralise) still invalidates it.
+#[derive(Default)]
+pub struct IdentityFastStages {
+    base: Option<std::sync::Arc<Vec<[f32; 3]>>>,
+    regional: Option<(usize, usize)>,
+    tone_key: Option<DevelopSettings>,
+    region: Option<std::sync::Arc<Vec<[f32; 3]>>>,
+    display_key: Option<DevelopSettings>,
+    display: Option<Vec<[f32; 3]>>,
+}
+
+/// `settings` with every Detail slider at its neutral default.
+fn without_detail(settings: &DevelopSettings) -> DevelopSettings {
+    let d = DevelopSettings::default();
+    DevelopSettings {
+        sharpening: d.sharpening,
+        sharpen_radius: d.sharpen_radius,
+        sharpen_detail: d.sharpen_detail,
+        sharpen_masking: d.sharpen_masking,
+        noise_reduction: d.noise_reduction,
+        noise_reduction_detail: d.noise_reduction_detail,
+        noise_reduction_contrast: d.noise_reduction_contrast,
+        color_noise_reduction: d.color_noise_reduction,
+        color_noise_detail: d.color_noise_detail,
+        color_noise_smoothness: d.color_noise_smoothness,
+        ..settings.clone()
+    }
+}
+
+/// `settings` reduced to what the scene tone reads (Colour, Effects, Detail
+/// and Local neutralised).
+fn scene_tone_key(settings: &DevelopSettings) -> DevelopSettings {
+    let d = DevelopSettings::default();
+    DevelopSettings {
+        saturation: d.saturation,
+        vibrance: d.vibrance,
+        mixer_hue: d.mixer_hue,
+        mixer_saturation: d.mixer_saturation,
+        mixer_luminance: d.mixer_luminance,
+        texture: d.texture,
+        clarity: d.clarity,
+        dehaze: d.dehaze,
+        vignette: d.vignette,
+        locals: Vec::new(),
+        ..without_detail(settings)
+    }
+}
+
+/// [`identity_fast_region_develop_with_detail`] with its tone and display
+/// stages memoised in `stages`; `base` is the cached fast-proxy base.
+#[allow(clippy::too_many_arguments)]
+pub fn identity_fast_region_develop_staged<F>(
+    stages: &mut IdentityFastStages,
+    base: &std::sync::Arc<Vec<[f32; 3]>>,
+    tone: &SceneToneData,
+    settings: &DevelopSettings,
+    regional_e: Option<(&[f32], usize, usize, u32)>,
+    w: usize,
+    h: usize,
+    origin_x: u32,
+    origin_y: u32,
+    source_w: u32,
+    source_h: u32,
+    downsample: u32,
+    apply_detail: F,
+) -> (std::sync::Arc<Vec<[f32; 3]>>, Vec<[f32; 3]>)
+where
+    F: FnOnce(&mut Vec<[f32; 3]>),
+{
+    let regional = regional_e.map(|(plane, ..)| (plane.as_ptr() as usize, plane.len()));
+    let tone_key = scene_tone_key(settings);
+    let tone_hit = stages
+        .base
+        .as_ref()
+        .is_some_and(|b| std::sync::Arc::ptr_eq(b, base))
+        && stages.regional == regional
+        && stages.tone_key.as_ref() == Some(&tone_key)
+        && stages.region.is_some();
+    if !tone_hit {
+        let region = identity_fast_region_tone(
+            base,
+            tone,
+            regional_e,
+            w,
+            origin_x,
+            origin_y,
+            source_w,
+            source_h,
+            downsample.max(1),
+        );
+        *stages = IdentityFastStages {
+            base: Some(base.clone()),
+            regional,
+            tone_key: Some(tone_key),
+            region: Some(std::sync::Arc::new(region)),
+            display_key: None,
+            display: None,
+        };
+    }
+    let region = stages.region.clone().expect("tone stage filled above");
+    let display_key = without_detail(settings);
+    if stages.display_key.as_ref() != Some(&display_key) || stages.display.is_none() {
+        stages.display = Some(
+            crate::core::develop::apply_fast_preview_to_region_with_detail(
+                &region,
+                &strip_scene_handled(settings),
+                None,
+                w,
+                h,
+                origin_x,
+                origin_y,
+                source_w,
+                source_h,
+                downsample.max(1),
+                |_| {},
+            ),
+        );
+        stages.display_key = Some(display_key);
+    }
+    let mut adjusted = stages.display.clone().expect("display stage filled above");
+    apply_detail(&mut adjusted);
+    (region, adjusted)
+}
+
+/// CPU-Detail form of [`identity_fast_region_develop_with_detail`].
+#[allow(clippy::too_many_arguments)]
+pub fn identity_fast_region_develop(
+    base: &[[f32; 3]],
+    tone: &SceneToneData,
+    settings: &DevelopSettings,
+    regional_e: Option<(&[f32], usize, usize, u32)>,
+    w: usize,
+    h: usize,
+    origin_x: u32,
+    origin_y: u32,
+    source_w: u32,
+    source_h: u32,
+    downsample: u32,
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+    identity_fast_region_develop_with_detail(
+        base,
+        tone,
+        settings,
+        regional_e,
+        w,
+        h,
+        origin_x,
+        origin_y,
+        source_w,
+        source_h,
+        downsample,
+        |out| {
+            crate::core::develop::apply_detail_to_display_buffer(
+                out,
+                w,
+                h,
+                settings,
+                downsample.max(1),
+            )
+        },
+    )
 }
 
 // ── Full renders ─────────────────────────────────────────────────────────────
@@ -4255,5 +4603,148 @@ mod tests {
             peak1 > peak0 + 20,
             "exposure must shift the luma peak right: {peak0} -> {peak1}"
         );
+    }
+
+    #[test]
+    fn raw_fast_stages_match_a_fresh_run() {
+        // RAW twin of the Identity stage check: reused stages must equal a
+        // from-scratch run at every step of a drag sequence.
+        let (w, h) = (40u32, 24u32);
+        let mut scene = SceneSource::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let fx = x as f32 / (w - 1) as f32;
+                let fy = y as f32 / (h - 1) as f32;
+                let input = [fx * 1.3, fy * 0.8, (1.0 - fx) * 0.6 + 0.05];
+                scene.set_rgb(x, y, scene.color_pipeline.working.from_linear_srgb(input));
+            }
+        }
+        let (base, pw, ph) = build_scene_fast_base(&scene, 0, 0, w, h, 1, true);
+        let base = std::sync::Arc::new(base);
+        let mut a = DevelopSettings {
+            sharpening: 40.0,
+            clarity: 25.0,
+            saturation: 20.0,
+            ..Default::default()
+        };
+        a.mixer_luminance[1] = 50.0;
+        let b = DevelopSettings {
+            sharpening: 70.0,
+            ..a.clone()
+        };
+        let mut c = b.clone();
+        c.mixer_hue[1] = -30.0;
+        let d = DevelopSettings {
+            exposure: 20.0,
+            shadows: 30.0,
+            ..c.clone()
+        };
+        let detail = |settings: &DevelopSettings| {
+            let settings = settings.clone();
+            move |out: &mut Vec<[f32; 3]>, space| {
+                crate::core::develop::apply_detail_to_working_buffer_in_space(
+                    out, pw, ph, &settings, space, 1,
+                )
+            }
+        };
+        let mut stages = RawFastStages::default();
+        for settings in [a.clone(), b, c, d, a] {
+            let tone = build_scene_tone_for_scene(&settings, &scene);
+            let (region, adjusted) = scene_fast_region_develop_staged(
+                &mut stages,
+                &base,
+                &tone,
+                &settings,
+                None,
+                pw,
+                ph,
+                0,
+                0,
+                w,
+                h,
+                1,
+                detail(&settings),
+            );
+            let (region_ref, adjusted_ref) = scene_fast_region_develop_staged(
+                &mut RawFastStages::default(),
+                &base,
+                &tone,
+                &settings,
+                None,
+                pw,
+                ph,
+                0,
+                0,
+                w,
+                h,
+                1,
+                detail(&settings),
+            );
+            assert_eq!(region, region_ref);
+            assert_eq!(adjusted, adjusted_ref);
+        }
+    }
+
+    #[test]
+    fn identity_fast_stages_match_the_unstaged_chain() {
+        // The stage memo must be a pure cache: every step of a drag sequence
+        // (Detail, Colour, Light, back again) equals a from-scratch run.
+        let (w, h) = (48u32, 32u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                px.extend_from_slice(&[
+                    (60 + x * 3) as u8,
+                    (40 + y * 4) as u8,
+                    (90 + (x * y) % 90) as u8,
+                    255,
+                ]);
+            }
+        }
+        let scene = SceneSource::from_display_tiles(&TileMap::from_rgba(&px, w, h));
+        let (base, pw, ph) = build_scene_fast_base(&scene, 0, 0, w, h, 1, true);
+        let base = std::sync::Arc::new(base);
+        let mut a = DevelopSettings {
+            sharpening: 40.0,
+            clarity: 20.0,
+            ..Default::default()
+        };
+        a.mixer_luminance[1] = 50.0;
+        let b = DevelopSettings {
+            sharpening: 70.0,
+            ..a.clone()
+        };
+        let mut c = b.clone();
+        c.mixer_hue[1] = -30.0;
+        let d = DevelopSettings {
+            exposure: 20.0,
+            shadows: 30.0,
+            ..c.clone()
+        };
+        let mut stages = IdentityFastStages::default();
+        for settings in [a.clone(), b, c, d, a] {
+            let tone = build_scene_tone_for_scene(&settings, &scene);
+            let (region, adjusted) = identity_fast_region_develop_staged(
+                &mut stages,
+                &base,
+                &tone,
+                &settings,
+                None,
+                pw,
+                ph,
+                0,
+                0,
+                w,
+                h,
+                1,
+                |out| {
+                    crate::core::develop::apply_detail_to_display_buffer(out, pw, ph, &settings, 1)
+                },
+            );
+            let (region_ref, adjusted_ref) =
+                identity_fast_region_develop(&base, &tone, &settings, None, pw, ph, 0, 0, w, h, 1);
+            assert_eq!(region.as_slice(), region_ref.as_slice());
+            assert_eq!(adjusted, adjusted_ref);
+        }
     }
 }
