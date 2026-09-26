@@ -2,6 +2,11 @@
 
 use super::state::*;
 
+/// How long the Develop view rests after a zoom/pan/resize before its
+/// preview renders the full display grid.
+pub(in crate::app) const DEVELOP_VIEW_SETTLE: std::time::Duration =
+    std::time::Duration::from_millis(160);
+
 /// The active pointer tool in the Develop window's canvas viewport (D5 tool
 /// rail). View state, not serialized. Middle-drag always pans regardless of the
 /// tool, and an armed local mask always takes the left drag.
@@ -40,6 +45,12 @@ pub struct DevelopShell {
     /// carry the view transform, so the Develop window must recomposite when its
     /// own zoom/pan/size diverges from this. `None` = nothing baked for it yet.
     pub(in crate::app) develop_composited_view: Option<[u32; 5]>,
+    /// Display-grid taps per axis the last composite gave the Develop layer
+    /// (see `App::develop_grid_taps`); a change recomposites the view.
+    pub(in crate::app) develop_composited_taps: u32,
+    /// When the Develop view last zoomed/panned/resized: the preview drafts
+    /// until it has rested for `DEVELOP_VIEW_SETTLE`.
+    pub(in crate::app) develop_view_moved_at: Option<std::time::Instant>,
     /// View (screen rect + offset + zoom bit patterns) the GPU Detail plane was
     /// last planned for. Mode A pans/zooms are re-blits only, so a view that
     /// drifts from this must recomposite to move the plane. `None` = no GPU

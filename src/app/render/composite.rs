@@ -339,6 +339,8 @@ impl App {
             None
         };
         let dev_preview = self.build_develop_gpu_preview();
+        let grid_taps = self.develop_grid_taps();
+        self.dev.develop_composited_taps = grid_taps;
         let allow_active_gpu_vector = self.active_vector_gpu_idle();
         if let Some(gpu) = &mut self.win.gpu {
             // Mode A composites in canvas-space (identity view); the dirty rect is
@@ -400,6 +402,7 @@ impl App {
                 .map(|overlay| page_stack.with_overlay(overlay));
             let base_stack = pdf_overlay_combined.as_ref().unwrap_or(page_stack);
             gpu.compositor.develop_preview = dev_preview;
+            gpu.compositor.develop_grid_taps = grid_taps;
             let has_effected_groups = base_stack.has_effected_groups();
             let gpu_isolates_groups = has_effected_groups
                 && gpu

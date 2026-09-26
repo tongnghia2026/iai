@@ -611,6 +611,7 @@ impl App {
                 detail_refine_at: None,
                 detail_refine_waiting_for_release: false,
                 detail_refine_settings: None,
+                drag_draft: false,
             }
         };
 
@@ -765,6 +766,9 @@ impl App {
                 || settings.preview_proxy_free();
             preview.job_id = preview.job_id.wrapping_add(1);
             preview.pending_settings = None;
+            if preview.detail_refine_waiting_for_release {
+                preview.drag_draft = true;
+            }
             // Keep an already-running receiver alive. Rayon work cannot be
             // cancelled, so dropping it here used to make `processing` look
             // false and allowed another full-image refine to start while the
@@ -841,6 +845,9 @@ impl App {
         };
         let was_down = preview.detail_refine_waiting_for_release;
         preview.detail_refine_waiting_for_release = down;
+        if was_down != down {
+            preview.drag_draft = false;
+        }
         if down {
             preview.detail_refine_at = None;
         } else if was_down && preview.detail_refine_settings.is_some() {

@@ -125,6 +125,30 @@ impl App {
         ))
     }
 
+    /// Display-grid taps per axis for the zoomed-out Develop preview (a cap on
+    /// the compositor's per-pixel grid). The grid runs the whole Develop chain
+    /// once per tap, so while a slider, a local mask or the view is being
+    /// dragged the preview draws a one-sample draft; the grid — what the
+    /// committed pixels will show — lands when it rests.
+    pub(in crate::app) fn develop_grid_taps(&self) -> u32 {
+        let dragging = self
+            .dev
+            .develop_preview
+            .as_ref()
+            .is_some_and(|p| p.drag_draft)
+            || self.dev.develop_local_drag.is_some()
+            || self.dev.develop_pan_drag.is_some()
+            || self
+                .dev
+                .develop_view_moved_at
+                .is_some_and(|t| t.elapsed() < crate::app::develop_shell::DEVELOP_VIEW_SETTLE);
+        if dragging {
+            1
+        } else {
+            3
+        }
+    }
+
     /// The Develop preview runs on a scene master the GPU can host with a
     /// hardware adapter — the shader then carries Effects, Detail and Locals.
     pub(in crate::app) fn develop_gpu_scene_ok(&self) -> bool {
@@ -382,27 +406,37 @@ impl App {
                 .find(|l| l.id == layer_id)
                 .map(|l| l.offset)
                 .unwrap_or((0, 0));
-            let (sx, sy, sw, sh) = self.canvas_screen_clip().unwrap_or_else(|| {
-                self.win
-                    .window
-                    .as_ref()
-                    .map(|w| {
-                        let sz = w.inner_size();
-                        (0, 0, sz.width.max(1), sz.height.max(1))
-                    })
-                    .unwrap_or((0, 0, 1, 1))
-            });
-            let zoom = self.edit.view.zoom.max(0.0001);
-            let lx0 = ((sx as f32 - self.edit.view.offset_x) / zoom - layer_offset.0 as f32)
+            // The view the preview is shown in: the Develop window's own while
+            // it is open (the main window's view may frame something else).
+            let ((sx0, sy0, sx1, sy1), (off_x, off_y), zoom) =
+                self.develop_display_view().unwrap_or_else(|| {
+                    let (w, h) = self
+                        .win
+                        .window
+                        .as_ref()
+                        .map(|w| {
+                            let sz = w.inner_size();
+                            (sz.width.max(1) as f32, sz.height.max(1) as f32)
+                        })
+                        .unwrap_or((1.0, 1.0));
+                    (
+                        (0.0, 0.0, w, h),
+                        (self.edit.view.offset_x, self.edit.view.offset_y),
+                        self.edit.view.zoom,
+                    )
+                });
+            let zoom = zoom.max(0.0001);
+            let to_layer = |s: f32, off: f32, layer_off: i32| (s - off) / zoom - layer_off as f32;
+            let lx0 = to_layer(sx0, off_x, layer_offset.0)
                 .floor()
                 .clamp(0.0, src_w as f32) as u32;
-            let ly0 = ((sy as f32 - self.edit.view.offset_y) / zoom - layer_offset.1 as f32)
+            let ly0 = to_layer(sy0, off_y, layer_offset.1)
                 .floor()
                 .clamp(0.0, src_h as f32) as u32;
-            let lx1 = (((sx + sw) as f32 - self.edit.view.offset_x) / zoom - layer_offset.0 as f32)
+            let lx1 = to_layer(sx1, off_x, layer_offset.0)
                 .ceil()
                 .clamp(0.0, src_w as f32) as u32;
-            let ly1 = (((sy + sh) as f32 - self.edit.view.offset_y) / zoom - layer_offset.1 as f32)
+            let ly1 = to_layer(sy1, off_y, layer_offset.1)
                 .ceil()
                 .clamp(0.0, src_h as f32) as u32;
             let mut rw = lx1.saturating_sub(lx0).max(1);
@@ -768,11 +802,12 @@ impl App {
                     ),
                 });
                 let guided_controls = toned_samples.as_ref().and_then(|samples| {
-                    develop::guided_mixer_controls(
+                    develop::guided_mixer_controls_scaled(
                         samples,
                         &settings,
                         color_region.w,
                         color_region.h,
+                        color_region.downsample as usize,
                     )
                 });
                 let uses_guided_controls = guided_controls.is_some();

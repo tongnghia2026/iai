@@ -808,7 +808,9 @@ fn headless_gpu_detail_plane_offset_and_downsample() {
     let mut px = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         for x in 0..width {
-            for c in textured_rgb(x % 128, y, 128) {
+            // Texture at 2×2-block granularity, so the zoomed-out plane's grid
+            // average below equals one pixel of its block.
+            for c in textured_rgb((x & !1) % 128, y & !1, 128) {
                 px.push(srgb8(c));
             }
             px.push(255);
@@ -857,8 +859,9 @@ fn headless_gpu_detail_plane_offset_and_downsample() {
     eprintln!("offset GPU Detail plane/commit max={max_error}/255");
     assert!(max_error <= 2, "offset plane max error {max_error}/255");
 
-    // Zoomed out: one texel per 2×2 block, Detail at preview scale 2 — the
-    // CPU fast chain at the same scale, upsampled like the shader samples it.
+    // Zoomed out: one texel per 2×2 block — the average of its (uniform)
+    // pixels — and Detail at preview scale 2: the CPU fast chain on one pixel
+    // per block, upsampled like the shader samples it.
     let ds = 2u32;
     compositor.develop_preview = Some(preview(DevelopDetailGpu {
         origin_x: 0,
@@ -881,7 +884,7 @@ fn headless_gpu_detail_plane_offset_and_downsample() {
         width,
         height,
         ds as usize,
-        true,
+        false,
     );
     let (_, plane) = iai::core::develop_scene::identity_fast_region_develop(
         &base, &tone, &settings, None, pw, ph, 0, 0, width, height, ds,
@@ -1278,5 +1281,221 @@ fn headless_gpu_local_masks_match_commit() {
                 if raw { "RAW" } else { "JPEG" }
             );
         }
+    }
+}
+
+/// Linear-light test value with pixel-scale contrast: a noisy mid-grey with
+/// dark and bright specks, the texture a zoomed-out view must not alias.
+fn speckled_rgb(x: u32, y: u32) -> [f32; 3] {
+    let h = hash01(x, y);
+    let base = if h < 0.3 {
+        0.012
+    } else if h > 0.8 {
+        0.62
+    } else {
+        0.09 + 0.1 * h
+    };
+    [
+        base * (0.9 + 0.2 * hash01(x + 11, y)),
+        base,
+        base * (0.85 + 0.3 * hash01(x, y + 7)),
+    ]
+}
+
+/// Mean of channel `c` over the grid pixels `xs × ys` of an RGBA8 image.
+fn grid_mean(img: &[u8], width: u32, xs: &[u32], ys: &[u32], c: usize) -> f32 {
+    let mut sum = 0.0;
+    for &y in ys {
+        for &x in xs {
+            sum += img[((y * width + x) * 4) as usize + c] as f32;
+        }
+    }
+    sum / (xs.len() * ys.len()) as f32
+}
+
+/// Zoomed out, a screen pixel averages its display grid of real pixels (the
+/// whole 2×2 block at 50 %) instead of point-sampling one — for a plain layer, and for the
+/// Develop preview, which must then equal the same grid of its commit.
+#[test]
+fn headless_zoomed_out_display_averages_the_pixel_grid() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("headless GPU pixel parity is a local real-GPU test; skipped on CI");
+        return;
+    }
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no headless GPU adapter; skipped");
+        return;
+    };
+    let (width, height) = (256u32, 128u32);
+    let mut scene = SceneSource::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let rgb = speckled_rgb(x, y);
+            scene.set_rgb(x, y, scene.color_pipeline.working.from_linear_srgb(rgb));
+        }
+    }
+    let scene = Arc::new(scene);
+    let neutral8: Vec<u8> = render_default_look(&scene)
+        .iter()
+        .map(|v| (v >> 8) as u8)
+        .collect();
+    let mut stack = LayerStack::new(width, height);
+    stack.layers[0] = Layer::from_rgba(0, "Background", neutral8, width, height);
+    let layer_px = stack.layers[0].tiles.flatten();
+    let max_texture = device.limits().max_texture_dimension_2d;
+    let (vw, vh) = (width / 2, height / 2);
+    let mut compositor = CompositorState::new(&device, vw, vh, max_texture);
+    // At 50 % screen pixel (sx, sy) covers layer px [2sx, 2sx + 2): its grid
+    // is the whole 2×2 block.
+    let check = |gpu: &[u8], reference: &[u8], label: &str| {
+        let mut max_error = 0.0f32;
+        for sy in 0..vh {
+            for sx in 0..vw {
+                let xs = [2 * sx, 2 * sx + 1];
+                let ys = [2 * sy, 2 * sy + 1];
+                for c in 0..3 {
+                    let expected = grid_mean(reference, width, &xs, &ys, c);
+                    let got = gpu[((sy * vw + sx) * 4) as usize + c] as f32;
+                    max_error = max_error.max((got - expected).abs());
+                }
+            }
+        }
+        eprintln!("zoomed-out {label}/grid mean max={max_error:.2}/255");
+        assert!(
+            max_error <= 2.0,
+            "zoomed-out {label} max error {max_error}/255"
+        );
+    };
+
+    let is_ping =
+        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 0.5, None, false, false);
+    check(
+        &compositor.readback_rgba8(&device, &queue, is_ping),
+        &layer_px,
+        "layer",
+    );
+
+    let settings = DevelopSettings {
+        exposure: 15.0,
+        contrast: 20.0,
+        saturation: 25.0,
+        ..Default::default()
+    };
+    let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+    compositor.develop_preview = Some(DevelopGpuPreview {
+        layer_id: 0,
+        settings,
+        region_luma: None,
+        color: None,
+        scene: Some(scene),
+        detail: None,
+    });
+    let is_ping =
+        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 0.5, None, false, false);
+    check(
+        &compositor.readback_rgba8(&device, &queue, is_ping),
+        &committed,
+        "Develop preview",
+    );
+}
+
+/// A zoomed-out Detail plane texel stands for its block the way the display
+/// shows the committed block: the chain runs on each grid pixel and the
+/// results are averaged — never the other way round, which brightened fine
+/// light/dark texture (hair, feathers) far past the commit.
+#[test]
+fn headless_zoomed_out_plane_averages_committed_pixels() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("headless GPU pixel parity is a local real-GPU test; skipped on CI");
+        return;
+    }
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no headless GPU adapter; skipped");
+        return;
+    };
+    // Texture periodic with the 6 px plane block, so every texel is equal and
+    // the upsampled plane reads that one value everywhere.
+    let (width, height, ds) = (96u32, 48u32, 6u32);
+    let block = |x: u32, y: u32| speckled_rgb(x % ds, y % ds);
+    let max_texture = device.limits().max_texture_dimension_2d;
+    for raw in [false, true] {
+        let scene = if raw {
+            let mut scene = SceneSource::new(width, height);
+            for y in 0..height {
+                for x in 0..width {
+                    let rgb = block(x, y);
+                    scene.set_rgb(x, y, scene.color_pipeline.working.from_linear_srgb(rgb));
+                }
+            }
+            scene
+        } else {
+            let mut px = Vec::with_capacity((width * height * 4) as usize);
+            for y in 0..height {
+                for x in 0..width {
+                    for c in block(x, y) {
+                        px.push(srgb8(c));
+                    }
+                    px.push(255);
+                }
+            }
+            SceneSource::from_display_tiles(&iai::core::tile::TileMap::from_rgba(
+                &px, width, height,
+            ))
+        };
+        let scene = Arc::new(scene);
+        let neutral8: Vec<u8> = render_default_look(&scene)
+            .iter()
+            .map(|v| (v >> 8) as u8)
+            .collect();
+        let mut stack = LayerStack::new(width, height);
+        stack.layers[0] = Layer::from_rgba(0, "Background", neutral8, width, height);
+        let settings = DevelopSettings {
+            exposure: 10.0,
+            ..Default::default()
+        };
+        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+        let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
+        let mut compositor = CompositorState::new(&device, width, height, max_texture);
+        compositor.develop_preview = Some(DevelopGpuPreview {
+            layer_id: 0,
+            settings,
+            region_luma: None,
+            color: None,
+            scene: Some(scene),
+            detail: Some(DevelopDetailGpu {
+                origin_x: 0,
+                origin_y: 0,
+                end_x: width,
+                end_y: height,
+                downsample: ds,
+                linear: raw,
+                luma_coeff: if raw {
+                    tone.working_space.render_luminance_coefficients()
+                } else {
+                    [0.2126, 0.7152, 0.0722]
+                },
+                run_detail: false,
+            }),
+        });
+        let is_ping =
+            compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+        let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
+        // A 6 px block's grid: 3 taps per axis at offsets 1, 3, 5.
+        let taps = [1, 3, 5];
+        let mut max_error = 0.0f32;
+        for c in 0..3 {
+            let expected = grid_mean(&committed, width, &taps, &taps, c);
+            for p in gpu.chunks_exact(4) {
+                max_error = max_error.max((p[c] as f32 - expected).abs());
+            }
+        }
+        eprintln!(
+            "{} zoomed-out plane/commit grid max={max_error:.2}/255",
+            if raw { "RAW " } else { "JPEG" }
+        );
+        assert!(
+            max_error <= 2.0,
+            "zoomed-out plane max error {max_error}/255"
+        );
     }
 }

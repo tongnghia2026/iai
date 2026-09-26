@@ -896,6 +896,8 @@ struct DevDetailState {
     /// Inputs of the plane currently in `dev_adjusted_rgb_buf`; an identical
     /// request (a recomposite for another reason) reuses it without GPU work.
     done: Option<DevelopGpuPreview>,
+    /// Display-grid cap the plane, colour field and base were built with.
+    grid_taps: u32,
 }
 
 impl DevDetailState {
@@ -955,6 +957,7 @@ impl DevDetailState {
             plane_base: 0,
             color_params: None,
             done: None,
+            grid_taps: 0,
         }
     }
 
@@ -1048,6 +1051,10 @@ fn effects_base_grid(
 /// in compositor.wgsl.
 const DEV_LOCALS_AT: usize = 256;
 const DEV_LOCAL_STRIDE: usize = 544;
+
+/// Parameter-bank slot (`dev_param`) of the Develop display-grid cap; mirrored
+/// by `dev_grid_taps` in compositor.wgsl.
+const DEV_GRID_TAPS_SLOT: usize = 280;
 
 /// The preview's local masks for the shader: count, then per mask its shape,
 /// Saturation and tone — the legacy tone table for an Identity scene
@@ -1422,6 +1429,10 @@ pub struct CompositorState {
     /// the view transform is baked in (zoom/pan recomposites) — large/streaming
     /// canvases. The App sizes the viewport + sets this via `sync_compositor_viewport`.
     pub canvas_space: bool,
+    /// Cap on the zoomed-out display grid (taps per axis) for the Develop
+    /// layer and its Detail plane: 1 while the App drags a slider or the view
+    /// (a one-sample draft), 3 at rest.
+    pub develop_grid_taps: u32,
 
     /// Backdrop cache ("below-active projection", à la Photoshop). Holds the
     /// accumulated composite of the visible layers *below* the active layer so a
@@ -2025,6 +2036,7 @@ struct VsOut {
             preview_adj: None,
             preview_filter: None,
             canvas_space: false,
+            develop_grid_taps: 3,
             backdrop_texture,
             backdrop_valid: false,
             backdrop_boundary: 0,
@@ -2647,6 +2659,12 @@ struct VsOut {
             return false;
         };
         let (pw, ph) = req.plane_size();
+        if state.grid_taps != self.develop_grid_taps {
+            state.grid_taps = self.develop_grid_taps;
+            state.done = None;
+            state.field = None;
+            state.base_key = None;
+        }
         // RAW colours inside the scene chain (per pixel or guided planes); a
         // display-domain colour proxy would land after its Detail boundary.
         let raw_display_colour =
@@ -2715,6 +2733,7 @@ struct VsOut {
         );
         let mut adj_lut = [0.0f32; 768];
         adj_lut[..256].copy_from_slice(&lut);
+        adj_lut[DEV_GRID_TAPS_SLOT] = self.develop_grid_taps as f32;
         if let Some((s, phase_x, phase_y, _, _)) = cells {
             adj_lut[268] = s as f32;
             adj_lut[269] = phase_x as f32;
@@ -4840,6 +4859,7 @@ struct VsOut {
                 if let Some(preview) = &self.develop_preview {
                     if preview.layer_id == layer.id {
                         adj_kind = 20;
+                        adj_lut[DEV_GRID_TAPS_SLOT] = self.develop_grid_taps as f32;
                         if let (Some(scene), true) = (&preview.scene, self.dev_scene_key != 0) {
                             let (p, lut) = develop_scene_to_gpu(
                                 &preview.settings,

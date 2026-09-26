@@ -40,6 +40,7 @@ pub use self::settings::{
 };
 pub use self::spatial::{
     apply_color_to_region, fast_preview_downsample, guided_mixer_active, guided_mixer_controls,
+    guided_mixer_controls_scaled,
 };
 
 pub const MIXER_BANDS: usize = 8;

@@ -722,6 +722,19 @@ pub fn guided_mixer_controls(
     pw: usize,
     ph: usize,
 ) -> Option<Vec<[f32; 3]>> {
+    guided_mixer_controls_scaled(samples, settings, pw, ph, 1)
+}
+
+/// [`guided_mixer_controls`] on samples that each stand for `scale`×`scale`
+/// source pixels (a live preview proxy): the guided radii shrink with the
+/// grid so the controls reach as far across the image as the commit's.
+pub fn guided_mixer_controls_scaled(
+    samples: &[[f32; 3]],
+    settings: &DevelopSettings,
+    pw: usize,
+    ph: usize,
+    scale: usize,
+) -> Option<Vec<[f32; 3]>> {
     if !guided_mixer_active(settings) || pw <= 1 || ph <= 1 || samples.len() != pw * ph {
         return None;
     }
@@ -747,16 +760,17 @@ pub fn guided_mixer_controls(
     let sat: Vec<f32> = controls.iter().map(|c| c[1]).collect();
     let lum: Vec<f32> = controls.iter().map(|c| c[2]).collect();
     // Hue/Saturation follow small colour regions; Luminance deliberately
-    // sees a broader lighting neighbourhood. Radii are clamped for tiny
-    // test/preview grids and are independent of the source RGB blur.
-    let short_r = 4usize
-        .min(pw.saturating_sub(1))
-        .min(ph.saturating_sub(1))
-        .max(1);
-    let long_r = 12usize
-        .min(pw.saturating_sub(1))
-        .min(ph.saturating_sub(1))
-        .max(1);
+    // sees a broader lighting neighbourhood. Radii are in source pixels,
+    // clamped for tiny test/preview grids and independent of the source RGB
+    // blur.
+    let radius = |source_px: f32| {
+        ((source_px / scale.max(1) as f32).round() as usize)
+            .min(pw.saturating_sub(1))
+            .min(ph.saturating_sub(1))
+            .max(1)
+    };
+    let short_r = radius(4.0);
+    let long_r = radius(12.0);
     let hue = guided_filter_plane(&guide, &hue, pw, ph, short_r, 0.0025);
     let sat = guided_filter_plane(&guide, &sat, pw, ph, short_r, 0.0025);
     let lum = guided_filter_plane(&guide, &lum, pw, ph, long_r, 0.0025);

@@ -841,6 +841,9 @@ pub struct DevelopPreviewState {
     pub detail_refine_at: Option<std::time::Instant>,
     pub detail_refine_waiting_for_release: bool,
     pub detail_refine_settings: Option<crate::core::develop::DevelopSettings>,
+    /// A slider moved while the pointer is held: the zoomed-out preview
+    /// renders its one-sample draft until release (see `develop_grid_taps`).
+    pub drag_draft: bool,
 }
 
 pub struct DevelopPreviewResult {
@@ -1628,6 +1631,8 @@ impl App {
                 develop_pan_drag: None,
                 develop_tool: crate::app::develop_shell::DevelopTool::default(),
                 develop_composited_view: None,
+                develop_composited_taps: 0,
+                develop_view_moved_at: None,
                 develop_detail_view: None,
                 develop_preview: None,
                 develop_histogram: None,

@@ -2014,8 +2014,26 @@ fn dev_detail_output(lx: f32, ly: f32) -> vec3<f32> {
     let a10 = vec3<f32>(dev_adjusted_rgb[i10], dev_adjusted_rgb[i10 + 1u], dev_adjusted_rgb[i10 + 2u]);
     let a01 = vec3<f32>(dev_adjusted_rgb[i01], dev_adjusted_rgb[i01 + 1u], dev_adjusted_rgb[i01 + 2u]);
     let a11 = vec3<f32>(dev_adjusted_rgb[i11], dev_adjusted_rgb[i11 + 1u], dev_adjusted_rgb[i11 + 2u]);
-    let v = mix(mix(a00, a10, wx), mix(a01, a11, wx), wy);
-    if (dev_param(264u) > 0.5) {
+    let raw = dev_param(264u) > 0.5;
+    var v = mix(mix(a00, a10, wx), mix(a01, a11, wx), wy);
+    if (s > 1.0) {
+        if (s <= 1.0 / max(u.zoom, 1e-6) + 0.01) {
+            // A zoomed-out texel no larger than a screen pixel: take the texel
+            // under the sample; the display grid averages them like pixels.
+            let ix = u32(clamp(floor(fx + 0.5), 0.0, f32(pw - 1u)));
+            let iy = u32(clamp(floor(fy + 0.5), 0.0, f32(ph - 1u)));
+            let i = base + (iy * pw + ix) * 3u;
+            v = vec3<f32>(dev_adjusted_rgb[i], dev_adjusted_rgb[i + 1u], dev_adjusted_rgb[i + 2u]);
+        } else if (raw) {
+            // A coarser RAW plane blends in the display encoding, like pixels.
+            v = dev_working_decode(mix(
+                mix(dev_working_encode(a00), dev_working_encode(a10), wx),
+                mix(dev_working_encode(a01), dev_working_encode(a11), wx),
+                wy,
+            ));
+        }
+    }
+    if (raw) {
         // RAW masks follow Detail in the commit.
         let size = vec2<f32>(dev_param(266u), dev_param(267u));
         var g = dev_scene_output(dev_apply_locals_working(v, vec2<f32>(lx, ly) - 0.5, size));
@@ -2035,28 +2053,64 @@ fn dev_detail_output(lx: f32, ly: f32) -> vec3<f32> {
 // evaluating the chain the commit feeds into Detail — display RGB for an
 // Identity scene, working RGB (dev_param(264) == 1) for RAW. Texel (i, j) covers
 // the layer block [origin + (i, j)·s, +s) clipped to the region end; s > 1
-// averages the same five taps as `build_scene_fast_base`. Uniform reuse:
-// offset = plane origin, view_offset = region end (exclusive), zoom = s.
+// runs the chain on the block's display grid (`dev_plane_tap`) and averages
+// the results the way the zoomed-out display averages the committed pixels.
+// Uniform reuse: offset = plane origin, view_offset = region end
+// (exclusive), zoom = s.
 @fragment
 fn fs_develop_prepass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let t = dev_plane_texel(u32(pos.x), u32(pos.y));
+    let b = dev_plane_block(u32(pos.x), u32(pos.y));
+    let taps = b.n * b.n;
     var v: vec3<f32>;
     if (dev_param(264u) > 0.5) {
-        v = dev_scene_working(t.rgb, t.local);
-        if (dev_effects_any()) {
-            // RAW Effects run on the working pixel before Detail; the base is
-            // the guided working luminance of this texel (bank [271] == 2).
-            var base = 0.0;
-            if (dev_param(271u) > 1.5 && dev_param(271u) < 2.5) {
-                let pw = u32(dev_param(258u));
-                base = dev_region_luma[u32(dev_param(272u)) + u32(pos.y) * pw + u32(pos.x)];
+        // RAW Effects run on the working pixel before Detail; the base is
+        // the guided working luminance of this texel (bank [271] == 2).
+        var base = 0.0;
+        if (dev_param(271u) > 1.5 && dev_param(271u) < 2.5) {
+            let pw = u32(dev_param(258u));
+            base = dev_region_luma[u32(dev_param(272u)) + u32(pos.y) * pw + u32(pos.x)];
+        }
+        let effects = dev_effects_any();
+        if (taps == 1u) {
+            let t = dev_plane_tap(b, 0u);
+            v = dev_scene_working(t.rgb, t.local);
+            if (effects) {
+                v = dev_effects_linear(v, t.local, base);
             }
-            v = dev_effects_linear(v, t.local, base);
+        } else {
+            var acc = vec3<f32>(0.0);
+            for (var k = 0u; k < taps; k = k + 1u) {
+                let t = dev_plane_tap(b, k);
+                var w = dev_scene_working(t.rgb, t.local);
+                if (effects) {
+                    w = dev_effects_linear(w, t.local, base);
+                }
+                acc = acc + dev_working_encode(w);
+            }
+            v = dev_working_decode(acc / f32(taps));
         }
     } else {
-        v = dev_develop_finish(dev_scene_display(t.rgb, t.local), t.local);
+        var acc = vec3<f32>(0.0);
+        for (var k = 0u; k < taps; k = k + 1u) {
+            let t = dev_plane_tap(b, k);
+            acc = acc + dev_develop_finish(dev_scene_display(t.rgb, t.local), t.local);
+        }
+        v = acc / f32(taps);
     }
     return vec4<f32>(v, 1.0);
+}
+
+// A working pixel as the display receives it — clipped into the output gamut
+// like `dev_scene_output`, then sRGB encoded — and its inverse: the domain the
+// zoomed-out display averages the committed pixels in, so a RAW plane block
+// averages like them (a highlight past white counts as white, not brighter).
+fn dev_working_encode(w: vec3<f32>) -> vec3<f32> {
+    let l = dev_gamut_clip_chroma(dev_filmlike_clip(dev_working_to_linear_srgb(w)));
+    return dev_linear_to_srgb(clamp(l, vec3(0.0), vec3(1.0)));
+}
+
+fn dev_working_decode(e: vec3<f32>) -> vec3<f32> {
+    return dev_linear_srgb_to_working(dev_srgb_to_linear(e));
 }
 
 struct DevPlaneTexel {
@@ -2064,38 +2118,37 @@ struct DevPlaneTexel {
     local: vec2<f32>,
 };
 
-// Scene value and representative position of Detail-plane texel (i, j).
-fn dev_plane_texel(i: u32, j: u32) -> DevPlaneTexel {
+// Layer block of Detail-plane texel (i, j) and its n×n sampling grid.
+struct DevPlaneBlock {
+    x0: u32,
+    y0: u32,
+    span_x: u32,
+    span_y: u32,
+    n: u32,
+};
+
+fn dev_plane_block(i: u32, j: u32) -> DevPlaneBlock {
     let s = max(u32(u.zoom), 1u);
     let lw = u32(u.layer_w);
     let lh = u32(u.layer_h);
     let ex = min(u32(u.view_offset_x), lw);
     let ey = min(u32(u.view_offset_y), lh);
-    let bx0 = u32(u.offset_x) + i * s;
-    let by0 = u32(u.offset_y) + j * s;
-    let span_x = max(min(bx0 + s, ex), bx0 + 1u) - bx0;
-    let span_y = max(min(by0 + s, ey), by0 + 1u) - by0;
+    var b: DevPlaneBlock;
+    b.x0 = u32(u.offset_x) + i * s;
+    b.y0 = u32(u.offset_y) + j * s;
+    b.span_x = max(min(b.x0 + s, ex), b.x0 + 1u) - b.x0;
+    b.span_y = max(min(b.y0 + s, ey), b.y0 + 1u) - b.y0;
+    b.n = dev_grid_taps(f32(s));
+    return b;
+}
+
+// Scene value and position of grid tap k (row-major) of block `b`.
+fn dev_plane_tap(b: DevPlaneBlock, k: u32) -> DevPlaneTexel {
+    let x = b.x0 + zoom_tap(k % b.n, b.n, f32(b.span_x));
+    let y = b.y0 + zoom_tap(k / b.n, b.n, f32(b.span_y));
     var out: DevPlaneTexel;
-    if (s == 1u) {
-        out.rgb = textureLoad(dev_scene_tex, vec2<i32>(i32(bx0), i32(by0)), 0).rgb;
-    } else {
-        let xa = i32(bx0);
-        let xb = i32(bx0 + span_x - 1u);
-        let ya = i32(by0);
-        let yb = i32(by0 + span_y - 1u);
-        let xc = i32(bx0 + (span_x - 1u) / 2u);
-        let yc = i32(by0 + (span_y - 1u) / 2u);
-        out.rgb = (textureLoad(dev_scene_tex, vec2<i32>(xa, ya), 0).rgb
-            + textureLoad(dev_scene_tex, vec2<i32>(xb, ya), 0).rgb
-            + textureLoad(dev_scene_tex, vec2<i32>(xa, yb), 0).rgb
-            + textureLoad(dev_scene_tex, vec2<i32>(xb, yb), 0).rgb
-            + textureLoad(dev_scene_tex, vec2<i32>(xc, yc), 0).rgb) / 5.0;
-    }
-    // Position-dependent stages read the block's representative pixel, like
-    // the CPU fast chain's `source_xy`.
-    let cx = min(bx0 + s / 2u, lw - 1u);
-    let cy = min(by0 + s / 2u, lh - 1u);
-    out.local = (vec2<f32>(f32(cx), f32(cy)) + 0.5) / vec2<f32>(u.layer_w, u.layer_h);
+    out.rgb = textureLoad(dev_scene_tex, vec2<i32>(i32(x), i32(y)), 0).rgb;
+    out.local = (vec2<f32>(f32(x), f32(y)) + 0.5) / vec2<f32>(u.layer_w, u.layer_h);
     return out;
 }
 
@@ -2104,22 +2157,33 @@ fn dev_plane_texel(i: u32, j: u32) -> DevPlaneTexel {
 // Identity: the toned, pre-colour display luminance pooled over the cell's
 // pixels [origin + (i, j)·cell, +cell) ∩ [origin, end) — read edge-clamped,
 // like the CPU base windows — (1), or of each plane texel when zoomed out
-// (3). The guided low-pass runs next.
+// (3). A plane texel pools its grid taps. The guided low-pass runs next.
 @fragment
 fn fs_develop_base_luma(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let i = u32(pos.x);
     let j = u32(pos.y);
     let kind = dev_param(271u);
     if (kind > 1.5 && kind < 2.5) {
-        let t = dev_plane_texel(i, j);
-        let w = dev_scene_working(t.rgb, t.local);
-        return vec4<f32>(max(dev_working_luma(w), 0.0), 0.0, 0.0, 1.0);
+        let b = dev_plane_block(i, j);
+        let taps = b.n * b.n;
+        var acc = 0.0;
+        for (var k = 0u; k < taps; k = k + 1u) {
+            let t = dev_plane_tap(b, k);
+            acc = acc + max(dev_working_luma(dev_scene_working(t.rgb, t.local)), 0.0);
+        }
+        return vec4<f32>(acc / f32(taps), 0.0, 0.0, 1.0);
     }
     let cell = i32(dev_param(275u));
     if (kind > 2.5) {
-        let t = dev_plane_texel(i, j);
-        let toned = dev_final_curves(dev_scene_display(t.rgb, t.local));
-        return vec4<f32>(clamp(dev_luma(toned), 0.0, 1.0), 0.0, 0.0, 1.0);
+        let b = dev_plane_block(i, j);
+        let taps = b.n * b.n;
+        var acc = 0.0;
+        for (var k = 0u; k < taps; k = k + 1u) {
+            let t = dev_plane_tap(b, k);
+            let toned = dev_final_curves(dev_scene_display(t.rgb, t.local));
+            acc = acc + clamp(dev_luma(toned), 0.0, 1.0);
+        }
+        return vec4<f32>(acc / f32(taps), 0.0, 0.0, 1.0);
     }
     let lw = i32(u.layer_w);
     let lh = i32(u.layer_h);
@@ -2164,12 +2228,83 @@ fn fs_develop_cells(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32>
     var n = 0.0;
     for (var ty = y0; ty < y1; ty = ty + 1u) {
         for (var tx = x0; tx < x1; tx = tx + 1u) {
-            let t = dev_plane_texel(tx, ty);
-            acc = acc + dev_final_curves(dev_scene_display(t.rgb, t.local));
+            let b = dev_plane_block(tx, ty);
+            let taps = b.n * b.n;
+            var texel = vec3<f32>(0.0);
+            for (var k = 0u; k < taps; k = k + 1u) {
+                let t = dev_plane_tap(b, k);
+                texel = texel + dev_final_curves(dev_scene_display(t.rgb, t.local));
+            }
+            acc = acc + texel / f32(taps);
             n = n + 1.0;
         }
     }
     return vec4<f32>(acc / max(n, 1.0), 1.0);
+}
+
+// ── Zoomed-out display grid ──────────────────────────────────────────────────
+// A screen pixel (or Detail-plane texel) covering `footprint` layer px averages
+// an n×n stratified grid of real pixels instead of point-sampling one, so noise
+// and fine texture do not alias. The display, the Develop preview and its
+// Detail plane share the grid, so a zoomed-out preview shows exactly what the
+// committed pixels will show.
+fn zoom_taps_per_axis(footprint: f32) -> u32 {
+    return clamp(u32(footprint * 0.5 + 1.0), 1u, 3u);
+}
+
+// The Develop layer's grid, capped by the App's draft setting (bank slot 280:
+// 1 while a slider or the view is dragged, 3 at rest).
+fn dev_grid_taps(footprint: f32) -> u32 {
+    let cap = u32(dev_param(280u));
+    return max(min(zoom_taps_per_axis(footprint), cap), 1u);
+}
+
+// Pixel offset of grid tap k of n across a span of `span` pixels.
+fn zoom_tap(k: u32, n: u32, span: f32) -> u32 {
+    return u32(floor((f32(k) + 0.5) * span / f32(n)));
+}
+
+// One layer pixel of the untransformed path as the display sees it: sRGB after
+// the layer's live Develop / adjustment preview, and its coverage (alpha ×
+// mask). An absent tile is transparent.
+fn layer_texel_srgb(ix: i32, iy: i32) -> vec4<f32> {
+    let ux = u32(ix);
+    let uy = u32(iy);
+    let tx = ux / 256u;
+    let ty = uy / 256u;
+    if (tx >= u.layer_tiles_w || ty >= u.layer_tiles_h) {
+        return vec4<f32>(0.0);
+    }
+    let slot = tile_map[ty * u.layer_tiles_w + tx];
+    if (slot < 0) {
+        return vec4<f32>(0.0);
+    }
+    let c = textureLoad(
+        atlas_tex,
+        vec2<i32>(
+            i32(u32(slot & 0xFFFF) * 256u + ux % 256u),
+            i32(u32(slot >> 16u) * 256u + uy % 256u),
+        ),
+        0,
+    );
+    var m = 1.0;
+    if (clip_is_child()) {
+        let sh = clip_shift();
+        m = clip_mask_at(ix + sh.x, iy + sh.y, u.layer_w, u.layer_h);
+    } else {
+        m = sample_mask_nearest_i(ix, iy);
+    }
+    var srgb = dev_linear_to_srgb(c.rgb);
+    if (u.adj_kind == 20u) {
+        let local = vec2<f32>(
+            (f32(ix) + 0.5) / max(u.layer_w, 1.0),
+            (f32(iy) + 0.5) / max(u.layer_h, 1.0),
+        );
+        srgb = develop_apply(srgb, local);
+    } else if (u.adj_kind >= 1u && u.adj_kind <= 13u) {
+        srgb = apply_adjustment(srgb);
+    }
+    return vec4<f32>(srgb, c.a * m);
 }
 
 // Bayer-8 threshold (0..1), identical matrix to the CPU `bayer8` so the GPU
@@ -2593,6 +2728,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var dev_local: vec2<f32> = vec2<f32>(0.5, 0.5);
     var filter_lx: f32 = 0.0;
     var filter_ly: f32 = 0.0;
+    var supersampled = false;
 
     if (u.xform_active == 2u) {
         // Free Transform uses a full inverse homography. The existing twelve
@@ -2705,9 +2841,46 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         filter_lx = layer_x;
         filter_ly = layer_y;
+
+        // Zoomed out: average the display grid of real pixels (see
+        // `zoom_taps_per_axis`). Filter previews keep their own sampling.
+        let footprint = 1.0 / max(u.zoom, 1e-6);
+        var n = zoom_taps_per_axis(footprint);
+        if (u.adj_kind == 20u) {
+            n = dev_grid_taps(footprint);
+        }
+        if (n > 1u && !(u.adj_kind >= 30u && u.adj_kind <= 35u)) {
+            let x0 = layer_x - 0.5 * footprint;
+            let y0 = layer_y - 0.5 * footprint;
+            let max_x = i32(u.layer_w) - 1;
+            let max_y = i32(u.layer_h) - 1;
+            var acc = vec3<f32>(0.0);
+            var cov = 0.0;
+            for (var ky = 0u; ky < n; ky = ky + 1u) {
+                let iy = clamp(i32(floor(y0 + (f32(ky) + 0.5) * footprint / f32(n))), 0, max_y);
+                for (var kx = 0u; kx < n; kx = kx + 1u) {
+                    let ix = clamp(i32(floor(x0 + (f32(kx) + 0.5) * footprint / f32(n))), 0, max_x);
+                    let t = layer_texel_srgb(ix, iy);
+                    acc = acc + t.rgb * t.a;
+                    cov = cov + t.a;
+                }
+            }
+            if (cov <= 0.00001) {
+                return dst;
+            }
+            var srgb = acc / cov;
+            if (u.adj_kind == 20u) {
+                srgb = dev_dither_srgb(srgb, in.pos.xy);
+            }
+            src = vec4<f32>(dev_srgb_to_linear(srgb), cov / f32(n * n));
+            mask_a = 1.0;
+            supersampled = true;
+        }
     }
 
-    if (u.adj_kind == 20u) {
+    // A supersampled pixel was adjusted per grid pixel above.
+    if (supersampled) {
+    } else if (u.adj_kind == 20u) {
         let srgb = dev_linear_to_srgb(src.rgb);
         let cr = develop_apply(srgb, dev_local);
         src = vec4<f32>(dev_srgb_to_linear(dev_dither_srgb(cr, in.pos.xy)), src.a);

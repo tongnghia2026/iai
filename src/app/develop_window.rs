@@ -1139,7 +1139,26 @@ impl App {
             .map_or(false, |g| !g.compositor.canvas_space);
         if mode_b {
             self.develop_resolve_fit();
-            if self.develop_view_key() != self.dev.develop_composited_view {
+            let view_moved = self.develop_view_key() != self.dev.develop_composited_view;
+            if view_moved {
+                self.dev.develop_view_moved_at = Some(std::time::Instant::now());
+            }
+            // A zoomed-out preview drafts while it is dragged and renders its
+            // full display grid once it rests (`develop_grid_taps`).
+            let grid_changed = self
+                .dev
+                .develop_preview
+                .as_ref()
+                .is_some_and(|p| p.gpu_preview_active)
+                && self.develop_grid_taps() != self.dev.develop_composited_taps;
+            if self
+                .dev
+                .develop_view_moved_at
+                .is_some_and(|t| t.elapsed() < crate::app::develop_shell::DEVELOP_VIEW_SETTLE)
+            {
+                window.request_redraw();
+            }
+            if view_moved || grid_changed {
                 // Throttle to the measured composite cost: pan/zoom events can
                 // arrive faster than a 45MP viewport composite of the Develop
                 // chain. A skipped frame keeps blitting the last baked view and
