@@ -709,6 +709,7 @@ fn perf_gpu_detail_drag() {
                     } else {
                         [0.2126, 0.7152, 0.0722]
                     },
+                    run_detail: true,
                 });
                 compositor.develop_preview = Some(DevelopGpuPreview {
                     layer_id: 0,

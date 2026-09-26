@@ -724,8 +724,10 @@ fn dev_region_luma_at(lx: f32, ly: f32) -> f32 {
     let pw = (u32(u.layer_w) + su - 1u) / su;
     let ph = (u32(u.layer_h) + su - 1u) / su;
     if (pw == 0u || ph == 0u) { return 0.0; }
-    let fx = clamp((lx + 0.5) / s - 0.5, 0.0, f32(pw - 1u));
-    let fy = clamp((ly + 0.5) / s - 0.5, 0.0, f32(ph - 1u));
+    // (lx, ly) is the pixel centre (x + 0.5): plane texel t is centred at
+    // (t + 0.5)·s, as the CPU samples it.
+    let fx = clamp(lx / s - 0.5, 0.0, f32(pw - 1u));
+    let fy = clamp(ly / s - 0.5, 0.0, f32(ph - 1u));
     let x0 = u32(floor(fx));
     let y0 = u32(floor(fy));
     let x1 = min(x0 + 1u, pw - 1u);
@@ -1064,10 +1066,42 @@ fn dev_scale_linear_chroma(c: vec3<f32>, factor: f32) -> vec3<f32> {
     return vec3<f32>(y) + d * (1.0 + req);
 }
 
+// Hard-clamped (raster) twin of dev_scale_linear_chroma: a positive push is
+// tanh-compressed into the pixel's sRGB-hull headroom instead of leaving the
+// gamut to an output boundary. CPU twin: scale_linear_chroma_around_luma with
+// boundary_managed = false.
+fn dev_scale_linear_chroma_hull(c: vec3<f32>, factor: f32) -> vec3<f32> {
+    let y = clamp(dev_working_luma(c), 0.0, 1.0);
+    let protect = dev_smootherstep(0.0027, 0.0174, y)
+        * (1.0 - dev_smootherstep(0.7874, 0.9774, y));
+    let req = (clamp(factor, 0.0, 3.20) - 1.0) * protect;
+    let d = c - vec3<f32>(y);
+    var scale = 1.0 + req;
+    if (req > 0.0) {
+        let room = dev_chroma_headroom(d, y);
+        scale = select(1.0, 1.0 + room * tanh(req / room), room > 1e-4);
+    }
+    return vec3<f32>(y) + d * scale;
+}
+
 // Full RAW colour stage on the unclamped linear working pixel. V2 classifies
 // and edits the same working-space OKLab value; Legacy keeps display-referred
 // UCS/HSV band semantics.
 fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>, guided: vec3<f32>, use_guided: bool) -> vec3<f32> {
+    return dev_color_linear(input, classification, guided, use_guided, true);
+}
+
+// Per-pixel display-domain colour transform of an Identity pixel (display
+// RGB in, display RGB out). CPU twin: `apply_color` (linear sRGB, clamped).
+fn dev_display_direct_color(toned: vec3<f32>) -> vec3<f32> {
+    let t = clamp(toned, vec3(0.0), vec3(1.0));
+    let c = dev_color_linear(dev_srgb_to_linear(t), t, vec3<f32>(0.0), false, false);
+    return clamp(dev_linear_to_srgb(c), vec3(0.0), vec3(1.0));
+}
+
+// `boundary_managed`: the result passes the scene output boundary (RAW), so a
+// positive saturation push may leave the hull; otherwise it is hull-clamped.
+fn dev_color_linear(input: vec3<f32>, classification: vec3<f32>, guided: vec3<f32>, use_guided: bool, boundary_managed: bool) -> vec3<f32> {
     var c = input;
     let display = classification;
     let working_lab = dev_working_to_oklab(c);
@@ -1139,7 +1173,11 @@ fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>, guided: vec3<f32
         factor = 1.0 + delta * (1.50 + mixer_share * 0.70);
     }
     if (abs(factor - 1.0) > 0.001) {
-        c = dev_scale_linear_chroma(c, factor);
+        if (boundary_managed) {
+            c = dev_scale_linear_chroma(c, factor);
+        } else {
+            c = dev_scale_linear_chroma_hull(c, factor);
+        }
     }
 
     let lum_delta = dev_eased(lum_ctl);
@@ -1324,13 +1362,10 @@ fn dev_color_proxy_at(lx: f32, ly: f32) -> CrColorProxy {
     }
     let origin = vec2<f32>(u.adj_p[1].z, u.adj_p[1].w);
     let s = max(u.adj_p[2].y, 1.0);
-    // Reduced proxies are indexed from source-pixel coordinates as before.
-    // The native Detail plane instead follows texture pixel-centre semantics:
-    // the first layer fragment arrives at lx=0.5 and must select texel 0,
-    // rather than interpolate texels 0/1 and soften the exact result.
-    let native_detail = u.adj_p[2].x > 3.5;
-    let sample_x = select(lx - origin.x + 0.5, lx - origin.x, native_detail);
-    let sample_y = select(ly - origin.y + 0.5, ly - origin.y, native_detail);
+    // (lx, ly) is an integer layer pixel; texel t covers [t·s, (t+1)·s) from
+    // the origin and is centred at (t + 0.5)·s, like the CPU colour field.
+    let sample_x = lx - origin.x + 0.5;
+    let sample_y = ly - origin.y + 0.5;
     let fx = clamp(sample_x / s - 0.5, 0.0, f32(pw - 1u));
     let fy = clamp(sample_y / s - 0.5, 0.0, f32(ph - 1u));
     let x0 = u32(floor(fx));
@@ -1479,13 +1514,123 @@ fn dev_effects_stage(c_in: vec3<f32>, local: vec2<f32>, base_l: f32) -> vec3<f32
     }
     if (dev_active(vignette_raw)) {
         let vignette = dev_eased(vignette_raw);
-        let n = local - vec2<f32>(0.5, 0.5);
+        let n = dev_vignette_pos(local);
         let edge = clamp(length(n) / 0.707, 0.0, 1.0);
         let amount = dev_smootherstep(0.18, 1.0, edge) * abs(vignette) * 0.42;
         let delta = select(amount, -amount, vignette > 0.0);
         c = dev_tone_delta(c, delta);
     }
     return clamp(c, vec3(0.0), vec3(1.0));
+}
+
+// Vignette position of the pixel at `local`: x / (w − 1) − 0.5 for integer
+// pixel x, like the CPU `x · inv_w − 0.5`.
+fn dev_vignette_pos(local: vec2<f32>) -> vec2<f32> {
+    let size = vec2<f32>(u.layer_w, u.layer_h);
+    let px = local * size - 0.5;
+    return px / max(size - 1.0, vec2<f32>(1.0)) - 0.5;
+}
+
+// RAW twin of dev_effects_stage on the unclamped working pixel (CPU twin:
+// apply_effects_linear_in_space); `base_l` is the guided working luminance.
+fn dev_effects_linear(c_in: vec3<f32>, local: vec2<f32>, base_l: f32) -> vec3<f32> {
+    var c = c_in;
+    let texture_raw = dev_effects[0];
+    let clarity_raw = dev_effects[1];
+    let dehaze_raw = dev_effects[2];
+    let vignette_raw = dev_effects[3];
+    if (dev_active(texture_raw)) {
+        let l = max(dev_working_luma(c), 0.0);
+        let base = max(base_l, 0.0);
+        let k = dev_eased(texture_raw) * 1.35;
+        let boost = k * dev_bell(clamp(base, 0.0, 1.0), 0.5, 0.62) * (l - base);
+        let delta = 0.14 * tanh(boost / 0.14);
+        c = dev_set_working_luma(c, max(l + delta, 0.0));
+    }
+    if (dev_active(clarity_raw)) {
+        let l = max(dev_working_luma(c), 0.0);
+        let base = max(base_l, 0.0);
+        let k = dev_eased(clarity_raw) * (200.0 / 180.0) * 2.2;
+        let boost = k * dev_bell(clamp(base, 0.0, 1.0), 0.5, 0.56) * (l - base);
+        let delta = 0.28 * tanh(boost / 0.28);
+        c = dev_set_working_luma(c, max(l + delta, 0.0));
+    }
+    if (dev_active(dehaze_raw)) {
+        let base = clamp(base_l, 0.0, 1.0);
+        let d = clamp(dev_eased(dehaze_raw) * (200.0 / 160.0), -1.0, 1.0);
+        if (d > 0.0) {
+            let veil = dev_smootherstep(0.25, 0.95, base);
+            let t = max(1.0 - d * veil * 0.7, 0.25);
+            let a = 1.0 - t;
+            c = (c - vec3<f32>(a, a, a)) / t;
+        } else {
+            let m = -d * 0.45 * dev_smootherstep(0.10, 0.90, base);
+            c = c * (1.0 - m) + vec3<f32>(m, m, m);
+        }
+    }
+    if (dev_active(vignette_raw)) {
+        let vignette = dev_eased(vignette_raw);
+        let n = dev_vignette_pos(local);
+        let edge = clamp(length(n) / 0.707, 0.0, 1.0);
+        let amount = dev_smootherstep(0.18, 1.0, edge) * abs(vignette) * 0.42;
+        let delta = select(amount, -amount, vignette > 0.0);
+        let l = max(dev_working_luma(c), 0.0);
+        c = dev_set_working_luma(c, max(l + delta, 0.0));
+    }
+    return c;
+}
+
+fn dev_set_working_luma(c: vec3<f32>, target_l: f32) -> vec3<f32> {
+    let old = dev_working_luma(c);
+    if (abs(old) > 1e-6) {
+        return c * (target_l / old);
+    }
+    return vec3<f32>(target_l);
+}
+
+fn dev_effects_any() -> bool {
+    return dev_active(dev_effects[0]) || dev_active(dev_effects[1])
+        || dev_active(dev_effects[2]) || dev_active(dev_effects[3]);
+}
+
+// Effects base on the plane's base grid (bank [271] == 1, see
+// fs_develop_base_luma): cell (i, j) spans [origin + (i, j)·cell, +cell) in
+// layer px and is sampled bilinearly at pixel centres, like the CPU upsample.
+fn dev_effects_base_at(local: vec2<f32>) -> f32 {
+    let gw = u32(dev_param(276u));
+    let gh = u32(dev_param(277u));
+    if (gw == 0u || gh == 0u) {
+        return 0.0;
+    }
+    let cell = max(dev_param(275u), 1.0);
+    let off = u32(dev_param(272u));
+    let lx = local.x * dev_param(266u);
+    let ly = local.y * dev_param(267u);
+    let fx = clamp((lx - dev_param(273u)) / cell - 0.5, 0.0, f32(gw - 1u));
+    let fy = clamp((ly - dev_param(274u)) / cell - 0.5, 0.0, f32(gh - 1u));
+    let x0 = u32(floor(fx));
+    let y0 = u32(floor(fy));
+    let x1 = min(x0 + 1u, gw - 1u);
+    let y1 = min(y0 + 1u, gh - 1u);
+    let wx = fx - f32(x0);
+    let wy = fy - f32(y0);
+    let v00 = dev_region_luma[off + y0 * gw + x0];
+    let v10 = dev_region_luma[off + y0 * gw + x1];
+    let v01 = dev_region_luma[off + y1 * gw + x0];
+    let v11 = dev_region_luma[off + y1 * gw + x1];
+    let top = v00 + (v10 - v00) * wx;
+    let bot = v01 + (v11 - v01) * wx;
+    return top + (bot - top) * wy;
+}
+
+// Effects base when the colour field does not supply one: the plane's base
+// grid when it was built, else the pixel's own luminance.
+fn dev_plane_effects_base(local: vec2<f32>, pixel: vec3<f32>) -> f32 {
+    let kind = dev_param(271u);
+    if ((kind > 0.5 && kind < 1.5) || kind > 2.5) {
+        return dev_effects_base_at(local);
+    }
+    return clamp(dev_luma(pixel), 0.0, 1.0);
 }
 
 // Develop tone stage: White Balance + Exposure as per-channel linear gains,
@@ -1597,37 +1742,53 @@ fn develop_apply(srgb_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
 }
 
 // Everything after tone: final curves, the colour proxies and Effects.
-fn dev_develop_finish(toned_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
-    var toned = toned_in;
-    // Final per-channel curve pass. A scene may also use these tables earlier
-    // only to classify colour-band membership; CPU does the same classification
-    // read before applying the composed camera + user curves to final output.
+// Final per-channel curve pass. A scene may also use these tables earlier
+// only to classify colour-band membership; CPU does the same classification
+// read before applying the composed camera + user curves to final output.
+fn dev_final_curves(c: vec3<f32>) -> vec3<f32> {
     if (dev_rgb_curve[0] > 0.5) {
-        toned = vec3<f32>(
-            dev_rgb_curve_at(0u, toned.r),
-            dev_rgb_curve_at(1u, toned.g),
-            dev_rgb_curve_at(2u, toned.b),
+        return vec3<f32>(
+            dev_rgb_curve_at(0u, c.r),
+            dev_rgb_curve_at(1u, c.g),
+            dev_rgb_curve_at(2u, c.b),
         );
     }
+    return c;
+}
+
+fn dev_develop_finish(toned_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
+    var toned = dev_final_curves(toned_in);
     if (u.adj_p[2].x > 0.5) {
-        let cp = dev_color_proxy_at(local.x * u.layer_w, local.y * u.layer_h);
+        // Integer layer-pixel coordinate: the proxies map texel t to its
+        // centre at (t + 0.5)·s, like the CPU colour field.
+        let cp = dev_color_proxy_at(local.x * u.layer_w - 0.5, local.y * u.layer_h - 0.5);
         if (u.adj_p[2].x > 3.5) {
             return clamp(cp.adjusted, vec3(0.0), vec3(1.0));
         }
         if (u.adj_p[2].x > 2.5) {
             return dev_effects_stage(toned, local, dev_luma(cp.region));
         }
+        let pixel = toned;
         toned = dev_finish_colored(toned, cp.region, cp.adjusted);
         if (u.adj_p[2].x > 1.5) {
             return clamp(toned, vec3(0.0), vec3(1.0));
         }
-        // Colour path: the toned region low-pass doubles as the spatial
-        // effects' base, exactly like the CPU `finish_colored_pixel_f32`.
-        return dev_effects_stage(toned, local, dev_luma(cp.region));
+        // Colour Smoothing below 100 blends the proxy reconstruction toward
+        // the per-pixel transform (dev_effects[84] = smoothing / 100), like the
+        // commit's `recombine_color`.
+        let smoothing = dev_effects[84];
+        if (smoothing < 1.0) {
+            let direct = dev_display_direct_color(pixel);
+            toned = clamp(direct + (toned - direct) * smoothing, vec3(0.0), vec3(1.0));
+        }
+        // With the colour field the toned region low-pass doubles as the
+        // spatial effects' base, exactly like the CPU `finish_colored_pixel_f32`;
+        // per-pixel colour (smoothing 0) reads the regional base luminance.
+        let base = select(dev_plane_effects_base(local, pixel), dev_luma(cp.region),
+                          smoothing > 0.001);
+        return dev_effects_stage(toned, local, base);
     }
-    // No colour and no fast proxy → the Effects sliders are all zero here (they
-    // route through the fast proxy); the base only feeds inert branches.
-    return dev_effects_stage(toned, local, clamp(dev_luma(toned), 0.0, 1.0));
+    return dev_effects_stage(toned, local, dev_plane_effects_base(local, toned));
 }
 
 // Read-back of the GPU-resident Detail plane at full-resolution layer pixel
@@ -1685,18 +1846,45 @@ fn dev_detail_output(lx: f32, ly: f32) -> vec3<f32> {
 // offset = plane origin, view_offset = region end (exclusive), zoom = s.
 @fragment
 fn fs_develop_prepass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let t = dev_plane_texel(u32(pos.x), u32(pos.y));
+    var v: vec3<f32>;
+    if (dev_param(264u) > 0.5) {
+        v = dev_scene_working(t.rgb, t.local);
+        if (dev_effects_any()) {
+            // RAW Effects run on the working pixel before Detail; the base is
+            // the guided working luminance of this texel (bank [271] == 2).
+            var base = 0.0;
+            if (dev_param(271u) > 1.5 && dev_param(271u) < 2.5) {
+                let pw = u32(dev_param(258u));
+                base = dev_region_luma[u32(dev_param(272u)) + u32(pos.y) * pw + u32(pos.x)];
+            }
+            v = dev_effects_linear(v, t.local, base);
+        }
+    } else {
+        v = dev_develop_finish(dev_scene_display(t.rgb, t.local), t.local);
+    }
+    return vec4<f32>(v, 1.0);
+}
+
+struct DevPlaneTexel {
+    rgb: vec3<f32>,
+    local: vec2<f32>,
+};
+
+// Scene value and representative position of Detail-plane texel (i, j).
+fn dev_plane_texel(i: u32, j: u32) -> DevPlaneTexel {
     let s = max(u32(u.zoom), 1u);
     let lw = u32(u.layer_w);
     let lh = u32(u.layer_h);
     let ex = min(u32(u.view_offset_x), lw);
     let ey = min(u32(u.view_offset_y), lh);
-    let bx0 = u32(u.offset_x) + u32(pos.x) * s;
-    let by0 = u32(u.offset_y) + u32(pos.y) * s;
+    let bx0 = u32(u.offset_x) + i * s;
+    let by0 = u32(u.offset_y) + j * s;
     let span_x = max(min(bx0 + s, ex), bx0 + 1u) - bx0;
     let span_y = max(min(by0 + s, ey), by0 + 1u) - by0;
-    var scene_rgb: vec3<f32>;
+    var out: DevPlaneTexel;
     if (s == 1u) {
-        scene_rgb = textureLoad(dev_scene_tex, vec2<i32>(i32(bx0), i32(by0)), 0).rgb;
+        out.rgb = textureLoad(dev_scene_tex, vec2<i32>(i32(bx0), i32(by0)), 0).rgb;
     } else {
         let xa = i32(bx0);
         let xb = i32(bx0 + span_x - 1u);
@@ -1704,7 +1892,7 @@ fn fs_develop_prepass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f3
         let yb = i32(by0 + span_y - 1u);
         let xc = i32(bx0 + (span_x - 1u) / 2u);
         let yc = i32(by0 + (span_y - 1u) / 2u);
-        scene_rgb = (textureLoad(dev_scene_tex, vec2<i32>(xa, ya), 0).rgb
+        out.rgb = (textureLoad(dev_scene_tex, vec2<i32>(xa, ya), 0).rgb
             + textureLoad(dev_scene_tex, vec2<i32>(xb, ya), 0).rgb
             + textureLoad(dev_scene_tex, vec2<i32>(xa, yb), 0).rgb
             + textureLoad(dev_scene_tex, vec2<i32>(xb, yb), 0).rgb
@@ -1714,14 +1902,81 @@ fn fs_develop_prepass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f3
     // the CPU fast chain's `source_xy`.
     let cx = min(bx0 + s / 2u, lw - 1u);
     let cy = min(by0 + s / 2u, lh - 1u);
-    let local = (vec2<f32>(f32(cx), f32(cy)) + 0.5) / vec2<f32>(u.layer_w, u.layer_h);
-    var v: vec3<f32>;
-    if (dev_param(264u) > 0.5) {
-        v = dev_scene_working(scene_rgb, local);
-    } else {
-        v = dev_develop_finish(dev_scene_display(scene_rgb, local), local);
+    out.local = (vec2<f32>(f32(cx), f32(cy)) + 0.5) / vec2<f32>(u.layer_w, u.layer_h);
+    return out;
+}
+
+// Effects-base luminance pre-pass, one fragment per base-grid cell. RAW
+// (bank [271] == 2): the post-colour working luminance of each plane texel.
+// Identity: the toned, pre-colour display luminance pooled over the cell's
+// pixels [origin + (i, j)·cell, +cell) ∩ [origin, end) — read edge-clamped,
+// like the CPU base windows — (1), or of each plane texel when zoomed out
+// (3). The guided low-pass runs next.
+@fragment
+fn fs_develop_base_luma(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let i = u32(pos.x);
+    let j = u32(pos.y);
+    let kind = dev_param(271u);
+    if (kind > 1.5 && kind < 2.5) {
+        let t = dev_plane_texel(i, j);
+        let w = dev_scene_working(t.rgb, t.local);
+        return vec4<f32>(max(dev_working_luma(w), 0.0), 0.0, 0.0, 1.0);
     }
-    return vec4<f32>(v, 1.0);
+    let cell = i32(dev_param(275u));
+    if (kind > 2.5) {
+        let t = dev_plane_texel(i, j);
+        let toned = dev_final_curves(dev_scene_display(t.rgb, t.local));
+        return vec4<f32>(clamp(dev_luma(toned), 0.0, 1.0), 0.0, 0.0, 1.0);
+    }
+    let lw = i32(u.layer_w);
+    let lh = i32(u.layer_h);
+    let x0 = i32(dev_param(273u)) + i32(i) * cell;
+    let y0 = i32(dev_param(274u)) + i32(j) * cell;
+    let x1 = min(x0 + cell, i32(dev_param(278u)));
+    let y1 = min(y0 + cell, i32(dev_param(279u)));
+    var acc = 0.0;
+    var n = 0.0;
+    for (var y = y0; y < y1; y = y + 1) {
+        for (var x = x0; x < x1; x = x + 1) {
+            let cx = clamp(x, 0, lw - 1);
+            let cy = clamp(y, 0, lh - 1);
+            let rgb = textureLoad(dev_scene_tex, vec2<i32>(cx, cy), 0).rgb;
+            let local = (vec2<f32>(f32(cx), f32(cy)) + 0.5) / vec2<f32>(u.layer_w, u.layer_h);
+            let toned = dev_final_curves(dev_scene_display(rgb, local));
+            acc = acc + clamp(dev_luma(toned), 0.0, 1.0);
+            n = n + 1.0;
+        }
+    }
+    return vec4<f32>(acc / max(n, 1.0), 0.0, 0.0, 1.0);
+}
+
+// Colour-field pre-pass: one fragment per cell of the display-domain colour
+// field, averaging the toned (pre-colour) value of the plane texels it pools —
+// the cells `build_color_proxy_field_from_buffer` pools on the CPU. Bank:
+// [268] cell size in texels, [269] / [270] phase x / y in texels.
+@fragment
+fn fs_develop_cells(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let s = max(u32(dev_param(268u)), 1u);
+    let phase_x = u32(dev_param(269u));
+    let phase_y = u32(dev_param(270u));
+    let pw = u32(dev_param(258u));
+    let ph = u32(dev_param(259u));
+    let cx = u32(pos.x);
+    let cy = u32(pos.y);
+    let x0 = max(cx * s, phase_x) - phase_x;
+    let x1 = min(max((cx + 1u) * s, phase_x) - phase_x, pw);
+    let y0 = max(cy * s, phase_y) - phase_y;
+    let y1 = min(max((cy + 1u) * s, phase_y) - phase_y, ph);
+    var acc = vec3<f32>(0.0);
+    var n = 0.0;
+    for (var ty = y0; ty < y1; ty = ty + 1u) {
+        for (var tx = x0; tx < x1; tx = tx + 1u) {
+            let t = dev_plane_texel(tx, ty);
+            acc = acc + dev_final_curves(dev_scene_display(t.rgb, t.local));
+            n = n + 1.0;
+        }
+    }
+    return vec4<f32>(acc / max(n, 1.0), 1.0);
 }
 
 // Bayer-8 threshold (0..1), identical matrix to the CPU `bayer8` so the GPU

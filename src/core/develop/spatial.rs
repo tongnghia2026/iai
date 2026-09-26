@@ -215,6 +215,21 @@ pub(crate) fn build_color_proxy_field_from_buffer(
     ColorProxyField::finish(low, pw, ph, s, phase, s * ds, settings)
 }
 
+/// Colour-stage proxies `(region, adjusted)` from already pooled cells — the
+/// GPU Detail pre-pass pools its toned plane into cells exactly as
+/// [`build_color_proxy_field_from_buffer`] does. `cell_px` is the cell size in
+/// source pixels (it sets the region filter radius).
+pub(crate) fn color_field_from_cells(
+    low: Vec<[f32; 3]>,
+    pw: usize,
+    ph: usize,
+    cell_px: usize,
+    settings: &DevelopSettings,
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+    let field = ColorProxyField::finish(low, pw, ph, 1, (0, 0), cell_px, settings);
+    (field.region, field.adjusted)
+}
+
 /// Build, for one tile, the three buffers the colour stage needs (each
 /// `valid_w * valid_h`): the tone-mapped pixels (`toned`), and the whole-layer
 /// `field`'s edge-aware regional low-pass (`region`) and colour-adjusted region

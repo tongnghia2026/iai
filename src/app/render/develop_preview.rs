@@ -14,17 +14,22 @@ fn raw_color_runs_per_pixel(settings: &crate::core::develop::DevelopSettings) ->
 /// 100 %); a larger view samples every `downsample` layer px instead.
 const GPU_DETAIL_MAX_PLANE_PX: u64 = 4_000_000;
 
-/// Plan the GPU Detail plane over the visible layer rect `[lx0, lx1) × [ly0,
-/// ly1)`: one texel per `downsample` layer px — never coarser than the
-/// display samples the layer unless the budget forces it — plus Detail's
-/// apron on every side, with the origin snapped to the texel grid so a pan
-/// keeps the sampling phase. Returns `(origin_x, origin_y, end_x, end_y,
-/// downsample)`.
+/// Reach of the spatial Effects' guided base (two 24 px box passes plus the
+/// 4 px cell upsample), kept inside the plane's apron.
+const EFFECTS_APRON: u32 = 56;
+
+/// Plan the GPU plane over the visible layer rect `[lx0, lx1) × [ly0, ly1)`:
+/// one texel per `downsample` layer px — never coarser than the display
+/// samples the layer unless the budget forces it — plus an apron of `halo`
+/// source px (scaled with the texel) on every side, with the origin snapped to
+/// the texel grid so a pan keeps the sampling phase. Returns `(origin_x,
+/// origin_y, end_x, end_y, downsample)`.
 fn plan_gpu_detail_region(
     (lx0, ly0, lx1, ly1): (u32, u32, u32, u32),
     src_w: u32,
     src_h: u32,
     zoom: f32,
+    halo: u32,
     budget: u64,
 ) -> (u32, u32, u32, u32, u32) {
     let mut ds = if zoom >= 1.0 {
@@ -33,7 +38,7 @@ fn plan_gpu_detail_region(
         ((1.0 / zoom.max(1e-4)).floor() as u32).max(1)
     };
     loop {
-        let pad = crate::core::develop::DETAIL_HALO as u32 * ds;
+        let pad = halo * ds;
         let ox = lx0.saturating_sub(pad) / ds * ds;
         let oy = ly0.saturating_sub(pad) / ds * ds;
         let ex = lx1.saturating_add(pad).min(src_w).max(ox + 1);
@@ -47,7 +52,8 @@ fn plan_gpu_detail_region(
     }
 }
 
-/// `settings` with its Detail sliders taken from `from`.
+/// `settings` with its Detail and Effects sliders taken from `from` (the
+/// shader-path colour proxies read neither).
 fn with_detail_of(
     settings: &crate::core::develop::DevelopSettings,
     from: &crate::core::develop::DevelopSettings,
@@ -63,6 +69,10 @@ fn with_detail_of(
         color_noise_reduction: from.color_noise_reduction,
         color_noise_detail: from.color_noise_detail,
         color_noise_smoothness: from.color_noise_smoothness,
+        texture: from.texture,
+        clarity: from.clarity,
+        dehaze: from.dehaze,
+        vignette: from.vignette,
         ..settings.clone()
     }
 }
@@ -134,6 +144,8 @@ impl App {
         layer_id: u32,
         raw_scene: bool,
         scene_tone: Option<&crate::core::develop_scene::SceneToneData>,
+        run_detail: bool,
+        spatial_effects: bool,
     ) -> Option<crate::gpu::compositor::DevelopDetailGpu> {
         let (src_w, src_h) = {
             let preview = self.dev.develop_preview.as_ref()?;
@@ -165,11 +177,19 @@ impl App {
         if lx1 <= lx0 || ly1 <= ly0 {
             return None;
         }
+        // Each stage's reach at the plane's edge: Detail's, plus the spatial
+        // Effects' guided base ahead of it.
+        let halo = if run_detail {
+            crate::core::develop::DETAIL_HALO as u32
+        } else {
+            0
+        } + if spatial_effects { EFFECTS_APRON } else { 0 };
         let (origin_x, origin_y, end_x, end_y, downsample) = plan_gpu_detail_region(
             (lx0, ly0, lx1, ly1),
             src_w,
             src_h,
             zoom,
+            halo,
             GPU_DETAIL_MAX_PLANE_PX,
         );
         let luma_coeff = if raw_scene {
@@ -185,6 +205,7 @@ impl App {
             downsample,
             linear: raw_scene,
             luma_coeff,
+            run_detail,
         })
     }
 
@@ -293,16 +314,14 @@ impl App {
         // to the old chroma-reconstruction model while the pointer is held:
         // changing models on release was the visible brightness/chroma jump.
         let linear_scene_color = raw_scene && raw_color_runs_per_pixel(&settings);
-        // Detail on the GPU (mode 5): the compositor evaluates the ordinary
-        // shader chain into a plane and runs the Detail kernels on it, so no
-        // CPU proxy is needed. Spatial Effects/Locals still need the CPU chain
-        // ahead of Detail, and a software adapter runs compute slower than
-        // the CPU does.
+        // The GPU plane (mode 5): the compositor evaluates the ordinary shader
+        // chain into a viewport plane, then Effects and the Detail kernels on
+        // it, so no CPU proxy is needed. Locals still need the CPU chain, and
+        // a software adapter runs compute slower than the CPU does.
         let software_adapter = self.win.gpu.as_ref().is_some_and(|g| g.software_adapter);
-        let gpu_detail = settings.has_detail()
+        let plane_effects = settings.has_spatial_effects() || settings.vignette.abs() > 0.001;
+        let gpu_plane = (settings.has_detail() || plane_effects)
             && !settings.has_locals()
-            && !settings.has_spatial_effects()
-            && settings.vignette.abs() <= 0.001
             && !software_adapter
             && scene.as_ref().is_some_and(|sc| {
                 self.win
@@ -310,15 +329,14 @@ impl App {
                     .as_ref()
                     .is_some_and(|g| g.compositor.scene_fits_texture(sc))
             });
-        let cpu_detail = settings.has_detail() && !gpu_detail;
-        let needs_spatial_proxy = settings.texture.abs() > 0.001
-            || settings.clarity.abs() > 0.001
-            || settings.dehaze.abs() > 0.001
-            || settings.vignette.abs() > 0.001
-            || cpu_detail
-            || settings.has_locals();
+        let cpu_detail = settings.has_detail() && !gpu_plane;
+        let needs_spatial_proxy =
+            settings.has_locals() || (!gpu_plane && (plane_effects || settings.has_detail()));
         let need_fast = needs_spatial_proxy;
-        let need_color = settings.has_color() && !linear_scene_color && !need_fast;
+        // With the GPU plane on an Identity scene the compositor builds the
+        // commit's colour field from the plane itself.
+        let need_color =
+            settings.has_color() && !linear_scene_color && !need_fast && !(gpu_plane && !raw_scene);
         // The fast low-res proxy carries the complete chain whenever a spatial
         // stage needs neighbourhood pixels. Its tail samples the same regional
         // luma/E proxy as the shader-only path, so stacking Shadows/Highlights
@@ -696,9 +714,9 @@ impl App {
         let finished_ok = cache
             .finished_color
             .as_ref()
-            .is_some_and(|c| !(gpu_detail && c.fast_preview))
+            .is_some_and(|c| !(gpu_plane && c.fast_preview))
             && cache.finished_settings.as_ref().is_some_and(|s| {
-                if gpu_detail {
+                if gpu_plane {
                     s.same_image_effect(&with_detail_of(&settings, s))
                 } else {
                     s.same_image_effect(&settings)
@@ -932,8 +950,14 @@ impl App {
             None
         };
 
-        let detail = if gpu_detail {
-            self.plan_develop_detail(layer_id, raw_scene, scene_tone.as_ref())
+        let detail = if gpu_plane {
+            self.plan_develop_detail(
+                layer_id,
+                raw_scene,
+                scene_tone.as_ref(),
+                settings.has_detail(),
+                settings.has_spatial_effects(),
+            )
         } else {
             None
         };
@@ -962,13 +986,13 @@ mod gpu_detail_region_tests {
         let halo = DETAIL_HALO as u32;
         // 100 %: native density, apron on every side, clipped at the image.
         let (ox, oy, ex, ey, ds) =
-            plan_gpu_detail_region((500, 10, 2100, 1010), 6000, 4000, 1.0, 4_000_000);
+            plan_gpu_detail_region((500, 10, 2100, 1010), 6000, 4000, 1.0, halo, 4_000_000);
         assert_eq!(ds, 1);
         assert_eq!((ox, oy, ex, ey), (500 - halo, 0, 2100 + halo, 1010 + halo));
 
         // 25 %: one texel per 4 px, origin on the texel grid, apron scaled.
         let (ox, oy, ex, ey, ds) =
-            plan_gpu_detail_region((1003, 777, 6000, 4000), 6000, 4000, 0.25, 4_000_000);
+            plan_gpu_detail_region((1003, 777, 6000, 4000), 6000, 4000, 0.25, halo, 4_000_000);
         assert_eq!(ds, 4);
         assert_eq!((ox % 4, oy % 4), (0, 0));
         assert!(ox + 4 * halo <= 1003 && oy + 4 * halo <= 777);
@@ -976,7 +1000,7 @@ mod gpu_detail_region_tests {
 
         // A view larger than the budget coarsens instead of overflowing it.
         let (ox, oy, ex, ey, ds) =
-            plan_gpu_detail_region((0, 0, 3840, 2160), 8000, 6000, 1.0, 4_000_000);
+            plan_gpu_detail_region((0, 0, 3840, 2160), 8000, 6000, 1.0, halo, 4_000_000);
         assert!(ds >= 2);
         let pixels = ((ex - ox).div_ceil(ds) as u64) * ((ey - oy).div_ceil(ds) as u64);
         assert!(pixels <= 4_000_000);

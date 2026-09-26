@@ -663,6 +663,7 @@ fn headless_gpu_detail_raw_matches_commit() {
             downsample: 1,
             linear: true,
             luma_coeff: tone.working_space.render_luminance_coefficients(),
+            run_detail: true,
         }),
     });
     let is_ping =
@@ -733,27 +734,6 @@ fn headless_gpu_detail_identity_matches_commit() {
     for (label, settings) in [("light+colour", with_colour), ("light", light_only)] {
         let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
         let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
-        let color = settings.has_color().then(|| {
-            let s = 6;
-            let (base, pw, ph) = iai::core::develop_scene::build_scene_color_base_box(
-                &scene, 0, 0, width, height, s,
-            );
-            let region =
-                iai::core::develop_scene::tone_lowpass_scene_region(&base, pw, ph, &tone, s);
-            let adjusted = iai::core::develop::apply_color_to_region(&region, &settings, pw, ph);
-            ColorProxies {
-                region: Arc::new(region),
-                adjusted: Arc::new(adjusted),
-                w: pw,
-                h: ph,
-                origin_x: 0,
-                origin_y: 0,
-                downsample: s as u32,
-                fast_preview: false,
-                guided_controls: false,
-                exact_detail: false,
-            }
-        });
         let region_luma = settings.has_local_tone().then(|| {
             let (b, w, h) = iai::core::develop_scene::build_scene_region_base(
                 &scene,
@@ -772,11 +752,13 @@ fn headless_gpu_detail_identity_matches_commit() {
                 downsample: iai::core::develop::TONE_DOWNSAMPLE as u32,
             }
         });
+        // The live preview passes no Identity colour proxies with a Detail
+        // plane: the compositor builds the commit's colour field from it.
         compositor.develop_preview = Some(DevelopGpuPreview {
             layer_id: 0,
             settings: settings.clone(),
             region_luma,
-            color,
+            color: None,
             scene: Some(scene.clone()),
             detail: Some(DevelopDetailGpu {
                 origin_x: 0,
@@ -786,6 +768,7 @@ fn headless_gpu_detail_identity_matches_commit() {
                 downsample: 1,
                 linear: false,
                 luma_coeff: [0.2126, 0.7152, 0.0722],
+                run_detail: true,
             }),
         });
         let is_ping =
@@ -863,6 +846,7 @@ fn headless_gpu_detail_plane_offset_and_downsample() {
         downsample: 1,
         linear: false,
         luma_coeff: [0.2126, 0.7152, 0.0722],
+        run_detail: true,
     }));
     let is_ping =
         compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
@@ -884,6 +868,7 @@ fn headless_gpu_detail_plane_offset_and_downsample() {
         downsample: ds,
         linear: false,
         luma_coeff: [0.2126, 0.7152, 0.0722],
+        run_detail: true,
     }));
     let is_ping =
         compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
@@ -924,4 +909,213 @@ fn headless_gpu_detail_plane_offset_and_downsample() {
         max_error <= 2,
         "downsampled plane max error {max_error}/255"
     );
+}
+
+/// Mode-5 preview of `settings` over the whole image (full-resolution
+/// plane), with the proxies the app sends for it: RAW guided mixer planes,
+/// the regional tone plane, no Identity colour proxies.
+fn plane_preview(
+    scene: &Arc<SceneSource>,
+    settings: &DevelopSettings,
+    raw: bool,
+) -> DevelopGpuPreview {
+    let (width, height) = (scene.width, scene.height);
+    let tone = iai::core::develop_scene::build_scene_tone_for_scene(settings, scene);
+    let color = (raw && iai::core::develop::guided_mixer_active(settings)).then(|| {
+        let (base, pw, ph) =
+            iai::core::develop_scene::build_scene_color_base_box(scene, 0, 0, width, height, 1);
+        let samples = iai::core::develop_scene::tone_scene_color_samples(&base, &tone);
+        let region = iai::core::develop_scene::tone_lowpass_scene_region(&base, pw, ph, &tone, 1);
+        let controls = iai::core::develop::guided_mixer_controls(&samples, settings, pw, ph)
+            .expect("guided controls");
+        ColorProxies {
+            region: Arc::new(region),
+            adjusted: Arc::new(controls),
+            w: pw,
+            h: ph,
+            origin_x: 0,
+            origin_y: 0,
+            downsample: 1,
+            fast_preview: false,
+            guided_controls: true,
+            exact_detail: false,
+        }
+    });
+    let region_luma = settings.has_local_tone().then(|| {
+        let (b, w, h) = iai::core::develop_scene::build_scene_region_base(
+            scene,
+            iai::core::develop::TONE_DOWNSAMPLE,
+        );
+        RegionLumaProxy {
+            data: Arc::new(iai::core::develop_scene::finish_region_e(
+                &b,
+                w,
+                h,
+                &tone,
+                iai::core::develop::TONE_DOWNSAMPLE,
+            )),
+            w,
+            h,
+            downsample: iai::core::develop::TONE_DOWNSAMPLE as u32,
+        }
+    });
+    DevelopGpuPreview {
+        layer_id: 0,
+        settings: settings.clone(),
+        region_luma,
+        color,
+        scene: Some(scene.clone()),
+        detail: Some(DevelopDetailGpu {
+            origin_x: 0,
+            origin_y: 0,
+            end_x: width,
+            end_y: height,
+            downsample: 1,
+            linear: raw,
+            luma_coeff: if raw {
+                tone.working_space.render_luminance_coefficients()
+            } else {
+                [0.2126, 0.7152, 0.0722]
+            },
+            run_detail: settings.has_detail(),
+        }),
+    }
+}
+
+/// Spatial Effects on the GPU plane (with and without Detail) against the
+/// commit, for Identity (colour field / per-pixel colour / no colour) and
+/// RAW. The image spans several 256 px tiles so the Identity base is
+/// checked across tile seams too.
+#[test]
+fn headless_gpu_effects_match_commit() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("headless GPU pixel parity is a local real-GPU test; skipped on CI");
+        return;
+    }
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no headless GPU adapter; skipped");
+        return;
+    };
+    let (width, height) = (400u32, 300u32);
+    let mut px = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let mut rgb = textured_rgb(x % 160, y, 160);
+            // A broad brightness ramp so the regional base varies.
+            let ramp = 0.6 + 0.8 * (x as f32 / width as f32);
+            for c in &mut rgb {
+                *c *= ramp;
+            }
+            for c in rgb {
+                px.push(srgb8(c));
+            }
+            px.push(255);
+        }
+    }
+    let tiles = iai::core::tile::TileMap::from_rgba(&px, width, height);
+    let max_texture = device.limits().max_texture_dimension_2d;
+
+    let effects = DevelopSettings {
+        exposure: 8.0,
+        clarity: 45.0,
+        texture: 30.0,
+        dehaze: 25.0,
+        vignette: -30.0,
+        ..Default::default()
+    };
+    let effects_detail = DevelopSettings {
+        sharpening: 50.0,
+        noise_reduction: 20.0,
+        ..effects.clone()
+    };
+    let effects_sat = DevelopSettings {
+        saturation: 20.0,
+        ..effects_detail.clone()
+    };
+    let mut effects_mixer = effects_detail.clone();
+    effects_mixer.mixer_luminance[1] = 40.0;
+    effects_mixer.mixer_hue[4] = -20.0;
+
+    for raw in [false, true] {
+        let mut scene = SceneSource::from_display_tiles(&tiles);
+        if raw {
+            scene.look = iai::core::develop_scene::BaseLook::Raw;
+        }
+        let scene = Arc::new(scene);
+        let source = if raw {
+            iai::core::develop_scene::render_default_look(&scene)
+                .iter()
+                .map(|v| (v >> 8) as u8)
+                .collect()
+        } else {
+            px.clone()
+        };
+        let mut stack = LayerStack::new(width, height);
+        stack.layers[0] = Layer::from_rgba(0, "Background", source, width, height);
+        let mut compositor = CompositorState::new(&device, width, height, max_texture);
+        let mut effects_mixer_only = effects.clone();
+        effects_mixer_only.mixer_luminance[1] = 40.0;
+        effects_mixer_only.mixer_hue[4] = -20.0;
+        let mut mixer_detail_only = DevelopSettings {
+            sharpening: 50.0,
+            noise_reduction: 20.0,
+            exposure: 8.0,
+            ..Default::default()
+        };
+        mixer_detail_only.mixer_luminance[1] = 40.0;
+        mixer_detail_only.mixer_hue[4] = -20.0;
+        let mut mixer_only = DevelopSettings {
+            exposure: 8.0,
+            ..Default::default()
+        };
+        mixer_only.mixer_luminance[1] = 40.0;
+        mixer_only.mixer_hue[4] = -20.0;
+        for (label, settings) in [
+            ("mixer", &mixer_only),
+            ("effects+mixer", &effects_mixer_only),
+            ("mixer+Detail", &mixer_detail_only),
+            ("effects", &effects),
+            ("effects+Detail", &effects_detail),
+            ("effects+sat+Detail", &effects_sat),
+            ("effects+mixer+Detail", &effects_mixer),
+        ] {
+            let committed = apply_scene_to_tilemap(&scene, settings, None).flatten();
+            compositor.develop_preview = Some(plane_preview(&scene, settings, raw));
+            let is_ping = compositor
+                .composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+            let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
+            let mut worst: Vec<(u8, usize, usize)> = gpu
+                .chunks_exact(4)
+                .zip(committed.chunks_exact(4))
+                .enumerate()
+                .map(|(i, (a, b))| {
+                    let e = (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap();
+                    (e, i % width as usize, i / width as usize)
+                })
+                .collect();
+            worst.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            // A near-black pixel can land on the Effects' zero-luma branch on
+            // one side only (f32 rounding at the 1e-6 threshold) and turn
+            // neutral there: allow a handful of such isolated outliers.
+            let outliers = worst.iter().filter(|w| w.0 > 3).count();
+
+            let mut errors: Vec<u8> = gpu
+                .chunks_exact(4)
+                .zip(committed.chunks_exact(4))
+                .flat_map(|(a, b)| (0..3).map(move |c| a[c].abs_diff(b[c])))
+                .collect();
+            errors.sort_unstable();
+            let max = *errors.last().unwrap();
+            let p99 = errors[errors.len() * 99 / 100];
+            eprintln!(
+                "{} GPU {label}: preview/commit max={max}/255 p99={p99}/255 outliers={outliers}",
+                if raw { "RAW " } else { "JPEG" }
+            );
+            assert!(
+                outliers * 10_000 <= worst.len() && p99 <= 1,
+                "{label} ({}) preview/commit max {max}/255 p99 {p99}/255, {outliers} outliers",
+                if raw { "RAW" } else { "JPEG" }
+            );
+        }
+    }
 }

@@ -37,7 +37,9 @@ pub use self::mixer::{mixer_mask_preview, mixer_target_from_srgb, MixerTarget};
 pub use self::settings::{
     ColorMixerAlgorithm, DevelopEngineVersion, DevelopSettings, PointCurveMode, ToneMapMode,
 };
-pub use self::spatial::{apply_color_to_region, fast_preview_downsample, guided_mixer_controls};
+pub use self::spatial::{
+    apply_color_to_region, fast_preview_downsample, guided_mixer_active, guided_mixer_controls,
+};
 
 pub const MIXER_BANDS: usize = 8;
 pub const MIXER_LABELS: [&str; MIXER_BANDS] = [
@@ -199,7 +201,7 @@ pub(crate) const TONE_REGION_RADIUS: usize = 24;
 /// steep COMBINED lift (Contrast+Blacks+Shadows) made that structure surface as
 /// blotchy "loang" with hard-ish region boundaries. Not so high that big light/dark
 /// edges halo.
-const TONE_GUIDED_EPS: f32 = 0.05;
+pub(crate) const TONE_GUIDED_EPS: f32 = 0.05;
 /// The Shadows/Highlights regional base luminance is a smooth (24px-blurred)
 /// signal, so the edge-aware guided filter behind it is computed on a 1/N proxy
 /// and bilinear-upsampled — same trick the colour stage uses. Cuts the guided

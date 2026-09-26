@@ -620,7 +620,7 @@ impl DetailGpuRuntime {
     /// Encode Detail over a GPU-resident plane: reads the `w×h` RGB of `src`
     /// (texel (0,0) = plane pixel (0,0)) and writes the result, packed
     /// `3·w·h` f32, into `out` from f32 element `out_base` on. No host upload
-    /// or readback.
+    /// or readback. `p = None` copies the plane through unchanged.
     #[allow(clippy::too_many_arguments)]
     pub fn encode_resident(
         &self,
@@ -633,7 +633,7 @@ impl DetailGpuRuntime {
         out_base: u32,
         w: u32,
         h: u32,
-        p: &DetailWorkingParams,
+        p: Option<&DetailWorkingParams>,
         linear: bool,
         luma_coeff: [f32; 3],
     ) {
@@ -666,7 +666,7 @@ impl DetailGpuRuntime {
         out_base: u32,
         w: u32,
         h: u32,
-        p: &DetailWorkingParams,
+        p: Option<&DetailWorkingParams>,
         linear: bool,
         luma_coeff: [f32; 3],
         max_plane: u64,
@@ -695,11 +695,13 @@ impl DetailGpuRuntime {
             base.out_w = w;
             base.out_base = out_base;
             passes.push((entry("load_tex"), base, groups_x, groups_y));
-            passes.extend(
-                build_passes(&lay, base, &p.plan)
-                    .into_iter()
-                    .map(|(e, pp)| (e, pp, groups_x, groups_y)),
-            );
+            if let Some(p) = p {
+                passes.extend(
+                    build_passes(&lay, base, &p.plan)
+                        .into_iter()
+                        .map(|(e, pp)| (e, pp, groups_x, groups_y)),
+                );
+            }
             passes.push((entry("store_out"), base, groups_x, groups_y));
         }
 
@@ -1175,7 +1177,7 @@ mod tests {
             0,
             w,
             h,
-            p,
+            Some(p),
             linear,
             coeff,
             budget.unwrap_or_else(|| max_plane_pixels(device)),

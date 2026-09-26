@@ -8,6 +8,7 @@ use winit::window::Window;
 
 pub mod compositor;
 pub mod detail_gpu;
+pub mod guided_gpu;
 pub mod tile_atlas;
 pub mod vector;
 
