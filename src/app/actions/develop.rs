@@ -675,10 +675,11 @@ impl App {
         }
 
         // The whole Develop panel previews on the GPU when there is no selection.
-        // Local-tone and Colour feed shader region proxies; spatial Effects,
-        // Detail, and Local adjustments share a reduced-resolution viewport
-        // proxy. Selection-active edits still take the exact CPU path because
-        // the shader does not blend the selection mask.
+        // Local-tone and Colour feed shader region proxies; spatial Effects and
+        // Detail run on a GPU plane of the view and Local masks in the shader
+        // (a software adapter or a legacy session keeps the reduced-resolution
+        // CPU proxy). Selection-active edits still take the exact CPU path
+        // because the shader does not blend the selection mask.
         // A scene (RAW) session additionally requires the f16 master to fit a
         // device texture; oversized masters fall back to the CPU bake.
         let scene_for_gpu = self
@@ -741,6 +742,8 @@ impl App {
         // bake after every mouse release: that worker saturates Rayon and makes
         // the next slider wait. Open Image separately requests one exact bake.
         const DETAIL_REFINE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+        // The shader applies the masks exactly on a GPU-hosted scene.
+        let gpu_locals = self.develop_gpu_scene_ok();
         let (layer_id, original_tiles, needs_restore, immediate_eligible) = {
             let Some(preview) = &mut self.dev.develop_preview else {
                 return false;
@@ -778,7 +781,7 @@ impl App {
             // the preview instead, so what you drag is what stays; the exact
             // full-resolution Detail is produced by Apply. Locals need the settled
             // bake for accurate mask evaluation, so they keep it.
-            if settings.has_locals() {
+            if settings.has_locals() && !gpu_locals {
                 preview.detail_refine_at = if preview.detail_refine_waiting_for_release {
                     None
                 } else {

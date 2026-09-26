@@ -1119,3 +1119,164 @@ fn headless_gpu_effects_match_commit() {
         }
     }
 }
+
+/// Local masks run in the shader: Identity masks after Effects (before
+/// Detail), RAW masks on the working pixel after Detail — both with and
+/// without a GPU plane — against the commit.
+#[test]
+fn headless_gpu_local_masks_match_commit() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("headless GPU pixel parity is a local real-GPU test; skipped on CI");
+        return;
+    }
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no headless GPU adapter; skipped");
+        return;
+    };
+    use iai::core::develop::{LocalAdjustment, LocalMaskShape, LocalSettings};
+    let (width, height) = (320u32, 240u32);
+    let mut px = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let mut rgb = textured_rgb(x % 160, y, 160);
+            let ramp = 0.5 + 0.9 * (y as f32 / height as f32);
+            for c in &mut rgb {
+                *c *= ramp;
+            }
+            for c in rgb {
+                px.push(srgb8(c));
+            }
+            px.push(255);
+        }
+    }
+    let tiles = iai::core::tile::TileMap::from_rgba(&px, width, height);
+    let max_texture = device.limits().max_texture_dimension_2d;
+    let masks = vec![
+        LocalAdjustment {
+            shape: LocalMaskShape::Linear {
+                x0: 0.1,
+                y0: 0.0,
+                x1: 0.6,
+                y1: 0.8,
+            },
+            settings: LocalSettings {
+                exposure: 25.0,
+                contrast: 30.0,
+                saturation: 35.0,
+                temperature: 20.0,
+                ..Default::default()
+            },
+        },
+        LocalAdjustment {
+            shape: LocalMaskShape::Radial {
+                cx: 0.7,
+                cy: 0.5,
+                rx: 0.25,
+                ry: 0.35,
+                feather: 0.6,
+                invert: false,
+            },
+            settings: LocalSettings {
+                exposure: -20.0,
+                shadows: 40.0,
+                highlights: -30.0,
+                saturation: -40.0,
+                tint: -15.0,
+                ..Default::default()
+            },
+        },
+    ];
+    let only = DevelopSettings {
+        exposure: 5.0,
+        locals: masks.clone(),
+        ..Default::default()
+    };
+    let with_colour = DevelopSettings {
+        saturation: 15.0,
+        ..only.clone()
+    };
+    let with_detail = DevelopSettings {
+        sharpening: 50.0,
+        noise_reduction: 20.0,
+        clarity: 30.0,
+        ..with_colour.clone()
+    };
+    for raw in [false, true] {
+        let mut scene = SceneSource::from_display_tiles(&tiles);
+        if raw {
+            scene.look = iai::core::develop_scene::BaseLook::Raw;
+        }
+        let scene = Arc::new(scene);
+        let source = if raw {
+            iai::core::develop_scene::render_default_look(&scene)
+                .iter()
+                .map(|v| (v >> 8) as u8)
+                .collect()
+        } else {
+            px.clone()
+        };
+        let mut stack = LayerStack::new(width, height);
+        stack.layers[0] = Layer::from_rgba(0, "Background", source, width, height);
+        let mut compositor = CompositorState::new(&device, width, height, max_texture);
+        for (label, settings, plane) in [
+            ("masks", &only, false),
+            ("masks+sat", &with_colour, false),
+            ("masks+sat+Clarity+Detail", &with_detail, true),
+        ] {
+            let committed = apply_scene_to_tilemap(&scene, settings, None).flatten();
+            let mut preview = plane_preview(&scene, settings, raw);
+            if !plane {
+                // The ordinary shader path: Identity colour through the app's
+                // proxies on the commit grid, no plane.
+                preview.detail = None;
+                if !raw && settings.has_color() {
+                    let tone =
+                        iai::core::develop_scene::build_scene_tone_for_scene(settings, &scene);
+                    let s = 6;
+                    let (base, pw, ph) = iai::core::develop_scene::build_scene_color_base_box(
+                        &scene, 0, 0, width, height, s,
+                    );
+                    let region = iai::core::develop_scene::tone_lowpass_scene_region(
+                        &base, pw, ph, &tone, s,
+                    );
+                    let adjusted =
+                        iai::core::develop::apply_color_to_region(&region, settings, pw, ph);
+                    preview.color = Some(ColorProxies {
+                        region: Arc::new(region),
+                        adjusted: Arc::new(adjusted),
+                        w: pw,
+                        h: ph,
+                        origin_x: 0,
+                        origin_y: 0,
+                        downsample: s as u32,
+                        fast_preview: false,
+                        guided_controls: false,
+                        exact_detail: false,
+                    });
+                }
+            }
+            compositor.develop_preview = Some(preview);
+            let is_ping = compositor
+                .composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+            let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
+            let mut errors: Vec<u8> = gpu
+                .chunks_exact(4)
+                .zip(committed.chunks_exact(4))
+                .flat_map(|(a, b)| (0..3).map(move |c| a[c].abs_diff(b[c])))
+                .collect();
+            errors.sort_unstable();
+            let max = *errors.last().unwrap();
+            let p99 = errors[errors.len() * 99 / 100];
+            let outliers = errors.iter().filter(|&&e| e > 3).count();
+            eprintln!(
+                "{} GPU {label}: preview/commit max={max}/255 p99={p99}/255 outliers={outliers}",
+                if raw { "RAW " } else { "JPEG" }
+            );
+            assert!(
+                outliers * 10_000 <= errors.len() && p99 <= 1,
+                "{label} ({}) preview/commit max {max}/255 p99 {p99}/255, {outliers} outliers",
+                if raw { "RAW" } else { "JPEG" }
+            );
+        }
+    }
+}

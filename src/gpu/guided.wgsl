@@ -40,36 +40,60 @@ fn load(@builtin(global_invocation_id) gid: vec3<u32>) {
     pool[G.dst2 + i] = v * v;
 }
 
+// Box means run along RUN consecutive outputs per invocation with a sliding
+// window, so each output costs a few loads instead of 2r + 1.
+const RUN: u32 = 16u;
+
 // Horizontal count-normalised box mean (radius r) of plane `src` → `dst`.
 @compute @workgroup_size(64)
 fn box_h(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gidx(gid);
-    if (i >= G.n) { return; }
-    let x = i32(i % G.w);
-    let row = i - u32(x);
-    let x0 = max(x - i32(G.r), 0);
-    let x1 = min(x + i32(G.r), i32(G.w) - 1);
+    let t = gidx(gid);
+    let runs = (G.w + RUN - 1u) / RUN;
+    if (t >= runs * G.h) { return; }
+    let row = (t / runs) * G.w;
+    let start = i32((t % runs) * RUN);
+    let end = min(start + i32(RUN), i32(G.w));
+    let r = i32(G.r);
+    let last = i32(G.w) - 1;
     var acc = 0.0;
-    for (var t = x0; t <= x1; t = t + 1) {
-        acc = acc + pool[G.src + row + u32(t)];
+    for (var k = max(start - r, 0); k <= min(start + r, last); k = k + 1) {
+        acc = acc + pool[G.src + row + u32(k)];
     }
-    pool[G.dst + i] = acc / f32(x1 - x0 + 1);
+    for (var x = start; x < end; x = x + 1) {
+        pool[G.dst + row + u32(x)] = acc / f32(min(x + r, last) - max(x - r, 0) + 1);
+        if (x + 1 + r <= last) {
+            acc = acc + pool[G.src + row + u32(x + 1 + r)];
+        }
+        if (x - r >= 0) {
+            acc = acc - pool[G.src + row + u32(x - r)];
+        }
+    }
 }
 
 // Vertical count-normalised box mean (radius r) of plane `src` → `dst`.
 @compute @workgroup_size(64)
 fn box_v(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gidx(gid);
-    if (i >= G.n) { return; }
-    let x = i % G.w;
-    let y = i32(i / G.w);
-    let y0 = max(y - i32(G.r), 0);
-    let y1 = min(y + i32(G.r), i32(G.h) - 1);
+    let t = gidx(gid);
+    let runs = (G.h + RUN - 1u) / RUN;
+    if (t >= runs * G.w) { return; }
+    let x = t % G.w;
+    let start = i32((t / G.w) * RUN);
+    let end = min(start + i32(RUN), i32(G.h));
+    let r = i32(G.r);
+    let last = i32(G.h) - 1;
     var acc = 0.0;
-    for (var t = y0; t <= y1; t = t + 1) {
-        acc = acc + pool[G.src + u32(t) * G.w + x];
+    for (var k = max(start - r, 0); k <= min(start + r, last); k = k + 1) {
+        acc = acc + pool[G.src + u32(k) * G.w + x];
     }
-    pool[G.dst + i] = acc / f32(y1 - y0 + 1);
+    for (var y = start; y < end; y = y + 1) {
+        pool[G.dst + u32(y) * G.w + x] = acc / f32(min(y + r, last) - max(y - r, 0) + 1);
+        if (y + 1 + r <= last) {
+            acc = acc + pool[G.src + u32(y + 1 + r) * G.w + x];
+        }
+        if (y - r >= 0) {
+            acc = acc - pool[G.src + u32(y - r) * G.w + x];
+        }
+    }
 }
 
 // a (→ dst) and b (→ dst2) from mean I (src) and mean I² (src2).

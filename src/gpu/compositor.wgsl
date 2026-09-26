@@ -1052,11 +1052,16 @@ fn dev_rotate_oklab_hue_working(c: vec3<f32>, deg: f32) -> vec3<f32> {
 // The perceptual positive push belongs to the Develop3 recipe; retained legacy
 // engines keep their historical radial response.
 fn dev_scale_linear_chroma(c: vec3<f32>, factor: f32) -> vec3<f32> {
+    return dev_scale_linear_chroma_ex(c, factor, dev_effects[82] > 0.5);
+}
+
+// `perceptual`: the Develop3 recipe's OKLCh positive push.
+fn dev_scale_linear_chroma_ex(c: vec3<f32>, factor: f32, perceptual: bool) -> vec3<f32> {
     let y = clamp(dev_working_luma(c), 0.0, 1.0);
     let protect = dev_smootherstep(0.0027, 0.0174, y)
         * (1.0 - dev_smootherstep(0.7874, 0.9774, y));
     let req = (clamp(factor, 0.0, 3.20) - 1.0) * protect;
-    if (req > 0.0 && dev_effects[82] > 0.5) {
+    if (req > 0.0 && perceptual) {
         var lab = dev_working_to_oklab(c);
         let s = 1.0 + req;
         lab = vec3<f32>(lab.x, lab.y * s, lab.z * s);
@@ -1211,7 +1216,9 @@ fn dev_display_lum_at(v: f32) -> f32 {
 // The full scene chain: linear scene RGB → display-referred gamma sRGB.
 // CPU twin: SceneToneData::scene_to_display (region_e from the proxy).
 fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
-    return dev_scene_output(dev_scene_working(scene_rgb, local));
+    let size = vec2<f32>(u.layer_w, u.layer_h);
+    let px = local * size - 0.5;
+    return dev_scene_output(dev_apply_locals_working(dev_scene_working(scene_rgb, local), px, size));
 }
 
 // Scene chain up to (and including) RAW colour, in the working space — the
@@ -1786,10 +1793,194 @@ fn dev_develop_finish(toned_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
         // per-pixel colour (smoothing 0) reads the regional base luminance.
         let base = select(dev_plane_effects_base(local, pixel), dev_luma(cp.region),
                           smoothing > 0.001);
-        return dev_effects_stage(toned, local, base);
+        return dev_apply_locals_display(dev_effects_stage(toned, local, base), local);
     }
-    return dev_effects_stage(toned, local, dev_plane_effects_base(local, toned));
+    return dev_apply_locals_display(
+        dev_effects_stage(toned, local, dev_plane_effects_base(local, toned)),
+        local,
+    );
 }
+
+// ── Local adjustments (Linear / Radial masks) ─────────────────────────────
+// dev_local_lut[DEV_LOCALS_AT] = mask count, then DEV_LOCAL_STRIDE floats per
+// mask (packed by `pack_develop_locals`): [0] shape kind (0 linear, 1
+// radial), [1..7) shape, [8] Saturation, [9] RAW contrast gamma, [10] its
+// flag, [11] Identity tone flag, [12..15) gains, [15] exposure multiplier,
+// [16] RAW tone-eq flag, [17] tone-map mode, [18] Develop3 flag, [19..28)
+// RAW CAT16·2^EV matrix, [32..288) tone LUT, [288..544) RAW tone-eq table.
+const DEV_LOCALS_AT: u32 = 256u;
+const DEV_LOCAL_STRIDE: u32 = 544u;
+
+fn dev_local_param(k: u32, i: u32) -> f32 {
+    return dev_local_lut[DEV_LOCALS_AT + 1u + k * DEV_LOCAL_STRIDE + i];
+}
+
+fn dev_locals_count() -> u32 {
+    return u32(dev_local_lut[DEV_LOCALS_AT]);
+}
+
+// Interpolated read of a mask's 256-entry table at t ∈ [0, 1].
+fn dev_local_table(k: u32, at: u32, t: f32) -> f32 {
+    let x = clamp(t, 0.0, 1.0) * 255.0;
+    let i0 = u32(floor(x));
+    let i1 = min(i0 + 1u, 255u);
+    let a = dev_local_param(k, at + i0);
+    let b = dev_local_param(k, at + i1);
+    return a + (b - a) * (x - f32(i0));
+}
+
+// Mask weight at image-normalized (x / (w − 1), y / (h − 1)).
+// CPU twin: LocalMaskShape::weight.
+fn dev_local_weight(k: u32, n: vec2<f32>) -> f32 {
+    if (dev_local_param(k, 0u) < 0.5) {
+        let x0 = dev_local_param(k, 1u);
+        let y0 = dev_local_param(k, 2u);
+        let dx = dev_local_param(k, 3u) - x0;
+        let dy = dev_local_param(k, 4u) - y0;
+        let len2 = max(dx * dx + dy * dy, 1e-8);
+        let t = ((n.x - x0) * dx + (n.y - y0) * dy) / len2;
+        return 1.0 - dev_smootherstep(0.0, 1.0, t);
+    }
+    let dx = (n.x - dev_local_param(k, 1u)) / max(dev_local_param(k, 3u), 1e-4);
+    let dy = (n.y - dev_local_param(k, 2u)) / max(dev_local_param(k, 4u), 1e-4);
+    let rho = sqrt(dx * dx + dy * dy);
+    let inner = min(1.0 - clamp(dev_local_param(k, 5u), 0.0, 1.0), 1.0 - 1e-3);
+    let w = 1.0 - dev_smootherstep(inner, 1.0, rho);
+    return select(w, 1.0 - w, dev_local_param(k, 6u) > 0.5);
+}
+
+// Image-normalized position of the integer pixel `px` (x · inv_w on the CPU).
+fn dev_local_pos(px: vec2<f32>, size: vec2<f32>) -> vec2<f32> {
+    return px / max(size - 1.0, vec2<f32>(1.0));
+}
+
+// Identity (display) masks after Effects. Each mask runs its own legacy tone
+// and Saturation on the developed pixel and blends back by its weight.
+// CPU twin: DevelopPlan::apply_locals. RAW scenes run theirs in the working
+// space (dev_apply_locals_working).
+fn dev_apply_locals_display(c_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
+    let count = dev_locals_count();
+    if (count == 0u || dev_effects[10] > 0.5) {
+        return c_in;
+    }
+    let size = vec2<f32>(u.layer_w, u.layer_h);
+    let n = dev_local_pos(local * size - 0.5, size);
+    var c = c_in;
+    for (var k = 0u; k < count; k = k + 1u) {
+        let m = dev_local_weight(k, n);
+        if (m <= 0.003) {
+            continue;
+        }
+        var c2 = c;
+        if (dev_local_param(k, 11u) > 0.5) {
+            let gains = vec3<f32>(dev_local_param(k, 12u), dev_local_param(k, 13u), dev_local_param(k, 14u));
+            var lin = dev_srgb_to_linear(c2) * gains * dev_local_param(k, 15u);
+            let l0 = max(dev_luma_lin(lin), 0.0);
+            let target_ro = dev_highlight_rolloff(l0);
+            if (l0 > 1e-6) {
+                lin = lin * (target_ro / l0);
+            }
+            lin = dev_fit_linear_rgb_to_luma(lin, target_ro);
+            let rgb = clamp(dev_linear_to_srgb(lin), vec3(0.0), vec3(1.0));
+            let l = clamp(dev_luma(rgb), 0.0, 1.0);
+            c2 = clamp(dev_apply_luma_target(rgb, dev_local_table(k, 32u, l)), vec3(0.0), vec3(1.0));
+        }
+        let sat = dev_local_param(k, 8u);
+        if (abs(sat) > 0.001) {
+            let d = clamp(dev_eased(sat), -1.0, 1.0);
+            let factor = select(1.0 + d * 1.50, 1.0 + d, d < 0.0);
+            var lin = dev_srgb_to_linear(clamp(c2, vec3(0.0), vec3(1.0)));
+            if (abs(d) > 0.001 && abs(factor - 1.0) > 0.001) {
+                lin = dev_scale_linear_chroma_hull(lin, factor);
+            }
+            c2 = clamp(dev_linear_to_srgb(lin), vec3(0.0), vec3(1.0));
+        }
+        c = c + (c2 - c) * m;
+    }
+    return c;
+}
+
+// A RAW mask's own scene tone on a working pixel (CPU twin: the mask's
+// SceneToneData::scene_to_working — identity look, own exposure for the
+// tone equalizer, no grade, contrast or shadow-chroma stage).
+fn dev_local_scene_working(v_in: vec3<f32>, k: u32) -> vec3<f32> {
+    let m0 = vec3<f32>(dev_local_param(k, 19u), dev_local_param(k, 20u), dev_local_param(k, 21u));
+    let m1 = vec3<f32>(dev_local_param(k, 22u), dev_local_param(k, 23u), dev_local_param(k, 24u));
+    let m2 = vec3<f32>(dev_local_param(k, 25u), dev_local_param(k, 26u), dev_local_param(k, 27u));
+    var v = vec3<f32>(dot(m0, v_in), dot(m1, v_in), dot(m2, v_in));
+    if (dev_local_param(k, 16u) > 0.5) {
+        let e = log2(max(dev_working_luma(v), 6.1035156e-5));
+        v = v * exp2(dev_local_table(k, 288u, (e + 14.0) / 20.0));
+    }
+    let lut_t = vec3<f32>(
+        log2(max(v.r, 6.1035156e-5)),
+        log2(max(v.g, 6.1035156e-5)),
+        log2(max(v.b, 6.1035156e-5)),
+    );
+    let pc = vec3<f32>(
+        select(dev_local_table(k, 32u, (lut_t.r + 14.0) / 20.0), 0.0, v.r <= 0.0),
+        select(dev_local_table(k, 32u, (lut_t.g + 14.0) / 20.0), 0.0, v.g <= 0.0),
+        select(dev_local_table(k, 32u, (lut_t.b + 14.0) / 20.0), 0.0, v.b <= 0.0),
+    );
+    var outc = pc;
+    let n = max(max(v.r, v.g), v.b);
+    if (n > 1e-8) {
+        let mapped_n = dev_local_table(k, 32u, (log2(max(n, 6.1035156e-5)) + 14.0) / 20.0);
+        let mode = dev_local_param(k, 17u);
+        let hw = dev_smootherstep(0.5, 1.0, mapped_n);
+        var blend = 1.0;
+        if (mode < 1.5) {
+            blend = 0.90 + (0.20 - 0.90) * hw;
+            if (mode < 0.5) { blend = min(blend + 0.10, 1.0); }
+        }
+        outc = mix(pc, v * (mapped_n / n), blend);
+        outc = dev_compress_highlight_chroma(outc, mapped_n, n, mode, dev_local_param(k, 18u) > 0.5);
+    }
+    return outc;
+}
+
+// RAW masks on the working pixel after Detail (CPU twin:
+// apply_scene_locals_linear_region). `px` is the integer layer pixel.
+fn dev_apply_locals_working(v_in: vec3<f32>, px: vec2<f32>, size: vec2<f32>) -> vec3<f32> {
+    let count = dev_locals_count();
+    if (count == 0u || dev_effects[10] < 0.5) {
+        return v_in;
+    }
+    let n = dev_local_pos(px, size);
+    var v = v_in;
+    for (var k = 0u; k < count; k = k + 1u) {
+        let m = dev_local_weight(k, n);
+        if (m <= 0.003) {
+            continue;
+        }
+        var a = dev_local_scene_working(v, k);
+        if (dev_local_param(k, 10u) > 0.5) {
+            let gamma = dev_local_param(k, 9u);
+            let y = clamp(dev_working_luma(a), 0.0, 1.0);
+            let pivot = 0.1845;
+            var target_l = pivot * pow(y / pivot, gamma);
+            if (y > pivot) {
+                target_l = 1.0 - (1.0 - pivot) * pow((1.0 - y) / (1.0 - pivot), gamma);
+            }
+            a = select(
+                dev_apply_luma_target(a, target_l),
+                dev_apply_working_luma_target(a, target_l),
+                dev_effects[57] > 0.5,
+            );
+        }
+        let sat = dev_local_param(k, 8u);
+        if (abs(sat) > 0.001) {
+            let d = clamp(dev_eased(sat), -1.0, 1.0);
+            let factor = select(1.0 + d * 1.50, 1.0 + d, d < 0.0);
+            if (abs(d) > 0.001 && abs(factor - 1.0) > 0.001) {
+                a = dev_scale_linear_chroma_ex(a, factor, dev_local_param(k, 18u) > 0.5);
+            }
+        }
+        v = v + (a - v) * m;
+    }
+    return v;
+}
+
 
 // Read-back of the GPU-resident Detail plane at full-resolution layer pixel
 // (lx, ly). Its parameters ride in the develop parameter bank past the tone
@@ -1825,7 +2016,9 @@ fn dev_detail_output(lx: f32, ly: f32) -> vec3<f32> {
     let a11 = vec3<f32>(dev_adjusted_rgb[i11], dev_adjusted_rgb[i11 + 1u], dev_adjusted_rgb[i11 + 2u]);
     let v = mix(mix(a00, a10, wx), mix(a01, a11, wx), wy);
     if (dev_param(264u) > 0.5) {
-        var g = dev_scene_output(v);
+        // RAW masks follow Detail in the commit.
+        let size = vec2<f32>(dev_param(266u), dev_param(267u));
+        var g = dev_scene_output(dev_apply_locals_working(v, vec2<f32>(lx, ly) - 0.5, size));
         if (dev_rgb_curve[0] > 0.5) {
             g = vec3<f32>(
                 dev_rgb_curve_at(0u, g.r),

@@ -125,6 +125,21 @@ impl App {
         ))
     }
 
+    /// The Develop preview runs on a scene master the GPU can host with a
+    /// hardware adapter — the shader then carries Effects, Detail and Locals.
+    pub(in crate::app) fn develop_gpu_scene_ok(&self) -> bool {
+        let Some(gpu) = self.win.gpu.as_ref() else {
+            return false;
+        };
+        !gpu.software_adapter
+            && self
+                .dev
+                .develop_preview
+                .as_ref()
+                .and_then(|p| p.scene.as_ref())
+                .is_some_and(|sc| gpu.compositor.scene_fits_texture(sc))
+    }
+
     fn develop_detail_view_sig(&mut self) -> Option<[u32; 7]> {
         let ((x0, y0, x1, y1), (ox, oy), zoom) = self.develop_display_view()?;
         Some([
@@ -305,10 +320,10 @@ impl App {
         let raw_scene = scene
             .as_ref()
             .is_some_and(|sc| sc.look == crate::core::develop_scene::BaseLook::Raw);
-        // Detail and Local reuse the same CPU kernels on a reduced-resolution
-        // viewport proxy. They must not suppress the colour preview — the old
-        // `&& !need_detail` gate made every Colour/Mixer edit vanish as soon as
-        // a Detail slider was touched.
+        // Without the GPU plane, Detail and Local reuse the same CPU kernels on
+        // a reduced-resolution viewport proxy. They must not suppress the
+        // colour preview — the old `&& !need_detail` gate made every
+        // Colour/Mixer edit vanish as soon as a Detail slider was touched.
         // RAW colour always runs through the scene shader. Interaction may
         // reduce the sampled scene texture's resolution, but must never swap
         // to the old chroma-reconstruction model while the pointer is held:
@@ -316,12 +331,13 @@ impl App {
         let linear_scene_color = raw_scene && raw_color_runs_per_pixel(&settings);
         // The GPU plane (mode 5): the compositor evaluates the ordinary shader
         // chain into a viewport plane, then Effects and the Detail kernels on
-        // it, so no CPU proxy is needed. Locals still need the CPU chain, and
-        // a software adapter runs compute slower than the CPU does.
+        // it, so no CPU proxy is needed. A software adapter runs compute
+        // slower than the CPU does, so it keeps the CPU proxy.
         let software_adapter = self.win.gpu.as_ref().is_some_and(|g| g.software_adapter);
         let plane_effects = settings.has_spatial_effects() || settings.vignette.abs() > 0.001;
+        // Local masks are point operations the shader applies itself.
+        let gpu_locals = self.develop_gpu_scene_ok();
         let gpu_plane = (settings.has_detail() || plane_effects)
-            && !settings.has_locals()
             && !software_adapter
             && scene.as_ref().is_some_and(|sc| {
                 self.win
@@ -330,18 +346,18 @@ impl App {
                     .is_some_and(|g| g.compositor.scene_fits_texture(sc))
             });
         let cpu_detail = settings.has_detail() && !gpu_plane;
-        let needs_spatial_proxy =
-            settings.has_locals() || (!gpu_plane && (plane_effects || settings.has_detail()));
+        let needs_spatial_proxy = (settings.has_locals() && !gpu_locals)
+            || (!gpu_plane && (plane_effects || settings.has_detail()));
         let need_fast = needs_spatial_proxy;
         // With the GPU plane on an Identity scene the compositor builds the
         // commit's colour field from the plane itself.
         let need_color =
             settings.has_color() && !linear_scene_color && !need_fast && !(gpu_plane && !raw_scene);
-        // The fast low-res proxy carries the complete chain whenever a spatial
-        // stage needs neighbourhood pixels. Its tail samples the same regional
-        // luma/E proxy as the shader-only path, so stacking Shadows/Highlights
-        // with Detail does not silently switch local adaptation to global tone.
-        // Spatial Effects, Detail, and Local all run through this viewport proxy.
+        // The fast low-res proxy (no GPU plane) carries the complete chain
+        // whenever a spatial stage needs neighbourhood pixels. Its tail samples
+        // the same regional luma/E proxy as the shader-only path, so stacking
+        // Shadows/Highlights with Detail does not silently switch local
+        // adaptation to global tone.
         // Detail requests a five-tap anti-aliased base below, avoiding the thin-edge
         // aliasing that made the earlier point-sampled attempt bead magenta/cyan.
         // Region-luma (regional Shadows/Highlights/Whites/Blacks adaptation) is

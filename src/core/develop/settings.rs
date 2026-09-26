@@ -708,8 +708,8 @@ impl DevelopSettings {
     }
 
     /// True when any local-adjustment mask carries non-neutral sliders. The
-    /// live preview then takes the CPU path (the exact commit bake), since the
-    /// shader does not evaluate masks.
+    /// shader evaluates the masks on a GPU-hosted scene; otherwise the live
+    /// preview takes the CPU path (then the exact commit bake on release).
     pub fn has_locals(&self) -> bool {
         self.locals.iter().any(|l| !l.settings.is_neutral())
     }

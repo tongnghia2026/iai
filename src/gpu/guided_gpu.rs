@@ -23,6 +23,8 @@ struct GuidedParams {
 }
 
 const STRIDE: u64 = 256;
+/// Outputs per invocation of the sliding box passes (`RUN` in guided.wgsl).
+const RUN: u32 = 16;
 /// f32 planes in the pool: I plus five scratch planes.
 const POOL_PLANES: u64 = 6;
 const ENTRIES: &[&str] = &["load", "box_h", "box_v", "coeffs", "finish"];
@@ -152,26 +154,35 @@ impl GuidedGpuRuntime {
             return;
         }
         let limit = device.limits().max_compute_workgroups_per_dimension.max(1);
-        let total = n.div_ceil(64);
-        let groups_x = total.min(limit);
-        let groups_y = total.div_ceil(groups_x);
+        // Invocations per pass: one per pixel, or one per RUN-long box run.
+        let groups = |items: u32| {
+            let total = items.div_ceil(64).max(1);
+            let gx = total.min(limit);
+            (gx, total.div_ceil(gx))
+        };
         let mut base: GuidedParams = bytemuck::Zeroable::zeroed();
         base.w = w;
         base.h = h;
         base.n = n;
         base.r = r;
-        base.groups_x = groups_x;
         base.out_off = out_off;
         base.eps = eps;
         let plane = |k: u32| k * n;
         let (i, s1, s2, s3, s4, t) = (plane(0), plane(1), plane(2), plane(3), plane(4), plane(5));
         let pass = |name: &str, src: u32, src2: u32, dst: u32, dst2: u32| {
+            let items = match name {
+                "box_h" => w.div_ceil(RUN) * h,
+                "box_v" => h.div_ceil(RUN) * w,
+                _ => n,
+            };
+            let (gx, gy) = groups(items);
             let mut p = base;
+            p.groups_x = gx;
             p.src = src;
             p.src2 = src2;
             p.dst = dst;
             p.dst2 = dst2;
-            (entry(name), p)
+            (entry(name), p, gy)
         };
         let passes = [
             pass("load", 0, 0, i, s1),
@@ -204,7 +215,7 @@ impl GuidedGpuRuntime {
             return;
         };
         let mut bytes = vec![0u8; passes.len() * STRIDE as usize];
-        for (k, (_, p)) in passes.iter().enumerate() {
+        for (k, (_, p, _)) in passes.iter().enumerate() {
             let at = k * STRIDE as usize;
             bytes[at..at + std::mem::size_of::<GuidedParams>()]
                 .copy_from_slice(bytemuck::bytes_of(p));
@@ -240,10 +251,10 @@ impl GuidedGpuRuntime {
             label: Some("guided_pass"),
             timestamp_writes: None,
         });
-        for (k, (pi, _)) in passes.iter().enumerate() {
+        for (k, (pi, p, groups_y)) in passes.iter().enumerate() {
             cpass.set_pipeline(&self.pipelines[*pi]);
             cpass.set_bind_group(0, &bind_group, &[(k as u64 * STRIDE) as u32]);
-            cpass.dispatch_workgroups(groups_x, groups_y, 1);
+            cpass.dispatch_workgroups(p.groups_x, *groups_y, 1);
         }
     }
 }

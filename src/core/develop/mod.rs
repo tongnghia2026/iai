@@ -35,7 +35,8 @@ pub(crate) use self::tone::*;
 pub use self::curves::build_histogram_proxy;
 pub use self::mixer::{mixer_mask_preview, mixer_target_from_srgb, MixerTarget};
 pub use self::settings::{
-    ColorMixerAlgorithm, DevelopEngineVersion, DevelopSettings, PointCurveMode, ToneMapMode,
+    ColorMixerAlgorithm, DevelopEngineVersion, DevelopSettings, LocalAdjustment, LocalMaskShape,
+    LocalSettings, PointCurveMode, ToneMapMode,
 };
 pub use self::spatial::{
     apply_color_to_region, fast_preview_downsample, guided_mixer_active, guided_mixer_controls,

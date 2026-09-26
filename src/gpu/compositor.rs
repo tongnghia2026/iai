@@ -1043,6 +1043,94 @@ fn effects_base_grid(
     })
 }
 
+/// Where the local masks start in `dev_local_lut_buf` (after the tone table),
+/// and the floats per mask; mirrored by `DEV_LOCALS_AT` / `DEV_LOCAL_STRIDE`
+/// in compositor.wgsl.
+const DEV_LOCALS_AT: usize = 256;
+const DEV_LOCAL_STRIDE: usize = 544;
+
+/// The preview's local masks for the shader: count, then per mask its shape,
+/// Saturation and tone — the legacy tone table for an Identity scene
+/// (applied after Effects), the mask's own scene tone for RAW (after
+/// Detail). An empty count when the CPU fast proxy already carries them.
+fn pack_develop_locals(p: &DevelopGpuPreview) -> Vec<f32> {
+    use crate::core::develop::{LocalMaskShape, ToneMapMode};
+    let Some(scene) = p.scene.as_ref() else {
+        return vec![0.0];
+    };
+    if p.color.as_ref().is_some_and(|c| c.fast_preview) {
+        return vec![0.0];
+    }
+    let locals: Vec<_> = p
+        .settings
+        .locals
+        .iter()
+        .filter(|l| !l.settings.is_neutral())
+        .collect();
+    if locals.is_empty() {
+        return vec![0.0];
+    }
+    let parent = (scene.look == crate::core::develop_scene::BaseLook::Raw)
+        .then(|| crate::core::develop_scene::build_scene_tone_for_scene(&p.settings, scene));
+    let mut out = vec![0.0f32; 1 + locals.len() * DEV_LOCAL_STRIDE];
+    out[0] = locals.len() as f32;
+    for (k, local) in locals.iter().enumerate() {
+        let b = &mut out[1 + k * DEV_LOCAL_STRIDE..1 + (k + 1) * DEV_LOCAL_STRIDE];
+        match local.shape {
+            LocalMaskShape::Linear { x0, y0, x1, y1 } => {
+                b[1..5].copy_from_slice(&[x0, y0, x1, y1]);
+            }
+            LocalMaskShape::Radial {
+                cx,
+                cy,
+                rx,
+                ry,
+                feather,
+                invert,
+            } => {
+                b[0] = 1.0;
+                b[1..7].copy_from_slice(&[cx, cy, rx, ry, feather, f32::from(u8::from(invert))]);
+            }
+        }
+        let s = local.settings.to_develop_settings();
+        b[8] = s.saturation;
+        match &parent {
+            Some(parent) => {
+                if s.contrast.abs() > 0.001 {
+                    b[9] = (0.75 * crate::core::develop::control_to_unit(s.contrast)).exp2();
+                    b[10] = 1.0;
+                }
+                let t = crate::core::develop_scene::build_local_scene_tone(&s, parent);
+                b[16] = f32::from(u8::from(t.tone_eq_active));
+                b[17] = match t.tone_map_mode {
+                    ToneMapMode::Perceptual => 0.0,
+                    ToneMapMode::FilmLike => 1.0,
+                    ToneMapMode::Neutral => 2.0,
+                };
+                b[18] = f32::from(u8::from(
+                    t.develop_engine_version
+                        == crate::core::develop::DevelopEngineVersion::Develop3,
+                ));
+                for (i, row) in t.wb_ev.iter().enumerate() {
+                    b[19 + i * 3..22 + i * 3].copy_from_slice(row);
+                }
+                b[32..288].copy_from_slice(&t.lut);
+                b[288..544].copy_from_slice(&t.tone_eq);
+            }
+            None => {
+                if crate::core::develop::tone_is_active(&s) {
+                    let t = crate::core::develop::build_tone_data(&s);
+                    b[11] = 1.0;
+                    b[12..15].copy_from_slice(&t.gains);
+                    b[15] = t.ev;
+                    b[32..288].copy_from_slice(&t.lut);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Colour-proxy slots for per-pixel (unsmoothed) Identity colour: mode 1 with
 /// an empty proxy, which the Colour Smoothing blend (0) turns into exactly the
 /// per-pixel transform.
@@ -1107,14 +1195,18 @@ fn effects_neutral(
 
 /// Whether `b` yields the Effects base built for `a`.
 fn same_base_inputs(a: &DevelopGpuPreview, b: &DevelopGpuPreview) -> bool {
-    same_field_inputs(a, b)
-        && effects_neutral(&a.settings) == effects_neutral(&b.settings)
-        && a.settings.has_spatial_effects() == b.settings.has_spatial_effects()
+    same_field_inputs(a, b) && a.settings.has_spatial_effects() == b.settings.has_spatial_effects()
 }
 
-/// Whether `b` yields the colour field built for `a`: same plane, scene,
-/// regional luma and non-Detail settings.
+/// Whether `b` yields the colour field built for `a`: same plane, scene and
+/// regional luma, and the same settings apart from Detail and Effects (the
+/// field reads tone and colour only).
 fn same_field_inputs(a: &DevelopGpuPreview, b: &DevelopGpuPreview) -> bool {
+    same_plane_inputs(a, b) && effects_neutral(&a.settings) == effects_neutral(&b.settings)
+}
+
+/// Same plane, scene and regional luma.
+fn same_plane_inputs(a: &DevelopGpuPreview, b: &DevelopGpuPreview) -> bool {
     let same_scene = match (&a.scene, &b.scene) {
         (Some(x), Some(y)) => std::sync::Arc::ptr_eq(x, y),
         (None, None) => true,
@@ -1128,11 +1220,7 @@ fn same_field_inputs(a: &DevelopGpuPreview, b: &DevelopGpuPreview) -> bool {
         (None, None) => true,
         _ => false,
     };
-    a.layer_id == b.layer_id
-        && a.detail == b.detail
-        && same_scene
-        && same_luma
-        && detail_neutral(&a.settings) == detail_neutral(&b.settings)
+    a.layer_id == b.layer_id && a.detail == b.detail && same_scene && same_luma
 }
 
 /// The develop parameter-bank entries (floats 256..268 of the LUT bank) that
@@ -1228,7 +1316,11 @@ pub struct CompositorState {
     /// proxy (grows on demand) and the 256-entry H/S/W/B luma-offset LUT. Bound on
     /// group 2 (bindings 3/4) for every draw; only read when the local path is on.
     dev_region_luma_buf: wgpu::Buffer,
+    /// [0..256) the regional tone table, then the local masks from
+    /// `DEV_LOCALS_AT` (see `pack_develop_locals`).
     dev_local_lut_buf: wgpu::Buffer,
+    /// f32 capacity of `dev_local_lut_buf`.
+    dev_local_capacity: usize,
     /// Capacity (in f32 elements) of `dev_region_luma_buf`; the buffer + uniform_bg
     /// are rebuilt when a proxy needs more.
     dev_region_capacity: usize,
@@ -1893,6 +1985,7 @@ struct VsOut {
             layer_pool_generation: u64::MAX,
             dev_region_luma_buf,
             dev_local_lut_buf,
+            dev_local_capacity: 256,
             dev_region_capacity,
             dev_uploaded_region_luma: None,
             dev_region_rgb_buf,
@@ -2223,6 +2316,30 @@ struct VsOut {
             }
             return;
         }
+
+        // Local masks the shader applies itself (sized before the tone table
+        // is written, since growing drops the buffer's contents).
+        let locals = self
+            .develop_preview
+            .as_ref()
+            .map_or_else(|| vec![0.0], pack_develop_locals);
+        let locals_need = DEV_LOCALS_AT + locals.len();
+        if locals_need > self.dev_local_capacity {
+            let cap = locals_need.next_power_of_two();
+            self.dev_local_lut_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("dev_local_lut_buf"),
+                size: (cap * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.dev_local_capacity = cap;
+            self.rebuild_uniform_bg(device);
+        }
+        queue.write_buffer(
+            &self.dev_local_lut_buf,
+            (DEV_LOCALS_AT * 4) as u64,
+            bytemuck::cast_slice(&locals),
+        );
 
         let local_upload: Option<(std::sync::Arc<Vec<f32>>, [f32; 256])> =
             self.develop_preview.as_ref().and_then(|p| {

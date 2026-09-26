@@ -1231,6 +1231,22 @@ fn build_scene_tone_impl(
     }
 }
 
+/// Scene tone of one local mask's sliders, applied to the parent's working
+/// pixel (identity look, parent working and output spaces) — what
+/// `apply_scene_locals_linear_region` runs per mask.
+pub(crate) fn build_local_scene_tone(
+    local: &DevelopSettings,
+    parent: &SceneToneData,
+) -> SceneToneData {
+    build_scene_tone_impl(
+        local,
+        BaseLook::Identity,
+        parent.working_space,
+        parent.output_space,
+        None,
+    )
+}
+
 /// Hue/strength control to a small, zero-luminance linear-RGB offset. Removing
 /// the direction's Rec.709 luminance makes grading change colour contrast
 /// without lifting or lowering the zone as a side effect.
@@ -2403,13 +2419,7 @@ fn apply_scene_locals_linear_region(
         .filter(|local| !local.settings.is_neutral())
         .map(|local| {
             let s = local.settings.to_develop_settings();
-            let tone = build_scene_tone_impl(
-                &s,
-                BaseLook::Identity,
-                parent_tone.working_space,
-                parent_tone.output_space,
-                None,
-            );
+            let tone = build_local_scene_tone(&s, parent_tone);
             (local.shape, s, tone)
         })
         .collect();

@@ -666,8 +666,8 @@ fn perf_gpu_detail_drag() {
 
     // "Detail 0" is the shader-only path the owner already finds smooth.
     for (label, with_detail) in [("GPU Detail", true), ("Detail 0  ", false)] {
-        for group in ["detail", "mixer", "light"] {
-            if !with_detail && group == "detail" {
+        for group in ["detail", "mixer", "light", "clarity"] {
+            if !with_detail && (group == "detail" || group == "clarity") {
                 continue;
             }
             let mut host = Vec::new();
@@ -678,25 +678,28 @@ fn perf_gpu_detail_drag() {
                 match group {
                     "detail" => settings.sharpening = 30.0 + step,
                     "mixer" => settings.mixer_luminance[1] = 30.0 + step,
+                    "clarity" => settings.clarity = 20.0 + step,
                     _ => settings.shadows = 30.0 + step,
                 }
                 let started = Instant::now();
                 // Host side of the frame: the colour proxies the app builds
-                // for the shader path — the only per-frame CPU work left.
+                // for the shader path — RAW guided planes, or Identity proxies
+                // without a plane (a plane builds its own colour field).
                 let tone = develop_scene::build_scene_tone_for_scene(&settings, &scene);
-                let region =
-                    develop_scene::tone_lowpass_scene_region(&color_base, cpw, cph, &tone, s);
-                let (adjusted, guided) = if raw {
-                    let samples = develop_scene::tone_scene_color_samples(&color_base, &tone);
-                    let controls = develop::guided_mixer_controls(&samples, &settings, cpw, cph)
-                        .expect("guided mixer controls");
-                    (controls, true)
-                } else {
-                    (
-                        develop::apply_color_to_region(&region, &settings, cpw, cph),
-                        false,
-                    )
-                };
+                let proxies = (raw || !with_detail).then(|| {
+                    let region =
+                        develop_scene::tone_lowpass_scene_region(&color_base, cpw, cph, &tone, s);
+                    if raw {
+                        let samples = develop_scene::tone_scene_color_samples(&color_base, &tone);
+                        let controls =
+                            develop::guided_mixer_controls(&samples, &settings, cpw, cph)
+                                .expect("guided mixer controls");
+                        (region, controls, true)
+                    } else {
+                        let adjusted = develop::apply_color_to_region(&region, &settings, cpw, cph);
+                        (region, adjusted, false)
+                    }
+                });
                 let detail = with_detail.then(|| DevelopDetailGpu {
                     origin_x: ox,
                     origin_y: oy,
@@ -709,7 +712,7 @@ fn perf_gpu_detail_drag() {
                     } else {
                         [0.2126, 0.7152, 0.0722]
                     },
-                    run_detail: true,
+                    run_detail: settings.has_detail(),
                 });
                 compositor.develop_preview = Some(DevelopGpuPreview {
                     layer_id: 0,
@@ -720,7 +723,7 @@ fn perf_gpu_detail_drag() {
                         h: rph,
                         downsample: TONE_DOWNSAMPLE as u32,
                     }),
-                    color: Some(ColorProxies {
+                    color: proxies.map(|(region, adjusted, guided)| ColorProxies {
                         region: Arc::new(region),
                         adjusted: Arc::new(adjusted),
                         w: cpw,
