@@ -8,6 +8,10 @@ use crate::core::document::DocumentId;
 /// Minimum spacing between live-histogram re-bins during a slider drag.
 const DEVELOP_HISTOGRAM_REBIN: std::time::Duration = std::time::Duration::from_millis(80);
 
+/// Longest a filmstrip click keeps the current image on screen while the
+/// selected one is read back or drafted; after this its placeholder shows.
+const DEVELOP_SWITCH_WAIT: std::time::Duration = std::time::Duration::from_millis(1200);
+
 /// RAM guard for linearizing a non-RAW layer into an f16 Identity scene master
 /// (8 bytes/px, held for the whole Develop session). 16384² — the worst case
 /// the old GPU-texture gate already admitted (2 GiB); anything larger falls
@@ -183,11 +187,82 @@ impl App {
         }
     }
 
+    /// A filmstrip click. A parked target (spilled to disk, or not decoded
+    /// yet) is prepared first while the current image stays on screen, then
+    /// shown as it will look (see `poll_develop_switch`), so the user never
+    /// sees a stale or camera-JPEG frame flash first. A resident target, or
+    /// one already showing its colour-true draft, switches at once.
+    pub(crate) fn develop_session_activate(&mut self, doc: DocumentId) {
+        if self.docs.documents[self.docs.active_doc_idx].id == doc {
+            self.dev.develop_switch_pending = None;
+            return;
+        }
+        let Some(idx) = self.docs.documents.iter().position(|d| d.id == doc) else {
+            return;
+        };
+        if !self.dev.develop_session.iter().any(|e| e.doc == doc) {
+            return;
+        }
+        let target = &self.docs.documents[idx];
+        let parked = target.deferred_raw
+            && !target.raw_draft
+            && self.dev.develop_bake_all.is_none()
+            && !self.jobs.raw_preview_failures.contains_key(&doc);
+        if parked {
+            self.dev.develop_switch_pending = Some((doc, std::time::Instant::now()));
+            self.ensure_raw_resident(idx);
+            if let Some(w) = &self.win.develop_window {
+                w.request_redraw();
+            }
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        self.dev.develop_switch_pending = None;
+        self.develop_session_activate_now(doc);
+    }
+
+    /// Complete a pending filmstrip switch once its target can be shown as it
+    /// will look: resident again, showing its colour-true draft, failed, or
+    /// after `DEVELOP_SWITCH_WAIT` at the latest. Called every frame.
+    pub(crate) fn poll_develop_switch(&mut self) {
+        let Some((doc, since)) = self.dev.develop_switch_pending else {
+            return;
+        };
+        let idx = self.docs.documents.iter().position(|d| d.id == doc);
+        let valid = idx.is_some()
+            && self.dev.develop_bake_all.is_none()
+            && self.dev.develop_session.iter().any(|e| e.doc == doc);
+        let Some(idx) = idx.filter(|_| valid) else {
+            self.dev.develop_switch_pending = None;
+            return;
+        };
+        let target = &self.docs.documents[idx];
+        let ready = !target.deferred_raw
+            || target.raw_draft
+            || self.jobs.raw_preview_failures.contains_key(&doc)
+            || since.elapsed() >= DEVELOP_SWITCH_WAIT;
+        if ready {
+            self.dev.develop_switch_pending = None;
+            self.develop_session_activate_now(doc);
+            // The target came back into RAM; park whatever is now surplus.
+            self.evict_background_raws();
+            return;
+        }
+        let deadline = since + DEVELOP_SWITCH_WAIT;
+        self.win.egui_repaint_deadline = Some(
+            self.win
+                .egui_repaint_deadline
+                .map_or(deadline, |d| d.min(deadline)),
+        );
+    }
+
     /// Make another filmstrip image the active one: save the current image's
     /// settings, restore the source tiles (cancel the live preview BEFORE the
     /// document switch — after it the cancel's doc guard would skip the
     /// restore), then start a session on the target with its saved settings.
-    pub(crate) fn develop_session_activate(&mut self, doc: DocumentId) {
+    fn develop_session_activate_now(&mut self, doc: DocumentId) {
         if self.docs.documents[self.docs.active_doc_idx].id == doc {
             return;
         }
@@ -260,6 +335,9 @@ impl App {
         for (key, id) in &self.jobs.raw_preview_docs {
             if ids.contains(id) {
                 self.jobs.cancelled_raw_loads.insert(key.clone());
+                if let Some(job) = self.jobs.raw_decode_jobs.get(key) {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
         self.jobs.raw_preview_docs.retain(|_, id| !ids.contains(id));
@@ -281,6 +359,8 @@ impl App {
         self.shell.ui.show_develop_dialog = false;
         self.cancel_develop_preview();
         self.dev.develop_session.clear();
+        self.dev.develop_switch_pending = None;
+        self.cancel_raw_prefetch();
     }
 
     /// Start the next queued "Open Image" bake on a worker (no-op while one is

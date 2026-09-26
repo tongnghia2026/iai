@@ -42,6 +42,7 @@ fn init_thread_pool() {
 
 /// Run IAI to completion. Blocks until the event loop exits.
 pub fn run() -> Result<(), BootstrapError> {
+    crate::core::hw::opt_out_of_power_throttling();
     init_thread_pool();
 
     #[cfg(windows)]

@@ -77,6 +77,23 @@ pub struct BackgroundJobs {
     /// and gets a tab (e.g. a fast double-click on a recent-files card). Cleared
     /// as each result is drained in `poll_loads`.
     pub(in crate::app) loading_keys: std::collections::HashSet<String>,
+    /// Early reduced-size RAW renders made by the same colour chain as the full
+    /// decode; each replaces its file's placeholder while the demosaic runs.
+    /// See `poll_raw_drafts`.
+    #[allow(clippy::type_complexity)]
+    pub(in crate::app) pending_raw_drafts:
+        Vec<std::sync::mpsc::Receiver<(std::path::PathBuf, crate::core::canvas::Canvas)>>,
+    /// Foreground RAW decodes in flight, by normalized path key. Each carries
+    /// the flag that abandons it once the user has moved to another image.
+    pub(in crate::app) raw_decode_jobs: std::collections::HashMap<String, RawDecodeJob>,
+    /// Background decode of a filmstrip neighbour straight into a disk spill.
+    pub(in crate::app) raw_prefetch: Option<RawPrefetchJob>,
+    /// Documents whose prefetch failed; not retried this session (a real
+    /// decoder error surfaces when the user selects the image).
+    pub(in crate::app) raw_prefetch_failed:
+        std::collections::HashSet<crate::core::document::DocumentId>,
+    /// Documents holding a RAW disk spill, least recently used first.
+    pub(in crate::app) raw_spill_lru: Vec<crate::core::document::DocumentId>,
     /// The next finished load becomes active immediately for early feedback; once
     /// a multi-file batch finishes, its final successfully loaded document becomes
     /// active (see the `is_last` marker carried by `pending_loads`).
@@ -200,4 +217,21 @@ pub(in crate::app) struct RepairAiJob {
     pub(in crate::app) work: crate::core::canvas::SpotHealWork,
     pub(in crate::app) overlay: Option<std::sync::Arc<crate::ui::CloneSourcePreview>>,
     pub(in crate::app) handle: std::thread::JoinHandle<Option<Vec<u8>>>,
+}
+
+/// A foreground RAW decode (see `BackgroundJobs::raw_decode_jobs`).
+pub(in crate::app) struct RawDecodeJob {
+    /// Target document; `None` until the first open's placeholder exists.
+    pub(in crate::app) doc: Option<crate::core::document::DocumentId>,
+    pub(in crate::app) cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(in crate::app) started: std::time::Instant,
+}
+
+/// A background RAW prefetch (see `BackgroundJobs::raw_prefetch`).
+pub(in crate::app) struct RawPrefetchJob {
+    pub(in crate::app) doc: crate::core::document::DocumentId,
+    pub(in crate::app) cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[allow(clippy::type_complexity)]
+    pub(in crate::app) rx:
+        std::sync::mpsc::Receiver<Result<std::sync::Arc<crate::core::raw_spill::RawSpill>, String>>,
 }

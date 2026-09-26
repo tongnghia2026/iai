@@ -885,6 +885,12 @@ pub struct Document {
     /// activates it (the swap-in goes through the existing preview→full path).
     /// `false` for every ordinary document. Session-only, never serialized.
     pub deferred_raw: bool,
+    /// While [`Self::deferred_raw`]: `canvas` is a reduced colour-true draft
+    /// rendered by iAi's RAW chain (not the camera's embedded JPEG).
+    pub raw_draft: bool,
+    /// The decoded RAW parked on disk, so reactivating a deferred document is a
+    /// read instead of a new decode. Session-only.
+    pub raw_spill: Option<std::sync::Arc<crate::core::raw_spill::RawSpill>>,
 }
 
 impl Document {
@@ -935,6 +941,8 @@ impl Document {
             master: None,
             editing_master: false,
             deferred_raw: false,
+            raw_draft: false,
+            raw_spill: None,
         }
     }
 
@@ -965,6 +973,8 @@ impl Document {
             master: None,
             editing_master: false,
             deferred_raw: false,
+            raw_draft: false,
+            raw_spill: None,
         }
     }
 

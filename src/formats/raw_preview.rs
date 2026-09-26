@@ -79,8 +79,10 @@ pub fn take_cached_mean_luma(path: &Path) -> Option<f32> {
         .map(|s| s.mean_luma)
 }
 
-pub fn take_cached_stats(path: &Path) -> Option<RawPreviewStats> {
-    preview_luma_cache().lock().ok()?.remove(path)
+/// Stats the preview worker measured for `path`, left in the cache so a
+/// cancelled decode can use them again; the decode forgets them on success.
+pub fn cached_stats(path: &Path) -> Option<RawPreviewStats> {
+    preview_luma_cache().lock().ok()?.get(path).cloned()
 }
 
 pub fn forget_cached_mean_luma(path: &Path) {

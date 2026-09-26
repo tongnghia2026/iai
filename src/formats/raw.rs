@@ -28,6 +28,27 @@ use crate::core::develop_scene::{
 use rawloader::{Orientation, RawImage, RawImageData};
 use rayon::prelude::*;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Error text of a decode abandoned through [`RawDecodeControl::cancel`].
+pub const RAW_DECODE_CANCELLED: &str = "RAW decode cancelled";
+
+/// Drives an interactive decode: `cancel` is polled between stages so the app
+/// can abandon an image the user has already left, and `draft` receives a
+/// reduced-size render made by the same colour chain as the full decode
+/// (same crop, white balance, camera match and default look) before the
+/// expensive demosaic starts. The full-resolution result is unaffected.
+#[derive(Default, Clone, Copy)]
+pub struct RawDecodeControl<'a> {
+    pub cancel: Option<&'a AtomicBool>,
+    pub draft: Option<&'a (dyn Fn(Canvas) + Sync)>,
+}
+
+impl RawDecodeControl<'_> {
+    fn cancelled(&self) -> bool {
+        self.cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+    }
+}
 
 /// File extensions handled by rawloader's bundled decoders. Anything outside this
 /// set falls through to the generic image importers.
@@ -282,7 +303,31 @@ fn decode_front_end(path: &Path) -> Result<DecodedRaw, String> {
 }
 
 fn decode_raw(path: &Path) -> Result<Canvas, String> {
-    decode_raw_from(decode_front_end(path)?, path)
+    decode_raw_controlled(path, RawDecodeControl::default())
+}
+
+/// [`RawImporter::import`] with cancellation and an early draft; see
+/// [`RawDecodeControl`].
+pub fn decode_raw_controlled(path: &Path, control: RawDecodeControl<'_>) -> Result<Canvas, String> {
+    // The camera-JPEG statistics for the colour match come from the embedded
+    // preview. Unless the preview worker already measured them, measure them
+    // while the sensor data decodes rather than after it (the draft needs
+    // them early).
+    let (decoded, preview_stats) = rayon::join(
+        || decode_front_end(path),
+        || {
+            crate::formats::raw_preview::cached_stats(path).or_else(|| {
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| crate::formats::raw_preview::preview_stats_from_bytes(&bytes))
+            })
+        },
+    );
+    let decoded = decoded?;
+    if control.cancelled() {
+        return Err(RAW_DECODE_CANCELLED.to_string());
+    }
+    decode_raw_from(decoded, path, preview_stats, control)
 }
 
 /// Where a channel's effective white level came from. The Q1 sensor-preprocessing
@@ -771,7 +816,19 @@ fn jpeg_match_plan(dcp_selected: bool, natural_default: bool) -> JpegMatchPlan {
 
 /// Build the iAi scene + canvas from a decoded rawloader mosaic. Shared by both
 /// the rawloader and rawler front-ends.
-fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
+fn decode_raw_from(
+    decoded: DecodedRaw,
+    path: &Path,
+    preview_stats: Option<crate::formats::raw_preview::RawPreviewStats>,
+    control: RawDecodeControl<'_>,
+) -> Result<Canvas, String> {
+    macro_rules! cancel_point {
+        () => {
+            if control.cancelled() {
+                return Err(RAW_DECODE_CANCELLED.to_string());
+            }
+        };
+    }
     let DecodedRaw {
         image: raw,
         backend,
@@ -914,6 +971,39 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     // opt-in Q1 audit path until its look has owner GUI approval.
     let raw_render_recipe = RawRenderRecipe::resolve();
 
+    // Baseline exposure: lift the scene so the default render matches the camera's
+    // embedded-JPEG brightness. A scene-referred RAW otherwise opens flatter and
+    // darker than that preview (the camera bakes its picture-style tone into the
+    // JPEG), which reads as the image "jumping dark" once the full decode replaces
+    // the instant preview. Best-effort: files without a preview are left as-is.
+    // Decide the embedded-JPEG match policy first: a profile-backed DCP render
+    // is already colour-accurate, so it defaults to no JPEG fit; the no-profile
+    // default is preview-safe under Natural v3 (matrix, no RGB curves) and the
+    // full curve fit under legacy. An explicit IAI_RAW_JPEG_MATCH override wins.
+    let jpeg_match = jpeg_match_plan(dcp_selected, raw_render_recipe.no_profile_preview_safe);
+
+    // Cached preview stats are forgotten only once the decode succeeds, so an
+    // abandoned decode does not have to measure them again.
+    let preview_stats = if jpeg_match.apply_gain
+        || jpeg_match.apply_matrix
+        || jpeg_match.apply_curves
+        || jpeg_match.preview_safe
+    {
+        preview_stats
+    } else {
+        None
+    };
+    let camera_name = format!("{} {}", raw.clean_make.trim(), raw.clean_model.trim());
+    let tail = RawSceneTail {
+        orientation: raw.orientation,
+        jpeg_match,
+        preview_stats: preview_stats.as_ref(),
+        recipe: &raw_render_recipe,
+        resolution: &resolver_provenance,
+        as_shot_white,
+        camera_name: camera_name.trim(),
+    };
+
     let crop_top = area.top;
     let crop_left = area.left;
     let cfa = &raw.cfa;
@@ -934,6 +1024,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
                     .map(|i| normalize(v[i], cfa.color_at(i / w, i % w)))
                     .collect(),
             };
+            cancel_point!();
             // Camera pipelines such as ART/ACR suppress isolated dead/hot
             // sensels before interpolation. Without this, one defective Bayer
             // sample expands into a small black/coloured dot after demosaic.
@@ -949,6 +1040,13 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
                 inpaint_opposed_bayer(&mut plane, w, h, cfa, gain);
             }
             let plane = plane;
+            cancel_point!();
+            if let (false, Some(sink)) = (mono, control.draft) {
+                if let Some(draft) = render_raw_draft(&plane, w, area, cfa, writer, &tail) {
+                    sink(draft);
+                }
+                cancel_point!();
+            }
 
             // Whole-sensor AHD demosaic, computed once (skipped for mono and past
             // the pixel cap). The per-pixel loop below just reads it back; a None
@@ -959,7 +1057,10 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
             let ahd_cap = env_usize("IAI_AHD_MAX_PIXELS", AHD_MAX_PIXELS);
             let ahd_rgb: Option<Vec<[f32; 3]>> =
                 if DEMOSAIC == DemosaicMethod::Ahd && !mono && w.saturating_mul(h) <= ahd_cap {
-                    Some(demosaic_ahd(&plane, w, h, cfa, &cam2xyz))
+                    match demosaic_ahd(&plane, w, h, cfa, &cam2xyz, control.cancel) {
+                        Some(rgb) => Some(rgb),
+                        None => return Err(RAW_DECODE_CANCELLED.to_string()),
+                    }
                 } else {
                     None
                 };
@@ -1041,6 +1142,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
         }
         other => return Err(format!("RAW {other} kênh/điểm ảnh chưa hỗ trợ")),
     }
+    cancel_point!();
 
     // Default false-colour suppression on the linear scene: a chroma median that
     // drops the Malvar demosaic's isolated edge colour specks (the reddish-brown
@@ -1051,6 +1153,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     if !mono && fc_iters > 0 {
         suppress_false_color(&mut out, cw, ch, fc_iters);
     }
+    cancel_point!();
 
     // Default colour-noise reduction on the linear scene, before capture sharpen
     // (so the sharpener never re-amplifies chroma speckle) and before any chroma
@@ -1059,6 +1162,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
     if !mono && scene_color_nr > 1e-4 {
         denoise_scene_chroma(&mut out, cw, ch, scene_color_nr);
     }
+    cancel_point!();
 
     // Capture sharpening on the linear scene, after demosaic and before the
     // master is frozen (before orientation too, but the pass is isotropic so
@@ -1079,38 +1183,41 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
             cs_edge,
         );
     }
+    cancel_point!();
 
+    let canvas = finish_raw_scene(out, cw, ch, &tail, true, control)?;
+    crate::formats::raw_preview::forget_cached_mean_luma(path);
+    Ok(canvas)
+}
+
+/// Per-decode constants for the colour tail shared by the draft and the full
+/// render, so both land on the same crop, camera match and default look.
+struct RawSceneTail<'a> {
+    orientation: Orientation,
+    jpeg_match: JpegMatchPlan,
+    preview_stats: Option<&'a crate::formats::raw_preview::RawPreviewStats>,
+    recipe: &'a RawRenderRecipe,
+    resolution: &'a resolver::ResolverProvenance,
+    as_shot_white: Option<crate::core::cat16::WhiteBalance>,
+    camera_name: &'a str,
+}
+
+/// Orient the linear f16 master, fit it to the camera JPEG, apply the
+/// default-look shaping and render the document pixels. `keep_scene` attaches
+/// the master as the Develop source; a draft only keeps its pixels.
+fn finish_raw_scene(
+    out: Vec<u16>,
+    cw: usize,
+    ch: usize,
+    tail: &RawSceneTail<'_>,
+    keep_scene: bool,
+    control: RawDecodeControl<'_>,
+) -> Result<Canvas, String> {
     // Apply EXIF orientation so portraits aren't sideways. The buffer holds f16
     // bits at this point; orientation only moves 4-u16 pixels, so it is agnostic.
-    let (out, fw, fh) = apply_orientation(out, cw, ch, raw.orientation);
-
-    // Baseline exposure: lift the scene so the default render matches the camera's
-    // embedded-JPEG brightness. A scene-referred RAW otherwise opens flatter and
-    // darker than that preview (the camera bakes its picture-style tone into the
-    // JPEG), which reads as the image "jumping dark" once the full decode replaces
-    // the instant preview. Best-effort: files without a preview are left as-is.
-    // Decide the embedded-JPEG match policy first: a profile-backed DCP render
-    // is already colour-accurate, so it defaults to no JPEG fit; the no-profile
-    // default is preview-safe under Natural v3 (matrix, no RGB curves) and the
-    // full curve fit under legacy. An explicit IAI_RAW_JPEG_MATCH override wins.
-    let jpeg_match = jpeg_match_plan(dcp_selected, raw_render_recipe.no_profile_preview_safe);
-
-    // Always consume any cached preview stats so stale preview data cannot leak
-    // into a later decode, but only read/compute them when a mode needs them.
-    let cached_preview = crate::formats::raw_preview::take_cached_stats(path);
-    let preview_stats = if jpeg_match.apply_gain
-        || jpeg_match.apply_matrix
-        || jpeg_match.apply_curves
-        || jpeg_match.preview_safe
-    {
-        cached_preview.or_else(|| {
-            std::fs::read(path)
-                .ok()
-                .and_then(|bytes| crate::formats::raw_preview::preview_stats_from_bytes(&bytes))
-        })
-    } else {
-        None
-    };
+    let (out, fw, fh) = apply_orientation(out, cw, ch, tail.orientation);
+    let jpeg_match = tail.jpeg_match;
+    let raw_render_recipe = tail.recipe;
 
     let mut scene = SceneSource {
         width: fw as u32,
@@ -1120,7 +1227,7 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
         look: crate::core::develop_scene::BaseLook::Raw,
         color_pipeline: crate::core::working_color::ColorPipelineMetadata::default(),
         camera_profile: Some(RawSceneCharacterization {
-            resolution: resolver_provenance,
+            resolution: tail.resolution.clone(),
             jpeg_match: JpegMatchMode::from_stages(
                 jpeg_match.apply_gain,
                 jpeg_match.apply_matrix,
@@ -1130,10 +1237,10 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
             ),
             raw_render_recipe: raw_render_recipe.version,
         }),
-        as_shot_white_balance: as_shot_white,
+        as_shot_white_balance: tail.as_shot_white,
         camera_rgb_curve: None,
     };
-    if let Some(target) = preview_stats {
+    if let Some(target) = tail.preview_stats {
         if jpeg_match.apply_gain {
             let gain =
                 crate::core::develop_scene::baseline_rgb_gains_for_scene(&scene, target.mean_rgb);
@@ -1226,23 +1333,117 @@ fn decode_raw_from(decoded: DecodedRaw, path: &Path) -> Result<Canvas, String> {
         warm_scene(&mut scene.half, raw_render_recipe.scene_warm);
     }
 
+    if control.cancelled() {
+        return Err(RAW_DECODE_CANCELLED.to_string());
+    }
+
     // The unclamped linear master + its neutral default-look render.
     let px16 = render_default_look(&scene);
+    if control.cancelled() {
+        return Err(RAW_DECODE_CANCELLED.to_string());
+    }
 
     let mut canvas = Canvas::from_rgba16(px16, fw as u32, fh as u32);
-    canvas.develop_source = Some(std::sync::Arc::new(scene));
+    if keep_scene {
+        canvas.develop_source = Some(std::sync::Arc::new(scene));
+    }
     // The rendered pixels are sRGB — tag the document accordingly.
     canvas.icc_profile = crate::core::canvas::IccProfile {
         name: crate::core::cms::WorkingProfile::Srgb.name().to_string(),
         data: crate::core::cms::srgb_icc_bytes(),
     };
-    let cam = format!("{} {}", raw.clean_make.trim(), raw.clean_model.trim());
-    canvas.metadata.source_profile = cam.trim().to_string();
+    canvas.metadata.source_profile = tail.camera_name.to_string();
     canvas.metadata.develop_working_space =
         crate::core::working_color::WorkingColorSpace::LinearProPhoto;
     canvas.metadata.color_pipeline_version = 2;
     canvas.metadata.raw_render_recipe = Some(raw_render_recipe.version);
     Ok(canvas)
+}
+
+/// Longest edge of the draft render: fills a Develop view at Fit on a large
+/// monitor while rendering in a fraction of a second.
+const DRAFT_MAX_DIM: usize = 3072;
+
+/// Superpixel size for the draft: the smallest block that brings the long
+/// edge under [`DRAFT_MAX_DIM`] and holds a red, a green and a blue sample at
+/// every placement over the CFA period (2×2 Bayer, 6×6 X-Trans).
+fn draft_block_size(
+    width: usize,
+    height: usize,
+    top: usize,
+    left: usize,
+    cfa: &rawloader::CFA,
+) -> Option<usize> {
+    let mut k = width.max(height).div_ceil(DRAFT_MAX_DIM).max(2);
+    while k <= 16 {
+        let complete = (0..6).all(|by| {
+            (0..6).all(|bx| {
+                let mut seen = [false; 3];
+                for r in 0..k {
+                    for c in 0..k {
+                        let col = chroma_channel(cfa.color_at(top + by * k + r, left + bx * k + c));
+                        if col < 3 {
+                            seen[col] = true;
+                        }
+                    }
+                }
+                seen == [true; 3]
+            })
+        });
+        if complete {
+            return Some(k);
+        }
+        k += 1;
+    }
+    None
+}
+
+/// Reduced-size render of the prepared mosaic: each k×k superpixel averages
+/// its own samples per colour (no demosaic), then goes through the same scene
+/// writer and colour tail as the full decode. The detail stages (false-colour
+/// suppression, colour NR, capture sharpening) are skipped; they are not
+/// visible at this scale.
+fn render_raw_draft(
+    plane: &[f32],
+    sensor_w: usize,
+    area: ActiveArea,
+    cfa: &rawloader::CFA,
+    writer: &SceneWriter<'_>,
+    tail: &RawSceneTail<'_>,
+) -> Option<Canvas> {
+    let k = draft_block_size(area.width, area.height, area.top, area.left, cfa)?;
+    let (dw, dh) = (area.width / k, area.height / k);
+    if dw == 0 || dh == 0 {
+        return None;
+    }
+    let mut out = vec![0u16; dw * dh * 4];
+    out.par_chunks_mut(dw * 4)
+        .enumerate()
+        .for_each(|(dy, row)| {
+            let top = area.top + dy * k;
+            for dx in 0..dw {
+                let left = area.left + dx * k;
+                let mut sum = [0.0f32; 3];
+                let mut count = [0u32; 3];
+                for r in top..top + k {
+                    let base = r * sensor_w;
+                    for c in left..left + k {
+                        let col = chroma_channel(cfa.color_at(r, c));
+                        if col < 3 {
+                            sum[col] += plane[base + c];
+                            count[col] += 1;
+                        }
+                    }
+                }
+                let cam = [
+                    sum[0] / count[0].max(1) as f32,
+                    sum[1] / count[1].max(1) as f32,
+                    sum[2] / count[2].max(1) as f32,
+                ];
+                writer.write(&mut row[dx * 4..dx * 4 + 4], cam);
+            }
+        });
+    finish_raw_scene(out, dw, dh, tail, false, RawDecodeControl::default()).ok()
 }
 
 /// Demosaic algorithm for Bayer sensors.
@@ -1454,28 +1655,40 @@ fn cam_to_lab(cam: [f32; 3], m: &[[f32; 4]; 3]) -> [f32; 3] {
 }
 
 /// Adaptive Homogeneity-Directed demosaic (see [`DemosaicMethod::Ahd`]). Returns
-/// full camera RGB over the whole sensor. Transient memory is ~50 bytes/px, so the
-/// caller gates this by [`AHD_MAX_PIXELS`].
+/// full camera RGB over the whole sensor, or `None` once `cancel` is raised
+/// (checked between passes). Transient memory is ~50 bytes/px, so the caller
+/// gates this by [`AHD_MAX_PIXELS`].
 fn demosaic_ahd(
     plane: &[f32],
     w: usize,
     h: usize,
     cfa: &rawloader::CFA,
     cam2xyz: &[[f32; 4]; 3],
-) -> Vec<[f32; 3]> {
+    cancel: Option<&AtomicBool>,
+) -> Option<Vec<[f32; 3]>> {
+    let cancelled = || cancel.is_some_and(|flag| flag.load(Ordering::Relaxed));
     // (1) Directional green, then (2) full RGB candidate per direction.
     let rgb_h = {
         let gh = ahd_green(plane, w, h, cfa, true);
         ahd_reconstruct(plane, &gh, w, h, cfa)
     };
+    if cancelled() {
+        return None;
+    }
     let rgb_v = {
         let gv = ahd_green(plane, w, h, cfa, false);
         ahd_reconstruct(plane, &gv, w, h, cfa)
     };
+    if cancelled() {
+        return None;
+    }
 
     // (3) CIELab of each candidate for the homogeneity metric.
     let lab_h: Vec<[f32; 3]> = rgb_h.par_iter().map(|&p| cam_to_lab(p, cam2xyz)).collect();
     let lab_v: Vec<[f32; 3]> = rgb_v.par_iter().map(|&p| cam_to_lab(p, cam2xyz)).collect();
+    if cancelled() {
+        return None;
+    }
 
     // (4) Per-pixel homogeneity count in each direction, using dcraw's adaptive Lab
     // thresholds: the tighter of the two directions' local luminance/chroma gradients.
@@ -1520,10 +1733,13 @@ fn demosaic_ahd(
         .collect();
     drop(lab_h);
     drop(lab_v);
+    if cancelled() {
+        return None;
+    }
 
     // (5) Pick, per pixel, the direction more homogeneous over a 3×3 window; tie →
     // average both candidates.
-    (0..w * h)
+    let rgb = (0..w * h)
         .into_par_iter()
         .map(|i| {
             let (r, c) = ((i / w) as i32, (i % w) as i32);
@@ -1547,7 +1763,8 @@ fn demosaic_ahd(
                 ]
             }
         })
-        .collect()
+        .collect();
+    Some(rgb)
 }
 
 // Highlight reconstruction — "inpaint opposed". A blown sensor channel clips at
@@ -2770,24 +2987,79 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Median of nine values (Paeth's 19-exchange network).
+#[inline]
+fn median9(mut v: [f32; 9]) -> f32 {
+    macro_rules! order {
+        ($a:expr, $b:expr) => {{
+            let (lo, hi) = (v[$a].min(v[$b]), v[$a].max(v[$b]));
+            v[$a] = lo;
+            v[$b] = hi;
+        }};
+    }
+    order!(1, 2);
+    order!(4, 5);
+    order!(7, 8);
+    order!(0, 1);
+    order!(3, 4);
+    order!(6, 7);
+    order!(1, 2);
+    order!(4, 5);
+    order!(7, 8);
+    order!(0, 3);
+    order!(5, 8);
+    order!(4, 7);
+    order!(3, 6);
+    order!(1, 4);
+    order!(2, 5);
+    order!(4, 7);
+    order!(4, 2);
+    order!(6, 4);
+    order!(4, 2);
+    v[4]
+}
+
 /// 3×3 median of an f32 plane, edge-clamped, parallel over rows.
 fn median3x3_plane(src: &[f32], w: usize, h: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; w * h];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for (x, slot) in row.iter_mut().enumerate() {
-            let mut v = [0.0f32; 9];
-            let mut k = 0;
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
-                    let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
-                    v[k] = src[ny * w + nx];
-                    k += 1;
-                }
+    let clamped = |x: usize, y: usize| -> f32 {
+        let mut v = [0.0f32; 9];
+        let mut k = 0;
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                v[k] = src[ny * w + nx];
+                k += 1;
             }
-            v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            *slot = v[4];
         }
+        median9(v)
+    };
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        if y == 0 || y + 1 >= h || w < 3 {
+            for (x, slot) in row.iter_mut().enumerate() {
+                *slot = clamped(x, y);
+            }
+            return;
+        }
+        let up = &src[(y - 1) * w..y * w];
+        let mid = &src[y * w..(y + 1) * w];
+        let down = &src[(y + 1) * w..(y + 2) * w];
+        row[0] = clamped(0, y);
+        for x in 1..w - 1 {
+            row[x] = median9([
+                up[x - 1],
+                up[x],
+                up[x + 1],
+                mid[x - 1],
+                mid[x],
+                mid[x + 1],
+                down[x - 1],
+                down[x],
+                down[x + 1],
+            ]);
+        }
+        row[w - 1] = clamped(w - 1, y);
     });
     out
 }
@@ -2803,22 +3075,36 @@ fn suppress_false_color(scene: &mut [u16], w: usize, h: usize, iterations: usize
         return;
     }
     let n = w * h;
-    let g: Vec<f32> = (0..n).map(|i| f16_bits_to_f32(scene[i * 4 + 1])).collect();
-    let mut cr: Vec<f32> = (0..n)
-        .map(|i| f16_bits_to_f32(scene[i * 4]) - g[i])
-        .collect();
-    let mut cb: Vec<f32> = (0..n)
-        .map(|i| f16_bits_to_f32(scene[i * 4 + 2]) - g[i])
-        .collect();
+    let mut g = vec![0.0f32; n];
+    let mut cr = vec![0.0f32; n];
+    let mut cb = vec![0.0f32; n];
+    g.par_chunks_mut(w)
+        .zip(cr.par_chunks_mut(w))
+        .zip(cb.par_chunks_mut(w))
+        .zip(scene.par_chunks(w * 4))
+        .for_each(|(((g, cr), cb), src)| {
+            for x in 0..w {
+                let green = f16_bits_to_f32(src[x * 4 + 1]);
+                g[x] = green;
+                cr[x] = f16_bits_to_f32(src[x * 4]) - green;
+                cb[x] = f16_bits_to_f32(src[x * 4 + 2]) - green;
+            }
+        });
     for _ in 0..iterations {
         cr = median3x3_plane(&cr, w, h);
         cb = median3x3_plane(&cb, w, h);
     }
-    scene.par_chunks_mut(4).enumerate().for_each(|(i, px)| {
-        px[0] = f32_to_f16_bits((g[i] + cr[i]).max(0.0));
-        px[2] = f32_to_f16_bits((g[i] + cb[i]).max(0.0));
-        // Green (px[1]) and alpha (px[3]) are left exactly as decoded.
-    });
+    scene
+        .par_chunks_mut(w * 4)
+        .zip(g.par_chunks(w))
+        .zip(cr.par_chunks(w).zip(cb.par_chunks(w)))
+        .for_each(|((row, g), (cr, cb))| {
+            for x in 0..w {
+                row[x * 4] = f32_to_f16_bits((g[x] + cr[x]).max(0.0));
+                row[x * 4 + 2] = f32_to_f16_bits((g[x] + cb[x]).max(0.0));
+                // Green and alpha are left exactly as decoded.
+            }
+        });
 }
 
 /// Default colour-noise reduction strength applied to every RAW scene master at
@@ -2843,21 +3129,42 @@ const SCENE_CHROMA_NR_ATTEN: [f32; 3] = [1.0, 0.85, 0.55];
 fn atrous_smooth_plane(src: &[f32], w: usize, h: usize, level: usize) -> Vec<f32> {
     const B3: [f32; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
     let step = 1i64 << level;
+    let hole = 1usize << level;
+    let reach = 2 * hole;
     let mut tmp = vec![0.0f32; w * h];
     tmp.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
-        let base = y * w;
+        let row = &src[y * w..(y + 1) * w];
         for (x, slot) in out.iter_mut().enumerate() {
             let mut acc = 0.0f32;
-            for (t, &kv) in B3.iter().enumerate() {
-                let o = (t as i64 - 2) * step;
-                let sx = (x as i64 + o).clamp(0, w as i64 - 1) as usize;
-                acc += src[base + sx] * kv;
+            if x >= reach && x + reach < w {
+                let first = x - reach;
+                for (t, &kv) in B3.iter().enumerate() {
+                    acc += row[first + t * hole] * kv;
+                }
+            } else {
+                for (t, &kv) in B3.iter().enumerate() {
+                    let o = (t as i64 - 2) * step;
+                    let sx = (x as i64 + o).clamp(0, w as i64 - 1) as usize;
+                    acc += row[sx] * kv;
+                }
             }
             *slot = acc;
         }
     });
     let mut dst = vec![0.0f32; w * h];
     dst.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+        if y >= reach && y + reach < h {
+            let rows: [&[f32]; 5] =
+                std::array::from_fn(|t| &tmp[(y - reach + t * hole) * w..][..w]);
+            for (x, slot) in out.iter_mut().enumerate() {
+                let mut acc = 0.0f32;
+                for (t, &kv) in B3.iter().enumerate() {
+                    acc += rows[t][x] * kv;
+                }
+                *slot = acc;
+            }
+            return;
+        }
         for (x, slot) in out.iter_mut().enumerate() {
             let mut acc = 0.0f32;
             for (t, &kv) in B3.iter().enumerate() {
@@ -2885,23 +3192,26 @@ fn denoise_scene_chroma(scene: &mut [u16], w: usize, h: usize, strength: f32) {
     // Decode once into luma + three chroma planes.
     let mut luma = vec![0.0f32; n];
     let mut chroma = [vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]];
-    scene
-        .par_chunks(4)
-        .zip(luma.par_iter_mut())
-        .enumerate()
-        .for_each(|(_, (px, l))| {
-            let rgb = [
-                f16_bits_to_f32(px[0]),
-                f16_bits_to_f32(px[1]),
-                f16_bits_to_f32(px[2]),
-            ];
-            *l = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
-        });
-    for (ch, plane) in chroma.iter_mut().enumerate() {
-        plane
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, slot)| *slot = f16_bits_to_f32(scene[i * 4 + ch]) - luma[i]);
+    {
+        let [c0, c1, c2] = &mut chroma;
+        luma.par_chunks_mut(w)
+            .zip(c0.par_chunks_mut(w))
+            .zip(c1.par_chunks_mut(w).zip(c2.par_chunks_mut(w)))
+            .zip(scene.par_chunks(w * 4))
+            .for_each(|(((l, c0), (c1, c2)), src)| {
+                for x in 0..w {
+                    let rgb = [
+                        f16_bits_to_f32(src[x * 4]),
+                        f16_bits_to_f32(src[x * 4 + 1]),
+                        f16_bits_to_f32(src[x * 4 + 2]),
+                    ];
+                    let y = LW[0] * rgb[0] + LW[1] * rgb[1] + LW[2] * rgb[2];
+                    l[x] = y;
+                    c0[x] = rgb[0] - y;
+                    c1[x] = rgb[1] - y;
+                    c2[x] = rgb[2] - y;
+                }
+            });
     }
     // À-trous shrink each chroma plane in place: subtract the attenuated fine
     // detail of each level (memory-light: only prev/next/accumulator live).
@@ -2919,12 +3229,18 @@ fn denoise_scene_chroma(scene: &mut [u16], w: usize, h: usize, strength: f32) {
         }
     }
     // Recompose luma + denoised chroma back into the scene master.
-    scene.par_chunks_mut(4).enumerate().for_each(|(i, px)| {
-        let l = luma[i];
-        for ch in 0..3 {
-            px[ch] = f32_to_f16_bits((l + chroma[ch][i]).max(0.0));
-        }
-    });
+    scene
+        .par_chunks_mut(w * 4)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..w {
+                let i = y * w + x;
+                let l = luma[i];
+                for ch in 0..3 {
+                    row[x * 4 + ch] = f32_to_f16_bits((l + chroma[ch][i]).max(0.0));
+                }
+            }
+        });
 }
 
 // ── Clean warm default-look shaping (non-full-fit RAW paths) ──────────────────
@@ -3184,20 +3500,17 @@ fn apply_orientation(
     }
     let (dw, dh) = if swap { (h, w) } else { (w, h) };
     let mut dst = vec![0u16; dw * dh * 4];
-    for sy in 0..h {
-        for sx in 0..w {
-            let (mut dx, mut dy) = if swap { (sy, sx) } else { (sx, sy) };
-            if fx {
-                dx = dw - 1 - dx;
+    dst.par_chunks_mut(dw * 4)
+        .enumerate()
+        .for_each(|(dy, row)| {
+            let py = if fy { dh - 1 - dy } else { dy };
+            for dx in 0..dw {
+                let px = if fx { dw - 1 - dx } else { dx };
+                let (sx, sy) = if swap { (py, px) } else { (px, py) };
+                let s = (sy * w + sx) * 4;
+                row[dx * 4..dx * 4 + 4].copy_from_slice(&src[s..s + 4]);
             }
-            if fy {
-                dy = dh - 1 - dy;
-            }
-            let s = (sy * w + sx) * 4;
-            let d = (dy * dw + dx) * 4;
-            dst[d..d + 4].copy_from_slice(&src[s..s + 4]);
-        }
-    }
+        });
     (dst, dw, dh)
 }
 
@@ -4643,7 +4956,7 @@ mod tests {
             [0.0, 1.0, 0.0, 0.0],
             [0.0, 0.0, 1.0, 0.0],
         ];
-        let ahd = demosaic_ahd(&plane, w, h, &cfa, &cam2xyz);
+        let ahd = demosaic_ahd(&plane, w, h, &cfa, &cam2xyz, None).unwrap();
         let chroma = |p: [f32; 3]| (p[0] - p[1]).abs() + (p[2] - p[1]).abs();
         let (mut e_ahd, mut e_malvar) = (0.0f64, 0.0f64);
         for y in 3..h - 3 {

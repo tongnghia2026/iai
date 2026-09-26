@@ -46,6 +46,18 @@
 5. Decode RAW tương tác phải được serialize và giới hạn CPU. Không đổi sang spawn nhiều full-decode song song.
 6. Late preview/decode result phải kiểm tra session/document còn hợp lệ trước khi attach.
 
+### Cập nhật 2026-09-26 — chuyển ảnh nhanh (spill + prefetch + draft)
+
+Thay đổi có chủ đích, owner đã duyệt; đừng hoàn tác khi sửa việc khác:
+
+- **Spill ra đĩa:** ảnh bị evict ghi scene master + look 16-bit ra file tạm delete-on-close (`src/core/raw_spill.rs`, `Document::raw_spill`, ngân sách 8 GB, giữ ≥10 GB trống, LRU). Bấm lại = đọc file (~0,3–0,7 s), không decode lại. RAM giữ như M1 (active + 1 MRU).
+- **Prefetch:** khi ảnh active đã sẵn, giải mã nền 1 ảnh/lần các ảnh kề (+1, −1, +2) thẳng ra spill, nửa số CPU, ưu tiên thấp; bị hủy ngay khi cần decode foreground. Mục 3 vẫn đúng: không eager-decode cả loạt.
+- **Mục 5 sửa lại:** decode foreground (người dùng đang chờ, panel khóa) dùng `logical − 2` luồng; vẫn chỉ 1 decode foreground một lúc; bấm sang ảnh khác thì decode của ảnh đã bỏ qua bị hủy (`RawDecodeControl::cancel`, lỗi `RAW_DECODE_CANCELLED` không phải lỗi thật).
+- **Draft đúng màu:** decode gửi bản nửa/phần ba độ phân giải đi cùng chuỗi màu (`render_raw_draft`/`finish_raw_scene`) trước AHD; lần mở đầu giữ preview JPEG ≤1,2 s chờ draft để lần hiện đầu tiên là ảnh iAi.
+- **Chuyển filmstrip:** ảnh đích đang park thì giữ ảnh hiện tại trên màn hình (`develop_switch_pending`, ≤1,2 s) tới khi đích đã nạp lại hoặc có draft.
+- **Tối ưu decode giữ nguyên từng bit:** kiểm bằng `tests/raw_open_speed_probe.rs` (in hash scene + tiles, so với bản trước).
+- `hw::opt_out_of_power_throttling()` lúc khởi động: Windows EcoQoS từng làm decode chậm 2,5×.
+
 ## C. Việc Claude làm tiếp — theo kế hoạch chính
 
 Kế hoạch gốc là nguồn sự thật. Thứ tự hiện tại sau khi M0/M1 đã hoàn tất:

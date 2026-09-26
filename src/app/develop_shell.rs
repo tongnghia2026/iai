@@ -100,6 +100,10 @@ pub struct DevelopShell {
     /// Filmstrip thumbnails for this Develop session (textures on the Develop
     /// window's egui context; dropped on teardown).
     pub(in crate::app) develop_thumbs: std::collections::HashMap<DocumentId, egui::TextureHandle>,
+    /// Filmstrip image the user selected while it was still parked (spilled or
+    /// decoding), and when. The current image stays on screen until the target
+    /// can be shown as it will look; see `poll_develop_switch`.
+    pub(in crate::app) develop_switch_pending: Option<(DocumentId, std::time::Instant)>,
     /// RAW decodes waiting to enter the Develop stage, drained next frame by
     /// `enter_pending_develop` (after the load attaches). A queue: a multi-open
     /// batch lands one decode at a time, and every one joins the session.

@@ -423,37 +423,41 @@ pub(crate) fn downscale_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> 
     if sw == 0 || sh == 0 {
         return out;
     }
-    for dy in 0..dh {
-        let sy0 = (dy as u64 * sh as u64 / dh as u64) as u32;
-        let sy1 = (((dy + 1) as u64 * sh as u64 / dh as u64) as u32)
-            .max(sy0 + 1)
-            .min(sh);
-        for dx in 0..dw {
-            let sx0 = (dx as u64 * sw as u64 / dw as u64) as u32;
-            let sx1 = (((dx + 1) as u64 * sw as u64 / dw as u64) as u32)
-                .max(sx0 + 1)
-                .min(sw);
-            let (mut r, mut g, mut b, mut a, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
-            for sy in sy0..sy1 {
-                for sx in sx0..sx1 {
-                    let i = ((sy * sw + sx) * 4) as usize;
-                    let av = src[i + 3] as u64;
-                    r += src[i] as u64 * av;
-                    g += src[i + 1] as u64 * av;
-                    b += src[i + 2] as u64 * av;
-                    a += av;
-                    n += 1;
+    use rayon::prelude::*;
+    out.par_chunks_mut(dw as usize * 4)
+        .enumerate()
+        .for_each(|(dy, row)| {
+            let dy = dy as u32;
+            let sy0 = (dy as u64 * sh as u64 / dh as u64) as u32;
+            let sy1 = (((dy + 1) as u64 * sh as u64 / dh as u64) as u32)
+                .max(sy0 + 1)
+                .min(sh);
+            for dx in 0..dw {
+                let sx0 = (dx as u64 * sw as u64 / dw as u64) as u32;
+                let sx1 = (((dx + 1) as u64 * sw as u64 / dw as u64) as u32)
+                    .max(sx0 + 1)
+                    .min(sw);
+                let (mut r, mut g, mut b, mut a, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
+                for sy in sy0..sy1 {
+                    for sx in sx0..sx1 {
+                        let i = ((sy * sw + sx) * 4) as usize;
+                        let av = src[i + 3] as u64;
+                        r += src[i] as u64 * av;
+                        g += src[i + 1] as u64 * av;
+                        b += src[i + 2] as u64 * av;
+                        a += av;
+                        n += 1;
+                    }
+                }
+                let di = (dx * 4) as usize;
+                if a > 0 {
+                    row[di] = (r / a) as u8;
+                    row[di + 1] = (g / a) as u8;
+                    row[di + 2] = (b / a) as u8;
+                    row[di + 3] = (a / n.max(1)) as u8;
                 }
             }
-            let di = ((dy * dw + dx) * 4) as usize;
-            if a > 0 {
-                out[di] = (r / a) as u8;
-                out[di + 1] = (g / a) as u8;
-                out[di + 2] = (b / a) as u8;
-                out[di + 3] = (a / n.max(1)) as u8;
-            }
-        }
-    }
+        });
     out
 }
 
@@ -620,10 +624,11 @@ impl Canvas {
     /// samples). The background layer keeps the 16-bit master; `bit_depth` is set
     /// to `Sixteen`. Display/tools still read the 8-bit mirror.
     pub fn from_rgba16(px16: Vec<u16>, width: u32, height: u32) -> Self {
-        let has_transparency = px16.chunks_exact(4).any(|pixel| pixel[3] < u16::MAX);
+        use rayon::prelude::*;
+        let has_transparency = px16.par_chunks_exact(4).any(|pixel| pixel[3] < u16::MAX);
         let tiles = crate::core::tile::TileMap::from_rgba16(&px16, width, height);
         let flat_pixels = if Self::fits_flat_buffer(width, height) {
-            px16.iter().map(|&v| (v >> 8) as u8).collect()
+            px16.par_iter().map(|&v| (v >> 8) as u8).collect()
         } else {
             Vec::new()
         };

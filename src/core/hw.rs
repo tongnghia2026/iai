@@ -215,6 +215,106 @@ fn total_ram_bytes() -> u64 {
     0
 }
 
+/// Windows throttles the CPU of a process it considers background (EcoQoS)
+/// once it has run hot for a few seconds; a RAW decode then takes ~2.5× as
+/// long. Opt the whole process out so heavy work runs at full speed.
+pub fn opt_out_of_power_throttling() {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct ProcessPowerThrottlingState {
+            version: u32,
+            control_mask: u32,
+            state_mask: u32,
+        }
+        const PROCESS_POWER_THROTTLING: i32 = 4;
+        const PROCESS_POWER_THROTTLING_CURRENT_VERSION: u32 = 1;
+        const PROCESS_POWER_THROTTLING_EXECUTION_SPEED: u32 = 0x1;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn SetProcessInformation(
+                process: isize,
+                class: i32,
+                information: *const std::ffi::c_void,
+                size: u32,
+            ) -> i32;
+        }
+        let state = ProcessPowerThrottlingState {
+            version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            control_mask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            state_mask: 0,
+        };
+        // SAFETY: the struct matches PROCESS_POWER_THROTTLING_STATE; the call
+        // only fails on systems that predate the class, which is harmless.
+        unsafe {
+            SetProcessInformation(
+                GetCurrentProcess(),
+                PROCESS_POWER_THROTTLING,
+                &state as *const ProcessPowerThrottlingState as *const std::ffi::c_void,
+                std::mem::size_of::<ProcessPowerThrottlingState>() as u32,
+            );
+        }
+    }
+}
+
+/// Drop the calling thread below normal priority, for background work (RAW
+/// prefetch) that must yield to the UI and to the image the user is waiting on.
+pub fn lower_current_thread_priority() {
+    #[cfg(windows)]
+    {
+        const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+        }
+        // SAFETY: the pseudo-handle always refers to the calling thread.
+        unsafe {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        }
+    }
+}
+
+/// Free bytes available to this user on the volume holding `path`; `None`
+/// when unknown.
+pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetDiskFreeSpaceExW(
+                directory: *const u16,
+                free_to_caller: *mut u64,
+                total: *mut u64,
+                total_free: *mut u64,
+            ) -> i32;
+        }
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut free = 0u64;
+        // SAFETY: `wide` is NUL-terminated; the optional outputs may be null.
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        (ok != 0).then_some(free)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

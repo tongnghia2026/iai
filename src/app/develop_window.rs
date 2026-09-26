@@ -452,6 +452,14 @@ impl App {
         self.dev.develop_composited_view = None;
         // Filmstrip thumbnails are textures on the dropped egui context.
         self.dev.develop_thumbs.clear();
+        // Parked RAW images and their background work belong to the session.
+        self.dev.develop_switch_pending = None;
+        self.cancel_raw_prefetch();
+        self.jobs.raw_prefetch_failed.clear();
+        for doc in &mut self.docs.documents {
+            doc.raw_spill = None;
+        }
+        self.jobs.raw_spill_lru.clear();
         // Mode B: the compositor was serving the Develop window's viewport and
         // view — hand it back to the main window (resize + rebake its view).
         if self
@@ -737,8 +745,11 @@ impl App {
         // Once this owned window is foreground, Windows may coalesce paints for
         // the covered main window. Pump file workers here as well so a finished
         // RAW can always replace its embedded preview and unlock the controls.
+        self.poll_raw_drafts(event_loop);
         self.poll_raw_previews(event_loop);
         self.poll_loads();
+        self.poll_raw_prefetch();
+        self.poll_develop_switch();
         self.enter_pending_develop(event_loop);
         // Pump the "Open Image" bake queue; this may finish the commit and
         // tear the window down (the extraction below then bails out).
@@ -811,6 +822,7 @@ impl App {
         let active_id = self.docs.documents[self.docs.active_doc_idx].id;
         let active_raw_loading = self.raw_decode_in_flight_for_doc(active_id);
         let active_raw_deferred = self.docs.documents[self.docs.active_doc_idx].deferred_raw;
+        let active_raw_draft = self.docs.documents[self.docs.active_doc_idx].raw_draft;
         let active_raw_failure = self.jobs.raw_preview_failures.get(&active_id).cloned();
         // Histogram R/G/B readout for the pixel under the cursor (D4).
         self.dev.develop_readout = self.compute_develop_readout();
@@ -837,22 +849,30 @@ impl App {
                         let scale = FILMSTRIP_THUMB_H / (s[1] as f32).max(1.0);
                         (t.id(), egui::vec2(s[0] as f32 * scale, FILMSTRIP_THUMB_H))
                     });
+                    let doc = self.docs.documents.iter().find(|doc| doc.id == e.doc);
+                    let parked_on_disk = doc.is_some_and(|doc| doc.raw_spill.is_some());
+                    let switching_to = self
+                        .dev
+                        .develop_switch_pending
+                        .is_some_and(|(pending, _)| pending == e.doc);
                     let state = if let Some(error) = self.jobs.raw_preview_failures.get(&e.doc) {
                         Some(format!("RAW decode failed: {error}"))
-                    } else if self.raw_decode_in_flight_for_doc(e.doc) {
-                        Some("Decoding RAW...".to_string())
-                    } else if self
-                        .docs
-                        .documents
-                        .iter()
-                        .find(|doc| doc.id == e.doc)
-                        .is_some_and(|doc| doc.deferred_raw)
-                    {
+                    } else if self.raw_decode_in_flight_for_doc(e.doc) || switching_to {
+                        Some(if parked_on_disk {
+                            "Loading...".to_string()
+                        } else {
+                            "Decoding RAW...".to_string()
+                        })
+                    } else if doc.is_some_and(|doc| doc.deferred_raw) {
                         Some("Preview — click to load".to_string())
                     } else {
                         None
                     };
-                    (e.doc, title, tex, e.doc == active_id, state)
+                    let highlighted = self
+                        .dev
+                        .develop_switch_pending
+                        .map_or(active_id, |(pending, _)| pending);
+                    (e.doc, title, tex, e.doc == highlighted, state)
                 })
                 .collect()
         } else {
@@ -953,7 +973,11 @@ impl App {
                                 "RAW queued..."
                             });
                             ui.add_space(6.0);
-                            ui.label("Showing the camera's embedded preview.");
+                            ui.label(if active_raw_draft {
+                                "Showing a quick preview."
+                            } else {
+                                "Showing the camera's embedded preview."
+                            });
                             ui.label("Develop controls will unlock when the full scene is ready.");
                             ui.add_space(18.0);
                             cancel_dev = ui.button("Cancel").clicked();

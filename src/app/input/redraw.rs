@@ -47,8 +47,11 @@ impl App {
         self.poll_flow_text_image();
         self.poll_mail_merge_data();
         self.poll_mail_merge_export();
+        self.poll_raw_drafts(event_loop);
         self.poll_raw_previews(event_loop);
         self.poll_loads();
+        self.poll_raw_prefetch();
+        self.poll_develop_switch();
         self.poll_iai_projects();
         self.poll_pdf_probe();
         self.poll_pdf_render();

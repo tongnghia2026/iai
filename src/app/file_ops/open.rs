@@ -4,10 +4,15 @@
 use super::{file_name, normalized_path_key};
 use crate::app::state::App;
 use crate::core::canvas::Canvas;
-use crate::core::document::file_modified_at;
+use crate::core::document::{file_modified_at, DocumentId};
+use crate::core::raw_spill::RawSpill;
 use crate::file_io;
+use crate::formats::raw::RAW_DECODE_CANCELLED;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Multi-RAW sessions present the embedded camera JPEG immediately, then swap
 /// in iAi's scene-linear render only for the active image. The placeholder is
@@ -17,16 +22,39 @@ fn present_embedded_raw_as_canvas() -> bool {
     true
 }
 
-fn direct_decode_raw_on_open(raw_count: usize) -> bool {
-    raw_count == 1
+const RAW_SESSION_PREVIEW_MAX_DIM: u32 = 2048;
+
+/// How long an embedded preview (or a filmstrip switch) waits for the
+/// colour-true draft before showing what it has.
+const RAW_DRAFT_WAIT: Duration = Duration::from_millis(1200);
+
+/// Error text of a spill that could not be read back; the image is decoded
+/// again instead.
+const RAW_SPILL_LOST: &str = "RAW spill unavailable";
+
+/// Disk budget for parked RAW images, and free space always left on the
+/// temp volume.
+const RAW_SPILL_BUDGET: u64 = 8 << 30;
+const RAW_SPILL_FREE_RESERVE: u64 = 10 << 30;
+
+/// Filmstrip neighbours prefetched in the background, in order of preference.
+const RAW_PREFETCH_OFFSETS: [isize; 3] = [1, -1, 2];
+
+/// Logical CPUs for a RAW decode the user is waiting on. The Develop panel is
+/// locked meanwhile, so only the UI thread and the GPU driver need headroom.
+fn foreground_raw_thread_count(logical_threads: usize) -> usize {
+    logical_threads.saturating_sub(2).max(1)
 }
 
-const RAW_SESSION_PREVIEW_MAX_DIM: u32 = 2048;
+/// Background prefetch leaves roughly half the logical CPUs free for editing.
+fn background_raw_thread_count(logical_threads: usize) -> usize {
+    logical_threads.div_ceil(2).max(1)
+}
 
 #[cfg(test)]
 mod raw_transition_tests {
     use super::{
-        direct_decode_raw_on_open, interactive_raw_thread_count, present_embedded_raw_as_canvas,
+        background_raw_thread_count, foreground_raw_thread_count, present_embedded_raw_as_canvas,
     };
 
     #[test]
@@ -35,18 +63,179 @@ mod raw_transition_tests {
     }
 
     #[test]
-    fn interactive_raw_decode_leaves_half_the_logical_cpus_free() {
-        assert_eq!(interactive_raw_thread_count(1), 1);
-        assert_eq!(interactive_raw_thread_count(8), 4);
-        assert_eq!(interactive_raw_thread_count(15), 8);
+    fn foreground_raw_decode_keeps_two_logical_cpus_for_the_ui() {
+        assert_eq!(foreground_raw_thread_count(1), 1);
+        assert_eq!(foreground_raw_thread_count(2), 1);
+        assert_eq!(foreground_raw_thread_count(16), 14);
     }
 
     #[test]
-    fn multi_raw_open_is_preview_first_but_single_raw_keeps_a_decode_fallback() {
-        assert!(direct_decode_raw_on_open(1));
-        assert!(!direct_decode_raw_on_open(2));
-        assert!(!direct_decode_raw_on_open(20));
+    fn background_raw_prefetch_leaves_half_the_logical_cpus_free() {
+        assert_eq!(background_raw_thread_count(1), 1);
+        assert_eq!(background_raw_thread_count(8), 4);
+        assert_eq!(background_raw_thread_count(15), 8);
     }
+
+    use crate::app::state::App;
+    use crate::core::canvas::Canvas;
+    use crate::core::develop_scene::{f32_to_f16_bits, SceneSource};
+    use crate::core::document::{Document, DocumentId};
+    use std::sync::Arc;
+
+    /// A decoded-RAW-shaped canvas: 16-bit tiles plus an opaque scene master.
+    fn raw_like_canvas(w: u32, h: u32, seed: usize) -> Canvas {
+        let n = (w * h) as usize;
+        let mut half = vec![0x3c00u16; n * 4];
+        let mut px16 = vec![u16::MAX; n * 4];
+        for i in 0..n {
+            for c in 0..3 {
+                half[i * 4 + c] = f32_to_f16_bits(((i + seed) * 3 + c) as f32 * 1e-4);
+                px16[i * 4 + c] = ((i * 7 + c * 13 + seed) % 65536) as u16;
+            }
+        }
+        let mut canvas = Canvas::from_rgba16(px16, w, h);
+        let mut scene = SceneSource::new(w, h);
+        scene.half = half;
+        canvas.develop_source = Some(Arc::new(scene));
+        canvas
+    }
+
+    /// Two transient RAW Develop documents; the first one is active.
+    fn raw_session() -> (App, DocumentId, DocumentId) {
+        let mut app = App::new();
+        let mut ids = Vec::new();
+        for (seed, name) in ["a.nef", "b.nef"].into_iter().enumerate() {
+            let id = DocumentId(app.docs.next_doc_id);
+            app.docs.next_doc_id += 1;
+            let path = std::env::temp_dir()
+                .join(format!("iai-no-such-dir-{seed}"))
+                .join(name);
+            app.docs.documents.push(Document::from_canvas(
+                id,
+                raw_like_canvas(96, 64, seed),
+                Some(path),
+            ));
+            app.develop_session_push(id, true);
+            ids.push(id);
+        }
+        let first = app
+            .docs
+            .documents
+            .iter()
+            .position(|d| d.id == ids[0])
+            .unwrap();
+        app.docs.active_doc_idx = first;
+        (app, ids[0], ids[1])
+    }
+
+    fn doc_idx(app: &App, id: DocumentId) -> usize {
+        app.docs.documents.iter().position(|d| d.id == id).unwrap()
+    }
+
+    fn fingerprint(canvas: &Canvas) -> (Vec<u16>, Vec<u16>) {
+        (
+            canvas.develop_source.as_ref().unwrap().half.clone(),
+            canvas.layer_stack.layers[0].tiles.flatten16(),
+        )
+    }
+
+    /// Wait for the single RAW job on `pending_loads` and route its result
+    /// the way `poll_loads` does (without touching the recent-files catalog).
+    fn land_raw_job(app: &mut App) {
+        let rx = app.jobs.pending_loads.pop().expect("a RAW job was started");
+        let (path, result, _) = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the RAW job finished");
+        let key = super::normalized_path_key(&path);
+        app.jobs.loading_keys.remove(&key);
+        app.jobs.raw_decode_jobs.remove(&key);
+        let canvas = result.expect("restore succeeded").pop().unwrap();
+        app.attach_loaded_doc(path, canvas, None, None);
+    }
+
+    #[test]
+    fn a_parked_raw_is_spilled_and_read_back_without_decoding() {
+        let (mut app, _a, b) = raw_session();
+        let expected = fingerprint(&app.docs.documents[doc_idx(&app, b)].canvas);
+
+        app.evict_raw_document(doc_idx(&app, b));
+        let parked = &app.docs.documents[doc_idx(&app, b)];
+        assert!(parked.deferred_raw);
+        assert!(parked.canvas.develop_source.is_none(), "RAM copy released");
+        assert!(parked.raw_spill.is_some(), "decode parked on disk");
+
+        app.ensure_raw_resident(doc_idx(&app, b));
+        assert!(
+            app.jobs.raw_decode_jobs.is_empty(),
+            "a spilled image is read back, not decoded"
+        );
+        land_raw_job(&mut app);
+
+        let doc = &app.docs.documents[doc_idx(&app, b)];
+        assert!(!doc.deferred_raw);
+        assert_eq!(fingerprint(&doc.canvas), expected);
+        // Parking it again reuses the spill instead of writing a new one.
+        let spill = doc.raw_spill.clone().unwrap();
+        app.evict_raw_document(doc_idx(&app, b));
+        assert!(Arc::ptr_eq(
+            app.docs.documents[doc_idx(&app, b)]
+                .raw_spill
+                .as_ref()
+                .unwrap(),
+            &spill
+        ));
+    }
+
+    #[test]
+    fn a_filmstrip_click_on_a_parked_raw_waits_for_it_then_switches() {
+        let (mut app, a, b) = raw_session();
+        app.evict_raw_document(doc_idx(&app, b));
+
+        app.develop_session_activate(b);
+        // The current image stays up while the target is read back.
+        assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, a);
+        assert_eq!(app.dev.develop_switch_pending.map(|(id, _)| id), Some(b));
+        app.poll_develop_switch();
+        assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, a);
+
+        land_raw_job(&mut app);
+        // The restored target must not be parked again before the switch.
+        app.evict_background_raws();
+        assert!(!app.docs.documents[doc_idx(&app, b)].deferred_raw);
+        app.poll_develop_switch();
+        assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, b);
+        assert!(app.dev.develop_switch_pending.is_none());
+    }
+
+    #[test]
+    fn a_cancelled_raw_decode_leaves_the_image_parked_not_failed() {
+        let (mut app, _a, b) = raw_session();
+        let b_idx = doc_idx(&app, b);
+        let path = app.docs.documents[b_idx].path.clone().unwrap();
+        let key = super::normalized_path_key(&path);
+        app.docs.documents[b_idx].deferred_raw = true;
+        app.jobs.raw_preview_docs.insert(key.clone(), b);
+        app.jobs.loading_keys.insert(key.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send((path, Err(super::RAW_DECODE_CANCELLED.to_string()), false))
+            .unwrap();
+        app.jobs.pending_loads.push(rx);
+
+        app.poll_loads();
+
+        assert!(!app.jobs.loading_keys.contains(&key));
+        assert_eq!(app.jobs.raw_preview_docs.get(&key), Some(&b));
+        assert!(!app.jobs.raw_preview_failures.contains_key(&b));
+        assert!(app.docs.documents[doc_idx(&app, b)].deferred_raw);
+    }
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
 }
 
 /// Run one import, converting a decoder panic into a normal error. A panic
@@ -58,11 +247,7 @@ pub(in crate::app) fn import_guarded(
 ) -> Result<Canvas, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| registry.import(path))).unwrap_or_else(
         |payload| {
-            let detail = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_default();
+            let detail = panic_message(payload);
             Err(if detail.is_empty() {
                 "Lỗi giải mã file (decoder panic)".to_string()
             } else {
@@ -78,11 +263,7 @@ pub(in crate::app) fn import_many_guarded(
 ) -> Result<Vec<Canvas>, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| registry.import_many(path)))
         .unwrap_or_else(|payload| {
-            let detail = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_default();
+            let detail = panic_message(payload);
             Err(if detail.is_empty() {
                 "File decoder panicked".to_string()
             } else {
@@ -91,22 +272,56 @@ pub(in crate::app) fn import_many_guarded(
         })
 }
 
-fn interactive_raw_thread_count(logical_threads: usize) -> usize {
-    logical_threads.div_ceil(2).max(1)
-}
-
-/// RAW demosaic can starve input/rendering when it occupies Rayon's global
-/// pool. Interactive loads use a bounded local pool so the UI and OS retain
-/// roughly half the logical CPUs.
-fn import_many_guarded_interactive_raw(
-    registry: &crate::formats::FormatRegistry,
+/// Decode one RAW in a bounded local pool (Rayon's global pool would starve
+/// input and rendering), abandoning it when `cancel` is raised and sending the
+/// colour-true draft to `draft_tx`. Background work runs below normal
+/// priority. A decoder panic becomes an ordinary error.
+fn decode_raw_job(
     path: &Path,
+    background: bool,
+    cancel: &AtomicBool,
+    draft_tx: Option<std::sync::mpsc::Sender<(PathBuf, Canvas)>>,
 ) -> Result<Vec<Canvas>, String> {
     let logical = std::thread::available_parallelism().map_or(1, usize::from);
-    let threads = interactive_raw_thread_count(logical);
-    match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
-        Ok(pool) => pool.install(|| import_many_guarded(registry, path)),
-        Err(_) => import_many_guarded(registry, path),
+    let mut builder = rayon::ThreadPoolBuilder::new();
+    if background {
+        builder = builder
+            .num_threads(background_raw_thread_count(logical))
+            .start_handler(|_| crate::core::hw::lower_current_thread_priority());
+    } else {
+        builder = builder.num_threads(foreground_raw_thread_count(logical));
+    }
+    let draft_path = path.to_path_buf();
+    let draft_sink = draft_tx.map(|tx| {
+        let tx = std::sync::Mutex::new(tx);
+        move |canvas: Canvas| {
+            if let Ok(tx) = tx.lock() {
+                let _ = tx.send((draft_path.clone(), canvas));
+            }
+        }
+    });
+    let run = || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let control = crate::formats::raw::RawDecodeControl {
+                cancel: Some(cancel),
+                draft: draft_sink
+                    .as_ref()
+                    .map(|sink| sink as &(dyn Fn(Canvas) + Sync)),
+            };
+            crate::formats::raw::decode_raw_controlled(path, control).map(|canvas| vec![canvas])
+        }))
+        .unwrap_or_else(|payload| {
+            let detail = panic_message(payload);
+            Err(if detail.is_empty() {
+                "File decoder panicked".to_string()
+            } else {
+                format!("File decoder panicked: {detail}")
+            })
+        })
+    };
+    match builder.build() {
+        Ok(pool) => pool.install(run),
+        Err(_) => run(),
     }
 }
 
@@ -308,19 +523,13 @@ impl App {
                 self.jobs.pending_raw_previews.push(preview_rx);
             }
 
-            // Full-decode ordinary raster files as before. A single RAW keeps
-            // the direct-load fallback for cameras without an embedded JPEG;
-            // a multi-RAW batch starts from previews and attach_raw_preview
-            // queues only the active image for full decode.
-            let direct_raw = direct_decode_raw_on_open(raw_paths.len()).then(|| &raw_paths[0]);
+            // Full-decode ordinary raster files as before. Of the RAWs only the
+            // first (the image the session opens on) is decoded now, at full
+            // speed and with an early draft; the rest stay previews until they
+            // are selected or prefetched.
             let paths_to_decode: Vec<PathBuf> = paths_to_load
                 .into_iter()
-                .filter(|path| {
-                    !crate::formats::raw::is_raw_path(path)
-                        || direct_raw.is_some_and(|direct| {
-                            normalized_path_key(direct) == normalized_path_key(path)
-                        })
-                })
+                .filter(|path| !crate::formats::raw::is_raw_path(path))
                 .collect();
             for path in &paths_to_decode {
                 self.jobs.loading_keys.insert(normalized_path_key(path));
@@ -333,17 +542,16 @@ impl App {
                     let registry = crate::formats::FormatRegistry::new();
                     let path_count = paths_to_decode.len();
                     for (index, path) in paths_to_decode.into_iter().enumerate() {
-                        let result = if crate::formats::raw::is_raw_path(&path) {
-                            import_many_guarded_interactive_raw(&registry, &path)
-                        } else {
-                            import_many_guarded(&registry, &path)
-                        };
+                        let result = import_many_guarded(&registry, &path);
                         if tx.send((path, result, index + 1 == path_count)).is_err() {
                             break; // UI dropped the receiver (app closing) — stop decoding.
                         }
                     }
                 });
                 self.jobs.pending_loads.push(rx);
+            }
+            if let Some(first_raw) = raw_paths.first() {
+                self.start_foreground_raw_decode(first_raw.clone(), None);
             }
             self.jobs.load_activate_pending = true;
             self.shell.status_msg = if n == 1 {
@@ -375,6 +583,9 @@ impl App {
                 match rx.try_recv() {
                     Ok((path, Ok(canvases), is_last)) => {
                         self.jobs.loading_keys.remove(&normalized_path_key(&path));
+                        self.jobs
+                            .raw_decode_jobs
+                            .remove(&normalized_path_key(&path));
                         // Record the successful open in the recent-files catalog
                         // (Track B) and prime its thumbnail.
                         let dims = canvases.first().map(|c| (c.width, c.height));
@@ -400,11 +611,29 @@ impl App {
                         }
                     }
                     Ok((path, Err(e), _is_last)) => {
-                        self.jobs.loading_keys.remove(&normalized_path_key(&path));
+                        let path_key = normalized_path_key(&path);
+                        self.jobs.loading_keys.remove(&path_key);
+                        self.jobs.raw_decode_jobs.remove(&path_key);
+                        if e == RAW_DECODE_CANCELLED {
+                            // Abandoned because the user moved on: the document
+                            // stays deferred and its preview stats stay cached.
+                            self.jobs.cancelled_raw_loads.remove(&path_key);
+                            continue;
+                        }
+                        if e == RAW_SPILL_LOST {
+                            // Decode it again instead (see the end of this poll).
+                            if let Some(doc) =
+                                self.jobs.raw_preview_docs.get(&path_key).and_then(|id| {
+                                    self.docs.documents.iter_mut().find(|d| d.id == *id)
+                                })
+                            {
+                                doc.raw_spill = None;
+                            }
+                            continue;
+                        }
                         // A failed decode never reached the point that consumes
                         // the preview-luma cache entry — drop it here.
                         crate::formats::raw_preview::forget_cached_mean_luma(&path);
-                        let path_key = normalized_path_key(&path);
                         if self.jobs.cancelled_raw_loads.remove(&path_key) {
                             continue;
                         }
@@ -450,6 +679,15 @@ impl App {
             .is_some_and(|doc| doc.deferred_raw)
         {
             self.ensure_raw_resident(self.docs.active_doc_idx);
+        }
+        // Likewise for a filmstrip image waiting to become active.
+        if let Some(idx) = self.dev.develop_switch_pending.and_then(|(id, _)| {
+            self.docs
+                .documents
+                .iter()
+                .position(|doc| doc.id == id && doc.deferred_raw)
+        }) {
+            self.ensure_raw_resident(idx);
         }
         if !self.jobs.pending_loads.is_empty() {
             if let Some(w) = &self.win.window {
@@ -699,6 +937,14 @@ impl App {
         if self.jobs.pending_raw_previews.is_empty() {
             return;
         }
+        // Leave previews in their bounded channel (the extractor waits) while
+        // the opening image's draft is due; see `raw_previews_on_hold`.
+        if self.raw_previews_on_hold() {
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
         let mut still_pending = Vec::new();
         for rx in std::mem::take(&mut self.jobs.pending_raw_previews) {
             let mut alive = true;
@@ -724,8 +970,20 @@ impl App {
         }
     }
 
-    /// Show a RAW's embedded-JPEG preview as a placeholder tab. Skipped if the
-    /// full decode already produced a document for this path (it won the race).
+    /// While a RAW that is being opened has no placeholder yet, its draft is
+    /// expected shortly: hold every embedded preview until then (or until
+    /// [`RAW_DRAFT_WAIT`]) — its own so the first paint is iAi's render rather
+    /// than the camera JPEG, the others so they cannot claim the active image
+    /// first.
+    fn raw_previews_on_hold(&self) -> bool {
+        self.jobs
+            .raw_decode_jobs
+            .values()
+            .any(|job| job.doc.is_none() && job.started.elapsed() < RAW_DRAFT_WAIT)
+    }
+
+    /// Show a RAW's embedded-JPEG preview as a placeholder tab. Skipped if a
+    /// draft or the full decode already produced a document for this path.
     pub(in crate::app) fn attach_raw_preview(
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
@@ -739,10 +997,20 @@ impl App {
         if self.jobs.cancelled_raw_loads.contains(&key) {
             return;
         }
-        if self.jobs.raw_preview_docs.contains_key(&key)
-            || self.find_open_document_by_path(&path).is_some()
-        {
-            crate::formats::raw_preview::forget_cached_mean_luma(&path);
+        let existing = self
+            .jobs
+            .raw_preview_docs
+            .get(&key)
+            .and_then(|id| self.docs.documents.iter().position(|d| d.id == *id))
+            .or_else(|| self.find_open_document_by_path(&path));
+        if let Some(idx) = existing {
+            // Keep the better pixels already shown; only adopt the metadata.
+            if self.docs.documents[idx].raw_exif.is_none() {
+                self.docs.documents[idx].raw_exif = preview.exif;
+            }
+            if !self.jobs.raw_decode_jobs.contains_key(&key) {
+                crate::formats::raw_preview::forget_cached_mean_luma(&path);
+            }
             return;
         }
         let longest = preview.width.max(preview.height).max(1);
@@ -761,14 +1029,31 @@ impl App {
             )
         };
         let canvas = Canvas::from_rgba(rgba, width, height);
+        self.attach_raw_placeholder(event_loop, path, canvas, preview.exif, false);
+    }
+
+    /// Open a deferred RAW document showing `canvas` (the camera JPEG, or the
+    /// colour-true draft when `draft`) and enter it into the Develop session.
+    /// While its id remains in raw_preview_docs the panel presents a decoder
+    /// state and does not expose RAW controls.
+    fn attach_raw_placeholder(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        path: PathBuf,
+        canvas: Canvas,
+        exif: Option<String>,
+        draft: bool,
+    ) {
+        let key = normalized_path_key(&path);
         let id = crate::core::document::DocumentId(self.docs.next_doc_id);
         self.docs.next_doc_id += 1;
         let mut doc = crate::core::document::Document::from_canvas(id, canvas, Some(path.clone()));
-        doc.raw_exif = preview.exif;
+        doc.raw_exif = exif;
         doc.deferred_raw = true;
+        doc.raw_draft = draft;
         let name = file_name(&path);
         if self.jobs.load_activate_pending {
-            // The first finished item (preview or full) claims the active tab.
+            // The first finished item (preview, draft or full) claims the active tab.
             self.jobs.load_activate_pending = false;
             self.activate_new_document(doc);
             self.shell.status_msg = format!("Opening {name}…");
@@ -784,10 +1069,12 @@ impl App {
         else {
             return;
         };
-        self.jobs.raw_preview_docs.insert(key, id);
-        // Open the actual Develop workflow as soon as the embedded preview is
-        // ready. While this id remains in raw_preview_docs the panel presents a
-        // decoder state and does not expose RAW controls.
+        self.jobs.raw_preview_docs.insert(key.clone(), id);
+        if let Some(job) = self.jobs.raw_decode_jobs.get_mut(&key) {
+            job.doc = Some(id);
+        }
+        // Open the actual Develop workflow as soon as the first placeholder is
+        // ready.
         if self.dev.develop_bake_all.is_some() || self.win.retiring_develop_window.is_some() {
             // Mid-"Open Image" bake, or during the two-phase window teardown,
             // the Develop window cannot host a new session (and switching the
@@ -814,10 +1101,114 @@ impl App {
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
-        // The first preview is the initial active filmstrip image. Materialize
+        // The first placeholder is the initial active filmstrip image. Materialize
         // only that one; background previews stay light until clicked.
         if new_idx == self.docs.active_doc_idx {
             self.ensure_raw_resident(new_idx);
+        }
+    }
+
+    /// Attach finished colour-true drafts (see `RawDecodeControl::draft`).
+    pub fn poll_raw_drafts(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if self.jobs.pending_raw_drafts.is_empty() {
+            return;
+        }
+        let mut still_pending = Vec::new();
+        for rx in std::mem::take(&mut self.jobs.pending_raw_drafts) {
+            let mut alive = true;
+            loop {
+                match rx.try_recv() {
+                    Ok((path, canvas)) => self.attach_raw_draft(event_loop, path, canvas),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        alive = false;
+                        break;
+                    }
+                }
+            }
+            if alive {
+                still_pending.push(rx);
+            }
+        }
+        self.jobs.pending_raw_drafts = still_pending;
+    }
+
+    /// Show a RAW's colour-true draft in place of its placeholder (or as its
+    /// first paint). Same crop and colour as the full decode, which later
+    /// replaces it without a visible change at Fit.
+    pub(in crate::app) fn attach_raw_draft(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        path: PathBuf,
+        canvas: Canvas,
+    ) {
+        let key = normalized_path_key(&path);
+        // A draft from an abandoned decode must not reopen or repaint anything.
+        if self.jobs.cancelled_raw_loads.contains(&key)
+            || !self.jobs.raw_decode_jobs.contains_key(&key)
+            || self.dev.develop_bake_all.is_some()
+        {
+            return;
+        }
+        let existing = self
+            .jobs
+            .raw_preview_docs
+            .get(&key)
+            .and_then(|id| self.docs.documents.iter().position(|d| d.id == *id));
+        match existing {
+            Some(idx) => {
+                if self.docs.documents[idx].deferred_raw {
+                    self.replace_placeholder_canvas(idx, canvas);
+                }
+            }
+            None => {
+                if self.find_open_document_by_path(&path).is_some() {
+                    return;
+                }
+                // The embedded preview, when it arrives, only adds its EXIF.
+                self.attach_raw_placeholder(event_loop, path, canvas, None, true);
+            }
+        }
+    }
+
+    /// Swap a deferred document's placeholder pixels for a draft, restarting
+    /// the (locked) Develop preview on it when it is the active image.
+    fn replace_placeholder_canvas(&mut self, idx: usize, canvas: Canvas) {
+        let id = self.docs.documents[idx].id;
+        let active = idx == self.docs.active_doc_idx;
+        let previewing = active
+            && self
+                .dev
+                .develop_preview
+                .as_ref()
+                .is_some_and(|preview| preview.doc_id == id);
+        if previewing {
+            self.cancel_develop_preview();
+        }
+        self.docs.documents[idx].saved_zoom = 0.0;
+        self.docs.documents[idx].canvas = canvas;
+        self.docs.documents[idx].raw_draft = true;
+        self.dev.develop_thumbs.remove(&id);
+        if active {
+            self.refresh_active_document();
+            if previewing && self.dev.develop_bake_all.is_none() {
+                let settings = self
+                    .dev
+                    .develop_session
+                    .iter()
+                    .find(|entry| entry.doc == id)
+                    .map(|entry| entry.settings.clone())
+                    .unwrap_or_default();
+                self.begin_develop_preview(settings);
+                self.dev.develop_view_fit = true;
+                self.dev.develop_composited_view = None;
+            }
+        }
+        if let Some(w) = &self.win.develop_window {
+            w.request_redraw();
+        }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
         }
     }
 
@@ -856,6 +1247,7 @@ impl App {
         // The full-resolution buffers are back: this is no longer a Memory
         // Milestone M1 deferred/evicted placeholder.
         self.docs.documents[idx].deferred_raw = false;
+        self.docs.documents[idx].raw_draft = false;
         self.jobs.raw_preview_failures.remove(&id);
         self.dev.develop_thumbs.remove(&id);
         if active {
@@ -1242,13 +1634,17 @@ impl App {
         if !is_transient {
             return;
         }
-        // A live preview or an in-flight decode means this image is really in
-        // play; leave it resident.
+        // A live preview, an in-flight decode or a pending filmstrip switch
+        // means this image is really in play; leave it resident.
         if self
             .dev
             .develop_preview
             .as_ref()
             .is_some_and(|p| p.doc_id == id)
+            || self
+                .dev
+                .develop_switch_pending
+                .is_some_and(|(pending, _)| pending == id)
         {
             return;
         }
@@ -1257,8 +1653,24 @@ impl App {
             return;
         }
         let thumb = self.docs.documents[idx].canvas.downscaled_thumbnail(2048);
-        self.docs.documents[idx].canvas = thumb;
+        let full = std::mem::replace(&mut self.docs.documents[idx].canvas, thumb);
         self.docs.documents[idx].deferred_raw = true;
+        self.docs.documents[idx].raw_draft = false;
+        // Park the decode on disk (unless an earlier visit already did), so
+        // coming back is a read instead of a new demosaic.
+        let spilled = self.docs.documents[idx]
+            .raw_spill
+            .as_ref()
+            .is_some_and(|spill| !spill.is_failed());
+        if !spilled {
+            let bytes = full.width as u64 * full.height as u64 * 12;
+            if self.make_raw_spill_room(bytes, &[id]) {
+                if let Some(spill) = RawSpill::spawn(full) {
+                    self.docs.documents[idx].raw_spill = Some(spill);
+                    self.touch_raw_spill(id);
+                }
+            }
+        }
         // A later decode of this path swaps the full image back into THIS doc
         // (attach_loaded_doc routes through raw_preview_docs).
         self.jobs.raw_preview_docs.insert(key, id);
@@ -1266,9 +1678,10 @@ impl App {
         self.dev.develop_thumbs.remove(&id);
     }
 
-    /// Memory Milestone M1: make an evicted RAW document full-resolution again by
-    /// re-decoding it off-thread. The decode lands in `poll_loads`, where
-    /// `raw_preview_docs` routes it back into this document via
+    /// Memory Milestone M1: make an evicted RAW document full-resolution again,
+    /// off-thread: read its disk spill back when it has one, otherwise decode it
+    /// at full speed (sending an early draft). The result lands in `poll_loads`,
+    /// where `raw_preview_docs` routes it back into this document via
     /// `replace_preview_with_full` (which also re-enters the Develop preview with
     /// the entry's saved settings). No-op unless the document is deferred.
     pub(in crate::app) fn ensure_raw_resident(&mut self, idx: usize) {
@@ -1282,43 +1695,265 @@ impl App {
             return;
         };
         let id = doc.id;
-        // A user-initiated filmstrip switch has already made this document
-        // active before asking for residency. The Open Image batch, however,
-        // rehydrates background documents without changing the visible tab.
-        let activate_on_load = idx == self.docs.active_doc_idx;
         let key = normalized_path_key(&path);
-        // Already re-decoding (e.g. a double activation): nothing to do.
+        // Already restoring or decoding (e.g. a double activation).
         if self.jobs.loading_keys.contains(&key) {
             return;
         }
-        let another_raw_is_loading = self.docs.documents.iter().any(|candidate| {
-            candidate.path.as_ref().is_some_and(|candidate_path| {
-                crate::formats::raw::is_raw_path(candidate_path)
-                    && self
-                        .jobs
-                        .loading_keys
-                        .contains(&normalized_path_key(candidate_path))
-            })
-        });
-        if another_raw_is_loading {
+        if let Some(spill) = doc.raw_spill.clone().filter(|spill| !spill.is_failed()) {
+            self.touch_raw_spill(id);
+            self.jobs.raw_preview_docs.insert(key.clone(), id);
+            self.jobs.cancelled_raw_loads.remove(&key);
+            self.jobs.loading_keys.insert(key);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = spill
+                    .restore()
+                    .map(|canvas| vec![canvas])
+                    .map_err(|_| RAW_SPILL_LOST.to_string());
+                let _ = tx.send((path, result, false));
+            });
+            self.jobs.pending_loads.push(rx);
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        // A full decode needs the CPU: stop the background prefetch, and when
+        // this is the image the user wants, abandon decodes of images they
+        // have already left.
+        self.cancel_raw_prefetch();
+        let wanted = idx == self.docs.active_doc_idx
+            || self
+                .dev
+                .develop_switch_pending
+                .is_some_and(|(pending, _)| pending == id);
+        if wanted {
+            for job in self.jobs.raw_decode_jobs.values() {
+                if job.doc != Some(id) {
+                    job.cancel.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        // One full decode at a time; the next poll_loads restarts this one when
+        // the running (or cancelled) decode lands.
+        if !self.jobs.raw_decode_jobs.is_empty() {
             self.shell.status_msg = format!("Đang xếp hàng RAW: {}", file_name(&path));
             return;
         }
-        // Route the decode back into this exact document.
-        self.jobs.raw_preview_docs.insert(key.clone(), id);
+        self.start_foreground_raw_decode(path.clone(), Some(id));
+        self.shell.status_msg = format!("Đang giải mã RAW: {}", file_name(&path));
+    }
+
+    /// Decode `path` at full speed on a worker, sending its colour-true draft
+    /// first. `doc` is the deferred document it fills (`None` for the first
+    /// image of an open, whose placeholder does not exist yet).
+    fn start_foreground_raw_decode(&mut self, path: PathBuf, doc: Option<DocumentId>) {
+        let key = normalized_path_key(&path);
+        if let Some(id) = doc {
+            // Route the decode back into this exact document.
+            self.jobs.raw_preview_docs.insert(key.clone(), id);
+        }
         self.jobs.cancelled_raw_loads.remove(&key);
-        self.jobs.loading_keys.insert(key);
+        self.jobs.loading_keys.insert(key.clone());
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.jobs.raw_decode_jobs.insert(
+            key,
+            crate::app::background_jobs::RawDecodeJob {
+                doc,
+                cancel: Arc::clone(&cancel),
+                started: Instant::now(),
+            },
+        );
         let (tx, rx) = std::sync::mpsc::channel();
-        let worker_path = path.clone();
+        let (draft_tx, draft_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let registry = crate::formats::FormatRegistry::new();
-            let result = import_many_guarded_interactive_raw(&registry, &worker_path);
-            let _ = tx.send((worker_path, result, activate_on_load));
+            let result = decode_raw_job(&path, false, &cancel, Some(draft_tx));
+            let _ = tx.send((path, result, false));
         });
         self.jobs.pending_loads.push(rx);
-        self.shell.status_msg = format!("Đang tải lại RAW: {}", file_name(&path));
+        self.jobs.pending_raw_drafts.push(draft_rx);
         if let Some(w) = &self.win.window {
             w.request_redraw();
+        }
+    }
+
+    fn raw_spill_bytes(&self) -> u64 {
+        self.docs
+            .documents
+            .iter()
+            .filter_map(|doc| doc.raw_spill.as_ref())
+            .map(|spill| spill.bytes())
+            .sum()
+    }
+
+    /// Mark `id`'s spill as the most recently used.
+    fn touch_raw_spill(&mut self, id: DocumentId) {
+        self.jobs.raw_spill_lru.retain(|other| *other != id);
+        self.jobs.raw_spill_lru.push(id);
+    }
+
+    /// Make room on disk for a new spill of `bytes`, dropping the least recently
+    /// used spills (never those of `keep`, the active image or the image being
+    /// switched to). False when it cannot fit, including when the temp volume
+    /// would drop below its free-space reserve.
+    fn make_raw_spill_room(&mut self, bytes: u64, keep: &[DocumentId]) -> bool {
+        let free = crate::core::hw::free_disk_bytes(&std::env::temp_dir()).unwrap_or(u64::MAX);
+        if bytes.saturating_add(RAW_SPILL_FREE_RESERVE) > free || bytes > RAW_SPILL_BUDGET {
+            return false;
+        }
+        let documents = &self.docs.documents;
+        self.jobs.raw_spill_lru.retain(|id| {
+            documents
+                .iter()
+                .any(|d| d.id == *id && d.raw_spill.is_some())
+        });
+        let active = self
+            .docs
+            .documents
+            .get(self.docs.active_doc_idx)
+            .map(|d| d.id);
+        let pending = self.dev.develop_switch_pending.map(|(id, _)| id);
+        while self.raw_spill_bytes() + bytes > RAW_SPILL_BUDGET {
+            let Some(pos) =
+                self.jobs.raw_spill_lru.iter().position(|id| {
+                    !keep.contains(id) && Some(*id) != active && Some(*id) != pending
+                })
+            else {
+                return false;
+            };
+            let victim = self.jobs.raw_spill_lru.remove(pos);
+            if let Some(doc) = self.docs.documents.iter_mut().find(|d| d.id == victim) {
+                doc.raw_spill = None;
+            }
+        }
+        true
+    }
+
+    /// Stop the background prefetch (it aborts at its next checkpoint).
+    pub(in crate::app) fn cancel_raw_prefetch(&mut self) {
+        if let Some(job) = self.jobs.raw_prefetch.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Land a finished prefetch and start the next one. Called every frame.
+    pub fn poll_raw_prefetch(&mut self) {
+        if let Some(job) = &self.jobs.raw_prefetch {
+            let result = match job.rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+            };
+            let doc_id = job.doc;
+            self.jobs.raw_prefetch = None;
+            match result {
+                Some(Ok(spill)) => {
+                    let wanted = self
+                        .docs
+                        .documents
+                        .iter()
+                        .any(|d| d.id == doc_id && d.deferred_raw && d.raw_spill.is_none());
+                    if wanted && self.make_raw_spill_room(spill.bytes(), &[doc_id]) {
+                        if let Some(doc) = self.docs.documents.iter_mut().find(|d| d.id == doc_id) {
+                            doc.raw_spill = Some(spill);
+                        }
+                        self.touch_raw_spill(doc_id);
+                    }
+                }
+                Some(Err(e)) if e != RAW_DECODE_CANCELLED => {
+                    self.jobs.raw_prefetch_failed.insert(doc_id);
+                }
+                _ => {}
+            }
+        }
+        self.schedule_raw_prefetch();
+    }
+
+    /// While the user edits a resident image, decode its filmstrip neighbours
+    /// in the background (one at a time, half the CPUs, below normal priority)
+    /// straight into disk spills, so selecting them next is a quick read.
+    fn schedule_raw_prefetch(&mut self) {
+        if self.jobs.raw_prefetch.is_some()
+            || !self.jobs.raw_decode_jobs.is_empty()
+            || !self.jobs.loading_keys.is_empty()
+            || self.win.develop_window.is_none()
+            || self.win.retiring_develop_window.is_some()
+            || self.dev.develop_bake_all.is_some()
+            || self.dev.develop_switch_pending.is_some()
+            || self.dev.develop_session.len() < 2
+        {
+            return;
+        }
+        let Some(active) = self.docs.documents.get(self.docs.active_doc_idx) else {
+            return;
+        };
+        if active.deferred_raw {
+            return;
+        }
+        let Some(pos) = self
+            .dev
+            .develop_session
+            .iter()
+            .position(|entry| entry.doc == active.id)
+        else {
+            return;
+        };
+        if self.raw_spill_bytes() >= RAW_SPILL_BUDGET {
+            return;
+        }
+        for offset in RAW_PREFETCH_OFFSETS {
+            let Some(entry) = pos
+                .checked_add_signed(offset)
+                .and_then(|i| self.dev.develop_session.get(i))
+            else {
+                continue;
+            };
+            let id = entry.doc;
+            let Some(doc) = self.docs.documents.iter().find(|d| d.id == id) else {
+                continue;
+            };
+            if !doc.deferred_raw
+                || doc.raw_spill.is_some()
+                || self.jobs.raw_prefetch_failed.contains(&id)
+                || self.jobs.raw_preview_failures.contains_key(&id)
+            {
+                continue;
+            }
+            let Some(path) = doc.path.clone() else {
+                continue;
+            };
+            if !crate::formats::raw::is_raw_path(&path)
+                || self
+                    .jobs
+                    .cancelled_raw_loads
+                    .contains(&normalized_path_key(&path))
+            {
+                continue;
+            }
+            let cancel = Arc::new(AtomicBool::new(false));
+            let worker_cancel = Arc::clone(&cancel);
+            let (tx, rx) = std::sync::mpsc::channel();
+            // Wake the (possibly idle) UI so the next prefetch is scheduled.
+            let window = self.win.window.clone();
+            std::thread::spawn(move || {
+                crate::core::hw::lower_current_thread_priority();
+                let result =
+                    decode_raw_job(&path, true, &worker_cancel, None).and_then(|mut canvases| {
+                        let canvas = canvases.pop().ok_or("RAW decode produced no image")?;
+                        RawSpill::write_now(&canvas)
+                    });
+                let _ = tx.send(result);
+                if let Some(window) = window {
+                    window.request_redraw();
+                }
+            });
+            self.jobs.raw_prefetch = Some(crate::app::background_jobs::RawPrefetchJob {
+                doc: id,
+                cancel,
+                rx,
+            });
+            return;
         }
     }
 }
