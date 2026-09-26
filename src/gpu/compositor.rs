@@ -817,6 +817,176 @@ pub struct DevelopGpuPreview {
     /// texture; the shader then runs the scene-referred chain (u.adj_pad_c == 1)
     /// instead of the legacy atlas tone path.
     pub scene: Option<std::sync::Arc<crate::core::develop_scene::SceneSource>>,
+    /// Run Detail on the GPU over this region (mode 5): a pre-pass evaluates
+    /// the scene chain into a plane, the Detail kernels run on it, and the layer
+    /// reads the result — no host round trip. `color`/`region_luma` are then the
+    /// ordinary shader-path proxies the pre-pass consumes.
+    pub detail: Option<DevelopDetailGpu>,
+}
+
+/// Region of a GPU-resident Detail plane (see [`DevelopGpuPreview::detail`]):
+/// texel (i, j) is the layer block starting at `origin + (i, j)·downsample`,
+/// clipped to `end` (exclusive).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DevelopDetailGpu {
+    pub origin_x: u32,
+    pub origin_y: u32,
+    pub end_x: u32,
+    pub end_y: u32,
+    pub downsample: u32,
+    /// RAW: Detail runs on working-space values ahead of the output transform
+    /// (like its commit); Identity scenes run it on display RGB.
+    pub linear: bool,
+    pub luma_coeff: [f32; 3],
+}
+
+impl DevelopDetailGpu {
+    pub fn plane_size(&self) -> (u32, u32) {
+        let s = self.downsample.max(1);
+        (
+            self.end_x.saturating_sub(self.origin_x).div_ceil(s),
+            self.end_y.saturating_sub(self.origin_y).div_ceil(s),
+        )
+    }
+}
+
+/// Persistent GPU objects plus per-session storage for the mode-5 Detail
+/// pre-pass. The pipelines survive between Develop sessions; the plane
+/// storage is released when the preview ends.
+struct DevDetailState {
+    prepass_pipeline: wgpu::RenderPipeline,
+    runtime: crate::gpu::detail_gpu::DetailGpuRuntime,
+    prepass_uniform_buf: wgpu::Buffer,
+    prepass_bg: Option<(u64, wgpu::BindGroup)>,
+    buffers: crate::gpu::detail_gpu::DetailResidentBuffers,
+    src: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// Inputs of the plane currently in `dev_adjusted_rgb_buf`; an identical
+    /// request (a recomposite for another reason) reuses it without GPU work.
+    done: Option<DevelopGpuPreview>,
+}
+
+impl DevDetailState {
+    fn new(
+        device: &wgpu::Device,
+        shader: &wgpu::ShaderModule,
+        layout: &wgpu::PipelineLayout,
+    ) -> Self {
+        let prepass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("develop_detail_prepass"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_develop_prepass"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: crate::gpu::detail_gpu::RESIDENT_SRC_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self {
+            prepass_pipeline,
+            runtime: crate::gpu::detail_gpu::DetailGpuRuntime::new(device),
+            prepass_uniform_buf: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("develop_detail_prepass_uniform"),
+                size: std::mem::size_of::<CompositorUniformsData>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            prepass_bg: None,
+            buffers: Default::default(),
+            src: None,
+            done: None,
+        }
+    }
+
+    fn release(&mut self) {
+        self.buffers = Default::default();
+        self.src = None;
+        self.done = None;
+    }
+}
+
+/// f32 offset of the GPU Detail plane inside `dev_adjusted_rgb_buf`: right
+/// after the colour proxy, 256-byte aligned.
+fn dev_detail_plane_base(p: &DevelopGpuPreview) -> u32 {
+    let color = p.color.as_ref().map_or(0, |c| c.adjusted.len() * 3);
+    (color.div_ceil(64) * 64) as u32
+}
+
+/// The develop parameter-bank entries (floats 256..268 of the LUT bank) that
+/// tell the layer shader to read the GPU Detail plane; see
+/// `dev_detail_output` in compositor.wgsl.
+fn dev_detail_bank(
+    req: &DevelopDetailGpu,
+    scene: &crate::core::develop_scene::SceneSource,
+    base: u32,
+) -> [f32; 12] {
+    let (pw, ph) = req.plane_size();
+    [
+        1.0,
+        req.downsample.max(1) as f32,
+        pw as f32,
+        ph as f32,
+        req.origin_x as f32,
+        req.origin_y as f32,
+        req.end_x as f32,
+        req.end_y as f32,
+        if req.linear { 1.0 } else { 0.0 },
+        base as f32,
+        scene.width as f32,
+        scene.height as f32,
+    ]
+}
+
+/// Whether two previews produce the same Detail plane: same settings,
+/// region and scene, and the very same proxy allocations.
+fn same_detail_inputs(a: &DevelopGpuPreview, b: &DevelopGpuPreview) -> bool {
+    fn same_arc<T>(a: &Option<std::sync::Arc<T>>, b: &Option<std::sync::Arc<T>>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+    let same_color = match (&a.color, &b.color) {
+        (Some(x), Some(y)) => {
+            std::sync::Arc::ptr_eq(&x.region, &y.region)
+                && std::sync::Arc::ptr_eq(&x.adjusted, &y.adjusted)
+                && (x.w, x.h, x.origin_x, x.origin_y, x.downsample)
+                    == (y.w, y.h, y.origin_x, y.origin_y, y.downsample)
+                && (x.fast_preview, x.guided_controls, x.exact_detail)
+                    == (y.fast_preview, y.guided_controls, y.exact_detail)
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    let same_luma = match (&a.region_luma, &b.region_luma) {
+        (Some(x), Some(y)) => {
+            std::sync::Arc::ptr_eq(&x.data, &y.data)
+                && (x.w, x.h, x.downsample) == (y.w, y.h, y.downsample)
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    a.layer_id == b.layer_id
+        && a.detail == b.detail
+        && a.settings == b.settings
+        && same_arc(&a.scene, &b.scene)
+        && same_color
+        && same_luma
 }
 
 #[derive(Clone)]
@@ -860,6 +1030,9 @@ pub struct CompositorState {
     dev_region_rgb_buf: wgpu::Buffer,
     dev_adjusted_rgb_buf: wgpu::Buffer,
     dev_color_capacity: usize,
+    /// f32 capacity of `dev_adjusted_rgb_buf`, which also holds the GPU
+    /// Detail plane after the colour proxy (see `dev_detail_plane_base`).
+    dev_adjusted_capacity: usize,
     dev_uploaded_region_rgb: Option<std::sync::Arc<Vec<[f32; 3]>>>,
     dev_uploaded_adjusted_rgb: Option<std::sync::Arc<Vec<[f32; 3]>>>,
 
@@ -880,6 +1053,11 @@ pub struct CompositorState {
     pipeline: wgpu::RenderPipeline,
     adjustment_pipeline: wgpu::RenderPipeline,
     clear_pipeline: wgpu::RenderPipeline,
+    /// Kept for pipelines built on demand (the Develop Detail pre-pass).
+    comp_shader: wgpu::ShaderModule,
+    comp_pipeline_layout: wgpu::PipelineLayout,
+    /// GPU-resident Develop Detail (mode 5); built on first use.
+    dev_detail: Option<DevDetailState>,
     #[allow(dead_code)]
     bg_layout_src: wgpu::BindGroupLayout,
     bg_layout_dst: wgpu::BindGroupLayout,
@@ -1511,6 +1689,7 @@ struct VsOut {
             dev_region_rgb_buf,
             dev_adjusted_rgb_buf,
             dev_color_capacity,
+            dev_adjusted_capacity: dev_color_capacity,
             dev_uploaded_region_rgb: None,
             dev_uploaded_adjusted_rgb: None,
             dev_effects_buf,
@@ -1522,6 +1701,9 @@ struct VsOut {
             pipeline,
             adjustment_pipeline,
             clear_pipeline,
+            comp_shader: shader,
+            comp_pipeline_layout: pipeline_layout,
+            dev_detail: None,
             bg_layout_src,
             bg_layout_dst,
             bg_layout_uniform,
@@ -1819,6 +2001,17 @@ struct VsOut {
             self.dev_uploaded_region_luma = None;
             self.dev_uploaded_region_rgb = None;
             self.dev_uploaded_adjusted_rgb = None;
+            // Give back a GPU Detail plane's storage once the session ends.
+            if self.dev_adjusted_capacity > 1 << 20 {
+                self.dev_adjusted_capacity = 4096;
+                self.dev_adjusted_rgb_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("dev_adjusted_rgb_buf"),
+                    size: (self.dev_adjusted_capacity * 4) as u64,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.rebuild_uniform_bg(device);
+            }
             return;
         }
 
@@ -1882,27 +2075,52 @@ struct VsOut {
                 }
                 Some((c.region.clone(), c.adjusted.clone()))
             });
-        if let Some((region, adjusted)) = color_upload {
-            let len_f32 = region.len() * 3;
-            if len_f32 > self.dev_color_capacity {
-                let cap = len_f32.next_power_of_two();
-                self.dev_region_rgb_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("dev_region_rgb_buf"),
-                    size: (cap * 4) as u64,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                self.dev_adjusted_rgb_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("dev_adjusted_rgb_buf"),
-                    size: (cap * 4) as u64,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                self.dev_color_capacity = cap;
-                self.dev_uploaded_region_rgb = None;
-                self.dev_uploaded_adjusted_rgb = None;
-                self.rebuild_uniform_bg(device);
+        // The GPU Detail plane (if any) lives in the adjusted buffer right
+        // after the colour proxy, so size that buffer for both.
+        let adjusted_need = self.develop_preview.as_ref().map_or(0, |p| {
+            let plane = p.detail.as_ref().map_or(0, |d| {
+                let (pw, ph) = d.plane_size();
+                3 * pw as usize * ph as usize
+            });
+            if plane == 0 {
+                0
+            } else {
+                dev_detail_plane_base(p) as usize + plane
             }
+        });
+        let color_len = color_upload
+            .as_ref()
+            .map_or(0, |(region, _)| region.len() * 3);
+        if color_len > self.dev_color_capacity {
+            let cap = color_len.next_power_of_two();
+            self.dev_region_rgb_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("dev_region_rgb_buf"),
+                size: (cap * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.dev_color_capacity = cap;
+            self.dev_uploaded_region_rgb = None;
+            self.rebuild_uniform_bg(device);
+        }
+        let adjusted_need = adjusted_need.max(color_len);
+        if adjusted_need > self.dev_adjusted_capacity {
+            let cap = adjusted_need.next_power_of_two();
+            self.dev_adjusted_rgb_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("dev_adjusted_rgb_buf"),
+                size: (cap * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.dev_adjusted_capacity = cap;
+            self.dev_uploaded_adjusted_rgb = None;
+            if let Some(state) = &mut self.dev_detail {
+                // The plane it held is gone with the old buffer.
+                state.done = None;
+            }
+            self.rebuild_uniform_bg(device);
+        }
+        if let Some((region, adjusted)) = color_upload {
             let same_region = self
                 .dev_uploaded_region_rgb
                 .as_ref()
@@ -2063,6 +2281,221 @@ struct VsOut {
             queue.write_buffer(&self.dev_effects_buf, 0, bytemuck::cast_slice(&effects));
             queue.write_buffer(&self.dev_rgb_curve_buf, 0, bytemuck::cast_slice(&rgb));
         }
+    }
+
+    /// Mode-5 Detail: encode the scene-chain pre-pass and the GPU Detail
+    /// kernels over the requested region into `command_buffers` (ahead of the
+    /// layer passes that read the plane). Returns whether the plane is ready
+    /// for this frame; `false` leaves the layer on its ordinary shader path.
+    fn prepare_develop_detail(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        command_buffers: &mut Vec<wgpu::CommandBuffer>,
+    ) -> bool {
+        let Some(preview) = self.develop_preview.clone() else {
+            if let Some(state) = &mut self.dev_detail {
+                state.release();
+            }
+            return false;
+        };
+        let Some(scene) = preview.scene.as_ref() else {
+            return false;
+        };
+        // Compile the pre-pass/Detail pipelines when a scene session opens, so
+        // the first Detail drag does not hitch on shader compilation.
+        if self.dev_detail.is_none() {
+            self.dev_detail = Some(DevDetailState::new(
+                device,
+                &self.comp_shader,
+                &self.comp_pipeline_layout,
+            ));
+        }
+        let Some(req) = preview.detail.as_ref() else {
+            return false;
+        };
+        let (pw, ph) = req.plane_size();
+        // RAW colours inside the scene chain (per pixel or guided planes); a
+        // display-domain colour proxy would land after its Detail boundary.
+        let raw_display_colour =
+            req.linear && preview.color.as_ref().is_some_and(|c| !c.guided_controls);
+        if self.dev_scene_key == 0
+            || raw_display_colour
+            || pw == 0
+            || ph == 0
+            || pw > self.max_texture_dimension
+            || ph > self.max_texture_dimension
+        {
+            return false;
+        }
+        let Some(state) = self.dev_detail.as_mut() else {
+            return false;
+        };
+
+        // Plane storage only grows during a session, so zoom/pan does not
+        // reallocate every frame.
+        let fits = state
+            .src
+            .as_ref()
+            .is_some_and(|(t, _)| t.width() >= pw && t.height() >= ph);
+        if !fits {
+            let (w, h) = state
+                .src
+                .as_ref()
+                .map_or((pw, ph), |(t, _)| (t.width().max(pw), t.height().max(ph)));
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("develop_detail_plane"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: crate::gpu::detail_gpu::RESIDENT_SRC_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            state.src = Some((tex, view));
+            state.done = None;
+        }
+        let base = dev_detail_plane_base(&preview);
+        if (base as usize + 3 * pw as usize * ph as usize) > self.dev_adjusted_capacity {
+            return false;
+        }
+        if state
+            .done
+            .as_ref()
+            .is_some_and(|done| same_detail_inputs(done, &preview))
+        {
+            return true;
+        }
+
+        let (adj_p, lut) = develop_scene_to_gpu(
+            &preview.settings,
+            scene,
+            preview.region_luma.as_ref(),
+            preview.color.as_ref(),
+        );
+        let mut adj_lut = [0.0f32; 768];
+        adj_lut[..256].copy_from_slice(&lut);
+        let mut bank = dev_detail_bank(req, scene, base);
+        // The pre-pass evaluates the chain itself; it reads only the linear flag.
+        bank[0] = 0.0;
+        adj_lut[256..268].copy_from_slice(&bank);
+        let uniform = CompositorUniformsData {
+            opacity: 1.0,
+            blend_mode: 0,
+            offset_x: req.origin_x as f32,
+            offset_y: req.origin_y as f32,
+            zoom: req.downsample.max(1) as f32,
+            view_offset_x: req.end_x as f32,
+            view_offset_y: req.end_y as f32,
+            viewport_w: pw as f32,
+            viewport_h: ph as f32,
+            layer_tiles_w: 0,
+            layer_tiles_h: 0,
+            layer_w: scene.width as f32,
+            layer_h: scene.height as f32,
+            xform_active: 0,
+            xform_inv_a: 1.0,
+            xform_inv_b: 0.0,
+            xform_inv_c: 0.0,
+            xform_inv_d: 1.0,
+            xform_pivot_x: 0.0,
+            xform_pivot_y: 0.0,
+            xform_tx: 0.0,
+            xform_ty: 0.0,
+            xform_orig_ox: 0.0,
+            xform_orig_oy: 0.0,
+            xform_orig_w: 0.0,
+            xform_orig_h: 0.0,
+            mask_enabled: 0,
+            mask_inverted: 0,
+            adj_kind: 20,
+            _adj_pad_a: 1,
+            clip_shift_packed: 0,
+            _adj_pad_c: 1,
+            adj_p,
+            adj_lut,
+        };
+        queue.write_buffer(&state.prepass_uniform_buf, 0, bytemuck::bytes_of(&uniform));
+        if state
+            .prepass_bg
+            .as_ref()
+            .is_none_or(|(generation, _)| *generation != self.uniform_bg_generation)
+        {
+            let bg = Self::build_uniform_bg(
+                device,
+                &self.bg_layout_uniform,
+                &state.prepass_uniform_buf,
+                &self.tile_map_buf,
+                &self.mask_tile_map_buf,
+                &self.dev_region_luma_buf,
+                &self.dev_local_lut_buf,
+                &self.dev_region_rgb_buf,
+                &self.dev_adjusted_rgb_buf,
+                &self.dev_effects_buf,
+                &self.dev_rgb_curve_buf,
+            );
+            state.prepass_bg = Some((self.uniform_bg_generation, bg));
+        }
+        let (Some((_, src_view)), Some((_, prepass_bg))) = (&state.src, &state.prepass_bg) else {
+            return false;
+        };
+
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("develop_detail_enc"),
+        });
+        {
+            let mut rpass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("develop_detail_prepass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: src_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            rpass.set_viewport(0.0, 0.0, pw as f32, ph as f32, 0.0, 1.0);
+            rpass.set_scissor_rect(0, 0, pw, ph);
+            rpass.set_pipeline(&state.prepass_pipeline);
+            rpass.set_bind_group(0, &self.tile_atlas.bind_group, &[]);
+            // The pre-pass never reads the accumulator; any group-1 texture
+            // satisfies the shared layout.
+            rpass.set_bind_group(1, &self.ping_bg, &[]);
+            rpass.set_bind_group(2, prepass_bg, &[]);
+            rpass.draw(0..3, 0..1);
+        }
+        let params = crate::gpu::detail_gpu::DetailWorkingParams::from_settings_scaled(
+            &preview.settings,
+            req.downsample,
+        );
+        state.runtime.encode_resident(
+            device,
+            queue,
+            &mut enc,
+            &mut state.buffers,
+            src_view,
+            &self.dev_adjusted_rgb_buf,
+            base,
+            pw,
+            ph,
+            &params,
+            req.linear,
+            req.luma_coeff,
+        );
+        command_buffers.push(enc.finish());
+        state.done = Some(preview);
+        true
     }
 
     fn create_pingpong(
@@ -3159,6 +3592,7 @@ struct VsOut {
         // (the layer loop only points the uniform at these buffers). Buffers grow on
         // demand; growing rebuilds uniform_bg (a bind group pins its buffers).
         self.upload_develop_proxies(device, queue);
+        let dev_detail_ready = self.prepare_develop_detail(device, queue, &mut command_buffers);
         self.ensure_layer_bind_pool(device, n_layers);
 
         // Zoomed-out LOD proxy pre-pass: decide, per visible layer, whether to
@@ -3668,6 +4102,13 @@ struct VsOut {
                             adj_lut[..256].copy_from_slice(&lut);
                             dev_tone_active = 1;
                             dev_scene_flag = 1;
+                            if let (true, Some(req)) = (dev_detail_ready, &preview.detail) {
+                                adj_lut[256..268].copy_from_slice(&dev_detail_bank(
+                                    req,
+                                    scene,
+                                    dev_detail_plane_base(preview),
+                                ));
+                            }
                         } else {
                             let (p, lut, _local_lut, tone_active) = develop_to_gpu(
                                 &preview.settings,

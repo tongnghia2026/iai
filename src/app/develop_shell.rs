@@ -40,6 +40,11 @@ pub struct DevelopShell {
     /// carry the view transform, so the Develop window must recomposite when its
     /// own zoom/pan/size diverges from this. `None` = nothing baked for it yet.
     pub(in crate::app) develop_composited_view: Option<[u32; 5]>,
+    /// View (screen rect + offset + zoom bit patterns) the GPU Detail plane was
+    /// last planned for. Mode A pans/zooms are re-blits only, so a view that
+    /// drifts from this must recomposite to move the plane. `None` = no GPU
+    /// Detail plane in use.
+    pub(in crate::app) develop_detail_view: Option<[u32; 7]>,
     pub(in crate::app) develop_preview: Option<DevelopPreviewState>,
     /// R/G/B/Luma histogram of the develop source layer through the CURRENT
     /// settings — the curve editor's backdrop, live-updated as sliders move.

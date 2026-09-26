@@ -1517,6 +1517,18 @@ impl App {
         }
     }
 
+    /// The Develop window's canvas viewport (right of the tool rail, left of
+    /// the panel, above the filmstrip) as `(x0, y0, x1, y1)` physical px.
+    pub(in crate::app) fn develop_viewport_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        let w = self.win.develop_window.as_ref()?;
+        let ppp = w.scale_factor() as f32;
+        let sz = w.inner_size();
+        let x0 = DEVELOP_RAIL_W * ppp;
+        let x1 = (sz.width as f32 - DEVELOP_PANEL_W * ppp).max(x0 + 1.0);
+        let y1 = (sz.height as f32 - self.develop_filmstrip_px(ppp)).max(1.0);
+        Some((x0, 0.0, x1, y1))
+    }
+
     /// True when the last cursor position sits over the canvas viewport (left
     /// of the controls panel, above the filmstrip) rather than the chrome.
     fn develop_cursor_in_viewport(&self) -> bool {

@@ -45,10 +45,26 @@ struct PassParams {
     lc1: f32,
     lc2: f32,
     _pad: f32,
+    // GPU-resident tiles: source texel of tile pixel (0,0), the tile's core
+    // (crop offset + size) and where that core lands in the output plane.
+    tex_x0: u32,
+    tex_y0: u32,
+    crop_x: u32,
+    crop_y: u32,
+    core_w: u32,
+    core_h: u32,
+    out_x0: u32,
+    out_y0: u32,
+    out_w: u32,
+    out_base: u32,
 };
 
 @group(0) @binding(0) var<storage, read_write> pool: array<f32>;
 @group(0) @binding(1) var<uniform> P: PassParams;
+// GPU-resident input plane (RGB in .rgb) and packed RGB output plane; host
+// round-trip runs bind 1×1 placeholders.
+@group(0) @binding(2) var src_tex: texture_2d<f32>;
+@group(0) @binding(3) var<storage, read_write> out_rgb: array<f32>;
 
 const FLAG_H: u32 = 1u;
 const FLAG_FIRST: u32 = 2u;
@@ -117,6 +133,36 @@ fn tap(i: u32, o: i32, horizontal: bool) -> u32 {
         return u32(y * w + clamp(x + o, 0, w - 1));
     }
     return u32(clamp(y + o, 0, h - 1) * w + x);
+}
+
+// Resident input: copy this tile's texels into the pool's RGB image plane.
+@compute @workgroup_size(64)
+fn load_tex(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = linear_index(gid);
+    if (i >= P.n) { return; }
+    let x = i % P.w;
+    let y = i / P.w;
+    let c = textureLoad(src_tex, vec2<i32>(i32(P.tex_x0 + x), i32(P.tex_y0 + y)), 0);
+    pool[P.img_off + i * 3u] = c.r;
+    pool[P.img_off + i * 3u + 1u] = c.g;
+    pool[P.img_off + i * 3u + 2u] = c.b;
+}
+
+// Resident output: write this tile's core (apron cropped) into the plane.
+@compute @workgroup_size(64)
+fn store_out(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = linear_index(gid);
+    if (i >= P.n) { return; }
+    let x = i % P.w;
+    let y = i / P.w;
+    if (x < P.crop_x || y < P.crop_y) { return; }
+    let cx = x - P.crop_x;
+    let cy = y - P.crop_y;
+    if (cx >= P.core_w || cy >= P.core_h) { return; }
+    let o = P.out_base + ((P.out_y0 + cy) * P.out_w + P.out_x0 + cx) * 3u;
+    out_rgb[o] = pool[P.img_off + i * 3u];
+    out_rgb[o + 1u] = pool[P.img_off + i * 3u + 1u];
+    out_rgb[o + 2u] = pool[P.img_off + i * 3u + 2u];
 }
 
 // RGB → gamma-encoded luma + chroma offsets.

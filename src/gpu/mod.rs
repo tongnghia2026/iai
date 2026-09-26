@@ -138,6 +138,9 @@ pub struct GpuState {
     /// Cached compute pipelines for Develop Detail. Kept beside the compositor
     /// so slider frames reuse shader/pipeline compilation.
     pub detail_runtime: detail_gpu::DetailGpuRuntime,
+    /// The adapter is a CPU rasteriser (e.g. WARP): compute kernels run far
+    /// slower than the native CPU code, so Develop Detail stays on the CPU.
+    pub software_adapter: bool,
     pub current_frame_is_ping: bool,
     /// Set by wgpu's device-lost callback (driver reset / TDR — e.g. after a
     /// heavy AI inference or an idle power cycle). Every resource on this
@@ -801,6 +804,7 @@ impl GpuState {
             is_large_canvas,
             compositor,
             detail_runtime,
+            software_adapter: adapter_info.device_type == wgpu::DeviceType::Cpu,
             current_frame_is_ping: true,
             device_lost,
             missing_texture_logged: std::collections::HashSet::new(),

@@ -1628,6 +1628,7 @@ impl App {
                 develop_pan_drag: None,
                 develop_tool: crate::app::develop_shell::DevelopTool::default(),
                 develop_composited_view: None,
+                develop_detail_view: None,
                 develop_preview: None,
                 develop_histogram: None,
                 develop_histogram_at: None,

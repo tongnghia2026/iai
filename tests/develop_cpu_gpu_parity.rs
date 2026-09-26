@@ -6,7 +6,9 @@ use iai::core::develop_scene::{
     apply_scene_to_tilemap, eval_scene_pixel_for_scene, render_default_look, SceneSource,
 };
 use iai::core::layer::{Layer, LayerStack};
-use iai::gpu::compositor::{ColorProxies, CompositorState, DevelopGpuPreview, RegionLumaProxy};
+use iai::gpu::compositor::{
+    ColorProxies, CompositorState, DevelopDetailGpu, DevelopGpuPreview, RegionLumaProxy,
+};
 use std::sync::Arc;
 
 #[test]
@@ -134,6 +136,7 @@ fn headless_identity_colour_preview_matches_commit() {
                 exact_detail: false,
             }),
             scene: Some(scene.clone()),
+            detail: None,
         });
         let is_ping =
             compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
@@ -256,6 +259,7 @@ fn headless_identity_fast_preview_matches_commit() {
                 exact_detail: settings.has_detail(),
             }),
             scene: Some(scene.clone()),
+            detail: None,
         });
         let is_ping =
             compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
@@ -351,6 +355,7 @@ fn headless_gpu_preview_matches_committed_scene() {
         region_luma: None,
         color: None,
         scene: Some(scene.clone()),
+        detail: None,
     });
     let result_is_ping =
         compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
@@ -440,6 +445,7 @@ fn headless_gpu_preview_matches_committed_scene() {
             exact_detail: false,
         }),
         scene: Some(scene.clone()),
+        detail: None,
     });
     let result_is_ping =
         compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
@@ -491,6 +497,7 @@ fn headless_gpu_preview_matches_committed_scene() {
             exact_detail: true,
         }),
         scene: Some(scene),
+        detail: None,
     });
     let result_is_ping =
         compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
@@ -505,5 +512,416 @@ fn headless_gpu_preview_matches_committed_scene() {
     assert!(
         max_detail <= 1,
         "native Detail proxy/commit max error {max_detail}/255"
+    );
+}
+
+fn hash01(x: u32, y: u32) -> f32 {
+    let mut v = x
+        .wrapping_mul(2_654_435_761)
+        .wrapping_add(y.wrapping_mul(2_246_822_519))
+        .wrapping_add(2_463_534_242);
+    v ^= v >> 15;
+    v = v.wrapping_mul(2_246_822_519);
+    v ^= v >> 13;
+    v as f32 / u32::MAX as f32
+}
+
+/// Linear-sRGB test pattern with a hard edge, fine texture and noise, so
+/// Sharpening, Luminance NR and Colour NR all engage.
+fn textured_rgb(x: u32, y: u32, w: u32) -> [f32; 3] {
+    let edge = if x > w / 2 { 0.34 } else { 0.07 };
+    let tex = 0.025 * ((x as f32) * 1.7).sin() * ((y as f32) * 0.9).cos();
+    let n = 0.03 * (hash01(x, y) - 0.5);
+    let c = 0.02 * (hash01(x + 7, y + 3) - 0.5);
+    [
+        (edge * 1.2 + tex + n + c).max(0.0),
+        (edge + tex + n).max(0.0),
+        (edge * 0.7 + tex + n - c).max(0.0),
+    ]
+}
+
+fn srgb8(linear: f32) -> u8 {
+    let v = linear.clamp(0.0, 1.0);
+    let e = if v <= 0.003_130_8 {
+        12.92 * v
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (e * 255.0 + 0.5) as u8
+}
+
+fn max_abs_rgb(a: &[u8], b: &[u8], keep: impl Fn(usize, usize) -> bool, width: usize) -> u8 {
+    a.chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .enumerate()
+        .filter(|(i, _)| keep(i % width, i / width))
+        .flat_map(|(_, (p, q))| (0..3).map(move |c| p[c].abs_diff(q[c])))
+        .max()
+        .unwrap_or(0)
+}
+
+/// GPU-resident Detail (mode 5) on a RAW scene: the compositor evaluates the
+/// shader chain up to colour into a plane, runs Detail on the working-space
+/// values and applies the output transform afterwards — the commit's order.
+#[test]
+fn headless_gpu_detail_raw_matches_commit() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("headless GPU pixel parity is a local real-GPU test; skipped on CI");
+        return;
+    }
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no headless GPU adapter; skipped");
+        return;
+    };
+    let (width, height) = (128u32, 96u32);
+    let mut scene = SceneSource::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let rgb = textured_rgb(x, y, width);
+            scene.set_rgb(x, y, scene.color_pipeline.working.from_linear_srgb(rgb));
+        }
+    }
+    let scene = Arc::new(scene);
+    let mut settings = DevelopSettings {
+        develop_engine_version: DevelopEngineVersion::Develop3,
+        exposure: 18.0,
+        contrast: 12.0,
+        shadows: 25.0,
+        saturation: 15.0,
+        sharpening: 70.0,
+        noise_reduction: 30.0,
+        color_noise_reduction: 45.0,
+        ..Default::default()
+    };
+    settings.mixer_hue[1] = -20.0;
+    settings.mixer_saturation[4] = 25.0;
+    let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+    let no_detail = DevelopSettings {
+        sharpening: 0.0,
+        noise_reduction: 0.0,
+        color_noise_reduction: 0.0,
+        ..settings.clone()
+    };
+    let committed_plain = apply_scene_to_tilemap(&scene, &no_detail, None).flatten();
+    let detail_effect = max_abs_rgb(&committed, &committed_plain, |_, _| true, width as usize);
+    assert!(
+        detail_effect > 8,
+        "test setup: Detail must visibly change the commit"
+    );
+
+    let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
+    let (base, pw, ph) =
+        iai::core::develop_scene::build_scene_color_base_box(&scene, 0, 0, width, height, 1);
+    let toned_samples = iai::core::develop_scene::tone_scene_color_samples(&base, &tone);
+    let region = iai::core::develop_scene::tone_lowpass_scene_region(&base, pw, ph, &tone, 1);
+    let controls = iai::core::develop::guided_mixer_controls(&toned_samples, &settings, pw, ph)
+        .expect("Develop3 V2 mixer must build guided controls");
+    let (tone_base, tone_w, tone_h) = iai::core::develop_scene::build_scene_region_base(
+        &scene,
+        iai::core::develop::TONE_DOWNSAMPLE,
+    );
+    let regional_e = iai::core::develop_scene::finish_region_e(
+        &tone_base,
+        tone_w,
+        tone_h,
+        &tone,
+        iai::core::develop::TONE_DOWNSAMPLE,
+    );
+    let neutral = render_default_look(&scene);
+    let neutral8: Vec<u8> = neutral.iter().map(|v| (v >> 8) as u8).collect();
+    let mut stack = LayerStack::new(width, height);
+    stack.layers[0] = Layer::from_rgba(0, "Background", neutral8, width, height);
+    let max_texture = device.limits().max_texture_dimension_2d;
+    let mut compositor = CompositorState::new(&device, width, height, max_texture);
+    compositor.develop_preview = Some(DevelopGpuPreview {
+        layer_id: 0,
+        settings: settings.clone(),
+        region_luma: Some(RegionLumaProxy {
+            data: Arc::new(regional_e),
+            w: tone_w,
+            h: tone_h,
+            downsample: iai::core::develop::TONE_DOWNSAMPLE as u32,
+        }),
+        color: Some(ColorProxies {
+            region: Arc::new(region),
+            adjusted: Arc::new(controls),
+            w: pw,
+            h: ph,
+            origin_x: 0,
+            origin_y: 0,
+            downsample: 1,
+            fast_preview: false,
+            guided_controls: true,
+            exact_detail: false,
+        }),
+        scene: Some(scene.clone()),
+        detail: Some(DevelopDetailGpu {
+            origin_x: 0,
+            origin_y: 0,
+            end_x: width,
+            end_y: height,
+            downsample: 1,
+            linear: true,
+            luma_coeff: tone.working_space.render_luminance_coefficients(),
+        }),
+    });
+    let is_ping =
+        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+    let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
+    let max_error = max_abs_rgb(&gpu, &committed, |_, _| true, width as usize);
+    eprintln!(
+        "RAW GPU Detail/commit max={max_error}/255 (Detail moves the commit by {detail_effect})"
+    );
+    assert!(
+        max_error <= 2,
+        "RAW GPU Detail/commit max error {max_error}/255"
+    );
+
+    // A recomposite with identical inputs reuses the plane (no GPU work) and
+    // must show the same pixels.
+    let is_ping =
+        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+    let again = compositor.readback_rgba8(&device, &queue, is_ping);
+    assert_eq!(gpu, again, "a cached Detail plane must render identically");
+}
+
+/// GPU-resident Detail on an Identity (JPEG/PNG) scene: the display-domain
+/// chain (tone, colour proxies) feeds display-domain Detail, like the commit.
+#[test]
+fn headless_gpu_detail_identity_matches_commit() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("headless GPU pixel parity is a local real-GPU test; skipped on CI");
+        return;
+    }
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no headless GPU adapter; skipped");
+        return;
+    };
+    let (width, height) = (128u32, 96u32);
+    let mut px = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            for c in textured_rgb(x, y, width) {
+                px.push(srgb8(c));
+            }
+            px.push(255);
+        }
+    }
+    let tiles = iai::core::tile::TileMap::from_rgba(&px, width, height);
+    let scene = Arc::new(SceneSource::from_display_tiles(&tiles));
+    let mut stack = LayerStack::new(width, height);
+    stack.layers[0] = Layer::from_rgba(0, "Background", px.clone(), width, height);
+    let max_texture = device.limits().max_texture_dimension_2d;
+    let mut compositor = CompositorState::new(&device, width, height, max_texture);
+
+    let mut with_colour = DevelopSettings {
+        exposure: 10.0,
+        contrast: 20.0,
+        sharpening: 80.0,
+        noise_reduction: 25.0,
+        color_noise_reduction: 40.0,
+        ..Default::default()
+    };
+    with_colour.mixer_luminance[1] = 40.0;
+    let light_only = DevelopSettings {
+        exposure: -8.0,
+        highlights: -30.0,
+        sharpening: 60.0,
+        sharpen_detail: 60.0,
+        ..Default::default()
+    };
+    for (label, settings) in [("light+colour", with_colour), ("light", light_only)] {
+        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+        let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
+        let color = settings.has_color().then(|| {
+            let s = 6;
+            let (base, pw, ph) = iai::core::develop_scene::build_scene_color_base_box(
+                &scene, 0, 0, width, height, s,
+            );
+            let region =
+                iai::core::develop_scene::tone_lowpass_scene_region(&base, pw, ph, &tone, s);
+            let adjusted = iai::core::develop::apply_color_to_region(&region, &settings, pw, ph);
+            ColorProxies {
+                region: Arc::new(region),
+                adjusted: Arc::new(adjusted),
+                w: pw,
+                h: ph,
+                origin_x: 0,
+                origin_y: 0,
+                downsample: s as u32,
+                fast_preview: false,
+                guided_controls: false,
+                exact_detail: false,
+            }
+        });
+        let region_luma = settings.has_local_tone().then(|| {
+            let (b, w, h) = iai::core::develop_scene::build_scene_region_base(
+                &scene,
+                iai::core::develop::TONE_DOWNSAMPLE,
+            );
+            RegionLumaProxy {
+                data: Arc::new(iai::core::develop_scene::finish_region_e(
+                    &b,
+                    w,
+                    h,
+                    &tone,
+                    iai::core::develop::TONE_DOWNSAMPLE,
+                )),
+                w,
+                h,
+                downsample: iai::core::develop::TONE_DOWNSAMPLE as u32,
+            }
+        });
+        compositor.develop_preview = Some(DevelopGpuPreview {
+            layer_id: 0,
+            settings: settings.clone(),
+            region_luma,
+            color,
+            scene: Some(scene.clone()),
+            detail: Some(DevelopDetailGpu {
+                origin_x: 0,
+                origin_y: 0,
+                end_x: width,
+                end_y: height,
+                downsample: 1,
+                linear: false,
+                luma_coeff: [0.2126, 0.7152, 0.0722],
+            }),
+        });
+        let is_ping =
+            compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+        let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
+        // Away from the colour edge, where the preview's colour low-pass grid
+        // legitimately differs from the commit's (see the colour gate above).
+        let half = width as usize / 2;
+        let max_error = max_abs_rgb(
+            &gpu,
+            &committed,
+            |x, _| x < half - 10 || x > half + 10,
+            width as usize,
+        );
+        eprintln!("identity GPU Detail {label}: preview/commit max={max_error}/255");
+        assert!(
+            max_error <= 2,
+            "identity GPU Detail {label} preview/commit max error {max_error}/255"
+        );
+    }
+}
+
+/// Mode-5 plane placement: a plane that starts inside the layer (a panned
+/// view) must land on the right pixels, and a downsampled plane (a zoomed-out
+/// view) must equal the CPU fast chain at the same preview scale.
+#[test]
+fn headless_gpu_detail_plane_offset_and_downsample() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("headless GPU pixel parity is a local real-GPU test; skipped on CI");
+        return;
+    }
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no headless GPU adapter; skipped");
+        return;
+    };
+    let (width, height) = (400u32, 120u32);
+    let mut px = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            for c in textured_rgb(x % 128, y, 128) {
+                px.push(srgb8(c));
+            }
+            px.push(255);
+        }
+    }
+    let tiles = iai::core::tile::TileMap::from_rgba(&px, width, height);
+    let scene = Arc::new(SceneSource::from_display_tiles(&tiles));
+    let mut stack = LayerStack::new(width, height);
+    stack.layers[0] = Layer::from_rgba(0, "Background", px.clone(), width, height);
+    let max_texture = device.limits().max_texture_dimension_2d;
+    let mut compositor = CompositorState::new(&device, width, height, max_texture);
+    let settings = DevelopSettings {
+        exposure: 12.0,
+        sharpening: 90.0,
+        noise_reduction: 20.0,
+        ..Default::default()
+    };
+    let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+    let preview = |detail: DevelopDetailGpu| DevelopGpuPreview {
+        layer_id: 0,
+        settings: settings.clone(),
+        region_luma: None,
+        color: None,
+        scene: Some(scene.clone()),
+        detail: Some(detail),
+    };
+
+    // Panned: plane over x ∈ [150, 400). Pixels a full apron inside its left
+    // edge see exactly the neighbourhood the whole-image commit sees.
+    compositor.develop_preview = Some(preview(DevelopDetailGpu {
+        origin_x: 150,
+        origin_y: 0,
+        end_x: width,
+        end_y: height,
+        downsample: 1,
+        linear: false,
+        luma_coeff: [0.2126, 0.7152, 0.0722],
+    }));
+    let is_ping =
+        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+    let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
+    // Detail's dependency radius (DETAIL_HALO = 72) plus a margin.
+    let apron = 74;
+    let max_error = max_abs_rgb(&gpu, &committed, |x, _| x >= 150 + apron, width as usize);
+    eprintln!("offset GPU Detail plane/commit max={max_error}/255");
+    assert!(max_error <= 2, "offset plane max error {max_error}/255");
+
+    // Zoomed out: one texel per 2×2 block, Detail at preview scale 2 — the
+    // CPU fast chain at the same scale, upsampled like the shader samples it.
+    let ds = 2u32;
+    compositor.develop_preview = Some(preview(DevelopDetailGpu {
+        origin_x: 0,
+        origin_y: 0,
+        end_x: width,
+        end_y: height,
+        downsample: ds,
+        linear: false,
+        luma_coeff: [0.2126, 0.7152, 0.0722],
+    }));
+    let is_ping =
+        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
+    let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
+    let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
+    let (base, pw, ph) = iai::core::develop_scene::build_scene_fast_base(
+        &scene,
+        0,
+        0,
+        width,
+        height,
+        ds as usize,
+        true,
+    );
+    let (_, plane) = iai::core::develop_scene::identity_fast_region_develop(
+        &base, &tone, &settings, None, pw, ph, 0, 0, width, height, ds,
+    );
+    let mut max_error = 0u8;
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let fx = ((x as f32 + 0.5) / ds as f32 - 0.5).clamp(0.0, (pw - 1) as f32);
+            let fy = ((y as f32 + 0.5) / ds as f32 - 0.5).clamp(0.0, (ph - 1) as f32);
+            let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+            let (x1, y1) = ((x0 + 1).min(pw - 1), (y0 + 1).min(ph - 1));
+            let (wx, wy) = (fx - x0 as f32, fy - y0 as f32);
+            for c in 0..3 {
+                let top = plane[y0 * pw + x0][c] * (1.0 - wx) + plane[y0 * pw + x1][c] * wx;
+                let bot = plane[y1 * pw + x0][c] * (1.0 - wx) + plane[y1 * pw + x1][c] * wx;
+                let v = (top * (1.0 - wy) + bot * wy).clamp(0.0, 1.0);
+                let expected = (v * 255.0 + 0.5) as u8;
+                let got = gpu[(y * width as usize + x) * 4 + c];
+                max_error = max_error.max(got.abs_diff(expected));
+            }
+        }
+    }
+    eprintln!("downsampled GPU Detail plane/CPU fast chain max={max_error}/255");
+    assert!(
+        max_error <= 2,
+        "downsampled plane max error {max_error}/255"
     );
 }

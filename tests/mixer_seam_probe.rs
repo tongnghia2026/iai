@@ -284,6 +284,7 @@ fn mixer_seam_probe() {
         }),
         color,
         scene: Some(scene.clone()),
+        detail: None,
     });
     let is_ping =
         compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);

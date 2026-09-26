@@ -10,6 +10,63 @@ fn raw_color_runs_per_pixel(settings: &crate::core::develop::DevelopSettings) ->
     settings.has_color() && !crate::core::develop::guided_mixer_active(settings)
 }
 
+/// Pixel budget of the GPU-resident Detail plane (about a 2K viewport at
+/// 100 %); a larger view samples every `downsample` layer px instead.
+const GPU_DETAIL_MAX_PLANE_PX: u64 = 4_000_000;
+
+/// Plan the GPU Detail plane over the visible layer rect `[lx0, lx1) × [ly0,
+/// ly1)`: one texel per `downsample` layer px — never coarser than the
+/// display samples the layer unless the budget forces it — plus Detail's
+/// apron on every side, with the origin snapped to the texel grid so a pan
+/// keeps the sampling phase. Returns `(origin_x, origin_y, end_x, end_y,
+/// downsample)`.
+fn plan_gpu_detail_region(
+    (lx0, ly0, lx1, ly1): (u32, u32, u32, u32),
+    src_w: u32,
+    src_h: u32,
+    zoom: f32,
+    budget: u64,
+) -> (u32, u32, u32, u32, u32) {
+    let mut ds = if zoom >= 1.0 {
+        1
+    } else {
+        ((1.0 / zoom.max(1e-4)).floor() as u32).max(1)
+    };
+    loop {
+        let pad = crate::core::develop::DETAIL_HALO as u32 * ds;
+        let ox = lx0.saturating_sub(pad) / ds * ds;
+        let oy = ly0.saturating_sub(pad) / ds * ds;
+        let ex = lx1.saturating_add(pad).min(src_w).max(ox + 1);
+        let ey = ly1.saturating_add(pad).min(src_h).max(oy + 1);
+        let pw = (ex - ox).div_ceil(ds) as u64;
+        let ph = (ey - oy).div_ceil(ds) as u64;
+        if pw * ph <= budget || ds >= 64 {
+            return (ox, oy, ex, ey, ds);
+        }
+        ds += 1;
+    }
+}
+
+/// `settings` with its Detail sliders taken from `from`.
+fn with_detail_of(
+    settings: &crate::core::develop::DevelopSettings,
+    from: &crate::core::develop::DevelopSettings,
+) -> crate::core::develop::DevelopSettings {
+    crate::core::develop::DevelopSettings {
+        sharpening: from.sharpening,
+        sharpen_radius: from.sharpen_radius,
+        sharpen_detail: from.sharpen_detail,
+        sharpen_masking: from.sharpen_masking,
+        noise_reduction: from.noise_reduction,
+        noise_reduction_detail: from.noise_reduction_detail,
+        noise_reduction_contrast: from.noise_reduction_contrast,
+        color_noise_reduction: from.color_noise_reduction,
+        color_noise_detail: from.color_noise_detail,
+        color_noise_smoothness: from.color_noise_smoothness,
+        ..settings.clone()
+    }
+}
+
 fn run_native_gpu_detail(
     gpu: &crate::gpu::GpuState,
     pixels: &mut Vec<[f32; 3]>,
@@ -41,7 +98,104 @@ fn run_native_gpu_detail(
 }
 
 impl App {
+    /// Screen rect `(x0, y0, x1, y1)` (physical px), view offset and zoom the
+    /// Develop preview is displayed at: the Develop window's own viewport while
+    /// it is open, else the main canvas view.
+    fn develop_display_view(&mut self) -> Option<((f32, f32, f32, f32), (f32, f32), f32)> {
+        if self.win.develop_window.is_some() {
+            self.develop_resolve_fit();
+            let rect = self.develop_viewport_rect()?;
+            return Some((rect, self.dev.develop_view_off, self.dev.develop_view_zoom));
+        }
+        let (sx, sy, sw, sh) = self.canvas_screen_clip()?;
+        Some((
+            (sx as f32, sy as f32, (sx + sw) as f32, (sy + sh) as f32),
+            (self.edit.view.offset_x, self.edit.view.offset_y),
+            self.edit.view.zoom,
+        ))
+    }
+
+    fn develop_detail_view_sig(&mut self) -> Option<[u32; 7]> {
+        let ((x0, y0, x1, y1), (ox, oy), zoom) = self.develop_display_view()?;
+        Some([
+            x0.to_bits(),
+            y0.to_bits(),
+            x1.to_bits(),
+            y1.to_bits(),
+            ox.to_bits(),
+            oy.to_bits(),
+            zoom.to_bits(),
+        ])
+    }
+
+    /// The GPU Detail plane request for what the Develop view currently shows.
+    fn plan_develop_detail(
+        &mut self,
+        layer_id: u32,
+        raw_scene: bool,
+        scene_tone: Option<&crate::core::develop_scene::SceneToneData>,
+    ) -> Option<crate::gpu::compositor::DevelopDetailGpu> {
+        let (src_w, src_h) = {
+            let preview = self.dev.develop_preview.as_ref()?;
+            (preview.original_tiles.width, preview.original_tiles.height)
+        };
+        let layer_offset = self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == layer_id)
+            .map(|l| l.offset)
+            .unwrap_or((0, 0));
+        let ((x0, y0, x1, y1), (off_x, off_y), zoom) = self.develop_display_view()?;
+        let zoom = zoom.max(0.0001);
+        let to_layer = |sx: f32, off: f32, layer_off: i32| (sx - off) / zoom - layer_off as f32;
+        let lx0 = to_layer(x0, off_x, layer_offset.0)
+            .floor()
+            .clamp(0.0, src_w as f32) as u32;
+        let ly0 = to_layer(y0, off_y, layer_offset.1)
+            .floor()
+            .clamp(0.0, src_h as f32) as u32;
+        let lx1 = to_layer(x1, off_x, layer_offset.0)
+            .ceil()
+            .clamp(0.0, src_w as f32) as u32;
+        let ly1 = to_layer(y1, off_y, layer_offset.1)
+            .ceil()
+            .clamp(0.0, src_h as f32) as u32;
+        if lx1 <= lx0 || ly1 <= ly0 {
+            return None;
+        }
+        let (origin_x, origin_y, end_x, end_y, downsample) = plan_gpu_detail_region(
+            (lx0, ly0, lx1, ly1),
+            src_w,
+            src_h,
+            zoom,
+            GPU_DETAIL_MAX_PLANE_PX,
+        );
+        let luma_coeff = if raw_scene {
+            scene_tone?.working_space.render_luminance_coefficients()
+        } else {
+            [0.2126, 0.7152, 0.0722]
+        };
+        Some(crate::gpu::compositor::DevelopDetailGpu {
+            origin_x,
+            origin_y,
+            end_x,
+            end_y,
+            downsample,
+            linear: raw_scene,
+            luma_coeff,
+        })
+    }
+
     pub fn flush_develop_gpu_preview(&mut self) {
+        // Mode A zoom/pan is a re-blit only; move the GPU Detail plane along
+        // with the view it was planned for.
+        if let Some(planned) = self.dev.develop_detail_view {
+            if self.develop_detail_view_sig() != Some(planned) {
+                self.dev.develop_gpu_preview_dirty = true;
+            }
+        }
         if !self.dev.develop_gpu_preview_dirty {
             return;
         }
@@ -84,6 +238,7 @@ impl App {
     ) -> Option<crate::gpu::compositor::DevelopGpuPreview> {
         use crate::core::develop;
 
+        self.dev.develop_detail_view = None;
         if self.win.gpu.is_none() {
             self.dev.develop_proxy_cache = None;
             return None;
@@ -138,11 +293,29 @@ impl App {
         // to the old chroma-reconstruction model while the pointer is held:
         // changing models on release was the visible brightness/chroma jump.
         let linear_scene_color = raw_scene && raw_color_runs_per_pixel(&settings);
+        // Detail on the GPU (mode 5): the compositor evaluates the ordinary
+        // shader chain into a plane and runs the Detail kernels on it, so no
+        // CPU proxy is needed. Spatial Effects/Locals still need the CPU chain
+        // ahead of Detail, and a software adapter runs compute slower than
+        // the CPU does.
+        let software_adapter = self.win.gpu.as_ref().is_some_and(|g| g.software_adapter);
+        let gpu_detail = settings.has_detail()
+            && !settings.has_locals()
+            && !settings.has_spatial_effects()
+            && settings.vignette.abs() <= 0.001
+            && !software_adapter
+            && scene.as_ref().is_some_and(|sc| {
+                self.win
+                    .gpu
+                    .as_ref()
+                    .is_some_and(|g| g.compositor.scene_fits_texture(sc))
+            });
+        let cpu_detail = settings.has_detail() && !gpu_detail;
         let needs_spatial_proxy = settings.texture.abs() > 0.001
             || settings.clarity.abs() > 0.001
             || settings.dehaze.abs() > 0.001
             || settings.vignette.abs() > 0.001
-            || settings.has_detail()
+            || cpu_detail
             || settings.has_locals();
         let need_fast = needs_spatial_proxy;
         let need_color = settings.has_color() && !linear_scene_color && !need_fast;
@@ -200,7 +373,7 @@ impl App {
                 .clamp(0.0, src_h as f32) as u32;
             let mut rw = lx1.saturating_sub(lx0).max(1);
             let mut rh = ly1.saturating_sub(ly0).max(1);
-            let downsample = if settings.has_detail() {
+            let downsample = if cpu_detail {
                 // Native-resolution viewport Detail is the WYSIWYG path. Bound
                 // the uploaded RGB proxy by both the adapter's storage-binding
                 // limit and a CPU-latency ceiling; zoomed-out views keep the
@@ -229,7 +402,7 @@ impl App {
             } as u32;
             // The apron must cover Detail's widest dependency so the viewport
             // crop matches the whole-image commit up to its visible edge.
-            let min_pad = if settings.has_detail() {
+            let min_pad = if cpu_detail {
                 develop::DETAIL_HALO as u32
             } else {
                 64
@@ -386,7 +559,7 @@ impl App {
                             rw,
                             rh,
                             downsample as usize,
-                            settings.has_detail(),
+                            cpu_detail,
                         ),
                         None => develop::build_fast_preview_region(
                             src,
@@ -396,7 +569,7 @@ impl App {
                             rw,
                             rh,
                             downsample as usize,
-                            settings.has_detail(),
+                            cpu_detail,
                         ),
                     };
                     Some(crate::app::state::DevelopRegionCache {
@@ -518,11 +691,19 @@ impl App {
         // finished proxies outright; the per-frame tails below only re-run when
         // a slider actually moved. The memo is cleared on every base rebuild, so
         // a hit always refers to the bases currently in the cache.
-        let finished_ok = cache.finished_color.is_some()
-            && cache
-                .finished_settings
-                .as_ref()
-                .is_some_and(|s| s.same_image_effect(&settings));
+        // With GPU Detail the proxies are the shader-path ones, which never read
+        // the Detail sliders: a Detail drag keeps them.
+        let finished_ok = cache
+            .finished_color
+            .as_ref()
+            .is_some_and(|c| !(gpu_detail && c.fast_preview))
+            && cache.finished_settings.as_ref().is_some_and(|s| {
+                if gpu_detail {
+                    s.same_image_effect(&with_detail_of(&settings, s))
+                } else {
+                    s.same_image_effect(&settings)
+                }
+            });
         let color = if !(need_color || need_fast) {
             None
         } else if finished_ok {
@@ -583,7 +764,10 @@ impl App {
                 }
             } else {
                 let fast = cache.fast_region.as_ref().unwrap();
-                let exact_detail = settings.has_detail() && fast.downsample == 1;
+                let exact_detail = cpu_detail && fast.downsample == 1;
+                // A software adapter emulates compute on the CPU far slower
+                // than the native Detail kernels.
+                let gpu_exact = exact_detail && !software_adapter;
                 let regional = cache
                     .region_luma
                     .as_ref()
@@ -605,7 +789,7 @@ impl App {
                             fast.source_h,
                             fast.downsample,
                             |pixels| {
-                                if exact_detail {
+                                if gpu_exact {
                                     run_native_gpu_detail(
                                         gpu,
                                         pixels,
@@ -643,7 +827,7 @@ impl App {
                             fast.source_h,
                             fast.downsample,
                             |working, working_space| {
-                                if exact_detail {
+                                if gpu_exact {
                                     run_native_gpu_detail(
                                         gpu,
                                         working,
@@ -681,15 +865,21 @@ impl App {
                             fast.source_h,
                             fast.downsample,
                             |pixels| {
-                                run_native_gpu_detail(
-                                    gpu,
-                                    pixels,
-                                    fast.w,
-                                    fast.h,
-                                    &settings,
-                                    false,
-                                    [0.2126, 0.7152, 0.0722],
-                                );
+                                if gpu_exact {
+                                    run_native_gpu_detail(
+                                        gpu,
+                                        pixels,
+                                        fast.w,
+                                        fast.h,
+                                        &settings,
+                                        false,
+                                        [0.2126, 0.7152, 0.0722],
+                                    );
+                                } else {
+                                    develop::apply_detail_to_display_buffer(
+                                        pixels, fast.w, fast.h, &settings, 1,
+                                    );
+                                }
                             },
                         );
                         (region, adjusted)
@@ -742,13 +932,54 @@ impl App {
             None
         };
 
+        let detail = if gpu_detail {
+            self.plan_develop_detail(layer_id, raw_scene, scene_tone.as_ref())
+        } else {
+            None
+        };
+        if detail.is_some() {
+            self.dev.develop_detail_view = self.develop_detail_view_sig();
+        }
+
         Some(crate::gpu::compositor::DevelopGpuPreview {
             layer_id,
             settings,
             region_luma,
             color,
             scene,
+            detail,
         })
+    }
+}
+
+#[cfg(test)]
+mod gpu_detail_region_tests {
+    use super::plan_gpu_detail_region;
+    use crate::core::develop::DETAIL_HALO;
+
+    #[test]
+    fn plane_covers_the_view_plus_apron_at_display_density() {
+        let halo = DETAIL_HALO as u32;
+        // 100 %: native density, apron on every side, clipped at the image.
+        let (ox, oy, ex, ey, ds) =
+            plan_gpu_detail_region((500, 10, 2100, 1010), 6000, 4000, 1.0, 4_000_000);
+        assert_eq!(ds, 1);
+        assert_eq!((ox, oy, ex, ey), (500 - halo, 0, 2100 + halo, 1010 + halo));
+
+        // 25 %: one texel per 4 px, origin on the texel grid, apron scaled.
+        let (ox, oy, ex, ey, ds) =
+            plan_gpu_detail_region((1003, 777, 6000, 4000), 6000, 4000, 0.25, 4_000_000);
+        assert_eq!(ds, 4);
+        assert_eq!((ox % 4, oy % 4), (0, 0));
+        assert!(ox + 4 * halo <= 1003 && oy + 4 * halo <= 777);
+        assert_eq!((ex, ey), (6000, 4000));
+
+        // A view larger than the budget coarsens instead of overflowing it.
+        let (ox, oy, ex, ey, ds) =
+            plan_gpu_detail_region((0, 0, 3840, 2160), 8000, 6000, 1.0, 4_000_000);
+        assert!(ds >= 2);
+        let pixels = ((ex - ox).div_ceil(ds) as u64) * ((ey - oy).div_ceil(ds) as u64);
+        assert!(pixels <= 4_000_000);
     }
 }
 
