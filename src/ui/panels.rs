@@ -1316,6 +1316,7 @@ fn ps_layer_thumbnail(
     is_background: bool,
     size: egui::Vec2,
     thumbnail: Option<&[u8]>,
+    content_key: u64,
     texture_cache_id: egui::Id,
     active: bool,
 ) -> egui::Response {
@@ -1358,8 +1359,13 @@ fn ps_layer_thumbnail(
         _ => {
             if let Some(thumbnail) = thumbnail.filter(|t| ps_thumbnail_side(t).is_some()) {
                 draw_ps_checkerboard(ui, rect.shrink(1.0), 4.0);
-                target_frame_rect =
-                    draw_ps_thumbnail_texture(ui, rect.shrink(1.0), thumbnail, texture_cache_id);
+                target_frame_rect = draw_ps_thumbnail_texture(
+                    ui,
+                    rect.shrink(1.0),
+                    thumbnail,
+                    content_key,
+                    texture_cache_id,
+                );
             } else if is_background {
                 painter.rect_filled(rect.shrink(1.0), 0.0, egui::Color32::WHITE);
             } else {
@@ -1401,6 +1407,7 @@ fn ps_mask_thumbnail(
     ui: &mut egui::Ui,
     size: egui::Vec2,
     thumbnail: Option<&[u8]>,
+    content_key: u64,
     texture_cache_id: egui::Id,
     active: bool,
     enabled: bool,
@@ -1411,8 +1418,13 @@ fn ps_mask_thumbnail(
     let mut target_frame_rect = rect;
     if let Some(thumbnail) = thumbnail.filter(|t| ps_thumbnail_side(t).is_some()) {
         draw_ps_checkerboard(ui, rect.shrink(1.0), 4.0);
-        target_frame_rect =
-            draw_ps_thumbnail_texture(ui, rect.shrink(1.0), thumbnail, texture_cache_id);
+        target_frame_rect = draw_ps_thumbnail_texture(
+            ui,
+            rect.shrink(1.0),
+            thumbnail,
+            content_key,
+            texture_cache_id,
+        );
     } else {
         painter.rect_filled(rect.shrink(1.0), 0.0, egui::Color32::WHITE);
     }
@@ -1648,9 +1660,12 @@ fn paint_target_frame(ui: &mut egui::Ui, rect: egui::Rect, active: bool, anim: f
     }
 }
 
+/// `content_key` identifies the pixels when the caller already knows it (a
+/// layer thumbnail's cache key); 0 falls back to hashing the bytes.
 fn ps_thumbnail_texture(
     ctx: &egui::Context,
     rgba: &[u8],
+    content_key: u64,
     cache_id: egui::Id,
 ) -> Option<egui::TextureHandle> {
     use std::hash::{Hash, Hasher};
@@ -1660,10 +1675,14 @@ fn ps_thumbnail_texture(
     };
     let rgba = &rgba[..thumb * thumb * 4];
 
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    thumb.hash(&mut hasher);
-    rgba.hash(&mut hasher);
-    let hash = hasher.finish();
+    let hash = if content_key != 0 {
+        content_key
+    } else {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        thumb.hash(&mut hasher);
+        rgba.hash(&mut hasher);
+        hasher.finish()
+    };
 
     let texture = ctx
         .data(|data| data.get_temp::<(u64, egui::TextureHandle)>(cache_id))
@@ -1693,9 +1712,10 @@ fn draw_ps_thumbnail_texture(
     ui: &mut egui::Ui,
     slot_rect: egui::Rect,
     rgba: &[u8],
+    content_key: u64,
     cache_id: egui::Id,
 ) -> egui::Rect {
-    let Some(texture) = ps_thumbnail_texture(ui.ctx(), rgba, cache_id) else {
+    let Some(texture) = ps_thumbnail_texture(ui.ctx(), rgba, content_key, cache_id) else {
         return slot_rect;
     };
     let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
@@ -2514,6 +2534,7 @@ fn paint_layer_drag_thumbnail(ui: &egui::Ui, data: &UiData) {
                 if let Some(texture) = ps_thumbnail_texture(
                     ui.ctx(),
                     thumbnail,
+                    data.layers.layer_thumb_keys.get(idx).copied().unwrap_or(0),
                     egui::Id::new("layer_drag_thumbnail_texture").with(idx),
                 ) {
                     let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
@@ -2550,11 +2571,25 @@ fn paint_layer_drag_thumbnail(ui: &egui::Ui, data: &UiData) {
     ui.ctx().request_repaint();
 }
 
+/// Where a dragged row lands relative to the row under the pointer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayerDropZone {
+    Above,
+    /// Into a folder, on top of its contents.
+    Into,
+    Below,
+}
+
+/// `(src, dst gap for drag_layer_to, zone)` for the row under the pointer.
+/// Folder rows have three zones like Photoshop: the top edge drops above the
+/// folder, the middle drops into it, and the bottom edge of a collapsed folder
+/// drops below its whole (hidden) contents. Nothing drops under the Background.
 fn layer_drop_target(
     ui: &egui::Ui,
+    data: &UiData,
     row_rect: egui::Rect,
     idx: usize,
-) -> Option<(usize, usize, bool)> {
+) -> Option<(usize, usize, LayerDropZone)> {
     let src = ui.memory(|mem| mem.data.get_temp::<usize>(egui::Id::new("dragging_layer")))?;
     if src == idx {
         return None;
@@ -2565,23 +2600,71 @@ fn layer_drop_target(
         return None;
     }
 
-    let insert_above = pos.y < row_rect.center().y;
-    let dst = if insert_above { idx + 1 } else { idx };
-    if dst == src || dst == src + 1 {
+    let layers = &data.layers;
+    let is_group = layers.layer_types.get(idx).is_some_and(|t| t == "Group");
+    let expanded = layers.layer_expanded.get(idx).copied().unwrap_or(true);
+    let rel = (pos.y - row_rect.top()) / row_rect.height().max(1.0);
+    let zone = if is_group {
+        if rel < 0.3 {
+            LayerDropZone::Above
+        } else if rel > 0.7 && !expanded {
+            LayerDropZone::Below
+        } else {
+            LayerDropZone::Into
+        }
+    } else if rel < 0.5 {
+        LayerDropZone::Above
+    } else {
+        LayerDropZone::Below
+    };
+    let dst = match zone {
+        LayerDropZone::Above => idx + 1,
+        LayerDropZone::Into => idx,
+        LayerDropZone::Below if is_group => {
+            // Rows hidden right under a collapsed folder are its contents.
+            let mut start = idx;
+            while start > 0
+                && layers
+                    .layer_collapsed_hidden
+                    .get(start - 1)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                start -= 1;
+            }
+            start
+        }
+        LayerDropZone::Below => idx,
+    };
+    if dst == 0 && layers.layer_is_background.first().copied().unwrap_or(false) {
+        return None;
+    }
+    if zone != LayerDropZone::Into && (dst == src || dst == src + 1) {
         return None;
     }
 
-    Some((src, dst, insert_above))
+    Some((src, dst, zone))
 }
 
 fn paint_layer_drop_indicator(
     ui: &egui::Ui,
     row_rect: egui::Rect,
-    insert_above: bool,
+    zone: LayerDropZone,
     color: egui::Color32,
 ) {
     let painter = ui.painter();
-    let y = if insert_above {
+    if zone == LayerDropZone::Into {
+        let glow = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 40);
+        painter.rect_filled(row_rect.shrink(1.0), 3.0, glow);
+        painter.rect_stroke(
+            row_rect.shrink(1.0),
+            3.0,
+            egui::Stroke::new(2.0_f32, color),
+            egui::StrokeKind::Inside,
+        );
+        return;
+    }
+    let y = if zone == LayerDropZone::Above {
         row_rect.top() + 0.5
     } else {
         row_rect.bottom() - 0.5
@@ -2737,6 +2820,7 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                     is_background,
                     egui::vec2(LAYER_PANEL_THUMB_SIZE, LAYER_PANEL_THUMB_SIZE),
                     data.layers.layer_thumbnails.get(idx).map(|v| v.as_slice()),
+                    data.layers.layer_thumb_keys.get(idx).copied().unwrap_or(0),
                     egui::Id::new("layer_pixel_thumbnail_texture").with(idx),
                     is_active && paint_target == PaintTarget::Pixels,
                 )
@@ -2766,6 +2850,11 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                             .layer_mask_thumbnails
                             .get(idx)
                             .map(|v| v.as_slice()),
+                        data.layers
+                            .layer_mask_thumb_keys
+                            .get(idx)
+                            .copied()
+                            .unwrap_or(0),
                         egui::Id::new("layer_mask_thumbnail_texture").with(idx),
                         is_active && paint_target == PaintTarget::Mask,
                         mask_enabled,
@@ -2833,7 +2922,7 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
     if is_active && data.layers.scroll_layers_to_active {
         row_resp.scroll_to_me(None);
     }
-    let drop_target = layer_drop_target(ui, frame_resp.rect, idx);
+    let drop_target = layer_drop_target(ui, data, frame_resp.rect, idx);
     let is_drop_target = drop_target.is_some();
 
     if row_resp.hovered() && !is_active && !is_being_dragged && dragging_layer.is_none() {
@@ -2857,13 +2946,19 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
             egui::StrokeKind::Inside,
         );
     }
-    if let Some((_src, _dst, insert_above)) = drop_target {
-        paint_layer_drop_indicator(ui, frame_resp.rect, insert_above, pal.accent_guide);
+    if let Some((_src, _dst, zone)) = drop_target {
+        paint_layer_drop_indicator(ui, frame_resp.rect, zone, pal.accent_guide);
         ui.ctx().request_repaint();
     }
 
-    if row_resp.clicked() {
+    // egui turns a slow (> 0.8 s) or slightly moved press into a drag, which
+    // never reports `clicked`; releasing on the row it started on still counts
+    // as a click, so a row never needs a second click to get selected.
+    let released_on_self = row_resp.drag_stopped() && row_resp.contains_pointer();
+    if row_resp.clicked() || released_on_self {
         let pos = ui.input(|i| i.pointer.interact_pos()).unwrap_or_default();
+        let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        let shift = ui.input(|i| i.modifiers.shift);
         let on_triangle = tri_rect.is_some_and(|r| r.contains(pos));
         let on_eye = eye_rect.is_some_and(|r| r.contains(pos));
         let on_pixel = pixel_thumb_rect.is_some_and(|r| r.contains(pos));
@@ -2875,20 +2970,21 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
             actions.layers.toggle_visible = Some(idx);
         } else if on_link {
             actions.layers.toggle_mask_link = Some(idx);
+        } else if on_pixel && ctrl {
+            // Photoshop: Ctrl+click a thumbnail loads its transparency.
+            actions.layers.load_layer_selection = Some(idx);
+        } else if on_pixel && shift {
+            actions.layers.select_layer = Some((idx, false, true));
         } else if on_pixel {
-            let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
-            if ctrl {
-                actions.layers.load_layer_selection = Some(idx);
-            } else {
-                actions.layers.select_layer = Some((idx, false, false));
-                actions.layers.set_paint_target = Some((idx, PaintTarget::Pixels));
-            }
+            actions.layers.select_layer = Some((idx, false, false));
+            actions.layers.set_paint_target = Some((idx, PaintTarget::Pixels));
+        } else if on_mask && shift {
+            // Photoshop: Shift+click a mask thumbnail turns the mask off/on.
+            actions.layers.toggle_mask_enabled = Some(idx);
         } else if on_mask {
             actions.layers.select_layer = Some((idx, false, false));
             actions.layers.set_paint_target = Some((idx, PaintTarget::Mask));
         } else {
-            let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
-            let shift = ui.input(|i| i.modifiers.shift);
             actions.layers.select_layer = Some((idx, ctrl, shift));
         }
     }
@@ -2922,11 +3018,12 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
         }
     }
 
-    if row_resp.drag_started() {
+    // The Background is pinned to the bottom, as in Photoshop.
+    if row_resp.drag_started() && !is_background {
         ui.memory_mut(|mem| mem.data.insert_temp(egui::Id::new("dragging_layer"), idx));
     }
     if row_resp.hovered() && ui.input(|i| i.pointer.any_released()) {
-        if let Some((src, dst, _insert_above)) = layer_drop_target(ui, frame_resp.rect, idx) {
+        if let Some((src, dst, _zone)) = layer_drop_target(ui, data, frame_resp.rect, idx) {
             if src != dst && src != idx {
                 actions.layers.move_layer_to = Some((src, dst));
             }
@@ -3114,6 +3211,7 @@ fn channels_panel_contents(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAct
                 false,
                 egui::vec2(CHANNEL_PANEL_THUMB_SIZE, CHANNEL_PANEL_THUMB_SIZE),
                 thumb,
+                0,
                 thumb_id,
                 selected,
             );
@@ -3227,6 +3325,7 @@ fn channels_panel_contents(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAct
                         false,
                         egui::vec2(CHANNEL_PANEL_THUMB_SIZE, CHANNEL_PANEL_THUMB_SIZE),
                         data.channels.alpha_thumbnails.get(i).map(|v| v.as_slice()),
+                        0,
                         egui::Id::new("channel_thumb_alpha").with(*id),
                         selected,
                     );

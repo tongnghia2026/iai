@@ -1224,6 +1224,9 @@ pub struct DisplayBakeInFlight {
 pub struct UiDataCache {
     pub history_entries: std::sync::Arc<Vec<crate::core::command::HistoryEntry>>,
     pub history_revision: u64,
+    /// Canvas band (`layer_revision >> 32`) the history list was built from, so
+    /// a swapped-in canvas (PDF page) never reuses another canvas's list.
+    pub history_canvas_gen: u64,
 
     pub layer_names: std::sync::Arc<Vec<String>>,
     pub layer_visibles: std::sync::Arc<Vec<bool>>,
@@ -1244,8 +1247,18 @@ pub struct UiDataCache {
     /// True when some other layer is clipped to this one (a clip base) — panel
     /// underlines its name.
     pub layer_is_clip_base: std::sync::Arc<Vec<bool>>,
-    pub layer_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
-    pub layer_mask_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
+    pub layer_thumbnails: std::sync::Arc<Vec<std::sync::Arc<Vec<u8>>>>,
+    pub layer_mask_thumbnails: std::sync::Arc<Vec<std::sync::Arc<Vec<u8>>>>,
+    /// Content key per thumbnail (0 = none), so the panel re-uploads a texture
+    /// only when the pixels changed instead of hashing every thumbnail per frame.
+    pub layer_thumb_keys: std::sync::Arc<Vec<u64>>,
+    pub layer_mask_thumb_keys: std::sync::Arc<Vec<u64>>,
+    /// Per-layer thumbnail cache: layer id → (content key, RGBA). Only layers
+    /// whose pixels changed are resampled.
+    pub layer_thumb_cache: std::collections::HashMap<u32, (u64, std::sync::Arc<Vec<u8>>)>,
+    pub layer_mask_thumb_cache: std::collections::HashMap<u32, (u64, std::sync::Arc<Vec<u8>>)>,
+    /// Document the per-layer thumbnail caches belong to.
+    pub layer_thumb_cache_doc: u32,
     pub print_preview_image: Option<std::sync::Arc<egui::ColorImage>>,
     pub print_preview_doc_id: u32,
     pub print_preview_layer_revision: u64,

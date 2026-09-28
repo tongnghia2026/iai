@@ -505,19 +505,17 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::KeyE) if pressed && self.edit.input.ctrl_held => {
-                let is_large = self.win.gpu.as_ref().map_or(false, |g| g.is_large_canvas);
-                if is_large {
-                    self.shell.status_msg =
-                        "Merge không hỗ trợ canvas > 25M pixels (Viewport Streaming mode)"
-                            .to_string();
-                    if let Some(w) = &self.win.window {
-                        w.request_redraw();
-                    }
-                } else if self.docs.documents[self.docs.active_doc_idx]
+                // Tile-native (256-px chunks): no large-canvas gate needed.
+                if self.docs.documents[self.docs.active_doc_idx]
                     .canvas
                     .merge_selected()
                 {
                     self.apply_canvas_event(crate::app::render::CanvasEvent::LayerStructureChanged);
+                } else {
+                    self.shell.status_msg = crate::app::actions::MERGE_REFUSED_MSG.to_string();
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
                 }
             }
             PhysicalKey::Code(KeyCode::KeyV) if pressed && !self.edit.input.ctrl_held => {

@@ -324,6 +324,14 @@ impl DirtyRegion {
     }
 }
 
+/// Starting value for a new canvas's `layer_revision`. Each canvas gets its own
+/// high 32-bit band, so UI caches keyed on (document, revision) never mistake a
+/// canvas swapped into the same document (PDF page, async load) for the old one.
+pub(crate) fn fresh_layer_revision() -> u64 {
+    static NEXT_CANVAS_BAND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    (NEXT_CANVAS_BAND.fetch_add(1, std::sync::atomic::Ordering::Relaxed) << 32) | 1
+}
+
 pub struct Canvas {
     pub width: u32,
     pub height: u32,
@@ -505,7 +513,7 @@ impl Canvas {
             pixels,
             pixels_stale: false,
             layer_stack,
-            layer_revision: 1,
+            layer_revision: fresh_layer_revision(),
             selection,
             metadata: CanvasMetadata::default(),
             color_space: ColorSpace::SRGB,
@@ -596,7 +604,7 @@ impl Canvas {
             pixels: flat_pixels,
             pixels_stale: false,
             layer_stack,
-            layer_revision: 1,
+            layer_revision: fresh_layer_revision(),
             selection: Selection::new(width, height),
             metadata: CanvasMetadata::default(),
             color_space: ColorSpace::SRGB,
@@ -649,7 +657,7 @@ impl Canvas {
             pixels: flat_pixels,
             pixels_stale: false,
             layer_stack,
-            layer_revision: 1,
+            layer_revision: fresh_layer_revision(),
             selection: Selection::new(width, height),
             metadata: CanvasMetadata::default(),
             color_space: ColorSpace::SRGB,

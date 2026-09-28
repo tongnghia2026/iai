@@ -2,6 +2,7 @@
 //! opacity/blend, ordering, merges, groups, masks and paint target.
 //! Split out of actions.rs (phase 2).
 
+use super::MERGE_REFUSED_MSG;
 use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 use crate::ui::UiActions;
@@ -33,6 +34,39 @@ impl App {
                 self.docs.documents[self.docs.active_doc_idx]
                     .canvas
                     .record(Box::new(cmd));
+            }};
+        }
+
+        // Like `undoable_layer_op!`, but the block yields whether anything
+        // changed; a no-op records no history step (so Ctrl+Z never looks dead).
+        macro_rules! undoable_layer_op_if {
+            ($name:expr, $block:block) => {{
+                let (cw, ch) = {
+                    let d = &self.docs.documents[self.docs.active_doc_idx];
+                    (d.canvas.width, d.canvas.height)
+                };
+                let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
+                    $name,
+                    &self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .layer_stack,
+                    cw,
+                    ch,
+                );
+                let changed: bool = $block;
+                if changed {
+                    cmd.capture_after(
+                        &self.docs.documents[self.docs.active_doc_idx]
+                            .canvas
+                            .layer_stack,
+                        cw,
+                        ch,
+                    );
+                    self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .record(Box::new(cmd));
+                }
+                changed
             }};
         }
 
@@ -96,7 +130,7 @@ impl App {
                     .layer_stack;
                 if is_grp {
                     ls.duplicate_group(idx);
-                } else {
+                } else if !ls.duplicate_selected_from(idx) {
                     ls.duplicate_layer(idx);
                 }
             });
@@ -197,30 +231,10 @@ impl App {
         }
         if let Some((idx, ctrl, shift)) = actions.layers.select_layer.take() {
             if ctrl {
-                if idx
-                    < self.docs.documents[self.docs.active_doc_idx]
-                        .canvas
-                        .layer_stack
-                        .layers
-                        .len()
-                {
-                    self.docs.documents[self.docs.active_doc_idx]
-                        .canvas
-                        .layer_stack
-                        .layers[idx]
-                        .selected ^= true;
-                    if self.docs.documents[self.docs.active_doc_idx]
-                        .canvas
-                        .layer_stack
-                        .layers[idx]
-                        .selected
-                    {
-                        self.docs.documents[self.docs.active_doc_idx]
-                            .canvas
-                            .layer_stack
-                            .active_idx = idx;
-                    }
-                }
+                self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .layer_stack
+                    .toggle_layer_selected(idx);
             } else if shift {
                 let ls = &mut self.docs.documents[self.docs.active_doc_idx]
                     .canvas
@@ -294,6 +308,13 @@ impl App {
                     .layer_stack
                     .rename_layer(idx, &name);
             });
+            // The panel's names are cached on layer_revision.
+            self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .layer_revision += 1;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
         }
         if let Some(idx) = actions.layers.unlock_background_layer.take() {
             let unlocked = self.docs.documents[self.docs.active_doc_idx]
@@ -457,53 +478,56 @@ impl App {
             }
         }
         if let Some(idx) = actions.layers.move_layer_up.take() {
-            undoable_layer_op!("Move Layer Up", {
+            if undoable_layer_op_if!("Move Layer Up", {
                 self.docs.documents[self.docs.active_doc_idx]
                     .canvas
                     .layer_stack
-                    .move_layer_up(idx);
-            });
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+                    .move_layer_up(idx)
+            }) {
+                self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            }
         }
         if let Some(idx) = actions.layers.move_layer_down.take() {
-            undoable_layer_op!("Move Layer Down", {
+            if undoable_layer_op_if!("Move Layer Down", {
                 self.docs.documents[self.docs.active_doc_idx]
                     .canvas
                     .layer_stack
-                    .move_layer_down(idx);
-            });
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+                    .move_layer_down(idx)
+            }) {
+                self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            }
         }
         if let Some((src, dst)) = actions.layers.move_layer_to.take() {
-            undoable_layer_op!("Move Layer", {
+            if undoable_layer_op_if!("Move Layer", {
                 self.docs.documents[self.docs.active_doc_idx]
                     .canvas
                     .layer_stack
-                    .drag_layer_to(src, dst);
-            });
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+                    .drag_layer_to(src, dst)
+            }) {
+                self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            }
         }
         if actions.layers.merge_selected {
-            let is_large = self.win.gpu.as_ref().map_or(false, |g| g.is_large_canvas);
-            if is_large {
-                self.shell.status_msg =
-                    "Merge không hỗ trợ canvas > 25M pixels (Viewport Streaming mode)".to_string();
-            } else if self.docs.documents[self.docs.active_doc_idx]
+            // Merge Selected / Merge Down are tile-native (256-px chunks), so they
+            // run under Viewport Streaming too.
+            if self.docs.documents[self.docs.active_doc_idx]
                 .canvas
                 .merge_selected()
             {
                 self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            } else {
+                self.shell.status_msg = MERGE_REFUSED_MSG.to_string();
             }
         }
         if let Some(idx) = actions.layers.merge_down.take() {
-            // merge_down is tile-native (256-px chunks) — runs under Viewport Streaming.
-            undoable_layer_op!("Merge Down", {
-                self.docs.documents[self.docs.active_doc_idx]
-                    .canvas
-                    .layer_stack
-                    .merge_down(idx);
-            });
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            if self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .merge_down(idx)
+            {
+                self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            } else {
+                self.shell.status_msg = MERGE_REFUSED_MSG.to_string();
+            }
         }
         if actions.layers.merge_all {
             // Flatten Image is tile-native (chunked 8- and 16-bit) — runs under
@@ -523,35 +547,26 @@ impl App {
                 .get(idx)
                 .map_or(false, |l| l.is_group())
             {
-                let (mcw, mch) = {
-                    let d = &self.docs.documents[self.docs.active_doc_idx];
-                    (d.canvas.width, d.canvas.height)
-                };
-                undoable_layer_op!("Merge Group", {
-                    self.docs.documents[self.docs.active_doc_idx]
-                        .canvas
-                        .layer_stack
-                        .merge_group(idx, mcw, mch);
-                });
-                self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-                self.shell.status_msg = "Merged group".to_string();
+                if self.docs.documents[self.docs.active_doc_idx]
+                    .canvas
+                    .merge_group(idx)
+                {
+                    self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+                    self.shell.status_msg = "Merged group".to_string();
+                }
             }
         }
         if actions.layers.merge_visible {
             // Merge Visible is tile-native (chunked flatten into tiles), so it runs
-            // under Viewport Streaming with no >25M px gate.
-            let (mcw, mch) = {
-                let d = &self.docs.documents[self.docs.active_doc_idx];
-                (d.canvas.width, d.canvas.height)
-            };
-            undoable_layer_op!("Stamp Visible", {
-                self.docs.documents[self.docs.active_doc_idx]
-                    .canvas
-                    .layer_stack
-                    .merge_visible(mcw, mch);
-            });
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.shell.status_msg = "Stamped visible layers".to_string();
+            // under Viewport Streaming with no >25M px gate. The Canvas wrapper
+            // picks the 16-bit composite on a 16-bit document, like Ctrl+Shift+E.
+            if self.docs.documents[self.docs.active_doc_idx]
+                .canvas
+                .merge_visible()
+            {
+                self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+                self.shell.status_msg = "Stamped visible layers".to_string();
+            }
         }
         if actions.layers.group_selected {
             self.do_group_selected();
@@ -621,13 +636,17 @@ impl App {
                     .layers
                     .len()
             {
-                undoable_layer_op!("Apply Layer Mask", {
+                if undoable_layer_op_if!("Apply Layer Mask", {
                     self.docs.documents[self.docs.active_doc_idx]
                         .canvas
                         .layer_stack
-                        .apply_layer_mask(idx);
-                });
-                self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+                        .apply_layer_mask(idx)
+                }) {
+                    self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+                } else {
+                    self.shell.status_msg =
+                        "Không áp dụng được mask: nhóm có chữ, vector hoặc adjustment".to_string();
+                }
             }
         }
         if let Some(idx) = actions.layers.delete_mask.take() {

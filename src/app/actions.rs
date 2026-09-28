@@ -21,6 +21,10 @@ mod ui_layers;
 mod ui_selection;
 mod ui_tools;
 
+/// Status line when Merge Down / Merge Selected is refused.
+pub(crate) const MERGE_REFUSED_MSG: &str =
+    "Không gộp được: không có layer phù hợp bên dưới (nhóm, adjustment hoặc đang khóa)";
+
 fn should_ring_modal_denial(denied: bool, text_input_frame: bool) -> bool {
     denied && !text_input_frame
 }

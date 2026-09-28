@@ -114,8 +114,12 @@ pub struct LayerViewModel {
     pub layer_is_clip_base: std::sync::Arc<Vec<bool>>,
     /// A PowerClip frame's contents are being edited in place (menu label toggle).
     pub powerclip_editing: bool,
-    pub layer_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
-    pub layer_mask_thumbnails: std::sync::Arc<Vec<Vec<u8>>>,
+    pub layer_thumbnails: std::sync::Arc<Vec<std::sync::Arc<Vec<u8>>>>,
+    pub layer_mask_thumbnails: std::sync::Arc<Vec<std::sync::Arc<Vec<u8>>>>,
+    /// Content key per thumbnail (0 = none); lets the panel skip re-uploading
+    /// unchanged thumbnail textures without hashing their bytes.
+    pub layer_thumb_keys: std::sync::Arc<Vec<u64>>,
+    pub layer_mask_thumb_keys: std::sync::Arc<Vec<u64>>,
     /// Group nesting depth per layer (0 = top level) — panel indentation.
     pub layer_depths: std::sync::Arc<Vec<u32>>,
     /// Group folder expanded state per layer (Group layers only).
@@ -771,6 +775,8 @@ impl Default for UiData {
                 powerclip_editing: false,
                 layer_thumbnails: std::sync::Arc::new(Vec::new()),
                 layer_mask_thumbnails: std::sync::Arc::new(Vec::new()),
+                layer_thumb_keys: std::sync::Arc::new(Vec::new()),
+                layer_mask_thumb_keys: std::sync::Arc::new(Vec::new()),
                 layer_depths: std::sync::Arc::new(vec![0]),
                 layer_expanded: std::sync::Arc::new(vec![true]),
                 layer_collapsed_hidden: std::sync::Arc::new(vec![false]),

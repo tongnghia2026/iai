@@ -131,7 +131,7 @@ impl LayerStack {
                 current = snapshot.get(&id).and_then(|entry| entry.0);
             }
             if !valid {
-                layer.clip_parent_id = None;
+                layer.release_clip();
             }
         }
     }

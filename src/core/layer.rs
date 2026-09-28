@@ -805,25 +805,30 @@ impl LayerMask {
         let mask_tiles = self.tiles;
         let inverted = self.inverted;
 
-        let old_layer_tiles = std::mem::take(&mut layer.tiles.tiles);
-        for (pos, tile) in old_layer_tiles {
-            if let Some(mask_tile) = mask_tiles.tiles.get(&pos) {
-                let dest =
-                    layer.tiles.tiles.entry(pos).or_insert_with(|| {
-                        std::sync::Arc::new(crate::core::tile::Tile::new_empty())
-                    });
-                let t = std::sync::Arc::make_mut(dest);
-                t.revision += 1;
-                t.pixels.copy_from_slice(&tile.pixels);
-                for i in (0..t.pixels.len()).step_by(4) {
-                    let la = t.pixels[i + 3] as f32 / 255.0;
-                    let mr = mask_tile.pixels[i];
-                    let mask_a = if inverted { 255 - mr } else { mr };
-                    t.pixels[i + 3] = (la * mask_a as f32).clamp(0.0, 255.0) as u8;
+        let positions: Vec<crate::core::tile::TilePos> =
+            layer.tiles.tiles.keys().copied().collect();
+        for pos in positions {
+            let Some(mask_tile) = mask_tiles.tiles.get(&pos) else {
+                // An absent mask tile is black: it hides the whole tile.
+                if !inverted {
+                    layer.tiles.tiles.remove(&pos);
                 }
-            } else {
-                if inverted {
-                    layer.tiles.tiles.insert(pos, tile);
+                continue;
+            };
+            let Some(tile) = layer.tiles.tiles.get_mut(&pos) else {
+                continue;
+            };
+            // Scale alpha in place so the 16-bit master and CMYK ink survive, and
+            // take a fresh revision so the GPU atlas re-uploads the tile.
+            let t = std::sync::Arc::make_mut(tile);
+            t.revision = crate::core::tile::next_tile_revision();
+            for i in (0..t.pixels.len()).step_by(4) {
+                let mr = mask_tile.pixels[i];
+                let mask_a = if inverted { 255 - mr } else { mr } as f32;
+                let la = t.pixels[i + 3] as f32 / 255.0;
+                t.pixels[i + 3] = (la * mask_a).clamp(0.0, 255.0) as u8;
+                if let Some(p16) = t.pixels16.as_mut() {
+                    p16[i + 3] = (p16[i + 3] as f32 * mask_a / 255.0).round() as u16;
                 }
             }
         }
@@ -848,7 +853,7 @@ impl LayerMask {
             let base_x = pos.x * TILE_SIZE as i32 + ox;
             let base_y = pos.y * TILE_SIZE as i32 + oy;
             let t = std::sync::Arc::make_mut(tile);
-            t.revision += 1;
+            t.revision = crate::core::tile::next_tile_revision();
             let mut any_visible = false;
             for ty in 0..TILE_SIZE {
                 let cy = base_y + ty as i32;
@@ -867,6 +872,9 @@ impl LayerMask {
                     };
                     let na = (a as f32 * m).round().clamp(0.0, 255.0) as u8;
                     t.pixels[i + 3] = na;
+                    if let Some(p16) = t.pixels16.as_mut() {
+                        p16[i + 3] = (p16[i + 3] as f32 * m).round() as u16;
+                    }
                     if na > 0 {
                         any_visible = true;
                     }
@@ -1120,6 +1128,18 @@ impl Layer {
                 t.pixels[i + 1] = 255 - t.pixels[i + 1];
                 t.pixels[i + 2] = 255 - t.pixels[i + 2];
             }
+        }
+    }
+
+    /// Drop a clip relation together with the managed clip mask that realised
+    /// it (derived state, never painted by the user), so the layer is free again.
+    pub fn release_clip(&mut self) {
+        self.clip_parent_id = None;
+        // A folder is never clip content, so its mask is the user's own.
+        if !self.is_group() {
+            self.mask = None;
+            self.mask_active = false;
+            self.paint_target = PaintTarget::Pixels;
         }
     }
 
@@ -1381,6 +1401,9 @@ impl Layer {
         let row_len = dst_w as usize * 4;
 
         if let LayerType::Adjustment(ref adj) = self.layer_type {
+            // Same as blend_onto_region: map chunk-local (x, y) back through the
+            // (temporarily shifted) offset so the mask is read at its canvas spot.
+            let (ox, oy) = self.offset;
             dst.par_chunks_mut(row_len)
                 .take(dst_h as usize)
                 .enumerate()
@@ -1391,7 +1414,9 @@ impl Layer {
                         let mut sa = opacity;
                         if has_mask {
                             if let Some(ref mask) = self.mask {
-                                sa *= mask.sample(x, y);
+                                let mx = (x as i32 - ox).max(0) as u32;
+                                let my = (y as i32 - oy).max(0) as u32;
+                                sa *= mask.sample(mx, my);
                             }
                         }
                         if sa < 0.001 {
@@ -1638,11 +1663,61 @@ impl LayerStack {
         }
     }
 
+    /// The Layers panel always draws the active row as selected. When
+    /// `active_idx` moved without the selection following (a tool created a
+    /// layer, a duplicate, an undo), collapse the selection to the active layer
+    /// as Photoshop does, so Ctrl+click / Ctrl+E / Delete act on what is shown.
+    /// Returns true if any flag changed.
+    pub fn normalize_selection(&mut self) -> bool {
+        self.normalize_active_idx();
+        let active = self.active_idx;
+        if self.layers.get(active).is_none_or(|l| l.selected) {
+            return false;
+        }
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            layer.selected = i == active;
+        }
+        true
+    }
+
+    /// Ctrl+click in the Layers panel. The active row counts as selected, so a
+    /// Ctrl+click on another row adds to it (one click, like Photoshop).
+    /// Deselecting the active layer hands "active" to the nearest selected
+    /// layer; the last selected layer stays selected.
+    pub fn toggle_layer_selected(&mut self, idx: usize) {
+        if idx >= self.layers.len() {
+            return;
+        }
+        self.normalize_active_idx();
+        if let Some(active) = self.layers.get_mut(self.active_idx) {
+            active.selected = true;
+        }
+        if !self.layers[idx].selected {
+            self.layers[idx].selected = true;
+            self.active_idx = idx;
+            return;
+        }
+        let Some(next) = (0..self.layers.len())
+            .filter(|&i| i != idx && self.layers[i].selected)
+            .min_by_key(|&i| i.abs_diff(idx))
+        else {
+            return;
+        };
+        self.layers[idx].selected = false;
+        if self.active_idx == idx {
+            self.active_idx = next;
+        }
+    }
+
     pub fn add_layer(&mut self, width: u32, height: u32) -> usize {
         let id = self.reserve_id();
         let name = self.numbered_name("Layer", 1);
-        let layer = Layer::new(id, &name, width, height);
+        let mut layer = Layer::new(id, &name, width, height);
         self.normalize_active_idx();
+        // Inserted right above the active layer, so it joins that layer's
+        // folder (a header's own level); a top-level layer there would split
+        // the folder's contiguous run.
+        layer.parent_id = self.layers.get(self.active_idx).and_then(|l| l.parent_id);
         let idx = (self.active_idx + 1).min(self.layers.len());
         self.layers.insert(idx, layer);
         self.active_idx = idx;
@@ -1655,6 +1730,7 @@ impl LayerStack {
         layer.add_mask(true);
         layer.paint_target = PaintTarget::Pixels;
         self.normalize_active_idx();
+        layer.parent_id = self.layers.get(self.active_idx).and_then(|l| l.parent_id);
         let idx = (self.active_idx + 1).min(self.layers.len());
         self.layers.insert(idx, layer);
         self.active_idx = idx;
@@ -1825,7 +1901,40 @@ impl LayerStack {
                 _ => return None,
             }
         }
+        // A selected folder comes along with its whole contents; grabbing only
+        // the header would strand its members outside it.
+        let headers: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&i| self.layers[i].is_group())
+            .collect();
+        for header in headers {
+            members.extend(self.group_member_range(header));
+        }
         members.sort_unstable();
+        members.dedup();
+
+        let member_id_set: std::collections::HashSet<u32> =
+            members.iter().map(|&i| self.layers[i].id).collect();
+        // The block lands where the lowest member was, i.e. inside that layer's
+        // nearest folder outside the selection; the new folder nests there.
+        let outer_parent = {
+            let mut parent = self.layers[members[0]].parent_id;
+            let mut guard = 0;
+            while let Some(pid) = parent.filter(|p| member_id_set.contains(p)) {
+                parent = self
+                    .layers
+                    .iter()
+                    .find(|l| l.id == pid)
+                    .and_then(|l| l.parent_id);
+                guard += 1;
+                if guard > self.layers.len() {
+                    parent = None;
+                    break;
+                }
+            }
+            parent
+        };
 
         let group_id = self.reserve_id();
 
@@ -1852,6 +1961,7 @@ impl LayerStack {
         let mut group = Layer::new_group(group_id, "Group", canvas_w, canvas_h);
         group.selected = true;
         group.expanded = false;
+        group.parent_id = outer_parent;
         let header_idx = at + n;
         self.layers.insert(header_idx, group);
         self.active_idx = header_idx;
@@ -1871,13 +1981,25 @@ impl LayerStack {
         }
         let gid = header.id;
         let outer = header.parent_id;
+        let members = self.group_member_range(group_idx);
         for l in self.layers.iter_mut() {
             if l.parent_id == Some(gid) {
                 l.parent_id = outer;
             }
         }
         self.layers.remove(group_idx);
-        self.normalize_active_idx();
+        // Like Photoshop, the former contents end up selected, the top one active.
+        for (i, l) in self.layers.iter_mut().enumerate() {
+            l.selected = members.contains(&i);
+        }
+        if members.is_empty() {
+            self.active_idx = group_idx.min(self.layers.len().saturating_sub(1));
+            if let Some(l) = self.layers.get_mut(self.active_idx) {
+                l.selected = true;
+            }
+        } else {
+            self.active_idx = members.end - 1;
+        }
         true
     }
 
@@ -1891,8 +2013,64 @@ impl LayerStack {
         new_layer.name = self.copy_name(&source_name);
         let insert = idx + 1;
         self.layers.insert(insert, new_layer);
+        // Like Photoshop, only the copy is selected afterwards.
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            layer.selected = i == insert;
+        }
         self.active_idx = insert;
         insert
+    }
+
+    /// Duplicate Layer on a row that is part of a multi-selection duplicates
+    /// every selected (non-folder) layer, each copy right above its source, and
+    /// selects the copies — as Photoshop does. Returns false (nothing done) when
+    /// `idx` isn't part of a selection of two or more layers.
+    pub fn duplicate_selected_from(&mut self, idx: usize) -> bool {
+        if !self.layers.get(idx).is_some_and(|l| l.selected) {
+            return false;
+        }
+        let sources: Vec<u32> = self
+            .layers
+            .iter()
+            .filter(|l| l.selected && !l.is_group())
+            .map(|l| l.id)
+            .collect();
+        if sources.len() < 2 {
+            return false;
+        }
+        let mut copies = Vec::with_capacity(sources.len());
+        for &src_id in sources.iter().rev() {
+            let Some(src) = self.index_of_id(src_id) else {
+                continue;
+            };
+            let copy = self.duplicate_layer(src);
+            copies.push(self.layers[copy].id);
+        }
+        for layer in &mut self.layers {
+            layer.selected = copies.contains(&layer.id);
+        }
+        if let Some(top) = copies.first().and_then(|&id| self.index_of_id(id)) {
+            self.active_idx = top;
+        }
+        true
+    }
+
+    /// `idxs` plus the full contents of every folder header among them, sorted.
+    /// Deleting a folder deletes what is in it (Photoshop's Delete on a group).
+    pub fn with_group_contents(&self, idxs: &[usize]) -> Vec<usize> {
+        let mut out: Vec<usize> = idxs
+            .iter()
+            .copied()
+            .filter(|&i| i < self.layers.len())
+            .collect();
+        for &i in idxs {
+            if self.layers.get(i).is_some_and(|l| l.is_group()) {
+                out.extend(self.group_member_range(i));
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     pub fn translate_active_layer(&mut self, dx: i32, dy: i32) {
@@ -1914,10 +2092,16 @@ impl LayerStack {
             return false;
         }
         let removed_id = self.layers[idx].id;
+        let removed_parent = self.layers[idx].parent_id;
         self.layers.remove(idx);
         for layer in &mut self.layers {
+            // A folder removed on its own ("group only") hands its members to
+            // its parent instead of leaving them pointing at a missing id.
+            if layer.parent_id == Some(removed_id) {
+                layer.parent_id = removed_parent;
+            }
             if layer.clip_parent_id == Some(removed_id) {
-                layer.clip_parent_id = None;
+                layer.release_clip();
             }
         }
         self.repair_clip_relations();
@@ -1965,62 +2149,147 @@ impl LayerStack {
         {
             return false;
         }
+        {
+            // Photoshop greys Merge Down out over an adjustment layer (it holds
+            // no pixels, so its effect would silently vanish) and over a fully
+            // locked layer. The Background is locked by design but still merges.
+            let below = &self.layers[idx - 1];
+            if below.is_adjustment() || (below.locked && !below.is_background) {
+                return false;
+            }
+        }
         let mut top = self.layers[idx].clone();
+        let top_id = top.id;
         // Visibility priority: a hidden layer contributes nothing to the merge,
         // and the result is visible when either input was — so merging a visible
         // top onto a hidden bottom keeps the top, not the hidden bottom.
         let top_visible = top.visible;
         let bottom_visible = self.layers[idx - 1].visible;
+        let top_paints = top_visible && top.opacity >= 0.001 && top.has_renderable_content();
         let bottom = &mut self.layers[idx - 1];
+        let bottom_id = bottom.id;
+        let bottom_clip = bottom.clip_parent_id;
         // Bake the bottom mask into its alpha first: the merged pixels are a
         // new image, so keeping the old mask would cut the freshly blended
         // content (the top layer's own mask is applied by blend_onto_region).
-        if let Some(mask) = bottom.mask.take() {
-            if mask.enabled {
-                mask.apply_to_layer(bottom);
-            } else {
-                bottom.mask_active = false;
-            }
-        }
-        let w = bottom.width;
-        let h = bottom.height;
-
-        let chunk_size = 256;
-        let mut patch = vec![0u8; chunk_size * chunk_size * 4];
-
-        for cy in (0..h).step_by(chunk_size) {
-            for cx in (0..w).step_by(chunk_size) {
-                let cw = chunk_size.min((w - cx) as usize) as u32;
-                let ch = chunk_size.min((h - cy) as usize) as u32;
-                let needed = (cw * ch * 4) as usize;
-
-                if bottom_visible {
-                    bottom
-                        .tiles
-                        .flatten_tiles_region_into(cx, cy, cw, ch, &mut patch[..needed]);
-                } else {
-                    // Hidden bottom: start from transparent so only the visible
-                    // top contributes (blend_onto_region no-ops a hidden top).
-                    for b in patch[..needed].iter_mut() {
-                        *b = 0;
-                    }
+        // A clipped bottom keeps its managed clip mask: like Photoshop, the
+        // merged layer stays in its clipping group.
+        if bottom_clip.is_none() {
+            if let Some(mask) = bottom.mask.take() {
+                if mask.enabled {
+                    mask.apply_to_layer(bottom);
                 }
-                let saved = top.offset;
-                top.offset = (saved.0 - cx as i32, saved.1 - cy as i32);
-                top.blend_onto_region(&mut patch[..needed], cw, 0, 0, cw, ch);
-                top.offset = saved;
-                bottom.tiles.write_region(cx, cy, cw, ch, &patch[..needed]);
+            }
+            bottom.mask_active = false;
+            bottom.paint_target = PaintTarget::Pixels;
+        }
+        if !bottom_visible && top_visible {
+            bottom.tiles.tiles.clear();
+        }
+
+        // Result bounds in canvas space. The Background stays canvas-fixed; any
+        // other lower layer grows to hold the whole upper layer, so nothing that
+        // was on screen (or parked off-canvas) is cropped or shifted.
+        let (bx, by) = bottom.offset;
+        let (mut x0, mut y0) = (bx, by);
+        let mut x1 = bx + bottom.width as i32;
+        let mut y1 = by + bottom.height as i32;
+        if top_paints && !bottom.is_background && !top.is_adjustment() {
+            x0 = x0.min(top.offset.0);
+            y0 = y0.min(top.offset.1);
+            x1 = x1.max(top.offset.0 + top.width as i32);
+            y1 = y1.max(top.offset.1 + top.height as i32);
+        }
+        // Grow left/up by whole tiles so existing tiles move by a key remap:
+        // lossless, and 16-bit masters / CMYK ink survive untouched areas.
+        let ts = crate::core::tile::TILE_SIZE as i32;
+        let shift_x = (bx - x0 + ts - 1) / ts * ts;
+        let shift_y = (by - y0 + ts - 1) / ts * ts;
+        let (ox, oy) = (bx - shift_x, by - shift_y);
+        let w = (x1 - ox) as u32;
+        let h = (y1 - oy) as u32;
+        if (w, h) != (bottom.width, bottom.height) || (ox, oy) != (bx, by) {
+            bottom.tiles.width = w;
+            bottom.tiles.height = h;
+            bottom.tiles.translate(shift_x, shift_y);
+            bottom.width = w;
+            bottom.height = h;
+            bottom.offset = (ox, oy);
+            if let Some(mask) = bottom.mask.as_mut() {
+                mask.tiles.width = w;
+                mask.tiles.height = h;
+                mask.tiles.translate(shift_x, shift_y);
+                mask.width = w;
+                mask.height = h;
             }
         }
 
-        bottom.blend_mode = BlendMode::Normal;
-        bottom.opacity = 1.0;
+        if top_paints {
+            let chunk = crate::core::tile::TILE_SIZE;
+            // Only the chunks the upper layer reaches change; everything else
+            // keeps its tiles (and their precision) as they were.
+            let (rx0, ry0, rx1, ry1) = if top.is_adjustment() {
+                (0, 0, w as i32, h as i32)
+            } else {
+                (
+                    (top.offset.0 - ox).clamp(0, w as i32),
+                    (top.offset.1 - oy).clamp(0, h as i32),
+                    (top.offset.0 + top.width as i32 - ox).clamp(0, w as i32),
+                    (top.offset.1 + top.height as i32 - oy).clamp(0, h as i32),
+                )
+            };
+            let (rx0, ry0, rx1, ry1) = (rx0 as u32, ry0 as u32, rx1 as u32, ry1 as u32);
+            let mut patch = vec![0u8; (chunk * chunk * 4) as usize];
+            let saved = top.offset;
+            let mut cy = ry0 / chunk * chunk;
+            while cy < ry1 {
+                let ch = chunk.min(h - cy);
+                let mut cx = rx0 / chunk * chunk;
+                while cx < rx1 {
+                    let cw = chunk.min(w - cx);
+                    let tile_pos = crate::core::tile::TilePos {
+                        x: (cx / chunk) as i32,
+                        y: (cy / chunk) as i32,
+                    };
+                    // An adjustment only recolours pixels that exist.
+                    if !top.is_adjustment() || bottom.tiles.tiles.contains_key(&tile_pos) {
+                        let needed = (cw * ch * 4) as usize;
+                        bottom.tiles.flatten_tiles_region_into(
+                            cx,
+                            cy,
+                            cw,
+                            ch,
+                            &mut patch[..needed],
+                        );
+                        top.offset = (saved.0 - (ox + cx as i32), saved.1 - (oy + cy as i32));
+                        top.blend_onto_region(&mut patch[..needed], cw, 0, 0, cw, ch);
+                        top.offset = saved;
+                        bottom.tiles.write_region(cx, cy, cw, ch, &patch[..needed]);
+                    }
+                    cx += cw;
+                }
+                cy += ch;
+            }
+        }
+
+        // Photoshop keeps the lower layer's name, blend mode and opacity.
         bottom.layer_type = LayerType::Raster;
+        bottom.connector = None;
         bottom.visible = top_visible || bottom_visible;
         self.layers.remove(idx);
-        if self.active_idx >= self.layers.len() {
-            self.active_idx = self.layers.len() - 1;
+        // Layers clipped to the merged-away layer now clip to the result.
+        let new_base = bottom_clip.unwrap_or(bottom_id);
+        for layer in &mut self.layers {
+            if layer.clip_parent_id == Some(top_id) {
+                layer.clip_parent_id = Some(new_base);
+            }
         }
+        self.repair_clip_relations();
+        for layer in &mut self.layers {
+            layer.selected = false;
+        }
+        self.layers[idx - 1].selected = true;
+        self.active_idx = idx - 1;
         true
     }
 
@@ -2136,14 +2405,14 @@ impl LayerStack {
         }
         let start = self.group_member_range(header_idx).start;
 
-        let (gid, name, parent, group_blend) = {
+        let (gid, name, parent, group_blend, group_visible) = {
             let g = &self.layers[header_idx];
-            (g.id, g.name.clone(), g.parent_id, g.blend_mode)
+            (g.id, g.name.clone(), g.parent_id, g.blend_mode, g.visible)
         };
 
         let new_tiles = if crate::core::canvas::Canvas::fits_flat_buffer(width, height) {
             // Small canvas: exact original path (full-canvas subtree + synth bake).
-            let subtree = self.flatten_group_subtree_region(header_idx, 0, 0, width, height);
+            let subtree = self.flatten_group_subtree_region(header_idx, 0, 0, width, height, true);
             let group = &self.layers[header_idx];
             let mut synth = Layer::from_rgba(0, "", subtree, width, height);
             synth.opacity = group.opacity;
@@ -2164,7 +2433,8 @@ impl LayerStack {
                 let mut cx = 0;
                 while cx < width {
                     let cw = chunk.min(width - cx);
-                    let mut buf = self.flatten_group_subtree_region(header_idx, cx, cy, cw, ch);
+                    let mut buf =
+                        self.flatten_group_subtree_region(header_idx, cx, cy, cw, ch, true);
                     Self::bake_opacity_mask_region(
                         &mut buf,
                         cw,
@@ -2187,9 +2457,28 @@ impl LayerStack {
         merged.tiles = new_tiles;
         merged.blend_mode = group_blend;
         merged.parent_id = parent;
+        // A hidden folder stays hidden: merging must not reveal its content.
+        merged.visible = group_visible;
+        merged.selected = true;
 
+        let removed_ids: Vec<u32> = self.layers[start..header_idx]
+            .iter()
+            .map(|l| l.id)
+            .collect();
         self.layers.drain(start..=header_idx);
         self.layers.insert(start, merged);
+        for layer in &mut self.layers {
+            if layer
+                .clip_parent_id
+                .is_some_and(|p| removed_ids.contains(&p))
+            {
+                layer.clip_parent_id = Some(gid);
+            }
+        }
+        self.repair_clip_relations();
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            layer.selected = i == start;
+        }
         self.active_idx = start;
         true
     }
@@ -2199,14 +2488,15 @@ impl LayerStack {
     /// its mask is baked into each raster child's alpha instead and the header just
     /// loses the mask. Routing both cases through here fixes "Apply Mask" on a
     /// group silently dropping the mask and un-clipping the whole subtree.
-    pub fn apply_layer_mask(&mut self, idx: usize) {
-        if idx >= self.layers.len() {
-            return;
+    pub fn apply_layer_mask(&mut self, idx: usize) -> bool {
+        if idx >= self.layers.len() || self.layers[idx].mask.is_none() {
+            return false;
         }
         if self.layers[idx].is_group() {
-            self.apply_group_mask(idx);
+            self.apply_group_mask(idx)
         } else {
             self.layers[idx].apply_mask();
+            true
         }
     }
 
@@ -2216,22 +2506,39 @@ impl LayerStack {
     /// nested folders) need no explicit clip: wherever the mask hides the group,
     /// every raster child becomes transparent, so the group's isolated buffer is
     /// empty there and an adjustment over it has nothing to show.
-    fn apply_group_mask(&mut self, header_idx: usize) {
+    fn apply_group_mask(&mut self, header_idx: usize) -> bool {
         let gid = self.layers[header_idx].id;
+        let inside: Vec<usize> = (0..self.layers.len())
+            .filter(|&i| self.is_descendant_of(i, gid))
+            .collect();
+        let enabled = self.layers[header_idx]
+            .mask
+            .as_ref()
+            .is_some_and(|m| m.enabled);
+        // Only plain pixels can take the mask. Text/vector content would lose it
+        // on re-render, and an adjustment would start recolouring the layers
+        // under the folder once the folder stops compositing in isolation.
+        if enabled
+            && inside
+                .iter()
+                .any(|&i| !self.layers[i].is_group() && !self.layers[i].is_raster())
+        {
+            return false;
+        }
         let mask = self.layers[header_idx].mask.take();
         self.layers[header_idx].mask_active = false;
         self.layers[header_idx].paint_target = PaintTarget::Pixels;
         let Some(mask) = mask else {
-            return;
+            return false;
         };
-        if !mask.enabled {
-            return;
-        }
-        for child in self.layers.iter_mut() {
-            if child.parent_id == Some(gid) && child.is_raster() {
-                mask.bake_into_child_alpha(child);
+        if mask.enabled {
+            for &i in &inside {
+                if self.layers[i].is_raster() {
+                    mask.bake_into_child_alpha(&mut self.layers[i]);
+                }
             }
         }
+        true
     }
 
     /// Stamp Visible (Ctrl+Shift+E): flatten every eye-on layer into ONE new
@@ -2463,32 +2770,32 @@ impl LayerStack {
         new_tiles
     }
 
+    /// Flatten Image: composite the visible stack exactly as displayed (isolated
+    /// folders keep their opacity, blend mode and mask), lay it over white and
+    /// replace the stack with one Background layer. Chunked, no canvas buffer.
     pub fn merge_all(&mut self, width: u32, height: u32) {
+        let (eff, targets) = self.flatten_chunk_plan();
         let mut new_tiles = crate::core::tile::TileMap::new_white(width, height);
-        let chunk_size = 256;
-        let mut patch = vec![0u8; chunk_size * chunk_size * 4];
-
-        let eff: Vec<bool> = (0..self.layers.len())
-            .map(|i| self.is_effectively_visible(i))
-            .collect();
-
-        for cy in (0..height).step_by(chunk_size) {
-            for cx in (0..width).step_by(chunk_size) {
-                let cw = chunk_size.min((width - cx) as usize) as u32;
-                let ch = chunk_size.min((height - cy) as usize) as u32;
-                let needed = (cw * ch * 4) as usize;
-
-                new_tiles.flatten_tiles_region_into(cx, cy, cw, ch, &mut patch[..needed]);
-                for (i, layer) in self.layers.iter_mut().enumerate() {
-                    if eff[i] {
-                        let saved = layer.offset;
-                        layer.offset = (saved.0 - cx as i32, saved.1 - cy as i32);
-                        layer.blend_onto_region(&mut patch[..needed], cw, 0, 0, cw, ch);
-                        layer.offset = saved;
+        let chunk = 256u32;
+        let mut cy = 0;
+        while cy < height {
+            let ch = chunk.min(height - cy);
+            let mut cx = 0;
+            while cx < width {
+                let cw = chunk.min(width - cx);
+                let mut composite = self.flatten_chunk(&eff, &targets, cx, cy, cw, ch);
+                // Flatten discards transparency: straight-alpha over white.
+                for px in composite.chunks_exact_mut(4) {
+                    let a = px[3] as f32 / 255.0;
+                    for c in &mut px[..3] {
+                        *c = (*c as f32 * a + 255.0 * (1.0 - a)).round() as u8;
                     }
+                    px[3] = 255;
                 }
-                new_tiles.write_region(cx, cy, cw, ch, &patch[..needed]);
+                new_tiles.write_region(cx, cy, cw, ch, &composite);
+                cx += cw;
             }
+            cy += ch;
         }
 
         self.layers.clear();
@@ -2503,6 +2810,13 @@ impl LayerStack {
     /// it over an opaque white background and replace the stack with one 16-bit
     /// Background layer.
     pub fn merge_all16(&mut self, width: u32, height: u32) {
+        // Isolated folders only composite at 8-bit (as flatten16 does); promote
+        // that exact result rather than lose the folders' opacity/blend/mask.
+        if self.has_effected_groups() {
+            self.merge_all(width, height);
+            self.layers[0].tiles.promote_to_hdr();
+            return;
+        }
         // Chunked (256-px) so a >25M px 16-bit doc (a large RAW) flattens without a
         // canvas-sized f32/u16 buffer. Mirrors flatten16's pass-through-group blend
         // via blend_onto_f32 with the offset-shift trick, over opaque white, into
@@ -2559,165 +2873,258 @@ impl LayerStack {
         self.active_idx = 0;
     }
 
-    /// Merge all selected (selected=true) layers into one at the lowest position.
-    /// If only one layer is selected → merge_down at active_idx.
+    /// Ctrl+E with several layers selected: composite them into one layer that
+    /// takes the top-most layer's slot and name (Photoshop), or folds everything
+    /// into the Background when it is part of the selection. The active row is
+    /// always drawn as selected, so it counts as part of the selection. With
+    /// fewer than two mergeable layers this is Merge Down on the active layer.
     /// Returns true if the merge succeeded.
     pub fn merge_selected(&mut self, canvas_width: u32, canvas_height: u32) -> bool {
+        if let Some(active) = self.layers.get_mut(self.active_idx) {
+            active.selected = true;
+        }
+        if self.layers.iter().filter(|l| l.selected).count() < 2 {
+            return self.merge_down(self.active_idx);
+        }
         // The Background counts as a valid *bottom* merge target: selecting a
         // layer together with the Background and merging composites the layer
         // down into it (the result stays the Background). It is locked by design,
         // so it is exempted from the `!locked` gate that blocks ordinary layers.
-        let selected_idxs: Vec<usize> = self
+        let mut selected_idxs: Vec<usize> = self
             .layers
             .iter()
             .enumerate()
-            .filter(|(_, l)| {
-                l.selected
-                    && (l.is_background || !l.locked)
-                    && matches!(l.layer_type, LayerType::Raster)
-            })
+            .filter(|(_, l)| l.selected && !l.is_group() && (l.is_background || !l.locked))
             .map(|(i, _)| i)
             .collect();
+        // An adjustment with no selected pixels beneath it has nothing to act on
+        // inside the merge; leave it in the stack instead of dropping its effect.
+        while selected_idxs
+            .first()
+            .is_some_and(|&i| self.layers[i].is_adjustment())
+        {
+            selected_idxs.remove(0);
+        }
 
+        // Several rows are selected but fewer than two can merge (folders,
+        // locked layers, an adjustment with nothing under it): refuse rather
+        // than fall back to merging the active layer into an unselected one.
         if selected_idxs.len() < 2 {
-            return self.merge_down(self.active_idx);
+            return false;
         }
 
         // Visibility priority: hidden selected layers are skipped by
         // blend_onto_region, so the composite already excludes them; the result
         // must stay visible when any input was (not inherit a hidden bottom).
         let any_visible = selected_idxs.iter().any(|&i| self.layers[i].visible);
+        let bottom_is_bg = self.layers[selected_idxs[0]].is_background;
+        let target = if bottom_is_bg {
+            selected_idxs[0]
+        } else {
+            selected_idxs[selected_idxs.len() - 1]
+        };
 
-        let min_ox = selected_idxs
-            .iter()
-            .map(|&i| self.layers[i].offset.0)
-            .min()
-            .unwrap_or(0);
-        let min_oy = selected_idxs
-            .iter()
-            .map(|&i| self.layers[i].offset.1)
-            .min()
-            .unwrap_or(0);
-        let max_ex = selected_idxs
-            .iter()
-            .map(|&i| self.layers[i].offset.0 + self.layers[i].width as i32)
-            .max()
-            .unwrap_or(0);
-        let max_ey = selected_idxs
-            .iter()
-            .map(|&i| self.layers[i].offset.1 + self.layers[i].height as i32)
-            .max()
-            .unwrap_or(0);
-
-        let ox = min_ox.max(0) as u32;
-        let oy = min_oy.max(0) as u32;
-        let ex = (max_ex.max(0) as u32).min(canvas_width);
-        let ey = (max_ey.max(0) as u32).min(canvas_height);
-        if ex <= ox || ey <= oy {
+        // Result bounds in canvas space: the Background stays canvas-sized; any
+        // other result spans every merged layer, off-canvas pixels included.
+        let (x0, y0, x1, y1) = if bottom_is_bg {
+            (0, 0, canvas_width as i32, canvas_height as i32)
+        } else {
+            selected_idxs
+                .iter()
+                .map(|&i| &self.layers[i])
+                .filter(|l| !l.is_adjustment())
+                .fold((i32::MAX, i32::MAX, i32::MIN, i32::MIN), |b, l| {
+                    (
+                        b.0.min(l.offset.0),
+                        b.1.min(l.offset.1),
+                        b.2.max(l.offset.0 + l.width as i32),
+                        b.3.max(l.offset.1 + l.height as i32),
+                    )
+                })
+        };
+        if x1 <= x0 || y1 <= y0 {
             return false;
         }
-        let w = ex - ox;
-        let h = ey - oy;
+        let w = (x1 - x0) as u32;
+        let h = (y1 - y0) as u32;
 
-        let chunk_size = 256usize;
-        let Some(merged_len) = (w as u64)
-            .checked_mul(h as u64)
-            .and_then(|n| n.checked_mul(4))
-            .and_then(|n| usize::try_from(n).ok())
-        else {
-            return false;
-        };
-        let mut merged_pixels = vec![0u8; merged_len];
-        let mut patch = vec![0u8; chunk_size * chunk_size * 4];
-
-        for cy in (0..h as usize).step_by(chunk_size) {
-            for cx in (0..w as usize).step_by(chunk_size) {
-                let cw = chunk_size.min(w as usize - cx) as u32;
-                let ch = chunk_size.min(h as usize - cy) as u32;
+        let chunk = crate::core::tile::TILE_SIZE;
+        let mut merged_tiles = crate::core::tile::TileMap::new(w, h);
+        let mut patch = vec![0u8; (chunk * chunk * 4) as usize];
+        let mut cy = 0;
+        while cy < h {
+            let ch = chunk.min(h - cy);
+            let mut cx = 0;
+            while cx < w {
+                let cw = chunk.min(w - cx);
                 let needed = (cw * ch * 4) as usize;
                 let patch_slice = &mut patch[..needed];
-
-                for b in patch_slice.iter_mut() {
-                    *b = 0;
-                }
-
+                patch_slice.fill(0);
                 for &idx in &selected_idxs {
                     let saved = self.layers[idx].offset;
-                    self.layers[idx].offset = (
-                        saved.0 - (ox + cx as u32) as i32,
-                        saved.1 - (oy + cy as u32) as i32,
-                    );
+                    self.layers[idx].offset =
+                        (saved.0 - (x0 + cx as i32), saved.1 - (y0 + cy as i32));
                     self.layers[idx].blend_onto_region(patch_slice, cw, 0, 0, cw, ch);
                     self.layers[idx].offset = saved;
                 }
+                merged_tiles.write_region(cx, cy, cw, ch, patch_slice);
+                cx += cw;
+            }
+            cy += ch;
+        }
 
-                for py in 0..ch {
-                    let src_start = (py * cw * 4) as usize;
-                    let dst_start = (((cy as u32 + py) * w + cx as u32) * 4) as usize;
-                    let row_len = (cw * 4) as usize;
-                    merged_pixels[dst_start..dst_start + row_len]
-                        .copy_from_slice(&patch_slice[src_start..src_start + row_len]);
-                }
+        let merged_ids: Vec<u32> = selected_idxs.iter().map(|&i| self.layers[i].id).collect();
+        let target_id = self.layers[target].id;
+        {
+            let t = &mut self.layers[target];
+            t.tiles = merged_tiles;
+            t.width = w;
+            t.height = h;
+            t.offset = (x0, y0);
+            t.blend_mode = BlendMode::Normal;
+            t.opacity = 1.0;
+            t.layer_type = LayerType::Raster;
+            // Masks and clips were applied by the composite.
+            t.mask = None;
+            t.mask_active = false;
+            t.paint_target = PaintTarget::Pixels;
+            t.clip_parent_id = None;
+            t.connector = None;
+            if bottom_is_bg {
+                // Merging into the Background keeps it a proper Background.
+                t.name = "Background".to_string();
+            }
+            t.visible = bottom_is_bg || any_visible;
+        }
+        // Layers clipped to a merged-away layer now clip to the result.
+        for layer in &mut self.layers {
+            if layer
+                .clip_parent_id
+                .is_some_and(|p| p != target_id && merged_ids.contains(&p))
+            {
+                layer.clip_parent_id = Some(target_id);
             }
         }
 
-        let merged_tiles = crate::core::tile::TileMap::from_rgba(&merged_pixels, w, h);
+        let mut target_idx = target;
+        for &idx in selected_idxs.iter().rev() {
+            if idx != target {
+                self.layers.remove(idx);
+                if idx < target {
+                    target_idx -= 1;
+                }
+            }
+        }
+        self.repair_clip_relations();
+        for layer in &mut self.layers {
+            layer.selected = false;
+        }
+        self.layers[target_idx].selected = true;
+        self.active_idx = target_idx;
+        true
+    }
 
-        let bottom_idx = selected_idxs[0];
-        // Merging into the Background keeps it a proper Background: same name, it
-        // stays visible, and its `is_background` flag is left untouched below.
-        let bottom_is_bg = self.layers[bottom_idx].is_background;
-        self.layers[bottom_idx].tiles = merged_tiles;
-        self.layers[bottom_idx].width = w;
-        self.layers[bottom_idx].height = h;
-        self.layers[bottom_idx].offset = (ox as i32, oy as i32);
-        self.layers[bottom_idx].blend_mode = BlendMode::Normal;
-        self.layers[bottom_idx].opacity = 1.0;
-        self.layers[bottom_idx].selected = false;
-        self.layers[bottom_idx].name = if bottom_is_bg {
-            "Background".to_string()
+    /// Rows `start..=end` of the node at `idx`: a folder with its contents, or
+    /// just the layer.
+    fn node_block(&self, idx: usize) -> (usize, usize) {
+        if self.layers[idx].is_group() {
+            (self.group_member_range(idx).start, idx)
         } else {
-            "Merged".to_string()
-        };
-        self.layers[bottom_idx].layer_type = LayerType::Raster;
-        self.layers[bottom_idx].mask = None;
-        self.layers[bottom_idx].visible = bottom_is_bg || any_visible;
-
-        for &idx in selected_idxs[1..].iter().rev() {
-            self.layers.remove(idx);
+            (idx, idx)
         }
-
-        if self.active_idx >= self.layers.len() {
-            self.active_idx = self.layers.len().saturating_sub(1);
-        }
-        self.active_idx = bottom_idx.min(self.layers.len().saturating_sub(1));
-
-        true
     }
 
+    fn index_of_id(&self, id: u32) -> Option<usize> {
+        self.layers.iter().position(|l| l.id == id)
+    }
+
+    fn has_background(&self) -> bool {
+        self.layers.first().is_some_and(|l| l.is_background)
+    }
+
+    /// Move the node block `start..=end` into gap `gap` (between rows gap-1 and
+    /// gap, outside the block) and give its top row `parent`. Keeps the active
+    /// layer.
+    fn relocate_block(&mut self, start: usize, end: usize, gap: usize, parent: Option<u32>) {
+        let active_id = self.layers.get(self.active_idx).map(|l| l.id);
+        let len = end - start + 1;
+        let block: Vec<Layer> = self.layers.drain(start..=end).collect();
+        let at = if gap > end { gap - len } else { gap };
+        self.layers.splice(at..at, block);
+        self.layers[at + len - 1].parent_id = parent;
+        if let Some(i) = active_id.and_then(|id| self.index_of_id(id)) {
+            self.active_idx = i;
+        }
+    }
+
+    /// Innermost folder holding gap `g` (between rows g-1 and g): its run spans
+    /// the gap, or the gap sits right under its header (its top child slot).
+    fn gap_container(&self, g: usize) -> Option<usize> {
+        (g..self.layers.len()).find(|&h| {
+            self.layers[h].is_group() && (g == h || self.group_member_range(h).start < g)
+        })
+    }
+
+    /// Move Up (Photoshop's Bring Forward): the layer or whole folder steps
+    /// over the next sibling above; the top item of a folder steps out above
+    /// it. Folders are never split and the Background never moves.
     pub fn move_layer_up(&mut self, idx: usize) -> bool {
-        if idx + 1 >= self.layers.len() {
+        if idx >= self.layers.len() || (idx == 0 && self.has_background()) {
             return false;
         }
-        self.layers.swap(idx, idx + 1);
-        if self.active_idx == idx {
-            self.active_idx += 1;
-        } else if self.active_idx == idx + 1 {
-            self.active_idx -= 1;
+        let (start, end) = self.node_block(idx);
+        let parent = self.layers[end].parent_id;
+        let above = end + 1;
+        if above >= self.layers.len() {
+            return false;
         }
+        if Some(self.layers[above].id) == parent {
+            let outer = self.layers[above].parent_id;
+            self.relocate_block(start, end, above + 1, outer);
+            return true;
+        }
+        let mut sibling = above;
+        let mut guard = 0;
+        while self.layers[sibling].parent_id != parent && guard <= self.layers.len() {
+            match self.layers[sibling]
+                .parent_id
+                .and_then(|p| self.index_of_id(p))
+            {
+                Some(h) => sibling = h,
+                None => break,
+            }
+            guard += 1;
+        }
+        self.relocate_block(start, end, sibling + 1, parent);
         true
     }
 
+    /// Move Down (Photoshop's Send Backward), the mirror of [`Self::move_layer_up`]:
+    /// the bottom item of a folder steps out below it, and nothing goes under
+    /// the Background.
     pub fn move_layer_down(&mut self, idx: usize) -> bool {
-        if idx == 0 {
+        if idx >= self.layers.len() || (idx == 0 && self.has_background()) {
             return false;
         }
-        self.layers.swap(idx, idx - 1);
-        if self.active_idx == idx {
-            self.active_idx -= 1;
-        } else if self.active_idx == idx - 1 {
-            self.active_idx += 1;
+        let (start, end) = self.node_block(idx);
+        if start == 0 {
+            return false;
         }
+        let parent = self.layers[end].parent_id;
+        let below = start - 1;
+        if self.layers[below].parent_id != parent {
+            // Bottom item of its folder: same rows, one level out.
+            let Some(header) = parent.and_then(|p| self.index_of_id(p)) else {
+                return false;
+            };
+            self.layers[end].parent_id = self.layers[header].parent_id;
+            return true;
+        }
+        if below == 0 && self.has_background() {
+            return false;
+        }
+        let (sibling_start, _) = self.node_block(below);
+        self.relocate_block(start, end, sibling_start, parent);
         true
     }
 
@@ -2740,74 +3147,37 @@ impl LayerStack {
         true
     }
 
-    /// Infer the `parent_id` for a layer that has just landed at index `i`:
-    /// dropped directly under an EXPANDED folder header → first child of it;
-    /// otherwise adopt the group of the row below (a child → same group; a
-    /// top-level row or a folder header → that row's own parent level).
-    fn infer_parent_at(&self, i: usize) -> Option<u32> {
-        if let Some(above) = self.layers.get(i + 1) {
-            if above.is_group() && above.expanded {
-                return Some(above.id);
-            }
-        }
-        if i > 0 {
-            if let Some(below) = self.layers.get(i - 1) {
-                return below.parent_id;
-            }
-        }
-        None
-    }
-
-    /// Move a whole folder (header + its members) as one block to `dst`. The
-    /// header is re-leveled to top-level (nested groups are Phase 3); members
-    /// keep their parent so the run stays intact.
-    fn move_group_block(&mut self, header_idx: usize, dst: usize) {
-        let range = self.group_member_range(header_idx);
-        let block_start = range.start;
-        let block_len = header_idx - block_start + 1;
-        if dst >= block_start && dst <= header_idx + 1 {
-            return;
-        }
-        let block: Vec<Layer> = self.layers.drain(block_start..=header_idx).collect();
-        let mut insert_at = if dst > header_idx {
-            dst - block_len
-        } else {
-            dst.min(block_start)
-        };
-        insert_at = insert_at.min(self.layers.len());
-        for (k, l) in block.into_iter().enumerate() {
-            self.layers.insert(insert_at + k, l);
-        }
-        let header_new = insert_at + block_len - 1;
-        if let Some(h) = self.layers.get_mut(header_new) {
-            h.parent_id = None;
-        }
-    }
-
-    /// Drag-and-drop reorder from the layer panel, group-aware (C-2):
-    /// dragging a folder header moves the whole folder; any other layer is
-    /// re-parented based on where it lands (into a folder, or out of one).
-    /// Maintains the contiguous-run invariant. Returns false on a no-op.
+    /// Drag-and-drop reorder from the layer panel, group-aware: a folder header
+    /// carries its whole folder, and the moved item joins whatever folder holds
+    /// the drop gap (`dst` = the header's own index means "into that folder, on
+    /// top"; a collapsed target folder is expanded so the drop stays visible).
+    /// Folders stay contiguous and nothing lands under the Background. Returns
+    /// false on a no-op.
     pub fn drag_layer_to(&mut self, src: usize, dst: usize) -> bool {
         let n = self.layers.len();
-        if src >= n || dst > n || src == dst {
+        if src >= n || dst > n {
             return false;
         }
         self.normalize_active_idx();
-        let active_id = self.layers.get(self.active_idx).map(|l| l.id);
-
-        if self.layers[src].is_group() {
-            self.move_group_block(src, dst);
-        } else {
-            let moved_id = self.layers[src].id;
-            self.move_layer_to(src, dst);
-            if let Some(i) = self.layers.iter().position(|l| l.id == moved_id) {
-                self.layers[i].parent_id = self.infer_parent_at(i);
-            }
+        let (start, end) = self.node_block(src);
+        let has_bg = self.has_background();
+        if (start == 0 && has_bg) || (dst >= start && dst <= end + 1) {
+            return false;
         }
-
-        if let Some(aid) = active_id {
-            self.active_idx = self.layers.iter().position(|l| l.id == aid).unwrap_or(0);
+        let active_id = self.layers.get(self.active_idx).map(|l| l.id);
+        let len = end - start + 1;
+        let block: Vec<Layer> = self.layers.drain(start..=end).collect();
+        let mut gap = if dst > end { dst - len } else { dst };
+        if has_bg {
+            gap = gap.max(1);
+        }
+        let parent = self.gap_container(gap).map(|h| self.layers[h].id);
+        self.layers.splice(gap..gap, block);
+        let top = gap + len - 1;
+        self.layers[top].parent_id = parent;
+        self.expand_collapsed_ancestors(top);
+        if let Some(i) = active_id.and_then(|id| self.index_of_id(id)) {
+            self.active_idx = i;
         }
         true
     }
@@ -2940,9 +3310,37 @@ impl LayerStack {
         })
     }
 
-    /// Composite the direct children of the group at `group_idx` into a
-    /// transparent buffer covering only the region `(rx,ry,rw,rh)` (each child's
-    /// own blend mode applied). Single-level; nested children are Phase 3.
+    /// Whether the layer at `idx` shows inside folder `gid`: it and every folder
+    /// between it and `gid` are visible (`gid`'s own eye is not considered).
+    fn visible_within(&self, idx: usize, gid: u32) -> bool {
+        let Some(layer) = self.layers.get(idx) else {
+            return false;
+        };
+        if !layer.visible {
+            return false;
+        }
+        let mut parent = layer.parent_id;
+        let mut guard = 0;
+        while let Some(pid) = parent.filter(|&p| p != gid) {
+            let Some(p) = self.layers.iter().find(|l| l.id == pid) else {
+                return false;
+            };
+            if !p.visible {
+                return false;
+            }
+            parent = p.parent_id;
+            guard += 1;
+            if guard > self.layers.len() {
+                return false;
+            }
+        }
+        parent == Some(gid)
+    }
+
+    /// Composite the contents of the group at `group_idx` (each layer's own
+    /// blend mode applied) into a transparent buffer covering only the region
+    /// `(rx,ry,rw,rh)`. `nested` also takes the contents of nested folders
+    /// (Merge Group); the live render keeps the single-level direct children.
     fn flatten_group_subtree_region(
         &self,
         group_idx: usize,
@@ -2950,6 +3348,7 @@ impl LayerStack {
         ry: u32,
         rw: u32,
         rh: u32,
+        nested: bool,
     ) -> Vec<u8> {
         let gid = self.layers[group_idx].id;
         let Some(len) = (rw as u64)
@@ -2964,8 +3363,13 @@ impl LayerStack {
             return buf;
         }
 
-        for layer in self.layers.iter() {
-            if layer.parent_id == Some(gid) && !layer.is_group() && layer.visible {
+        for (i, layer) in self.layers.iter().enumerate() {
+            let inside = if nested {
+                self.visible_within(i, gid)
+            } else {
+                layer.parent_id == Some(gid) && layer.visible
+            };
+            if !layer.is_group() && inside {
                 let mut shifted = layer.clone();
                 shifted.offset.0 -= rx as i32;
                 shifted.offset.1 -= ry as i32;
@@ -3115,7 +3519,7 @@ impl LayerStack {
         for (i, layer) in self.layers.iter().enumerate() {
             if layer.is_group() {
                 if self.is_effectively_visible(i) && Self::group_needs_isolation(layer) {
-                    let buf = self.flatten_group_subtree_region(i, rx, ry, rw, rh);
+                    let buf = self.flatten_group_subtree_region(i, rx, ry, rw, rh, false);
                     layers.push(Self::region_to_synthetic_group_layer(
                         layer, width, height, rx, ry, rw, rh, &buf,
                     ));
@@ -3181,6 +3585,7 @@ mod tests {
         curve_is_identity, identity_curve, levels_eval, AdjustmentType, BlendMode, Layer,
         LayerMask, LayerStack, LevelsParams,
     };
+    use crate::core::tile::TileMap;
 
     #[test]
     fn with_backdrop_stacks_master_beneath_and_hides_page_paper() {
@@ -3571,6 +3976,602 @@ mod tests {
         assert!(stack.layers[0].visible, "Background stays visible");
         // The blue layer painted onto the white Background.
         assert_eq!(stack.layers[0].tiles.get_pixel(0, 0), (0, 0, 255, 255));
+    }
+
+    /// Pixel of `layer` at canvas position (x, y), honouring its offset.
+    fn canvas_px(layer: &Layer, x: i32, y: i32) -> (u8, u8, u8, u8) {
+        let (lx, ly) = (x - layer.offset.0, y - layer.offset.1);
+        if lx < 0 || ly < 0 || lx >= layer.width as i32 || ly >= layer.height as i32 {
+            return (0, 0, 0, 0);
+        }
+        layer.tiles.get_pixel(lx as u32, ly as u32)
+    }
+
+    fn small_layer(stack: &mut LayerStack, w: u32, h: u32, offset: (i32, i32)) -> usize {
+        let idx = stack.add_layer(w, h);
+        let layer = &mut stack.layers[idx];
+        layer.tiles = TileMap::new(w, h);
+        layer.width = w;
+        layer.height = h;
+        layer.offset = offset;
+        idx
+    }
+
+    #[test]
+    fn merge_down_keeps_every_pixel_where_it_was_on_an_offset_bottom() {
+        // Repro: a small moved layer below a canvas-sized one. The top used to
+        // be blended as if the bottom sat at (0, 0) (shifted by the bottom's
+        // offset) and cropped to the bottom's box.
+        let mut stack = LayerStack::new(40, 40);
+        let bottom = small_layer(&mut stack, 4, 4, (10, 10));
+        stack.layers[bottom].tiles.set_pixel(0, 0, 255, 0, 0, 255); // canvas (10,10)
+        let top = stack.add_layer(40, 40);
+        stack.layers[top].tiles.set_pixel(12, 12, 0, 0, 255, 255); // inside bottom box
+        stack.layers[top].tiles.set_pixel(30, 2, 0, 255, 0, 255); // outside bottom box
+
+        assert!(stack.merge_down(top));
+
+        let merged = &stack.layers[bottom];
+        assert_eq!(
+            canvas_px(merged, 10, 10),
+            (255, 0, 0, 255),
+            "bottom pixel stays"
+        );
+        assert_eq!(
+            canvas_px(merged, 12, 12),
+            (0, 0, 255, 255),
+            "top pixel not shifted"
+        );
+        assert_eq!(
+            canvas_px(merged, 30, 2),
+            (0, 255, 0, 255),
+            "top pixel not cropped"
+        );
+        assert_eq!(canvas_px(merged, 22, 22), (0, 0, 0, 0), "no ghost copy");
+        assert_eq!(stack.active_idx, bottom);
+        assert!(stack.layers[bottom].selected);
+    }
+
+    #[test]
+    fn merge_down_keeps_off_canvas_pixels_of_a_larger_top() {
+        let mut stack = LayerStack::new(20, 20);
+        let bottom = stack.add_layer(20, 20);
+        stack.layers[bottom].tiles.set_pixel(5, 5, 255, 0, 0, 255);
+        let top = small_layer(&mut stack, 40, 40, (-10, -10));
+        stack.layers[top].tiles.set_pixel(2, 2, 0, 0, 255, 255); // canvas (-8,-8)
+        stack.layers[top].tiles.set_pixel(20, 20, 0, 255, 0, 255); // canvas (10,10)
+
+        assert!(stack.merge_down(top));
+
+        let merged = &stack.layers[bottom];
+        assert_eq!(canvas_px(merged, 5, 5), (255, 0, 0, 255));
+        assert_eq!(canvas_px(merged, 10, 10), (0, 255, 0, 255));
+        assert_eq!(
+            canvas_px(merged, -8, -8),
+            (0, 0, 255, 255),
+            "off-canvas kept"
+        );
+    }
+
+    #[test]
+    fn merge_down_onto_background_stays_canvas_sized() {
+        let mut stack = LayerStack::new(20, 20);
+        let top = small_layer(&mut stack, 40, 40, (-10, -10));
+        stack.layers[top].tiles.set_pixel(15, 15, 0, 0, 255, 255); // canvas (5,5)
+
+        assert!(stack.merge_down(top));
+
+        let bg = &stack.layers[0];
+        assert!(bg.is_background);
+        assert_eq!((bg.offset, bg.width, bg.height), ((0, 0), 20, 20));
+        assert_eq!(canvas_px(bg, 5, 5), (0, 0, 255, 255));
+        assert_eq!(canvas_px(bg, 0, 0), (255, 255, 255, 255));
+    }
+
+    #[test]
+    fn merge_down_keeps_lower_blend_mode_and_opacity() {
+        let mut stack = LayerStack::new(4, 4);
+        let bottom = stack.add_layer(4, 4);
+        stack.layers[bottom].opacity = 0.5;
+        stack.layers[bottom].blend_mode = BlendMode::Multiply;
+        let top = stack.add_layer(4, 4);
+        stack.layers[top].tiles.set_pixel(1, 1, 0, 0, 255, 255);
+
+        assert!(stack.merge_down(top));
+
+        assert_eq!(stack.layers[bottom].opacity, 0.5);
+        assert_eq!(stack.layers[bottom].blend_mode, BlendMode::Multiply);
+    }
+
+    #[test]
+    fn merge_down_of_a_middle_layer_activates_the_result() {
+        let mut stack = LayerStack::new(4, 4);
+        let a = stack.add_layer(4, 4);
+        let b = stack.add_layer(4, 4);
+        stack.add_layer(4, 4);
+
+        assert!(stack.merge_down(b));
+
+        assert_eq!(
+            stack.active_idx, a,
+            "active is the merged layer, not the one above"
+        );
+        assert!(stack.layers[a].selected);
+        assert_eq!(stack.layers.iter().filter(|l| l.selected).count(), 1);
+    }
+
+    #[test]
+    fn merge_down_refuses_an_adjustment_or_locked_layer_below() {
+        let mut stack = LayerStack::new(4, 4);
+        stack.add_adjustment_layer(AdjustmentType::default_curves(), 4, 4);
+        let top = stack.add_layer(4, 4);
+        assert!(!stack.merge_down(top));
+
+        let mut stack = LayerStack::new(4, 4);
+        let locked = stack.add_layer(4, 4);
+        stack.layers[locked].locked = true;
+        let top = stack.add_layer(4, 4);
+        assert!(!stack.merge_down(top));
+        assert_eq!(stack.layers.len(), 3);
+    }
+
+    #[test]
+    fn merge_selected_keeps_off_canvas_pixels_and_takes_the_top_slot() {
+        let mut stack = LayerStack::new(20, 20);
+        let lower = small_layer(&mut stack, 10, 10, (15, 15)); // spills off-canvas
+        stack.layers[lower].tiles.set_pixel(9, 9, 255, 0, 0, 255); // canvas (24,24)
+        stack.layers[lower].selected = true;
+        let middle = stack.add_layer(20, 20); // unselected, between
+        let upper = small_layer(&mut stack, 4, 4, (2, 3));
+        stack.layers[upper].tiles.set_pixel(0, 0, 0, 0, 255, 255); // canvas (2,3)
+        stack.layers[upper].name = "Upper".to_string();
+        stack.layers[upper].selected = true;
+        stack.active_idx = upper;
+
+        assert!(stack.merge_selected(20, 20));
+
+        assert_eq!(stack.layers.len(), 3);
+        let merged_idx = stack.active_idx;
+        assert_eq!(
+            merged_idx, middle,
+            "result sits in the top-most selected slot"
+        );
+        let merged = &stack.layers[merged_idx];
+        assert_eq!(merged.name, "Upper");
+        assert!(merged.selected);
+        assert_eq!(canvas_px(merged, 2, 3), (0, 0, 255, 255));
+        assert_eq!(
+            canvas_px(merged, 24, 24),
+            (255, 0, 0, 255),
+            "off-canvas kept"
+        );
+    }
+
+    #[test]
+    fn merge_selected_counts_the_active_row_as_selected() {
+        // The active row is drawn highlighted even if its flag is stale.
+        let mut stack = LayerStack::new(4, 4);
+        let a = stack.add_layer(4, 4);
+        stack.layers[a].tiles.set_pixel(0, 0, 255, 0, 0, 255);
+        stack.layers[a].selected = true;
+        let b = stack.add_layer(4, 4);
+        stack.layers[b].tiles.set_pixel(1, 1, 0, 0, 255, 255);
+        stack.layers[b].selected = true;
+        let c = stack.add_layer(4, 4);
+        stack.layers[c].tiles.set_pixel(2, 2, 0, 255, 0, 255);
+        stack.layers[c].selected = false;
+        stack.active_idx = c;
+
+        assert!(stack.merge_selected(4, 4));
+
+        assert_eq!(stack.layers.len(), 2);
+        let merged = &stack.layers[stack.active_idx];
+        assert_eq!(canvas_px(merged, 0, 0), (255, 0, 0, 255));
+        assert_eq!(canvas_px(merged, 1, 1), (0, 0, 255, 255));
+        assert_eq!(canvas_px(merged, 2, 2), (0, 255, 0, 255));
+    }
+
+    #[test]
+    fn ctrl_click_adds_to_the_active_layer_in_one_click() {
+        // Repro: Background active (flag not set), Ctrl+click Layer 1 must give
+        // Background + Layer 1 at once.
+        let mut stack = LayerStack::new(4, 4);
+        let l1 = stack.add_layer(4, 4);
+        for l in stack.layers.iter_mut() {
+            l.selected = false;
+        }
+        stack.active_idx = 0;
+
+        stack.toggle_layer_selected(l1);
+        assert!(stack.layers[0].selected && stack.layers[l1].selected);
+        assert_eq!(stack.active_idx, l1);
+
+        // Ctrl+click the active row again: it leaves, the other takes over.
+        stack.toggle_layer_selected(l1);
+        assert!(!stack.layers[l1].selected);
+        assert_eq!(stack.active_idx, 0);
+        assert!(stack.layers[0].selected);
+
+        // The last selected layer can't be deselected.
+        stack.toggle_layer_selected(0);
+        assert!(stack.layers[0].selected);
+        assert_eq!(stack.active_idx, 0);
+    }
+
+    #[test]
+    fn normalize_selection_collapses_a_stale_selection_to_the_active_layer() {
+        let mut stack = LayerStack::new(4, 4);
+        let a = stack.add_layer(4, 4);
+        let b = stack.add_layer(4, 4);
+        stack.layers[a].selected = true;
+        stack.layers[b].selected = false;
+        stack.active_idx = b;
+
+        assert!(stack.normalize_selection());
+        assert!(stack.layers[b].selected);
+        assert!(!stack.layers[a].selected);
+        assert!(!stack.normalize_selection(), "already consistent");
+    }
+
+    /// [Background, a(G), b(G), G(expanded), c] — returns (stack, G id).
+    fn folder_stack() -> (LayerStack, u32) {
+        let mut s = LayerStack::new(8, 8);
+        let a = s.add_layer(8, 8);
+        s.layers[a].name = "a".into();
+        let b = s.add_layer(8, 8);
+        s.layers[b].name = "b".into();
+        for l in s.layers.iter_mut() {
+            l.selected = false;
+        }
+        s.layers[a].selected = true;
+        s.layers[b].selected = true;
+        let g = s.create_group_from_selected(8, 8).unwrap();
+        s.layers[g].expanded = true;
+        let gid = s.layers[g].id;
+        s.active_idx = g;
+        let c = s.add_layer(8, 8);
+        s.layers[c].name = "c".into();
+        (s, gid)
+    }
+
+    fn idx_named(s: &LayerStack, name: &str) -> usize {
+        s.layers.iter().position(|l| l.name == name).unwrap()
+    }
+
+    /// Every folder's members sit contiguously right below its header.
+    fn assert_folders_contiguous(s: &LayerStack) {
+        for (h, header) in s.layers.iter().enumerate() {
+            if !header.is_group() {
+                continue;
+            }
+            let range = s.group_member_range(h);
+            for (i, l) in s.layers.iter().enumerate() {
+                if s.is_descendant_of(i, header.id) {
+                    assert!(
+                        range.contains(&i),
+                        "{} strayed out of {}",
+                        l.name,
+                        header.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_selects_only_the_copy() {
+        let mut s = LayerStack::new(4, 4);
+        let a = s.add_layer(4, 4);
+        s.layers[a].selected = true;
+        let copy = s.duplicate_layer(a);
+        assert!(s.layers[copy].selected);
+        assert!(!s.layers[a].selected, "the source must not stay selected");
+    }
+
+    #[test]
+    fn duplicate_from_a_multi_selection_copies_every_selected_layer() {
+        let mut s = LayerStack::new(4, 4);
+        let a = s.add_layer(4, 4);
+        let b = s.add_layer(4, 4);
+        s.layers[a].selected = true;
+        s.layers[b].selected = true;
+        assert!(s.duplicate_selected_from(b));
+        assert_eq!(s.layers.len(), 5);
+        let selected: Vec<&str> = s
+            .layers
+            .iter()
+            .filter(|l| l.selected)
+            .map(|l| l.name.as_str())
+            .collect();
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|n| n.ends_with("copy")));
+    }
+
+    #[test]
+    fn new_layer_inside_a_folder_joins_it() {
+        let (mut s, gid) = folder_stack();
+        s.active_idx = idx_named(&s, "a");
+        let new = s.add_layer(8, 8);
+        assert_eq!(s.layers[new].parent_id, Some(gid));
+        assert_folders_contiguous(&s);
+    }
+
+    #[test]
+    fn deleting_a_folder_takes_its_contents() {
+        let (mut s, _gid) = folder_stack();
+        let g = s.layers.iter().position(|l| l.is_group()).unwrap();
+        let doomed = s.with_group_contents(&[g]);
+        assert_eq!(doomed.len(), 3, "header + a + b");
+        for &i in doomed.iter().rev() {
+            assert!(s.remove_layer(i));
+        }
+        assert_eq!(s.layers.len(), 2, "Background + c remain");
+    }
+
+    #[test]
+    fn removing_a_folder_header_alone_hands_members_to_its_parent() {
+        let (mut s, gid) = folder_stack();
+        let g = s.layers.iter().position(|l| l.is_group()).unwrap();
+        assert!(s.remove_layer(g));
+        assert!(s.layers.iter().all(|l| l.parent_id != Some(gid)));
+    }
+
+    #[test]
+    fn deleting_a_clip_base_drops_the_managed_clip_mask() {
+        let mut s = LayerStack::new(4, 4);
+        let base = s.add_layer(4, 4);
+        let base_id = s.layers[base].id;
+        let child = s.add_layer(4, 4);
+        s.layers[child].clip_parent_id = Some(base_id);
+        s.layers[child].mask = Some(LayerMask::new_black(4, 4));
+        assert!(s.remove_layer(base));
+        let child = &s.layers[s.layers.len() - 1];
+        assert_eq!(child.clip_parent_id, None);
+        assert!(child.mask.is_none(), "no invisible silhouette left behind");
+    }
+
+    #[test]
+    fn ungroup_selects_the_former_contents() {
+        let (mut s, _gid) = folder_stack();
+        let g = s.layers.iter().position(|l| l.is_group()).unwrap();
+        s.active_idx = g;
+        assert!(s.ungroup(g));
+        assert_eq!(
+            s.layers[s.active_idx].name, "b",
+            "top former member is active"
+        );
+        assert!(s.layers[idx_named(&s, "a")].selected);
+        assert!(s.layers[idx_named(&s, "b")].selected);
+        assert!(!s.layers[idx_named(&s, "c")].selected);
+    }
+
+    #[test]
+    fn grouping_inside_a_folder_nests_and_keeps_the_folder_whole() {
+        let (mut s, gid) = folder_stack();
+        for l in s.layers.iter_mut() {
+            l.selected = false;
+        }
+        let b = idx_named(&s, "b");
+        s.layers[b].selected = true;
+        let inner = s.create_group_from_selected(8, 8).unwrap();
+        assert_eq!(
+            s.layers[inner].parent_id,
+            Some(gid),
+            "new folder nests in G"
+        );
+        assert_folders_contiguous(&s);
+    }
+
+    #[test]
+    fn grouping_a_selected_folder_brings_its_contents() {
+        let (mut s, gid) = folder_stack();
+        for l in s.layers.iter_mut() {
+            l.selected = false;
+        }
+        let g = s.layers.iter().position(|l| l.is_group()).unwrap();
+        s.layers[g].selected = true;
+        let outer = s.create_group_from_selected(8, 8).unwrap();
+        let outer_id = s.layers[outer].id;
+        let g = s.layers.iter().position(|l| l.id == gid).unwrap();
+        assert_eq!(s.layers[g].parent_id, Some(outer_id));
+        assert_eq!(s.layers[idx_named(&s, "a")].parent_id, Some(gid));
+        assert_folders_contiguous(&s);
+    }
+
+    #[test]
+    fn move_up_and_down_never_split_a_folder() {
+        let (mut s, gid) = folder_stack();
+        // c steps down over the whole folder, not into it.
+        let c = idx_named(&s, "c");
+        assert!(s.move_layer_down(c));
+        assert_eq!(s.layers[idx_named(&s, "c")].parent_id, None);
+        assert_eq!(idx_named(&s, "c"), 1, "c sits right above the Background");
+        assert_folders_contiguous(&s);
+        // The folder header moves its whole block.
+        let g = s.layers.iter().position(|l| l.is_group()).unwrap();
+        assert!(s.move_layer_down(g));
+        assert_eq!(idx_named(&s, "c"), 4, "c is now above the folder again");
+        assert_folders_contiguous(&s);
+        // The top member steps out above the folder.
+        let b = idx_named(&s, "b");
+        assert!(s.move_layer_up(b));
+        assert_eq!(s.layers[idx_named(&s, "b")].parent_id, None);
+        assert_eq!(s.layers[idx_named(&s, "a")].parent_id, Some(gid));
+        assert_folders_contiguous(&s);
+    }
+
+    #[test]
+    fn nothing_moves_under_or_moves_the_background() {
+        let mut s = LayerStack::new(4, 4);
+        let a = s.add_layer(4, 4);
+        assert!(!s.move_layer_up(0), "Background stays put");
+        assert!(!s.move_layer_down(a), "nothing goes under the Background");
+        assert!(!s.drag_layer_to(0, 2));
+        assert!(s.layers[0].is_background);
+        // A drop in the gap under the Background lands just above it instead.
+        let b = s.add_layer(4, 4);
+        assert!(s.drag_layer_to(b, 0));
+        assert!(s.layers[0].is_background);
+        assert_eq!(s.layers[1].name, "Layer 2");
+    }
+
+    #[test]
+    fn dropping_into_a_collapsed_folder_opens_it() {
+        let (mut s, gid) = folder_stack();
+        let g = s.layers.iter().position(|l| l.is_group()).unwrap();
+        s.layers[g].expanded = false;
+        let c = idx_named(&s, "c");
+        assert!(s.drag_layer_to(c, g));
+        let c = idx_named(&s, "c");
+        assert_eq!(s.layers[c].parent_id, Some(gid));
+        let g = s.layers.iter().position(|l| l.is_group()).unwrap();
+        assert!(s.layers[g].expanded, "the drop stays visible");
+        assert_folders_contiguous(&s);
+    }
+
+    #[test]
+    fn dropping_below_a_collapsed_folder_stays_outside() {
+        let (mut s, _gid) = folder_stack();
+        let g = s.layers.iter().position(|l| l.is_group()).unwrap();
+        s.layers[g].expanded = false;
+        let start = s.group_member_range(g).start;
+        let c = idx_named(&s, "c");
+        assert!(s.drag_layer_to(c, start));
+        assert_eq!(s.layers[idx_named(&s, "c")].parent_id, None);
+        assert_folders_contiguous(&s);
+    }
+
+    #[test]
+    fn dropping_a_folder_into_another_nests_it_whole() {
+        let (mut s, gid) = folder_stack();
+        s.active_idx = idx_named(&s, "c");
+        let d = s.add_layer(8, 8);
+        for l in s.layers.iter_mut() {
+            l.selected = false;
+        }
+        s.layers[d].selected = true;
+        let h2 = s.create_group_from_selected(8, 8).unwrap();
+        let h2_id = s.layers[h2].id;
+        // Drop the second folder between a and b inside G.
+        let b = idx_named(&s, "b");
+        assert!(s.drag_layer_to(h2, b));
+        let h2 = s.layers.iter().position(|l| l.id == h2_id).unwrap();
+        assert_eq!(s.layers[h2].parent_id, Some(gid));
+        assert_folders_contiguous(&s);
+    }
+
+    #[test]
+    fn merge_group_keeps_nested_content_and_hidden_state() {
+        let mut s = LayerStack::new(4, 4);
+        let a = s.add_layer(4, 4);
+        s.layers[a].tiles.set_pixel(1, 1, 255, 0, 0, 255);
+        for l in s.layers.iter_mut() {
+            l.selected = false;
+        }
+        s.layers[a].selected = true;
+        let inner = s.create_group_from_selected(4, 4).unwrap();
+        for l in s.layers.iter_mut() {
+            l.selected = false;
+        }
+        s.layers[inner].selected = true;
+        let outer = s.create_group_from_selected(4, 4).unwrap();
+        s.layers[outer].visible = false;
+
+        assert!(s.merge_group(outer, 4, 4));
+
+        let merged = &s.layers[s.active_idx];
+        assert_eq!(
+            merged.tiles.get_pixel(1, 1),
+            (255, 0, 0, 255),
+            "nested pixel kept"
+        );
+        assert!(!merged.visible, "a hidden folder stays hidden");
+        assert_eq!(s.layers.len(), 2);
+    }
+
+    #[test]
+    fn flatten_keeps_a_folder_opacity() {
+        let mut s = LayerStack::new(1, 1);
+        s.layers
+            .push(Layer::from_rgba(1, "red", vec![255, 0, 0, 255], 1, 1));
+        s.next_id = 2;
+        s.layers[1].selected = true;
+        let g = s.create_group_from_selected(1, 1).unwrap();
+        s.layers[g].opacity = 0.5;
+        let shown = s.flatten(1, 1);
+        s.merge_all(1, 1);
+        let (r, g, b, a) = s.layers[0].tiles.get_pixel(0, 0);
+        assert_eq!(a, 255);
+        assert!(
+            (r as i32 - shown[0] as i32).abs() <= 1,
+            "{r} vs {}",
+            shown[0]
+        );
+        assert!((g as i32 - shown[1] as i32).abs() <= 1);
+        assert!((b as i32 - shown[2] as i32).abs() <= 1);
+        assert!(g > 100, "50% red over white is pink, not solid red");
+    }
+
+    #[test]
+    fn apply_mask_keeps_16bit_and_takes_a_fresh_revision() {
+        let mut layer = Layer::new(1, "L", 4, 4);
+        layer.tiles.set_pixel(0, 0, 10, 20, 30, 255);
+        layer.tiles.promote_to_hdr();
+        let rev_before = layer.tiles.tiles.values().next().unwrap().revision;
+        let mut mask = LayerMask::new_white(4, 4);
+        mask.tiles.set_pixel(0, 0, 128, 128, 128, 255);
+        layer.mask = Some(mask);
+        layer.apply_mask();
+        let tile = layer.tiles.tiles.values().next().unwrap();
+        assert!(tile.pixels16.is_some(), "16-bit master survives");
+        assert_ne!(tile.revision, rev_before);
+        let a16 = tile.pixels16.as_ref().unwrap()[3];
+        assert!(
+            (a16 as i32 - 32896).abs() < 400,
+            "alpha halved at 16-bit: {a16}"
+        );
+    }
+
+    #[test]
+    fn merge_selected_never_merges_into_an_unselected_layer() {
+        // [Bg, P, Adj, R] with Adj + R selected: the adjustment has nothing
+        // selected under it, so only R is mergeable — refuse, don't touch P.
+        let mut s = LayerStack::new(4, 4);
+        let p = s.add_layer(4, 4);
+        s.layers[p].tiles.set_pixel(0, 0, 255, 0, 0, 255);
+        s.add_adjustment_layer(AdjustmentType::default_curves(), 4, 4);
+        let r = s.add_layer(4, 4);
+        for l in s.layers.iter_mut() {
+            l.selected = false;
+        }
+        s.layers[r].selected = true;
+        s.layers[r - 1].selected = true;
+        s.active_idx = r - 1;
+        assert!(!s.merge_selected(4, 4));
+        assert_eq!(s.layers.len(), 4);
+    }
+
+    #[test]
+    fn masked_adjustment_flattens_16bit_where_its_mask_is() {
+        // 300 px wide so the chunked 16-bit flatten spans two 256-px chunks.
+        let (w, h) = (300u32, 2u32);
+        let mut s = LayerStack::new(w, h);
+        s.layers[0].tiles.promote_to_hdr();
+        let adj = s.add_adjustment_layer(AdjustmentType::Invert, w, h);
+        // Hide the adjustment on the left half only.
+        let mask = s.layers[adj].mask.as_mut().unwrap();
+        for y in 0..h {
+            for x in 0..150 {
+                mask.tiles.set_pixel(x, y, 0, 0, 0, 255);
+            }
+        }
+        s.merge_all16(w, h);
+        let px = |x| s.layers[0].tiles.get_pixel16(x, 0).0;
+        assert!(px(10) > 60000, "left half untouched (white)");
+        assert!(
+            px(270) < 5000,
+            "right half inverted (black), not a repeat of x=14"
+        );
     }
 
     #[test]

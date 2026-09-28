@@ -44,6 +44,7 @@ impl Canvas {
         if to_remove.is_empty() {
             to_remove.push(self.layer_stack.active_idx);
         }
+        let mut to_remove = self.layer_stack.with_group_contents(&to_remove);
 
         if to_remove.is_empty() {
             return false;
@@ -101,6 +102,7 @@ impl Canvas {
         } else {
             vec![idx]
         };
+        let to_remove = self.layer_stack.with_group_contents(&to_remove);
 
         if to_remove.is_empty() {
             return false;
@@ -263,14 +265,16 @@ impl Canvas {
         last_new_idx
     }
 
-    pub fn merge_down(&mut self) -> bool {
+    /// Merge the layer at `idx` into the one below it. Undoable; records nothing
+    /// when the merge is refused (group boundary, adjustment/locked below).
+    pub fn merge_down(&mut self, idx: usize) -> bool {
         let mut _cmd = crate::core::command::LayerStructureCommand::capture_before(
             "Merge Down",
             &self.layer_stack,
             self.width,
             self.height,
         );
-        let ok = self.layer_stack.merge_down(self.layer_stack.active_idx);
+        let ok = self.layer_stack.merge_down(idx);
         if ok {
             self.ensure_16bit_layer_masters();
             _cmd.capture_after(&self.layer_stack, self.width, self.height);
@@ -290,6 +294,25 @@ impl Canvas {
             self.height,
         );
         let ok = self.layer_stack.merge_selected(self.width, self.height);
+        if ok {
+            self.ensure_16bit_layer_masters();
+            cmd.capture_after(&self.layer_stack, self.width, self.height);
+            self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
+            self.flatten_full();
+        }
+        ok
+    }
+
+    /// Merge the folder at `idx` into one layer. Undoable; keeps a 16-bit
+    /// document 16-bit.
+    pub fn merge_group(&mut self, idx: usize) -> bool {
+        let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
+            "Merge Group",
+            &self.layer_stack,
+            self.width,
+            self.height,
+        );
+        let ok = self.layer_stack.merge_group(idx, self.width, self.height);
         if ok {
             self.ensure_16bit_layer_masters();
             cmd.capture_after(&self.layer_stack, self.width, self.height);

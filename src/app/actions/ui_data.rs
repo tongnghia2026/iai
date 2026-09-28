@@ -467,6 +467,73 @@ impl App {
         }))
     }
 
+    /// Layers-panel thumbnails from a per-layer cache keyed by layer id and a
+    /// content key (tile revisions + size). Only layers whose pixels changed
+    /// are resampled, so selecting a row, toggling an eye, scrubbing opacity or
+    /// painting one layer no longer rebuilds every thumbnail in the document.
+    fn refresh_layer_thumbnails(&mut self) {
+        use std::sync::Arc;
+        let doc = &self.docs.documents[self.docs.active_doc_idx];
+        let layers = &doc.canvas.layer_stack.layers;
+        let cache = &mut self.shell.ui_data_cache;
+        if cache.layer_thumb_cache_doc != doc.id.0 {
+            cache.layer_thumb_cache.clear();
+            cache.layer_mask_thumb_cache.clear();
+            cache.layer_thumb_cache_doc = doc.id.0;
+        }
+        let empty: Arc<Vec<u8>> = Arc::new(Vec::new());
+        let mut thumbs = Vec::with_capacity(layers.len());
+        let mut keys = Vec::with_capacity(layers.len());
+        let mut mask_thumbs = Vec::with_capacity(layers.len());
+        let mut mask_keys = Vec::with_capacity(layers.len());
+        for layer in layers {
+            // Group / adjustment / text rows draw a glyph, not the pixels.
+            let draws_pixels = !matches!(
+                layer.layer_type,
+                crate::core::layer::LayerType::Group
+                    | crate::core::layer::LayerType::Adjustment(_)
+                    | crate::core::layer::LayerType::Text(_)
+            );
+            let (key, thumb) = if draws_pixels {
+                let key = tiles_content_key(&layer.tiles, layer.width, layer.height, 0);
+                cached_thumbnail(&mut cache.layer_thumb_cache, layer.id, key, || {
+                    build_layer_thumbnail_rgba(layer)
+                })
+            } else {
+                (0, empty.clone())
+            };
+            thumbs.push(thumb);
+            keys.push(key);
+
+            // A clipped layer's mask is the managed clip; the panel hides it.
+            let (mask_key, mask_thumb) = match layer.mask.as_ref() {
+                Some(mask) if layer.clip_parent_id.is_none() => {
+                    let key = tiles_content_key(
+                        &mask.tiles,
+                        mask.width,
+                        mask.height,
+                        mask.inverted as u64,
+                    );
+                    cached_thumbnail(&mut cache.layer_mask_thumb_cache, layer.id, key, || {
+                        build_layer_mask_thumbnail_rgba(layer)
+                    })
+                }
+                _ => (0, empty.clone()),
+            };
+            mask_thumbs.push(mask_thumb);
+            mask_keys.push(mask_key);
+        }
+        let live: std::collections::HashSet<u32> = layers.iter().map(|l| l.id).collect();
+        cache.layer_thumb_cache.retain(|id, _| live.contains(id));
+        cache
+            .layer_mask_thumb_cache
+            .retain(|id, _| live.contains(id));
+        cache.layer_thumbnails = Arc::new(thumbs);
+        cache.layer_thumb_keys = Arc::new(keys);
+        cache.layer_mask_thumbnails = Arc::new(mask_thumbs);
+        cache.layer_mask_thumb_keys = Arc::new(mask_keys);
+    }
+
     pub fn collect_ui_data(&mut self) -> UiData {
         self.poll_printer_settings();
         self.poll_printer_refresh();
@@ -532,13 +599,20 @@ impl App {
             .canvas
             .layer_revision;
         let doc_id = self.docs.documents[self.docs.active_doc_idx].id.0;
+        // While a stroke is live the painted layer's thumbnail follows it; the
+        // per-layer cache keeps every other layer's thumbnail untouched.
         let force_layer_thumb_refresh = self.docs.documents[self.docs.active_doc_idx]
             .canvas
             .pending_stroke
             .is_some();
 
+        let canvas_gen = self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_revision
+            >> 32;
         if self.shell.ui_data_cache.history_revision != history_rev
             || self.shell.ui_data_cache.ui_cache_doc_id != doc_id
+            || self.shell.ui_data_cache.history_canvas_gen != canvas_gen
         {
             self.shell.ui_data_cache.history_entries = std::sync::Arc::new(
                 self.docs.documents[self.docs.active_doc_idx]
@@ -546,12 +620,15 @@ impl App {
                     .history_entries(),
             );
             self.shell.ui_data_cache.history_revision = history_rev;
+            self.shell.ui_data_cache.history_canvas_gen = canvas_gen;
         }
 
-        if self.shell.ui_data_cache.layer_revision != layer_rev
-            || self.shell.ui_data_cache.ui_cache_doc_id != doc_id
-            || force_layer_thumb_refresh
-        {
+        let layer_meta_stale = self.shell.ui_data_cache.layer_revision != layer_rev
+            || self.shell.ui_data_cache.ui_cache_doc_id != doc_id;
+        if layer_meta_stale || force_layer_thumb_refresh {
+            self.refresh_layer_thumbnails();
+        }
+        if layer_meta_stale {
             let layers = &self.docs.documents[self.docs.active_doc_idx]
                 .canvas
                 .layer_stack
@@ -604,18 +681,6 @@ impl App {
                 std::sync::Arc::new(layers.iter().map(|l| l.lock_alpha).collect());
             self.shell.ui_data_cache.layer_selected =
                 std::sync::Arc::new(layers.iter().map(|l| l.selected).collect());
-            self.shell.ui_data_cache.layer_thumbnails = std::sync::Arc::new(
-                layers
-                    .iter()
-                    .map(build_layer_thumbnail_rgba)
-                    .collect::<Vec<_>>(),
-            );
-            self.shell.ui_data_cache.layer_mask_thumbnails = std::sync::Arc::new(
-                layers
-                    .iter()
-                    .map(build_layer_mask_thumbnail_rgba)
-                    .collect::<Vec<_>>(),
-            );
             let ls = &self.docs.documents[self.docs.active_doc_idx]
                 .canvas
                 .layer_stack;
@@ -632,6 +697,11 @@ impl App {
             self.shell.ui_data_cache.ui_cache_doc_id = doc_id;
         }
 
+        // The panel draws the active row as selected; make the model agree.
+        self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack
+            .normalize_selection();
         // Selection is lightweight UI state, not layer image data. Keep it in
         // lockstep with the model every frame instead of relying exclusively on
         // `layer_revision`: several undoable/model operations restore or adjust
@@ -1071,6 +1141,8 @@ impl App {
                 powerclip_editing: self.powerclip_editing_contents(),
                 layer_thumbnails: self.shell.ui_data_cache.layer_thumbnails.clone(),
                 layer_mask_thumbnails: self.shell.ui_data_cache.layer_mask_thumbnails.clone(),
+                layer_thumb_keys: self.shell.ui_data_cache.layer_thumb_keys.clone(),
+                layer_mask_thumb_keys: self.shell.ui_data_cache.layer_mask_thumb_keys.clone(),
                 layer_depths: self.shell.ui_data_cache.layer_depths.clone(),
                 layer_expanded: self.shell.ui_data_cache.layer_expanded.clone(),
                 layer_collapsed_hidden: self.shell.ui_data_cache.layer_collapsed_hidden.clone(),
@@ -1997,6 +2069,43 @@ fn layer_ui_type(layer_type: &crate::core::layer::LayerType) -> &'static str {
         LayerType::Vector(VectorGeometry::Primitive(_)) => "Shape",
         LayerType::Vector(VectorGeometry::Path(_)) => "Path",
     }
+}
+
+/// Order-independent content key of a tile map: every tile's position and
+/// revision plus the map size and `salt`. No pixel reads; never 0.
+fn tiles_content_key(tiles: &crate::core::tile::TileMap, w: u32, h: u32, salt: u64) -> u64 {
+    fn mix(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    let mut acc = 0u64;
+    for (pos, tile) in &tiles.tiles {
+        let p = ((pos.x as u32 as u64) << 32) | pos.y as u32 as u64;
+        acc = acc.wrapping_add(mix(p ^ mix(tile.revision)));
+    }
+    let size = ((w as u64) << 32) | h as u64;
+    let key = mix(acc ^ mix(size) ^ mix(tiles.tiles.len() as u64 ^ salt.rotate_left(17)));
+    key.max(1)
+}
+
+/// The cached thumbnail for layer `id` when its content key still matches,
+/// otherwise a freshly built one (which replaces the cache entry).
+fn cached_thumbnail(
+    cache: &mut std::collections::HashMap<u32, (u64, std::sync::Arc<Vec<u8>>)>,
+    id: u32,
+    key: u64,
+    build: impl FnOnce() -> Vec<u8>,
+) -> (u64, std::sync::Arc<Vec<u8>>) {
+    if let Some((cached_key, thumb)) = cache.get(&id) {
+        if *cached_key == key {
+            return (key, thumb.clone());
+        }
+    }
+    let thumb = std::sync::Arc::new(build());
+    cache.insert(id, (key, thumb.clone()));
+    (key, thumb)
 }
 
 fn build_layer_thumbnail_rgba(layer: &crate::core::layer::Layer) -> Vec<u8> {
