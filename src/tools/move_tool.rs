@@ -858,6 +858,48 @@ mod tests {
     }
 
     #[test]
+    fn alt_drag_duplicates_and_moves_every_selected_layer() {
+        // Regression: Alt-drag with several layers selected duplicated them all
+        // but moved only one copy; the other copies stayed on their sources.
+        let mut t = MoveTool::new();
+        t.snap_enabled = false;
+        let mut doc = Document::new(DocumentId(1), 400, 300);
+        let first = add_empty_vector_layer(&mut doc, 40, 50, 80, 80, true);
+        let second = add_empty_vector_layer(&mut doc, 70, 70, 80, 80, true);
+        let third = add_empty_vector_layer(&mut doc, 200, 60, 80, 80, true);
+        doc.canvas.layer_stack.active_idx = second;
+        let source_ids: Vec<u32> = [first, second, third]
+            .iter()
+            .map(|&i| doc.canvas.layer_stack.layers[i].id)
+            .collect();
+
+        let press = PointerEvent::new(90.0, 90.0);
+        let mut drag = PointerEvent::new(120.0, 100.0);
+        drag.alt = true;
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(press, &mut c);
+            t.on_drag(drag, &press, &mut c);
+        }
+
+        let layers = &doc.canvas.layer_stack.layers;
+        assert_eq!(layers.len(), 7, "Background + 3 sources + 3 copies");
+        for (id, start) in source_ids.iter().zip([(40, 50), (70, 70), (200, 60)]) {
+            let src = layers.iter().find(|l| l.id == *id).unwrap();
+            assert_eq!(src.offset, start, "{} stays put", src.name);
+        }
+        let copies: Vec<_> = layers.iter().filter(|l| l.selected).collect();
+        assert_eq!(copies.len(), 3, "every copy stays selected");
+        let mut moved: Vec<(i32, i32)> = copies.iter().map(|l| l.offset).collect();
+        moved.sort_unstable();
+        assert_eq!(
+            moved,
+            vec![(70, 60), (100, 80), (230, 70)],
+            "all copies moved"
+        );
+    }
+
+    #[test]
     fn shift_moves_multiple_selected_layers_on_one_axis() {
         let mut t = MoveTool::new();
         t.snap_enabled = false;

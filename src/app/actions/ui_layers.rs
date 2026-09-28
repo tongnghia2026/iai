@@ -131,7 +131,8 @@ impl App {
                 if is_grp {
                     ls.duplicate_group(idx);
                 } else if !ls.duplicate_selected_from(idx) {
-                    ls.duplicate_layer(idx);
+                    let copy = ls.duplicate_layer(idx);
+                    ls.select_only(copy);
                 }
             });
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);

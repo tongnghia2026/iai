@@ -2013,12 +2013,23 @@ impl LayerStack {
         new_layer.name = self.copy_name(&source_name);
         let insert = idx + 1;
         self.layers.insert(insert, new_layer);
-        // Like Photoshop, only the copy is selected afterwards.
-        for (i, layer) in self.layers.iter_mut().enumerate() {
-            layer.selected = i == insert;
-        }
+        // Selection is the caller's business: the Move tool's Alt-drag, Layer
+        // via Copy and Repeat duplicate several layers in a loop and select
+        // every copy, so this primitive must not reset the other layers.
         self.active_idx = insert;
         insert
+    }
+
+    /// Make the layer at `idx` the only selected layer and the active one
+    /// (the panel's Duplicate Layer leaves just the copy selected).
+    pub fn select_only(&mut self, idx: usize) {
+        if idx >= self.layers.len() {
+            return;
+        }
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            layer.selected = i == idx;
+        }
+        self.active_idx = idx;
     }
 
     /// Duplicate Layer on a row that is part of a multi-selection duplicates
@@ -4259,13 +4270,40 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_selects_only_the_copy() {
+    fn panel_duplicate_selects_only_the_copy() {
         let mut s = LayerStack::new(4, 4);
         let a = s.add_layer(4, 4);
         s.layers[a].selected = true;
         let copy = s.duplicate_layer(a);
+        s.select_only(copy);
         assert!(s.layers[copy].selected);
         assert!(!s.layers[a].selected, "the source must not stay selected");
+    }
+
+    #[test]
+    fn duplicating_in_a_loop_keeps_every_copy_selected() {
+        // Regression: the Move tool's Alt-drag duplicates each selected layer
+        // in turn and selects the copy; every copy must stay selected so the
+        // whole set moves, not just the last one.
+        let mut s = LayerStack::new(4, 4);
+        let a = s.add_layer(4, 4);
+        let b = s.add_layer(4, 4);
+        let c = s.add_layer(4, 4);
+        for l in s.layers.iter_mut() {
+            l.selected = false;
+        }
+        for &idx in [a, b, c].iter().rev() {
+            let copy = s.duplicate_layer(idx);
+            s.layers[copy].selected = true;
+        }
+        let selected: Vec<&str> = s
+            .layers
+            .iter()
+            .filter(|l| l.selected)
+            .map(|l| l.name.as_str())
+            .collect();
+        assert_eq!(selected.len(), 3, "{selected:?}");
+        assert!(selected.iter().all(|n| n.ends_with("copy")));
     }
 
     #[test]
