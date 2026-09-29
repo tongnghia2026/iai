@@ -7,6 +7,7 @@
 //! dirty-marking boilerplate instead of triplicating it.
 
 use crate::core::canvas::Canvas;
+use crate::core::layer::{Layer, PaintTarget};
 use crate::core::tile::{TilePos, TILE_SIZE};
 
 /// Soft-round brush coverage at squared distance `dist2` for a tip of `radius`
@@ -15,6 +16,15 @@ use crate::core::tile::{TilePos, TILE_SIZE};
 #[inline]
 pub fn dab_coverage(dist2: f32, radius: f32, hardness: f32) -> f32 {
     super::brush::soft_round_alpha(dist2, radius, hardness)
+}
+
+/// Whether the scrub tools can edit `layer`'s paint target: raster pixels, or
+/// the grayscale mask of any layer kind (folder, text, shape, adjustment...).
+pub fn can_scrub(layer: &Layer) -> bool {
+    match layer.paint_target {
+        PaintTarget::Pixels => layer.is_raster(),
+        PaintTarget::Mask => layer.mask.is_some(),
+    }
 }
 
 /// Read the active layer's pixel at canvas-space `(cx, cy)` as linearised 0..1
@@ -68,7 +78,7 @@ where
     let idx = canvas.layer_stack.active_idx;
     {
         let l = &canvas.layer_stack.layers[idx];
-        if (!l.is_background && l.locked) || !l.is_raster() {
+        if (!l.is_background && l.locked) || !can_scrub(l) {
             return false;
         }
     }
@@ -102,12 +112,12 @@ where
     let tile_size = TILE_SIZE;
     // Channels-panel write gate: keep only the enabled channels of the
     // computed result (mask painting is grayscale and ignores the gate).
-    let channel_wm =
-        if canvas.layer_stack.layers[idx].paint_target == crate::core::layer::PaintTarget::Mask {
-            None
-        } else {
-            canvas.channels.write_gate()
-        };
+    let paint_mask = canvas.layer_stack.layers[idx].paint_target == PaintTarget::Mask;
+    let channel_wm = if paint_mask {
+        None
+    } else {
+        canvas.channels.write_gate()
+    };
     let Some(tiles) = canvas.layer_stack.layers[idx].get_paint_tiles_mut() else {
         return false;
     };
@@ -159,6 +169,10 @@ where
                     ];
                     let mut dst = before;
                     f(px, py, cov, &mut dst);
+                    if paint_mask {
+                        // Mask texels are opaque gray, as Brush writes them.
+                        dst = [dst[0], dst[0], dst[0], 255];
+                    }
                     if let Some(wm) = channel_wm {
                         crate::core::tile::apply_write_mask(before, &mut dst, wm);
                     }

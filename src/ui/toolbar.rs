@@ -107,8 +107,15 @@ const PIXEL_GROUPS: &[&[(ToolId, &str, &str)]] = &[
 ];
 
 // A layer mask is a grayscale raster whatever its owner is (folder, text,
-// shape, adjustment), so these paint it like Photoshop does.
-const MASK_GROUPS: &[&[(ToolId, &str, &str)]] = &[BRUSH_GROUP, ERASER_GROUP, PIXEL_FILL_GROUP];
+// shape, adjustment). Smudge and Dodge/Burn refine soft mask edges; the
+// texture tools (Clone, Repair, Patch) have no use on a mask.
+const MASK_GROUPS: &[&[(ToolId, &str, &str)]] = &[
+    BRUSH_GROUP,
+    ERASER_GROUP,
+    PIXEL_FILL_GROUP,
+    SMUDGE_GROUP,
+    DODGE_GROUP,
+];
 
 const VECTOR_GROUPS: &[&[(ToolId, &str, &str)]] = &[NODE_GROUP];
 const NO_CONTEXT_GROUPS: &[&[(ToolId, &str, &str)]] = &[];
@@ -963,11 +970,20 @@ mod tests {
         for kind in ["Group", "Text", "Adjustment", "SmartObject"] {
             let context = context_for_layer(Some(kind), true);
             assert_eq!(context, ToolbarContext::Mask { vector: false });
-            for tool in [ToolId::Brush, ToolId::Pencil, ToolId::Eraser, ToolId::Fill] {
+            for tool in [
+                ToolId::Brush,
+                ToolId::Pencil,
+                ToolId::Eraser,
+                ToolId::Fill,
+                ToolId::Smudge,
+                ToolId::Dodge,
+                ToolId::Burn,
+            ] {
                 assert!(tool_visible_in_context(context, tool), "{kind}: {tool:?}");
             }
-            assert!(!tool_visible_in_context(context, ToolId::Clone));
-            assert!(!tool_visible_in_context(context, ToolId::Node));
+            for tool in [ToolId::Clone, ToolId::Repair, ToolId::Patch, ToolId::Node] {
+                assert!(!tool_visible_in_context(context, tool), "{kind}: {tool:?}");
+            }
         }
         for kind in ["Shape", "Path"] {
             let context = context_for_layer(Some(kind), true);

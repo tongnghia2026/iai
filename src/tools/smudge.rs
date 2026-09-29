@@ -63,6 +63,31 @@ fn sample_tile_bilinear(tiles: &TileMap, x: f32, y: f32) -> [f32; 4] {
     ]
 }
 
+/// Bilinear read of a layer mask's gray value (red byte) at layer-local `(x, y)`,
+/// pixel centres on integers. Clamp-to-edge like `LayerMask::sample`; missing
+/// tiles read as black, which is what an unpainted hide-all mask holds.
+fn sample_mask_bilinear(tiles: &TileMap, w: u32, h: u32, x: f32, y: f32) -> f32 {
+    if w == 0 || h == 0 || !x.is_finite() || !y.is_finite() {
+        return 0.0;
+    }
+    let x = x.clamp(0.0, (w - 1) as f32);
+    let y = y.clamp(0.0, (h - 1) as f32);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let v = |px: u32, py: u32| tiles.get_pixel(px, py).0 as f32 / 255.0;
+    let top = v(x0, y0) + (v(x1, y0) - v(x0, y0)) * tx;
+    let bottom = v(x0, y1) + (v(x1, y1) - v(x0, y1)) * tx;
+    top + (bottom - top) * ty
+}
+
+fn luma(c: [f32; 4]) -> f32 {
+    (c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722).clamp(0.0, 1.0)
+}
+
 fn blend_toward_rgba(dst: &mut [u8; 4], src: [f32; 4], amount: f32) {
     let amount = amount.clamp(0.0, 1.0);
     if amount <= 0.0 {
@@ -127,16 +152,61 @@ impl SmudgeTool {
         let Some(layer) = ctx.canvas().layer_stack.layers.get(active_idx) else {
             return;
         };
-        if (!layer.is_background && layer.locked) || !layer.is_raster() {
+        if (!layer.is_background && layer.locked) || !scrub::can_scrub(layer) {
             return;
         }
-
-        let source_tiles = layer.tiles.clone();
         let layer_offset = layer.offset;
         let strength = self.strength.clamp(0.0, 1.0);
         let pull_dx = cx - prev_x;
         let pull_dy = cy - prev_y;
         let finger = self.finger;
+
+        // A mask is smeared as its own gray values, never the layer's colours.
+        if layer.paint_target == crate::core::layer::PaintTarget::Mask {
+            let Some(mask) = layer.mask.as_ref() else {
+                return;
+            };
+            let (mw, mh) = (mask.width, mask.height);
+            let source_tiles = mask.tiles.clone();
+            let finger_v = finger.map(luma);
+            scrub::for_each_dab_pixel(
+                ctx.canvas_mut(),
+                cx,
+                cy,
+                self.size * 0.5,
+                self.hardness,
+                strength,
+                |px, py, cov, dst| {
+                    let mut src = sample_mask_bilinear(
+                        &source_tiles,
+                        mw,
+                        mh,
+                        px as f32 - pull_dx,
+                        py as f32 - pull_dy,
+                    );
+                    if let Some(f) = finger_v {
+                        src = f + (src - f) * (1.0 - strength);
+                    }
+                    let d = dst[0] as f32 / 255.0;
+                    let v = ((d + (src - d) * cov) * 255.0).round().clamp(0.0, 255.0) as u8;
+                    *dst = [v, v, v, 255];
+                },
+            );
+            if let Some(f) = finger_v {
+                let center = sample_mask_bilinear(
+                    &source_tiles,
+                    mw,
+                    mh,
+                    cx - 0.5 - layer_offset.0 as f32,
+                    cy - 0.5 - layer_offset.1 as f32,
+                );
+                let v = center + (f - center) * strength;
+                self.finger = Some([v, v, v, 1.0]);
+            }
+            return;
+        }
+
+        let source_tiles = layer.tiles.clone();
 
         scrub::for_each_dab_pixel(
             ctx.canvas_mut(),
@@ -245,7 +315,107 @@ impl Tool for SmudgeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::canvas::Canvas;
+    use crate::core::document::{Document, DocumentId};
     use crate::core::tile::TileMap;
+
+    fn black_doc_with_white_mask() -> Document {
+        let px = [0u8, 0, 0, 255].repeat(64 * 64);
+        let mut doc = Document::from_canvas(DocumentId(1), Canvas::from_rgba(px, 64, 64), None);
+        let idx = doc.canvas.layer_stack.active_idx;
+        doc.canvas.layer_stack.layers[idx].add_mask(true);
+        doc
+    }
+
+    fn drag(tool: &mut dyn Tool, doc: &mut Document, y: f32, xs: std::ops::Range<i32>) {
+        let mut ctx = ToolCtx::new(doc, [0, 0, 0, 255], [255; 4], 1.0, 0.0, 0.0);
+        let mut prev = PointerEvent::new(xs.start as f32, y);
+        tool.on_press(prev, &mut ctx);
+        for x in xs {
+            let ev = PointerEvent::new(x as f32, y);
+            tool.on_drag(ev, &prev, &mut ctx);
+            prev = ev;
+        }
+        tool.on_release(prev, &mut ctx);
+    }
+
+    #[test]
+    fn smudging_a_mask_never_pulls_in_the_layer_colours() {
+        let mut doc = black_doc_with_white_mask();
+        drag(&mut SmudgeTool::new(), &mut doc, 32.0, 20..44);
+        let layer = doc.canvas.layer_stack.active_layer();
+        let mask = layer.mask.as_ref().unwrap();
+        assert_eq!(mask.tiles.get_pixel(32, 32), (255, 255, 255, 255));
+        assert_eq!(layer.tiles.get_pixel(32, 32), (0, 0, 0, 255));
+    }
+
+    #[test]
+    fn smudge_drags_a_mask_edge_along_the_stroke() {
+        let mut doc = black_doc_with_white_mask();
+        let idx = doc.canvas.layer_stack.active_idx;
+        let mask = doc.canvas.layer_stack.layers[idx].mask.as_mut().unwrap();
+        for y in 0..64 {
+            for x in 32..64 {
+                mask.tiles.set_pixel(x, y, 0, 0, 0, 255);
+            }
+        }
+        // Drag from the revealed half into the hidden half.
+        drag(&mut SmudgeTool::new(), &mut doc, 32.0, 24..44);
+        let mask = doc.canvas.layer_stack.layers[idx].mask.as_ref().unwrap();
+        let (v, g, b, a) = mask.tiles.get_pixel(36, 32);
+        assert!(v > 40, "white is pushed past the edge, got {v}");
+        assert_eq!((g, b, a), (v, v, 255), "mask stays opaque gray");
+        assert_eq!(
+            mask.tiles.get_pixel(36, 5).0,
+            0,
+            "outside the stroke untouched"
+        );
+    }
+
+    #[test]
+    fn smudge_and_dodge_edit_a_group_mask() {
+        use crate::core::layer::Layer;
+        let mut doc = black_doc_with_white_mask();
+        let stack = &mut doc.canvas.layer_stack;
+        let mut part = Layer::from_rgba(9, "part", [255, 0, 0, 255].repeat(64 * 64), 64, 64);
+        part.selected = true;
+        stack.layers.push(part);
+        stack.set_next_id(10);
+        let group = stack.create_group_from_selected(64, 64).unwrap();
+        stack.layers[group].add_mask(true);
+        stack.active_idx = group;
+        let mask = stack.layers[group].mask.as_mut().unwrap();
+        for y in 0..64 {
+            for x in 0..64 {
+                mask.tiles.set_pixel(x, y, 150, 150, 150, 255);
+            }
+        }
+
+        drag(
+            &mut crate::tools::dodge_burn::DodgeBurnTool::dodge(),
+            &mut doc,
+            32.0,
+            20..44,
+        );
+        let v = |doc: &Document| {
+            let mask = doc.canvas.layer_stack.layers[group].mask.as_ref().unwrap();
+            mask.tiles.get_pixel(32, 32).0
+        };
+        assert!(v(&doc) > 150, "dodge lightens the folder's mask");
+
+        let mask = doc.canvas.layer_stack.layers[group].mask.as_mut().unwrap();
+        for x in 40..64 {
+            for y in 0..64 {
+                mask.tiles.set_pixel(x, y, 0, 0, 0, 255);
+            }
+        }
+        drag(&mut SmudgeTool::new(), &mut doc, 32.0, 30..48);
+        let mask = doc.canvas.layer_stack.layers[group].mask.as_ref().unwrap();
+        assert!(
+            mask.tiles.get_pixel(42, 32).0 > 30,
+            "smudge moves the folder's mask edge"
+        );
+    }
 
     #[test]
     fn bilinear_sample_keeps_transparent_edges_from_darkening_colour() {
