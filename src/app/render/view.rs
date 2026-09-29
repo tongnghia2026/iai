@@ -13,6 +13,16 @@ impl App {
     }
 
     pub fn fit_canvas_to_screen(&mut self) {
+        self.fit_canvas_with_max_zoom(64.0);
+    }
+
+    /// The view a document opens with: fit like Photoshop, but never magnify a
+    /// small image past 100 % (nearest-neighbour enlargement looks jagged).
+    pub fn fit_canvas_for_open(&mut self) {
+        self.fit_canvas_with_max_zoom(1.0);
+    }
+
+    fn fit_canvas_with_max_zoom(&mut self, max_zoom: f32) {
         if let Some(win) = &self.win.window {
             let sz = win.inner_size();
             let ruler_size = if self.shell.ui.show_rulers { 20.0 } else { 0.0 };
@@ -28,7 +38,7 @@ impl App {
             let padding = 24.0;
             let zoom_x = (sw - padding * 2.0) / cw;
             let zoom_y = (sh - padding * 2.0) / ch;
-            self.edit.view.zoom = zoom_x.min(zoom_y).clamp(0.01, 64.0);
+            self.edit.view.zoom = zoom_x.min(zoom_y).clamp(0.01, max_zoom);
             self.constrain_pan();
             self.push_canvas_uniforms();
             self.shell.status_msg = format!("Fit: {:.0}%", self.edit.view.zoom * 100.0);

@@ -253,7 +253,7 @@ impl App {
             self.shell.status_msg = format!("New canvas {}x{}", w, h);
         }
 
-        self.fit_canvas_to_screen();
+        self.fit_canvas_for_open();
         self.push_canvas_uniforms();
         self.upload_full();
         self.upload_selection_mask();
@@ -346,7 +346,7 @@ impl App {
             self.shell.status_msg = format!("New canvas {}x{}", w, h);
         }
 
-        self.fit_canvas_to_screen();
+        self.fit_canvas_for_open();
         self.push_canvas_uniforms();
         self.upload_full();
         self.upload_selection_mask();

@@ -42,6 +42,11 @@ struct CompositorUniforms {
 // Scene-referred Develop master (RAW sessions, u.adj_pad_c == 1u): the full
 // layer as UNCLAMPED linear f16 RGBA. A 1×1 dummy is bound outside a session.
 @group(0) @binding(2) var dev_scene_tex: texture_2d<f32>;
+// The same atlas with its mip chain, viewed as plain bytes (sRGB-encoded
+// values, no decode) for the zoomed-out area filter.
+@group(0) @binding(3) var atlas_raw: texture_2d<f32>;
+// Bilinear, explicit-level sampler for `atlas_raw`.
+@group(0) @binding(4) var atlas_lin: sampler;
 
 @group(1) @binding(0) var dst_tex: texture_2d<f32>;
 
@@ -2245,9 +2250,9 @@ fn fs_develop_cells(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32>
 // ── Zoomed-out display grid ──────────────────────────────────────────────────
 // A screen pixel (or Detail-plane texel) covering `footprint` layer px averages
 // an n×n stratified grid of real pixels instead of point-sampling one, so noise
-// and fine texture do not alias. The display, the Develop preview and its
-// Detail plane share the grid, so a zoomed-out preview shows exactly what the
-// committed pixels will show.
+// and fine texture do not alias. The Develop preview and its Detail plane
+// share the grid (the chain runs per grid pixel); committed layers use the
+// full-area filter (`area_sample`).
 fn zoom_taps_per_axis(footprint: f32) -> u32 {
     return clamp(u32(footprint * 0.5 + 1.0), 1u, 3u);
 }
@@ -2550,6 +2555,153 @@ fn clip_mask_at(lx: i32, ly: i32, lw: f32, lh: f32) -> f32 {
     return sample_mask_nearest_i(lx, ly);
 }
 
+// ── Zoomed-out area filter ───────────────────────────────────────────────────
+// A screen pixel covering `footprint` > 1 layer px shows the exact area average
+// of that footprint (Photoshop-style, in sRGB byte space), so fine texture and
+// noise neither alias nor sparkle. The atlas mips hold alpha-weighted 2×2
+// averages; the footprint is read from the level whose texels are a quarter to
+// a half of it, so at most 5×5 texels contribute. Must match
+// `tile_atlas::ATLAS_MIP_LEVELS`.
+const ATLAS_MIP_LEVELS: u32 = 6u;
+
+// Atlas texel of `slot` at in-tile level-`lv` coords (`shift` = 8 − lv).
+fn area_slot_texel(slot: i32, local: vec2<u32>, shift: u32, lv: u32) -> vec4<f32> {
+    let base = vec2<u32>(u32(slot & 0xFFFF), u32(slot >> 16u)) << vec2<u32>(shift);
+    return textureLoad(atlas_raw, vec2<i32>(base + local), i32(lv));
+}
+
+// Level-`lv` texel of the untransformed layer: (sRGB rgb, alpha × mask).
+// Tile maths uses shifts: integer division is slow on GPUs.
+fn area_texel(tx: u32, ty: u32, lv: u32) -> vec4<f32> {
+    let shift = 8u - lv;
+    let tile_x = tx >> shift;
+    let tile_y = ty >> shift;
+    if (tile_x >= u.layer_tiles_w || tile_y >= u.layer_tiles_h) {
+        return vec4<f32>(0.0);
+    }
+    let tile_idx = tile_y * u.layer_tiles_w + tile_x;
+    let slot = tile_map[tile_idx];
+    if (slot < 0) {
+        return vec4<f32>(0.0);
+    }
+    let in_tile = (256u >> lv) - 1u;
+    let local = vec2<u32>(tx & in_tile, ty & in_tile);
+    let c = area_slot_texel(slot, local, shift, lv);
+    var m = 1.0;
+    if (clip_is_child()) {
+        let s = 1u << lv;
+        let sh = clip_shift();
+        m = clip_mask_at(
+            i32(tx * s + s / 2u) + sh.x,
+            i32(ty * s + s / 2u) + sh.y,
+            u.layer_w, u.layer_h);
+    } else if (u.mask_enabled != 0u) {
+        let mslot = mask_tile_map[tile_idx];
+        var v = 0.0;
+        if (mslot >= 0) {
+            v = area_slot_texel(mslot, local, shift, lv).r;
+        }
+        if (u.mask_inverted == 1u) {
+            v = 1.0 - v;
+        }
+        m = v;
+    }
+    return vec4<f32>(c.rgb, c.a * m);
+}
+
+// Overlap of the box [a, b) with level texel i.
+fn area_box_weight(a: f32, b: f32, i: u32) -> f32 {
+    return max(min(b, f32(i + 1u)) - max(a, f32(i)), 0.0);
+}
+
+// Area average of the layer over the footprint centred on layer px (lx, ly),
+// clipped to the layer: (sRGB rgb, coverage). The footprint is walked in
+// aligned 2×2 texel blocks (a block never straddles a tile); an opaque block
+// is one bilinear fetch placed so the hardware applies the box weights, any
+// other block — or a masked / clipped layer — is summed texel by texel with
+// alpha weighting.
+fn area_sample(lx: f32, ly: f32, footprint: f32) -> vec4<f32> {
+    let lv = u32(clamp(floor(log2(footprint * 0.5)), 0.0, f32(ATLAS_MIP_LEVELS - 1u)));
+    let s = f32(1u << lv);
+    let half = 0.5 * footprint;
+    let x0 = max(lx - half, 0.0) / s;
+    let x1 = min(lx + half, u.layer_w) / s;
+    let y0 = max(ly - half, 0.0) / s;
+    let y1 = min(ly + half, u.layer_h) / s;
+    let shift = 8u - lv;
+    let in_tile = (256u >> lv) - 1u;
+    let inv_dims = 1.0 / vec2<f32>(textureDimensions(atlas_raw, lv));
+    let fast = u.mask_enabled == 0u && !clip_is_child();
+    let bx0 = u32(floor(x0)) >> 1u;
+    let by0 = u32(floor(y0)) >> 1u;
+    var acc = vec3<f32>(0.0);
+    var cov = 0.0;
+    var area = 0.0;
+    for (var j = 0u; j < 4u; j = j + 1u) {
+        let ty = (by0 + j) * 2u;
+        if (f32(ty) >= y1) {
+            break;
+        }
+        let wy0 = area_box_weight(y0, y1, ty);
+        let wy1 = area_box_weight(y0, y1, ty + 1u);
+        let wy = wy0 + wy1;
+        for (var i = 0u; i < 4u; i = i + 1u) {
+            let tx = (bx0 + i) * 2u;
+            if (f32(tx) >= x1) {
+                break;
+            }
+            let wx0 = area_box_weight(x0, x1, tx);
+            let wx1 = area_box_weight(x0, x1, tx + 1u);
+            let wx = wx0 + wx1;
+            let w = wx * wy;
+            if (w <= 0.0) {
+                continue;
+            }
+            area = area + w;
+            let tile_x = tx >> shift;
+            let tile_y = ty >> shift;
+            if (tile_x >= u.layer_tiles_w || tile_y >= u.layer_tiles_h) {
+                continue;
+            }
+            let slot = tile_map[tile_y * u.layer_tiles_w + tile_x];
+            if (slot < 0) {
+                continue;
+            }
+            if (fast) {
+                let base = vec2<u32>(u32(slot & 0xFFFF), u32(slot >> 16u)) << vec2<u32>(shift);
+                let pos = vec2<f32>(base + vec2<u32>(tx & in_tile, ty & in_tile))
+                    + vec2<f32>(0.5 + wx1 / wx, 0.5 + wy1 / wy);
+                let c = textureSampleLevel(atlas_raw, atlas_lin, pos * inv_dims, f32(lv));
+                if (c.a >= 0.9999) {
+                    acc = acc + c.rgb * w;
+                    cov = cov + w;
+                    continue;
+                }
+            }
+            for (var dj = 0u; dj < 2u; dj = dj + 1u) {
+                let wyk = select(wy0, wy1, dj == 1u);
+                if (wyk <= 0.0) {
+                    continue;
+                }
+                for (var di = 0u; di < 2u; di = di + 1u) {
+                    let wxk = select(wx0, wx1, di == 1u);
+                    if (wxk <= 0.0) {
+                        continue;
+                    }
+                    let t = area_texel(tx + di, ty + dj, lv);
+                    let tw = wxk * wyk;
+                    acc = acc + t.rgb * (t.a * tw);
+                    cov = cov + t.a * tw;
+                }
+            }
+        }
+    }
+    if (cov <= 0.00001 || area <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(acc / cov, cov / area);
+}
+
 // ── Per-layer adjustment preview (adj_kind 1..=13) ────────────────────────────
 // These functions are a VERBATIM copy of the ones in ADJUSTMENT_SHADER so the
 // live Ctrl+L/M preview (applied to a raster layer's own pixels here) matches
@@ -2842,14 +2994,28 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         filter_lx = layer_x;
         filter_ly = layer_y;
 
-        // Zoomed out: average the display grid of real pixels (see
-        // `zoom_taps_per_axis`). Filter previews keep their own sampling.
+        // Zoomed out: the Develop layer averages its display grid of real
+        // pixels (see `zoom_taps_per_axis`); every other layer shows the exact
+        // footprint area (see `area_sample`). Filter previews keep their own
+        // sampling.
         let footprint = 1.0 / max(u.zoom, 1e-6);
-        var n = zoom_taps_per_axis(footprint);
+        var n = 1u;
         if (u.adj_kind == 20u) {
             n = dev_grid_taps(footprint);
+        } else if (footprint > 1.001 && !(u.adj_kind >= 30u && u.adj_kind <= 35u)) {
+            let r = area_sample(layer_x, layer_y, footprint);
+            if (r.a <= 0.00001) {
+                return dst;
+            }
+            var srgb = r.rgb;
+            if (u.adj_kind >= 1u && u.adj_kind <= 13u) {
+                srgb = apply_adjustment(srgb);
+            }
+            src = vec4<f32>(dev_srgb_to_linear(srgb), r.a);
+            mask_a = 1.0;
+            supersampled = true;
         }
-        if (n > 1u && !(u.adj_kind >= 30u && u.adj_kind <= 35u)) {
+        if (n > 1u) {
             let x0 = layer_x - 0.5 * footprint;
             let y0 = layer_y - 0.5 * footprint;
             let max_x = i32(u.layer_w) - 1;
@@ -2868,10 +3034,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             if (cov <= 0.00001) {
                 return dst;
             }
-            var srgb = acc / cov;
-            if (u.adj_kind == 20u) {
-                srgb = dev_dither_srgb(srgb, in.pos.xy);
-            }
+            let srgb = dev_dither_srgb(acc / cov, in.pos.xy);
             src = vec4<f32>(dev_srgb_to_linear(srgb), cov / f32(n * n));
             mask_a = 1.0;
             supersampled = true;

@@ -103,7 +103,7 @@ impl App {
 
         if self.docs.documents[idx].saved_zoom <= 0.0 {
             self.edit.view.zoom = 1.0;
-            self.fit_canvas_to_screen();
+            self.fit_canvas_for_open();
         } else {
             self.edit.view.zoom = self.docs.documents[idx].saved_zoom;
             self.edit.view.offset_x = self.docs.documents[idx].saved_offset_x;

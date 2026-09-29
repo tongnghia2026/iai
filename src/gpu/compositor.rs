@@ -1560,9 +1560,12 @@ impl CompositorState {
         viewport_h: u32,
         max_texture_dimension: u32,
     ) -> Self {
+        // The atlas carries a mip chain for the zoomed-out filter, which reads
+        // levels explicitly; every implicit-LOD sample must stay on level 0.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
+            lod_max_clamp: 0.0,
             ..Default::default()
         });
 
@@ -1595,6 +1598,24 @@ impl CompositorState {
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
+                    count: None,
+                },
+                // The atlas with all mip levels, viewed as plain bytes.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Bilinear sampler for the zoomed-out filter's explicit-level reads.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -3392,6 +3413,12 @@ struct VsOut {
         (layer_id as usize).wrapping_add(1usize << (usize::BITS - 1))
     }
 
+    /// Whether an atlas key names mask tiles (full-res or proxy): both set the
+    /// top bit.
+    fn is_mask_atlas_id(atlas_layer_id: usize) -> bool {
+        atlas_layer_id >> (usize::BITS - 1) == 1
+    }
+
     /// Atlas key namespace for a layer's LOD-proxy tiles. Bit 62 tags "proxy" and
     /// the level sits in bits 48.. so proxy levels never collide with each other,
     /// the full-res tiles (bit 62 clear), or masks (bit 63). `layer_id` occupies
@@ -3916,6 +3943,7 @@ struct VsOut {
         .map_or(0, |span| Self::unique_tile_slots_in_span(tiles, span))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn atlas_slot_for_tile(
         atlas: &mut TileAtlas,
         queue: &wgpu::Queue,
@@ -3923,6 +3951,7 @@ struct VsOut {
         atlas_layer_id: usize,
         pos: TilePos,
         arc_tile: &std::sync::Arc<crate::core::tile::Tile>,
+        source_size: (u32, u32),
     ) -> i32 {
         let ptr = std::sync::Arc::as_ptr(arc_tile);
         if let Some(&slot) = slot_cache.get(&ptr) {
@@ -3932,7 +3961,13 @@ struct VsOut {
         let (slot_x, slot_y, needs_upload) =
             atlas.get_or_allocate(atlas_layer_id, pos, arc_tile.revision);
         if needs_upload {
-            atlas.upload_tile(queue, slot_x, slot_y, &arc_tile.pixels);
+            let tile = crate::gpu::tile_atlas::ATLAS_SLOT_SIZE;
+            let mip_info = crate::gpu::tile_atlas::slot_mip_info(
+                source_size.0.saturating_sub(pos.x.max(0) as u32 * tile),
+                source_size.1.saturating_sub(pos.y.max(0) as u32 * tile),
+                Self::is_mask_atlas_id(atlas_layer_id),
+            );
+            atlas.upload_tile(queue, slot_x, slot_y, &arc_tile.pixels, mip_info);
         }
         let slot = (slot_x | (slot_y << 16)) as i32;
         slot_cache.insert(ptr, slot);
@@ -3988,6 +4023,7 @@ struct VsOut {
                     atlas_layer_id,
                     *pos,
                     arc_tile,
+                    (tiles.width, tiles.height),
                 );
             }
             return;
@@ -4021,6 +4057,7 @@ struct VsOut {
                         atlas_layer_id,
                         pos,
                         arc_tile,
+                        (tiles.width, tiles.height),
                     );
                 }
             }
@@ -5172,6 +5209,12 @@ struct VsOut {
                 let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("layer_comp_enc"),
                 });
+                // A zoomed-out pass reads the atlas mips: rebuild any stale
+                // ones (e.g. the tiles just uploaded) first. At 100 % and
+                // above nothing reads them, so edits there skip the work.
+                if eff_zoom < 1.0 {
+                    self.tile_atlas.encode_mips(device, &mut enc);
+                }
 
                 if first_layer && !use_partial {
                     let rpass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {

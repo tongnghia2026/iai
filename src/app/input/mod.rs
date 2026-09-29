@@ -394,7 +394,7 @@ impl App {
         self.win.egui_ctx.set_fonts(fonts);
         self.win.startup_phase = crate::app::state::StartupPhase::Done;
         self.win.startup_rx = None;
-        self.fit_canvas_to_screen();
+        self.fit_canvas_for_open();
         self.push_cursor_uniforms();
         self.sync_cursor(event_loop);
         self.upload_full();
