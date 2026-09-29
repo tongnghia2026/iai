@@ -652,8 +652,7 @@ impl App {
                     true
                 }
             } {
-                self.docs.pending_exit_docs.pop_front();
-                self.present_next_exit_document();
+                self.close_answered_exit_document();
             } else {
                 // A synchronous write failed; keep this tab in the sweep.
                 self.shell.ui.show_exit_dialog = true;

@@ -1396,8 +1396,7 @@ impl App {
         if self.shell.exit_save_pending {
             self.shell.exit_save_pending = false;
             if persistence_clean {
-                self.docs.pending_exit_docs.pop_front();
-                self.present_next_exit_document();
+                self.close_answered_exit_document();
             } else {
                 self.shell.ui.show_exit_dialog = true;
             }

@@ -2828,8 +2828,24 @@ impl App {
     }
 
     pub(crate) fn discard_current_exit_document(&mut self) {
-        self.docs.pending_exit_docs.pop_front();
         self.shell.ui.show_exit_dialog = false;
+        self.close_answered_exit_document();
+    }
+
+    /// The front tab of the exit sweep has been answered (saved or discarded):
+    /// close it so it leaves the tab strip, then prompt the next one.
+    pub(crate) fn close_answered_exit_document(&mut self) {
+        if let Some(id) = self.docs.pending_exit_docs.pop_front() {
+            if let Some(idx) = self.docs.documents.iter().position(|doc| doc.id == id) {
+                // Land straight on the next tab to ask about rather than the
+                // most recently used one, so each close costs one switch.
+                if let Some(&next) = self.docs.pending_exit_docs.front() {
+                    self.docs.doc_mru.retain(|mru| *mru != next);
+                    self.docs.doc_mru.insert(0, next);
+                }
+                self.close_doc_confirmed(idx);
+            }
+        }
         self.present_next_exit_document();
     }
 

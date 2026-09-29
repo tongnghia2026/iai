@@ -547,6 +547,10 @@ mod tests {
         assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, second_id);
 
         app.discard_current_exit_document();
+        assert!(
+            app.docs.documents.iter().all(|doc| doc.id != second_id),
+            "an answered tab leaves the strip"
+        );
         assert_eq!(app.docs.pending_exit_docs.front(), Some(&first_id));
         assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, first_id);
         assert!(app.shell.ui.show_exit_dialog);
@@ -576,6 +580,31 @@ mod tests {
         }
         assert_eq!(prompted, vec![ids[2], ids[1], ids[0]]);
         assert!(app.shell.exit_requested);
+        // Like closing the last tab by hand: one blank placeholder remains.
+        assert_eq!(app.docs.documents.len(), 1);
+        assert!(!app.docs.documents[0].is_modified());
+    }
+
+    #[test]
+    fn cancelling_mid_sweep_keeps_only_the_unanswered_tabs() {
+        let mut app = App::new();
+        app.open_new_doc_tab();
+        app.open_new_doc_tab();
+        let ids: Vec<_> = app.docs.documents.iter().map(|doc| doc.id).collect();
+        for doc in &mut app.docs.documents {
+            doc.canvas.deselect();
+        }
+
+        assert!(!app.request_app_exit());
+        app.discard_current_exit_document(); // tab 3
+        assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, ids[1]);
+        app.cancel_app_exit(); // at tab 2
+
+        let open: Vec<_> = app.docs.documents.iter().map(|doc| doc.id).collect();
+        assert_eq!(open, vec![ids[0], ids[1]]);
+        assert!(app.docs.documents.iter().all(Document::is_modified));
+        assert!(!app.shell.exit_requested);
+        assert!(!app.shell.ui.show_exit_dialog);
     }
 
     #[test]
