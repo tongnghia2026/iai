@@ -106,6 +106,10 @@ const PIXEL_GROUPS: &[&[(ToolId, &str, &str)]] = &[
     DODGE_GROUP,
 ];
 
+// A layer mask is a grayscale raster whatever its owner is (folder, text,
+// shape, adjustment), so these paint it like Photoshop does.
+const MASK_GROUPS: &[&[(ToolId, &str, &str)]] = &[BRUSH_GROUP, ERASER_GROUP, PIXEL_FILL_GROUP];
+
 const VECTOR_GROUPS: &[&[(ToolId, &str, &str)]] = &[NODE_GROUP];
 const NO_CONTEXT_GROUPS: &[&[(ToolId, &str, &str)]] = &[];
 
@@ -124,6 +128,10 @@ enum ToolbarContext {
     Pixel,
     Vector,
     Neutral,
+    /// A non-raster layer whose mask is the paint target.
+    Mask {
+        vector: bool,
+    },
 }
 
 const TOOLBOX_TOOL_W: f32 = 36.0;
@@ -176,18 +184,28 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 }
 
 fn toolbar_context(data: &UiData) -> ToolbarContext {
-    context_for_layer_type(
-        data.layers
-            .layer_types
-            .get(data.layers.active_layer_idx)
-            .map(String::as_str),
+    let idx = data.layers.active_layer_idx;
+    // `layer_has_mask` already hides managed clip masks, which are never painted.
+    let on_mask = data
+        .layers
+        .layer_has_mask
+        .get(idx)
+        .copied()
+        .unwrap_or(false)
+        && data.layers.layer_paint_targets.get(idx).copied()
+            == Some(crate::core::layer::PaintTarget::Mask);
+    context_for_layer(
+        data.layers.layer_types.get(idx).map(String::as_str),
+        on_mask,
     )
 }
 
-fn context_for_layer_type(layer_type: Option<&str>) -> ToolbarContext {
+fn context_for_layer(layer_type: Option<&str>, on_mask: bool) -> ToolbarContext {
     match layer_type {
         Some("Raster") => ToolbarContext::Pixel,
+        Some("Shape" | "Path") if on_mask => ToolbarContext::Mask { vector: true },
         Some("Shape" | "Path") => ToolbarContext::Vector,
+        Some(_) if on_mask => ToolbarContext::Mask { vector: false },
         _ => ToolbarContext::Neutral,
     }
 }
@@ -209,12 +227,13 @@ fn visible_groups(
     // vector context so the "select/move object → edit its points" relationship
     // reads straight from the toolbar layout (no Corel-style renaming needed).
     let node_under_move: &[&[(ToolId, &str, &str)]] = match context {
-        ToolbarContext::Vector => VECTOR_GROUPS,
+        ToolbarContext::Vector | ToolbarContext::Mask { vector: true } => VECTOR_GROUPS,
         _ => NO_CONTEXT_GROUPS,
     };
     // Pixel-only retouch tools sit in the middle band on raster layers.
     let mid: &[&[(ToolId, &str, &str)]] = match context {
         ToolbarContext::Pixel => PIXEL_GROUPS,
+        ToolbarContext::Mask { .. } => MASK_GROUPS,
         _ => NO_CONTEXT_GROUPS,
     };
     std::iter::once(MOVE_GROUP)
@@ -913,19 +932,49 @@ mod tests {
     #[test]
     fn layer_types_map_to_expected_toolbar_context() {
         assert_eq!(
-            context_for_layer_type(Some("Raster")),
+            context_for_layer(Some("Raster"), false),
             ToolbarContext::Pixel
         );
         assert_eq!(
-            context_for_layer_type(Some("Shape")),
+            context_for_layer(Some("Raster"), true),
+            ToolbarContext::Pixel
+        );
+        assert_eq!(
+            context_for_layer(Some("Shape"), false),
             ToolbarContext::Vector
         );
-        assert_eq!(context_for_layer_type(Some("Path")), ToolbarContext::Vector);
         assert_eq!(
-            context_for_layer_type(Some("Text")),
+            context_for_layer(Some("Path"), false),
+            ToolbarContext::Vector
+        );
+        assert_eq!(
+            context_for_layer(Some("Text"), false),
             ToolbarContext::Neutral
         );
-        assert_eq!(context_for_layer_type(None), ToolbarContext::Neutral);
+        assert_eq!(
+            context_for_layer(Some("Group"), false),
+            ToolbarContext::Neutral
+        );
+        assert_eq!(context_for_layer(None, false), ToolbarContext::Neutral);
+    }
+
+    #[test]
+    fn a_selected_mask_brings_its_paint_tools_on_any_layer_kind() {
+        for kind in ["Group", "Text", "Adjustment", "SmartObject"] {
+            let context = context_for_layer(Some(kind), true);
+            assert_eq!(context, ToolbarContext::Mask { vector: false });
+            for tool in [ToolId::Brush, ToolId::Pencil, ToolId::Eraser, ToolId::Fill] {
+                assert!(tool_visible_in_context(context, tool), "{kind}: {tool:?}");
+            }
+            assert!(!tool_visible_in_context(context, ToolId::Clone));
+            assert!(!tool_visible_in_context(context, ToolId::Node));
+        }
+        for kind in ["Shape", "Path"] {
+            let context = context_for_layer(Some(kind), true);
+            assert_eq!(context, ToolbarContext::Mask { vector: true });
+            assert!(tool_visible_in_context(context, ToolId::Brush));
+            assert!(tool_visible_in_context(context, ToolId::Node));
+        }
     }
 
     #[test]
@@ -934,6 +983,8 @@ mod tests {
             ToolbarContext::Pixel,
             ToolbarContext::Vector,
             ToolbarContext::Neutral,
+            ToolbarContext::Mask { vector: false },
+            ToolbarContext::Mask { vector: true },
         ] {
             assert!(tool_visible_in_context(context, ToolId::Move));
             assert!(tool_visible_in_context(context, ToolId::Eyedropper));

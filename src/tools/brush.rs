@@ -1528,6 +1528,54 @@ mod tests {
     }
 
     #[test]
+    fn brush_paints_a_group_mask_and_hides_the_folder_there() {
+        use crate::core::layer::Layer;
+        let mut canvas = Canvas::new_blank(32, 32);
+        let stack = &mut canvas.layer_stack;
+        for (id, rgba) in [(2, [255, 0, 0, 255]), (3, [0, 0, 255, 128])] {
+            let pixels = rgba.repeat(32 * 32);
+            let mut layer = Layer::from_rgba(id, "part", pixels, 32, 32);
+            layer.selected = true;
+            stack.layers.push(layer);
+        }
+        stack.set_next_id(4);
+        let group = stack.create_group_from_selected(32, 32).unwrap();
+        stack.layers[group].add_mask(true);
+        stack.active_idx = group;
+
+        let settings = BrushSettings {
+            size: 10.0,
+            hardness: 1.0,
+            color: [0, 0, 0, 255],
+            ..BrushSettings::default()
+        };
+        let mut stroke = StrokeBuffer::begin(&canvas).expect("group mask is paintable");
+        BrushTool::paint_cpu_dab_stroked(&settings, &mut canvas, 8.0, 8.0, &mut stroke);
+        drop(stroke);
+
+        let stack = &canvas.layer_stack;
+        let mask = stack.layers[group].mask.as_ref().unwrap();
+        assert_eq!(mask.tiles.get_pixel(8, 8).0, 0, "stroke lands on the mask");
+        assert_eq!(
+            mask.tiles.get_pixel(24, 24).0,
+            255,
+            "rest of the mask untouched"
+        );
+        let flat = stack.flatten(32, 32);
+        let px = |x: usize, y: usize| &flat[(y * 32 + x) * 4..(y * 32 + x) * 4 + 3];
+        assert_eq!(
+            px(8, 8),
+            [255, 255, 255],
+            "painted area reveals the backdrop"
+        );
+        assert_ne!(
+            px(24, 24),
+            [255, 255, 255],
+            "unpainted area keeps the folder"
+        );
+    }
+
+    #[test]
     fn mask_paint_accumulates_across_low_flow_dabs() {
         use crate::core::layer::{LayerMask, PaintTarget};
         let mut canvas = Canvas::new_blank(16, 16);
