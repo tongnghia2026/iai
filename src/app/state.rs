@@ -1222,6 +1222,8 @@ pub struct DisplayBakeInFlight {
 
 #[derive(Default)]
 pub struct UiDataCache {
+    /// Hover previews for the document tabs and the hidden-tab list.
+    pub doc_thumbs: crate::app::doc_thumbs::DocThumbs,
     pub history_entries: std::sync::Arc<Vec<crate::core::command::HistoryEntry>>,
     pub history_revision: u64,
     /// Canvas band (`layer_revision >> 32`) the history list was built from, so

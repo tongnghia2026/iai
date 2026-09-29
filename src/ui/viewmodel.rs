@@ -72,6 +72,10 @@ pub struct DocumentViewModel {
     pub doc_titles: std::sync::Arc<Vec<String>>,
     pub doc_modified: std::sync::Arc<Vec<bool>>,
     pub doc_ai_busy: std::sync::Arc<Vec<Option<DocAiBusy>>>,
+    /// Hover preview texture per tab, once rendered.
+    pub doc_thumbs: std::sync::Arc<Vec<Option<(egui::TextureId, egui::Vec2)>>>,
+    /// Pixel size per tab; None for documents without a pixel preview.
+    pub doc_dims: std::sync::Arc<Vec<Option<(u32, u32)>>>,
     pub has_doc: bool,
     /// Navigator strip: Some when the active document is a page of an imported PDF.
     pub pdf_nav: Option<PdfNavData>,
@@ -744,6 +748,8 @@ impl Default for UiData {
                 doc_titles: std::sync::Arc::new(vec!["Untitled".to_string()]),
                 doc_modified: std::sync::Arc::new(vec![false]),
                 doc_ai_busy: std::sync::Arc::new(vec![None]),
+                doc_thumbs: std::sync::Arc::new(vec![None]),
+                doc_dims: std::sync::Arc::new(vec![None]),
                 has_doc: false,
                 pdf_nav: None,
                 active_artboard: 0,

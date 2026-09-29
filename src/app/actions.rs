@@ -204,6 +204,17 @@ impl App {
         if actions.doc.new_doc_tab {
             self.open_new_doc_tab();
         }
+        if let Some(doc) = actions
+            .doc
+            .hovered_doc
+            .and_then(|idx| self.docs.documents.get(idx))
+        {
+            if self.shell.ui_data_cache.doc_thumbs.request(doc) {
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+        }
 
         // Dirty itself is derived from each document's saved checkpoint. Only the
         // sticky "this PDF page has been edited" flag needs latching, because it

@@ -2,6 +2,7 @@
 //! print/clone/layer/mask thumbnail builders it uses. Split out of
 //! actions.rs (phase 3).
 
+use crate::app::doc_thumbs::tiles_content_key;
 use crate::app::state::App;
 use crate::ui::{
     AiViewModel, ChannelsViewModel, ChromeViewModel, DevelopViewModel, DialogViewModel,
@@ -848,6 +849,25 @@ impl App {
             None
         };
         let print_preview_image = self.build_print_preview_thumbnail();
+        self.shell
+            .ui_data_cache
+            .doc_thumbs
+            .poll(&self.win.egui_ctx, &self.docs.documents);
+        let doc_thumbs = std::sync::Arc::new(
+            self.docs
+                .documents
+                .iter()
+                .map(|doc| self.shell.ui_data_cache.doc_thumbs.get(doc.id))
+                .collect::<Vec<_>>(),
+        );
+        // A flowing-text document has no pixel preview (None).
+        let doc_dims = std::sync::Arc::new(
+            self.docs
+                .documents
+                .iter()
+                .map(|doc| (!doc.is_flow_text()).then_some((doc.canvas.width, doc.canvas.height)))
+                .collect::<Vec<_>>(),
+        );
         let doc_ai_busy = std::sync::Arc::new(
             self.docs
                 .documents
@@ -1112,6 +1132,8 @@ impl App {
                         .collect(),
                 ),
                 doc_ai_busy,
+                doc_thumbs,
+                doc_dims,
             },
             layers: LayerViewModel {
                 layer_count: self.docs.documents[self.docs.active_doc_idx]
@@ -2069,25 +2091,6 @@ fn layer_ui_type(layer_type: &crate::core::layer::LayerType) -> &'static str {
         LayerType::Vector(VectorGeometry::Primitive(_)) => "Shape",
         LayerType::Vector(VectorGeometry::Path(_)) => "Path",
     }
-}
-
-/// Order-independent content key of a tile map: every tile's position and
-/// revision plus the map size and `salt`. No pixel reads; never 0.
-fn tiles_content_key(tiles: &crate::core::tile::TileMap, w: u32, h: u32, salt: u64) -> u64 {
-    fn mix(mut z: u64) -> u64 {
-        z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    }
-    let mut acc = 0u64;
-    for (pos, tile) in &tiles.tiles {
-        let p = ((pos.x as u32 as u64) << 32) | pos.y as u32 as u64;
-        acc = acc.wrapping_add(mix(p ^ mix(tile.revision)));
-    }
-    let size = ((w as u64) << 32) | h as u64;
-    let key = mix(acc ^ mix(size) ^ mix(tiles.tiles.len() as u64 ^ salt.rotate_left(17)));
-    key.max(1)
 }
 
 /// The cached thumbnail for layer `id` when its content key still matches,

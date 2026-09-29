@@ -244,6 +244,8 @@ pub struct DocumentIntent {
     pub switch_doc: Option<usize>,
     pub close_doc_tab: Option<usize>,
     pub new_doc_tab: bool,
+    /// Tab (or hidden-tab list row) under the pointer: render its preview.
+    pub hovered_doc: Option<usize>,
 }
 /// Layer panel commands.
 #[derive(Default)]

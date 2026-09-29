@@ -6,6 +6,7 @@ pub mod commands;
 mod cursor;
 pub mod develop_shell;
 pub mod develop_window;
+pub mod doc_thumbs;
 pub mod docmgr;
 pub mod document_session;
 #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]

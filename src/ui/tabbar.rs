@@ -14,6 +14,11 @@ const DOC_LIST_BTN_W: f32 = 30.0;
 const DOC_LIST_ROW_H: f32 = 24.0;
 const DOC_LIST_MIN_W: f32 = 260.0;
 const DOC_LIST_MAX_W: f32 = 360.0;
+const PREVIEW_MAX_W: f32 = 220.0;
+const PREVIEW_MAX_H: f32 = 165.0;
+/// Per-tab "fully inside the strip" flags from the last layout, so the
+/// document list can offer only the tabs the strip is hiding.
+const TAB_VISIBLE_KEY: &str = "document_tab_fully_visible";
 
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
@@ -103,6 +108,8 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         .unwrap_or(data.doc.active_doc_idx);
     let documents_appended = data.doc.doc_count > previous_count;
     let active_changed = data.doc.active_doc_idx != previous_active;
+    let viewport = ui.clip_rect();
+    let mut fully_visible = Vec::with_capacity(data.doc.doc_count);
 
     for i in 0..data.doc.doc_count {
         let title = data
@@ -130,6 +137,12 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 
         let (tab_rect, tab_response) =
             ui.allocate_exact_size(egui::vec2(tab_w, TAB_H), egui::Sense::click());
+        fully_visible
+            .push(tab_rect.min.x >= viewport.min.x - 0.5 && tab_rect.max.x <= viewport.max.x + 0.5);
+        if tab_response.hovered() {
+            actions.doc.hovered_doc = Some(i);
+        }
+        let tab_response = tab_response.on_hover_ui(|ui| doc_preview_ui(ui, data, i));
 
         // Appends take precedence so the newest filename is always visible on
         // the right.  Otherwise follow explicit tab/keyboard navigation.
@@ -257,7 +270,60 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     ui.ctx().data_mut(|d| {
         d.insert_temp(count_key, data.doc.doc_count);
         d.insert_temp(active_key, data.doc.active_doc_idx);
+        d.insert_temp(egui::Id::new(TAB_VISIBLE_KEY), fully_visible);
     });
+}
+
+/// Tooltip body for tab `i`: its preview (a placeholder while it renders), the
+/// full title and the pixel size.
+fn doc_preview_ui(ui: &mut egui::Ui, data: &UiData, i: usize) {
+    let pal = data.chrome.theme_mode.palette();
+    let title = data
+        .doc
+        .doc_titles
+        .get(i)
+        .map(|s| s.as_str())
+        .unwrap_or("Untitled");
+    let dims = data.doc.doc_dims.get(i).copied().flatten();
+    if let Some((w, h)) = dims {
+        let fit = |size: egui::Vec2| {
+            let scale = (PREVIEW_MAX_W / size.x.max(1.0))
+                .min(PREVIEW_MAX_H / size.y.max(1.0))
+                .min(1.0);
+            size * scale
+        };
+        match data.doc.doc_thumbs.get(i).copied().flatten() {
+            Some((texture, size)) => {
+                let (rect, _) = ui.allocate_exact_size(fit(size), egui::Sense::hover());
+                ui.painter().image(
+                    texture,
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                ui.painter().rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(1.0_f32, pal.separator),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            None => {
+                let size = fit(egui::vec2(w as f32, h as f32)).max(egui::vec2(64.0, 48.0));
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, pal.app_bg);
+                ui.put(rect, egui::Spinner::new().size(16.0));
+            }
+        }
+    }
+    ui.label(egui::RichText::new(title).strong().color(pal.text));
+    if let Some((w, h)) = dims {
+        ui.label(
+            egui::RichText::new(format!("{w} \u{d7} {h} px"))
+                .size(11.0)
+                .color(pal.text_dim),
+        );
+    }
 }
 
 fn build_document_list(
@@ -267,13 +333,24 @@ fn build_document_list(
     actions: &mut UiActions,
 ) {
     let pal = data.chrome.theme_mode.palette();
-    // The popup frame has 6 px of vertical margin on each side. Fill all
-    // remaining space down to the top edge of the status bar.
+    // Offer only the tabs the strip hides (off either end or clipped); an
+    // unknown flag (a tab appended since the last layout) counts as shown.
+    let visible = ctx
+        .data(|d| d.get_temp::<Vec<bool>>(egui::Id::new(TAB_VISIBLE_KEY)))
+        .unwrap_or_default();
+    let hidden = hidden_tabs(&visible, data.doc.doc_count);
+    let open_flag = egui::Id::new("doc_list_was_open");
+    if hidden.is_empty() {
+        ctx.data_mut(|d| d.insert_temp(open_flag, false));
+        return;
+    }
+    // The popup frame has 6 px of vertical margin on each side. Grow with the
+    // hidden tabs up to the top edge of the status bar, then scroll.
     let available_height =
         (ctx.content_rect().bottom() - ui.max_rect().bottom() - super::statusbar::HEIGHT - 12.0)
             .max(DOC_LIST_ROW_H);
     let button = egui::Button::new(
-        egui::RichText::new(ph::CARET_DOWN)
+        egui::RichText::new(format!("{} {}", hidden.len(), ph::CARET_DOWN))
             .size(12.0)
             .color(pal.text_dim),
     )
@@ -283,7 +360,6 @@ fn build_document_list(
 
     // Scroll to the active document only on the frame the popup opens, so a
     // long list starts centered on it without fighting later user scrolling.
-    let open_flag = egui::Id::new("doc_list_was_open");
     let was_open = ctx.data(|d| d.get_temp::<bool>(open_flag)).unwrap_or(false);
 
     let (response, menu_inner) =
@@ -294,12 +370,11 @@ fn build_document_list(
             egui::ScrollArea::vertical()
                 .id_salt("document_list_scroll")
                 .max_height(available_height)
-                .min_scrolled_height(available_height)
-                .auto_shrink([false, false])
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
                     ui.set_min_width(DOC_LIST_MIN_W);
 
-                    for i in 0..data.doc.doc_count {
+                    for &i in &hidden {
                         let title = data
                             .doc
                             .doc_titles
@@ -333,15 +408,18 @@ fn build_document_list(
                                     } else {
                                         egui::RichText::new(label)
                                     };
-                                    let select = ui
-                                        .add_sized(
-                                            [row_width, DOC_LIST_ROW_H],
-                                            egui::Button::new(())
-                                                .left_text(label)
-                                                .selected(is_active)
-                                                .frame_when_inactive(false),
-                                        )
-                                        .on_hover_text(title);
+                                    let select = ui.add_sized(
+                                        [row_width, DOC_LIST_ROW_H],
+                                        egui::Button::new(())
+                                            .left_text(label)
+                                            .selected(is_active)
+                                            .frame_when_inactive(false),
+                                    );
+                                    if select.hovered() {
+                                        actions.doc.hovered_doc = Some(i);
+                                    }
+                                    let select =
+                                        select.on_hover_ui(|ui| doc_preview_ui(ui, data, i));
 
                                     if is_active {
                                         let row = select.rect.union(close.rect);
@@ -383,7 +461,14 @@ fn build_document_list(
 
     ctx.data_mut(|d| d.insert_temp(open_flag, menu_inner.is_some()));
 
-    response.on_hover_text("All open documents");
+    response.on_hover_text(format!("{} more open documents", hidden.len()));
+}
+
+/// Indices of the tabs the strip does not show in full.
+fn hidden_tabs(fully_visible: &[bool], doc_count: usize) -> Vec<usize> {
+    (0..doc_count)
+        .filter(|&i| !fully_visible.get(i).copied().unwrap_or(true))
+        .collect()
 }
 
 fn truncate_title(s: &str, max_chars: usize) -> String {
@@ -393,5 +478,18 @@ fn truncate_title(s: &str, max_chars: usize) -> String {
     } else {
         let truncated: String = chars[..max_chars - 1].iter().collect();
         format!("{}…", truncated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hidden_tabs;
+
+    #[test]
+    fn the_list_offers_only_tabs_the_strip_hides() {
+        assert!(hidden_tabs(&[true, true, true], 3).is_empty());
+        assert_eq!(hidden_tabs(&[false, true, true, false], 4), vec![0, 3]);
+        // A tab appended since the last layout is assumed shown until measured.
+        assert_eq!(hidden_tabs(&[false, true], 3), vec![0]);
     }
 }
