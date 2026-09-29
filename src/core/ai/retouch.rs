@@ -2298,7 +2298,7 @@ pub fn ensure_model_folders_with_readme() {
 /// Search roots for model folders, most authoritative first. A release-local
 /// bundle beside the executable wins; user model directories remain a
 /// development/override fallback but cannot silently shadow shipped artifacts.
-fn model_roots() -> Vec<PathBuf> {
+pub(crate) fn model_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
@@ -2401,6 +2401,35 @@ fn first_onnx_in(dir: &Path) -> Option<PathBuf> {
         .collect();
     entries.sort();
     entries.into_iter().next()
+}
+
+/// A YuNet face box (x, y, width, height) with its five keypoints: image-left
+/// eye, image-right eye, nose tip, image-left and image-right mouth corners.
+#[derive(Clone, Debug)]
+pub struct FaceSeed {
+    pub rect: [f32; 4],
+    pub keypoints: [[f32; 2]; 5],
+    pub score: f32,
+}
+
+/// Detect faces with YuNet on the CPU, for landmark models seeded from it.
+pub fn detect_face_seeds(rgba: &[u8], width: u32, height: u32) -> Result<Vec<FaceSeed>, String> {
+    let detector = LocalOnnxRunner::new(ModelId::FaceDetector);
+    if !detector.available() {
+        return Err(format!(
+            "thiếu model tìm mặt YuNet ({})",
+            detector.path().display()
+        ));
+    }
+    Ok(detector
+        .detect_faces(rgba, width, height)?
+        .into_iter()
+        .map(|face| FaceSeed {
+            rect: [face.x, face.y, face.width, face.height],
+            keypoints: face.landmarks,
+            score: face.score,
+        })
+        .collect())
 }
 
 pub fn model_metadata() -> Vec<ModelMetadata> {

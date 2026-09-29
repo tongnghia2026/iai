@@ -8,6 +8,7 @@ mod channels;
 mod clipboard;
 mod develop;
 mod edit_ops;
+mod face_mesh_trial;
 mod filters;
 mod impose;
 mod print;

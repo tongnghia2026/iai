@@ -300,6 +300,9 @@ impl App {
         if actions.ai.retouch_cancel {
             self.cancel_active_ai();
         }
+        if actions.ai.face_mesh_trial {
+            self.do_face_mesh_trial();
+        }
         if let Some((paper, kind, gap)) = actions.doc.impose_sheet.take() {
             self.do_impose_sheet(paper, kind, gap);
         }

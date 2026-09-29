@@ -934,6 +934,8 @@ pub struct AiIntent {
     /// Run/cancel the local offline Auto Retouch pipeline.
     pub retouch_run: bool,
     pub retouch_cancel: bool,
+    /// Trial: draw MediaPipe face landmarks as a new layer.
+    pub face_mesh_trial: bool,
 }
 
 /// Preferences edits. The dialog emits the whole updated [`AppSettings`] on any

@@ -1064,6 +1064,18 @@ fn offline_retouch_section(
         .small()
         .weak(),
     );
+    ui.separator();
+    if ui
+        .add_enabled(
+            can_run,
+            egui::Button::new("Thử nhận diện mốc mặt (MediaPipe)")
+                .min_size(egui::vec2(ui.available_width(), 26.0)),
+        )
+        .on_hover_text("Bản thử: vẽ 478 điểm mốc lên mỗi khuôn mặt thành một layer mới")
+        .clicked()
+    {
+        actions.ai.face_mesh_trial = true;
+    }
 }
 
 fn output_selector(ui: &mut egui::Ui, st: &mut AiPanelState, changed: &mut bool) {
