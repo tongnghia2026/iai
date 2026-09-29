@@ -1399,10 +1399,34 @@ fn headless_zoomed_out_display_averages_the_pixel_grid() {
     );
 }
 
+/// Half-resolution copy of `scene` (2×2 means, linear), keeping its look.
+fn downsample_scene_2x(scene: &SceneSource) -> SceneSource {
+    let (w, h) = (scene.width / 2, scene.height / 2);
+    let mut out = SceneSource::new(w, h);
+    out.look = scene.look.clone();
+    out.color_pipeline = scene.color_pipeline;
+    out.camera_rgb_curve = scene.camera_rgb_curve.clone();
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0.0f32; 3];
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let c = scene.get_rgb(2 * x + dx, 2 * y + dy);
+                for i in 0..3 {
+                    acc[i] += c[i] * 0.25;
+                }
+            }
+            out.set_rgb(x, y, acc);
+        }
+    }
+    out
+}
+
 /// A zoomed-out Detail plane texel stands for its block the way the display
-/// shows the committed block: the chain runs on each grid pixel and the
-/// results are averaged — never the other way round, which brightened fine
-/// light/dark texture (hair, feathers) far past the commit.
+/// shows the committed block: the chain runs on each grid tap and the results
+/// are averaged. A tap covering more than a pixel reads its sub-block's mean
+/// from the scene mips (so every pixel counts), which on real photos sits far
+/// closer to the area-filtered commit than point taps; averaging the whole
+/// block before the chain would brighten fine light/dark texture instead.
 #[test]
 fn headless_zoomed_out_plane_averages_committed_pixels() {
     if std::env::var_os("CI").is_some() {
@@ -1453,7 +1477,10 @@ fn headless_zoomed_out_plane_averages_committed_pixels() {
             exposure: 10.0,
             ..Default::default()
         };
-        let committed = apply_scene_to_tilemap(&scene, &settings, None).flatten();
+        // A 6 px block's grid: 3 taps per axis, each the mean of a 2×2
+        // sub-block — the chain on the half-resolution scene, then averaged.
+        let half = downsample_scene_2x(&scene);
+        let half_committed = apply_scene_to_tilemap(&half, &settings, None).flatten();
         let tone = iai::core::develop_scene::build_scene_tone_for_scene(&settings, &scene);
         let mut compositor = CompositorState::new(&device, width, height, max_texture);
         compositor.develop_preview = Some(DevelopGpuPreview {
@@ -1480,11 +1507,10 @@ fn headless_zoomed_out_plane_averages_committed_pixels() {
         let is_ping =
             compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 1.0, None, false, false);
         let gpu = compositor.readback_rgba8(&device, &queue, is_ping);
-        // A 6 px block's grid: 3 taps per axis at offsets 1, 3, 5.
-        let taps = [1, 3, 5];
+        let taps = [0, 1, 2];
         let mut max_error = 0.0f32;
         for c in 0..3 {
-            let expected = grid_mean(&committed, width, &taps, &taps, c);
+            let expected = grid_mean(&half_committed, width / 2, &taps, &taps, c);
             for p in gpu.chunks_exact(4) {
                 max_error = max_error.max((p[c] as f32 - expected).abs());
             }

@@ -237,7 +237,7 @@ pub struct TileAtlas {
     pub view: wgpu::TextureView,
     /// All mip levels, viewed as plain bytes (see [`TILE_ATLAS_RAW_FORMAT`]).
     pub raw_view: wgpu::TextureView,
-    /// Bilinear sampler for explicit-level reads of `raw_view`.
+    /// Trilinear sampler for explicit-LOD reads (`raw_view`, the scene master).
     raw_sampler: wgpu::Sampler,
     pub bind_group: wgpu::BindGroup,
     pub slots: Vec<Option<AtlasSlot>>,
@@ -310,10 +310,13 @@ impl TileAtlas {
             format: Some(TILE_ATLAS_RAW_FORMAT),
             ..Default::default()
         });
+        // Trilinear: the atlas filter passes whole LODs (exact levels); the
+        // Develop scene reads pass fractional ones.
         let raw_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("TileAtlas_raw_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
         let bind_group = Self::build_bind_group(

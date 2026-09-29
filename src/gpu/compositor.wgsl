@@ -45,7 +45,7 @@ struct CompositorUniforms {
 // The same atlas with its mip chain, viewed as plain bytes (sRGB-encoded
 // values, no decode) for the zoomed-out area filter.
 @group(0) @binding(3) var atlas_raw: texture_2d<f32>;
-// Bilinear, explicit-level sampler for `atlas_raw`.
+// Trilinear, explicit-LOD sampler for `atlas_raw` and the Develop scene master.
 @group(0) @binding(4) var atlas_lin: sampler;
 
 @group(1) @binding(0) var dst_tex: texture_2d<f32>;
@@ -1687,7 +1687,7 @@ fn dev_rgb_curve_at(ch: u32, v: f32) -> f32 {
     return mix(dev_rgb_curve[base + i0], dev_rgb_curve[base + i1], t);
 }
 
-fn develop_apply(srgb_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
+fn develop_apply(srgb_in: vec3<f32>, local: vec2<f32>, lod: f32) -> vec3<f32> {
     // GPU Detail plane: the pre-pass already ran the chain and Detail over
     // this view. Pixels outside it (a view that has just panned, before the
     // plane follows) take the ordinary chain below, without Detail.
@@ -1707,7 +1707,13 @@ fn develop_apply(srgb_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
         // non-uniform control flow. Display curves are inside the chain, so the
         // rgb-point-curve block below is skipped for this path (scene sessions
         // fold them into dev_scene_display's display stage instead).
-        let scene_rgb = textureSampleLevel(dev_scene_tex, samp, local, 0.0).rgb;
+        // A zoomed-out tap reads its sub-block mean (bilinear, scene mips).
+        var scene_rgb: vec3<f32>;
+        if (lod >= 0.0) {
+            scene_rgb = textureSampleLevel(dev_scene_tex, atlas_lin, local, lod).rgb;
+        } else {
+            scene_rgb = textureSampleLevel(dev_scene_tex, samp, local, 0.0).rgb;
+        }
         toned = dev_scene_display(scene_rgb, local);
     } else {
     // Tone stage (skipped when inactive, so a Colour-only edit does not roll off
@@ -2149,11 +2155,22 @@ fn dev_plane_block(i: u32, j: u32) -> DevPlaneBlock {
 
 // Scene value and position of grid tap k (row-major) of block `b`.
 fn dev_plane_tap(b: DevPlaneBlock, k: u32) -> DevPlaneTexel {
-    let x = b.x0 + zoom_tap(k % b.n, b.n, f32(b.span_x));
-    let y = b.y0 + zoom_tap(k / b.n, b.n, f32(b.span_y));
+    let kx = k % b.n;
+    let ky = k / b.n;
+    let size = vec2<f32>(u.layer_w, u.layer_h);
+    let span = vec2<f32>(f32(b.span_x), f32(b.span_y)) / f32(b.n);
+    let lod = dev_span_lod(max(span.x, span.y));
     var out: DevPlaneTexel;
+    if (lod >= 0.0) {
+        let c = vec2<f32>(f32(b.x0), f32(b.y0)) + (vec2<f32>(f32(kx), f32(ky)) + 0.5) * span;
+        out.local = c / size;
+        out.rgb = textureSampleLevel(dev_scene_tex, atlas_lin, out.local, lod).rgb;
+        return out;
+    }
+    let x = b.x0 + zoom_tap(kx, b.n, f32(b.span_x));
+    let y = b.y0 + zoom_tap(ky, b.n, f32(b.span_y));
     out.rgb = textureLoad(dev_scene_tex, vec2<i32>(i32(x), i32(y)), 0).rgb;
-    out.local = (vec2<f32>(f32(x), f32(y)) + 0.5) / vec2<f32>(u.layer_w, u.layer_h);
+    out.local = (vec2<f32>(f32(x), f32(y)) + 0.5) / size;
     return out;
 }
 
@@ -2248,13 +2265,23 @@ fn fs_develop_cells(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32>
 }
 
 // ── Zoomed-out display grid ──────────────────────────────────────────────────
-// A screen pixel (or Detail-plane texel) covering `footprint` layer px averages
-// an n×n stratified grid of real pixels instead of point-sampling one, so noise
-// and fine texture do not alias. The Develop preview and its Detail plane
-// share the grid (the chain runs per grid pixel); committed layers use the
-// full-area filter (`area_sample`).
+// A screen pixel (or Detail-plane texel) covering `footprint` layer px runs the
+// Develop chain on an n×n grid. Each tap stands for its footprint/n sub-block:
+// when that is wider than a pixel the scene is read as the sub-block's mean
+// (a bilinear read of the scene mips), so every pixel contributes and fine texture
+// and noise do not alias. Committed layers use the full-area filter
+// (`area_sample`).
 fn zoom_taps_per_axis(footprint: f32) -> u32 {
     return clamp(u32(footprint * 0.5 + 1.0), 1u, 3u);
+}
+
+// Scene mip level for a tap standing for a `span`-px sub-block, or -1 when
+// the tap is a single pixel. A bilinear read at level L spans ~2·2^L px, hence
+// one level finer than the span: a wider read would blur and, averaged before
+// the chain's tone curve, brighten fine dark/light texture. A whole level
+// keeps it one bilinear fetch (trilinear doubled the preview's fetch cost).
+fn dev_span_lod(span: f32) -> f32 {
+    return select(-1.0, max(round(log2(span) - 1.0), 0.0), span > 1.001);
 }
 
 // The Develop layer's grid, capped by the App's draft setting (bank slot 280:
@@ -2271,8 +2298,9 @@ fn zoom_tap(k: u32, n: u32, span: f32) -> u32 {
 
 // One layer pixel of the untransformed path as the display sees it: sRGB after
 // the layer's live Develop / adjustment preview, and its coverage (alpha ×
-// mask). An absent tile is transparent.
-fn layer_texel_srgb(ix: i32, iy: i32) -> vec4<f32> {
+// mask). An absent tile is transparent. `local` / `lod` place the Develop
+// chain's scene read (the tap's sub-block, see `dev_span_lod`).
+fn layer_texel_srgb(ix: i32, iy: i32, local: vec2<f32>, lod: f32) -> vec4<f32> {
     let ux = u32(ix);
     let uy = u32(iy);
     let tx = ux / 256u;
@@ -2301,11 +2329,7 @@ fn layer_texel_srgb(ix: i32, iy: i32) -> vec4<f32> {
     }
     var srgb = dev_linear_to_srgb(c.rgb);
     if (u.adj_kind == 20u) {
-        let local = vec2<f32>(
-            (f32(ix) + 0.5) / max(u.layer_w, 1.0),
-            (f32(iy) + 0.5) / max(u.layer_h, 1.0),
-        );
-        srgb = develop_apply(srgb, local);
+        srgb = develop_apply(srgb, local, lod);
     } else if (u.adj_kind >= 1u && u.adj_kind <= 13u) {
         srgb = apply_adjustment(srgb);
     }
@@ -2881,6 +2905,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var filter_lx: f32 = 0.0;
     var filter_ly: f32 = 0.0;
     var supersampled = false;
+    // Scene LOD of a one-sample Develop draft (-1 = one pixel, see `dev_span_lod`).
+    var dev_lod: f32 = -1.0;
 
     if (u.xform_active == 2u) {
         // Free Transform uses a full inverse homography. The existing twelve
@@ -3015,18 +3041,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             mask_a = 1.0;
             supersampled = true;
         }
+        if (u.adj_kind == 20u && n == 1u) {
+            dev_lod = dev_span_lod(footprint);
+        }
         if (n > 1u) {
             let x0 = layer_x - 0.5 * footprint;
             let y0 = layer_y - 0.5 * footprint;
             let max_x = i32(u.layer_w) - 1;
             let max_y = i32(u.layer_h) - 1;
+            let size = vec2<f32>(u.layer_w, u.layer_h);
+            let span = footprint / f32(n);
+            let lod = dev_span_lod(span);
             var acc = vec3<f32>(0.0);
             var cov = 0.0;
             for (var ky = 0u; ky < n; ky = ky + 1u) {
-                let iy = clamp(i32(floor(y0 + (f32(ky) + 0.5) * footprint / f32(n))), 0, max_y);
+                let cy = y0 + (f32(ky) + 0.5) * span;
+                let iy = clamp(i32(floor(cy)), 0, max_y);
                 for (var kx = 0u; kx < n; kx = kx + 1u) {
-                    let ix = clamp(i32(floor(x0 + (f32(kx) + 0.5) * footprint / f32(n))), 0, max_x);
-                    let t = layer_texel_srgb(ix, iy);
+                    let cx = x0 + (f32(kx) + 0.5) * span;
+                    let ix = clamp(i32(floor(cx)), 0, max_x);
+                    var local = (vec2<f32>(f32(ix), f32(iy)) + 0.5) / size;
+                    if (lod >= 0.0) {
+                        local = clamp(vec2<f32>(cx, cy), vec2<f32>(0.0), size) / size;
+                    }
+                    let t = layer_texel_srgb(ix, iy, local, lod);
                     acc = acc + t.rgb * t.a;
                     cov = cov + t.a;
                 }
@@ -3045,7 +3083,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (supersampled) {
     } else if (u.adj_kind == 20u) {
         let srgb = dev_linear_to_srgb(src.rgb);
-        let cr = develop_apply(srgb, dev_local);
+        let cr = develop_apply(srgb, dev_local, dev_lod);
         src = vec4<f32>(dev_srgb_to_linear(dev_dither_srgb(cr, in.pos.xy)), src.a);
     } else if (u.adj_kind >= 1u && u.adj_kind <= 13u) {
         // Live Ctrl+L/M preview on this raster layer's own pixels. Use the exact

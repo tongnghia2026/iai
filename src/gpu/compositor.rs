@@ -67,6 +67,36 @@ struct ProxyRender {
 /// this module's tests plus the CPU/GPU parity tests in core.
 pub const COMPOSITOR_SHADER: &str = include_str!("compositor.wgsl");
 
+/// Develop scene master mips: each texel is the mean of the 2×2 texels below
+/// it (edge-clamped for odd sizes). Scene values are linear, so a plain mean.
+const SCENE_MIP_SHADER: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((vi << 1u) & 2u);
+    let y = f32(vi & 2u);
+    return vec4<f32>(x * 2.0 - 1.0, y * -2.0 + 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let last = vec2<i32>(textureDimensions(src, 0)) - 1;
+    let p = vec2<i32>(pos.xy) * 2;
+    let a = textureLoad(src, min(p, last), 0);
+    let b = textureLoad(src, min(p + vec2<i32>(1, 0), last), 0);
+    let c = textureLoad(src, min(p + vec2<i32>(0, 1), last), 0);
+    let d = textureLoad(src, min(p + vec2<i32>(1, 1), last), 0);
+    return (a + b + c + d) * 0.25;
+}
+"#;
+
+/// Scene master mip levels: enough for a Develop tap standing for a 64 px
+/// sub-block (the 2 % minimum zoom's one-sample draft), within the size.
+fn scene_mip_level_count(w: u32, h: u32) -> u32 {
+    (u32::BITS - w.max(h).max(1).leading_zeros()).min(7)
+}
+
 pub const ADJUSTMENT_SHADER: &str = r#"
 struct CompositorUniforms {
     opacity:        f32,
@@ -1357,6 +1387,9 @@ pub struct CompositorState {
     dev_scene_dummy_tex: wgpu::Texture,
     dev_scene_dummy_view: wgpu::TextureView,
     dev_scene_key: usize,
+    /// Builds the scene master's mips (2×2 means) at session upload; created
+    /// on first use.
+    scene_mip_pipeline: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
 
     pipeline: wgpu::RenderPipeline,
     adjustment_pipeline: wgpu::RenderPipeline,
@@ -2032,6 +2065,7 @@ struct VsOut {
             dev_scene_dummy_tex,
             dev_scene_dummy_view,
             dev_scene_key: 0,
+            scene_mip_pipeline: None,
             pipeline,
             adjustment_pipeline,
             clear_pipeline,
@@ -2240,6 +2274,7 @@ struct VsOut {
             Some(scene) => {
                 let w = scene.width.max(1);
                 let h = scene.height.max(1);
+                let mip_levels = scene_mip_level_count(w, h);
                 let tex = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("dev_scene_tex"),
                     size: wgpu::Extent3d {
@@ -2247,11 +2282,13 @@ struct VsOut {
                         height: h,
                         depth_or_array_layers: 1,
                     },
-                    mip_level_count: 1,
+                    mip_level_count: mip_levels,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Rgba16Float,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
                     view_formats: &[],
                 });
                 // write_texture wants bytes_per_row % 256 == 0 (h > 1): upload
@@ -2305,6 +2342,7 @@ struct VsOut {
                         },
                     );
                 }
+                self.build_scene_mips(device, queue, &tex, mip_levels);
                 let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
                 self.tile_atlas
                     .rebind_scene(device, &self.bg_layout_src, &self.sampler, &view);
@@ -2321,6 +2359,112 @@ struct VsOut {
             }
         }
         self.dev_scene_key = key;
+    }
+
+    /// Fill levels 1.. of the scene master with 2×2 means of the level below
+    /// (edge-clamped), so a zoomed-out Develop tap can read its sub-block's
+    /// mean. Submitted right away: the level-0 upload is staged ahead of it.
+    fn build_scene_mips(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tex: &wgpu::Texture,
+        mip_levels: u32,
+    ) {
+        if mip_levels < 2 {
+            return;
+        }
+        let (pipeline, layout) = self.scene_mip_pipeline.get_or_insert_with(|| {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("scene_mip_shader"),
+                source: wgpu::ShaderSource::Wgsl(SCENE_MIP_SHADER.into()),
+            });
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("scene_mip_bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                }],
+            });
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("scene_mip_pl"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("scene_mip_pipeline"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            (pipeline, layout)
+        });
+        let level_view = |level: u32| {
+            tex.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("dev_scene_mip"),
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("scene_mip_enc"),
+        });
+        for level in 1..mip_levels {
+            let src = level_view(level - 1);
+            let dst = level_view(level);
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scene_mip_bg"),
+                layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&src),
+                }],
+            });
+            let mut rpass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene_mip_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dst,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            rpass.set_pipeline(pipeline);
+            rpass.set_bind_group(0, &bg, &[]);
+            rpass.draw(0..3, 0..1);
+        }
+        queue.submit(std::iter::once(enc.finish()));
     }
 
     /// Whether the shader can run the scene chain for this preview (the master
@@ -5356,6 +5500,15 @@ mod shader_tests {
     fn shaders_are_valid_wgsl() {
         validate("compositor", super::COMPOSITOR_SHADER);
         validate("adjustment", super::ADJUSTMENT_SHADER);
+        validate("scene mips", super::SCENE_MIP_SHADER);
+    }
+
+    #[test]
+    fn scene_mip_levels_fit_the_master() {
+        assert_eq!(super::scene_mip_level_count(1, 1), 1);
+        assert_eq!(super::scene_mip_level_count(3, 2), 2);
+        assert_eq!(super::scene_mip_level_count(64, 16), 7);
+        assert_eq!(super::scene_mip_level_count(6000, 4000), 7);
     }
 
     #[test]
