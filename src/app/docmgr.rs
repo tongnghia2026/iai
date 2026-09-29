@@ -543,18 +543,39 @@ mod tests {
         app.open_new_doc_tab(); // clean tab, active when exit is requested
         assert!(!app.request_app_exit());
         assert_eq!(app.docs.pending_exit_docs.len(), 2);
-        assert_eq!(app.docs.pending_exit_docs.front(), Some(&first_id));
-        assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, first_id);
-
-        app.discard_current_exit_document();
         assert_eq!(app.docs.pending_exit_docs.front(), Some(&second_id));
         assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, second_id);
+
+        app.discard_current_exit_document();
+        assert_eq!(app.docs.pending_exit_docs.front(), Some(&first_id));
+        assert_eq!(app.docs.documents[app.docs.active_doc_idx].id, first_id);
         assert!(app.shell.ui.show_exit_dialog);
 
         app.discard_current_exit_document();
         assert!(app.docs.pending_exit_docs.is_empty());
         assert!(app.shell.exit_requested);
         assert!(!app.shell.ui.show_exit_dialog);
+    }
+
+    #[test]
+    fn app_exit_prompts_tabs_newest_first() {
+        let mut app = App::new();
+        app.open_new_doc_tab();
+        app.open_new_doc_tab();
+        let ids: Vec<_> = app.docs.documents.iter().map(|doc| doc.id).collect();
+        for doc in &mut app.docs.documents {
+            doc.canvas.deselect();
+        }
+        app.switch_to_doc_confirmed(1);
+
+        assert!(!app.request_app_exit());
+        let mut prompted = Vec::new();
+        while app.shell.ui.show_exit_dialog {
+            prompted.push(app.docs.documents[app.docs.active_doc_idx].id);
+            app.discard_current_exit_document();
+        }
+        assert_eq!(prompted, vec![ids[2], ids[1], ids[0]]);
+        assert!(app.shell.exit_requested);
     }
 
     #[test]

@@ -2760,10 +2760,13 @@ impl App {
         #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
         let webview_dirty_ids = self.document_webview_dirty_document_ids();
 
+        // Newest tab first: tabs open left to right, so the sweep unwinds them
+        // right to left instead of jumping back to the oldest one.
         self.docs.pending_exit_docs = self
             .docs
             .documents
             .iter()
+            .rev()
             .filter(|document| {
                 document.is_modified() || {
                     #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
