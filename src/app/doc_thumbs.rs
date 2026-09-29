@@ -7,8 +7,9 @@ use crate::core::layer::LayerStack;
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 
-/// Longest side of a preview, in pixels.
-const DOC_THUMB_MAX: u32 = 256;
+/// Longest side of a preview, in pixels: a soft glance, not a sharp copy, so
+/// it composites few rows and lands fast.
+const DOC_THUMB_MAX: u32 = 96;
 /// Checkerboard cell (preview pixels) shown under transparent areas.
 const CHECKER: u32 = 6;
 
@@ -210,7 +211,7 @@ fn render_preview(stack: &mut LayerStack, w: u32, h: u32) -> Option<egui::ColorI
             let x0 = (tx as u64 * w as u64 / tw as u64) as u32;
             let x1 = (((tx as u64 + 1) * w as u64 / tw as u64) as u32).clamp(x0 + 1, w);
             let span = x1 - x0;
-            let n = span.min(8);
+            let n = span.min(4);
             let mut acc = [0f32; 4];
             for k in 0..n {
                 let sx = x0 + (2 * k + 1) * span / (2 * n);
@@ -258,15 +259,15 @@ mod tests {
         let mut doc = solid(1200, 300, [200, 40, 10, 255]);
         let image =
             render_preview(&mut doc.canvas.layer_stack, 1200, 300).expect("preview renders");
-        assert_eq!(image.size, [256, 64]);
-        let px = image.pixels[64 * 20 + 100];
+        assert_eq!(image.size, [96, 24]);
+        let px = image.pixels[96 * 10 + 40];
         assert_eq!((px.r(), px.g(), px.b()), (200, 40, 10));
     }
 
     #[test]
     fn small_documents_are_not_upscaled() {
         assert_eq!(preview_size(90, 40, DOC_THUMB_MAX), (90, 40));
-        assert_eq!(preview_size(4000, 6000, DOC_THUMB_MAX), (171, 256));
+        assert_eq!(preview_size(4000, 6000, DOC_THUMB_MAX), (64, 96));
     }
 
     #[test]
@@ -285,7 +286,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
             thumbs.poll(&ctx, &docs);
         }
-        assert_eq!(thumbs.get(docs[0].id).unwrap().1, egui::vec2(256.0, 171.0));
+        assert_eq!(thumbs.get(docs[0].id).unwrap().1, egui::vec2(96.0, 64.0));
         assert!(
             !thumbs.request(&docs[0]),
             "unchanged document is not re-rendered"

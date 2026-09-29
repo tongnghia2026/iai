@@ -14,8 +14,8 @@ const DOC_LIST_BTN_W: f32 = 30.0;
 const DOC_LIST_ROW_H: f32 = 24.0;
 const DOC_LIST_MIN_W: f32 = 260.0;
 const DOC_LIST_MAX_W: f32 = 360.0;
-const PREVIEW_MAX_W: f32 = 220.0;
-const PREVIEW_MAX_H: f32 = 165.0;
+const PREVIEW_MAX_W: f32 = 160.0;
+const PREVIEW_MAX_H: f32 = 120.0;
 /// Per-tab "fully inside the strip" flags from the last layout, so the
 /// document list can offer only the tabs the strip is hiding.
 const TAB_VISIBLE_KEY: &str = "document_tab_fully_visible";
@@ -142,7 +142,7 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         if tab_response.hovered() {
             actions.doc.hovered_doc = Some(i);
         }
-        let tab_response = tab_response.on_hover_ui(|ui| doc_preview_ui(ui, data, i));
+        let tab_response = with_doc_preview(tab_response, data, i);
 
         // Appends take precedence so the newest filename is always visible on
         // the right.  Otherwise follow explicit tab/keyboard navigation.
@@ -274,56 +274,36 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     });
 }
 
-/// Tooltip body for tab `i`: its preview (a placeholder while it renders), the
-/// full title and the pixel size.
-fn doc_preview_ui(ui: &mut egui::Ui, data: &UiData, i: usize) {
-    let pal = data.chrome.theme_mode.palette();
-    let title = data
-        .doc
-        .doc_titles
-        .get(i)
-        .map(|s| s.as_str())
-        .unwrap_or("Untitled");
-    let dims = data.doc.doc_dims.get(i).copied().flatten();
-    if let Some((w, h)) = dims {
-        let fit = |size: egui::Vec2| {
-            let scale = (PREVIEW_MAX_W / size.x.max(1.0))
-                .min(PREVIEW_MAX_H / size.y.max(1.0))
-                .min(1.0);
-            size * scale
-        };
-        match data.doc.doc_thumbs.get(i).copied().flatten() {
-            Some((texture, size)) => {
-                let (rect, _) = ui.allocate_exact_size(fit(size), egui::Sense::hover());
+/// Attach tab `i`'s preview as a hover tooltip: only the low-resolution image,
+/// upscaled soft. Documents without a pixel preview get no tooltip.
+fn with_doc_preview(response: egui::Response, data: &UiData, i: usize) -> egui::Response {
+    let Some((w, h)) = data.doc.doc_dims.get(i).copied().flatten() else {
+        return response;
+    };
+    let fit = |size: egui::Vec2| {
+        let scale = (PREVIEW_MAX_W / size.x.max(1.0)).min(PREVIEW_MAX_H / size.y.max(1.0));
+        size * scale
+    };
+    let thumb = data.doc.doc_thumbs.get(i).copied().flatten();
+    response.on_hover_ui(|ui| {
+        let size = fit(thumb.map_or(egui::vec2(w as f32, h as f32), |(_, size)| size));
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        match thumb {
+            Some((texture, _)) => {
                 ui.painter().image(
                     texture,
                     rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
-                ui.painter().rect_stroke(
-                    rect,
-                    0.0,
-                    egui::Stroke::new(1.0_f32, pal.separator),
-                    egui::StrokeKind::Outside,
-                );
             }
             None => {
-                let size = fit(egui::vec2(w as f32, h as f32)).max(egui::vec2(64.0, 48.0));
-                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                let pal = data.chrome.theme_mode.palette();
                 ui.painter().rect_filled(rect, 2.0, pal.app_bg);
                 ui.put(rect, egui::Spinner::new().size(16.0));
             }
         }
-    }
-    ui.label(egui::RichText::new(title).strong().color(pal.text));
-    if let Some((w, h)) = dims {
-        ui.label(
-            egui::RichText::new(format!("{w} \u{d7} {h} px"))
-                .size(11.0)
-                .color(pal.text_dim),
-        );
-    }
+    })
 }
 
 fn build_document_list(
@@ -418,8 +398,7 @@ fn build_document_list(
                                     if select.hovered() {
                                         actions.doc.hovered_doc = Some(i);
                                     }
-                                    let select =
-                                        select.on_hover_ui(|ui| doc_preview_ui(ui, data, i));
+                                    let select = with_doc_preview(select, data, i);
 
                                     if is_active {
                                         let row = select.rect.union(close.rect);
