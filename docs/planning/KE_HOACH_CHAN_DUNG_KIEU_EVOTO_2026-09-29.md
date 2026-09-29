@@ -8,8 +8,9 @@
 
 - Ngày lập kế hoạch: **2026-09-29**.
 - Nhánh: `feat/vector-core-foundation`.
-- Trạng thái: **Phase 0 (thử MediaPipe) — code xong, chờ chủ test trên ảnh thật.**
-- Việc kế tiếp: chủ bấm nút thử trên 10–20 ảnh thật → quyết giữ/bỏ MediaPipe.
+- Trạng thái: **Phase 0 ĐẠT** (chủ test 29/09: "khá ổn") → giữ MediaPipe cho mốc mặt.
+- Việc kế tiếp: chủ chọn có thử Sapiens2 (Meta) làm model mask da/tóc/răng/môi
+  hay không (mục 5), rồi vào Phase 1.
 - Không push nếu chủ chưa yêu cầu. Sau mỗi phase: build Release + đường dẫn
   `.exe` thật rồi mới mời chủ test.
 
@@ -66,7 +67,7 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
       ảnh chân dung thường lệch 1,2–2,0% (NME theo khoảng cách 2 khoé mắt);
       iAi tìm được các mặt Google bỏ sót (ảnh cũ 3 mặt nhỏ ~70px, 2 bé người
       châu Á, mặt trong canvas 4000×3000, ảnh xoay 80°). ~100–220 ms/ảnh CPU.
-- [~] Nút **AI Panel ▸ AI Auto Retouch ▸ "Thử nhận diện mốc mặt (MediaPipe)"**
+- [x] Nút **AI Panel ▸ AI Auto Retouch ▸ "Thử nhận diện mốc mặt (MediaPipe)"**
       → thêm layer "Mốc mặt MediaPipe (thử)" (Ctrl+Z được).
 - **Cổng nghiệm thu**: chủ thử trên 10–20 ảnh thật (chân dung, ảnh thẻ, ảnh
   nhóm, nghiêng mặt, đeo kính). Viền mắt, lông mày, môi, mũi, cằm phải bám đúng.
@@ -139,8 +140,32 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
 - Model ONNX do mình tự chuyển từ TFLite: giữ checksum
   (`58b89dbb…ed4cd`) và script chuyển đổi khi đưa vào chính thức.
 
-## 5. Changelog
+## 5. Model thay thế / bổ sung đã khảo sát (29/09)
+
+Chủ cho phép dùng model phi thương mại nếu tốt hơn (app miễn phí, nhận
+donate). Kết luận:
+
+- **Mốc mặt: giữ MediaPipe.** Các model đứng đầu bảng xếp hạng WFLW (STAR,
+  PIPNet, SPIGA, POPoS) chỉ 98 điểm, không có mống mắt, dữ liệu train chỉ cho
+  nghiên cứu; hơn MediaPipe chủ yếu ở mặt nghiêng mạnh/bị che. InsightFace
+  2d106det: 106 điểm, phi thương mại, không hơn trên mặt chính diện.
+  Điểm yếu MediaPipe cần xử lý ở Phase 2: đường viền hàm ở mặt nghiêng bám
+  theo mặt lưới 3D, không luôn trùng mép mặt thật → nắn theo mép mask.
+- **Mask điểm ảnh (quyết định chất lượng kiểu Evoto): ứng viên Sapiens2**
+  (Meta, 04/2026): phân vùng 29 lớp ở 1024×768 (mặt+cổ, tóc, môi trên/dưới,
+  răng trên/dưới, lưỡi, kính, tay/chân/thân, quần áo…), kèm pose 308 điểm,
+  normal/albedo (mở đường relight), matting. Giấy phép Sapiens2 **cho phép
+  thương mại**, cấm giám sát/sinh trắc/deepfake. Nặng: bản nhỏ nhất có đầu
+  seg = 0,4B tham số, 1,26 TFLOP/ảnh. Máy chủ: GTX 1050 2 GB + i5-13400F →
+  GPU dễ thiếu VRAM, CPU ước 10–20 s/ảnh (phải đo).
+- Dự phòng nếu Sapiens2 quá chậm: model face-parsing nhẹ hơn (SegFace,
+  SegFormer face-parsing; dữ liệu CelebAMask-HQ phi thương mại) — để người
+  dùng tự tải như ô model tuỳ chỉnh, không đóng gói.
+
+## 6. Changelog
 
 - **2026-09-29** — Lập kế hoạch. Phase 0: chuyển model, module `face_mesh`,
   đo so với Google (tốt hơn ở ảnh nhóm/ảnh cũ/ảnh xoay), nút thử trong AI
   Panel; chờ chủ test.
+- **2026-09-29 (khuya)** — Chủ test Phase 0 "khá ổn" → ĐẠT. Khảo sát model
+  thay thế (mục 5): giữ MediaPipe; đề xuất thử Sapiens2 cho mask.
