@@ -936,6 +936,8 @@ pub struct AiIntent {
     pub retouch_cancel: bool,
     /// Trial: draw MediaPipe face landmarks as a new layer.
     pub face_mesh_trial: bool,
+    /// Trial: Sapiens2 body parts cross-checked with the face mesh.
+    pub body_parts_trial: bool,
 }
 
 /// Preferences edits. The dialog emits the whole updated [`AppSettings`] on any

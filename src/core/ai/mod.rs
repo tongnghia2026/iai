@@ -6,6 +6,7 @@
 // the parts they want. Mirrors the async pattern of `select_subject.rs`:
 // `Arc<Mutex<Status>>` + a background thread + an mpsc channel polled per-frame.
 
+pub mod body_parts;
 pub mod edit;
 pub mod face_mesh;
 pub mod ort_ep;

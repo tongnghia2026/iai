@@ -1076,6 +1076,19 @@ fn offline_retouch_section(
     {
         actions.ai.face_mesh_trial = true;
     }
+    if ui
+        .add_enabled(
+            can_run,
+            egui::Button::new("Thử tách vùng + kiểm chéo (Sapiens2)")
+                .min_size(egui::vec2(ui.available_width(), 26.0)),
+        )
+        .on_hover_text(
+            "Bản thử: tô màu tóc, da, môi, răng, kính, áo quanh mỗi khuôn mặt; mặt nào lệch với mốc MediaPipe bị gạch đỏ",
+        )
+        .clicked()
+    {
+        actions.ai.body_parts_trial = true;
+    }
 }
 
 fn output_selector(ui: &mut egui::Ui, st: &mut AiPanelState, changed: &mut bool) {

@@ -4,6 +4,7 @@ use winit::event_loop::ActiveEventLoop;
 
 mod adjustments;
 mod ai;
+mod body_parts_trial;
 mod channels;
 mod clipboard;
 mod develop;

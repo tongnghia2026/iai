@@ -9,8 +9,8 @@
 - Ngày lập kế hoạch: **2026-09-29**.
 - Nhánh: `feat/vector-core-foundation`.
 - Trạng thái: **Phase 0 ĐẠT** (chủ test 29/09: "khá ổn") → giữ MediaPipe cho mốc mặt.
-- Việc kế tiếp: chủ chọn có thử Sapiens2 (Meta) làm model mask da/tóc/răng/môi
-  hay không (mục 5), rồi vào Phase 1.
+- Việc kế tiếp: chủ test nút Phase 0b (Sapiens2 + kiểm chéo) → giữ/bỏ, rồi
+  vào Phase 1.
 - Không push nếu chủ chưa yêu cầu. Sau mỗi phase: build Release + đường dẫn
   `.exe` thật rồi mới mời chủ test.
 
@@ -46,13 +46,30 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
      mắt). Lượt 2 cắt lại quanh các điểm của lượt 1 cho khít hơn (giống vòng
      theo dõi của MediaPipe).
    - Lọc mặt trùng giữa các hướng, giữ bản có độ tin cậy cao nhất.
-2. **Mask hình học từ mốc** (Phase 1): da mặt (viền mặt trừ mắt/lông mày/
-   môi/lỗ mũi), mắt, lòng trắng (mắt trừ mống mắt), mống mắt, môi, miệng trong/
-   răng, dải quầng thâm dưới mắt. Mép mask làm mềm + tinh theo màu da thật
-   (tóc mái che trán…). Da thân và tóc lấy từ selfie multiclass.
-3. **Hiệu ứng trên GPU (wgpu)**, xem trước ngay khi kéo thanh trượt; bản xem
+2. **Tách vùng điểm ảnh** — Sapiens2 seg (nếu Phase 0b đạt): 29 lớp ở
+   1024×768 — mặt+cổ, tóc, môi trên/dưới, răng trên/dưới, lưỡi, kính, tay/
+   chân/thân từng đoạn, quần áo. Chạy 1 lần mỗi ảnh (cache), chạy nền.
+3. **Hợp nhất (app chịu trách nhiệm)** — mỗi model lo đúng mảng mạnh:
+
+   | Việc | Nguồn chính | App kiểm/bù bằng |
+   |---|---|---|
+   | Tìm mặt, đếm người, xoay | YuNet (3 hướng) | độ tin cậy Face Mesh |
+   | Hình học: mắt, tròng, lông mày, mũi, đường môi, hướng mặt | MediaPipe | — |
+   | Mép da mặt/cổ, tóc mái che trán, tay che mặt | Sapiens2 | viền mặt MediaPipe |
+   | Lòng trắng mắt, mống mắt, quầng thâm | MediaPipe (đa giác) | màu điểm ảnh |
+   | Răng, môi, lưỡi | Sapiens2 | đường môi trong MediaPipe |
+   | Da thân, quần áo, tóc | Sapiens2 | — |
+   | Viền hàm để thon mặt | MediaPipe | nắn theo mép mặt Sapiens2 |
+   | Kính (tránh làm mịn/lóa) | Sapiens2 | — |
+
+   Quy tắc: mask da = Sapiens2 (mặt+cổ ∪ da thân) − đa giác mắt/lông mày/lỗ
+   mũi của MediaPipe − môi/răng/tóc/kính của Sapiens2, rồi làm mềm mép. Hai
+   nguồn lệch nhau quá ngưỡng (vd tay che nửa mặt) → vùng đó bị loại khỏi chỉnh
+   và mặt được đánh dấu "cần xem lại". Thiếu Sapiens2 (máy yếu / chưa tải) →
+   tự lùi về mask từ đa giác MediaPipe + màu da (kém hơn nhưng vẫn chạy).
+4. **Hiệu ứng trên GPU (wgpu)**, xem trước ngay khi kéo thanh trượt; bản xem
    trước thu nhỏ như Develop, bấm Áp dụng mới tính full-res.
-4. **Công thức chân dung** (`PortraitRecipe`, serde): chỉ thông số, không
+5. **Công thức chân dung** (`PortraitRecipe`, serde): chỉ thông số, không
    pixel → lưu preset và đồng bộ sang ảnh khác; mỗi ảnh tự nhận diện mặt lại.
 
 ## 3. Các phase
@@ -81,6 +98,32 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
   - `retouch.rs`: bỏ `FaceSeed` + `detect_face_seeds`, trả `model_roots` về
     `fn`; `ai.rs`: trả `place_ai_result_named` về `fn`.
   - Xoá thư mục model `models/face-mesh/` và `%APPDATA%\IAI\models\face-mesh\`.
+
+### Phase 0b — Thử Sapiens2 seg (cổng giữ/bỏ)
+
+- [x] Tải `facebook/sapiens2-seg-0.4b` (1,6 GB, giấy phép Sapiens2), xuất ONNX
+      cỡ cố định 512×384 (exporter dynamo; exporter cũ vấp InstanceNorm). So
+      với PyTorch: argmax khớp 100%.
+- [x] Module `src/core/ai/body_parts.rs`: mỗi mặt (từ Face Mesh) một khung
+      3:4 quanh đầu-vai rộng 3× chiều cao mặt, xoay theo đường mắt; kiểm chéo =
+      tỉ lệ 468 điểm mốc rơi vào lớp mặt/môi/răng/lưỡi/kính/tóc (ngưỡng 80%).
+- [x] Đo trên máy chủ: DirectML (GTX 1050 2 GB) không nạp được → tự về CPU;
+      CPU ~1,5 s/mặt + nạp model ~2 s. (PyTorch CPU cùng cỡ: 6–11 s; 1024×768
+      qua ONNX: ~9,5 s — không dùng.)
+- [x] 7 mặt ảnh mẫu: 6 mặt khớp 100%, mặt ảnh in báo (chấm lưới in) khớp 2% →
+      bị đánh dấu đúng (Sapiens2 nhận nhầm là quần áo, MediaPipe vẫn đúng).
+- [~] Nút **"Thử tách vùng + kiểm chéo (Sapiens2)"** (dưới nút mốc mặt) → chạy
+      nền, thêm 2 layer "Vùng Sapiens2 (thử)" + "Mốc mặt MediaPipe (thử)".
+- **Cổng**: chủ xem trên ảnh thật — mép tóc/da/môi/răng đúng, thời gian chịu
+  được. Không đạt → gỡ: `src/core/ai/body_parts.rs`,
+  `src/app/actions/body_parts_trial.rs`, dòng `pub mod body_parts;`,
+  `mod body_parts_trial;`, field `body_parts_trial` (intent.rs), nút trong
+  ai_panel.rs, nhánh gọi trong ui_dialogs.rs, dòng `poll_body_parts_trial` trong
+  `src/app/input/redraw.rs`, `FaceMesh::frame` + `pub(super)` của
+  `sample_rgb`/`blend_over` trong face_mesh.rs; xoá
+  `%APPDATA%\IAI\models\sapiens2-seg\` và `tmp/model-sources/sapiens2-seg-0.4b/`.
+- Nguồn tái xuất: `tmp/model-sources/sapiens2-seg-0.4b/` (safetensors +
+  config), env `tmp/model-export-env` (transformers 5.17, torch 2.14 CPU).
 
 ### Phase 1 — Da, mắt, răng cho 1 ảnh
 
@@ -169,3 +212,7 @@ donate). Kết luận:
   Panel; chờ chủ test.
 - **2026-09-29 (khuya)** — Chủ test Phase 0 "khá ổn" → ĐẠT. Khảo sát model
   thay thế (mục 5): giữ MediaPipe; đề xuất thử Sapiens2 cho mask.
+- **2026-09-29 (khuya)** — Chủ chốt hướng kết hợp: mỗi model lo mảng mạnh, app
+  hợp nhất (bảng ở mục 2.3). Thêm Phase 0b thử Sapiens2.
+- **2026-09-30** — Phase 0b code xong: ONNX 512×384, CPU ~1,5 s/mặt trên máy
+  chủ (GPU 2 GB không đủ), kiểm chéo bắt đúng mặt ảnh in báo; chờ chủ test.

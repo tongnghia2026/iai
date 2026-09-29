@@ -303,6 +303,9 @@ impl App {
         if actions.ai.face_mesh_trial {
             self.do_face_mesh_trial();
         }
+        if actions.ai.body_parts_trial {
+            self.do_body_parts_trial();
+        }
         if let Some((paper, kind, gap)) = actions.doc.impose_sheet.take() {
             self.do_impose_sheet(paper, kind, gap);
         }

@@ -32,6 +32,14 @@ pub fn model_path() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+impl FaceMesh {
+    /// Face centre, forehead-to-chin extent and eye-line angle (radians).
+    pub fn frame(&self) -> ([f32; 2], f32, f32) {
+        let crop = Crop::from_points(&self.points);
+        ([crop.cx, crop.cy], crop.side / MARGIN_SCALE, crop.angle)
+    }
+}
+
 /// A square crop of the image, rotated by `angle` around its centre.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Crop {
@@ -88,7 +96,7 @@ impl Crop {
 }
 
 /// Bilinear RGB sample at continuous image coordinates, edges replicated.
-fn sample_rgb(rgba: &[u8], width: u32, height: u32, x: f32, y: f32) -> [f32; 3] {
+pub(super) fn sample_rgb(rgba: &[u8], width: u32, height: u32, x: f32, y: f32) -> [f32; 3] {
     let px = (x - 0.5).clamp(0.0, (width - 1) as f32);
     let py = (y - 0.5).clamp(0.0, (height - 1) as f32);
     let x0 = px.floor() as usize;
@@ -278,7 +286,7 @@ pub fn detect(rgba: &[u8], width: u32, height: u32) -> Result<Vec<FaceMesh>, Str
 }
 
 /// Straight-alpha "over" of one colour with coverage into an RGBA pixel.
-fn blend_over(pixel: &mut [u8], color: [u8; 4], coverage: f32) {
+pub(super) fn blend_over(pixel: &mut [u8], color: [u8; 4], coverage: f32) {
     let a = color[3] as f32 / 255.0 * coverage;
     if a <= 0.0 {
         return;
