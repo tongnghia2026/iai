@@ -27,7 +27,7 @@ và qua cổng · `[!]` bị chặn.
   trước khi AI chạy**; AI lấy không hết thì **người dùng tô thêm/bớt**, rồi mới
   kéo các thanh sáng tối, màu sắc, mạnh yếu.
 
-## 1. Quyết định đề xuất (chờ chủ duyệt)
+## 1. Quyết định đã khóa (chủ duyệt 2026-10-01)
 
 1. Làm theo thứ tự **Pha 0 → Pha 1 → Pha 2**; mỗi pha một bản build cho chủ test.
 2. Khoanh vùng **dùng lại các công cụ chọn sẵn có** (Marquee, Lasso, Smart
@@ -100,3 +100,5 @@ và qua cổng · `[!]` bị chặn.
 
 - **2026-10-01** — Lập kế hoạch theo đề xuất của chủ (khoanh vùng + cọ tô) và
   kết quả phân tích vùng tóc; chưa code.
+- **2026-10-01** — Chủ duyệt kế hoạch (thứ tự Pha 0 → 1 → 2; cọ tô Da + Tóc
+  trước). Làm ở hội thoại mới, bắt đầu Pha 0.
