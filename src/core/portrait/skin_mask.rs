@@ -8,6 +8,7 @@
 //! fringe is still skin when it has skin's colour.
 
 use std::collections::VecDeque;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
@@ -68,15 +69,21 @@ const SEEDS: [(u16, f32); 9] = [
 /// Forehead samples, used only where no fringe covers them.
 const FOREHEAD: [(u16, f32); 4] = [(151, 0.04), (108, 0.03), (337, 0.03), (9, 0.018)];
 
+#[cfg(test)]
 static LEGACY: AtomicBool = AtomicBool::new(false);
 
-/// Probe switch: the part model's own skin mask instead, for comparison.
+/// Probe switch (tests only): the part model's own skin mask instead, for
+/// comparison.
+#[cfg(test)]
 pub(super) fn set_legacy(on: bool) {
     LEGACY.store(on, Ordering::Relaxed);
 }
 
 pub(super) fn legacy() -> bool {
-    LEGACY.load(Ordering::Relaxed)
+    #[cfg(test)]
+    return LEGACY.load(Ordering::Relaxed);
+    #[cfg(not(test))]
+    false
 }
 
 pub(super) struct SkinInputs<'a> {

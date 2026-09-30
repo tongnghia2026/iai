@@ -122,19 +122,19 @@ và qua cổng · `[!]` bị chặn (ghi lý do ở Changelog).
 
 ## 4. Các pha
 
-- [~] **A. Công cụ đo** — probe: chỉ số (1) **lỗ** = số điểm trong viền mặt
+- [x] **A. Công cụ đo** — probe: chỉ số (1) **lỗ** = số điểm trong viền mặt
       MediaPipe, ngoài mắt/lông mày/môi/lỗ mũi, có màu giống mẫu da mà mask <
       0,5; (2) **rò** = điểm mask > 0,5 mà Sapiens2 chắc tóc/nền/áo và màu
       không giống da; (3) thời gian. Chạy trên bộ ảnh thử với mask CŨ làm mốc.
-- [~] **B. Mẫu + mô hình màu** (3-A, 3-B) → ảnh xám "giống da" hợp lý trên
+- [x] **B. Mẫu + mô hình màu** (3-A, 3-B) → ảnh xám "giống da" hợp lý trên
       mọi ảnh thử (kể cả ảnh đèn vàng, da ngăm).
-- [~] **C. Cắt đồ thị + hàng rào + hạt cứng** (3-C, 3-D phần hàng rào/tóc).
-- [~] **D. Cắt đặc điểm sát** (3-D mắt, lông mày, môi, lỗ mũi).
-- [~] **E. Làm mềm + tích hợp** vào `build_face` (công tắc cũ/mới), Hiện vùng
+- [x] **C. Cắt đồ thị + hàng rào + hạt cứng** (3-C, 3-D phần hàng rào/tóc).
+- [x] **D. Cắt đặc điểm sát** (3-D mắt, lông mày, môi, lỗ mũi).
+- [x] **E. Làm mềm + tích hợp** vào `build_face` (công tắc cũ/mới), Hiện vùng
       nhận diện, test đơn vị (vd. ảnh tổng hợp: mặt màu da có "mái" màu da đậm
       che trán → mask phải phủ phần trán lộ; lông mày tổng hợp → da quanh sợi
       được giữ).
-- [~] **F. Đo + tối ưu + build**: `cargo fmt --check`, `cargo test --lib`
+- [x] **F. Đo + tối ưu + build**: `cargo fmt --check`, `cargo test --lib`
       (release), build Release có Canvas Editor (`--target-dir
       target\portrait-test` nếu exe chính bị khoá), đưa đường dẫn exe thật.
 - **Cổng nghiệm thu (chủ test)**: trên ảnh bị lỗ trán + vài ảnh khác — không
@@ -198,3 +198,8 @@ và qua cổng · `[!]` bị chặn (ghi lý do ở Changelog).
   0,06%. Thời gian mask 0,07–1,8 s/mặt (ảnh 9 MP vùng mặt), "chuẩn bị" tăng
   ~0,2–0,7 s so với mask cũ. 1818 test pass. Công tắc cũ/mới (`set_legacy`)
   còn giữ cho probe; gỡ khi chủ duyệt.
+- **2026-10-01** — **Chủ test đạt** (ảnh thẻ nam tóc mái bị lỗ trán trước đây:
+  "Hiện vùng nhận diện" phủ kín trán dưới mái, sát lông mày/môi/mắt). Qua cổng
+  nghiệm thu; công tắc cũ/mới chỉ còn trong bản test (`#[cfg(test)]`, cho
+  probe so sánh), bản chạy thật luôn dùng mask mới (mask cũ chỉ khi ảnh quá ít
+  màu).
