@@ -946,6 +946,17 @@ impl LocalOnnxRunner {
         width: u32,
         height: u32,
     ) -> Result<Vec<FaceDetection>, String> {
+        let mut session = self.build_session("YuNet")?;
+        self.detect_faces_in(&mut session, rgba, width, height)
+    }
+
+    fn detect_faces_in(
+        &self,
+        session: &mut ort::session::Session,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<FaceDetection>, String> {
         const DETECTOR_LONG_EDGE: f32 = 640.0;
         const SCORE_THRESHOLD: f32 = 0.65;
         const NMS_THRESHOLD: f32 = 0.30;
@@ -984,7 +995,6 @@ impl LocalOnnxRunner {
             bgr,
         ))
         .map_err(|e| format!("YuNet input tensor: {e}"))?;
-        let mut session = self.build_session("YuNet")?;
         let input_name = session
             .inputs()
             .first()
@@ -2412,24 +2422,48 @@ pub struct FaceSeed {
     pub score: f32,
 }
 
-/// Detect faces with YuNet on the CPU, for landmark models seeded from it.
+/// Detect faces with YuNet, for landmark models seeded from it.
 pub fn detect_face_seeds(rgba: &[u8], width: u32, height: u32) -> Result<Vec<FaceSeed>, String> {
-    let detector = LocalOnnxRunner::new(ModelId::FaceDetector);
-    if !detector.available() {
-        return Err(format!(
-            "thiếu model tìm mặt YuNet ({})",
-            detector.path().display()
-        ));
+    FaceSeedDetector::new()?.detect(rgba, width, height)
+}
+
+/// YuNet kept loaded for many detections, such as the tiles of a large group
+/// photo.
+pub struct FaceSeedDetector {
+    runner: LocalOnnxRunner,
+    session: ort::session::Session,
+}
+
+impl FaceSeedDetector {
+    pub fn new() -> Result<Self, String> {
+        let runner = LocalOnnxRunner::new(ModelId::FaceDetector);
+        if !runner.available() {
+            return Err(format!(
+                "thiếu model tìm mặt YuNet ({})",
+                runner.path().display()
+            ));
+        }
+        let session = runner.build_session("YuNet")?;
+        Ok(Self { runner, session })
     }
-    Ok(detector
-        .detect_faces(rgba, width, height)?
-        .into_iter()
-        .map(|face| FaceSeed {
-            rect: [face.x, face.y, face.width, face.height],
-            keypoints: face.landmarks,
-            score: face.score,
-        })
-        .collect())
+
+    pub fn detect(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<FaceSeed>, String> {
+        Ok(self
+            .runner
+            .detect_faces_in(&mut self.session, rgba, width, height)?
+            .into_iter()
+            .map(|face| FaceSeed {
+                rect: [face.x, face.y, face.width, face.height],
+                keypoints: face.landmarks,
+                score: face.score,
+            })
+            .collect())
+    }
 }
 
 pub fn model_metadata() -> Vec<ModelMetadata> {

@@ -56,6 +56,53 @@ The app never downloads or bundles these models. Non-commercial weights
 (CodeFormer, GPEN, BRIA RMBG) remain unsuitable for redistributable builds; the
 AGPL relicensing does not change that.
 
+## Portrait retouch (Image ▸ Chỉnh chân dung…)
+
+The portrait dialog uses two more models from the same model folders. Both are
+optional in the sense that the dialog reports what is missing: without the face
+mesh it cannot run; without Sapiens2 it falls back to masks drawn from the face
+mesh and skin colour, and the hair controls are disabled.
+
+| Directory | File | Purpose | Source / license |
+|---|---|---|---|
+| `face-mesh` | `face_landmarks_detector.onnx` | 478 face landmarks (MediaPipe Face Mesh V2, incl. irises) | Google `face_landmarker.task`; Apache-2.0 |
+| `sapiens2-seg` | `sapiens2_seg_0.4b_512x384.onnx` + `.onnx.data` | 29-class body-part segmentation of a head-and-shoulders crop | Meta `facebook/sapiens2-seg-0.4b`; Sapiens2 License |
+
+SHA-256 of the validated files:
+
+- `face_landmarks_detector.onnx`: `58b89dbbaca1d944bdca16ea3c3a0853c74d473c9b789f76d1ead580e59ed4cd`
+- `sapiens2_seg_0.4b_512x384.onnx`: `90b5d000ef43eec947486bcca0d6419412a59336032801b34af4c2f30782e1f9`
+- `sapiens2_seg_0.4b_512x384.onnx.data`: `1bb7df2dbb1b0c513cab993282c012065c668090869a8a4a4afcc3dece1f3f93`
+
+- Face mesh: `face_landmarks_detector.tflite` taken from the official
+  `face_landmarker.task` bundle and converted with tf2onnx (opset 17). Input
+  `[1,256,256,3]` float32 RGB in `[0,1]`; outputs 478 x/y/z landmarks and a
+  face-presence score. The converted model differs from the TFLite original by
+  at most `0.0002` px. Faces are seeded by YuNet on a 640px overview in three
+  orientations (upright, rotated 90° either way); photos of 2000px or more are
+  also scanned in 2x2 to 4x4 overlapping tiles so small faces at the back of a
+  group photo are found. Each face is cropped square, levelled by the eye line
+  with 25% margin, and fitted twice (the second crop from the first fit).
+  Against Google's own Python pipeline the landmarks differ by 1.2–2.0% of the
+  eye-corner distance on ordinary portraits.
+- Sapiens2 seg 0.4B: exported with `scripts/export_sapiens2_seg_onnx.py`
+  (PyTorch dynamo exporter, opset 18, fixed `[1,3,512,384]` float32 NCHW,
+  ImageNet mean/std) from the Hugging Face checkpoint; ONNX Runtime and
+  PyTorch argmax agree on 100% of pixels. Each face gets a 3:4 crop three face
+  heights wide, levelled by the eye line. The class odds are softened by about
+  one model pixel so outlines scaled back to the photo are smooth. The face
+  mesh cross-checks every face: if fewer than 80% of its landmarks land on
+  face, lips, teeth, tongue, glasses or hair, that face uses mesh masks only.
+  DirectML is tried first; on a 2 GB GPU it cannot load and the CPU takes
+  ~1.5 s per face. A dynamic int8 build (450 MB) was tried and rejected: it was
+  not faster on CPU and the lip, teeth and hair masks agreed with the float
+  model at only 0.63–0.85 IoU.
+- Sapiens2 License: commercial use and redistribution are allowed with a copy
+  of the license (`licenses/Sapiens2-LICENSE.md`), but not for surveillance,
+  biometric processing, identifying people, deepfakes or other listed uses.
+  iAi only uses it to decide where skin, hair, lips and teeth are for
+  retouching, locally on the user's own photos.
+
 ## Current integration status
 
 The current build has these active ONNX adapters. On Windows it first tries

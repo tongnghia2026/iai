@@ -11,8 +11,12 @@
 - Trạng thái: **Phase 0 ĐẠT** (chủ test 29/09: "khá ổn") → giữ MediaPipe cho mốc mặt.
 - Phase 0b ĐẠT (chủ test 30/09). Phase 1 đang làm: hộp thoại Chỉnh chân dung —
   đợt 1→4 chủ test OK ("rất tuyệt", 30/09).
-- Đợt 6 (30/09 khuya, chờ chủ test): tóc chỉnh kiểu Shadows/Blacks của
-  Develop trong vùng tóc mềm rộng (chi tiết ở Phase 1, đợt 5–6).
+- Đợt 6 (30/09 khuya): tóc chỉnh kiểu Shadows/Blacks của Develop trong vùng
+  tóc mềm rộng (chi tiết ở Phase 1, đợt 5–6). Chủ test: còn lỗ trong mask da
+  (trán dưới mái bị model coi là tóc, viền an toàn quanh lông mày/môi rộng) →
+  hướng mới: mask da bằng thuật toán màu + loang (kế hoạch đợt sau).
+- Đợt 7 (30/09 khuya): làm nốt nợ Phase 1 — xem trước tính ở luồng nền, dò
+  mặt nhỏ theo ô, ghi model/giấy phép, thử int8 (bỏ). Chờ chủ test.
 - Không push nếu chủ chưa yêu cầu. Sau mỗi phase: build Release + đường dẫn
   `.exe` thật rồi mới mời chủ test.
 
@@ -212,10 +216,18 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
 - Đo trên máy chủ (4 ảnh NASA public domain 23–58 MP, 1 ảnh nhóm 4 người):
   phân tích ~9–11 s (nạp Sapiens2 ~2,8 s + lần chạy đầu ~5,5 s), kéo thanh
   trượt 60–300 ms/lần; màu da giữ nguyên (H/S/V lệch < 1%).
-- [ ] Tối ưu: lượng tử hoá int8 Sapiens2 (nhẹ + nhanh hơn), render nền.
-- [ ] Tìm mặt nhỏ trong ảnh nhóm lớn: dò theo ô (tile) khi ảnh > 640px.
-- [ ] Ghi model vào `docs/AI_MODELS.md` + `THIRD_PARTY.md`; bản portable kèm
-      model mốc mặt + Sapiens2.
+- [!] Lượng tử hoá int8 Sapiens2: đã thử (dynamic int8, 450 MB). Theo kênh
+      (per-channel) hỏng hẳn; theo tensor: không nhanh hơn trên CPU, mask môi/
+      răng/tóc chỉ khớp 0,63–0,85 IoU với bản gốc → BỎ, giữ fp32.
+- [~] Xem trước tính ở luồng nền: kéo thanh không khựng cửa sổ, kéo nhanh
+      thì chỉ tính giá trị mới nhất (`portrait_ops.rs`).
+- [~] Tìm mặt nhỏ trong ảnh nhóm lớn: ảnh ≥ 2000px dò thêm 2×2…4×4 ô chồng
+      25%, một phiên YuNet (`FaceSeedDetector`); bỏ mặt bị cắt ở mép ô hoặc đã
+      thấy ở lượt toàn cảnh. Ảnh 30–60 MP: +0,7–1 s. Test ảnh nhóm 6000×4000
+      có 12 mặt ~110px: tìm đủ, không trùng.
+- [~] Ghi model vào `docs/AI_MODELS.md` + `THIRD_PARTY.md` +
+      `licenses/Sapiens2-LICENSE.md` + `scripts/export_sapiens2_seg_onnx.py`;
+      bản portable kèm model mốc mặt + Sapiens2.
 - Đã biết: râu lún phún bị làm mịn nhẹ; ảnh 16-bit → layer kết quả 8-bit.
 - **Cổng**: chủ test trên ảnh thật (chân dung, thẻ, nhóm) — da tự nhiên, không
   quầng viền, mụn được xoá, thời gian chấp nhận được.
@@ -310,3 +322,8 @@ donate). Kết luận:
   Blacks/Shadows của Develop → đợt 6: gỡ tách mép theo màu, tóc chỉnh theo
   công thức Shadows/Blacks của Develop trong vùng tóc mềm, trọng số theo độ
   tối từng điểm. Chờ chủ test.
+- **2026-09-30 (khuya)** — Chủ gửi ảnh layer kết quả: còn lỗ ở trán dưới mái
+  + viền quanh lông mày/môi (điểm trắng = điểm không đổi, gồm cả chỗ đổi < 1
+  mức). Chủ chốt: làm nốt nợ Phase 1, sửa mask để đợt sau với kế hoạch mới
+  (mask da bằng thuật toán màu + loang, AI chỉ định hướng). Đợt 7: xem trước
+  luồng nền, dò mặt nhỏ theo ô, tài liệu model/giấy phép, int8 thử và bỏ.

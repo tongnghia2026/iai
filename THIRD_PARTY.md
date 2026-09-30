@@ -60,7 +60,11 @@ must obtain and distribute the model under its upstream terms.
 | IAT exposure checkpoint | Apache-2.0 | `licenses/Apache-2.0.txt` |
 | GFPGAN v1.4 | Apache-2.0 except upstream-listed third-party components | `licenses/GFPGAN.txt` |
 | Real-ESRGAN General/x2/x4 | BSD-3-Clause | `licenses/Real-ESRGAN-BSD-3-Clause.txt` |
+| MediaPipe Face Mesh V2 (face landmarker) | Apache-2.0 | `licenses/Apache-2.0.txt` |
+| Meta Sapiens2 seg 0.4B | Sapiens2 License (use restrictions apply) | `licenses/Sapiens2-LICENSE.md` |
 
+The Sapiens2 License must travel with any copy of the Sapiens2 weights and
+forbids surveillance, biometric processing, identifying people and deepfakes.
 GFPGAN's upstream license file contains additional licenses, including terms
 for third-party components. Keep that complete file with any portable bundle.
 The project does not assert that every converted checkpoint is cleared for

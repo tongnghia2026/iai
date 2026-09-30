@@ -1,18 +1,23 @@
 //! "Chỉnh chân dung" (Image ▸ Chỉnh chân dung…): skin, blemish, under-eye, eye
 //! and teeth retouching with a live canvas preview. The photo is analysed once
 //! on a worker thread (`core::portrait::analyze`); each slider change then only
-//! recombines the cached layers of the analysis. OK adds the result as a new
-//! layer above the source, holding just the retouched pixels.
+//! recombines the cached layers of the analysis, also on a worker so dragging
+//! never stalls the window (a drag skips to the latest values). OK adds the
+//! result as a new layer above the source, holding just the retouched pixels.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
 use super::render::CanvasEvent;
 use super::state::App;
-use crate::core::portrait::{self, PortraitModel, PortraitSettings};
+use crate::core::portrait::{self, PortraitModel, PortraitSettings, Region};
 use crate::core::tile::TileMap;
 
 const RESULT_LAYER: &str = "Chân dung";
+
+/// What the preview shows: settings, faces on, retouch on, areas tinted.
+type PreviewKey = (PortraitSettings, Vec<bool>, bool, bool);
+type Rendered = Option<(Region, Vec<u8>)>;
 
 pub struct PortraitSession {
     pub doc_id: crate::core::document::DocumentId,
@@ -27,8 +32,10 @@ pub struct PortraitSession {
     pub model: Option<Arc<PortraitModel>>,
     pub error: Option<String>,
     /// What the dialog last asked to see, and what the canvas shows now.
-    pub wanted: Option<(PortraitSettings, Vec<bool>, bool, bool)>,
-    pub shown: Option<(PortraitSettings, Vec<bool>, bool, bool)>,
+    pub wanted: Option<PreviewKey>,
+    pub shown: Option<PreviewKey>,
+    /// The preview render running on a worker, and what it will show.
+    rendering: Option<(PreviewKey, Receiver<Rendered>)>,
 }
 
 impl App {
@@ -81,47 +88,39 @@ impl App {
             error: None,
             wanted: None,
             shown: None,
+            rendering: None,
         });
         Ok(())
     }
 
-    /// Collect a finished analysis; keep repainting while it runs so the
-    /// progress line stays live.
+    /// Collect a finished analysis or preview render; keep repainting while
+    /// either runs so the progress line and the preview stay live.
     pub(crate) fn poll_portrait(&mut self) {
-        let finished = {
-            let Some(session) = self.shell.portrait.as_mut() else {
-                return;
-            };
-            let Some(rx) = session.rx.take() else {
-                return;
-            };
-            match rx.try_recv() {
-                Ok(result) => Some(result),
-                Err(TryRecvError::Empty) => {
-                    session.rx = Some(rx);
-                    None
-                }
-                Err(TryRecvError::Disconnected) => {
-                    Some(Err("phân tích dừng bất thường".to_string()))
-                }
-            }
+        let Some(session) = self.shell.portrait.as_mut() else {
+            return;
         };
+        let busy = session.rx.is_some() || session.rendering.is_some();
+        let finished = session.rx.take().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => {
+                session.rx = Some(rx);
+                None
+            }
+            Err(TryRecvError::Disconnected) => Some(Err("phân tích dừng bất thường".to_string())),
+        });
         match finished {
             Some(Ok(model)) => {
-                if let Some(session) = self.shell.portrait.as_mut() {
-                    session.model = Some(Arc::new(model));
-                }
+                session.model = Some(Arc::new(model));
                 self.refresh_portrait_preview();
             }
-            Some(Err(error)) => {
-                if let Some(session) = self.shell.portrait.as_mut() {
-                    session.error = Some(error);
-                }
-            }
+            Some(Err(error)) => session.error = Some(error),
             None => {}
         }
-        if let Some(window) = &self.win.window {
-            window.request_redraw();
+        self.collect_portrait_render();
+        if busy {
+            if let Some(window) = &self.win.window {
+                window.request_redraw();
+            }
         }
     }
 
@@ -140,38 +139,85 @@ impl App {
         self.refresh_portrait_preview();
     }
 
+    /// Start rendering what the dialog wants unless it is on screen or a
+    /// render is already running (that one's completion starts the next).
     fn refresh_portrait_preview(&mut self) {
         let idx = self.docs.active_doc_idx;
-        let Some(session) = self.shell.portrait.as_ref() else {
+        let Some(session) = self.shell.portrait.as_mut() else {
             return;
         };
-        if session.doc_id != self.docs.documents[idx].id || session.wanted == session.shown {
+        if session.doc_id != self.docs.documents[idx].id
+            || session.wanted == session.shown
+            || session.rendering.is_some()
+        {
             return;
         }
-        let Some((settings, enabled, preview, masks)) = session.wanted.clone() else {
+        let Some(key) = session.wanted.clone() else {
             return;
         };
         let Some(model) = session.model.clone() else {
             return;
         };
-        let mut tiles = session.original_tiles.clone();
-        let shown = if masks {
-            portrait::render_masks(&session.src, &model, &enabled)
-        } else if preview {
-            portrait::render(&session.src, &model, &settings, &enabled)
-        } else {
-            None
+        let (settings, enabled, preview, masks) = key.clone();
+        if !preview && !masks {
+            self.show_portrait_preview(key, None);
+            return;
+        }
+        let src = Arc::clone(&session.src);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let rendered = if masks {
+                portrait::render_masks(&src, &model, &enabled)
+            } else {
+                portrait::render(&src, &model, &settings, &enabled)
+            };
+            let _ = tx.send(rendered);
+        });
+        session.rendering = Some((key, rx));
+    }
+
+    /// Put a finished preview render on the canvas, then start the next one
+    /// if the sliders moved meanwhile.
+    fn collect_portrait_render(&mut self) {
+        let Some(session) = self.shell.portrait.as_mut() else {
+            return;
         };
-        if let Some((region, pixels)) = shown {
+        let Some((key, rx)) = session.rendering.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(rendered) => {
+                self.show_portrait_preview(key, rendered);
+                self.refresh_portrait_preview();
+            }
+            Err(TryRecvError::Empty) => session.rendering = Some((key, rx)),
+            Err(TryRecvError::Disconnected) => {}
+        }
+    }
+
+    fn show_portrait_preview(&mut self, key: PreviewKey, rendered: Rendered) {
+        let Some(session) = self.shell.portrait.as_mut() else {
+            return;
+        };
+        let Some(idx) = self
+            .docs
+            .documents
+            .iter()
+            .position(|d| d.id == session.doc_id)
+        else {
+            return;
+        };
+        let mut tiles = session.original_tiles.clone();
+        if let Some((region, pixels)) = rendered {
             tiles.write_region(region.x, region.y, region.w, region.h, &pixels);
         }
         let layer_id = session.layer_id;
+        session.shown = Some(key);
         self.docs.documents[idx]
             .canvas
             .preview_layer_tiles(layer_id, tiles);
-        self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
-        if let Some(session) = self.shell.portrait.as_mut() {
-            session.shown = Some((settings, enabled, preview, masks));
+        if idx == self.docs.active_doc_idx {
+            self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
         }
         if let Some(window) = &self.win.window {
             window.request_redraw();
@@ -352,6 +398,21 @@ mod tests {
         Some(app)
     }
 
+    /// Let the preview worker catch up with the last slider values.
+    fn wait_for_preview(app: &mut App) {
+        let started = Instant::now();
+        while app
+            .shell
+            .portrait
+            .as_ref()
+            .is_some_and(|s| s.wanted != s.shown)
+        {
+            assert!(started.elapsed() < Duration::from_secs(60), "preview hung");
+            std::thread::sleep(Duration::from_millis(10));
+            app.poll_portrait();
+        }
+    }
+
     fn photo_pixels(app: &App) -> Vec<u8> {
         app.docs.documents[0].canvas.layer_stack.layers[0]
             .tiles
@@ -386,10 +447,22 @@ mod tests {
         let on = vec![true; faces.len()];
 
         app.set_portrait_preview(PortraitSettings::default(), on.clone(), true, false);
+        wait_for_preview(&mut app);
         assert_ne!(photo_pixels(&app), original, "preview shows the retouch");
         app.set_portrait_preview(PortraitSettings::default(), on.clone(), false, false);
+        wait_for_preview(&mut app);
         assert_eq!(photo_pixels(&app), original, "preview off shows the photo");
+        // A drag: only the last values need to end up on screen.
+        let mut strong = PortraitSettings::default();
+        for step in 0..5 {
+            strong.brighten = step as f32 * 20.0;
+            app.set_portrait_preview(strong, on.clone(), true, false);
+        }
+        wait_for_preview(&mut app);
+        let shown = app.shell.portrait.as_ref().and_then(|s| s.shown.clone());
+        assert_eq!(shown.map(|k| k.0), Some(strong));
         app.set_portrait_preview(PortraitSettings::default(), on.clone(), true, false);
+        wait_for_preview(&mut app);
 
         app.apply_portrait(PortraitSettings::default(), on).unwrap();
         let canvas = &app.docs.documents[0].canvas;

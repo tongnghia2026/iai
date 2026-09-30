@@ -211,9 +211,10 @@ fn detect_seeds_all_orientations(
         (&clockwise, &|p: [f32; 2]| [p[1], sh - p[0]]),
         (&counter, &|p: [f32; 2]| [sw - p[1], p[0]]),
     ];
+    let mut detector = super::retouch::FaceSeedDetector::new()?;
     let mut seeds = Vec::new();
     for (view, to_upright) in views {
-        for seed in super::retouch::detect_face_seeds(view.as_raw(), view.width(), view.height())? {
+        for seed in detector.detect(view.as_raw(), view.width(), view.height())? {
             let [x, y, w, h] = seed.rect;
             let a = to_upright([x, y]);
             let b = to_upright([x + w, y + h]);
@@ -225,6 +226,89 @@ fn detect_seeds_all_orientations(
                 keypoints: seed.keypoints.map(|k| full(to_upright(k))),
                 score: seed.score,
             });
+        }
+    }
+    seeds.extend(detect_small_faces(
+        rgba,
+        width,
+        height,
+        &seeds,
+        &mut detector,
+    )?);
+    Ok(seeds)
+}
+
+/// Faces too small to survive the 640px overview of a large photo (people at
+/// the back of a group): look again in overlapping upright tiles. A face cut
+/// by a tile's inner edge is left to the neighbouring tile, and one the
+/// overview already found is not repeated.
+fn detect_small_faces(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    found: &[super::retouch::FaceSeed],
+    detector: &mut super::retouch::FaceSeedDetector,
+) -> Result<Vec<super::retouch::FaceSeed>, String> {
+    const TILE_FROM: u32 = 2000;
+    const TILE_TARGET: u32 = 1800;
+    let long = width.max(height);
+    if long < TILE_FROM {
+        return Ok(Vec::new());
+    }
+    let count = long.div_ceil(TILE_TARGET).clamp(2, 4);
+    let spans = |length: u32| -> Vec<(u32, u32)> {
+        let step = length as f32 / count as f32;
+        let overlap = step * 0.25;
+        (0..count)
+            .map(|k| {
+                let start = (k as f32 * step - overlap).max(0.0) as u32;
+                let end = (((k + 1) as f32 * step + overlap) as u32).min(length);
+                (start, end)
+            })
+            .collect()
+    };
+    let covered = |rect: [f32; 4]| {
+        let (cx, cy) = (rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5);
+        found.iter().any(|seed| {
+            let [x, y, w, h] = seed.rect;
+            cx >= x && cx <= x + w && cy >= y && cy <= y + h
+        })
+    };
+    let mut seeds: Vec<super::retouch::FaceSeed> = Vec::new();
+    for &(y0, y1) in &spans(height) {
+        for &(x0, x1) in &spans(width) {
+            let (tw, th) = (x1 - x0, y1 - y0);
+            let mut tile = Vec::with_capacity(tw as usize * th as usize * 4);
+            for y in y0..y1 {
+                let o = (y as usize * width as usize + x0 as usize) * 4;
+                tile.extend_from_slice(&rgba[o..o + tw as usize * 4]);
+            }
+            for seed in detector.detect(&tile, tw, th)? {
+                let [x, y, w, h] = seed.rect;
+                // Cut by an inner tile edge: the neighbour sees it whole.
+                let margin = 2.0;
+                let cut = (x0 > 0 && x < margin)
+                    || (y0 > 0 && y < margin)
+                    || (x1 < width && x + w > tw as f32 - margin)
+                    || (y1 < height && y + h > th as f32 - margin);
+                let rect = [x + x0 as f32, y + y0 as f32, w, h];
+                if cut || covered(rect) {
+                    continue;
+                }
+                let duplicate = seeds.iter().any(|other| {
+                    let [ox, oy, ow, oh] = other.rect;
+                    let (cx, cy) = (rect[0] + w * 0.5, rect[1] + h * 0.5);
+                    cx >= ox && cx <= ox + ow && cy >= oy && cy <= oy + oh
+                });
+                if duplicate {
+                    continue;
+                }
+                seeds.push(super::retouch::FaceSeed {
+                    rect,
+                    keypoints: seed.keypoints.map(|k| [k[0] + x0 as f32, k[1] + y0 as f32]),
+                    score: seed.score,
+                });
+            }
         }
     }
     Ok(seeds)
@@ -440,6 +524,54 @@ const NOSE: &[(u16, u16)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A group photo shrinks to 640px for the overview, where people at the
+    /// back vanish; the tiled pass must still find each small face once.
+    #[test]
+    fn small_faces_in_a_large_group_photo_are_found() {
+        let path =
+            std::path::Path::new("tmp/model-sources/gfpgan/inputs/whole_imgs/Blake_Lively.jpg");
+        if !path.is_file() || model_path().is_none() {
+            return;
+        }
+        let person = image::open(path).unwrap().to_rgba8();
+        let person = image::imageops::resize(
+            &person,
+            person.width() * 55 / 100,
+            person.height() * 55 / 100,
+            image::imageops::FilterType::Triangle,
+        );
+        let mut group = image::RgbaImage::from_pixel(6000, 4000, image::Rgba([235, 235, 230, 255]));
+        let spots = [
+            (300, 400),
+            (2500, 350),
+            (4800, 500),
+            (900, 2600),
+            (3100, 3000),
+            (5200, 2400),
+        ];
+        for (x, y) in spots {
+            image::imageops::replace(&mut group, &person, x, y);
+        }
+        // The sample photo holds two faces (a child and an adult).
+        let meshes = detect(group.as_raw(), 6000, 4000).unwrap();
+        assert_eq!(
+            meshes.len(),
+            spots.len() * 2,
+            "faces found: {}",
+            meshes.len()
+        );
+        for (x, y) in spots {
+            let inside = meshes.iter().filter(|m| {
+                let nose = m.points[1];
+                nose[0] > x as f32
+                    && nose[0] < (x + person.width() as i64) as f32
+                    && nose[1] > y as f32
+                    && nose[1] < (y + person.height() as i64) as f32
+            });
+            assert_eq!(inside.count(), 2, "faces at {x},{y}");
+        }
+    }
 
     #[test]
     fn crop_from_points_recovers_a_tilted_face_frame() {
