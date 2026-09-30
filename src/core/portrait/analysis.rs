@@ -8,6 +8,7 @@ use super::blur::{blur4, masked_blur};
 use super::geometry::*;
 use crate::core::ai::body_parts::{self, PartLabels, Segmenter};
 use crate::core::ai::face_mesh::{self, FaceMesh};
+use crate::core::color::luminance_f32;
 
 /// Share of mesh landmarks that must land on face-like part classes before the
 /// part masks are trusted over the mesh-only fallback.
@@ -39,9 +40,12 @@ pub struct FaceModel {
     /// Nose contour: +127 lights the bridge, -127 shades its sides.
     pub(super) nose: Vec<i8>,
     /// Hair lies outside the face region, so it has its own (head and
-    /// shoulders) region and mask; empty without the part model.
+    /// shoulders) region; empty without the part model. `hair` is how much
+    /// each pixel takes the hair change, `hair_base` its regional luminance
+    /// (Rec. 709, 0..65535) for Develop-style Shadows/Blacks.
     pub hair_region: Region,
     pub(super) hair: Vec<u8>,
+    pub(super) hair_base: Vec<u16>,
     /// Eyes, lashes, brows and lips: where sharpening applies.
     pub(super) detail: Vec<u8>,
     /// Plain small blur of the photo, the sharpening reference.
@@ -117,6 +121,55 @@ fn max_filter(values: &[f32], width: usize, height: usize, radius: usize) -> Vec
     out
 }
 
+/// Guided filter of `mask` with a grey `guide`: snaps a soft mask onto the
+/// photo's own edges. Never grows the mask where it had nothing nearby.
+fn guided(mask: &[f32], guide: &[f32], w: usize, h: usize, radius: f32, eps: f32) -> Vec<f32> {
+    let mut stats: Vec<[f32; 4]> = mask
+        .par_iter()
+        .zip(guide.par_iter())
+        .map(|(&p, &g)| [g, p, g * g, g * p])
+        .collect();
+    blur4(&mut stats, w, h, radius);
+    let mut coefficients: Vec<[f32; 4]> = stats
+        .par_iter()
+        .map(|m| {
+            let variance = (m[2] - m[0] * m[0]).max(0.0);
+            let covariance = m[3] - m[0] * m[1];
+            let a = covariance / (variance + eps);
+            [a, m[1] - a * m[0], m[1], 0.0]
+        })
+        .collect();
+    blur4(&mut coefficients, w, h, radius);
+    coefficients
+        .par_iter()
+        .zip(guide.par_iter())
+        .map(|(c, &g)| ((c[0] * g + c[1]).clamp(0.0, 1.0)) * smoothstep(0.0, 0.05, c[2]))
+        .collect()
+}
+
+/// Edge-aware smoothing of a grey image (a guided filter guided by itself):
+/// the regional tone Develop's Shadows/Blacks read, flat within a region yet
+/// not bleeding across strong edges such as hair against skin.
+fn edge_aware_base(values: &[f32], w: usize, h: usize, radius: f32, eps: f32) -> Vec<f32> {
+    let mut stats: Vec<[f32; 4]> = values.par_iter().map(|&v| [v, v * v, 0.0, 0.0]).collect();
+    blur4(&mut stats, w, h, radius);
+    let mut coefficients: Vec<[f32; 4]> = stats
+        .par_iter()
+        .map(|m| {
+            let variance = (m[1] - m[0] * m[0]).max(0.0);
+            let a = variance / (variance + eps);
+            [a, m[0] - a * m[0], 0.0, 0.0]
+        })
+        .collect();
+    drop(stats);
+    blur4(&mut coefficients, w, h, radius);
+    coefficients
+        .par_iter()
+        .zip(values.par_iter())
+        .map(|(c, &v)| c[0] * v + c[1])
+        .collect()
+}
+
 /// Fade toward the region sides flagged in `open_sides` (left, top, right,
 /// bottom): those sides lie inside the image, so an effect must not end there
 /// in a hard line.
@@ -134,18 +187,10 @@ fn side_fade(i: usize, w: usize, h: usize, open_sides: [bool; 4], fade: f32) -> 
 /// Near a mask's outline, keep only pixels whose colour matches the mask's
 /// solid core: a chroma model (mean and covariance of two colour-difference
 /// axes) from pixels deep inside, then a Mahalanobis cut. The core itself is
-/// left alone, so off-colour spots inside (a red pimple) still count, and so
-/// are pixels a colour matte already placed (`settled`, 0..1). Chroma is read
-/// slightly blurred: JPEG stores it in coarse blocks, which would otherwise
-/// cut the outline into squares.
-fn gate_by_colour(
-    mask: &[f32],
-    colours: &[[f32; 3]],
-    w: usize,
-    h: usize,
-    radius: f32,
-    settled: &[f32],
-) -> Vec<f32> {
+/// left alone, so off-colour spots inside (a red pimple) still count. Chroma
+/// is read slightly blurred: JPEG stores it in coarse blocks, which would
+/// otherwise cut the outline into squares.
+fn gate_by_colour(mask: &[f32], colours: &[[f32; 3]], w: usize, h: usize, radius: f32) -> Vec<f32> {
     let n = w * h;
     let mut core: Vec<[f32; 4]> = mask.iter().map(|&m| [m, 0.0, 0.0, 0.0]).collect();
     blur4(&mut core, w, h, radius);
@@ -192,161 +237,15 @@ fn gate_by_colour(
             let (du, dv) = (u - mu, v - mv);
             let d2 = (svv * du * du - 2.0 * suv * du * dv + suu * dv * dv) / det;
             let gate = 1.0 - smoothstep(9.0, 25.0, d2);
-            let gate = gate + (1.0 - gate) * settled[i];
             mask[i] * (core[i] + (1.0 - core[i]) * gate)
         })
         .collect()
 }
 
-/// Bilinear read of a coarse grid of `cell`-pixel cells at pixel (x, y).
-fn grid_at(grid: &[[f32; 4]], gw: usize, gh: usize, cell: usize, x: usize, y: usize) -> [f32; 4] {
-    let fx = ((x as f32 + 0.5) / cell as f32 - 0.5).clamp(0.0, (gw - 1) as f32);
-    let fy = ((y as f32 + 0.5) / cell as f32 - 0.5).clamp(0.0, (gh - 1) as f32);
-    let (x0, y0) = (fx as usize, fy as usize);
-    let (x1, y1) = ((x0 + 1).min(gw - 1), (y0 + 1).min(gh - 1));
-    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-    let (a, b, c, d) = (
-        grid[y0 * gw + x0],
-        grid[y0 * gw + x1],
-        grid[y1 * gw + x0],
-        grid[y1 * gw + x1],
-    );
-    let mut out = [0.0f32; 4];
-    for k in 0..4 {
-        let top = a[k] + (b[k] - a[k]) * tx;
-        let bottom = c[k] + (d[k] - c[k]) * tx;
-        out[k] = top + (bottom - top) * ty;
-    }
-    out
-}
-
-/// Re-read a soft mask's outline from the photo (a colour-line matte):
-/// within `band` pixels of the mask's 0.5 contour each pixel takes the place
-/// its colour holds between the local inside and outside colours, averaged
-/// from sure pixels around the band. Hair strands over skin then split
-/// cleanly instead of following the part model's coarse outline. Where inside
-/// and outside look alike, or a pixel's colour is neither (teeth beside lips),
-/// the mask is kept, as it is wherever `hold` is set. Returns the matte and
-/// how much each pixel was re-read (0..1).
-fn colour_matte(
-    mask: &[f32],
-    src: &[[f32; 3]],
-    w: usize,
-    h: usize,
-    band: f32,
-    hold: Option<&[f32]>,
-) -> (Vec<f32>, Vec<f32>) {
-    let cell = ((band / 3.0).round() as usize).max(2);
-    let (gw, gh) = (w.div_ceil(cell), h.div_ceil(cell));
-    let span = |g: usize, limit: usize| g * cell..((g + 1) * cell).min(limit);
-    let crossed: Vec<f32> = (0..gw * gh)
-        .into_par_iter()
-        .map(|g| {
-            let (mut above, mut below) = (false, false);
-            for y in span(g / gw, h) {
-                for x in span(g % gw, w) {
-                    if mask[y * w + x] >= 0.5 {
-                        above = true;
-                    } else {
-                        below = true;
-                    }
-                }
-            }
-            if above && below {
-                1.0
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let reach = (band / cell as f32).ceil() as usize;
-    let near = max_filter(&crossed, gw, gh, reach);
-
-    // Colour sums of the sure inside and outside. Cells on the contour give
-    // none; cells within the band count a little, so a thin lock of hair
-    // still has a colour of its own.
-    let (mut inside, mut outside): (Vec<[f32; 4]>, Vec<[f32; 4]>) = (0..gw * gh)
-        .into_par_iter()
-        .map(|g| {
-            let (mut fg, mut bg) = ([0.0f32; 4], [0.0f32; 4]);
-            if crossed[g] > 0.0 {
-                return (fg, bg);
-            }
-            let weight = if near[g] > 0.0 { 0.15 } else { 1.0 };
-            for y in span(g / gw, h) {
-                for x in span(g % gw, w) {
-                    let i = y * w + x;
-                    let sum = match mask[i] {
-                        m if m >= 0.9 => &mut fg,
-                        m if m <= 0.1 => &mut bg,
-                        _ => continue,
-                    };
-                    let c = src[i];
-                    *sum = [
-                        sum[0] + c[0] * weight,
-                        sum[1] + c[1] * weight,
-                        sum[2] + c[2] * weight,
-                        sum[3] + weight,
-                    ];
-                }
-            }
-            (fg, bg)
-        })
-        .unzip();
-    let spread = reach as f32 * 1.5;
-    blur4(&mut inside, gw, gh, spread);
-    blur4(&mut outside, gw, gh, spread);
-    let mut closeness: Vec<[f32; 4]> = near.iter().map(|&v| [v, 0.0, 0.0, 0.0]).collect();
-    blur4(&mut closeness, gw, gh, 1.0);
-    // Enough sure pixels behind a colour estimate: a tenth of a cell.
-    let enough = (cell * cell) as f32 * 0.1;
-
-    (0..w * h)
-        .into_par_iter()
-        .map(|i| {
-            let m = mask[i];
-            let (x, y) = (i % w, i / w);
-            let close = grid_at(&closeness, gw, gh, cell, x, y)[0].clamp(0.0, 1.0)
-                * hold.map_or(1.0, |hold| 1.0 - hold[i]);
-            if close <= 0.0 {
-                return (m, 0.0);
-            }
-            let (fg, bg) = (
-                grid_at(&inside, gw, gh, cell, x, y),
-                grid_at(&outside, gw, gh, cell, x, y),
-            );
-            let support = smoothstep(0.2 * enough, enough, fg[3].min(bg[3]));
-            if support <= 0.0 {
-                return (m, 0.0);
-            }
-            let f = [fg[0] / fg[3], fg[1] / fg[3], fg[2] / fg[3]];
-            let b = [bg[0] / bg[3], bg[1] / bg[3], bg[2] / bg[3]];
-            let d = [f[0] - b[0], f[1] - b[1], f[2] - b[2]];
-            let dd = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).max(1e-6);
-            let c = src[i];
-            let along = ((c[0] - b[0]) * d[0] + (c[1] - b[1]) * d[1] + (c[2] - b[2]) * d[2]) / dd;
-            // A mix of the two sides lies on the line between them.
-            let miss = ((0..3)
-                .map(|k| (c[k] - b[k] - along * d[k]).powi(2))
-                .sum::<f32>()
-                / dd)
-                .sqrt();
-            let beyond = (along - 1.0).max(-along);
-            let trust = smoothstep(0.003, 0.03, dd)
-                * (1.0 - smoothstep(0.2, 0.45, miss))
-                * (1.0 - smoothstep(0.3, 0.7, beyond))
-                * support
-                * close;
-            (m + (smoothstep(0.1, 0.8, along) - m) * trust, trust)
-        })
-        .unzip()
-}
-
-/// Tighten the soft, low-resolution skin mask onto the photo: a colour matte
-/// splits its outline along real edges such as single hairs at the hairline
-/// (except in `hold`, the mouth, where teeth fool it), pixels near the
-/// outline must also have the face's skin colour, and the mask fades out
-/// toward region sides inside the image.
+/// Tighten the soft, low-resolution skin mask onto the photo: a guided filter
+/// (luma guide) snaps its outline to real edges such as the hairline, pixels
+/// near the outline must also have the face's skin colour, and the mask fades
+/// out toward region sides inside the image.
 fn refine_skin(
     mask: Vec<f32>,
     src: &[[f32; 3]],
@@ -354,11 +253,11 @@ fn refine_skin(
     h: usize,
     e: f32,
     open_sides: [bool; 4],
-    hold: &[f32],
 ) -> Vec<f32> {
     let n = w * h;
-    let (matted, settled) = colour_matte(&mask, src, w, h, (e / 40.0).max(3.0), Some(hold));
-    let gated = gate_by_colour(&matted, src, w, h, (e / 28.0).max(3.0), &settled);
+    let guide: Vec<f32> = src.par_iter().map(|&c| luma(c)).collect();
+    let snapped = guided(&mask, &guide, w, h, (e / 80.0).max(2.0), 0.0015);
+    let gated = gate_by_colour(&snapped, src, w, h, (e / 28.0).max(3.0));
     let fade = (0.06 * e).max(4.0);
     (0..n)
         .into_par_iter()
@@ -750,15 +649,7 @@ fn build_face(
         region.x + region.w < width,
         region.y + region.h < height,
     ];
-    let mut mouth_zone = vec![0.0f32; n];
-    stamp_polygon(
-        &mut mouth_zone,
-        region,
-        &loop_points(points, &LIPS_OUTER),
-        0.03 * e,
-        0.03 * e,
-    );
-    let refined = refine_skin(raw_skin, &src, w, h, e, open_sides, &mouth_zone);
+    let refined = refine_skin(raw_skin, &src, w, h, e, open_sides);
     let cheek_luma_src = luma(cheek_colour).max(0.05);
     let own_centre = owners[index];
     let skin: Vec<f32> = (0..n)
@@ -1121,8 +1012,12 @@ fn build_face(
         .map(|i| ((ridge[i] - flanks[i]).clamp(-1.0, 1.0) * 127.0).round() as i8)
         .collect();
 
-    // Hair: the part model's hair over its whole head-and-shoulders crop.
-    let (hair_region, hair) = match parts {
+    // Hair: a broad soft zone over the part model's whole head-and-shoulders
+    // crop, with no outline cut. As with Develop's Shadows/Blacks, each
+    // pixel's own tone decides how much it changes: fully where the model is
+    // sure of hair, elsewhere by how much darker it is than the skin next to
+    // it, so strands over the forehead change and the skin between them not.
+    let (hair_region, hair, hair_base) = match parts {
         Some(p) if trusted => {
             let [x0, y0, x1, y1] = p.bounds();
             let hr = Region::around([[x0, y0], [x1, y1]].into_iter(), [0.0; 4], width, height);
@@ -1146,7 +1041,11 @@ fn build_face(
                 })
                 .collect();
             let own_centre = owners[index];
-            let raw: Vec<f32> = (0..hr.len())
+            // Per pixel: sure hair (never where the model sees skin: faint
+            // hair odds spread over blond or grey-haired foreheads), skin-
+            // weighted brightness and skin weight for the local skin tone,
+            // and whether the model sees this person at all (not backdrop).
+            let (mut spread, on_person): (Vec<[f32; 4]>, Vec<f32>) = (0..hr.len())
                 .into_par_iter()
                 .map(|i| {
                     let (x, y) = at(i);
@@ -1156,21 +1055,39 @@ fn build_face(
                         .enumerate()
                         .any(|(j, (c, s))| j != index && (x - c[0]).hypot(y - c[1]) / s < own)
                     {
-                        return 0.0;
+                        return ([0.0; 4], 0.0);
                     }
-                    // Keep only confident hair, and never where the model sees
-                    // skin: faint hair odds spread over blond or grey-haired
-                    // foreheads and would dye the face.
                     let g = p.groups_at(x, y);
                     let skin = g[body_parts::GROUP_FACE_SKIN] + g[body_parts::GROUP_BODY_SKIN];
-                    smoothstep(0.35, 0.65, g[body_parts::GROUP_HAIR])
-                        * (1.0 - smoothstep(0.2, 0.5, skin))
+                    let hair = g[body_parts::GROUP_HAIR];
+                    let sure = smoothstep(0.35, 0.65, hair) * (1.0 - smoothstep(0.2, 0.5, skin));
+                    (
+                        [sure, skin * luma(colours[i]), skin, 0.0],
+                        smoothstep(0.3, 0.7, hair + skin),
+                    )
                 })
-                .collect();
-            let (matted, settled) = colour_matte(&raw, &colours, hw, hh, (e / 40.0).max(3.0), None);
-            // Strand edges blend into the background; only hair-coloured
-            // pixels there may be dyed, or a blue backdrop turns pink.
-            let snapped = gate_by_colour(&matted, &colours, hw, hh, (e / 40.0).max(3.0), &settled);
+                .unzip();
+            blur4(&mut spread, hw, hh, (e / 40.0).max(3.0));
+            // Brows and eyes stay out even under a fringe.
+            let mut features = vec![0.0f32; hr.len()];
+            for brow in [&RIGHT_BROW[..], &LEFT_BROW[..]] {
+                stamp_polygon(
+                    &mut features,
+                    hr,
+                    &loop_points(points, brow),
+                    0.02 * e,
+                    0.03 * e,
+                );
+            }
+            for eye in [&RIGHT_EYE[..], &LEFT_EYE[..]] {
+                stamp_polygon(
+                    &mut features,
+                    hr,
+                    &loop_points(points, eye),
+                    0.03 * e,
+                    0.03 * e,
+                );
+            }
             let open = [
                 hr.x > 0,
                 hr.y > 0,
@@ -1178,11 +1095,36 @@ fn build_face(
                 hr.y + hr.h < height,
             ];
             let fade = (0.05 * e).max(4.0);
-            let hair = (0..hr.len())
+            let hair: Vec<u8> = (0..hr.len())
                 .into_par_iter()
-                .map(|i| to_u8(snapped[i] * side_fade(i, hw, hh, open, fade)))
+                .map(|i| {
+                    let [b, skin_luma, skin, _] = spread[i];
+                    let zone = smoothstep(0.0, 0.5, b) * on_person[i];
+                    let core = smoothstep(0.75, 0.97, b);
+                    let reference = if skin > 0.02 {
+                        skin_luma / skin
+                    } else {
+                        cheek_luma
+                    };
+                    let dark =
+                        1.0 - smoothstep(reference - 0.4, reference - 0.15, luma(colours[i]));
+                    let keep = (1.0 - features[i]) * side_fade(i, hw, hh, open, fade);
+                    to_u8(zone * (core + (1.0 - core) * dark) * keep)
+                })
                 .collect();
-            (hr, hair)
+            drop(spread);
+            // Develop's regional luminance: Shadows/Blacks move each strand
+            // by its neighbourhood's tone, so hair texture survives a lift.
+            let tone: Vec<f32> = colours
+                .par_iter()
+                .map(|c| luminance_f32(c[0], c[1], c[2]).clamp(0.0, 1.0))
+                .collect();
+            drop(colours);
+            let base = edge_aware_base(&tone, hw, hh, (e / 100.0).max(2.0), 0.01)
+                .into_par_iter()
+                .map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16)
+                .collect();
+            (hr, hair, base)
         }
         _ => (
             Region {
@@ -1191,6 +1133,7 @@ fn build_face(
                 w: 0,
                 h: 0,
             },
+            Vec::new(),
             Vec::new(),
         ),
     };
@@ -1215,6 +1158,7 @@ fn build_face(
         nose,
         hair_region,
         hair,
+        hair_base,
         detail,
         soft,
         low1: low1.into_par_iter().map(to_u16).collect(),
@@ -1222,61 +1166,5 @@ fn build_face(
         broad,
         skin_mean,
         cheek_luma,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A blocky mask over a clean diagonal hairline with one stray strand on
-    /// the skin: the matte follows the photo, not the blocks.
-    #[test]
-    fn colour_matte_follows_the_photo_not_the_blocks() {
-        let (w, h) = (160usize, 160usize);
-        let (hair, skin) = ([0.22f32, 0.16, 0.12], [0.86f32, 0.66, 0.56]);
-        let edge = |x: usize, y: usize| x as f32 + 0.5 * y as f32 - 110.0;
-        let strand = |x: usize, y: usize| (x as f32 - 0.5 * y as f32 - 20.0).abs() < 0.8;
-        let src: Vec<[f32; 3]> = (0..w * h)
-            .map(|i| {
-                let (x, y) = (i % w, i / w);
-                if edge(x, y) < 0.0 || (strand(x, y) && edge(x, y) < 12.0) {
-                    hair
-                } else {
-                    skin
-                }
-            })
-            .collect();
-        // Skin mask decided per 10-pixel block, as a coarse model would.
-        let mask: Vec<f32> = (0..w * h)
-            .map(|i| {
-                let (x, y) = (i % w / 10 * 10 + 5, i / w / 10 * 10 + 5);
-                if edge(x, y) < 0.0 {
-                    0.0
-                } else {
-                    1.0
-                }
-            })
-            .collect();
-        let (matte, _) = colour_matte(&mask, &src, w, h, 24.0, None);
-        let (mut wrong, mut checked) = (0, 0);
-        for y in 20..140 {
-            for x in 0..w {
-                let d = edge(x, y);
-                if d.abs() < 1.5 || d.abs() > 14.0 {
-                    continue;
-                }
-                let want = if src[y * w + x] == hair { 0.0 } else { 1.0 };
-                checked += 1;
-                if (matte[y * w + x] - want).abs() > 0.2 {
-                    wrong += 1;
-                }
-            }
-        }
-        assert!(checked > 1000);
-        assert!(wrong * 100 < checked, "{wrong} of {checked} pixels off");
-        // Far from the outline the mask is untouched.
-        assert_eq!(matte[80 * w + 150], 1.0);
-        assert_eq!(matte[80 * w + 2], 0.0);
     }
 }

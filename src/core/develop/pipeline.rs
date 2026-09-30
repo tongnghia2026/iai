@@ -1056,7 +1056,7 @@ const DETAIL_KEEP_LO: f32 = 0.10;
 const DETAIL_KEEP_HI: f32 = 0.35;
 
 #[inline]
-fn local_detail_boost(l: f32, base: f32, offset: f32) -> f32 {
+pub(crate) fn local_detail_boost(l: f32, base: f32, offset: f32) -> f32 {
     if offset.abs() <= 1e-4 {
         return 0.0;
     }

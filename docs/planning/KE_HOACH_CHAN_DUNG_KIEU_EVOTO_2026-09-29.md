@@ -11,8 +11,8 @@
 - Trạng thái: **Phase 0 ĐẠT** (chủ test 29/09: "khá ổn") → giữ MediaPipe cho mốc mặt.
 - Phase 0b ĐẠT (chủ test 30/09). Phase 1 đang làm: hộp thoại Chỉnh chân dung —
   đợt 1→4 chủ test OK ("rất tuyệt", 30/09).
-- Đợt 5 (30/09 tối, chờ chủ test): mép tóc–da mềm theo từng sợi + giảm tối
-  2 bên mũi (chi tiết ở Phase 1, đợt 5).
+- Đợt 6 (30/09 khuya, chờ chủ test): tóc chỉnh kiểu Shadows/Blacks của
+  Develop trong vùng tóc mềm rộng (chi tiết ở Phase 1, đợt 5–6).
 - Không push nếu chủ chưa yêu cầu. Sau mỗi phase: build Release + đường dẫn
   `.exe` thật rồi mới mời chủ test.
 
@@ -197,17 +197,18 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
   thuộc bên nào. Đợt 5:
   - [~] Làm mịn xác suất Sapiens2 ~1 ô model (`body_parts::soften`) → hết bậc
         lưới ở mọi mask lấy từ model (da, tóc, môi, răng).
-  - [~] **Tách mép theo màu** (`colour_matte`, kiểu Refine Edge): trong dải
-        ±e/40 quanh đường ranh, mỗi điểm ảnh lấy tỉ lệ theo vị trí màu của nó
-        giữa màu "chắc trong" và "chắc ngoài" lân cận (lấy mẫu trên lưới thô).
-        Không tin khi hai bên cùng màu, khi màu điểm không nằm trên đường nối
-        hai màu, hoặc thiếu mẫu. Da và tóc cùng dùng → hai mask bù nhau, hết
-        khe hở. Vùng miệng giữ mask cũ (răng sáng làm lệch phép tách).
-  - [~] Lọc màu mép đọc màu đã làm mờ nhẹ (hết ô JPEG) và bỏ qua điểm đã được
-        tách theo màu.
-  - [~] Hiệu ứng tóc trên điểm "một phần là tóc" giảm theo bình phương độ phủ
-        (tránh da/nền lộ giữa sợi bị nhuộm, viền hồng trên nền sáng).
+  - [x] ~~Tách mép theo màu (`colour_matte`, kiểu Refine Edge)~~ — chủ test
+        30/09: hết ô vuông nhưng chuyển tiếp "bệt", không mượt → GỠ ở đợt 6.
+  - [~] Lọc màu mép đọc màu đã làm mờ nhẹ (hết ô JPEG).
   - [~] Sống mũi cao: 2 bên tối nhẹ hơn (0,12 → 0,05) + dải mảnh, mép mềm hơn.
+- Đợt 6 (chủ gợi ý dùng Blacks/Shadows của Develop): **Sáng tóc** = đúng công
+  thức Develop (Shadows = giá trị thanh, Blacks = ½), đọc ở độ sáng vùng (bộ
+  lọc giữ cạnh, bán kính e/100) + giữ vân như Develop (`local_detail_boost`)
+  → tối vẫn sâu, sợi không bệt. Không cắt mép tóc nữa: vùng tóc = xác suất
+  tóc chắc làm mờ rộng (e/40), chỉ trong người (không nền), trừ lông mày/mắt;
+  trong vùng, điểm nào đổi bao nhiêu do chính độ tối của nó so với da ngay
+  cạnh (tối hơn da ≥0,4 → đổi hết, <0,15 → không đổi), lõi tóc chắc thì đổi
+  hết. Màu tóc (nhuộm) dùng cùng trọng số. Mask da quay lại guided filter.
 - Đo trên máy chủ (4 ảnh NASA public domain 23–58 MP, 1 ảnh nhóm 4 người):
   phân tích ~9–11 s (nạp Sapiens2 ~2,8 s + lần chạy đầu ~5,5 s), kéo thanh
   trượt 60–300 ms/lần; màu da giữ nguyên (H/S/V lệch < 1%).
@@ -305,3 +306,7 @@ donate). Kết luận:
 - **2026-09-30 (khuya)** — Đợt 5: chủ gửi ảnh chân tóc răng cưa → làm mịn
   xác suất Sapiens2, tách mép tóc/da theo màu, lọc màu mép hết ô JPEG, hiệu
   ứng tóc nhẹ trên điểm pha; 2 bên mũi tối nhẹ hơn. Chờ chủ test.
+- **2026-09-30 (khuya)** — Chủ test đợt 5: hết ô nhưng "bệt"; gợi ý dùng
+  Blacks/Shadows của Develop → đợt 6: gỡ tách mép theo màu, tóc chỉnh theo
+  công thức Shadows/Blacks của Develop trong vùng tóc mềm, trọng số theo độ
+  tối từng điểm. Chờ chủ test.

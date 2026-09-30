@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use super::analysis::{luma, FaceModel, PortraitModel, BLEMISH_SCALE};
 use super::geometry::Region;
+use crate::core::color::luminance_f32;
+use crate::core::develop::{apply_light_luma, apply_luma_target, local_detail_boost};
 
 /// Sliders run 0..100, the two-sided ones (lip saturation and brightness,
 /// brows, hair brightness) -100..100, and the colour pickers (`*_hue`) are
@@ -371,15 +373,19 @@ fn retouch_pixel(
     out
 }
 
-/// Hair lighter or darker (a curve, so black stays rich) and dyed toward
-/// `hair_hue`.
-fn recolour_hair(src: [f32; 3], s: &PortraitSettings) -> [f32; 3] {
-    let mut out = src;
-    if s.hair_brightness > 0.0 {
-        out = out.map(|v| 1.0 - (1.0 - v.clamp(0.0, 1.0)).powf(1.0 + s.hair_brightness));
-    } else if s.hair_brightness < 0.0 {
-        out = out.map(|v| v.clamp(0.0, 1.0).powf(1.0 - s.hair_brightness));
+/// Hair lighter or darker with Develop's own Shadows and Blacks, read at the
+/// pixel's regional tone `base` as Develop does (black stays rich, strands
+/// keep their texture), and dyed toward `hair_hue`.
+fn recolour_hair(src: [f32; 3], base: f32, s: &PortraitSettings) -> [f32; 3] {
+    let [mut r, mut g, mut b] = src.map(|v| v.clamp(0.0, 1.0));
+    if s.hair_brightness != 0.0 {
+        let l = luminance_f32(r, g, b).clamp(0.0, 1.0);
+        let amount = s.hair_brightness;
+        let offset = apply_light_luma(base, 0.0, amount, 0.0, 0.5 * amount) - base;
+        let target = (l + offset + local_detail_boost(l, base, offset)).clamp(0.0, 1.0);
+        apply_luma_target(&mut r, &mut g, &mut b, target);
     }
+    let mut out = [r, g, b];
     if s.hair_tint > 0.0 {
         let dyed = colourise(out, s.hair_hue, 0.35);
         for k in 0..3 {
@@ -500,14 +506,14 @@ pub fn render(
                 .for_each(|(urow, line)| {
                     let row = urow - hy;
                     for col in 0..hw {
-                        // Pixels only partly hair (strands over skin or sky)
-                        // change more gently, or what shows through is dyed too.
-                        let weight = (face.hair[row * hw + col] as f32 / 255.0).powi(2);
+                        let k = row * hw + col;
+                        let weight = face.hair[k] as f32 / 255.0;
                         if weight <= 0.0 {
                             continue;
                         }
                         let src = pixel(r.x as usize + col, r.y as usize + row);
-                        let res = recolour_hair(src, &s);
+                        let base = face.hair_base[k] as f32 / 65535.0;
+                        let res = recolour_hair(src, base, &s);
                         let cell = &mut line[hx + col];
                         for k in 0..3 {
                             cell[k] += (res[k] - src[k]) * weight;
@@ -607,6 +613,23 @@ pub fn render_masks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hair_tone_moves_dark_strands_and_spares_skin_tones() {
+        let darker = PortraitSettings {
+            hair_brightness: -1.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        let strand = [0.22f32, 0.16, 0.12];
+        let skin = [0.86f32, 0.68, 0.58];
+        let tone = |c: [f32; 3]| luminance_f32(c[0], c[1], c[2]);
+        let dark = recolour_hair(strand, tone(strand), &darker);
+        assert!(tone(dark) < tone(strand) - 0.05, "{dark:?}");
+        let kept = recolour_hair(skin, tone(skin), &darker);
+        assert!((tone(kept) - tone(skin)).abs() < 0.01, "{kept:?}");
+        let none = recolour_hair(strand, tone(strand), &PortraitSettings::NEUTRAL);
+        assert_eq!(none, strand);
+    }
 
     #[test]
     fn hsl_round_trips_and_colourise_keeps_lightness() {
