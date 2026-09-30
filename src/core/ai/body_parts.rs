@@ -61,6 +61,29 @@ const HAIR: u8 = 4;
 const LOWER_LIP: u8 = 24;
 const TONGUE: u8 = 28;
 
+/// Soft groups of classes the portrait masks read, in [`PartLabels::groups_at`] order.
+pub const PART_GROUPS: usize = 7;
+pub const GROUP_FACE_SKIN: usize = 0;
+pub const GROUP_BODY_SKIN: usize = 1;
+pub const GROUP_HAIR: usize = 2;
+pub const GROUP_LIPS: usize = 3;
+pub const GROUP_TEETH: usize = 4;
+pub const GROUP_TONGUE: usize = 5;
+pub const GROUP_GLASSES: usize = 6;
+
+fn group_of(class: usize) -> Option<usize> {
+    match class {
+        3 => Some(GROUP_FACE_SKIN),
+        5..=8 | 11 | 12 | 14..=17 | 20..=22 => Some(GROUP_BODY_SKIN),
+        4 => Some(GROUP_HAIR),
+        24 | 25 => Some(GROUP_LIPS),
+        26 | 27 => Some(GROUP_TEETH),
+        28 => Some(GROUP_TONGUE),
+        2 => Some(GROUP_GLASSES),
+        _ => None,
+    }
+}
+
 pub fn model_path() -> Option<PathBuf> {
     super::retouch::model_roots()
         .into_iter()
@@ -118,6 +141,8 @@ impl PartCrop {
 pub struct PartLabels {
     crop: PartCrop,
     labels: Vec<u8>,
+    /// Softmax probability of each part group per crop pixel, 0..255.
+    groups: Vec<[u8; PART_GROUPS]>,
     /// Face centre and forehead-to-chin extent from the mesh.
     face: ([f32; 2], f32),
     /// Share of the face mesh's landmarks that land on face-like classes.
@@ -131,6 +156,35 @@ impl PartLabels {
             return None;
         }
         Some(self.labels[v as usize * INPUT_W + u as usize])
+    }
+
+    /// Group probabilities (0..1) at image coordinates, bilinear; zero outside the crop.
+    pub fn groups_at(&self, x: f32, y: f32) -> [f32; PART_GROUPS] {
+        let [u, v] = self.crop.to_crop(x, y);
+        let (px, py) = (u - 0.5, v - 0.5);
+        if px < -0.5 || py < -0.5 || px > INPUT_W as f32 - 0.5 || py > INPUT_H as f32 - 0.5 {
+            return [0.0; PART_GROUPS];
+        }
+        let px = px.clamp(0.0, (INPUT_W - 1) as f32);
+        let py = py.clamp(0.0, (INPUT_H - 1) as f32);
+        let (x0, y0) = (px as usize, py as usize);
+        let (x1, y1) = ((x0 + 1).min(INPUT_W - 1), (y0 + 1).min(INPUT_H - 1));
+        let (fx, fy) = (px - x0 as f32, py - y0 as f32);
+        let at = |xx: usize, yy: usize| &self.groups[yy * INPUT_W + xx];
+        let (a, b, c, d) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
+        let mut out = [0.0; PART_GROUPS];
+        for (g, value) in out.iter_mut().enumerate() {
+            let top = a[g] as f32 * (1.0 - fx) + b[g] as f32 * fx;
+            let bottom = c[g] as f32 * (1.0 - fx) + d[g] as f32 * fx;
+            *value = (top * (1.0 - fy) + bottom * fy) / 255.0;
+        }
+        out
+    }
+
+    /// Whether image point (x, y) lies inside this crop.
+    pub fn covers(&self, x: f32, y: f32) -> bool {
+        let [u, v] = self.crop.to_crop(x, y);
+        u >= 0.0 && v >= 0.0 && u < INPUT_W as f32 && v < INPUT_H as f32
     }
 }
 
@@ -147,7 +201,7 @@ impl Segmenter {
         Ok(Self { session, on_gpu })
     }
 
-    fn run(&mut self, input: Vec<f32>) -> Result<Vec<u8>, String> {
+    fn run(&mut self, input: Vec<f32>) -> Result<(Vec<u8>, Vec<[u8; PART_GROUPS]>), String> {
         let tensor = ort::value::Tensor::<f32>::from_array((
             [1i64, 3, INPUT_H as i64, INPUT_W as i64],
             input,
@@ -173,9 +227,20 @@ impl Segmenter {
                         best = class;
                     }
                 }
-                best as u8
+                let peak = logits[best * plane + i];
+                let mut total = 0.0f32;
+                let mut sums = [0.0f32; PART_GROUPS];
+                for class in 0..CLASS_COUNT {
+                    let e = (logits[class * plane + i] - peak).exp();
+                    total += e;
+                    if let Some(group) = group_of(class) {
+                        sums[group] += e;
+                    }
+                }
+                let groups = sums.map(|s| (s / total * 255.0).round() as u8);
+                (best as u8, groups)
             })
-            .collect())
+            .unzip())
     }
 
     /// Segment the head-and-shoulders region around one face.
@@ -188,8 +253,8 @@ impl Segmenter {
     ) -> Result<PartLabels, String> {
         let crop = PartCrop::around(mesh);
         let input = sample_crop(rgba, width, height, &crop);
-        let labels = match self.run(input.clone()) {
-            Ok(labels) => labels,
+        let (labels, groups) = match self.run(input.clone()) {
+            Ok(result) => result,
             // DirectML can accept the graph yet fail to allocate at run time.
             Err(_) if self.on_gpu => {
                 *self = Self::load(false)?;
@@ -201,6 +266,7 @@ impl Segmenter {
         let mut result = PartLabels {
             crop,
             labels,
+            groups,
             face: (centre, extent),
             agreement: 0.0,
         };

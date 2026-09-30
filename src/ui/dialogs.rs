@@ -1,6 +1,7 @@
 mod adjustment;
 mod document;
 mod filter;
+mod portrait;
 mod print;
 mod scan_cleanup;
 mod select_ops;
@@ -10,6 +11,7 @@ mod vector_style;
 pub(crate) use adjustment::*;
 pub(crate) use document::*;
 pub(crate) use filter::*;
+pub(crate) use portrait::*;
 pub(crate) use print::*;
 pub(crate) use scan_cleanup::*;
 pub(crate) use select_ops::*;
@@ -160,6 +162,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     }
     if data.dialogs.show_scan_cleanup_dialog {
         scan_cleanup_dialog(ctx, data, actions);
+    }
+    if data.dialogs.show_portrait_dialog {
+        portrait_dialog(ctx, data, actions);
     }
     if data.dialogs.show_resize_dialog {
         resize_dialog(ctx, data, actions);

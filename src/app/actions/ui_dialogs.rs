@@ -300,12 +300,6 @@ impl App {
         if actions.ai.retouch_cancel {
             self.cancel_active_ai();
         }
-        if actions.ai.face_mesh_trial {
-            self.do_face_mesh_trial();
-        }
-        if actions.ai.body_parts_trial {
-            self.do_body_parts_trial();
-        }
         if let Some((paper, kind, gap)) = actions.doc.impose_sheet.take() {
             self.do_impose_sheet(paper, kind, gap);
         }
@@ -556,6 +550,34 @@ impl App {
         }
         if let Some(params) = actions.dialogs.set_scan_cleanup_preview.take() {
             self.update_scan_preview(params);
+        }
+        if let Some(open) = actions.dialogs.show_portrait_dialog.take() {
+            if open {
+                match self.begin_portrait() {
+                    Ok(()) => self.shell.ui.show_portrait_dialog = true,
+                    Err(message) => self.shell.status_msg = message,
+                }
+            } else {
+                self.shell.ui.show_portrait_dialog = false;
+                self.cancel_portrait();
+            }
+        }
+        if let Some((settings, faces, preview)) = actions.dialogs.set_portrait_preview.take() {
+            self.set_portrait_preview(settings, faces, preview);
+        }
+        if std::mem::take(&mut actions.dialogs.cancel_portrait_dialog) {
+            self.shell.ui.show_portrait_dialog = false;
+            self.cancel_portrait();
+        }
+        if let Some((settings, faces)) = actions.dialogs.apply_portrait.take() {
+            match self.apply_portrait(settings, faces) {
+                Ok(()) => {
+                    self.shell.ui.show_portrait_dialog = false;
+                    self.shell.status_msg =
+                        "Chỉnh chân dung: đã thêm layer \"Chân dung\"".to_string();
+                }
+                Err(message) => self.shell.status_msg = message,
+            }
         }
         if std::mem::take(&mut actions.dialogs.cancel_scan_cleanup_dialog) {
             self.shell.ui.show_scan_cleanup_dialog = false;

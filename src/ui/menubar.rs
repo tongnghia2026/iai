@@ -556,6 +556,17 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.dialogs.show_scan_cleanup_dialog = Some(true);
                             ui.close();
                         }
+                        if ui
+                            .add(menu_item_enabled(
+                                "Chỉnh chân dung…",
+                                "",
+                                data.doc.has_doc,
+                            ))
+                            .clicked()
+                        {
+                            actions.dialogs.show_portrait_dialog = Some(true);
+                            ui.close();
+                        }
                         ui.separator();
                         ui.menu_button("Adjustments", |ui| {
                             use crate::core::layer::AdjustmentType;

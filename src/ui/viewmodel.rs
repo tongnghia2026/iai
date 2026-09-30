@@ -461,6 +461,12 @@ pub struct DialogViewModel {
     pub show_vector_style_dialog: bool,
     /// "Làm sạch bản scan" dialog is open.
     pub show_scan_cleanup_dialog: bool,
+    /// "Chỉnh chân dung" dialog is open, its status line, whether the analysis
+    /// is ready for previews, and per face whether the part masks are trusted.
+    pub show_portrait_dialog: bool,
+    pub portrait_status: String,
+    pub portrait_ready: bool,
+    pub portrait_faces: Vec<bool>,
     /// Active document is a multi-page PDF session (enables page-scope options).
     pub scan_is_pdf: bool,
     /// PDF page count (1 for a plain image), for the scan-cleanup scope UI.
@@ -1014,6 +1020,10 @@ impl Default for UiData {
                 pdf_batch_page_count: 1,
                 show_vector_style_dialog: false,
                 show_scan_cleanup_dialog: false,
+                show_portrait_dialog: false,
+                portrait_status: String::new(),
+                portrait_ready: false,
+                portrait_faces: Vec::new(),
                 scan_is_pdf: false,
                 scan_page_count: 1,
                 scan_active_page: 0,

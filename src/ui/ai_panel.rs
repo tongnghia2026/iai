@@ -1067,27 +1067,15 @@ fn offline_retouch_section(
     ui.separator();
     if ui
         .add_enabled(
-            can_run,
-            egui::Button::new("Thử nhận diện mốc mặt (MediaPipe)")
-                .min_size(egui::vec2(ui.available_width(), 26.0)),
-        )
-        .on_hover_text("Bản thử: vẽ 478 điểm mốc lên mỗi khuôn mặt thành một layer mới")
-        .clicked()
-    {
-        actions.ai.face_mesh_trial = true;
-    }
-    if ui
-        .add_enabled(
-            can_run,
-            egui::Button::new("Thử tách vùng + kiểm chéo (Sapiens2)")
-                .min_size(egui::vec2(ui.available_width(), 26.0)),
+            data.doc.has_doc,
+            egui::Button::new("Chỉnh chân dung…").min_size(egui::vec2(ui.available_width(), 26.0)),
         )
         .on_hover_text(
-            "Bản thử: tô màu tóc, da, môi, răng, kính, áo quanh mỗi khuôn mặt; mặt nào lệch với mốc MediaPipe bị gạch đỏ",
+            "Làm mịn da, xóa mụn, quầng thâm, trắng mắt, trắng răng — xem trực tiếp trên ảnh",
         )
         .clicked()
     {
-        actions.ai.body_parts_trial = true;
+        actions.dialogs.show_portrait_dialog = Some(true);
     }
 }
 

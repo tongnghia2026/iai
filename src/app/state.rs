@@ -370,6 +370,8 @@ pub struct UiState {
     pub show_vector_style_dialog: bool,
     /// "Làm sạch bản scan" dialog (Image ▸ Làm sạch bản scan…).
     pub show_scan_cleanup_dialog: bool,
+    /// "Chỉnh chân dung" dialog (Image ▸ Chỉnh chân dung…).
+    pub show_portrait_dialog: bool,
     pub vector_style_target: crate::ui::intent::VectorStyleTarget,
     pub show_resize_dialog: bool,
     pub show_image_size_dialog: bool,
@@ -1689,6 +1691,7 @@ impl App {
                     pdf_batch_page_count: 1,
                     show_vector_style_dialog: false,
                     show_scan_cleanup_dialog: false,
+                    show_portrait_dialog: false,
                     vector_style_target: crate::ui::intent::VectorStyleTarget::Document,
                     show_resize_dialog: false,
                     show_image_size_dialog: false,
@@ -1821,6 +1824,7 @@ impl App {
                 adjustment_preview_cost: std::time::Duration::ZERO,
                 filter_preview: None,
                 scan_preview: None,
+                portrait: None,
                 user_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all()),
                 develop_presets: std::sync::Arc::new(
                     crate::core::presets::DevelopPreset::load_all(),
@@ -2576,6 +2580,7 @@ impl App {
             || self.shell.ui.show_filter_dialog
             || self.shell.ui.show_develop_dialog
             || self.shell.ui.show_scan_cleanup_dialog
+            || self.shell.ui.show_portrait_dialog
     }
 
     /// Bug 7: True when Crop (with an active selection) or Free Transform is active.

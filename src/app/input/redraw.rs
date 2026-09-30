@@ -136,7 +136,7 @@ impl App {
         }
         self.poll_ai_edits();
         self.poll_offline_retouch();
-        self.poll_body_parts_trial();
+        self.poll_portrait();
         self.poll_ext_bridge();
 
         self.update_refine_overlay_tex();

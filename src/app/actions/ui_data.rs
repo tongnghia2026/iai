@@ -922,6 +922,11 @@ impl App {
                 .collect(),
         );
         let selected_arrow_settings = self.active_arrow_settings();
+        let portrait_state = if self.shell.ui.show_portrait_dialog {
+            self.portrait_dialog_state()
+        } else {
+            (String::new(), false, Vec::new())
+        };
 
         UiData {
             doc: DocumentViewModel {
@@ -1768,6 +1773,10 @@ impl App {
                 pdf_batch_page_count: self.shell.ui.pdf_batch_page_count,
                 show_vector_style_dialog: self.shell.ui.show_vector_style_dialog,
                 show_scan_cleanup_dialog: self.shell.ui.show_scan_cleanup_dialog,
+                show_portrait_dialog: self.shell.ui.show_portrait_dialog,
+                portrait_status: portrait_state.0,
+                portrait_ready: portrait_state.1,
+                portrait_faces: portrait_state.2,
                 scan_is_pdf: self
                     .docs
                     .documents

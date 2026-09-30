@@ -594,7 +594,7 @@ impl App {
         self.place_ai_result_named(origin_id, rgba, w, h, output_new_file, "Gemini")
     }
 
-    pub(super) fn place_ai_result_named(
+    fn place_ai_result_named(
         &mut self,
         origin_id: Option<u32>,
         rgba: Vec<u8>,

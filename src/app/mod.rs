@@ -24,6 +24,7 @@ pub mod path_display;
 pub mod path_gradient;
 pub mod path_style;
 pub mod pen_ops;
+pub mod portrait_ops;
 pub mod powerclip_ops;
 pub mod render;
 pub mod scan_cleanup_ops;

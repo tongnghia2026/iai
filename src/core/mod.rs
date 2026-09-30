@@ -30,6 +30,7 @@ pub mod output_sharpen;
 pub mod page;
 pub mod palette;
 pub mod perceptual_color;
+pub mod portrait;
 pub mod quick_select;
 pub mod raw_spill;
 pub mod refine;

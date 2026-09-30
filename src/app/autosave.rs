@@ -291,6 +291,7 @@ impl App {
             || self.shell.adjustment_preview.is_some()
             || self.shell.filter_preview.is_some()
             || self.shell.scan_preview.is_some()
+            || self.shell.portrait.is_some()
             || self.dev.develop_preview.is_some()
             || self.win.develop_window.is_some()
             || self.is_preview_dialog_open()

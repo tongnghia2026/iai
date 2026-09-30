@@ -805,6 +805,14 @@ pub struct DialogIntent {
     pub apply_vector_style: Option<VectorBatchStyle>,
     /// Open/close the "Làm sạch bản scan" dialog.
     pub show_scan_cleanup_dialog: Option<bool>,
+    /// Open/close the "Chỉnh chân dung" dialog.
+    pub show_portrait_dialog: Option<bool>,
+    /// Live-preview request: sliders, faces switched on, preview on/off.
+    pub set_portrait_preview: Option<(crate::core::portrait::PortraitSettings, Vec<bool>, bool)>,
+    /// Cancel the portrait dialog (restore the previewed layer).
+    pub cancel_portrait_dialog: bool,
+    /// Apply the portrait retouch as a new layer.
+    pub apply_portrait: Option<(crate::core::portrait::PortraitSettings, Vec<bool>)>,
     /// Live-preview params for the open scan-cleanup dialog (current page only).
     pub set_scan_cleanup_preview: Option<crate::core::scan_cleanup::ScanCleanupParams>,
     /// Cancel/close the scan-cleanup dialog (restore the previewed layer).
@@ -934,10 +942,6 @@ pub struct AiIntent {
     /// Run/cancel the local offline Auto Retouch pipeline.
     pub retouch_run: bool,
     pub retouch_cancel: bool,
-    /// Trial: draw MediaPipe face landmarks as a new layer.
-    pub face_mesh_trial: bool,
-    /// Trial: Sapiens2 body parts cross-checked with the face mesh.
-    pub body_parts_trial: bool,
 }
 
 /// Preferences edits. The dialog emits the whole updated [`AppSettings`] on any

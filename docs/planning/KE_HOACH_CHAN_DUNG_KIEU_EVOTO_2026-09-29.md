@@ -9,8 +9,7 @@
 - Ngày lập kế hoạch: **2026-09-29**.
 - Nhánh: `feat/vector-core-foundation`.
 - Trạng thái: **Phase 0 ĐẠT** (chủ test 29/09: "khá ổn") → giữ MediaPipe cho mốc mặt.
-- Việc kế tiếp: chủ test nút Phase 0b (Sapiens2 + kiểm chéo) → giữ/bỏ, rồi
-  vào Phase 1.
+- Phase 0b ĐẠT (chủ test 30/09). Phase 1 đang làm: hộp thoại Chỉnh chân dung.
 - Không push nếu chủ chưa yêu cầu. Sau mỗi phase: build Release + đường dẫn
   `.exe` thật rồi mới mời chủ test.
 
@@ -112,7 +111,7 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
       qua ONNX: ~9,5 s — không dùng.)
 - [x] 7 mặt ảnh mẫu: 6 mặt khớp 100%, mặt ảnh in báo (chấm lưới in) khớp 2% →
       bị đánh dấu đúng (Sapiens2 nhận nhầm là quần áo, MediaPipe vẫn đúng).
-- [~] Nút **"Thử tách vùng + kiểm chéo (Sapiens2)"** (dưới nút mốc mặt) → chạy
+- [x] Nút **"Thử tách vùng + kiểm chéo (Sapiens2)"** (dưới nút mốc mặt) → chạy
       nền, thêm 2 layer "Vùng Sapiens2 (thử)" + "Mốc mặt MediaPipe (thử)".
 - **Cổng**: chủ xem trên ảnh thật — mép tóc/da/môi/răng đúng, thời gian chịu
   được. Không đạt → gỡ: `src/core/ai/body_parts.rs`,
@@ -127,22 +126,34 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
 
 ### Phase 1 — Da, mắt, răng cho 1 ảnh
 
-- [ ] Hộp thoại **"Chỉnh chân dung…"** (cách mở giống Develop): danh sách mặt
-      (Tất cả / Mặt 1 / Mặt 2…, bấm vào mặt trên ảnh để chọn), xem trước trực
-      tiếp trên canvas, Áp dụng → layer mới.
-- [ ] Mask hình học từ mốc (mục 2.2) + test tự động trên ảnh mẫu.
-- [ ] **Da**: Làm mịn giữ vân (tách tần số: chỉ làm mịn lớp màu/khối), Đều màu
-      da, Giảm bóng dầu, Sáng da.
-- [ ] **Mụn & thâm**: Tự xoá mụn (tìm đốm tương phản cục bộ trên lớp chi tiết
-      trong mask da → vá bằng engine Repair Brush sẵn có), Quầng thâm (nâng
-      sáng/khử ám màu dải dưới mắt).
-- [ ] **Mắt**: Trắng lòng trắng, Sáng mống mắt. **Răng**: Trắng răng (chỉ các
-      điểm sáng, ít bão hoà trong miệng).
+- [~] Hộp thoại **Image ▸ "Chỉnh chân dung…"** (cũng có nút trong AI Panel,
+      thay 2 nút thử của Phase 0/0b): phân tích chạy nền (tiến độ + spinner),
+      xem trực tiếp trên canvas, ô "Xem trước" để so ảnh gốc, tick/bỏ từng mặt,
+      "Mặc định"/"Về 0", **Áp dụng → layer mới "Chân dung"** chỉ chứa điểm ảnh
+      đã đổi (độ mờ layer = độ mạnh), Hủy/Esc khôi phục.
+      Code: `src/core/portrait/` (geometry, blur, analysis, effects),
+      `src/app/portrait_ops.rs`, `src/ui/dialogs/portrait.rs`.
+- [~] Mask: da = Sapiens2 mặt+cổ (mặt lệch → viền mặt MediaPipe × màu da) trừ
+      mắt/lông mày/lỗ mũi; lòng trắng, tròng, dải quầng thâm từ mốc; răng từ
+      Sapiens2 (dự phòng: miệng trong × điểm sáng ít bão hoà); điểm ảnh gần mặt
+      khác hơn thì thuộc mặt đó (ảnh nhóm không chỉnh chồng).
+- [~] **Da**: tách 3 dải (vân r=e/220, khối vừa r=e/28, nền); Làm mịn giảm dải
+      giữa, giữ vân; Đều màu kéo hướng màu về trung bình mặt nhưng giữ độ bão
+      hoà; Giảm bóng dầu nén vùng sáng vượt nền rộng (r=e/7); Sáng da. Làm mịn
+      tắt dần sát mép da (hết quầng viền tai/cằm).
+- [~] **Mụn**: đốm tối/đỏ hơn vòng tròn quanh nó ở MỌI hướng (2 bán kính) →
+      nếp gấp, đường viền không bị bắt nhầm; slider = ngưỡng.
+- [~] **Quầng thâm**, **Trắng mắt**, **Sáng tròng mắt**, **Trắng răng**.
+- Đo trên máy chủ (4 ảnh NASA public domain 23–58 MP, 1 ảnh nhóm 4 người):
+  phân tích ~9–11 s (nạp Sapiens2 ~2,8 s + lần chạy đầu ~5,5 s), kéo thanh
+  trượt 60–300 ms/lần; màu da giữ nguyên (H/S/V lệch < 1%).
+- [ ] Tối ưu: lượng tử hoá int8 Sapiens2 (nhẹ + nhanh hơn), render nền.
 - [ ] Tìm mặt nhỏ trong ảnh nhóm lớn: dò theo ô (tile) khi ảnh > 640px.
 - [ ] Ghi model vào `docs/AI_MODELS.md` + `THIRD_PARTY.md`; bản portable kèm
-      `models/face-mesh/`.
-- **Cổng**: kéo thanh trượt mượt trên ảnh 24MP; Áp dụng < 2 giây; chủ test bộ
-  20–30 ảnh thật, so với ảnh chụp màn hình kết quả Evoto (bản chỉnh miễn phí).
+      model mốc mặt + Sapiens2.
+- Đã biết: râu lún phún bị làm mịn nhẹ; ảnh 16-bit → layer kết quả 8-bit.
+- **Cổng**: chủ test trên ảnh thật (chân dung, thẻ, nhóm) — da tự nhiên, không
+  quầng viền, mụn được xoá, thời gian chấp nhận được.
 
 ### Phase 2 — Chỉnh dáng mặt (Liquify theo mốc)
 
@@ -215,4 +226,6 @@ donate). Kết luận:
 - **2026-09-29 (khuya)** — Chủ chốt hướng kết hợp: mỗi model lo mảng mạnh, app
   hợp nhất (bảng ở mục 2.3). Thêm Phase 0b thử Sapiens2.
 - **2026-09-30** — Phase 0b code xong: ONNX 512×384, CPU ~1,5 s/mặt trên máy
-  chủ (GPU 2 GB không đủ), kiểm chéo bắt đúng mặt ảnh in báo; chờ chủ test.
+  chủ (GPU 2 GB không đủ), kiểm chéo bắt đúng mặt ảnh in báo; chủ test ĐẠT.
+- **2026-09-30** — Phase 1: module `core::portrait` + hộp thoại Chỉnh chân dung;
+  2 nút thử được thay bằng nút "Chỉnh chân dung…".
