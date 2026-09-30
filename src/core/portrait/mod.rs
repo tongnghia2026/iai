@@ -7,6 +7,7 @@ pub mod analysis;
 mod blur;
 pub mod effects;
 pub mod geometry;
+mod skin_mask;
 
 pub use analysis::{analyze, FaceModel, PortraitModel, TRUSTED_AGREEMENT};
 pub use effects::{render, render_masks, PortraitSettings};
@@ -21,6 +22,167 @@ mod tests {
             let o = (((r.y + y) * width + r.x + x) * 4) as usize;
             image::Rgb([rgba[o], rgba[o + 1], rgba[o + 2]])
         })
+    }
+
+    /// Opt-in: set IAI_PORTRAIT_SKIN_PROBE to a folder of photos; compares the
+    /// part model's skin mask with the colour-model one (holes, leaks, time)
+    /// and writes an old | new overlay sheet per face.
+    #[test]
+    #[ignore]
+    fn probe_skin_mask() {
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_SKIN_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".jpg") && !n.starts_with("pr_"))
+            .filter(|n| {
+                std::env::var("IAI_PORTRAIT_SKIN_ONLY").map_or(true, |only| n.contains(&only))
+            })
+            .collect();
+        names.sort();
+        let mut segmenter = crate::core::ai::body_parts::Segmenter::load(false).unwrap();
+        for name in names {
+            let image = image::open(dir.join(&name)).unwrap().to_rgba8();
+            let (width, height) = image.dimensions();
+            let rgba = image.into_raw();
+            skin_mask::set_legacy(true);
+            let old = analyze(&rgba, width, height, false, &|_| {}).unwrap();
+            skin_mask::set_legacy(false);
+            println!(
+                "{name}: {width}x{height}, prepare old {} ms",
+                old.timings[3]
+            );
+            let new = &old;
+            let owners: Vec<([f32; 2], f32)> = new
+                .faces
+                .iter()
+                .map(|f| {
+                    let (c, s, _) = f.mesh.frame();
+                    (c, s)
+                })
+                .collect();
+            for (i, face) in new.faces.iter().enumerate() {
+                let r = face.region;
+                let parts = segmenter
+                    .segment_face(&rgba, width, height, &face.mesh)
+                    .unwrap();
+                let trusted = parts.agreement >= TRUSTED_AGREEMENT;
+                let src: Vec<[f32; 3]> = (0..r.len())
+                    .map(|k| {
+                        let o = ((r.y as usize + k / r.w as usize) * width as usize
+                            + r.x as usize
+                            + k % r.w as usize)
+                            * 4;
+                        [
+                            rgba[o] as f32 / 255.0,
+                            rgba[o + 1] as f32 / 255.0,
+                            rgba[o + 2] as f32 / 255.0,
+                        ]
+                    })
+                    .collect();
+                let input = skin_mask::SkinInputs {
+                    src: &src,
+                    region: r,
+                    extent: face.extent,
+                    points: &face.mesh.points,
+                    parts: trusted.then_some(&parts),
+                    owners: &owners,
+                    index: i,
+                    open_sides: [r.x > 0, r.y > 0, r.x + r.w < width, r.y + r.h < height],
+                };
+                let started = std::time::Instant::now();
+                let fresh = skin_mask::skin_mask(&input);
+                let mask_ms = started.elapsed().as_millis();
+                let a_old = skin_mask::audit(&input, &old.faces[i].skin);
+                let fresh: Vec<u8> = fresh
+                    .map(|m| m.iter().map(|&v| (v * 255.0).round() as u8).collect())
+                    .unwrap_or_else(|| old.faces[i].skin.clone());
+                let a_new = skin_mask::audit(&input, &fresh);
+                if let Some((gw, gh, map, summary)) = skin_mask::evidence_map(&input) {
+                    println!("    {summary}");
+                    image::RgbImage::from_raw(gw as u32, gh as u32, map)
+                        .unwrap()
+                        .save(dir.join(format!("pr_{name}_ev{i}.png")))
+                        .unwrap();
+                }
+                let pct = |a: Option<(f32, f32)>| {
+                    a.map_or("-".to_string(), |(hole, leak)| {
+                        format!("holes {:.1}% leaks {:.2}%", hole * 100.0, leak * 100.0)
+                    })
+                };
+                println!(
+                    "  face {i}: {}x{} at {},{} e {:.0} trusted {trusted} | old {} | new {} | mask {mask_ms} ms",
+                    r.w,
+                    r.h,
+                    r.x,
+                    r.y,
+                    face.extent,
+                    pct(a_old),
+                    pct(a_new),
+                );
+                let tint = |mask: &[u8]| {
+                    image::RgbImage::from_fn(r.w, r.h, |x, y| {
+                        let k = (y * r.w + x) as usize;
+                        let m = mask[k] as f32 / 255.0 * 0.55;
+                        let c = src[k];
+                        image::Rgb([
+                            ((c[0] * (1.0 - m) + m) * 255.0) as u8,
+                            (c[1] * (1.0 - m) * 255.0) as u8,
+                            ((c[2] * (1.0 - m) + m * 0.2) * 255.0) as u8,
+                        ])
+                    })
+                };
+                let mut sheet = image::RgbImage::new(r.w * 2 + 8, r.h);
+                image::imageops::replace(&mut sheet, &tint(&old.faces[i].skin), 0, 0);
+                image::imageops::replace(&mut sheet, &tint(&fresh), (r.w + 8) as i64, 0);
+                let k = (2000.0 / sheet.width() as f32).min(1.0);
+                image::imageops::resize(
+                    &sheet,
+                    (sheet.width() as f32 * k) as u32,
+                    (sheet.height() as f32 * k) as u32,
+                    image::imageops::FilterType::Triangle,
+                )
+                .save(dir.join(format!("pr_{name}_cmp{i}.jpg")))
+                .unwrap();
+                image::GrayImage::from_raw(r.w, r.h, fresh.clone())
+                    .unwrap()
+                    .save(dir.join(format!("pr_{name}_new{i}.png")))
+                    .unwrap();
+                image::GrayImage::from_raw(r.w, r.h, old.faces[i].skin.clone())
+                    .unwrap()
+                    .save(dir.join(format!("pr_{name}_old{i}.png")))
+                    .unwrap();
+            }
+            if std::env::var("IAI_PORTRAIT_SKIN_RENDER").is_ok() {
+                let fresh = analyze(&rgba, width, height, false, &|_| {}).unwrap();
+                println!("  prepare new {} ms", fresh.timings[3]);
+                let strong = PortraitSettings {
+                    smooth: 80.0,
+                    even_tone: 60.0,
+                    brighten: 40.0,
+                    shine: 40.0,
+                    ..PortraitSettings::default()
+                };
+                let enabled = vec![true; old.faces.len()];
+                let r = old.faces[0].region;
+                for (tag, model) in [("old", &old), ("new", &fresh)] {
+                    let (u, px) = render(&rgba, model, &strong, &enabled).unwrap();
+                    let mut full = rgba.clone();
+                    for row in 0..u.h as usize {
+                        let o = ((u.y as usize + row) * width as usize + u.x as usize) * 4;
+                        let s = row * u.w as usize * 4;
+                        full[o..o + u.w as usize * 4].copy_from_slice(&px[s..s + u.w as usize * 4]);
+                    }
+                    crop_rgb(&full, width, r)
+                        .save(dir.join(format!("pr_{name}_r{tag}.png")))
+                        .unwrap();
+                }
+            }
+        }
     }
 
     /// Opt-in: set IAI_PORTRAIT_PROBE to a folder of photos; writes before/after

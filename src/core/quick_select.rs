@@ -53,7 +53,7 @@ const FREE: u8 = 0;
 const FIX_TARGET: u8 = 1;
 const FIX_OTHER: u8 = 2;
 
-const DIRS: [(i32, i32); 8] = [
+pub(crate) const DIRS: [(i32, i32); 8] = [
     (1, 0),
     (1, 1),
     (0, 1),
@@ -102,7 +102,9 @@ const P_TERMINAL: u8 = 8;
 const P_ORPHAN: u8 = 9;
 const P_NONE: u8 = 10;
 
-struct Maxflow {
+/// Shared with the portrait skin mask, which cuts skin on the same kind of
+/// 8-connected grid.
+pub(crate) struct Maxflow {
     nbr: Vec<[u32; 8]>,
     cap: Vec<[i32; 8]>,
     /// Residual terminal capacity: > 0 towards the source, < 0 towards the sink.
@@ -119,7 +121,7 @@ struct Maxflow {
 }
 
 impl Maxflow {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         Self {
             nbr: vec![[NO_NODE; 8]; n],
             cap: vec![[0; 8]; n],
@@ -135,7 +137,9 @@ impl Maxflow {
         }
     }
 
-    fn link(&mut self, i: usize, d: usize, j: usize, c: i32) {
+    /// Link node `i` to `j`, its neighbour in direction `d` of [`DIRS`], with
+    /// capacity `c` both ways.
+    pub(crate) fn link(&mut self, i: usize, d: usize, j: usize, c: i32) {
         self.nbr[i][d] = j as u32;
         self.nbr[j][opp(d)] = i as u32;
         self.cap[i][d] = c;
@@ -165,7 +169,13 @@ impl Maxflow {
         self.orphans.push_front(i as u32);
     }
 
-    fn solve(&mut self) {
+    /// Add terminal capacity to node `i`: > 0 towards the source, < 0 towards
+    /// the sink.
+    pub(crate) fn add_terminal(&mut self, i: usize, c: i32) {
+        self.tr[i] = self.tr[i].saturating_add(c);
+    }
+
+    pub(crate) fn solve(&mut self) {
         for i in 0..self.tr.len() {
             if self.tr[i] != 0 {
                 self.parent[i] = P_TERMINAL;
@@ -426,7 +436,7 @@ impl Maxflow {
         }
     }
 
-    fn is_source(&self, i: usize) -> bool {
+    pub(crate) fn is_source(&self, i: usize) -> bool {
         self.parent[i] != P_NONE && !self.sink[i]
     }
 }

@@ -6,6 +6,7 @@ use rayon::prelude::*;
 
 use super::blur::{blur4, masked_blur};
 use super::geometry::*;
+use super::skin_mask::{self, SkinInputs};
 use crate::core::ai::body_parts::{self, PartLabels, Segmenter};
 use crate::core::ai::face_mesh::{self, FaceMesh};
 use crate::core::color::luminance_f32;
@@ -81,7 +82,7 @@ pub(super) fn luma(c: [f32; 3]) -> f32 {
     0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
 }
 
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+pub(super) fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -123,7 +124,14 @@ fn max_filter(values: &[f32], width: usize, height: usize, radius: usize) -> Vec
 
 /// Guided filter of `mask` with a grey `guide`: snaps a soft mask onto the
 /// photo's own edges. Never grows the mask where it had nothing nearby.
-fn guided(mask: &[f32], guide: &[f32], w: usize, h: usize, radius: f32, eps: f32) -> Vec<f32> {
+pub(super) fn guided(
+    mask: &[f32],
+    guide: &[f32],
+    w: usize,
+    h: usize,
+    radius: f32,
+    eps: f32,
+) -> Vec<f32> {
     let mut stats: Vec<[f32; 4]> = mask
         .par_iter()
         .zip(guide.par_iter())
@@ -173,7 +181,7 @@ fn edge_aware_base(values: &[f32], w: usize, h: usize, radius: f32, eps: f32) ->
 /// Fade toward the region sides flagged in `open_sides` (left, top, right,
 /// bottom): those sides lie inside the image, so an effect must not end there
 /// in a hard line.
-fn side_fade(i: usize, w: usize, h: usize, open_sides: [bool; 4], fade: f32) -> f32 {
+pub(super) fn side_fade(i: usize, w: usize, h: usize, open_sides: [bool; 4], fade: f32) -> f32 {
     let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
     let distances = [x, y, w as f32 - x, h as f32 - y];
     open_sides
@@ -603,53 +611,77 @@ fn build_face(
         sum
     };
 
-    // Mesh-only fallback: the face outline limited to skin-coloured pixels.
-    let mut oval = vec![0.0f32; n];
-    if !trusted {
-        stamp_polygon(
-            &mut oval,
-            region,
-            &loop_points(points, &FACE_OVAL),
-            -0.01 * e,
-            0.05 * e,
-        );
-        stamp_polygon(
-            &mut exclude,
-            region,
-            &loop_points(points, &LIPS_OUTER),
-            0.01 * e,
-            0.02 * e,
-        );
-    }
-    let cheek_chroma = {
-        let y = luma(cheek_colour);
-        cheek_colour.map(|v| v - y)
-    };
-    let raw_skin: Vec<f32> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let (x, y) = pixel_xy(i);
-            match parts {
-                Some(p) if trusted => p.groups_at(x, y)[body_parts::GROUP_FACE_SKIN],
-                _ => {
-                    let c = src[i];
-                    let yl = luma(c);
-                    let distance = (0..3)
-                        .map(|k| (c[k] - yl - cheek_chroma[k]).powi(2))
-                        .sum::<f32>()
-                        .sqrt();
-                    oval[i] * (1.0 - smoothstep(0.05, 0.12, distance))
-                }
-            }
-        })
-        .collect();
     let open_sides = [
         region.x > 0,
         region.y > 0,
         region.x + region.w < width,
         region.y + region.h < height,
     ];
-    let refined = refine_skin(raw_skin, &src, w, h, e, open_sides);
+    // Skin from the photo's own colours; the part model's mask (or, without
+    // it, the face outline limited to cheek-coloured pixels) when the photo
+    // has too little colour to go on.
+    let coloured = if skin_mask::legacy() {
+        None
+    } else {
+        skin_mask::skin_mask(&SkinInputs {
+            src: &src,
+            region,
+            extent: e,
+            points,
+            parts: parts.filter(|_| trusted),
+            owners,
+            index,
+            open_sides,
+        })
+    };
+    let refined = match coloured {
+        Some(mask) => {
+            exclude.fill(0.0);
+            mask
+        }
+        None => {
+            let mut oval = vec![0.0f32; n];
+            if !trusted {
+                stamp_polygon(
+                    &mut oval,
+                    region,
+                    &loop_points(points, &FACE_OVAL),
+                    -0.01 * e,
+                    0.05 * e,
+                );
+                stamp_polygon(
+                    &mut exclude,
+                    region,
+                    &loop_points(points, &LIPS_OUTER),
+                    0.01 * e,
+                    0.02 * e,
+                );
+            }
+            let cheek_chroma = {
+                let y = luma(cheek_colour);
+                cheek_colour.map(|v| v - y)
+            };
+            let raw_skin: Vec<f32> = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let (x, y) = pixel_xy(i);
+                    match parts {
+                        Some(p) if trusted => p.groups_at(x, y)[body_parts::GROUP_FACE_SKIN],
+                        _ => {
+                            let c = src[i];
+                            let yl = luma(c);
+                            let distance = (0..3)
+                                .map(|k| (c[k] - yl - cheek_chroma[k]).powi(2))
+                                .sum::<f32>()
+                                .sqrt();
+                            oval[i] * (1.0 - smoothstep(0.05, 0.12, distance))
+                        }
+                    }
+                })
+                .collect();
+            refine_skin(raw_skin, &src, w, h, e, open_sides)
+        }
+    };
     let cheek_luma_src = luma(cheek_colour).max(0.05);
     let own_centre = owners[index];
     let skin: Vec<f32> = (0..n)

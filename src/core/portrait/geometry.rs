@@ -92,7 +92,7 @@ pub fn loop_points(points: &[[f32; 3]], indices: &[u16]) -> Vec<[f32; 2]> {
 }
 
 /// Positive inside `poly`, negative outside: distance to the nearest edge.
-fn signed_distance(poly: &[[f32; 2]], x: f32, y: f32) -> f32 {
+pub(super) fn signed_distance(poly: &[[f32; 2]], x: f32, y: f32) -> f32 {
     let mut inside = false;
     let mut nearest = f32::MAX;
     let mut j = poly.len() - 1;

@@ -122,19 +122,19 @@ và qua cổng · `[!]` bị chặn (ghi lý do ở Changelog).
 
 ## 4. Các pha
 
-- [ ] **A. Công cụ đo** — probe: chỉ số (1) **lỗ** = số điểm trong viền mặt
+- [~] **A. Công cụ đo** — probe: chỉ số (1) **lỗ** = số điểm trong viền mặt
       MediaPipe, ngoài mắt/lông mày/môi/lỗ mũi, có màu giống mẫu da mà mask <
       0,5; (2) **rò** = điểm mask > 0,5 mà Sapiens2 chắc tóc/nền/áo và màu
       không giống da; (3) thời gian. Chạy trên bộ ảnh thử với mask CŨ làm mốc.
-- [ ] **B. Mẫu + mô hình màu** (3-A, 3-B) → ảnh xám "giống da" hợp lý trên
+- [~] **B. Mẫu + mô hình màu** (3-A, 3-B) → ảnh xám "giống da" hợp lý trên
       mọi ảnh thử (kể cả ảnh đèn vàng, da ngăm).
-- [ ] **C. Cắt đồ thị + hàng rào + hạt cứng** (3-C, 3-D phần hàng rào/tóc).
-- [ ] **D. Cắt đặc điểm sát** (3-D mắt, lông mày, môi, lỗ mũi).
-- [ ] **E. Làm mềm + tích hợp** vào `build_face` (công tắc cũ/mới), Hiện vùng
+- [~] **C. Cắt đồ thị + hàng rào + hạt cứng** (3-C, 3-D phần hàng rào/tóc).
+- [~] **D. Cắt đặc điểm sát** (3-D mắt, lông mày, môi, lỗ mũi).
+- [~] **E. Làm mềm + tích hợp** vào `build_face` (công tắc cũ/mới), Hiện vùng
       nhận diện, test đơn vị (vd. ảnh tổng hợp: mặt màu da có "mái" màu da đậm
       che trán → mask phải phủ phần trán lộ; lông mày tổng hợp → da quanh sợi
       được giữ).
-- [ ] **F. Đo + tối ưu + build**: `cargo fmt --check`, `cargo test --lib`
+- [~] **F. Đo + tối ưu + build**: `cargo fmt --check`, `cargo test --lib`
       (release), build Release có Canvas Editor (`--target-dir
       target\portrait-test` nếu exe chính bị khoá), đưa đường dẫn exe thật.
 - **Cổng nghiệm thu (chủ test)**: trên ảnh bị lỗ trán + vài ảnh khác — không
@@ -161,3 +161,40 @@ và qua cổng · `[!]` bị chặn (ghi lý do ở Changelog).
 
 - **2026-09-30** — Lập kế hoạch theo đề xuất đã chủ duyệt; chưa code. Phiên
   mới: xin ảnh "Hiện vùng nhận diện", làm pha A trước.
+- **2026-10-01** — Code xong A→F, chờ chủ test (cổng nghiệm thu). Module
+  `src/core/portrait/skin_mask.rs`; `build_face` gọi nó, lùi về mask cũ khi ảnh
+  quá ít màu (ảnh đen trắng). Probe `probe_skin_mask`
+  (`IAI_PORTRAIT_SKIN_PROBE=<thư mục>`, thêm `IAI_PORTRAIT_SKIN_RENDER=1` để
+  xuất ảnh chỉnh cũ/mới, `IAI_PORTRAIT_SKIN_ONLY=<tên>` để chạy 1 ảnh) in lỗ/rò/
+  thời gian, ghi `pr_*_cmp` (cũ | mới), `pr_*_ev` (bản đồ giống da). Bộ ảnh thử
+  public domain: 4 phi hành gia Artemis II, Kim, Meir, Nelson + chân dung Quốc
+  hội Mỹ (Judy Chu, Mazie Hirono — tóc mái; Lauren Underwood — da ngăm, đeo
+  kính; Hakeem Jeffries — da ngăm).
+  Khác thiết kế ban đầu, rút ra khi đo:
+  1. **Không gian màu = Lab a\*b\*** (không phải tỉ lệ log r/g, b/g): đo trên 11
+     mặt, sắc độ Lab của da gần như không đổi từ L\* 25 tới 85 (góc màu 45–60°),
+     còn tỉ lệ log tăng mạnh khi tối → mô hình cũ bỏ cả vùng bóng. Độ nới dọc
+     hướng sắc độ 20% (sáng) → 45% (L\* < 15–35).
+  2. Ở điểm gần đen (L\* < 3–15) hoặc cháy sáng, màu không đọc được → bỏ bằng
+     chứng màu, để Sapiens2 quyết (nửa mặt khuất sáng của ảnh Artemis L\* 2–6).
+  3. **Lông mày không dùng mô hình màu trong bước cắt**: lông mày vàng/nhạt
+     trùng màu da làm mất thái dương, lông mày rậm thì Sapiens2 (không có lớp
+     lông mày) kéo vào da. Thay bằng kiểm tra từng điểm: sợi = tối hơn da ngay
+     quanh lông mày (vùng lông mày loại trừ, bán kính e/30) hoặc tối hơn lân cận
+     nhỏ (e/150) → da giữa các sợi vẫn được xử lý, hết dải viền đậm.
+  4. Mắt: lòng mắt chặn cứng, lông mi = sợi tối (vùng mi nở 0,012e), guard
+     0,005e/0,01e; không mô hình màu mắt (mống mắt nâu trùng da trong bóng).
+  5. Môi: mô hình màu môi/răng/lòng miệng chỉ có hiệu lực trong 0,03e quanh môi.
+  6. Mẫu "không phải da" (tóc, nền, áo) bị bỏ khi trùng màu da **và** sáng như
+     da mẫu (trán dưới mái AI nhận nhầm là tóc); tóc nâu sẫm vẫn là tóc.
+  7. Lấp "lỗ kín" trong vùng da ≤ 0,02e² không chạm mắt/lông mày/miệng khi
+     Sapiens2 cũng đọc là da (bóng áo xanh hắt dưới cằm Jeffries).
+  8. Tròng kính: Sapiens2 "kính" = trung lập (da sau tròng kính được xử lý).
+  9. Mép: guided filter luma bán kính e/100 (sắc ở mép thật, mềm nơi phẳng),
+     không lan quá ~e/60 theo sợi tóc sáng.
+  Kết quả probe (lỗ % mask cũ → mới): Artemis 0,7/2,4/0,8/0,9 → 0,4/1,9/0,4/0,0;
+  Jeffries 0,4 → 0,0; Judy 5,9 → 4,3; Kim 0,2 → 0,0; Lauren 33 → 7; Mazie 3,5 →
+  2,7; Meir 0,7 → 0,0; Nelson 0,9 → 2,1 (tóc vàng thưa ở thái dương); rò ≤
+  0,06%. Thời gian mask 0,07–1,8 s/mặt (ảnh 9 MP vùng mặt), "chuẩn bị" tăng
+  ~0,2–0,7 s so với mask cũ. 1818 test pass. Công tắc cũ/mới (`set_legacy`)
+  còn giữ cho probe; gỡ khi chủ duyệt.
