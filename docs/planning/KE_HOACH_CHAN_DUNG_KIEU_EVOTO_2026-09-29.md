@@ -9,7 +9,14 @@
 - Ngày lập kế hoạch: **2026-09-29**.
 - Nhánh: `feat/vector-core-foundation`.
 - Trạng thái: **Phase 0 ĐẠT** (chủ test 29/09: "khá ổn") → giữ MediaPipe cho mốc mặt.
-- Phase 0b ĐẠT (chủ test 30/09). Phase 1 đang làm: hộp thoại Chỉnh chân dung.
+- Phase 0b ĐẠT (chủ test 30/09). Phase 1 đang làm: hộp thoại Chỉnh chân dung —
+  đợt 1→4 chủ test OK ("rất tuyệt", 30/09).
+- **Việc kế tiếp (chủ giao 30/09, chưa làm):**
+  1. Giảm độ tối 2 bên mũi của "Sống mũi cao" (đang đen quá): hệ số tối trong
+     `effects.rs` (`gain` âm 0.12) + dải bên trong `analysis.rs` (Nose contour).
+  2. Làm mềm, hòa trộn vùng giáp ranh tóc / lông mày / mắt / môi với da — xin
+     ảnh chủ chỉ chỗ gắt (kèm "Hiện vùng nhận diện") rồi feather mask đặc điểm
+     và tắt dần hiệu ứng da sát đặc điểm.
 - Không push nếu chủ chưa yêu cầu. Sau mỗi phase: build Release + đường dẫn
   `.exe` thật rồi mới mời chủ test.
 
@@ -277,3 +284,5 @@ donate). Kết luận:
   nhận diện.
 - **2026-09-30 (tối)** — Chủ test đợt 3 "tuyệt vời"; thêm Sống mũi cao, màu
   tròng mắt/môi/tóc (dải cầu vồng + phủ màu), sáng tối tóc.
+- **2026-09-30 (tối)** — Chủ test đợt 4 "rất tuyệt"; giao tiếp: giảm tối 2 bên
+  mũi + làm mềm vùng giáp ranh. Bàn giao sang phiên mới (hết context).
