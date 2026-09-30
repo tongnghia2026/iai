@@ -23,14 +23,20 @@ fn section_title(ui: &mut egui::Ui, title: &str) {
     );
 }
 
-fn rows(ui: &mut egui::Ui, enabled: bool, items: [(&str, &mut f32, &str); 3]) {
-    for (label, value, tip) in items {
+/// Slider rows: (label, value, tooltip, two-sided -100..100).
+fn rows(ui: &mut egui::Ui, enabled: bool, items: Vec<(&str, &mut f32, &str, bool)>) {
+    for (label, value, tip, two_sided) in items {
+        let range = if two_sided {
+            -100.0..=100.0
+        } else {
+            0.0..=100.0
+        };
         ui.add_enabled_ui(enabled, |ui| {
             crate::ui::widgets::dev_slider_stacked_resp(
                 ui,
                 label,
                 value,
-                0.0..=100.0,
+                range,
                 &slider_colors(),
                 1.0,
             )
@@ -100,39 +106,113 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                 );
             }
 
-            section_title(ui, "Da");
-            rows(
-                ui,
-                ready,
-                [
-                    (
-                        "Làm mịn da",
-                        &mut s.smooth,
-                        "Mịn da nhưng giữ vân lỗ chân lông",
-                    ),
-                    ("Đều màu da", &mut s.even_tone, "Giảm mảng đỏ, loang màu"),
-                    ("Giảm bóng dầu", &mut s.shine, "Dịu các vùng bóng loáng"),
-                ],
-            );
-            rows(
-                ui,
-                ready,
-                [
-                    ("Sáng da", &mut s.brighten, "Da sáng hơn, giữ màu"),
-                    ("Xóa mụn", &mut s.blemish, "Tự tìm và xóa mụn, đốm thâm nhỏ"),
-                    ("Quầng thâm", &mut s.dark_circles, "Làm sáng vùng dưới mắt"),
-                ],
-            );
-            section_title(ui, "Mắt & răng");
-            rows(
-                ui,
-                ready,
-                [
-                    ("Trắng mắt", &mut s.eye_white, "Lòng trắng mắt sáng, bớt đỏ"),
-                    ("Sáng tròng mắt", &mut s.iris, "Tròng mắt sáng và trong hơn"),
-                    ("Trắng răng", &mut s.teeth, "Răng trắng, bớt ố vàng"),
-                ],
-            );
+            egui::ScrollArea::vertical()
+                .max_height(ctx.content_rect().height() * 0.62)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    section_title(ui, "Da");
+                    rows(
+                        ui,
+                        ready,
+                        vec![
+                            (
+                                "Làm mịn da",
+                                &mut s.smooth,
+                                "Mịn da nhưng giữ vân lỗ chân lông",
+                                false,
+                            ),
+                            (
+                                "Đều màu da",
+                                &mut s.even_tone,
+                                "Giảm mảng đỏ, loang màu",
+                                false,
+                            ),
+                            (
+                                "Giảm bóng dầu",
+                                &mut s.shine,
+                                "Dịu các vùng bóng loáng",
+                                false,
+                            ),
+                            ("Sáng da", &mut s.brighten, "Da sáng hơn, giữ màu", false),
+                            (
+                                "Xóa mụn",
+                                &mut s.blemish,
+                                "Tự tìm và xóa mụn, đốm thâm nhỏ (lấp bằng vân da lành bên cạnh)",
+                                false,
+                            ),
+                            (
+                                "Quầng thâm",
+                                &mut s.dark_circles,
+                                "Làm sáng vùng dưới mắt",
+                                false,
+                            ),
+                        ],
+                    );
+                    section_title(ui, "Mắt & răng");
+                    rows(
+                        ui,
+                        ready,
+                        vec![
+                            (
+                                "Trắng mắt",
+                                &mut s.eye_white,
+                                "Lòng trắng mắt sáng, bớt đỏ",
+                                false,
+                            ),
+                            (
+                                "Sáng tròng mắt",
+                                &mut s.iris,
+                                "Tròng mắt sáng và trong hơn",
+                                false,
+                            ),
+                            ("Trắng răng", &mut s.teeth, "Răng trắng, bớt ố vàng", false),
+                        ],
+                    );
+                    section_title(ui, "Môi");
+                    rows(
+                        ui,
+                        ready,
+                        vec![
+                            (
+                                "Đậm môi",
+                                &mut s.lip_saturation,
+                                "Trái: môi nhạt màu — phải: môi đậm, tươi",
+                                true,
+                            ),
+                            (
+                                "Sắc môi",
+                                &mut s.lip_hue,
+                                "Trái: cam, san hô — phải: hồng, tím",
+                                true,
+                            ),
+                            (
+                                "Sáng môi",
+                                &mut s.lip_brightness,
+                                "Trái: môi tối hơn — phải: môi sáng hơn",
+                                true,
+                            ),
+                        ],
+                    );
+                    section_title(ui, "Chi tiết");
+                    rows(
+                        ui,
+                        ready,
+                        vec![
+                            (
+                                "Tăng nét",
+                                &mut s.sharpen,
+                                "Mắt, mi, lông mày, môi nét hơn (không đụng da)",
+                                false,
+                            ),
+                            (
+                                "Lông mày",
+                                &mut s.brows,
+                                "Trái: lông mày nhạt — phải: lông mày đậm",
+                                true,
+                            ),
+                        ],
+                    );
+                });
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {

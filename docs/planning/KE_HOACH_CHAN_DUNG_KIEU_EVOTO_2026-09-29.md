@@ -144,6 +144,19 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
 - [~] **Mụn**: đốm tối/đỏ hơn vòng tròn quanh nó ở MỌI hướng (2 bán kính) →
       nếp gấp, đường viền không bị bắt nhầm; slider = ngưỡng.
 - [~] **Quầng thâm**, **Trắng mắt**, **Sáng tròng mắt**, **Trắng răng**.
+- Chủ test 30/09: "tất cả hoạt động ngon lành" trừ **Xóa mụn loang thành mảng
+  vuông sáng** (tai, cánh mũi, cằm râu, mép má) + xin thêm thanh môi, tăng nét,
+  lông mày. Đợt 2 (30/09):
+  - [~] Xóa mụn kiểu Healing Brush: đốm = đĩa tròn đúng bán kính (không còn
+        vuông); lấp bằng vân của da lành gần đó (ưu tiên hướng vào giữa mặt)
+        dịch màu theo màu da quanh đốm (đo khi đã loại các đốm) → không sáng/
+        phẳng. Chỉ tìm trong viền mặt thu vào 4% (bỏ tai, mép hàm), tránh cánh
+        mũi; chấm dày đặc (râu, lỗ chân lông mũi) bị giảm điểm; đốm có vòng
+        quanh lệch (sát nếp gấp) bị bỏ qua.
+  - [~] **Môi**: Đậm môi, Sắc môi (cam ↔ hồng), Sáng môi (hai chiều). Mask môi
+        Sapiens2 (dự phòng: viền môi MediaPipe trừ lòng miệng).
+  - [~] **Chi tiết**: Tăng nét (mắt, mi, lông mày, môi; mặc định 20), Lông mày
+        đậm/nhạt (chỉ các sợi tối hơn da quanh). Hộp thoại có thanh cuộn.
 - Đo trên máy chủ (4 ảnh NASA public domain 23–58 MP, 1 ảnh nhóm 4 người):
   phân tích ~9–11 s (nạp Sapiens2 ~2,8 s + lần chạy đầu ~5,5 s), kéo thanh
   trượt 60–300 ms/lần; màu da giữ nguyên (H/S/V lệch < 1%).
@@ -229,3 +242,5 @@ donate). Kết luận:
   chủ (GPU 2 GB không đủ), kiểm chéo bắt đúng mặt ảnh in báo; chủ test ĐẠT.
 - **2026-09-30** — Phase 1: module `core::portrait` + hộp thoại Chỉnh chân dung;
   2 nút thử được thay bằng nút "Chỉnh chân dung…".
+- **2026-09-30 (chiều)** — Chủ test Phase 1 OK trừ mụn loang; sửa mụn kiểu
+  Healing Brush + thêm Môi (3 thanh), Tăng nét, Lông mày.

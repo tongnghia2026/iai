@@ -27,7 +27,19 @@ pub struct FaceModel {
     pub(super) under_eye: Vec<u8>,
     pub(super) teeth: Vec<u8>,
     pub(super) interior: Vec<u8>,
-    pub(super) blemish: Vec<u8>,
+    /// Spot strength (score, fixed point) and soft disc coverage.
+    pub(super) spot_score: Vec<u8>,
+    pub(super) spot_cover: Vec<u8>,
+    /// Offset (dx, dy) to clean skin whose texture heals each spot pixel, and
+    /// the local skin colour around spots used to match that texture.
+    pub(super) donor: Vec<[i16; 2]>,
+    pub(super) heal_base: Vec<[u16; 3]>,
+    pub(super) lips: Vec<u8>,
+    pub(super) brows: Vec<u8>,
+    /// Eyes, lashes, brows and lips: where sharpening applies.
+    pub(super) detail: Vec<u8>,
+    /// Plain small blur of the photo, the sharpening reference.
+    pub(super) soft: Vec<[u16; 3]>,
     pub(super) low1: Vec<[u16; 3]>,
     pub(super) low2: Vec<[u16; 3]>,
     pub(super) broad: Vec<u16>,
@@ -97,6 +109,161 @@ fn max_filter(values: &[f32], width: usize, height: usize, radius: usize) -> Vec
         }
     });
     out
+}
+
+/// A blemish found by the ring test, in region pixels.
+struct Spot {
+    x: f32,
+    y: f32,
+    score: f32,
+    radius: f32,
+}
+
+/// Visit the pixels within `reach` of (cx, cy) with their distance.
+fn for_disc(w: usize, h: usize, cx: f32, cy: f32, reach: f32, mut visit: impl FnMut(usize, f32)) {
+    let x0 = (cx - reach).floor().max(0.0) as usize;
+    let y0 = (cy - reach).floor().max(0.0) as usize;
+    let x1 = ((cx + reach).ceil() as usize).min(w);
+    let y1 = ((cy + reach).ceil() as usize).min(h);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let d = (x as f32 + 0.5 - cx).hypot(y as f32 + 0.5 - cy);
+            if d <= reach {
+                visit(y * w + x, d);
+            }
+        }
+    }
+}
+
+/// Ring-test peaks become spots. Peaks packed densely (stubble, nose pores)
+/// are skin texture rather than blemishes, so they are damped.
+fn find_spots(ring: &[(f32, usize)], radii: &[f32; 2], w: usize, h: usize, e: f32) -> Vec<Spot> {
+    // The most permissive slider threshold; weaker peaks never matter.
+    const FLOOR: f32 = 0.3;
+    let raw: Vec<f32> = ring.iter().map(|r| r.0).collect();
+    let local = max_filter(&raw, w, h, 2);
+    let mut peaks: Vec<Spot> = (0..raw.len())
+        .filter(|&i| raw[i] >= FLOOR && raw[i] >= local[i])
+        .map(|i| Spot {
+            x: (i % w) as f32 + 0.5,
+            y: (i / w) as f32 + 0.5,
+            score: raw[i],
+            radius: radii[ring[i].1] * 0.9,
+        })
+        .collect();
+    peaks.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut kept: Vec<Spot> = Vec::new();
+    for p in peaks {
+        if kept.len() >= 3000 {
+            break;
+        }
+        if kept
+            .iter()
+            .all(|k| (k.x - p.x).hypot(k.y - p.y) > k.radius.max(p.radius) * 0.8)
+        {
+            kept.push(p);
+        }
+    }
+    let crowd = e / 12.0;
+    let neighbours: Vec<usize> = kept
+        .iter()
+        .map(|a| {
+            kept.iter()
+                .filter(|b| (a.x - b.x).hypot(a.y - b.y) < crowd)
+                .count()
+                - 1
+        })
+        .collect();
+    for (spot, count) in kept.iter_mut().zip(neighbours) {
+        spot.score *= (1.0 - count.saturating_sub(5) as f32 * 0.12).clamp(0.2, 1.0);
+    }
+    kept
+}
+
+/// Per spot, pick nearby clean skin to borrow texture from (toward the face
+/// centre first), and paint soft discs of spot strength, coverage and donor
+/// offset. Also the local skin colour around spots, measured without them.
+#[allow(clippy::type_complexity)]
+fn heal_spots(
+    spots: &[Spot],
+    src: &[[f32; 3]],
+    interior: &[f32],
+    w: usize,
+    h: usize,
+    centre: [f32; 2],
+    small_radius: f32,
+) -> (Vec<u8>, Vec<u8>, Vec<[i16; 2]>, Vec<[u16; 3]>) {
+    let n = w * h;
+    let mut score = vec![0u8; n];
+    let mut cover = vec![0u8; n];
+    if spots.is_empty() {
+        return (score, cover, Vec::new(), Vec::new());
+    }
+    let mut taken = vec![0.0f32; n];
+    for s in spots {
+        for_disc(w, h, s.x, s.y, s.radius * 1.4, |i, _| taken[i] = 1.0);
+    }
+    let clean = |x: f32, y: f32| {
+        if x < 0.0 || y < 0.0 || x >= w as f32 || y >= h as f32 {
+            return false;
+        }
+        let i = y as usize * w + x as usize;
+        interior[i] >= 0.8 && taken[i] < 0.5
+    };
+    let mut donor = vec![[0i16; 2]; n];
+    let mut owner = vec![0.0f32; n];
+    for s in spots {
+        let (mut bx, mut by) = (centre[0] - s.x, centre[1] - s.y);
+        let length = bx.hypot(by);
+        if length > 1e-3 {
+            bx /= length;
+            by /= length;
+        } else {
+            (bx, by) = (1.0, 0.0);
+        }
+        let reach = s.radius * 2.5 + 2.0;
+        let mut offset = [0i16; 2];
+        for degrees in [0.0f32, 60.0, -60.0, 120.0, -120.0, 180.0] {
+            let (sin, cos) = degrees.to_radians().sin_cos();
+            let (dx, dy) = ((bx * cos - by * sin) * reach, (bx * sin + by * cos) * reach);
+            let (qx, qy) = (s.x + dx, s.y + dy);
+            let r = s.radius;
+            if [(0.0, 0.0), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)]
+                .iter()
+                .all(|(ox, oy)| clean(qx + ox, qy + oy))
+            {
+                offset = [dx.round() as i16, dy.round() as i16];
+                break;
+            }
+        }
+        let feather = (s.radius * 0.35).max(1.5);
+        for_disc(w, h, s.x, s.y, s.radius + feather, |i, d| {
+            let c = smoothstep(s.radius + feather, s.radius - feather, d);
+            if c <= 0.0 {
+                return;
+            }
+            cover[i] = cover[i].max(to_u8(c));
+            if s.score > owner[i] {
+                owner[i] = s.score;
+                score[i] = (s.score * BLEMISH_SCALE).round().clamp(0.0, 255.0) as u8;
+                donor[i] = offset;
+            }
+        });
+    }
+    let mut colour: Vec<[f32; 4]> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let weight = interior[i] * (1.0 - taken[i]) + 1e-4;
+            let c = src[i];
+            [c[0] * weight, c[1] * weight, c[2] * weight, weight]
+        })
+        .collect();
+    blur4(&mut colour, w, h, (small_radius * 1.5).max(2.0));
+    let heal_base = colour
+        .into_par_iter()
+        .map(|a| to_u16([a[0] / a[3], a[1] / a[3], a[2] / a[3]]))
+        .collect();
+    (score, cover, donor, heal_base)
 }
 
 /// Analyse `rgba` (straight RGBA, `width * height`). `progress` receives short
@@ -480,7 +647,8 @@ fn build_face(
 
     // Blemishes: compact spots darker or redder than a ring around them in
     // every direction (creases and outlines fail the ring test along their
-    // length), in units of the face's own skin texture spread.
+    // length), in units of the face's own skin texture spread. Only inside the
+    // face outline (not ears or the jaw edge) and away from the nose wings.
     let (mut spread, mut spread_weight) = (0.0f64, 0.0f64);
     for i in 0..n {
         let m = interior[i] as f64;
@@ -493,6 +661,19 @@ fn build_face(
         .par_iter()
         .map(|c| [luma(*c), c[0] - (c[1] + c[2]) * 0.5])
         .collect();
+    let mut zone = vec![0.0f32; n];
+    stamp_polygon(
+        &mut zone,
+        region,
+        &loop_points(points, &FACE_OVAL),
+        -0.04 * e,
+        0.02 * e,
+    );
+    let mut wings = vec![0.0f32; n];
+    for &k in &NOSE_WINGS {
+        let p = points[k as usize];
+        stamp_disc(&mut wings, region, [p[0], p[1]], 0.06 * e, 0.02 * e);
+    }
     let radii = [(e / 110.0).max(2.0), (e / 55.0).max(3.0)];
     let directions: Vec<[f32; 2]> = (0..8)
         .map(|k| {
@@ -500,40 +681,118 @@ fn build_face(
             [a.cos(), a.sin()]
         })
         .collect();
-    let score: Vec<[f32; 4]> = (0..n)
+    let ring: Vec<(f32, usize)> = (0..n)
         .into_par_iter()
         .map(|i| {
-            if interior[i] < 0.8 {
-                return [0.0; 4];
+            if interior[i] < 0.8 || zone[i] * (1.0 - wings[i]) < 0.5 {
+                return (0.0, 0);
             }
             let (x, y) = ((i % w) as f32, (i / w) as f32);
             let centre = tone[i];
-            let mut best = 0.0f32;
-            for radius in radii {
-                let (mut dark, mut red) = (f32::MAX, f32::MAX);
+            let (mut best, mut which) = (0.0f32, 0usize);
+            for (k, radius) in radii.iter().enumerate() {
+                let (mut dark, mut red, mut brightest) = (f32::MAX, f32::MAX, f32::MIN);
                 for d in &directions {
                     let (sx, sy) = (x + d[0] * radius, y + d[1] * radius);
                     if sx < 0.0 || sy < 0.0 || sx >= w as f32 || sy >= h as f32 {
-                        return [0.0; 4];
+                        return (0.0, 0);
                     }
                     let ring = tone[sy as usize * w + sx as usize];
                     dark = dark.min(ring[0] - centre[0]);
                     red = red.min(centre[1] - ring[1]);
+                    brightest = brightest.max(ring[0] - centre[0]);
                 }
-                best = best.max((dark.max(0.0) + 0.5 * red.max(0.0)) / sigma);
+                // A spot sits in even skin; one beside a crease or shadow edge
+                // sees a lopsided ring, and healing it would lift the crease.
+                let depth = dark.max(0.0);
+                let even = depth / (depth + (brightest - dark) + 1e-6);
+                let score = (depth + 0.5 * red.max(0.0)) / sigma * smoothstep(0.3, 0.55, even);
+                if score > best {
+                    best = score;
+                    which = k;
+                }
             }
-            [best, 0.0, 0.0, 0.0]
+            (best, which)
         })
         .collect();
-    // The ring test peaks at a spot's centre; spread each peak over the spot's
-    // radius, then soften the rim.
-    let raw: Vec<f32> = score.iter().map(|s| s[0]).collect();
-    let spread = max_filter(&raw, w, h, radii[0].round() as usize);
-    let mut soft: Vec<[f32; 4]> = spread.iter().map(|&v| [v, 0.0, 0.0, 0.0]).collect();
-    blur4(&mut soft, w, h, (radii[0] / 3.0).max(1.0));
-    let blemish: Vec<u8> = soft
-        .par_iter()
-        .map(|s| (s[0] * BLEMISH_SCALE).round().clamp(0.0, 255.0) as u8)
+    let spots = find_spots(&ring, &radii, w, h, e);
+    let own = owners[index].0;
+    let (spot_score, spot_cover, donor, heal_base) = heal_spots(
+        &spots,
+        &src,
+        &interior,
+        w,
+        h,
+        [own[0] - region.x as f32, own[1] - region.y as f32],
+        radii[0],
+    );
+
+    // Lips, brows and the sharpening zone.
+    let mut lip_shape = vec![0.0f32; n];
+    let mut mouth_hole = vec![0.0f32; n];
+    if !trusted {
+        stamp_polygon(
+            &mut lip_shape,
+            region,
+            &loop_points(points, &LIPS_OUTER),
+            0.0,
+            0.012 * e,
+        );
+        stamp_polygon(
+            &mut mouth_hole,
+            region,
+            &loop_points(points, &MOUTH_INNER),
+            0.0,
+            0.01 * e,
+        );
+    }
+    let lips: Vec<u8> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let (x, y) = pixel_xy(i);
+            match parts {
+                Some(p) if trusted => to_u8(p.groups_at(x, y)[body_parts::GROUP_LIPS]),
+                _ => to_u8(lip_shape[i] * (1.0 - mouth_hole[i])),
+            }
+        })
+        .collect();
+    let mut brow_shape = vec![0.0f32; n];
+    let mut detail_shape = vec![0.0f32; n];
+    for brow in [&RIGHT_BROW[..], &LEFT_BROW[..]] {
+        let outline = loop_points(points, brow);
+        stamp_polygon(&mut brow_shape, region, &outline, 0.012 * e, 0.015 * e);
+        stamp_polygon(&mut detail_shape, region, &outline, 0.02 * e, 0.02 * e);
+    }
+    for eye in [&RIGHT_EYE[..], &LEFT_EYE[..]] {
+        stamp_polygon(
+            &mut detail_shape,
+            region,
+            &loop_points(points, eye),
+            0.035 * e,
+            0.02 * e,
+        );
+    }
+    stamp_polygon(
+        &mut detail_shape,
+        region,
+        &loop_points(points, &LIPS_OUTER),
+        0.01 * e,
+        0.015 * e,
+    );
+    // Brow hairs are the pixels darker than the skin around them.
+    let brows: Vec<u8> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let darker = luma(low2[i]) - luma(src[i]);
+            to_u8(brow_shape[i] * smoothstep(0.015, 0.08, darker))
+        })
+        .collect();
+    let detail: Vec<u8> = detail_shape.into_par_iter().map(to_u8).collect();
+    let mut soft4: Vec<[f32; 4]> = src.iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
+    blur4(&mut soft4, w, h, (e / 350.0).max(1.0));
+    let soft: Vec<[u16; 3]> = soft4
+        .into_par_iter()
+        .map(|c| to_u16([c[0], c[1], c[2]]))
         .collect();
 
     FaceModel {
@@ -547,7 +806,14 @@ fn build_face(
         iris,
         under_eye,
         teeth,
-        blemish,
+        spot_score,
+        spot_cover,
+        donor,
+        heal_base,
+        lips,
+        brows,
+        detail,
+        soft,
         low1: low1.into_par_iter().map(to_u16).collect(),
         low2: low2.into_par_iter().map(to_u16).collect(),
         broad,

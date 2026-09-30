@@ -60,6 +60,39 @@ mod tests {
                 model.parts_used,
                 model.parts_note
             );
+            let strong = PortraitSettings {
+                lip_saturation: 60.0,
+                lip_hue: 50.0,
+                lip_brightness: -20.0,
+                brows: 60.0,
+                sharpen: 60.0,
+                ..PortraitSettings::NEUTRAL
+            };
+            let (su, sp) = render(&rgba, &model, &strong, &enabled).unwrap();
+            let mut styled = rgba.clone();
+            for row in 0..su.h as usize {
+                let o = ((su.y as usize + row) * width as usize + su.x as usize) * 4;
+                let s = row * su.w as usize * 4;
+                styled[o..o + su.w as usize * 4].copy_from_slice(&sp[s..s + su.w as usize * 4]);
+            }
+            let r0 = model.faces[0].region;
+            let mut sheet = image::RgbImage::new(r0.w * 2 + 8, r0.h);
+            image::imageops::replace(&mut sheet, &crop_rgb(&rgba, width, r0), 0, 0);
+            image::imageops::replace(
+                &mut sheet,
+                &crop_rgb(&styled, width, r0),
+                (r0.w + 8) as i64,
+                0,
+            );
+            let k = (1800.0 / sheet.width() as f32).min(1.0);
+            image::imageops::resize(
+                &sheet,
+                (sheet.width() as f32 * k) as u32,
+                (sheet.height() as f32 * k) as u32,
+                image::imageops::FilterType::Triangle,
+            )
+            .save(dir.join(format!("pr_{name}_styled.jpg")))
+            .unwrap();
             let mut after = rgba.clone();
             for row in 0..union.h as usize {
                 let o = ((union.y as usize + row) * width as usize + union.x as usize) * 4;
@@ -74,7 +107,7 @@ mod tests {
                     r.w, r.h, face.extent, face.agreement
                 );
                 let mut scores: Vec<u8> = face
-                    .blemish
+                    .spot_score
                     .iter()
                     .zip(&face.interior)
                     .filter(|(_, &m)| m > 200)
@@ -105,7 +138,7 @@ mod tests {
                 );
                 let heat = image::GrayImage::from_fn(r.w, r.h, |x, y| {
                     let k = (y * r.w + x) as usize;
-                    image::Luma([face.blemish[k].saturating_mul(2)])
+                    image::Luma([face.spot_score[k].saturating_mul(2)])
                 });
                 heat.save(dir.join(format!("pr_{name}_heat{i}.png")))
                     .unwrap();
@@ -145,7 +178,7 @@ mod tests {
                     .unwrap();
                 let masks = image::RgbImage::from_fn(r.w, r.h, |x, y| {
                     let k = (y * r.w + x) as usize;
-                    let spot = face.blemish[k] as f32 / analysis::BLEMISH_SCALE > 0.81;
+                    let spot = face.spot_score[k] as f32 / analysis::BLEMISH_SCALE > 0.81;
                     image::Rgb([
                         face.skin[k].max(if spot { 255 } else { 0 }),
                         face.under_eye[k]
