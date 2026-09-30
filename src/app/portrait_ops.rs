@@ -287,13 +287,24 @@ impl App {
     }
 
     /// Dialog view of the session: progress/status line, whether sliders can
-    /// preview yet, and per face whether its part masks are trusted.
-    pub(crate) fn portrait_dialog_state(&self) -> (String, bool, Vec<bool>) {
+    /// preview yet, per face whether its part masks are trusted, and whether
+    /// any hair was found.
+    pub(crate) fn portrait_dialog_state(&self) -> (String, bool, Vec<bool>, bool) {
         let Some(session) = self.shell.portrait.as_ref() else {
-            return ("Không chỉnh được layer này".to_string(), false, Vec::new());
+            return (
+                "Không chỉnh được layer này".to_string(),
+                false,
+                Vec::new(),
+                false,
+            );
         };
         if let Some(error) = &session.error {
-            return (format!("Không chỉnh được: {error}"), false, Vec::new());
+            return (
+                format!("Không chỉnh được: {error}"),
+                false,
+                Vec::new(),
+                false,
+            );
         }
         let Some(model) = &session.model else {
             let line = session
@@ -301,7 +312,7 @@ impl App {
                 .lock()
                 .map(|p| p.clone())
                 .unwrap_or_default();
-            return (line, false, Vec::new());
+            return (line, false, Vec::new(), false);
         };
         let faces: Vec<bool> = model
             .faces
@@ -316,7 +327,8 @@ impl App {
         if !model.parts_used {
             line.push_str(" · chỉ dùng mốc mặt");
         }
-        (line, true, faces)
+        let hair = model.faces.iter().any(|face| !face.hair_region.is_empty());
+        (line, true, faces, hair)
     }
 }
 
@@ -368,7 +380,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
             app.poll_portrait();
         }
-        let (status, ready, faces) = app.portrait_dialog_state();
+        let (status, ready, faces, _) = app.portrait_dialog_state();
         assert!(ready, "{status}");
         assert!(!faces.is_empty());
         let on = vec![true; faces.len()];

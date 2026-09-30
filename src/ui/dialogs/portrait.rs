@@ -23,24 +23,38 @@ fn section_title(ui: &mut egui::Ui, title: &str) {
     );
 }
 
-/// Slider rows: (label, value, tooltip, two-sided -100..100).
-fn rows(ui: &mut egui::Ui, enabled: bool, items: Vec<(&str, &mut f32, &str, bool)>) {
-    for (label, value, tip, two_sided) in items {
-        let range = if two_sided {
-            -100.0..=100.0
-        } else {
-            0.0..=100.0
+/// How a slider row reads: 0..100, two-sided -100..100, or a colour picker
+/// over the hue circle (0..360) drawn as a rainbow like Hue/Saturation.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Amount,
+    TwoSided,
+    Hue,
+}
+
+fn rainbow() -> [egui::Color32; 7] {
+    [
+        egui::Color32::from_rgb(255, 0, 0),
+        egui::Color32::from_rgb(255, 255, 0),
+        egui::Color32::from_rgb(0, 255, 0),
+        egui::Color32::from_rgb(0, 255, 255),
+        egui::Color32::from_rgb(0, 0, 255),
+        egui::Color32::from_rgb(255, 0, 255),
+        egui::Color32::from_rgb(255, 0, 0),
+    ]
+}
+
+/// Slider rows: (label, value, tooltip, kind).
+fn rows(ui: &mut egui::Ui, enabled: bool, items: Vec<(&str, &mut f32, &str, Kind)>) {
+    for (label, value, tip, kind) in items {
+        let (range, colours): (_, Vec<egui::Color32>) = match kind {
+            Kind::Amount => (0.0..=100.0, slider_colors().to_vec()),
+            Kind::TwoSided => (-100.0..=100.0, slider_colors().to_vec()),
+            Kind::Hue => (0.0..=360.0, rainbow().to_vec()),
         };
         ui.add_enabled_ui(enabled, |ui| {
-            crate::ui::widgets::dev_slider_stacked_resp(
-                ui,
-                label,
-                value,
-                range,
-                &slider_colors(),
-                1.0,
-            )
-            .on_hover_text(tip);
+            crate::ui::widgets::dev_slider_stacked_resp(ui, label, value, range, &colours, 1.0)
+                .on_hover_text(tip);
         });
     }
 }
@@ -112,41 +126,28 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                 .max_height(ctx.content_rect().height() * 0.62)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    use Kind::*;
                     section_title(ui, "Da");
                     rows(
                         ui,
                         ready,
                         vec![
-                            (
-                                "Làm mịn da",
-                                &mut s.smooth,
-                                "Mịn da nhưng giữ vân lỗ chân lông",
-                                false,
-                            ),
-                            (
-                                "Đều màu da",
-                                &mut s.even_tone,
-                                "Giảm mảng đỏ, loang màu",
-                                false,
-                            ),
-                            (
-                                "Giảm bóng dầu",
-                                &mut s.shine,
-                                "Dịu các vùng bóng loáng",
-                                false,
-                            ),
-                            ("Sáng da", &mut s.brighten, "Da sáng hơn, giữ màu", false),
+                            ("Làm mịn da", &mut s.smooth, "Mịn da nhưng giữ vân lỗ chân lông", Amount),
+                            ("Đều màu da", &mut s.even_tone, "Giảm mảng đỏ, loang màu", Amount),
+                            ("Giảm bóng dầu", &mut s.shine, "Dịu các vùng bóng loáng", Amount),
+                            ("Sáng da", &mut s.brighten, "Da sáng hơn, giữ màu", Amount),
                             (
                                 "Xóa mụn",
                                 &mut s.blemish,
                                 "Tự tìm và xóa mụn, đốm thâm nhỏ (lấp bằng vân da lành bên cạnh)",
-                                false,
+                                Amount,
                             ),
+                            ("Quầng thâm", &mut s.dark_circles, "Làm sáng vùng dưới mắt", Amount),
                             (
-                                "Quầng thâm",
-                                &mut s.dark_circles,
-                                "Làm sáng vùng dưới mắt",
-                                false,
+                                "Sống mũi cao",
+                                &mut s.nose_bridge,
+                                "Tạo khối: sáng dọc sống mũi, tối nhẹ hai bên",
+                                Amount,
                             ),
                         ],
                     );
@@ -155,19 +156,16 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         ui,
                         ready,
                         vec![
+                            ("Trắng mắt", &mut s.eye_white, "Lòng trắng mắt sáng, bớt đỏ", Amount),
+                            ("Sáng tròng mắt", &mut s.iris, "Tròng mắt sáng và trong hơn", Amount),
                             (
-                                "Trắng mắt",
-                                &mut s.eye_white,
-                                "Lòng trắng mắt sáng, bớt đỏ",
-                                false,
+                                "Màu tròng mắt",
+                                &mut s.iris_hue,
+                                "Chọn màu trên dải — cần kéo \"Phủ màu tròng\" để thấy",
+                                Hue,
                             ),
-                            (
-                                "Sáng tròng mắt",
-                                &mut s.iris,
-                                "Tròng mắt sáng và trong hơn",
-                                false,
-                            ),
-                            ("Trắng răng", &mut s.teeth, "Răng trắng, bớt ố vàng", false),
+                            ("Phủ màu tròng", &mut s.iris_tint, "0 = giữ màu mắt thật", Amount),
+                            ("Trắng răng", &mut s.teeth, "Răng trắng, bớt ố vàng", Amount),
                         ],
                     );
                     section_title(ui, "Môi");
@@ -179,20 +177,48 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                                 "Đậm môi",
                                 &mut s.lip_saturation,
                                 "Trái: môi nhạt màu — phải: môi đậm, tươi",
-                                true,
-                            ),
-                            (
-                                "Sắc môi",
-                                &mut s.lip_hue,
-                                "Trái: cam, san hô — phải: hồng, tím",
-                                true,
+                                TwoSided,
                             ),
                             (
                                 "Sáng môi",
                                 &mut s.lip_brightness,
                                 "Trái: môi tối hơn — phải: môi sáng hơn",
-                                true,
+                                TwoSided,
                             ),
+                            (
+                                "Màu môi",
+                                &mut s.lip_hue,
+                                "Chọn màu son trên dải — cần kéo \"Phủ màu môi\" để thấy",
+                                Hue,
+                            ),
+                            ("Phủ màu môi", &mut s.lip_tint, "0 = giữ màu môi thật", Amount),
+                        ],
+                    );
+                    section_title(ui, "Tóc");
+                    if !data.dialogs.portrait_hair && ready {
+                        ui.label(
+                            egui::RichText::new("Không nhận ra tóc (cần model tách vùng Sapiens2).")
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(220, 150, 90)),
+                        );
+                    }
+                    rows(
+                        ui,
+                        ready && data.dialogs.portrait_hair,
+                        vec![
+                            (
+                                "Sáng tóc",
+                                &mut s.hair_brightness,
+                                "Trái: tóc tối hơn — phải: tóc sáng hơn",
+                                TwoSided,
+                            ),
+                            (
+                                "Màu tóc",
+                                &mut s.hair_hue,
+                                "Chọn màu nhuộm trên dải — cần kéo \"Phủ màu tóc\" để thấy",
+                                Hue,
+                            ),
+                            ("Phủ màu tóc", &mut s.hair_tint, "0 = giữ màu tóc thật", Amount),
                         ],
                     );
                     section_title(ui, "Chi tiết");
@@ -204,13 +230,13 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                                 "Tăng nét",
                                 &mut s.sharpen,
                                 "Mắt, mi, lông mày, môi nét hơn (không đụng da)",
-                                false,
+                                Amount,
                             ),
                             (
                                 "Lông mày",
                                 &mut s.brows,
                                 "Trái: lông mày nhạt — phải: lông mày đậm",
-                                true,
+                                TwoSided,
                             ),
                         ],
                     );
@@ -229,7 +255,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
             });
             ui.add_enabled_ui(ready, |ui| {
                 ui.checkbox(&mut masks, "Hiện vùng nhận diện").on_hover_text(
-                    "Tô màu vùng app nhận ra: da đỏ, quầng mắt cam, lòng trắng xanh lá, tròng xanh dương, lông mày vàng, môi hồng, răng xanh ngọc",
+                    "Tô màu vùng app nhận ra: da đỏ, quầng mắt cam, lòng trắng xanh lá, tròng xanh dương, lông mày vàng, môi hồng, răng xanh ngọc, tóc tím",
                 );
             });
             ui.add_space(6.0);

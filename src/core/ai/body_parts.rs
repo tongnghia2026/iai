@@ -181,6 +181,24 @@ impl PartLabels {
         out
     }
 
+    /// Axis-aligned image bounds of the crop: [x0, y0, x1, y1].
+    pub fn bounds(&self) -> [f32; 4] {
+        let corners = [
+            self.crop.to_image(0.0, 0.0),
+            self.crop.to_image(INPUT_W as f32, 0.0),
+            self.crop.to_image(0.0, INPUT_H as f32),
+            self.crop.to_image(INPUT_W as f32, INPUT_H as f32),
+        ];
+        let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for [x, y] in corners {
+            b[0] = b[0].min(x);
+            b[1] = b[1].min(y);
+            b[2] = b[2].max(x);
+            b[3] = b[3].max(y);
+        }
+        b
+    }
+
     /// Whether image point (x, y) lies inside this crop.
     pub fn covers(&self, x: f32, y: f32) -> bool {
         let [u, v] = self.crop.to_crop(x, y);

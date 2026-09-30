@@ -169,6 +169,22 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
         đường cắt ngang cổ.
   - [~] Ô **"Hiện vùng nhận diện"**: tô màu da/quầng mắt/lòng trắng/tròng/lông
         mày/môi/răng ngay trên ảnh.
+- Chủ test đợt 3 "tuyệt vời" (30/09). Xin thêm: sống mũi cao, đổi màu tròng
+  mắt, đổi màu môi (thanh màu dạng dải cầu vồng như Ctrl+U), sáng tối + đổi
+  màu tóc. Đợt 4:
+  - [~] **Sống mũi cao**: tạo khối bằng sáng-tối (dải sáng dọc mốc 6-197-195-5-4,
+        hai dải tối lệch ±0,075e), trong mask da.
+  - [~] Thanh màu = **chọn màu đích** trên dải cầu vồng 0..360° + thanh "Phủ màu"
+        (0 = giữ nguyên). Đổi màu kiểu tô màu HSL: giữ độ sáng từng điểm (giữ
+        vân tròng, vân môi, sợi tóc), độ bão hoà tối thiểu (tròng 0,5, môi 0,45,
+        tóc 0,35) để mắt nâu/tóc xám vẫn lên màu.
+  - [~] **Tóc**: vùng riêng = khung đầu-vai của Sapiens2 (tóc dài ngoài mặt);
+        mask = xác suất tóc CHẮC (0,35–0,65) và KHÔNG nơi model thấy da (tóc
+        vàng/bạc cùng tông trán từng làm mặt bị nhuộm) → guided filter → lọc màu
+        tóc ở mép (hết viền hồng trên nền xanh) → mờ dần ở cạnh khung. Sáng tóc
+        dùng đường cong (tóc đen vẫn sâu). Thiếu Sapiens2 → nhóm Tóc bị khoá.
+  - Đo rò rỉ (probe): da trơn đổi 0,000 mức; điểm ảnh ngoài tóc ~0,06 mức (sai
+    số JPEG của ảnh so sánh).
 - Đo trên máy chủ (4 ảnh NASA public domain 23–58 MP, 1 ảnh nhóm 4 người):
   phân tích ~9–11 s (nạp Sapiens2 ~2,8 s + lần chạy đầu ~5,5 s), kéo thanh
   trượt 60–300 ms/lần; màu da giữ nguyên (H/S/V lệch < 1%).
@@ -259,3 +275,5 @@ donate). Kết luận:
 - **2026-09-30 (chiều)** — Chủ test đợt 2 OK; Sáng da lan ra ngoài da → nắn
   mask (guided filter + lọc màu da ở mép + mờ dần ở cạnh khung) + ô Hiện vùng
   nhận diện.
+- **2026-09-30 (tối)** — Chủ test đợt 3 "tuyệt vời"; thêm Sống mũi cao, màu
+  tròng mắt/môi/tóc (dải cầu vồng + phủ màu), sáng tối tóc.

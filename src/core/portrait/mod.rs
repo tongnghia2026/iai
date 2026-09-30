@@ -61,7 +61,14 @@ mod tests {
                 model.parts_note
             );
             let strong = PortraitSettings {
-                brighten: 100.0,
+                nose_bridge: 80.0,
+                iris_hue: 200.0,
+                iris_tint: 70.0,
+                lip_hue: 340.0,
+                lip_tint: 60.0,
+                hair_brightness: 30.0,
+                hair_hue: 15.0,
+                hair_tint: 60.0,
                 ..PortraitSettings::NEUTRAL
             };
             let (su, sp) = render(&rgba, &model, &strong, &enabled).unwrap();
@@ -72,7 +79,11 @@ mod tests {
                 let s = row * mu.w as usize * 4;
                 tinted[o..o + mu.w as usize * 4].copy_from_slice(&mp[s..s + mu.w as usize * 4]);
             }
-            let r0 = model.faces[0].region;
+            let r0 = if model.faces[0].hair_region.is_empty() {
+                model.faces[0].region
+            } else {
+                model.faces[0].hair_region
+            };
             let k = (900.0 / r0.w as f32).min(1.0);
             image::imageops::resize(
                 &crop_rgb(&tinted, width, r0),
@@ -88,7 +99,81 @@ mod tests {
                 let s = row * su.w as usize * 4;
                 styled[o..o + su.w as usize * 4].copy_from_slice(&sp[s..s + su.w as usize * 4]);
             }
-            let r0 = model.faces[0].region;
+            // Leak check: how much the styled render moved pixels that no
+            // styled area covers (plain skin away from nose, lips and eyes;
+            // non-hair pixels of the hair region).
+            {
+                let f = &model.faces[0];
+                let diff = |x: u32, y: u32| {
+                    let o = ((y * width + x) * 4) as usize;
+                    (0..3)
+                        .map(|k| (styled[o + k] as f32 - rgba[o + k] as f32).abs())
+                        .sum::<f32>()
+                        / 3.0
+                };
+                let (mut skin_sum, mut skin_n, mut bg_sum, mut bg_n) = (0.0f64, 0u64, 0.0f64, 0u64);
+                for yy in 0..f.region.h {
+                    for xx in 0..f.region.w {
+                        let i = (yy * f.region.w + xx) as usize;
+                        if f.skin[i] > 200 && f.nose[i] == 0 && f.lips[i] == 0 && f.iris[i] == 0 {
+                            let (x, y) = (f.region.x + xx, f.region.y + yy);
+                            let hx = x as i64 - f.hair_region.x as i64;
+                            let hy = y as i64 - f.hair_region.y as i64;
+                            let in_hair = !f.hair.is_empty()
+                                && hx >= 0
+                                && hy >= 0
+                                && (hx as u32) < f.hair_region.w
+                                && (hy as u32) < f.hair_region.h
+                                && f.hair[(hy as u32 * f.hair_region.w + hx as u32) as usize] > 0;
+                            if !in_hair {
+                                skin_sum += diff(x, y) as f64;
+                                skin_n += 1;
+                            }
+                        }
+                    }
+                }
+                for yy in 0..f.hair_region.h {
+                    for xx in 0..f.hair_region.w {
+                        let i = (yy * f.hair_region.w + xx) as usize;
+                        if !f.hair.is_empty() && f.hair[i] == 0 {
+                            bg_sum += diff(f.hair_region.x + xx, f.hair_region.y + yy) as f64;
+                            bg_n += 1;
+                        }
+                    }
+                }
+                println!(
+                    "    leak: plain skin {:.3} levels over {skin_n} px, non-hair {:.3} levels over {bg_n} px",
+                    skin_sum / skin_n.max(1) as f64,
+                    bg_sum / bg_n.max(1) as f64
+                );
+                let mut on_skin = 0u64;
+                for yy in 0..f.region.h {
+                    for xx in 0..f.region.w {
+                        if f.skin[(yy * f.region.w + xx) as usize] < 200 || f.hair.is_empty() {
+                            continue;
+                        }
+                        let (x, y) = (f.region.x + xx, f.region.y + yy);
+                        if x >= f.hair_region.x
+                            && y >= f.hair_region.y
+                            && x < f.hair_region.x + f.hair_region.w
+                            && y < f.hair_region.y + f.hair_region.h
+                        {
+                            let k = ((y - f.hair_region.y) * f.hair_region.w + x - f.hair_region.x)
+                                as usize;
+                            if f.hair[k] > 10 {
+                                on_skin += 1;
+                            }
+                        }
+                    }
+                }
+                println!("    solid skin pixels also marked hair: {on_skin}");
+            }
+            let face0 = &model.faces[0];
+            let r0 = if face0.hair_region.is_empty() {
+                face0.region
+            } else {
+                face0.hair_region
+            };
             let mut sheet = image::RgbImage::new(r0.w * 2 + 8, r0.h);
             image::imageops::replace(&mut sheet, &crop_rgb(&rgba, width, r0), 0, 0);
             image::imageops::replace(

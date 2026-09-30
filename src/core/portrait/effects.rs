@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use super::analysis::{luma, FaceModel, PortraitModel, BLEMISH_SCALE};
 use super::geometry::Region;
 
-/// Sliders run 0..100, except the two-sided lip and brow ones (-100..100).
+/// Sliders run 0..100, the two-sided ones (lip saturation and brightness,
+/// brows, hair brightness) -100..100, and the colour pickers (`*_hue`) are
+/// target hues in degrees, 0..360, applied by the matching `*_tint` amount.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PortraitSettings {
@@ -25,6 +27,13 @@ pub struct PortraitSettings {
     pub lip_brightness: f32,
     pub sharpen: f32,
     pub brows: f32,
+    pub nose_bridge: f32,
+    pub iris_hue: f32,
+    pub iris_tint: f32,
+    pub lip_tint: f32,
+    pub hair_brightness: f32,
+    pub hair_hue: f32,
+    pub hair_tint: f32,
 }
 
 impl Default for PortraitSettings {
@@ -40,10 +49,17 @@ impl Default for PortraitSettings {
             iris: 15.0,
             teeth: 25.0,
             lip_saturation: 0.0,
-            lip_hue: 0.0,
+            lip_hue: 350.0,
             lip_brightness: 0.0,
             sharpen: 20.0,
             brows: 0.0,
+            nose_bridge: 0.0,
+            iris_hue: 200.0,
+            iris_tint: 0.0,
+            lip_tint: 0.0,
+            hair_brightness: 0.0,
+            hair_hue: 25.0,
+            hair_tint: 0.0,
         }
     }
 }
@@ -60,10 +76,17 @@ impl PortraitSettings {
         iris: 0.0,
         teeth: 0.0,
         lip_saturation: 0.0,
-        lip_hue: 0.0,
+        lip_hue: 350.0,
         lip_brightness: 0.0,
         sharpen: 0.0,
         brows: 0.0,
+        nose_bridge: 0.0,
+        iris_hue: 200.0,
+        iris_tint: 0.0,
+        lip_tint: 0.0,
+        hair_brightness: 0.0,
+        hair_hue: 25.0,
+        hair_tint: 0.0,
     };
 
     fn unit(&self) -> Self {
@@ -80,11 +103,22 @@ impl PortraitSettings {
             iris: u(self.iris),
             teeth: u(self.teeth),
             lip_saturation: both(self.lip_saturation),
-            lip_hue: both(self.lip_hue),
+            lip_hue: self.lip_hue.rem_euclid(360.0),
             lip_brightness: both(self.lip_brightness),
             sharpen: u(self.sharpen),
             brows: both(self.brows),
+            nose_bridge: u(self.nose_bridge),
+            iris_hue: self.iris_hue.rem_euclid(360.0),
+            iris_tint: u(self.iris_tint),
+            lip_tint: u(self.lip_tint),
+            hair_brightness: both(self.hair_brightness),
+            hair_hue: self.hair_hue.rem_euclid(360.0),
+            hair_tint: u(self.hair_tint),
         }
+    }
+
+    fn hair_active(&self) -> bool {
+        self.hair_brightness != 0.0 || self.hair_tint > 0.0
     }
 }
 
@@ -176,19 +210,45 @@ fn skin_result(
     r
 }
 
-/// Rotate a colour's hue around the grey axis by `angle` radians; positive
-/// turns red toward yellow.
-fn rotate_hue(c: [f32; 3], angle: f32) -> [f32; 3] {
-    let mean = (c[0] + c[1] + c[2]) / 3.0;
-    let d = c.map(|v| v - mean);
-    let k = 1.0 / 3.0f32.sqrt();
-    let cross = [k * (d[2] - d[1]), k * (d[0] - d[2]), k * (d[1] - d[0])];
-    let (sin, cos) = angle.sin_cos();
-    [
-        mean + d[0] * cos + cross[0] * sin,
-        mean + d[1] * cos + cross[1] * sin,
-        mean + d[2] * cos + cross[2] * sin,
-    ]
+fn rgb_to_hsl(c: [f32; 3]) -> [f32; 3] {
+    let (max, min) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+    let l = (max + min) * 0.5;
+    let d = max - min;
+    if d <= 1e-6 {
+        return [0.0, 0.0, l];
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs()).max(1e-6);
+    let h = if max == c[0] {
+        ((c[1] - c[2]) / d).rem_euclid(6.0)
+    } else if max == c[1] {
+        (c[2] - c[0]) / d + 2.0
+    } else {
+        (c[0] - c[1]) / d + 4.0
+    };
+    [h * 60.0, s.min(1.0), l]
+}
+
+fn hsl_to_rgb(hsl: [f32; 3]) -> [f32; 3] {
+    let [h, s, l] = hsl;
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match (h.rem_euclid(360.0) / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c * 0.5;
+    [r + m, g + m, b + m]
+}
+
+/// Recolour to `hue` (degrees) keeping lightness, with at least `saturation`
+/// so even grey-brown features take the colour.
+fn colourise(c: [f32; 3], hue: f32, saturation: f32) -> [f32; 3] {
+    let [_, s, l] = rgb_to_hsl(c.map(|v| v.clamp(0.0, 1.0)));
+    hsl_to_rgb([hue, s.max(saturation), l])
 }
 
 /// The retouched colour of one region pixel. `src` is the photo in 0..1;
@@ -234,6 +294,15 @@ fn retouch_pixel(
                 }
             }
         }
+        let contour = face.nose[i] as f32 / 127.0 * s.nose_bridge;
+        if contour != 0.0 {
+            let gain = if contour > 0.0 {
+                0.14 * contour
+            } else {
+                0.12 * contour
+            };
+            r = r.map(|v| v * (1.0 + gain));
+        }
         for k in 0..3 {
             out[k] = src[k] + m * (r[k] - src[k]);
         }
@@ -252,16 +321,26 @@ fn retouch_pixel(
         let (y, c) = split(out);
         out = join(y * (1.0 + 0.18 * iris), c.map(|v| v * (1.0 + 0.35 * iris)));
     }
+    let iris_tint = face.iris[i] as f32 / 255.0 * s.iris_tint;
+    if iris_tint > 0.0 {
+        let tinted = colourise(out, s.iris_hue, 0.5);
+        for k in 0..3 {
+            out[k] += (tinted[k] - out[k]) * iris_tint;
+        }
+    }
     let teeth = face.teeth[i] as f32 / 255.0 * s.teeth;
     if teeth > 0.0 {
         let (y, c) = split(out);
         out = join(y * (1.0 + 0.1 * teeth), c.map(|v| v * (1.0 - 0.8 * teeth)));
     }
     let lips = face.lips[i] as f32 / 255.0;
-    if lips > 0.0 && (s.lip_saturation != 0.0 || s.lip_hue != 0.0 || s.lip_brightness != 0.0) {
-        // Positive hue turns the lips pinker (toward berry), negative toward coral.
-        let turned = rotate_hue(out, -s.lip_hue * 0.35);
-        let (y, c) = split(turned);
+    if lips > 0.0 && (s.lip_saturation != 0.0 || s.lip_tint > 0.0 || s.lip_brightness != 0.0) {
+        let tinted = colourise(out, s.lip_hue, 0.45);
+        let mut lip = out;
+        for k in 0..3 {
+            lip[k] += (tinted[k] - lip[k]) * s.lip_tint;
+        }
+        let (y, c) = split(lip);
         let coloured = join(
             y * (1.0 + 0.3 * s.lip_brightness),
             c.map(|v| v * (1.0 + 0.8 * s.lip_saturation).max(0.0)),
@@ -291,8 +370,27 @@ fn retouch_pixel(
     out
 }
 
-/// The smallest rectangle holding every enabled face's region.
-pub fn union_region(model: &PortraitModel, enabled: &[bool]) -> Option<Region> {
+/// Hair lighter or darker (a curve, so black stays rich) and dyed toward
+/// `hair_hue`.
+fn recolour_hair(src: [f32; 3], s: &PortraitSettings) -> [f32; 3] {
+    let mut out = src;
+    if s.hair_brightness > 0.0 {
+        out = out.map(|v| 1.0 - (1.0 - v.clamp(0.0, 1.0)).powf(1.0 + s.hair_brightness));
+    } else if s.hair_brightness < 0.0 {
+        out = out.map(|v| v.clamp(0.0, 1.0).powf(1.0 - s.hair_brightness));
+    }
+    if s.hair_tint > 0.0 {
+        let dyed = colourise(out, s.hair_hue, 0.35);
+        for k in 0..3 {
+            out[k] += (dyed[k] - out[k]) * s.hair_tint;
+        }
+    }
+    out
+}
+
+/// The smallest rectangle holding every enabled face's region, and their
+/// hair regions when `hair` is set.
+pub fn union_region(model: &PortraitModel, enabled: &[bool], hair: bool) -> Option<Region> {
     let mut bounds: Option<(u32, u32, u32, u32)> = None;
     for (face, _) in model
         .faces
@@ -300,12 +398,14 @@ pub fn union_region(model: &PortraitModel, enabled: &[bool]) -> Option<Region> {
         .zip(enabled.iter().chain(std::iter::repeat(&true)))
         .filter(|(face, &on)| on && !face.region.is_empty())
     {
-        let r = face.region;
-        let (x1, y1) = (r.x + r.w, r.y + r.h);
-        bounds = Some(match bounds {
-            None => (r.x, r.y, x1, y1),
-            Some((a, b, c, d)) => (a.min(r.x), b.min(r.y), c.max(x1), d.max(y1)),
-        });
+        let hair_region = (hair && !face.hair_region.is_empty()).then_some(face.hair_region);
+        for r in std::iter::once(face.region).chain(hair_region) {
+            let (x1, y1) = (r.x + r.w, r.y + r.h);
+            bounds = Some(match bounds {
+                None => (r.x, r.y, x1, y1),
+                Some((a, b, c, d)) => (a.min(r.x), b.min(r.y), c.max(x1), d.max(y1)),
+            });
+        }
     }
     bounds.map(|(x0, y0, x1, y1)| Region {
         x: x0,
@@ -324,7 +424,8 @@ pub fn render(
     settings: &PortraitSettings,
     enabled: &[bool],
 ) -> Option<(Region, Vec<u8>)> {
-    let union = union_region(model, enabled)?;
+    let s = settings.unit();
+    let union = union_region(model, enabled, s.hair_active())?;
     let width = model.width as usize;
     let (uw, uh) = (union.w as usize, union.h as usize);
     let mut out = vec![0u8; uw * uh * 4];
@@ -334,7 +435,6 @@ pub fn render(
             let o = ((union.y as usize + row) * width + union.x as usize) * 4;
             line.copy_from_slice(&rgba[o..o + uw * 4]);
         });
-    let s = settings.unit();
     let pixel = |x: usize, y: usize| {
         let o = (y * width + x) * 4;
         [
@@ -378,6 +478,41 @@ pub fn render(
                 }
             });
     }
+    if s.hair_active() {
+        for (face, _) in model
+            .faces
+            .iter()
+            .zip(enabled.iter().chain(std::iter::repeat(&true)))
+            .filter(|(face, &on)| on && !face.hair.is_empty())
+        {
+            let r = face.hair_region;
+            let (hw, hx, hy) = (
+                r.w as usize,
+                (r.x - union.x) as usize,
+                (r.y - union.y) as usize,
+            );
+            delta
+                .par_chunks_mut(uw)
+                .enumerate()
+                .skip(hy)
+                .take(r.h as usize)
+                .for_each(|(urow, line)| {
+                    let row = urow - hy;
+                    for col in 0..hw {
+                        let weight = face.hair[row * hw + col] as f32 / 255.0;
+                        if weight <= 0.0 {
+                            continue;
+                        }
+                        let src = pixel(r.x as usize + col, r.y as usize + row);
+                        let res = recolour_hair(src, &s);
+                        let cell = &mut line[hx + col];
+                        for k in 0..3 {
+                            cell[k] += (res[k] - src[k]) * weight;
+                        }
+                    }
+                });
+        }
+    }
     out.par_chunks_mut(4)
         .zip(delta.par_iter())
         .for_each(|(px, d)| {
@@ -396,7 +531,7 @@ pub fn render_masks(
     model: &PortraitModel,
     enabled: &[bool],
 ) -> Option<(Region, Vec<u8>)> {
-    let union = union_region(model, enabled)?;
+    let union = union_region(model, enabled, true)?;
     let width = model.width as usize;
     let uw = union.w as usize;
     let mut out = vec![0u8; uw * union.h as usize * 4];
@@ -412,6 +547,26 @@ pub fn render_masks(
         .zip(enabled.iter().chain(std::iter::repeat(&true)))
         .filter(|(_, &on)| on)
     {
+        let hr = face.hair_region;
+        if !face.hair.is_empty() {
+            let (hx, hy) = ((hr.x - union.x) as usize, (hr.y - union.y) as usize);
+            out.par_chunks_mut(uw * 4)
+                .enumerate()
+                .skip(hy)
+                .take(hr.h as usize)
+                .for_each(|(urow, line)| {
+                    let row = urow - hy;
+                    for col in 0..hr.w as usize {
+                        let a = face.hair[row * hr.w as usize + col] as f32 / 255.0 * 0.55;
+                        if a > 0.0 {
+                            let px = &mut line[(hx + col) * 4..(hx + col) * 4 + 3];
+                            for (k, colour) in [150.0f32, 60.0, 255.0].iter().enumerate() {
+                                px[k] = (px[k] as f32 * (1.0 - a) + colour * a).round() as u8;
+                            }
+                        }
+                    }
+                });
+        }
         let r = face.region;
         let (fx, fy) = ((r.x - union.x) as usize, (r.y - union.y) as usize);
         out.par_chunks_mut(uw * 4)
@@ -451,13 +606,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hue_rotation_keeps_grey_and_turns_red_toward_yellow() {
-        let grey = rotate_hue([0.5, 0.5, 0.5], 0.4);
-        assert!(grey.iter().all(|v| (v - 0.5).abs() < 1e-6));
-        let red = rotate_hue([0.8, 0.3, 0.3], 0.3);
-        assert!(
-            red[1] > red[2],
-            "positive angle moves red toward yellow: {red:?}"
-        );
+    fn hsl_round_trips_and_colourise_keeps_lightness() {
+        for c in [[0.8f32, 0.3, 0.3], [0.2, 0.5, 0.9], [0.4, 0.4, 0.4]] {
+            let back = hsl_to_rgb(rgb_to_hsl(c));
+            for k in 0..3 {
+                assert!((back[k] - c[k]).abs() < 1e-4, "{c:?} -> {back:?}");
+            }
+        }
+        let brown = [0.35f32, 0.22, 0.12];
+        let blue = colourise(brown, 220.0, 0.5);
+        assert!(blue[2] > blue[0], "turned blue: {blue:?}");
+        assert!((rgb_to_hsl(blue)[2] - rgb_to_hsl(brown)[2]).abs() < 1e-4);
     }
 }

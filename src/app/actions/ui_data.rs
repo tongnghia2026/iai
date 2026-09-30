@@ -925,7 +925,7 @@ impl App {
         let portrait_state = if self.shell.ui.show_portrait_dialog {
             self.portrait_dialog_state()
         } else {
-            (String::new(), false, Vec::new())
+            (String::new(), false, Vec::new(), false)
         };
 
         UiData {
@@ -1777,6 +1777,7 @@ impl App {
                 portrait_status: portrait_state.0,
                 portrait_ready: portrait_state.1,
                 portrait_faces: portrait_state.2,
+                portrait_hair: portrait_state.3,
                 scan_is_pdf: self
                     .docs
                     .documents

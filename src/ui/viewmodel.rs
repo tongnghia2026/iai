@@ -467,6 +467,8 @@ pub struct DialogViewModel {
     pub portrait_status: String,
     pub portrait_ready: bool,
     pub portrait_faces: Vec<bool>,
+    /// Whether the analysis found hair to lighten or recolour.
+    pub portrait_hair: bool,
     /// Active document is a multi-page PDF session (enables page-scope options).
     pub scan_is_pdf: bool,
     /// PDF page count (1 for a plain image), for the scan-cleanup scope UI.
@@ -1024,6 +1026,7 @@ impl Default for UiData {
                 portrait_status: String::new(),
                 portrait_ready: false,
                 portrait_faces: Vec::new(),
+                portrait_hair: false,
                 scan_is_pdf: false,
                 scan_page_count: 1,
                 scan_active_page: 0,
