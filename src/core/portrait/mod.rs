@@ -294,6 +294,52 @@ mod tests {
                 masks
                     .save(dir.join(format!("pr_{name}_mask{i}.jpg")))
                     .unwrap();
+                image::GrayImage::from_raw(r.w, r.h, face.skin.clone())
+                    .unwrap()
+                    .save(dir.join(format!("pr_{name}_skin{i}.png")))
+                    .unwrap();
+                image::GrayImage::from_raw(r.w, r.h, face.interior.clone())
+                    .unwrap()
+                    .save(dir.join(format!("pr_{name}_inside{i}.png")))
+                    .unwrap();
+                if i == 0 && std::env::var("IAI_PORTRAIT_PROBE_PARTS").is_ok() {
+                    let mut seg = crate::core::ai::body_parts::Segmenter::load(false).unwrap();
+                    let parts = seg.segment_face(&rgba, width, height, &face.mesh).unwrap();
+                    let dump = |group: usize, tag: &str| {
+                        image::GrayImage::from_fn(r.w, r.h, |x, y| {
+                            let g = parts.groups_at((r.x + x) as f32 + 0.5, (r.y + y) as f32 + 0.5);
+                            image::Luma([(g[group] * 255.0).round() as u8])
+                        })
+                        .save(dir.join(format!("pr_{name}_{tag}{i}.png")))
+                        .unwrap();
+                    };
+                    dump(crate::core::ai::body_parts::GROUP_HAIR, "phair");
+                    dump(crate::core::ai::body_parts::GROUP_FACE_SKIN, "pskin");
+                }
+                if !face.hair.is_empty() {
+                    let hr = face.hair_region;
+                    image::GrayImage::from_raw(hr.w, hr.h, face.hair.clone())
+                        .unwrap()
+                        .save(dir.join(format!("pr_{name}_hair{i}.png")))
+                        .unwrap();
+                    println!("    hair region at {},{} {}x{}", hr.x, hr.y, hr.w, hr.h);
+                }
+                let mut full = rgba.clone();
+                for row in 0..union.h as usize {
+                    let o = ((union.y as usize + row) * width as usize + union.x as usize) * 4;
+                    let s = row * union.w as usize * 4;
+                    full[o..o + union.w as usize * 4]
+                        .copy_from_slice(&pixels[s..s + union.w as usize * 4]);
+                }
+                crop_rgb(&full, width, r)
+                    .save(dir.join(format!("pr_{name}_after{i}.png")))
+                    .unwrap();
+                crop_rgb(&rgba, width, r)
+                    .save(dir.join(format!("pr_{name}_before{i}.png")))
+                    .unwrap();
+                crop_rgb(&styled, width, r)
+                    .save(dir.join(format!("pr_{name}_strong{i}.png")))
+                    .unwrap();
             }
         }
     }

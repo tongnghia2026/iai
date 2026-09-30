@@ -11,12 +11,8 @@
 - Trạng thái: **Phase 0 ĐẠT** (chủ test 29/09: "khá ổn") → giữ MediaPipe cho mốc mặt.
 - Phase 0b ĐẠT (chủ test 30/09). Phase 1 đang làm: hộp thoại Chỉnh chân dung —
   đợt 1→4 chủ test OK ("rất tuyệt", 30/09).
-- **Việc kế tiếp (chủ giao 30/09, chưa làm):**
-  1. Giảm độ tối 2 bên mũi của "Sống mũi cao" (đang đen quá): hệ số tối trong
-     `effects.rs` (`gain` âm 0.12) + dải bên trong `analysis.rs` (Nose contour).
-  2. Làm mềm, hòa trộn vùng giáp ranh tóc / lông mày / mắt / môi với da — xin
-     ảnh chủ chỉ chỗ gắt (kèm "Hiện vùng nhận diện") rồi feather mask đặc điểm
-     và tắt dần hiệu ứng da sát đặc điểm.
+- Đợt 5 (30/09 tối, chờ chủ test): mép tóc–da mềm theo từng sợi + giảm tối
+  2 bên mũi (chi tiết ở Phase 1, đợt 5).
 - Không push nếu chủ chưa yêu cầu. Sau mỗi phase: build Release + đường dẫn
   `.exe` thật rồi mới mời chủ test.
 
@@ -192,6 +188,26 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
         dùng đường cong (tóc đen vẫn sâu). Thiếu Sapiens2 → nhóm Tóc bị khoá.
   - Đo rò rỉ (probe): da trơn đổi 0,000 mức; điểm ảnh ngoài tóc ~0,06 mức (sai
     số JPEG của ảnh so sánh).
+- Chủ test đợt 4 "rất tuyệt" (30/09); gửi ảnh chân tóc bị **răng cưa bậc
+  thang** + dải tóc lơ thơ không đổi màu cùng tóc. Nguyên nhân (đo trên ảnh
+  NASA): (1) xác suất Sapiens2 gần như 0/1 trên lưới 512×384 (1 ô ≈ e/128 px
+  ảnh) → mép theo bậc lưới; (2) bước lọc màu mép đọc kênh màu JPEG vốn nén
+  theo khối 8–16 px → cắt mask thành ô vuông; (3) mask tóc dừng ở đường ranh
+  của model, mask da lùi xa hơn → giữa hai mask có dải sợi tóc trên da không
+  thuộc bên nào. Đợt 5:
+  - [~] Làm mịn xác suất Sapiens2 ~1 ô model (`body_parts::soften`) → hết bậc
+        lưới ở mọi mask lấy từ model (da, tóc, môi, răng).
+  - [~] **Tách mép theo màu** (`colour_matte`, kiểu Refine Edge): trong dải
+        ±e/40 quanh đường ranh, mỗi điểm ảnh lấy tỉ lệ theo vị trí màu của nó
+        giữa màu "chắc trong" và "chắc ngoài" lân cận (lấy mẫu trên lưới thô).
+        Không tin khi hai bên cùng màu, khi màu điểm không nằm trên đường nối
+        hai màu, hoặc thiếu mẫu. Da và tóc cùng dùng → hai mask bù nhau, hết
+        khe hở. Vùng miệng giữ mask cũ (răng sáng làm lệch phép tách).
+  - [~] Lọc màu mép đọc màu đã làm mờ nhẹ (hết ô JPEG) và bỏ qua điểm đã được
+        tách theo màu.
+  - [~] Hiệu ứng tóc trên điểm "một phần là tóc" giảm theo bình phương độ phủ
+        (tránh da/nền lộ giữa sợi bị nhuộm, viền hồng trên nền sáng).
+  - [~] Sống mũi cao: 2 bên tối nhẹ hơn (0,12 → 0,05) + dải mảnh, mép mềm hơn.
 - Đo trên máy chủ (4 ảnh NASA public domain 23–58 MP, 1 ảnh nhóm 4 người):
   phân tích ~9–11 s (nạp Sapiens2 ~2,8 s + lần chạy đầu ~5,5 s), kéo thanh
   trượt 60–300 ms/lần; màu da giữ nguyên (H/S/V lệch < 1%).
@@ -286,3 +302,6 @@ donate). Kết luận:
   tròng mắt/môi/tóc (dải cầu vồng + phủ màu), sáng tối tóc.
 - **2026-09-30 (tối)** — Chủ test đợt 4 "rất tuyệt"; giao tiếp: giảm tối 2 bên
   mũi + làm mềm vùng giáp ranh. Bàn giao sang phiên mới (hết context).
+- **2026-09-30 (khuya)** — Đợt 5: chủ gửi ảnh chân tóc răng cưa → làm mịn
+  xác suất Sapiens2, tách mép tóc/da theo màu, lọc màu mép hết ô JPEG, hiệu
+  ứng tóc nhẹ trên điểm pha; 2 bên mũi tối nhẹ hơn. Chờ chủ test.

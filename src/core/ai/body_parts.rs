@@ -280,6 +280,7 @@ impl Segmenter {
             }
             Err(error) => return Err(error),
         };
+        let groups = soften(&groups);
         let (centre, extent, _) = mesh.frame();
         let mut result = PartLabels {
             crop,
@@ -291,6 +292,45 @@ impl Segmenter {
         result.agreement = agreement(&result, mesh);
         Ok(result)
     }
+}
+
+/// Soften the part odds by about one model pixel (two [1 2 1] passes each
+/// way), so outlines scaled up to the photo follow smooth curves instead of
+/// the model grid's stair steps.
+fn soften(groups: &[[u8; PART_GROUPS]]) -> Vec<[u8; PART_GROUPS]> {
+    let mut data: Vec<[f32; PART_GROUPS]> =
+        groups.iter().map(|g| g.map(|v| v as f32 / 255.0)).collect();
+    let pass = |data: &[[f32; PART_GROUPS]], horizontal: bool| -> Vec<[f32; PART_GROUPS]> {
+        (0..data.len())
+            .into_par_iter()
+            .map(|i| {
+                let (x, y) = (i % INPUT_W, i / INPUT_W);
+                let (a, b) = if horizontal {
+                    (
+                        y * INPUT_W + x.saturating_sub(1),
+                        y * INPUT_W + (x + 1).min(INPUT_W - 1),
+                    )
+                } else {
+                    (
+                        y.saturating_sub(1) * INPUT_W + x,
+                        (y + 1).min(INPUT_H - 1) * INPUT_W + x,
+                    )
+                };
+                let mut out = [0.0f32; PART_GROUPS];
+                for (g, value) in out.iter_mut().enumerate() {
+                    *value = (data[a][g] + 2.0 * data[i][g] + data[b][g]) * 0.25;
+                }
+                out
+            })
+            .collect()
+    };
+    for _ in 0..2 {
+        data = pass(&data, true);
+        data = pass(&data, false);
+    }
+    data.into_iter()
+        .map(|g| g.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
+        .collect()
 }
 
 fn agreement(parts: &PartLabels, mesh: &FaceMesh) -> f32 {
@@ -428,6 +468,26 @@ pub fn render_overlay(width: u32, height: u32, parts: &[PartLabels], trusted: f3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soften_turns_grid_steps_into_ramps() {
+        let mut groups = vec![[0u8; PART_GROUPS]; INPUT_W * INPUT_H];
+        for (i, g) in groups.iter_mut().enumerate() {
+            if i % INPUT_W >= INPUT_W / 2 {
+                g[GROUP_HAIR] = 255;
+            }
+        }
+        let soft = soften(&groups);
+        let row = 100 * INPUT_W;
+        let edge = INPUT_W / 2;
+        assert_eq!(soft[row + 10][GROUP_HAIR], 0);
+        assert_eq!(soft[row + INPUT_W - 10][GROUP_HAIR], 255);
+        let ramp: Vec<u8> = (edge - 2..edge + 2)
+            .map(|x| soft[row + x][GROUP_HAIR])
+            .collect();
+        assert!(ramp.windows(2).all(|p| p[0] < p[1]), "{ramp:?}");
+        assert!(ramp[0] > 0 && ramp[3] < 255, "{ramp:?}");
+    }
 
     #[test]
     fn part_crop_round_trips_between_image_and_crop_space() {

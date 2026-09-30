@@ -296,10 +296,11 @@ fn retouch_pixel(
         }
         let contour = face.nose[i] as f32 / 127.0 * s.nose_bridge;
         if contour != 0.0 {
+            // Shade lightly: the sides only need to hint at depth.
             let gain = if contour > 0.0 {
                 0.14 * contour
             } else {
-                0.12 * contour
+                0.05 * contour
             };
             r = r.map(|v| v * (1.0 + gain));
         }
@@ -499,7 +500,9 @@ pub fn render(
                 .for_each(|(urow, line)| {
                     let row = urow - hy;
                     for col in 0..hw {
-                        let weight = face.hair[row * hw + col] as f32 / 255.0;
+                        // Pixels only partly hair (strands over skin or sky)
+                        // change more gently, or what shows through is dyed too.
+                        let weight = (face.hair[row * hw + col] as f32 / 255.0).powi(2);
                         if weight <= 0.0 {
                             continue;
                         }
