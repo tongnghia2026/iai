@@ -388,6 +388,64 @@ pub fn render(
     Some((union, out))
 }
 
+/// The photo with each detected area tinted (skin red, under-eye orange,
+/// eye whites green, irises blue, brows yellow, lips pink, teeth cyan), so the
+/// user can see where every slider acts.
+pub fn render_masks(
+    rgba: &[u8],
+    model: &PortraitModel,
+    enabled: &[bool],
+) -> Option<(Region, Vec<u8>)> {
+    let union = union_region(model, enabled)?;
+    let width = model.width as usize;
+    let uw = union.w as usize;
+    let mut out = vec![0u8; uw * union.h as usize * 4];
+    out.par_chunks_mut(uw * 4)
+        .enumerate()
+        .for_each(|(row, line)| {
+            let o = ((union.y as usize + row) * width + union.x as usize) * 4;
+            line.copy_from_slice(&rgba[o..o + uw * 4]);
+        });
+    for (face, _) in model
+        .faces
+        .iter()
+        .zip(enabled.iter().chain(std::iter::repeat(&true)))
+        .filter(|(_, &on)| on)
+    {
+        let r = face.region;
+        let (fx, fy) = ((r.x - union.x) as usize, (r.y - union.y) as usize);
+        out.par_chunks_mut(uw * 4)
+            .enumerate()
+            .skip(fy)
+            .take(r.h as usize)
+            .for_each(|(urow, line)| {
+                let row = urow - fy;
+                for col in 0..r.w as usize {
+                    let i = row * r.w as usize + col;
+                    let tints: [(u8, [f32; 3]); 7] = [
+                        (face.skin[i], [255.0, 40.0, 40.0]),
+                        (face.under_eye[i], [255.0, 150.0, 0.0]),
+                        (face.eye_white[i], [0.0, 255.0, 60.0]),
+                        (face.iris[i], [40.0, 110.0, 255.0]),
+                        (face.brows[i], [255.0, 230.0, 0.0]),
+                        (face.lips[i], [255.0, 0.0, 200.0]),
+                        (face.teeth[i], [0.0, 230.0, 255.0]),
+                    ];
+                    let px = &mut line[(fx + col) * 4..(fx + col) * 4 + 4];
+                    for (weight, colour) in tints {
+                        let a = weight as f32 / 255.0 * 0.55;
+                        if a > 0.0 {
+                            for k in 0..3 {
+                                px[k] = (px[k] as f32 * (1.0 - a) + colour[k] * a).round() as u8;
+                            }
+                        }
+                    }
+                }
+            });
+    }
+    Some((union, out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

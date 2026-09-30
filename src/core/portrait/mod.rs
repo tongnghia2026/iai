@@ -9,7 +9,7 @@ pub mod effects;
 pub mod geometry;
 
 pub use analysis::{analyze, FaceModel, PortraitModel, TRUSTED_AGREEMENT};
-pub use effects::{render, PortraitSettings};
+pub use effects::{render, render_masks, PortraitSettings};
 pub use geometry::Region;
 
 #[cfg(test)]
@@ -61,14 +61,27 @@ mod tests {
                 model.parts_note
             );
             let strong = PortraitSettings {
-                lip_saturation: 60.0,
-                lip_hue: 50.0,
-                lip_brightness: -20.0,
-                brows: 60.0,
-                sharpen: 60.0,
+                brighten: 100.0,
                 ..PortraitSettings::NEUTRAL
             };
             let (su, sp) = render(&rgba, &model, &strong, &enabled).unwrap();
+            let (mu, mp) = render_masks(&rgba, &model, &enabled).unwrap();
+            let mut tinted = rgba.clone();
+            for row in 0..mu.h as usize {
+                let o = ((mu.y as usize + row) * width as usize + mu.x as usize) * 4;
+                let s = row * mu.w as usize * 4;
+                tinted[o..o + mu.w as usize * 4].copy_from_slice(&mp[s..s + mu.w as usize * 4]);
+            }
+            let r0 = model.faces[0].region;
+            let k = (900.0 / r0.w as f32).min(1.0);
+            image::imageops::resize(
+                &crop_rgb(&tinted, width, r0),
+                (r0.w as f32 * k) as u32,
+                (r0.h as f32 * k) as u32,
+                image::imageops::FilterType::Triangle,
+            )
+            .save(dir.join(format!("pr_{name}_areas.jpg")))
+            .unwrap();
             let mut styled = rgba.clone();
             for row in 0..su.h as usize {
                 let o = ((su.y as usize + row) * width as usize + su.x as usize) * 4;

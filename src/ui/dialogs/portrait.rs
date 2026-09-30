@@ -49,8 +49,10 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let settings_id = egui::Id::new("portrait_settings");
     let faces_id = egui::Id::new("portrait_faces");
     let preview_id = egui::Id::new("portrait_preview");
+    let masks_id = egui::Id::new("portrait_masks");
     let mut s: PortraitSettings = ctx.data_mut(|d| d.get_temp(settings_id).unwrap_or_default());
     let mut preview: bool = ctx.data_mut(|d| d.get_temp(preview_id).unwrap_or(true));
+    let mut masks: bool = ctx.data_mut(|d| d.get_temp(masks_id).unwrap_or(false));
     let face_count = data.dialogs.portrait_faces.len();
     let mut faces: Vec<bool> = ctx.data_mut(|d| d.get_temp(faces_id).unwrap_or_default());
     faces.resize(face_count, true);
@@ -225,6 +227,11 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                 ui.checkbox(&mut preview, "Xem trước")
                     .on_hover_text("Bỏ tích để xem ảnh gốc");
             });
+            ui.add_enabled_ui(ready, |ui| {
+                ui.checkbox(&mut masks, "Hiện vùng nhận diện").on_hover_text(
+                    "Tô màu vùng app nhận ra: da đỏ, quầng mắt cam, lòng trắng xanh lá, tròng xanh dương, lông mày vàng, môi hồng, răng xanh ngọc",
+                );
+            });
             ui.add_space(6.0);
             ui.separator();
             ui.horizontal(|ui| {
@@ -248,6 +255,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
         d.insert_temp(settings_id, s);
         d.insert_temp(faces_id, faces.clone());
         d.insert_temp(preview_id, preview);
+        d.insert_temp(masks_id, masks);
     });
 
     if do_apply {
@@ -255,6 +263,6 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     } else if do_cancel {
         actions.dialogs.cancel_portrait_dialog = true;
     } else {
-        actions.dialogs.set_portrait_preview = Some((s, faces, preview));
+        actions.dialogs.set_portrait_preview = Some((s, faces, preview, masks));
     }
 }

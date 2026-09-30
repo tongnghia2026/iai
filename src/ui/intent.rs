@@ -807,8 +807,14 @@ pub struct DialogIntent {
     pub show_scan_cleanup_dialog: Option<bool>,
     /// Open/close the "Chỉnh chân dung" dialog.
     pub show_portrait_dialog: Option<bool>,
-    /// Live-preview request: sliders, faces switched on, preview on/off.
-    pub set_portrait_preview: Option<(crate::core::portrait::PortraitSettings, Vec<bool>, bool)>,
+    /// Live-preview request: sliders, faces switched on, preview on/off, and
+    /// whether to tint the detected areas instead.
+    pub set_portrait_preview: Option<(
+        crate::core::portrait::PortraitSettings,
+        Vec<bool>,
+        bool,
+        bool,
+    )>,
     /// Cancel the portrait dialog (restore the previewed layer).
     pub cancel_portrait_dialog: bool,
     /// Apply the portrait retouch as a new layer.

@@ -111,6 +111,110 @@ fn max_filter(values: &[f32], width: usize, height: usize, radius: usize) -> Vec
     out
 }
 
+/// Tighten the soft, low-resolution skin mask onto the photo: a guided filter
+/// (luma guide) snaps its outline to real edges such as the hairline, pixels
+/// near the outline must also have the face's skin colour, and the mask fades
+/// out toward region sides that do not meet the image edge, so no effect ends
+/// in a hard line (left, top, right, bottom in `open_sides`).
+fn refine_skin(
+    mask: Vec<f32>,
+    src: &[[f32; 3]],
+    w: usize,
+    h: usize,
+    e: f32,
+    open_sides: [bool; 4],
+) -> Vec<f32> {
+    let n = w * h;
+    let guide: Vec<f32> = src.par_iter().map(|&c| luma(c)).collect();
+    let radius = (e / 80.0).max(2.0);
+    let mut stats: Vec<[f32; 4]> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let (g, p) = (guide[i], mask[i]);
+            [g, p, g * g, g * p]
+        })
+        .collect();
+    blur4(&mut stats, w, h, radius);
+    const EPS: f32 = 0.0015;
+    let mut coefficients: Vec<[f32; 4]> = stats
+        .par_iter()
+        .map(|m| {
+            let variance = (m[2] - m[0] * m[0]).max(0.0);
+            let covariance = m[3] - m[0] * m[1];
+            let a = covariance / (variance + EPS);
+            [a, m[1] - a * m[0], m[1], 0.0]
+        })
+        .collect();
+    blur4(&mut coefficients, w, h, radius);
+    let snapped: Vec<f32> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let c = coefficients[i];
+            // Never grow the mask where the original had nothing nearby.
+            ((c[0] * guide[i] + c[1]).clamp(0.0, 1.0)) * smoothstep(0.0, 0.05, c[2])
+        })
+        .collect();
+
+    // Skin colour model (chroma mean and covariance) from the solid core.
+    let mut core: Vec<[f32; 4]> = snapped.iter().map(|&m| [m, 0.0, 0.0, 0.0]).collect();
+    blur4(&mut core, w, h, (e / 28.0).max(3.0));
+    let core: Vec<f32> = core
+        .par_iter()
+        .map(|c| smoothstep(0.7, 0.95, c[0]))
+        .collect();
+    let chroma = |c: [f32; 3]| {
+        let y = luma(c);
+        [c[2] - y, c[0] - y]
+    };
+    let (mut total, mut mean, mut cov) = (0.0f64, [0.0f64; 2], [0.0f64; 3]);
+    for i in 0..n {
+        if core[i] > 0.9 && snapped[i] > 0.9 {
+            let [u, v] = chroma(src[i]);
+            total += 1.0;
+            mean[0] += u as f64;
+            mean[1] += v as f64;
+            cov[0] += (u * u) as f64;
+            cov[1] += (u * v) as f64;
+            cov[2] += (v * v) as f64;
+        }
+    }
+    let colour_gate: Option<([f32; 2], [f32; 3])> = (total > 200.0).then(|| {
+        let (mu, mv) = (mean[0] / total, mean[1] / total);
+        let floor = 1e-5;
+        (
+            [mu as f32, mv as f32],
+            [
+                (cov[0] / total - mu * mu).max(floor) as f32,
+                (cov[1] / total - mu * mv) as f32,
+                (cov[2] / total - mv * mv).max(floor) as f32,
+            ],
+        )
+    });
+    let fade = (0.06 * e).max(4.0);
+    (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut m = snapped[i];
+            if let Some(([mu, mv], [suu, suv, svv])) = colour_gate {
+                let [u, v] = chroma(src[i]);
+                let (du, dv) = (u - mu, v - mv);
+                let det = (suu * svv - suv * suv).max(1e-12);
+                let d2 = (svv * du * du - 2.0 * suv * du * dv + suu * dv * dv) / det;
+                let gate = 1.0 - smoothstep(9.0, 25.0, d2);
+                m *= core[i] + (1.0 - core[i]) * gate;
+            }
+            let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
+            let distances = [x, y, w as f32 - x, h as f32 - y];
+            for (open, d) in open_sides.iter().zip(distances) {
+                if *open {
+                    m *= smoothstep(0.0, fade, d);
+                }
+            }
+            m
+        })
+        .collect()
+}
+
 /// A blemish found by the ring test, in region pixels.
 struct Spot {
     x: f32,
@@ -424,7 +528,8 @@ fn build_face(
             ]
         })
         .collect();
-    stamp_polygon(&mut exclude, region, &nostrils, 0.0, 0.03 * e);
+    let mut nostril_area = vec![0.0f32; n];
+    stamp_polygon(&mut nostril_area, region, &nostrils, 0.0, 0.03 * e);
 
     // Cheek reference colour from the source.
     let cheek_samples: Vec<[f32; 3]> = CHEEKS
@@ -470,6 +575,32 @@ fn build_face(
         let y = luma(cheek_colour);
         cheek_colour.map(|v| v - y)
     };
+    let raw_skin: Vec<f32> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let (x, y) = pixel_xy(i);
+            match parts {
+                Some(p) if trusted => p.groups_at(x, y)[body_parts::GROUP_FACE_SKIN],
+                _ => {
+                    let c = src[i];
+                    let yl = luma(c);
+                    let distance = (0..3)
+                        .map(|k| (c[k] - yl - cheek_chroma[k]).powi(2))
+                        .sum::<f32>()
+                        .sqrt();
+                    oval[i] * (1.0 - smoothstep(0.05, 0.12, distance))
+                }
+            }
+        })
+        .collect();
+    let open_sides = [
+        region.x > 0,
+        region.y > 0,
+        region.x + region.w < width,
+        region.y + region.h < height,
+    ];
+    let refined = refine_skin(raw_skin, &src, w, h, e, open_sides);
+    let cheek_luma_src = luma(cheek_colour).max(0.05);
     let own_centre = owners[index];
     let skin: Vec<f32> = (0..n)
         .into_par_iter()
@@ -484,19 +615,10 @@ fn build_face(
             {
                 return 0.0;
             }
-            let base = match parts {
-                Some(p) if trusted => p.groups_at(x, y)[body_parts::GROUP_FACE_SKIN],
-                _ => {
-                    let c = src[i];
-                    let yl = luma(c);
-                    let distance = (0..3)
-                        .map(|k| (c[k] - yl - cheek_chroma[k]).powi(2))
-                        .sum::<f32>()
-                        .sqrt();
-                    oval[i] * (1.0 - smoothstep(0.05, 0.12, distance))
-                }
-            };
-            base * (1.0 - exclude[i])
+            // Only the dark nostril holes leave the skin, not the nose around them.
+            let hole =
+                nostril_area[i] * (1.0 - smoothstep(0.6, 0.85, luma(src[i]) / cheek_luma_src));
+            refined[i] * (1.0 - exclude[i]) * (1.0 - hole)
         })
         .collect();
 

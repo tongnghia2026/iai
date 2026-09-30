@@ -157,6 +157,18 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
         Sapiens2 (dự phòng: viền môi MediaPipe trừ lòng miệng).
   - [~] **Chi tiết**: Tăng nét (mắt, mi, lông mày, môi; mặc định 20), Lông mày
         đậm/nhạt (chỉ các sợi tối hơn da quanh). Hộp thoại có thanh cuộn.
+- Chủ test đợt 2 OK (30/09). Báo tiếp: **Sáng da lan ra ngoài vùng da**. Nguyên
+  nhân: mask Sapiens2 tính ở 512×384 trên khung ~3× mặt → mép mờ, lấn vài
+  điểm ảnh sang tóc/nền; hiệu ứng áp theo mask mà không kiểm màu; khung xử lý
+  cắt cứng ở cổ. Đợt 3:
+  - [~] Nắn mask da bằng guided filter (ảnh sáng-tối làm dẫn) → mép bám mép
+        thật (chân tóc, viền mặt).
+  - [~] Gần mép: điểm ảnh phải có màu giống da (mô hình màu từ lõi da,
+        Mahalanobis trên 2 kênh màu) — lõi da không bị lọc (mụn đỏ vẫn xử lý).
+  - [~] Mask mờ dần về các cạnh khung xử lý (không chạm mép ảnh) → không còn
+        đường cắt ngang cổ.
+  - [~] Ô **"Hiện vùng nhận diện"**: tô màu da/quầng mắt/lòng trắng/tròng/lông
+        mày/môi/răng ngay trên ảnh.
 - Đo trên máy chủ (4 ảnh NASA public domain 23–58 MP, 1 ảnh nhóm 4 người):
   phân tích ~9–11 s (nạp Sapiens2 ~2,8 s + lần chạy đầu ~5,5 s), kéo thanh
   trượt 60–300 ms/lần; màu da giữ nguyên (H/S/V lệch < 1%).
@@ -244,3 +256,6 @@ donate). Kết luận:
   2 nút thử được thay bằng nút "Chỉnh chân dung…".
 - **2026-09-30 (chiều)** — Chủ test Phase 1 OK trừ mụn loang; sửa mụn kiểu
   Healing Brush + thêm Môi (3 thanh), Tăng nét, Lông mày.
+- **2026-09-30 (chiều)** — Chủ test đợt 2 OK; Sáng da lan ra ngoài da → nắn
+  mask (guided filter + lọc màu da ở mép + mờ dần ở cạnh khung) + ô Hiện vùng
+  nhận diện.

@@ -562,8 +562,9 @@ impl App {
                 self.cancel_portrait();
             }
         }
-        if let Some((settings, faces, preview)) = actions.dialogs.set_portrait_preview.take() {
-            self.set_portrait_preview(settings, faces, preview);
+        if let Some((settings, faces, preview, masks)) = actions.dialogs.set_portrait_preview.take()
+        {
+            self.set_portrait_preview(settings, faces, preview, masks);
         }
         if std::mem::take(&mut actions.dialogs.cancel_portrait_dialog) {
             self.shell.ui.show_portrait_dialog = false;

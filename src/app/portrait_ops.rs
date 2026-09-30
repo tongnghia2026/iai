@@ -27,8 +27,8 @@ pub struct PortraitSession {
     pub model: Option<Arc<PortraitModel>>,
     pub error: Option<String>,
     /// What the dialog last asked to see, and what the canvas shows now.
-    pub wanted: Option<(PortraitSettings, Vec<bool>, bool)>,
-    pub shown: Option<(PortraitSettings, Vec<bool>, bool)>,
+    pub wanted: Option<(PortraitSettings, Vec<bool>, bool, bool)>,
+    pub shown: Option<(PortraitSettings, Vec<bool>, bool, bool)>,
 }
 
 impl App {
@@ -126,14 +126,16 @@ impl App {
     }
 
     /// The dialog streams its sliders every frame; re-render only on change.
+    /// `preview` off shows the photo; `masks` tints the detected areas instead.
     pub(crate) fn set_portrait_preview(
         &mut self,
         settings: PortraitSettings,
         enabled: Vec<bool>,
         preview: bool,
+        masks: bool,
     ) {
         if let Some(session) = self.shell.portrait.as_mut() {
-            session.wanted = Some((settings, enabled, preview));
+            session.wanted = Some((settings, enabled, preview, masks));
         }
         self.refresh_portrait_preview();
     }
@@ -146,19 +148,22 @@ impl App {
         if session.doc_id != self.docs.documents[idx].id || session.wanted == session.shown {
             return;
         }
-        let Some((settings, enabled, preview)) = session.wanted.clone() else {
+        let Some((settings, enabled, preview, masks)) = session.wanted.clone() else {
             return;
         };
         let Some(model) = session.model.clone() else {
             return;
         };
         let mut tiles = session.original_tiles.clone();
-        if preview {
-            if let Some((region, pixels)) =
-                portrait::render(&session.src, &model, &settings, &enabled)
-            {
-                tiles.write_region(region.x, region.y, region.w, region.h, &pixels);
-            }
+        let shown = if masks {
+            portrait::render_masks(&session.src, &model, &enabled)
+        } else if preview {
+            portrait::render(&session.src, &model, &settings, &enabled)
+        } else {
+            None
+        };
+        if let Some((region, pixels)) = shown {
+            tiles.write_region(region.x, region.y, region.w, region.h, &pixels);
         }
         let layer_id = session.layer_id;
         self.docs.documents[idx]
@@ -166,7 +171,7 @@ impl App {
             .preview_layer_tiles(layer_id, tiles);
         self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
         if let Some(session) = self.shell.portrait.as_mut() {
-            session.shown = Some((settings, enabled, preview));
+            session.shown = Some((settings, enabled, preview, masks));
         }
         if let Some(window) = &self.win.window {
             window.request_redraw();
@@ -368,11 +373,11 @@ mod tests {
         assert!(!faces.is_empty());
         let on = vec![true; faces.len()];
 
-        app.set_portrait_preview(PortraitSettings::default(), on.clone(), true);
+        app.set_portrait_preview(PortraitSettings::default(), on.clone(), true, false);
         assert_ne!(photo_pixels(&app), original, "preview shows the retouch");
-        app.set_portrait_preview(PortraitSettings::default(), on.clone(), false);
+        app.set_portrait_preview(PortraitSettings::default(), on.clone(), false, false);
         assert_eq!(photo_pixels(&app), original, "preview off shows the photo");
-        app.set_portrait_preview(PortraitSettings::default(), on.clone(), true);
+        app.set_portrait_preview(PortraitSettings::default(), on.clone(), true, false);
 
         app.apply_portrait(PortraitSettings::default(), on).unwrap();
         let canvas = &app.docs.documents[0].canvas;
