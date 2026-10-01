@@ -27,8 +27,8 @@ pub const FACE_OVAL: [u16; 36] = [
 /// Iris centre and its four rim points.
 pub const RIGHT_IRIS: (u16, [u16; 4]) = (468, [469, 470, 471, 472]);
 pub const LEFT_IRIS: (u16, [u16; 4]) = (473, [474, 475, 476, 477]);
-/// Nose midline from between the eyes down to the tip.
-pub const NOSE_BRIDGE: [u16; 5] = [6, 197, 195, 5, 4];
+/// Nose midline from between the brows, past the eyes, down to the tip.
+pub const NOSE_BRIDGE: [u16; 8] = [8, 168, 6, 197, 195, 5, 4, 1];
 /// Outer edges of the nostril wings and the point below the nose tip.
 pub const NOSE_WINGS: [u16; 2] = [98, 327];
 pub const SUBNASALE: u16 = 2;

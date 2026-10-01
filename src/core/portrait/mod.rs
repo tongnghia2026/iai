@@ -336,8 +336,28 @@ mod tests {
                 let g = (128 + v as i32) as u8;
                 image::Rgb([g, g, g])
             });
+            let mut photo = crop_rgb(&rgba, width, area);
+            if std::env::var("IAI_PORTRAIT_NOSE_MARKS").is_ok() {
+                for (k, &m) in [9u16, 8, 168, 6, 197, 195, 5, 4, 1, 19, 94, 2]
+                    .iter()
+                    .enumerate()
+                {
+                    let p = face.mesh.points[m as usize];
+                    let (px, py) = (p[0] - area.x as f32, p[1] - area.y as f32);
+                    println!("  {name} mark {k} = point {m}: {px:.0},{py:.0}");
+                    let colour = image::Rgb([(k * 20) as u8, 255 - (k * 20) as u8, 0]);
+                    for dy in -4i32..=4 {
+                        for dx in -4i32..=4 {
+                            let (x, y) = (px as i32 + dx, py as i32 + dy);
+                            if x >= 0 && y >= 0 && (x as u32) < area.w && (y as u32) < area.h {
+                                photo.put_pixel(x as u32, y as u32, colour);
+                            }
+                        }
+                    }
+                }
+            }
             let tiles = [
-                crop_rgb(&rgba, width, area),
+                photo,
                 field,
                 paste(&PortraitSettings {
                     nose_bridge: 60.0,

@@ -326,7 +326,7 @@ fn retouch_pixel(
             let gain = if contour > 0.0 {
                 0.18 * contour
             } else {
-                0.06 * contour
+                0.03 * contour
             };
             r = r.map(|v| v * (1.0 + gain));
         }

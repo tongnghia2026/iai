@@ -143,10 +143,10 @@ fn brow_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((0.7 * (ya - yb)).powi(2) + du * du + dv * dv).sqrt()
 }
 
-/// Nose contour over `region` (-127..127): light down the bridge, shade
-/// along both sides of it. Both fall off as bell curves across the bridge
-/// and fade in below the brows and out toward the tip, so the change has no
-/// edge anywhere.
+/// Nose contour over `region` (-127..127): light down the bridge, from
+/// between the brows onto the tip, and a light shade along both sides of
+/// it. Both fall off as bell curves across the bridge and fade in and out
+/// along it, so the change has no edge anywhere.
 fn nose_contour(points: &[[f32; 3]], region: Region, e: f32) -> Vec<i8> {
     let line: Vec<[f32; 2]> = loop_points(points, &NOSE_BRIDGE);
     let lengths: Vec<f32> = line
@@ -174,7 +174,7 @@ fn nose_contour(points: &[[f32; 3]], region: Region, e: f32) -> Vec<i8> {
         }
         (best, along)
     };
-    let (light_width, shade_offset, shade_width) = (0.02 * e, 0.075 * e, 0.028 * e);
+    let (light_width, shade_offset, shade_width) = (0.026 * e, 0.08 * e, 0.035 * e);
     let bounds = Region::around(
         line.iter().copied(),
         [shade_offset + 3.0 * shade_width; 4],
@@ -192,11 +192,14 @@ fn nose_contour(points: &[[f32; 3]], region: Region, e: f32) -> Vec<i8> {
             }
             let (d, t) = nearest(x as f32 + 0.5, y as f32 + 0.5);
             let bell = |offset: f32, width: f32| (-0.5 * ((d - offset) / width).powi(2)).exp();
-            let light =
-                bell(0.0, light_width) * smoothstep(0.0, 0.3, t) * (1.0 - smoothstep(0.75, 1.0, t));
+            // In from brow level, full from between the eyes, a third left
+            // on the tip; the shade only beside the bony bridge.
+            let light = bell(0.0, light_width)
+                * smoothstep(0.0, 0.22, t)
+                * (1.0 - 0.7 * smoothstep(0.75, 1.0, t));
             let shade = bell(shade_offset, shade_width)
-                * smoothstep(0.0, 0.3, t)
-                * (1.0 - smoothstep(0.6, 0.95, t));
+                * smoothstep(0.15, 0.4, t)
+                * (1.0 - smoothstep(0.6, 0.85, t));
             ((light - shade).clamp(-1.0, 1.0) * 127.0).round() as i8
         })
         .collect()
