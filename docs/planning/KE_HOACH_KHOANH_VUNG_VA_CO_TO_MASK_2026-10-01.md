@@ -147,7 +147,14 @@ và qua cổng · `[!]` bị chặn.
   bên = chuông rộng (cách 0,075e, σ 0,028e); cả hai hiện dần dưới chân mày và
   tắt dần về chóp mũi. Mạnh hơn chút (sáng 0,18, tối 0,06) bù cho dáng mềm.
   Probe `probe_nose` (IAI_PORTRAIT_NOSE_PROBE).
-- Cổng: kéo "Sống mũi cao" tới 100 không thấy mép dải. **Chờ chủ test.**
+- Chủ test lần 1: mềm hơn nhưng **vẫn cụt hai đầu** (bắt đầu dưới tầm mắt,
+  dừng trên đầu mũi), muốn dài hơn, mềm hơn, **bớt tối hai bên**.
+- [~] Lần 2: đường sống mũi kéo từ tầm chân mày (8, 168) xuống chóp mũi (1);
+  sáng hiện dần từ chân mày, đầy từ giữa hai mắt, còn 1/3 trên chóp mũi; sáng
+  rộng hơn (σ 0,026e); tối hai bên rộng hơn (σ 0,035e, cách 0,08e), chỉ dọc
+  phần xương sống mũi, mạnh bằng nửa (0,03).
+- Cổng: kéo "Sống mũi cao" tới 100: vệt sáng dài từ giữa chân mày tới chóp
+  mũi, không mép, không cụt; hai bên chỉ tối nhẹ. **Chờ chủ test.**
 
 ### Pha 1 — Khoanh vùng trước khi phân tích (chủ cho làm sau Pha 2)
 
@@ -255,3 +262,6 @@ và qua cổng · `[!]` bị chặn.
   hình lông mày mềm, mặc định giữ nguyên, mục "Lông mày" từ 0); chờ chủ test.
 - **2026-10-01** — Chủ test Pha 6 OK; báo "Sống mũi cao" chuyển không mượt →
   Pha 7 code xong (trường tạo khối dạng chuông); chờ chủ test.
+- **2026-10-01** — Chủ test Pha 7: còn cụt hai đầu, tối hai bên nhiều → kéo
+  dài từ chân mày tới chóp mũi, mềm hơn, tối hai bên giảm một nửa; chờ chủ
+  test.
