@@ -352,7 +352,8 @@ mod tests {
                 let image = image::open(dir.join(&name)).unwrap().to_rgba8();
                 let (width, height) = image.dimensions();
                 let rgba = image.into_raw();
-                let model = super::super::analyze(&rgba, width, height, false, &|_| {}).unwrap();
+                let model =
+                    super::super::analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
                 cache = Some((name.clone(), rgba, width, model));
             }
             let (_, rgba, width, model) = cache.as_ref().unwrap();

@@ -10,7 +10,7 @@ pub mod effects;
 pub mod geometry;
 mod skin_mask;
 
-pub use analysis::{analyze, FaceModel, PortraitModel, SkinLayers, TRUSTED_AGREEMENT};
+pub use analysis::{analyze, Clip, FaceModel, PortraitModel, SkinLayers, TRUSTED_AGREEMENT};
 pub use effects::{render, render_masks, FaceEdits, PortraitSettings};
 pub use geometry::Region;
 
@@ -51,7 +51,7 @@ mod tests {
             let (width, height) = image.dimensions();
             let rgba = image.into_raw();
             skin_mask::set_legacy(true);
-            let old = analyze(&rgba, width, height, false, &|_| {}).unwrap();
+            let old = analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
             skin_mask::set_legacy(false);
             println!(
                 "{name}: {width}x{height}, prepare old {} ms",
@@ -159,7 +159,7 @@ mod tests {
                     .unwrap();
             }
             if std::env::var("IAI_PORTRAIT_SKIN_RENDER").is_ok() {
-                let fresh = analyze(&rgba, width, height, false, &|_| {}).unwrap();
+                let fresh = analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
                 println!("  prepare new {} ms", fresh.timings[3]);
                 let strong = PortraitSettings {
                     smooth: 80.0,
@@ -186,6 +186,73 @@ mod tests {
         }
     }
 
+    /// Opt-in: IAI_PORTRAIT_CLIP_PROBE is a folder with photos and `clips.txt`
+    /// (`name.jpg x0,y0,x1,y1` per line): hair masks without and with that
+    /// rectangle selected, side by side over the rectangle.
+    #[test]
+    #[ignore]
+    fn probe_clip() {
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_CLIP_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let list = std::fs::read_to_string(dir.join("clips.txt")).unwrap();
+        for line in list.lines().filter(|l| !l.trim().is_empty()) {
+            let (name, rect) = line.split_once(' ').unwrap();
+            let v: Vec<u32> = rect.split(',').map(|p| p.trim().parse().unwrap()).collect();
+            let image = image::open(dir.join(name)).unwrap().to_rgba8();
+            let (width, height) = image.dimensions();
+            let rgba = image.into_raw();
+            let r = Region {
+                x: v[0],
+                y: v[1],
+                w: v[2].min(width) - v[0],
+                h: v[3].min(height) - v[1],
+            };
+            let clip = Clip {
+                region: r,
+                mask: vec![255; r.len()],
+            };
+            let tile = |model: &PortraitModel| {
+                let f = &model.faces[0];
+                let hr = f.hair_region;
+                image::RgbImage::from_fn(r.w, r.h, |x, y| {
+                    let (ix, iy) = (r.x + x, r.y + y);
+                    let o = ((iy * width + ix) * 4) as usize;
+                    let inside = ix >= hr.x && iy >= hr.y && ix < hr.x + hr.w && iy < hr.y + hr.h;
+                    let m = if inside {
+                        f.hair_mask()[((iy - hr.y) * hr.w + ix - hr.x) as usize] as f32 / 255.0
+                            * 0.7
+                    } else {
+                        0.0
+                    };
+                    let tint = [150.0, 60.0, 255.0];
+                    image::Rgb(std::array::from_fn(|k| {
+                        (rgba[o + k] as f32 * (1.0 - m) + tint[k] * m) as u8
+                    }))
+                })
+            };
+            let auto = analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
+            let close = analyze(&rgba, width, height, false, Some(clip), &|_| {}).unwrap();
+            println!(
+                "{name}: hair region auto {}x{} close {}x{}, prepare {} / {} ms",
+                auto.faces[0].hair_region.w,
+                auto.faces[0].hair_region.h,
+                close.faces[0].hair_region.w,
+                close.faces[0].hair_region.h,
+                auto.timings[3],
+                close.timings[3]
+            );
+            let mut sheet =
+                image::RgbImage::from_pixel(r.w * 2 + 8, r.h, image::Rgb([255, 255, 255]));
+            image::imageops::replace(&mut sheet, &tile(&auto), 0, 0);
+            image::imageops::replace(&mut sheet, &tile(&close), (r.w + 8) as i64, 0);
+            sheet
+                .save(dir.join(format!("pc_{}.png", name.trim_end_matches(".jpg"))))
+                .unwrap();
+        }
+    }
+
     /// Opt-in: set IAI_PORTRAIT_PROBE to a folder of photos; writes before/after
     /// and mask sheets per face and prints timings.
     #[test]
@@ -207,7 +274,7 @@ mod tests {
             let (width, height) = image.dimensions();
             let rgba = image.into_raw();
             let started = std::time::Instant::now();
-            let model = analyze(&rgba, width, height, false, &|_| {}).unwrap();
+            let model = analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
             let analyse_ms = started.elapsed().as_millis();
             let enabled = vec![true; model.faces.len()];
             let started = std::time::Instant::now();

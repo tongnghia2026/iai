@@ -116,6 +116,23 @@ impl PartCrop {
         }
     }
 
+    /// The closest upright 3:4 crop holding `frame` ([x0, y0, x1, y1], a
+    /// selection drawn around the person) with a small margin, when it is
+    /// closer than this crop — the model then sees the head at a finer scale.
+    fn closer(self, frame: [f32; 4]) -> Self {
+        let [x0, y0, x1, y1] = frame;
+        let width = (x1 - x0).max((y1 - y0) * INPUT_W as f32 / INPUT_H as f32) * 1.08;
+        if !(width > 1.0 && width < self.width) {
+            return self;
+        }
+        Self {
+            cx: (x0 + x1) * 0.5,
+            cy: (y0 + y1) * 0.5,
+            width,
+            angle: 0.0,
+        }
+    }
+
     fn scale(&self) -> f32 {
         self.width / INPUT_W as f32
     }
@@ -271,7 +288,23 @@ impl Segmenter {
         height: u32,
         mesh: &FaceMesh,
     ) -> Result<PartLabels, String> {
-        let crop = PartCrop::around(mesh);
+        self.segment_face_within(rgba, width, height, mesh, None)
+    }
+
+    /// [`segment_face`](Self::segment_face), looking only at `frame`
+    /// ([x0, y0, x1, y1]) when that is closer than the crop around the face.
+    pub fn segment_face_within(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        mesh: &FaceMesh,
+        frame: Option<[f32; 4]>,
+    ) -> Result<PartLabels, String> {
+        let crop = match frame {
+            Some(f) => PartCrop::around(mesh).closer(f),
+            None => PartCrop::around(mesh),
+        };
         let input = sample_crop(rgba, width, height, &crop);
         let (labels, groups) = match self.run(input.clone()) {
             Ok(result) => result,
@@ -504,6 +537,26 @@ mod tests {
             let [u2, v2] = crop.to_crop(x, y);
             assert!((u - u2).abs() < 1e-3 && (v - v2).abs() < 1e-3);
         }
+    }
+
+    #[test]
+    fn a_close_selection_gives_a_finer_upright_crop() {
+        let around = PartCrop {
+            cx: 500.0,
+            cy: 600.0,
+            width: 900.0,
+            angle: 0.2,
+        };
+        // A head-sized selection, taller than 3:4: the crop holds its height.
+        let close = around.closer([400.0, 300.0, 700.0, 800.0]);
+        assert_eq!((close.cx, close.cy, close.angle), (550.0, 550.0, 0.0));
+        assert!((close.width - 500.0 * 0.75 * 1.08).abs() < 1e-3);
+        let [x0, y0] = close.to_image(0.0, 0.0);
+        let [x1, y1] = close.to_image(INPUT_W as f32, INPUT_H as f32);
+        assert!(x0 <= 400.0 && y0 <= 300.0 && x1 >= 700.0 && y1 >= 800.0);
+        // A selection wider than the face's own crop changes nothing.
+        let wide = around.closer([0.0, 0.0, 2000.0, 2000.0]);
+        assert_eq!((wide.cx, wide.width, wide.angle), (500.0, 900.0, 0.2));
     }
 
     /// Opt-in: set IAI_BODY_PARTS_PROBE to a folder of images; writes

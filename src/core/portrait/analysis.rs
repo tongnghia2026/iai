@@ -251,10 +251,44 @@ impl PortraitModel {
     }
 }
 
+/// The selection the dialog opened with, in image pixels: its bounds and its
+/// soft mask there. Faces are looked for inside it, the part model looks at
+/// it alone when that is closer than its own crop, and the retouch fades out
+/// along its edge.
+#[derive(Clone, Debug)]
+pub struct Clip {
+    pub region: Region,
+    pub mask: Vec<u8>,
+}
+
+impl Clip {
+    /// Selection alpha (0..1) at image pixel (x, y).
+    pub fn at(&self, x: u32, y: u32) -> f32 {
+        let r = self.region;
+        if x < r.x || y < r.y || x >= r.x + r.w || y >= r.y + r.h {
+            return 0.0;
+        }
+        self.mask[((y - r.y) * r.w + x - r.x) as usize] as f32 / 255.0
+    }
+
+    /// [x0, y0, x1, y1] in image pixels.
+    pub fn bounds(&self) -> [f32; 4] {
+        let r = self.region;
+        [
+            r.x as f32,
+            r.y as f32,
+            (r.x + r.w) as f32,
+            (r.y + r.h) as f32,
+        ]
+    }
+}
+
 pub struct PortraitModel {
     pub width: u32,
     pub height: u32,
     pub faces: Vec<FaceModel>,
+    /// The selection the analysis kept to, if any.
+    pub clip: Option<Clip>,
     /// Whether the Sapiens2 part model ran (else every face uses mesh masks).
     pub parts_used: bool,
     pub parts_on_gpu: bool,
@@ -629,23 +663,71 @@ fn heal_spots(
     (score, cover, donor, heal_base)
 }
 
-/// Analyse `rgba` (straight RGBA, `width * height`). `progress` receives short
-/// Vietnamese status lines for the dialog.
+/// Faces in `clip` and a margin around it (a close crop finds small faces in
+/// a group photo more surely), kept when centred in the selection.
+fn faces_in(rgba: &[u8], width: u32, height: u32, clip: &Clip) -> Result<Vec<FaceMesh>, String> {
+    let r = clip.region;
+    let area = Region::around(
+        [
+            [r.x as f32, r.y as f32],
+            [(r.x + r.w) as f32, (r.y + r.h) as f32],
+        ]
+        .into_iter(),
+        [
+            0.25 * r.w as f32,
+            0.25 * r.h as f32,
+            0.25 * r.w as f32,
+            0.25 * r.h as f32,
+        ],
+        width,
+        height,
+    );
+    let row = area.w as usize * 4;
+    let mut crop = vec![0u8; row * area.h as usize];
+    for (y, line) in crop.chunks_exact_mut(row).enumerate() {
+        let o = ((area.y as usize + y) * width as usize + area.x as usize) * 4;
+        line.copy_from_slice(&rgba[o..o + row]);
+    }
+    let mut meshes = face_mesh::detect(&crop, area.w, area.h)?;
+    for mesh in &mut meshes {
+        for p in &mut mesh.points {
+            p[0] += area.x as f32;
+            p[1] += area.y as f32;
+        }
+    }
+    meshes.retain(|mesh| {
+        let (c, _, _) = mesh.frame();
+        c[0] >= 0.0 && c[1] >= 0.0 && clip.at(c[0] as u32, c[1] as u32) >= 0.5
+    });
+    Ok(meshes)
+}
+
+/// Analyse `rgba` (straight RGBA, `width * height`), keeping to `clip` when
+/// given. `progress` receives short Vietnamese status lines for the dialog.
 pub fn analyze(
     rgba: &[u8],
     width: u32,
     height: u32,
     prefer_gpu: bool,
+    clip: Option<Clip>,
     progress: &(dyn Fn(String) + Sync),
 ) -> Result<PortraitModel, String> {
     progress("Đang tìm khuôn mặt…".to_string());
     let mut timings = [0u128; 4];
     let started = std::time::Instant::now();
-    let meshes = face_mesh::detect(rgba, width, height)?;
+    let meshes = match &clip {
+        Some(c) => faces_in(rgba, width, height, c)?,
+        None => face_mesh::detect(rgba, width, height)?,
+    };
     timings[0] = started.elapsed().as_millis();
     if meshes.is_empty() {
-        return Err("không tìm thấy khuôn mặt nào".to_string());
+        return Err(if clip.is_some() {
+            "không tìm thấy khuôn mặt nào trong vùng chọn".to_string()
+        } else {
+            "không tìm thấy khuôn mặt nào".to_string()
+        });
     }
+    let frame = clip.as_ref().map(Clip::bounds);
     let mut parts: Vec<Option<PartLabels>> = (0..meshes.len()).map(|_| None).collect();
     let mut parts_on_gpu = false;
     let mut parts_note = None;
@@ -658,7 +740,7 @@ pub fn analyze(
                 let started = std::time::Instant::now();
                 for (i, mesh) in meshes.iter().enumerate() {
                     progress(format!("Đang tách vùng mặt {}/{}…", i + 1, meshes.len()));
-                    match segmenter.segment_face(rgba, width, height, mesh) {
+                    match segmenter.segment_face_within(rgba, width, height, mesh, frame) {
                         Ok(labels) => parts[i] = Some(labels),
                         Err(error) => parts_note = Some(error),
                     }
@@ -699,6 +781,7 @@ pub fn analyze(
         width,
         height,
         faces,
+        clip,
         parts_used,
         parts_on_gpu,
         parts_note,

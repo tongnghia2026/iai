@@ -75,13 +75,19 @@ và qua cổng · `[!]` bị chặn.
 
 ### Pha 1 — Khoanh vùng trước khi phân tích (chủ cho làm sau Pha 2)
 
-- [ ] Mở Chỉnh chân dung khi đang có vùng chọn → chỉ dò mặt trong vùng đó (ảnh
-      nhóm: chọn đúng người cần chỉnh) và dòng trạng thái ghi "Phân tích trong
-      vùng chọn".
-- [ ] Sapiens2 chạy trên khung ôm sát vùng chọn (giữ tỉ lệ 3:4 của model) thay
-      cho khung 3 lần bề rộng mặt → mép tóc/da **mịn hơn tới ~2 lần** khi khoanh
-      sát đầu.
-- [ ] Mask (da, tóc, môi…) cắt theo vùng chọn (mép mềm theo vùng chọn).
+- [~] Mở Chỉnh chân dung khi đang có vùng chọn → chỉ dò mặt trong vùng đó (ảnh
+      nhóm: chọn đúng người cần chỉnh) và dòng trạng thái ghi "Trong vùng
+      chọn". Dò mặt trên ảnh cắt quanh vùng chọn (+25 % mỗi phía, mặt nhỏ dễ
+      thấy hơn), giữ mặt có tâm trong vùng chọn; không có → báo "không tìm thấy
+      khuôn mặt nào trong vùng chọn".
+- [~] Sapiens2 chạy trên khung ôm sát vùng chọn (giữ tỉ lệ 3:4 của model, thẳng
+      đứng, lề 8 %) khi khung đó nhỏ hơn khung 3 lần bề rộng mặt
+      (`PartCrop::closer`). Probe khoanh quanh đầu: khung nhỏ hơn 1,8–2,3 lần
+      (Kim 2987→1296 px), bắt thêm sợi tóc bay (Kim, Meir), bỏ lòng áo tối sau
+      gáy Meir bị nhận nhầm; chuẩn bị còn nhanh hơn.
+- [~] Mọi hiệu ứng (và "Hiện vùng nhận diện", lớp phủ khi tô) nhân độ phủ vùng
+      chọn tại điểm đó (`Clip`) — mép mềm theo vùng chọn như Photoshop; Áp dụng
+      chỉ tạo điểm ảnh trong vùng chọn.
 - Cổng: khoanh sát đầu cho mép tóc rõ hơn tự động; ảnh nhóm chỉ xử lý người
   được khoanh.
 
@@ -162,3 +168,5 @@ và qua cổng · `[!]` bị chặn.
   2b (khung da kéo theo da model thấy); chờ chủ test.
 - **2026-10-01** — Chủ test Pha 2b OK; thêm Pha 5 (cọ Thông minh cho Refine
   Selection, làm sau). Bắt đầu Pha 1.
+- **2026-10-01** — Pha 1 code xong (dò mặt trong vùng chọn, khung Sapiens2 ôm
+  sát, cắt hiệu ứng theo vùng chọn); probe + test đạt; chờ chủ test.

@@ -546,11 +546,16 @@ pub fn render(
                 });
         }
     }
+    let clip = model.clip.as_ref();
     out.par_chunks_mut(4)
         .zip(delta.par_iter())
-        .for_each(|(px, d)| {
+        .enumerate()
+        .for_each(|(i, (px, d))| {
+            let a = clip.map_or(1.0, |c| {
+                c.at(union.x + (i % uw) as u32, union.y + (i / uw) as u32)
+            });
             for k in 0..3 {
-                px[k] = (px[k] as f32 + d[k] * 255.0).round().clamp(0.0, 255.0) as u8;
+                px[k] = (px[k] as f32 + d[k] * 255.0 * a).round().clamp(0.0, 255.0) as u8;
             }
         });
     Some((union, out))
@@ -596,7 +601,11 @@ pub fn render_masks(
                 .for_each(|(urow, line)| {
                     let row = urow - hy;
                     for col in 0..hr.w as usize {
-                        let a = hair[row * hr.w as usize + col] as f32 / 255.0 * 0.55;
+                        let inside = model
+                            .clip
+                            .as_ref()
+                            .map_or(1.0, |c| c.at(hr.x + col as u32, hr.y + row as u32));
+                        let a = hair[row * hr.w as usize + col] as f32 / 255.0 * 0.55 * inside;
                         if a > 0.0 {
                             let px = &mut line[(hx + col) * 4..(hx + col) * 4 + 3];
                             for (k, colour) in [150.0f32, 60.0, 255.0].iter().enumerate() {
@@ -626,8 +635,12 @@ pub fn render_masks(
                         (face.teeth[i], [0.0, 230.0, 255.0]),
                     ];
                     let px = &mut line[(fx + col) * 4..(fx + col) * 4 + 4];
+                    let inside = model
+                        .clip
+                        .as_ref()
+                        .map_or(1.0, |c| c.at(r.x + col as u32, r.y + row as u32));
                     for (weight, colour) in tints {
-                        let a = weight as f32 / 255.0 * 0.55;
+                        let a = weight as f32 / 255.0 * 0.55 * inside;
                         if a > 0.0 {
                             for k in 0..3 {
                                 px[k] = (px[k] as f32 * (1.0 - a) + colour[k] * a).round() as u8;

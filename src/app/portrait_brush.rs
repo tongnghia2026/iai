@@ -622,6 +622,10 @@ fn overlay_pixels(
                         m = m.max(mask[((y - r.y) * r.w + x - r.x) as usize]);
                     }
                 }
+                // Only what the retouch reaches: inside the selection, if any.
+                if let Some(clip) = &model.clip {
+                    m = (m as f32 * clip.at(x, y)).round() as u8;
+                }
                 *px = lut[m as usize];
             }
         });

@@ -55,6 +55,7 @@ impl App {
     pub(crate) fn begin_portrait(&mut self) -> Result<(), String> {
         self.cancel_portrait();
         let idx = self.docs.active_doc_idx;
+        self.docs.documents[idx].canvas.selection.refresh_bbox();
         let canvas = &self.docs.documents[idx].canvas;
         if canvas.is_cmyk() {
             return Err("Chỉnh chân dung chưa hỗ trợ chế độ CMYK".to_string());
@@ -67,6 +68,14 @@ impl App {
         }
         let (w, h) = (layer.width, layer.height);
         let offset = layer.offset;
+        let clip = if canvas.selection.active {
+            Some(
+                selection_clip(&canvas.selection, offset, w, h)
+                    .ok_or_else(|| "Vùng chọn nằm ngoài layer ảnh".to_string())?,
+            )
+        } else {
+            None
+        };
         let src = Arc::new(layer.flatten_tiles());
         if w == 0 || h == 0 || src.len() != w as usize * h as usize * 4 {
             return Err("Layer ảnh không hợp lệ".to_string());
@@ -83,7 +92,7 @@ impl App {
                         *slot = line;
                     }
                 };
-                let _ = tx.send(portrait::analyze(&src, w, h, prefer_gpu, &report));
+                let _ = tx.send(portrait::analyze(&src, w, h, prefer_gpu, clip, &report));
             });
         }
         self.shell.portrait = Some(PortraitSession {
@@ -410,7 +419,12 @@ impl App {
             .collect();
         let seconds = model.timings.iter().sum::<u128>() as f32 / 1000.0;
         let mut line = format!(
-            "Tìm thấy {} khuôn mặt · phân tích {seconds:.1} s",
+            "{}Tìm thấy {} khuôn mặt · phân tích {seconds:.1} s",
+            if model.clip.is_some() {
+                "Trong vùng chọn · "
+            } else {
+                ""
+            },
             faces.len()
         );
         if !model.parts_used {
@@ -419,6 +433,50 @@ impl App {
         let hair = model.faces.iter().any(|face| !face.hair_region.is_empty());
         (line, true, faces, hair)
     }
+}
+
+/// The canvas selection over a layer at `offset` of `w` x `h` pixels, in the
+/// layer's own pixels; `None` when it misses the layer.
+fn selection_clip(
+    selection: &crate::core::selection::Selection,
+    offset: (i32, i32),
+    w: u32,
+    h: u32,
+) -> Option<portrait::Clip> {
+    let (x0, y0, x1, y1) = selection.bounding_box_cached();
+    let to_layer = |v: f32, o: i32, size: u32| (v as i64 - o as i64).clamp(0, size as i64) as u32;
+    let (lx0, ly0) = (
+        to_layer(x0.floor(), offset.0, w),
+        to_layer(y0.floor(), offset.1, h),
+    );
+    let (lx1, ly1) = (
+        to_layer(x1.ceil(), offset.0, w),
+        to_layer(y1.ceil(), offset.1, h),
+    );
+    if lx1 <= lx0 || ly1 <= ly0 {
+        return None;
+    }
+    let region = Region {
+        x: lx0,
+        y: ly0,
+        w: lx1 - lx0,
+        h: ly1 - ly0,
+    };
+    let mask: Vec<u8> = (0..region.len())
+        .map(|i| {
+            let (x, y) = (
+                (lx0 + i as u32 % region.w) as i64 + offset.0 as i64,
+                (ly0 + i as u32 / region.w) as i64 + offset.1 as i64,
+            );
+            if x < 0 || y < 0 {
+                return 0;
+            }
+            (selection.sample(x as u32, y as u32) * 255.0).round() as u8
+        })
+        .collect();
+    mask.iter()
+        .any(|&m| m > 0)
+        .then_some(portrait::Clip { region, mask })
 }
 
 #[cfg(test)]
@@ -620,6 +678,97 @@ mod tests {
             layer.tiles.get_pixel(x, y).3 > 0,
             "the painted hair at the face centre was retouched"
         );
+    }
+
+    fn analysed(app: &mut App) -> Result<Arc<PortraitModel>, String> {
+        app.begin_portrait()?;
+        let started = Instant::now();
+        loop {
+            let session = app.shell.portrait.as_ref().unwrap();
+            if let Some(model) = &session.model {
+                return Ok(Arc::clone(model));
+            }
+            if let Some(error) = &session.error {
+                return Err(error.clone());
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(180),
+                "analysis hung"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            app.poll_portrait();
+        }
+    }
+
+    #[test]
+    fn a_selection_picks_the_faces_and_bounds_the_retouch() {
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        let original = photo_pixels(&app);
+        let (w, h) = {
+            let c = &app.docs.documents[0].canvas;
+            (c.width, c.height)
+        };
+        let whole = analysed(&mut app).unwrap();
+        let (centre, extent, _) = whole.faces[0].mesh.frame();
+        app.cancel_portrait();
+
+        // Nothing but a corner far from the face: no face to retouch.
+        let corner = (extent * 0.3) as u32;
+        let far_x = if centre[0] > w as f32 / 2.0 {
+            0
+        } else {
+            w - corner
+        };
+        let far_y = if centre[1] > h as f32 / 2.0 {
+            0
+        } else {
+            h - corner
+        };
+        app.docs.documents[0].canvas.selection.select_rect(
+            far_x,
+            far_y,
+            far_x + corner,
+            far_y + corner,
+        );
+        let error = analysed(&mut app).err().expect("no face in the corner");
+        assert!(error.contains("vùng chọn"), "{error}");
+        app.cancel_portrait();
+
+        // A box around the head: the face is found, the retouch stays inside.
+        let half = (extent * 0.8) as u32;
+        let (cx, cy) = (centre[0] as u32, centre[1] as u32);
+        let (x0, y0) = (cx.saturating_sub(half), cy.saturating_sub(half));
+        let (x1, y1) = ((cx + half).min(w), (cy + half).min(h));
+        app.docs.documents[0]
+            .canvas
+            .selection
+            .select_rect(x0, y0, x1, y1);
+        let model = analysed(&mut app).unwrap();
+        assert_eq!(model.faces.len(), 1);
+        assert!(model.clip.is_some());
+        let (status, ..) = app.portrait_dialog_state();
+        assert!(status.starts_with("Trong vùng chọn"), "{status}");
+        let strong = PortraitSettings {
+            brighten: 100.0,
+            ..PortraitSettings::default()
+        };
+        app.apply_portrait(strong, vec![true]).unwrap();
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
+        let mut inside = 0;
+        for y in (0..h).step_by(4) {
+            for x in (0..w).step_by(4) {
+                let alpha = layer.tiles.get_pixel(x, y).3;
+                if x >= x0 && x < x1 && y >= y0 && y < y1 {
+                    inside += (alpha > 0) as u32;
+                } else {
+                    assert_eq!(alpha, 0, "changed outside the selection at {x},{y}");
+                }
+            }
+        }
+        assert!(inside > 0, "the face was retouched");
+        assert_eq!(photo_pixels(&app), original);
     }
 
     #[test]
