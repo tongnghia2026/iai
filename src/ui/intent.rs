@@ -819,6 +819,11 @@ pub struct DialogIntent {
     pub cancel_portrait_dialog: bool,
     /// Apply the portrait retouch as a new layer.
     pub apply_portrait: Option<(crate::core::portrait::PortraitSettings, Vec<bool>)>,
+    /// Pick the mask the "Tô vùng" brush paints (`Some(None)` puts it away).
+    pub set_portrait_brush: Option<Option<crate::core::portrait::brush::MaskTarget>>,
+    /// Undo / redo a "Tô vùng" stroke.
+    pub portrait_brush_undo: bool,
+    pub portrait_brush_redo: bool,
     /// Live-preview params for the open scan-cleanup dialog (current page only).
     pub set_scan_cleanup_preview: Option<crate::core::scan_cleanup::ScanCleanupParams>,
     /// Cancel/close the scan-cleanup dialog (restore the previewed layer).

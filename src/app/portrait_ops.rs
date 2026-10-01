@@ -2,21 +2,25 @@
 //! and teeth retouching with a live canvas preview. The photo is analysed once
 //! on a worker thread (`core::portrait::analyze`); each slider change then only
 //! recombines the cached layers of the analysis, also on a worker so dragging
-//! never stalls the window (a drag skips to the latest values). OK adds the
-//! result as a new layer above the source, holding just the retouched pixels.
+//! never stalls the window (a drag skips to the latest values). The "Tô vùng"
+//! brush (`portrait_brush`) edits the skin and hair masks in between. OK adds
+//! the result as a new layer above the source, holding just the retouched
+//! pixels.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
+use super::portrait_brush::PortraitBrush;
 use super::render::CanvasEvent;
 use super::state::App;
-use crate::core::portrait::{self, PortraitModel, PortraitSettings, Region};
+use crate::core::portrait::{self, FaceEdits, PortraitModel, PortraitSettings, Region};
 use crate::core::tile::TileMap;
 
 const RESULT_LAYER: &str = "Chân dung";
 
-/// What the preview shows: settings, faces on, retouch on, areas tinted.
-type PreviewKey = (PortraitSettings, Vec<bool>, bool, bool);
+/// What the preview shows: settings, faces on, retouch on, areas tinted, and
+/// the brush edits' revision.
+type PreviewKey = (PortraitSettings, Vec<bool>, bool, bool, u64);
 type Rendered = Option<(Region, Vec<u8>)>;
 
 pub struct PortraitSession {
@@ -24,6 +28,8 @@ pub struct PortraitSession {
     pub layer_id: u32,
     pub w: u32,
     pub h: u32,
+    /// Where the layer sits on the canvas.
+    pub offset: (i32, i32),
     pub original_tiles: TileMap,
     pub src: Arc<Vec<u8>>,
     /// Latest progress line from the analysis worker.
@@ -36,6 +42,10 @@ pub struct PortraitSession {
     pub shown: Option<PreviewKey>,
     /// The preview render running on a worker, and what it will show.
     rendering: Option<(PreviewKey, Receiver<Rendered>)>,
+    /// Masks painted with the brush, per face, and their revision.
+    pub edits: Vec<FaceEdits>,
+    pub edit_rev: u64,
+    pub brush: PortraitBrush,
 }
 
 impl App {
@@ -56,6 +66,7 @@ impl App {
             return Err("Hãy chọn layer ảnh (không khóa) để chỉnh chân dung".to_string());
         }
         let (w, h) = (layer.width, layer.height);
+        let offset = layer.offset;
         let src = Arc::new(layer.flatten_tiles());
         if w == 0 || h == 0 || src.len() != w as usize * h as usize * 4 {
             return Err("Layer ảnh không hợp lệ".to_string());
@@ -80,6 +91,7 @@ impl App {
             layer_id: layer.id,
             w,
             h,
+            offset,
             original_tiles: layer.tiles.clone(),
             src,
             progress,
@@ -89,6 +101,9 @@ impl App {
             wanted: None,
             shown: None,
             rendering: None,
+            edits: Vec::new(),
+            edit_rev: 0,
+            brush: PortraitBrush::default(),
         });
         Ok(())
     }
@@ -116,8 +131,9 @@ impl App {
             Some(Err(error)) => session.error = Some(error),
             None => {}
         }
+        self.poll_portrait_brush();
         self.collect_portrait_render();
-        if busy {
+        if busy || self.shell.portrait.as_ref().is_some_and(|s| s.brush.busy()) {
             if let Some(window) = &self.win.window {
                 window.request_redraw();
             }
@@ -134,18 +150,25 @@ impl App {
         masks: bool,
     ) {
         if let Some(session) = self.shell.portrait.as_mut() {
-            session.wanted = Some((settings, enabled, preview, masks));
+            session.wanted = Some((settings, enabled, preview, masks, 0));
         }
         self.refresh_portrait_preview();
     }
 
     /// Start rendering what the dialog wants unless it is on screen or a
     /// render is already running (that one's completion starts the next).
-    fn refresh_portrait_preview(&mut self) {
+    /// While the brush paints, its overlay shows the mask instead of the
+    /// tinted areas.
+    pub(super) fn refresh_portrait_preview(&mut self) {
         let idx = self.docs.active_doc_idx;
         let Some(session) = self.shell.portrait.as_mut() else {
             return;
         };
+        let painting = session.brush.target.is_some();
+        if let Some(key) = session.wanted.as_mut() {
+            key.3 &= !painting;
+            key.4 = session.edit_rev;
+        }
         if session.doc_id != self.docs.documents[idx].id
             || session.wanted == session.shown
             || session.rendering.is_some()
@@ -158,18 +181,19 @@ impl App {
         let Some(model) = session.model.clone() else {
             return;
         };
-        let (settings, enabled, preview, masks) = key.clone();
+        let (settings, enabled, preview, masks, _) = key.clone();
         if !preview && !masks {
             self.show_portrait_preview(key, None);
             return;
         }
         let src = Arc::clone(&session.src);
+        let edits = session.edits.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let rendered = if masks {
-                portrait::render_masks(&src, &model, &enabled)
+                portrait::render_masks(&src, &model, &enabled, &edits)
             } else {
-                portrait::render(&src, &model, &settings, &enabled)
+                portrait::render(&src, &model, &settings, &enabled, &edits)
             };
             let _ = tx.send(rendered);
         });
@@ -226,6 +250,7 @@ impl App {
 
     /// Drop the session and put the layer back as it was.
     pub(crate) fn cancel_portrait(&mut self) {
+        self.end_portrait_brush();
         let Some(session) = self.shell.portrait.take() else {
             return;
         };
@@ -267,8 +292,10 @@ impl App {
                 model,
             )
         };
+        let edits = self.finished_portrait_edits();
         self.cancel_portrait();
-        let Some((region, pixels)) = portrait::render(&src, &model, &settings, &enabled) else {
+        let Some((region, pixels)) = portrait::render(&src, &model, &settings, &enabled, &edits)
+        else {
             return Err("Không có khuôn mặt nào được chọn".to_string());
         };
         let mut patch = vec![0u8; pixels.len()];
@@ -330,6 +357,22 @@ impl App {
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         }
         Ok(())
+    }
+
+    /// The brush edits with every stroke's skin rebuilt (waits for workers
+    /// still running).
+    fn finished_portrait_edits(&mut self) -> Vec<FaceEdits> {
+        self.poll_portrait_brush();
+        self.end_portrait_stroke();
+        while self.shell.portrait.as_ref().is_some_and(|s| s.brush.busy()) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            self.poll_portrait_brush();
+        }
+        self.shell
+            .portrait
+            .as_ref()
+            .map(|s| s.edits.clone())
+            .unwrap_or_default()
     }
 
     /// Dialog view of the session: progress/status line, whether sliders can
@@ -471,6 +514,112 @@ mod tests {
         assert_eq!(photo_pixels(&app), original, "the photo layer is untouched");
         assert_eq!(canvas.undo_count(), undo_before + 1);
         assert!(app.shell.portrait.is_none());
+    }
+
+    #[test]
+    fn brush_paints_hair_and_skin_with_undo_and_apply() {
+        use crate::core::portrait::brush::MaskTarget;
+        use crate::core::refine::{MaskBrushEvent, StampOp};
+        use crate::tools::ToolId;
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        let tool_before = app.edit.tools.active_id();
+        app.shell.ui.show_portrait_dialog = true;
+        app.begin_portrait().unwrap();
+        let started = Instant::now();
+        while app
+            .shell
+            .portrait
+            .as_ref()
+            .is_some_and(|s| s.model.is_none())
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(180),
+                "analysis hung"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            app.poll_portrait();
+        }
+        let model = app.shell.portrait.as_ref().unwrap().model.clone().unwrap();
+        let face = &model.faces[0];
+        if face.hair_region.is_empty() {
+            return;
+        }
+        let (centre, extent, _) = face.mesh.frame();
+        let at = (centre[0], centre[1]);
+        let stroke = |app: &mut App, op: StampOp| {
+            let queue = app.docs.documents[0].canvas.mask_brush.as_mut().unwrap();
+            queue.push(MaskBrushEvent::Begin(op));
+            queue.push(MaskBrushEvent::Dabs {
+                points: vec![at],
+                radius: extent * 0.05,
+                hardness: 1.0,
+            });
+            queue.push(MaskBrushEvent::End);
+            app.poll_portrait_brush();
+        };
+        let hair_here = |app: &App| {
+            let s = app.shell.portrait.as_ref().unwrap();
+            let r = s.model.as_ref().unwrap().faces[0].hair_region;
+            let k = (at.1 as u32 - r.y) * r.w + at.0 as u32 - r.x;
+            let mask = s.edits.first().and_then(|e| e.hair.clone());
+            mask.map_or(
+                s.model.as_ref().unwrap().faces[0].hair_mask()[k as usize],
+                |m| m[k as usize],
+            )
+        };
+        let skin_here = |app: &App| {
+            let s = app.shell.portrait.as_ref().unwrap();
+            let r = s.model.as_ref().unwrap().faces[0].region;
+            let k = ((at.1 as u32 - r.y) * r.w + at.0 as u32 - r.x) as usize;
+            s.edits
+                .first()
+                .and_then(|e| e.skin.clone())
+                .map(|l| l.mask()[k])
+        };
+        let analysed = hair_here(&app);
+
+        app.set_portrait_brush_target(Some(MaskTarget::Hair));
+        assert!(app.portrait_painting());
+        assert_eq!(app.edit.tools.active_id(), ToolId::RefineBrush);
+        assert!(app.portrait_brush_view().3.is_some(), "overlay shown");
+        stroke(&mut app, StampOp::Add);
+        assert_eq!(hair_here(&app), 255);
+        app.portrait_brush_step(false);
+        assert_eq!(hair_here(&app), analysed, "undo");
+        app.portrait_brush_step(true);
+        assert_eq!(hair_here(&app), 255, "redo");
+
+        app.set_portrait_brush_target(Some(MaskTarget::Skin));
+        stroke(&mut app, StampOp::Subtract);
+        let started = Instant::now();
+        while app.shell.portrait.as_ref().is_some_and(|s| s.brush.busy()) {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "skin rebuild hung"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+            app.poll_portrait_brush();
+        }
+        assert_eq!(skin_here(&app), Some(0));
+
+        app.set_portrait_brush_target(None);
+        assert_eq!(app.edit.tools.active_id(), tool_before, "tool given back");
+        assert!(app.docs.documents[0].canvas.mask_brush.is_none());
+        let strong = PortraitSettings {
+            hair_hue: 200.0,
+            hair_tint: 100.0,
+            ..PortraitSettings::default()
+        };
+        app.apply_portrait(strong, vec![true; model.faces.len()])
+            .unwrap();
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
+        let (x, y) = (at.0 as u32, at.1 as u32);
+        assert!(
+            layer.tiles.get_pixel(x, y).3 > 0,
+            "the painted hair at the face centre was retouched"
+        );
     }
 
     #[test]

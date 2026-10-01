@@ -141,6 +141,9 @@ impl App {
         {
             return;
         }
+        if self.portrait_painting() && self.portrait_brush_key(event_loop, physical_key, pressed) {
+            return;
+        }
         if pressed && self.is_preview_dialog_open() {
             let is_view_shortcut = matches!(
                 physical_key,
@@ -1263,6 +1266,48 @@ impl App {
     /// the original; modifiers, Space, Ctrl+zoom and `[ ]` go on to the normal
     /// arms. Everything else is refused like any modal operation. Returns true
     /// when the key was taken here.
+    /// Keys while the Chỉnh chân dung brush paints: Ctrl+Z / Ctrl+Shift+Z
+    /// step its strokes, [ ] size the brush and Shift+[ ] its hardness.
+    fn portrait_brush_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        physical_key: PhysicalKey,
+        pressed: bool,
+    ) -> bool {
+        let PhysicalKey::Code(code) = physical_key else {
+            return false;
+        };
+        if !pressed {
+            return false;
+        }
+        let command = self
+            .pressed_chord(physical_key)
+            .and_then(|c| self.shell.keymap.command_for(c));
+        match (code, command) {
+            (_, Some(Command::EditUndo)) => self.portrait_brush_step(false),
+            (_, Some(Command::EditRedo)) => self.portrait_brush_step(true),
+            (KeyCode::BracketLeft | KeyCode::BracketRight, _) => {
+                let grow = code == KeyCode::BracketRight;
+                let shift = self.edit.input.shift_held;
+                let tool = self.edit.tools.refine_brush_mut();
+                if shift {
+                    tool.hardness = (tool.hardness + if grow { 0.1 } else { -0.1 }).clamp(0.0, 1.0);
+                } else if grow {
+                    tool.size = (tool.size + clone_bracket_step(tool.size, true)).min(1000.0);
+                } else {
+                    tool.size = (tool.size - clone_bracket_step(tool.size, false)).max(1.0);
+                }
+                self.win.last_cursor_radius = 0;
+                self.sync_cursor(event_loop);
+            }
+            _ => return false,
+        }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     fn refine_panel_key(
         &mut self,
         event_loop: &ActiveEventLoop,

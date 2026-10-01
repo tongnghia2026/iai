@@ -132,7 +132,8 @@ impl App {
         // or the eyedropper cursor and hover sampling are suppressed.
         let modal_ui = self.is_modal_open()
             && !self.shell.ui.show_paint_color_dialog
-            && !self.shell.ui.show_color_range_dialog;
+            && !self.shell.ui.show_color_range_dialog
+            && !self.portrait_painting();
         // Tools/states that legitimately act on the gray pasteboard outside the
         // page. Brush-like tools need their center to cross the page edge so they
         // can paint cleanly up to it; the actual pixel writes remain canvas-clipped.

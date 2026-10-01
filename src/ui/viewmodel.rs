@@ -469,6 +469,13 @@ pub struct DialogViewModel {
     pub portrait_faces: Vec<bool>,
     /// Whether the analysis found hair to lighten or recolour.
     pub portrait_hair: bool,
+    /// The "Tô vùng" brush: the mask it paints, whether its strokes can be
+    /// undone / redone, and the tinted mask over the canvas (texture and
+    /// canvas-pixel rect).
+    pub portrait_brush: Option<crate::core::portrait::brush::MaskTarget>,
+    pub portrait_brush_undo: bool,
+    pub portrait_brush_redo: bool,
+    pub portrait_overlay: Option<(egui::TextureId, egui::Rect)>,
     /// Active document is a multi-page PDF session (enables page-scope options).
     pub scan_is_pdf: bool,
     /// PDF page count (1 for a plain image), for the scan-cleanup scope UI.
@@ -1027,6 +1034,10 @@ impl Default for UiData {
                 portrait_ready: false,
                 portrait_faces: Vec::new(),
                 portrait_hair: false,
+                portrait_brush: None,
+                portrait_brush_undo: false,
+                portrait_brush_redo: false,
+                portrait_overlay: None,
                 scan_is_pdf: false,
                 scan_page_count: 1,
                 scan_active_page: 0,

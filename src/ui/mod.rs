@@ -999,6 +999,28 @@ pub fn build(
             }
         }
 
+        if let Some((tex_id, rect)) = data.dialogs.portrait_overlay {
+            let (zoom, ox, oy) = (data.doc.zoom, data.doc.offset_x, data.doc.offset_y);
+            let screen = egui::Rect::from_min_max(
+                egui::pos2(ox + rect.min.x * zoom, oy + rect.min.y * zoom),
+                egui::pos2(ox + rect.max.x * zoom, oy + rect.max.y * zoom),
+            );
+            let clip_rect = screen.intersect(canvas_viewport);
+            if clip_rect.is_positive() {
+                ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Background,
+                    egui::Id::new("portrait_overlay"),
+                ))
+                .with_clip_rect(clip_rect)
+                .image(
+                    tex_id,
+                    screen,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+        }
+
         let sel_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
         let zoom = data.doc.zoom;
         let ox = data.doc.offset_x;

@@ -1,9 +1,13 @@
 //! "Chỉnh chân dung" dialog (Image ▸ Chỉnh chân dung…): skin, blemish,
 //! under-eye, eye and teeth sliders with a live canvas preview, like the
-//! Filter/Levels dialogs. Áp dụng adds the retouch as a new layer; Hủy restores.
+//! Filter/Levels dialogs, and a brush ("Tô vùng") to fix the skin and hair
+//! areas before sliding. Áp dụng adds the retouch as a new layer; Hủy restores.
 
 use super::*;
+use crate::core::portrait::brush::MaskTarget;
 use crate::core::portrait::PortraitSettings;
+use crate::core::selection::RefineBrushMode;
+use egui_phosphor::regular as ph;
 
 fn slider_colors() -> [egui::Color32; 3] {
     [
@@ -57,6 +61,126 @@ fn rows(ui: &mut egui::Ui, enabled: bool, items: Vec<(&str, &mut f32, &str, Kind
                 .on_hover_text(tip);
         });
     }
+}
+
+/// "Tô vùng": which area the brush paints, then its mode, size and hardness.
+fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, ready: bool) {
+    let d = &data.dialogs;
+    section_title(ui, "Tô vùng");
+    ui.add_enabled_ui(ready, |ui| {
+        ui.horizontal(|ui| {
+            let targets = [
+                (None, "Tắt", "Không tô — bấm lên ảnh không làm gì"),
+                (
+                    Some(MaskTarget::Skin),
+                    "Da",
+                    "Tô thêm / bớt vùng da app nhận ra (hiện màu đỏ)",
+                ),
+                (
+                    Some(MaskTarget::Hair),
+                    "Tóc",
+                    "Tô thêm / bớt vùng tóc app nhận ra (hiện màu tím)",
+                ),
+            ];
+            for (target, label, tip) in targets {
+                let enabled = target != Some(MaskTarget::Hair) || d.portrait_hair;
+                let response = ui
+                    .add_enabled_ui(enabled, |ui| {
+                        ui.selectable_label(d.portrait_brush == target, label)
+                    })
+                    .inner
+                    .on_hover_text(tip);
+                if response.clicked() {
+                    actions.dialogs.set_portrait_brush = Some(target);
+                }
+            }
+        });
+        if d.portrait_brush.is_none() {
+            return;
+        }
+        ui.horizontal(|ui| {
+            let modes = [
+                (
+                    RefineBrushMode::Smart,
+                    format!("{} Thông minh", ph::SPARKLE),
+                    "Bám theo mép màu dưới cọ (sợi tóc, chân tóc)",
+                ),
+                (
+                    RefineBrushMode::Add,
+                    format!("{} Thêm", ph::PLUS),
+                    "Tô thêm vào vùng",
+                ),
+                (
+                    RefineBrushMode::Subtract,
+                    format!("{} Bớt", ph::MINUS),
+                    "Tô bớt khỏi vùng",
+                ),
+            ];
+            for (mode, label, tip) in modes {
+                if ui
+                    .selectable_label(data.sel.refine_brush_mode == mode, label)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    actions.sel.set_refine_brush_mode = Some(mode);
+                }
+            }
+        });
+        let mut size = data.sel.refine_brush_size;
+        if crate::ui::widgets::dev_slider_stacked_log_resp(
+            ui,
+            "Cỡ cọ",
+            &mut size,
+            1.0..=1000.0,
+            &slider_colors(),
+        )
+        .on_hover_text("Đường kính cọ (px) — phím [ ]")
+        .changed()
+        {
+            actions.sel.set_refine_brush_size = Some(size);
+        }
+        let mut hardness = data.sel.refine_brush_hardness * 100.0;
+        if crate::ui::widgets::dev_slider_stacked_resp(
+            ui,
+            "Độ cứng",
+            &mut hardness,
+            0.0..=100.0,
+            &slider_colors(),
+            1.0,
+        )
+        .on_hover_text("0 = mép cọ mềm — Shift + [ ]")
+        .changed()
+        {
+            actions.sel.set_refine_brush_hardness = Some(hardness / 100.0);
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    d.portrait_brush_undo,
+                    egui::Button::new(ph::ARROW_U_UP_LEFT),
+                )
+                .on_hover_text("Hoàn tác nét tô (Ctrl+Z)")
+                .clicked()
+            {
+                actions.dialogs.portrait_brush_undo = true;
+            }
+            if ui
+                .add_enabled(
+                    d.portrait_brush_redo,
+                    egui::Button::new(ph::ARROW_U_UP_RIGHT),
+                )
+                .on_hover_text("Làm lại nét tô (Ctrl+Shift+Z)")
+                .clicked()
+            {
+                actions.dialogs.portrait_brush_redo = true;
+            }
+            ui.label(
+                egui::RichText::new("Alt: đảo Thêm ↔ Bớt (Thông minh: trả lại vùng app tìm)")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(150)),
+            );
+        });
+    });
 }
 
 pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
@@ -121,6 +245,8 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         .color(egui::Color32::from_rgb(220, 150, 90)),
                 );
             }
+
+            brush_section(ui, data, actions, ready);
 
             egui::ScrollArea::vertical()
                 .max_height(ctx.content_rect().height() * 0.62)

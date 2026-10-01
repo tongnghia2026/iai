@@ -23,12 +23,12 @@ pub struct FaceModel {
     pub agreement: Option<f32>,
     pub region: Region,
     pub extent: f32,
-    pub(super) skin: Vec<u8>,
+    pub skin: SkinLayers,
+    /// Under-eye bands below each lower lid, before the skin mask cuts them.
+    pub(super) under_band: Vec<u8>,
     pub(super) eye_white: Vec<u8>,
     pub(super) iris: Vec<u8>,
-    pub(super) under_eye: Vec<u8>,
     pub(super) teeth: Vec<u8>,
-    pub(super) interior: Vec<u8>,
     /// Spot strength (score, fixed point) and soft disc coverage.
     pub(super) spot_score: Vec<u8>,
     pub(super) spot_cover: Vec<u8>,
@@ -51,16 +51,164 @@ pub struct FaceModel {
     pub(super) detail: Vec<u8>,
     /// Plain small blur of the photo, the sharpening reference.
     pub(super) soft: Vec<[u16; 3]>,
-    pub(super) low1: Vec<[u16; 3]>,
-    pub(super) low2: Vec<[u16; 3]>,
-    pub(super) broad: Vec<u16>,
-    pub(super) skin_mean: [f32; 3],
-    pub(super) cheek_luma: f32,
 }
 
 impl FaceModel {
     pub fn trusted(&self) -> bool {
         self.agreement.is_some_and(|a| a >= TRUSTED_AGREEMENT)
+    }
+
+    /// How much each hair-region pixel takes the hair change.
+    pub fn hair_mask(&self) -> &[u8] {
+        &self.hair
+    }
+}
+
+/// What the skin sliders read that follows from the skin mask: the mask, how
+/// deep inside it each pixel sits, the under-eye bands within it, the
+/// skin-weighted frequency split and the face's skin tone. Rebuilt whole when
+/// the brush edits the mask.
+#[derive(Clone)]
+pub struct SkinLayers {
+    pub(super) mask: Vec<u8>,
+    pub(super) interior: Vec<u8>,
+    pub(super) under_eye: Vec<u8>,
+    pub(super) low1: Vec<[u16; 3]>,
+    pub(super) low2: Vec<[u16; 3]>,
+    pub(super) broad: Vec<u16>,
+    pub(super) mean: [f32; 3],
+    pub(super) cheek_luma: f32,
+}
+
+impl SkinLayers {
+    pub fn mask(&self) -> &[u8] {
+        &self.mask
+    }
+}
+
+/// [`SkinLayers`] with the float lows and interior the blemish search reads.
+struct SkinSplit {
+    low1: Vec<[f32; 3]>,
+    low2: Vec<[f32; 3]>,
+    interior: Vec<f32>,
+    layers: SkinLayers,
+}
+
+/// Split a face region's photo `src` by its skin mask (0..1), weighted to
+/// skin so hair and features do not bleed in. `fallback` is the skin colour
+/// when the mask is empty.
+#[allow(clippy::too_many_arguments)]
+fn split_skin(
+    src: &[[f32; 3]],
+    skin: &[f32],
+    under_band: &[u8],
+    w: usize,
+    h: usize,
+    e: f32,
+    region: Region,
+    points: &[[f32; 3]],
+    fallback: [f32; 3],
+) -> SkinSplit {
+    let r1 = (e / 220.0).max(1.0);
+    let r2 = (e / 28.0).max(3.0);
+    let r3 = (e / 7.0).max(6.0);
+    let low1 = masked_blur(src, skin, w, h, r1);
+    let low2 = masked_blur(src, skin, w, h, r2);
+    let broad: Vec<u16> = masked_blur(src, skin, w, h, r3)
+        .into_par_iter()
+        .map(|c| (luma(c).clamp(0.0, 1.0) * 65535.0).round() as u16)
+        .collect();
+
+    let (mut weight, mut mean) = (0.0f64, [0.0f64; 3]);
+    for (c, &m) in low2.iter().zip(skin) {
+        weight += m as f64;
+        for k in 0..3 {
+            mean[k] += c[k] as f64 * m as f64;
+        }
+    }
+    let mean = if weight > 1.0 {
+        mean.map(|v| (v / weight) as f32)
+    } else {
+        fallback
+    };
+    let cheek_values: Vec<f32> = CHEEKS
+        .iter()
+        .filter_map(|&k| {
+            let p = points[k as usize];
+            let (x, y) = (p[0] - region.x as f32, p[1] - region.y as f32);
+            (x >= 0.0 && y >= 0.0 && (x as usize) < w && (y as usize) < h)
+                .then(|| luma(low2[y as usize * w + x as usize]))
+        })
+        .collect();
+    let cheek_luma = if cheek_values.is_empty() {
+        luma(mean)
+    } else {
+        cheek_values.iter().sum::<f32>() / cheek_values.len() as f32
+    };
+
+    // How deep inside the skin each pixel sits: 1 well inside, falling to 0 at
+    // the outline, so smoothing fades out before it can halo the edges.
+    let mut spread_mask: Vec<[f32; 4]> = skin.iter().map(|&m| [m, 0.0, 0.0, 0.0]).collect();
+    blur4(&mut spread_mask, w, h, r2);
+    let interior: Vec<f32> = spread_mask
+        .par_iter()
+        .zip(skin.par_iter())
+        .map(|(b, &m)| smoothstep(0.55, 0.92, b[0]) * m)
+        .collect();
+
+    let layers = SkinLayers {
+        mask: skin.par_iter().map(|&m| to_u8(m)).collect(),
+        interior: interior.par_iter().map(|&v| to_u8(v)).collect(),
+        under_eye: under_band
+            .par_iter()
+            .zip(skin.par_iter())
+            .map(|(&b, &m)| to_u8(b as f32 / 255.0 * m))
+            .collect(),
+        low1: low1.par_iter().map(|&c| to_u16(c)).collect(),
+        low2: low2.par_iter().map(|&c| to_u16(c)).collect(),
+        broad,
+        mean,
+        cheek_luma,
+    };
+    SkinSplit {
+        low1,
+        low2,
+        interior,
+        layers,
+    }
+}
+
+impl PortraitModel {
+    /// Skin layers of face `index` for an edited skin mask, built the way the
+    /// analysis builds them. `rgba` is the analysed image.
+    pub fn skin_layers_from(&self, rgba: &[u8], index: usize, mask: &[u8]) -> SkinLayers {
+        let face = &self.faces[index];
+        let r = face.region;
+        let (w, h) = (r.w as usize, r.h as usize);
+        let src: Vec<[f32; 3]> = (0..r.len())
+            .into_par_iter()
+            .map(|i| {
+                let o = ((r.y as usize + i / w) * self.width as usize + r.x as usize + i % w) * 4;
+                [
+                    rgba[o] as f32 / 255.0,
+                    rgba[o + 1] as f32 / 255.0,
+                    rgba[o + 2] as f32 / 255.0,
+                ]
+            })
+            .collect();
+        let skin: Vec<f32> = mask.par_iter().map(|&m| m as f32 / 255.0).collect();
+        split_skin(
+            &src,
+            &skin,
+            &face.under_band,
+            w,
+            h,
+            face.extent,
+            r,
+            &face.mesh.points,
+            face.skin.mean,
+        )
+        .layers
     }
 }
 
@@ -779,10 +927,7 @@ fn build_face(
         }
         stamp_polygon(&mut bands, region, &band, 0.0, 0.05 * e);
     }
-    let under_eye: Vec<u8> = (0..n)
-        .into_par_iter()
-        .map(|i| to_u8(bands[i] * skin[i]))
-        .collect();
+    let under_band: Vec<u8> = bands.into_par_iter().map(to_u8).collect();
 
     // Teeth: bright pixels inside the mouth.
     let mut mouth = vec![0.0f32; n];
@@ -814,54 +959,23 @@ fn build_face(
         })
         .collect();
 
-    // Frequency split, weighted to skin so hair and features do not bleed in.
-    let r1 = (e / 220.0).max(1.0);
-    let r2 = (e / 28.0).max(3.0);
-    let r3 = (e / 7.0).max(6.0);
-    let low1 = masked_blur(&src, &skin, w, h, r1);
-    let low2 = masked_blur(&src, &skin, w, h, r2);
-    let broad: Vec<u16> = masked_blur(&src, &skin, w, h, r3)
-        .into_par_iter()
-        .map(|c| (luma(c).clamp(0.0, 1.0) * 65535.0).round() as u16)
-        .collect();
-
-    let (mut weight, mut mean) = (0.0f64, [0.0f64; 3]);
-    for i in 0..n {
-        let m = skin[i] as f64;
-        weight += m;
-        for k in 0..3 {
-            mean[k] += low2[i][k] as f64 * m;
-        }
-    }
-    let skin_mean = if weight > 1.0 {
-        mean.map(|v| (v / weight) as f32)
-    } else {
-        cheek_colour
-    };
-    let cheek_values: Vec<f32> = CHEEKS
-        .iter()
-        .filter_map(|&k| {
-            let p = points[k as usize];
-            let (x, y) = (p[0] - region.x as f32, p[1] - region.y as f32);
-            (x >= 0.0 && y >= 0.0 && (x as usize) < w && (y as usize) < h)
-                .then(|| luma(low2[y as usize * w + x as usize]))
-        })
-        .collect();
-    let cheek_luma = if cheek_values.is_empty() {
-        luma(skin_mean)
-    } else {
-        cheek_values.iter().sum::<f32>() / cheek_values.len() as f32
-    };
-
-    // How deep inside the skin each pixel sits: 1 well inside, falling to 0 at
-    // the outline, so smoothing fades out before it can halo the edges.
-    let mut spread_mask: Vec<[f32; 4]> = skin.iter().map(|&m| [m, 0.0, 0.0, 0.0]).collect();
-    blur4(&mut spread_mask, w, h, r2);
-    let interior: Vec<f32> = spread_mask
-        .par_iter()
-        .zip(skin.par_iter())
-        .map(|(b, &m)| smoothstep(0.55, 0.92, b[0]) * m)
-        .collect();
+    let SkinSplit {
+        low1,
+        low2,
+        interior,
+        layers: skin_layers,
+    } = split_skin(
+        &src,
+        &skin,
+        &under_band,
+        w,
+        h,
+        e,
+        region,
+        points,
+        cheek_colour,
+    );
+    let cheek_luma = skin_layers.cheek_luma;
 
     // Blemishes: compact spots darker or redder than a ring around them in
     // every direction (creases and outlines fail the ring test along their
@@ -1317,11 +1431,10 @@ fn build_face(
         agreement,
         region,
         extent,
-        skin: skin.into_par_iter().map(to_u8).collect(),
-        interior: interior.into_par_iter().map(to_u8).collect(),
+        skin: skin_layers,
+        under_band,
         eye_white,
         iris,
-        under_eye,
         teeth,
         spot_score,
         spot_cover,
@@ -1335,10 +1448,5 @@ fn build_face(
         hair_base,
         detail,
         soft,
-        low1: low1.into_par_iter().map(to_u16).collect(),
-        low2: low2.into_par_iter().map(to_u16).collect(),
-        broad,
-        skin_mean,
-        cheek_luma,
     }
 }

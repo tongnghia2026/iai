@@ -1,12 +1,14 @@
 // Refine Brush — paints on the open Refine Selection session (see
 // `core::refine`), never on the selection or the document history directly.
+// Without one, it queues its strokes for a dialog that paints its own masks
+// (`Canvas::mask_brush`, Chỉnh chân dung).
 //
 // Modes: Smart (colour-aware matting for hair / fur), Add, Subtract. Holding
 // Alt reverses the mode (Smart → put the opening selection back), as in
 // Photoshop. Strokes are undone inside the panel with Ctrl+Z.
 
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
-use crate::core::refine::StampOp;
+use crate::core::refine::{MaskBrushEvent, StampOp};
 use crate::core::selection::RefineBrushMode;
 
 pub struct RefineBrushTool {
@@ -61,8 +63,21 @@ impl RefineBrushTool {
     fn flush(&mut self, ctx: &mut ToolCtx) {
         let dabs = self.walk();
         if !dabs.is_empty() {
-            ctx.canvas_mut()
-                .refine_paint(self.op, &dabs, self.radius(), self.hardness);
+            self.paint(ctx, dabs);
+        }
+    }
+
+    fn paint(&self, ctx: &mut ToolCtx, points: Vec<(f32, f32)>) {
+        let (radius, hardness) = (self.radius(), self.hardness);
+        let canvas = ctx.canvas_mut();
+        if canvas.refine.is_some() {
+            canvas.refine_paint(self.op, &points, radius, hardness);
+        } else if let Some(queue) = canvas.mask_brush.as_mut() {
+            queue.push(MaskBrushEvent::Dabs {
+                points,
+                radius,
+                hardness,
+            });
         }
     }
 }
@@ -86,13 +101,16 @@ impl Tool for RefineBrushTool {
 
     fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         let canvas = ctx.canvas_mut();
-        if canvas.refine.is_none() {
+        self.op = StampOp::for_mode(self.mode, event.alt);
+        if canvas.refine.is_some() {
+            canvas.refine_stroke_begin(self.op);
+        } else if let Some(queue) = canvas.mask_brush.as_mut() {
+            queue.push(MaskBrushEvent::Begin(self.op));
+        } else {
             return ToolResponse::none();
         }
-        self.op = StampOp::for_mode(self.mode, event.alt);
-        canvas.refine_stroke_begin(self.op);
         let at = (event.canvas_x, event.canvas_y);
-        canvas.refine_paint(self.op, &[at], self.radius(), self.hardness);
+        self.paint(ctx, vec![at]);
         self.last = at;
         self.pending.clear();
         self.dragging = true;
@@ -125,7 +143,12 @@ impl Tool for RefineBrushTool {
         }
         self.flush(ctx);
         self.dragging = false;
-        ctx.canvas_mut().refine_stroke_end();
+        let canvas = ctx.canvas_mut();
+        if canvas.refine.is_some() {
+            canvas.refine_stroke_end();
+        } else if let Some(queue) = canvas.mask_brush.as_mut() {
+            queue.push(MaskBrushEvent::End);
+        }
         ToolResponse::repaint()
     }
 

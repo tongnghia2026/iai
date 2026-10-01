@@ -43,26 +43,27 @@ và qua cổng · `[!]` bị chặn.
 
 ### Pha 0 — Sửa nhanh vùng tóc tự động (nhỏ)
 
-- [~] Hệ số "tối hơn da" theo **tỉ lệ** thay cho hiệu cố định: tóc đủ khi
+- [x] Hệ số "tối hơn da" theo **tỉ lệ** thay cho hiệu cố định: tóc đủ khi
       `luma < 0,55·ref`, không tính khi `luma > 0,85·ref`.
-- [~] `ref` lấy từ **mask da mới** (đợt 8) trong vùng mặt, ngoài vùng mặt mới
+- [x] `ref` lấy từ **mask da mới** (đợt 8) trong vùng mặt, ngoài vùng mặt mới
       dùng Sapiens2; điểm là da theo mask mới thì không là tóc.
-- [~] Viền ngoài: tách sợi tóc khỏi nền kiểu Refine Edge, **theo màu RGB** (không
+- [x] Viền ngoài: tách sợi tóc khỏi nền kiểu Refine Edge, **theo màu RGB** (không
       chỉ độ sáng: tóc nâu tối trên nền xanh đậm gần cùng độ sáng): chiếu màu
       điểm lên đoạn màu nền → màu tóc tại chỗ; chỉ khi nền trơn và màu nền/tóc
       cách xa đủ. Thêm nhóm "Nền" (class 0) vào nhóm vùng Sapiens2. Màu tóc lấy
       từ lõi vùng tóc của model (mép model hay lấn ra nền). Ở dải tóc giáp nền,
       phép tách màu thay quy tắc "tối hơn da" → hết quầng màu quanh tóc.
-- [~] Thu hẹp vùng loại trừ quanh lông mày/mắt (0,005e/0,015e và 0,01e/0,015e);
+- [x] Thu hẹp vùng loại trừ quanh lông mày/mắt (0,005e/0,015e và 0,01e/0,015e);
       chỗ model chắc chắn là tóc (lọn tóc vắt qua đuôi lông mày) thì không loại.
-- [~] Probe 13 ảnh: tóc mai/chân tóc được bắt (Judy, Kim, Mazie, Lauren,
+- [x] Probe 13 ảnh: tóc mai/chân tóc được bắt (Judy, Kim, Mazie, Lauren,
       Jeffries); quầng màu viền tóc trên nền xanh hết (Nelson, Lauren); không rò
       sang kệ sách (Mazie). Tính trên lưới thô (ô ≈ e/150) → bớt RAM, nhanh hơn.
       Còn lại (để cọ tô Pha 2): tóc bạc sáng hơn da trên tường xám (tóc mai
       bạc không tự bắt), nền lọt qua tóc mà model chắc chắn là tóc.
-- Cổng: tóc mai hai bên, mép mái được tô; không lan ra nền/áo.
+- Cổng: tóc mai hai bên, mép mái được tô; không lan ra nền/áo. **Đạt — chủ test
+  OK 01/10.**
 
-### Pha 1 — Khoanh vùng trước khi phân tích
+### Pha 1 — Khoanh vùng trước khi phân tích (chủ cho làm sau Pha 2)
 
 - [ ] Mở Chỉnh chân dung khi đang có vùng chọn → chỉ dò mặt trong vùng đó (ảnh
       nhóm: chọn đúng người cần chỉnh) và dòng trạng thái ghi "Phân tích trong
@@ -76,17 +77,22 @@ và qua cổng · `[!]` bị chặn.
 
 ### Pha 2 — Cọ tô thêm/bớt mask
 
-- [ ] Hộp thoại có mục **"Tô vùng"**: chọn loại mask (Da / Tóc), chế độ Thêm /
-      Bớt / Thông minh, cỡ cọ, độ mềm; tự bật "Hiện vùng nhận diện" cho loại
-      đang tô.
-- [ ] Công cụ `PortraitBrush` (như `RefineBrush`): nét tô ghi vào lớp sửa riêng
-      của từng mặt (thêm/bớt, u8) chồng lên mask phân tích; Thông minh dùng lõi
-      cắt đồ thị của Smart Select để nét tô bám mép màu (tóc/nền).
-- [ ] Sau mỗi nét: tính lại phần phụ thuộc mask chỉ trong khung nét tô (da:
-      interior, làm mịn có trọng số; tóc: vùng tóc) → xem trước theo luồng nền
-      như thanh kéo.
-- [ ] Ctrl+Z / Ctrl+Shift+Z trong hộp thoại; Hủy bỏ hết nét tô; Áp dụng tạo
-      layer như cũ.
+- [~] Hộp thoại có mục **"Tô vùng"** (đầu hộp thoại): Tắt / Da / Tóc, chế độ
+      Thông minh / Thêm / Bớt, cỡ cọ, độ cứng, nút hoàn tác/làm lại; khi tô, lớp
+      phủ màu (da đỏ, tóc tím) của vùng đang tô hiện trên canvas (texture GPU,
+      vá từng vùng nét tô), ảnh xem trước vẫn là ảnh đã chỉnh.
+- [~] Dùng lại công cụ **Refine Brush** (vòng con trỏ, `[` `]`, Shift+`[` `]`,
+      Alt+chuột phải kéo cỡ, Alt đảo Thêm↔Bớt, Alt+Thông minh = trả lại vùng app
+      tìm): khi không có phiên Refine Selection, nét tô xếp hàng ở
+      `Canvas::mask_brush` cho hộp thoại xử lý mỗi khung hình. Thông minh = thuật
+      toán bám mép màu của Refine Brush (`refine_edge_stamp`, Lab + Sobel của
+      vùng, tính lần đầu dùng). Mỗi nét chỉ tô một mặt (mặt gần điểm bắt đầu).
+- [~] Sau mỗi nét: tóc dùng ngay; da tính lại cả khối `SkinLayers` (mask,
+      interior, quầng mắt, tách tần số có trọng số, màu da) trên luồng nền rồi
+      xem trước lại. Chấm mụn giữ theo lần phân tích (bớt da thì hết xóa mụn ở
+      đó; thêm da không dò mụn mới).
+- [~] Ctrl+Z / Ctrl+Shift+Z trong hộp thoại; Hủy bỏ hết nét tô; Áp dụng dùng
+      mask đã tô (đợi da tính xong) và trả công cụ cũ.
 - Cổng: tô thêm phần tóc/da AI bỏ sót và bớt phần lấy thừa bằng vài nét; kéo
   thanh sau khi tô cho kết quả đúng vùng đã tô.
 
@@ -94,6 +100,12 @@ và qua cổng · `[!]` bị chặn.
 
 - [ ] Lưu mask đã tô cùng layer "Chân dung" để mở lại chỉnh tiếp; nền cho đồng
       bộ hàng loạt (Phase 5 kế hoạch Evoto).
+
+### Pha 4 — (sau) "Sáng tóc" bằng thanh Blacks của Develop
+
+- [ ] Chủ test 01/10: tăng sáng tóc hiện khá yếu → áp thẳng thanh **Blacks** của
+      Develop cho vùng tóc cho nhanh. Ảnh chủ gửi (kéo tóc sáng/bạc mạnh) còn
+      một **viền cam ở chân tóc** giáp trán — soát khi làm.
 
 ## 3. Rủi ro
 
@@ -111,3 +123,6 @@ và qua cổng · `[!]` bị chặn.
   trước). Làm ở hội thoại mới, bắt đầu Pha 0.
 - **2026-10-01** — Pha 0 code xong (tỉ lệ tối, ref từ mask da mới, tách viền
   theo màu, nhóm Nền, thu hẹp loại trừ lông mày/mắt); probe đạt; chờ chủ test.
+- **2026-10-01** — Chủ test Pha 0 OK; thêm Pha 4 (Sáng tóc theo Blacks của
+  Develop, làm sau); chủ cho làm Pha 2 trước Pha 1. Pha 2 code xong, chờ chủ
+  test.

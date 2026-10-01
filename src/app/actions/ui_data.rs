@@ -133,7 +133,7 @@ where
 /// gamma-space premultiply (egui's default) darkens every soft edge — the dark
 /// halo the Clone preview used to show. Premultiplying in linear light makes
 /// the blend come out right.
-pub(super) fn premultiply_for_linear_target(rgb: [u8; 3], alpha: f32) -> [u8; 4] {
+pub(in crate::app) fn premultiply_for_linear_target(rgb: [u8; 3], alpha: f32) -> [u8; 4] {
     let a = alpha.clamp(0.0, 1.0);
     if a >= 0.999 {
         return [rgb[0], rgb[1], rgb[2], 255];
@@ -927,6 +927,7 @@ impl App {
         } else {
             (String::new(), false, Vec::new(), false)
         };
+        let portrait_brush = self.portrait_brush_view();
 
         UiData {
             doc: DocumentViewModel {
@@ -1778,6 +1779,10 @@ impl App {
                 portrait_ready: portrait_state.1,
                 portrait_faces: portrait_state.2,
                 portrait_hair: portrait_state.3,
+                portrait_brush: portrait_brush.0,
+                portrait_brush_undo: portrait_brush.1,
+                portrait_brush_redo: portrait_brush.2,
+                portrait_overlay: portrait_brush.3,
                 scan_is_pdf: self
                     .docs
                     .documents

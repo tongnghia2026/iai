@@ -241,27 +241,28 @@ impl App {
                     self.edit.input.alt_right_dragging = true;
                     self.edit.input.alt_drag_start_x = self.edit.input.mouse_x;
                     self.edit.input.alt_drag_start_y = self.edit.input.mouse_y;
-                    self.edit.input.alt_drag_start_size = if self.edit.show_refine_panel {
-                        self.edit.tools.refine_brush().size
-                    } else if self.edit.tools.active_id() == crate::tools::ToolId::SmartSelect {
-                        self.edit.tools.wand().brush_size
-                    } else if matches!(
-                        self.edit.tools.active_id(),
-                        crate::tools::ToolId::Clone | crate::tools::ToolId::Repair
-                    ) {
-                        self.edit.tools.clone_like().size
-                    } else if self.edit.tools.active_id() == crate::tools::ToolId::Smudge {
-                        self.edit.tools.smudge().size
-                    } else if matches!(
-                        self.edit.tools.active_id(),
-                        crate::tools::ToolId::Dodge | crate::tools::ToolId::Burn
-                    ) {
-                        self.edit.tools.dodge_burn().size
-                    } else if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {
-                        self.edit.tools.eraser().size
-                    } else {
-                        self.edit.tools.brush().settings.size
-                    };
+                    self.edit.input.alt_drag_start_size =
+                        if self.edit.show_refine_panel || self.portrait_painting() {
+                            self.edit.tools.refine_brush().size
+                        } else if self.edit.tools.active_id() == crate::tools::ToolId::SmartSelect {
+                            self.edit.tools.wand().brush_size
+                        } else if matches!(
+                            self.edit.tools.active_id(),
+                            crate::tools::ToolId::Clone | crate::tools::ToolId::Repair
+                        ) {
+                            self.edit.tools.clone_like().size
+                        } else if self.edit.tools.active_id() == crate::tools::ToolId::Smudge {
+                            self.edit.tools.smudge().size
+                        } else if matches!(
+                            self.edit.tools.active_id(),
+                            crate::tools::ToolId::Dodge | crate::tools::ToolId::Burn
+                        ) {
+                            self.edit.tools.dodge_burn().size
+                        } else if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {
+                            self.edit.tools.eraser().size
+                        } else {
+                            self.edit.tools.brush().settings.size
+                        };
                     if let Some(win) = &self.win.window {
                         win.set_cursor_visible(false);
                     }
@@ -1280,7 +1281,7 @@ impl App {
             let delta_x = self.edit.input.mouse_x - self.edit.input.alt_drag_start_x;
             let new_size = (self.edit.input.alt_drag_start_size + delta_x / self.edit.view.zoom)
                 .clamp(1.0, 5000.0);
-            if self.edit.show_refine_panel {
+            if self.edit.show_refine_panel || self.portrait_painting() {
                 self.edit.tools.refine_brush_mut().size = new_size;
             } else if self.edit.tools.active_id() == crate::tools::ToolId::SmartSelect {
                 self.edit.tools.wand_mut().brush_size = new_size;

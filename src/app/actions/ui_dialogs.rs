@@ -562,6 +562,15 @@ impl App {
                 self.cancel_portrait();
             }
         }
+        if let Some(target) = actions.dialogs.set_portrait_brush.take() {
+            self.set_portrait_brush_target(target);
+        }
+        if std::mem::take(&mut actions.dialogs.portrait_brush_undo) {
+            self.portrait_brush_step(false);
+        }
+        if std::mem::take(&mut actions.dialogs.portrait_brush_redo) {
+            self.portrait_brush_step(true);
+        }
         if let Some((settings, faces, preview, masks)) = actions.dialogs.set_portrait_preview.take()
         {
             self.set_portrait_preview(settings, faces, preview, masks);

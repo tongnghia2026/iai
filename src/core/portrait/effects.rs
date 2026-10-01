@@ -1,10 +1,12 @@
 //! Slider settings and the cheap per-pixel recombination that turns a
 //! [`PortraitModel`] into retouched pixels.
 
+use std::sync::Arc;
+
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::analysis::{luma, FaceModel, PortraitModel, BLEMISH_SCALE};
+use super::analysis::{luma, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
 use super::geometry::Region;
 use crate::core::color::luminance_f32;
 use crate::core::develop::{apply_light_luma, apply_luma_target, local_detail_boost};
@@ -153,7 +155,7 @@ fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 /// Skin retouch of one pixel from its bands: the photo `src`, the fine-split
 /// low `l1` and the mid-split low `l2`.
 fn skin_result(
-    face: &FaceModel,
+    skin: &SkinLayers,
     s: &PortraitSettings,
     i: usize,
     src: [f32; 3],
@@ -165,7 +167,7 @@ fn skin_result(
     let mid = sub(l1, l2);
 
     let (mut low_y, mut low_c) = split(l2);
-    let (_, mean_c) = split(face.skin_mean);
+    let (_, mean_c) = split(skin.mean);
     // Even tone steers the hue toward the face's average while keeping most
     // of the local saturation, so skin evens out without going grey.
     let magnitude = |c: [f32; 3]| (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
@@ -175,9 +177,9 @@ fn skin_result(
     for k in 0..3 {
         low_c[k] += (target[k] - low_c[k]) * 0.6 * s.even_tone;
     }
-    let under = face.under_eye[i] as f32 / 255.0 * s.dark_circles;
+    let under = skin.under_eye[i] as f32 / 255.0 * s.dark_circles;
     if under > 0.0 {
-        low_y += under * (face.cheek_luma - low_y).max(0.0) * 0.85;
+        low_y += under * (skin.cheek_luma - low_y).max(0.0) * 0.85;
         for k in 0..3 {
             low_c[k] += (mean_c[k] - low_c[k]) * under * 0.5;
         }
@@ -196,7 +198,7 @@ fn skin_result(
     }
 
     let y = luma(r);
-    let lift = y - face.broad[i] as f32 / 65535.0;
+    let lift = y - skin.broad[i] as f32 / 65535.0;
     let shine = s.shine * smoothstep(0.03, 0.18, lift) * smoothstep(0.45, 0.8, y);
     if shine > 0.0 {
         for v in r.iter_mut() {
@@ -257,18 +259,19 @@ fn colourise(c: [f32; 3], hue: f32, saturation: f32) -> [f32; 3] {
 /// `fetch(dx, dy)` reads the photo at an offset from this pixel.
 fn retouch_pixel(
     face: &FaceModel,
+    skin: &SkinLayers,
     s: &PortraitSettings,
     i: usize,
     src: [f32; 3],
     fetch: &dyn Fn(isize, isize) -> [f32; 3],
 ) -> [f32; 3] {
-    let m = face.skin[i] as f32 / 255.0;
+    let m = skin.mask[i] as f32 / 255.0;
     let mut out = src;
     if m > 0.0 {
-        let inside = face.interior[i] as f32 / 255.0;
-        let l1 = from_u16(face.low1[i]);
-        let l2 = from_u16(face.low2[i]);
-        let mut r = skin_result(face, s, i, src, l1, l2, inside);
+        let inside = skin.interior[i] as f32 / 255.0;
+        let l1 = from_u16(skin.low1[i]);
+        let l2 = from_u16(skin.low2[i]);
+        let mut r = skin_result(skin, s, i, src, l1, l2, inside);
         let cover = face.spot_cover[i] as f32 / 255.0;
         if s.blemish > 0.0 && cover > 0.0 {
             let score = face.spot_score[i] as f32 / BLEMISH_SCALE;
@@ -287,10 +290,10 @@ fn retouch_pixel(
                     let shift = sub(here, from_u16(face.heal_base[q]));
                     (
                         add(fetch(dx as isize, dy as isize), shift),
-                        add(from_u16(face.low1[q]), shift),
+                        add(from_u16(skin.low1[q]), shift),
                     )
                 };
-                let fixed = skin_result(face, s, i, healed, healed_l1, l2, inside);
+                let fixed = skin_result(skin, s, i, healed, healed_l1, l2, inside);
                 for k in 0..3 {
                     r[k] += (fixed[k] - r[k]) * spot;
                 }
@@ -357,9 +360,9 @@ fn retouch_pixel(
         if s.brows > 0.0 {
             out = out.map(|v| v * (1.0 - 0.4 * brow));
         } else {
-            let skin = from_u16(face.low2[i]);
+            let under = from_u16(skin.low2[i]);
             for k in 0..3 {
-                out[k] += (skin[k] - out[k]) * 0.7 * brow;
+                out[k] += (under[k] - out[k]) * 0.7 * brow;
             }
         }
     }
@@ -393,6 +396,22 @@ fn recolour_hair(src: [f32; 3], base: f32, s: &PortraitSettings) -> [f32; 3] {
         }
     }
     out
+}
+
+/// Brush edits of one face's masks, used in place of the analysis's own.
+#[derive(Clone, Default)]
+pub struct FaceEdits {
+    pub skin: Option<Arc<SkinLayers>>,
+    pub hair: Option<Arc<Vec<u8>>>,
+}
+
+fn skin_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> &'a SkinLayers {
+    edit.and_then(|e| e.skin.as_deref()).unwrap_or(&face.skin)
+}
+
+fn hair_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> &'a [u8] {
+    edit.and_then(|e| e.hair.as_deref())
+        .map_or(&face.hair[..], |h| &h[..])
 }
 
 /// The smallest rectangle holding every enabled face's region, and their
@@ -430,6 +449,7 @@ pub fn render(
     model: &PortraitModel,
     settings: &PortraitSettings,
     enabled: &[bool],
+    edits: &[FaceEdits],
 ) -> Option<(Region, Vec<u8>)> {
     let s = settings.unit();
     let union = union_region(model, enabled, s.hair_active())?;
@@ -451,12 +471,14 @@ pub fn render(
         ]
     };
     let mut delta = vec![[0.0f32; 3]; uw * uh];
-    for (face, _) in model
+    for (index, (face, _)) in model
         .faces
         .iter()
         .zip(enabled.iter().chain(std::iter::repeat(&true)))
-        .filter(|(_, &on)| on)
+        .enumerate()
+        .filter(|(_, (_, &on))| on)
     {
+        let skin = skin_of(face, edits.get(index));
         let r = face.region;
         let (fw, fx, fy) = (
             r.w as usize,
@@ -477,7 +499,7 @@ pub fn render(
                     let fetch = |dx: isize, dy: isize| {
                         pixel((x as isize + dx) as usize, (y as isize + dy) as usize)
                     };
-                    let res = retouch_pixel(face, &s, i, src, &fetch);
+                    let res = retouch_pixel(face, skin, &s, i, src, &fetch);
                     let cell = &mut line[fx + col];
                     for k in 0..3 {
                         cell[k] += res[k] - src[k];
@@ -486,12 +508,14 @@ pub fn render(
             });
     }
     if s.hair_active() {
-        for (face, _) in model
+        for (index, (face, _)) in model
             .faces
             .iter()
             .zip(enabled.iter().chain(std::iter::repeat(&true)))
-            .filter(|(face, &on)| on && !face.hair.is_empty())
+            .enumerate()
+            .filter(|(_, (face, &on))| on && !face.hair.is_empty())
         {
+            let hair = hair_of(face, edits.get(index));
             let r = face.hair_region;
             let (hw, hx, hy) = (
                 r.w as usize,
@@ -507,7 +531,7 @@ pub fn render(
                     let row = urow - hy;
                     for col in 0..hw {
                         let k = row * hw + col;
-                        let weight = face.hair[k] as f32 / 255.0;
+                        let weight = hair[k] as f32 / 255.0;
                         if weight <= 0.0 {
                             continue;
                         }
@@ -539,6 +563,7 @@ pub fn render_masks(
     rgba: &[u8],
     model: &PortraitModel,
     enabled: &[bool],
+    edits: &[FaceEdits],
 ) -> Option<(Region, Vec<u8>)> {
     let union = union_region(model, enabled, true)?;
     let width = model.width as usize;
@@ -550,14 +575,19 @@ pub fn render_masks(
             let o = ((union.y as usize + row) * width + union.x as usize) * 4;
             line.copy_from_slice(&rgba[o..o + uw * 4]);
         });
-    for (face, _) in model
+    for (index, (face, _)) in model
         .faces
         .iter()
         .zip(enabled.iter().chain(std::iter::repeat(&true)))
-        .filter(|(_, &on)| on)
+        .enumerate()
+        .filter(|(_, (_, &on))| on)
     {
+        let (skin, hair) = (
+            skin_of(face, edits.get(index)),
+            hair_of(face, edits.get(index)),
+        );
         let hr = face.hair_region;
-        if !face.hair.is_empty() {
+        if !hair.is_empty() {
             let (hx, hy) = ((hr.x - union.x) as usize, (hr.y - union.y) as usize);
             out.par_chunks_mut(uw * 4)
                 .enumerate()
@@ -566,7 +596,7 @@ pub fn render_masks(
                 .for_each(|(urow, line)| {
                     let row = urow - hy;
                     for col in 0..hr.w as usize {
-                        let a = face.hair[row * hr.w as usize + col] as f32 / 255.0 * 0.55;
+                        let a = hair[row * hr.w as usize + col] as f32 / 255.0 * 0.55;
                         if a > 0.0 {
                             let px = &mut line[(hx + col) * 4..(hx + col) * 4 + 3];
                             for (k, colour) in [150.0f32, 60.0, 255.0].iter().enumerate() {
@@ -587,8 +617,8 @@ pub fn render_masks(
                 for col in 0..r.w as usize {
                     let i = row * r.w as usize + col;
                     let tints: [(u8, [f32; 3]); 7] = [
-                        (face.skin[i], [255.0, 40.0, 40.0]),
-                        (face.under_eye[i], [255.0, 150.0, 0.0]),
+                        (skin.mask[i], [255.0, 40.0, 40.0]),
+                        (skin.under_eye[i], [255.0, 150.0, 0.0]),
                         (face.eye_white[i], [0.0, 255.0, 60.0]),
                         (face.iris[i], [40.0, 110.0, 255.0]),
                         (face.brows[i], [255.0, 230.0, 0.0]),

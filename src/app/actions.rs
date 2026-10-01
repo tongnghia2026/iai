@@ -15,6 +15,7 @@ mod refine;
 mod ui_chrome;
 mod ui_color_print;
 mod ui_data;
+pub(in crate::app) use ui_data::premultiply_for_linear_target;
 mod ui_dialogs;
 mod ui_document;
 mod ui_layers;

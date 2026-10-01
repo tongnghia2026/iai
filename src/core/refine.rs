@@ -743,7 +743,22 @@ impl StampOp {
     }
 }
 
-fn restore_stamp(
+/// Refine Brush input for a dialog that keeps its own masks (Chỉnh chân
+/// dung): the tool queues it on the canvas and the app applies it each frame.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaskBrushEvent {
+    Begin(StampOp),
+    Dabs {
+        points: Vec<(f32, f32)>,
+        radius: f32,
+        hardness: f32,
+    },
+    End,
+}
+
+/// Blend the brush disc of `base` back toward `start`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn restore_stamp(
     base: &mut [u8],
     start: &[u8],
     w: usize,

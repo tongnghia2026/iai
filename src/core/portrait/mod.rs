@@ -5,12 +5,13 @@
 
 pub mod analysis;
 mod blur;
+pub mod brush;
 pub mod effects;
 pub mod geometry;
 mod skin_mask;
 
-pub use analysis::{analyze, FaceModel, PortraitModel, TRUSTED_AGREEMENT};
-pub use effects::{render, render_masks, PortraitSettings};
+pub use analysis::{analyze, FaceModel, PortraitModel, SkinLayers, TRUSTED_AGREEMENT};
+pub use effects::{render, render_masks, FaceEdits, PortraitSettings};
 pub use geometry::Region;
 
 #[cfg(test)]
@@ -97,10 +98,10 @@ mod tests {
                 let started = std::time::Instant::now();
                 let fresh = skin_mask::skin_mask(&input);
                 let mask_ms = started.elapsed().as_millis();
-                let a_old = skin_mask::audit(&input, &old.faces[i].skin);
+                let a_old = skin_mask::audit(&input, &old.faces[i].skin.mask);
                 let fresh: Vec<u8> = fresh
                     .map(|m| m.iter().map(|&v| (v * 255.0).round() as u8).collect())
-                    .unwrap_or_else(|| old.faces[i].skin.clone());
+                    .unwrap_or_else(|| old.faces[i].skin.mask.clone());
                 let a_new = skin_mask::audit(&input, &fresh);
                 if let Some((gw, gh, map, summary)) = skin_mask::evidence_map(&input) {
                     println!("    {summary}");
@@ -137,7 +138,7 @@ mod tests {
                     })
                 };
                 let mut sheet = image::RgbImage::new(r.w * 2 + 8, r.h);
-                image::imageops::replace(&mut sheet, &tint(&old.faces[i].skin), 0, 0);
+                image::imageops::replace(&mut sheet, &tint(&old.faces[i].skin.mask), 0, 0);
                 image::imageops::replace(&mut sheet, &tint(&fresh), (r.w + 8) as i64, 0);
                 let k = (2000.0 / sheet.width() as f32).min(1.0);
                 image::imageops::resize(
@@ -152,7 +153,7 @@ mod tests {
                     .unwrap()
                     .save(dir.join(format!("pr_{name}_new{i}.png")))
                     .unwrap();
-                image::GrayImage::from_raw(r.w, r.h, old.faces[i].skin.clone())
+                image::GrayImage::from_raw(r.w, r.h, old.faces[i].skin.mask.clone())
                     .unwrap()
                     .save(dir.join(format!("pr_{name}_old{i}.png")))
                     .unwrap();
@@ -170,7 +171,7 @@ mod tests {
                 let enabled = vec![true; old.faces.len()];
                 let r = old.faces[0].region;
                 for (tag, model) in [("old", &old), ("new", &fresh)] {
-                    let (u, px) = render(&rgba, model, &strong, &enabled).unwrap();
+                    let (u, px) = render(&rgba, model, &strong, &enabled, &[]).unwrap();
                     let mut full = rgba.clone();
                     for row in 0..u.h as usize {
                         let o = ((u.y as usize + row) * width as usize + u.x as usize) * 4;
@@ -211,7 +212,7 @@ mod tests {
             let enabled = vec![true; model.faces.len()];
             let started = std::time::Instant::now();
             let (union, pixels) =
-                render(&rgba, &model, &PortraitSettings::default(), &enabled).unwrap();
+                render(&rgba, &model, &PortraitSettings::default(), &enabled, &[]).unwrap();
             let render_ms = started.elapsed().as_millis();
             println!(
                 "{name}: {width}x{height}, {} face(s), analyse {analyse_ms} ms {:?}, render {render_ms} ms, union {}x{}, parts={} {:?}",
@@ -233,8 +234,8 @@ mod tests {
                 hair_tint: 60.0,
                 ..PortraitSettings::NEUTRAL
             };
-            let (su, sp) = render(&rgba, &model, &strong, &enabled).unwrap();
-            let (mu, mp) = render_masks(&rgba, &model, &enabled).unwrap();
+            let (su, sp) = render(&rgba, &model, &strong, &enabled, &[]).unwrap();
+            let (mu, mp) = render_masks(&rgba, &model, &enabled, &[]).unwrap();
             let mut tinted = rgba.clone();
             for row in 0..mu.h as usize {
                 let o = ((mu.y as usize + row) * width as usize + mu.x as usize) * 4;
@@ -277,7 +278,11 @@ mod tests {
                 for yy in 0..f.region.h {
                     for xx in 0..f.region.w {
                         let i = (yy * f.region.w + xx) as usize;
-                        if f.skin[i] > 200 && f.nose[i] == 0 && f.lips[i] == 0 && f.iris[i] == 0 {
+                        if f.skin.mask[i] > 200
+                            && f.nose[i] == 0
+                            && f.lips[i] == 0
+                            && f.iris[i] == 0
+                        {
                             let (x, y) = (f.region.x + xx, f.region.y + yy);
                             let hx = x as i64 - f.hair_region.x as i64;
                             let hy = y as i64 - f.hair_region.y as i64;
@@ -311,7 +316,7 @@ mod tests {
                 let mut on_skin = 0u64;
                 for yy in 0..f.region.h {
                     for xx in 0..f.region.w {
-                        if f.skin[(yy * f.region.w + xx) as usize] < 200 || f.hair.is_empty() {
+                        if f.skin.mask[(yy * f.region.w + xx) as usize] < 200 || f.hair.is_empty() {
                             continue;
                         }
                         let (x, y) = (f.region.x + xx, f.region.y + yy);
@@ -369,7 +374,7 @@ mod tests {
                 let mut scores: Vec<u8> = face
                     .spot_score
                     .iter()
-                    .zip(&face.interior)
+                    .zip(&face.skin.interior)
                     .filter(|(_, &m)| m > 200)
                     .map(|(&b, _)| b)
                     .collect();
@@ -440,10 +445,12 @@ mod tests {
                     let k = (y * r.w + x) as usize;
                     let spot = face.spot_score[k] as f32 / analysis::BLEMISH_SCALE > 0.81;
                     image::Rgb([
-                        face.skin[k].max(if spot { 255 } else { 0 }),
-                        face.under_eye[k]
-                            .max(face.eye_white[k])
-                            .max(if spot { 255 } else { 0 }),
+                        face.skin.mask[k].max(if spot { 255 } else { 0 }),
+                        face.skin.under_eye[k].max(face.eye_white[k]).max(if spot {
+                            255
+                        } else {
+                            0
+                        }),
                         face.teeth[k].max(face.iris[k]),
                     ])
                 });
@@ -456,11 +463,11 @@ mod tests {
                 masks
                     .save(dir.join(format!("pr_{name}_mask{i}.jpg")))
                     .unwrap();
-                image::GrayImage::from_raw(r.w, r.h, face.skin.clone())
+                image::GrayImage::from_raw(r.w, r.h, face.skin.mask.clone())
                     .unwrap()
                     .save(dir.join(format!("pr_{name}_skin{i}.png")))
                     .unwrap();
-                image::GrayImage::from_raw(r.w, r.h, face.interior.clone())
+                image::GrayImage::from_raw(r.w, r.h, face.skin.interior.clone())
                     .unwrap()
                     .save(dir.join(format!("pr_{name}_inside{i}.png")))
                     .unwrap();
