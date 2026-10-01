@@ -216,10 +216,27 @@ và qua cổng · `[!]` bị chặn.
   thanh sau khi tô cho kết quả đúng vùng đã tô. **Đạt — chủ test OK 01/10**
   (chủ bất ngờ vì Thông minh tự nhận sợi tóc mảnh khi tô lại vùng tóc).
 
-### Pha 3 — (sau, tùy chủ) lưu mask đã tô
+### Pha 3 — Lưu mask đã tô, mở lại chỉnh tiếp
 
-- [ ] Lưu mask đã tô cùng layer "Chân dung" để mở lại chỉnh tiếp; nền cho đồng
-      bộ hàng loạt (Phase 5 kế hoạch Evoto).
+- [~] Áp dụng lưu "công thức" vào layer "Chân dung" (`Layer.portrait`,
+      `core::portrait::recipe`): thanh trượt, mặt nào bật, mask Da/Tóc đã tô
+      (chỉ mặt có tô), vùng chọn lúc phân tích, id + kích thước layer ảnh gốc.
+- [~] Mở lại: chọn layer "Chân dung" **hoặc** layer ảnh ngay dưới nó rồi vào
+      Image ▸ Chỉnh chân dung… → phân tích lại ảnh gốc (giữ vùng chọn cũ nếu
+      không có vùng chọn mới), thanh trượt + mặt bật/tắt về như lần trước, mask
+      đã tô đặt lại lên vùng mới (ghép mặt theo vị trí, lệch < 0,35 cỡ mặt) và
+      cọ tô tiếp từ đó. Dòng trạng thái: "Chỉnh tiếp layer "Chân dung"". Trong
+      lúc chỉnh layer cũ tạm ẩn (xem trước vẽ trên ảnh gốc), Hủy thì hiện lại y
+      cũ; Áp dụng **cập nhật đúng layer đó** (một bước hoàn tác), không thêm
+      layer mới. Layer khóa → báo mở khóa; mất layer gốc → báo.
+- [~] Lưu trong file `.iai`: khóa "portrait" của layer trong manifest + ảnh
+      xám `layer_N_portrait_*.png`; bản iAi cũ bỏ qua (mở vẫn thấy điểm ảnh).
+      Tự lưu khôi phục dùng cùng định dạng.
+- Test: `reopening_the_portrait_layer_restores_and_updates_it` (ảnh thật: tô
+  tóc → OK → mở lại từ layer kết quả và từ ảnh gốc → Hủy/OK/hoàn tác),
+  `portrait_recipe_round_trips_with_its_masks` (.iai).
+- Cổng: Áp dụng, đóng mở file, mở lại → thanh trượt và vùng tô còn nguyên; kéo
+  tiếp rồi Áp dụng → layer cũ được cập nhật.
 
 ### Pha 5 — (sau) Cọ Thông minh cho Refine Selection
 
@@ -227,11 +244,23 @@ và qua cổng · `[!]` bị chặn.
       (`core::portrait::brush`) sang Refine Brush của Refine Selection (thay
       `refine_edge_stamp` ở chế độ Smart; mẫu lấy từ vùng chọn đang tinh chỉnh).
 
-### Pha 4 — (sau) "Sáng tóc" bằng thanh Blacks của Develop
+### Pha 4 — "Sáng tóc" bằng thanh Blacks của Develop
 
-- [ ] Chủ test 01/10: tăng sáng tóc hiện khá yếu → áp thẳng thanh **Blacks** của
-      Develop cho vùng tóc cho nhanh. Ảnh chủ gửi (kéo tóc sáng/bạc mạnh) còn
-      một **viền cam ở chân tóc** giáp trán — soát khi làm.
+- Chủ test 01/10: tăng sáng tóc hiện khá yếu → áp thẳng thanh **Blacks** của
+  Develop cho vùng tóc cho nhanh. Ảnh chủ gửi (kéo tóc sáng/bạc mạnh) còn một
+  **viền cam ở chân tóc** giáp trán — soát khi làm.
+- Nguyên nhân viền cam (tái hiện trên Jonny Kim, Judy, Mazie, Amy): cách cũ
+  nâng độ sáng trong miền hiển thị rồi **nhân thêm độ đậm màu** khi nâng
+  (`apply_luma_target`), điểm pha tóc + da ở chân tóc (và cả tóc vàng của Amy)
+  thành cam gắt; tóc đen thành xám bạc phẳng.
+- [~] Kéo phải = đúng thanh **Blacks** của Develop3 (bộ cân tông theo vùng,
+  miền tuyến tính, look giữ nguyên ảnh): Sáng tóc +100 = Blacks +200 (tối đa),
+  +50 = Blacks +100; đọc ở tông vùng `hair_base` như Develop → tóc sáng tự
+  nhiên, giữ màu và vân sợi, hết viền cam. Kéo trái (tối hơn) giữ cách cũ
+  (Shadows + Blacks miền hiển thị) vì Blacks âm gần như không đụng tóc nâu.
+  Probe `probe_hair_tone` (IAI_PORTRAIT_HAIR_PROBE), 7 ảnh; tốc độ như cũ.
+- Cổng: kéo Sáng tóc lên mạnh — tóc sáng hơn tự nhiên, không viền cam ở chân
+  tóc, không cam hóa tóc vàng.
 
 ## 3. Rủi ro
 
@@ -279,3 +308,7 @@ và qua cổng · `[!]` bị chặn.
   tóc" theo Blacks của Develop, Pha 5 cọ Thông minh cho Refine Selection;
   nhỏ: sợi tóc mái dày sát đuôi mày còn bị tính là lông mày, chưa có cọ Tô
   vùng → Lông mày.
+- **2026-10-01** — Chủ giao Pha 3 + 4 (hội thoại mới). Pha 4 code xong
+  (`cd49239`: Sáng tóc = Blacks của Develop3, hết viền cam); Pha 3 code xong
+  (`da15cee`: lưu công thức vào layer "Chân dung" + file .iai, mở lại chỉnh
+  tiếp, Áp dụng cập nhật tại chỗ). Test đạt; chờ chủ test.
