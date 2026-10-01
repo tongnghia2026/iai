@@ -495,7 +495,8 @@ impl Canvas {
     }
 
     pub fn refine_stroke_begin(&mut self, op: crate::core::refine::StampOp) {
-        if op == crate::core::refine::StampOp::Smart {
+        use crate::core::refine::StampOp;
+        if matches!(op, StampOp::Smart | StampOp::SmartOut) {
             self.ensure_edge_cache(true);
         }
         if let Some(session) = self.refine.as_deref_mut() {

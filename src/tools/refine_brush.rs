@@ -3,10 +3,10 @@
 // Without one, it queues its strokes for a dialog that paints its own masks
 // (`Canvas::mask_brush`, Chỉnh chân dung).
 //
-// Modes: Smart (colour-aware matting for hair / fur), Add, Subtract. Holding
-// Alt reverses the mode (Smart → put the opening selection back; in Chỉnh
-// chân dung, take out what looks like the backdrop), as in Photoshop. Strokes
-// are undone inside the panel with Ctrl+Z.
+// Modes: Smart (`core::smart_brush`: adds what looks like the painted area,
+// for hair / fur), Add, Subtract. Holding Alt reverses the mode (Smart takes
+// out what looks like the rest). Strokes are undone inside the panel with
+// Ctrl+Z.
 
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::refine::{MaskBrushEvent, StampOp};

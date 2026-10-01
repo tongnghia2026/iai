@@ -1,18 +1,12 @@
 //! The dialog's "Tô vùng" brush: edits one face's skin or hair mask. Add and
 //! Subtract paint plainly; Smart grades each pixel by colour against the area
-//! being painted and the rest around the brush (see [`MaskPaint::stamp`]).
-
-use rayon::prelude::*;
+//! being painted and the rest around the brush (`core::smart_brush`).
 
 use crate::core::refine::{Rect, StampOp};
-use crate::core::selection::{lab_dist, rgb_to_lab};
+use crate::core::selection::rgb_to_lab;
+use crate::core::smart_brush::{self, Colours};
 
 use super::geometry::Region;
-
-/// Colour samples taken from each side around a dab.
-const MAX_SAMPLES: usize = 96;
-/// Lab distance under which a sample could be either side.
-const AMBIGUOUS: f32 = 10.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MaskTarget {
@@ -27,6 +21,34 @@ pub struct MaskPaint {
     /// The mask when the current stroke began: Smart samples it and builds
     /// on it, so its own dabs neither feed its samples nor stack up.
     base: Option<Vec<u8>>,
+}
+
+/// The analysed image (`width` pixels a row) under a mask region.
+struct RegionColours<'a> {
+    rgba: &'a [u8],
+    width: usize,
+    region: Region,
+}
+
+impl RegionColours<'_> {
+    fn rgb(&self, i: usize) -> [u8; 3] {
+        let w = self.region.w as usize;
+        let o =
+            ((self.region.y as usize + i / w) * self.width + self.region.x as usize + i % w) * 4;
+        [self.rgba[o], self.rgba[o + 1], self.rgba[o + 2]]
+    }
+}
+
+impl Colours for RegionColours<'_> {
+    fn lab(&self, i: usize) -> [f32; 3] {
+        let [r, g, b] = self.rgb(i);
+        rgb_to_lab(r, g, b)
+    }
+
+    fn tone(&self, i: usize) -> f32 {
+        let [r, g, b] = self.rgb(i);
+        0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
+    }
 }
 
 impl MaskPaint {
@@ -47,18 +69,8 @@ impl MaskPaint {
     }
 
     /// Stamp one dab at image point (x, y); `rgba` is the analysed image of
-    /// `width` pixels a row. Returns the touched area in region pixels.
-    ///
-    /// Smart is Select ▸ Color Range graded against both sides: colours are
-    /// sampled around the brush from the area being painted (mask near full)
-    /// and from the rest (mask near empty, flat pixels only, so a loose strand
-    /// is not taken for backdrop), samples the two share are dropped, and each
-    /// pixel under the brush takes its share of the painted side by Lab
-    /// distance to the nearest sample of each. A faint strand comes in faint,
-    /// the backdrop stays out, and colours like neither side (skin beside
-    /// hair) stay out too. It only adds, on top of the mask the stroke began
-    /// with, so painting again strengthens faint strands; Restore (Alt) takes
-    /// out what resembles the rest instead.
+    /// `width` pixels a row. Returns the touched area in region pixels. Smart
+    /// (and SmartOut, Alt) is the shared [`smart_brush`].
     #[allow(clippy::too_many_arguments)]
     pub fn stamp(
         &mut self,
@@ -71,154 +83,42 @@ impl MaskPaint {
         hardness: f32,
     ) -> Option<Rect> {
         let r = self.region;
+        let image = RegionColours {
+            rgba,
+            width: width as usize,
+            region: r,
+        };
         let (w, h) = (r.w as usize, r.h as usize);
         let (cx, cy) = (x - r.x as f32, y - r.y as f32);
-        let touched = Rect::around(cx, cy, radius + 1.0, w, h)?;
-        let mut disc = Vec::new();
-        for py in touched.y0..touched.y1 {
-            for px in touched.x0..touched.x1 {
-                let d = (px as f32 + 0.5 - cx).hypot(py as f32 + 0.5 - cy);
-                if d <= radius {
-                    disc.push((py * w + px, falloff(d, radius, hardness)));
-                }
+        match &self.base {
+            Some(base) => smart_brush::stamp(
+                &mut self.mask,
+                base,
+                w,
+                h,
+                &image,
+                op,
+                cx,
+                cy,
+                radius,
+                hardness,
+            ),
+            None => {
+                let start = self.mask.clone();
+                smart_brush::stamp(
+                    &mut self.mask,
+                    &start,
+                    w,
+                    h,
+                    &image,
+                    op,
+                    cx,
+                    cy,
+                    radius,
+                    hardness,
+                )
             }
         }
-        let grade: Vec<f32> = match op {
-            StampOp::Add | StampOp::Subtract => vec![1.0; disc.len()],
-            StampOp::Smart | StampOp::Restore => {
-                self.smart_grade(rgba, width, op == StampOp::Restore, cx, cy, radius, &disc)
-            }
-        };
-        let base = self.base.as_deref().unwrap_or(&self.mask);
-        let fresh: Vec<u8> = disc
-            .iter()
-            .zip(&grade)
-            .map(|(&(i, weight), &k)| {
-                let (m, start) = (self.mask[i] as f32 / 255.0, base[i] as f32 / 255.0);
-                let k = k * weight;
-                let v = match op {
-                    StampOp::Add => m.max(k),
-                    StampOp::Smart => m.max(start + (1.0 - start) * k),
-                    StampOp::Subtract | StampOp::Restore => m * (1.0 - k),
-                };
-                (v * 255.0).round() as u8
-            })
-            .collect();
-        for ((i, _), v) in disc.into_iter().zip(fresh) {
-            self.mask[i] = v;
-        }
-        Some(touched)
-    }
-
-    /// Smart's share (0..1) of the painted side for each `disc` pixel, or of
-    /// the rest with `remove`.
-    #[allow(clippy::too_many_arguments)]
-    fn smart_grade(
-        &self,
-        rgba: &[u8],
-        width: u32,
-        remove: bool,
-        cx: f32,
-        cy: f32,
-        radius: f32,
-        disc: &[(usize, f32)],
-    ) -> Vec<f32> {
-        let r = self.region;
-        let (w, h) = (r.w as usize, r.h as usize);
-        let rgb = |i: usize| {
-            let o = ((r.y as usize + i / w) * width as usize + r.x as usize + i % w) * 4;
-            [rgba[o], rgba[o + 1], rgba[o + 2]]
-        };
-        let lab = |i: usize| {
-            let [cr, cg, cb] = rgb(i);
-            rgb_to_lab(cr, cg, cb)
-        };
-        let luma = |i: usize| {
-            let [cr, cg, cb] = rgb(i);
-            0.299 * cr as f32 + 0.587 * cg as f32 + 0.114 * cb as f32
-        };
-        let mask = self.base.as_deref().unwrap_or(&self.mask);
-
-        let reach = radius * 2.5;
-        let (mut fg, mut bg) = (Vec::new(), Vec::new());
-        if let Some(ring) = Rect::around(cx, cy, reach, w, h) {
-            let area = ring.width() * ring.height();
-            let stride = ((area as f32 / (8 * MAX_SAMPLES) as f32).sqrt().ceil() as usize).max(1);
-            for py in (ring.y0..ring.y1).step_by(stride) {
-                for px in (ring.x0..ring.x1).step_by(stride) {
-                    if (px as f32 + 0.5 - cx).hypot(py as f32 + 0.5 - cy) > reach {
-                        continue;
-                    }
-                    let i = py * w + px;
-                    if mask[i] >= 230 {
-                        fg.push(lab(i));
-                    } else if mask[i] <= 25 && px > 0 && py > 0 && px + 1 < w && py + 1 < h {
-                        // Largest step to a neighbour: a strand one pixel wide
-                        // stands out from both sides.
-                        let l = luma(i);
-                        let step = [i - 1, i + 1, i - w, i + w]
-                            .iter()
-                            .map(|&j| (luma(j) - l).abs())
-                            .fold(0.0, f32::max);
-                        bg.push((step, lab(i)));
-                    }
-                }
-            }
-        }
-        bg.sort_by(|a, b| a.0.total_cmp(&b.0));
-        bg.truncate((bg.len() * 6).div_ceil(10));
-        let thin = |v: Vec<[f32; 3]>| -> Vec<[f32; 3]> {
-            let step = v.len().div_ceil(MAX_SAMPLES).max(1);
-            v.into_iter().step_by(step).collect()
-        };
-        let nearest = |set: &[[f32; 3]], c: [f32; 3]| {
-            set.iter().map(|&s| lab_dist(s, c)).fold(f32::MAX, f32::min)
-        };
-        // Backdrop showing between strands inside the mask, a strand lying in
-        // the backdrop: samples either side could hold.
-        let keep = |own: Vec<[f32; 3]>, other: &[[f32; 3]]| -> Vec<[f32; 3]> {
-            let kept: Vec<[f32; 3]> = own
-                .iter()
-                .copied()
-                .filter(|&c| nearest(other, c) > AMBIGUOUS)
-                .collect();
-            if kept.is_empty() {
-                own
-            } else {
-                kept
-            }
-        };
-        let (fg, bg) = (thin(fg), thin(bg.into_iter().map(|(_, c)| c).collect()));
-        let fg = keep(fg, &bg);
-        let bg = keep(bg, &fg);
-        // How far the painted side's colours typically sit from the rest.
-        let span = if fg.is_empty() || bg.is_empty() {
-            0.0
-        } else {
-            let mut d: Vec<f32> = fg.iter().map(|&c| nearest(&bg, c)).collect();
-            d.sort_by(f32::total_cmp);
-            d[d.len() / 2]
-        };
-        disc.par_iter()
-            .map(|&(i, _)| {
-                let c = lab(i);
-                if bg.is_empty() {
-                    // Nothing but the painted side around.
-                    return if remove { 0.0 } else { 1.0 };
-                }
-                if fg.is_empty() {
-                    // Only backdrop around: how far from it, up to a solid
-                    // strand's distance.
-                    let share = ((nearest(&bg, c) - 6.0) / 24.0).clamp(0.0, 1.0);
-                    return if remove { 1.0 - share } else { share };
-                }
-                let (to_fg, to_bg) = (nearest(&fg, c), nearest(&bg, c));
-                let total = (to_fg + to_bg).max(1e-3);
-                let like = if remove { to_fg } else { to_bg };
-                let share = ((like / total - 0.1) / 0.8).clamp(0.0, 1.0).powf(0.7);
-                share * (1.0 - smoothstep(1.3, 1.8, total / span.max(1.0)))
-            })
-            .collect()
     }
 
     /// The mask inside `rect` (region pixels), row by row.
@@ -236,23 +136,6 @@ impl MaskPaint {
             self.mask[y * w + rect.x0..y * w + rect.x1]
                 .copy_from_slice(&data[row * rw..(row + 1) * rw]);
         }
-    }
-}
-
-fn smoothstep(lo: f32, hi: f32, v: f32) -> f32 {
-    let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// Brush tip: 1 at the centre, 0 at the rim; harder tips hold 1 further out.
-fn falloff(d: f32, radius: f32, hardness: f32) -> f32 {
-    let t = (d / radius).clamp(0.0, 1.0);
-    let soft = 1.0 - hardness.clamp(0.0, 1.0);
-    if soft < 0.01 || t <= 1.0 - soft {
-        1.0
-    } else {
-        let f = (t - (1.0 - soft)) / soft;
-        1.0 - f * f
     }
 }
 
@@ -320,7 +203,7 @@ mod tests {
         // Alt + Smart takes out what looks like the wall, not the hair.
         p.mask[20 * 60 + 41] = 200;
         p.begin_stroke();
-        p.stamp(&rgba, width, StampOp::Restore, 38.0, 20.0, 10.0, 1.0);
+        p.stamp(&rgba, width, StampOp::SmartOut, 38.0, 20.0, 10.0, 1.0);
         p.end_stroke();
         assert!(p.mask[20 * 60 + 41] < 20);
         assert_eq!(p.mask[20 * 60 + 29], 255);

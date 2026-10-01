@@ -38,6 +38,7 @@ pub mod scan_cleanup;
 pub mod selection;
 pub mod settings;
 pub mod shape;
+pub mod smart_brush;
 pub mod smart_fill;
 pub mod ucs;
 pub mod units;

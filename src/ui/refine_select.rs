@@ -285,7 +285,7 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             (
                 RefineBrushMode::Smart,
                 format!("{} Smart", ph::SPARKLE),
-                "Read the edge from the photo colours under the brush (hair, fur)",
+                "Adds what looks like the selected area by colour (hair, fur): faint strands come in faint, paint again to strengthen them",
             ),
             (
                 RefineBrushMode::Add,
@@ -344,7 +344,10 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             actions.sel.refine_redo = true;
         }
     });
-    hint(ui, "Alt: reverse the brush (Smart puts the start back)");
+    hint(
+        ui,
+        "Alt: reverse the brush (Smart takes out what looks like the outside)",
+    );
     hint(ui, "[ / ] size  ·  Alt+right-drag size");
 }
 

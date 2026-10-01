@@ -10,6 +10,7 @@
 //! settings and moving a slider never wipes a stroke.
 
 use super::selection::{refine_edge_stamp, EdgeCache, RefineBrushMode, Selection};
+use super::smart_brush::{self, LabColours};
 use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
@@ -723,12 +724,13 @@ fn finish_region(matte: &[u8], w: usize, h: usize, p: &RefineParams, roi: Rect, 
 /// What one Refine Brush dab does to the session's base mask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StampOp {
-    /// Colour-aware matting under the brush (hair / fur).
+    /// Colour-aware: adds what looks like the area being painted (hair /
+    /// fur strands), see `core::smart_brush`.
     Smart,
     Add,
     Subtract,
-    /// Put back the selection the panel was opened with (Alt + Smart).
-    Restore,
+    /// Alt + Smart: takes out what looks like the rest around the brush.
+    SmartOut,
 }
 
 impl StampOp {
@@ -736,7 +738,7 @@ impl StampOp {
     pub fn for_mode(mode: RefineBrushMode, alt: bool) -> Self {
         match (mode, alt) {
             (RefineBrushMode::Smart, false) => StampOp::Smart,
-            (RefineBrushMode::Smart, true) => StampOp::Restore,
+            (RefineBrushMode::Smart, true) => StampOp::SmartOut,
             (RefineBrushMode::Add, false) | (RefineBrushMode::Subtract, true) => StampOp::Add,
             (RefineBrushMode::Subtract, false) | (RefineBrushMode::Add, true) => StampOp::Subtract,
         }
@@ -756,40 +758,6 @@ pub enum MaskBrushEvent {
     End,
 }
 
-fn restore_stamp(
-    base: &mut [u8],
-    start: &[u8],
-    w: usize,
-    h: usize,
-    cx: f32,
-    cy: f32,
-    radius: f32,
-    hardness: f32,
-) {
-    let Some(r) = Rect::around(cx, cy, radius, w, h) else {
-        return;
-    };
-    for y in r.y0..r.y1 {
-        for x in r.x0..r.x1 {
-            let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
-            if d > radius {
-                continue;
-            }
-            let t = (d / radius).clamp(0.0, 1.0);
-            let soft = 1.0 - hardness;
-            let k = if soft < 0.01 || t <= 1.0 - soft {
-                1.0
-            } else {
-                let f = (t - (1.0 - soft)) / soft;
-                1.0 - f * f
-            };
-            let i = y * w + x;
-            let v = base[i] as f32 + (start[i] as f32 - base[i] as f32) * k;
-            base[i] = v.round() as u8;
-        }
-    }
-}
-
 // ── Session ────────────────────────────────────────────────────────────────
 
 struct BasePatch {
@@ -802,8 +770,6 @@ struct BasePatch {
 pub struct RefineSession {
     /// The selection as it was when the panel opened.
     pub original: Selection,
-    /// `original`'s mask with its move offset baked in, when it had one.
-    start: Option<Vec<u8>>,
     base: Vec<u8>,
     matte: Vec<u8>,
     params: RefineParams,
@@ -822,10 +788,8 @@ impl RefineSession {
     /// `baked` is `original`'s mask with its offset applied.
     pub fn new(original: Selection, baked: Vec<u8>) -> Self {
         let (width, height) = (original.width as usize, original.height as usize);
-        let start = (original.offset != (0, 0)).then(|| baked.clone());
         Self {
             original,
-            start,
             matte: baked.clone(),
             base: baked,
             params: RefineParams::default(),
@@ -838,10 +802,6 @@ impl RefineSession {
             display_dirty: None,
             last_full_render: Duration::ZERO,
         }
-    }
-
-    fn start_mask(&self) -> &[u8] {
-        self.start.as_deref().unwrap_or(&self.original.mask)
     }
 
     pub fn params(&self) -> RefineParams {
@@ -937,22 +897,40 @@ impl RefineSession {
                 continue;
             };
             match op {
-                StampOp::Smart => {
-                    let Some(c) = cache else {
+                StampOp::Smart | StampOp::SmartOut => {
+                    let Some(c) = cache.filter(|c| c.lab.len() >= w * h) else {
                         continue;
                     };
-                    refine_edge_stamp(
-                        &c.lab,
-                        &c.sobel,
-                        &mut self.base,
-                        w as u32,
-                        h as u32,
-                        x,
-                        y,
-                        radius,
-                        hardness,
-                        RefineBrushMode::Smart,
-                    );
+                    let image = LabColours(&c.lab);
+                    match &self.stroke_before {
+                        Some(start) => smart_brush::stamp(
+                            &mut self.base,
+                            start,
+                            w,
+                            h,
+                            &image,
+                            op,
+                            x,
+                            y,
+                            radius,
+                            hardness,
+                        ),
+                        None => {
+                            let start = self.base.clone();
+                            smart_brush::stamp(
+                                &mut self.base,
+                                &start,
+                                w,
+                                h,
+                                &image,
+                                op,
+                                x,
+                                y,
+                                radius,
+                                hardness,
+                            )
+                        }
+                    };
                 }
                 StampOp::Add | StampOp::Subtract => {
                     let mode = if op == StampOp::Add {
@@ -961,8 +939,6 @@ impl RefineSession {
                         RefineBrushMode::Subtract
                     };
                     refine_edge_stamp(
-                        &[],
-                        &[],
                         &mut self.base,
                         w as u32,
                         h as u32,
@@ -972,11 +948,6 @@ impl RefineSession {
                         hardness,
                         mode,
                     );
-                }
-                StampOp::Restore => {
-                    let mut base = std::mem::take(&mut self.base);
-                    restore_stamp(&mut base, self.start_mask(), w, h, x, y, radius, hardness);
-                    self.base = base;
                 }
             }
             touched = Some(union_opt(touched, r));
@@ -1371,10 +1342,179 @@ mod tests {
         assert_eq!(s.base, mask);
         assert!(s.redo().is_some());
         assert_eq!(s.base, painted);
-        // Alt + Smart puts the opening selection back.
+        // Smart needs the photo's colours; without them it does nothing.
         s.begin_stroke();
-        s.paint(None, StampOp::Restore, &[(60.0, 30.0)], 10.0, 1.0);
-        s.end_stroke();
-        assert_eq!(s.base, mask);
+        s.paint(None, StampOp::SmartOut, &[(60.0, 30.0)], 10.0, 1.0);
+        assert!(!s.end_stroke());
+        assert_eq!(s.base, painted);
+    }
+
+    /// Opt-in: IAI_REFINE_PROBE is a folder with photos and `strokes.txt`
+    /// (`name.jpg radius x,y x,y …` per line). The selection starts as the
+    /// portrait analysis's hair and skin, cut hard at half and grown 6 px
+    /// (like a rough Select Subject: faint strands out, backdrop spill in);
+    /// each line paints Smart along the path, then Alt + Smart, and writes
+    /// photo | start | Smart | Alt sheets of the stroke's area.
+    #[test]
+    #[ignore]
+    fn probe_refine_brush() {
+        use crate::core::selection::{compute_sobel, pixels_to_lab};
+        let Ok(dir) = std::env::var("IAI_REFINE_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let list = std::fs::read_to_string(dir.join("strokes.txt")).unwrap();
+        for (n, line) in list.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+            let mut parts = line.split_whitespace();
+            let name = parts.next().unwrap().to_string();
+            let radius: f32 = parts.next().unwrap().parse().unwrap();
+            let path: Vec<(f32, f32)> = parts
+                .map(|p| {
+                    let (x, y) = p.split_once(',').unwrap();
+                    (x.parse().unwrap(), y.parse().unwrap())
+                })
+                .collect();
+            let image = image::open(dir.join(&name)).unwrap().to_rgba8();
+            let (width, height) = image.dimensions();
+            let rgba = image.into_raw();
+            let (w, h) = (width as usize, height as usize);
+            let model =
+                crate::core::portrait::analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
+            let face = &model.faces[0];
+            let mut start = vec![0u8; w * h];
+            for (region, mask) in [
+                (face.hair_region, face.hair_mask()),
+                (face.skin.region(), face.skin.mask()),
+            ] {
+                for y in 0..region.h as usize {
+                    for x in 0..region.w as usize {
+                        if mask[y * region.w as usize + x] >= 128 {
+                            start[(region.y as usize + y) * w + region.x as usize + x] = 255;
+                        }
+                    }
+                }
+            }
+            let mut grown = start.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    if start[y * w + x] == 0 {
+                        continue;
+                    }
+                    for yy in y.saturating_sub(6)..(y + 7).min(h) {
+                        for xx in x.saturating_sub(6)..(x + 7).min(w) {
+                            grown[yy * w + xx] = 255;
+                        }
+                    }
+                }
+            }
+            let cache = EdgeCache {
+                lab: pixels_to_lab(&rgba, width, height),
+                sobel: compute_sobel(&rgba, width, height),
+                width,
+                height,
+                layer_idx: 0,
+                layer_revision: 0,
+                sample_merged: false,
+            };
+            let mut dabs = vec![path[0]];
+            for pair in path.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                let steps = ((b.0 - a.0).hypot(b.1 - a.1) / (radius * 0.35))
+                    .ceil()
+                    .max(1.0) as usize;
+                for i in 1..=steps {
+                    let t = i as f32 / steps as f32;
+                    dabs.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+                }
+            }
+            let mut s = session(w, h, grown.clone());
+            let started = std::time::Instant::now();
+            s.begin_stroke();
+            s.paint(Some(&cache), StampOp::Smart, &dabs, radius, 0.5);
+            s.end_stroke();
+            let smart = s.base.clone();
+            let smart_ms = started.elapsed().as_millis();
+            s.begin_stroke();
+            s.paint(Some(&cache), StampOp::SmartOut, &dabs, radius, 0.5);
+            s.end_stroke();
+            let out = s.base.clone();
+            println!(
+                "{n} {name}: {} dabs, Smart {smart_ms} ms ({:.1} ms/dab)",
+                dabs.len(),
+                smart_ms as f32 / dabs.len() as f32
+            );
+            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for &(x, y) in &path {
+                x0 = x0.min(x - radius * 1.6);
+                y0 = y0.min(y - radius * 1.6);
+                x1 = x1.max(x + radius * 1.6);
+                y1 = y1.max(y + radius * 1.6);
+            }
+            let (x0, y0) = (x0.max(0.0) as u32, y0.max(0.0) as u32);
+            let (x1, y1) = ((x1 as u32).min(width), (y1 as u32).min(height));
+            let (cw, ch) = (x1 - x0, y1 - y0);
+            let tile = |mask: Option<&[u8]>| {
+                image::RgbImage::from_fn(cw, ch, |x, y| {
+                    let i = ((y0 + y) * width + x0 + x) as usize;
+                    let c = [
+                        rgba[i * 4] as f32,
+                        rgba[i * 4 + 1] as f32,
+                        rgba[i * 4 + 2] as f32,
+                    ];
+                    let m = mask.map_or(0.0, |m| m[i] as f32 / 255.0 * 0.7);
+                    let tint = [255.0, 40.0, 40.0];
+                    image::Rgb(std::array::from_fn(|k| {
+                        (c[k] * (1.0 - m) + tint[k] * m) as u8
+                    }))
+                })
+            };
+            let tiles = [
+                tile(None),
+                tile(Some(&grown)),
+                tile(Some(&smart)),
+                tile(Some(&out)),
+            ];
+            let mut sheet = image::RgbImage::from_pixel(cw * 4 + 18, ch, image::Rgb([255; 3]));
+            for (k, t) in tiles.iter().enumerate() {
+                image::imageops::replace(&mut sheet, t, ((cw + 6) * k as u32) as i64, 0);
+            }
+            sheet.save(dir.join(format!("rb_{n}_{name}.png"))).unwrap();
+        }
+    }
+
+    #[test]
+    fn smart_brush_adds_strands_and_alt_takes_out_the_backdrop() {
+        // Dark hair (columns 28..=44) with a strand at 56..=57 on a white
+        // wall; the selection holds the hair plus wall up to column 50.
+        let (w, h) = (96usize, 72usize);
+        let dark = |x: usize, y: usize| {
+            ((28..=44).contains(&x) || (56..=57).contains(&x)) && (8..=64).contains(&y)
+        };
+        let cache = cache_of(w, h, |x, y| {
+            if dark(x, y) {
+                [18, 17, 20]
+            } else {
+                [248, 248, 246]
+            }
+        });
+        let mut mask = vec![0u8; w * h];
+        for y in 8..=64 {
+            for x in 28..=50 {
+                mask[y * w + x] = 255;
+            }
+        }
+        let mut s = session(w, h, mask);
+        s.begin_stroke();
+        s.paint(Some(&cache), StampOp::Smart, &[(56.0, 36.0)], 12.0, 0.7);
+        assert!(s.end_stroke());
+        assert!(s.base[36 * w + 57] > 200, "strand added");
+        assert_eq!(s.base[36 * w + 62], 0, "wall left out");
+        assert_eq!(s.base[36 * w + 49], 255, "Smart only adds");
+        s.begin_stroke();
+        s.paint(Some(&cache), StampOp::SmartOut, &[(50.0, 36.0)], 8.0, 0.7);
+        assert!(s.end_stroke());
+        assert!(s.base[36 * w + 49] < 30, "wall inside the selection out");
+        assert_eq!(s.base[36 * w + 44], 255, "hair kept");
+        assert!(s.base[36 * w + 56] > 200, "strand kept");
     }
 }
