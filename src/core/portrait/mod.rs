@@ -286,6 +286,84 @@ mod tests {
         }
     }
 
+    /// Opt-in: IAI_PORTRAIT_NOSE_PROBE is a folder of photos; per face 0, a
+    /// close-up of the nose: photo, contour field (grey = 0), and the contour
+    /// at 60 and 100 over the default retouch.
+    #[test]
+    #[ignore]
+    fn probe_nose() {
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_NOSE_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".jpg"))
+            .collect();
+        names.sort();
+        for name in names {
+            let image = image::open(dir.join(&name)).unwrap().to_rgba8();
+            let (width, height) = image.dimensions();
+            let rgba = image.into_raw();
+            let model = analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
+            let face = &model.faces[0];
+            let e = face.extent;
+            let nose = geometry::NOSE_BRIDGE
+                .iter()
+                .chain(&geometry::NOSE_WINGS)
+                .map(|&k| {
+                    [
+                        face.mesh.points[k as usize][0],
+                        face.mesh.points[k as usize][1],
+                    ]
+                });
+            let area = Region::around(nose, [0.15 * e; 4], width, height);
+            let enabled = [true];
+            let paste = |settings: &PortraitSettings| {
+                let (u, px) = render(&rgba, &model, settings, &enabled, &[]).unwrap();
+                image::RgbImage::from_fn(area.w, area.h, |x, y| {
+                    let k = ((area.y + y - u.y) * u.w + area.x + x - u.x) as usize * 4;
+                    image::Rgb([px[k], px[k + 1], px[k + 2]])
+                })
+            };
+            let field = image::RgbImage::from_fn(area.w, area.h, |x, y| {
+                let v = face
+                    .region
+                    .index_at(area.x + x, area.y + y)
+                    .map_or(0, |f| face.nose[f]);
+                let g = (128 + v as i32) as u8;
+                image::Rgb([g, g, g])
+            });
+            let tiles = [
+                crop_rgb(&rgba, width, area),
+                field,
+                paste(&PortraitSettings {
+                    nose_bridge: 60.0,
+                    ..PortraitSettings::default()
+                }),
+                paste(&PortraitSettings {
+                    nose_bridge: 100.0,
+                    ..PortraitSettings::default()
+                }),
+            ];
+            let mut sheet = image::RgbImage::new((area.w + 6) * tiles.len() as u32, area.h);
+            for (k, tile) in tiles.iter().enumerate() {
+                image::imageops::replace(&mut sheet, tile, ((area.w + 6) * k as u32) as i64, 0);
+            }
+            let k = (1400.0 / sheet.width() as f32).min(2.0);
+            image::imageops::resize(
+                &sheet,
+                (sheet.width() as f32 * k) as u32,
+                (sheet.height() as f32 * k) as u32,
+                image::imageops::FilterType::Lanczos3,
+            )
+            .save(dir.join(format!("pn_{}.png", name.trim_end_matches(".jpg"))))
+            .unwrap();
+        }
+    }
+
     /// Opt-in: IAI_PORTRAIT_ANALYSE names one photo; analyses it alone (for
     /// timing and peak memory) and prints each face's regions.
     #[test]

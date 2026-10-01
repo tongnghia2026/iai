@@ -324,9 +324,9 @@ fn retouch_pixel(
         if contour != 0.0 {
             // Shade lightly: the sides only need to hint at depth.
             let gain = if contour > 0.0 {
-                0.14 * contour
+                0.18 * contour
             } else {
-                0.05 * contour
+                0.06 * contour
             };
             r = r.map(|v| v * (1.0 + gain));
         }

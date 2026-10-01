@@ -143,6 +143,65 @@ fn brow_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((0.7 * (ya - yb)).powi(2) + du * du + dv * dv).sqrt()
 }
 
+/// Nose contour over `region` (-127..127): light down the bridge, shade
+/// along both sides of it. Both fall off as bell curves across the bridge
+/// and fade in below the brows and out toward the tip, so the change has no
+/// edge anywhere.
+fn nose_contour(points: &[[f32; 3]], region: Region, e: f32) -> Vec<i8> {
+    let line: Vec<[f32; 2]> = loop_points(points, &NOSE_BRIDGE);
+    let lengths: Vec<f32> = line
+        .windows(2)
+        .map(|s| (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1]))
+        .collect();
+    let total = lengths.iter().sum::<f32>().max(1.0);
+    // Distance from the bridge line and how far down it (0 at the top,
+    // 1 at the tip) the nearest point lies.
+    let nearest = |x: f32, y: f32| {
+        let (mut best, mut along, mut start) = (f32::MAX, 0.0f32, 0.0f32);
+        for (s, &length) in line.windows(2).zip(&lengths) {
+            let (dx, dy) = (s[1][0] - s[0][0], s[1][1] - s[0][1]);
+            let u = if length > 0.0 {
+                (((x - s[0][0]) * dx + (y - s[0][1]) * dy) / (length * length)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let d = (x - s[0][0] - u * dx).hypot(y - s[0][1] - u * dy);
+            if d < best {
+                best = d;
+                along = (start + u * length) / total;
+            }
+            start += length;
+        }
+        (best, along)
+    };
+    let (light_width, shade_offset, shade_width) = (0.02 * e, 0.075 * e, 0.028 * e);
+    let bounds = Region::around(
+        line.iter().copied(),
+        [shade_offset + 3.0 * shade_width; 4],
+        region.x + region.w,
+        region.y + region.h,
+    )
+    .intersect(region);
+    let w = region.w as usize;
+    (0..region.len())
+        .into_par_iter()
+        .map(|i| {
+            let (x, y) = (region.x + (i % w) as u32, region.y + (i / w) as u32);
+            if bounds.index_at(x, y).is_none() {
+                return 0;
+            }
+            let (d, t) = nearest(x as f32 + 0.5, y as f32 + 0.5);
+            let bell = |offset: f32, width: f32| (-0.5 * ((d - offset) / width).powi(2)).exp();
+            let light =
+                bell(0.0, light_width) * smoothstep(0.0, 0.3, t) * (1.0 - smoothstep(0.75, 1.0, t));
+            let shade = bell(shade_offset, shade_width)
+                * smoothstep(0.0, 0.3, t)
+                * (1.0 - smoothstep(0.6, 0.95, t));
+            ((light - shade).clamp(-1.0, 1.0) * 127.0).round() as i8
+        })
+        .collect()
+}
+
 /// Value at quantile `q` (0..1) of `values`.
 fn quantile(mut values: Vec<f32>, q: f32) -> Option<f32> {
     if values.is_empty() {
@@ -1526,50 +1585,7 @@ fn build_face(
         .map(|c| to_u16([c[0], c[1], c[2]]))
         .collect();
 
-    // Nose contour: light down the bridge, shade along both sides of it.
-    let across = [cos, sin];
-    let ribbon = |line: &[u16], shift: f32, half: f32| -> Vec<[f32; 2]> {
-        let centre: Vec<[f32; 2]> = line
-            .iter()
-            .map(|&k| {
-                let p = points[k as usize];
-                [p[0] + across[0] * shift, p[1] + across[1] * shift]
-            })
-            .collect();
-        let mut outline: Vec<[f32; 2]> = centre
-            .iter()
-            .map(|p| [p[0] - across[0] * half, p[1] - across[1] * half])
-            .collect();
-        outline.extend(
-            centre
-                .iter()
-                .rev()
-                .map(|p| [p[0] + across[0] * half, p[1] + across[1] * half]),
-        );
-        outline
-    };
-    let mut ridge = vec![0.0f32; n];
-    stamp_polygon(
-        &mut ridge,
-        region,
-        &ribbon(&NOSE_BRIDGE, 0.0, 0.022 * e),
-        0.0,
-        0.03 * e,
-    );
-    let mut flanks = vec![0.0f32; n];
-    for side in [-1.0f32, 1.0] {
-        stamp_polygon(
-            &mut flanks,
-            region,
-            &ribbon(&NOSE_BRIDGE[..4], side * 0.075 * e, 0.02 * e),
-            0.0,
-            0.05 * e,
-        );
-    }
-    let nose: Vec<i8> = (0..n)
-        .into_par_iter()
-        .map(|i| ((ridge[i] - flanks[i]).clamp(-1.0, 1.0) * 127.0).round() as i8)
-        .collect();
+    let nose = nose_contour(points, region, e);
 
     // Hair: a broad soft zone over the part model's whole head-and-shoulders
     // crop, with no outline cut. As with Develop's Shadows/Blacks, each
