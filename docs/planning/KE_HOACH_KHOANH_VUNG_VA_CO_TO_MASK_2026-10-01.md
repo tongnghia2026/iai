@@ -161,7 +161,7 @@ và qua cổng · `[!]` bị chặn.
   giữa sống mũi.
 - Cổng: kéo "Sống mũi cao" tới 100: vệt sáng dài từ giữa chân mày tới chóp
   mũi, không mép, không cụt, giữa hai mắt nhẹ và hẹp; hai bên chỉ tối nhẹ.
-  **Chờ chủ test.**
+  **Đạt — chủ test OK 01/10.**
 
 ### Pha 1 — Khoanh vùng trước khi phân tích (chủ cho làm sau Pha 2)
 
@@ -274,3 +274,8 @@ và qua cổng · `[!]` bị chặn.
   test.
 - **2026-10-01** — Chủ test lần 2: giữa hai mắt sáng mạnh, loang → thu hẹp và
   giảm đoạn đầu; chờ chủ test.
+- **2026-10-01** — Chủ test Pha 7 lần 3 OK. Bàn giao sang hội thoại mới
+  (context đầy). Việc còn lại theo chủ dặn: Pha 3 lưu mask đã tô, Pha 4 "Sáng
+  tóc" theo Blacks của Develop, Pha 5 cọ Thông minh cho Refine Selection;
+  nhỏ: sợi tóc mái dày sát đuôi mày còn bị tính là lông mày, chưa có cọ Tô
+  vùng → Lông mày.
