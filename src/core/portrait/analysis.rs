@@ -16,6 +16,44 @@ use crate::core::color::luminance_f32;
 pub const TRUSTED_AGREEMENT: f32 = 0.8;
 /// Fixed-point scale of the stored blemish score.
 pub(super) const BLEMISH_SCALE: f32 = 32.0;
+/// How far below the chin (in face sizes) the face's own skin tone is read.
+const TONE_BELOW_CHIN: f32 = 0.45;
+
+/// How far below the chin the part model still sees skin across the face's
+/// width (neck, an open collar), plus a margin.
+fn skin_reach(parts: &PartLabels, points: &[[f32; 3]], e: f32) -> f32 {
+    let (mut x0, mut x1, mut chin) = (f32::MAX, f32::MIN, f32::MIN);
+    for p in points {
+        x0 = x0.min(p[0]);
+        x1 = x1.max(p[0]);
+        chin = chin.max(p[1]);
+    }
+    let step = (e / 50.0).max(1.0);
+    let bottom = parts.bounds()[3];
+    let mut reach = 0.0;
+    let mut y = chin;
+    while y < bottom {
+        let mut x = x0 - 0.15 * e;
+        while x <= x1 + 0.15 * e {
+            let g = parts.groups_at(x, y);
+            if g[body_parts::GROUP_FACE_SKIN] + g[body_parts::GROUP_BODY_SKIN] > 0.5 {
+                reach = y - chin;
+                break;
+            }
+            x += step;
+        }
+        y += step;
+    }
+    reach + 0.1 * e
+}
+
+/// Rows of `region` from its top down to just below the chin: where the
+/// face's skin tone is read, so neck and chest skin do not shift it.
+fn tone_rows(points: &[[f32; 3]], region: Region, e: f32) -> usize {
+    let chin = points.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+    ((chin + TONE_BELOW_CHIN * e).ceil() - region.y as f32).clamp(1.0, region.h.max(1) as f32)
+        as usize
+}
 
 pub struct FaceModel {
     pub mesh: FaceMesh,
@@ -120,7 +158,8 @@ fn split_skin(
         .collect();
 
     let (mut weight, mut mean) = (0.0f64, [0.0f64; 3]);
-    for (c, &m) in low2.iter().zip(skin) {
+    let face_rows = tone_rows(points, region, e) * w;
+    for (c, &m) in low2.iter().zip(skin).take(face_rows) {
         weight += m as f64;
         for k in 0..3 {
             mean[k] += c[k] as f64 * m as f64;
@@ -678,9 +717,17 @@ fn build_face(
 ) -> FaceModel {
     let (_, extent, angle) = mesh.frame();
     let e = extent;
+    let agreement = parts.map(|p| p.agreement);
+    let trusted = agreement.is_some_and(|a| a >= TRUSTED_AGREEMENT);
+    // Down to just below the chin; with the part model, on down to where it
+    // still sees skin, so an open neckline is not cut off.
+    let below = match parts {
+        Some(p) if trusted => skin_reach(p, &mesh.points, e).max(TONE_BELOW_CHIN * e),
+        _ => TONE_BELOW_CHIN * e,
+    };
     let region = Region::around(
         mesh.points.iter().map(|p| [p[0], p[1]]),
-        [0.15 * e, 0.15 * e, 0.15 * e, 0.45 * e],
+        [0.15 * e, 0.15 * e, 0.15 * e, below],
         width,
         height,
     );
@@ -705,8 +752,6 @@ fn build_face(
             ]
         })
         .collect();
-    let agreement = parts.map(|p| p.agreement);
-    let trusted = agreement.is_some_and(|a| a >= TRUSTED_AGREEMENT);
     let points = &mesh.points;
 
     // Features that are never skin.

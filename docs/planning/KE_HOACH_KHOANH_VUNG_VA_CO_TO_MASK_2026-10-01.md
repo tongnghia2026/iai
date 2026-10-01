@@ -63,6 +63,16 @@ và qua cổng · `[!]` bị chặn.
 - Cổng: tóc mai hai bên, mép mái được tô; không lan ra nền/áo. **Đạt — chủ test
   OK 01/10.**
 
+### Pha 2b — Da cổ / ngực không bị cắt ngang
+
+- [~] Chủ test cọ Thông minh OK; gửi ảnh: da ở cổ áo chữ V bị cắt thẳng ngang
+      (đáy khung phân tích mặt = cằm + 0,45e). Sửa: khi model tách vùng tin
+      cậy, đáy khung kéo xuống tới hàng cuối Sapiens2 còn thấy da (mặt + thân,
+      > 0,5) trong bề ngang mặt, + 0,1e (`skin_reach`) — chỉ ảnh hở cổ mới dài
+      ra (Judy, Mazie, c01), áo vest/cao cổ giữ khung cũ nên không chậm thêm.
+      Màu da trung bình (Đều màu da) vẫn chỉ đọc tới cằm + 0,45e
+      (`tone_rows`). Cọ tô Da với tới vùng này theo.
+
 ### Pha 1 — Khoanh vùng trước khi phân tích (chủ cho làm sau Pha 2)
 
 - [ ] Mở Chỉnh chân dung khi đang có vùng chọn → chỉ dò mặt trong vùng đó (ảnh
@@ -141,3 +151,5 @@ và qua cổng · `[!]` bị chặn.
   test.
 - **2026-10-01** — Chủ: cọ Thông minh chưa thông minh, thử Color Range. Thử 3
   cách trên ảnh thật, chốt "Color Range hai phía" (xem Pha 2); chờ chủ test.
+- **2026-10-01** — Chủ test cọ Thông minh OK; báo da cổ/ngực bị cắt ngang → Pha
+  2b (khung da kéo theo da model thấy); chờ chủ test.
