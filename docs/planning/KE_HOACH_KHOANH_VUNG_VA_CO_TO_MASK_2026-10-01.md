@@ -65,7 +65,7 @@ và qua cổng · `[!]` bị chặn.
 
 ### Pha 2b — Da cổ / ngực không bị cắt ngang
 
-- [~] Chủ test cọ Thông minh OK; gửi ảnh: da ở cổ áo chữ V bị cắt thẳng ngang
+- [x] Chủ test cọ Thông minh OK; gửi ảnh: da ở cổ áo chữ V bị cắt thẳng ngang
       (đáy khung phân tích mặt = cằm + 0,45e). Sửa: khi model tách vùng tin
       cậy, đáy khung kéo xuống tới hàng cuối Sapiens2 còn thấy da (mặt + thân,
       > 0,5) trong bề ngang mặt, + 0,1e (`skin_reach`) — chỉ ảnh hở cổ mới dài
@@ -87,16 +87,16 @@ và qua cổng · `[!]` bị chặn.
 
 ### Pha 2 — Cọ tô thêm/bớt mask
 
-- [~] Hộp thoại có mục **"Tô vùng"** (đầu hộp thoại): Tắt / Da / Tóc, chế độ
+- [x] Hộp thoại có mục **"Tô vùng"** (đầu hộp thoại): Tắt / Da / Tóc, chế độ
       Thông minh / Thêm / Bớt, cỡ cọ, độ cứng, nút hoàn tác/làm lại; khi tô, lớp
       phủ màu (da đỏ, tóc tím) của vùng đang tô hiện trên canvas (texture GPU,
       vá từng vùng nét tô), ảnh xem trước vẫn là ảnh đã chỉnh.
-- [~] Dùng lại công cụ **Refine Brush** (vòng con trỏ, `[` `]`, Shift+`[` `]`,
+- [x] Dùng lại công cụ **Refine Brush** (vòng con trỏ, `[` `]`, Shift+`[` `]`,
       Alt+chuột phải kéo cỡ, Alt đảo Thêm↔Bớt, Alt+Thông minh = trả lại vùng app
       tìm): khi không có phiên Refine Selection, nét tô xếp hàng ở
       `Canvas::mask_brush` cho hộp thoại xử lý mỗi khung hình. Mỗi nét chỉ tô
       một mặt (mặt gần điểm bắt đầu).
-- [~] **Thông minh làm lại (chủ: "cọ không thông minh", đề xuất thử Color
+- [x] **Thông minh làm lại (chủ: "cọ không thông minh", đề xuất thử Color
       Range)**. Thử trên ảnh thật (Meir tóc xoăn mảnh trên áo trắng, Nelson sợi
       bạc trên nền xanh): cọ cũ (`refine_edge_stamp`) còn **khoét lỗ** vùng tóc
       đã có; Color Range lấy màu ở điểm bấm thì sợi mảnh trên nền sáng gần như
@@ -110,19 +110,26 @@ và qua cổng · `[!]` bị chặn.
       phía → sợi mờ được tô mờ, nền giữ 0, màu không giống bên nào (da cạnh tóc)
       bị loại. Chỉ cộng thêm, tính trên mask lúc bắt đầu nét → **tô lại để sợi mờ
       đậm hơn**; Alt + Thông minh = bớt phần giống nền.
-- [~] Sau mỗi nét: tóc dùng ngay; da tính lại cả khối `SkinLayers` (mask,
+- [x] Sau mỗi nét: tóc dùng ngay; da tính lại cả khối `SkinLayers` (mask,
       interior, quầng mắt, tách tần số có trọng số, màu da) trên luồng nền rồi
       xem trước lại. Chấm mụn giữ theo lần phân tích (bớt da thì hết xóa mụn ở
       đó; thêm da không dò mụn mới).
-- [~] Ctrl+Z / Ctrl+Shift+Z trong hộp thoại; Hủy bỏ hết nét tô; Áp dụng dùng
+- [x] Ctrl+Z / Ctrl+Shift+Z trong hộp thoại; Hủy bỏ hết nét tô; Áp dụng dùng
       mask đã tô (đợi da tính xong) và trả công cụ cũ.
 - Cổng: tô thêm phần tóc/da AI bỏ sót và bớt phần lấy thừa bằng vài nét; kéo
-  thanh sau khi tô cho kết quả đúng vùng đã tô.
+  thanh sau khi tô cho kết quả đúng vùng đã tô. **Đạt — chủ test OK 01/10**
+  (chủ bất ngờ vì Thông minh tự nhận sợi tóc mảnh khi tô lại vùng tóc).
 
 ### Pha 3 — (sau, tùy chủ) lưu mask đã tô
 
 - [ ] Lưu mask đã tô cùng layer "Chân dung" để mở lại chỉnh tiếp; nền cho đồng
       bộ hàng loạt (Phase 5 kế hoạch Evoto).
+
+### Pha 5 — (sau) Cọ Thông minh cho Refine Selection
+
+- [ ] Chủ 01/10: đưa thuật toán "Color Range hai phía" của cọ Thông minh
+      (`core::portrait::brush`) sang Refine Brush của Refine Selection (thay
+      `refine_edge_stamp` ở chế độ Smart; mẫu lấy từ vùng chọn đang tinh chỉnh).
 
 ### Pha 4 — (sau) "Sáng tóc" bằng thanh Blacks của Develop
 
@@ -153,3 +160,5 @@ và qua cổng · `[!]` bị chặn.
   cách trên ảnh thật, chốt "Color Range hai phía" (xem Pha 2); chờ chủ test.
 - **2026-10-01** — Chủ test cọ Thông minh OK; báo da cổ/ngực bị cắt ngang → Pha
   2b (khung da kéo theo da model thấy); chờ chủ test.
+- **2026-10-01** — Chủ test Pha 2b OK; thêm Pha 5 (cọ Thông minh cho Refine
+  Selection, làm sau). Bắt đầu Pha 1.
