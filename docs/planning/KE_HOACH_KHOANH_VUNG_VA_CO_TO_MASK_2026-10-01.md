@@ -107,7 +107,34 @@ và qua cổng · `[!]` bị chặn.
   Tay áo ren mờ của cô dâu vẫn không nhận là da (Sapiens2 đọc là áo) — chấp
   nhận.
 - Cổng: ảnh chân dung vai/tay trần — mask da phủ hết vai, tay, bàn tay, không
-  còn mép thẳng; không lan sang áo/nền. **Chờ chủ test.**
+  còn mép thẳng; không lan sang áo/nền. **Đạt — chủ test OK 01/10.**
+
+### Pha 6 — Lông mày: mask mượt, mặc định giữ nguyên
+
+- Chủ test 2c OK, yêu cầu: mask lông mày hơi thô, vùng chuyển không mượt;
+  **mặc định lông mày giữ nguyên như ảnh gốc**, người dùng tự kéo đậm nhạt,
+  độ nét… từ 0 nếu muốn.
+- Soát (probe `probe_brows`, 10 mặt): mask cũ = đa giác mốc mặt tô gần đặc,
+  mép răng cưa; lông mày bạc (Nelson) gần như không bắt (chỉ tính điểm tối hơn
+  da); kéo "Lông mày" vẽ ra dải cứng; mặc định làm mịn da và "Tăng nét" (20)
+  vẫn đụng lông mày.
+- [~] Mask mới (`BrowLayers` vùng riêng trong khung mặt): độ lệch màu của từng
+  điểm so với da quanh lông mày (nội suy qua lông mày); mỗi bên lông mày tự
+  học mức lệch của da trơn cạnh nó và của lõi lông mày → bắt được lông mày
+  đậm, bạc, nhạt. **Hình lông mày** = nơi sợi tụ lại (làm mờ cỡ e/45, chuẩn
+  hóa theo lõi từng bên) → mép mềm. Vùng tìm lệch lên trên và quá đuôi, gần
+  như không xuống dưới (phấn mắt), không vào giữa hai mày (nếp nhăn); bỏ chỗ
+  Sapiens2 thấy tóc (mái) — Sapiens2 luôn đọc lông mày là da mặt.
+- [~] Hình lông mày được **loại khỏi chỉnh da và "Tăng nét"** → mặc định lông
+  mày y ảnh gốc.
+- [~] Mục **"Lông mày"** riêng trong hộp thoại, mặc định 0: Đậm nhạt (phải:
+  đậm sợi + phủ nhẹ như chì kẻ; trái: kéo tông lông mày về màu da bên dưới,
+  giữ vân sợi), Độ nét, Màu lông mày + Phủ màu lông mày. "Hiện vùng nhận
+  diện" tô vàng hình lông mày mềm.
+- Còn lại: một sợi tóc mái dày sát đuôi mày (Mazie) vẫn bị tính là lông mày —
+  Sapiens2 đọc chỗ đó là da; chưa có cọ "Tô vùng → Lông mày".
+- Cổng: mặc định lông mày y gốc; kéo đậm/nhạt/nét/màu ra kết quả tự nhiên,
+  không có viền cứng. **Chờ chủ test.**
 
 ### Pha 1 — Khoanh vùng trước khi phân tích (chủ cho làm sau Pha 2)
 
@@ -211,3 +238,5 @@ và qua cổng · `[!]` bị chặn.
 - **2026-10-01** — Pha 2c code xong (khung da riêng có cổng màu, giữ da qua dây
   áo, nhìn rộng lần hai khi da chạm mép khung model, mờ rộng trên lưới khối);
   probe đạt; chờ chủ test.
+- **2026-10-01** — Chủ test 2c OK; yêu cầu lông mày → Pha 6 code xong (mask
+  hình lông mày mềm, mặc định giữ nguyên, mục "Lông mày" từ 0); chờ chủ test.
