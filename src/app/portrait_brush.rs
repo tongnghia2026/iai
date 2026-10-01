@@ -78,7 +78,7 @@ impl PortraitBrush {
 fn region_of(model: &PortraitModel, face: usize, target: MaskTarget) -> Region {
     let f = &model.faces[face];
     match target {
-        MaskTarget::Skin => f.region,
+        MaskTarget::Skin => f.skin.region(),
         MaskTarget::Hair => f.hair_region,
     }
 }

@@ -67,7 +67,7 @@ mod tests {
                 })
                 .collect();
             for (i, face) in new.faces.iter().enumerate() {
-                let r = face.region;
+                let r = face.skin.region;
                 let parts = segmenter
                     .segment_face(&rgba, width, height, &face.mesh)
                     .unwrap();
@@ -88,6 +88,7 @@ mod tests {
                 let input = skin_mask::SkinInputs {
                     src: &src,
                     region: r,
+                    face: face.region,
                     extent: face.extent,
                     points: &face.mesh.points,
                     parts: trusted.then_some(&parts),
@@ -183,6 +184,33 @@ mod tests {
                         .unwrap();
                 }
             }
+        }
+    }
+
+    /// Opt-in: IAI_PORTRAIT_ANALYSE names one photo; analyses it alone (for
+    /// timing and peak memory) and prints each face's regions.
+    #[test]
+    #[ignore]
+    fn probe_analyse() {
+        let Ok(path) = std::env::var("IAI_PORTRAIT_ANALYSE") else {
+            return;
+        };
+        let image = image::open(&path).unwrap().to_rgba8();
+        let (width, height) = image.dimensions();
+        let rgba = image.into_raw();
+        let started = std::time::Instant::now();
+        let model = analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
+        println!(
+            "{width}x{height}: analyse {} ms {:?}",
+            started.elapsed().as_millis(),
+            model.timings
+        );
+        for face in &model.faces {
+            let (r, s) = (face.region, face.skin.region);
+            println!(
+                "  face {}x{} skin {}x{} at {},{}",
+                r.w, r.h, s.w, s.h, s.x, s.y
+            );
         }
     }
 
@@ -342,15 +370,16 @@ mod tests {
                         / 3.0
                 };
                 let (mut skin_sum, mut skin_n, mut bg_sum, mut bg_n) = (0.0f64, 0u64, 0.0f64, 0u64);
-                for yy in 0..f.region.h {
-                    for xx in 0..f.region.w {
-                        let i = (yy * f.region.w + xx) as usize;
-                        if f.skin.mask[i] > 200
-                            && f.nose[i] == 0
-                            && f.lips[i] == 0
-                            && f.iris[i] == 0
-                        {
-                            let (x, y) = (f.region.x + xx, f.region.y + yy);
+                let sr = f.skin.region;
+                for yy in 0..sr.h {
+                    for xx in 0..sr.w {
+                        let i = (yy * sr.w + xx) as usize;
+                        let (x, y) = (sr.x + xx, sr.y + yy);
+                        let feature = f
+                            .region
+                            .index_at(x, y)
+                            .is_some_and(|k| f.nose[k] != 0 || f.lips[k] != 0 || f.iris[k] != 0);
+                        if f.skin.mask[i] > 200 && !feature {
                             let hx = x as i64 - f.hair_region.x as i64;
                             let hy = y as i64 - f.hair_region.y as i64;
                             let in_hair = !f.hair.is_empty()
@@ -381,12 +410,12 @@ mod tests {
                     bg_sum / bg_n.max(1) as f64
                 );
                 let mut on_skin = 0u64;
-                for yy in 0..f.region.h {
-                    for xx in 0..f.region.w {
-                        if f.skin.mask[(yy * f.region.w + xx) as usize] < 200 || f.hair.is_empty() {
+                for yy in 0..sr.h {
+                    for xx in 0..sr.w {
+                        if f.skin.mask[(yy * sr.w + xx) as usize] < 200 || f.hair.is_empty() {
                             continue;
                         }
-                        let (x, y) = (f.region.x + xx, f.region.y + yy);
+                        let (x, y) = (sr.x + xx, sr.y + yy);
                         if x >= f.hair_region.x
                             && y >= f.hair_region.y
                             && x < f.hair_region.x + f.hair_region.w
@@ -438,10 +467,11 @@ mod tests {
                     "  face {i}: region {}x{} extent {:.0} agreement {:?}",
                     r.w, r.h, face.extent, face.agreement
                 );
+                let face_interior = face.skin.region.crop(&face.skin.interior, r);
                 let mut scores: Vec<u8> = face
                     .spot_score
                     .iter()
-                    .zip(&face.skin.interior)
+                    .zip(&face_interior)
                     .filter(|(_, &m)| m > 200)
                     .map(|(&b, _)| b)
                     .collect();
@@ -508,11 +538,12 @@ mod tests {
                 sheet
                     .save(dir.join(format!("pr_{name}_face{i}.jpg")))
                     .unwrap();
+                let face_skin = face.skin.region.crop(&face.skin.mask, r);
                 let masks = image::RgbImage::from_fn(r.w, r.h, |x, y| {
                     let k = (y * r.w + x) as usize;
                     let spot = face.spot_score[k] as f32 / analysis::BLEMISH_SCALE > 0.81;
                     image::Rgb([
-                        face.skin.mask[k].max(if spot { 255 } else { 0 }),
+                        face_skin[k].max(if spot { 255 } else { 0 }),
                         face.skin.under_eye[k].max(face.eye_white[k]).max(if spot {
                             255
                         } else {
@@ -530,27 +561,37 @@ mod tests {
                 masks
                     .save(dir.join(format!("pr_{name}_mask{i}.jpg")))
                     .unwrap();
-                image::GrayImage::from_raw(r.w, r.h, face.skin.mask.clone())
+                let sr = face.skin.region;
+                println!("    skin region at {},{} {}x{}", sr.x, sr.y, sr.w, sr.h);
+                image::GrayImage::from_raw(sr.w, sr.h, face.skin.mask.clone())
                     .unwrap()
                     .save(dir.join(format!("pr_{name}_skin{i}.png")))
                     .unwrap();
-                image::GrayImage::from_raw(r.w, r.h, face.skin.interior.clone())
+                image::GrayImage::from_raw(sr.w, sr.h, face.skin.interior.clone())
                     .unwrap()
                     .save(dir.join(format!("pr_{name}_inside{i}.png")))
                     .unwrap();
                 if i == 0 && std::env::var("IAI_PORTRAIT_PROBE_PARTS").is_ok() {
                     let mut seg = crate::core::ai::body_parts::Segmenter::load(false).unwrap();
                     let parts = seg.segment_face(&rgba, width, height, &face.mesh).unwrap();
+                    let sr = face.skin.region;
                     let dump = |group: usize, tag: &str| {
-                        image::GrayImage::from_fn(r.w, r.h, |x, y| {
-                            let g = parts.groups_at((r.x + x) as f32 + 0.5, (r.y + y) as f32 + 0.5);
-                            image::Luma([(g[group] * 255.0).round() as u8])
+                        image::GrayImage::from_fn(sr.w, sr.h, |x, y| {
+                            let (px, py) = ((sr.x + x) as f32 + 0.5, (sr.y + y) as f32 + 0.5);
+                            let g = parts.groups_at(px, py);
+                            let v = if parts.covers(px, py) {
+                                g[group] * 255.0
+                            } else {
+                                40.0
+                            };
+                            image::Luma([v.round() as u8])
                         })
                         .save(dir.join(format!("pr_{name}_{tag}{i}.png")))
                         .unwrap();
                     };
                     dump(crate::core::ai::body_parts::GROUP_HAIR, "phair");
                     dump(crate::core::ai::body_parts::GROUP_FACE_SKIN, "pskin");
+                    dump(crate::core::ai::body_parts::GROUP_BODY_SKIN, "pbody");
                 }
                 if !face.hair.is_empty() {
                     let hr = face.hair_region;

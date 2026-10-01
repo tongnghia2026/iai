@@ -53,6 +53,46 @@ impl Region {
         self.len() == 0
     }
 
+    /// Index of image pixel (x, y) in this region, if it lies inside.
+    pub fn index_at(&self, x: u32, y: u32) -> Option<usize> {
+        (x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h)
+            .then(|| ((y - self.y) * self.w + x - self.x) as usize)
+    }
+
+    /// Index in this region of pixel `i` of `inner`, a region inside it.
+    pub fn index_of(&self, inner: Region, i: usize) -> usize {
+        let (x, y) = (i as u32 % inner.w, i as u32 / inner.w);
+        ((inner.y - self.y + y) * self.w + inner.x - self.x + x) as usize
+    }
+
+    /// The smallest region holding both.
+    pub fn union(&self, other: Region) -> Region {
+        if other.is_empty() {
+            return *self;
+        }
+        if self.is_empty() {
+            return other;
+        }
+        let (x0, y0) = (self.x.min(other.x), self.y.min(other.y));
+        let x1 = (self.x + self.w).max(other.x + other.w);
+        let y1 = (self.y + self.h).max(other.y + other.h);
+        Region {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
+    }
+
+    /// The values of `inner`, a region inside this one, from this region's
+    /// `values`.
+    pub fn crop<T: Copy + Send + Sync>(&self, values: &[T], inner: Region) -> Vec<T> {
+        (0..inner.len())
+            .into_par_iter()
+            .map(|i| values[self.index_of(inner, i)])
+            .collect()
+    }
+
     /// Bounds of `points` grown by the given margins and clipped to the image.
     pub fn around(
         points: impl Iterator<Item = [f32; 2]>,
@@ -192,5 +232,34 @@ mod tests {
         assert!(mask[2 * 40 + 2] < 0.01);
         let edge = mask[20 * 40 + 10];
         assert!(edge > 0.2 && edge < 0.8, "edge coverage {edge}");
+    }
+
+    #[test]
+    fn inner_regions_map_into_outer_ones() {
+        let outer = Region {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 25,
+        };
+        let inner = Region {
+            x: 15,
+            y: 22,
+            w: 8,
+            h: 6,
+        };
+        let values: Vec<usize> = (0..outer.len()).collect();
+        let cropped = outer.crop(&values, inner);
+        assert_eq!(cropped[0], outer.index_at(15, 22).unwrap());
+        assert_eq!(cropped[9], outer.index_at(16, 23).unwrap());
+        assert_eq!(outer.index_at(40, 22), None);
+        assert_eq!(outer.union(inner), outer);
+        let wide = inner.union(Region {
+            x: 30,
+            y: 40,
+            w: 5,
+            h: 5,
+        });
+        assert_eq!((wide.x, wide.y, wide.w, wide.h), (15, 22, 20, 23));
     }
 }

@@ -29,6 +29,11 @@ const PRIOR: f32 = 1.5;
 const LAMBDA: f32 = 6.0;
 const SCALE: f32 = 64.0;
 const HARD: i32 = 1 << 26;
+/// Part-model skin odds (face plus body) above which the colour cut may take
+/// skin there; the fence grows this by about e/25.
+pub(super) const SEEN_SKIN: f32 = 0.35;
+/// Part-model skin odds that keep skin apart from the face's (past a strap).
+const SURE_SKIN: f32 = 0.8;
 /// Most cells in the first, coarsest cut.
 const TOP_CELLS: usize = 60_000;
 /// Cells on each side of a coarser boundary that the next level re-solves.
@@ -87,9 +92,11 @@ pub(super) fn legacy() -> bool {
 }
 
 pub(super) struct SkinInputs<'a> {
-    /// The face region of the photo, 0..1.
+    /// The skin region of the photo, 0..1.
     pub src: &'a [[f32; 3]],
     pub region: Region,
+    /// The face's own region inside it (eyes, brows, mouth).
+    pub face: Region,
     pub extent: f32,
     pub points: &'a [[f32; 3]],
     /// Part labels, only when they agree with the mesh.
@@ -566,7 +573,7 @@ impl<'a> Scene<'a> {
                     let x = r.x as f32 + ((c % fence_w) as f32 + 0.5) * fence_cell;
                     let y = r.y as f32 + ((c / fence_w) as f32 + 0.5) * fence_cell;
                     let g = parts.groups_at(x, y);
-                    g[body_parts::GROUP_FACE_SKIN] + g[body_parts::GROUP_BODY_SKIN] > 0.35
+                    g[body_parts::GROUP_FACE_SKIN] + g[body_parts::GROUP_BODY_SKIN] > SEEN_SKIN
                 })
                 .collect();
             let reach = ((e / 25.0) / fence_cell).ceil() as isize;
@@ -1026,6 +1033,16 @@ pub(super) fn skin_mask(input: &SkinInputs) -> Option<Vec<f32>> {
         }
         labels = solve_level(&scene, &pyramid, &models, j, &state, |c| centre(j, c));
         if previous.is_none() {
+            // Skin the part model is sure of stays even where clothes part it
+            // from the face (an arm past a strap).
+            let sure: Vec<usize> = (0..gw * gh)
+                .into_par_iter()
+                .filter(|&c| {
+                    let (x, y) = centre(j, c);
+                    labels[c] && scene.read(x, y).is_some_and(|r| r.skin > SURE_SKIN)
+                })
+                .collect();
+            starts.extend(sure);
             labels = connected(&labels, gw, gh, &starts);
             // Start cells for the final connectivity pass, at full resolution.
             starts = starts
@@ -1062,24 +1079,26 @@ pub(super) fn skin_mask(input: &SkinInputs) -> Option<Vec<f32>> {
         .map(|(&g, &m)| [g, m, 0.0, 0.0])
         .collect();
     blur4(&mut local, w, h, (e / 150.0).max(2.0));
-    let mut brow_zone = vec![0.0f32; w * h];
+    // Brows and eyes lie in the face region; their zones are kept that size.
+    let face = input.face;
+    let mut brow_zone = vec![0.0f32; face.len()];
     for ring in [&RIGHT_BROW[..], &LEFT_BROW[..]] {
         stamp_polygon(
             &mut brow_zone,
-            r,
+            face,
             &loop_points(input.points, ring),
             0.02 * e,
             0.02 * e,
         );
     }
-    let rim = brow_rim(&guide, &hard, &brow_zone, w, h, e);
+    let rim = brow_rim(&guide, &hard, &brow_zone, r, face, e);
     drop(hard);
-    let mut lash_zone = vec![0.0f32; w * h];
-    let mut eye_guard = vec![0.0f32; w * h];
+    let mut lash_zone = vec![0.0f32; face.len()];
+    let mut eye_guard = vec![0.0f32; face.len()];
     for ring in [&RIGHT_EYE[..], &LEFT_EYE[..]] {
         let outline = loop_points(input.points, ring);
-        stamp_polygon(&mut lash_zone, r, &outline, 0.012 * e, 0.01 * e);
-        stamp_polygon(&mut eye_guard, r, &outline, 0.005 * e, 0.01 * e);
+        stamp_polygon(&mut lash_zone, face, &outline, 0.012 * e, 0.01 * e);
+        stamp_polygon(&mut eye_guard, face, &outline, 0.005 * e, 0.01 * e);
     }
     let fade = (0.06 * e).max(4.0);
     Some(
@@ -1091,16 +1110,18 @@ pub(super) fn skin_mask(input: &SkinInputs) -> Option<Vec<f32>> {
                 if m <= 0.0 {
                     return 0.0;
                 }
+                let m = m * side_fade(i, w, h, input.open_sides, fade);
+                let Some(f) = face.index_at(r.x + (i % w) as u32, r.y + (i / w) as u32) else {
+                    return m;
+                };
                 let darker = around - guide[i];
                 let hairs = smoothstep(0.03, 0.12, darker).max(
                     rim.get(&i)
                         .map_or(0.0, |&skin| smoothstep(0.03, 0.1, skin - guide[i])),
                 );
                 let strand =
-                    (brow_zone[i] * hairs).max(lash_zone[i] * smoothstep(0.04, 0.15, darker));
-                m * (1.0 - strand)
-                    * (1.0 - eye_guard[i])
-                    * side_fade(i, w, h, input.open_sides, fade)
+                    (brow_zone[f] * hairs).max(lash_zone[f] * smoothstep(0.04, 0.15, darker));
+                m * (1.0 - strand) * (1.0 - eye_guard[f])
             })
             .collect(),
     )
@@ -1109,18 +1130,21 @@ pub(super) fn skin_mask(input: &SkinInputs) -> Option<Vec<f32>> {
 /// Luma of the skin around the brows (not the brows themselves), for each
 /// brow-zone pixel: brow hairs are what is clearly darker than it, however
 /// dense the brow.
+/// `guide` and `skin` lie in `region`, `zone` in the `face` region inside it;
+/// the result is keyed by `region` pixel.
 fn brow_rim(
     guide: &[f32],
     skin: &[f32],
     zone: &[f32],
-    w: usize,
-    h: usize,
+    region: Region,
+    face: Region,
     e: f32,
 ) -> std::collections::HashMap<usize, f32> {
-    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    let (fw, fh) = (face.w as usize, face.h as usize);
+    let (mut x0, mut y0, mut x1, mut y1) = (fw, fh, 0, 0);
     for (i, &z) in zone.iter().enumerate() {
         if z > 0.0 {
-            let (x, y) = (i % w, i / w);
+            let (x, y) = (i % fw, i / fw);
             x0 = x0.min(x);
             y0 = y0.min(y);
             x1 = x1.max(x + 1);
@@ -1132,21 +1156,25 @@ fn brow_rim(
     }
     let pad = (e / 12.0) as usize;
     let (x0, y0) = (x0.saturating_sub(pad), y0.saturating_sub(pad));
-    let (x1, y1) = ((x1 + pad).min(w), (y1 + pad).min(h));
+    let (x1, y1) = ((x1 + pad).min(fw), (y1 + pad).min(fh));
     let (cw, ch) = (x1 - x0, y1 - y0);
+    let at = |k: usize| {
+        let f = (y0 + k / cw) * fw + x0 + k % cw;
+        (f, region.index_of(face, f))
+    };
     let mut sums: Vec<[f32; 4]> = (0..cw * ch)
         .into_par_iter()
         .map(|k| {
-            let i = (y0 + k / cw) * w + x0 + k % cw;
-            let weight = skin[i] * (1.0 - zone[i]);
+            let (f, i) = at(k);
+            let weight = skin[i] * (1.0 - zone[f]);
             [guide[i] * weight, weight, 0.0, 0.0]
         })
         .collect();
     blur4(&mut sums, cw, ch, (e / 30.0).max(3.0));
     (0..cw * ch)
         .filter_map(|k| {
-            let i = (y0 + k / cw) * w + x0 + k % cw;
-            (zone[i] > 0.0 && sums[k][1] > 1e-3).then(|| (i, sums[k][0] / sums[k][1]))
+            let (f, i) = at(k);
+            (zone[f] > 0.0 && sums[k][1] > 1e-3).then(|| (i, sums[k][0] / sums[k][1]))
         })
         .collect()
 }
@@ -1530,14 +1558,16 @@ mod tests {
         points: &'a [[f32; 3]],
         owners: &'a [([f32; 2], f32)],
     ) -> SkinInputs<'a> {
+        let region = Region {
+            x: 0,
+            y: 0,
+            w: W,
+            h: H,
+        };
         SkinInputs {
             src,
-            region: Region {
-                x: 0,
-                y: 0,
-                w: W,
-                h: H,
-            },
+            region,
+            face: region,
             extent: 190.0,
             points,
             parts: None,

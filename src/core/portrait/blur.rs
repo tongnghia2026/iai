@@ -44,11 +44,65 @@ fn transpose(data: &[[f32; 4]], width: usize, height: usize) -> Vec<[f32; 4]> {
     out
 }
 
-/// Blur four channels in place; `sigma` in pixels.
+/// Blur four channels in place; `sigma` in pixels. A wide blur runs on a grid
+/// of blocks up to 8 pixels across and is read back bilinearly: its result is
+/// smooth on that scale anyway.
 pub fn blur4(data: &mut Vec<[f32; 4]>, width: usize, height: usize, sigma: f32) {
     if width == 0 || height == 0 {
         return;
     }
+    let mut factor = 1usize;
+    while factor < 8 && sigma / (factor * 2) as f32 >= 10.0 {
+        factor *= 2;
+    }
+    if factor == 1 {
+        box_blur(data, width, height, sigma);
+        return;
+    }
+    let (cw, ch) = (width.div_ceil(factor), height.div_ceil(factor));
+    let mut coarse: Vec<[f32; 4]> = (0..cw * ch)
+        .into_par_iter()
+        .map(|c| {
+            let (x0, y0) = ((c % cw) * factor, (c / cw) * factor);
+            let (x1, y1) = ((x0 + factor).min(width), (y0 + factor).min(height));
+            let mut sum = [0.0f32; 4];
+            for y in y0..y1 {
+                for v in &data[y * width + x0..y * width + x1] {
+                    for k in 0..4 {
+                        sum[k] += v[k];
+                    }
+                }
+            }
+            let n = ((x1 - x0) * (y1 - y0)) as f32;
+            sum.map(|s| s / n)
+        })
+        .collect();
+    // The radius whose three passes spread as far as the full blur's would.
+    let radius = sigma.round();
+    let spread = (radius * (radius + 1.0)).sqrt() / factor as f32;
+    let coarse_radius = ((1.0 + 4.0 * spread * spread).sqrt() - 1.0) * 0.5;
+    box_blur(&mut coarse, cw, ch, coarse_radius);
+    let at = |p: usize, cells: usize| {
+        let t = ((p as f32 + 0.5) / factor as f32 - 0.5).clamp(0.0, (cells - 1) as f32);
+        let lo = t as usize;
+        (lo, (lo + 1).min(cells - 1), t - lo as f32)
+    };
+    data.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
+        let (y0, y1, fy) = at(y, ch);
+        for (x, cell) in row.iter_mut().enumerate() {
+            let (x0, x1, fx) = at(x, cw);
+            let (a, b) = (coarse[y0 * cw + x0], coarse[y0 * cw + x1]);
+            let (c, d) = (coarse[y1 * cw + x0], coarse[y1 * cw + x1]);
+            for k in 0..4 {
+                let top = a[k] + (b[k] - a[k]) * fx;
+                let bottom = c[k] + (d[k] - c[k]) * fx;
+                cell[k] = top + (bottom - top) * fy;
+            }
+        }
+    });
+}
+
+fn box_blur(data: &mut Vec<[f32; 4]>, width: usize, height: usize, sigma: f32) {
     // Three box passes of radius r give a Gaussian of sigma ~ r.
     let radius = sigma.round().max(0.0) as usize;
     if radius == 0 {
@@ -109,5 +163,39 @@ mod tests {
         assert!(data[10 * w + 15][0] < 1.0);
         let total: f32 = data.iter().map(|p| p[0] - 0.5).sum();
         assert!((total - 10.0).abs() < 0.05, "mass {total}");
+    }
+
+    #[test]
+    fn wide_blur_on_blocks_matches_the_full_one() {
+        for sigma in [24.0f32, 50.0, 90.0] {
+            let (w, h) = ((sigma * 12.0) as usize, (sigma * 9.0) as usize);
+            let field: Vec<[f32; 4]> = (0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as f32 / sigma, (i / w) as f32 / sigma);
+                    let v = if (x - 6.0).hypot(y - 4.5) < 2.5 {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    [v, (x * 2.4).sin(), 0.5, 0.0]
+                })
+                .collect();
+            let mut full = field.clone();
+            box_blur(&mut full, w, h, sigma);
+            let mut fast = field;
+            blur4(&mut fast, w, h, sigma);
+            // Edges replicate a block's mean rather than one pixel, so only
+            // the inside is compared.
+            let m = (2.0 * sigma) as usize;
+            let worst = (0..w * h)
+                .filter(|i| (m..w - m).contains(&(i % w)) && (m..h - m).contains(&(i / w)))
+                .map(|i| {
+                    (0..3)
+                        .map(|k| (full[i][k] - fast[i][k]).abs())
+                        .fold(0.0, f32::max)
+                })
+                .fold(0.0, f32::max);
+            assert!(worst < 0.02, "sigma {sigma}: largest difference {worst}");
+        }
     }
 }

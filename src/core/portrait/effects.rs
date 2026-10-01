@@ -152,12 +152,15 @@ fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-/// Skin retouch of one pixel from its bands: the photo `src`, the fine-split
-/// low `l1` and the mid-split low `l2`.
+/// Skin retouch of skin-region pixel `i` from its bands: the photo `src`, the
+/// fine-split low `l1` and the mid-split low `l2`; `under` is its under-eye
+/// weight (0..1).
+#[allow(clippy::too_many_arguments)]
 fn skin_result(
     skin: &SkinLayers,
     s: &PortraitSettings,
     i: usize,
+    under: f32,
     src: [f32; 3],
     l1: [f32; 3],
     l2: [f32; 3],
@@ -177,7 +180,7 @@ fn skin_result(
     for k in 0..3 {
         low_c[k] += (target[k] - low_c[k]) * 0.6 * s.even_tone;
     }
-    let under = skin.under_eye[i] as f32 / 255.0 * s.dark_circles;
+    let under = under * s.dark_circles;
     if under > 0.0 {
         low_y += under * (skin.cheek_luma - low_y).max(0.0) * 0.85;
         for k in 0..3 {
@@ -255,13 +258,16 @@ fn colourise(c: [f32; 3], hue: f32, saturation: f32) -> [f32; 3] {
     hsl_to_rgb([hue, s.max(saturation), l])
 }
 
-/// The retouched colour of one region pixel. `src` is the photo in 0..1;
-/// `fetch(dx, dy)` reads the photo at an offset from this pixel.
+/// The retouched colour of skin-region pixel `i`, which is pixel `f` of the
+/// face region when it lies there. `src` is the photo in 0..1; `fetch(dx,
+/// dy)` reads the photo at an offset from this pixel.
+#[allow(clippy::too_many_arguments)]
 fn retouch_pixel(
     face: &FaceModel,
     skin: &SkinLayers,
     s: &PortraitSettings,
     i: usize,
+    f: Option<usize>,
     src: [f32; 3],
     fetch: &dyn Fn(isize, isize) -> [f32; 3],
 ) -> [f32; 3] {
@@ -271,35 +277,37 @@ fn retouch_pixel(
         let inside = skin.interior[i] as f32 / 255.0;
         let l1 = from_u16(skin.low1[i]);
         let l2 = from_u16(skin.low2[i]);
-        let mut r = skin_result(skin, s, i, src, l1, l2, inside);
-        let cover = face.spot_cover[i] as f32 / 255.0;
-        if s.blemish > 0.0 && cover > 0.0 {
-            let score = face.spot_score[i] as f32 / BLEMISH_SCALE;
+        let under = f.map_or(0.0, |f| skin.under_eye[f] as f32 / 255.0);
+        let mut r = skin_result(skin, s, i, under, src, l1, l2, inside);
+        let cover = f.map_or(0.0, |f| face.spot_cover[f] as f32 / 255.0);
+        if let Some(f) = f.filter(|_| s.blemish > 0.0 && cover > 0.0) {
+            let score = face.spot_score[f] as f32 / BLEMISH_SCALE;
             let threshold = 1.5 - 1.15 * s.blemish;
             let spot = smoothstep(threshold * 0.85, threshold * 1.15, score) * cover * inside;
             if spot > 0.0 {
                 // Heal like a healing brush: borrow the texture of nearby clean
                 // skin, shifted to the colour around this spot.
-                let here = from_u16(face.heal_base[i]);
-                let [dx, dy] = face.donor[i];
+                let here = from_u16(face.heal_base[f]);
+                let [dx, dy] = face.donor[f];
                 let (healed, healed_l1) = if dx == 0 && dy == 0 {
                     (here, here)
                 } else {
-                    let q =
-                        (i as isize + dy as isize * face.region.w as isize + dx as isize) as usize;
-                    let shift = sub(here, from_u16(face.heal_base[q]));
+                    let (dx, dy) = (dx as isize, dy as isize);
+                    let qf = (f as isize + dy * face.region.w as isize + dx) as usize;
+                    let qi = (i as isize + dy * skin.region.w as isize + dx) as usize;
+                    let shift = sub(here, from_u16(face.heal_base[qf]));
                     (
-                        add(fetch(dx as isize, dy as isize), shift),
-                        add(from_u16(skin.low1[q]), shift),
+                        add(fetch(dx, dy), shift),
+                        add(from_u16(skin.low1[qi]), shift),
                     )
                 };
-                let fixed = skin_result(skin, s, i, healed, healed_l1, l2, inside);
+                let fixed = skin_result(skin, s, i, under, healed, healed_l1, l2, inside);
                 for k in 0..3 {
                     r[k] += (fixed[k] - r[k]) * spot;
                 }
             }
         }
-        let contour = face.nose[i] as f32 / 127.0 * s.nose_bridge;
+        let contour = f.map_or(0.0, |f| face.nose[f] as f32 / 127.0 * s.nose_bridge);
         if contour != 0.0 {
             // Shade lightly: the sides only need to hint at depth.
             let gain = if contour > 0.0 {
@@ -313,8 +321,11 @@ fn retouch_pixel(
             out[k] = src[k] + m * (r[k] - src[k]);
         }
     }
-
-    let white = face.eye_white[i] as f32 / 255.0 * s.eye_white;
+    // The features lie in the face region.
+    let Some(f) = f else {
+        return out;
+    };
+    let white = face.eye_white[f] as f32 / 255.0 * s.eye_white;
     if white > 0.0 {
         let (y, c) = split(out);
         out = join(
@@ -322,24 +333,24 @@ fn retouch_pixel(
             c.map(|v| v * (1.0 - 0.75 * white)),
         );
     }
-    let iris = face.iris[i] as f32 / 255.0 * s.iris;
+    let iris = face.iris[f] as f32 / 255.0 * s.iris;
     if iris > 0.0 {
         let (y, c) = split(out);
         out = join(y * (1.0 + 0.18 * iris), c.map(|v| v * (1.0 + 0.35 * iris)));
     }
-    let iris_tint = face.iris[i] as f32 / 255.0 * s.iris_tint;
+    let iris_tint = face.iris[f] as f32 / 255.0 * s.iris_tint;
     if iris_tint > 0.0 {
         let tinted = colourise(out, s.iris_hue, 0.5);
         for k in 0..3 {
             out[k] += (tinted[k] - out[k]) * iris_tint;
         }
     }
-    let teeth = face.teeth[i] as f32 / 255.0 * s.teeth;
+    let teeth = face.teeth[f] as f32 / 255.0 * s.teeth;
     if teeth > 0.0 {
         let (y, c) = split(out);
         out = join(y * (1.0 + 0.1 * teeth), c.map(|v| v * (1.0 - 0.8 * teeth)));
     }
-    let lips = face.lips[i] as f32 / 255.0;
+    let lips = face.lips[f] as f32 / 255.0;
     if lips > 0.0 && (s.lip_saturation != 0.0 || s.lip_tint > 0.0 || s.lip_brightness != 0.0) {
         let tinted = colourise(out, s.lip_hue, 0.45);
         let mut lip = out;
@@ -355,7 +366,7 @@ fn retouch_pixel(
             out[k] += (coloured[k] - out[k]) * lips;
         }
     }
-    let brow = face.brows[i] as f32 / 255.0 * s.brows.abs();
+    let brow = face.brows[f] as f32 / 255.0 * s.brows.abs();
     if brow > 0.0 {
         if s.brows > 0.0 {
             out = out.map(|v| v * (1.0 - 0.4 * brow));
@@ -366,9 +377,9 @@ fn retouch_pixel(
             }
         }
     }
-    let crisp = face.detail[i] as f32 / 255.0 * s.sharpen;
+    let crisp = face.detail[f] as f32 / 255.0 * s.sharpen;
     if crisp > 0.0 {
-        let soft = from_u16(face.soft[i]);
+        let soft = from_u16(face.soft[f]);
         for k in 0..3 {
             out[k] += 1.5 * crisp * (src[k] - soft[k]);
         }
@@ -414,31 +425,23 @@ fn hair_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> &'a [u8] {
         .map_or(&face.hair[..], |h| &h[..])
 }
 
-/// The smallest rectangle holding every enabled face's region, and their
-/// hair regions when `hair` is set.
+/// The smallest rectangle holding every enabled face's skin region (which
+/// holds its face region), and their hair regions when `hair` is set.
 pub fn union_region(model: &PortraitModel, enabled: &[bool], hair: bool) -> Option<Region> {
-    let mut bounds: Option<(u32, u32, u32, u32)> = None;
-    for (face, _) in model
+    model
         .faces
         .iter()
         .zip(enabled.iter().chain(std::iter::repeat(&true)))
         .filter(|(face, &on)| on && !face.region.is_empty())
-    {
-        let hair_region = (hair && !face.hair_region.is_empty()).then_some(face.hair_region);
-        for r in std::iter::once(face.region).chain(hair_region) {
-            let (x1, y1) = (r.x + r.w, r.y + r.h);
-            bounds = Some(match bounds {
-                None => (r.x, r.y, x1, y1),
-                Some((a, b, c, d)) => (a.min(r.x), b.min(r.y), c.max(x1), d.max(y1)),
-            });
-        }
-    }
-    bounds.map(|(x0, y0, x1, y1)| Region {
-        x: x0,
-        y: y0,
-        w: x1 - x0,
-        h: y1 - y0,
-    })
+        .map(|(face, _)| {
+            let r = face.skin.region;
+            if hair {
+                r.union(face.hair_region)
+            } else {
+                r
+            }
+        })
+        .reduce(|a, b| a.union(b))
 }
 
 /// Retouch every enabled face of `rgba` (the analysed image) and return the
@@ -479,8 +482,8 @@ pub fn render(
         .filter(|(_, (_, &on))| on)
     {
         let skin = skin_of(face, edits.get(index));
-        let r = face.region;
-        let (fw, fx, fy) = (
+        let r = skin.region;
+        let (sw, sx, sy) = (
             r.w as usize,
             (r.x - union.x) as usize,
             (r.y - union.y) as usize,
@@ -488,19 +491,23 @@ pub fn render(
         delta
             .par_chunks_mut(uw)
             .enumerate()
-            .skip(fy)
+            .skip(sy)
             .take(r.h as usize)
             .for_each(|(urow, line)| {
-                let row = urow - fy;
-                for col in 0..fw {
-                    let i = row * fw + col;
+                let row = urow - sy;
+                for col in 0..sw {
+                    let i = row * sw + col;
                     let (x, y) = (r.x as usize + col, r.y as usize + row);
+                    let f = face.region.index_at(x as u32, y as u32);
+                    if f.is_none() && skin.mask[i] == 0 {
+                        continue;
+                    }
                     let src = pixel(x, y);
                     let fetch = |dx: isize, dy: isize| {
                         pixel((x as isize + dx) as usize, (y as isize + dy) as usize)
                     };
-                    let res = retouch_pixel(face, skin, &s, i, src, &fetch);
-                    let cell = &mut line[fx + col];
+                    let res = retouch_pixel(face, skin, &s, i, f, src, &fetch);
+                    let cell = &mut line[sx + col];
                     for k in 0..3 {
                         cell[k] += res[k] - src[k];
                     }
@@ -615,26 +622,28 @@ pub fn render_masks(
                     }
                 });
         }
-        let r = face.region;
-        let (fx, fy) = ((r.x - union.x) as usize, (r.y - union.y) as usize);
+        let r = skin.region;
+        let (sx, sy) = ((r.x - union.x) as usize, (r.y - union.y) as usize);
         out.par_chunks_mut(uw * 4)
             .enumerate()
-            .skip(fy)
+            .skip(sy)
             .take(r.h as usize)
             .for_each(|(urow, line)| {
-                let row = urow - fy;
+                let row = urow - sy;
                 for col in 0..r.w as usize {
                     let i = row * r.w as usize + col;
+                    let f = face.region.index_at(r.x + col as u32, r.y + row as u32);
+                    let feature = |layer: &[u8]| f.map_or(0, |f| layer[f]);
                     let tints: [(u8, [f32; 3]); 7] = [
                         (skin.mask[i], [255.0, 40.0, 40.0]),
-                        (skin.under_eye[i], [255.0, 150.0, 0.0]),
-                        (face.eye_white[i], [0.0, 255.0, 60.0]),
-                        (face.iris[i], [40.0, 110.0, 255.0]),
-                        (face.brows[i], [255.0, 230.0, 0.0]),
-                        (face.lips[i], [255.0, 0.0, 200.0]),
-                        (face.teeth[i], [0.0, 230.0, 255.0]),
+                        (feature(&skin.under_eye), [255.0, 150.0, 0.0]),
+                        (feature(&face.eye_white), [0.0, 255.0, 60.0]),
+                        (feature(&face.iris), [40.0, 110.0, 255.0]),
+                        (feature(&face.brows), [255.0, 230.0, 0.0]),
+                        (feature(&face.lips), [255.0, 0.0, 200.0]),
+                        (feature(&face.teeth), [0.0, 230.0, 255.0]),
                     ];
-                    let px = &mut line[(fx + col) * 4..(fx + col) * 4 + 4];
+                    let px = &mut line[(sx + col) * 4..(sx + col) * 4 + 4];
                     let inside = model
                         .clip
                         .as_ref()

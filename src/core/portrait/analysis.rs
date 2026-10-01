@@ -19,32 +19,51 @@ pub(super) const BLEMISH_SCALE: f32 = 32.0;
 /// How far below the chin (in face sizes) the face's own skin tone is read.
 const TONE_BELOW_CHIN: f32 = 0.45;
 
-/// How far below the chin the part model still sees skin across the face's
-/// width (neck, an open collar), plus a margin.
-fn skin_reach(parts: &PartLabels, points: &[[f32; 3]], e: f32) -> f32 {
-    let (mut x0, mut x1, mut chin) = (f32::MAX, f32::MIN, f32::MIN);
-    for p in points {
-        x0 = x0.min(p[0]);
-        x1 = x1.max(p[0]);
-        chin = chin.max(p[1]);
-    }
-    let step = (e / 50.0).max(1.0);
-    let bottom = parts.bounds()[3];
-    let mut reach = 0.0;
-    let mut y = chin;
-    while y < bottom {
-        let mut x = x0 - 0.15 * e;
-        while x <= x1 + 0.15 * e {
+/// The face region grown over all the skin the part model may see on this
+/// person (neck, shoulders, arms, a hand at the face) where the photo has
+/// skin's colour, plus a margin past the skin mask's fence, so the mask is
+/// not cut off by the face's own box. Points nearer another face are that
+/// face's.
+fn skin_region(
+    rgba: &[u8],
+    parts: &PartLabels,
+    face: Region,
+    owners: &[([f32; 2], f32)],
+    index: usize,
+    width: u32,
+    height: u32,
+) -> Region {
+    let (own_centre, e) = owners[index];
+    let step = (e / 50.0).max(2.0);
+    let [x0, y0, x1, y1] = parts.bounds();
+    let (x0, y0) = (x0.max(0.0), y0.max(0.0));
+    let cols = ((x1.min(width as f32) - x0) / step).ceil().max(0.0) as usize;
+    let rows = ((y1.min(height as f32) - y0) / step).ceil().max(0.0) as usize;
+    let seen: Vec<[f32; 2]> = (0..cols * rows)
+        .into_par_iter()
+        .filter_map(|c| {
+            let x = x0 + ((c % cols) as f32 + 0.5) * step;
+            let y = y0 + ((c / cols) as f32 + 0.5) * step;
             let g = parts.groups_at(x, y);
-            if g[body_parts::GROUP_FACE_SKIN] + g[body_parts::GROUP_BODY_SKIN] > 0.5 {
-                reach = y - chin;
-                break;
+            if g[body_parts::GROUP_FACE_SKIN] + g[body_parts::GROUP_BODY_SKIN]
+                <= skin_mask::SEEN_SKIN
+            {
+                return None;
             }
-            x += step;
-        }
-        y += step;
+            let own = (x - own_centre[0]).hypot(y - own_centre[1]) / e;
+            let foreign = owners
+                .iter()
+                .enumerate()
+                .any(|(j, (c, s))| j != index && (x - c[0]).hypot(y - c[1]) / s < own);
+            let colour = body_parts::colour_near(rgba, width, height, x, y, step);
+            (!foreign && parts.skin_coloured(colour)).then_some([x, y])
+        })
+        .collect();
+    if seen.is_empty() {
+        return face;
     }
-    reach + 0.1 * e
+    let margin = 0.1 * e + step;
+    face.union(Region::around(seen.into_iter(), [margin; 4], width, height))
 }
 
 /// Rows of `region` from its top down to just below the chin: where the
@@ -105,9 +124,12 @@ impl FaceModel {
 /// What the skin sliders read that follows from the skin mask: the mask, how
 /// deep inside it each pixel sits, the under-eye bands within it, the
 /// skin-weighted frequency split and the face's skin tone. Rebuilt whole when
-/// the brush edits the mask.
+/// the brush edits the mask. Skin reaches past the face (neck, shoulders,
+/// arms), so it has its own region holding the face's; only `under_eye` lies
+/// in the face region.
 #[derive(Clone)]
 pub struct SkinLayers {
+    pub(super) region: Region,
     pub(super) mask: Vec<u8>,
     pub(super) interior: Vec<u8>,
     pub(super) under_eye: Vec<u8>,
@@ -122,9 +144,15 @@ impl SkinLayers {
     pub fn mask(&self) -> &[u8] {
         &self.mask
     }
+
+    /// Where `mask` lies in the image.
+    pub fn region(&self) -> Region {
+        self.region
+    }
 }
 
-/// [`SkinLayers`] with the float lows and interior the blemish search reads.
+/// [`SkinLayers`] with the float lows and interior of the face region, which
+/// the blemish search reads.
 struct SkinSplit {
     low1: Vec<[f32; 3]>,
     low2: Vec<[f32; 3]>,
@@ -132,21 +160,21 @@ struct SkinSplit {
     layers: SkinLayers,
 }
 
-/// Split a face region's photo `src` by its skin mask (0..1), weighted to
-/// skin so hair and features do not bleed in. `fallback` is the skin colour
-/// when the mask is empty.
+/// Split the photo `src` of a skin `region` by its skin mask (0..1), weighted
+/// to skin so hair and features do not bleed in. `under_band` lies in the
+/// `face` region; `fallback` is the skin colour when the mask is empty.
 #[allow(clippy::too_many_arguments)]
 fn split_skin(
     src: &[[f32; 3]],
     skin: &[f32],
     under_band: &[u8],
-    w: usize,
-    h: usize,
-    e: f32,
     region: Region,
+    face: Region,
+    e: f32,
     points: &[[f32; 3]],
     fallback: [f32; 3],
 ) -> SkinSplit {
+    let (w, h) = (region.w as usize, region.h as usize);
     let r1 = (e / 220.0).max(1.0);
     let r2 = (e / 28.0).max(3.0);
     let r3 = (e / 7.0).max(6.0);
@@ -157,9 +185,11 @@ fn split_skin(
         .map(|c| (luma(c).clamp(0.0, 1.0) * 65535.0).round() as u16)
         .collect();
 
+    // The face's own tone: within its region, down to just below the chin.
     let (mut weight, mut mean) = (0.0f64, [0.0f64; 3]);
-    let face_rows = tone_rows(points, region, e) * w;
-    for (c, &m) in low2.iter().zip(skin).take(face_rows) {
+    for k in 0..tone_rows(points, face, e) * face.w as usize {
+        let i = region.index_of(face, k);
+        let (c, m) = (low2[i], skin[i]);
         weight += m as f64;
         for k in 0..3 {
             mean[k] += c[k] as f64 * m as f64;
@@ -196,12 +226,13 @@ fn split_skin(
         .collect();
 
     let layers = SkinLayers {
+        region,
         mask: skin.par_iter().map(|&m| to_u8(m)).collect(),
         interior: interior.par_iter().map(|&v| to_u8(v)).collect(),
         under_eye: under_band
             .par_iter()
-            .zip(skin.par_iter())
-            .map(|(&b, &m)| to_u8(b as f32 / 255.0 * m))
+            .enumerate()
+            .map(|(k, &b)| to_u8(b as f32 / 255.0 * skin[region.index_of(face, k)]))
             .collect(),
         low1: low1.par_iter().map(|&c| to_u16(c)).collect(),
         low2: low2.par_iter().map(|&c| to_u16(c)).collect(),
@@ -210,9 +241,9 @@ fn split_skin(
         cheek_luma,
     };
     SkinSplit {
-        low1,
-        low2,
-        interior,
+        low1: region.crop(&low1, face),
+        low2: region.crop(&low2, face),
+        interior: region.crop(&interior, face),
         layers,
     }
 }
@@ -222,33 +253,37 @@ impl PortraitModel {
     /// analysis builds them. `rgba` is the analysed image.
     pub fn skin_layers_from(&self, rgba: &[u8], index: usize, mask: &[u8]) -> SkinLayers {
         let face = &self.faces[index];
-        let r = face.region;
-        let (w, h) = (r.w as usize, r.h as usize);
-        let src: Vec<[f32; 3]> = (0..r.len())
-            .into_par_iter()
-            .map(|i| {
-                let o = ((r.y as usize + i / w) * self.width as usize + r.x as usize + i % w) * 4;
-                [
-                    rgba[o] as f32 / 255.0,
-                    rgba[o + 1] as f32 / 255.0,
-                    rgba[o + 2] as f32 / 255.0,
-                ]
-            })
-            .collect();
+        let r = face.skin.region;
+        let src = read_region(rgba, self.width, r);
         let skin: Vec<f32> = mask.par_iter().map(|&m| m as f32 / 255.0).collect();
         split_skin(
             &src,
             &skin,
             &face.under_band,
-            w,
-            h,
-            face.extent,
             r,
+            face.region,
+            face.extent,
             &face.mesh.points,
             face.skin.mean,
         )
         .layers
     }
+}
+
+/// The pixels of `region` of an RGBA image `width` wide, as RGB in 0..1.
+fn read_region(rgba: &[u8], width: u32, region: Region) -> Vec<[f32; 3]> {
+    let w = region.w as usize;
+    (0..region.len())
+        .into_par_iter()
+        .map(|i| {
+            let o = ((region.y as usize + i / w) * width as usize + region.x as usize + i % w) * 4;
+            [
+                rgba[o] as f32 / 255.0,
+                rgba[o + 1] as f32 / 255.0,
+                rgba[o + 2] as f32 / 255.0,
+            ]
+        })
+        .collect()
 }
 
 /// The selection the dialog opened with, in image pixels: its bounds and its
@@ -802,18 +837,18 @@ fn build_face(
     let e = extent;
     let agreement = parts.map(|p| p.agreement);
     let trusted = agreement.is_some_and(|a| a >= TRUSTED_AGREEMENT);
-    // Down to just below the chin; with the part model, on down to where it
-    // still sees skin, so an open neckline is not cut off.
-    let below = match parts {
-        Some(p) if trusted => skin_reach(p, &mesh.points, e).max(TONE_BELOW_CHIN * e),
-        _ => TONE_BELOW_CHIN * e,
-    };
+    // The features down to just below the chin; skin, with the part model,
+    // wherever it sees this person's skin.
     let region = Region::around(
         mesh.points.iter().map(|p| [p[0], p[1]]),
-        [0.15 * e, 0.15 * e, 0.15 * e, below],
+        [0.15 * e, 0.15 * e, 0.15 * e, TONE_BELOW_CHIN * e],
         width,
         height,
     );
+    let skin_region = match parts {
+        Some(p) if trusted => skin_region(rgba, p, region, owners, index, width, height),
+        _ => region,
+    };
     let (w, h) = (region.w as usize, region.h as usize);
     let n = region.len();
     let pixel_xy = |i: usize| {
@@ -822,19 +857,15 @@ fn build_face(
             region.y as f32 + (i / w) as f32 + 0.5,
         )
     };
-    let src: Vec<[f32; 3]> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let x = region.x as usize + i % w;
-            let y = region.y as usize + i / w;
-            let o = (y * width as usize + x) * 4;
-            [
-                rgba[o] as f32 / 255.0,
-                rgba[o + 1] as f32 / 255.0,
-                rgba[o + 2] as f32 / 255.0,
-            ]
-        })
-        .collect();
+    let (sw, sn) = (skin_region.w as usize, skin_region.len());
+    let skin_xy = |i: usize| {
+        (
+            skin_region.x + (i % sw) as u32,
+            skin_region.y + (i / sw) as u32,
+        )
+    };
+    let skin_src = read_region(rgba, width, skin_region);
+    let src = skin_region.crop(&skin_src, region);
     let points = &mesh.points;
 
     // Features that are never skin.
@@ -902,10 +933,10 @@ fn build_face(
     };
 
     let open_sides = [
-        region.x > 0,
-        region.y > 0,
-        region.x + region.w < width,
-        region.y + region.h < height,
+        skin_region.x > 0,
+        skin_region.y > 0,
+        skin_region.x + skin_region.w < width,
+        skin_region.y + skin_region.h < height,
     ];
     // Skin from the photo's own colours; the part model's mask (or, without
     // it, the face outline limited to cheek-coloured pixels) when the photo
@@ -914,8 +945,9 @@ fn build_face(
         None
     } else {
         skin_mask::skin_mask(&SkinInputs {
-            src: &src,
-            region,
+            src: &skin_src,
+            region: skin_region,
+            face: region,
             extent: e,
             points,
             parts: parts.filter(|_| trusted),
@@ -930,11 +962,11 @@ fn build_face(
             mask
         }
         None => {
-            let mut oval = vec![0.0f32; n];
+            let mut oval = vec![0.0f32; sn];
             if !trusted {
                 stamp_polygon(
                     &mut oval,
-                    region,
+                    skin_region,
                     &loop_points(points, &FACE_OVAL),
                     -0.01 * e,
                     0.05 * e,
@@ -951,14 +983,18 @@ fn build_face(
                 let y = luma(cheek_colour);
                 cheek_colour.map(|v| v - y)
             };
-            let raw_skin: Vec<f32> = (0..n)
+            let raw_skin: Vec<f32> = (0..sn)
                 .into_par_iter()
                 .map(|i| {
-                    let (x, y) = pixel_xy(i);
+                    let (x, y) = skin_xy(i);
                     match parts {
-                        Some(p) if trusted => p.groups_at(x, y)[body_parts::GROUP_FACE_SKIN],
+                        Some(p) if trusted => {
+                            let g = p.groups_at(x as f32 + 0.5, y as f32 + 0.5);
+                            (g[body_parts::GROUP_FACE_SKIN] + g[body_parts::GROUP_BODY_SKIN])
+                                .min(1.0)
+                        }
                         _ => {
-                            let c = src[i];
+                            let c = skin_src[i];
                             let yl = luma(c);
                             let distance = (0..3)
                                 .map(|k| (c[k] - yl - cheek_chroma[k]).powi(2))
@@ -969,15 +1005,23 @@ fn build_face(
                     }
                 })
                 .collect();
-            refine_skin(raw_skin, &src, w, h, e, open_sides)
+            refine_skin(
+                raw_skin,
+                &skin_src,
+                sw,
+                skin_region.h as usize,
+                e,
+                open_sides,
+            )
         }
     };
     let cheek_luma_src = luma(cheek_colour).max(0.05);
     let own_centre = owners[index];
-    let skin: Vec<f32> = (0..n)
+    let skin: Vec<f32> = (0..sn)
         .into_par_iter()
         .map(|i| {
-            let (x, y) = pixel_xy(i);
+            let (px, py) = skin_xy(i);
+            let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
             // Pixels nearer another face (in face sizes) belong to that face.
             let own = ((x - own_centre.0[0]).hypot(y - own_centre.0[1])) / own_centre.1;
             if owners
@@ -987,12 +1031,16 @@ fn build_face(
             {
                 return 0.0;
             }
+            let Some(f) = region.index_at(px, py) else {
+                return refined[i];
+            };
             // Only the dark nostril holes leave the skin, not the nose around them.
             let hole =
-                nostril_area[i] * (1.0 - smoothstep(0.6, 0.85, luma(src[i]) / cheek_luma_src));
-            refined[i] * (1.0 - exclude[i]) * (1.0 - hole)
+                nostril_area[f] * (1.0 - smoothstep(0.6, 0.85, luma(src[f]) / cheek_luma_src));
+            refined[i] * (1.0 - exclude[f]) * (1.0 - hole)
         })
         .collect();
+    drop(refined);
 
     // Eyes: whites and irises.
     let mut eye_area = vec![0.0f32; n];
@@ -1093,16 +1141,16 @@ fn build_face(
         interior,
         layers: skin_layers,
     } = split_skin(
-        &src,
+        &skin_src,
         &skin,
         &under_band,
-        w,
-        h,
-        e,
+        skin_region,
         region,
+        e,
         points,
         cheek_colour,
     );
+    drop(skin_src);
     let cheek_luma = skin_layers.cheek_luma;
 
     // Blemishes: compact spots darker or redder than a ring around them in
@@ -1312,7 +1360,7 @@ fn build_face(
     // took for hair does not.
     let (hair_region, hair, hair_base) = match parts {
         Some(p) if trusted => {
-            let [x0, y0, x1, y1] = p.bounds();
+            let [x0, y0, x1, y1] = p.head_bounds();
             let hr = Region::around([[x0, y0], [x1, y1]].into_iter(), [0.0; 4], width, height);
             let (hw, hh) = (hr.w as usize, hr.h as usize);
             let at = |i: usize| {
@@ -1334,11 +1382,8 @@ fn build_face(
                 })
                 .collect();
             let own_centre = owners[index];
-            let colour_skin_at = |x: f32, y: f32| {
-                let (fx, fy) = (x - region.x as f32, y - region.y as f32);
-                (fx >= 0.0 && fy >= 0.0 && (fx as usize) < w && (fy as usize) < h)
-                    .then(|| skin[fy as usize * w + fx as usize])
-            };
+            let colour_skin_at =
+                |x: f32, y: f32| skin_region.index_at(x as u32, y as u32).map(|i| skin[i]);
             // Neighbourhood sums on a grid of `cell`-pixel blocks (the part
             // model is no finer), per block: sure hair (never where the model
             // sees skin: faint hair odds spread over blond or grey-haired

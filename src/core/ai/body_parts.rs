@@ -21,6 +21,16 @@ const MODEL_FILE: &str = "sapiens2_seg_0.4b_512x384.onnx";
 const CROP_WIDTH_FACES: f32 = 3.0;
 /// The face centre sits this far down the crop, leaving room for neck and shoulders.
 const FACE_CENTRE_DOWN: f32 = 0.4;
+/// The wider look taken when skin runs off the head crop: this many face
+/// extents across, from this far above the face centre to this far below.
+const WIDE_FACES: f32 = 6.0;
+const WIDE_ABOVE_FACES: f32 = 1.0;
+const WIDE_BELOW_FACES: f32 = 6.0;
+/// Head-crop pixels over which its odds fade into the wider look's.
+const WIDE_BLEND: f32 = 24.0;
+/// How far a colour's chromaticity (its red and green shares) may sit from
+/// the face's own and still pass for this person's skin.
+const SKIN_HUE_TOLERANCE: f32 = 0.09;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
@@ -166,6 +176,89 @@ pub struct PartLabels {
     face: ([f32; 2], f32),
     /// Share of the face mesh's landmarks that land on face-like classes.
     pub agreement: f32,
+    /// A coarser look around the body, when skin ran off the head crop.
+    wide: Option<WideLook>,
+    /// Chromaticity of the face's skin, when the model saw enough of it.
+    skin_tone: Option<[f32; 2]>,
+}
+
+#[derive(Clone, Debug)]
+struct WideLook {
+    crop: PartCrop,
+    groups: Vec<[u8; PART_GROUPS]>,
+}
+
+/// Group probabilities (0..1) of one crop at image coordinates, bilinear;
+/// None outside it.
+fn odds_at(
+    crop: &PartCrop,
+    groups: &[[u8; PART_GROUPS]],
+    x: f32,
+    y: f32,
+) -> Option<[f32; PART_GROUPS]> {
+    let [u, v] = crop.to_crop(x, y);
+    let (px, py) = (u - 0.5, v - 0.5);
+    if px < -0.5 || py < -0.5 || px > INPUT_W as f32 - 0.5 || py > INPUT_H as f32 - 0.5 {
+        return None;
+    }
+    let px = px.clamp(0.0, (INPUT_W - 1) as f32);
+    let py = py.clamp(0.0, (INPUT_H - 1) as f32);
+    let (x0, y0) = (px as usize, py as usize);
+    let (x1, y1) = ((x0 + 1).min(INPUT_W - 1), (y0 + 1).min(INPUT_H - 1));
+    let (fx, fy) = (px - x0 as f32, py - y0 as f32);
+    let at = |xx: usize, yy: usize| &groups[yy * INPUT_W + xx];
+    let (a, b, c, d) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
+    let mut out = [0.0; PART_GROUPS];
+    for (g, value) in out.iter_mut().enumerate() {
+        let top = a[g] as f32 * (1.0 - fx) + b[g] as f32 * fx;
+        let bottom = c[g] as f32 * (1.0 - fx) + d[g] as f32 * fx;
+        *value = (top * (1.0 - fy) + bottom * fy) / 255.0;
+    }
+    Some(out)
+}
+
+/// Red and green shares of a colour (0..255); None when too dark to tell.
+fn chromaticity(rgb: [f32; 3]) -> Option<[f32; 2]> {
+    let sum = rgb[0] + rgb[1] + rgb[2];
+    (sum > 120.0).then(|| [rgb[0] / sum, rgb[1] / sum])
+}
+
+/// Mean colour (0..255) over about `size` image pixels around (x, y).
+pub fn colour_near(rgba: &[u8], width: u32, height: u32, x: f32, y: f32, size: f32) -> [f32; 3] {
+    let mut sum = [0.0f32; 3];
+    for dy in [-1.0f32, 0.0, 1.0] {
+        for dx in [-1.0f32, 0.0, 1.0] {
+            let c = super::face_mesh::sample_rgb(
+                rgba,
+                width,
+                height,
+                x + dx * size / 3.0,
+                y + dy * size / 3.0,
+            );
+            for k in 0..3 {
+                sum[k] += c[k] / 9.0;
+            }
+        }
+    }
+    sum
+}
+
+/// Axis-aligned image bounds of a crop: [x0, y0, x1, y1].
+fn crop_bounds(crop: &PartCrop) -> [f32; 4] {
+    let corners = [
+        crop.to_image(0.0, 0.0),
+        crop.to_image(INPUT_W as f32, 0.0),
+        crop.to_image(0.0, INPUT_H as f32),
+        crop.to_image(INPUT_W as f32, INPUT_H as f32),
+    ];
+    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for [x, y] in corners {
+        b[0] = b[0].min(x);
+        b[1] = b[1].min(y);
+        b[2] = b[2].max(x);
+        b[3] = b[3].max(y);
+    }
+    b
 }
 
 impl PartLabels {
@@ -177,51 +270,133 @@ impl PartLabels {
         Some(self.labels[v as usize * INPUT_W + u as usize])
     }
 
-    /// Group probabilities (0..1) at image coordinates, bilinear; zero outside the crop.
+    /// Group probabilities (0..1) at image coordinates, bilinear; zero
+    /// outside everything the model looked at. Around the head crop's rim
+    /// its odds fade into the wider look's, so no seam shows.
     pub fn groups_at(&self, x: f32, y: f32) -> [f32; PART_GROUPS] {
-        let [u, v] = self.crop.to_crop(x, y);
-        let (px, py) = (u - 0.5, v - 0.5);
-        if px < -0.5 || py < -0.5 || px > INPUT_W as f32 - 0.5 || py > INPUT_H as f32 - 0.5 {
-            return [0.0; PART_GROUPS];
+        let head = odds_at(&self.crop, &self.groups, x, y);
+        let wide = self
+            .wide
+            .as_ref()
+            .and_then(|w| odds_at(&w.crop, &w.groups, x, y));
+        match (head, wide) {
+            (Some(head), Some(wide)) => {
+                let [u, v] = self.crop.to_crop(x, y);
+                let rim = u.min(v).min(INPUT_W as f32 - u).min(INPUT_H as f32 - v);
+                let t = (rim / WIDE_BLEND).clamp(0.0, 1.0);
+                std::array::from_fn(|g| wide[g] + (head[g] - wide[g]) * t)
+            }
+            (head, wide) => head.or(wide).unwrap_or([0.0; PART_GROUPS]),
         }
-        let px = px.clamp(0.0, (INPUT_W - 1) as f32);
-        let py = py.clamp(0.0, (INPUT_H - 1) as f32);
-        let (x0, y0) = (px as usize, py as usize);
-        let (x1, y1) = ((x0 + 1).min(INPUT_W - 1), (y0 + 1).min(INPUT_H - 1));
-        let (fx, fy) = (px - x0 as f32, py - y0 as f32);
-        let at = |xx: usize, yy: usize| &self.groups[yy * INPUT_W + xx];
-        let (a, b, c, d) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
-        let mut out = [0.0; PART_GROUPS];
-        for (g, value) in out.iter_mut().enumerate() {
-            let top = a[g] as f32 * (1.0 - fx) + b[g] as f32 * fx;
-            let bottom = c[g] as f32 * (1.0 - fx) + d[g] as f32 * fx;
-            *value = (top * (1.0 - fy) + bottom * fy) / 255.0;
-        }
-        out
     }
 
-    /// Axis-aligned image bounds of the crop: [x0, y0, x1, y1].
+    /// Axis-aligned image bounds of everything the model looked at:
+    /// [x0, y0, x1, y1].
     pub fn bounds(&self) -> [f32; 4] {
-        let corners = [
-            self.crop.to_image(0.0, 0.0),
-            self.crop.to_image(INPUT_W as f32, 0.0),
-            self.crop.to_image(0.0, INPUT_H as f32),
-            self.crop.to_image(INPUT_W as f32, INPUT_H as f32),
-        ];
-        let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-        for [x, y] in corners {
-            b[0] = b[0].min(x);
-            b[1] = b[1].min(y);
-            b[2] = b[2].max(x);
-            b[3] = b[3].max(y);
+        let head = crop_bounds(&self.crop);
+        match &self.wide {
+            Some(w) => {
+                let wide = crop_bounds(&w.crop);
+                [
+                    head[0].min(wide[0]),
+                    head[1].min(wide[1]),
+                    head[2].max(wide[2]),
+                    head[3].max(wide[3]),
+                ]
+            }
+            None => head,
         }
-        b
     }
 
-    /// Whether image point (x, y) lies inside this crop.
+    /// Image bounds of the head crop alone.
+    pub fn head_bounds(&self) -> [f32; 4] {
+        crop_bounds(&self.crop)
+    }
+
+    /// Whether image point (x, y) lies inside anything the model looked at.
     pub fn covers(&self, x: f32, y: f32) -> bool {
-        let [u, v] = self.crop.to_crop(x, y);
-        u >= 0.0 && v >= 0.0 && u < INPUT_W as f32 && v < INPUT_H as f32
+        let inside = |crop: &PartCrop| {
+            let [u, v] = crop.to_crop(x, y);
+            u >= 0.0 && v >= 0.0 && u < INPUT_W as f32 && v < INPUT_H as f32
+        };
+        inside(&self.crop) || self.wide.as_ref().is_some_and(|w| inside(&w.crop))
+    }
+
+    /// Whether a colour (0..255) could be this person's skin: its hue sits
+    /// near the face's own, unlike white gloves or a pink top. Colours too
+    /// dark to tell pass.
+    pub fn skin_coloured(&self, rgb: [f32; 3]) -> bool {
+        match (self.skin_tone, chromaticity(rgb)) {
+            (Some(tone), Some(c)) => (c[0] - tone[0]).hypot(c[1] - tone[1]) < SKIN_HUE_TOLERANCE,
+            _ => true,
+        }
+    }
+
+    /// The face's skin chromaticity, over the crop pixels the model is sure
+    /// are face skin.
+    fn face_tone(&self, rgba: &[u8], width: u32, height: u32) -> Option<[f32; 2]> {
+        let size = self.crop.scale();
+        let (mut sum, mut count) = ([0.0f32; 2], 0usize);
+        for v in (0..INPUT_H).step_by(3) {
+            for u in (0..INPUT_W).step_by(3) {
+                let g = &self.groups[v * INPUT_W + u];
+                if g[GROUP_FACE_SKIN] < 230 {
+                    continue;
+                }
+                let [x, y] = self.crop.to_image(u as f32 + 0.5, v as f32 + 0.5);
+                if let Some(c) = chromaticity(colour_near(rgba, width, height, x, y, size)) {
+                    sum[0] += c[0];
+                    sum[1] += c[1];
+                    count += 1;
+                }
+            }
+        }
+        (count >= 20).then(|| sum.map(|s| s / count as f32))
+    }
+
+    /// Whether skin runs off the head crop's sides or bottom where the image
+    /// goes on (arms below a half-length crop), so a wider look finds more.
+    fn skin_cut_off(&self, rgba: &[u8], width: u32, height: u32) -> bool {
+        let margin = 2.0 * self.crop.scale();
+        let rim = (0..INPUT_H)
+            .step_by(2)
+            .flat_map(|v| [(1, v), (INPUT_W - 2, v)])
+            .chain((0..INPUT_W).step_by(2).map(|u| (u, INPUT_H - 2)));
+        let cut = rim
+            .filter(|&(u, v)| {
+                let [x, y] = self.crop.to_image(u as f32 + 0.5, v as f32 + 0.5);
+                let inside = x > margin
+                    && y > margin
+                    && x < width as f32 - margin
+                    && y < height as f32 - margin;
+                let g = &self.groups[v * INPUT_W + u];
+                inside
+                    && g[GROUP_FACE_SKIN] as u32 + g[GROUP_BODY_SKIN] as u32 > 128
+                    && self.skin_coloured(colour_near(rgba, width, height, x, y, self.crop.scale()))
+            })
+            .count();
+        cut >= 6
+    }
+
+    /// An upright crop around the body, wider than the head crop, within
+    /// the image and `frame`; None when it would not see clearly more.
+    fn wider(&self, width: u32, height: u32, frame: Option<[f32; 4]>) -> Option<PartCrop> {
+        let ([fx, fy], e) = self.face;
+        let limit = frame.unwrap_or([0.0, 0.0, width as f32, height as f32]);
+        let x0 = (fx - 0.5 * WIDE_FACES * e).max(limit[0]).max(0.0);
+        let y0 = (fy - WIDE_ABOVE_FACES * e).max(limit[1]).max(0.0);
+        let x1 = (fx + 0.5 * WIDE_FACES * e).min(limit[2]).min(width as f32);
+        let y1 = (fy + WIDE_BELOW_FACES * e).min(limit[3]).min(height as f32);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let crop_width = (x1 - x0).max((y1 - y0) * INPUT_W as f32 / INPUT_H as f32);
+        (crop_width > self.crop.width * 1.2).then_some(PartCrop {
+            cx: (x0 + x1) * 0.5,
+            cy: (y0 + y1) * 0.5,
+            width: crop_width,
+            angle: 0.0,
+        })
     }
 }
 
@@ -305,27 +480,51 @@ impl Segmenter {
             Some(f) => PartCrop::around(mesh).closer(f),
             None => PartCrop::around(mesh),
         };
-        let input = sample_crop(rgba, width, height, &crop);
-        let (labels, groups) = match self.run(input.clone()) {
-            Ok(result) => result,
-            // DirectML can accept the graph yet fail to allocate at run time.
-            Err(_) if self.on_gpu => {
-                *self = Self::load(false)?;
-                self.run(input)?
-            }
-            Err(error) => return Err(error),
-        };
-        let groups = soften(&groups);
+        let (labels, groups) = self.run_crop(rgba, width, height, &crop)?;
         let (centre, extent, _) = mesh.frame();
         let mut result = PartLabels {
             crop,
             labels,
-            groups,
+            groups: soften(&groups),
             face: (centre, extent),
             agreement: 0.0,
+            wide: None,
+            skin_tone: None,
         };
         result.agreement = agreement(&result, mesh);
+        result.skin_tone = result.face_tone(rgba, width, height);
+        if result.skin_cut_off(rgba, width, height) {
+            if let Some(crop) = result.wider(width, height, frame) {
+                // Without it the skin just stops at the head crop.
+                if let Ok((_, groups)) = self.run_crop(rgba, width, height, &crop) {
+                    result.wide = Some(WideLook {
+                        crop,
+                        groups: soften(&groups),
+                    });
+                }
+            }
+        }
         Ok(result)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn run_crop(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        crop: &PartCrop,
+    ) -> Result<(Vec<u8>, Vec<[u8; PART_GROUPS]>), String> {
+        let input = sample_crop(rgba, width, height, crop);
+        match self.run(input.clone()) {
+            Ok(result) => Ok(result),
+            // DirectML can accept the graph yet fail to allocate at run time.
+            Err(_) if self.on_gpu => {
+                *self = Self::load(false)?;
+                self.run(input)
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 

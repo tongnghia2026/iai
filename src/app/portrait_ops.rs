@@ -629,7 +629,7 @@ mod tests {
         };
         let skin_here = |app: &App| {
             let s = app.shell.portrait.as_ref().unwrap();
-            let r = s.model.as_ref().unwrap().faces[0].region;
+            let r = s.model.as_ref().unwrap().faces[0].skin.region();
             let k = ((at.1 as u32 - r.y) * r.w + at.0 as u32 - r.x) as usize;
             s.edits
                 .first()
