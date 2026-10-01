@@ -146,7 +146,8 @@ fn brow_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// Nose contour over `region` (-127..127): light down the bridge, from
 /// between the brows onto the tip, and a light shade along both sides of
 /// it. Both fall off as bell curves across the bridge and fade in and out
-/// along it, so the change has no edge anywhere.
+/// along it, so the change has no edge anywhere. Between the eyes, where the
+/// face is flat and broad, the light stays narrow and gentle.
 fn nose_contour(points: &[[f32; 3]], region: Region, e: f32) -> Vec<i8> {
     let line: Vec<[f32; 2]> = loop_points(points, &NOSE_BRIDGE);
     let lengths: Vec<f32> = line
@@ -175,6 +176,7 @@ fn nose_contour(points: &[[f32; 3]], region: Region, e: f32) -> Vec<i8> {
         (best, along)
     };
     let (light_width, shade_offset, shade_width) = (0.026 * e, 0.08 * e, 0.035 * e);
+    let top_width = 0.015 * e;
     let bounds = Region::around(
         line.iter().copied(),
         [shade_offset + 3.0 * shade_width; 4],
@@ -192,10 +194,12 @@ fn nose_contour(points: &[[f32; 3]], region: Region, e: f32) -> Vec<i8> {
             }
             let (d, t) = nearest(x as f32 + 0.5, y as f32 + 0.5);
             let bell = |offset: f32, width: f32| (-0.5 * ((d - offset) / width).powi(2)).exp();
-            // In from brow level, full from between the eyes, a third left
-            // on the tip; the shade only beside the bony bridge.
-            let light = bell(0.0, light_width)
-                * smoothstep(0.0, 0.22, t)
+            // In from brow level, about half between the eyes, full and
+            // widest down the middle of the bridge, a third left on the tip;
+            // the shade only beside the bony bridge.
+            let width = top_width + (light_width - top_width) * smoothstep(0.2, 0.55, t);
+            let light = bell(0.0, width)
+                * smoothstep(0.05, 0.5, t)
                 * (1.0 - 0.7 * smoothstep(0.75, 1.0, t));
             let shade = bell(shade_offset, shade_width)
                 * smoothstep(0.15, 0.4, t)
