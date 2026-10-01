@@ -366,7 +366,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             (
                                 "Sáng tóc",
                                 &mut s.hair_brightness,
-                                "Trái: tóc tối hơn — phải: tóc sáng hơn",
+                                "Trái: tóc tối hơn — phải: tóc sáng hơn (như thanh Blacks của Develop, giữ màu và vân tóc)",
                                 TwoSided,
                             ),
                             (

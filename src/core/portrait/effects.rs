@@ -9,7 +9,11 @@ use serde::{Deserialize, Serialize};
 use super::analysis::{luma, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
 use super::geometry::Region;
 use crate::core::color::luminance_f32;
-use crate::core::develop::{apply_light_luma, apply_luma_target, local_detail_boost};
+use crate::core::develop::{
+    apply_light_luma, apply_luma_target, local_detail_boost, srgb_to_linear, DevelopEngineVersion,
+    DevelopSettings, CONTROL_LIMIT,
+};
+use crate::core::develop_scene::{build_scene_tone_for, BaseLook, SceneToneData, SCENE_EV_MIN};
 
 /// Sliders run 0..100, the two-sided ones (lip saturation and brightness,
 /// brows, hair brightness) -100..100, and the colour pickers (`*_hue`) are
@@ -443,12 +447,35 @@ fn retouch_brow(
     out
 }
 
-/// Hair lighter or darker with Develop's own Shadows and Blacks, read at the
-/// pixel's regional tone `base` as Develop does (black stays rich, strands
-/// keep their texture), and dyed toward `hair_hue`.
-fn recolour_hair(src: [f32; 3], base: f32, s: &PortraitSettings) -> [f32; 3] {
+/// Develop's tone stage on a photo with only Blacks set, to the hair's lift
+/// (`amount` 0..1 of the slider is Blacks 0..+200); `None` unless lifting.
+fn hair_lift(amount: f32) -> Option<SceneToneData> {
+    (amount > 0.0).then(|| {
+        let develop = DevelopSettings {
+            develop_engine_version: DevelopEngineVersion::Develop3,
+            blacks: amount * CONTROL_LIMIT,
+            ..DevelopSettings::default()
+        };
+        build_scene_tone_for(&develop, BaseLook::Identity)
+    })
+}
+
+/// Hair lighter with Develop's own Blacks (`lift`, from [`hair_lift`]): the
+/// photo's linear light scaled by the gain at the pixel's regional tone
+/// `base`, as Develop reads it, so strands keep their texture and colour.
+/// Darker with Develop's display Shadows and Blacks, also read at `base`.
+/// Then dyed toward `hair_hue`.
+fn recolour_hair(
+    src: [f32; 3],
+    base: f32,
+    lift: Option<&SceneToneData>,
+    s: &PortraitSettings,
+) -> [f32; 3] {
     let [mut r, mut g, mut b] = src.map(|v| v.clamp(0.0, 1.0));
-    if s.hair_brightness != 0.0 {
+    if let Some(tone) = lift {
+        let region = srgb_to_linear(base).max(SCENE_EV_MIN.exp2()).log2();
+        [r, g, b] = tone.scene_to_display([r, g, b].map(srgb_to_linear), Some(region));
+    } else if s.hair_brightness != 0.0 {
         let l = luminance_f32(r, g, b).clamp(0.0, 1.0);
         let amount = s.hair_brightness;
         let offset = apply_light_luma(base, 0.0, amount, 0.0, 0.5 * amount) - base;
@@ -571,6 +598,7 @@ pub fn render(
             });
     }
     if s.hair_active() {
+        let lift = hair_lift(s.hair_brightness);
         for (index, (face, _)) in model
             .faces
             .iter()
@@ -600,7 +628,7 @@ pub fn render(
                         }
                         let src = pixel(r.x as usize + col, r.y as usize + row);
                         let base = face.hair_base[k] as f32 / 65535.0;
-                        let res = recolour_hair(src, base, &s);
+                        let res = recolour_hair(src, base, lift.as_ref(), &s);
                         let cell = &mut line[hx + col];
                         for k in 0..3 {
                             cell[k] += (res[k] - src[k]) * weight;
@@ -735,19 +763,34 @@ mod tests {
 
     #[test]
     fn hair_tone_moves_dark_strands_and_spares_skin_tones() {
+        let tone = |c: [f32; 3]| luminance_f32(c[0], c[1], c[2]);
+        let strand = [0.22f32, 0.16, 0.12];
+        let skin = [0.86f32, 0.68, 0.58];
         let darker = PortraitSettings {
             hair_brightness: -1.0,
             ..PortraitSettings::NEUTRAL
         };
-        let strand = [0.22f32, 0.16, 0.12];
-        let skin = [0.86f32, 0.68, 0.58];
-        let tone = |c: [f32; 3]| luminance_f32(c[0], c[1], c[2]);
-        let dark = recolour_hair(strand, tone(strand), &darker);
+        let dark = recolour_hair(strand, tone(strand), None, &darker);
         assert!(tone(dark) < tone(strand) - 0.05, "{dark:?}");
-        let kept = recolour_hair(skin, tone(skin), &darker);
+        let kept = recolour_hair(skin, tone(skin), None, &darker);
         assert!((tone(kept) - tone(skin)).abs() < 0.01, "{kept:?}");
-        let none = recolour_hair(strand, tone(strand), &PortraitSettings::NEUTRAL);
+        let none = recolour_hair(strand, tone(strand), None, &PortraitSettings::NEUTRAL);
         assert_eq!(none, strand);
+
+        // Lighter is Develop's Blacks: deep strands lift, keeping their hue;
+        // skin tones stay put.
+        let lighter = PortraitSettings {
+            hair_brightness: 1.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        let lift = hair_lift(1.0);
+        let black = [0.1f32, 0.08, 0.07];
+        let lit = recolour_hair(black, tone(black), lift.as_ref(), &lighter);
+        assert!(tone(lit) > tone(black) + 0.05, "{lit:?}");
+        assert!(lit[0] > lit[1] && lit[1] > lit[2], "hue kept: {lit:?}");
+        let kept = recolour_hair(skin, tone(skin), lift.as_ref(), &lighter);
+        assert!((tone(kept) - tone(skin)).abs() < 0.01, "{kept:?}");
+        assert!(hair_lift(0.0).is_none() && hair_lift(-0.5).is_none());
     }
 
     #[test]

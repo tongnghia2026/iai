@@ -411,6 +411,88 @@ mod tests {
         }
     }
 
+    /// Opt-in: IAI_PORTRAIT_HAIR_PROBE is a folder of photos; per photo a
+    /// sheet of the hair region (photo | Sáng tóc +50 | +100 | -100) and the
+    /// same at the forehead hairline.
+    #[test]
+    #[ignore]
+    fn probe_hair_tone() {
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_HAIR_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".jpg") && !n.starts_with("pr_"))
+            .collect();
+        names.sort();
+        for name in names {
+            let image = image::open(dir.join(&name)).unwrap().to_rgba8();
+            let (width, height) = image.dimensions();
+            let rgba = image.into_raw();
+            let model = analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
+            let Some(face) = model.faces.first() else {
+                continue;
+            };
+            if face.hair_region.is_empty() {
+                println!("{name}: no hair");
+                continue;
+            }
+            let enabled = vec![true; model.faces.len()];
+            let mut views = vec![rgba.clone()];
+            for amount in [50.0, 100.0, -100.0] {
+                let s = PortraitSettings {
+                    hair_brightness: amount,
+                    ..PortraitSettings::NEUTRAL
+                };
+                let started = std::time::Instant::now();
+                let (u, px) = render(&rgba, &model, &s, &enabled, &[]).unwrap();
+                println!(
+                    "{name}: hair {amount} render {} ms",
+                    started.elapsed().as_millis()
+                );
+                let mut out = rgba.clone();
+                for row in 0..u.h as usize {
+                    let o = ((u.y as usize + row) * width as usize + u.x as usize) * 4;
+                    let k = row * u.w as usize * 4;
+                    out[o..o + u.w as usize * 4].copy_from_slice(&px[k..k + u.w as usize * 4]);
+                }
+                views.push(out);
+            }
+            let (centre, extent, _) = face.mesh.frame();
+            let hr = face.hair_region;
+            let line = Region::around(
+                [
+                    [centre[0] - 0.45 * extent, centre[1] - 0.95 * extent],
+                    [centre[0] + 0.45 * extent, centre[1] - 0.35 * extent],
+                ]
+                .into_iter(),
+                [0.0; 4],
+                width,
+                height,
+            );
+            for (tag, r, side) in [("hair", hr, 420u32), ("line", line, 600u32)] {
+                let k = side as f32 / r.w as f32;
+                let (tw, th) = (side, (r.h as f32 * k) as u32);
+                let mut sheet = image::RgbImage::new(tw * views.len() as u32, th);
+                for (i, v) in views.iter().enumerate() {
+                    let tile = image::imageops::resize(
+                        &crop_rgb(v, width, r),
+                        tw,
+                        th,
+                        image::imageops::FilterType::Triangle,
+                    );
+                    image::imageops::replace(&mut sheet, &tile, (i as u32 * tw) as i64, 0);
+                }
+                sheet
+                    .save(dir.join(format!("pr_{name}_{tag}.png")))
+                    .unwrap();
+            }
+        }
+    }
+
     /// Opt-in: IAI_PORTRAIT_CLIP_PROBE is a folder with photos and `clips.txt`
     /// (`name.jpg x0,y0,x1,y1` per line): hair masks without and with that
     /// rectangle selected, side by side over the rectangle.
