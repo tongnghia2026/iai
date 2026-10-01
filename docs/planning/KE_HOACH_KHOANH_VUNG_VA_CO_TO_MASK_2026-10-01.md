@@ -73,20 +73,41 @@ và qua cổng · `[!]` bị chặn.
       Màu da trung bình (Đều màu da) vẫn chỉ đọc tới cằm + 0,45e
       (`tone_rows`). Cọ tô Da với tới vùng này theo.
 
-### Pha 2c — (VIỆC TIẾP THEO) Da vai, tay, bàn tay không bị khung chữ nhật cắt
+### Pha 2c — Da vai, tay, bàn tay không bị khung chữ nhật cắt
 
-- [ ] Chủ test Pha 1 OK, gửi ảnh mẫu (cô gái chống cằm, áo hai dây): mask da
-      dừng ở **khung chữ nhật** = bề ngang mặt + 0,15e mỗi bên (Pha 2b chỉ kéo
-      đáy xuống) → vai, cánh tay, phần bàn tay ngoài khung không được chọn, có
-      mép dọc thấy rõ. Nghi thêm: áo trắng/ren trong khung có thể bị tô hồng —
-      soát khi probe.
-- Hướng: cho **da một khung riêng** — `SkinLayers` có `region` của nó = khung
-  ôm vùng Sapiens2 thấy da (mặt + thân > 0,5) nối với mặt, trong khung model;
-  các mask đặc điểm mặt (mắt, môi, mụn…) giữ khung mặt cũ cho nhẹ RAM. Hiệu
-  ứng da (`retouch_pixel` phần da) chạy trên khung da; `skin_mask` (graph cut)
-  chạy trên khung da (giới hạn ô lưới TOP_CELLS sẵn có lo phần nặng); cọ tô Da
-  dùng khung da. Không có model tin cậy → như cũ. Probe: thời gian/RAM ảnh
-  23 MP, rò sang áo trắng/nền màu da.
+- Chủ test Pha 1 OK, gửi ảnh mẫu (cô gái chống cằm, áo hai dây): mask da dừng
+  ở **khung chữ nhật** = bề ngang mặt + 0,15e mỗi bên (Pha 2b chỉ kéo đáy
+  xuống) → vai, cánh tay, phần bàn tay ngoài khung không được chọn, có mép
+  dọc thấy rõ.
+- Tái hiện trên ảnh thử công cộng (Amy Adams vai trần; cô dâu ren; bà Romand
+  áo hai dây, tay trần buông dọc người, 30 MP): đúng mép dọc cắt vai; thêm hai
+  lỗi chưa thấy trước đó — (1) **vai/tay bên kia dây áo bị bỏ hẳn** vì mask
+  chỉ giữ da nối liền với mẫu da trên mặt, dây áo cắt rời; (2) ảnh nửa người
+  thì **tay bị cắt ngang ở đáy khung của Sapiens2** (khung 3e × 4e quanh đầu).
+- [~] **Da có khung riêng** (`SkinLayers.region`): khung mặt + mọi điểm
+  Sapiens2 thấy da (mặt + thân > 0,35, đúng ngưỡng hàng rào của mask) **có màu
+  giống da mặt** (độ lệch sắc độ r,g < 0,09 — loại găng tay trắng, áo hồng),
+  không thuộc mặt khác, nới 0,1e. Mask, tách tần số, hiệu ứng da, "Hiện vùng
+  nhận diện", lớp phủ và cọ tô Da chạy trên khung da; mắt, môi, mụn, lông
+  mày, sống mũi giữ khung mặt (khung mặt quay về đáy cằm + 0,45e). Không có
+  model tin cậy → khung da = khung mặt như cũ.
+- [~] **Da qua dây áo**: ô da mà Sapiens2 chắc ≥ 0,8 (và cắt đồ thị cũng nhận
+  là da) được giữ dù không nối với mặt.
+- [~] **Nhìn rộng lần hai**: khi da (có màu da) chạm cạnh trái/phải/đáy khung
+  Sapiens2 mà ảnh còn tiếp, chạy Sapiens2 thêm một lần trên khung đứng rộng
+  6e, từ 1e trên tâm mặt tới 6e dưới (trong ảnh và trong vùng chọn); hai lần
+  nhìn hòa vào nhau ở 24 điểm ảnh model sát mép khung đầu. Tóc vẫn theo khung
+  đầu.
+- [~] Tốc độ/RAM: mờ rộng (σ ≥ 20) chạy trên lưới khối 2–8 px rồi nội suy (lệch
+  < 0,02 trong lòng ảnh); bỏ sớm các mảng float lớn. Ảnh 20 MP (Amy phóng 2×,
+  khung da 3721×4742): chuẩn bị ~4,0 s (cũ 3,5 s), đỉnh RAM 2,1 GB (cũ
+  2,4 GB). Ảnh 30 MP có tay: thêm ~1,7 s cho lần nhìn rộng.
+- Probe: 8 ảnh cũ (Kim, Lauren, Nelson, Mazie, Jeffries, Meir, Judy, Artemis)
+  mask y như trước; Kim (găng tay phi hành gia) không còn chạy lần nhìn rộng.
+  Tay áo ren mờ của cô dâu vẫn không nhận là da (Sapiens2 đọc là áo) — chấp
+  nhận.
+- Cổng: ảnh chân dung vai/tay trần — mask da phủ hết vai, tay, bàn tay, không
+  còn mép thẳng; không lan sang áo/nền. **Chờ chủ test.**
 
 ### Pha 1 — Khoanh vùng trước khi phân tích (chủ cho làm sau Pha 2)
 
@@ -187,3 +208,6 @@ và qua cổng · `[!]` bị chặn.
   sát, cắt hiệu ứng theo vùng chọn); probe + test đạt; chờ chủ test.
 - **2026-10-01** — Chủ test Pha 1 OK; báo da vai/tay bị khung chữ nhật cắt →
   Pha 2c, làm ở hội thoại mới (context phiên này đầy).
+- **2026-10-01** — Pha 2c code xong (khung da riêng có cổng màu, giữ da qua dây
+  áo, nhìn rộng lần hai khi da chạm mép khung model, mờ rộng trên lưới khối);
+  probe đạt; chờ chủ test.
