@@ -84,9 +84,22 @@ và qua cổng · `[!]` bị chặn.
 - [~] Dùng lại công cụ **Refine Brush** (vòng con trỏ, `[` `]`, Shift+`[` `]`,
       Alt+chuột phải kéo cỡ, Alt đảo Thêm↔Bớt, Alt+Thông minh = trả lại vùng app
       tìm): khi không có phiên Refine Selection, nét tô xếp hàng ở
-      `Canvas::mask_brush` cho hộp thoại xử lý mỗi khung hình. Thông minh = thuật
-      toán bám mép màu của Refine Brush (`refine_edge_stamp`, Lab + Sobel của
-      vùng, tính lần đầu dùng). Mỗi nét chỉ tô một mặt (mặt gần điểm bắt đầu).
+      `Canvas::mask_brush` cho hộp thoại xử lý mỗi khung hình. Mỗi nét chỉ tô
+      một mặt (mặt gần điểm bắt đầu).
+- [~] **Thông minh làm lại (chủ: "cọ không thông minh", đề xuất thử Color
+      Range)**. Thử trên ảnh thật (Meir tóc xoăn mảnh trên áo trắng, Nelson sợi
+      bạc trên nền xanh): cọ cũ (`refine_edge_stamp`) còn **khoét lỗ** vùng tóc
+      đã có; Color Range lấy màu ở điểm bấm thì sợi mảnh trên nền sáng gần như
+      không ăn, còn trên Nelson **chọn lan cả nền xanh** (thước đo Color Range
+      thiên về độ sáng mà tóc nâu tối và nền xanh đậm gần cùng độ sáng). Chốt:
+      **Color Range chấm theo cả hai phía** — quanh cọ lấy mẫu màu vùng đang tô
+      (mask ≥ 0,9) và phần còn lại (mask ≤ 0,1, chỉ điểm phẳng để sợi tóc bay
+      không bị tính là nền; đo bằng bước lệch lớn nhất với điểm kề nên sợi rộng
+      1 px cũng nhận ra), bỏ mẫu hai phía trùng nhau (nền lộ giữa các sợi trong
+      mask), mỗi điểm dưới cọ lấy tỉ lệ khoảng cách Lab tới mẫu gần nhất mỗi
+      phía → sợi mờ được tô mờ, nền giữ 0, màu không giống bên nào (da cạnh tóc)
+      bị loại. Chỉ cộng thêm, tính trên mask lúc bắt đầu nét → **tô lại để sợi mờ
+      đậm hơn**; Alt + Thông minh = bớt phần giống nền.
 - [~] Sau mỗi nét: tóc dùng ngay; da tính lại cả khối `SkinLayers` (mask,
       interior, quầng mắt, tách tần số có trọng số, màu da) trên luồng nền rồi
       xem trước lại. Chấm mụn giữ theo lần phân tích (bớt da thì hết xóa mụn ở
@@ -126,3 +139,5 @@ và qua cổng · `[!]` bị chặn.
 - **2026-10-01** — Chủ test Pha 0 OK; thêm Pha 4 (Sáng tóc theo Blacks của
   Develop, làm sau); chủ cho làm Pha 2 trước Pha 1. Pha 2 code xong, chờ chủ
   test.
+- **2026-10-01** — Chủ: cọ Thông minh chưa thông minh, thử Color Range. Thử 3
+  cách trên ảnh thật, chốt "Color Range hai phía" (xem Pha 2); chờ chủ test.

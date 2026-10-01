@@ -287,15 +287,12 @@ impl App {
             return;
         };
         let paint = brush.paints.entry((face, target)).or_insert_with(|| {
-            let original = match target {
-                MaskTarget::Skin => model.faces[face].skin.mask().to_vec(),
-                MaskTarget::Hair => model.faces[face].hair_mask().to_vec(),
-            };
             let now = current_mask(&model, &session.edits, &HashMap::new(), face, target).to_vec();
-            MaskPaint::new(region_of(&model, face, target), now, original)
+            MaskPaint::new(region_of(&model, face, target), now)
         });
         if stroke.before.is_empty() {
             stroke.before = paint.mask.clone();
+            paint.begin_stroke();
         }
         let mut touched: Option<Rect> = None;
         for &(x, y) in &points {
@@ -325,12 +322,14 @@ impl App {
         let Some(stroke) = session.brush.stroke.take() else {
             return;
         };
-        let (Some(face), Some(rect), Some(target)) =
-            (stroke.face, stroke.rect, session.brush.target)
-        else {
+        let (Some(face), Some(target)) = (stroke.face, session.brush.target) else {
             return;
         };
-        let Some(paint) = session.brush.paints.get(&(face, target)) else {
+        let Some(paint) = session.brush.paints.get_mut(&(face, target)) else {
+            return;
+        };
+        paint.end_stroke();
+        let Some(rect) = stroke.rect else {
             return;
         };
         let w = paint.region.w as usize;

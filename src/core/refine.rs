@@ -756,9 +756,7 @@ pub enum MaskBrushEvent {
     End,
 }
 
-/// Blend the brush disc of `base` back toward `start`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn restore_stamp(
+fn restore_stamp(
     base: &mut [u8],
     start: &[u8],
     w: usize,

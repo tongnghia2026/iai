@@ -103,7 +103,7 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
                 (
                     RefineBrushMode::Smart,
                     format!("{} Thông minh", ph::SPARKLE),
-                    "Bám theo mép màu dưới cọ (sợi tóc, chân tóc)",
+                    "Chọn theo màu: điểm giống vùng đang tô hơn nền thì được thêm, sợi mờ thêm mờ — tô lại để đậm hơn",
                 ),
                 (
                     RefineBrushMode::Add,
@@ -175,7 +175,7 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
                 actions.dialogs.portrait_brush_redo = true;
             }
             ui.label(
-                egui::RichText::new("Alt: đảo Thêm ↔ Bớt (Thông minh: trả lại vùng app tìm)")
+                egui::RichText::new("Alt: đảo Thêm ↔ Bớt (Thông minh: bớt phần giống nền)")
                     .size(10.0)
                     .color(egui::Color32::from_gray(150)),
             );
