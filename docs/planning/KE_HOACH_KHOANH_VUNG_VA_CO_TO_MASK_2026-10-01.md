@@ -43,16 +43,23 @@ và qua cổng · `[!]` bị chặn.
 
 ### Pha 0 — Sửa nhanh vùng tóc tự động (nhỏ)
 
-- [ ] Hệ số "tối hơn da" theo **tỉ lệ** thay cho hiệu cố định: tóc đủ khi
+- [~] Hệ số "tối hơn da" theo **tỉ lệ** thay cho hiệu cố định: tóc đủ khi
       `luma < 0,55·ref`, không tính khi `luma > 0,85·ref`.
-- [ ] `ref` lấy từ **mask da mới** (đợt 8) trong vùng mặt, ngoài vùng mặt mới
+- [~] `ref` lấy từ **mask da mới** (đợt 8) trong vùng mặt, ngoài vùng mặt mới
       dùng Sapiens2; điểm là da theo mask mới thì không là tóc.
-- [ ] Viền ngoài: dải ~e/20 quanh mép tóc Sapiens2, tách sợi tóc khỏi nền theo
-      độ sáng tóc/nền tại chỗ (alpha = (nền − điểm)/(nền − tóc), chỉ khi tóc và
-      nền đủ tương phản) — kiểu Refine Edge.
-- [ ] Thu hẹp vùng loại trừ quanh lông mày/mắt (~0,005–0,01e).
-- [ ] Probe: ảnh vùng tóc cũ/mới + ảnh chỉnh "Sáng tóc" mạnh; soát rò sang nền
-      tối (kệ sách sau Mazie Hirono, nền xanh đậm NASA), áo tối.
+- [~] Viền ngoài: tách sợi tóc khỏi nền kiểu Refine Edge, **theo màu RGB** (không
+      chỉ độ sáng: tóc nâu tối trên nền xanh đậm gần cùng độ sáng): chiếu màu
+      điểm lên đoạn màu nền → màu tóc tại chỗ; chỉ khi nền trơn và màu nền/tóc
+      cách xa đủ. Thêm nhóm "Nền" (class 0) vào nhóm vùng Sapiens2. Màu tóc lấy
+      từ lõi vùng tóc của model (mép model hay lấn ra nền). Ở dải tóc giáp nền,
+      phép tách màu thay quy tắc "tối hơn da" → hết quầng màu quanh tóc.
+- [~] Thu hẹp vùng loại trừ quanh lông mày/mắt (0,005e/0,015e và 0,01e/0,015e);
+      chỗ model chắc chắn là tóc (lọn tóc vắt qua đuôi lông mày) thì không loại.
+- [~] Probe 13 ảnh: tóc mai/chân tóc được bắt (Judy, Kim, Mazie, Lauren,
+      Jeffries); quầng màu viền tóc trên nền xanh hết (Nelson, Lauren); không rò
+      sang kệ sách (Mazie). Tính trên lưới thô (ô ≈ e/150) → bớt RAM, nhanh hơn.
+      Còn lại (để cọ tô Pha 2): tóc bạc sáng hơn da trên tường xám (tóc mai
+      bạc không tự bắt), nền lọt qua tóc mà model chắc chắn là tóc.
 - Cổng: tóc mai hai bên, mép mái được tô; không lan ra nền/áo.
 
 ### Pha 1 — Khoanh vùng trước khi phân tích
@@ -102,3 +109,5 @@ và qua cổng · `[!]` bị chặn.
   kết quả phân tích vùng tóc; chưa code.
 - **2026-10-01** — Chủ duyệt kế hoạch (thứ tự Pha 0 → 1 → 2; cọ tô Da + Tóc
   trước). Làm ở hội thoại mới, bắt đầu Pha 0.
+- **2026-10-01** — Pha 0 code xong (tỉ lệ tối, ref từ mask da mới, tách viền
+  theo màu, nhóm Nền, thu hẹp loại trừ lông mày/mắt); probe đạt; chờ chủ test.

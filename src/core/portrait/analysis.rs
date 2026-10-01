@@ -122,6 +122,20 @@ fn max_filter(values: &[f32], width: usize, height: usize, radius: usize) -> Vec
     out
 }
 
+/// Bilinear read at pixel (x, y) of a `gw` x `gh` grid of `cell`-pixel blocks.
+fn grid_at(grid: &[[f32; 4]], gw: usize, gh: usize, cell: usize, x: usize, y: usize) -> [f32; 4] {
+    let u = ((x as f32 + 0.5) / cell as f32 - 0.5).clamp(0.0, (gw - 1) as f32);
+    let v = ((y as f32 + 0.5) / cell as f32 - 0.5).clamp(0.0, (gh - 1) as f32);
+    let (x0, y0) = (u as usize, v as usize);
+    let (x1, y1) = ((x0 + 1).min(gw - 1), (y0 + 1).min(gh - 1));
+    let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+    let (a, b) = (grid[y0 * gw + x0], grid[y0 * gw + x1]);
+    let (c, d) = (grid[y1 * gw + x0], grid[y1 * gw + x1]);
+    std::array::from_fn(|k| {
+        (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy
+    })
+}
+
 /// Guided filter of `mask` with a grey `guide`: snaps a soft mask onto the
 /// photo's own edges. Never grows the mask where it had nothing nearby.
 pub(super) fn guided(
@@ -1048,7 +1062,12 @@ fn build_face(
     // crop, with no outline cut. As with Develop's Shadows/Blacks, each
     // pixel's own tone decides how much it changes: fully where the model is
     // sure of hair, elsewhere by how much darker it is than the skin next to
-    // it, so strands over the forehead change and the skin between them not.
+    // it (as a ratio, so sideburns beside a shaded temple count), so strands
+    // over the forehead change and the skin between them not. Against the
+    // backdrop, each pixel's share of hair is where its colour sits between
+    // the backdrop's and the hair's there, as Refine Edge does, so stray
+    // strands past the model's coarse outline count and backdrop the model
+    // took for hair does not.
     let (hair_region, hair, hair_base) = match parts {
         Some(p) if trusted => {
             let [x0, y0, x1, y1] = p.bounds();
@@ -1073,42 +1092,129 @@ fn build_face(
                 })
                 .collect();
             let own_centre = owners[index];
-            // Per pixel: sure hair (never where the model sees skin: faint
-            // hair odds spread over blond or grey-haired foreheads), skin-
-            // weighted brightness and skin weight for the local skin tone,
-            // and whether the model sees this person at all (not backdrop).
-            let (mut spread, on_person): (Vec<[f32; 4]>, Vec<f32>) = (0..hr.len())
-                .into_par_iter()
-                .map(|i| {
-                    let (x, y) = at(i);
-                    let own = (x - own_centre.0[0]).hypot(y - own_centre.0[1]) / own_centre.1;
-                    if owners
-                        .iter()
-                        .enumerate()
-                        .any(|(j, (c, s))| j != index && (x - c[0]).hypot(y - c[1]) / s < own)
-                    {
-                        return ([0.0; 4], 0.0);
+            let colour_skin_at = |x: f32, y: f32| {
+                let (fx, fy) = (x - region.x as f32, y - region.y as f32);
+                (fx >= 0.0 && fy >= 0.0 && (fx as usize) < w && (fy as usize) < h)
+                    .then(|| skin[fy as usize * w + fx as usize])
+            };
+            // Neighbourhood sums on a grid of `cell`-pixel blocks (the part
+            // model is no finer), per block: sure hair (never where the model
+            // sees skin: faint hair odds spread over blond or grey-haired
+            // foreheads), skin-weighted brightness and skin weight for the
+            // local skin tone, sure backdrop with its colour and squared
+            // colour, hair-weighted colour, and the pixel count.
+            let cell = ((e / 150.0).round() as usize).max(1);
+            let (gw, gh) = (hw.div_ceil(cell), hh.div_ceil(cell));
+            // Per pixel: whether the model sees this person at all (not
+            // backdrop), whether it may be a strand against the backdrop (not
+            // skin or clothes), the colour skin mask, and whether the model is
+            // certain of hair (a strand across a brow end).
+            let mut weights = vec![[0u8; 4]; hr.len()];
+            let sums: Vec<[f32; 12]> = weights
+                .par_chunks_mut(cell * hw)
+                .enumerate()
+                .map(|(gy, rows)| {
+                    let mut line = vec![[0.0f32; 12]; gw];
+                    for (j, out) in rows.iter_mut().enumerate() {
+                        let i = gy * cell * hw + j;
+                        let (x, y) = at(i);
+                        let sum = &mut line[(j % hw) / cell];
+                        sum[11] += 1.0;
+                        let own = (x - own_centre.0[0]).hypot(y - own_centre.0[1]) / own_centre.1;
+                        if owners
+                            .iter()
+                            .enumerate()
+                            .any(|(k, (c, s))| k != index && (x - c[0]).hypot(y - c[1]) / s < own)
+                        {
+                            continue;
+                        }
+                        let g = p.groups_at(x, y);
+                        let part_skin =
+                            g[body_parts::GROUP_FACE_SKIN] + g[body_parts::GROUP_BODY_SKIN];
+                        let hair = g[body_parts::GROUP_HAIR];
+                        let not_skin = 1.0 - smoothstep(0.2, 0.5, part_skin);
+                        let sure = smoothstep(0.35, 0.65, hair) * not_skin;
+                        let colour_skin = colour_skin_at(x, y);
+                        let tone_weight = colour_skin.unwrap_or(part_skin);
+                        let back = smoothstep(0.5, 0.9, g[body_parts::GROUP_BACKDROP]);
+                        let c = colours[i];
+                        let add = [
+                            sure,
+                            tone_weight * luma(c),
+                            tone_weight,
+                            back * (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]),
+                            back,
+                            back * c[0],
+                            back * c[1],
+                            back * c[2],
+                            sure * c[0],
+                            sure * c[1],
+                            sure * c[2],
+                        ];
+                        for (total, value) in sum.iter_mut().zip(add) {
+                            *total += value;
+                        }
+                        let colour_skin = colour_skin.unwrap_or(0.0);
+                        *out = [
+                            to_u8(smoothstep(0.3, 0.7, hair + part_skin)),
+                            to_u8(
+                                smoothstep(0.6, 0.85, hair + g[body_parts::GROUP_BACKDROP])
+                                    * not_skin
+                                    * (1.0 - colour_skin),
+                            ),
+                            to_u8(colour_skin),
+                            to_u8(smoothstep(0.6, 0.9, hair) * not_skin),
+                        ];
                     }
-                    let g = p.groups_at(x, y);
-                    let skin = g[body_parts::GROUP_FACE_SKIN] + g[body_parts::GROUP_BODY_SKIN];
-                    let hair = g[body_parts::GROUP_HAIR];
-                    let sure = smoothstep(0.35, 0.65, hair) * (1.0 - smoothstep(0.2, 0.5, skin));
-                    (
-                        [sure, skin * luma(colours[i]), skin, 0.0],
-                        smoothstep(0.3, 0.7, hair + skin),
-                    )
+                    line
                 })
-                .unzip();
-            blur4(&mut spread, hw, hh, (e / 40.0).max(3.0));
-            // Brows and eyes stay out even under a fringe.
+                .collect::<Vec<_>>()
+                .concat();
+            let spread = |mut grid: Vec<[f32; 4]>, sigma: f32| {
+                blur4(&mut grid, gw, gh, sigma / cell as f32);
+                grid
+            };
+            let mean = |s: &[f32; 12], k: usize| s[k] / s[11].max(1.0);
+            let near = spread(
+                sums.iter()
+                    .map(|s| [mean(s, 0), mean(s, 1), mean(s, 2), mean(s, 3)])
+                    .collect(),
+                (e / 40.0).max(3.0),
+            );
+            let backdrop = spread(
+                sums.iter()
+                    .map(|s| [mean(s, 4), mean(s, 5), mean(s, 6), mean(s, 7)])
+                    .collect(),
+                (e / 40.0).max(3.0),
+            );
+            // The hair's own colour from well inside the model's hair only:
+            // its outline can run past the real hair onto the backdrop.
+            let strands = spread(
+                sums.iter()
+                    .zip(&near)
+                    .map(|(s, n)| {
+                        let inside = smoothstep(0.8, 0.97, n[0]);
+                        [
+                            mean(s, 0) * inside,
+                            mean(s, 8) * inside,
+                            mean(s, 9) * inside,
+                            mean(s, 10) * inside,
+                        ]
+                    })
+                    .collect(),
+                (e / 20.0).max(3.0),
+            );
+            drop(sums);
+            // Brows and eyes stay out under a fringe, unless the model is
+            // certain of hair there.
             let mut features = vec![0.0f32; hr.len()];
             for brow in [&RIGHT_BROW[..], &LEFT_BROW[..]] {
                 stamp_polygon(
                     &mut features,
                     hr,
                     &loop_points(points, brow),
-                    0.02 * e,
-                    0.03 * e,
+                    0.005 * e,
+                    0.015 * e,
                 );
             }
             for eye in [&RIGHT_EYE[..], &LEFT_EYE[..]] {
@@ -1116,8 +1222,8 @@ fn build_face(
                     &mut features,
                     hr,
                     &loop_points(points, eye),
-                    0.03 * e,
-                    0.03 * e,
+                    0.01 * e,
+                    0.015 * e,
                 );
             }
             let open = [
@@ -1130,21 +1236,57 @@ fn build_face(
             let hair: Vec<u8> = (0..hr.len())
                 .into_par_iter()
                 .map(|i| {
-                    let [b, skin_luma, skin, _] = spread[i];
-                    let zone = smoothstep(0.0, 0.5, b) * on_person[i];
+                    let [person, strand, colour_skin, certain] =
+                        weights[i].map(|v| v as f32 / 255.0);
+                    if person == 0.0 && strand == 0.0 {
+                        return 0;
+                    }
+                    let (x, y) = (i % hw, i / hw);
+                    let c = colours[i];
+                    let [b, skin_luma, skin, back_sq] = grid_at(&near, gw, gh, cell, x, y);
+                    // Against a plain backdrop whose colour stands well apart
+                    // from the hair's (not a busy one such as a bookshelf,
+                    // which would pass for strands), the pixel's share of hair
+                    // by where its colour sits between the two.
+                    let [back_w, br, bg, bb] = grid_at(&backdrop, gw, gh, cell, x, y);
+                    let [fore_w, fr, fg, fb] = grid_at(&strands, gw, gh, cell, x, y);
+                    let (share, clear) = if back_w > 0.02 && fore_w > 0.02 {
+                        let back = [br / back_w, bg / back_w, bb / back_w];
+                        let fore = [fr / fore_w, fg / fore_w, fb / fore_w];
+                        let gap: [f32; 3] = std::array::from_fn(|k| back[k] - fore[k]);
+                        let gap2 = gap.iter().map(|v| v * v).sum::<f32>();
+                        let busy = (back_sq / back_w - back.iter().map(|v| v * v).sum::<f32>())
+                            .max(0.0)
+                            .sqrt();
+                        let clear = smoothstep(0.12, 0.25, gap2.sqrt())
+                            * smoothstep(2.0, 4.0, gap2.sqrt() / busy.max(1e-3))
+                            * smoothstep(0.02, 0.1, back_w);
+                        if clear > 0.0 {
+                            let along = (0..3).map(|k| (back[k] - c[k]) * gap[k]).sum::<f32>();
+                            (smoothstep(0.1, 0.9, along / gap2), clear)
+                        } else {
+                            (0.0, 0.0)
+                        }
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let zone = smoothstep(0.0, 0.5, b) * person;
                     let core = smoothstep(0.75, 0.97, b);
                     let reference = if skin > 0.02 {
                         skin_luma / skin
                     } else {
                         cheek_luma
                     };
-                    let dark =
-                        1.0 - smoothstep(reference - 0.4, reference - 0.15, luma(colours[i]));
-                    let keep = (1.0 - features[i]) * side_fade(i, hw, hh, open, fade);
-                    to_u8(zone * (core + (1.0 - core) * dark) * keep)
+                    let dark = 1.0 - smoothstep(0.55 * reference, 0.85 * reference, luma(c));
+                    let tone = dark + (share - dark) * clear;
+                    let body = zone * (core + (1.0 - core) * tone);
+                    let edge = share * clear * smoothstep(0.02, 0.12, b) * strand;
+                    let keep =
+                        (1.0 - features[i] * (1.0 - certain)) * side_fade(i, hw, hh, open, fade);
+                    to_u8(body.max(edge) * (1.0 - colour_skin) * keep)
                 })
                 .collect();
-            drop(spread);
+            drop(weights);
             // Develop's regional luminance: Shadows/Blacks move each strand
             // by its neighbourhood's tone, so hair texture survives a lift.
             let tone: Vec<f32> = colours

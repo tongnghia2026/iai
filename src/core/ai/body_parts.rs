@@ -62,7 +62,7 @@ const LOWER_LIP: u8 = 24;
 const TONGUE: u8 = 28;
 
 /// Soft groups of classes the portrait masks read, in [`PartLabels::groups_at`] order.
-pub const PART_GROUPS: usize = 7;
+pub const PART_GROUPS: usize = 8;
 pub const GROUP_FACE_SKIN: usize = 0;
 pub const GROUP_BODY_SKIN: usize = 1;
 pub const GROUP_HAIR: usize = 2;
@@ -70,6 +70,7 @@ pub const GROUP_LIPS: usize = 3;
 pub const GROUP_TEETH: usize = 4;
 pub const GROUP_TONGUE: usize = 5;
 pub const GROUP_GLASSES: usize = 6;
+pub const GROUP_BACKDROP: usize = 7;
 
 fn group_of(class: usize) -> Option<usize> {
     match class {
@@ -80,6 +81,7 @@ fn group_of(class: usize) -> Option<usize> {
         26 | 27 => Some(GROUP_TEETH),
         28 => Some(GROUP_TONGUE),
         2 => Some(GROUP_GLASSES),
+        0 => Some(GROUP_BACKDROP),
         _ => None,
     }
 }
