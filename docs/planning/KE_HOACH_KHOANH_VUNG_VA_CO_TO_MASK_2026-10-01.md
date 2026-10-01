@@ -153,8 +153,15 @@ và qua cổng · `[!]` bị chặn.
   sáng hiện dần từ chân mày, đầy từ giữa hai mắt, còn 1/3 trên chóp mũi; sáng
   rộng hơn (σ 0,026e); tối hai bên rộng hơn (σ 0,035e, cách 0,08e), chỉ dọc
   phần xương sống mũi, mạnh bằng nửa (0,03).
+- Chủ test lần 2: đoạn giữa hai mắt (khoanh tròn) **sáng quá mạnh và loang
+  rộng ra hai bên** (chỗ đó mặt phẳng và rộng, vệt rộng đủ mạnh đủ thành
+  quầng).
+- [~] Lần 3: vệt sáng thu hẹp về phía trên (σ 0,015e ở đầu → 0,026e từ giữa
+  sống mũi) và hiện chậm hơn: giữa hai mắt còn khoảng một nửa, mạnh nhất ở
+  giữa sống mũi.
 - Cổng: kéo "Sống mũi cao" tới 100: vệt sáng dài từ giữa chân mày tới chóp
-  mũi, không mép, không cụt; hai bên chỉ tối nhẹ. **Chờ chủ test.**
+  mũi, không mép, không cụt, giữa hai mắt nhẹ và hẹp; hai bên chỉ tối nhẹ.
+  **Chờ chủ test.**
 
 ### Pha 1 — Khoanh vùng trước khi phân tích (chủ cho làm sau Pha 2)
 
@@ -265,3 +272,5 @@ và qua cổng · `[!]` bị chặn.
 - **2026-10-01** — Chủ test Pha 7: còn cụt hai đầu, tối hai bên nhiều → kéo
   dài từ chân mày tới chóp mũi, mềm hơn, tối hai bên giảm một nửa; chờ chủ
   test.
+- **2026-10-01** — Chủ test lần 2: giữa hai mắt sáng mạnh, loang → thu hẹp và
+  giảm đoạn đầu; chờ chủ test.
