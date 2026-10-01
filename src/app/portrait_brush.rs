@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use super::state::App;
 use crate::core::portrait::brush::{MaskPaint, MaskTarget};
+use crate::core::portrait::recipe::RestoredFace;
 use crate::core::portrait::{FaceEdits, PortraitModel, Region, SkinLayers};
 use crate::core::refine::{MaskBrushEvent, Rect, StampOp};
 use crate::tools::ToolId;
@@ -409,6 +410,40 @@ impl App {
         }
         if let Some(window) = &self.win.window {
             window.request_redraw();
+        }
+    }
+
+    /// Take the painted masks a reopened "Chân dung" layer kept: the brush
+    /// paints on from them and the preview uses them (they are not undo
+    /// steps of this session).
+    pub(super) fn restore_portrait_masks(&mut self, restored: Vec<RestoredFace>) {
+        let Some(session) = self.shell.portrait.as_mut() else {
+            return;
+        };
+        let Some(model) = session.model.clone() else {
+            return;
+        };
+        let mut used = Vec::new();
+        for (face, saved) in restored.into_iter().enumerate() {
+            for (target, mask) in [
+                (MaskTarget::Skin, saved.skin),
+                (MaskTarget::Hair, saved.hair),
+            ] {
+                let Some(mask) = mask else {
+                    continue;
+                };
+                let region = region_of(&model, face, target);
+                if mask.len() == region.len() {
+                    session
+                        .brush
+                        .paints
+                        .insert((face, target), MaskPaint::new(region, mask));
+                    used.push((face, target));
+                }
+            }
+        }
+        for (face, target) in used {
+            self.use_portrait_mask(face, target);
         }
     }
 

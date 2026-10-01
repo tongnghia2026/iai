@@ -928,6 +928,11 @@ impl App {
             (String::new(), false, Vec::new(), false)
         };
         let portrait_brush = self.portrait_brush_view();
+        let portrait_restore = if self.shell.ui.show_portrait_dialog {
+            self.portrait_restore()
+        } else {
+            (false, None, None)
+        };
 
         UiData {
             doc: DocumentViewModel {
@@ -1783,6 +1788,9 @@ impl App {
                 portrait_brush_undo: portrait_brush.1,
                 portrait_brush_redo: portrait_brush.2,
                 portrait_overlay: portrait_brush.3,
+                portrait_reopened: portrait_restore.0,
+                portrait_restore_settings: portrait_restore.1,
+                portrait_restore_faces: portrait_restore.2,
                 scan_is_pdf: self
                     .docs
                     .documents

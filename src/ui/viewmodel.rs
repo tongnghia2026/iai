@@ -476,6 +476,11 @@ pub struct DialogViewModel {
     pub portrait_brush_undo: bool,
     pub portrait_brush_redo: bool,
     pub portrait_overlay: Option<(egui::TextureId, egui::Rect)>,
+    /// A "Chân dung" layer is reopened; its saved sliders and faces, until
+    /// the dialog takes them.
+    pub portrait_reopened: bool,
+    pub portrait_restore_settings: Option<crate::core::portrait::PortraitSettings>,
+    pub portrait_restore_faces: Option<Vec<bool>>,
     /// Active document is a multi-page PDF session (enables page-scope options).
     pub scan_is_pdf: bool,
     /// PDF page count (1 for a plain image), for the scan-cleanup scope UI.
@@ -1038,6 +1043,9 @@ impl Default for UiData {
                 portrait_brush_undo: false,
                 portrait_brush_redo: false,
                 portrait_overlay: None,
+                portrait_reopened: false,
+                portrait_restore_settings: None,
+                portrait_restore_faces: None,
                 scan_is_pdf: false,
                 scan_page_count: 1,
                 scan_active_page: 0,

@@ -824,6 +824,8 @@ pub struct DialogIntent {
     /// Undo / redo a "Tô vùng" stroke.
     pub portrait_brush_undo: bool,
     pub portrait_brush_redo: bool,
+    /// The dialog took a reopened layer's saved (sliders, faces).
+    pub portrait_restored: Option<(bool, bool)>,
     /// Live-preview params for the open scan-cleanup dialog (current page only).
     pub set_scan_cleanup_preview: Option<crate::core::scan_cleanup::ScanCleanupParams>,
     /// Cancel/close the scan-cleanup dialog (restore the previewed layer).

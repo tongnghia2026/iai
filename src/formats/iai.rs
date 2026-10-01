@@ -509,6 +509,8 @@ fn build_canvas_from_meta<R: Read + Seek>(
                 bake_frame_offset: (0, 0),
             });
         }
+        layer.portrait =
+            read_portrait(archive, prefix, i, &layer_info["portrait"]).map(std::sync::Arc::new);
 
         canvas.layer_stack.layers.push(layer);
     }
@@ -1144,6 +1146,12 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             "shape": shape_json,
             "path": path_json,
             "connector": connector_json,
+            "portrait": layer
+                .portrait
+                .as_ref()
+                .map_or(serde_json::Value::Null, |r| {
+                    portrait_to_json(r, &canvas.layer_stack.layers)
+                }),
         }));
     }
 
@@ -1354,6 +1362,13 @@ fn write_canvas_layers(
                 .map_err(|e| e.to_string())?;
             zip.write_all(&mask_png).map_err(|e| e.to_string())?;
         }
+        if let Some(recipe) = layer
+            .portrait
+            .as_ref()
+            .filter(|r| canvas.layer_stack.layers.iter().any(|l| l.id == r.source))
+        {
+            write_portrait_masks(zip, prefix, i, recipe)?;
+        }
     }
 
     // Saved alpha channels (Channels panel), indexed to match the
@@ -1553,6 +1568,141 @@ pub fn save_pdf_project(
             write_canvas_layers(zip, page.canvas, &prefix)?;
         }
         Ok(())
+    })
+}
+
+/// Bound on one recipe mask entry (a sanity check, like the manifest's).
+const MAX_PORTRAIT_MASK_BYTES: usize = 512 * 1024 * 1024;
+
+fn portrait_entry(prefix: &str, layer: usize, what: &str) -> String {
+    format!("{prefix}layer_{layer}_portrait_{what}.png")
+}
+
+/// A "Chân dung" layer's recipe, so Chỉnh chân dung can reopen it after a
+/// reload. The photo it was made from is stored as its position (its id on
+/// load); the selection and painted masks ride in gray PNG entries next to
+/// the layer. Older builds ignore both. `Null` when the photo is gone.
+fn portrait_to_json(
+    recipe: &crate::core::portrait::PortraitRecipe,
+    layers: &[Layer],
+) -> serde_json::Value {
+    let Some(source) = layers.iter().position(|l| l.id == recipe.source) else {
+        return serde_json::Value::Null;
+    };
+    let region = |r: crate::core::portrait::Region| serde_json::json!([r.x, r.y, r.w, r.h]);
+    let faces: Vec<serde_json::Value> = recipe
+        .faces
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "centre": f.centre,
+                "extent": f.extent,
+                "enabled": f.enabled,
+                "skin": f.skin.as_ref().map(|m| region(m.region)),
+                "hair": f.hair.as_ref().map(|m| region(m.region)),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "source": source as u64,
+        "source_size": [recipe.source_size.0, recipe.source_size.1],
+        "settings": serde_json::to_value(recipe.settings).unwrap_or(serde_json::Value::Null),
+        "clip": recipe.clip.as_ref().map(|c| region(c.region)),
+        "faces": faces,
+    })
+}
+
+fn write_portrait_masks(
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    prefix: &str,
+    layer: usize,
+    recipe: &crate::core::portrait::PortraitRecipe,
+) -> Result<(), String> {
+    let mut masks: Vec<(String, &[u8], crate::core::portrait::Region)> = Vec::new();
+    if let Some(clip) = &recipe.clip {
+        masks.push(("clip".to_string(), &clip.mask, clip.region));
+    }
+    for (f, face) in recipe.faces.iter().enumerate() {
+        for (what, mask) in [("skin", &face.skin), ("hair", &face.hair)] {
+            if let Some(m) = mask {
+                masks.push((format!("{f}_{what}"), &m.mask, m.region));
+            }
+        }
+    }
+    for (what, mask, region) in masks {
+        let png = encode_gray_png(mask, region.w, region.h)?;
+        zip.start_file(portrait_entry(prefix, layer, &what), stored_options())
+            .map_err(|e| e.to_string())?;
+        zip.write_all(&png).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The recipe [`portrait_to_json`] wrote for layer `layer`; `None` when
+/// absent or damaged (the layer then opens as plain pixels).
+fn read_portrait<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    prefix: &str,
+    layer: usize,
+    v: &serde_json::Value,
+) -> Option<crate::core::portrait::PortraitRecipe> {
+    use crate::core::portrait::recipe::{SavedFace, SavedMask};
+    use crate::core::portrait::{Clip, PortraitRecipe, Region};
+    if !v.is_object() {
+        return None;
+    }
+    let region = |v: &serde_json::Value| -> Option<Region> {
+        let a = v.as_array().filter(|a| a.len() == 4)?;
+        let n = |k: usize| a[k].as_u64().and_then(|n| u32::try_from(n).ok());
+        Some(Region {
+            x: n(0)?,
+            y: n(1)?,
+            w: n(2)?,
+            h: n(3)?,
+        })
+    };
+    let mut mask = |what: &str, r: Region| -> Option<Vec<u8>> {
+        let bytes = read_bounded_entry(
+            archive,
+            &portrait_entry(prefix, layer, what),
+            MAX_PORTRAIT_MASK_BYTES,
+        )
+        .ok()?;
+        let gray = image::load_from_memory(&bytes).ok()?.to_luma8();
+        (gray.dimensions() == (r.w, r.h)).then(|| gray.into_raw())
+    };
+    let size = v["source_size"].as_array().filter(|a| a.len() == 2)?;
+    let clip = match region(&v["clip"]) {
+        Some(r) => Some(Clip {
+            region: r,
+            mask: mask("clip", r)?,
+        }),
+        None => None,
+    };
+    let mut faces = Vec::new();
+    for (f, face) in v["faces"].as_array()?.iter().enumerate() {
+        let centre = face["centre"].as_array().filter(|a| a.len() == 2)?;
+        let mut saved = |what: &str| {
+            let r = region(&face[what])?;
+            Some(SavedMask {
+                region: r,
+                mask: mask(&format!("{f}_{what}"), r)?,
+            })
+        };
+        faces.push(SavedFace {
+            centre: [centre[0].as_f64()? as f32, centre[1].as_f64()? as f32],
+            extent: face["extent"].as_f64()? as f32,
+            enabled: face["enabled"].as_bool().unwrap_or(true),
+            skin: saved("skin"),
+            hair: saved("hair"),
+        });
+    }
+    Some(PortraitRecipe {
+        source: v["source"].as_u64()? as u32,
+        source_size: (size[0].as_u64()? as u32, size[1].as_u64()? as u32),
+        settings: serde_json::from_value(v["settings"].clone()).ok()?,
+        clip,
+        faces,
     })
 }
 
@@ -2893,6 +3043,98 @@ mod tests {
             "page 1's opt-out round-trips"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn portrait_recipe_round_trips_with_its_masks() {
+        use crate::core::portrait::recipe::{SavedFace, SavedMask};
+        use crate::core::portrait::{Clip, PortraitRecipe, PortraitSettings, Region};
+
+        let dir = tmp_dir("portrait-recipe");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([200, 160, 140, 255], 40, 30);
+        let photo = canvas.layer_stack.layers[0].id;
+        let idx = canvas.layer_stack.add_layer(40, 30);
+        let region = |x, y, w, h| Region { x, y, w, h };
+        let ramp = |n: usize| (0..n).map(|v| (v * 7 % 256) as u8).collect::<Vec<u8>>();
+        let settings = PortraitSettings {
+            hair_brightness: 35.0,
+            hair_tint: 20.0,
+            ..PortraitSettings::default()
+        };
+        canvas.layer_stack.layers[idx].portrait = Some(std::sync::Arc::new(PortraitRecipe {
+            source: photo,
+            source_size: (40, 30),
+            settings,
+            clip: Some(Clip {
+                region: region(2, 3, 20, 10),
+                mask: ramp(200),
+            }),
+            faces: vec![
+                SavedFace {
+                    centre: [12.5, 9.0],
+                    extent: 8.0,
+                    enabled: false,
+                    skin: Some(SavedMask {
+                        region: region(1, 1, 9, 7),
+                        mask: ramp(63),
+                    }),
+                    hair: None,
+                },
+                SavedFace {
+                    centre: [30.0, 9.0],
+                    extent: 6.0,
+                    enabled: true,
+                    skin: None,
+                    hair: Some(SavedMask {
+                        region: region(20, 0, 15, 12),
+                        mask: ramp(180),
+                    }),
+                },
+            ],
+        }));
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.layer_stack.layers[0].portrait.is_none());
+        let back = loaded.layer_stack.layers[1]
+            .portrait
+            .clone()
+            .expect("recipe round-trips");
+        assert_eq!(back.source, loaded.layer_stack.layers[0].id);
+        assert_eq!(back.source_size, (40, 30));
+        assert_eq!(back.settings, settings);
+        let clip = back.clip.as_ref().expect("selection kept");
+        assert_eq!(
+            (clip.region, clip.mask.clone()),
+            (region(2, 3, 20, 10), ramp(200))
+        );
+        assert_eq!(back.faces.len(), 2);
+        let (a, b) = (&back.faces[0], &back.faces[1]);
+        assert_eq!((a.centre, a.extent, a.enabled), ([12.5, 9.0], 8.0, false));
+        let skin = a.skin.as_ref().expect("skin mask");
+        assert_eq!(
+            (skin.region, skin.mask.clone()),
+            (region(1, 1, 9, 7), ramp(63))
+        );
+        assert!(a.hair.is_none() && b.skin.is_none());
+        assert_eq!(b.hair.as_ref().map(|m| m.mask.clone()), Some(ramp(180)));
+
+        // Without its photo the recipe is dropped, the pixels stay.
+        canvas.layer_stack.layers.remove(0);
+        canvas.layer_stack.active_idx = 0;
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.layer_stack.layers[0].portrait.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

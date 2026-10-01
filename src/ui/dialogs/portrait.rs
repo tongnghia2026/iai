@@ -193,6 +193,20 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let mut masks: bool = ctx.data_mut(|d| d.get_temp(masks_id).unwrap_or(false));
     let face_count = data.dialogs.portrait_faces.len();
     let mut faces: Vec<bool> = ctx.data_mut(|d| d.get_temp(faces_id).unwrap_or_default());
+    // A reopened "Chân dung" layer brings back what it was made with.
+    let d = &data.dialogs;
+    if let Some(saved) = d.portrait_restore_settings {
+        s = saved;
+    }
+    if let Some(saved) = &d.portrait_restore_faces {
+        faces = saved.clone();
+    }
+    if d.portrait_restore_settings.is_some() || d.portrait_restore_faces.is_some() {
+        actions.dialogs.portrait_restored = Some((
+            d.portrait_restore_settings.is_some(),
+            d.portrait_restore_faces.is_some(),
+        ));
+    }
     faces.resize(face_count, true);
 
     let ready = data.dialogs.portrait_ready;
@@ -414,7 +428,11 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(ready, egui::Button::new("  Áp dụng  "))
-                    .on_hover_text("Thêm kết quả thành layer mới \"Chân dung\"")
+                    .on_hover_text(if data.dialogs.portrait_reopened {
+                        "Cập nhật layer \"Chân dung\" đang chỉnh tiếp"
+                    } else {
+                        "Thêm kết quả thành layer mới \"Chân dung\" (mở lại để chỉnh tiếp: chọn layer đó rồi vào Chỉnh chân dung)"
+                    })
                     .clicked()
                 {
                     do_apply = true;

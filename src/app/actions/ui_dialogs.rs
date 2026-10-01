@@ -571,6 +571,9 @@ impl App {
         if std::mem::take(&mut actions.dialogs.portrait_brush_redo) {
             self.portrait_brush_step(true);
         }
+        if let Some((settings, faces)) = actions.dialogs.portrait_restored.take() {
+            self.portrait_restored(settings, faces);
+        }
         if let Some((settings, faces, preview, masks)) = actions.dialogs.set_portrait_preview.take()
         {
             self.set_portrait_preview(settings, faces, preview, masks);
@@ -581,10 +584,13 @@ impl App {
         }
         if let Some((settings, faces)) = actions.dialogs.apply_portrait.take() {
             match self.apply_portrait(settings, faces) {
-                Ok(()) => {
+                Ok(updated) => {
                     self.shell.ui.show_portrait_dialog = false;
-                    self.shell.status_msg =
-                        "Chỉnh chân dung: đã thêm layer \"Chân dung\"".to_string();
+                    self.shell.status_msg = if updated {
+                        "Chỉnh chân dung: đã cập nhật layer \"Chân dung\"".to_string()
+                    } else {
+                        "Chỉnh chân dung: đã thêm layer \"Chân dung\"".to_string()
+                    };
                 }
                 Err(message) => self.shell.status_msg = message,
             }

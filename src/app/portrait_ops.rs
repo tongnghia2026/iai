@@ -5,7 +5,8 @@
 //! never stalls the window (a drag skips to the latest values). The "Tô vùng"
 //! brush (`portrait_brush`) edits the skin and hair masks in between. OK adds
 //! the result as a new layer above the source, holding just the retouched
-//! pixels.
+//! pixels and the recipe (sliders, faces, painted masks, selection) so the
+//! dialog can reopen that layer and update it in place.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -13,7 +14,10 @@ use std::sync::{Arc, Mutex};
 use super::portrait_brush::PortraitBrush;
 use super::render::CanvasEvent;
 use super::state::App;
-use crate::core::portrait::{self, FaceEdits, PortraitModel, PortraitSettings, Region};
+use crate::core::layer::Layer;
+use crate::core::portrait::{
+    self, FaceEdits, PortraitModel, PortraitRecipe, PortraitSettings, Region,
+};
 use crate::core::tile::TileMap;
 
 const RESULT_LAYER: &str = "Chân dung";
@@ -46,6 +50,20 @@ pub struct PortraitSession {
     pub edits: Vec<FaceEdits>,
     pub edit_rev: u64,
     pub brush: PortraitBrush,
+    /// The "Chân dung" layer being reopened, if any.
+    pub reopened: Option<Reopened>,
+    /// Its saved sliders and which faces were on, for the dialog to take
+    /// once (the faces once the analysis has found them again).
+    pub restore_settings: Option<PortraitSettings>,
+    pub restore_faces: Option<Vec<bool>>,
+}
+
+/// A "Chân dung" layer reopened for more edits: hidden while the dialog
+/// previews on the photo beneath it, shown again when the session ends.
+pub struct Reopened {
+    pub layer_id: u32,
+    visible: bool,
+    recipe: Arc<PortraitRecipe>,
 }
 
 impl App {
@@ -60,7 +78,9 @@ impl App {
         if canvas.is_cmyk() {
             return Err("Chỉnh chân dung chưa hỗ trợ chế độ CMYK".to_string());
         }
-        let Some(layer) = canvas.layer_stack.layers.get(canvas.layer_stack.active_idx) else {
+        let (source_idx, reopen) =
+            reopen_target(&canvas.layer_stack.layers, canvas.layer_stack.active_idx)?;
+        let Some(layer) = canvas.layer_stack.layers.get(source_idx) else {
             return Err("Không có layer để chỉnh".to_string());
         };
         if (!layer.is_background && layer.locked) || !layer.is_raster() {
@@ -74,7 +94,14 @@ impl App {
                     .ok_or_else(|| "Vùng chọn nằm ngoài layer ảnh".to_string())?,
             )
         } else {
-            None
+            // Reopening keeps to the selection it was made with.
+            reopen
+                .as_ref()
+                .and_then(|(_, recipe)| recipe.clip.clone())
+                .filter(|c| {
+                    let r = c.region;
+                    r.x + r.w <= w && r.y + r.h <= h && c.mask.len() == r.len()
+                })
         };
         let src = Arc::new(layer.flatten_tiles());
         if w == 0 || h == 0 || src.len() != w as usize * h as usize * 4 {
@@ -95,13 +122,32 @@ impl App {
                 let _ = tx.send(portrait::analyze(&src, w, h, prefer_gpu, clip, &report));
             });
         }
+        let layer_id = layer.id;
+        let original_tiles = layer.tiles.clone();
+        // The reopened layer would cover the preview drawn on the photo.
+        let reopened = reopen.map(|(result_idx, recipe)| {
+            let canvas = &mut self.docs.documents[idx].canvas;
+            let layer = &mut canvas.layer_stack.layers[result_idx];
+            let reopened = Reopened {
+                layer_id: layer.id,
+                visible: layer.visible,
+                recipe,
+            };
+            layer.visible = false;
+            canvas.layer_revision += 1;
+            reopened
+        });
+        let restore_settings = reopened.as_ref().map(|r| r.recipe.settings);
+        if reopened.is_some() {
+            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        }
         self.shell.portrait = Some(PortraitSession {
             doc_id: self.docs.documents[idx].id,
-            layer_id: layer.id,
+            layer_id,
             w,
             h,
             offset,
-            original_tiles: layer.tiles.clone(),
+            original_tiles,
             src,
             progress,
             rx: Some(rx),
@@ -113,6 +159,9 @@ impl App {
             edits: Vec::new(),
             edit_rev: 0,
             brush: PortraitBrush::default(),
+            reopened,
+            restore_settings,
+            restore_faces: None,
         });
         Ok(())
     }
@@ -134,7 +183,13 @@ impl App {
         });
         match finished {
             Some(Ok(model)) => {
-                session.model = Some(Arc::new(model));
+                let model = Arc::new(model);
+                session.model = Some(Arc::clone(&model));
+                let restored = session.reopened.as_ref().map(|r| r.recipe.restore(&model));
+                if let Some(restored) = restored {
+                    session.restore_faces = Some(restored.iter().map(|f| f.enabled).collect());
+                    self.restore_portrait_masks(restored);
+                }
                 self.refresh_portrait_preview();
             }
             Some(Err(error)) => session.error = Some(error),
@@ -271,21 +326,39 @@ impl App {
         {
             doc.canvas
                 .restore_layer_tiles(session.layer_id, session.original_tiles);
+            if let Some(reopened) = &session.reopened {
+                if let Some(layer) = doc
+                    .canvas
+                    .layer_stack
+                    .layers
+                    .iter_mut()
+                    .find(|l| l.id == reopened.layer_id)
+                {
+                    layer.visible = reopened.visible;
+                }
+                doc.canvas.layer_revision += 1;
+            }
         }
-        self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+        self.apply_canvas_event(if session.reopened.is_some() {
+            CanvasEvent::LayerStructureChanged
+        } else {
+            CanvasEvent::LayerPixelsChanged
+        });
         if let Some(window) = &self.win.window {
             window.request_redraw();
         }
     }
 
     /// Add the retouch as a new layer above the source (only the changed
-    /// pixels are opaque, so layer opacity scales the whole retouch).
+    /// pixels are opaque, so layer opacity scales the whole retouch) with its
+    /// recipe, or update the reopened "Chân dung" layer in place. Returns
+    /// whether a layer was updated rather than added.
     pub(crate) fn apply_portrait(
         &mut self,
         settings: PortraitSettings,
         enabled: Vec<bool>,
-    ) -> Result<(), String> {
-        let (doc_id, layer_id, w, h, src, model) = {
+    ) -> Result<bool, String> {
+        let (doc_id, layer_id, w, h, src, model, reopened) = {
             let Some(session) = self.shell.portrait.as_ref() else {
                 return Err("Chưa mở chỉnh chân dung".to_string());
             };
@@ -299,6 +372,7 @@ impl App {
                 session.h,
                 Arc::clone(&session.src),
                 model,
+                session.reopened.as_ref().map(|r| r.layer_id),
             )
         };
         let edits = self.finished_portrait_edits();
@@ -320,9 +394,17 @@ impl App {
                 }
             }
         }
-        if !changed {
+        if !changed && reopened.is_none() {
             return Err("Các thanh trượt đang ở 0 — ảnh không đổi".to_string());
         }
+        let recipe = Arc::new(PortraitRecipe::new(
+            layer_id,
+            (w, h),
+            settings,
+            &model,
+            &enabled,
+            &edits,
+        ));
         let Some(idx) = self.docs.documents.iter().position(|d| d.id == doc_id) else {
             return Err("Tài liệu đã đóng".to_string());
         };
@@ -345,19 +427,30 @@ impl App {
             cw,
             ch,
         );
-        for layer in &mut canvas.layer_stack.layers {
-            layer.selected = false;
-        }
-        canvas.layer_stack.active_idx = source_idx;
-        let new_idx = canvas.layer_stack.add_layer(w, h);
-        {
-            let layer = &mut canvas.layer_stack.layers[new_idx];
-            layer.name = RESULT_LAYER.to_string();
+        let result_idx =
+            reopened.and_then(|id| canvas.layer_stack.layers.iter().position(|l| l.id == id));
+        if let Some(result_idx) = result_idx {
+            let layer = &mut canvas.layer_stack.layers[result_idx];
             layer.tiles = tiles;
-            layer.offset = offset;
-            layer.selected = true;
+            (layer.width, layer.height, layer.offset) = (w, h, offset);
+            layer.visible = true;
+            layer.portrait = Some(recipe);
+        } else {
+            for layer in &mut canvas.layer_stack.layers {
+                layer.selected = false;
+            }
+            canvas.layer_stack.active_idx = source_idx;
+            let new_idx = canvas.layer_stack.add_layer(w, h);
+            {
+                let layer = &mut canvas.layer_stack.layers[new_idx];
+                layer.name = RESULT_LAYER.to_string();
+                layer.tiles = tiles;
+                layer.offset = offset;
+                layer.selected = true;
+                layer.portrait = Some(recipe);
+            }
+            canvas.layer_stack.active_idx = new_idx;
         }
-        canvas.layer_stack.active_idx = new_idx;
         cmd.capture_after(&canvas.layer_stack, cw, ch);
         canvas.record(Box::new(cmd));
         canvas.layer_revision += 1;
@@ -365,7 +458,7 @@ impl App {
             self.upload_full();
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         }
-        Ok(())
+        Ok(result_idx.is_some())
     }
 
     /// The brush edits with every stroke's skin rebuilt (waits for workers
@@ -419,7 +512,12 @@ impl App {
             .collect();
         let seconds = model.timings.iter().sum::<u128>() as f32 / 1000.0;
         let mut line = format!(
-            "{}Tìm thấy {} khuôn mặt · phân tích {seconds:.1} s",
+            "{}{}Tìm thấy {} khuôn mặt · phân tích {seconds:.1} s",
+            if session.reopened.is_some() {
+                "Chỉnh tiếp layer \"Chân dung\" · "
+            } else {
+                ""
+            },
             if model.clip.is_some() {
                 "Trong vùng chọn · "
             } else {
@@ -433,6 +531,69 @@ impl App {
         let hair = model.faces.iter().any(|face| !face.hair_region.is_empty());
         (line, true, faces, hair)
     }
+
+    /// Dialog view of a reopened layer: whether one is reopened, and the
+    /// saved sliders and faces the dialog has not taken yet.
+    pub(crate) fn portrait_restore(&self) -> (bool, Option<PortraitSettings>, Option<Vec<bool>>) {
+        self.shell
+            .portrait
+            .as_ref()
+            .map_or((false, None, None), |s| {
+                (
+                    s.reopened.is_some(),
+                    s.restore_settings,
+                    s.restore_faces.clone(),
+                )
+            })
+    }
+
+    /// The dialog took the saved sliders and/or faces.
+    pub(crate) fn portrait_restored(&mut self, settings: bool, faces: bool) {
+        if let Some(session) = self.shell.portrait.as_mut() {
+            if settings {
+                session.restore_settings = None;
+            }
+            if faces {
+                session.restore_faces = None;
+            }
+        }
+    }
+}
+
+/// The photo layer to analyse and, when reopening, the "Chân dung" layer
+/// made from it with its recipe: that layer is active, or sits right above
+/// the active photo.
+#[allow(clippy::type_complexity)]
+fn reopen_target(
+    layers: &[Layer],
+    active: usize,
+) -> Result<(usize, Option<(usize, Arc<PortraitRecipe>)>), String> {
+    let made_from = |result: usize, recipe: &PortraitRecipe| {
+        layers
+            .iter()
+            .position(|l| l.id == recipe.source)
+            .filter(|&s| s != result && (layers[s].width, layers[s].height) == recipe.source_size)
+    };
+    let unlocked = |result: usize| {
+        if layers[result].locked {
+            Err("Layer \"Chân dung\" đang khóa — mở khóa để chỉnh tiếp".to_string())
+        } else {
+            Ok(())
+        }
+    };
+    if let Some(recipe) = layers.get(active).and_then(|l| l.portrait.clone()) {
+        unlocked(active)?;
+        let source = made_from(active, &recipe)
+            .ok_or_else(|| "Không còn layer ảnh gốc của layer \"Chân dung\" này".to_string())?;
+        return Ok((source, Some((active, recipe))));
+    }
+    if let Some(recipe) = layers.get(active + 1).and_then(|l| l.portrait.clone()) {
+        if made_from(active + 1, &recipe) == Some(active) {
+            unlocked(active + 1)?;
+            return Ok((active, Some((active + 1, recipe))));
+        }
+    }
+    Ok((active, None))
 }
 
 /// The canvas selection over a layer at `offset` of `w` x `h` pixels, in the
@@ -769,6 +930,93 @@ mod tests {
         }
         assert!(inside > 0, "the face was retouched");
         assert_eq!(photo_pixels(&app), original);
+    }
+
+    #[test]
+    fn reopening_the_portrait_layer_restores_and_updates_it() {
+        use crate::core::portrait::brush::MaskTarget;
+        use crate::core::refine::{MaskBrushEvent, StampOp};
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        app.shell.ui.show_portrait_dialog = true;
+        let model = analysed(&mut app).unwrap();
+        let face = &model.faces[0];
+        if face.hair_region.is_empty() {
+            return;
+        }
+        let (centre, extent, _) = face.mesh.frame();
+        let at = (centre[0], centre[1]);
+        let r = face.hair_region;
+        let k = ((at.1 as u32 - r.y) * r.w + at.0 as u32 - r.x) as usize;
+        app.set_portrait_brush_target(Some(MaskTarget::Hair));
+        let queue = app.docs.documents[0].canvas.mask_brush.as_mut().unwrap();
+        queue.push(MaskBrushEvent::Begin(StampOp::Add));
+        queue.push(MaskBrushEvent::Dabs {
+            points: vec![at],
+            radius: extent * 0.05,
+            hardness: 1.0,
+        });
+        queue.push(MaskBrushEvent::End);
+        app.poll_portrait_brush();
+        app.set_portrait_brush_target(None);
+        let first = PortraitSettings {
+            hair_hue: 200.0,
+            hair_tint: 100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        let faces = vec![true; model.faces.len()];
+        assert!(!app.apply_portrait(first, faces.clone()).unwrap(), "added");
+        let layers = |app: &App| app.docs.documents[0].canvas.layer_stack.layers.clone();
+        let undo_after_first = app.docs.documents[0].canvas.undo_count();
+        let recipe = layers(&app)[1].portrait.clone().expect("recipe kept");
+        assert_eq!(recipe.settings, first);
+        assert_eq!(recipe.faces[0].hair.as_ref().unwrap().mask[k], 255);
+        assert!(recipe.faces[0].skin.is_none());
+        let first_pixels = layers(&app)[1].tiles.flatten();
+
+        // Reopened from the "Chân dung" layer (active after OK): sliders,
+        // faces and the painted hair come back; the layer hides meanwhile.
+        analysed(&mut app).unwrap();
+        assert!(!layers(&app)[1].visible, "hidden while previewing");
+        let (reopened, settings, restored) = app.portrait_restore();
+        assert!(reopened);
+        assert_eq!(settings, Some(first));
+        assert_eq!(restored, Some(faces.clone()));
+        let session = app.shell.portrait.as_ref().unwrap();
+        assert_eq!(session.edits[0].hair.as_ref().unwrap()[k], 255);
+        app.portrait_restored(true, true);
+        assert_eq!(app.portrait_restore(), (true, None, None));
+        let (status, ..) = app.portrait_dialog_state();
+        assert!(status.starts_with("Chỉnh tiếp"), "{status}");
+        app.cancel_portrait();
+        assert!(layers(&app)[1].visible, "shown again on cancel");
+        assert_eq!(layers(&app)[1].tiles.flatten(), first_pixels);
+        assert_eq!(app.docs.documents[0].canvas.undo_count(), undo_after_first);
+
+        // Reopened from the photo beneath: OK updates the layer in place.
+        app.docs.documents[0].canvas.layer_stack.active_idx = 0;
+        analysed(&mut app).unwrap();
+        let second = PortraitSettings {
+            hair_tint: 40.0,
+            ..first
+        };
+        assert!(app.apply_portrait(second, faces).unwrap(), "updated");
+        let after = layers(&app);
+        assert_eq!(after.len(), 2);
+        assert!(after[1].visible);
+        let recipe = after[1].portrait.clone().unwrap();
+        assert_eq!(recipe.settings, second);
+        assert_eq!(recipe.faces[0].hair.as_ref().unwrap().mask[k], 255);
+        assert_ne!(after[1].tiles.flatten(), first_pixels);
+        assert_eq!(
+            app.docs.documents[0].canvas.undo_count(),
+            undo_after_first + 1
+        );
+        app.docs.documents[0].canvas.undo();
+        let undone = layers(&app);
+        assert_eq!(undone[1].tiles.flatten(), first_pixels);
+        assert_eq!(undone[1].portrait.as_ref().unwrap().settings, first);
     }
 
     #[test]

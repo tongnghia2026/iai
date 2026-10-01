@@ -931,6 +931,9 @@ pub struct Layer {
     /// end(s) stick to other layers, so it re-routes when they move. `None` for
     /// every ordinary layer — the common case pays nothing.
     pub connector: Option<crate::core::connector::ConnectorBinding>,
+    /// What a "Chân dung" layer was made with, so Chỉnh chân dung can reopen
+    /// it; `None` for every other layer.
+    pub portrait: Option<std::sync::Arc<crate::core::portrait::PortraitRecipe>>,
 }
 
 impl Layer {
@@ -979,6 +982,7 @@ impl Layer {
             page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
             connector: None,
+            portrait: None,
         }
     }
 
@@ -1014,6 +1018,7 @@ impl Layer {
             page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
             connector: None,
+            portrait: None,
         }
     }
 
@@ -1043,6 +1048,7 @@ impl Layer {
             page_id: crate::core::page::PageId::IMPLICIT,
             expanded: true,
             connector: None,
+            portrait: None,
         }
     }
 
@@ -1103,6 +1109,8 @@ impl Layer {
             expanded: self.expanded,
             // A duplicated connector keeps its bindings (same targets).
             connector: self.connector,
+            // A duplicated "Chân dung" layer reopens from the same photo.
+            portrait: self.portrait.clone(),
         }
     }
 
