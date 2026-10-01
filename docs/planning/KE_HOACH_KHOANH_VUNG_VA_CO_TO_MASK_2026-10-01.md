@@ -218,10 +218,10 @@ và qua cổng · `[!]` bị chặn.
 
 ### Pha 3 — Lưu mask đã tô, mở lại chỉnh tiếp
 
-- [~] Áp dụng lưu "công thức" vào layer "Chân dung" (`Layer.portrait`,
+- [x] Áp dụng lưu "công thức" vào layer "Chân dung" (`Layer.portrait`,
       `core::portrait::recipe`): thanh trượt, mặt nào bật, mask Da/Tóc đã tô
       (chỉ mặt có tô), vùng chọn lúc phân tích, id + kích thước layer ảnh gốc.
-- [~] Mở lại: chọn layer "Chân dung" **hoặc** layer ảnh ngay dưới nó rồi vào
+- [x] Mở lại: chọn layer "Chân dung" **hoặc** layer ảnh ngay dưới nó rồi vào
       Image ▸ Chỉnh chân dung… → phân tích lại ảnh gốc (giữ vùng chọn cũ nếu
       không có vùng chọn mới), thanh trượt + mặt bật/tắt về như lần trước, mask
       đã tô đặt lại lên vùng mới (ghép mặt theo vị trí, lệch < 0,35 cỡ mặt) và
@@ -229,20 +229,33 @@ và qua cổng · `[!]` bị chặn.
       lúc chỉnh layer cũ tạm ẩn (xem trước vẽ trên ảnh gốc), Hủy thì hiện lại y
       cũ; Áp dụng **cập nhật đúng layer đó** (một bước hoàn tác), không thêm
       layer mới. Layer khóa → báo mở khóa; mất layer gốc → báo.
-- [~] Lưu trong file `.iai`: khóa "portrait" của layer trong manifest + ảnh
+- [x] Lưu trong file `.iai`: khóa "portrait" của layer trong manifest + ảnh
       xám `layer_N_portrait_*.png`; bản iAi cũ bỏ qua (mở vẫn thấy điểm ảnh).
       Tự lưu khôi phục dùng cùng định dạng.
 - Test: `reopening_the_portrait_layer_restores_and_updates_it` (ảnh thật: tô
   tóc → OK → mở lại từ layer kết quả và từ ảnh gốc → Hủy/OK/hoàn tác),
   `portrait_recipe_round_trips_with_its_masks` (.iai).
 - Cổng: Áp dụng, đóng mở file, mở lại → thanh trượt và vùng tô còn nguyên; kéo
-  tiếp rồi Áp dụng → layer cũ được cập nhật.
+  tiếp rồi Áp dụng → layer cũ được cập nhật. **Đạt — chủ test OK 01/10.**
 
-### Pha 5 — (sau) Cọ Thông minh cho Refine Selection
+### Pha 5 — Cọ Thông minh cho Refine Selection
 
-- [ ] Chủ 01/10: đưa thuật toán "Color Range hai phía" của cọ Thông minh
-      (`core::portrait::brush`) sang Refine Brush của Refine Selection (thay
-      `refine_edge_stamp` ở chế độ Smart; mẫu lấy từ vùng chọn đang tinh chỉnh).
+- Chủ 01/10: đưa thuật toán "Color Range hai phía" của cọ Thông minh
+  (`core::portrait::brush`) sang Refine Brush của Refine Selection (thay
+  `refine_edge_stamp` ở chế độ Smart; mẫu lấy từ vùng chọn đang tinh chỉnh).
+- [~] Thuật toán tách ra `core::smart_brush` (dùng chung, cọ chân dung gọi
+  lại y nguyên): Refine Selection ▸ Smart = chỉ **thêm** phần giống vùng chọn
+  theo màu (sợi mờ thêm mờ, tô lại đậm hơn), không khoét lỗ; mẫu lấy từ vùng
+  chọn lúc bắt đầu nét (`stroke_before`), màu Lab từ bảng màu sẵn có
+  (EdgeCache). **Alt + Smart đổi nghĩa**: trước là trả lại vùng chọn lúc mở
+  bảng (kiểu "Erase Refinements" của PTS), nay là **bớt phần giống bên ngoài**
+  (nền lọt vào mép vùng chọn) — như cọ chân dung chủ đã duyệt; Ctrl+Z vẫn hoàn
+  tác từng nét. Bỏ thuật toán KNN cũ + guided filter + restore stamp.
+- Probe `probe_refine_brush` (IAI_REFINE_PROBE, vùng chọn thô = tóc + da cắt
+  cứng nở 6 px): Meir tóc xoăn trên tường trắng, Nelson tóc bạc trên nền xanh —
+  Smart thêm sợi, Alt bỏ nền lọt mép, giữ tóc; 1,5–3,5 ms/chấm cọ.
+- Cổng: Refine Selection trên ảnh tóc — tô Smart thêm sợi tóc mảnh không lan
+  ra nền; Alt + Smart bỏ phần nền thừa ở mép mà không mất tóc.
 
 ### Pha 4 — "Sáng tóc" bằng thanh Blacks của Develop
 
@@ -253,14 +266,14 @@ và qua cổng · `[!]` bị chặn.
   nâng độ sáng trong miền hiển thị rồi **nhân thêm độ đậm màu** khi nâng
   (`apply_luma_target`), điểm pha tóc + da ở chân tóc (và cả tóc vàng của Amy)
   thành cam gắt; tóc đen thành xám bạc phẳng.
-- [~] Kéo phải = đúng thanh **Blacks** của Develop3 (bộ cân tông theo vùng,
+- [x] Kéo phải = đúng thanh **Blacks** của Develop3 (bộ cân tông theo vùng,
   miền tuyến tính, look giữ nguyên ảnh): Sáng tóc +100 = Blacks +200 (tối đa),
   +50 = Blacks +100; đọc ở tông vùng `hair_base` như Develop → tóc sáng tự
   nhiên, giữ màu và vân sợi, hết viền cam. Kéo trái (tối hơn) giữ cách cũ
   (Shadows + Blacks miền hiển thị) vì Blacks âm gần như không đụng tóc nâu.
   Probe `probe_hair_tone` (IAI_PORTRAIT_HAIR_PROBE), 7 ảnh; tốc độ như cũ.
 - Cổng: kéo Sáng tóc lên mạnh — tóc sáng hơn tự nhiên, không viền cam ở chân
-  tóc, không cam hóa tóc vàng.
+  tóc, không cam hóa tóc vàng. **Đạt — chủ test OK 01/10.**
 
 ## 3. Rủi ro
 
@@ -312,3 +325,6 @@ và qua cổng · `[!]` bị chặn.
   (`cd49239`: Sáng tóc = Blacks của Develop3, hết viền cam); Pha 3 code xong
   (`da15cee`: lưu công thức vào layer "Chân dung" + file .iai, mở lại chỉnh
   tiếp, Áp dụng cập nhật tại chỗ). Test đạt; chờ chủ test.
+- **2026-10-01** — Chủ test Pha 3 + 4 OK. Pha 5 code xong (`08c8541`: cọ
+  Smart của Refine Selection dùng chung `core::smart_brush`; Alt + Smart = bớt
+  phần giống nền); probe + test đạt; chờ chủ test.
