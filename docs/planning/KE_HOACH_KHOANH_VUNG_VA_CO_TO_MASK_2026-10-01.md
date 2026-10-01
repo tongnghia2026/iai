@@ -134,7 +134,20 @@ và qua cổng · `[!]` bị chặn.
 - Còn lại: một sợi tóc mái dày sát đuôi mày (Mazie) vẫn bị tính là lông mày —
   Sapiens2 đọc chỗ đó là da; chưa có cọ "Tô vùng → Lông mày".
 - Cổng: mặc định lông mày y gốc; kéo đậm/nhạt/nét/màu ra kết quả tự nhiên,
-  không có viền cứng. **Chờ chủ test.**
+  không có viền cứng. **Đạt — chủ test OK 01/10.**
+
+### Pha 7 — "Sống mũi cao" chuyển mượt
+
+- Chủ test lông mày OK, gửi ảnh: dải sáng sống mũi có mép dọc rõ, không tan
+  vào da.
+- Nguyên nhân: vùng sáng là dải đa giác đỉnh phẳng, dốc ngắn (mềm 0,03e); hai
+  dải tối bên là hai hình chữ nhật đầu cụt.
+- [~] Trường tạo khối mới (`nose_contour`): khoảng cách tới đường sống mũi
+  (6→197→195→5→4) và vị trí dọc theo nó; sáng = chuông hẹp (σ 0,02e), tối hai
+  bên = chuông rộng (cách 0,075e, σ 0,028e); cả hai hiện dần dưới chân mày và
+  tắt dần về chóp mũi. Mạnh hơn chút (sáng 0,18, tối 0,06) bù cho dáng mềm.
+  Probe `probe_nose` (IAI_PORTRAIT_NOSE_PROBE).
+- Cổng: kéo "Sống mũi cao" tới 100 không thấy mép dải. **Chờ chủ test.**
 
 ### Pha 1 — Khoanh vùng trước khi phân tích (chủ cho làm sau Pha 2)
 
@@ -240,3 +253,5 @@ và qua cổng · `[!]` bị chặn.
   probe đạt; chờ chủ test.
 - **2026-10-01** — Chủ test 2c OK; yêu cầu lông mày → Pha 6 code xong (mask
   hình lông mày mềm, mặc định giữ nguyên, mục "Lông mày" từ 0); chờ chủ test.
+- **2026-10-01** — Chủ test Pha 6 OK; báo "Sống mũi cao" chuyển không mượt →
+  Pha 7 code xong (trường tạo khối dạng chuông); chờ chủ test.
