@@ -187,6 +187,105 @@ mod tests {
         }
     }
 
+    /// Opt-in: IAI_PORTRAIT_BROW_PROBE is a folder of photos; per face 0, a
+    /// close-up of the brows: photo, brow mask, the default retouch, and the
+    /// brow sliders pushed both ways.
+    #[test]
+    #[ignore]
+    fn probe_brows() {
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_BROW_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".jpg") && !n.starts_with("pb_"))
+            .collect();
+        names.sort();
+        for name in names {
+            let image = image::open(dir.join(&name)).unwrap().to_rgba8();
+            let (width, height) = image.dimensions();
+            let rgba = image.into_raw();
+            let model = analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
+            let face = &model.faces[0];
+            let e = face.extent;
+            let brows = geometry::RIGHT_BROW
+                .iter()
+                .chain(&geometry::LEFT_BROW)
+                .map(|&k| {
+                    [
+                        face.mesh.points[k as usize][0],
+                        face.mesh.points[k as usize][1],
+                    ]
+                });
+            let area = Region::around(brows, [0.12 * e; 4], width, height);
+            let enabled = [true];
+            let paste = |settings: &PortraitSettings| {
+                let (u, px) = render(&rgba, &model, settings, &enabled, &[]).unwrap();
+                image::RgbImage::from_fn(area.w, area.h, |x, y| {
+                    let (ix, iy) = (area.x + x, area.y + y);
+                    let k = ((iy - u.y) * u.w + ix - u.x) as usize * 4;
+                    image::Rgb([px[k], px[k + 1], px[k + 2]])
+                })
+            };
+            let b = &face.brows;
+            let mask = image::RgbImage::from_fn(area.w, area.h, |x, y| {
+                let (v, a) = b
+                    .region
+                    .index_at(area.x + x, area.y + y)
+                    .map_or((0, 0), |k| (b.hair[k], b.area[k]));
+                image::Rgb([v, v, v.max(a / 2)])
+            });
+            let tiles = [
+                crop_rgb(&rgba, width, area),
+                mask,
+                paste(&PortraitSettings::default()),
+                paste(&PortraitSettings {
+                    brows: 70.0,
+                    ..PortraitSettings::NEUTRAL
+                }),
+                paste(&PortraitSettings {
+                    brows: -70.0,
+                    ..PortraitSettings::NEUTRAL
+                }),
+                paste(&PortraitSettings {
+                    brow_sharpen: 80.0,
+                    ..PortraitSettings::NEUTRAL
+                }),
+            ];
+            let mut tiles = tiles.to_vec();
+            if std::env::var("IAI_PORTRAIT_BROW_PARTS").is_ok() {
+                let mut seg = crate::core::ai::body_parts::Segmenter::load(false).unwrap();
+                let parts = seg.segment_face(&rgba, width, height, &face.mesh).unwrap();
+                tiles.push(image::RgbImage::from_fn(area.w, area.h, |x, y| {
+                    let g = parts.groups_at((area.x + x) as f32 + 0.5, (area.y + y) as f32 + 0.5);
+                    let v = |k: usize| (g[k] * 255.0) as u8;
+                    image::Rgb([
+                        v(crate::core::ai::body_parts::GROUP_HAIR),
+                        v(crate::core::ai::body_parts::GROUP_FACE_SKIN),
+                        0,
+                    ])
+                }));
+            }
+            let mut sheet = image::RgbImage::new(area.w, (area.h + 6) * tiles.len() as u32);
+            for (k, tile) in tiles.iter().enumerate() {
+                image::imageops::replace(&mut sheet, tile, 0, ((area.h + 6) * k as u32) as i64);
+            }
+            let k = (700.0 / area.w as f32).min(2.0);
+            image::imageops::resize(
+                &sheet,
+                (sheet.width() as f32 * k) as u32,
+                (sheet.height() as f32 * k) as u32,
+                image::imageops::FilterType::Lanczos3,
+            )
+            .save(dir.join(format!("pb_{}.png", name.trim_end_matches(".jpg"))))
+            .unwrap();
+            println!("{name}: brows {}x{} e {e:.0}", area.w, area.h);
+        }
+    }
+
     /// Opt-in: IAI_PORTRAIT_ANALYSE names one photo; analyses it alone (for
     /// timing and peak memory) and prints each face's regions.
     #[test]

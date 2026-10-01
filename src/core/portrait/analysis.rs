@@ -94,7 +94,7 @@ pub struct FaceModel {
     pub(super) donor: Vec<[i16; 2]>,
     pub(super) heal_base: Vec<[u16; 3]>,
     pub(super) lips: Vec<u8>,
-    pub(super) brows: Vec<u8>,
+    pub(super) brows: BrowLayers,
     /// Nose contour: +127 lights the bridge, -127 shades its sides.
     pub(super) nose: Vec<i8>,
     /// Hair lies outside the face region, so it has its own (head and
@@ -104,7 +104,7 @@ pub struct FaceModel {
     pub hair_region: Region,
     pub(super) hair: Vec<u8>,
     pub(super) hair_base: Vec<u16>,
-    /// Eyes, lashes, brows and lips: where sharpening applies.
+    /// Eyes, lashes and lips: where sharpening applies.
     pub(super) detail: Vec<u8>,
     /// Plain small blur of the photo, the sharpening reference.
     pub(super) soft: Vec<[u16; 3]>,
@@ -118,6 +118,228 @@ impl FaceModel {
     /// How much each hair-region pixel takes the hair change.
     pub fn hair_mask(&self) -> &[u8] {
         &self.hair
+    }
+}
+
+/// The brows over their own region (inside the face's): the smooth brow
+/// shape (`area`: what the brow sliders act on, kept out of the skin retouch
+/// so brows stay as shot until their own sliders move), how much each pixel
+/// in it is hair, the brow's local mean colour, and the skin colour beneath,
+/// which a fading brow moves toward.
+pub(super) struct BrowLayers {
+    pub(super) region: Region,
+    pub(super) hair: Vec<u8>,
+    pub(super) area: Vec<u8>,
+    pub(super) mean: Vec<[u16; 3]>,
+    pub(super) skin: Vec<[u16; 3]>,
+}
+
+/// Colour distance that counts a change of hue or saturation fully and one
+/// of brightness a little less (creases are shading, brow hairs are both).
+fn brow_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let (ya, yb) = (luma(a), luma(b));
+    let du = (a[2] - ya) - (b[2] - yb);
+    let dv = (a[0] - ya) - (b[0] - yb);
+    ((0.7 * (ya - yb)).powi(2) + du * du + dv * dv).sqrt()
+}
+
+/// Value at quantile `q` (0..1) of `values`.
+fn quantile(mut values: Vec<f32>, q: f32) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    let k = ((values.len() - 1) as f32 * q) as usize;
+    values.select_nth_unstable_by(k, f32::total_cmp);
+    Some(values[k])
+}
+
+/// Where to look for one brow's hairs: the mesh's brow outline (lower edge
+/// outer to inner, then upper edge inner to outer) moved out where hairs
+/// often reach past it: up, and on past the tail, but hardly down, where
+/// eye make-up lies, nor in past the head, where frown lines are.
+fn brow_search(outline: &[[f32; 2]], down: [f32; 2], e: f32) -> Vec<[f32; 2]> {
+    let half = outline.len() / 2;
+    let mid = |a: usize, b: usize| {
+        [
+            (outline[a][0] + outline[b][0]) * 0.5,
+            (outline[a][1] + outline[b][1]) * 0.5,
+        ]
+    };
+    let (outer, inner) = (mid(0, outline.len() - 1), mid(half - 1, half));
+    let length = (outer[0] - inner[0]).hypot(outer[1] - inner[1]).max(1.0);
+    let along = [
+        (outer[0] - inner[0]) / length,
+        (outer[1] - inner[1]) / length,
+    ];
+    outline
+        .iter()
+        .enumerate()
+        .map(|(k, p)| {
+            let normal = if k < half { 0.012 * e } else { -0.025 * e };
+            let tail = k == 0 || k == outline.len() - 1;
+            let end = if tail { 0.02 * e } else { 0.0 };
+            [
+                p[0] + down[0] * normal + along[0] * end,
+                p[1] + down[1] * normal + along[1] * end,
+            ]
+        })
+        .collect()
+}
+
+/// Find the brows around the mesh's brow outlines. Each pixel's colour is
+/// measured against the skin around the brows carried across them; each
+/// brow learns how far its own hairs and the plain skin beside it stray from
+/// that, so dark, grey and fair brows all register. The brow shape is where
+/// those hairs gather (not single hairs), so its edge is soft and the
+/// sliders do not paint a hard outline.
+#[allow(clippy::too_many_arguments)]
+fn brow_layers(
+    src: &[[f32; 3]],
+    face: Region,
+    skin: &[f32],
+    skin_region: Region,
+    points: &[[f32; 3]],
+    parts: Option<&PartLabels>,
+    down: [f32; 2],
+    e: f32,
+) -> BrowLayers {
+    let outlines = [
+        loop_points(points, &RIGHT_BROW),
+        loop_points(points, &LEFT_BROW),
+    ];
+    let r = Region::around(
+        outlines.iter().flatten().copied(),
+        [0.12 * e; 4],
+        face.x + face.w,
+        face.y + face.h,
+    )
+    .intersect(face);
+    let (w, h, n) = (r.w as usize, r.h as usize, r.len());
+    let colours = face.crop(src, r);
+    if n == 0 {
+        return BrowLayers {
+            region: r,
+            hair: Vec::new(),
+            area: Vec::new(),
+            mean: Vec::new(),
+            skin: Vec::new(),
+        };
+    }
+    let skin_here: Vec<f32> = (0..n).map(|i| skin[skin_region.index_of(r, i)]).collect();
+    let at = |i: usize| {
+        (
+            r.x as f32 + (i % w) as f32 + 0.5,
+            r.y as f32 + (i / w) as f32 + 0.5,
+        )
+    };
+    // Scalp hair (a fringe, a strand at the temple) is no brow: the part
+    // model reads brows as face skin, so even faint odds of hair rule out.
+    let scalp: Vec<f32> = (0..n)
+        .map(|i| {
+            parts.map_or(0.0, |p| {
+                let (x, y) = at(i);
+                smoothstep(0.25, 0.55, p.groups_at(x, y)[body_parts::GROUP_HAIR])
+            })
+        })
+        .collect();
+    let mut zone = vec![0.0f32; n];
+    let mut core = vec![0.0f32; n];
+    let mut near = vec![0.0f32; n];
+    let mut eyes = vec![0.0f32; n];
+    for outline in &outlines {
+        stamp_polygon(&mut core, r, outline, 0.0, 0.01 * e);
+        stamp_polygon(&mut zone, r, &brow_search(outline, down, e), 0.0, 0.035 * e);
+        stamp_polygon(&mut near, r, outline, 0.08 * e, 0.02 * e);
+    }
+    for eye in [&RIGHT_EYE[..], &LEFT_EYE[..]] {
+        stamp_polygon(&mut eyes, r, &loop_points(points, eye), 0.03 * e, 0.02 * e);
+    }
+    for i in 0..n {
+        zone[i] *= (1.0 - eyes[i]) * (1.0 - scalp[i]);
+    }
+    // The skin around the brows, carried across them.
+    let weight: Vec<f32> = (0..n)
+        .map(|i| skin_here[i] * (1.0 - zone[i]) * (1.0 - eyes[i]) * (1.0 - scalp[i]))
+        .collect();
+    let beneath = masked_blur(&colours, &weight, w, h, (e / 18.0).max(2.0));
+    let mut smooth: Vec<[f32; 4]> = colours.iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
+    blur4(&mut smooth, w, h, (e / 900.0).round());
+    let distance: Vec<f32> = (0..n)
+        .map(|i| {
+            let c = smooth[i];
+            brow_distance([c[0], c[1], c[2]], beneath[i])
+        })
+        .collect();
+    let centres: Vec<[f32; 2]> = outlines
+        .iter()
+        .map(|o| {
+            let k = o.len() as f32;
+            [
+                o.iter().map(|p| p[0]).sum::<f32>() / k,
+                o.iter().map(|p| p[1]).sum::<f32>() / k,
+            ]
+        })
+        .collect();
+    let side: Vec<usize> = (0..n)
+        .map(|i| {
+            let (x, y) = at(i);
+            let d = |c: [f32; 2]| (x - c[0]).hypot(y - c[1]);
+            usize::from(d(centres[1]) < d(centres[0]))
+        })
+        .collect();
+    // Each brow's own levels: how far the plain skin beside it strays
+    // (texture, creases) and how far its hairs do.
+    let mut levels = [(0.03f32, 0.1f32); 2];
+    for (s, level) in levels.iter_mut().enumerate() {
+        let plain: Vec<f32> = (0..n)
+            .filter(|&i| {
+                side[i] == s
+                    && near[i] > 0.5
+                    && zone[i] < 0.05
+                    && eyes[i] < 0.1
+                    && skin_here[i] > 0.5
+            })
+            .map(|i| distance[i])
+            .collect();
+        let hairs: Vec<f32> = (0..n)
+            .filter(|&i| side[i] == s && core[i] > 0.7)
+            .map(|i| distance[i])
+            .collect();
+        let noise = if plain.len() >= 50 {
+            quantile(plain, 0.9).unwrap_or(0.03)
+        } else {
+            0.03
+        };
+        let brow = quantile(hairs, 0.75).unwrap_or(noise);
+        *level = (noise, noise + (brow - noise).max(0.02));
+    }
+    let strand: Vec<f32> = (0..n)
+        .map(|i| {
+            let (lo, hi) = levels[side[i]];
+            smoothstep(lo, hi, distance[i]) * zone[i]
+        })
+        .collect();
+    // The brow shape: where hairs gather, relative to each brow's core.
+    let mut spread: Vec<[f32; 4]> = strand.iter().map(|&v| [v, 0.0, 0.0, 0.0]).collect();
+    blur4(&mut spread, w, h, (e / 45.0).max(1.5));
+    let mut gathered = [1.0f32; 2];
+    for (s, g) in gathered.iter_mut().enumerate() {
+        let inside: Vec<f32> = (0..n)
+            .filter(|&i| side[i] == s && core[i] > 0.7)
+            .map(|i| spread[i][0])
+            .collect();
+        *g = quantile(inside, 0.75).unwrap_or(1.0).max(0.05);
+    }
+    let area: Vec<f32> = (0..n)
+        .map(|i| smoothstep(0.12, 0.45, spread[i][0] / gathered[side[i]]) * zone[i])
+        .collect();
+    let mean = masked_blur(&colours, &area, w, h, (e / 50.0).max(1.5));
+    BrowLayers {
+        region: r,
+        hair: (0..n).map(|i| to_u8(strand[i] * area[i])).collect(),
+        area: area.into_iter().map(to_u8).collect(),
+        mean: mean.into_iter().map(to_u16).collect(),
+        skin: beneath.into_iter().map(to_u16).collect(),
     }
 }
 
@@ -1041,6 +1263,21 @@ fn build_face(
         })
         .collect();
     drop(refined);
+    let brows = brow_layers(
+        &src,
+        region,
+        &skin,
+        skin_region,
+        points,
+        parts.filter(|_| trusted),
+        [-sin, cos],
+        e,
+    );
+    // Brows stay as shot under the skin retouch.
+    let mut skin = skin;
+    for (k, &a) in brows.area.iter().enumerate() {
+        skin[skin_region.index_of(brows.region, k)] *= 1.0 - a as f32 / 255.0;
+    }
 
     // Eyes: whites and irises.
     let mut eye_area = vec![0.0f32; n];
@@ -1235,7 +1472,7 @@ fn build_face(
         radii[0],
     );
 
-    // Lips, brows and the sharpening zone.
+    // Lips and the sharpening zone.
     let mut lip_shape = vec![0.0f32; n];
     let mut mouth_hole = vec![0.0f32; n];
     if !trusted {
@@ -1264,13 +1501,7 @@ fn build_face(
             }
         })
         .collect();
-    let mut brow_shape = vec![0.0f32; n];
     let mut detail_shape = vec![0.0f32; n];
-    for brow in [&RIGHT_BROW[..], &LEFT_BROW[..]] {
-        let outline = loop_points(points, brow);
-        stamp_polygon(&mut brow_shape, region, &outline, 0.012 * e, 0.015 * e);
-        stamp_polygon(&mut detail_shape, region, &outline, 0.02 * e, 0.02 * e);
-    }
     for eye in [&RIGHT_EYE[..], &LEFT_EYE[..]] {
         stamp_polygon(
             &mut detail_shape,
@@ -1287,14 +1518,6 @@ fn build_face(
         0.01 * e,
         0.015 * e,
     );
-    // Brow hairs are the pixels darker than the skin around them.
-    let brows: Vec<u8> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let darker = luma(low2[i]) - luma(src[i]);
-            to_u8(brow_shape[i] * smoothstep(0.015, 0.08, darker))
-        })
-        .collect();
     let detail: Vec<u8> = detail_shape.into_par_iter().map(to_u8).collect();
     let mut soft4: Vec<[f32; 4]> = src.iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
     blur4(&mut soft4, w, h, (e / 350.0).max(1.0));
@@ -1621,5 +1844,43 @@ fn build_face(
         hair_base,
         detail,
         soft,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brow_search_reaches_up_and_past_the_tail_but_hardly_down() {
+        // A level brow: lower edge outer to inner, upper edge inner to outer.
+        let outline: Vec<[f32; 2]> = [0.0f32, 25.0, 50.0, 75.0, 100.0]
+            .iter()
+            .map(|&x| [x, 110.0])
+            .chain(
+                [100.0f32, 75.0, 50.0, 25.0, 0.0]
+                    .iter()
+                    .map(|&x| [x, 100.0]),
+            )
+            .collect();
+        let e = 1000.0;
+        let search = brow_search(&outline, [0.0, 1.0], e);
+        let mid_lower = search[2][1] - outline[2][1];
+        let mid_upper = outline[7][1] - search[7][1];
+        assert!(
+            mid_lower > 0.0 && mid_upper > 2.0 * mid_lower,
+            "{mid_lower} {mid_upper}"
+        );
+        // The outer end (x = 0) moves out, the inner end (x = 100) stays.
+        assert!(search[0][0] < -15.0, "tail {:?}", search[0]);
+        assert_eq!(search[4][0], 100.0, "head {:?}", search[4]);
+    }
+
+    #[test]
+    fn quantile_picks_the_ranked_value() {
+        let values: Vec<f32> = (0..101).map(|v| v as f32).collect();
+        assert_eq!(quantile(values.clone(), 0.75), Some(75.0));
+        assert_eq!(quantile(values, 0.0), Some(0.0));
+        assert_eq!(quantile(Vec::new(), 0.5), None);
     }
 }

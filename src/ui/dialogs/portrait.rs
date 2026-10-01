@@ -320,6 +320,37 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             ("Phủ màu môi", &mut s.lip_tint, "0 = giữ màu môi thật", Amount),
                         ],
                     );
+                    section_title(ui, "Lông mày");
+                    rows(
+                        ui,
+                        ready,
+                        vec![
+                            (
+                                "Đậm nhạt",
+                                &mut s.brows,
+                                "0 = giữ nguyên — trái: lông mày nhạt đi — phải: đậm hơn",
+                                TwoSided,
+                            ),
+                            (
+                                "Độ nét",
+                                &mut s.brow_sharpen,
+                                "0 = giữ nguyên — sợi lông mày rõ nét hơn",
+                                Amount,
+                            ),
+                            (
+                                "Màu lông mày",
+                                &mut s.brow_hue,
+                                "Chọn màu trên dải — cần kéo \"Phủ màu lông mày\" để thấy",
+                                Hue,
+                            ),
+                            (
+                                "Phủ màu lông mày",
+                                &mut s.brow_tint,
+                                "0 = giữ màu lông mày thật",
+                                Amount,
+                            ),
+                        ],
+                    );
                     section_title(ui, "Tóc");
                     if !data.dialogs.portrait_hair && ready {
                         ui.label(
@@ -355,14 +386,8 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             (
                                 "Tăng nét",
                                 &mut s.sharpen,
-                                "Mắt, mi, lông mày, môi nét hơn (không đụng da)",
+                                "Mắt, mi, môi nét hơn (không đụng da và lông mày)",
                                 Amount,
-                            ),
-                            (
-                                "Lông mày",
-                                &mut s.brows,
-                                "Trái: lông mày nhạt — phải: lông mày đậm",
-                                TwoSided,
                             ),
                         ],
                     );

@@ -14,6 +14,7 @@ use crate::core::develop::{apply_light_luma, apply_luma_target, local_detail_boo
 /// Sliders run 0..100, the two-sided ones (lip saturation and brightness,
 /// brows, hair brightness) -100..100, and the colour pickers (`*_hue`) are
 /// target hues in degrees, 0..360, applied by the matching `*_tint` amount.
+/// Brows have only their own sliders, all 0 by default: they stay as shot.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PortraitSettings {
@@ -38,6 +39,9 @@ pub struct PortraitSettings {
     pub hair_brightness: f32,
     pub hair_hue: f32,
     pub hair_tint: f32,
+    pub brow_sharpen: f32,
+    pub brow_hue: f32,
+    pub brow_tint: f32,
 }
 
 impl Default for PortraitSettings {
@@ -64,6 +68,9 @@ impl Default for PortraitSettings {
             hair_brightness: 0.0,
             hair_hue: 25.0,
             hair_tint: 0.0,
+            brow_sharpen: 0.0,
+            brow_hue: 25.0,
+            brow_tint: 0.0,
         }
     }
 }
@@ -91,6 +98,9 @@ impl PortraitSettings {
         hair_brightness: 0.0,
         hair_hue: 25.0,
         hair_tint: 0.0,
+        brow_sharpen: 0.0,
+        brow_hue: 25.0,
+        brow_tint: 0.0,
     };
 
     fn unit(&self) -> Self {
@@ -118,6 +128,9 @@ impl PortraitSettings {
             hair_brightness: both(self.hair_brightness),
             hair_hue: self.hair_hue.rem_euclid(360.0),
             hair_tint: u(self.hair_tint),
+            brow_sharpen: u(self.brow_sharpen),
+            brow_hue: self.brow_hue.rem_euclid(360.0),
+            brow_tint: u(self.brow_tint),
         }
     }
 
@@ -366,22 +379,65 @@ fn retouch_pixel(
             out[k] += (coloured[k] - out[k]) * lips;
         }
     }
-    let brow = face.brows[f] as f32 / 255.0 * s.brows.abs();
-    if brow > 0.0 {
-        if s.brows > 0.0 {
-            out = out.map(|v| v * (1.0 - 0.4 * brow));
-        } else {
-            let under = from_u16(skin.low2[i]);
-            for k in 0..3 {
-                out[k] += (under[k] - out[k]) * 0.7 * brow;
-            }
-        }
+    if let Some(b) = brow_index(face, f) {
+        out = retouch_brow(face, s, b, src, out, from_u16(face.soft[f]));
     }
     let crisp = face.detail[f] as f32 / 255.0 * s.sharpen;
     if crisp > 0.0 {
         let soft = from_u16(face.soft[f]);
         for k in 0..3 {
             out[k] += 1.5 * crisp * (src[k] - soft[k]);
+        }
+    }
+    out
+}
+
+/// Index in the brow layers of face-region pixel `f`, if it lies there.
+fn brow_index(face: &FaceModel, f: usize) -> Option<usize> {
+    let w = face.region.w as usize;
+    face.brows.region.index_at(
+        face.region.x + (f % w) as u32,
+        face.region.y + (f / w) as u32,
+    )
+}
+
+/// Brow sliders at brow pixel `b`: dye the hairs, darken them (and fill the
+/// gaps between them a little, like brow powder) or lighten the brow toward
+/// the skin beneath while its hairs still show, and crisp the whole brow
+/// shape. `soft` is the photo's small blur there.
+fn retouch_brow(
+    face: &FaceModel,
+    s: &PortraitSettings,
+    b: usize,
+    src: [f32; 3],
+    mut out: [f32; 3],
+    soft: [f32; 3],
+) -> [f32; 3] {
+    let brows = &face.brows;
+    let (hair, area) = (brows.hair[b] as f32 / 255.0, brows.area[b] as f32 / 255.0);
+    if area <= 0.0 {
+        return out;
+    }
+    if s.brow_tint > 0.0 && hair > 0.0 {
+        let dyed = colourise(out, s.brow_hue, 0.3);
+        for k in 0..3 {
+            out[k] += (dyed[k] - out[k]) * s.brow_tint * hair;
+        }
+    }
+    if s.brows > 0.0 {
+        let fill = 0.25 * area + 0.75 * hair;
+        out = out.map(|v| v * (1.0 - 0.5 * s.brows * fill));
+    } else if s.brows < 0.0 {
+        let (skin, mean) = (from_u16(brows.skin[b]), from_u16(brows.mean[b]));
+        let fade = -s.brows * area;
+        for k in 0..3 {
+            let toned = mean[k] + (skin[k] - mean[k]) * 0.9 * fade;
+            out[k] = toned + (out[k] - mean[k]) * (1.0 - 0.5 * fade);
+        }
+    }
+    if s.brow_sharpen > 0.0 {
+        for k in 0..3 {
+            out[k] += 2.0 * s.brow_sharpen * area * (src[k] - soft[k]);
         }
     }
     out
@@ -639,7 +695,11 @@ pub fn render_masks(
                         (feature(&skin.under_eye), [255.0, 150.0, 0.0]),
                         (feature(&face.eye_white), [0.0, 255.0, 60.0]),
                         (feature(&face.iris), [40.0, 110.0, 255.0]),
-                        (feature(&face.brows), [255.0, 230.0, 0.0]),
+                        (
+                            f.and_then(|f| brow_index(face, f))
+                                .map_or(0, |b| face.brows.area[b]),
+                            [255.0, 230.0, 0.0],
+                        ),
                         (feature(&face.lips), [255.0, 0.0, 200.0]),
                         (feature(&face.teeth), [0.0, 230.0, 255.0]),
                     ];
@@ -665,6 +725,13 @@ pub fn render_masks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brows_stay_as_shot_unless_their_own_sliders_move() {
+        for s in [PortraitSettings::default(), PortraitSettings::NEUTRAL] {
+            assert_eq!((s.brows, s.brow_sharpen, s.brow_tint), (0.0, 0.0, 0.0));
+        }
+    }
 
     #[test]
     fn hair_tone_moves_dark_strands_and_spares_skin_tones() {

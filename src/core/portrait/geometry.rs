@@ -84,6 +84,19 @@ impl Region {
         }
     }
 
+    /// The part of this region inside `other` (empty when they do not meet).
+    pub fn intersect(&self, other: Region) -> Region {
+        let (x0, y0) = (self.x.max(other.x), self.y.max(other.y));
+        let x1 = (self.x + self.w).min(other.x + other.w);
+        let y1 = (self.y + self.h).min(other.y + other.h);
+        Region {
+            x: x0,
+            y: y0,
+            w: x1.saturating_sub(x0),
+            h: y1.saturating_sub(y0),
+        }
+    }
+
     /// The values of `inner`, a region inside this one, from this region's
     /// `values`.
     pub fn crop<T: Copy + Send + Sync>(&self, values: &[T], inner: Region) -> Vec<T> {
