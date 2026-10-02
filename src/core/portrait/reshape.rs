@@ -10,6 +10,7 @@
 use rayon::prelude::*;
 
 use super::analysis::{Clip, PortraitModel};
+use super::body::{body_field, leg_field, BodySliders};
 use super::geometry::{
     loop_points, Region, FACE_OVAL, LEFT_BROW, LEFT_EYE, LEFT_IRIS, LIPS_OUTER, MOUTH_INNER,
     NOSE_BRIDGE, RIGHT_BROW, RIGHT_EYE, RIGHT_IRIS,
@@ -136,6 +137,37 @@ impl Displacement {
         })
     }
 
+    /// The field `offset(x, y)` over `region`, evaluated every `cell`
+    /// pixels, with no fade at the region's edges.
+    pub fn from_fn(
+        region: Region,
+        cell: f32,
+        offset: impl Fn(f32, f32) -> [f32; 2] + Sync,
+    ) -> Option<Self> {
+        if region.is_empty() {
+            return None;
+        }
+        let cell = cell.max(1.0);
+        let gw = (region.w as f32 / cell).ceil() as usize + 1;
+        let gh = (region.h as f32 / cell).ceil() as usize + 1;
+        let offset = (0..gw * gh)
+            .into_par_iter()
+            .map(|n| {
+                offset(
+                    region.x as f32 + (n % gw) as f32 * cell,
+                    region.y as f32 + (n / gw) as f32 * cell,
+                )
+            })
+            .collect();
+        Some(Self {
+            region,
+            cell,
+            gw,
+            gh,
+            offset,
+        })
+    }
+
     /// Offset at image point (x, y), bilinear between grid nodes.
     pub fn offset_at(&self, x: f32, y: f32) -> [f32; 2] {
         let r = self.region;
@@ -163,15 +195,17 @@ impl Displacement {
     }
 }
 
-/// `src` (the RGBA pixels of `source`, a region of the image) warped by the
-/// sum of `fields` over `region`, as that region's RGBA pixels; colour is
-/// taken from within `source`. Within a selection (`clip`) the offsets are
-/// scaled by its coverage, so the warp eases out along its edge instead of
-/// blending two images.
+/// `src` (the RGBA pixels of `source`, a region of the image) warped by
+/// `stages` of fields over `region`, as that region's RGBA pixels; colour is
+/// taken from within `source`. The fields of a stage add up; the stages
+/// follow one another, the first the last warp made (an output pixel looks
+/// through the first stage, then from there through the next). Within a
+/// selection (`clip`) the offsets are scaled by its coverage, so the warp
+/// eases out along its edge instead of blending two images.
 pub fn warp_region(
     src: &[u8],
     source: Region,
-    fields: &[&Displacement],
+    stages: &[Vec<&Displacement>],
     clip: Option<&Clip>,
     region: Region,
 ) -> Vec<u8> {
@@ -185,12 +219,17 @@ pub fn warp_region(
             for col in 0..rw {
                 let x = region.x + col as u32;
                 let (fx, fy) = (x as f32, y as f32);
-                let mut offset = [0.0f32; 2];
-                for field in fields {
-                    let o = field.offset_at(fx, fy);
-                    offset[0] += o[0];
-                    offset[1] += o[1];
+                let mut at = [fx, fy];
+                for stage in stages {
+                    let mut o = [0.0f32; 2];
+                    for field in stage {
+                        let d = field.offset_at(at[0], at[1]);
+                        o[0] += d[0];
+                        o[1] += d[1];
+                    }
+                    at = [at[0] + o[0], at[1] + o[1]];
                 }
+                let mut offset = [at[0] - fx, at[1] - fy];
                 if let Some(clip) = clip {
                     let a = clip.at(x, y);
                     offset = offset.map(|v| v * a);
@@ -599,40 +638,64 @@ pub fn face_controls(
 }
 
 /// `retouched` (the retouch's region and pixels over `rgba`, the analysed
-/// image) with every enabled face reshaped: the changed region and its
-/// pixels. Other faces hold still.
-pub fn reshape_faces(
+/// image) with every enabled face and, once analysed, every enabled body
+/// reshaped: the changed region and its pixels. Other faces hold still.
+/// The body warps come after the face ones (a lengthened neck carries the
+/// reshaped face up), the leg stretch last.
+pub fn reshape(
     rgba: &[u8],
     model: &PortraitModel,
     shape: &FaceShape,
+    body: &BodySliders,
     enabled: &[bool],
     retouched: Option<(Region, Vec<u8>)>,
 ) -> Option<(Region, Vec<u8>)> {
-    if shape.is_neutral() {
-        return retouched;
-    }
     let (width, height) = (model.width, model.height);
-    let outlines: Vec<Vec<[f32; 2]>> = model
-        .faces
-        .iter()
-        .map(|f| loop_points(&f.mesh.points, &FACE_OVAL))
+    let on = |i: usize| enabled.get(i).copied().unwrap_or(true);
+    let mut faces = Vec::new();
+    if !shape.is_neutral() {
+        let outlines: Vec<Vec<[f32; 2]>> = model
+            .faces
+            .iter()
+            .map(|f| loop_points(&f.mesh.points, &FACE_OVAL))
+            .collect();
+        faces = model
+            .faces
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| on(*i))
+            .filter_map(|(i, face)| {
+                let others: Vec<[f32; 2]> = outlines
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .flat_map(|(_, o)| o.iter().copied())
+                    .collect();
+                face_field(&face.mesh.points, shape, &others, width, height)
+            })
+            .collect();
+    }
+    let (mut bodies, mut legs) = (Vec::new(), Vec::new());
+    if let (false, Some(Ok(found))) = (body.is_neutral(), model.bodies.get()) {
+        for (i, (person, face)) in found.iter().zip(&model.faces).enumerate() {
+            let Some(person) = person.as_ref().filter(|_| on(i)) else {
+                continue;
+            };
+            bodies.extend(body_field(person, &face.mesh.points, body, width, height));
+            legs.extend(leg_field(person, body, width, height));
+        }
+    }
+    let stages: Vec<Vec<&Displacement>> = [&legs, &bodies, &faces]
+        .into_iter()
+        .filter(|fields| !fields.is_empty())
+        .map(|fields| fields.iter().collect())
         .collect();
-    let fields: Vec<Displacement> = model
-        .faces
+    let Some(mut region) = stages
         .iter()
-        .enumerate()
-        .filter(|(i, _)| enabled.get(*i).copied().unwrap_or(true))
-        .filter_map(|(i, face)| {
-            let others: Vec<[f32; 2]> = outlines
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != i)
-                .flat_map(|(_, o)| o.iter().copied())
-                .collect();
-            face_field(&face.mesh.points, shape, &others, width, height)
-        })
-        .collect();
-    let Some(mut region) = fields.iter().map(|f| f.region).reduce(|a, b| a.union(b)) else {
+        .flatten()
+        .map(|f| f.region)
+        .reduce(|a, b| a.union(b))
+    else {
         return retouched;
     };
     if let Some((r, _)) = &retouched {
@@ -658,8 +721,7 @@ pub fn reshape_faces(
             src[o..o + w * 4].copy_from_slice(&px[row * w * 4..(row + 1) * w * 4]);
         }
     }
-    let refs: Vec<&Displacement> = fields.iter().collect();
-    let out = warp_region(&src, region, &refs, model.clip.as_ref(), region);
+    let out = warp_region(&src, region, &stages, model.clip.as_ref(), region);
     Some((region, out))
 }
 
@@ -751,7 +813,7 @@ mod tests {
         let (controls, r) = pushed(8.0);
         let field = Displacement::from_controls(&controls, r, 4.0, 20.0).unwrap();
         let whole = region(0, 0, w, h);
-        let out = warp_region(&rgba, whole, &[&field], None, r);
+        let out = warp_region(&rgba, whole, &[vec![&field]], None, r);
         let at = |out: &[u8], x: u32, y: u32| out[(((y - r.y) * r.w + x - r.x) * 4) as usize];
         assert!((at(&out, 108, 100) as i32 - 100).abs() <= 1);
         assert_eq!(at(&out, 25, 25), 25);
@@ -759,7 +821,7 @@ mod tests {
             region: region(0, 0, w, h),
             mask: vec![0; (w * h) as usize],
         };
-        let held = warp_region(&rgba, whole, &[&field], Some(&none), r);
+        let held = warp_region(&rgba, whole, &[vec![&field]], Some(&none), r);
         assert_eq!(at(&held, 108, 100), 108);
     }
 }

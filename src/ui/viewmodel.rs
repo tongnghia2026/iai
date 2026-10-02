@@ -469,6 +469,9 @@ pub struct DialogViewModel {
     pub portrait_faces: Vec<bool>,
     /// Whether the analysis found hair to lighten or recolour.
     pub portrait_hair: bool,
+    /// A note on the body analysis for the body group, if any, and whether
+    /// it is a warning.
+    pub portrait_body: Option<(String, bool)>,
     /// The "Tô vùng" brush: the mask it paints, whether its strokes can be
     /// undone / redone, and the tinted mask over the canvas (texture and
     /// canvas-pixel rect).
@@ -1039,6 +1042,7 @@ impl Default for UiData {
                 portrait_ready: false,
                 portrait_faces: Vec::new(),
                 portrait_hair: false,
+                portrait_body: None,
                 portrait_brush: None,
                 portrait_brush_undo: false,
                 portrait_brush_redo: false,

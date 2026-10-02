@@ -23,6 +23,7 @@ enum Group {
     Brush,
     Skin,
     Shape,
+    Body,
     Eyes,
     Mouth,
     Brows,
@@ -483,6 +484,55 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         rows(ui, ready, eyes_nose);
                         sub_title(ui, "Miệng");
                         rows(ui, ready, mouth);
+                    });
+                    let body = vec![
+                        (
+                            "Eo thon",
+                            &mut s.body_waist,
+                            "Phải: eo thon lại — trái: eo đầy hơn",
+                            TwoSided,
+                        ),
+                        (
+                            "Vai",
+                            &mut s.body_shoulders,
+                            "Phải: vai hẹp lại — trái: vai rộng ra (tay đi theo vai)",
+                            TwoSided,
+                        ),
+                        (
+                            "Cổ",
+                            &mut s.body_neck,
+                            "Phải: cổ cao hơn (đầu nâng lên) — trái: cổ ngắn lại",
+                            TwoSided,
+                        ),
+                        (
+                            "Tay thon",
+                            &mut s.body_arms,
+                            "Phải: tay thon lại — trái: tay đầy hơn",
+                            TwoSided,
+                        ),
+                        (
+                            "Chân thon",
+                            &mut s.body_legs,
+                            "Phải: chân thon lại — trái: chân đầy hơn",
+                            TwoSided,
+                        ),
+                        (
+                            "Chân dài",
+                            &mut s.body_leg_length,
+                            "Kéo dài phần dưới hông (chỉ khi đứng, thấy cả bàn chân và còn chỗ dưới chân)",
+                            Amount,
+                        ),
+                    ];
+                    group(ui, shown, &mut next, Group::Body, "Dáng người", at_work(&body), |ui| {
+                        if let Some((note, warning)) = &data.dialogs.portrait_body {
+                            let colour = if *warning {
+                                egui::Color32::from_rgb(220, 150, 90)
+                            } else {
+                                egui::Color32::from_gray(150)
+                            };
+                            ui.label(egui::RichText::new(note).size(10.0).color(colour));
+                        }
+                        rows(ui, ready, body)
                     });
                     let eyes = vec![
                         ("Trắng mắt", &mut s.eye_white, "Lòng trắng mắt sáng, bớt đỏ", Amount),

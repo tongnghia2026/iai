@@ -208,18 +208,32 @@ Cùng lõi `core::portrait::reshape` (thêm trường vào `FaceShape` +
 
 ### Pha B1 — Dáng người
 
-- [ ] Thanh:
-  - **Eo thon**: hai mép bóng người ở dải eo dời vào trục thân, nhạt dần lên
-    ngực và xuống hông.
-  - **Tay thon**: hai mép bắp tay (và cẳng tay, nhẹ hơn) dời vào trục tay.
-  - **Chân dài**: kéo dãn theo chiều dọc phần dưới hông (cả bề ngang ảnh nên
-    đường thẳng đứng không cong); phần cuối ảnh bị đẩy ra ngoài khung — chỉ
-    cho dài tới mức còn chỗ dưới bàn chân.
-  - **Chân thon**: mép đùi / cẳng chân dời vào trục chân.
-  - **Vai**: hai đầu vai dời vào/ra (hẹp/rộng vai).
-  - **Cổ**: kéo dãn dải giữa cằm và vai theo chiều dọc (cổ cao), đầu dời lên.
-- [ ] Neo: bóng người nới rộng một khoảng làm vòng neo; tay ép sát thân thì eo
-      và tay dùng chung neo để không xé nhau.
+- [~] Thanh (mục **"Dáng người"** của hộp thoại, sau Dáng mặt; mức ở 100):
+  - **Eo thon**: hai mép thân ở dải eo dời vào trục 15 % (mạnh nhất ở đường
+    eo, nhạt dần 0,3 thân lên ngực, 0,35 xuống hông); tay buông sát eo dời
+    theo mép eo, tay cách eo thì đứng yên.
+  - **Vai**: mép ngoài vai + đường từ cổ ra vai dời vào / ra 10 % nửa bề
+    rộng vai; khớp vai, khuỷu, cổ tay đi theo (1 ; 0,75 ; 0,5).
+  - **Cổ**: đầu (viền mặt, đỉnh tóc, hai bên tóc) nâng lên 30 % chiều dài cổ,
+    mép cổ dãn đều từ cằm xuống vai.
+  - **Tay thon** / **Chân thon**: mép tay / chân dời vào trục xương 18 % /
+    12 %, chỉ mép nào là đường viền người (mép chạm thân / chân kia đứng yên);
+    nhạt dần ở vai, hông, cổ tay, cổ chân.
+  - **Chân dài** (một chiều 0..100): kéo dãn cả hàng ngang phía dưới hông
+    tới 12 % (vào dần quanh hông); chỉ khi đứng (đùi gần thẳng đứng), thấy cổ
+    chân, và dài tới mức bàn chân còn trong ảnh.
+- [~] Neo: trục thân + mép thân ngoài dải đang chỉnh + vòng neo chữ nhật quanh
+      bóng người (cách 0,35 vai); điểm điều khiển gom theo vị trí để hai thanh
+      cùng chạm một điểm thì cộng dồn (không hai đích cho một điểm).
+- [~] Phân tích dáng người chạy **khi kéo thanh dáng người đầu tiên** (vài
+      giây, hộp thoại báo "Đang phân tích dáng người…"), không làm chậm ai chỉ
+      chỉnh mặt; mặt quá to (cận mặt) bỏ qua. Áp dụng chờ phân tích xong.
+- [~] Uốn ghép tầng: mặt trước, người sau, chân dài cuối (`warp_region` nay
+      nhận các tầng nối tiếp) → cổ dài vẫn mang đúng mặt đã thon.
+- [~] Probe `probe_body_shape` thêm `bw_*.png` (ảnh | eo | vai | cổ | tay |
+      chân | chân dài | lưới); 13 ảnh: thay đổi đúng chỗ, khung cửa / chân trời
+      thẳng; 10–850 ms mỗi thanh trên ảnh 20 MP. Test app
+      `body_shape_analyses_bodies_on_first_use_and_narrows_the_waist`.
 - Cổng: chủ test — ở mức vừa người thon tự nhiên, nền cạnh eo/tay không cong
   thấy rõ.
 
@@ -241,6 +255,10 @@ Cùng lõi `core::portrait::reshape` (thêm trường vào `FaceShape` +
 | Ảnh lớn chậm | Lưới thô, chỉ tính trong khung ảnh hưởng, luồng nền |
 
 ## 4. Changelog
+
+- **2026-10-02 (tối)** — B1 code xong: 6 thanh dáng người (Eo thon, Vai,
+  Cổ, Tay thon, Chân thon, Chân dài), phân tích dáng người khi cần, uốn ghép
+  tầng. Chờ chủ test.
 
 - **2026-10-02 (chiều)** — B0: Sapiens2 một mình không đạt (tay/chân trong
   quần áo); chủ đồng ý tải MediaPipe Pose; ghép khung xương + bóng người →

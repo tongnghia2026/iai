@@ -23,7 +23,7 @@ use crate::core::tile::TileMap;
 const RESULT_LAYER: &str = "Chân dung";
 
 /// What the preview shows: settings, faces on, retouch on, areas tinted, and
-/// the brush edits' revision.
+/// the brush edits' revision (doubled, plus one once bodies are analysed).
 type PreviewKey = (PortraitSettings, Vec<bool>, bool, bool, u64);
 type Rendered = Option<(Region, Vec<u8>)>;
 
@@ -46,6 +46,9 @@ pub struct PortraitSession {
     pub shown: Option<PreviewKey>,
     /// The preview render running on a worker, and what it will show.
     rendering: Option<(PreviewKey, Receiver<Rendered>)>,
+    /// The body analysis running on a worker (started by the first body
+    /// slider moved); it fills the model's bodies, then signals.
+    body_rx: Option<Receiver<()>>,
     /// Masks painted with the brush, per face, and their revision.
     pub edits: Vec<FaceEdits>,
     pub edit_rev: u64,
@@ -156,6 +159,7 @@ impl App {
             wanted: None,
             shown: None,
             rendering: None,
+            body_rx: None,
             edits: Vec::new(),
             edit_rev: 0,
             brush: PortraitBrush::default(),
@@ -172,7 +176,15 @@ impl App {
         let Some(session) = self.shell.portrait.as_mut() else {
             return;
         };
-        let busy = session.rx.is_some() || session.rendering.is_some();
+        let busy = session.rx.is_some() || session.rendering.is_some() || session.body_rx.is_some();
+        // Bodies analysed: the preview redraws with them.
+        let bodies_done = session
+            .body_rx
+            .as_ref()
+            .is_some_and(|rx| !matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        if bodies_done {
+            session.body_rx = None;
+        }
         let finished = session.rx.take().and_then(|rx| match rx.try_recv() {
             Ok(result) => Some(result),
             Err(TryRecvError::Empty) => {
@@ -194,6 +206,9 @@ impl App {
             }
             Some(Err(error)) => session.error = Some(error),
             None => {}
+        }
+        if bodies_done {
+            self.refresh_portrait_preview();
         }
         self.poll_portrait_brush();
         self.collect_portrait_render();
@@ -229,9 +244,14 @@ impl App {
             return;
         };
         let painting = session.brush.target.is_some();
+        let bodies = session
+            .model
+            .as_ref()
+            .is_some_and(|m| m.bodies.get().is_some());
         if let Some(key) = session.wanted.as_mut() {
             key.3 &= !painting;
-            key.4 = session.edit_rev;
+            // Analysed bodies change what the same sliders show.
+            key.4 = session.edit_rev * 2 + bodies as u64;
             // The brush paints the face as shot: show it unreshaped meanwhile.
             if painting {
                 key.0 = key.0.without_shape();
@@ -250,6 +270,12 @@ impl App {
             return;
         };
         let (settings, enabled, preview, masks, _) = key.clone();
+        if !settings.body_shape().is_neutral()
+            && model.bodies.get().is_none()
+            && session.body_rx.is_none()
+        {
+            session.body_rx = Some(start_body_analysis(&session.src, &model));
+        }
         if !preview && !masks {
             self.show_portrait_preview(key, None);
             return;
@@ -380,6 +406,12 @@ impl App {
             )
         };
         let edits = self.finished_portrait_edits();
+        // The body sliders need the bodies: wait for their analysis.
+        if !settings.body_shape().is_neutral() && model.bodies.get().is_none() {
+            let running = self.shell.portrait.as_mut().and_then(|s| s.body_rx.take());
+            let rx = running.unwrap_or_else(|| start_body_analysis(&src, &model));
+            let _ = rx.recv();
+        }
         self.cancel_portrait();
         let Some((region, pixels)) = portrait::render(&src, &model, &settings, &enabled, &edits)
         else {
@@ -536,6 +568,32 @@ impl App {
         (line, true, faces, hair)
     }
 
+    /// A note for the dialog's body group, and whether it is a warning: the
+    /// body analysis still to come or running, or failed or finding no one.
+    pub(crate) fn portrait_body_note(&self) -> Option<(String, bool)> {
+        let session = self.shell.portrait.as_ref()?;
+        let model = session.model.as_ref()?;
+        if session.body_rx.is_some() {
+            return Some(("Đang phân tích dáng người…".to_string(), false));
+        }
+        match model.bodies.get() {
+            None if crate::core::ai::pose::model_path().is_none() => Some((
+                "Cần model khung xương (models\\pose) — chưa cài".to_string(),
+                true,
+            )),
+            None => Some((
+                "Lần đầu kéo thanh, app phân tích dáng người vài giây.".to_string(),
+                false,
+            )),
+            Some(Err(error)) => Some((format!("Không phân tích được dáng người: {error}"), true)),
+            Some(Ok(bodies)) if bodies.iter().all(Option::is_none) => Some((
+                "Không nhận ra dáng người (cần thấy rõ hai vai)".to_string(),
+                true,
+            )),
+            Some(Ok(_)) => None,
+        }
+    }
+
     /// Dialog view of a reopened layer: whether one is reopened, and the
     /// saved sliders and faces the dialog has not taken yet.
     pub(crate) fn portrait_restore(&self) -> (bool, Option<PortraitSettings>, Option<Vec<bool>>) {
@@ -562,6 +620,20 @@ impl App {
             }
         }
     }
+}
+
+/// Analyse the bodies below `model`'s faces on a worker; the receiver hears
+/// once the model holds them.
+fn start_body_analysis(src: &Arc<Vec<u8>>, model: &Arc<PortraitModel>) -> Receiver<()> {
+    let (tx, rx) = mpsc::channel();
+    let (src, model) = (Arc::clone(src), Arc::clone(model));
+    let prefer_gpu = crate::core::ai::ort_ep::prefer_gpu();
+    std::thread::spawn(move || {
+        let bodies = portrait::body::analyze_bodies(&src, &model, prefer_gpu);
+        let _ = model.bodies.set(bodies);
+        let _ = tx.send(());
+    });
+    rx
 }
 
 /// The photo layer to analyse and, when reopening, the "Chân dung" layer
@@ -1111,6 +1183,65 @@ mod tests {
         settle(&mut app);
         assert_eq!(now(&app), (Some(255), Some(0)), "reopened");
         app.cancel_portrait();
+    }
+
+    #[test]
+    fn body_shape_analyses_bodies_on_first_use_and_narrows_the_waist() {
+        let path = std::path::Path::new("tmp/anh-thu-dang/doorway_man.jpg");
+        if !path.is_file()
+            || crate::core::ai::face_mesh::model_path().is_none()
+            || crate::core::ai::pose::model_path().is_none()
+            || crate::core::ai::body_parts::model_path().is_none()
+        {
+            return;
+        }
+        let image =
+            image::open(path)
+                .unwrap()
+                .resize(900, 1350, image::imageops::FilterType::Triangle);
+        let image = image.to_rgba8();
+        let (w, h) = image.dimensions();
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.docs.documents[0].canvas = Canvas::from_rgba(image.into_raw(), w, h);
+        app.shell.ui.show_portrait_dialog = true;
+        let model = analysed(&mut app).unwrap();
+        let faces = vec![true; model.faces.len()];
+        assert!(model.bodies.get().is_none(), "not before a body slider");
+
+        // The first body slider starts the analysis; the preview follows.
+        let waist = PortraitSettings {
+            body_waist: 100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        app.set_portrait_preview(waist, faces.clone(), true, false);
+        assert_eq!(
+            app.portrait_body_note(),
+            Some(("Đang phân tích dáng người…".to_string(), false))
+        );
+        let started = Instant::now();
+        while model.bodies.get().is_none() || app.portrait_body_note().is_some() {
+            assert!(
+                started.elapsed() < Duration::from_secs(180),
+                "body analysis hung"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            app.poll_portrait();
+        }
+        wait_for_preview(&mut app);
+        let bodies = model.bodies.get().unwrap().as_ref().unwrap();
+        let body = bodies[0].as_ref().expect("the man's body");
+        let edge = body.shape.waist.expect("his waist").start;
+
+        assert!(!app.apply_portrait(waist, faces).unwrap(), "added");
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
+        assert!(
+            layer.tiles.get_pixel(edge[0] as u32, edge[1] as u32).3 > 0,
+            "the waist's edge moved"
+        );
+        assert_eq!(layer.tiles.get_pixel(w / 2, 2).3, 0, "above the head stays");
+        let recipe = layer.portrait.clone().expect("recipe kept");
+        assert_eq!(recipe.settings.body_shape(), waist.body_shape());
     }
 
     #[test]

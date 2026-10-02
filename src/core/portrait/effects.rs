@@ -7,8 +7,9 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::analysis::{luma, BrowLayers, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
+use super::body::BodySliders;
 use super::geometry::Region;
-use super::reshape::{reshape_faces, FaceShape};
+use super::reshape::{reshape, FaceShape};
 use crate::core::color::luminance_f32;
 use crate::core::develop::{
     apply_light_luma, apply_luma_target, local_detail_boost, srgb_to_linear, DevelopEngineVersion,
@@ -58,6 +59,14 @@ pub struct PortraitSettings {
     pub lip_fullness: f32,
     pub eye_tilt: f32,
     pub face_squeeze: f32,
+    /// Body shape, -100..100 (leg length 0..100; 0 = as shot); see
+    /// [`BodySliders`].
+    pub body_waist: f32,
+    pub body_shoulders: f32,
+    pub body_neck: f32,
+    pub body_arms: f32,
+    pub body_legs: f32,
+    pub body_leg_length: f32,
 }
 
 impl Default for PortraitSettings {
@@ -97,6 +106,12 @@ impl Default for PortraitSettings {
             lip_fullness: 0.0,
             eye_tilt: 0.0,
             face_squeeze: 0.0,
+            body_waist: 0.0,
+            body_shoulders: 0.0,
+            body_neck: 0.0,
+            body_arms: 0.0,
+            body_legs: 0.0,
+            body_leg_length: 0.0,
         }
     }
 }
@@ -137,6 +152,12 @@ impl PortraitSettings {
         lip_fullness: 0.0,
         eye_tilt: 0.0,
         face_squeeze: 0.0,
+        body_waist: 0.0,
+        body_shoulders: 0.0,
+        body_neck: 0.0,
+        body_arms: 0.0,
+        body_legs: 0.0,
+        body_leg_length: 0.0,
     };
 
     fn unit(&self) -> Self {
@@ -187,7 +208,19 @@ impl PortraitSettings {
         }
     }
 
-    /// These settings with the face shape as shot.
+    /// The body shape sliders.
+    pub fn body_shape(&self) -> BodySliders {
+        BodySliders {
+            waist: self.body_waist,
+            shoulders: self.body_shoulders,
+            neck: self.body_neck,
+            arms: self.body_arms,
+            legs: self.body_legs,
+            leg_length: self.body_leg_length,
+        }
+    }
+
+    /// These settings with the face and body shape as shot.
     pub fn without_shape(&self) -> Self {
         Self {
             face_slim: 0.0,
@@ -200,6 +233,12 @@ impl PortraitSettings {
             lip_fullness: 0.0,
             eye_tilt: 0.0,
             face_squeeze: 0.0,
+            body_waist: 0.0,
+            body_shoulders: 0.0,
+            body_neck: 0.0,
+            body_arms: 0.0,
+            body_legs: 0.0,
+            body_leg_length: 0.0,
             ..*self
         }
     }
@@ -612,7 +651,14 @@ pub fn render(
     edits: &[FaceEdits],
 ) -> Option<(Region, Vec<u8>)> {
     let retouched = retouch(rgba, model, settings, enabled, edits);
-    reshape_faces(rgba, model, &settings.face_shape(), enabled, retouched)
+    reshape(
+        rgba,
+        model,
+        &settings.face_shape(),
+        &settings.body_shape(),
+        enabled,
+        retouched,
+    )
 }
 
 /// The retouch alone: the union region of the enabled faces with its new
@@ -751,7 +797,14 @@ pub fn render_masks(
     edits: &[FaceEdits],
 ) -> Option<(Region, Vec<u8>)> {
     let tinted = tint_masks(rgba, model, enabled, edits);
-    reshape_faces(rgba, model, &settings.face_shape(), enabled, tinted)
+    reshape(
+        rgba,
+        model,
+        &settings.face_shape(),
+        &settings.body_shape(),
+        enabled,
+        tinted,
+    )
 }
 
 fn tint_masks(

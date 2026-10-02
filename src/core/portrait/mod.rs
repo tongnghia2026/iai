@@ -438,6 +438,112 @@ mod tests {
             }
             out.save(dir.join(format!("bs_{}.png", name.trim_end_matches(".jpg"))))
                 .unwrap();
+
+            // Each body slider at 100 over the person: photo, waist,
+            // shoulders, neck, arms, legs, leg length, and a grid warped by
+            // waist + arms + legs.
+            let (Some(silhouette), Some(shape)) = (silhouette, shape) else {
+                continue;
+            };
+            let [bx0, by0, bx1, by1] = silhouette.bounds();
+            let model = body::BodyModel {
+                pose,
+                silhouette,
+                shape,
+            };
+            let pad = 0.15 * (bx1 - bx0);
+            let area = Region::around(
+                [[bx0, by0], [bx1, by1]].into_iter(),
+                [pad; 4],
+                width,
+                height,
+            );
+            let whole = Region {
+                x: 0,
+                y: 0,
+                w: width,
+                h: height,
+            };
+            let one = |f: fn(&mut body::BodySliders)| {
+                let mut s = body::BodySliders::default();
+                f(&mut s);
+                s
+            };
+            let sliders = [
+                ("waist", one(|s| s.waist = 100.0)),
+                ("shoulders", one(|s| s.shoulders = 100.0)),
+                ("neck", one(|s| s.neck = 100.0)),
+                ("arms", one(|s| s.arms = 100.0)),
+                ("legs", one(|s| s.legs = 100.0)),
+                ("leg length", one(|s| s.leg_length = 100.0)),
+            ];
+            let warp = |pixels: &[u8], s: &body::BodySliders| {
+                let fields: Vec<_> = [
+                    body::leg_field(&model, s, width, height),
+                    body::body_field(&model, &mesh.points, s, width, height),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                let stages: Vec<Vec<&reshape::Displacement>> =
+                    fields.iter().map(|f| vec![f]).collect();
+                let largest = fields.iter().map(|f| f.largest()).fold(0.0, f32::max);
+                (
+                    reshape::warp_region(pixels, whole, &stages, None, area),
+                    largest,
+                )
+            };
+            let mut tiles = vec![crop_rgb(&rgba, width, area)];
+            let mut report = format!("{name}:");
+            for (label, s) in &sliders {
+                let started = std::time::Instant::now();
+                let (out, largest) = warp(&rgba, s);
+                report += &format!(
+                    " {label} {largest:.0}px {}ms |",
+                    started.elapsed().as_millis()
+                );
+                tiles.push(image::RgbImage::from_fn(area.w, area.h, |x, y| {
+                    let k = ((y * area.w + x) * 4) as usize;
+                    image::Rgb([out[k], out[k + 1], out[k + 2]])
+                }));
+            }
+            let gap = ((bx1 - bx0) * 0.06).max(6.0) as u32;
+            let mut grid = rgba.clone();
+            for y in area.y..area.y + area.h {
+                for x in area.x..area.x + area.w {
+                    if (x - area.x) % gap < 2 || (y - area.y) % gap < 2 {
+                        let o = ((y * width + x) * 4) as usize;
+                        grid[o..o + 3].copy_from_slice(&[0, 255, 255]);
+                    }
+                }
+            }
+            let (out, _) = warp(
+                &grid,
+                &body::BodySliders {
+                    waist: 100.0,
+                    arms: 100.0,
+                    legs: 100.0,
+                    ..Default::default()
+                },
+            );
+            tiles.push(image::RgbImage::from_fn(area.w, area.h, |x, y| {
+                let k = ((y * area.w + x) * 4) as usize;
+                image::Rgb([out[k], out[k + 1], out[k + 2]])
+            }));
+            println!("{report}");
+            let scale = (700.0 / area.h as f32).min(1.0);
+            let (tw, th) = (
+                (area.w as f32 * scale) as u32,
+                (area.h as f32 * scale) as u32,
+            );
+            let mut sheet = image::RgbImage::new((tw + 4) * tiles.len() as u32, th);
+            for (i, t) in tiles.iter().enumerate() {
+                let t = image::imageops::resize(t, tw, th, image::imageops::FilterType::Triangle);
+                image::imageops::replace(&mut sheet, &t, ((tw + 4) * i as u32) as i64, 0);
+            }
+            sheet
+                .save(dir.join(format!("bw_{}.png", name.trim_end_matches(".jpg"))))
+                .unwrap();
         }
     }
 
@@ -710,7 +816,7 @@ mod tests {
                 let started = std::time::Instant::now();
                 let field = face_field(points, shape, &[], width, height).unwrap();
                 let built = started.elapsed().as_millis();
-                let out = warp_region(&rgba, whole, &[&field], None, area);
+                let out = warp_region(&rgba, whole, &[vec![&field]], None, area);
                 line += &format!(
                     " | {label} {:.1}px {built}+{}ms",
                     field.largest(),
@@ -729,13 +835,25 @@ mod tests {
                     }
                 }
             }
-            tiles.push(tile(&warp_region(&grid, whole, &[&reference], None, area)));
+            tiles.push(tile(&warp_region(
+                &grid,
+                whole,
+                &[vec![&reference]],
+                None,
+                area,
+            )));
             let squeezed = FaceShape {
                 squeeze: 100.0,
                 ..Default::default()
             };
             let field = face_field(points, &squeezed, &[], width, height).unwrap();
-            tiles.push(tile(&warp_region(&grid, whole, &[&field], None, area)));
+            tiles.push(tile(&warp_region(
+                &grid,
+                whole,
+                &[vec![&field]],
+                None,
+                area,
+            )));
             println!("{line}");
             let cols = 4u32;
             let rows = (tiles.len() as u32).div_ceil(cols);

@@ -873,6 +873,9 @@ pub struct PortraitModel {
     /// Milliseconds spent finding faces, loading and running the part model,
     /// and preparing the faces.
     pub timings: [u128; 4],
+    /// The bodies below the faces, analysed once a body slider is first
+    /// used (see [`super::body::analyze_bodies`]).
+    pub bodies: std::sync::OnceLock<Result<Vec<Option<super::body::BodyModel>>, String>>,
 }
 
 pub(super) fn luma(c: [f32; 3]) -> f32 {
@@ -1362,6 +1365,7 @@ pub fn analyze(
         parts_on_gpu,
         parts_note,
         timings,
+        bodies: std::sync::OnceLock::new(),
     })
 }
 
