@@ -51,14 +51,14 @@ và qua cổng · `[!]` bị chặn.
 
 ### Pha A0 — Lõi uốn ảnh theo điểm điều khiển
 
-- [~] Module `core::portrait::reshape`: từ danh sách cặp điểm (gốc → đích) và
+- [x] Module `core::portrait::reshape`: từ danh sách cặp điểm (gốc → đích) và
       vòng neo, dựng trường dịch chuyển **ngược** (điểm ra lấy màu từ đâu) trên
       lưới thô (ô ≈ e/100, tối thiểu 4 px) chỉ trong khung ảnh hưởng; MLS rigid
       tính ngược (đích → gốc) nên không phải đảo trường.
-- [~] Vẽ: lấy mẫu song tuyến như Warp; cộng dồn nhiều mặt (mỗi mặt một trường,
+- [x] Vẽ: lấy mẫu song tuyến như Warp; cộng dồn nhiều mặt (mỗi mặt một trường,
       khung riêng); nhân độ phủ vùng chọn (`Clip`) vào **độ dời** (không trộn
       ảnh uốn với ảnh gốc → không bóng ma ở mép vùng chọn).
-- [~] Probe `probe_reshape` (IAI_PORTRAIT_RESHAPE_PROBE): mỗi thanh ở 100 +
+- [x] Probe `probe_reshape` (IAI_PORTRAIT_RESHAPE_PROBE): mỗi thanh ở 100 +
       lưới ô vuông vẽ lên ảnh rồi uốn (Mặt thon + Mắt to) để xem đường thẳng.
 - Kết quả lần 1: viền hàm bị **răng cưa** (36 điểm viền dời mà giữa hai điểm
   trường bị kéo về các điểm đứng yên khác) → thêm điểm nội suy dọc mọi viền
@@ -72,7 +72,7 @@ và qua cổng · `[!]` bị chặn.
 
 ### Pha A1 — Dáng mặt
 
-- [~] Thanh (đều hai chiều −100..100):
+- [x] Thanh (đều hai chiều −100..100):
   - **Mặt thon**: viền hàm/má (nửa dưới `FACE_OVAL`, từ ngang tai tới cằm) dời
     vào trục giữa mặt, mạnh nhất ở xương hàm, nhẹ dần lên thái dương và về cằm.
   - **Cằm**: các điểm cằm dời theo trục mặt (dài/ngắn cằm).
@@ -81,28 +81,67 @@ và qua cổng · `[!]` bị chặn.
   - **Miệng**: khóe miệng dời ra/vào (rộng/hẹp).
   - **Trán**: viền trán (nửa trên `FACE_OVAL`) dời lên/xuống theo trục mặt.
   - (Sau nếu cần) **Cân đối hai mắt**: kéo cỡ và độ cao hai mắt về trung bình.
-- [~] Điểm không thuộc thanh nào được giữ làm neo (ví dụ kéo Mặt thon thì mắt,
+- [x] Điểm không thuộc thanh nào được giữ làm neo (ví dụ kéo Mặt thon thì mắt,
       mũi, miệng đứng yên); mặt nghiêng: mức dời mỗi bên theo bề rộng thấy
       được của bên đó (bên khuất dời ít).
-- [~] Probe trên 14 ảnh (5 cũ + 9 ảnh CC0 mới tải từ Wikimedia Commons, có
+- [x] Probe trên 14 ảnh (5 cũ + 9 ảnh CC0 mới tải từ Wikimedia Commons, có
       tường gạch, kệ sách, khung cửa, kính mắt, cận mặt): tự nhiên, không vỡ.
       Mức 100: hàm/má thon ~9% khoảng cách tới giữa mặt; cằm dài 0,05e; mắt
       to 14%; cánh mũi hẹp 15%; khóe miệng ra 12% nửa miệng; trán cao 0,06e.
 - Cổng: chủ test — ở mức vừa (≈ 50) mặt đổi rõ mà tự nhiên, không thấy nền
-  cong; 100 vẫn chấp nhận được; mặt nghiêng không vỡ.
+  cong; 100 vẫn chấp nhận được; mặt nghiêng không vỡ. **Đạt — chủ test OK
+  02/10.**
 
 ### Pha A2 — Ghép vào hộp thoại
 
-- [~] Mục "Dáng mặt" trong hộp thoại (ngay sau "Da"), xem trước ở luồng nền
+- [x] Mục "Dáng mặt" trong hộp thoại (ngay sau "Da"), xem trước ở luồng nền
       như các thanh khác; "Hiện vùng nhận diện" hiện trên ảnh đã uốn. Khi đang
       tô vùng, xem trước tạm không uốn (cọ tô theo mặt gốc).
-- [~] Áp dụng: layer "Chân dung" phủ cả vùng uốn; các thanh dáng nằm trong
+- [x] Áp dụng: layer "Chân dung" phủ cả vùng uốn; các thanh dáng nằm trong
       `PortraitSettings` nên công thức tự lưu; mở lại → thanh về như cũ.
-- [~] Ảnh nhóm: mỗi mặt bật/tắt như hiện nay, mặt khác giữ yên (viền của chúng
+- [x] Ảnh nhóm: mỗi mặt bật/tắt như hiện nay, mặt khác giữ yên (viền của chúng
       làm neo); vùng chọn giảm dần độ dời theo mép vùng chọn.
 - Test app `face_shape_warps_the_jaw_only_and_is_kept_in_the_recipe`: Áp dụng
   Mặt thon → điểm ở hàm đổi, góc ảnh không đổi, công thức giữ thanh.
-- Cổng: chủ test cả luồng trên ảnh thật.
+- Cổng: chủ test cả luồng trên ảnh thật. **Đạt — chủ test OK 02/10.**
+
+### Pha A3 — Thêm thanh dáng mặt (chủ yêu cầu 02/10)
+
+Cùng lõi `core::portrait::reshape` (thêm trường vào `FaceShape` +
+`PortraitSettings`, điểm dời trong `face_controls`), mỗi thanh hai chiều
+−100..100:
+
+- [ ] **Miệng cười / mếu**: hai khóe miệng (61, 291 và các điểm môi sát khóe,
+      cả viền trong 78, 308) dời **lên** theo trục mặt (cười) hoặc **xuống**
+      (mếu), mạnh nhất ở khóe, giảm dần về giữa môi; giữa môi trên/dưới đứng
+      yên. Thử thêm nâng nhẹ gò má khi cười nếu trông cứng.
+- [ ] **Môi dày / mỏng**: viền ngoài môi trên dời lên và môi dưới dời xuống
+      (dày) hoặc ngược lại (mỏng), so với đường khép môi (viền trong
+      `MOUTH_INNER`, giữ yên); mạnh ở giữa, nhạt dần về khóe.
+- [ ] **Mắt nghiêng**: xoay mỗi mắt quanh tâm mống mắt — đuôi mắt (33 / 263)
+      lên, đầu mắt (133 / 362) xuống (mắt xếch) hoặc ngược lại; hai mắt đối
+      xứng qua trục mặt. Mống mắt giữ tròn (dời theo tâm, không xoay méo).
+- [ ] **Độ rộng mặt** ("bóp cả khuôn mặt" theo chiều ngang): toàn bộ viền
+      `FACE_OVAL` (từ thái dương tới hàm) **và** mắt, mày, mũi, miệng co /
+      giãn theo chiều ngang quanh trục giữa mặt cùng một tỉ lệ — khác "Mặt
+      thon" (chỉ hàm/má, giữ nguyên ngũ quan). Vòng neo giữ nền như cũ.
+- [ ] Probe `probe_reshape` thêm 4 thanh; test giữ công thức.
+- Cổng: chủ test — cười/mếu tự nhiên, môi không vỡ viền, mắt nghiêng không méo
+  mống mắt, bóp mặt không cong nền gần má.
+
+### Pha A4 — Sắp xếp lại bố cục hộp thoại (chủ yêu cầu 02/10)
+
+- [ ] Chia thành các **nhóm thu gọn được**, có mũi tên ▸/▾ ở tiêu đề: Tô vùng,
+      Da, Dáng mặt, Mắt, Môi & miệng, Lông mày, Tóc, Chi tiết (gom lại cho cụ
+      thể: ví dụ "Mắt" gồm trắng mắt, sáng/màu tròng; "Dáng mặt" có thể tách
+      nhỏ Khuôn mặt / Mắt / Mũi / Miệng nếu dài).
+- [ ] **Mặc định tất cả đóng**; bấm mở một nhóm thì **nhóm đang mở tự đóng**
+      (chỉ một nhóm mở một lúc) → hộp thoại gọn, không phải cuộn dài.
+- [ ] Tiêu đề nhóm hiện dấu khi trong nhóm có thanh khác 0 / khác mặc định (để
+      biết nhóm nào đang chỉnh) — đề xuất, hỏi chủ nếu không chắc.
+- [ ] Nút Mặc định / Về 0, Xem trước, Hiện vùng nhận diện, Áp dụng / Hủy giữ
+      ở dưới cùng, luôn thấy.
+- Cổng: chủ test — hộp thoại gọn, mở/đóng nhóm mượt, không mất thanh nào.
 
 ### Pha B0 — Phân tích dáng người (cổng giữ/bỏ cách làm)
 
@@ -157,6 +196,11 @@ và qua cổng · `[!]` bị chặn.
 
 - **2026-10-02** — Lập kế hoạch theo lựa chọn của chủ (dáng mặt + dáng người);
   chưa code. Chờ chủ duyệt mục 1 (nhất là tải ảnh thử, và Pose chỉ khi cần).
+- **2026-10-02** — Chủ test Dáng mặt (A0–A2) OK. Chủ yêu cầu thêm: miệng cười
+  / mếu, môi dày / mỏng, mắt nghiêng, bóp cả khuôn mặt theo chiều ngang (Pha
+  A3) và sắp xếp lại bố cục thành nhóm thu gọn, mặc định đóng, mở một đóng
+  các nhóm khác (Pha A4). **Làm ở phiên mới** (context phiên này đầy): A3 →
+  A4 → rồi mới tới B0 (dáng người).
 - **2026-10-02** — Chủ duyệt toàn bộ. Tải 12 ảnh CC0 (Unsplash qua Wikimedia
   Commons; giữ 11, nguồn ghi trong `SOURCES.txt` ở thư mục probe). Pha A0 +
   A1 + A2 code xong (`4880b1a`); probe + test đạt; chờ chủ test Dáng mặt.
