@@ -90,7 +90,16 @@ Crop preset 3×4 chủ vẫn dùng tay.
   (Trong trẻo, Hồng hào, Trắng sáng, Ấm áp, Tự nhiên, Film nhẹ) — LUT 33³, giữ trắng
   cho áo/nền trắng; nhóm "Màu studio" có ô màu mẫu + thanh "Độ đậm"; Áp dụng tạo layer
   "Màu studio: <tên>" ngay trên "Chân dung", độ đậm = opacity; mở lại thì cập nhật/bỏ.
-- [ ] Build Release, chủ test đợt 3.
+- [x] Build Release, chủ test đợt 3: **OK** (riêng BiRefNet Full: chủ thấy chậm và tách
+  không đẹp bằng bản Quality).
+
+## Đợt 4 (02/10 tối)
+
+- [x] Tách nền về lại **BiRefNet Tiny ("Quality")**; bỏ BiRefNet Full khỏi app.
+- [x] Chỉnh chân dung: ảnh mới **luôn bắt đầu từ thông số Mặc định** (trước đây hộp thoại
+  giữ thông số ảnh trước → bóp mặt, son, màu studio bị áp sang người khác). Mở lại layer
+  "Chân dung" cũ vẫn khôi phục thông số của chính nó.
+- [ ] Build Release, chủ test đợt 4.
 
 ## Kết quả đo thử (02/10)
 
