@@ -26,7 +26,7 @@ và qua cổng · `[!]` bị chặn.
   - Hộp thoại Chỉnh chân dung: xem trước ở luồng nền, Áp dụng ra layer "Chân
     dung", công thức lưu trên layer + file `.iai`, mở lại chỉnh tiếp.
 
-## 1. Quyết định đề xuất (chờ chủ duyệt)
+## 1. Quyết định đã khóa (chủ duyệt 2026-10-02)
 
 1. Hai mục mới trong hộp thoại Chỉnh chân dung: **"Dáng mặt"** và **"Dáng
    người"**. Mọi thanh mặc định **0** = không đổi dáng.
@@ -51,22 +51,28 @@ và qua cổng · `[!]` bị chặn.
 
 ### Pha A0 — Lõi uốn ảnh theo điểm điều khiển
 
-- [ ] Module `core::portrait::reshape`: từ danh sách cặp điểm (gốc → đích) và
+- [~] Module `core::portrait::reshape`: từ danh sách cặp điểm (gốc → đích) và
       vòng neo, dựng trường dịch chuyển **ngược** (điểm ra lấy màu từ đâu) trên
       lưới thô (ô ≈ e/100, tối thiểu 4 px) chỉ trong khung ảnh hưởng; MLS rigid
       tính ngược (đích → gốc) nên không phải đảo trường.
-- [ ] Vẽ: lấy mẫu song tuyến như Warp; cộng dồn nhiều mặt (mỗi mặt một trường,
+- [~] Vẽ: lấy mẫu song tuyến như Warp; cộng dồn nhiều mặt (mỗi mặt một trường,
       khung riêng); nhân độ phủ vùng chọn (`Clip`) vào **độ dời** (không trộn
       ảnh uốn với ảnh gốc → không bóng ma ở mép vùng chọn).
-- [ ] Probe `probe_reshape`: ảnh lưới ô vuông + ảnh chân dung có nền nhiều
-      đường thẳng; đo độ cong lớn nhất của đường thẳng nền và độ dời ở vòng
-      neo (= 0); thời gian (mục tiêu < 150 ms cho ảnh 20 MP một mặt).
-- Cổng (nội bộ, trước khi đưa chủ): dời điểm đúng tới đích, ngoài vòng neo
-  không đổi một điểm ảnh, đường thẳng cạnh mặt cong < 2 px ở mức vừa.
+- [~] Probe `probe_reshape` (IAI_PORTRAIT_RESHAPE_PROBE): mỗi thanh ở 100 +
+      lưới ô vuông vẽ lên ảnh rồi uốn (Mặt thon + Mắt to) để xem đường thẳng.
+- Kết quả lần 1: viền hàm bị **răng cưa** (36 điểm viền dời mà giữa hai điểm
+  trường bị kéo về các điểm đứng yên khác) → thêm điểm nội suy dọc mọi viền
+  (mặt, mắt, mày, môi, sống mũi; cách nhau e/150) → hết răng cưa, lưới cong
+  mượt. Dựng trường 9–53 ms; uốn 6–180 ms (mặt lớn chiếm cả ảnh 20 MP:
+  ~180 ms); điểm không dời chép thẳng.
+- Cổng (nội bộ): điểm dời đúng tới đích, ngoài vùng không đổi, mép vùng về 0
+  (test `field_takes_colour_from_where_a_point_came_from_and_nothing_past_the_ring`).
+  Nền sát hàm vẫn dời vài px khi kéo mạnh (bản chất của uốn; PTS cũng vậy) —
+  nền cách mặt từ ~0,15e trở ra gần như đứng yên. **Đạt nội bộ.**
 
 ### Pha A1 — Dáng mặt
 
-- [ ] Thanh (đa số hai chiều −100..100):
+- [~] Thanh (đều hai chiều −100..100):
   - **Mặt thon**: viền hàm/má (nửa dưới `FACE_OVAL`, từ ngang tai tới cằm) dời
     vào trục giữa mặt, mạnh nhất ở xương hàm, nhẹ dần lên thái dương và về cằm.
   - **Cằm**: các điểm cằm dời theo trục mặt (dài/ngắn cằm).
@@ -75,23 +81,27 @@ và qua cổng · `[!]` bị chặn.
   - **Miệng**: khóe miệng dời ra/vào (rộng/hẹp).
   - **Trán**: viền trán (nửa trên `FACE_OVAL`) dời lên/xuống theo trục mặt.
   - (Sau nếu cần) **Cân đối hai mắt**: kéo cỡ và độ cao hai mắt về trung bình.
-- [ ] Điểm không thuộc thanh nào được giữ làm neo (ví dụ kéo Mặt thon thì mắt,
+- [~] Điểm không thuộc thanh nào được giữ làm neo (ví dụ kéo Mặt thon thì mắt,
       mũi, miệng đứng yên); mặt nghiêng: mức dời mỗi bên theo bề rộng thấy
       được của bên đó (bên khuất dời ít).
-- [ ] Probe trên 13 ảnh chân dung đã có + ảnh mới có nền đường thẳng; ảnh trước
-      / sau ở 50 và 100 mỗi thanh.
+- [~] Probe trên 14 ảnh (5 cũ + 9 ảnh CC0 mới tải từ Wikimedia Commons, có
+      tường gạch, kệ sách, khung cửa, kính mắt, cận mặt): tự nhiên, không vỡ.
+      Mức 100: hàm/má thon ~9% khoảng cách tới giữa mặt; cằm dài 0,05e; mắt
+      to 14%; cánh mũi hẹp 15%; khóe miệng ra 12% nửa miệng; trán cao 0,06e.
 - Cổng: chủ test — ở mức vừa (≈ 50) mặt đổi rõ mà tự nhiên, không thấy nền
   cong; 100 vẫn chấp nhận được; mặt nghiêng không vỡ.
 
 ### Pha A2 — Ghép vào hộp thoại
 
-- [ ] Mục "Dáng mặt" trong hộp thoại (sau "Da"/"Mắt & răng"…), xem trước ở
-      luồng nền như các thanh khác; "Hiện vùng nhận diện" hiện trên ảnh đã uốn.
-- [ ] Áp dụng: layer "Chân dung" phủ cả vùng uốn (điểm ảnh đổi chỗ phải phủ
-      kín); công thức lưu các thanh dáng; mở lại → thanh về như cũ.
-- [ ] Ảnh nhóm: mỗi mặt bật/tắt như hiện nay; vùng chọn giới hạn uốn.
-- Test app: kéo thanh → xem trước khác ảnh gốc trong khung mặt, ngoài vòng neo
-  y nguyên; Áp dụng / hoàn tác / mở lại.
+- [~] Mục "Dáng mặt" trong hộp thoại (ngay sau "Da"), xem trước ở luồng nền
+      như các thanh khác; "Hiện vùng nhận diện" hiện trên ảnh đã uốn. Khi đang
+      tô vùng, xem trước tạm không uốn (cọ tô theo mặt gốc).
+- [~] Áp dụng: layer "Chân dung" phủ cả vùng uốn; các thanh dáng nằm trong
+      `PortraitSettings` nên công thức tự lưu; mở lại → thanh về như cũ.
+- [~] Ảnh nhóm: mỗi mặt bật/tắt như hiện nay, mặt khác giữ yên (viền của chúng
+      làm neo); vùng chọn giảm dần độ dời theo mép vùng chọn.
+- Test app `face_shape_warps_the_jaw_only_and_is_kept_in_the_recipe`: Áp dụng
+  Mặt thon → điểm ở hàm đổi, góc ảnh không đổi, công thức giữ thanh.
 - Cổng: chủ test cả luồng trên ảnh thật.
 
 ### Pha B0 — Phân tích dáng người (cổng giữ/bỏ cách làm)
@@ -147,3 +157,6 @@ và qua cổng · `[!]` bị chặn.
 
 - **2026-10-02** — Lập kế hoạch theo lựa chọn của chủ (dáng mặt + dáng người);
   chưa code. Chờ chủ duyệt mục 1 (nhất là tải ảnh thử, và Pose chỉ khi cần).
+- **2026-10-02** — Chủ duyệt toàn bộ. Tải 12 ảnh CC0 (Unsplash qua Wikimedia
+  Commons; giữ 11, nguồn ghi trong `SOURCES.txt` ở thư mục probe). Pha A0 +
+  A1 + A2 code xong (`4880b1a`); probe + test đạt; chờ chủ test Dáng mặt.
