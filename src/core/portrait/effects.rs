@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::analysis::{luma, BrowLayers, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
 use super::geometry::Region;
+use super::reshape::{reshape_faces, FaceShape};
 use crate::core::color::luminance_f32;
 use crate::core::develop::{
     apply_light_luma, apply_luma_target, local_detail_boost, srgb_to_linear, DevelopEngineVersion,
@@ -46,6 +47,13 @@ pub struct PortraitSettings {
     pub brow_sharpen: f32,
     pub brow_hue: f32,
     pub brow_tint: f32,
+    /// Face shape, -100..100 (0 = as shot); see [`FaceShape`].
+    pub face_slim: f32,
+    pub chin_length: f32,
+    pub eye_size: f32,
+    pub nose_slim: f32,
+    pub mouth_width: f32,
+    pub forehead_height: f32,
 }
 
 impl Default for PortraitSettings {
@@ -75,6 +83,12 @@ impl Default for PortraitSettings {
             brow_sharpen: 0.0,
             brow_hue: 25.0,
             brow_tint: 0.0,
+            face_slim: 0.0,
+            chin_length: 0.0,
+            eye_size: 0.0,
+            nose_slim: 0.0,
+            mouth_width: 0.0,
+            forehead_height: 0.0,
         }
     }
 }
@@ -105,6 +119,12 @@ impl PortraitSettings {
         brow_sharpen: 0.0,
         brow_hue: 25.0,
         brow_tint: 0.0,
+        face_slim: 0.0,
+        chin_length: 0.0,
+        eye_size: 0.0,
+        nose_slim: 0.0,
+        mouth_width: 0.0,
+        forehead_height: 0.0,
     };
 
     fn unit(&self) -> Self {
@@ -135,6 +155,32 @@ impl PortraitSettings {
             brow_sharpen: u(self.brow_sharpen),
             brow_hue: self.brow_hue.rem_euclid(360.0),
             brow_tint: u(self.brow_tint),
+            ..*self
+        }
+    }
+
+    /// The face shape sliders.
+    pub fn face_shape(&self) -> FaceShape {
+        FaceShape {
+            slim: self.face_slim,
+            chin: self.chin_length,
+            eyes: self.eye_size,
+            nose: self.nose_slim,
+            mouth: self.mouth_width,
+            forehead: self.forehead_height,
+        }
+    }
+
+    /// These settings with the face shape as shot.
+    pub fn without_shape(&self) -> Self {
+        Self {
+            face_slim: 0.0,
+            chin_length: 0.0,
+            eye_size: 0.0,
+            nose_slim: 0.0,
+            mouth_width: 0.0,
+            forehead_height: 0.0,
+            ..*self
         }
     }
 
@@ -536,10 +582,22 @@ pub fn union_region(model: &PortraitModel, enabled: &[bool], hair: bool) -> Opti
         .reduce(|a, b| a.union(b))
 }
 
-/// Retouch every enabled face of `rgba` (the analysed image) and return the
-/// union region with its new RGBA pixels. Faces add their own changes, so
-/// overlapping regions compose.
+/// Retouch every enabled face of `rgba` (the analysed image), then reshape
+/// it, and return the changed region with its new RGBA pixels.
 pub fn render(
+    rgba: &[u8],
+    model: &PortraitModel,
+    settings: &PortraitSettings,
+    enabled: &[bool],
+    edits: &[FaceEdits],
+) -> Option<(Region, Vec<u8>)> {
+    let retouched = retouch(rgba, model, settings, enabled, edits);
+    reshape_faces(rgba, model, &settings.face_shape(), enabled, retouched)
+}
+
+/// The retouch alone: the union region of the enabled faces with its new
+/// RGBA pixels. Faces add their own changes, so overlapping regions compose.
+fn retouch(
     rgba: &[u8],
     model: &PortraitModel,
     settings: &PortraitSettings,
@@ -664,8 +722,19 @@ pub fn render(
 
 /// The photo with each detected area tinted (skin red, under-eye orange,
 /// eye whites green, irises blue, brows yellow, lips pink, teeth cyan), so the
-/// user can see where every slider acts.
+/// user can see where every slider acts; reshaped like the retouch.
 pub fn render_masks(
+    rgba: &[u8],
+    model: &PortraitModel,
+    settings: &PortraitSettings,
+    enabled: &[bool],
+    edits: &[FaceEdits],
+) -> Option<(Region, Vec<u8>)> {
+    let tinted = tint_masks(rgba, model, enabled, edits);
+    reshape_faces(rgba, model, &settings.face_shape(), enabled, tinted)
+}
+
+fn tint_masks(
     rgba: &[u8],
     model: &PortraitModel,
     enabled: &[bool],

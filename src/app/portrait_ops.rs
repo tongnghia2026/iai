@@ -232,6 +232,10 @@ impl App {
         if let Some(key) = session.wanted.as_mut() {
             key.3 &= !painting;
             key.4 = session.edit_rev;
+            // The brush paints the face as shot: show it unreshaped meanwhile.
+            if painting {
+                key.0 = key.0.without_shape();
+            }
         }
         if session.doc_id != self.docs.documents[idx].id
             || session.wanted == session.shown
@@ -255,7 +259,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let rendered = if masks {
-                portrait::render_masks(&src, &model, &enabled, &edits)
+                portrait::render_masks(&src, &model, &settings, &enabled, &edits)
             } else {
                 portrait::render(&src, &model, &settings, &enabled, &edits)
             };
@@ -1107,6 +1111,31 @@ mod tests {
         settle(&mut app);
         assert_eq!(now(&app), (Some(255), Some(0)), "reopened");
         app.cancel_portrait();
+    }
+
+    #[test]
+    fn face_shape_warps_the_jaw_only_and_is_kept_in_the_recipe() {
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        app.shell.ui.show_portrait_dialog = true;
+        let model = analysed(&mut app).unwrap();
+        let points = &model.faces[0].mesh.points;
+        let jaw = points[172];
+        let slim = PortraitSettings {
+            face_slim: 100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        let faces = vec![true; model.faces.len()];
+        assert!(!app.apply_portrait(slim, faces).unwrap(), "added");
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
+        assert!(
+            layer.tiles.get_pixel(jaw[0] as u32, jaw[1] as u32).3 > 0,
+            "the jaw moved"
+        );
+        assert_eq!(layer.tiles.get_pixel(0, 0).3, 0, "the corner stays");
+        let recipe = layer.portrait.clone().expect("recipe kept");
+        assert_eq!(recipe.settings.face_slim, 100.0);
     }
 
     #[test]

@@ -306,6 +306,56 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             ),
                         ],
                     );
+                    section_title(ui, "Dáng mặt");
+                    if data.dialogs.portrait_brush.is_some() {
+                        ui.label(
+                            egui::RichText::new("Đang tô vùng: xem trước tạm chưa uốn dáng.")
+                                .size(10.0)
+                                .color(egui::Color32::from_gray(150)),
+                        );
+                    }
+                    rows(
+                        ui,
+                        ready,
+                        vec![
+                            (
+                                "Mặt thon",
+                                &mut s.face_slim,
+                                "Phải: hàm và má thon lại — trái: mặt đầy hơn",
+                                TwoSided,
+                            ),
+                            (
+                                "Cằm",
+                                &mut s.chin_length,
+                                "Phải: cằm dài hơn — trái: cằm ngắn lại",
+                                TwoSided,
+                            ),
+                            (
+                                "Mắt to",
+                                &mut s.eye_size,
+                                "Phải: mắt to hơn — trái: mắt nhỏ lại",
+                                TwoSided,
+                            ),
+                            (
+                                "Mũi thon",
+                                &mut s.nose_slim,
+                                "Phải: cánh mũi hẹp lại — trái: mũi rộng hơn",
+                                TwoSided,
+                            ),
+                            (
+                                "Miệng",
+                                &mut s.mouth_width,
+                                "Phải: miệng rộng hơn — trái: miệng hẹp lại",
+                                TwoSided,
+                            ),
+                            (
+                                "Trán",
+                                &mut s.forehead_height,
+                                "Phải: trán cao hơn — trái: trán thấp lại",
+                                TwoSided,
+                            ),
+                        ],
+                    );
                     section_title(ui, "Mắt & răng");
                     rows(
                         ui,

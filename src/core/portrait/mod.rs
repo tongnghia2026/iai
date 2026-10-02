@@ -9,6 +9,7 @@ pub mod brush;
 pub mod effects;
 pub mod geometry;
 pub mod recipe;
+pub mod reshape;
 mod skin_mask;
 
 pub use analysis::{
@@ -287,6 +288,161 @@ mod tests {
             .save(dir.join(format!("pb_{}.png", name.trim_end_matches(".jpg"))))
             .unwrap();
             println!("{name}: brows {}x{} e {e:.0}", area.w, area.h);
+        }
+    }
+
+    /// Opt-in: IAI_PORTRAIT_RESHAPE_PROBE is a folder of photos; per face 0,
+    /// the area the face shape warps: photo, each shape slider at 100 (and
+    /// face slimming at -100), and a grid drawn over the photo warped by
+    /// slimming + bigger eyes, to see how straight lines bend.
+    #[test]
+    #[ignore]
+    fn probe_reshape() {
+        use reshape::{face_field, warp_region, FaceShape};
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_RESHAPE_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".jpg"))
+            .collect();
+        names.sort();
+        for name in names {
+            let image = image::open(dir.join(&name)).unwrap().to_rgba8();
+            let (width, height) = image.dimensions();
+            let rgba = image.into_raw();
+            let model = analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
+            let Some(face) = model.faces.first() else {
+                println!("{name}: no face");
+                continue;
+            };
+            let points = &face.mesh.points;
+            let shapes = [
+                (
+                    "slim",
+                    FaceShape {
+                        slim: 100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "wide",
+                    FaceShape {
+                        slim: -100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "chin",
+                    FaceShape {
+                        chin: 100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "eyes",
+                    FaceShape {
+                        eyes: 100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "nose",
+                    FaceShape {
+                        nose: 100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "mouth",
+                    FaceShape {
+                        mouth: 100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "forehead",
+                    FaceShape {
+                        forehead: 100.0,
+                        ..Default::default()
+                    },
+                ),
+            ];
+            let both = FaceShape {
+                slim: 100.0,
+                eyes: 100.0,
+                ..Default::default()
+            };
+            let reference = face_field(points, &both, &[], width, height).unwrap();
+            let whole = Region {
+                x: 0,
+                y: 0,
+                w: width,
+                h: height,
+            };
+            let area = reference.region;
+            let e = face.extent;
+            let tile = |pixels: &[u8]| {
+                image::RgbImage::from_fn(area.w, area.h, |x, y| {
+                    let k = ((y * area.w + x) * 4) as usize;
+                    image::Rgb([pixels[k], pixels[k + 1], pixels[k + 2]])
+                })
+            };
+            let mut tiles = vec![crop_rgb(&rgba, width, area)];
+            let mut line = format!("{name}: e {e:.0} area {}x{}", area.w, area.h);
+            for (label, shape) in &shapes {
+                let started = std::time::Instant::now();
+                let field = face_field(points, shape, &[], width, height).unwrap();
+                let built = started.elapsed().as_millis();
+                let out = warp_region(&rgba, whole, &[&field], None, area);
+                line += &format!(
+                    " | {label} {:.1}px {built}+{}ms",
+                    field.largest(),
+                    started.elapsed().as_millis() - built
+                );
+                tiles.push(tile(&out));
+            }
+            // A grid over the photo, warped.
+            let step = (e * 0.04).max(6.0) as u32;
+            let mut grid = rgba.clone();
+            for y in area.y..area.y + area.h {
+                for x in area.x..area.x + area.w {
+                    if (x - area.x) % step < 2 || (y - area.y) % step < 2 {
+                        let o = ((y * width + x) * 4) as usize;
+                        grid[o..o + 3].copy_from_slice(&[0, 255, 255]);
+                    }
+                }
+            }
+            tiles.push(tile(&warp_region(&grid, whole, &[&reference], None, area)));
+            println!("{line}");
+            let cols = 3u32;
+            let rows = (tiles.len() as u32).div_ceil(cols);
+            let mut sheet = image::RgbImage::from_pixel(
+                (area.w + 6) * cols,
+                (area.h + 6) * rows,
+                image::Rgb([255, 0, 255]),
+            );
+            for (k, t) in tiles.iter().enumerate() {
+                let k = k as u32;
+                image::imageops::replace(
+                    &mut sheet,
+                    t,
+                    ((area.w + 6) * (k % cols)) as i64,
+                    ((area.h + 6) * (k / cols)) as i64,
+                );
+            }
+            let scale = (2400.0 / sheet.width() as f32).min(1.0);
+            image::imageops::resize(
+                &sheet,
+                (sheet.width() as f32 * scale) as u32,
+                (sheet.height() as f32 * scale) as u32,
+                image::imageops::FilterType::Triangle,
+            )
+            .save(dir.join(format!("rp_{}.png", name.trim_end_matches(".jpg"))))
+            .unwrap();
         }
     }
 
@@ -613,7 +769,8 @@ mod tests {
                 ..PortraitSettings::NEUTRAL
             };
             let (su, sp) = render(&rgba, &model, &strong, &enabled, &[]).unwrap();
-            let (mu, mp) = render_masks(&rgba, &model, &enabled, &[]).unwrap();
+            let (mu, mp) =
+                render_masks(&rgba, &model, &PortraitSettings::NEUTRAL, &enabled, &[]).unwrap();
             let mut tinted = rgba.clone();
             for row in 0..mu.h as usize {
                 let o = ((mu.y as usize + row) * width as usize + mu.x as usize) * 4;
