@@ -158,14 +158,14 @@ Cùng lõi `core::portrait::reshape` (thêm trường vào `FaceShape` +
 
 ### Pha B0 — Phân tích dáng người (cổng giữ/bỏ cách làm)
 
-- [ ] Khung người: từ mặt kéo xuống theo tỉ lệ người (≈ 8 lần chiều cao đầu),
+- [x] Khung người: từ mặt kéo xuống theo tỉ lệ người (≈ 8 lần chiều cao đầu),
       cắt theo vùng ảnh / vùng chọn; chạy Sapiens2 trên 1–2 khung đứng (nửa
       trên, nửa dưới) để người không quá nhỏ ở 512×384.
-- [ ] Từ các vùng: **bóng người** (mọi lớp trừ nền), thân, tay, chân; suy ra
+- [x] Từ các vùng: **bóng người** (mọi lớp trừ nền), thân, tay, chân; suy ra
       đường vai, eo (chỗ thân hẹp nhất giữa nách và hông), hông, trục bắp tay /
       cẳng tay / đùi / cẳng chân (trục chính của từng vùng), cổ (giữa cằm và
       vai).
-- [ ] Probe trên ảnh nửa người, toàn thân đứng, ngồi, áo rộng, váy dài, tay
+- [x] Probe trên ảnh nửa người, toàn thân đứng, ngồi, áo rộng, váy dài, tay
       chống hông.
 - Cổng: đường eo/hông/vai và trục tay chân đúng ở ≥ 8/10 ảnh thử. Không đạt →
   đề xuất chủ cho tải MediaPipe Pose (khung xương 33 điểm) ghép với vùng
@@ -184,6 +184,27 @@ Cùng lõi `core::portrait::reshape` (thêm trường vào `FaceShape` +
   đề xuất chủ tải MediaPipe Pose (Google, Apache-2.0, `pose_landmarker_heavy`,
   chuyển ONNX như Face Mesh bằng `tmp/model-export-env`); khung xương cho vai,
   khuỷu, cổ tay, hông, gối, cổ chân, Sapiens2 cho đường viền.
+- Lần 2 (02/10 chiều, chủ đồng ý tải): `pose_landmarker_heavy.task` chính
+  thức → `pose_landmarks_detector.onnx` (tf2onnx opset 17, lệch TFLite
+  ≤ 0,007 px; `models/pose/` + `%APPDATA%\IAI\models\pose\`). Module
+  `core::ai::pose`: không dùng model tìm người — khung đầu suy từ mặt (hông
+  ~3,6e dưới tâm mặt), rồi 2 lần cắt lại theo 2 điểm căn của chính model như
+  vòng theo dõi của MediaPipe; tinh chỉnh theo heatmap như MediaPipe;
+  60–200 ms CPU. So với pipeline Python chính thức của Google trên 15 ảnh:
+  lệch trung vị 1,5–4 % chiều dài thân; chỗ khác nhau (hông bị váy che, tay
+  áo) bản iAi hợp lý hơn; iAi bắt được cả ảnh ngồi Google bỏ sót.
+- `core::portrait::body`: `Silhouette` (vùng người Sapiens2 nối liền từ
+  giữa hai vai — bỏ người khác) + `measure(pose, silhouette, chin)` →
+  `BodyShape`: trục thân, vai (mép ngoài qua khớp vai), cổ (chỗ hẹp nhất
+  dưới cằm, bề rộng 0,2–0,7 vai), eo (hẹp nhất trong dải 0,55–0,78 từ vai
+  xuống hông, kéo về 0,64; bỏ khi < 0,5 vai = tay che trước bụng), hông
+  (rộng nhất 0,9–1,15), từng đoạn tay / chân (khớp → khớp, bề ngang ở giữa;
+  vùng tay = chuỗi khớp tay bán kính 0,12 thân, không tính vào eo). Probe
+  `probe_body_shape` (IAI_PORTRAIT_BODY_SHAPE_PROBE) → `bs_*.png`.
+- **Cổng: Đạt (nội bộ, 02/10)** — 13 ảnh có mặt: vai đúng 12/13, trục tay
+  chân đúng 11/13 (sai: người ngồi co sát khung), eo hợp lý 9/11 ảnh đo được
+  (bỏ đúng ở ảnh tay che bụng / ngồi). Hạn chế: áo khoác mở / áo rộng thì
+  "eo" là mép áo ngoài; ảnh không bắt được mặt thì không có dáng người.
 
 ### Pha B1 — Dáng người
 
@@ -220,6 +241,10 @@ Cùng lõi `core::portrait::reshape` (thêm trường vào `FaceShape` +
 | Ảnh lớn chậm | Lưới thô, chỉ tính trong khung ảnh hưởng, luồng nền |
 
 ## 4. Changelog
+
+- **2026-10-02 (chiều)** — B0: Sapiens2 một mình không đạt (tay/chân trong
+  quần áo); chủ đồng ý tải MediaPipe Pose; ghép khung xương + bóng người →
+  **B0 đạt nội bộ** (`446aad6`). Tiếp: B1 (thanh dáng người).
 
 - **2026-10-02 (chiều)** — Chủ test A3 + A4 OK (`d87076e`). Bắt đầu Pha B0.
 
