@@ -1020,6 +1020,96 @@ mod tests {
     }
 
     #[test]
+    fn brush_paints_brows_moves_the_skin_and_reopens() {
+        use crate::core::portrait::brush::MaskTarget;
+        use crate::core::refine::{MaskBrushEvent, StampOp};
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        app.shell.ui.show_portrait_dialog = true;
+        let model = analysed(&mut app).unwrap();
+        let face = &model.faces[0];
+        let (brows, skin) = (face.brow_layers(), &face.skin);
+        let (br, sr) = (brows.region(), skin.region());
+        // Plain forehead skin beside a brow, well inside the brow region.
+        let spot = (0..br.len())
+            .filter(|&k| {
+                let (x, y) = (k as u32 % br.w, k as u32 / br.w);
+                x >= 8 && y >= 8 && x + 8 < br.w && y + 8 < br.h
+            })
+            .find(|&k| brows.area()[k] == 0 && skin.mask()[sr.index_of(br, k)] > 230)
+            .expect("skin beside the brows");
+        let at = (
+            (br.x + spot as u32 % br.w) as f32 + 0.5,
+            (br.y + spot as u32 / br.w) as f32 + 0.5,
+        );
+        let s = sr.index_of(br, spot);
+        let analysed_skin = skin.mask()[s];
+        let stroke = |app: &mut App, op: StampOp| {
+            let queue = app.docs.documents[0].canvas.mask_brush.as_mut().unwrap();
+            queue.push(MaskBrushEvent::Begin(op));
+            queue.push(MaskBrushEvent::Dabs {
+                points: vec![at],
+                radius: 3.0,
+                hardness: 1.0,
+            });
+            queue.push(MaskBrushEvent::End);
+            app.poll_portrait_brush();
+        };
+        let settle = |app: &mut App| {
+            let started = Instant::now();
+            while app.shell.portrait.as_ref().is_some_and(|s| s.brush.busy()) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(60),
+                    "skin rebuild hung"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+                app.poll_portrait_brush();
+            }
+        };
+        let now = |app: &App| {
+            let edit = &app.shell.portrait.as_ref().unwrap().edits[0];
+            (
+                edit.brows.as_ref().map(|b| b.area()[spot]),
+                edit.skin.as_ref().map(|l| l.mask()[s]),
+            )
+        };
+
+        app.set_portrait_brush_target(Some(MaskTarget::Brows));
+        stroke(&mut app, StampOp::Smart);
+        settle(&mut app);
+        assert_eq!(now(&app), (Some(255), Some(0)), "brow in, skin out");
+        app.portrait_brush_step(false);
+        settle(&mut app);
+        assert_eq!(now(&app), (Some(0), Some(analysed_skin)), "undo");
+        app.portrait_brush_step(true);
+        settle(&mut app);
+        assert_eq!(now(&app), (Some(255), Some(0)), "redo");
+
+        app.set_portrait_brush_target(None);
+        let faces = vec![true; model.faces.len()];
+        let darker = PortraitSettings {
+            brows: 100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        assert!(!app.apply_portrait(darker, faces).unwrap(), "added");
+        let layers = &app.docs.documents[0].canvas.layer_stack.layers;
+        let recipe = layers[1].portrait.clone().expect("recipe kept");
+        assert_eq!(recipe.faces[0].brows.as_ref().unwrap().mask[spot], 255);
+        assert!(recipe.faces[0].skin.is_none(), "no skin was painted");
+        assert!(
+            layers[1].tiles.get_pixel(at.0 as u32, at.1 as u32).3 > 0,
+            "the painted brow was darkened"
+        );
+
+        // Reopened: the painted brow comes back and takes the skin again.
+        analysed(&mut app).unwrap();
+        settle(&mut app);
+        assert_eq!(now(&app), (Some(255), Some(0)), "reopened");
+        app.cancel_portrait();
+    }
+
+    #[test]
     fn cancel_while_analysing_restores_the_photo() {
         let Some(mut app) = app_with_photo() else {
             return;

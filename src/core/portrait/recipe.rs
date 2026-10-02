@@ -1,6 +1,7 @@
 //! What a "Chân dung" layer was made with, kept on the layer so Chỉnh chân
 //! dung can reopen it: the sliders, which faces were on, the masks painted
-//! with "Tô vùng" and the selection the analysis kept to. The analysis itself
+//! with "Tô vùng" (skin as painted, before an edited brow takes its share)
+//! and the selection the analysis kept to. The analysis itself
 //! is not kept; reopening runs it again and lays the painted masks over it.
 
 use super::analysis::{Clip, PortraitModel};
@@ -47,6 +48,7 @@ pub struct SavedFace {
     pub enabled: bool,
     pub skin: Option<SavedMask>,
     pub hair: Option<SavedMask>,
+    pub brows: Option<SavedMask>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +67,7 @@ pub struct RestoredFace {
     pub enabled: bool,
     pub skin: Option<Vec<u8>>,
     pub hair: Option<Vec<u8>>,
+    pub brows: Option<Vec<u8>>,
 }
 
 /// Faces further apart than this, in face sizes, are different faces.
@@ -90,13 +93,17 @@ impl PortraitRecipe {
                     centre,
                     extent,
                     enabled: enabled.get(i).copied().unwrap_or(true),
-                    skin: edit.and_then(|e| e.skin.as_ref()).map(|s| SavedMask {
-                        region: s.region(),
-                        mask: s.mask().to_vec(),
+                    skin: edit.and_then(|e| e.skin_paint.as_ref()).map(|s| SavedMask {
+                        region: face.skin.region(),
+                        mask: s.to_vec(),
                     }),
                     hair: edit.and_then(|e| e.hair.as_ref()).map(|h| SavedMask {
                         region: face.hair_region,
                         mask: h.to_vec(),
+                    }),
+                    brows: edit.and_then(|e| e.brows.as_ref()).map(|b| SavedMask {
+                        region: b.region(),
+                        mask: b.area().to_vec(),
                     }),
                 }
             })
@@ -138,6 +145,7 @@ impl PortraitRecipe {
                         enabled: true,
                         skin: None,
                         hair: None,
+                        brows: None,
                     };
                 };
                 used[j] = true;
@@ -153,6 +161,10 @@ impl PortraitRecipe {
                         .as_ref()
                         .filter(|_| !face.hair_region.is_empty())
                         .map(|m| m.onto(face.hair_region, face.hair_mask())),
+                    brows: saved.brows.as_ref().map(|m| {
+                        let analysed = face.brow_layers();
+                        m.onto(analysed.region(), analysed.area())
+                    }),
                 }
             })
             .collect()

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::analysis::{luma, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
+use super::analysis::{luma, BrowLayers, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
 use super::geometry::Region;
 use crate::core::color::luminance_f32;
 use crate::core::develop::{
@@ -282,6 +282,7 @@ fn colourise(c: [f32; 3], hue: f32, saturation: f32) -> [f32; 3] {
 fn retouch_pixel(
     face: &FaceModel,
     skin: &SkinLayers,
+    brows: &BrowLayers,
     s: &PortraitSettings,
     i: usize,
     f: Option<usize>,
@@ -383,8 +384,8 @@ fn retouch_pixel(
             out[k] += (coloured[k] - out[k]) * lips;
         }
     }
-    if let Some(b) = brow_index(face, f) {
-        out = retouch_brow(face, s, b, src, out, from_u16(face.soft[f]));
+    if let Some(b) = brow_index(face.region, brows, f) {
+        out = retouch_brow(brows, s, b, src, out, from_u16(face.soft[f]));
     }
     let crisp = face.detail[f] as f32 / 255.0 * s.sharpen;
     if crisp > 0.0 {
@@ -396,13 +397,13 @@ fn retouch_pixel(
     out
 }
 
-/// Index in the brow layers of face-region pixel `f`, if it lies there.
-fn brow_index(face: &FaceModel, f: usize) -> Option<usize> {
-    let w = face.region.w as usize;
-    face.brows.region.index_at(
-        face.region.x + (f % w) as u32,
-        face.region.y + (f / w) as u32,
-    )
+/// Index in the brow layers of pixel `f` of the face region, if it lies
+/// there.
+fn brow_index(face: Region, brows: &BrowLayers, f: usize) -> Option<usize> {
+    let w = face.w as usize;
+    brows
+        .region
+        .index_at(face.x + (f % w) as u32, face.y + (f / w) as u32)
 }
 
 /// Brow sliders at brow pixel `b`: dye the hairs, darken them (and fill the
@@ -410,14 +411,13 @@ fn brow_index(face: &FaceModel, f: usize) -> Option<usize> {
 /// the skin beneath while its hairs still show, and crisp the whole brow
 /// shape. `soft` is the photo's small blur there.
 fn retouch_brow(
-    face: &FaceModel,
+    brows: &BrowLayers,
     s: &PortraitSettings,
     b: usize,
     src: [f32; 3],
     mut out: [f32; 3],
     soft: [f32; 3],
 ) -> [f32; 3] {
-    let brows = &face.brows;
     let (hair, area) = (brows.hair[b] as f32 / 255.0, brows.area[b] as f32 / 255.0);
     if area <= 0.0 {
         return out;
@@ -493,14 +493,23 @@ fn recolour_hair(
 }
 
 /// Brush edits of one face's masks, used in place of the analysis's own.
+/// `skin_paint` is the skin mask as painted, before the brows' share moved
+/// to an edited brow area (`skin` is built from both).
 #[derive(Clone, Default)]
 pub struct FaceEdits {
     pub skin: Option<Arc<SkinLayers>>,
+    pub skin_paint: Option<Arc<Vec<u8>>>,
     pub hair: Option<Arc<Vec<u8>>>,
+    pub brows: Option<Arc<BrowLayers>>,
 }
 
 fn skin_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> &'a SkinLayers {
     edit.and_then(|e| e.skin.as_deref()).unwrap_or(&face.skin)
+}
+
+fn brows_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> &'a BrowLayers {
+    edit.and_then(|e| e.brows.as_deref())
+        .unwrap_or(face.brow_layers())
 }
 
 fn hair_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> &'a [u8] {
@@ -565,6 +574,7 @@ pub fn render(
         .filter(|(_, (_, &on))| on)
     {
         let skin = skin_of(face, edits.get(index));
+        let brows = brows_of(face, edits.get(index));
         let r = skin.region;
         let (sw, sx, sy) = (
             r.w as usize,
@@ -589,7 +599,7 @@ pub fn render(
                     let fetch = |dx: isize, dy: isize| {
                         pixel((x as isize + dx) as usize, (y as isize + dy) as usize)
                     };
-                    let res = retouch_pixel(face, skin, &s, i, f, src, &fetch);
+                    let res = retouch_pixel(face, skin, brows, &s, i, f, src, &fetch);
                     let cell = &mut line[sx + col];
                     for k in 0..3 {
                         cell[k] += res[k] - src[k];
@@ -678,9 +688,10 @@ pub fn render_masks(
         .enumerate()
         .filter(|(_, (_, &on))| on)
     {
-        let (skin, hair) = (
+        let (skin, hair, brows) = (
             skin_of(face, edits.get(index)),
             hair_of(face, edits.get(index)),
+            brows_of(face, edits.get(index)),
         );
         let hr = face.hair_region;
         if !hair.is_empty() {
@@ -724,8 +735,8 @@ pub fn render_masks(
                         (feature(&face.eye_white), [0.0, 255.0, 60.0]),
                         (feature(&face.iris), [40.0, 110.0, 255.0]),
                         (
-                            f.and_then(|f| brow_index(face, f))
-                                .map_or(0, |b| face.brows.area[b]),
+                            f.and_then(|f| brow_index(face.region, brows, f))
+                                .map_or(0, |b| brows.area[b]),
                             [255.0, 230.0, 0.0],
                         ),
                         (feature(&face.lips), [255.0, 0.0, 200.0]),

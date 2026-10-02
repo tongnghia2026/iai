@@ -1,6 +1,7 @@
-//! The dialog's "Tô vùng" brush: edits one face's skin or hair mask. Add and
-//! Subtract paint plainly; Smart grades each pixel by colour against the area
-//! being painted and the rest around the brush (`core::smart_brush`).
+//! The dialog's "Tô vùng" brush: edits one face's skin, hair or brow mask.
+//! Add and Subtract paint plainly; Smart grades each pixel by colour against
+//! the area being painted and the rest around the brush
+//! (`core::smart_brush`).
 
 use crate::core::refine::{Rect, StampOp};
 use crate::core::selection::rgb_to_lab;
@@ -12,6 +13,7 @@ use super::geometry::Region;
 pub enum MaskTarget {
     Skin,
     Hair,
+    Brows,
 }
 
 /// A mask being painted, in its own region of the analysed image.

@@ -1,7 +1,7 @@
 //! "Chỉnh chân dung" dialog (Image ▸ Chỉnh chân dung…): skin, blemish,
 //! under-eye, eye and teeth sliders with a live canvas preview, like the
-//! Filter/Levels dialogs, and a brush ("Tô vùng") to fix the skin and hair
-//! areas before sliding. Áp dụng adds the retouch as a new layer; Hủy restores.
+//! Filter/Levels dialogs, and a brush ("Tô vùng") to fix the skin, hair and
+//! brow areas before sliding. Áp dụng adds the retouch as a new layer; Hủy restores.
 
 use super::*;
 use crate::core::portrait::brush::MaskTarget;
@@ -81,6 +81,11 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
                     "Tóc",
                     "Tô thêm / bớt vùng tóc app nhận ra (hiện màu tím)",
                 ),
+                (
+                    Some(MaskTarget::Brows),
+                    "Lông mày",
+                    "Tô thêm / bớt vùng lông mày mà các thanh \"Lông mày\" tác động (hiện màu vàng). Vùng lông mày không bị làm mịn da",
+                ),
             ];
             for (target, label, tip) in targets {
                 let enabled = target != Some(MaskTarget::Hair) || d.portrait_hair;
@@ -92,12 +97,19 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
                     .on_hover_text(tip);
                 if response.clicked() {
                     actions.dialogs.set_portrait_brush = Some(target);
+                    if target == Some(MaskTarget::Brows)
+                        && data.sel.refine_brush_mode == RefineBrushMode::Smart
+                    {
+                        actions.sel.set_refine_brush_mode = Some(RefineBrushMode::Add);
+                    }
                 }
             }
         });
         if d.portrait_brush.is_none() {
             return;
         }
+        // Brows are a soft shape around sparse hairs: painted plainly.
+        let smart = d.portrait_brush != Some(MaskTarget::Brows);
         ui.horizontal(|ui| {
             let modes = [
                 (
@@ -117,6 +129,9 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
                 ),
             ];
             for (mode, label, tip) in modes {
+                if mode == RefineBrushMode::Smart && !smart {
+                    continue;
+                }
                 if ui
                     .selectable_label(data.sel.refine_brush_mode == mode, label)
                     .on_hover_text(tip)

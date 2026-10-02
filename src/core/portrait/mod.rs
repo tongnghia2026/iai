@@ -11,7 +11,9 @@ pub mod geometry;
 pub mod recipe;
 mod skin_mask;
 
-pub use analysis::{analyze, Clip, FaceModel, PortraitModel, SkinLayers, TRUSTED_AGREEMENT};
+pub use analysis::{
+    analyze, BrowLayers, Clip, FaceModel, PortraitModel, SkinLayers, TRUSTED_AGREEMENT,
+};
 pub use effects::{render, render_masks, FaceEdits, PortraitSettings};
 pub use geometry::Region;
 pub use recipe::PortraitRecipe;

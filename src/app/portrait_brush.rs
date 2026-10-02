@@ -1,8 +1,10 @@
-//! "Tô vùng" in Chỉnh chân dung: the Refine Brush paints one face's skin or
-//! hair mask (`core::portrait::brush`), with undo inside the dialog and a
-//! tinted overlay of the mask being painted. After each stroke the skin's
-//! dependent layers are rebuilt on a worker and the preview re-renders from
-//! the edited masks.
+//! "Tô vùng" in Chỉnh chân dung: the Refine Brush paints one face's skin,
+//! hair or brow mask (`core::portrait::brush`), with undo inside the dialog
+//! and a tinted overlay of the mask being painted. After each stroke the
+//! preview re-renders from the edited masks: hair at once, brows once their
+//! layers are rebuilt (quick, a small region), skin once its dependent layers
+//! are rebuilt on a worker. Brow takes precedence over skin, so a brow stroke
+//! rebuilds the skin too.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -81,13 +83,14 @@ fn region_of(model: &PortraitModel, face: usize, target: MaskTarget) -> Region {
     match target {
         MaskTarget::Skin => f.skin.region(),
         MaskTarget::Hair => f.hair_region,
+        MaskTarget::Brows => f.brow_layers().region(),
     }
 }
 
-/// The mask a face shows now: being painted, else edited, else analysed.
-fn current_mask<'a>(
+/// A face's mask as painted, else as analysed. (Every edit comes from a
+/// paint; skin is the mask before an edited brow takes its share.)
+fn painted_mask<'a>(
     model: &'a PortraitModel,
-    edits: &'a [FaceEdits],
     paints: &'a HashMap<(usize, MaskTarget), MaskPaint>,
     face: usize,
     target: MaskTarget,
@@ -95,15 +98,11 @@ fn current_mask<'a>(
     if let Some(p) = paints.get(&(face, target)) {
         return &p.mask;
     }
-    let edit = edits.get(face);
     let f = &model.faces[face];
     match target {
-        MaskTarget::Skin => edit
-            .and_then(|e| e.skin.as_deref())
-            .map_or(f.skin.mask(), |s| s.mask()),
-        MaskTarget::Hair => edit
-            .and_then(|e| e.hair.as_deref())
-            .map_or(f.hair_mask(), |h| &h[..]),
+        MaskTarget::Skin => f.skin.mask(),
+        MaskTarget::Hair => f.hair_mask(),
+        MaskTarget::Brows => f.brow_layers().area(),
     }
 }
 
@@ -288,17 +287,23 @@ impl App {
             return;
         };
         let paint = brush.paints.entry((face, target)).or_insert_with(|| {
-            let now = current_mask(&model, &session.edits, &HashMap::new(), face, target).to_vec();
+            let now = painted_mask(&model, &HashMap::new(), face, target).to_vec();
             MaskPaint::new(region_of(&model, face, target), now)
         });
+        // Brows are a soft shape around sparse hairs, not a colour area:
+        // Smart paints them plainly.
+        let op = match (target, stroke.op) {
+            (MaskTarget::Brows, StampOp::Smart) => StampOp::Add,
+            (MaskTarget::Brows, StampOp::SmartOut) => StampOp::Subtract,
+            (_, op) => op,
+        };
         if stroke.before.is_empty() {
             stroke.before = paint.mask.clone();
             paint.begin_stroke();
         }
         let mut touched: Option<Rect> = None;
         for &(x, y) in &points {
-            if let Some(r) = paint.stamp(&session.src, session.w, stroke.op, x, y, radius, hardness)
-            {
+            if let Some(r) = paint.stamp(&session.src, session.w, op, x, y, radius, hardness) {
                 touched = Some(touched.map_or(r, |t| t.union(r)));
             }
         }
@@ -428,6 +433,7 @@ impl App {
             for (target, mask) in [
                 (MaskTarget::Skin, saved.skin),
                 (MaskTarget::Hair, saved.hair),
+                (MaskTarget::Brows, saved.brows),
             ] {
                 let Some(mask) = mask else {
                     continue;
@@ -442,13 +448,22 @@ impl App {
                 }
             }
         }
+        // A brow rebuilds the skin as well.
+        let brows: Vec<usize> = used
+            .iter()
+            .filter(|u| u.1 == MaskTarget::Brows)
+            .map(|u| u.0)
+            .collect();
         for (face, target) in used {
-            self.use_portrait_mask(face, target);
+            if target != MaskTarget::Skin || !brows.contains(&face) {
+                self.use_portrait_mask(face, target);
+            }
         }
     }
 
-    /// Hand a painted mask to the preview: hair at once, skin once its
-    /// dependent layers are rebuilt on a worker.
+    /// Hand a painted mask to the preview: hair at once, brows once their
+    /// layers are rebuilt, skin once its dependent layers are rebuilt on a
+    /// worker (after a brow stroke as well).
     fn use_portrait_mask(&mut self, face: usize, target: MaskTarget) {
         let Some(session) = self.shell.portrait.as_mut() else {
             return;
@@ -470,19 +485,58 @@ impl App {
                 session.edit_rev += 1;
                 self.refresh_portrait_preview();
             }
-            MaskTarget::Skin => {
-                let mask = paint.mask.clone();
-                let src = Arc::clone(&session.src);
-                let generation = session.brush.skin_gen.entry(face).or_insert(0);
-                *generation += 1;
-                let generation = *generation;
-                let (tx, rx) = mpsc::channel();
-                std::thread::spawn(move || {
-                    let _ = tx.send(model.skin_layers_from(&src, face, &mask));
-                });
-                session.brush.skin_jobs.push((face, generation, rx));
+            MaskTarget::Brows => {
+                let brows = model.brow_layers_from(&session.src, face, &paint.mask);
+                session.edits[face].brows = Some(Arc::new(brows));
+                session.edit_rev += 1;
+                self.refresh_portrait_preview();
+                self.rebuild_portrait_skin(face);
             }
+            MaskTarget::Skin => self.rebuild_portrait_skin(face),
         }
+    }
+
+    /// Rebuild a face's skin layers on a worker from its skin mask as
+    /// painted, with an edited brow taking its share.
+    fn rebuild_portrait_skin(&mut self, face: usize) {
+        let Some(session) = self.shell.portrait.as_mut() else {
+            return;
+        };
+        let Some(model) = session.model.clone() else {
+            return;
+        };
+        if session.edits.len() < model.faces.len() {
+            session
+                .edits
+                .resize(model.faces.len(), FaceEdits::default());
+        }
+        let paints = &session.brush.paints;
+        let painted = paints.get(&(face, MaskTarget::Skin)).map(|p| &p.mask);
+        let skin = painted_mask(&model, paints, face, MaskTarget::Skin);
+        let mask = match paints.get(&(face, MaskTarget::Brows)) {
+            Some(brows) => model.faces[face].skin_with_brows(skin, &brows.mask),
+            None => skin.to_vec(),
+        };
+        let edit = &mut session.edits[face];
+        edit.skin_paint = painted.map(|m| Arc::new(m.clone()));
+        let generation = session.brush.skin_gen.entry(face).or_insert(0);
+        *generation += 1;
+        let generation = *generation;
+        // Unchanged (a brow stroke away from the skin): only drop a pending
+        // rebuild, which the generation just did.
+        let shown = edit
+            .skin
+            .as_deref()
+            .map_or(model.faces[face].skin.mask(), |s| s.mask());
+        if shown == &mask[..] {
+            return;
+        }
+        let src = Arc::clone(&session.src);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(model.skin_layers_from(&src, face, &mask));
+        });
+        session.brush.skin_jobs.push((face, generation, rx));
     }
 
     fn collect_portrait_skin(&mut self) {
@@ -546,7 +600,6 @@ impl App {
         ];
         let image = overlay_pixels(
             model,
-            &session.edits,
             &session.brush.paints,
             target,
             rect,
@@ -591,7 +644,6 @@ impl App {
         }
         let image = overlay_pixels(
             model,
-            &session.edits,
             &session.brush.paints,
             overlay.target,
             rect,
@@ -606,11 +658,14 @@ impl App {
     }
 }
 
+/// A face in the overlay: index, region, mask and, for skin, an edited brow
+/// area.
+type OverlayFace<'a> = (usize, Region, &'a [u8], Option<&'a [u8]>);
+
 /// Overlay texels in `area` of a `size` texture over image `rect`: the mask
 /// of the nearest face's `target` area, tinted like "Hiện vùng nhận diện".
 fn overlay_pixels(
     model: &PortraitModel,
-    edits: &[FaceEdits],
     paints: &HashMap<(usize, MaskTarget), MaskPaint>,
     target: MaskTarget,
     rect: Region,
@@ -621,6 +676,7 @@ fn overlay_pixels(
     let colour = match target {
         MaskTarget::Skin => [255, 40, 40],
         MaskTarget::Hair => [150, 60, 255],
+        MaskTarget::Brows => [255, 230, 0],
     };
     let lut: Vec<egui::Color32> = (0..256)
         .map(|m| {
@@ -631,14 +687,21 @@ fn overlay_pixels(
             egui::Color32::from_rgba_premultiplied(r, g, b, a)
         })
         .collect();
-    let faces: Vec<(Region, &[u8])> = (0..model.faces.len())
+    // Skin as retouched: an edited brow takes its share.
+    let faces: Vec<OverlayFace> = (0..model.faces.len())
         .map(|i| {
+            let brows = paints
+                .get(&(i, MaskTarget::Brows))
+                .filter(|_| target == MaskTarget::Skin)
+                .map(|p| &p.mask[..]);
             (
+                i,
                 region_of(model, i, target),
-                current_mask(model, edits, paints, i, target),
+                painted_mask(model, paints, i, target),
+                brows,
             )
         })
-        .filter(|(r, m)| !r.is_empty() && m.len() == r.len())
+        .filter(|(_, r, m, _)| !r.is_empty() && m.len() == r.len())
         .collect();
     let (aw, ah) = (area.width(), area.height());
     let mut pixels = vec![egui::Color32::TRANSPARENT; aw * ah];
@@ -652,9 +715,13 @@ fn overlay_pixels(
                 let tx = area.x0 + col;
                 let x = rect.x + ((tx as f32 + 0.5) * rect.w as f32 / size[0] as f32) as u32;
                 let mut m = 0u8;
-                for (r, mask) in &faces {
+                for &(i, r, mask, brows) in &faces {
                     if x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h {
-                        m = m.max(mask[((y - r.y) * r.w + x - r.x) as usize]);
+                        let mut v = mask[((y - r.y) * r.w + x - r.x) as usize];
+                        if let Some(area) = brows {
+                            v = model.faces[i].skin_with_brow_at(area, x, y, v);
+                        }
+                        m = m.max(v);
                     }
                 }
                 // Only what the retouch reaches: inside the selection, if any.

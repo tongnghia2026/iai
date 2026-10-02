@@ -1600,6 +1600,7 @@ fn portrait_to_json(
                 "enabled": f.enabled,
                 "skin": f.skin.as_ref().map(|m| region(m.region)),
                 "hair": f.hair.as_ref().map(|m| region(m.region)),
+                "brows": f.brows.as_ref().map(|m| region(m.region)),
             })
         })
         .collect();
@@ -1623,7 +1624,11 @@ fn write_portrait_masks(
         masks.push(("clip".to_string(), &clip.mask, clip.region));
     }
     for (f, face) in recipe.faces.iter().enumerate() {
-        for (what, mask) in [("skin", &face.skin), ("hair", &face.hair)] {
+        for (what, mask) in [
+            ("skin", &face.skin),
+            ("hair", &face.hair),
+            ("brows", &face.brows),
+        ] {
             if let Some(m) = mask {
                 masks.push((format!("{f}_{what}"), &m.mask, m.region));
             }
@@ -1695,6 +1700,7 @@ fn read_portrait<R: Read + Seek>(
             enabled: face["enabled"].as_bool().unwrap_or(true),
             skin: saved("skin"),
             hair: saved("hair"),
+            brows: saved("brows"),
         });
     }
     Some(PortraitRecipe {
@@ -3080,6 +3086,10 @@ mod tests {
                         mask: ramp(63),
                     }),
                     hair: None,
+                    brows: Some(SavedMask {
+                        region: region(4, 2, 8, 3),
+                        mask: ramp(24),
+                    }),
                 },
                 SavedFace {
                     centre: [30.0, 9.0],
@@ -3090,6 +3100,7 @@ mod tests {
                         region: region(20, 0, 15, 12),
                         mask: ramp(180),
                     }),
+                    brows: None,
                 },
             ],
         }));
@@ -3121,7 +3132,12 @@ mod tests {
             (skin.region, skin.mask.clone()),
             (region(1, 1, 9, 7), ramp(63))
         );
-        assert!(a.hair.is_none() && b.skin.is_none());
+        assert!(a.hair.is_none() && b.skin.is_none() && b.brows.is_none());
+        let brows = a.brows.as_ref().expect("brow mask");
+        assert_eq!(
+            (brows.region, brows.mask.clone()),
+            (region(4, 2, 8, 3), ramp(24))
+        );
         assert_eq!(b.hair.as_ref().map(|m| m.mask.clone()), Some(ramp(180)));
 
         // Without its photo the recipe is dropped, the pixels stay.

@@ -119,19 +119,94 @@ impl FaceModel {
     pub fn hair_mask(&self) -> &[u8] {
         &self.hair
     }
+
+    /// The brows as analysed.
+    pub fn brow_layers(&self) -> &BrowLayers {
+        &self.brows
+    }
+
+    /// The skin mask `skin` (of the skin region, as the analysis or the
+    /// brush left it) with the brows' share moved to brow `area` (of the
+    /// brow region): brow takes precedence over skin.
+    pub fn skin_with_brows(&self, skin: &[u8], area: &[u8]) -> Vec<u8> {
+        let mut out = skin.to_vec();
+        let b = &self.brows;
+        if area.len() != b.region.len() || skin.len() != self.skin.region.len() {
+            return out;
+        }
+        for (k, &a1) in area.iter().enumerate() {
+            let i = self.skin.region.index_of(b.region, k);
+            out[i] = self.skin_beside_brow_at(k, skin[i], a1);
+        }
+        out
+    }
+
+    /// [`skin_with_brows`](Self::skin_with_brows) at image pixel (x, y) only.
+    pub fn skin_with_brow_at(&self, area: &[u8], x: u32, y: u32, skin: u8) -> u8 {
+        match self.brows.region.index_at(x, y) {
+            Some(k) if area.len() == self.brows.region.len() => {
+                self.skin_beside_brow_at(k, skin, area[k])
+            }
+            _ => skin,
+        }
+    }
+
+    fn skin_beside_brow_at(&self, k: usize, skin: u8, a1: u8) -> u8 {
+        let b = &self.brows;
+        let unit = |v: u8| v as f32 / 255.0;
+        to_u8(skin_beside_brow(
+            unit(skin),
+            unit(b.area[k]),
+            unit(a1),
+            unit(b.uncut[k]),
+        ))
+    }
 }
 
 /// The brows over their own region (inside the face's): the smooth brow
 /// shape (`area`: what the brow sliders act on, kept out of the skin retouch
 /// so brows stay as shot until their own sliders move), how much each pixel
 /// in it is hair, the brow's local mean colour, and the skin colour beneath,
-/// which a fading brow moves toward.
-pub(super) struct BrowLayers {
+/// which a fading brow moves toward. The brush repaints `area`; what the rest
+/// is rebuilt from rides along: how much each pixel looks like a brow hair
+/// wherever it lies (`strand`), the weights the skin colour beneath is read
+/// with, and the skin mask before the brows were cut out of it.
+#[derive(Clone)]
+pub struct BrowLayers {
     pub(super) region: Region,
     pub(super) hair: Vec<u8>,
     pub(super) area: Vec<u8>,
     pub(super) mean: Vec<[u16; 3]>,
     pub(super) skin: Vec<[u16; 3]>,
+    strand: Vec<u8>,
+    beneath_weight: Vec<u8>,
+    uncut: Vec<u8>,
+}
+
+impl BrowLayers {
+    /// Where the brows' layers lie in the image.
+    pub fn region(&self) -> Region {
+        self.region
+    }
+
+    /// The brow shape the sliders act on.
+    pub fn area(&self) -> &[u8] {
+        &self.area
+    }
+}
+
+/// Skin coverage at a brow pixel whose brow area changed from the
+/// analysis's `a0` to `a1`, given the skin mask `s` there: more brow takes
+/// skin away in proportion, less gives back the skin found there before the
+/// brows were cut out (`uncut`), never less than `s`.
+fn skin_beside_brow(s: f32, a0: f32, a1: f32, uncut: f32) -> f32 {
+    if a1 > a0 {
+        s * (1.0 - a1) / (1.0 - a0)
+    } else if a1 < a0 {
+        s.max(uncut * (1.0 - a1))
+    } else {
+        s
+    }
 }
 
 /// Colour distance that counts a change of hue or saturation fully and one
@@ -412,6 +487,9 @@ fn brow_layers(
             area: Vec::new(),
             mean: Vec::new(),
             skin: Vec::new(),
+            strand: Vec::new(),
+            beneath_weight: Vec::new(),
+            uncut: Vec::new(),
         };
     }
     let skin_here: Vec<f32> = (0..n).map(|i| skin[skin_region.index_of(r, i)]).collect();
@@ -517,12 +595,13 @@ fn brow_layers(
         let brow = quantile(hairs, 0.75).unwrap_or(noise);
         *level = (noise, noise + (brow - noise).max(0.02));
     }
-    let strand: Vec<f32> = (0..n)
+    let anywhere: Vec<f32> = (0..n)
         .map(|i| {
             let (lo, hi) = levels[side[i]];
-            smoothstep(lo, hi, distance[i]) * zone[i]
+            smoothstep(lo, hi, distance[i]) * (1.0 - eyes[i])
         })
         .collect();
+    let strand: Vec<f32> = (0..n).map(|i| anywhere[i] * zone[i]).collect();
     // The brow shape: where hairs gather, relative to each brow's core.
     let mut spread: Vec<[f32; 4]> = strand.iter().map(|&v| [v, 0.0, 0.0, 0.0]).collect();
     blur4(&mut spread, w, h, (e / 45.0).max(1.5));
@@ -544,6 +623,9 @@ fn brow_layers(
         area: area.into_iter().map(to_u8).collect(),
         mean: mean.into_iter().map(to_u16).collect(),
         skin: beneath.into_iter().map(to_u16).collect(),
+        strand: anywhere.into_iter().map(to_u8).collect(),
+        beneath_weight: weight.into_iter().map(to_u8).collect(),
+        uncut: skin_here.into_iter().map(to_u8).collect(),
     }
 }
 
@@ -675,6 +757,39 @@ fn split_skin(
 }
 
 impl PortraitModel {
+    /// Brow layers of face `index` for a painted brow `area`: the hairs in
+    /// it, its mean colour and the skin colour beneath it. `rgba` is the
+    /// analysed image.
+    pub fn brow_layers_from(&self, rgba: &[u8], index: usize, area: &[u8]) -> BrowLayers {
+        let face = &self.faces[index];
+        let b = &face.brows;
+        let r = b.region;
+        if area.len() != r.len() {
+            return b.clone();
+        }
+        let (w, h, e) = (r.w as usize, r.h as usize, face.extent);
+        let colours = read_region(rgba, self.width, r);
+        let unit = |v: u8| v as f32 / 255.0;
+        let shape: Vec<f32> = area.iter().map(|&a| unit(a)).collect();
+        let weight: Vec<f32> = (0..r.len())
+            .map(|i| unit(b.beneath_weight[i]) * (1.0 - shape[i]))
+            .collect();
+        let beneath = masked_blur(&colours, &weight, w, h, (e / 18.0).max(2.0));
+        let mean = masked_blur(&colours, &shape, w, h, (e / 50.0).max(1.5));
+        BrowLayers {
+            region: r,
+            hair: (0..r.len())
+                .map(|i| to_u8(unit(b.strand[i]) * shape[i]))
+                .collect(),
+            area: area.to_vec(),
+            mean: mean.into_iter().map(to_u16).collect(),
+            skin: beneath.into_iter().map(to_u16).collect(),
+            strand: b.strand.clone(),
+            beneath_weight: b.beneath_weight.clone(),
+            uncut: b.uncut.clone(),
+        }
+    }
+
     /// Skin layers of face `index` for an edited skin mask, built the way the
     /// analysis builds them. `rgba` is the analysed image.
     pub fn skin_layers_from(&self, rgba: &[u8], index: usize, mask: &[u8]) -> SkinLayers {
@@ -2081,6 +2196,21 @@ mod tests {
     fn fringe_edge_leaves_a_brow_as_dark_as_the_hair_alone() {
         let fringe = fringe_scene([0.15, 0.1, 0.08, 0.0]);
         assert!(fringe.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn brow_takes_skin_in_proportion_and_gives_back_the_uncut_skin() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(near(skin_beside_brow(0.6, 0.25, 0.625, 0.8), 0.3));
+        assert!(near(skin_beside_brow(0.6, 0.25, 1.0, 0.8), 0.0));
+        assert!(near(skin_beside_brow(0.1, 0.8, 0.2, 0.9), 0.72));
+        // Skin painted in past the brow stays.
+        assert!(near(skin_beside_brow(0.9, 0.8, 0.2, 0.5), 0.9));
+        assert!(near(skin_beside_brow(0.4, 0.5, 0.5, 1.0), 0.4));
+        // As analysed (skin = uncut cut by the brow), there and back.
+        let (uncut, a0, a1) = (0.9f32, 0.3, 0.7);
+        let more = skin_beside_brow(uncut * (1.0 - a0), a0, a1, uncut);
+        assert!(near(more, uncut * (1.0 - a1)));
     }
 
     #[test]
