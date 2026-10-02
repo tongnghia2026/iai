@@ -5,6 +5,7 @@
 
 pub mod analysis;
 mod blur;
+pub mod body;
 pub mod brush;
 pub mod effects;
 pub mod geometry;
@@ -288,6 +289,155 @@ mod tests {
             .save(dir.join(format!("pb_{}.png", name.trim_end_matches(".jpg"))))
             .unwrap();
             println!("{name}: brows {}x{} e {e:.0}", area.w, area.h);
+        }
+    }
+
+    /// Opt-in: IAI_PORTRAIT_BODY_SHAPE_PROBE is a folder of photos; for the
+    /// largest face, what the body sliders would work from, drawn over the
+    /// photo (others dimmed): skeleton (white), shoulders (cyan), neck
+    /// (magenta), waist (yellow), hips (orange), across each limb (green).
+    #[test]
+    #[ignore]
+    fn probe_body_shape() {
+        use crate::core::ai::body_parts::Segmenter;
+        use crate::core::ai::face_mesh;
+        use crate::core::ai::pose::PoseModel;
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_BODY_SHAPE_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".jpg"))
+            .collect();
+        names.sort();
+        let mut segmenter = Segmenter::load(false).unwrap();
+        let mut poser = PoseModel::load(false).unwrap();
+        for name in names {
+            let image = image::open(dir.join(&name)).unwrap().to_rgba8();
+            let (width, height) = image.dimensions();
+            let rgba = image.into_raw();
+            let meshes = face_mesh::detect(&rgba, width, height).unwrap_or_default();
+            let Some(mesh) = meshes
+                .iter()
+                .max_by(|a, b| a.frame().1.total_cmp(&b.frame().1))
+            else {
+                println!("{name}: no face");
+                continue;
+            };
+            let started = std::time::Instant::now();
+            let Some(pose) = poser.detect(&rgba, width, height, mesh).unwrap() else {
+                println!("{name}: no pose");
+                continue;
+            };
+            let posed = started.elapsed().as_millis();
+            let labels = segmenter
+                .segment_body(&rgba, width, height, mesh, None, 1)
+                .unwrap()
+                .remove(0);
+            let segmented = started.elapsed().as_millis() - posed;
+            let seed = {
+                let (l, r) = (pose.at(11), pose.at(12));
+                [(l[0] + r[0]) * 0.5, (l[1] + r[1]) * 0.5]
+            };
+            let chin = [mesh.points[152][0], mesh.points[152][1]];
+            let silhouette = body::Silhouette::new(labels, seed);
+            let shape = silhouette
+                .as_ref()
+                .and_then(|s| body::measure(&pose, s, chin));
+            println!(
+                "{name}: pose {posed} ms, parts {segmented} ms, shape {}",
+                shape.as_ref().map_or("none".to_string(), |s| {
+                    let w = s.shoulders.width();
+                    let share = |span: Option<&body::Span>| {
+                        span.map_or("-".to_string(), |x| format!("{:.2}", x.width() / w))
+                    };
+                    format!(
+                        "shoulders {w:.0}px, waist {} hips {} neck {} (of shoulders), limbs {}",
+                        share(s.waist.as_ref()),
+                        share(s.hips.as_ref()),
+                        share(s.neck.as_ref()),
+                        s.limbs.len()
+                    )
+                })
+            );
+            let k = (1000.0 / height as f32).min(1.0);
+            let (tw, th) = ((width as f32 * k) as u32, (height as f32 * k) as u32);
+            let small = image::imageops::resize(
+                &image::RgbaImage::from_raw(width, height, rgba.clone()).unwrap(),
+                tw,
+                th,
+                image::imageops::FilterType::Triangle,
+            );
+            let mut out = image::RgbImage::from_fn(tw, th, |x, y| {
+                let p = small.get_pixel(x, y).0;
+                let on = silhouette.as_ref().is_some_and(|s| {
+                    s.label_at((x as f32 + 0.5) / k, (y as f32 + 0.5) / k)
+                        .is_some()
+                });
+                if on {
+                    image::Rgb([p[0], p[1], p[2]])
+                } else {
+                    image::Rgb([p[0] / 3, p[1] / 3, p[2] / 3])
+                }
+            });
+            let mut line = |a: [f32; 2], b: [f32; 2], c: [u8; 3], w: i32| {
+                let (a, b) = ([a[0] * k, a[1] * k], [b[0] * k, b[1] * k]);
+                let n = ((b[0] - a[0]).hypot(b[1] - a[1]).ceil() as usize).max(1);
+                for i in 0..=n {
+                    let t = i as f32 / n as f32;
+                    let (x, y) = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t);
+                    for dy in -w..=w {
+                        for dx in -w..=w {
+                            let (px, py) = (x as i32 + dx, y as i32 + dy);
+                            if px >= 0 && py >= 0 && (px as u32) < tw && (py as u32) < th {
+                                out.put_pixel(px as u32, py as u32, image::Rgb(c));
+                            }
+                        }
+                    }
+                }
+            };
+            let bones = [
+                (11, 12),
+                (11, 13),
+                (13, 15),
+                (12, 14),
+                (14, 16),
+                (11, 23),
+                (12, 24),
+                (23, 24),
+                (23, 25),
+                (25, 27),
+                (24, 26),
+                (26, 28),
+            ];
+            for (a, b) in bones {
+                if pose.seen(a) && pose.seen(b) {
+                    line(pose.at(a), pose.at(b), [255, 255, 255], 0);
+                }
+            }
+            if let Some(s) = &shape {
+                let mut span = |s: &body::Span, c: [u8; 3]| line(s.start, s.end, c, 1);
+                span(&s.shoulders, [0, 255, 255]);
+                if let Some(n) = &s.neck {
+                    span(n, [255, 0, 255]);
+                }
+                if let Some(w) = &s.waist {
+                    span(w, [255, 255, 0]);
+                }
+                if let Some(h) = &s.hips {
+                    span(h, [255, 140, 0]);
+                }
+                for limb in &s.limbs {
+                    if let Some(a) = &limb.across {
+                        span(a, [0, 255, 0]);
+                    }
+                }
+            }
+            out.save(dir.join(format!("bs_{}.png", name.trim_end_matches(".jpg"))))
+                .unwrap();
         }
     }
 

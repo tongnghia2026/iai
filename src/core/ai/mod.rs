@@ -10,6 +10,7 @@ pub mod body_parts;
 pub mod edit;
 pub mod face_mesh;
 pub mod ort_ep;
+pub mod pose;
 pub mod retouch;
 pub mod settings;
 
