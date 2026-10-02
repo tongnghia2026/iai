@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::analysis::{luma, BrowLayers, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
 use super::body::BodySliders;
 use super::geometry::Region;
+use super::looks::StudioLook;
 use super::reshape::{reshape, FaceShape};
 use crate::core::color::luminance_f32;
 use crate::core::develop::{
@@ -67,6 +68,10 @@ pub struct PortraitSettings {
     pub body_arms: f32,
     pub body_legs: f32,
     pub body_leg_length: f32,
+    /// "Màu studio": the look (index into [`StudioLook::ALL`], 0 = none) and
+    /// its strength 0..100, the opacity of the layer it lands on.
+    pub look: u8,
+    pub look_strength: f32,
 }
 
 impl Default for PortraitSettings {
@@ -112,9 +117,13 @@ impl Default for PortraitSettings {
             body_arms: 0.0,
             body_legs: 0.0,
             body_leg_length: 0.0,
+            look: 0,
+            look_strength: DEFAULT_LOOK_STRENGTH,
         }
     }
 }
+
+pub const DEFAULT_LOOK_STRENGTH: f32 = 70.0;
 
 impl PortraitSettings {
     pub const NEUTRAL: Self = Self {
@@ -158,6 +167,8 @@ impl PortraitSettings {
         body_arms: 0.0,
         body_legs: 0.0,
         body_leg_length: 0.0,
+        look: 0,
+        look_strength: DEFAULT_LOOK_STRENGTH,
     };
 
     fn unit(&self) -> Self {
@@ -190,6 +201,13 @@ impl PortraitSettings {
             brow_tint: u(self.brow_tint),
             ..*self
         }
+    }
+
+    /// The chosen studio look and its strength 0..1, when one is on.
+    pub fn studio_look(&self) -> Option<(StudioLook, f32)> {
+        let look = StudioLook::from_index(self.look);
+        let strength = (self.look_strength / 100.0).clamp(0.0, 1.0);
+        (look != StudioLook::None && strength > 0.0).then_some((look, strength))
     }
 
     /// The face shape sliders.

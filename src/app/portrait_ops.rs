@@ -15,12 +15,15 @@ use super::portrait_brush::PortraitBrush;
 use super::render::CanvasEvent;
 use super::state::App;
 use crate::core::layer::Layer;
+use crate::core::portrait::looks::{self, LookLut, StudioLook};
 use crate::core::portrait::{
     self, FaceEdits, PortraitModel, PortraitRecipe, PortraitSettings, Region,
 };
 use crate::core::tile::TileMap;
 
 const RESULT_LAYER: &str = "Chân dung";
+/// Name prefix of the "Màu studio" layer that sits right above the result.
+const LOOK_LAYER_PREFIX: &str = "Màu studio: ";
 
 /// What the preview shows: settings, faces on, retouch on, areas tinted, and
 /// the brush edits' revision (doubled, plus one once bodies are analysed).
@@ -67,6 +70,8 @@ pub struct Reopened {
     pub layer_id: u32,
     visible: bool,
     recipe: Arc<PortraitRecipe>,
+    /// Its "Màu studio" layer, hidden too: id and visibility.
+    look: Option<(u32, bool)>,
 }
 
 impl App {
@@ -130,11 +135,18 @@ impl App {
         // The reopened layer would cover the preview drawn on the photo.
         let reopened = reopen.map(|(result_idx, recipe)| {
             let canvas = &mut self.docs.documents[idx].canvas;
+            let look = look_layer_above(&canvas.layer_stack.layers, result_idx).map(|i| {
+                let layer = &mut canvas.layer_stack.layers[i];
+                let state = (layer.id, layer.visible);
+                layer.visible = false;
+                state
+            });
             let layer = &mut canvas.layer_stack.layers[result_idx];
             let reopened = Reopened {
                 layer_id: layer.id,
                 visible: layer.visible,
                 recipe,
+                look,
             };
             layer.visible = false;
             canvas.layer_revision += 1;
@@ -282,12 +294,19 @@ impl App {
         }
         let src = Arc::clone(&session.src);
         let edits = session.edits.clone();
+        let (w, h) = (session.w, session.h);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let rendered = if masks {
                 portrait::render_masks(&src, &model, &settings, &enabled, &edits)
             } else {
-                portrait::render(&src, &model, &settings, &enabled, &edits)
+                let retouched = portrait::render(&src, &model, &settings, &enabled, &edits);
+                match settings.studio_look() {
+                    Some((look, strength)) => {
+                        looks::preview_with_look(&src, w, h, retouched, look, strength)
+                    }
+                    None => retouched,
+                }
             };
             let _ = tx.send(rendered);
         });
@@ -357,14 +376,18 @@ impl App {
             doc.canvas
                 .restore_layer_tiles(session.layer_id, session.original_tiles);
             if let Some(reopened) = &session.reopened {
-                if let Some(layer) = doc
-                    .canvas
-                    .layer_stack
-                    .layers
-                    .iter_mut()
-                    .find(|l| l.id == reopened.layer_id)
-                {
-                    layer.visible = reopened.visible;
+                let hidden =
+                    std::iter::once((reopened.layer_id, reopened.visible)).chain(reopened.look);
+                for (id, visible) in hidden {
+                    if let Some(layer) = doc
+                        .canvas
+                        .layer_stack
+                        .layers
+                        .iter_mut()
+                        .find(|l| l.id == id)
+                    {
+                        layer.visible = visible;
+                    }
                 }
                 doc.canvas.layer_revision += 1;
             }
@@ -388,7 +411,7 @@ impl App {
         settings: PortraitSettings,
         enabled: Vec<bool>,
     ) -> Result<bool, String> {
-        let (doc_id, layer_id, w, h, src, model, reopened) = {
+        let (doc_id, layer_id, w, h, src, model, reopened, reopened_look) = {
             let Some(session) = self.shell.portrait.as_ref() else {
                 return Err("Chưa mở chỉnh chân dung".to_string());
             };
@@ -403,6 +426,10 @@ impl App {
                 Arc::clone(&session.src),
                 model,
                 session.reopened.as_ref().map(|r| r.layer_id),
+                session
+                    .reopened
+                    .as_ref()
+                    .and_then(|r| r.look.map(|(id, _)| id)),
             )
         };
         let edits = self.finished_portrait_edits();
@@ -430,7 +457,15 @@ impl App {
                 }
             }
         }
-        if !changed && reopened.is_none() {
+        // The look, baked at full strength over the retouched photo; its
+        // strength becomes the layer's opacity.
+        let look = settings.studio_look().and_then(|(look, strength)| {
+            let lut = LookLut::new(look)?;
+            let mut full = looks::with_retouch(&src, w, Some((region, pixels.clone())));
+            lut.apply(&mut full, 1.0);
+            Some((look, strength, full))
+        });
+        if !changed && reopened.is_none() && look.is_none() {
             return Err("Các thanh trượt đang ở 0 — ảnh không đổi".to_string());
         }
         let recipe = Arc::new(PortraitRecipe::new(
@@ -468,13 +503,14 @@ impl App {
         );
         let result_idx =
             reopened.and_then(|id| canvas.layer_stack.layers.iter().position(|l| l.id == id));
-        if let Some(result_idx) = result_idx {
+        let result_id = if let Some(result_idx) = result_idx {
             let layer = &mut canvas.layer_stack.layers[result_idx];
             layer.tiles = tiles;
             (layer.width, layer.height, layer.offset) = (w, h, offset);
             layer.visible = true;
             layer.portrait = Some(recipe);
-            set_result_mask(layer, source_mask);
+            set_result_mask(layer, source_mask.clone());
+            layer.id
         } else {
             for layer in &mut canvas.layer_stack.layers {
                 layer.selected = false;
@@ -488,10 +524,19 @@ impl App {
                 layer.offset = offset;
                 layer.selected = true;
                 layer.portrait = Some(recipe);
-                set_result_mask(layer, source_mask);
+                set_result_mask(layer, source_mask.clone());
             }
             canvas.layer_stack.active_idx = new_idx;
-        }
+            canvas.layer_stack.layers[new_idx].id
+        };
+        place_look_layer(
+            &mut canvas.layer_stack,
+            result_id,
+            reopened_look,
+            look,
+            (w, h, offset),
+            source_mask,
+        );
         cmd.capture_after(&canvas.layer_stack, cw, ch);
         canvas.record(Box::new(cmd));
         canvas.layer_revision += 1;
@@ -677,6 +722,58 @@ fn reopen_target(
     Ok((active, None))
 }
 
+/// The "Màu studio" layer directly above the result at `result_idx`.
+fn look_layer_above(layers: &[Layer], result_idx: usize) -> Option<usize> {
+    let i = result_idx + 1;
+    layers
+        .get(i)
+        .filter(|l| l.name.starts_with(LOOK_LAYER_PREFIX) && l.is_raster())
+        .map(|_| i)
+}
+
+/// Put the studio look right above the "Chân dung" layer `result_id`
+/// (update the reopened one, add one, or drop it when the look was switched
+/// off), selected so its opacity is at hand.
+fn place_look_layer(
+    stack: &mut crate::core::layer::LayerStack,
+    result_id: u32,
+    existing: Option<u32>,
+    look: Option<(StudioLook, f32, Vec<u8>)>,
+    (w, h, offset): (u32, u32, (i32, i32)),
+    mask: Option<crate::core::layer::LayerMask>,
+) {
+    let existing = existing.and_then(|id| stack.layers.iter().position(|l| l.id == id));
+    let Some((look, strength, pixels)) = look else {
+        if let Some(i) = existing {
+            stack.layers.remove(i);
+            if stack.active_idx >= i {
+                stack.active_idx = stack.active_idx.saturating_sub(1);
+            }
+        }
+        return;
+    };
+    let idx = match existing {
+        Some(i) => i,
+        None => {
+            let result = stack.layers.iter().position(|l| l.id == result_id);
+            stack.active_idx = result.unwrap_or(stack.active_idx);
+            stack.add_layer(w, h)
+        }
+    };
+    for layer in &mut stack.layers {
+        layer.selected = false;
+    }
+    let layer = &mut stack.layers[idx];
+    layer.name = format!("{LOOK_LAYER_PREFIX}{}", look.label());
+    layer.tiles = TileMap::from_rgba(&pixels, w, h);
+    (layer.width, layer.height, layer.offset) = (w, h, offset);
+    layer.opacity = strength;
+    layer.visible = true;
+    layer.selected = true;
+    set_result_mask(layer, mask);
+    stack.active_idx = idx;
+}
+
 fn set_result_mask(layer: &mut Layer, mask: Option<crate::core::layer::LayerMask>) {
     layer.mask = mask;
     layer.mask_active = false;
@@ -730,6 +827,40 @@ pub(crate) fn selection_clip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn studio_look_layer_is_added_updated_and_dropped_above_the_retouch() {
+        let mut stack = crate::core::layer::LayerStack::new(4, 4);
+        let result = stack.add_layer(4, 4);
+        stack.layers[result].name = RESULT_LAYER.to_string();
+        let result_id = stack.layers[result].id;
+        let above = stack.add_layer(4, 4);
+        stack.layers[above].name = "Chữ".to_string();
+        let pixels = vec![200u8; 4 * 4 * 4];
+        let look = |strength: f32| Some((StudioLook::Rosy, strength, pixels.clone()));
+        place_look_layer(&mut stack, result_id, None, look(0.7), (4, 4, (0, 0)), None);
+        let idx = look_layer_above(&stack.layers, result).expect("right above the retouch");
+        let layer = &stack.layers[idx];
+        assert_eq!(layer.name, "Màu studio: Hồng hào");
+        assert!((layer.opacity - 0.7).abs() < 1e-6);
+        assert_eq!(stack.active_idx, idx);
+        let id = layer.id;
+        // Reopened with another strength: the same layer, updated.
+        place_look_layer(
+            &mut stack,
+            result_id,
+            Some(id),
+            look(0.4),
+            (4, 4, (0, 0)),
+            None,
+        );
+        assert_eq!(stack.layers.len(), 4);
+        assert!((stack.layers[idx].opacity - 0.4).abs() < 1e-6);
+        // Look switched off: the layer goes.
+        place_look_layer(&mut stack, result_id, Some(id), None, (4, 4, (0, 0)), None);
+        assert_eq!(stack.layers.len(), 3);
+        assert!(look_layer_above(&stack.layers, result).is_none());
+    }
     use crate::core::canvas::Canvas;
     use std::time::{Duration, Instant};
 

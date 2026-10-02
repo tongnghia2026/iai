@@ -9,6 +9,7 @@ pub mod body;
 pub mod brush;
 pub mod effects;
 pub mod geometry;
+pub mod looks;
 pub mod recipe;
 pub mod reshape;
 mod skin_mask;

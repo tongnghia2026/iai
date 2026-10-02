@@ -1,10 +1,12 @@
 //! "Chỉnh chân dung" dialog (Image ▸ Chỉnh chân dung…): skin, blemish,
 //! under-eye, eye and teeth sliders with a live canvas preview, like the
 //! Filter/Levels dialogs, and a brush ("Tô vùng") to fix the skin, hair and
-//! brow areas before sliding. Áp dụng adds the retouch as a new layer; Hủy restores.
+//! brow areas before sliding, and studio colour looks. Áp dụng adds the
+//! retouch as a new layer (and the look as its own layer above); Hủy restores.
 
 use super::*;
 use crate::core::portrait::brush::MaskTarget;
+use crate::core::portrait::looks::StudioLook;
 use crate::core::portrait::PortraitSettings;
 use crate::core::selection::RefineBrushMode;
 use egui_phosphor::regular as ph;
@@ -29,6 +31,7 @@ enum Group {
     Brows,
     Hair,
     Detail,
+    Look,
 }
 
 /// A group's header bar: caret, title and, when something in the group is
@@ -142,6 +145,68 @@ fn at_work(items: &[Row]) -> bool {
     items
         .iter()
         .any(|(_, v, _, k)| *k != Kind::Hue && **v != 0.0)
+}
+
+/// The studio looks as chips (three skin swatches and a name), two a row,
+/// then the strength slider.
+fn look_section(ui: &mut egui::Ui, ready: bool, s: &mut PortraitSettings) {
+    let current = StudioLook::from_index(s.look);
+    let width = (ui.available_width() - 6.0) / 2.0;
+    for pair in StudioLook::ALL.chunks(2) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for &look in pair {
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(width, 26.0), egui::Sense::click());
+                let visuals = ui.visuals();
+                let selected = look == current;
+                let fill = if selected {
+                    visuals.selection.bg_fill
+                } else if response.hovered() {
+                    visuals.widgets.hovered.weak_bg_fill
+                } else {
+                    visuals.widgets.inactive.weak_bg_fill
+                };
+                let painter = ui.painter();
+                painter.rect_filled(rect, 3.0, fill);
+                let mut x = rect.left() + 6.0;
+                if look != StudioLook::None {
+                    for c in look.swatch() {
+                        let square = egui::Rect::from_min_size(
+                            egui::pos2(x, rect.center().y - 6.0),
+                            egui::vec2(12.0, 12.0),
+                        );
+                        painter.rect_filled(square, 2.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
+                        x += 13.0;
+                    }
+                    x += 4.0;
+                }
+                painter.text(
+                    egui::pos2(x, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    look.label(),
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(220, 220, 220),
+                );
+                if ready
+                    && response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(look.tip())
+                        .clicked()
+                {
+                    s.look = look.index();
+                }
+            }
+        });
+    }
+    ui.add_space(2.0);
+    let strength = vec![(
+        "Độ đậm",
+        &mut s.look_strength,
+        "Thành opacity của layer \"Màu studio\" — chỉnh lại trong bảng Layer lúc nào cũng được",
+        Kind::Amount,
+    )];
+    rows(ui, ready && current != StudioLook::None, strength);
 }
 
 fn rows(ui: &mut egui::Ui, enabled: bool, items: Vec<Row>) {
@@ -639,6 +704,10 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     group(ui, shown, &mut next, Group::Detail, "Chi tiết", at_work(&detail), |ui| {
                         rows(ui, ready, detail)
                     });
+                    let look_on = s.look != 0;
+                    group(ui, shown, &mut next, Group::Look, "Màu studio", look_on, |ui| {
+                        look_section(ui, ready, &mut s)
+                    });
                 });
 
             ui.add_space(8.0);
@@ -665,7 +734,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     .on_hover_text(if data.dialogs.portrait_reopened {
                         "Cập nhật layer \"Chân dung\" đang chỉnh tiếp"
                     } else {
-                        "Thêm kết quả thành layer mới \"Chân dung\" (mở lại để chỉnh tiếp: chọn layer đó rồi vào Chỉnh chân dung)"
+                        "Thêm kết quả thành layer mới \"Chân dung\" (có chọn Màu studio thì thêm layer \"Màu studio\" ngay trên, độ đậm = opacity). Mở lại để chỉnh tiếp: chọn layer đó rồi vào Chỉnh chân dung"
                     })
                     .clicked()
                 {
