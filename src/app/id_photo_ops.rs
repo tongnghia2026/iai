@@ -16,6 +16,7 @@ const SEGMENT_MODEL: SelectSubjectModel = SelectSubjectModel::BiRefNetTiny;
 
 pub struct IdPhotoJob {
     doc_id: crate::core::document::DocumentId,
+    options: IdPhotoOptions,
     size: (u32, u32),
     progress: Arc<Mutex<String>>,
     rx: Receiver<Result<IdPhotoPlan, String>>,
@@ -167,6 +168,7 @@ impl App {
         }
         self.shell.id_photo.job = Some(IdPhotoJob {
             doc_id: self.docs.documents[idx].id,
+            options,
             size: (w, h),
             progress,
             rx,
@@ -207,10 +209,20 @@ impl App {
         };
         let job = self.shell.id_photo.job.take().expect("job checked above");
         match result.and_then(|plan| self.apply_id_photo(&job, plan)) {
-            Ok(message) => {
-                self.shell.status_msg = message;
+            Ok(mut message) => {
                 self.shell.ui.show_id_photo_dialog = false;
                 self.close_id_photo();
+                let active = self.docs.documents[self.docs.active_doc_idx].id == job.doc_id;
+                if job.options.then_portrait && active {
+                    // Straight on to retouching the person: sliders, then OK.
+                    match self.begin_portrait() {
+                        Ok(()) => self.shell.ui.show_portrait_dialog = true,
+                        Err(e) => {
+                            message = format!("{message} — chưa mở được Chỉnh chân dung: {e}")
+                        }
+                    }
+                }
+                self.shell.status_msg = message;
             }
             Err(e) => {
                 self.shell

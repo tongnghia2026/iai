@@ -17,7 +17,8 @@ pub const PRINT_PPI: f32 = 600.0;
 pub const DEFAULT_WIDEN: f32 = 0.10;
 pub const MAX_WIDEN: f32 = 0.40;
 pub const PERSON_LAYER: &str = "Người";
-pub const WHITE_LAYER: &str = "Nền trắng";
+pub const ORIGINAL_LAYER: &str = "Ảnh gốc";
+const BACKGROUND_STEP: &str = "Nền trắng";
 const UNDO_LABEL: &str = "Làm ảnh thẻ";
 
 /// Eye line and chin, as fractions of the reference frame's height.
@@ -52,6 +53,8 @@ pub struct IdPhotoOptions {
     pub widen: f32,
     pub straighten: bool,
     pub white_background: bool,
+    /// Open Chỉnh chân dung on the result.
+    pub then_portrait: bool,
 }
 
 impl Default for IdPhotoOptions {
@@ -61,6 +64,7 @@ impl Default for IdPhotoOptions {
             widen: DEFAULT_WIDEN,
             straighten: true,
             white_background: true,
+            then_portrait: true,
         }
     }
 }
@@ -223,6 +227,8 @@ pub struct Cutout {
     pub region: Region,
     pub rgba: Vec<u8>,
     pub mask: Vec<u8>,
+    /// The region as photographed, for the "Ảnh gốc" layer.
+    pub original: Vec<u8>,
 }
 
 pub struct IdPhotoPlan {
@@ -318,11 +324,13 @@ pub fn prepare(
             return Err("không tách được người khỏi nền".to_string());
         }
         progress("Đang làm sạch viền tóc…".to_string());
+        let original = pixels.clone();
         decontaminate(&mut pixels, &mask, region.w, region.h);
         Some(Cutout {
             region,
             rgba: pixels,
             mask,
+            original,
         })
     } else {
         None
@@ -674,9 +682,11 @@ fn box_sum(src: &[[f32; 4]], cols: usize, rows: usize, r: usize) -> Vec<[f32; 4]
     out
 }
 
-/// Apply `plan` as one undo step: the "Người" layer on top, the crop
-/// (levelled, resampled to the print size, 600 ppi), then "Nền trắng" right
-/// under the person.
+/// Apply `plan` as one undo step: the person twice on top — "Ảnh gốc" (the
+/// untouched photo behind a black mask, to paint details back in) under
+/// "Người" (the cut-out) — then the crop (levelled, resampled to the print
+/// size, 600 ppi), then the background turned white and the older layers
+/// hidden.
 pub fn apply(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
     if plan.frame.is_none() && plan.cutout.is_none() {
         return Err("không có gì để làm".to_string());
@@ -689,36 +699,7 @@ pub fn apply(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
 }
 
 fn apply_steps(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
-    let person = plan.cutout.map(|cut| {
-        let mut cmd = LayerStructureCommand::capture_before(
-            PERSON_LAYER,
-            &canvas.layer_stack,
-            canvas.width,
-            canvas.height,
-        );
-        let stack = &mut canvas.layer_stack;
-        for layer in &mut stack.layers {
-            layer.selected = false;
-        }
-        stack.active_idx = stack.layers.len().saturating_sub(1);
-        let (w, h) = (cut.region.w, cut.region.h);
-        let idx = stack.add_layer(w, h);
-        let mask_rgba: Vec<u8> = cut.mask.iter().flat_map(|&m| [m, m, m, 255]).collect();
-        let layer = &mut stack.layers[idx];
-        layer.name = PERSON_LAYER.to_string();
-        layer.parent_id = None;
-        layer.tiles = TileMap::from_rgba(&cut.rgba, w, h);
-        layer.offset = (cut.region.x as i32, cut.region.y as i32);
-        layer.add_mask(true);
-        if let Some(mask) = &mut layer.mask {
-            mask.tiles = TileMap::from_rgba(&mask_rgba, w, h);
-        }
-        layer.selected = true;
-        let id = layer.id;
-        cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
-        canvas.record(Box::new(cmd));
-        id
-    });
+    let added = plan.cutout.map(|cut| add_person_layers(canvas, cut));
 
     if let Some(frame) = plan.frame {
         let (out_w, out_h) = output_size();
@@ -741,42 +722,110 @@ fn apply_steps(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
         canvas.metadata.resolution_ppi = PRINT_PPI;
     }
 
-    if let Some(person_id) = person {
-        let mut cmd = LayerStructureCommand::capture_before(
-            WHITE_LAYER,
-            &canvas.layer_stack,
-            canvas.width,
-            canvas.height,
-        );
-        let (w, h) = (canvas.width, canvas.height);
-        let stack = &mut canvas.layer_stack;
-        let Some(person_idx) = stack.layers.iter().position(|l| l.id == person_id) else {
-            return Err("mất layer người".to_string());
-        };
-        // add_layer inserts above the active layer: make that the one under
-        // the person so the white lands right below it.
-        stack.active_idx = person_idx.saturating_sub(1);
-        let white_idx = if person_idx == 0 {
-            let idx = stack.add_layer(w, h);
-            let white = stack.layers.remove(idx);
-            stack.layers.insert(0, white);
-            0
+    if let Some(added) = added {
+        whiten_background(canvas, added);
+    }
+    Ok(())
+}
+
+/// Ids of the "Ảnh gốc" and "Người" layers.
+type PersonLayers = [u32; 2];
+
+fn add_person_layers(canvas: &mut Canvas, cut: Cutout) -> PersonLayers {
+    let mut cmd = LayerStructureCommand::capture_before(
+        PERSON_LAYER,
+        &canvas.layer_stack,
+        canvas.width,
+        canvas.height,
+    );
+    let stack = &mut canvas.layer_stack;
+    for layer in &mut stack.layers {
+        layer.selected = false;
+    }
+    stack.active_idx = stack.layers.len().saturating_sub(1);
+    let (w, h) = (cut.region.w, cut.region.h);
+    let mut add = |name: &str, rgba: &[u8], mask: TileMap| {
+        // add_layer inserts above the active layer and makes it active.
+        let idx = stack.add_layer(w, h);
+        let layer = &mut stack.layers[idx];
+        layer.name = name.to_string();
+        layer.parent_id = None;
+        layer.tiles = TileMap::from_rgba(rgba, w, h);
+        layer.offset = (cut.region.x as i32, cut.region.y as i32);
+        layer.add_mask(true);
+        if let Some(m) = &mut layer.mask {
+            m.tiles = mask;
+        }
+        layer.id
+    };
+    let original = add(ORIGINAL_LAYER, &cut.original, TileMap::new_black(w, h));
+    let mask_rgba: Vec<u8> = cut.mask.iter().flat_map(|&m| [m, m, m, 255]).collect();
+    let person = add(
+        PERSON_LAYER,
+        &cut.rgba,
+        TileMap::from_rgba(&mask_rgba, w, h),
+    );
+    if let Some(layer) = stack.layers.get_mut(stack.active_idx) {
+        layer.selected = true;
+    }
+    cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
+    canvas.record(Box::new(cmd));
+    [original, person]
+}
+
+/// Fill the background layer (the bottom one when none is marked) with
+/// white and hide every other layer under the person: their pixels are in
+/// the person layers already.
+fn whiten_background(canvas: &mut Canvas, added: PersonLayers) {
+    let mut cmd = LayerStructureCommand::capture_before(
+        BACKGROUND_STEP,
+        &canvas.layer_stack,
+        canvas.width,
+        canvas.height,
+    );
+    let (w, h) = (canvas.width, canvas.height);
+    let stack = &mut canvas.layer_stack;
+    let background = stack
+        .layers
+        .iter()
+        .position(|l| l.is_background)
+        .or_else(|| {
+            stack
+                .layers
+                .first()
+                .filter(|l| l.is_raster() && l.parent_id.is_none() && !added.contains(&l.id))
+                .map(|_| 0)
+        });
+    for (i, layer) in stack.layers.iter_mut().enumerate() {
+        if added.contains(&layer.id) {
+            continue;
+        }
+        if Some(i) == background {
+            layer.tiles = TileMap::new_white(w, h);
+            (layer.width, layer.height, layer.offset) = (w, h, (0, 0));
+            layer.mask = None;
+            layer.mask_active = false;
+            layer.visible = true;
         } else {
-            stack.add_layer(w, h)
-        };
-        let white = &mut stack.layers[white_idx];
-        white.name = WHITE_LAYER.to_string();
+            layer.visible = false;
+        }
+    }
+    if background.is_none() {
+        let person_id = added[1];
+        let id = stack.add_layer(w, h);
+        let mut white = stack.layers.remove(id);
+        white.name = "Background".to_string();
         white.parent_id = None;
         white.tiles = TileMap::new_white(w, h);
         white.selected = false;
+        stack.layers.insert(0, white);
         if let Some(idx) = stack.layers.iter().position(|l| l.id == person_id) {
-            stack.layers[idx].selected = true;
             stack.active_idx = idx;
+            stack.layers[idx].selected = true;
         }
-        cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
-        canvas.record(Box::new(cmd));
     }
-    Ok(())
+    cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
+    canvas.record(Box::new(cmd));
 }
 
 #[cfg(test)]
@@ -1023,13 +1072,16 @@ mod tests {
     }
 
     #[test]
-    fn apply_adds_person_on_white_and_crops_to_print_size_in_one_undo() {
+    fn apply_stacks_person_over_the_original_on_white_in_one_undo() {
         let (w, h) = (1000u32, 1300u32);
         let mut pixels = vec![0u8; (w * h * 4) as usize];
         for px in pixels.chunks_exact_mut(4) {
             px.copy_from_slice(&[90, 120, 200, 255]);
         }
         let mut canvas = Canvas::from_rgba(pixels.clone(), w, h);
+        // An earlier retouch layer: its pixels are in the person layers now.
+        let extra = canvas.layer_stack.add_layer(w, h);
+        canvas.layer_stack.layers[extra].tiles = TileMap::new_solid(w, h, 200, 10, 10, 255);
         let face = reference_face();
         let frame = frame_for(&face, 0.1, false, aspect());
         let region = Region {
@@ -1044,12 +1096,14 @@ mod tests {
                 mask[y * 700 + x] = 255;
             }
         }
+        let cut = copy_region(&pixels, w, region);
         let plan = IdPhotoPlan {
             frame: Some(frame),
             cutout: Some(Cutout {
                 region,
-                rgba: copy_region(&pixels, w, region),
+                rgba: cut.clone(),
                 mask,
+                original: cut,
             }),
             notes: Vec::new(),
         };
@@ -1057,30 +1111,41 @@ mod tests {
         apply(&mut canvas, plan).unwrap();
         assert_eq!((canvas.width, canvas.height), output_size());
         assert_eq!(canvas.metadata.resolution_ppi, PRINT_PPI);
-        let names: Vec<&str> = canvas
-            .layer_stack
-            .layers
-            .iter()
-            .map(|l| l.name.as_str())
-            .collect();
-        assert_eq!(names.len(), layers_before + 2);
-        assert_eq!(&names[names.len() - 2..], &[WHITE_LAYER, PERSON_LAYER]);
-        let person = canvas.layer_stack.layers.last().unwrap();
+        let layers = &canvas.layer_stack.layers;
+        let names: Vec<&str> = layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names.len(), layers_before + 2, "{names:?}");
+        assert_eq!(&names[names.len() - 2..], &[ORIGINAL_LAYER, PERSON_LAYER]);
+        assert_eq!(canvas.layer_stack.active_idx, layers.len() - 1);
+        // The background is white now and the old retouch layer hidden.
+        assert!(layers[0].is_background && layers[0].visible);
+        assert_eq!(layers[0].tiles.get_pixel(300, 400), (255, 255, 255, 255));
+        assert!(!layers[1].visible);
+        // "Ảnh gốc" waits behind a black mask; "Người" shows the person only.
+        let original = &layers[layers.len() - 2];
+        assert_eq!(mask_value(original.mask.as_ref().unwrap(), 330, 700), 0);
+        let person = layers.last().unwrap();
         assert_eq!((person.width, person.height), output_size());
         let mask = person.mask.as_ref().unwrap();
-        // Inside the cut-out but off the person is hidden; the middle shows.
         let scale = frame.height / output_size().1 as f32;
         let [u, v] = frame.local([120.0, 100.0]);
         let (ox, oy) = ((u / scale) as u32, (v / scale) as u32);
         assert_eq!(mask_value(mask, ox, oy), 0, "at {ox},{oy}");
         assert_eq!(mask_value(mask, 330, 700), 255);
         canvas.ensure_pixels();
-        let corner = &canvas.pixels[(5 * canvas.width as usize + 5) * 4..][..3];
-        assert_eq!(corner, &[255, 255, 255]);
+        let at = |x: u32, y: u32| {
+            let i = (y as usize * canvas.width as usize + x as usize) * 4;
+            [canvas.pixels[i], canvas.pixels[i + 1], canvas.pixels[i + 2]]
+        };
+        assert_eq!(at(5, 5), [255, 255, 255]);
+        assert_eq!(at(ox, oy), [255, 255, 255]);
+        assert_eq!(at(330, 700), [90, 120, 200]);
 
         assert!(canvas.undo().is_some());
         assert_eq!((canvas.width, canvas.height), (w, h));
-        assert_eq!(canvas.layer_stack.layers.len(), layers_before);
+        let layers = &canvas.layer_stack.layers;
+        assert_eq!(layers.len(), layers_before);
+        assert!(layers[1].visible);
+        assert_eq!(layers[0].tiles.get_pixel(300, 400), (90, 120, 200, 255));
     }
 
     /// Opt-in visual probe: set IAI_ID_PHOTO_PROBE to a folder of photos;

@@ -454,6 +454,9 @@ impl App {
             return Err("Layer gốc không còn".to_string());
         };
         let offset = canvas.layer_stack.layers[source_idx].offset;
+        // The retouch shows only where its photo does (a cut-out keeps its
+        // old background hidden).
+        let source_mask = canvas.layer_stack.layers[source_idx].mask.clone();
         let (cw, ch) = (canvas.width, canvas.height);
         let mut tiles = TileMap::new(w, h);
         tiles.write_region(region.x, region.y, region.w, region.h, &patch);
@@ -471,6 +474,7 @@ impl App {
             (layer.width, layer.height, layer.offset) = (w, h, offset);
             layer.visible = true;
             layer.portrait = Some(recipe);
+            set_result_mask(layer, source_mask);
         } else {
             for layer in &mut canvas.layer_stack.layers {
                 layer.selected = false;
@@ -484,6 +488,7 @@ impl App {
                 layer.offset = offset;
                 layer.selected = true;
                 layer.portrait = Some(recipe);
+                set_result_mask(layer, source_mask);
             }
             canvas.layer_stack.active_idx = new_idx;
         }
@@ -670,6 +675,12 @@ fn reopen_target(
         }
     }
     Ok((active, None))
+}
+
+fn set_result_mask(layer: &mut Layer, mask: Option<crate::core::layer::LayerMask>) {
+    layer.mask = mask;
+    layer.mask_active = false;
+    layer.paint_target = crate::core::layer::PaintTarget::Pixels;
 }
 
 /// The canvas selection over a layer at `offset` of `w` x `h` pixels, in the

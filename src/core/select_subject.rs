@@ -47,6 +47,9 @@ struct ModelSpec {
     apply_sigmoid: bool,
     soft_mask: bool,
     cache_session: bool,
+    /// Worth trying on DirectML. BiRefNet is not: it fails there (out of
+    /// memory or unsupported) and the CPU retry stalls the app for a beat.
+    gpu: bool,
     kind: SubjectKind,
 }
 
@@ -82,6 +85,7 @@ impl SelectSubjectModel {
                 apply_sigmoid: true,
                 soft_mask: true,
                 cache_session: false,
+                gpu: false,
                 kind: SubjectKind::BgRemoval,
             },
             // Ultralytics YOLO11-seg (COCO, AGPL-3.0) — detects objects and unions
@@ -97,6 +101,7 @@ impl SelectSubjectModel {
                 apply_sigmoid: false,
                 soft_mask: false,
                 cache_session: true,
+                gpu: true,
                 kind: SubjectKind::YoloSeg,
             },
         }
@@ -440,7 +445,8 @@ impl SelectSubjectEngine {
         // Decide GPU vs CPU on the main thread (reads the cached wgpu adapter
         // decision) and let the worker record which path the session took. Skip
         // the GPU for a model that already failed on it this session.
-        let prefer_gpu = crate::core::ai::ort_ep::prefer_gpu() && !gpu_blocked(spec.file_name);
+        let prefer_gpu =
+            spec.gpu && crate::core::ai::ort_ep::prefer_gpu() && !gpu_blocked(spec.file_name);
         let used_gpu = self.used_gpu.clone();
 
         let (tx, rx): (Sender<InferencePayload>, Receiver<InferencePayload>) = mpsc::channel();
@@ -525,7 +531,7 @@ impl SelectSubjectEngine {
 }
 
 /// Run `model` on `pixels` on the calling thread and return its mask (soft for
-/// BiRefNet). Takes the GPU when `prefer_gpu`, falling back to the CPU the way
+/// BiRefNet). Takes the GPU when `prefer_gpu` and the model runs there, falling back to the CPU the way
 /// `run_async` does.
 pub fn segment_blocking(
     model: SelectSubjectModel,
@@ -542,7 +548,7 @@ pub fn segment_blocking(
             spec.short_label, spec.size_hint
         ));
     }
-    let prefer_gpu = prefer_gpu && !gpu_blocked(spec.file_name);
+    let prefer_gpu = spec.gpu && prefer_gpu && !gpu_blocked(spec.file_name);
     let (session, on_gpu) = SelectSubjectEngine::load_session_from_path(&path, prefer_gpu)?;
     let result = run_inference(spec, &session, pixels, width, height, false);
     if result.is_err() && on_gpu {
