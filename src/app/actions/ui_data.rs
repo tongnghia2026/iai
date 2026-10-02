@@ -922,6 +922,11 @@ impl App {
                 .collect(),
         );
         let selected_arrow_settings = self.active_arrow_settings();
+        let id_photo = if self.shell.ui.show_id_photo_dialog {
+            self.id_photo_state()
+        } else {
+            Default::default()
+        };
         let portrait_state = if self.shell.ui.show_portrait_dialog {
             self.portrait_dialog_state()
         } else {
@@ -1796,6 +1801,10 @@ impl App {
                 portrait_reopened: portrait_restore.0,
                 portrait_restore_settings: portrait_restore.1,
                 portrait_restore_faces: portrait_restore.2,
+                show_id_photo_dialog: self.shell.ui.show_id_photo_dialog,
+                id_photo_status: id_photo.status,
+                id_photo_error: id_photo.error,
+                id_photo_busy: id_photo.busy,
                 scan_is_pdf: self
                     .docs
                     .documents

@@ -1244,7 +1244,12 @@ fn heal_spots(
 
 /// Faces in `clip` and a margin around it (a close crop finds small faces in
 /// a group photo more surely), kept when centred in the selection.
-fn faces_in(rgba: &[u8], width: u32, height: u32, clip: &Clip) -> Result<Vec<FaceMesh>, String> {
+pub fn faces_in(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    clip: &Clip,
+) -> Result<Vec<FaceMesh>, String> {
     let r = clip.region;
     let area = Region::around(
         [

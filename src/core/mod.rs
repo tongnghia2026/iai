@@ -24,6 +24,7 @@ pub mod develop_scene;
 pub mod gateway;
 pub mod geometry;
 pub mod hw;
+pub mod id_photo;
 pub mod layer;
 pub mod mem_report;
 pub mod output_sharpen;

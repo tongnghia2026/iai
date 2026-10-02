@@ -75,6 +75,8 @@ pub struct UiShell {
     pub(in crate::app) scan_preview: Option<ScanPreviewSession>,
     /// Session of the "Chỉnh chân dung" dialog (analysis + live preview).
     pub(in crate::app) portrait: Option<crate::app::portrait_ops::PortraitSession>,
+    /// The "Làm ảnh thẻ" job (and its wait for the background model).
+    pub(in crate::app) id_photo: crate::app::id_photo_ops::IdPhotoSession,
     pub(in crate::app) user_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
     /// Named Develop slider sets saved by the user (develop_presets.json).
     pub(in crate::app) develop_presets: std::sync::Arc<Vec<crate::core::presets::DevelopPreset>>,

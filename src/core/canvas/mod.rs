@@ -2099,6 +2099,27 @@ mod hdr_adjust_tests {
     }
 
     #[test]
+    fn shrinking_crop_averages_fine_detail_instead_of_aliasing() {
+        // One-pixel stripes shrunk 4x: a single bilinear tap per output pixel
+        // lands on whole stripes (solid black or white); the footprint average
+        // gives the true mid grey.
+        let (w, h) = (400u32, 400u32);
+        let pixels: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let v = if (i % w) % 2 == 0 { 0 } else { 255 };
+                [v, v, v, 255]
+            })
+            .collect();
+        let mut canvas = Canvas::from_rgba(pixels, w, h);
+        assert!(canvas.crop_transformed(200.0, 200.0, 400.0, 400.0, 100, 100, 0.0, 0.0, 0.0, true));
+        for x in [10u32, 11, 50, 51] {
+            let (r, _, _, a) = canvas.layer_stack.layers[0].tiles.get_pixel(x, 50);
+            assert_eq!(a, 255);
+            assert!((r as i32 - 128).abs() <= 20, "x {x}: {r}");
+        }
+    }
+
+    #[test]
     fn undo_after_crop_restores_canvas_and_selection_dimensions() {
         // The crop command restores the layers and canvas size on undo, but it
         // does not carry the selection — undo/redo must still leave the

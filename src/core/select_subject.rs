@@ -524,6 +524,35 @@ impl SelectSubjectEngine {
     }
 }
 
+/// Run `model` on `pixels` on the calling thread and return its mask (soft for
+/// BiRefNet). Takes the GPU when `prefer_gpu`, falling back to the CPU the way
+/// `run_async` does.
+pub fn segment_blocking(
+    model: SelectSubjectModel,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    prefer_gpu: bool,
+) -> Result<Vec<u8>, String> {
+    let spec = model.spec();
+    let path = SelectSubjectEngine::model_path_for(model);
+    if !path.is_file() {
+        return Err(format!(
+            "thiếu model {} ({})",
+            spec.short_label, spec.size_hint
+        ));
+    }
+    let prefer_gpu = prefer_gpu && !gpu_blocked(spec.file_name);
+    let (session, on_gpu) = SelectSubjectEngine::load_session_from_path(&path, prefer_gpu)?;
+    let result = run_inference(spec, &session, pixels, width, height, false);
+    if result.is_err() && on_gpu {
+        block_gpu_for(spec.file_name);
+        let (session, _) = SelectSubjectEngine::load_session_from_path(&path, false)?;
+        return run_inference(spec, &session, pixels, width, height, false);
+    }
+    result
+}
+
 fn run_inference(
     spec: ModelSpec,
     session: &Mutex<OrtSession>,

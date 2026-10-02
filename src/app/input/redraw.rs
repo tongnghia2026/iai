@@ -137,6 +137,7 @@ impl App {
         self.poll_ai_edits();
         self.poll_offline_retouch();
         self.poll_portrait();
+        self.poll_id_photo();
         self.poll_ext_bridge();
 
         self.update_refine_overlay_tex();

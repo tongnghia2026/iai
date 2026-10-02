@@ -14,6 +14,7 @@ pub mod document_webview;
 pub mod editor_interaction;
 pub mod ext_bridge;
 pub mod file_ops;
+pub mod id_photo_ops;
 pub mod input;
 pub mod library;
 pub mod node_ops;

@@ -551,6 +551,15 @@ impl App {
         if let Some(params) = actions.dialogs.set_scan_cleanup_preview.take() {
             self.update_scan_preview(params);
         }
+        if let Some(open) = actions.dialogs.show_id_photo_dialog.take() {
+            self.shell.ui.show_id_photo_dialog = open;
+            if !open {
+                self.close_id_photo();
+            }
+        }
+        if let Some(options) = actions.dialogs.run_id_photo.take() {
+            self.run_id_photo(options);
+        }
         if let Some(open) = actions.dialogs.show_portrait_dialog.take() {
             if open {
                 match self.begin_portrait() {

@@ -807,6 +807,10 @@ pub struct DialogIntent {
     pub show_scan_cleanup_dialog: Option<bool>,
     /// Open/close the "Chỉnh chân dung" dialog.
     pub show_portrait_dialog: Option<bool>,
+    /// Open/close the "Làm ảnh thẻ" dialog.
+    pub show_id_photo_dialog: Option<bool>,
+    /// Make the ID photo with these options.
+    pub run_id_photo: Option<crate::core::id_photo::IdPhotoOptions>,
     /// Live-preview request: sliders, faces switched on, preview on/off, and
     /// whether to tint the detected areas instead.
     pub set_portrait_preview: Option<(

@@ -807,6 +807,7 @@ impl Canvas {
 
         let scale_x = viewport_w / out_w as f32;
         let scale_y = viewport_h / out_h as f32;
+        let footprint = scale_x.max(scale_y);
         let hw = out_w as f32 * 0.5;
         let hh = out_h as f32 * 0.5;
         let cos_inv = angle_rad.cos();
@@ -836,18 +837,26 @@ impl Canvas {
                 (src_cx - ox, src_cy - oy)
             };
             let layer_fill = background.filter(|_| layer.is_background);
-            layer.tiles = Self::resample_into_tiles(&layer.tiles, out_w, out_h, &map, layer_fill);
+            layer.tiles = Self::resample_into_tiles_footprint(
+                &layer.tiles,
+                out_w,
+                out_h,
+                &map,
+                layer_fill,
+                footprint,
+            );
             layer.width = out_w;
             layer.height = out_h;
             layer.offset = (0, 0);
 
             if let Some(mask) = &mut layer.mask {
-                mask.tiles = Self::resample_into_tiles(
+                mask.tiles = Self::resample_into_tiles_footprint(
                     &mask.tiles,
                     out_w,
                     out_h,
                     &map,
                     background.map(|_| [255, 255, 255, 255]),
+                    footprint,
                 );
                 mask.width = out_w;
                 mask.height = out_h;
@@ -1008,7 +1017,78 @@ impl Canvas {
         map: impl Fn(f32, f32) -> (f32, f32) + Sync,
         background: Option<[u8; 4]>,
     ) -> crate::core::tile::TileMap {
+        Self::resample_into_tiles_footprint(src, out_w, out_h, map, background, 1.0)
+    }
+
+    /// [`Self::resample_into_tiles`] for a reduction: `footprint` is how many
+    /// source pixels one output pixel spans. Past 1.5 each output pixel
+    /// averages a grid of bilinear taps over its footprint (premultiplied),
+    /// so a big photo shrunk to print size stays crisp instead of aliasing.
+    pub(crate) fn resample_into_tiles_footprint(
+        src: &crate::core::tile::TileMap,
+        out_w: u32,
+        out_h: u32,
+        map: impl Fn(f32, f32) -> (f32, f32) + Sync,
+        background: Option<[u8; 4]>,
+        footprint: f32,
+    ) -> crate::core::tile::TileMap {
         use rayon::prelude::*;
+        let taps = if footprint.is_finite() {
+            footprint.round().clamp(1.0, 5.0) as usize
+        } else {
+            1
+        };
+        let offsets: Vec<f32> = (0..taps)
+            .map(|i| (i as f32 + 0.5) / taps as f32 - 0.5)
+            .collect();
+        let sample8 = |u: f32, v: f32| -> (u8, u8, u8, u8) {
+            if taps == 1 {
+                let (sx, sy) = map(u, v);
+                return src.sample_bilinear(sx, sy);
+            }
+            let mut acc = [0.0f32; 4];
+            for &dv in &offsets {
+                for &du in &offsets {
+                    let (sx, sy) = map(u + du, v + dv);
+                    let (r, g, b, a) = src.sample_bilinear(sx, sy);
+                    let a = a as f32;
+                    acc[0] += r as f32 * a;
+                    acc[1] += g as f32 * a;
+                    acc[2] += b as f32 * a;
+                    acc[3] += a;
+                }
+            }
+            if acc[3] <= 0.0 {
+                return (0, 0, 0, 0);
+            }
+            let c = |v: f32| (v / acc[3]).round().clamp(0.0, 255.0) as u8;
+            let a = (acc[3] / (taps * taps) as f32).round().clamp(0.0, 255.0) as u8;
+            (c(acc[0]), c(acc[1]), c(acc[2]), a)
+        };
+        let sample16 = |u: f32, v: f32| -> (u16, u16, u16, u16) {
+            if taps == 1 {
+                let (sx, sy) = map(u, v);
+                return src.sample_bilinear16(sx, sy);
+            }
+            let mut acc = [0.0f64; 4];
+            for &dv in &offsets {
+                for &du in &offsets {
+                    let (sx, sy) = map(u + du, v + dv);
+                    let (r, g, b, a) = src.sample_bilinear16(sx, sy);
+                    let a = a as f64;
+                    acc[0] += r as f64 * a;
+                    acc[1] += g as f64 * a;
+                    acc[2] += b as f64 * a;
+                    acc[3] += a;
+                }
+            }
+            if acc[3] <= 0.0 {
+                return (0, 0, 0, 0);
+            }
+            let c = |v: f64| (v / acc[3]).round().clamp(0.0, 65535.0) as u16;
+            let a = (acc[3] / (taps * taps) as f64).round().clamp(0.0, 65535.0) as u16;
+            (c(acc[0]), c(acc[1]), c(acc[2]), a)
+        };
         let mut new_tiles = crate::core::tile::TileMap::new(out_w, out_h);
         // The common large-document case contains many empty/group/adjustment
         // layers. Sampling every output pixel for each empty sparse map makes a
@@ -1035,9 +1115,7 @@ impl Canvas {
                             let v = (by + r as u32) as f32 + 0.5;
                             for c in 0..cw as usize {
                                 let u = (bx + c as u32) as f32 + 0.5;
-                                let (sx, sy) = map(u, v);
-                                let (mut rr, mut gg, mut bb, mut aa) =
-                                    src.sample_bilinear16(sx, sy);
+                                let (mut rr, mut gg, mut bb, mut aa) = sample16(u, v);
                                 if let Some([br, bg, bb_bg, ba]) = background {
                                     // Background is an 8-bit fill colour; lift to 16 bits.
                                     let (br, bg, bb_bg, ba) = (
@@ -1087,8 +1165,7 @@ impl Canvas {
                             let v = (by + r as u32) as f32 + 0.5;
                             for c in 0..cw as usize {
                                 let u = (bx + c as u32) as f32 + 0.5;
-                                let (sx, sy) = map(u, v);
-                                let (mut rr, mut gg, mut bb, mut aa) = src.sample_bilinear(sx, sy);
+                                let (mut rr, mut gg, mut bb, mut aa) = sample8(u, v);
                                 if let Some([br, bg, bb_bg, ba]) = background {
                                     let src_a = aa as f32 / 255.0;
                                     let bg_a = ba as f32 / 255.0;

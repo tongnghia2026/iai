@@ -674,7 +674,7 @@ fn reopen_target(
 
 /// The canvas selection over a layer at `offset` of `w` x `h` pixels, in the
 /// layer's own pixels; `None` when it misses the layer.
-fn selection_clip(
+pub(crate) fn selection_clip(
     selection: &crate::core::selection::Selection,
     offset: (i32, i32),
     w: u32,

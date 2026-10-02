@@ -484,6 +484,12 @@ pub struct DialogViewModel {
     pub portrait_reopened: bool,
     pub portrait_restore_settings: Option<crate::core::portrait::PortraitSettings>,
     pub portrait_restore_faces: Option<Vec<bool>>,
+    /// "Làm ảnh thẻ" dialog is open, its status line, whether that line is
+    /// an error, and whether a job (or its model download) is running.
+    pub show_id_photo_dialog: bool,
+    pub id_photo_status: String,
+    pub id_photo_error: bool,
+    pub id_photo_busy: bool,
     /// Active document is a multi-page PDF session (enables page-scope options).
     pub scan_is_pdf: bool,
     /// PDF page count (1 for a plain image), for the scan-cleanup scope UI.
@@ -1048,6 +1054,10 @@ impl Default for UiData {
                 portrait_brush_redo: false,
                 portrait_overlay: None,
                 portrait_reopened: false,
+                show_id_photo_dialog: false,
+                id_photo_status: String::new(),
+                id_photo_error: false,
+                id_photo_busy: false,
                 portrait_restore_settings: None,
                 portrait_restore_faces: None,
                 scan_is_pdf: false,
