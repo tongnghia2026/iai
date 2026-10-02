@@ -33,6 +33,8 @@ type OrtSession = ort::session::Session;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectSubjectModel {
     BiRefNetTiny,
+    /// The full Swin-L BiRefNet: slower, cleaner edges (ID photos use it).
+    BiRefNetFull,
     Yolo11Seg,
 }
 
@@ -68,8 +70,9 @@ enum SubjectKind {
 }
 
 impl SelectSubjectModel {
-    pub const ALL: [SelectSubjectModel; 2] = [
+    pub const ALL: [SelectSubjectModel; 3] = [
         SelectSubjectModel::BiRefNetTiny,
+        SelectSubjectModel::BiRefNetFull,
         SelectSubjectModel::Yolo11Seg,
     ];
 
@@ -81,6 +84,19 @@ impl SelectSubjectModel {
                 file_name: "birefnet-general-tiny-epoch_232.onnx",
                 url: "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx",
                 size_hint: "~214 MB",
+                normalization: Normalization::ImageNet,
+                apply_sigmoid: true,
+                soft_mask: true,
+                cache_session: false,
+                gpu: false,
+                kind: SubjectKind::BgRemoval,
+            },
+            SelectSubjectModel::BiRefNetFull => ModelSpec {
+                label: "BiRefNet Full (Max Quality)",
+                short_label: "BiRefNet Full",
+                file_name: "birefnet-general-epoch_244.onnx",
+                url: "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-epoch_244.onnx",
+                size_hint: "~928 MB",
                 normalization: Normalization::ImageNet,
                 apply_sigmoid: true,
                 soft_mask: true,

@@ -16,7 +16,6 @@ pub const PRINT_CM: [f32; 2] = [2.8, 3.8];
 pub const PRINT_PPI: f32 = 600.0;
 pub const DEFAULT_WIDEN: f32 = 0.10;
 pub const MAX_WIDEN: f32 = 0.40;
-pub const PERSON_LAYER: &str = "Người";
 pub const ORIGINAL_LAYER: &str = "Ảnh gốc";
 const BACKGROUND_STEP: &str = "Nền trắng";
 const UNDO_LABEL: &str = "Làm ảnh thẻ";
@@ -683,10 +682,11 @@ fn box_sum(src: &[[f32; 4]], cols: usize, rows: usize, r: usize) -> Vec<[f32; 4]
 }
 
 /// Apply `plan` as one undo step: the person twice on top — "Ảnh gốc" (the
-/// untouched photo behind a black mask, to paint details back in) under
-/// "Người" (the cut-out) — then the crop (levelled, resampled to the print
-/// size, 600 ppi), then the background turned white and the older layers
-/// hidden.
+/// untouched photo behind a black mask, to paint details back in) under the
+/// cut-out — then the crop (levelled, resampled to the print size, 600 ppi),
+/// then the cut-out's mask pressed into its alpha like Ctrl+J with a
+/// selection ("Layer 1", no mask), the background turned white and the older
+/// layers hidden.
 pub fn apply(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
     if plan.frame.is_none() && plan.cutout.is_none() {
         return Err("không có gì để làm".to_string());
@@ -723,17 +723,38 @@ fn apply_steps(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
     }
 
     if let Some(added) = added {
-        whiten_background(canvas, added);
+        finish_layers(canvas, added);
     }
     Ok(())
 }
 
-/// Ids of the "Ảnh gốc" and "Người" layers.
+/// Multiply the layer's alpha by its mask and drop the mask; the colours
+/// under transparent pixels stay, so later retouching blurs nothing dark in.
+fn press_mask_into_alpha(layer: &mut crate::core::layer::Layer) {
+    let Some(mask) = layer.mask.take() else {
+        return;
+    };
+    let (w, h) = (layer.width, layer.height);
+    let mut rgba = layer.tiles.flatten();
+    let values = mask.tiles.flatten();
+    if values.len() != rgba.len() || rgba.len() != w as usize * h as usize * 4 {
+        layer.mask = Some(mask);
+        return;
+    }
+    for (px, m) in rgba.chunks_exact_mut(4).zip(values.chunks_exact(4)) {
+        px[3] = ((px[3] as u32 * m[0] as u32 + 127) / 255) as u8;
+    }
+    layer.tiles = TileMap::from_rgba(&rgba, w, h);
+    layer.mask_active = false;
+    layer.paint_target = crate::core::layer::PaintTarget::Pixels;
+}
+
+/// Ids of the "Ảnh gốc" and cut-out layers.
 type PersonLayers = [u32; 2];
 
 fn add_person_layers(canvas: &mut Canvas, cut: Cutout) -> PersonLayers {
     let mut cmd = LayerStructureCommand::capture_before(
-        PERSON_LAYER,
+        UNDO_LABEL,
         &canvas.layer_stack,
         canvas.width,
         canvas.height,
@@ -748,7 +769,9 @@ fn add_person_layers(canvas: &mut Canvas, cut: Cutout) -> PersonLayers {
         // add_layer inserts above the active layer and makes it active.
         let idx = stack.add_layer(w, h);
         let layer = &mut stack.layers[idx];
-        layer.name = name.to_string();
+        if !name.is_empty() {
+            layer.name = name.to_string();
+        }
         layer.parent_id = None;
         layer.tiles = TileMap::from_rgba(rgba, w, h);
         layer.offset = (cut.region.x as i32, cut.region.y as i32);
@@ -759,12 +782,9 @@ fn add_person_layers(canvas: &mut Canvas, cut: Cutout) -> PersonLayers {
         layer.id
     };
     let original = add(ORIGINAL_LAYER, &cut.original, TileMap::new_black(w, h));
+    // Carried as a mask through the crop's resample, pressed into alpha after.
     let mask_rgba: Vec<u8> = cut.mask.iter().flat_map(|&m| [m, m, m, 255]).collect();
-    let person = add(
-        PERSON_LAYER,
-        &cut.rgba,
-        TileMap::from_rgba(&mask_rgba, w, h),
-    );
+    let person = add("", &cut.rgba, TileMap::from_rgba(&mask_rgba, w, h));
     if let Some(layer) = stack.layers.get_mut(stack.active_idx) {
         layer.selected = true;
     }
@@ -773,10 +793,10 @@ fn add_person_layers(canvas: &mut Canvas, cut: Cutout) -> PersonLayers {
     [original, person]
 }
 
-/// Fill the background layer (the bottom one when none is marked) with
-/// white and hide every other layer under the person: their pixels are in
-/// the person layers already.
-fn whiten_background(canvas: &mut Canvas, added: PersonLayers) {
+/// Press the cut-out's mask into its alpha, fill the background layer (the
+/// bottom one when none is marked) with white and hide every other layer
+/// under the person: their pixels are in the person layers already.
+fn finish_layers(canvas: &mut Canvas, added: PersonLayers) {
     let mut cmd = LayerStructureCommand::capture_before(
         BACKGROUND_STEP,
         &canvas.layer_stack,
@@ -785,6 +805,9 @@ fn whiten_background(canvas: &mut Canvas, added: PersonLayers) {
     );
     let (w, h) = (canvas.width, canvas.height);
     let stack = &mut canvas.layer_stack;
+    if let Some(cut) = stack.layers.iter_mut().find(|l| l.id == added[1]) {
+        press_mask_into_alpha(cut);
+    }
     let background = stack
         .layers
         .iter()
@@ -1082,6 +1105,7 @@ mod tests {
         // An earlier retouch layer: its pixels are in the person layers now.
         let extra = canvas.layer_stack.add_layer(w, h);
         canvas.layer_stack.layers[extra].tiles = TileMap::new_solid(w, h, 200, 10, 10, 255);
+        canvas.layer_stack.layers[extra].name = "Chân dung".to_string();
         let face = reference_face();
         let frame = frame_for(&face, 0.1, false, aspect());
         let region = Region {
@@ -1114,23 +1138,30 @@ mod tests {
         let layers = &canvas.layer_stack.layers;
         let names: Vec<&str> = layers.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names.len(), layers_before + 2, "{names:?}");
-        assert_eq!(&names[names.len() - 2..], &[ORIGINAL_LAYER, PERSON_LAYER]);
+        assert_eq!(&names[names.len() - 2..], &[ORIGINAL_LAYER, "Layer 1"]);
         assert_eq!(canvas.layer_stack.active_idx, layers.len() - 1);
         // The background is white now and the old retouch layer hidden.
         assert!(layers[0].is_background && layers[0].visible);
         assert_eq!(layers[0].tiles.get_pixel(300, 400), (255, 255, 255, 255));
         assert!(!layers[1].visible);
-        // "Ảnh gốc" waits behind a black mask; "Người" shows the person only.
+        // "Ảnh gốc" waits behind a black mask; the cut-out is a plain layer
+        // whose alpha holds the person only, like Ctrl+J with a selection.
         let original = &layers[layers.len() - 2];
         assert_eq!(mask_value(original.mask.as_ref().unwrap(), 330, 700), 0);
         let person = layers.last().unwrap();
         assert_eq!((person.width, person.height), output_size());
-        let mask = person.mask.as_ref().unwrap();
+        assert!(person.mask.is_none());
         let scale = frame.height / output_size().1 as f32;
         let [u, v] = frame.local([120.0, 100.0]);
         let (ox, oy) = ((u / scale) as u32, (v / scale) as u32);
-        assert_eq!(mask_value(mask, ox, oy), 0, "at {ox},{oy}");
-        assert_eq!(mask_value(mask, 330, 700), 255);
+        let hidden = person.tiles.get_pixel(ox, oy);
+        assert_eq!(hidden.3, 0, "at {ox},{oy}");
+        assert_eq!(
+            &[hidden.0, hidden.1, hidden.2],
+            &[90, 120, 200],
+            "colour kept"
+        );
+        assert_eq!(person.tiles.get_pixel(330, 700).3, 255);
         canvas.ensure_pixels();
         let at = |x: u32, y: u32| {
             let i = (y as usize * canvas.width as usize + x as usize) * 4;
@@ -1179,7 +1210,7 @@ mod tests {
             };
             let mut segment = |px: &[u8], sw: u32, sh: u32| {
                 super::super::select_subject::segment_blocking(
-                    super::super::select_subject::SelectSubjectModel::BiRefNetTiny,
+                    super::super::select_subject::SelectSubjectModel::BiRefNetFull,
                     px,
                     sw,
                     sh,

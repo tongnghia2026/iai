@@ -106,7 +106,7 @@ pub(crate) fn id_photo_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     "Tách người ra layer riêng, nền trắng",
                 )
                 .on_hover_text(
-                    "Background thành trắng; người nhân 2 layer: \"Người\" (đã tách nền) và bên dưới \"Ảnh gốc\" (mask đen — tô trắng để lấy lại chi tiết)",
+                    "Background thành trắng; người tách ra \"Layer 1\" (như Ctrl+J với vùng chọn), bên dưới là \"Ảnh gốc\" (mask đen — tô trắng để lấy lại chi tiết)",
                 );
                 ui.checkbox(&mut options.then_portrait, "Xong thì mở Chỉnh chân dung");
             });
