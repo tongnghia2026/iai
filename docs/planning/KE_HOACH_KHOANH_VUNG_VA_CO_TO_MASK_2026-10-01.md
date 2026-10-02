@@ -275,6 +275,39 @@ và qua cổng · `[!]` bị chặn.
 - Cổng: kéo Sáng tóc lên mạnh — tóc sáng hơn tự nhiên, không viền cam ở chân
   tóc, không cam hóa tóc vàng. **Đạt — chủ test OK 01/10.**
 
+### Pha 8 — Hai việc nhỏ còn lại: tóc mái sát đuôi mày, cọ Tô vùng → Lông mày
+
+- Chủ 02/10: làm tiếp hai việc nhỏ ghi lại từ Pha 6.
+- [~] **Mép tóc mái không còn bị tính là lông mày** (`fringe_edge`): mép vùng
+  tóc của Sapiens2 thô (512×384) nên hay dừng trước mép tóc mái thật, để lại
+  một dải tóc sát đuôi mày bị đọc là lông mày (Mazie: một mảng nêm trắng ở
+  đuôi mày, kéo "Lông mày" đậm thì mép tóc đậm theo). Nay vùng tóc được nối
+  tiếp từ chỗ model chắc là tóc qua các điểm có **màu giống tóc đó** (chứ không
+  giống da bên dưới), đi ngắn thôi (0,04e), rồi xuôi theo mép mềm của tóc
+  (chỉ đi xuống, không leo ngược lên sợi lông mày bên cạnh). Bên nào có lông
+  mày trông giống tóc (lông mày đen sát tóc mái đen — Judy) thì không đụng,
+  để người dùng tô tay. Mức sợi lông mày của từng bên không còn lấy mẫu chỗ
+  tóc (trước đây bị kéo lệch). Probe 15 ảnh: chỉ Mazie đổi (hết nêm, hết vệt
+  tối dọc mép tóc khi kéo đậm) và Nelson bỏ một sợi tóc bạc ở thái dương;
+  13 ảnh còn lại y như cũ.
+- [~] **Cọ Tô vùng → Lông mày** (màu vàng, như "Hiện vùng nhận diện"): tô thêm /
+  bớt hình lông mày mà các thanh "Lông mày" tác động; chỉ Thêm / Bớt (Thông
+  minh tô như Thêm vì lông mày là một hình mềm quanh các sợi thưa, không phải
+  vùng màu). Sau mỗi nét: tính lại lớp lông mày từ hình đã tô (sợi trong đó,
+  màu trung bình, màu da bên dưới) và tính lại da — **lông mày được ưu tiên
+  hơn da**: thêm lông mày thì bớt da tương ứng (chỗ đó không bị làm mịn), bớt
+  lông mày thì trả lại da như trước khi cắt lông mày ra. Hoàn tác / làm lại
+  chính xác. Công thức trên layer "Chân dung" lưu hình lông mày đã tô (và da
+  như đã tô, trước khi nhường cho lông mày); file `.iai` thêm ảnh
+  `layer_N_portrait_F_brows.png`, bản iAi cũ bỏ qua.
+- Test: `fringe_edge_*` (2), `brow_takes_skin_in_proportion_and_gives_back_the_uncut_skin`,
+  `brush_paints_brows_moves_the_skin_and_reopens` (ảnh thật: tô → da đổi →
+  hoàn tác/làm lại → Áp dụng → mở lại), `portrait_recipe_round_trips_with_its_masks`
+  thêm lông mày.
+- Cổng: ảnh có tóc mái sát đuôi mày — kéo "Lông mày" đậm không làm đậm mép
+  tóc; tô Lông mày thêm đuôi mày / bớt chỗ thừa rồi kéo thanh Lông mày đúng
+  vùng đã tô; Áp dụng, mở lại vẫn còn.
+
 ## 3. Rủi ro
 
 | Rủi ro | Xử lý |
@@ -328,3 +361,6 @@ và qua cổng · `[!]` bị chặn.
 - **2026-10-01** — Chủ test Pha 3 + 4 OK. Pha 5 code xong (`08c8541`: cọ
   Smart của Refine Selection dùng chung `core::smart_brush`; Alt + Smart = bớt
   phần giống nền); probe + test đạt; chờ chủ test.
+- **2026-10-02** — Chủ giao hai việc nhỏ còn lại → Pha 8 code xong (`5beea7e`
+  mép tóc mái không còn là lông mày; `cce8c5c` cọ Tô vùng → Lông mày); probe +
+  test đạt; chờ chủ test (cùng Pha 5).
