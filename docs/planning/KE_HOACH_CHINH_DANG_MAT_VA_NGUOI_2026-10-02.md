@@ -235,7 +235,9 @@ Cùng lõi `core::portrait::reshape` (thêm trường vào `FaceShape` +
       thẳng; 10–850 ms mỗi thanh trên ảnh 20 MP. Test app
       `body_shape_analyses_bodies_on_first_use_and_narrows_the_waist`.
 - Cổng: chủ test — ở mức vừa người thon tự nhiên, nền cạnh eo/tay không cong
-  thấy rõ.
+  thấy rõ. **Chủ test 02/10 tối: "chưa được chính xác" — TẠM GÁC** (chủ ít
+  dùng, để khi rảnh làm tiếp). Khi quay lại: hỏi chủ ảnh / thanh nào sai,
+  dùng probe `probe_body_shape` (`bs_*`, `bw_*`) để dò.
 
 ### Pha C (tùy chọn) — Giữ nền thẳng bằng vá AI
 
@@ -255,6 +257,10 @@ Cùng lõi `core::portrait::reshape` (thêm trường vào `FaceShape` +
 | Ảnh lớn chậm | Lưới thô, chỉ tính trong khung ảnh hưởng, luồng nền |
 
 ## 4. Changelog
+
+- **2026-10-02 (tối)** — Chủ test Dáng người: chưa chính xác, **tạm gác** (ít
+  dùng). Đợt 10 dừng ở đây; việc tiếp theo chủ chọn: **chỉnh ảnh thẻ** (phiên
+  mới).
 
 - **2026-10-02 (tối)** — B1 code xong: 6 thanh dáng người (Eo thon, Vai,
   Cổ, Tay thon, Chân thon, Chân dài), phân tích dáng người khi cần, uốn ghép
