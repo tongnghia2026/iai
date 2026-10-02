@@ -291,6 +291,117 @@ mod tests {
         }
     }
 
+    /// Opt-in: IAI_PORTRAIT_BODY_PROBE is a folder of photos; for the largest
+    /// face, the body parts the part model sees over the whole person, from
+    /// one crop and from two stacked ones: photo | one | two.
+    #[test]
+    #[ignore]
+    fn probe_body_labels() {
+        use crate::core::ai::body_parts::{BodyLabels, Segmenter};
+        use crate::core::ai::face_mesh;
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_BODY_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".jpg"))
+            .collect();
+        names.sort();
+        let mut segmenter = Segmenter::load(false).unwrap();
+        let colour = |label: u8| -> Option<[u8; 3]> {
+            Some(match label {
+                0 => return None,
+                1 => [170, 90, 255],
+                2 => [255, 255, 255],
+                3 => [255, 190, 150],
+                4 => [110, 60, 20],
+                6 | 15 => [255, 230, 0],
+                7 => [0, 220, 220],
+                16 => [0, 140, 160],
+                11 => [60, 220, 60],
+                20 => [20, 130, 20],
+                12 => [255, 60, 60],
+                21 => [170, 20, 20],
+                8 => [230, 150, 60],
+                17 => [150, 90, 20],
+                13 => [160, 60, 200],
+                22 => [255, 140, 0],
+                23 => [40, 90, 255],
+                24..=28 => [255, 0, 130],
+                _ => [128, 128, 128],
+            })
+        };
+        // Of overlapping crops, the one the point sits deepest in.
+        let label_of = |pieces: &[BodyLabels], x: f32, y: f32| -> Option<u8> {
+            let (w, h) = BodyLabels::SIZE;
+            pieces
+                .iter()
+                .filter_map(|p| {
+                    let [u, v] = p.to_grid(x, y);
+                    let depth = u.min(v).min(w as f32 - u).min(h as f32 - v);
+                    (depth >= 0.0).then(|| (depth, p))
+                })
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .and_then(|(_, p)| p.label_at(x, y))
+        };
+        for name in names {
+            let image = image::open(dir.join(&name)).unwrap().to_rgba8();
+            let (width, height) = image.dimensions();
+            let rgba = image.into_raw();
+            let meshes = face_mesh::detect(&rgba, width, height).unwrap_or_default();
+            let Some(mesh) = meshes
+                .iter()
+                .max_by(|a, b| a.frame().1.total_cmp(&b.frame().1))
+            else {
+                println!("{name}: no face");
+                continue;
+            };
+            let mut tiles = Vec::new();
+            let k = (900.0 / height as f32).min(1.0);
+            let (tw, th) = ((width as f32 * k) as u32, (height as f32 * k) as u32);
+            let photo = image::imageops::resize(
+                &image::RgbaImage::from_raw(width, height, rgba.clone()).unwrap(),
+                tw,
+                th,
+                image::imageops::FilterType::Triangle,
+            );
+            tiles.push(image::DynamicImage::ImageRgba8(photo.clone()).to_rgb8());
+            let mut line = format!("{name}: e {:.0}", mesh.frame().1);
+            for pieces in [1, 2] {
+                let started = std::time::Instant::now();
+                let parts = segmenter
+                    .segment_body(&rgba, width, height, mesh, None, pieces)
+                    .unwrap();
+                line += &format!(
+                    " | {pieces} crop(s) {} ms, {:.1} px/cell",
+                    started.elapsed().as_millis(),
+                    parts[0].scale()
+                );
+                tiles.push(image::RgbImage::from_fn(tw, th, |x, y| {
+                    let p = photo.get_pixel(x, y).0;
+                    let (ix, iy) = ((x as f32 + 0.5) / k, (y as f32 + 0.5) / k);
+                    match label_of(&parts, ix, iy).and_then(colour) {
+                        Some(c) => image::Rgb(std::array::from_fn(|i| {
+                            ((p[i] as u16 + c[i] as u16 * 2) / 3) as u8
+                        })),
+                        None => image::Rgb([p[0] / 3, p[1] / 3, p[2] / 3]),
+                    }
+                }));
+            }
+            println!("{line}");
+            let mut sheet = image::RgbImage::new((tw + 6) * 3, th);
+            for (i, t) in tiles.iter().enumerate() {
+                image::imageops::replace(&mut sheet, t, ((tw + 6) * i as u32) as i64, 0);
+            }
+            sheet
+                .save(dir.join(format!("bl_{}.png", name.trim_end_matches(".jpg"))))
+                .unwrap();
+        }
+    }
+
     /// Opt-in: IAI_PORTRAIT_RESHAPE_PROBE is a folder of photos; per face 0,
     /// the area the face shape warps: photo, each shape slider at 100 (and
     /// some at -100), and a grid drawn over the photo warped by slimming +

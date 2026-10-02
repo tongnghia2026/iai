@@ -400,6 +400,98 @@ impl PartLabels {
     }
 }
 
+/// Class labels over one upright crop around a whole person.
+#[derive(Clone, Debug)]
+pub struct BodyLabels {
+    crop: PartCrop,
+    labels: Vec<u8>,
+}
+
+impl BodyLabels {
+    /// Label grid size: (columns, rows).
+    pub const SIZE: (usize, usize) = (INPUT_W, INPUT_H);
+
+    /// The label at grid cell (u, v).
+    pub fn label(&self, u: usize, v: usize) -> u8 {
+        self.labels[v * INPUT_W + u]
+    }
+
+    /// Image pixels per grid cell.
+    pub fn scale(&self) -> f32 {
+        self.crop.scale()
+    }
+
+    /// Continuous grid coordinates to image coordinates.
+    pub fn to_image(&self, u: f32, v: f32) -> [f32; 2] {
+        self.crop.to_image(u, v)
+    }
+
+    /// Image coordinates to continuous grid coordinates.
+    pub fn to_grid(&self, x: f32, y: f32) -> [f32; 2] {
+        self.crop.to_crop(x, y)
+    }
+
+    /// The label at image point (x, y), if the crop holds it.
+    pub fn label_at(&self, x: f32, y: f32) -> Option<u8> {
+        let [u, v] = self.crop.to_crop(x, y);
+        (u >= 0.0 && v >= 0.0 && u < INPUT_W as f32 && v < INPUT_H as f32)
+            .then(|| self.labels[v as usize * INPUT_W + u as usize])
+    }
+}
+
+/// How far a whole person reaches from the face, in face extents: across
+/// each way, above and below the face centre.
+const BODY_ACROSS_FACES: f32 = 3.5;
+const BODY_ABOVE_FACES: f32 = 2.2;
+const BODY_BELOW_FACES: f32 = 10.0;
+
+/// Upright 3:4 crops covering the person around `mesh`, within the image and
+/// `frame`: one for the whole box, or `pieces` stacked ones overlapping by a
+/// fifth, so a tall person is seen at a finer scale. Each crop is shifted to
+/// stay inside the image where it can.
+fn body_crops(
+    mesh: &FaceMesh,
+    width: u32,
+    height: u32,
+    frame: Option<[f32; 4]>,
+    pieces: usize,
+) -> Vec<PartCrop> {
+    let ([fx, fy], e, _) = mesh.frame();
+    let limit = frame.unwrap_or([0.0, 0.0, width as f32, height as f32]);
+    let x0 = (fx - BODY_ACROSS_FACES * e).max(limit[0]).max(0.0);
+    let x1 = (fx + BODY_ACROSS_FACES * e).min(limit[2]).min(width as f32);
+    let y0 = (fy - BODY_ABOVE_FACES * e).max(limit[1]).max(0.0);
+    let y1 = (fy + BODY_BELOW_FACES * e).min(limit[3]).min(height as f32);
+    if x1 <= x0 || y1 <= y0 {
+        return Vec::new();
+    }
+    let pieces = pieces.max(1);
+    let step = (y1 - y0) / (pieces as f32 - (pieces as f32 - 1.0) * 0.2);
+    let aspect = INPUT_W as f32 / INPUT_H as f32;
+    (0..pieces)
+        .map(|k| {
+            let top = y0 + k as f32 * step * 0.8;
+            let (bottom, h) = (top + step, step);
+            let w = (x1 - x0).max(h * aspect);
+            let h = w / aspect;
+            // Centred on the box, then kept inside the image if it fits.
+            let fit = |centre: f32, size: f32, extent: f32| {
+                if size >= extent {
+                    extent * 0.5
+                } else {
+                    centre.clamp(size * 0.5, extent - size * 0.5)
+                }
+            };
+            PartCrop {
+                cx: fit((x0 + x1) * 0.5, w, width as f32),
+                cy: fit((top + bottom) * 0.5, h, height as f32),
+                width: w,
+                angle: 0.0,
+            }
+        })
+        .collect()
+}
+
 pub struct Segmenter {
     session: ort::session::Session,
     pub on_gpu: bool,
@@ -505,6 +597,26 @@ impl Segmenter {
             }
         }
         Ok(result)
+    }
+
+    /// Labels over the whole person around `mesh`, in `pieces` stacked crops
+    /// (see [`body_crops`]), within `frame` when given.
+    pub fn segment_body(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        mesh: &FaceMesh,
+        frame: Option<[f32; 4]>,
+        pieces: usize,
+    ) -> Result<Vec<BodyLabels>, String> {
+        body_crops(mesh, width, height, frame, pieces)
+            .into_iter()
+            .map(|crop| {
+                let (labels, _) = self.run_crop(rgba, width, height, &crop)?;
+                Ok(BodyLabels { crop, labels })
+            })
+            .collect()
     }
 
     #[allow(clippy::type_complexity)]
