@@ -1210,7 +1210,7 @@ mod tests {
             };
             let mut segment = |px: &[u8], sw: u32, sh: u32| {
                 super::super::select_subject::segment_blocking(
-                    super::super::select_subject::SelectSubjectModel::BiRefNetFull,
+                    super::super::select_subject::SelectSubjectModel::BiRefNetTiny,
                     px,
                     sw,
                     sh,

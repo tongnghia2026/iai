@@ -152,7 +152,15 @@ impl App {
             canvas.layer_revision += 1;
             reopened
         });
-        let restore_settings = reopened.as_ref().map(|r| r.recipe.settings);
+        // A reopened layer brings back its own sliders; a new photo starts
+        // from the defaults, never from the last photo's (not everyone wants
+        // a slimmer face or lipstick).
+        let restore_settings = Some(
+            reopened
+                .as_ref()
+                .map_or_else(PortraitSettings::default, |r| r.recipe.settings),
+        );
+        let restore_faces = reopened.is_none().then(Vec::new);
         if reopened.is_some() {
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         }
@@ -177,7 +185,7 @@ impl App {
             brush: PortraitBrush::default(),
             reopened,
             restore_settings,
-            restore_faces: None,
+            restore_faces,
         });
         Ok(())
     }
@@ -907,6 +915,11 @@ mod tests {
         let original = photo_pixels(&app);
         let undo_before = app.docs.documents[0].canvas.undo_count();
         app.begin_portrait().unwrap();
+        // A new photo starts from the defaults with every face on.
+        assert_eq!(
+            app.portrait_restore(),
+            (false, Some(PortraitSettings::default()), Some(Vec::new()))
+        );
         let started = Instant::now();
         while app
             .shell

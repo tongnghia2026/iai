@@ -80,10 +80,10 @@ Exact sources, commits, tensor contracts, and SHA-256 values are documented in
 | Model | License / restriction | Use |
 |---|---|---|
 | LaMa / big-lama | Apache-2.0 upstream; verify the selected host's model card | Smart Fill / inpainting |
-| BiRefNet Tiny / Full | MIT | Select Subject (Tiny default; Full for Làm ảnh thẻ) — foreground matte |
+| BiRefNet Tiny | MIT | Select Subject (default) and Làm ảnh thẻ — foreground matte |
 | YOLO11-seg | AGPL-3.0 (Ultralytics) — compatible with iAi's AGPL | Select Subject — object instance masks |
 
-All Select Subject models are commercial-safe: BiRefNet is MIT and YOLO11-seg is
+Both Select Subject models are commercial-safe: BiRefNet is MIT and YOLO11-seg is
 AGPL (matching iAi's own license).
 
 ## Services and user credentials

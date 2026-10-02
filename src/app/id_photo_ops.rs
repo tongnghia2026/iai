@@ -12,7 +12,7 @@ use super::state::App;
 use crate::core::id_photo::{self, IdPhotoOptions, IdPhotoPlan};
 use crate::core::select_subject::{SelectSubjectEngine, SelectSubjectModel, SubjectStatus};
 
-const SEGMENT_MODEL: SelectSubjectModel = SelectSubjectModel::BiRefNetFull;
+const SEGMENT_MODEL: SelectSubjectModel = SelectSubjectModel::BiRefNetTiny;
 
 pub struct IdPhotoJob {
     doc_id: crate::core::document::DocumentId,
@@ -105,11 +105,11 @@ impl App {
     fn segment_model_status(&self) -> String {
         match self.segment_model_state() {
             Some(SubjectStatus::Downloading { progress }) => format!(
-                "Đang tải model tách nền BiRefNet Full (~928 MB)… {:.0}% — tải xong sẽ tự chạy",
+                "Đang tải model tách nền BiRefNet (~214 MB)… {:.0}% — tải xong sẽ tự chạy",
                 progress * 100.0
             ),
             Some(SubjectStatus::Error(e)) => format!("Tải model tách nền lỗi: {e}"),
-            _ => "Đang chuẩn bị tải model tách nền BiRefNet Full (~928 MB)…".to_string(),
+            _ => "Đang chuẩn bị tải model tách nền BiRefNet (~214 MB)…".to_string(),
         }
     }
 
