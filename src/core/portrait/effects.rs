@@ -54,6 +54,10 @@ pub struct PortraitSettings {
     pub nose_slim: f32,
     pub mouth_width: f32,
     pub forehead_height: f32,
+    pub smile: f32,
+    pub lip_fullness: f32,
+    pub eye_tilt: f32,
+    pub face_squeeze: f32,
 }
 
 impl Default for PortraitSettings {
@@ -89,6 +93,10 @@ impl Default for PortraitSettings {
             nose_slim: 0.0,
             mouth_width: 0.0,
             forehead_height: 0.0,
+            smile: 0.0,
+            lip_fullness: 0.0,
+            eye_tilt: 0.0,
+            face_squeeze: 0.0,
         }
     }
 }
@@ -125,6 +133,10 @@ impl PortraitSettings {
         nose_slim: 0.0,
         mouth_width: 0.0,
         forehead_height: 0.0,
+        smile: 0.0,
+        lip_fullness: 0.0,
+        eye_tilt: 0.0,
+        face_squeeze: 0.0,
     };
 
     fn unit(&self) -> Self {
@@ -168,6 +180,10 @@ impl PortraitSettings {
             nose: self.nose_slim,
             mouth: self.mouth_width,
             forehead: self.forehead_height,
+            smile: self.smile,
+            lips: self.lip_fullness,
+            eye_tilt: self.eye_tilt,
+            squeeze: self.face_squeeze,
         }
     }
 
@@ -180,6 +196,10 @@ impl PortraitSettings {
             nose_slim: 0.0,
             mouth_width: 0.0,
             forehead_height: 0.0,
+            smile: 0.0,
+            lip_fullness: 0.0,
+            eye_tilt: 0.0,
+            face_squeeze: 0.0,
             ..*self
         }
     }

@@ -17,13 +17,98 @@ fn slider_colors() -> [egui::Color32; 3] {
     ]
 }
 
-fn section_title(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(6.0);
+/// The dialog's collapsible groups; one is open at a time.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Group {
+    Brush,
+    Skin,
+    Shape,
+    Eyes,
+    Mouth,
+    Brows,
+    Hair,
+    Detail,
+}
+
+/// A group's header bar: caret, title and, when something in the group is
+/// at work, a dot on the right.
+fn group_header(ui: &mut egui::Ui, title: &str, open: bool, active: bool) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+    let visuals = ui.visuals();
+    let fill = if response.hovered() {
+        visuals.widgets.hovered.weak_bg_fill
+    } else {
+        visuals.widgets.inactive.weak_bg_fill
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, fill);
+    let text = egui::Color32::from_rgb(210, 210, 210);
+    let caret = if open {
+        ph::CARET_DOWN
+    } else {
+        ph::CARET_RIGHT
+    };
+    painter.text(
+        rect.left_center() + egui::vec2(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        caret,
+        egui::FontId::proportional(12.0),
+        text,
+    );
+    painter.text(
+        rect.left_center() + egui::vec2(26.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(12.5),
+        text,
+    );
+    if active {
+        painter.circle_filled(
+            rect.right_center() - egui::vec2(12.0, 0.0),
+            3.5,
+            egui::Color32::from_rgb(90, 170, 255),
+        );
+    }
+    let tip = if active {
+        "Có thanh đang chỉnh trong nhóm này"
+    } else {
+        "Bấm để mở / đóng nhóm"
+    };
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tip)
+}
+
+/// One group: its header, and its contents while it is the open group
+/// (`shown`, as of the start of the frame). A click on the header opens it
+/// in `next`, closing the others, or closes it.
+fn group(
+    ui: &mut egui::Ui,
+    shown: Option<Group>,
+    next: &mut Option<Group>,
+    id: Group,
+    title: &str,
+    active: bool,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    ui.add_space(3.0);
+    if group_header(ui, title, shown == Some(id), active).clicked() {
+        *next = if shown == Some(id) { None } else { Some(id) };
+    }
+    if shown == Some(id) {
+        ui.add_space(2.0);
+        body(ui);
+        ui.add_space(4.0);
+    }
+}
+
+fn sub_title(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
     ui.label(
         egui::RichText::new(title)
-            .strong()
-            .size(12.0)
-            .color(egui::Color32::from_rgb(210, 210, 210)),
+            .size(10.5)
+            .color(egui::Color32::from_gray(150)),
     );
 }
 
@@ -48,8 +133,17 @@ fn rainbow() -> [egui::Color32; 7] {
     ]
 }
 
-/// Slider rows: (label, value, tooltip, kind).
-fn rows(ui: &mut egui::Ui, enabled: bool, items: Vec<(&str, &mut f32, &str, Kind)>) {
+/// A slider row: label, value, tooltip, kind.
+type Row<'a> = (&'a str, &'a mut f32, &'a str, Kind);
+
+/// Whether any slider (not a colour picker) is away from 0.
+fn at_work(items: &[Row]) -> bool {
+    items
+        .iter()
+        .any(|(_, v, _, k)| *k != Kind::Hue && **v != 0.0)
+}
+
+fn rows(ui: &mut egui::Ui, enabled: bool, items: Vec<Row>) {
     for (label, value, tip, kind) in items {
         let (range, colours): (_, Vec<egui::Color32>) = match kind {
             Kind::Amount => (0.0..=100.0, slider_colors().to_vec()),
@@ -66,7 +160,6 @@ fn rows(ui: &mut egui::Ui, enabled: bool, items: Vec<(&str, &mut f32, &str, Kind
 /// "Tô vùng": which area the brush paints, then its mode, size and hardness.
 fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, ready: bool) {
     let d = &data.dialogs;
-    section_title(ui, "Tô vùng");
     ui.add_enabled_ui(ready, |ui| {
         ui.horizontal(|ui| {
             let targets = [
@@ -203,9 +296,13 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let faces_id = egui::Id::new("portrait_faces");
     let preview_id = egui::Id::new("portrait_preview");
     let masks_id = egui::Id::new("portrait_masks");
+    let group_id = egui::Id::new("portrait_group");
     let mut s: PortraitSettings = ctx.data_mut(|d| d.get_temp(settings_id).unwrap_or_default());
     let mut preview: bool = ctx.data_mut(|d| d.get_temp(preview_id).unwrap_or(true));
     let mut masks: bool = ctx.data_mut(|d| d.get_temp(masks_id).unwrap_or(false));
+    // Every group starts closed; opening one closes the rest.
+    let shown: Option<Group> = ctx.data_mut(|d| d.get_temp(group_id).unwrap_or(None));
+    let mut next = shown;
     let face_count = data.dialogs.portrait_faces.len();
     let mut faces: Vec<bool> = ctx.data_mut(|d| d.get_temp(faces_id).unwrap_or_default());
     // A reopened "Chân dung" layer brings back what it was made with.
@@ -275,201 +372,223 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                 );
             }
 
-            brush_section(ui, data, actions, ready);
-
             egui::ScrollArea::vertical()
                 .max_height(ctx.content_rect().height() * 0.62)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     use Kind::*;
-                    section_title(ui, "Da");
-                    rows(
+                    let hair = data.dialogs.portrait_hair;
+                    group(
                         ui,
-                        ready,
-                        vec![
-                            ("Làm mịn da", &mut s.smooth, "Mịn da nhưng giữ vân lỗ chân lông", Amount),
-                            ("Đều màu da", &mut s.even_tone, "Giảm mảng đỏ, loang màu", Amount),
-                            ("Giảm bóng dầu", &mut s.shine, "Dịu các vùng bóng loáng", Amount),
-                            ("Sáng da", &mut s.brighten, "Da sáng hơn, giữ màu", Amount),
-                            (
-                                "Xóa mụn",
-                                &mut s.blemish,
-                                "Tự tìm và xóa mụn, đốm thâm nhỏ (lấp bằng vân da lành bên cạnh)",
-                                Amount,
-                            ),
-                            ("Quầng thâm", &mut s.dark_circles, "Làm sáng vùng dưới mắt", Amount),
-                            (
-                                "Sống mũi cao",
-                                &mut s.nose_bridge,
-                                "Tạo khối: sáng dọc sống mũi, tối nhẹ hai bên",
-                                Amount,
-                            ),
-                        ],
+                        shown,
+                        &mut next,
+                        Group::Brush,
+                        "Tô vùng",
+                        data.dialogs.portrait_brush_undo,
+                        |ui| brush_section(ui, data, actions, ready),
                     );
-                    section_title(ui, "Dáng mặt");
-                    if data.dialogs.portrait_brush.is_some() {
-                        ui.label(
-                            egui::RichText::new("Đang tô vùng: xem trước tạm chưa uốn dáng.")
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(150)),
-                        );
-                    }
-                    rows(
-                        ui,
-                        ready,
-                        vec![
-                            (
-                                "Mặt thon",
-                                &mut s.face_slim,
-                                "Phải: hàm và má thon lại — trái: mặt đầy hơn",
-                                TwoSided,
-                            ),
-                            (
-                                "Cằm",
-                                &mut s.chin_length,
-                                "Phải: cằm dài hơn — trái: cằm ngắn lại",
-                                TwoSided,
-                            ),
-                            (
-                                "Mắt to",
-                                &mut s.eye_size,
-                                "Phải: mắt to hơn — trái: mắt nhỏ lại",
-                                TwoSided,
-                            ),
-                            (
-                                "Mũi thon",
-                                &mut s.nose_slim,
-                                "Phải: cánh mũi hẹp lại — trái: mũi rộng hơn",
-                                TwoSided,
-                            ),
-                            (
-                                "Miệng",
-                                &mut s.mouth_width,
-                                "Phải: miệng rộng hơn — trái: miệng hẹp lại",
-                                TwoSided,
-                            ),
-                            (
-                                "Trán",
-                                &mut s.forehead_height,
-                                "Phải: trán cao hơn — trái: trán thấp lại",
-                                TwoSided,
-                            ),
-                        ],
-                    );
-                    section_title(ui, "Mắt & răng");
-                    rows(
-                        ui,
-                        ready,
-                        vec![
-                            ("Trắng mắt", &mut s.eye_white, "Lòng trắng mắt sáng, bớt đỏ", Amount),
-                            ("Sáng tròng mắt", &mut s.iris, "Tròng mắt sáng và trong hơn", Amount),
-                            (
-                                "Màu tròng mắt",
-                                &mut s.iris_hue,
-                                "Chọn màu trên dải — cần kéo \"Phủ màu tròng\" để thấy",
-                                Hue,
-                            ),
-                            ("Phủ màu tròng", &mut s.iris_tint, "0 = giữ màu mắt thật", Amount),
-                            ("Trắng răng", &mut s.teeth, "Răng trắng, bớt ố vàng", Amount),
-                        ],
-                    );
-                    section_title(ui, "Môi");
-                    rows(
-                        ui,
-                        ready,
-                        vec![
-                            (
-                                "Đậm môi",
-                                &mut s.lip_saturation,
-                                "Trái: môi nhạt màu — phải: môi đậm, tươi",
-                                TwoSided,
-                            ),
-                            (
-                                "Sáng môi",
-                                &mut s.lip_brightness,
-                                "Trái: môi tối hơn — phải: môi sáng hơn",
-                                TwoSided,
-                            ),
-                            (
-                                "Màu môi",
-                                &mut s.lip_hue,
-                                "Chọn màu son trên dải — cần kéo \"Phủ màu môi\" để thấy",
-                                Hue,
-                            ),
-                            ("Phủ màu môi", &mut s.lip_tint, "0 = giữ màu môi thật", Amount),
-                        ],
-                    );
-                    section_title(ui, "Lông mày");
-                    rows(
-                        ui,
-                        ready,
-                        vec![
-                            (
-                                "Đậm nhạt",
-                                &mut s.brows,
-                                "0 = giữ nguyên — trái: lông mày nhạt đi — phải: đậm hơn",
-                                TwoSided,
-                            ),
-                            (
-                                "Độ nét",
-                                &mut s.brow_sharpen,
-                                "0 = giữ nguyên — sợi lông mày rõ nét hơn",
-                                Amount,
-                            ),
-                            (
-                                "Màu lông mày",
-                                &mut s.brow_hue,
-                                "Chọn màu trên dải — cần kéo \"Phủ màu lông mày\" để thấy",
-                                Hue,
-                            ),
-                            (
-                                "Phủ màu lông mày",
-                                &mut s.brow_tint,
-                                "0 = giữ màu lông mày thật",
-                                Amount,
-                            ),
-                        ],
-                    );
-                    section_title(ui, "Tóc");
-                    if !data.dialogs.portrait_hair && ready {
-                        ui.label(
-                            egui::RichText::new("Không nhận ra tóc (cần model tách vùng Sapiens2).")
+                    let skin = vec![
+                        ("Làm mịn da", &mut s.smooth, "Mịn da nhưng giữ vân lỗ chân lông", Amount),
+                        ("Đều màu da", &mut s.even_tone, "Giảm mảng đỏ, loang màu", Amount),
+                        ("Giảm bóng dầu", &mut s.shine, "Dịu các vùng bóng loáng", Amount),
+                        ("Sáng da", &mut s.brighten, "Da sáng hơn, giữ màu", Amount),
+                        (
+                            "Xóa mụn",
+                            &mut s.blemish,
+                            "Tự tìm và xóa mụn, đốm thâm nhỏ (lấp bằng vân da lành bên cạnh)",
+                            Amount,
+                        ),
+                        ("Quầng thâm", &mut s.dark_circles, "Làm sáng vùng dưới mắt", Amount),
+                        (
+                            "Sống mũi cao",
+                            &mut s.nose_bridge,
+                            "Tạo khối: sáng dọc sống mũi, tối nhẹ hai bên",
+                            Amount,
+                        ),
+                    ];
+                    group(ui, shown, &mut next, Group::Skin, "Da", at_work(&skin), |ui| {
+                        rows(ui, ready, skin)
+                    });
+                    let face = vec![
+                        (
+                            "Mặt thon",
+                            &mut s.face_slim,
+                            "Phải: hàm và má thon lại — trái: mặt đầy hơn",
+                            TwoSided,
+                        ),
+                        (
+                            "Bóp mặt",
+                            &mut s.face_squeeze,
+                            "Phải: cả khuôn mặt hẹp lại theo chiều ngang (mắt, mũi, miệng theo cùng tỉ lệ) — trái: rộng ra",
+                            TwoSided,
+                        ),
+                        (
+                            "Cằm",
+                            &mut s.chin_length,
+                            "Phải: cằm dài hơn — trái: cằm ngắn lại",
+                            TwoSided,
+                        ),
+                        (
+                            "Trán",
+                            &mut s.forehead_height,
+                            "Phải: trán cao hơn — trái: trán thấp lại",
+                            TwoSided,
+                        ),
+                    ];
+                    let eyes_nose = vec![
+                        (
+                            "Mắt to",
+                            &mut s.eye_size,
+                            "Phải: mắt to hơn — trái: mắt nhỏ lại",
+                            TwoSided,
+                        ),
+                        (
+                            "Mắt nghiêng",
+                            &mut s.eye_tilt,
+                            "Phải: đuôi mắt xếch lên — trái: đuôi mắt cụp xuống",
+                            TwoSided,
+                        ),
+                        (
+                            "Mũi thon",
+                            &mut s.nose_slim,
+                            "Phải: cánh mũi hẹp lại — trái: mũi rộng hơn",
+                            TwoSided,
+                        ),
+                    ];
+                    let mouth = vec![
+                        (
+                            "Rộng miệng",
+                            &mut s.mouth_width,
+                            "Phải: miệng rộng hơn — trái: miệng hẹp lại",
+                            TwoSided,
+                        ),
+                        (
+                            "Cười",
+                            &mut s.smile,
+                            "Phải: khóe miệng nhếch lên (cười) — trái: khóe miệng trễ xuống (mếu)",
+                            TwoSided,
+                        ),
+                        (
+                            "Môi dày",
+                            &mut s.lip_fullness,
+                            "Phải: môi dày hơn — trái: môi mỏng lại",
+                            TwoSided,
+                        ),
+                    ];
+                    let reshaping = at_work(&face) || at_work(&eyes_nose) || at_work(&mouth);
+                    group(ui, shown, &mut next, Group::Shape, "Dáng mặt", reshaping, |ui| {
+                        sub_title(ui, "Khuôn mặt");
+                        rows(ui, ready, face);
+                        sub_title(ui, "Mắt & mũi");
+                        rows(ui, ready, eyes_nose);
+                        sub_title(ui, "Miệng");
+                        rows(ui, ready, mouth);
+                    });
+                    let eyes = vec![
+                        ("Trắng mắt", &mut s.eye_white, "Lòng trắng mắt sáng, bớt đỏ", Amount),
+                        ("Sáng tròng mắt", &mut s.iris, "Tròng mắt sáng và trong hơn", Amount),
+                        (
+                            "Màu tròng mắt",
+                            &mut s.iris_hue,
+                            "Chọn màu trên dải — cần kéo \"Phủ màu tròng\" để thấy",
+                            Hue,
+                        ),
+                        ("Phủ màu tròng", &mut s.iris_tint, "0 = giữ màu mắt thật", Amount),
+                    ];
+                    group(ui, shown, &mut next, Group::Eyes, "Mắt", at_work(&eyes), |ui| {
+                        rows(ui, ready, eyes)
+                    });
+                    let lips = vec![
+                        (
+                            "Đậm môi",
+                            &mut s.lip_saturation,
+                            "Trái: môi nhạt màu — phải: môi đậm, tươi",
+                            TwoSided,
+                        ),
+                        (
+                            "Sáng môi",
+                            &mut s.lip_brightness,
+                            "Trái: môi tối hơn — phải: môi sáng hơn",
+                            TwoSided,
+                        ),
+                        (
+                            "Màu môi",
+                            &mut s.lip_hue,
+                            "Chọn màu son trên dải — cần kéo \"Phủ màu môi\" để thấy",
+                            Hue,
+                        ),
+                        ("Phủ màu môi", &mut s.lip_tint, "0 = giữ màu môi thật", Amount),
+                        ("Trắng răng", &mut s.teeth, "Răng trắng, bớt ố vàng", Amount),
+                    ];
+                    group(ui, shown, &mut next, Group::Mouth, "Môi & răng", at_work(&lips), |ui| {
+                        rows(ui, ready, lips)
+                    });
+                    let brows = vec![
+                        (
+                            "Đậm nhạt",
+                            &mut s.brows,
+                            "0 = giữ nguyên — trái: lông mày nhạt đi — phải: đậm hơn",
+                            TwoSided,
+                        ),
+                        (
+                            "Độ nét",
+                            &mut s.brow_sharpen,
+                            "0 = giữ nguyên — sợi lông mày rõ nét hơn",
+                            Amount,
+                        ),
+                        (
+                            "Màu lông mày",
+                            &mut s.brow_hue,
+                            "Chọn màu trên dải — cần kéo \"Phủ màu lông mày\" để thấy",
+                            Hue,
+                        ),
+                        (
+                            "Phủ màu lông mày",
+                            &mut s.brow_tint,
+                            "0 = giữ màu lông mày thật",
+                            Amount,
+                        ),
+                    ];
+                    group(ui, shown, &mut next, Group::Brows, "Lông mày", at_work(&brows), |ui| {
+                        rows(ui, ready, brows)
+                    });
+                    let hair_rows = vec![
+                        (
+                            "Sáng tóc",
+                            &mut s.hair_brightness,
+                            "Trái: tóc tối hơn — phải: tóc sáng hơn (như thanh Blacks của Develop, giữ màu và vân tóc)",
+                            TwoSided,
+                        ),
+                        (
+                            "Màu tóc",
+                            &mut s.hair_hue,
+                            "Chọn màu nhuộm trên dải — cần kéo \"Phủ màu tóc\" để thấy",
+                            Hue,
+                        ),
+                        ("Phủ màu tóc", &mut s.hair_tint, "0 = giữ màu tóc thật", Amount),
+                    ];
+                    let hair_active = hair && at_work(&hair_rows);
+                    group(ui, shown, &mut next, Group::Hair, "Tóc", hair_active, |ui| {
+                        if !hair && ready {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Không nhận ra tóc (cần model tách vùng Sapiens2).",
+                                )
                                 .size(10.0)
                                 .color(egui::Color32::from_rgb(220, 150, 90)),
-                        );
-                    }
-                    rows(
-                        ui,
-                        ready && data.dialogs.portrait_hair,
-                        vec![
-                            (
-                                "Sáng tóc",
-                                &mut s.hair_brightness,
-                                "Trái: tóc tối hơn — phải: tóc sáng hơn (như thanh Blacks của Develop, giữ màu và vân tóc)",
-                                TwoSided,
-                            ),
-                            (
-                                "Màu tóc",
-                                &mut s.hair_hue,
-                                "Chọn màu nhuộm trên dải — cần kéo \"Phủ màu tóc\" để thấy",
-                                Hue,
-                            ),
-                            ("Phủ màu tóc", &mut s.hair_tint, "0 = giữ màu tóc thật", Amount),
-                        ],
-                    );
-                    section_title(ui, "Chi tiết");
-                    rows(
-                        ui,
-                        ready,
-                        vec![
-                            (
-                                "Tăng nét",
-                                &mut s.sharpen,
-                                "Mắt, mi, môi nét hơn (không đụng da và lông mày)",
-                                Amount,
-                            ),
-                        ],
-                    );
+                            );
+                        }
+                        rows(ui, ready && hair, hair_rows)
+                    });
+                    let detail = vec![(
+                        "Tăng nét",
+                        &mut s.sharpen,
+                        "Mắt, mi, môi nét hơn (không đụng da và lông mày)",
+                        Amount,
+                    )];
+                    group(ui, shown, &mut next, Group::Detail, "Chi tiết", at_work(&detail), |ui| {
+                        rows(ui, ready, detail)
+                    });
                 });
 
             ui.add_space(8.0);
@@ -516,7 +635,16 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
         d.insert_temp(faces_id, faces.clone());
         d.insert_temp(preview_id, preview);
         d.insert_temp(masks_id, masks);
+        if do_apply || do_cancel {
+            d.remove_temp::<Option<Group>>(group_id);
+        } else {
+            d.insert_temp(group_id, next);
+        }
     });
+    // The brush paints only while its group is open.
+    if next != Some(Group::Brush) && data.dialogs.portrait_brush.is_some() {
+        actions.dialogs.set_portrait_brush = Some(None);
+    }
 
     if do_apply {
         actions.dialogs.apply_portrait = Some((s, faces));

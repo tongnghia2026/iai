@@ -293,8 +293,8 @@ mod tests {
 
     /// Opt-in: IAI_PORTRAIT_RESHAPE_PROBE is a folder of photos; per face 0,
     /// the area the face shape warps: photo, each shape slider at 100 (and
-    /// face slimming at -100), and a grid drawn over the photo warped by
-    /// slimming + bigger eyes, to see how straight lines bend.
+    /// some at -100), and a grid drawn over the photo warped by slimming +
+    /// bigger eyes and by squeezing, to see how straight lines bend.
     #[test]
     #[ignore]
     fn probe_reshape() {
@@ -314,7 +314,10 @@ mod tests {
             let image = image::open(dir.join(&name)).unwrap().to_rgba8();
             let (width, height) = image.dimensions();
             let rgba = image.into_raw();
-            let model = analyze(&rgba, width, height, false, None, &|_| {}).unwrap();
+            let Some(model) = analyze(&rgba, width, height, false, None, &|_| {}).ok() else {
+                println!("{name}: no face");
+                continue;
+            };
             let Some(face) = model.faces.first() else {
                 println!("{name}: no face");
                 continue;
@@ -370,6 +373,55 @@ mod tests {
                         ..Default::default()
                     },
                 ),
+                (
+                    "smile",
+                    FaceShape {
+                        smile: 100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "frown",
+                    FaceShape {
+                        smile: -100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "full lips",
+                    FaceShape {
+                        lips: 100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "thin lips",
+                    FaceShape {
+                        lips: -100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "tilt up",
+                    FaceShape {
+                        eye_tilt: 100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "tilt down",
+                    FaceShape {
+                        eye_tilt: -100.0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "squeeze",
+                    FaceShape {
+                        squeeze: 100.0,
+                        ..Default::default()
+                    },
+                ),
             ];
             let both = FaceShape {
                 slim: 100.0,
@@ -417,8 +469,14 @@ mod tests {
                 }
             }
             tiles.push(tile(&warp_region(&grid, whole, &[&reference], None, area)));
+            let squeezed = FaceShape {
+                squeeze: 100.0,
+                ..Default::default()
+            };
+            let field = face_field(points, &squeezed, &[], width, height).unwrap();
+            tiles.push(tile(&warp_region(&grid, whole, &[&field], None, area)));
             println!("{line}");
-            let cols = 3u32;
+            let cols = 4u32;
             let rows = (tiles.len() as u32).div_ceil(cols);
             let mut sheet = image::RgbImage::from_pixel(
                 (area.w + 6) * cols,
@@ -443,6 +501,56 @@ mod tests {
             )
             .save(dir.join(format!("rp_{}.png", name.trim_end_matches(".jpg"))))
             .unwrap();
+            // Close-ups, three a row: the mouth (photo, wider, smile, frown,
+            // full and thin lips), then the eyes (photo, bigger, tilted up
+            // and down).
+            let at = |k: usize| [points[k][0] - area.x as f32, points[k][1] - area.y as f32];
+            let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+            let close_ups = [
+                (
+                    mid(at(13), at(14)),
+                    [0.6 * e, 0.36 * e],
+                    vec![0, 6, 8, 9, 10, 11],
+                ),
+                (
+                    mid(at(468), at(473)),
+                    [0.9 * e, 0.3 * e],
+                    vec![0, 4, 12, 13],
+                ),
+            ];
+            let (cell_w, cell_h) = (600u32, 360u32);
+            let mut cells = Vec::new();
+            for (centre, [w, h], picks) in close_ups {
+                let (w, h) = (w.min(area.w as f32) as u32, h.min(area.h as f32) as u32);
+                let x0 = (centre[0] - w as f32 * 0.5).clamp(0.0, (area.w - w) as f32) as u32;
+                let y0 = (centre[1] - h as f32 * 0.5).clamp(0.0, (area.h - h) as f32) as u32;
+                for k in picks {
+                    let crop = image::imageops::crop_imm(&tiles[k], x0, y0, w, h).to_image();
+                    let ch = (cell_w * h / w.max(1)).min(cell_h);
+                    cells.push(image::imageops::resize(
+                        &crop,
+                        cell_w,
+                        ch,
+                        image::imageops::FilterType::Lanczos3,
+                    ));
+                }
+            }
+            let mut zoom = image::RgbImage::from_pixel(
+                (cell_w + 4) * 3,
+                (cell_h + 4) * (cells.len() as u32).div_ceil(3),
+                image::Rgb([255, 0, 255]),
+            );
+            for (k, c) in cells.iter().enumerate() {
+                let k = k as u32;
+                image::imageops::replace(
+                    &mut zoom,
+                    c,
+                    ((cell_w + 4) * (k % 3)) as i64,
+                    ((cell_h + 4) * (k / 3)) as i64,
+                );
+            }
+            zoom.save(dir.join(format!("rz_{}.png", name.trim_end_matches(".jpg"))))
+                .unwrap();
         }
     }
 

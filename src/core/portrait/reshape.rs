@@ -11,8 +11,8 @@ use rayon::prelude::*;
 
 use super::analysis::{Clip, PortraitModel};
 use super::geometry::{
-    loop_points, Region, FACE_OVAL, LEFT_BROW, LEFT_EYE, LEFT_IRIS, LIPS_OUTER, NOSE_BRIDGE,
-    RIGHT_BROW, RIGHT_EYE, RIGHT_IRIS,
+    loop_points, Region, FACE_OVAL, LEFT_BROW, LEFT_EYE, LEFT_IRIS, LIPS_OUTER, MOUTH_INNER,
+    NOSE_BRIDGE, RIGHT_BROW, RIGHT_EYE, RIGHT_IRIS,
 };
 
 /// A control point the field carries from `from` to `to` (image pixels);
@@ -243,6 +243,14 @@ pub struct FaceShape {
     pub mouth: f32,
     /// Raise (positive) or lower the forehead's top.
     pub forehead: f32,
+    /// Lift the mouth corners (positive, a smile) or drop them.
+    pub smile: f32,
+    /// Fuller (positive) or thinner lips.
+    pub lips: f32,
+    /// Tilt the eyes' outer corners up (positive) or down.
+    pub eye_tilt: f32,
+    /// Narrow the whole face, features and all (positive), or widen it.
+    pub squeeze: f32,
 }
 
 impl FaceShape {
@@ -409,18 +417,105 @@ pub fn face_controls(
             nudge(k, -d * 0.15 * nose, 0.0);
         }
     }
+    // The mouth: its centre between the lips and half its width.
+    let centre = [
+        (pick(13)[0] + pick(14)[0]) * 0.5,
+        (pick(13)[1] + pick(14)[1]) * 0.5,
+    ];
+    let half = (f.local(pick(291), centre)[0] - f.local(pick(61), centre)[0])
+        .abs()
+        .max(2.0)
+        * 0.5;
+    let lip_points = || LIPS_OUTER.iter().chain(&MOUTH_INNER).copied();
     // Mouth corners: out (wider) or in.
     let mouth = unit(shape.mouth);
     if mouth != 0.0 {
-        let centre = [
-            (pick(13)[0] + pick(14)[0]) * 0.5,
-            (pick(13)[1] + pick(14)[1]) * 0.5,
-        ];
-        let half = (f.local(pick(291), centre)[0] - f.local(pick(61), centre)[0]).abs() * 0.5;
-        for &k in &LIPS_OUTER {
+        for k in lip_points() {
             let d = f.local(pick(k), centre)[0];
-            let weight = (d.abs() / half.max(1.0)).powi(3).min(1.0);
+            let weight = (d.abs() / half).powi(3).min(1.0);
             nudge(k, d.signum() * half * 0.12 * mouth * weight, 0.0);
+        }
+    }
+    // Smile: the corners up (or down), the middle of the lips still.
+    let smile = unit(shape.smile);
+    if smile != 0.0 {
+        for k in lip_points() {
+            let d = f.local(pick(k), centre)[0];
+            let weight = smoothstep(0.3, 1.0, d.abs() / half);
+            nudge(k, 0.0, -half * 0.16 * smile * weight);
+        }
+    }
+    // Lips: the outer edges away from (or toward) the line where they meet,
+    // most at the middle; the inner edges hold still.
+    let lips = unit(shape.lips);
+    if lips != 0.0 {
+        let down = |k: u16| f.local(pick(k), centre)[1];
+        let upper = (down(13) - down(0)).max(0.0);
+        let lower = (down(17) - down(14)).max(0.0);
+        // LIPS_OUTER runs from the right corner along the lower lip to the
+        // left corner (10), then back along the upper lip.
+        for (i, &k) in LIPS_OUTER.iter().enumerate() {
+            let d = f.local(pick(k), centre)[0];
+            let profile = (1.0 - (d / half).powi(2)).max(0.0);
+            let thickness = match i {
+                0 | 10 => 0.0,
+                1..=9 => lower,
+                _ => -upper,
+            };
+            nudge(k, 0.0, thickness * 0.4 * lips * profile);
+        }
+    }
+    // Eye tilt: each eye turned about its middle, outer corner up and inner
+    // down (or the reverse), the iris carried along without turning.
+    let tilt = unit(shape.eye_tilt);
+    if tilt != 0.0 {
+        let angle = 12f32.to_radians() * tilt;
+        let eyes = [
+            (&RIGHT_EYE, RIGHT_IRIS, [33, 133], angle),
+            (&LEFT_EYE, LEFT_IRIS, [263, 362], -angle),
+        ];
+        for (eye, iris, [outer, inner], angle) in eyes {
+            let (a, b) = (pick(outer), pick(inner));
+            let pivot = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+            let (sin, cos) = angle.sin_cos();
+            let turn = |k: u16| {
+                let [x, y] = f.local(pick(k), pivot);
+                [x * cos - y * sin - x, x * sin + y * cos - y]
+            };
+            for &k in eye {
+                let m = turn(k);
+                nudge(k, m[0], m[1]);
+            }
+            let m = turn(iris.0);
+            for k in std::iter::once(iris.0).chain(iris.1) {
+                nudge(k, m[0], m[1]);
+            }
+        }
+    }
+    // The whole face narrower (or wider) about its midline, features too;
+    // irises keep round, carried by their centres.
+    let squeeze = unit(shape.squeeze);
+    if squeeze != 0.0 {
+        let scale = -0.08 * squeeze;
+        let shapes: [&[u16]; 9] = [
+            &FACE_OVAL,
+            &RIGHT_EYE,
+            &LEFT_EYE,
+            &RIGHT_BROW,
+            &LEFT_BROW,
+            &NOSE_BRIDGE,
+            &NOSE_WINGS,
+            &LIPS_OUTER,
+            &MOUTH_INNER,
+        ];
+        for &k in shapes.into_iter().flatten().chain(&[2]) {
+            nudge(k, across_of(pick(k)) * scale, 0.0);
+        }
+        for iris in [RIGHT_IRIS, LEFT_IRIS] {
+            let m = across_of(pick(iris.0)) * scale;
+            for k in std::iter::once(iris.0).chain(iris.1) {
+                nudge(k, m, 0.0);
+            }
         }
     }
 
@@ -433,6 +528,7 @@ pub fn face_controls(
     keys.extend_from_slice(&NOSE_BRIDGE);
     keys.extend_from_slice(&NOSE_WINGS);
     keys.extend_from_slice(&LIPS_OUTER);
+    keys.extend_from_slice(&MOUTH_INNER);
     keys.extend_from_slice(&[RIGHT_IRIS.0, LEFT_IRIS.0, 2]);
     keys.extend_from_slice(&RIGHT_IRIS.1);
     keys.extend_from_slice(&LEFT_IRIS.1);
@@ -447,13 +543,14 @@ pub fn face_controls(
     // Along the outlines, points in between too: a sparse moved outline
     // would dip between its points.
     let step = (e / 150.0).max(3.0);
-    let loops: [(&[u16], bool); 6] = [
+    let loops: [(&[u16], bool); 7] = [
         (&FACE_OVAL, true),
         (&RIGHT_EYE, true),
         (&LEFT_EYE, true),
         (&RIGHT_BROW, true),
         (&LEFT_BROW, true),
         (&LIPS_OUTER, true),
+        (&MOUTH_INNER, true),
     ];
     for (outline, closed) in loops.into_iter().chain([(&NOSE_BRIDGE[..], false)]) {
         let n = outline.len();

@@ -111,36 +111,48 @@ Cùng lõi `core::portrait::reshape` (thêm trường vào `FaceShape` +
 `PortraitSettings`, điểm dời trong `face_controls`), mỗi thanh hai chiều
 −100..100:
 
-- [ ] **Miệng cười / mếu**: hai khóe miệng (61, 291 và các điểm môi sát khóe,
-      cả viền trong 78, 308) dời **lên** theo trục mặt (cười) hoặc **xuống**
-      (mếu), mạnh nhất ở khóe, giảm dần về giữa môi; giữa môi trên/dưới đứng
-      yên. Thử thêm nâng nhẹ gò má khi cười nếu trông cứng.
-- [ ] **Môi dày / mỏng**: viền ngoài môi trên dời lên và môi dưới dời xuống
-      (dày) hoặc ngược lại (mỏng), so với đường khép môi (viền trong
-      `MOUTH_INNER`, giữ yên); mạnh ở giữa, nhạt dần về khóe.
-- [ ] **Mắt nghiêng**: xoay mỗi mắt quanh tâm mống mắt — đuôi mắt (33 / 263)
-      lên, đầu mắt (133 / 362) xuống (mắt xếch) hoặc ngược lại; hai mắt đối
-      xứng qua trục mặt. Mống mắt giữ tròn (dời theo tâm, không xoay méo).
-- [ ] **Độ rộng mặt** ("bóp cả khuôn mặt" theo chiều ngang): toàn bộ viền
-      `FACE_OVAL` (từ thái dương tới hàm) **và** mắt, mày, mũi, miệng co /
-      giãn theo chiều ngang quanh trục giữa mặt cùng một tỉ lệ — khác "Mặt
-      thon" (chỉ hàm/má, giữ nguyên ngũ quan). Vòng neo giữ nền như cũ.
-- [ ] Probe `probe_reshape` thêm 4 thanh; test giữ công thức.
+- [~] **Miệng cười / mếu** (thanh "Cười"): mọi điểm viền ngoài + viền trong
+      môi dời **lên** theo trục mặt (cười) hoặc **xuống** (mếu) theo
+      smoothstep(0,3..1) của khoảng cách tới giữa miệng / nửa bề rộng miệng —
+      khóe dời 0,16 nửa bề rộng ở 100, giữa môi đứng yên. Probe: cười / mếu rõ,
+      tự nhiên; chưa cần nâng gò má.
+- [~] **Môi dày / mỏng** (thanh "Môi dày"): viền ngoài môi trên dời lên, môi
+      dưới dời xuống (dày) hoặc ngược lại (mỏng), mỗi môi 0,4 độ dày của nó
+      (đo ở giữa) × (1 − (khoảng cách / nửa bề rộng)²); viền trong
+      `MOUTH_INNER` giữ yên (nay là điểm neo + nội suy dọc viền cho mọi thanh;
+      "Rộng miệng" dời cả viền trong theo cùng quy tắc).
+- [~] **Mắt nghiêng**: xoay viền mỗi mắt tối đa 12° quanh **giữa hai khóe
+      mắt** (không phải tâm mống — mắt liếc thì tâm mống lệch) — đuôi mắt
+      (33 / 263) lên, đầu mắt (133 / 362) xuống (xếch) hoặc ngược lại; hai mắt
+      đối xứng. Mống mắt dời theo tâm của nó, không xoay → giữ tròn. (Probe:
+      9° còn khó thấy → 12°.)
+- [~] **Bóp mặt** ("bóp cả khuôn mặt" theo chiều ngang; phải = hẹp lại):
+      toàn bộ viền `FACE_OVAL` **và** mắt, mày, mũi, miệng co / giãn ngang
+      quanh trục giữa mặt cùng tỉ lệ (8 % ở 100) — khác "Mặt thon" (chỉ
+      hàm/má). Mống mắt dời theo tâm (giữ tròn). Vòng neo giữ nền như cũ;
+      probe lưới: cột cửa, tường cạnh má gần như thẳng.
+- [~] Probe `probe_reshape` thêm 4 thanh (cả chiều âm), lưới khi bóp mặt, và
+      ảnh cận miệng / mắt `rz_*.png`; bỏ qua ảnh không thấy mặt. Test app
+      `face_shape_warps_the_face_only_and_is_kept_in_the_recipe` thêm 4 thanh
+      (khóe miệng đổi, góc ảnh giữ, công thức giữ đủ thanh dáng).
 - Cổng: chủ test — cười/mếu tự nhiên, môi không vỡ viền, mắt nghiêng không méo
   mống mắt, bóp mặt không cong nền gần má.
 
 ### Pha A4 — Sắp xếp lại bố cục hộp thoại (chủ yêu cầu 02/10)
 
-- [ ] Chia thành các **nhóm thu gọn được**, có mũi tên ▸/▾ ở tiêu đề: Tô vùng,
-      Da, Dáng mặt, Mắt, Môi & miệng, Lông mày, Tóc, Chi tiết (gom lại cho cụ
-      thể: ví dụ "Mắt" gồm trắng mắt, sáng/màu tròng; "Dáng mặt" có thể tách
-      nhỏ Khuôn mặt / Mắt / Mũi / Miệng nếu dài).
-- [ ] **Mặc định tất cả đóng**; bấm mở một nhóm thì **nhóm đang mở tự đóng**
-      (chỉ một nhóm mở một lúc) → hộp thoại gọn, không phải cuộn dài.
-- [ ] Tiêu đề nhóm hiện dấu khi trong nhóm có thanh khác 0 / khác mặc định (để
-      biết nhóm nào đang chỉnh) — đề xuất, hỏi chủ nếu không chắc.
-- [ ] Nút Mặc định / Về 0, Xem trước, Hiện vùng nhận diện, Áp dụng / Hủy giữ
-      ở dưới cùng, luôn thấy.
+- [~] Chia thành các **nhóm thu gọn được**, mũi tên ▸/▾ ở tiêu đề: Tô vùng,
+      Da, Dáng mặt (tiêu đề nhỏ Khuôn mặt: Mặt thon, Bóp mặt, Cằm, Trán · Mắt &
+      mũi: Mắt to, Mắt nghiêng, Mũi thon · Miệng: Rộng miệng, Cười, Môi dày),
+      Mắt (trắng mắt, sáng / màu / phủ màu tròng), Môi & răng (đậm / sáng /
+      màu / phủ màu môi, trắng răng), Lông mày, Tóc, Chi tiết.
+- [~] **Mặc định tất cả đóng** (mỗi lần mở hộp thoại); bấm mở một nhóm thì
+      **nhóm đang mở tự đóng**. Cọ "Tô vùng" chỉ bật khi nhóm Tô vùng mở —
+      đóng nhóm / mở nhóm khác thì cọ tắt (nên bỏ dòng "đang tô: xem trước
+      chưa uốn" ở Dáng mặt).
+- [~] Tiêu đề nhóm có **chấm xanh** bên phải khi trong nhóm có thanh khác 0
+      (thanh chọn màu không tính; Tô vùng: khi đã có nét tô).
+- [~] Nút Mặc định / Về 0, Xem trước, Hiện vùng nhận diện, Áp dụng / Hủy giữ
+      ở dưới cùng, ngoài vùng cuộn, luôn thấy.
 - Cổng: chủ test — hộp thoại gọn, mở/đóng nhóm mượt, không mất thanh nào.
 
 ### Pha B0 — Phân tích dáng người (cổng giữ/bỏ cách làm)
@@ -193,6 +205,11 @@ Cùng lõi `core::portrait::reshape` (thêm trường vào `FaceShape` +
 | Ảnh lớn chậm | Lưới thô, chỉ tính trong khung ảnh hưởng, luồng nền |
 
 ## 4. Changelog
+
+- **2026-10-02 (chiều)** — Pha A3 + A4 code xong: 4 thanh Cười, Môi dày, Mắt
+  nghiêng, Bóp mặt; hộp thoại chia nhóm thu gọn (mặc định đóng, mở một đóng
+  các nhóm khác, chấm xanh ở nhóm đang chỉnh). Probe 10/11 ảnh (1 ảnh không
+  thấy mặt như trước) đạt nội bộ; chờ chủ test.
 
 - **2026-10-02** — Lập kế hoạch theo lựa chọn của chủ (dáng mặt + dáng người);
   chưa code. Chờ chủ duyệt mục 1 (nhất là tải ảnh thử, và Pose chỉ khi cần).

@@ -1114,28 +1114,34 @@ mod tests {
     }
 
     #[test]
-    fn face_shape_warps_the_jaw_only_and_is_kept_in_the_recipe() {
+    fn face_shape_warps_the_face_only_and_is_kept_in_the_recipe() {
         let Some(mut app) = app_with_photo() else {
             return;
         };
         app.shell.ui.show_portrait_dialog = true;
         let model = analysed(&mut app).unwrap();
         let points = &model.faces[0].mesh.points;
-        let jaw = points[172];
-        let slim = PortraitSettings {
+        let (jaw, mouth) = (points[172], points[61]);
+        let shape = PortraitSettings {
             face_slim: 100.0,
+            smile: 60.0,
+            lip_fullness: -40.0,
+            eye_tilt: 50.0,
+            face_squeeze: 30.0,
             ..PortraitSettings::NEUTRAL
         };
         let faces = vec![true; model.faces.len()];
-        assert!(!app.apply_portrait(slim, faces).unwrap(), "added");
+        assert!(!app.apply_portrait(shape, faces).unwrap(), "added");
         let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
-        assert!(
-            layer.tiles.get_pixel(jaw[0] as u32, jaw[1] as u32).3 > 0,
-            "the jaw moved"
-        );
+        for (p, what) in [(jaw, "the jaw"), (mouth, "the mouth corner")] {
+            assert!(
+                layer.tiles.get_pixel(p[0] as u32, p[1] as u32).3 > 0,
+                "{what} moved"
+            );
+        }
         assert_eq!(layer.tiles.get_pixel(0, 0).3, 0, "the corner stays");
         let recipe = layer.portrait.clone().expect("recipe kept");
-        assert_eq!(recipe.settings.face_slim, 100.0);
+        assert_eq!(recipe.settings.face_shape(), shape.face_shape());
     }
 
     #[test]
