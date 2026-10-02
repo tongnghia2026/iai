@@ -252,6 +252,129 @@ fn brow_search(outline: &[[f32; 2]], down: [f32; 2], e: f32) -> Vec<[f32; 2]> {
         .collect()
 }
 
+/// The part model's hair outline is coarse and can stop short of a fringe's
+/// edge, leaving a band of scalp hair beside a brow's tail. Carry the scalp
+/// on from where the model is sure of hair through pixels coloured like that
+/// hair (rather than like the skin `beneath`), a short way only, so a brow
+/// touching the fringe loses at most its very end. Returns how much each
+/// pixel is such hair (0..1).
+#[allow(clippy::too_many_arguments)]
+fn fringe_edge(
+    colours: &[[f32; 4]],
+    beneath: &[[f32; 3]],
+    odds: &[f32],
+    side: &[usize],
+    middle: &[bool],
+    w: usize,
+    h: usize,
+    e: f32,
+) -> Vec<f32> {
+    let n = w * h;
+    let seed: Vec<bool> = odds.iter().map(|&o| o >= 0.5).collect();
+    let seeds = seed.iter().filter(|&&s| s).count();
+    if seeds == 0 {
+        return vec![0.0; n];
+    }
+    // Where a pixel's colour sits from the skin beneath (0) to `hair` (1).
+    let share_of = |i: usize, hair: [f32; 3]| {
+        let (c, skin) = (colours[i], beneath[i]);
+        let gap = [hair[0] - skin[0], hair[1] - skin[1], hair[2] - skin[2]];
+        let gap2 = gap.iter().map(|v| v * v).sum::<f32>();
+        if gap2 < 0.12 * 0.12 {
+            return 0.0;
+        }
+        (0..3).map(|k| (c[k] - skin[k]) * gap[k]).sum::<f32>() / gap2
+    };
+    // A brow whose own hairs look like the scalp's cannot be told from a
+    // fringe touching it by colour: leave that side alone. Otherwise only
+    // pixels clearly more like the scalp than the brow carry it on.
+    let scalp_colour = {
+        let mut sum = [0.0f32; 3];
+        for i in (0..n).filter(|&i| seed[i]) {
+            for k in 0..3 {
+                sum[k] += colours[i][k];
+            }
+        }
+        sum.map(|v| v / seeds as f32)
+    };
+    let mut needed = [f32::INFINITY; 2];
+    for (s, need) in needed.iter_mut().enumerate() {
+        let brow: Vec<f32> = (0..n)
+            .filter(|&i| side[i] == s && middle[i])
+            .map(|i| share_of(i, scalp_colour))
+            .collect();
+        if let Some(like) = quantile(brow, 0.75).filter(|&like| like < 0.5) {
+            *need = (like + 0.25).max(0.6);
+        }
+    }
+    if needed.iter().all(|v| v.is_infinite()) {
+        return vec![0.0; n];
+    }
+    let mut hair: Vec<[f32; 4]> = (0..n)
+        .map(|i| {
+            let (c, s) = (colours[i], f32::from(u8::from(seed[i])));
+            [c[0] * s, c[1] * s, c[2] * s, s]
+        })
+        .collect();
+    blur4(&mut hair, w, h, (e / 40.0).max(2.0));
+    let share: Vec<f32> = (0..n)
+        .map(|i| {
+            let [r, g, b, s] = hair[i];
+            if s < 0.05 || needed[side[i]].is_infinite() {
+                return 0.0;
+            }
+            share_of(i, [r / s, g / s, b / s])
+        })
+        .collect();
+    let reach = (0.04 * e).max(2.0) as u32;
+    let mut steps = vec![u32::MAX; n];
+    let mut queue = std::collections::VecDeque::new();
+    for i in (0..n).filter(|&i| seed[i]) {
+        steps[i] = 0;
+        queue.push_back(i);
+    }
+    // Through hair-coloured pixels, then on down the soft edge of the hair
+    // (never back up it, onto a brow hair beyond).
+    let blend = (e / 60.0).max(2.0) as u32;
+    let mut edge = vec![0u32; n];
+    while let Some(i) = queue.pop_front() {
+        let next = steps[i] + 1;
+        if next > reach + blend {
+            continue;
+        }
+        let (x, y) = (i % w, i / w);
+        let around = [
+            (x > 0).then(|| i - 1),
+            (x + 1 < w).then(|| i + 1),
+            (y > 0).then(|| i - w),
+            (y + 1 < h).then(|| i + w),
+        ];
+        for j in around.into_iter().flatten() {
+            if steps[j] != u32::MAX {
+                continue;
+            }
+            let blended = share[j] < needed[side[j]];
+            let into_edge = edge[i] + u32::from(blended);
+            let downhill = !blended || share[j] <= share[i] + 0.03;
+            if share[j] >= 0.1 && downhill && into_edge <= blend && (into_edge > 0 || next <= reach)
+            {
+                steps[j] = next;
+                edge[j] = into_edge;
+                queue.push_back(j);
+            }
+        }
+    }
+    (0..n)
+        .map(|i| {
+            if steps[i] == u32::MAX || seed[i] {
+                0.0
+            } else {
+                smoothstep(0.1, 0.25, share[i])
+            }
+        })
+        .collect()
+}
+
 /// Find the brows around the mesh's brow outlines. Each pixel's colour is
 /// measured against the skin around the brows carried across them; each
 /// brow learns how far its own hairs and the plain skin beside it stray from
@@ -300,14 +423,15 @@ fn brow_layers(
     };
     // Scalp hair (a fringe, a strand at the temple) is no brow: the part
     // model reads brows as face skin, so even faint odds of hair rule out.
-    let scalp: Vec<f32> = (0..n)
+    let odds: Vec<f32> = (0..n)
         .map(|i| {
             parts.map_or(0.0, |p| {
                 let (x, y) = at(i);
-                smoothstep(0.25, 0.55, p.groups_at(x, y)[body_parts::GROUP_HAIR])
+                p.groups_at(x, y)[body_parts::GROUP_HAIR]
             })
         })
         .collect();
+    let mut scalp: Vec<f32> = odds.iter().map(|&o| smoothstep(0.25, 0.55, o)).collect();
     let mut zone = vec![0.0f32; n];
     let mut core = vec![0.0f32; n];
     let mut near = vec![0.0f32; n];
@@ -330,12 +454,6 @@ fn brow_layers(
     let beneath = masked_blur(&colours, &weight, w, h, (e / 18.0).max(2.0));
     let mut smooth: Vec<[f32; 4]> = colours.iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
     blur4(&mut smooth, w, h, (e / 900.0).round());
-    let distance: Vec<f32> = (0..n)
-        .map(|i| {
-            let c = smooth[i];
-            brow_distance([c[0], c[1], c[2]], beneath[i])
-        })
-        .collect();
     let centres: Vec<[f32; 2]> = outlines
         .iter()
         .map(|o| {
@@ -353,6 +471,26 @@ fn brow_layers(
             usize::from(d(centres[1]) < d(centres[0]))
         })
         .collect();
+    // The middle of each brow (well clear of a fringe at either end), to
+    // tell whether its hairs look like the scalp's.
+    let middle: Vec<bool> = (0..n)
+        .map(|i| {
+            let (x, y) = at(i);
+            let c = centres[side[i]];
+            core[i] > 0.7 && odds[i] < 0.25 && (x - c[0]).hypot(y - c[1]) < 0.1 * e
+        })
+        .collect();
+    let fringe = fringe_edge(&smooth, &beneath, &odds, &side, &middle, w, h, e);
+    for i in 0..n {
+        scalp[i] = scalp[i].max(fringe[i]);
+        zone[i] *= 1.0 - fringe[i];
+    }
+    let distance: Vec<f32> = (0..n)
+        .map(|i| {
+            let c = smooth[i];
+            brow_distance([c[0], c[1], c[2]], beneath[i])
+        })
+        .collect();
     // Each brow's own levels: how far the plain skin beside it strays
     // (texture, creases) and how far its hairs do.
     let mut levels = [(0.03f32, 0.1f32); 2];
@@ -368,7 +506,7 @@ fn brow_layers(
             .map(|i| distance[i])
             .collect();
         let hairs: Vec<f32> = (0..n)
-            .filter(|&i| side[i] == s && core[i] > 0.7)
+            .filter(|&i| side[i] == s && core[i] > 0.7 && scalp[i] < 0.5)
             .map(|i| distance[i])
             .collect();
         let noise = if plain.len() >= 50 {
@@ -391,7 +529,7 @@ fn brow_layers(
     let mut gathered = [1.0f32; 2];
     for (s, g) in gathered.iter_mut().enumerate() {
         let inside: Vec<f32> = (0..n)
-            .filter(|&i| side[i] == s && core[i] > 0.7)
+            .filter(|&i| side[i] == s && core[i] > 0.7 && scalp[i] < 0.5)
             .map(|i| spread[i][0])
             .collect();
         *g = quantile(inside, 0.75).unwrap_or(1.0).max(0.05);
@@ -1897,6 +2035,52 @@ mod tests {
         // The outer end (x = 0) moves out, the inner end (x = 100) stays.
         assert!(search[0][0] < -15.0, "tail {:?}", search[0]);
         assert_eq!(search[4][0], 100.0, "head {:?}", search[4]);
+    }
+
+    /// A fringe edge the part model stopped short of (hair-coloured x 20..28,
+    /// a soft ramp to x 31), with a brow starting at x 32 just past it.
+    fn fringe_scene(brow: [f32; 4]) -> Vec<f32> {
+        let (w, h, e) = (80usize, 40usize, 300.0);
+        let (skin, hair) = ([0.8f32, 0.6, 0.5, 0.0], [0.15f32, 0.1, 0.08, 0.0]);
+        let mix = |t: f32| std::array::from_fn(|k| skin[k] + (hair[k] - skin[k]) * t);
+        let colours: Vec<[f32; 4]> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                match x {
+                    _ if x < 28 => hair,
+                    28..=31 => mix(0.8 - 0.2 * (x - 28) as f32),
+                    _ if (32..70).contains(&x) && (18..22).contains(&y) => brow,
+                    _ => skin,
+                }
+            })
+            .collect();
+        let beneath = vec![[skin[0], skin[1], skin[2]]; w * h];
+        let odds: Vec<f32> = (0..w * h)
+            .map(|i| if i % w < 20 { 0.9 } else { 0.0 })
+            .collect();
+        let middle: Vec<bool> = (0..w * h)
+            .map(|i| (45..60).contains(&(i % w)) && (18..22).contains(&(i / w)))
+            .collect();
+        fringe_edge(&colours, &beneath, &odds, &vec![0; w * h], &middle, w, h, e)
+    }
+
+    #[test]
+    fn fringe_edge_takes_the_hair_past_the_model_but_not_a_light_brow() {
+        let fringe = fringe_scene([0.55, 0.4, 0.33, 0.0]);
+        let at = |x: usize, y: usize| fringe[y * 80 + x];
+        assert!(at(24, 10) > 0.95, "hair past the model {}", at(24, 10));
+        assert!(at(29, 20) > 0.95, "soft hair edge {}", at(29, 20));
+        assert_eq!(at(10, 10), 0.0, "the model's own hair stays its own");
+        for x in 32..70 {
+            assert_eq!(at(x, 20), 0.0, "brow at x {x}");
+        }
+        assert_eq!(at(50, 5), 0.0, "skin");
+    }
+
+    #[test]
+    fn fringe_edge_leaves_a_brow_as_dark_as_the_hair_alone() {
+        let fringe = fringe_scene([0.15, 0.1, 0.08, 0.0]);
+        assert!(fringe.iter().all(|&v| v == 0.0));
     }
 
     #[test]
