@@ -77,7 +77,20 @@ Crop preset 3×4 chủ vẫn dùng tay.
   Layer kết quả "Chân dung" nay nhận mask của layer nguồn (không lộ nền cũ).
 - [x] Sửa lỗi cũ phát hiện khi làm: mask "Hide All" (đen) bị Crop có thu nhỏ/xoay
   biến thành trắng (lộ hết) — `LayerMask::new_black` nay là tile đặc.
-- [ ] Build Release, chủ test đợt 2.
+- [x] Build Release, chủ test đợt 2: **OK**.
+
+## Đợt 3 (chủ chỉnh sau test đợt 2, 02/10 tối)
+
+- [x] Tách nền bằng **BiRefNet Full** (`birefnet-general-epoch_244.onnx`, ~928 MB, CPU;
+  đưa lại vào danh sách Select Subject) — giữ sợi tóc tốt hơn Tiny rõ rệt; chậm hơn
+  ~7–8 s/ảnh trên máy dev.
+- [x] Layer người kiểu **Ctrl+J với vùng chọn**: "Layer 1" KHÔNG mask (mask AI ép vào
+  alpha sau khi crop; màu dưới chỗ trong suốt giữ nguyên). "Ảnh gốc" (mask đen) giữ.
+- [x] **Màu studio** trong Chỉnh chân dung (`src/core/portrait/looks.rs`): 6 bộ màu
+  (Trong trẻo, Hồng hào, Trắng sáng, Ấm áp, Tự nhiên, Film nhẹ) — LUT 33³, giữ trắng
+  cho áo/nền trắng; nhóm "Màu studio" có ô màu mẫu + thanh "Độ đậm"; Áp dụng tạo layer
+  "Màu studio: <tên>" ngay trên "Chân dung", độ đậm = opacity; mở lại thì cập nhật/bỏ.
+- [ ] Build Release, chủ test đợt 3.
 
 ## Kết quả đo thử (02/10)
 
