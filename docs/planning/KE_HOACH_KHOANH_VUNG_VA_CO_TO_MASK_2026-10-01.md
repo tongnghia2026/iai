@@ -84,21 +84,21 @@ và qua cổng · `[!]` bị chặn.
   lỗi chưa thấy trước đó — (1) **vai/tay bên kia dây áo bị bỏ hẳn** vì mask
   chỉ giữ da nối liền với mẫu da trên mặt, dây áo cắt rời; (2) ảnh nửa người
   thì **tay bị cắt ngang ở đáy khung của Sapiens2** (khung 3e × 4e quanh đầu).
-- [~] **Da có khung riêng** (`SkinLayers.region`): khung mặt + mọi điểm
+- [x] **Da có khung riêng** (`SkinLayers.region`): khung mặt + mọi điểm
   Sapiens2 thấy da (mặt + thân > 0,35, đúng ngưỡng hàng rào của mask) **có màu
   giống da mặt** (độ lệch sắc độ r,g < 0,09 — loại găng tay trắng, áo hồng),
   không thuộc mặt khác, nới 0,1e. Mask, tách tần số, hiệu ứng da, "Hiện vùng
   nhận diện", lớp phủ và cọ tô Da chạy trên khung da; mắt, môi, mụn, lông
   mày, sống mũi giữ khung mặt (khung mặt quay về đáy cằm + 0,45e). Không có
   model tin cậy → khung da = khung mặt như cũ.
-- [~] **Da qua dây áo**: ô da mà Sapiens2 chắc ≥ 0,8 (và cắt đồ thị cũng nhận
+- [x] **Da qua dây áo**: ô da mà Sapiens2 chắc ≥ 0,8 (và cắt đồ thị cũng nhận
   là da) được giữ dù không nối với mặt.
-- [~] **Nhìn rộng lần hai**: khi da (có màu da) chạm cạnh trái/phải/đáy khung
+- [x] **Nhìn rộng lần hai**: khi da (có màu da) chạm cạnh trái/phải/đáy khung
   Sapiens2 mà ảnh còn tiếp, chạy Sapiens2 thêm một lần trên khung đứng rộng
   6e, từ 1e trên tâm mặt tới 6e dưới (trong ảnh và trong vùng chọn); hai lần
   nhìn hòa vào nhau ở 24 điểm ảnh model sát mép khung đầu. Tóc vẫn theo khung
   đầu.
-- [~] Tốc độ/RAM: mờ rộng (σ ≥ 20) chạy trên lưới khối 2–8 px rồi nội suy (lệch
+- [x] Tốc độ/RAM: mờ rộng (σ ≥ 20) chạy trên lưới khối 2–8 px rồi nội suy (lệch
   < 0,02 trong lòng ảnh); bỏ sớm các mảng float lớn. Ảnh 20 MP (Amy phóng 2×,
   khung da 3721×4742): chuẩn bị ~4,0 s (cũ 3,5 s), đỉnh RAM 2,1 GB (cũ
   2,4 GB). Ảnh 30 MP có tay: thêm ~1,7 s cho lần nhìn rộng.
@@ -118,16 +118,16 @@ và qua cổng · `[!]` bị chặn.
   mép răng cưa; lông mày bạc (Nelson) gần như không bắt (chỉ tính điểm tối hơn
   da); kéo "Lông mày" vẽ ra dải cứng; mặc định làm mịn da và "Tăng nét" (20)
   vẫn đụng lông mày.
-- [~] Mask mới (`BrowLayers` vùng riêng trong khung mặt): độ lệch màu của từng
+- [x] Mask mới (`BrowLayers` vùng riêng trong khung mặt): độ lệch màu của từng
   điểm so với da quanh lông mày (nội suy qua lông mày); mỗi bên lông mày tự
   học mức lệch của da trơn cạnh nó và của lõi lông mày → bắt được lông mày
   đậm, bạc, nhạt. **Hình lông mày** = nơi sợi tụ lại (làm mờ cỡ e/45, chuẩn
   hóa theo lõi từng bên) → mép mềm. Vùng tìm lệch lên trên và quá đuôi, gần
   như không xuống dưới (phấn mắt), không vào giữa hai mày (nếp nhăn); bỏ chỗ
   Sapiens2 thấy tóc (mái) — Sapiens2 luôn đọc lông mày là da mặt.
-- [~] Hình lông mày được **loại khỏi chỉnh da và "Tăng nét"** → mặc định lông
+- [x] Hình lông mày được **loại khỏi chỉnh da và "Tăng nét"** → mặc định lông
   mày y ảnh gốc.
-- [~] Mục **"Lông mày"** riêng trong hộp thoại, mặc định 0: Đậm nhạt (phải:
+- [x] Mục **"Lông mày"** riêng trong hộp thoại, mặc định 0: Đậm nhạt (phải:
   đậm sợi + phủ nhẹ như chì kẻ; trái: kéo tông lông mày về màu da bên dưới,
   giữ vân sợi), Độ nét, Màu lông mày + Phủ màu lông mày. "Hiện vùng nhận
   diện" tô vàng hình lông mày mềm.
@@ -142,21 +142,21 @@ và qua cổng · `[!]` bị chặn.
   vào da.
 - Nguyên nhân: vùng sáng là dải đa giác đỉnh phẳng, dốc ngắn (mềm 0,03e); hai
   dải tối bên là hai hình chữ nhật đầu cụt.
-- [~] Trường tạo khối mới (`nose_contour`): khoảng cách tới đường sống mũi
+- [x] Trường tạo khối mới (`nose_contour`): khoảng cách tới đường sống mũi
   (6→197→195→5→4) và vị trí dọc theo nó; sáng = chuông hẹp (σ 0,02e), tối hai
   bên = chuông rộng (cách 0,075e, σ 0,028e); cả hai hiện dần dưới chân mày và
   tắt dần về chóp mũi. Mạnh hơn chút (sáng 0,18, tối 0,06) bù cho dáng mềm.
   Probe `probe_nose` (IAI_PORTRAIT_NOSE_PROBE).
 - Chủ test lần 1: mềm hơn nhưng **vẫn cụt hai đầu** (bắt đầu dưới tầm mắt,
   dừng trên đầu mũi), muốn dài hơn, mềm hơn, **bớt tối hai bên**.
-- [~] Lần 2: đường sống mũi kéo từ tầm chân mày (8, 168) xuống chóp mũi (1);
+- [x] Lần 2: đường sống mũi kéo từ tầm chân mày (8, 168) xuống chóp mũi (1);
   sáng hiện dần từ chân mày, đầy từ giữa hai mắt, còn 1/3 trên chóp mũi; sáng
   rộng hơn (σ 0,026e); tối hai bên rộng hơn (σ 0,035e, cách 0,08e), chỉ dọc
   phần xương sống mũi, mạnh bằng nửa (0,03).
 - Chủ test lần 2: đoạn giữa hai mắt (khoanh tròn) **sáng quá mạnh và loang
   rộng ra hai bên** (chỗ đó mặt phẳng và rộng, vệt rộng đủ mạnh đủ thành
   quầng).
-- [~] Lần 3: vệt sáng thu hẹp về phía trên (σ 0,015e ở đầu → 0,026e từ giữa
+- [x] Lần 3: vệt sáng thu hẹp về phía trên (σ 0,015e ở đầu → 0,026e từ giữa
   sống mũi) và hiện chậm hơn: giữa hai mắt còn khoảng một nửa, mạnh nhất ở
   giữa sống mũi.
 - Cổng: kéo "Sống mũi cao" tới 100: vệt sáng dài từ giữa chân mày tới chóp
@@ -243,7 +243,7 @@ và qua cổng · `[!]` bị chặn.
 - Chủ 01/10: đưa thuật toán "Color Range hai phía" của cọ Thông minh
   (`core::portrait::brush`) sang Refine Brush của Refine Selection (thay
   `refine_edge_stamp` ở chế độ Smart; mẫu lấy từ vùng chọn đang tinh chỉnh).
-- [~] Thuật toán tách ra `core::smart_brush` (dùng chung, cọ chân dung gọi
+- [x] Thuật toán tách ra `core::smart_brush` (dùng chung, cọ chân dung gọi
   lại y nguyên): Refine Selection ▸ Smart = chỉ **thêm** phần giống vùng chọn
   theo màu (sợi mờ thêm mờ, tô lại đậm hơn), không khoét lỗ; mẫu lấy từ vùng
   chọn lúc bắt đầu nét (`stroke_before`), màu Lab từ bảng màu sẵn có
@@ -255,7 +255,8 @@ và qua cổng · `[!]` bị chặn.
   cứng nở 6 px): Meir tóc xoăn trên tường trắng, Nelson tóc bạc trên nền xanh —
   Smart thêm sợi, Alt bỏ nền lọt mép, giữ tóc; 1,5–3,5 ms/chấm cọ.
 - Cổng: Refine Selection trên ảnh tóc — tô Smart thêm sợi tóc mảnh không lan
-  ra nền; Alt + Smart bỏ phần nền thừa ở mép mà không mất tóc.
+  ra nền; Alt + Smart bỏ phần nền thừa ở mép mà không mất tóc. **Đạt — chủ
+  test OK 02/10.**
 
 ### Pha 4 — "Sáng tóc" bằng thanh Blacks của Develop
 
@@ -278,7 +279,7 @@ và qua cổng · `[!]` bị chặn.
 ### Pha 8 — Hai việc nhỏ còn lại: tóc mái sát đuôi mày, cọ Tô vùng → Lông mày
 
 - Chủ 02/10: làm tiếp hai việc nhỏ ghi lại từ Pha 6.
-- [~] **Mép tóc mái không còn bị tính là lông mày** (`fringe_edge`): mép vùng
+- [x] **Mép tóc mái không còn bị tính là lông mày** (`fringe_edge`): mép vùng
   tóc của Sapiens2 thô (512×384) nên hay dừng trước mép tóc mái thật, để lại
   một dải tóc sát đuôi mày bị đọc là lông mày (Mazie: một mảng nêm trắng ở
   đuôi mày, kéo "Lông mày" đậm thì mép tóc đậm theo). Nay vùng tóc được nối
@@ -290,7 +291,7 @@ và qua cổng · `[!]` bị chặn.
   tóc (trước đây bị kéo lệch). Probe 15 ảnh: chỉ Mazie đổi (hết nêm, hết vệt
   tối dọc mép tóc khi kéo đậm) và Nelson bỏ một sợi tóc bạc ở thái dương;
   13 ảnh còn lại y như cũ.
-- [~] **Cọ Tô vùng → Lông mày** (màu vàng, như "Hiện vùng nhận diện"): tô thêm /
+- [x] **Cọ Tô vùng → Lông mày** (màu vàng, như "Hiện vùng nhận diện"): tô thêm /
   bớt hình lông mày mà các thanh "Lông mày" tác động; chỉ Thêm / Bớt (Thông
   minh tô như Thêm vì lông mày là một hình mềm quanh các sợi thưa, không phải
   vùng màu). Sau mỗi nét: tính lại lớp lông mày từ hình đã tô (sợi trong đó,
@@ -306,7 +307,8 @@ và qua cổng · `[!]` bị chặn.
   thêm lông mày.
 - Cổng: ảnh có tóc mái sát đuôi mày — kéo "Lông mày" đậm không làm đậm mép
   tóc; tô Lông mày thêm đuôi mày / bớt chỗ thừa rồi kéo thanh Lông mày đúng
-  vùng đã tô; Áp dụng, mở lại vẫn còn.
+  vùng đã tô; Áp dụng, mở lại vẫn còn. **Đạt — chủ test OK
+  02/10.**
 
 ## 3. Rủi ro
 
@@ -364,3 +366,7 @@ và qua cổng · `[!]` bị chặn.
 - **2026-10-02** — Chủ giao hai việc nhỏ còn lại → Pha 8 code xong (`5beea7e`
   mép tóc mái không còn là lông mày; `cce8c5c` cọ Tô vùng → Lông mày); probe +
   test đạt; chờ chủ test (cùng Pha 5).
+- **2026-10-02** — Chủ test Pha 5 + Pha 8 OK → **kế hoạch đợt 9 hoàn tất**.
+  Giới hạn đã chấp nhận (dùng cọ tô tay): tay áo ren mỏng không là da; tóc
+  bạc sáng hơn da trên nền xám; lông mày đen sát tóc mái đen; thêm da bằng cọ
+  không dò mụn mới; cọ chưa có Môi / Răng / Quầng thâm (làm nếu cần).
