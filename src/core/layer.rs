@@ -733,9 +733,11 @@ impl LayerMask {
         }
     }
 
+    /// Solid like `new_white`: an empty map reads as transparent, which a
+    /// crop's edge fill turns white (revealing everything).
     pub fn new_black(width: u32, height: u32) -> Self {
         Self {
-            tiles: TileMap::new(width, height),
+            tiles: TileMap::new_black(width, height),
             width,
             height,
             enabled: true,

@@ -2120,6 +2120,29 @@ mod hdr_adjust_tests {
     }
 
     #[test]
+    fn shrinking_crop_keeps_a_hide_all_mask_hidden() {
+        let pixels = vec![120u8; 200 * 200 * 4];
+        let mut canvas = Canvas::from_rgba(pixels, 200, 200);
+        let idx = canvas.layer_stack.add_layer(200, 200);
+        canvas.layer_stack.layers[idx].add_mask(false);
+        assert!(canvas.crop_transformed_with_background(
+            100.0,
+            100.0,
+            200.0,
+            200.0,
+            100,
+            100,
+            0.0,
+            0.0,
+            0.0,
+            true,
+            [255, 255, 255, 255],
+        ));
+        let mask = canvas.layer_stack.layers[idx].mask.as_ref().unwrap();
+        assert_eq!(mask.sample(50, 50), 0.0);
+    }
+
+    #[test]
     fn undo_after_crop_restores_canvas_and_selection_dimensions() {
         // The crop command restores the layers and canvas size on undo, but it
         // does not carry the selection — undo/redo must still leave the
