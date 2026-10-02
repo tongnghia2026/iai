@@ -64,7 +64,20 @@ Crop preset 3×4 chủ vẫn dùng tay.
   trong prefs.json (khóa `id_photo`).
 - [x] P4 Crop thu nhỏ: `resample_into_tiles_footprint` lấy trung bình lưới điểm trong ô
   (áp cho Crop có xoay/thu nhỏ, kể cả Crop preset tay); test sọc 1 px thu 4 lần.
-- [ ] Build Release, chủ test.
+- [x] Build Release, chủ test 02/10: **OK**.
+
+## Đợt 2 (chủ chỉnh sau test, 02/10 tối)
+
+- [x] Bỏ layer "Nền trắng": **Background tô trắng** (các layer cũ khác ẩn); người nhân
+  2 layer: **"Người"** (tách nền, mask AI) trên **"Ảnh gốc"** (ảnh gốc, mask đen — tô
+  trắng để lấy lại chi tiết AI cắt mất).
+- [x] BiRefNet **không thử GPU nữa** (cờ `gpu` trong ModelSpec; YOLO vẫn GPU) — hết
+  khựng do lùi GPU→CPU, áp cho cả Select Subject.
+- [x] Xong thì **tự mở Chỉnh chân dung** trên layer "Người" (ô tích, mặc định bật).
+  Layer kết quả "Chân dung" nay nhận mask của layer nguồn (không lộ nền cũ).
+- [x] Sửa lỗi cũ phát hiện khi làm: mask "Hide All" (đen) bị Crop có thu nhỏ/xoay
+  biến thành trắng (lộ hết) — `LayerMask::new_black` nay là tile đặc.
+- [ ] Build Release, chủ test đợt 2.
 
 ## Kết quả đo thử (02/10)
 
