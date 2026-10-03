@@ -293,4 +293,24 @@ tóc cũng tương tự".
 - [x] File / layer lưu bằng bản đợt 11 (`hair_fade`, `iris_fade`, `brow_fade` 0..100) mở ra
   thành nửa trái của thanh mới (`PortraitSettings::from_saved`).
 - [x] Probe `IAI_PORTRAIT_EYE_PROBE` (`tmp/anh-the/mat-do`): mắt thật và mắt đỏ giả lập.
+- [x] Build Release, chủ test đợt 12: **OK**.
+
+## Đợt 13 (03/10 khuya): "Sáng da" dùng thuật toán thanh Midtones của Develop
+
+Chủ sau khi test đợt 12: "đổi thanh tăng sáng da bằng thuật toán xử lý của thanh Midtones ở
+Develop".
+
+- [x] "Sáng da" trước là một đường cong áp từng điểm ảnh (1 − (1 − v)^p): sáng đều cả vùng tối
+  lẫn vùng sáng, bệt vân da. Giờ chạy đúng tầng tone của Develop (Develop3, chỉ đặt Midtones;
+  thanh 100 = Midtones +200): ánh sáng tuyến tính nhân với hệ số theo **tông của vùng da xung
+  quanh** (dải thấp `low2` của da, sau "Đều sáng da"). Tông giữa đổi nhiều, vùng rất tối và
+  rất sáng gần như đứng yên, lỗ chân lông và nếp da giữ nguyên tương phản (`skin_tone`,
+  `midtoned` trong `effects.rs` — cùng kiểu với "Sáng tóc" dùng Blacks của Develop).
+- [x] Thanh thành **hai chiều** như Midtones của Develop: trái = da tối hơn, phải = sáng hơn.
+  Giá trị dương đã lưu giữ nguyên nghĩa.
+- [x] Mắt, môi, lông mày, chân mũi (không phải da) đổi tông **theo tông của chính chúng**, phần
+  mà mask da không phủ: môi và lòng trắng sáng / tối theo da, mi, tròng, tóc che mắt vẫn tối.
+  Không làm vậy thì kéo tối sẽ lộ viền sáng quanh lông mày, môi, chân mũi (thấy trên
+  `brick_woman.jpg` ở −100).
+- [x] Probe `IAI_PORTRAIT_SKIN_TONE_PROBE` (`tmp/anh-the/sang-da`): 0 | 50 | 100 | −50 | −100.
 - [ ] Build Release, chủ test.
