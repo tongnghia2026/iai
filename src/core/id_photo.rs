@@ -422,8 +422,13 @@ fn head_top(frame: &Frame, face: &FaceMarks, mask: &[u8], region: Region) -> Opt
     top
 }
 
-/// Keep only the masked blob holding `seed` (image space) and its soft rim,
-/// dropping other people or objects the segmenter picked up.
+/// Mask values that count as part of a blob: low enough that wisps of hair
+/// join the person they grow from; fainter values are invisible on white.
+const BLOB_LINK: u8 = 8;
+
+/// Drop the masked blobs not joined to the one holding `seed` (image space):
+/// other people or objects the segmenter picked up. Joined is through any
+/// visible mask value, so thin hair is never cut away from its person.
 fn keep_person(mask: &mut [u8], region: Region, seed: [f32; 2]) {
     let (w, h) = (region.w as usize, region.h as usize);
     let sx = (seed[0] - region.x as f32).floor();
@@ -455,7 +460,7 @@ fn keep_person(mask: &mut [u8], region: Region, seed: [f32; 2]) {
     while let Some(i) = stack.pop() {
         let (x, y) = (i % w, i / w);
         let mut visit = |j: usize| {
-            if !keep[j] && mask[j] >= 128 {
+            if !keep[j] && mask[j] >= BLOB_LINK {
                 keep[j] = true;
                 stack.push(j);
             }
@@ -473,45 +478,11 @@ fn keep_person(mask: &mut [u8], region: Region, seed: [f32; 2]) {
             visit(i + w);
         }
     }
-    let rim = (w.max(h) / 150).max(2);
-    let near_keep = dilate(&keep, w, h, rim);
-    for (m, near) in mask.iter_mut().zip(near_keep) {
-        if !near {
+    for (m, kept) in mask.iter_mut().zip(keep) {
+        if !kept && *m >= BLOB_LINK {
             *m = 0;
         }
     }
-}
-
-/// Square dilation by `r` of a boolean mask (separable running counts).
-fn dilate(src: &[bool], w: usize, h: usize, r: usize) -> Vec<bool> {
-    let mut rows = vec![false; w * h];
-    for y in 0..h {
-        let line = &src[y * w..(y + 1) * w];
-        let mut count = line[..r.min(w)].iter().filter(|&&b| b).count();
-        for x in 0..w {
-            if x + r < w && line[x + r] {
-                count += 1;
-            }
-            rows[y * w + x] = count > 0;
-            if x >= r && line[x - r] {
-                count -= 1;
-            }
-        }
-    }
-    let mut out = vec![false; w * h];
-    for x in 0..w {
-        let mut count = (0..r.min(h)).filter(|&y| rows[y * w + x]).count();
-        for y in 0..h {
-            if y + r < h && rows[(y + r) * w + x] {
-                count += 1;
-            }
-            out[y * w + x] = count > 0;
-            if y >= r && rows[(y - r) * w + x] {
-                count -= 1;
-            }
-        }
-    }
-    out
 }
 
 /// Recolour the partly masked rim (hair) so it carries no tint of the old
@@ -1111,6 +1082,27 @@ mod tests {
         assert_eq!(mask[40 * w as usize + 50], 90, "the person's own rim stays");
         assert_eq!(mask[40 * w as usize + 90], 0);
         assert_eq!(mask[40 * w as usize + 79], 0);
+    }
+
+    #[test]
+    fn keep_person_keeps_a_long_thin_wisp_of_hair() {
+        // A faint strand (mask 40) running 25 px out from the head: it was
+        // cut where it left a square band around the solid mask.
+        let (w, h) = (100u32, 60u32);
+        let region = Region { x: 0, y: 0, w, h };
+        let mut mask = vec![0u8; (w * h) as usize];
+        for y in 10..50 {
+            for x in 10..40 {
+                mask[y * w as usize + x] = 255;
+            }
+        }
+        for x in 40..65 {
+            mask[20 * w as usize + x] = 40;
+        }
+        keep_person(&mut mask, region, [25.0, 30.0]);
+        for x in 40..65 {
+            assert_eq!(mask[20 * w as usize + x], 40, "wisp cut at x {x}");
+        }
     }
 
     #[test]
