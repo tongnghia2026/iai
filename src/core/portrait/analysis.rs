@@ -89,6 +89,9 @@ pub struct FaceModel {
     pub(super) eye_white: Vec<u8>,
     pub(super) iris: Vec<u8>,
     pub(super) teeth: Vec<u8>,
+    /// The nostrils and the nose's base between them: not skin, yet lit and
+    /// toned with the skin around.
+    pub(super) nostrils: Vec<u8>,
     /// Spot strength (score, fixed point) and soft disc coverage.
     pub(super) spot_score: Vec<u8>,
     pub(super) spot_cover: Vec<u8>,
@@ -2183,6 +2186,7 @@ fn build_face(
         eye_white,
         iris,
         teeth,
+        nostrils: nostril_area.into_par_iter().map(to_u8).collect(),
         spot_score,
         spot_cover,
         donor,

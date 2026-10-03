@@ -20,8 +20,8 @@ use crate::core::develop::{
 };
 use crate::core::develop_scene::{build_scene_tone_for, BaseLook, SceneToneData, SCENE_EV_MIN};
 
-/// Sliders run 0..100, the two-sided ones (the `*_saturation`s, lip and hair
-/// brightness, brows) -100..100, and the colour pickers (`*_hue`) are
+/// Sliders run 0..100, the two-sided ones (the `*_saturation`s, skin, lip and
+/// hair brightness, brows) -100..100, and the colour pickers (`*_hue`) are
 /// target hues in degrees, 0..360, applied by the matching `*_tint` amount.
 /// Brows have only their own sliders, all 0 by default: they stay as shot.
 /// A new photo starts with the corrections of "Sửa màu & sáng", the "Trong
@@ -60,6 +60,8 @@ pub struct PortraitSettings {
     pub even_light: f32,
     pub even_tone: f32,
     pub shine: f32,
+    /// "Sáng da", -100..100: Develop's Midtones on the skin (see
+    /// [`skin_tone`]).
     pub brighten: f32,
     pub blemish: f32,
     pub dark_circles: f32,
@@ -283,7 +285,7 @@ impl PortraitSettings {
             even_light: u(self.even_light),
             even_tone: u(self.even_tone),
             shine: u(self.shine),
-            brighten: u(self.brighten),
+            brighten: both(self.brighten),
             blemish: u(self.blemish),
             dark_circles: u(self.dark_circles),
             eye_white: u(self.eye_white),
@@ -599,12 +601,6 @@ fn skin_result(
             *v -= shine * lift * 0.75;
         }
     }
-    if s.brighten > 0.0 {
-        let power = 1.0 + 0.5 * s.brighten;
-        for v in r.iter_mut() {
-            *v = 1.0 - (1.0 - v.clamp(0.0, 1.0)).powf(power);
-        }
-    }
     r
 }
 
@@ -688,18 +684,25 @@ fn colourise(c: [f32; 3], hue: f32, saturation: f32) -> [f32; 3] {
     hsl_to_rgb([hue, s.max(saturation), l])
 }
 
+/// What a render works out once from the sliders and the photo's light.
+struct Shared {
+    /// The photo's neutral ([`grey_axis`]).
+    grey: [f32; 3],
+    /// Develop's Midtones for "Sáng da", unless it is at rest.
+    skin_tone: Option<SceneToneData>,
+}
+
 /// The retouched colour of skin-region pixel `i`, which is pixel `f` of the
 /// face region when it lies there. `src` is the photo in 0..1; `fetch(dx,
 /// dy)` reads the photo at an offset from this pixel; `ai` is the restore
-/// model's detail here, once made; `grey` is the photo's neutral
-/// ([`grey_axis`]).
+/// model's detail here, once made.
 #[allow(clippy::too_many_arguments)]
 fn retouch_pixel(
     face: &FaceModel,
     skin: &SkinLayers,
     brows: &BrowLayers,
     s: &PortraitSettings,
-    grey: [f32; 3],
+    shared: &Shared,
     i: usize,
     f: Option<usize>,
     src: [f32; 3],
@@ -709,10 +712,10 @@ fn retouch_pixel(
     let m = skin.mask[i] as f32 / 255.0;
     let ai = ai.filter(|_| s.ai_detail > 0.0);
     let mut out = src;
+    let l2 = from_u16(skin.low2[i]);
     if m > 0.0 {
         let inside = skin.interior[i] as f32 / 255.0;
         let l1 = from_u16(skin.low1[i]);
-        let l2 = from_u16(skin.low2[i]);
         let under = f.map_or(0.0, |f| skin.under_eye[f] as f32 / 255.0);
         let mut r = skin_result(skin, s, i, under, src, l1, l2, inside);
         let cover = f.map_or(0.0, |f| face.spot_cover[f] as f32 / 255.0);
@@ -758,6 +761,10 @@ fn retouch_pixel(
                 r[k] += add[k] * (1.0 - healed);
             }
         }
+        if let Some(tone) = &shared.skin_tone {
+            // Read at the skin's tone around, as the evened light left it.
+            r = midtoned(r, l2.map(|v| v * light), tone);
+        }
         let contour = f.map_or(0.0, |f| face.nose[f] as f32 / 127.0 * s.nose_bridge);
         if contour != 0.0 {
             // Shade lightly: the sides only need to hint at depth.
@@ -787,13 +794,27 @@ fn retouch_pixel(
     let Some(f) = f else {
         return out;
     };
+    let grey = shared.grey;
     let brow = brow_index(face.region, brows, f);
     let light = even_light_gain(skin, s, i);
+    // Eyes, brows and lips take the evened light with the skin around.
+    let feature = face.detail[f].max(brow.map_or(0, |b| brows.area[b]));
     if light != 1.0 {
-        // Eyes, brows and lips take the evened light with the skin around.
-        let feature = face.detail[f].max(brow.map_or(0, |b| brows.area[b])) as f32 / 255.0;
-        let share = (feature - m).max(0.0);
+        let share = (feature as f32 / 255.0 - m).max(0.0);
         out = out.map(|v| v * (1.0 + (light - 1.0) * share));
+    }
+    if let Some(tone) = &shared.skin_tone {
+        // And the skin's tone, the nostrils too: left as shot they would
+        // stand out of skin made darker. Each by its own tone, so lashes,
+        // irises and hair over an eye stay dark.
+        let share = (feature.max(face.nostrils[f]) as f32 / 255.0).min(1.0 - m);
+        if share > 0.0 {
+            let around = from_u16(face.soft[f]).map(|v| v * light);
+            let toned = midtoned(out, around, tone);
+            for k in 0..3 {
+                out[k] += (toned[k] - out[k]) * share;
+            }
+        }
     }
     let sclera = face.sclera[f] as f32 / 255.0;
     if s.eye_saturation < 0.0 && sclera > 0.0 {
@@ -913,6 +934,28 @@ fn retouch_brow(
         }
     }
     out
+}
+
+/// Develop's tone stage on a photo with only Midtones set, for "Sáng da"
+/// (`amount` -1..1 of the slider is Midtones -200..+200); `None` at rest.
+fn skin_tone(amount: f32) -> Option<SceneToneData> {
+    (amount != 0.0).then(|| {
+        let develop = DevelopSettings {
+            develop_engine_version: DevelopEngineVersion::Develop3,
+            midtones: amount * CONTROL_LIMIT,
+            ..DevelopSettings::default()
+        };
+        build_scene_tone_for(&develop, BaseLook::Identity)
+    })
+}
+
+/// Skin lighter or darker with Develop's own Midtones (`tone`, from
+/// [`skin_tone`]): the linear light of `c` scaled by the gain at the tone of
+/// the skin around it, `region`, as Develop reads it. Mid tones move most,
+/// deep shade and highlights hardly, and pores and lines keep their contrast.
+fn midtoned(c: [f32; 3], region: [f32; 3], tone: &SceneToneData) -> [f32; 3] {
+    let linear = |c: [f32; 3]| c.map(|v| srgb_to_linear(v.clamp(0.0, 1.0)));
+    tone.scene_to_display(linear(c), Some(tone.own_e(linear(region))))
 }
 
 /// Develop's tone stage on a photo with only Blacks set, to the hair's lift
@@ -1039,7 +1082,10 @@ fn retouch(
     edits: &[FaceEdits],
 ) -> Option<(Region, Vec<u8>)> {
     let s = settings.unit();
-    let grey = grey_axis(&model.light, settings.fixes().as_ref());
+    let shared = Shared {
+        grey: grey_axis(&model.light, settings.fixes().as_ref()),
+        skin_tone: skin_tone(s.brighten),
+    };
     // Hair takes its own sliders, and the AI detail where the model saw it.
     let hair_detail = s.ai_detail > 0.0
         && model
@@ -1101,7 +1147,7 @@ fn retouch(
                         pixel((x as isize + dx) as usize, (y as isize + dy) as usize)
                     };
                     let ai = detail.and_then(|d| d.at(x as u32, y as u32));
-                    let res = retouch_pixel(face, skin, brows, &s, grey, i, f, src, &fetch, ai);
+                    let res = retouch_pixel(face, skin, brows, &s, &shared, i, f, src, &fetch, ai);
                     let cell = &mut line[sx + col];
                     for k in 0..3 {
                         cell[k] += res[k] - src[k];
@@ -1150,7 +1196,7 @@ fn retouch(
                         if recolour {
                             let src = pixel(x, y);
                             let base = face.hair_base[k] as f32 / 65535.0;
-                            let res = recolour_hair(src, base, lift.as_ref(), &s, grey);
+                            let res = recolour_hair(src, base, lift.as_ref(), &s, shared.grey);
                             for k in 0..3 {
                                 cell[k] += (res[k] - src[k]) * weight;
                             }
@@ -1912,6 +1958,94 @@ mod tests {
         // Without a cast it is plain grey.
         let plain = balanced(dyed, [1.0; 3], |c| saturated(c, -1.0));
         assert_eq!(plain, saturated(dyed, -1.0));
+    }
+
+    #[test]
+    fn skin_brightness_is_develops_midtones_and_keeps_the_texture() {
+        let lin = |c: [f32; 3]| luminance_f32(c[0], c[1], c[2]);
+        let (up, down) = (skin_tone(1.0).unwrap(), skin_tone(-1.0).unwrap());
+        assert!(skin_tone(0.0).is_none());
+        let skin = [0.72f32, 0.55, 0.47];
+        let (lit, dim) = (midtoned(skin, skin, &up), midtoned(skin, skin, &down));
+        assert!(lin(lit) > lin(skin) + 0.05, "{lit:?}");
+        assert!(lin(dim) < lin(skin) - 0.05, "{dim:?}");
+        assert!(lit[0] > lit[1] && lit[1] > lit[2], "hue kept: {lit:?}");
+        // Deep shade and highlights move far less than the mid tones.
+        let moved = |c: [f32; 3]| lin(midtoned(c, c, &up)) - lin(c);
+        assert!(moved([0.06, 0.05, 0.04]) < 0.25 * moved(skin));
+        assert!(moved([0.97, 0.95, 0.93]) < 0.25 * moved(skin));
+        // A pore keeps its contrast against the skin around it: both take the
+        // gain of the skin around.
+        let pore = skin.map(|v| v * 0.9);
+        let ratio = |a: [f32; 3], b: [f32; 3]| srgb_to_linear(a[1]) / srgb_to_linear(b[1]);
+        let after = ratio(midtoned(pore, skin, &up), lit);
+        assert!((after - ratio(pore, skin)).abs() < 0.01, "{after}");
+        // Half the slider is well under half the lift, as in Develop.
+        let half = PortraitSettings {
+            brighten: 50.0,
+            ..PortraitSettings::NEUTRAL
+        }
+        .unit();
+        let tone = skin_tone(half.brighten).unwrap();
+        let part = lin(midtoned(skin, skin, &tone)) - lin(skin);
+        assert!(part > 0.0 && part < 0.5 * (lin(lit) - lin(skin)), "{part}");
+        assert_eq!(
+            PortraitSettings {
+                brighten: -40.0,
+                ..PortraitSettings::NEUTRAL
+            }
+            .unit()
+            .brighten,
+            -0.4
+        );
+    }
+
+    /// Opt-in visual probe: IAI_PORTRAIT_SKIN_TONE_PROBE is a folder of
+    /// photos; each gets `tone_<name>.png`, face 0 with "Sáng da" at 0 | 50 |
+    /// 100 | -50 | -100 and nothing else on.
+    #[test]
+    #[ignore]
+    fn probe_skin_brightness() {
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_SKIN_TONE_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !name.ends_with(".jpg") {
+                continue;
+            }
+            let photo = image::open(&path).unwrap().to_rgba8();
+            let (w, h) = photo.dimensions();
+            let photo = photo.into_raw();
+            let model = super::super::analyze(&photo, w, h, false, None, &|_| {}).unwrap();
+            let Some(face) = model.faces.first() else {
+                continue;
+            };
+            let enabled = vec![true; model.faces.len()];
+            let r = face.skin.region;
+            let scale = (480.0 / r.w as f32).min(1.0);
+            let (tw, th) = ((r.w as f32 * scale) as u32, (r.h as f32 * scale) as u32);
+            let amounts = [0.0f32, 50.0, 100.0, -50.0, -100.0];
+            let mut sheet = image::RgbaImage::new((tw + 8) * amounts.len() as u32, th);
+            for (k, &brighten) in amounts.iter().enumerate() {
+                let settings = PortraitSettings {
+                    brighten,
+                    ..PortraitSettings::NEUTRAL
+                };
+                let mut full = image::RgbaImage::from_raw(w, h, photo.clone()).unwrap();
+                if let Some((u, px)) = render(&photo, &model, &settings, &enabled, &[]) {
+                    let part = image::RgbaImage::from_raw(u.w, u.h, px).unwrap();
+                    image::imageops::replace(&mut full, &part, u.x as i64, u.y as i64);
+                }
+                let crop = image::imageops::crop_imm(&full, r.x, r.y, r.w, r.h).to_image();
+                let tile =
+                    image::imageops::resize(&crop, tw, th, image::imageops::FilterType::Triangle);
+                image::imageops::replace(&mut sheet, &tile, (k as u32 * (tw + 8)) as i64, 0);
+            }
+            sheet.save(dir.join(format!("tone_{name}.png"))).unwrap();
+        }
     }
 
     /// Opt-in visual probe: IAI_PORTRAIT_EYE_PROBE is a folder of photos;

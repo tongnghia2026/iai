@@ -472,7 +472,12 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         ),
                         ("Đều màu da", &mut s.even_tone, "Giảm mảng đỏ, loang màu", Amount),
                         ("Giảm bóng dầu", &mut s.shine, "Dịu các vùng bóng loáng", Amount),
-                        ("Sáng da", &mut s.brighten, "Da sáng hơn, giữ màu", Amount),
+                        (
+                            "Sáng da",
+                            &mut s.brighten,
+                            "Trái: da tối hơn — phải: da sáng hơn (như thanh Midtones của Develop: tông giữa đổi nhiều, vùng rất sáng và rất tối ít đổi, giữ màu và vân da)",
+                            TwoSided,
+                        ),
                         (
                             "Xóa mụn",
                             &mut s.blemish,
