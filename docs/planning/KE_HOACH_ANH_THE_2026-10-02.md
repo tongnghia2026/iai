@@ -108,7 +108,12 @@ Crop preset 3×4 chủ vẫn dùng tay.
   → tìm mặt (chỉ nhận mặt nằm trên người đã tách) → crop → Chỉnh chân dung.
 - [x] Màu studio **gộp chung vào layer "Chân dung"** (không còn layer màu riêng); "Độ đậm"
   = mức pha màu vào layer đó.
-- [ ] Build Release, chủ test đợt 5.
+- [x] Build Release, chủ test đợt 5: tóc mỏng ở cổ bị **mảng trắng cạnh vuông**.
+- [x] Nguyên nhân: bước lọc bỏ người/vật khác (`keep_person`) chỉ giữ khối mask ≥50% cộng
+  một dải nới HÌNH VUÔNG ~1/150 cạnh vùng → sợi tóc mỏng xa hơn bị xóa, cạnh thẳng (đo:
+  29–31% điểm tóc mỏng trên ảnh tóc dài). Sửa: nối khối qua mọi giá trị mask ≥8 (3%), chỉ
+  xóa khối tách rời hẳn; đo lại: 0 điểm tóc mỏng bị xóa. (Không phải do thứ tự model.)
+- [ ] Build Release, chủ test + chủ gửi ảnh Select Subject để so.
 
 ## Kết quả đo thử (02/10)
 
