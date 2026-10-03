@@ -225,4 +225,28 @@ xử lý tóc cho ảnh mờ. Ảnh thử: `tmp/anh-the/am-mau` (ảnh khách + 
 - Còn hạn chế: ảnh thứ hai chủ dán trong chat không lưu thành file nên chưa thử trực tiếp;
   ám cam (đèn dây tóc) chỉ tự khử một phần — dùng thanh Ấm / lạnh; tóc dài quá khung rộng thì
   phần xa vẫn mờ; nền ngoài người không được làm nét.
+- [x] Build Release, chủ test đợt 9: **OK** ("quá tuyệt").
+
+## Đợt 10 (03/10 khuya): ẩn layer nguồn, mở lại không phân tích lại, Đều sáng da
+
+Chủ sau khi test đợt 9:
+
+- [x] **Bấm Áp dụng thì tắt con mắt layer nguồn** (Layer 1): có bóp mặt thì ảnh gốc bên dưới
+  lòi ra quanh mặt, quên tắt là in luôn. Muốn ẩn được thì layer "Chân dung" phải chứa **cả
+  ảnh** (trước chỉ chứa phần thay đổi) → giờ luôn chứa cả ảnh đã chỉnh. Mở lại layer "Chân
+  dung": layer nguồn tạm hiện để vẽ xem trước, Hủy / Áp dụng lại ẩn. Một bước undo trả lại
+  cả con mắt.
+- [x] **Mở lại (bấm đúp) không chạy lại model**: giữ kết quả phân tích của phiên gần nhất
+  (`PortraitCache` trong `portrait_ops.rs`): cùng tài liệu, cùng layer, điểm ảnh layer và vùng
+  chọn y nguyên thì dùng lại ngay — kể cả chi tiết AI (GFPGAN) và dáng người đã chạy. Bỏ khi
+  đóng tài liệu. Sau khi tắt app mở lại file thì vẫn phải phân tích một lần.
+- [x] **"Đều sáng da"** (thay "Đều sáng mặt" của đợt 9, cùng thanh): da khuất đèn — dưới cằm,
+  cổ, nửa mặt bên tối — được nâng về mức sáng của da được chiếu (phân vị 70 độ sáng dải rộng
+  của da mặt); da sáng hơn mức đó dịu nhẹ. Bỏ qua chênh lệch nhỏ (≤ 0,12 ln) là khối tự nhiên
+  của mặt (hốc mắt, cạnh mũi). Theo dải rộng (σ ≈ e/7) nên vân da và nét không đổi. "Tự
+  động" đặt 60.
+- [x] Sapiens2 cho tóc: model đã có ở máy chủ (`%APPDATA%\iAi\models\sapiens2-seg`, 1,6 GB)
+  và trong bản portable, nên không cần làm gì thêm. Thiếu nó thì nhóm Tóc tắt và AI chỉ làm
+  nét mặt → thêm dòng ghi chú báo rõ khi kéo thanh AI. Phương án dự phòng bằng BiSeNet (50 MB,
+  có sẵn) để nhận tóc khi thiếu Sapiens2: chưa làm, làm nếu chủ định phát hành bản nhẹ.
 - [ ] Build Release, chủ test.
