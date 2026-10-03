@@ -14,7 +14,7 @@ pub const SHEET_DPI: f32 = 600.0;
 
 /// Width of the cutting line drawn around a photo on white, which white
 /// paper would otherwise hide.
-pub const BORDER_PX: u32 = 4;
+pub const BORDER_PX: u32 = 2;
 /// Its colour.
 pub const BORDER_RGB: [u8; 3] = [224, 40, 40];
 

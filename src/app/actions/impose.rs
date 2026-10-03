@@ -84,13 +84,13 @@ fn stamp(
     let mut rgba = img.into_raw();
     let (mut w, mut h, mut pad) = (cell_w, cell_h, 0);
     if on_white.unwrap_or_else(|| imposition::rim_is_white(&rgba, w, h)) {
-        // The line lies in the cutting gap, clear of the photo, when there
-        // is one.
-        pad = (gap / 2).min(imposition::BORDER_PX);
-        if pad > 0 {
+        // The line lies in the cutting gap, clear of the photo, when the gap
+        // has room for two of them.
+        if gap >= 2 * imposition::BORDER_PX {
+            pad = imposition::BORDER_PX;
             (rgba, w, h) = imposition::framed(&rgba, w, h, pad);
         } else {
-            imposition::outlined(&mut rgba, w, h, imposition::BORDER_PX / 2);
+            imposition::outlined(&mut rgba, w, h, imposition::BORDER_PX);
         }
     }
     let img = image::RgbaImage::from_raw(w, h, rgba).expect("sized above");
@@ -298,7 +298,7 @@ mod tests {
         let lined = stamp(white.clone(), PhotoKind::Id3x4, Some(true), 10, true);
         assert_eq!(
             (lined.size, lined.pad, lined.cropped),
-            ((h + 8, w + 8), 4, false)
+            ((h + 4, w + 4), 2, false)
         );
         // None on a colour; a 3×4 photo is cropped into a 4×6 cell.
         let plain = stamp(white.clone(), PhotoKind::Id4x6, Some(false), 10, true);
@@ -367,6 +367,8 @@ mod tests {
             ] {
                 assert_eq!(at(lx, ly), BORDER_RGB, "({lx}, {ly})");
             }
+            // Two pixels of it, then paper.
+            assert_eq!(at(x - 3, y + 30), [255; 3]);
             assert_eq!(at(x + large.cell_w / 4, y + large.cell_h / 2), [90, 80, 70]);
         }
         // The lower half of the sheet stays blank.
