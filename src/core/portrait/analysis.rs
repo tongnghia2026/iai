@@ -83,6 +83,9 @@ pub struct FaceModel {
     pub skin: SkinLayers,
     /// Under-eye bands below each lower lid, before the skin mask cuts them.
     pub(super) under_band: Vec<u8>,
+    /// The eye openings outside the irises, whatever their brightness, and
+    /// their bright part: the whites as "Trắng mắt" sees them.
+    pub(super) sclera: Vec<u8>,
     pub(super) eye_white: Vec<u8>,
     pub(super) iris: Vec<u8>,
     pub(super) teeth: Vec<u8>,
@@ -1687,6 +1690,10 @@ fn build_face(
             / 4.0;
         stamp_disc(&mut irises, region, [c[0], c[1]], radius * 1.05, 0.008 * e);
     }
+    let sclera: Vec<u8> = (0..n)
+        .into_par_iter()
+        .map(|i| to_u8(eye_area[i] * (1.0 - irises[i])))
+        .collect();
     let eye_white: Vec<u8> = (0..n)
         .into_par_iter()
         .map(|i| {
@@ -2172,6 +2179,7 @@ fn build_face(
         extent,
         skin: skin_layers,
         under_band,
+        sclera,
         eye_white,
         iris,
         teeth,

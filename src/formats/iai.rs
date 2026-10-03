@@ -1706,7 +1706,7 @@ fn read_portrait<R: Read + Seek>(
     Some(PortraitRecipe {
         source: v["source"].as_u64()? as u32,
         source_size: (size[0].as_u64()? as u32, size[1].as_u64()? as u32),
-        settings: serde_json::from_value(v["settings"].clone()).ok()?,
+        settings: crate::core::portrait::PortraitSettings::from_saved(v["settings"].clone())?,
         clip,
         faces,
     })

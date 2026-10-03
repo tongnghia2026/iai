@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::ai_detail::DetailAt;
 use super::analysis::{luma, BrowLayers, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
 use super::body::BodySliders;
-use super::correct::Fixes;
+use super::correct::{grey_axis, Fixes};
 use super::geometry::Region;
 use super::looks::StudioLook;
 use super::reshape::{reshape, FaceShape};
@@ -20,8 +20,8 @@ use crate::core::develop::{
 };
 use crate::core::develop_scene::{build_scene_tone_for, BaseLook, SceneToneData, SCENE_EV_MIN};
 
-/// Sliders run 0..100, the two-sided ones (lip saturation and brightness,
-/// brows, hair brightness) -100..100, and the colour pickers (`*_hue`) are
+/// Sliders run 0..100, the two-sided ones (the `*_saturation`s, lip and hair
+/// brightness, brows) -100..100, and the colour pickers (`*_hue`) are
 /// target hues in degrees, 0..360, applied by the matching `*_tint` amount.
 /// Brows have only their own sliders, all 0 by default: they stay as shot.
 /// A new photo starts with the corrections of "Sửa màu & sáng", the "Trong
@@ -81,15 +81,16 @@ pub struct PortraitSettings {
     pub brow_sharpen: f32,
     pub brow_hue: f32,
     pub brow_tint: f32,
-    /// "Giảm màu": how much colour is taken out of the hair, the irises and
-    /// the brows (dyed hair, coloured lenses, tinted brows), 0..100, before
-    /// any of their own tints goes on.
+    /// "Đậm / giảm màu", -100..100: left takes colour out of the hair, the
+    /// eyes (whites and irises: sore red eyes, coloured lenses) and the brows
+    /// before any of their own tints goes on; right deepens it (of the eyes,
+    /// the irises only).
     #[serde(default)]
-    pub hair_fade: f32,
+    pub hair_saturation: f32,
     #[serde(default)]
-    pub iris_fade: f32,
+    pub eye_saturation: f32,
     #[serde(default)]
-    pub brow_fade: f32,
+    pub brow_saturation: f32,
     /// Face shape, -100..100 (0 = as shot); see [`FaceShape`].
     pub face_slim: f32,
     pub chin_length: f32,
@@ -152,9 +153,9 @@ impl Default for PortraitSettings {
             brow_sharpen: 0.0,
             brow_hue: 25.0,
             brow_tint: 0.0,
-            hair_fade: 0.0,
-            iris_fade: 0.0,
-            brow_fade: 0.0,
+            hair_saturation: 0.0,
+            eye_saturation: 0.0,
+            brow_saturation: 0.0,
             face_slim: 0.0,
             chin_length: 0.0,
             eye_size: 0.0,
@@ -229,9 +230,9 @@ impl PortraitSettings {
         brow_sharpen: 0.0,
         brow_hue: 25.0,
         brow_tint: 0.0,
-        hair_fade: 0.0,
-        iris_fade: 0.0,
-        brow_fade: 0.0,
+        hair_saturation: 0.0,
+        eye_saturation: 0.0,
+        brow_saturation: 0.0,
         face_slim: 0.0,
         chin_length: 0.0,
         eye_size: 0.0,
@@ -251,6 +252,25 @@ impl PortraitSettings {
         look: 0,
         look_strength: DEFAULT_LOOK_STRENGTH,
     };
+
+    /// The settings a layer was saved with. The one-sided "Giảm màu" sliders
+    /// of an earlier build (`*_fade`, 0..100) read as the left half of
+    /// today's two-sided ones.
+    pub fn from_saved(mut saved: serde_json::Value) -> Option<Self> {
+        if let Some(map) = saved.as_object_mut() {
+            for (old, new) in [
+                ("hair_fade", "hair_saturation"),
+                ("iris_fade", "eye_saturation"),
+                ("brow_fade", "brow_saturation"),
+            ] {
+                let fade = map.remove(old).and_then(|v| v.as_f64());
+                if let Some(fade) = fade.filter(|_| !map.contains_key(new)) {
+                    map.insert(new.to_string(), (-fade).into());
+                }
+            }
+        }
+        serde_json::from_value(saved).ok()
+    }
 
     fn unit(&self) -> Self {
         let u = |v: f32| (v / 100.0).clamp(0.0, 1.0);
@@ -284,9 +304,9 @@ impl PortraitSettings {
             brow_sharpen: u(self.brow_sharpen),
             brow_hue: self.brow_hue.rem_euclid(360.0),
             brow_tint: u(self.brow_tint),
-            hair_fade: u(self.hair_fade),
-            iris_fade: u(self.iris_fade),
-            brow_fade: u(self.brow_fade),
+            hair_saturation: both(self.hair_saturation),
+            eye_saturation: both(self.eye_saturation),
+            brow_saturation: both(self.brow_saturation),
             ..*self
         }
     }
@@ -361,7 +381,7 @@ impl PortraitSettings {
     }
 
     fn hair_active(&self) -> bool {
-        self.hair_brightness != 0.0 || self.hair_tint > 0.0 || self.hair_fade > 0.0
+        self.hair_brightness != 0.0 || self.hair_tint > 0.0 || self.hair_saturation != 0.0
     }
 
     /// The "Sửa màu & sáng" sliders at their usual amounts ("Tự động").
@@ -622,10 +642,43 @@ fn hsl_to_rgb(hsl: [f32; 3]) -> [f32; 3] {
     [r + m, g + m, b + m]
 }
 
-/// `c` with `amount` (0..1) of its colour taken out, at the same brightness.
-fn faded(c: [f32; 3], amount: f32) -> [f32; 3] {
+/// How far "Đậm / giảm màu" at +100 deepens a colour.
+const SATURATION_GAIN: f32 = 0.8;
+
+/// `c` at the same brightness with its colour scaled by a two-sided
+/// `amount`: -1 takes all of it out, +1 deepens it by [`SATURATION_GAIN`].
+fn saturated(c: [f32; 3], amount: f32) -> [f32; 3] {
+    if amount == 0.0 {
+        return c;
+    }
+    let gain = if amount < 0.0 {
+        1.0 + amount.max(-1.0)
+    } else {
+        1.0 + SATURATION_GAIN * amount.min(1.0)
+    };
     let (y, chroma) = split(c);
-    join(y, chroma.map(|v| v * (1.0 - amount.clamp(0.0, 1.0))))
+    join(y, chroma.map(|v| v * gain))
+}
+
+/// `change` made to `c` as the corrections will balance it: `grey` is the
+/// photo's colour for neutral ([`grey_axis`]), so colour taken out leaves
+/// that, not a grey the white balance then tints.
+fn balanced(c: [f32; 3], grey: [f32; 3], change: impl Fn([f32; 3]) -> [f32; 3]) -> [f32; 3] {
+    let out = change(std::array::from_fn(|k| c[k] / grey[k]));
+    std::array::from_fn(|k| out[k] * grey[k])
+}
+
+/// How far a reddened eye white is lifted from its luma toward its brightest
+/// channel as its colour goes.
+const WHITE_LIFT: f32 = 0.75;
+
+/// The white of an eye with `amount` (0..1) of its colour taken out. Blood
+/// (veins, a sore red eye) dims green and blue and hardly red, so the white
+/// beneath is brighter than the luma: a plain fade would leave grey patches.
+fn whitened(c: [f32; 3], amount: f32) -> [f32; 3] {
+    let y = luma(c);
+    let level = y + WHITE_LIFT * (c[0].max(c[1]).max(c[2]) - y);
+    c.map(|v| v + (level - v) * amount.clamp(0.0, 1.0))
 }
 
 /// Recolour to `hue` (degrees) keeping lightness, with at least `saturation`
@@ -638,13 +691,15 @@ fn colourise(c: [f32; 3], hue: f32, saturation: f32) -> [f32; 3] {
 /// The retouched colour of skin-region pixel `i`, which is pixel `f` of the
 /// face region when it lies there. `src` is the photo in 0..1; `fetch(dx,
 /// dy)` reads the photo at an offset from this pixel; `ai` is the restore
-/// model's detail here, once made.
+/// model's detail here, once made; `grey` is the photo's neutral
+/// ([`grey_axis`]).
 #[allow(clippy::too_many_arguments)]
 fn retouch_pixel(
     face: &FaceModel,
     skin: &SkinLayers,
     brows: &BrowLayers,
     s: &PortraitSettings,
+    grey: [f32; 3],
     i: usize,
     f: Option<usize>,
     src: [f32; 3],
@@ -740,6 +795,12 @@ fn retouch_pixel(
         let share = (feature - m).max(0.0);
         out = out.map(|v| v * (1.0 + (light - 1.0) * share));
     }
+    let sclera = face.sclera[f] as f32 / 255.0;
+    if s.eye_saturation < 0.0 && sclera > 0.0 {
+        // The whole eye loses colour, its white by its own rule and before
+        // "Trắng mắt" takes some of the red that rule reads.
+        out = balanced(out, grey, |c| whitened(c, -s.eye_saturation * sclera));
+    }
     let white = face.eye_white[f] as f32 / 255.0 * s.eye_white;
     if white > 0.0 {
         let (y, c) = split(out);
@@ -753,9 +814,9 @@ fn retouch_pixel(
         let (y, c) = split(out);
         out = join(y * (1.0 + 0.18 * iris), c.map(|v| v * (1.0 + 0.35 * iris)));
     }
-    let iris_fade = face.iris[f] as f32 / 255.0 * s.iris_fade;
-    if iris_fade > 0.0 {
-        out = faded(out, iris_fade);
+    let iris_colour = s.eye_saturation * face.iris[f] as f32 / 255.0;
+    if iris_colour != 0.0 {
+        out = balanced(out, grey, |c| saturated(c, iris_colour));
     }
     let iris_tint = face.iris[f] as f32 / 255.0 * s.iris_tint;
     if iris_tint > 0.0 {
@@ -786,7 +847,7 @@ fn retouch_pixel(
         }
     }
     if let Some(b) = brow {
-        out = retouch_brow(brows, s, b, src, out, from_u16(face.soft[f]));
+        out = retouch_brow(brows, s, grey, b, src, out, from_u16(face.soft[f]));
     }
     let crisp = face.detail[f] as f32 / 255.0 * s.sharpen;
     if crisp > 0.0 {
@@ -814,6 +875,7 @@ fn brow_index(face: Region, brows: &BrowLayers, f: usize) -> Option<usize> {
 fn retouch_brow(
     brows: &BrowLayers,
     s: &PortraitSettings,
+    grey: [f32; 3],
     b: usize,
     src: [f32; 3],
     mut out: [f32; 3],
@@ -823,9 +885,10 @@ fn retouch_brow(
     if area <= 0.0 {
         return out;
     }
-    if s.brow_fade > 0.0 {
-        // The hairs fully, the skin between them a little.
-        out = faded(out, s.brow_fade * (0.25 * area + 0.75 * hair));
+    // The hairs fully, the skin between them a little.
+    let colour = s.brow_saturation * (0.25 * area + 0.75 * hair);
+    if colour != 0.0 {
+        out = balanced(out, grey, |c| saturated(c, colour));
     }
     if s.brow_tint > 0.0 && hair > 0.0 {
         let dyed = colourise(out, s.brow_hue, 0.3);
@@ -869,12 +932,14 @@ fn hair_lift(amount: f32) -> Option<SceneToneData> {
 /// photo's linear light scaled by the gain at the pixel's regional tone
 /// `base`, as Develop reads it, so strands keep their texture and colour.
 /// Darker with Develop's display Shadows and Blacks, also read at `base`.
-/// Then dyed toward `hair_hue`.
+/// Then its colour faded toward `grey` ([`grey_axis`]) or deepened, and
+/// dyed toward `hair_hue`.
 fn recolour_hair(
     src: [f32; 3],
     base: f32,
     lift: Option<&SceneToneData>,
     s: &PortraitSettings,
+    grey: [f32; 3],
 ) -> [f32; 3] {
     let [mut r, mut g, mut b] = src.map(|v| v.clamp(0.0, 1.0));
     if let Some(tone) = lift {
@@ -887,7 +952,10 @@ fn recolour_hair(
         let target = (l + offset + local_detail_boost(l, base, offset)).clamp(0.0, 1.0);
         apply_luma_target(&mut r, &mut g, &mut b, target);
     }
-    let mut out = faded([r, g, b], s.hair_fade);
+    let mut out = [r, g, b];
+    if s.hair_saturation != 0.0 {
+        out = balanced(out, grey, |c| saturated(c, s.hair_saturation));
+    }
     if s.hair_tint > 0.0 {
         let dyed = colourise(out, s.hair_hue, 0.35);
         for k in 0..3 {
@@ -971,6 +1039,7 @@ fn retouch(
     edits: &[FaceEdits],
 ) -> Option<(Region, Vec<u8>)> {
     let s = settings.unit();
+    let grey = grey_axis(&model.light, settings.fixes().as_ref());
     // Hair takes its own sliders, and the AI detail where the model saw it.
     let hair_detail = s.ai_detail > 0.0
         && model
@@ -1032,7 +1101,7 @@ fn retouch(
                         pixel((x as isize + dx) as usize, (y as isize + dy) as usize)
                     };
                     let ai = detail.and_then(|d| d.at(x as u32, y as u32));
-                    let res = retouch_pixel(face, skin, brows, &s, i, f, src, &fetch, ai);
+                    let res = retouch_pixel(face, skin, brows, &s, grey, i, f, src, &fetch, ai);
                     let cell = &mut line[sx + col];
                     for k in 0..3 {
                         cell[k] += res[k] - src[k];
@@ -1081,7 +1150,7 @@ fn retouch(
                         if recolour {
                             let src = pixel(x, y);
                             let base = face.hair_base[k] as f32 / 65535.0;
-                            let res = recolour_hair(src, base, lift.as_ref(), &s);
+                            let res = recolour_hair(src, base, lift.as_ref(), &s, grey);
                             for k in 0..3 {
                                 cell[k] += (res[k] - src[k]) * weight;
                             }
@@ -1299,15 +1368,44 @@ mod tests {
             "fix_haze",
             "even_light",
             "look",
-            "hair_fade",
+            "hair_saturation",
         ] {
             map.remove(later);
         }
-        let read: PortraitSettings = serde_json::from_value(old).unwrap();
+        let read = PortraitSettings::from_saved(old).unwrap();
         assert_eq!((read.volume, read.texture, read.ai_detail), (0.0, 0.0, 0.0));
         assert!(read.fixes().is_none() && read.studio_look().is_none());
-        assert_eq!((read.even_light, read.hair_fade), (0.0, 0.0));
+        assert_eq!((read.even_light, read.hair_saturation), (0.0, 0.0));
         assert_eq!(read.smooth, PortraitSettings::default().smooth);
+    }
+
+    #[test]
+    fn one_sided_fades_read_as_the_left_half_of_the_two_sided_sliders() {
+        let mut old = serde_json::to_value(PortraitSettings::NEUTRAL).unwrap();
+        let map = old.as_object_mut().unwrap();
+        for now in ["hair_saturation", "eye_saturation", "brow_saturation"] {
+            map.remove(now);
+        }
+        map.insert("hair_fade".into(), 80.0.into());
+        map.insert("iris_fade".into(), 30.0.into());
+        map.insert("brow_fade".into(), 0.0.into());
+        let read = PortraitSettings::from_saved(old).unwrap();
+        assert_eq!(
+            (
+                read.hair_saturation,
+                read.eye_saturation,
+                read.brow_saturation
+            ),
+            (-80.0, -30.0, 0.0)
+        );
+        // What is saved today reads back as it is.
+        let now = PortraitSettings {
+            hair_saturation: 40.0,
+            eye_saturation: -100.0,
+            ..PortraitSettings::default()
+        };
+        let read = PortraitSettings::from_saved(serde_json::to_value(now).unwrap());
+        assert_eq!(read, Some(now));
     }
 
     #[test]
@@ -1697,7 +1795,10 @@ mod tests {
     fn brows_stay_as_shot_unless_their_own_sliders_move() {
         for s in [PortraitSettings::default(), PortraitSettings::NEUTRAL] {
             assert_eq!((s.brows, s.brow_sharpen, s.brow_tint), (0.0, 0.0, 0.0));
-            assert_eq!((s.brow_fade, s.hair_fade, s.iris_fade), (0.0, 0.0, 0.0));
+            assert_eq!(
+                (s.brow_saturation, s.hair_saturation, s.eye_saturation),
+                (0.0, 0.0, 0.0)
+            );
         }
     }
 
@@ -1710,11 +1811,17 @@ mod tests {
             hair_brightness: -1.0,
             ..PortraitSettings::NEUTRAL
         };
-        let dark = recolour_hair(strand, tone(strand), None, &darker);
+        let dark = recolour_hair(strand, tone(strand), None, &darker, [1.0; 3]);
         assert!(tone(dark) < tone(strand) - 0.05, "{dark:?}");
-        let kept = recolour_hair(skin, tone(skin), None, &darker);
+        let kept = recolour_hair(skin, tone(skin), None, &darker, [1.0; 3]);
         assert!((tone(kept) - tone(skin)).abs() < 0.01, "{kept:?}");
-        let none = recolour_hair(strand, tone(strand), None, &PortraitSettings::NEUTRAL);
+        let none = recolour_hair(
+            strand,
+            tone(strand),
+            None,
+            &PortraitSettings::NEUTRAL,
+            [1.0; 3],
+        );
         assert_eq!(none, strand);
 
         // Lighter is Develop's Blacks: deep strands lift, keeping their hue;
@@ -1725,33 +1832,220 @@ mod tests {
         };
         let lift = hair_lift(1.0);
         let black = [0.1f32, 0.08, 0.07];
-        let lit = recolour_hair(black, tone(black), lift.as_ref(), &lighter);
+        let lit = recolour_hair(black, tone(black), lift.as_ref(), &lighter, [1.0; 3]);
         assert!(tone(lit) > tone(black) + 0.05, "{lit:?}");
         assert!(lit[0] > lit[1] && lit[1] > lit[2], "hue kept: {lit:?}");
-        let kept = recolour_hair(skin, tone(skin), lift.as_ref(), &lighter);
+        let kept = recolour_hair(skin, tone(skin), lift.as_ref(), &lighter, [1.0; 3]);
         assert!((tone(kept) - tone(skin)).abs() < 0.01, "{kept:?}");
         assert!(hair_lift(0.0).is_none() && hair_lift(-0.5).is_none());
     }
 
     #[test]
-    fn fading_takes_the_colour_out_and_keeps_the_brightness() {
+    fn saturation_fades_or_deepens_the_colour_and_keeps_the_brightness() {
         let dyed = [0.55f32, 0.25, 0.15];
-        let grey = faded(dyed, 1.0);
+        let grey = saturated(dyed, -1.0);
         assert!((grey[0] - grey[1]).abs() < 1e-6 && (grey[1] - grey[2]).abs() < 1e-6);
         assert!((luma(grey) - luma(dyed)).abs() < 1e-6);
-        let half = faded(dyed, 0.5);
+        let half = saturated(dyed, -0.5);
         assert!((half[0] - (dyed[0] + grey[0]) * 0.5).abs() < 1e-6);
-        assert_eq!(faded(dyed, 0.0), dyed);
+        assert_eq!(saturated(dyed, 0.0), dyed);
+        let deep = saturated(dyed, 1.0);
+        assert!((luma(deep) - luma(dyed)).abs() < 1e-6);
+        let spread = |c: [f32; 3]| c[0] - c[2];
+        assert!((spread(deep) - (1.0 + SATURATION_GAIN) * spread(dyed)).abs() < 1e-6);
 
         // Dyed hair loses its colour before a new tint goes on.
         let fade = PortraitSettings {
-            hair_fade: 100.0,
+            hair_saturation: -100.0,
             ..PortraitSettings::NEUTRAL
         }
         .unit();
         assert!(fade.hair_active());
-        let out = recolour_hair(dyed, luma(dyed), None, &fade);
+        let out = recolour_hair(dyed, luma(dyed), None, &fade, [1.0; 3]);
         assert!((out[0] - out[2]).abs() < 1e-5, "{out:?}");
+        let vivid = PortraitSettings {
+            hair_saturation: 100.0,
+            ..PortraitSettings::NEUTRAL
+        }
+        .unit();
+        assert!(vivid.hair_active());
+        let out = recolour_hair(dyed, luma(dyed), None, &vivid, [1.0; 3]);
+        assert!(spread(out) > spread(dyed) + 0.1, "{out:?}");
+    }
+
+    #[test]
+    fn a_sore_eye_white_loses_its_red_without_turning_grey() {
+        let (clear, sore) = ([0.82f32, 0.78, 0.75], [0.8f32, 0.5, 0.5]);
+        let out = whitened(sore, 1.0);
+        assert!(
+            (out[0] - out[1]).abs() < 1e-6 && (out[1] - out[2]).abs() < 1e-6,
+            "{out:?}"
+        );
+        // Brighter than its own luma, not brighter than the white beneath.
+        assert!(out[0] > luma(sore) + 0.05 && out[0] <= sore[0], "{out:?}");
+        // A clear white hardly moves.
+        let out = whitened(clear, 1.0);
+        assert!((luma(out) - luma(clear)).abs() < 0.03, "{out:?}");
+        assert_eq!(whitened(sore, 0.0), sore);
+    }
+
+    #[test]
+    fn colour_fades_to_the_photos_grey_not_to_equal_channels() {
+        // Under a yellow cast the photo's grey is yellow.
+        let grey = [1.05f32, 1.0, 0.8];
+        let dyed = [0.55f32, 0.25, 0.15];
+        let out = balanced(dyed, grey, |c| saturated(c, -1.0));
+        assert!(
+            (out[0] / grey[0] - out[1] / grey[1]).abs() < 1e-6,
+            "{out:?}"
+        );
+        assert!(
+            (out[2] / grey[2] - out[1] / grey[1]).abs() < 1e-6,
+            "{out:?}"
+        );
+        let fade = PortraitSettings {
+            hair_saturation: -100.0,
+            ..PortraitSettings::NEUTRAL
+        }
+        .unit();
+        assert_eq!(recolour_hair(dyed, luma(dyed), None, &fade, grey), out);
+        // Without a cast it is plain grey.
+        let plain = balanced(dyed, [1.0; 3], |c| saturated(c, -1.0));
+        assert_eq!(plain, saturated(dyed, -1.0));
+    }
+
+    /// Opt-in visual probe: IAI_PORTRAIT_EYE_PROBE is a folder of photos;
+    /// each gets `eye_<name>.png`, the eyes of face 0 enlarged, under the
+    /// default retouch and corrections. Top row, the photo: "Đậm / giảm màu
+    /// mắt" 0 | -100 | +100. Bottom row, the same eyes made sore (whites
+    /// reddened in patches): 0 | -50 | -100 | -100 faded to the photo's own
+    /// grey, which the white balance then tints.
+    #[test]
+    #[ignore]
+    fn probe_eye_colour() {
+        use super::super::correct::fix_lut;
+        use super::super::looks::preview_graded;
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_EYE_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name.starts_with("eye_") || !name.ends_with(".jpg") {
+                continue;
+            }
+            let photo = image::open(&path).unwrap().to_rgba8();
+            let (w, h) = photo.dimensions();
+            let photo = photo.into_raw();
+            let analyse =
+                |rgba: &[u8]| super::super::analyze(rgba, w, h, false, None, &|_| {}).unwrap();
+            let model = analyse(&photo);
+            let Some(face) = model.faces.first() else {
+                continue;
+            };
+            let r = face.region;
+            let at = |f: usize| {
+                (
+                    r.x as usize + f % r.w as usize,
+                    r.y as usize + f / r.w as usize,
+                )
+            };
+            let mut sore = photo.clone();
+            let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+            for f in 0..r.len() {
+                let (x, y) = at(f);
+                if face.sclera[f].max(face.iris[f]) > 0 {
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                }
+                let patch = 0.75 + 0.25 * ((x as f32 * 0.9).sin() * (y as f32 * 1.3).cos());
+                let red = 0.45 * patch * face.sclera[f] as f32 / 255.0;
+                let o = (y * w as usize + x) * 4;
+                for k in 1..3 {
+                    sore[o + k] = (sore[o + k] as f32 * (1.0 - red)).round() as u8;
+                }
+            }
+            let pad = (x1 - x0) / 10;
+            let (x0, y0) = (x0.saturating_sub(pad), y0.saturating_sub(pad));
+            let (x1, y1) = (
+                (x1 + pad).min(w as usize - 1),
+                (y1 + pad).min(h as usize - 1),
+            );
+            let (cw, ch) = ((x1 - x0 + 1) as u32, (y1 - y0 + 1) as u32);
+            let eyes = |amount: f32| PortraitSettings {
+                eye_saturation: amount,
+                ..PortraitSettings::default()
+            };
+            // The retouch of `retouch`, then the corrections of `fixes`.
+            let rendered = |rgba: &[u8],
+                            model: &PortraitModel,
+                            retouch: &PortraitSettings,
+                            fixes: &PortraitSettings| {
+                let enabled = vec![true; model.faces.len()];
+                let retouched = render(rgba, model, retouch, &enabled, &[]);
+                let fix = fixes.fixes().and_then(|f| fix_lut(&model.light, &f));
+                let mut out = rgba.to_vec();
+                if let Some((u, px)) =
+                    preview_graded(rgba, w, h, retouched, fix.as_ref(), None, None)
+                {
+                    for y in 0..u.h as usize {
+                        let o = ((u.y as usize + y) * w as usize + u.x as usize) * 4;
+                        out[o..o + u.w as usize * 4]
+                            .copy_from_slice(&px[y * u.w as usize * 4..(y + 1) * u.w as usize * 4]);
+                    }
+                }
+                out
+            };
+            let view = |rgba: &[u8], model: &PortraitModel, amount: f32| {
+                rendered(rgba, model, &eyes(amount), &eyes(amount))
+            };
+            let sore_model = analyse(&sore);
+            let unbalanced = PortraitSettings {
+                fix_cast: 0.0,
+                fix_warmth: 0.0,
+                ..eyes(-100.0)
+            };
+            println!(
+                "{name}: grey {:?}",
+                grey_axis(&sore_model.light, eyes(0.0).fixes().as_ref())
+            );
+            let rows = [
+                vec![
+                    view(&photo, &model, 0.0),
+                    view(&photo, &model, -100.0),
+                    view(&photo, &model, 100.0),
+                ],
+                vec![
+                    view(&sore, &sore_model, 0.0),
+                    view(&sore, &sore_model, -50.0),
+                    view(&sore, &sore_model, -100.0),
+                    rendered(&sore, &sore_model, &unbalanced, &eyes(-100.0)),
+                ],
+            ];
+            let zoom = (900 / cw).clamp(1, 6);
+            let (tw, th) = (cw * zoom, ch * zoom);
+            let mut sheet = image::RgbaImage::new((tw + 8) * 4, (th + 8) * 2);
+            for (row, views) in rows.iter().enumerate() {
+                for (col, view) in views.iter().enumerate() {
+                    let full = image::RgbaImage::from_raw(w, h, view.clone()).unwrap();
+                    let crop =
+                        image::imageops::crop_imm(&full, x0 as u32, y0 as u32, cw, ch).to_image();
+                    let tile = image::imageops::resize(
+                        &crop,
+                        tw,
+                        th,
+                        image::imageops::FilterType::CatmullRom,
+                    );
+                    image::imageops::replace(
+                        &mut sheet,
+                        &tile,
+                        (col as u32 * (tw + 8)) as i64,
+                        (row as u32 * (th + 8)) as i64,
+                    );
+                }
+            }
+            sheet.save(dir.join(format!("eye_{name}.png"))).unwrap();
+        }
     }
 
     #[test]

@@ -177,17 +177,34 @@ struct Correction {
     contrast: f32,
 }
 
+/// The white balance of `fixes` as linear gains per channel.
+fn balance(stats: &LightStats, fixes: &Fixes) -> [f32; 3] {
+    let cast = stats.cast().map(|v| v * fixes.cast.clamp(0.0, 1.0));
+    let warmth = fixes.warmth.clamp(-1.0, 1.0) * WARMTH_RANGE;
+    let balance = [(warmth - cast[0]).exp(), 1.0, (-warmth - cast[1]).exp()];
+    // White balance keeps a grey's brightness.
+    let norm = luminance(balance);
+    balance.map(|g| g / norm)
+}
+
+/// The photo's colour for a mid grey once `fixes` have balanced it, as sRGB
+/// factors per channel around 1 (all 1 without a balance): what a feature
+/// losing its colour fades toward, so it is neutral after the corrections
+/// rather than tinted by them.
+pub fn grey_axis(stats: &LightStats, fixes: Option<&Fixes>) -> [f32; 3] {
+    const MID: f32 = 0.2;
+    let Some(fixes) = fixes else {
+        return [1.0; 3];
+    };
+    balance(stats, fixes).map(|g| linear_to_srgb(MID / g) / linear_to_srgb(MID))
+}
+
 impl Correction {
     fn new(stats: &LightStats, fixes: &Fixes) -> Self {
         let veil = stats
             .veil
             .map(|v| v * VEIL_REMOVED * fixes.haze.clamp(0.0, 1.0));
-        let cast = stats.cast().map(|v| v * fixes.cast.clamp(0.0, 1.0));
-        let warmth = fixes.warmth.clamp(-1.0, 1.0) * WARMTH_RANGE;
-        let balance = [(warmth - cast[0]).exp(), 1.0, (-warmth - cast[1]).exp()];
-        // White balance keeps a grey's brightness.
-        let norm = luminance(balance);
-        let balance = balance.map(|g| g / norm);
+        let balance = balance(stats, fixes);
         let ev = stats.skin.map_or(0.0, |skin| {
             let lit: [f32; 3] = std::array::from_fn(|c| {
                 ((skin[c] - veil[c]) / (1.0 - veil[c])).max(0.0) * balance[c]
@@ -301,6 +318,29 @@ mod tests {
             let after = out.iter().cloned().fold(f32::MIN, f32::max)
                 - out.iter().cloned().fold(f32::MAX, f32::min);
             assert!(after < 0.6 * before as f32, "{name}: {grey:?} -> {out:?}");
+        }
+    }
+
+    #[test]
+    fn the_grey_axis_is_what_the_balance_turns_neutral() {
+        assert_eq!(grey_axis(&stats([1.0, 1.0, 0.7]), None), [1.0; 3]);
+        let stats = stats([1.0, 1.0, 0.7]);
+        let fixes = Fixes {
+            cast: 1.0,
+            warmth: 0.3,
+            ..NO_FIX
+        };
+        let axis = grey_axis(&stats, Some(&fixes));
+        assert!(
+            axis[2] < axis[0],
+            "a yellow cast's grey is yellow: {axis:?}"
+        );
+        let lut = fix_lut(&stats, &fixes).unwrap();
+        for level in [0.3f32, 0.5, 0.7] {
+            let out = lut.map(axis.map(|a| (level * a * 255.0).round() as u8));
+            let spread = out.iter().cloned().fold(f32::MIN, f32::max)
+                - out.iter().cloned().fold(f32::MAX, f32::min);
+            assert!(spread < 3.0, "{level}: {out:?}");
         }
     }
 

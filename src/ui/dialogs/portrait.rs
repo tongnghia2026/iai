@@ -573,10 +573,10 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         ("Trắng mắt", &mut s.eye_white, "Lòng trắng mắt sáng, bớt đỏ", Amount),
                         ("Sáng tròng mắt", &mut s.iris, "Tròng mắt sáng và trong hơn", Amount),
                         (
-                            "Giảm màu tròng mắt",
-                            &mut s.iris_fade,
-                            "Bớt màu của tròng mắt (kính áp tròng màu) về màu trung tính — 0 = giữ nguyên",
-                            Amount,
+                            "Đậm / giảm màu mắt",
+                            &mut s.eye_saturation,
+                            "Trái: giảm màu cả mắt, lòng trắng lẫn tròng (mắt đỏ, đau mắt đỏ, kính áp tròng màu) về màu trung tính — phải: tròng mắt đậm màu hơn",
+                            TwoSided,
                         ),
                         (
                             "Màu tròng mắt",
@@ -663,10 +663,10 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             Amount,
                         ),
                         (
-                            "Giảm màu lông mày",
-                            &mut s.brow_fade,
-                            "Bớt màu của lông mày (lông mày nhuộm, xăm ngả nâu đỏ) về màu trung tính — 0 = giữ nguyên",
-                            Amount,
+                            "Đậm / giảm màu lông mày",
+                            &mut s.brow_saturation,
+                            "Trái: giảm màu lông mày (nhuộm, xăm ngả nâu đỏ) về màu trung tính — phải: màu lông mày đậm hơn",
+                            TwoSided,
                         ),
                         (
                             "Màu lông mày",
@@ -692,10 +692,10 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             TwoSided,
                         ),
                         (
-                            "Giảm màu tóc",
-                            &mut s.hair_fade,
-                            "Bớt màu của tóc nhuộm (vàng, đỏ, nâu) về màu trung tính — 0 = giữ nguyên. Kéo thêm \"Sáng tóc\" sang trái để ra tóc đen",
-                            Amount,
+                            "Đậm / giảm màu tóc",
+                            &mut s.hair_saturation,
+                            "Trái: giảm màu tóc nhuộm (vàng, đỏ, nâu) về màu trung tính, kéo thêm \"Sáng tóc\" sang trái để ra tóc đen — phải: màu tóc đậm, tươi hơn",
+                            TwoSided,
                         ),
                         (
                             "Màu tóc",
