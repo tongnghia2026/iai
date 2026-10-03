@@ -24,7 +24,8 @@ use crate::core::tile::TileMap;
 const RESULT_LAYER: &str = "Chân dung";
 
 /// What the preview shows: settings, faces on, retouch on, areas tinted, and
-/// the brush edits' revision (doubled, plus one once bodies are analysed).
+/// a revision of what they act on: the brush edits, how many faces have
+/// their AI detail and whether bodies are analysed.
 type PreviewKey = (PortraitSettings, Vec<bool>, bool, bool, u64);
 type Rendered = Option<(Region, Vec<u8>)>;
 
@@ -50,6 +51,9 @@ pub struct PortraitSession {
     /// The body analysis running on a worker (started by the first body
     /// slider moved); it fills the model's bodies, then signals.
     body_rx: Option<Receiver<()>>,
+    /// The AI face detail being made on a worker (started by "Chi tiết mặt
+    /// (AI)" leaving 0); it fills the faces' detail, then signals.
+    detail_rx: Option<Receiver<()>>,
     /// Masks painted with the brush, per face, and their revision.
     pub edits: Vec<FaceEdits>,
     pub edit_rev: u64,
@@ -169,6 +173,7 @@ impl App {
             shown: None,
             rendering: None,
             body_rx: None,
+            detail_rx: None,
             edits: Vec::new(),
             edit_rev: 0,
             brush: PortraitBrush::default(),
@@ -202,14 +207,22 @@ impl App {
         let Some(session) = self.shell.portrait.as_mut() else {
             return;
         };
-        let busy = session.rx.is_some() || session.rendering.is_some() || session.body_rx.is_some();
-        // Bodies analysed: the preview redraws with them.
-        let bodies_done = session
-            .body_rx
-            .as_ref()
-            .is_some_and(|rx| !matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        let busy = session.rx.is_some()
+            || session.rendering.is_some()
+            || session.body_rx.is_some()
+            || session.detail_rx.is_some();
+        // Bodies analysed, or AI detail made: the preview redraws with them.
+        let done = |rx: &Option<Receiver<()>>| {
+            rx.as_ref()
+                .is_some_and(|rx| !matches!(rx.try_recv(), Err(TryRecvError::Empty)))
+        };
+        let bodies_done = done(&session.body_rx);
         if bodies_done {
             session.body_rx = None;
+        }
+        let details_done = done(&session.detail_rx);
+        if details_done {
+            session.detail_rx = None;
         }
         let finished = session.rx.take().and_then(|rx| match rx.try_recv() {
             Ok(result) => Some(result),
@@ -233,7 +246,7 @@ impl App {
             Some(Err(error)) => session.error = Some(error),
             None => {}
         }
-        if bodies_done {
+        if bodies_done || details_done {
             self.refresh_portrait_preview();
         }
         self.poll_portrait_brush();
@@ -274,10 +287,16 @@ impl App {
             .model
             .as_ref()
             .is_some_and(|m| m.bodies.get().is_some());
+        let details = session.model.as_ref().map_or(0, |m| {
+            m.faces
+                .iter()
+                .filter(|f| f.ai_detail.get().is_some())
+                .count()
+        });
         if let Some(key) = session.wanted.as_mut() {
             key.3 &= !painting;
-            // Analysed bodies change what the same sliders show.
-            key.4 = session.edit_rev * 2 + bodies as u64;
+            // Analysed bodies and AI detail change what the same sliders show.
+            key.4 = (session.edit_rev << 32) | ((details as u64) << 1) | bodies as u64;
             // The brush paints the face as shot: show it unreshaped meanwhile.
             if painting {
                 key.0 = key.0.without_shape();
@@ -301,6 +320,10 @@ impl App {
             && session.body_rx.is_none()
         {
             session.body_rx = Some(start_body_analysis(&session.src, &model));
+        }
+        if settings.ai_detail > 0.0 && session.detail_rx.is_none() && lacks_detail(&model, &enabled)
+        {
+            session.detail_rx = Some(start_detail_analysis(&session.src, &model, &enabled));
         }
         if !preview && !masks {
             self.show_portrait_preview(key, None);
@@ -444,6 +467,21 @@ impl App {
             let running = self.shell.portrait.as_mut().and_then(|s| s.body_rx.take());
             let rx = running.unwrap_or_else(|| start_body_analysis(&src, &model));
             let _ = rx.recv();
+        }
+        // "Chi tiết mặt (AI)" needs the model's detail for every face on: wait
+        // for a run under way (it may be for other faces), then make the rest.
+        if settings.ai_detail > 0.0 {
+            if let Some(rx) = self
+                .shell
+                .portrait
+                .as_mut()
+                .and_then(|s| s.detail_rx.take())
+            {
+                let _ = rx.recv();
+            }
+            if lacks_detail(&model, &enabled) {
+                let _ = start_detail_analysis(&src, &model, &enabled).recv();
+            }
         }
         self.cancel_portrait();
         let Some((region, pixels)) = portrait::render(&src, &model, &settings, &enabled, &edits)
@@ -646,6 +684,27 @@ impl App {
         }
     }
 
+    /// A note for the dialog's skin group, and whether it is a warning: the
+    /// AI detail being made, or why it could not be.
+    pub(crate) fn portrait_detail_note(&self) -> Option<(String, bool)> {
+        let session = self.shell.portrait.as_ref()?;
+        let model = session.model.as_ref()?;
+        if session.detail_rx.is_some() {
+            return Some(("Đang tạo chi tiết bằng AI…".to_string(), false));
+        }
+        if !crate::core::ai::retouch::FaceRestorer::installed() {
+            return Some((
+                "Chi tiết mặt (AI) cần model GFPGAN (models\\gfpgan) — chưa cài".to_string(),
+                true,
+            ));
+        }
+        model
+            .faces
+            .iter()
+            .find_map(|face| face.ai_detail.get()?.as_ref().err())
+            .map(|error| (format!("Không tạo được chi tiết (AI): {error}"), true))
+    }
+
     /// Dialog view of a reopened layer: whether one is reopened, and the
     /// saved sliders and faces the dialog has not taken yet.
     pub(crate) fn portrait_restore(&self) -> (bool, Option<PortraitSettings>, Option<Vec<bool>>) {
@@ -683,6 +742,31 @@ fn start_body_analysis(src: &Arc<Vec<u8>>, model: &Arc<PortraitModel>) -> Receiv
     std::thread::spawn(move || {
         let bodies = portrait::body::analyze_bodies(&src, &model, prefer_gpu);
         let _ = model.bodies.set(bodies);
+        let _ = tx.send(());
+    });
+    rx
+}
+
+/// Whether a face that is on has no AI detail yet.
+fn lacks_detail(model: &PortraitModel, enabled: &[bool]) -> bool {
+    model
+        .faces
+        .iter()
+        .zip(enabled.iter().chain(std::iter::repeat(&true)))
+        .any(|(face, &on)| on && face.ai_detail.get().is_none())
+}
+
+/// Make the AI detail of `model`'s faces that are on, on a worker; the
+/// receiver hears once the faces hold it.
+fn start_detail_analysis(
+    src: &Arc<Vec<u8>>,
+    model: &Arc<PortraitModel>,
+    enabled: &[bool],
+) -> Receiver<()> {
+    let (tx, rx) = mpsc::channel();
+    let (src, model, enabled) = (Arc::clone(src), Arc::clone(model), enabled.to_vec());
+    std::thread::spawn(move || {
+        portrait::ai_detail::analyze_details(&src, &model, &enabled);
         let _ = tx.send(());
     });
     rx
@@ -1359,6 +1443,64 @@ mod tests {
         assert_eq!(layer.tiles.get_pixel(w / 2, 2).3, 0, "above the head stays");
         let recipe = layer.portrait.clone().expect("recipe kept");
         assert_eq!(recipe.settings.body_shape(), waist.body_shape());
+    }
+
+    #[test]
+    fn ai_detail_is_made_on_first_use_and_lands_in_the_layer() {
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        if !crate::core::ai::retouch::FaceRestorer::installed() {
+            return;
+        }
+        app.shell.ui.show_portrait_dialog = true;
+        let model = analysed(&mut app).unwrap();
+        let faces = vec![true; model.faces.len()];
+        let made = |model: &PortraitModel| model.faces.iter().all(|f| f.ai_detail.get().is_some());
+        assert!(!made(&model), "not before the slider moves");
+        assert_eq!(app.portrait_detail_note(), None);
+
+        // Without the detail the slider shows nothing yet.
+        app.set_portrait_preview(PortraitSettings::NEUTRAL, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        let plain = photo_pixels(&app);
+
+        // The slider leaving 0 starts the model; the preview follows.
+        let detail = PortraitSettings {
+            ai_detail: 100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        app.set_portrait_preview(detail, faces.clone(), true, false);
+        assert_eq!(
+            app.portrait_detail_note(),
+            Some(("Đang tạo chi tiết bằng AI…".to_string(), false))
+        );
+        let started = Instant::now();
+        while !made(&model) || app.portrait_detail_note().is_some() {
+            assert!(
+                started.elapsed() < Duration::from_secs(240),
+                "AI detail hung"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            app.poll_portrait();
+        }
+        wait_for_preview(&mut app);
+        assert!(model.faces[0].ai_detail.get().unwrap().is_ok());
+        assert_ne!(photo_pixels(&app), plain, "the preview gained the detail");
+
+        assert!(!app.apply_portrait(detail, faces).unwrap(), "added");
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
+        let nose = model.faces[0].mesh.points[4];
+        let near = (-6i32..=6).any(|d| {
+            layer
+                .tiles
+                .get_pixel((nose[0] as i32 + d) as u32, nose[1] as u32)
+                .3
+                > 0
+        });
+        assert!(near, "the skin by the nose took the detail");
+        let recipe = layer.portrait.clone().expect("recipe kept");
+        assert_eq!(recipe.settings.ai_detail, 100.0);
     }
 
     #[test]

@@ -108,6 +108,9 @@ pub struct FaceModel {
     pub(super) detail: Vec<u8>,
     /// Plain small blur of the photo, the sharpening reference.
     pub(super) soft: Vec<[u16; 3]>,
+    /// The restore model's detail for this face, made once "Chi tiết mặt
+    /// (AI)" is first used (see [`super::ai_detail::analyze_details`]).
+    pub ai_detail: std::sync::OnceLock<Result<super::ai_detail::FaceDetail, String>>,
 }
 
 impl FaceModel {
@@ -2145,6 +2148,7 @@ fn build_face(
         hair_base,
         detail,
         soft,
+        ai_detail: std::sync::OnceLock::new(),
     }
 }
 

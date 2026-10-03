@@ -715,6 +715,195 @@ fn aligned_face_crop(
     crop
 }
 
+/// The face restore model (GFPGAN family) on one aligned RGBA crop,
+/// [`FACE_ALIGNMENT_SIDE`] square.
+fn restore_aligned_crop(
+    session: &mut ort::session::Session,
+    input_name: &str,
+    crop: &[u8],
+) -> Result<RgbaImage, String> {
+    let aligned_pixels = (FACE_ALIGNMENT_SIDE * FACE_ALIGNMENT_SIDE) as usize;
+    let mut chw = vec![0.0f32; aligned_pixels * 3];
+    for (index, pixel) in crop.chunks_exact(4).enumerate() {
+        chw[index] = pixel[0] as f32 / 127.5 - 1.0;
+        chw[aligned_pixels + index] = pixel[1] as f32 / 127.5 - 1.0;
+        chw[aligned_pixels * 2 + index] = pixel[2] as f32 / 127.5 - 1.0;
+    }
+    let tensor = ort::value::Tensor::<f32>::from_array((
+        [
+            1i64,
+            3,
+            FACE_ALIGNMENT_SIDE as i64,
+            FACE_ALIGNMENT_SIDE as i64,
+        ],
+        chw,
+    ))
+    .map_err(|e| format!("GFPGAN input tensor: {e}"))?;
+    let outputs = session
+        .run(ort::inputs![input_name => tensor])
+        .map_err(|e| format!("GFPGAN inference: {e}"))?;
+    let (_, data) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| format!("GFPGAN output tensor: {e}"))?;
+    if data.len() != aligned_pixels * 3 {
+        return Err(format!(
+            "GFPGAN output contract mismatch: expected {} RGB values, got {}",
+            aligned_pixels * 3,
+            data.len()
+        ));
+    }
+
+    // GFPGAN outputs [0,1]; some drop-in aligned-face models such as
+    // RestoreFormer++ output [-1,1]. Detect the signed range once and
+    // map it back to [0,1] so a custom face model decodes correctly.
+    let signed_output = data.iter().copied().fold(f32::INFINITY, f32::min) < -0.1;
+    let decode = |value: f32| {
+        let value = if signed_output {
+            (value + 1.0) * 0.5
+        } else {
+            value
+        };
+        (value.clamp(0.0, 1.0) * 255.0).round() as u8
+    };
+    let mut restored = RgbaImage::new(FACE_ALIGNMENT_SIDE, FACE_ALIGNMENT_SIDE);
+    for index in 0..aligned_pixels {
+        restored.put_pixel(
+            (index % FACE_ALIGNMENT_SIDE as usize) as u32,
+            (index / FACE_ALIGNMENT_SIDE as usize) as u32,
+            image::Rgba([
+                decode(data[index]),
+                decode(data[aligned_pixels + index]),
+                decode(data[aligned_pixels * 2 + index]),
+                255,
+            ]),
+        );
+    }
+    Ok(restored)
+}
+
+/// A face brought to the restore model's frame (eyes, nose and mouth at
+/// fixed places of a square) beside the model's restored version of it.
+pub struct RestoredFace {
+    /// RGB (0..1) of the photo's square and of what the model made of it,
+    /// row by row, [`RestoredFace::SIDE`] pixels each way.
+    pub source: Vec<[f32; 3]>,
+    pub restored: Vec<[f32; 3]>,
+    transform: SimilarityTransform,
+}
+
+impl RestoredFace {
+    pub const SIDE: usize = FACE_ALIGNMENT_SIDE as usize;
+
+    /// `[a, b, tx, ty]` of the map from the photo to the square: photo pixel
+    /// (x, y) lies at (a·x − b·y + tx, b·x + a·y + ty).
+    pub fn square_from_photo(&self) -> [f32; 4] {
+        let t = self.transform;
+        [t.a, t.b, t.tx, t.ty]
+    }
+
+    /// Square pixels per photo pixel: above 1 for a face smaller than the
+    /// square.
+    pub fn scale(&self) -> f32 {
+        self.transform.a.hypot(self.transform.b)
+    }
+}
+
+/// The face restore model on its own, for callers that mix its detail
+/// themselves (Chỉnh chân dung). On the CPU: the model is too large for small
+/// graphics cards, where a failed DirectML run stalls the app.
+pub struct FaceRestorer {
+    session: ort::session::Session,
+    input_name: String,
+}
+
+impl FaceRestorer {
+    /// Whether a model file is in place (its checksum is read on `load`).
+    pub fn installed() -> bool {
+        model_path(ModelId::Gfpgan).is_file()
+    }
+
+    pub fn load() -> Result<Self, String> {
+        let runner = LocalOnnxRunner::new(ModelId::Gfpgan);
+        if !runner.available() {
+            return Err("thiếu model phục hồi khuôn mặt (models\\gfpgan)".to_string());
+        }
+        let session = runner.build_session("GFPGAN")?;
+        let input_name = session
+            .inputs()
+            .first()
+            .map(|input| input.name().to_string())
+            .unwrap_or_else(|| "input".to_string());
+        Ok(Self {
+            session,
+            input_name,
+        })
+    }
+
+    /// Restore the face whose eye centres, nose tip and mouth corners (the
+    /// image's left one first) are `landmarks`, in pixels of `rgba`.
+    pub fn restore(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        landmarks: &[[f32; 2]; 5],
+    ) -> Result<RestoredFace, String> {
+        if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
+            return Err("GFPGAN: invalid image".to_string());
+        }
+        let transform = SimilarityTransform::fit(landmarks, &FACE_ALIGNMENT_TARGET)?;
+        let side = FACE_ALIGNMENT_SIDE as usize;
+        // A face larger than the square is averaged down, not point sampled;
+        // past the photo's edge its last pixels repeat.
+        let photo_per_square = 1.0 / transform.a.hypot(transform.b);
+        let taps = (photo_per_square.ceil() as usize).clamp(1, 6);
+        let norm = 1.0 / (taps * taps) as f32;
+        let (max_x, max_y) = (width as f32 - 1.0, height as f32 - 1.0);
+        let mut crop = vec![0u8; side * side * 4];
+        crop.par_chunks_mut(side * 4)
+            .enumerate()
+            .for_each(|(row, line)| {
+                for col in 0..side {
+                    let mut sum = [0.0f32; 3];
+                    for ty in 0..taps {
+                        for tx in 0..taps {
+                            let u = col as f32 + (tx as f32 + 0.5) / taps as f32 - 0.5;
+                            let v = row as f32 + (ty as f32 + 0.5) / taps as f32 - 0.5;
+                            let (x, y) = transform.target_to_source(u, v);
+                            let pixel = bilinear_rgba(
+                                rgba,
+                                width,
+                                height,
+                                x.clamp(0.0, max_x),
+                                y.clamp(0.0, max_y),
+                            );
+                            for channel in 0..3 {
+                                sum[channel] += pixel[channel] as f32;
+                            }
+                        }
+                    }
+                    let pixel = &mut line[col * 4..col * 4 + 4];
+                    for channel in 0..3 {
+                        pixel[channel] = (sum[channel] * norm).round() as u8;
+                    }
+                    pixel[3] = 255;
+                }
+            });
+        let restored = restore_aligned_crop(&mut self.session, &self.input_name, &crop)?;
+        let unit = |pixels: &[u8]| -> Vec<[f32; 3]> {
+            pixels
+                .chunks_exact(4)
+                .map(|p| [p[0], p[1], p[2]].map(|v| v as f32 / 255.0))
+                .collect()
+        };
+        Ok(RestoredFace {
+            source: unit(&crop),
+            restored: unit(restored.as_raw()),
+            transform,
+        })
+    }
+}
+
 fn class_membership(
     classes: &[u8],
     width: u32,
@@ -1514,61 +1703,7 @@ impl LocalOnnxRunner {
         for (face_index, transform) in transforms.iter().copied().enumerate() {
             cancel_if_requested_optional(cancel)?;
             let crop = aligned_face_crop(rgba, width, height, transform);
-            let mut chw = vec![0.0f32; aligned_pixels * 3];
-            for (index, pixel) in crop.chunks_exact(4).enumerate() {
-                chw[index] = pixel[0] as f32 / 127.5 - 1.0;
-                chw[aligned_pixels + index] = pixel[1] as f32 / 127.5 - 1.0;
-                chw[aligned_pixels * 2 + index] = pixel[2] as f32 / 127.5 - 1.0;
-            }
-            let tensor = ort::value::Tensor::<f32>::from_array((
-                [
-                    1i64,
-                    3,
-                    FACE_ALIGNMENT_SIDE as i64,
-                    FACE_ALIGNMENT_SIDE as i64,
-                ],
-                chw,
-            ))
-            .map_err(|e| format!("GFPGAN input tensor: {e}"))?;
-            let outputs = session
-                .run(ort::inputs![input_name.as_str() => tensor])
-                .map_err(|e| format!("GFPGAN inference: {e}"))?;
-            let (_, data) = outputs[0]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("GFPGAN output tensor: {e}"))?;
-            if data.len() != aligned_pixels * 3 {
-                return Err(format!(
-                    "GFPGAN output contract mismatch: expected {} RGB values, got {}",
-                    aligned_pixels * 3,
-                    data.len()
-                ));
-            }
-
-            // GFPGAN outputs [0,1]; some drop-in aligned-face models such as
-            // RestoreFormer++ output [-1,1]. Detect the signed range once and
-            // map it back to [0,1] so a custom face model decodes correctly.
-            let signed_output = data.iter().copied().fold(f32::INFINITY, f32::min) < -0.1;
-            let decode = |value: f32| {
-                let value = if signed_output {
-                    (value + 1.0) * 0.5
-                } else {
-                    value
-                };
-                (value.clamp(0.0, 1.0) * 255.0).round() as u8
-            };
-            let mut restored = RgbaImage::new(FACE_ALIGNMENT_SIDE, FACE_ALIGNMENT_SIDE);
-            for index in 0..aligned_pixels {
-                restored.put_pixel(
-                    (index % FACE_ALIGNMENT_SIDE as usize) as u32,
-                    (index / FACE_ALIGNMENT_SIDE as usize) as u32,
-                    image::Rgba([
-                        decode(data[index]),
-                        decode(data[aligned_pixels + index]),
-                        decode(data[aligned_pixels * 2 + index]),
-                        255,
-                    ]),
-                );
-            }
+            let restored = restore_aligned_crop(&mut session, &input_name, &crop)?;
             // Transfer a wider mid/high-frequency band than the old 1.35 px
             // high-pass. At small face sizes that band disappeared during the
             // inverse warp, making Face Restore look like a no-op even at 100.

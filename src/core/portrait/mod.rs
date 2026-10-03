@@ -3,6 +3,7 @@
 //! teeth and hair, and classic frequency-split processing does the retouch so
 //! real skin texture survives.
 
+pub mod ai_detail;
 pub mod analysis;
 mod blur;
 pub mod body;

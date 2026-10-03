@@ -116,6 +116,16 @@ fn sub_title(ui: &mut egui::Ui, title: &str) {
     );
 }
 
+/// A small note inside a group: grey, or orange for a warning.
+fn note_line(ui: &mut egui::Ui, note: &str, warning: bool) {
+    let colour = if warning {
+        egui::Color32::from_rgb(220, 150, 90)
+    } else {
+        egui::Color32::from_gray(150)
+    };
+    ui.label(egui::RichText::new(note).size(10.0).color(colour));
+}
+
 /// How a slider row reads: 0..100, two-sided -100..100, or a colour picker
 /// over the hue circle (0..360) drawn as a rainbow like Hue/Saturation.
 #[derive(Clone, Copy, PartialEq)]
@@ -467,6 +477,12 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             "Thêm vân lỗ chân lông cho da bệt (ảnh điện thoại, độ phân giải thấp, làm mịn mạnh)",
                             Amount,
                         ),
+                        (
+                            "Chi tiết mặt (AI)",
+                            &mut s.ai_detail,
+                            "AI vẽ lại chi tiết cả khuôn mặt (da, mắt, mi, lông mày, môi) cho ảnh mờ, nhiễu, ảnh điện thoại, ảnh nhỏ — màu, sáng tối và dáng mặt vẫn là của ảnh. Da sau AI rất sạch: kéo thêm \"Vân da\" nếu muốn có lỗ chân lông. Lần đầu kéo, app chạy AI vài giây cho mỗi khuôn mặt",
+                            Amount,
+                        ),
                         ("Đều màu da", &mut s.even_tone, "Giảm mảng đỏ, loang màu", Amount),
                         ("Giảm bóng dầu", &mut s.shine, "Dịu các vùng bóng loáng", Amount),
                         ("Sáng da", &mut s.brighten, "Da sáng hơn, giữ màu", Amount),
@@ -485,7 +501,10 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         ),
                     ];
                     group(ui, shown, &mut next, Group::Skin, "Da", at_work(&skin), |ui| {
-                        rows(ui, ready, skin)
+                        rows(ui, ready, skin);
+                        if let Some((note, warning)) = &data.dialogs.portrait_detail {
+                            note_line(ui, note, *warning);
+                        }
                     });
                     let face = vec![
                         (
@@ -602,12 +621,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     ];
                     group(ui, shown, &mut next, Group::Body, "Dáng người", at_work(&body), |ui| {
                         if let Some((note, warning)) = &data.dialogs.portrait_body {
-                            let colour = if *warning {
-                                egui::Color32::from_rgb(220, 150, 90)
-                            } else {
-                                egui::Color32::from_gray(150)
-                            };
-                            ui.label(egui::RichText::new(note).size(10.0).color(colour));
+                            note_line(ui, note, *warning);
                         }
                         rows(ui, ready, body)
                     });

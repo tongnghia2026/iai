@@ -6,6 +6,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::ai_detail::DetailAt;
 use super::analysis::{luma, BrowLayers, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
 use super::body::BodySliders;
 use super::geometry::Region;
@@ -34,6 +35,11 @@ pub struct PortraitSettings {
     /// "Vân da": synthetic pore texture for flat, low-resolution skin.
     #[serde(default)]
     pub texture: f32,
+    /// "Chi tiết mặt (AI)": how far the face's fine detail is the one a
+    /// face restore model draws rather than the photo's own (see
+    /// [`super::ai_detail`]).
+    #[serde(default)]
+    pub ai_detail: f32,
     pub even_tone: f32,
     pub shine: f32,
     pub brighten: f32,
@@ -88,6 +94,7 @@ impl Default for PortraitSettings {
             smooth: 40.0,
             volume: 30.0,
             texture: 0.0,
+            ai_detail: 0.0,
             even_tone: 25.0,
             shine: 20.0,
             brighten: 0.0,
@@ -140,6 +147,7 @@ impl PortraitSettings {
         smooth: 0.0,
         volume: 0.0,
         texture: 0.0,
+        ai_detail: 0.0,
         even_tone: 0.0,
         shine: 0.0,
         brighten: 0.0,
@@ -190,6 +198,7 @@ impl PortraitSettings {
             smooth: u(self.smooth),
             volume: u(self.volume),
             texture: u(self.texture),
+            ai_detail: u(self.ai_detail),
             even_tone: u(self.even_tone),
             shine: u(self.shine),
             brighten: u(self.brighten),
@@ -284,6 +293,25 @@ impl PortraitSettings {
 const VOLUME_GAIN: f32 = 0.45;
 /// Luminance swing of "Vân da" at 100.
 const TEXTURE_GAIN: f32 = 0.10;
+
+/// What smoothing leaves of the skin's mid band.
+fn keep_mid(s: &PortraitSettings, inside: f32) -> f32 {
+    1.0 - 0.85 * s.smooth * inside
+}
+
+/// What smoothing leaves of the finest grain: near the top of the slider it
+/// goes too (phone noise); "Vân da" and "Chi tiết mặt (AI)" can lay clean
+/// texture back.
+fn keep_fine(s: &PortraitSettings, inside: f32) -> f32 {
+    1.0 - (0.15 * s.smooth + 0.45 * s.smooth.powi(3)) * inside
+}
+
+/// What "Chi tiết mặt (AI)" adds to a pixel still holding `kept` of the
+/// photo's own detail: the model's detail in its place, as far as the slider
+/// goes.
+fn ai_detail_swap(s: &PortraitSettings, detail: &DetailAt, kept: f32) -> [f32; 3] {
+    std::array::from_fn(|k| s.ai_detail * (detail.model[k] - kept * detail.photo[k]))
+}
 
 /// Pore spacing for a face `extent` pixels from forehead to chin: about 1/350
 /// of it, never finer than a pixel.
@@ -398,10 +426,8 @@ fn skin_result(
         low_y += s.volume * VOLUME_GAIN * (broad - huge) * inside;
     }
 
-    let keep_mid = 1.0 - 0.85 * s.smooth * inside;
-    // Near the top of the slider the finest grain goes too (phone noise);
-    // "Vân da" can lay clean texture back.
-    let keep_fine = 1.0 - (0.15 * s.smooth + 0.45 * s.smooth.powi(3)) * inside;
+    let keep_mid = keep_mid(s, inside);
+    let keep_fine = keep_fine(s, inside);
     let (mid_y, mid_c) = split(mid);
     // The coarser half of the mid band's light is the face's shape (nose,
     // folds, eye sockets); "Tạo khối" keeps it while the grain still goes.
@@ -490,7 +516,8 @@ fn colourise(c: [f32; 3], hue: f32, saturation: f32) -> [f32; 3] {
 
 /// The retouched colour of skin-region pixel `i`, which is pixel `f` of the
 /// face region when it lies there. `src` is the photo in 0..1; `fetch(dx,
-/// dy)` reads the photo at an offset from this pixel.
+/// dy)` reads the photo at an offset from this pixel; `ai` is the restore
+/// model's detail here, once made.
 #[allow(clippy::too_many_arguments)]
 fn retouch_pixel(
     face: &FaceModel,
@@ -501,8 +528,10 @@ fn retouch_pixel(
     f: Option<usize>,
     src: [f32; 3],
     fetch: &dyn Fn(isize, isize) -> [f32; 3],
+    ai: Option<DetailAt>,
 ) -> [f32; 3] {
     let m = skin.mask[i] as f32 / 255.0;
+    let ai = ai.filter(|_| s.ai_detail > 0.0);
     let mut out = src;
     if m > 0.0 {
         let inside = skin.interior[i] as f32 / 255.0;
@@ -511,10 +540,12 @@ fn retouch_pixel(
         let under = f.map_or(0.0, |f| skin.under_eye[f] as f32 / 255.0);
         let mut r = skin_result(skin, s, i, under, src, l1, l2, inside);
         let cover = f.map_or(0.0, |f| face.spot_cover[f] as f32 / 255.0);
+        let mut healed = 0.0;
         if let Some(f) = f.filter(|_| s.blemish > 0.0 && cover > 0.0) {
             let score = face.spot_score[f] as f32 / BLEMISH_SCALE;
             let threshold = 1.5 - 1.15 * s.blemish;
             let spot = smoothstep(threshold * 0.85, threshold * 1.15, score) * cover * inside;
+            healed = spot;
             if spot > 0.0 {
                 // Heal like a healing brush: borrow the texture of nearby clean
                 // skin, shifted to the colour around this spot.
@@ -538,6 +569,15 @@ fn retouch_pixel(
                 }
             }
         }
+        if let Some(detail) = &ai {
+            // Smoothing has taken part of the photo's detail already. A
+            // healed spot has its donor's instead: no swap there.
+            let kept = 0.5 * (keep_mid(s, inside) + keep_fine(s, inside));
+            let add = ai_detail_swap(s, detail, kept);
+            for k in 0..3 {
+                r[k] += add[k] * (1.0 - healed);
+            }
+        }
         let contour = f.map_or(0.0, |f| face.nose[f] as f32 / 127.0 * s.nose_bridge);
         if contour != 0.0 {
             // Shade lightly: the sides only need to hint at depth.
@@ -550,6 +590,17 @@ fn retouch_pixel(
         }
         for k in 0..3 {
             out[k] = src[k] + m * (r[k] - src[k]);
+        }
+    }
+    if let Some(detail) = &ai {
+        // What is not skin inside the face outline: eyes, brows, lips,
+        // glasses, beard.
+        let share = (detail.face - m).max(0.0);
+        if share > 0.0 {
+            let add = ai_detail_swap(s, detail, 1.0);
+            for k in 0..3 {
+                out[k] += add[k] * share;
+            }
         }
     }
     // The features lie in the face region.
@@ -807,6 +858,7 @@ fn retouch(
     {
         let skin = skin_of(face, edits.get(index));
         let brows = brows_of(face, edits.get(index));
+        let detail = face.ai_detail.get().and_then(|d| d.as_ref().ok());
         let r = skin.region;
         let (sw, sx, sy) = (
             r.w as usize,
@@ -831,7 +883,8 @@ fn retouch(
                     let fetch = |dx: isize, dy: isize| {
                         pixel((x as isize + dx) as usize, (y as isize + dy) as usize)
                     };
-                    let res = retouch_pixel(face, skin, brows, &s, i, f, src, &fetch);
+                    let ai = detail.and_then(|d| d.at(x as u32, y as u32));
+                    let res = retouch_pixel(face, skin, brows, &s, i, f, src, &fetch, ai);
                     let cell = &mut line[sx + col];
                     for k in 0..3 {
                         cell[k] += res[k] - src[k];
@@ -1065,9 +1118,139 @@ mod tests {
         let map = old.as_object_mut().unwrap();
         map.remove("volume");
         map.remove("texture");
+        map.remove("ai_detail");
         let read: PortraitSettings = serde_json::from_value(old).unwrap();
-        assert_eq!((read.volume, read.texture), (0.0, 0.0));
+        assert_eq!((read.volume, read.texture, read.ai_detail), (0.0, 0.0, 0.0));
         assert_eq!(read.smooth, PortraitSettings::default().smooth);
+    }
+
+    #[test]
+    fn ai_detail_swaps_the_photos_detail_for_the_models() {
+        let detail = DetailAt {
+            model: [0.05, 0.04, 0.03],
+            photo: [-0.02, 0.01, 0.0],
+            face: 1.0,
+        };
+        let at = |amount: f32| {
+            PortraitSettings {
+                ai_detail: amount,
+                ..PortraitSettings::NEUTRAL
+            }
+            .unit()
+        };
+        // At 100 a pixel holding the photo's detail ends up with the model's.
+        let full = ai_detail_swap(&at(100.0), &detail, 1.0);
+        for k in 0..3 {
+            let after = detail.photo[k] + full[k];
+            assert!((after - detail.model[k]).abs() < 1e-6);
+        }
+        // Where smoothing left a quarter of the photo's detail, only that
+        // quarter is taken back out.
+        let smoothed = ai_detail_swap(&at(100.0), &detail, 0.25);
+        assert!((smoothed[0] - (0.05 + 0.25 * 0.02)).abs() < 1e-6);
+        // Halfway is half of it; 0 is nothing.
+        let half = ai_detail_swap(&at(50.0), &detail, 1.0);
+        assert!((half[0] - 0.5 * full[0]).abs() < 1e-6);
+        assert_eq!(ai_detail_swap(&at(0.0), &detail, 1.0), [0.0; 3]);
+    }
+
+    /// Opt-in visual probe: IAI_PORTRAIT_DETAIL_PROBE is a folder of photos;
+    /// each gets `detail_<name>.png`, face 0 at least 420 pixels wide: as
+    /// shot | the default retouch | + Chi tiết mặt (AI) 50 | + 100 |
+    /// + 100 and Vân da 50 | AI 100 alone.
+    #[test]
+    #[ignore]
+    fn probe_ai_detail() {
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_DETAIL_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name.starts_with("detail_") || !(name.ends_with(".jpg") || name.ends_with(".png")) {
+                continue;
+            }
+            let rgba = image::open(&path).unwrap().to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let rgba = rgba.into_raw();
+            let model = super::super::analyze(&rgba, w, h, false, None, &|_| {}).unwrap();
+            if model.faces.is_empty() {
+                println!("{name}: no face");
+                continue;
+            }
+            let enabled = vec![true; model.faces.len()];
+            let base = PortraitSettings::default();
+            let half = PortraitSettings {
+                ai_detail: 50.0,
+                ..base
+            };
+            let full_ai = PortraitSettings {
+                ai_detail: 100.0,
+                ..base
+            };
+            let pores = PortraitSettings {
+                texture: 50.0,
+                ..full_ai
+            };
+            let alone = PortraitSettings {
+                ai_detail: 100.0,
+                ..PortraitSettings::NEUTRAL
+            };
+            let full = |settings: &PortraitSettings| {
+                let mut out = rgba.clone();
+                if let Some((r, px)) = render(&rgba, &model, settings, &enabled, &[]) {
+                    for y in 0..r.h as usize {
+                        let o = ((r.y as usize + y) * w as usize + r.x as usize) * 4;
+                        out[o..o + r.w as usize * 4]
+                            .copy_from_slice(&px[y * r.w as usize * 4..(y + 1) * r.w as usize * 4]);
+                    }
+                }
+                out
+            };
+            // Before the model's layer exists the slider changes nothing.
+            let before = full(&full_ai);
+            assert!(before == full(&base), "{name}: detail before analysis");
+            let started = std::time::Instant::now();
+            super::super::ai_detail::analyze_details(&rgba, &model, &enabled);
+            let seconds = started.elapsed().as_secs_f32();
+            if let Some(Err(error)) = model.faces[0].ai_detail.get() {
+                println!("{name}: {error}");
+                continue;
+            }
+            let views = [
+                rgba.clone(),
+                full(&base),
+                full(&half),
+                full(&full_ai),
+                full(&pores),
+                full(&alone),
+            ];
+            let r = model.faces[0].region;
+            let zoom = (420.0 / r.w as f32).ceil().max(1.0) as u32;
+            let mut sheet =
+                image::RgbaImage::new((r.w * zoom + 8) * views.len() as u32, r.h * zoom);
+            for (k, view) in views.iter().enumerate() {
+                for y in 0..r.h * zoom {
+                    for x in 0..r.w * zoom {
+                        let o = (((r.y + y / zoom) * w + r.x + x / zoom) * 4) as usize;
+                        sheet.put_pixel(
+                            k as u32 * (r.w * zoom + 8) + x,
+                            y,
+                            image::Rgba([view[o], view[o + 1], view[o + 2], 255]),
+                        );
+                    }
+                }
+            }
+            sheet.save(dir.join(format!("detail_{name}.png"))).unwrap();
+            println!(
+                "{name}: face {}x{}, extent {:.0}, {} face(s) in {seconds:.1} s",
+                r.w,
+                r.h,
+                model.faces[0].extent,
+                model.faces.len()
+            );
+        }
     }
 
     #[test]
