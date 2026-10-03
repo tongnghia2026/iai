@@ -249,4 +249,22 @@ Chủ sau khi test đợt 9:
   và trong bản portable, nên không cần làm gì thêm. Thiếu nó thì nhóm Tóc tắt và AI chỉ làm
   nét mặt → thêm dòng ghi chú báo rõ khi kéo thanh AI. Phương án dự phòng bằng BiSeNet (50 MB,
   có sẵn) để nhận tóc khi thiếu Sapiens2: chưa làm, làm nếu chủ định phát hành bản nhẹ.
+- [x] Build Release, chủ test đợt 10: **OK** ("hoàn hảo").
+
+## Đợt 11 (03/10 khuya): mặc định mới, sắp lại nhóm, thanh giảm màu
+
+Chủ sau khi test đợt 10:
+
+- [x] **Ảnh mới mở ra đã bật sẵn**: "Sửa màu & sáng" ở mức Tự động (Khử ám màu 100, Cân sáng
+  80, Khử đục 60, Đều sáng da 60), Màu studio **"Trong trẻo"** (độ đậm 70), **Chi tiết mặt
+  (AI) 60** (app tự chạy AI ngay sau khi phân tích; dòng trạng thái báo "đang tạo chi tiết
+  AI…"). Layer cũ / file cũ vẫn đọc đúng giá trị đã lưu (thiếu thì 0).
+- [x] Sắp lại nhóm: **Dáng mặt** còn Mặt thon, Bóp mặt, Cằm, Trán; **Mắt** thêm Mắt to, Mắt
+  nghiêng; nhóm mới **Mũi** = Mũi thon + Sống mũi cao (chuyển từ Da); **Miệng, môi & răng**
+  thêm Rộng miệng, Cười, Môi dày; **Chi tiết** = Chi tiết mặt (AI) (chuyển từ Da) + Tăng nét.
+- [x] Thanh **giảm màu** (bớt bão hòa, giữ độ sáng, chạy trước phủ màu): "Giảm màu tóc",
+  "Giảm màu tròng mắt", "Giảm màu lông mày". Môi đã có thanh hai chiều → đổi tên "Đậm / giảm
+  màu môi" (trái = giảm màu), không thêm thanh trùng.
+- [x] Có vùng chọn thì Sửa màu & sáng và Màu studio chỉ áp trong vùng chọn (như phần chỉnh da);
+  trước đây look áp cả layer — giờ bật mặc định nên phải theo vùng chọn.
 - [ ] Build Release, chủ test.
