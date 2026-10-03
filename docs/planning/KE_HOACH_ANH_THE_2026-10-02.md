@@ -148,4 +148,11 @@ mặt mất khối; muốn thêm "tạo khối" khi làm mịn và "tạo vân d
   Vân da 50 hết cảm giác nhựa.
 - Chưa làm: chi tiết da bằng AI (GFPGAN có sẵn trong models, Auto Retouch đã có đường
   "texture transfer") — làm nếu chủ thấy Vân da tổng hợp chưa đủ.
-- [ ] Build Release, chủ test đợt 6.
+- [x] Build Release, chủ test đợt 6: **OK**.
+
+## Đợt 7 (03/10): bấm đúp layer "Chân dung" để chỉnh tiếp
+
+- [x] Bấm đúp dòng layer "Chân dung" trong bảng Layer (trừ icon mắt/mask) → chọn layer đó và
+  mở lại Chỉnh chân dung với đúng thông số/mặt/mask đã tô — như layer điều chỉnh. Đổi tên
+  vẫn ở menu chuột phải. (`layer_is_portrait` trong view model, `reopen_portrait_layer`.)
+- [ ] Build Release, chủ test đợt 7.
