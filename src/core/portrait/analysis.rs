@@ -644,8 +644,15 @@ pub struct SkinLayers {
     pub(super) low1: Vec<[u16; 3]>,
     pub(super) low2: Vec<[u16; 3]>,
     pub(super) broad: Vec<u16>,
+    /// Luma between the fine and mid splits: what of the mid band is shape
+    /// (nose, folds, eye sockets) rather than grain and noise.
+    pub(super) form: Vec<u16>,
+    /// Luma at the scale of the face's big forms (cheekbones, brow, jaw).
+    pub(super) huge: Vec<u16>,
     pub(super) mean: [f32; 3],
     pub(super) cheek_luma: f32,
+    /// Forehead-to-chin extent of the face, in pixels.
+    pub(super) extent: f32,
 }
 
 impl SkinLayers {
@@ -686,12 +693,18 @@ fn split_skin(
     let r1 = (e / 220.0).max(1.0);
     let r2 = (e / 28.0).max(3.0);
     let r3 = (e / 7.0).max(6.0);
+    let r4 = (e / 2.5).max(12.0);
     let low1 = masked_blur(src, skin, w, h, r1);
     let low2 = masked_blur(src, skin, w, h, r2);
-    let broad: Vec<u16> = masked_blur(src, skin, w, h, r3)
-        .into_par_iter()
-        .map(|c| (luma(c).clamp(0.0, 1.0) * 65535.0).round() as u16)
-        .collect();
+    let luma_band = |r: f32| -> Vec<u16> {
+        masked_blur(src, skin, w, h, r)
+            .into_par_iter()
+            .map(|c| (luma(c).clamp(0.0, 1.0) * 65535.0).round() as u16)
+            .collect()
+    };
+    let broad = luma_band(r3);
+    let form = luma_band((e / 80.0).max(2.0));
+    let huge = luma_band(r4);
 
     // The face's own tone: within its region, down to just below the chin.
     let (mut weight, mut mean) = (0.0f64, [0.0f64; 3]);
@@ -745,8 +758,11 @@ fn split_skin(
         low1: low1.par_iter().map(|&c| to_u16(c)).collect(),
         low2: low2.par_iter().map(|&c| to_u16(c)).collect(),
         broad,
+        form,
+        huge,
         mean,
         cheek_luma,
+        extent: e,
     };
     SkinSplit {
         low1: region.crop(&low1, face),

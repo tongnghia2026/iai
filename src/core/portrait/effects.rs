@@ -26,6 +26,14 @@ use crate::core::develop_scene::{build_scene_tone_for, BaseLook, SceneToneData, 
 #[serde(default)]
 pub struct PortraitSettings {
     pub smooth: f32,
+    /// "Tạo khối": keep the face's shape (nose, folds, eye sockets) that
+    /// strong smoothing flattens, and deepen its big forms a little. Layers
+    /// saved before it existed read 0, as they were made.
+    #[serde(default)]
+    pub volume: f32,
+    /// "Vân da": synthetic pore texture for flat, low-resolution skin.
+    #[serde(default)]
+    pub texture: f32,
     pub even_tone: f32,
     pub shine: f32,
     pub brighten: f32,
@@ -78,6 +86,8 @@ impl Default for PortraitSettings {
     fn default() -> Self {
         Self {
             smooth: 40.0,
+            volume: 30.0,
+            texture: 0.0,
             even_tone: 25.0,
             shine: 20.0,
             brighten: 0.0,
@@ -128,6 +138,8 @@ pub const DEFAULT_LOOK_STRENGTH: f32 = 70.0;
 impl PortraitSettings {
     pub const NEUTRAL: Self = Self {
         smooth: 0.0,
+        volume: 0.0,
+        texture: 0.0,
         even_tone: 0.0,
         shine: 0.0,
         brighten: 0.0,
@@ -176,6 +188,8 @@ impl PortraitSettings {
         let both = |v: f32| (v / 100.0).clamp(-1.0, 1.0);
         Self {
             smooth: u(self.smooth),
+            volume: u(self.volume),
+            texture: u(self.texture),
             even_tone: u(self.even_tone),
             shine: u(self.shine),
             brighten: u(self.brighten),
@@ -266,6 +280,54 @@ impl PortraitSettings {
     }
 }
 
+/// How far "Tạo khối" at 100 deepens the big forms' light and shade.
+const VOLUME_GAIN: f32 = 0.45;
+/// Luminance swing of "Vân da" at 100.
+const TEXTURE_GAIN: f32 = 0.10;
+
+/// Pore spacing for a face `extent` pixels from forehead to chin: about 1/350
+/// of it, never finer than a pixel.
+fn pore_period(extent: f32) -> f32 {
+    (extent / 350.0).max(1.0)
+}
+
+/// A fixed pseudo-random value in 0..1 for lattice point (x, y).
+fn lattice(x: i32, y: i32, seed: u32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(0x8da6_b343)
+        ^ (y as u32).wrapping_mul(0xd816_3841)
+        ^ seed.wrapping_mul(0xcb1a_b31f);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x5bd1_e995);
+    h ^= h >> 15;
+    (h & 0xff_ffff) as f32 / 0x100_0000 as f32
+}
+
+/// Smooth value noise in −1..1 with features `period` pixels apart.
+fn value_noise(x: f32, y: f32, period: f32, seed: u32) -> f32 {
+    // Off the lattice even at a 1-pixel period, where every sample would
+    // otherwise land on a lattice point.
+    let (u, v) = (x / period + 0.37, y / period + 0.61);
+    let (x0, y0) = (u.floor(), v.floor());
+    let ease = |t: f32| t * t * (3.0 - 2.0 * t);
+    let (tx, ty) = (ease(u - x0), ease(v - y0));
+    let (x0, y0) = (x0 as i32, y0 as i32);
+    let a = lattice(x0, y0, seed) * (1.0 - tx) + lattice(x0 + 1, y0, seed) * tx;
+    let b = lattice(x0, y0 + 1, seed) * (1.0 - tx) + lattice(x0 + 1, y0 + 1, seed) * tx;
+    (a * (1.0 - ty) + b * ty) * 2.0 - 1.0
+}
+
+/// Skin texture in about −1..1 at image pixel (x, y): pore dots and the
+/// lighter ridges between them, a finer grain and a faint larger mottling.
+/// Odd in every noise, so it averages to zero at any scale (the skin keeps its
+/// brightness), and fixed per position, so the preview and the applied layer
+/// match.
+fn pores(x: f32, y: f32, period: f32) -> f32 {
+    let dots = value_noise(x, y, period, 1);
+    let grain = value_noise(x, y, period * 0.5, 2);
+    let mottle = value_noise(x, y, period * 2.3, 3);
+    -1.4 * dots * dots.abs() + 0.35 * grain + 0.2 * mottle
+}
+
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -328,16 +390,44 @@ fn skin_result(
         }
     }
 
+    if s.volume > 0.0 {
+        // The big forms (cheekbones, brow, jaw) a little deeper, from the
+        // photo's own light.
+        let broad = skin.broad[i] as f32 / 65535.0;
+        let huge = skin.huge[i] as f32 / 65535.0;
+        low_y += s.volume * VOLUME_GAIN * (broad - huge) * inside;
+    }
+
     let keep_mid = 1.0 - 0.85 * s.smooth * inside;
-    let keep_fine = 1.0 - 0.15 * s.smooth * inside;
+    // Near the top of the slider the finest grain goes too (phone noise);
+    // "Vân da" can lay clean texture back.
+    let keep_fine = 1.0 - (0.15 * s.smooth + 0.45 * s.smooth.powi(3)) * inside;
     let (mid_y, mid_c) = split(mid);
+    // The coarser half of the mid band's light is the face's shape (nose,
+    // folds, eye sockets); "Tạo khối" keeps it while the grain still goes.
+    let shape_y = skin.form[i] as f32 / 65535.0 - luma(l2);
+    let keep_shape = keep_mid + (1.0 - keep_mid) * s.volume;
     let low = join(low_y, low_c);
     let mut r = [0.0f32; 3];
     for k in 0..3 {
         r[k] = low[k]
-            + mid_y * keep_mid
+            + (mid_y - shape_y) * keep_mid
+            + shape_y * keep_shape
             + mid_c[k] * keep_mid * (1.0 - 0.6 * s.even_tone * inside)
             + fine[k] * keep_fine;
+    }
+
+    if s.texture > 0.0 {
+        let w = skin.region.w as usize;
+        let (x, y) = (
+            (skin.region.x as usize + i % w) as f32,
+            (skin.region.y as usize + i / w) as f32,
+        );
+        let y_now = luma(r).clamp(0.0, 1.0);
+        // Pores show in the midtones, not in deep shade or bright highlights.
+        let amount = s.texture * TEXTURE_GAIN * inside * 4.0 * y_now * (1.0 - y_now);
+        let grain = 1.0 + amount * pores(x, y, pore_period(skin.extent));
+        r = r.map(|v| v * grain);
     }
 
     let y = luma(r);
@@ -924,6 +1014,150 @@ fn tint_masks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One skin pixel whose mid band holds 0.08 of shape and 0.02 of grain.
+    fn one_pixel_skin() -> SkinLayers {
+        let u16v = |v: f32| (v * 65535.0).round() as u16;
+        SkinLayers {
+            region: Region {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+            mask: vec![255],
+            interior: vec![255],
+            under_eye: vec![0],
+            low1: vec![[u16v(0.5); 3]],
+            low2: vec![[u16v(0.4); 3]],
+            broad: vec![u16v(0.4)],
+            form: vec![u16v(0.48)],
+            huge: vec![u16v(0.4)],
+            mean: [0.4; 3],
+            cheek_luma: 0.4,
+            extent: 300.0,
+        }
+    }
+
+    #[test]
+    fn volume_keeps_the_shape_that_strong_smoothing_removes() {
+        let skin = one_pixel_skin();
+        let src = [0.5f32; 3];
+        let (l1, l2) = ([0.5f32; 3], [0.4f32; 3]);
+        let result = |volume: f32| {
+            let s = PortraitSettings {
+                smooth: 100.0,
+                volume,
+                ..PortraitSettings::NEUTRAL
+            }
+            .unit();
+            luma(skin_result(&skin, &s, 0, 0.0, src, l1, l2, 1.0))
+        };
+        // Smoothing alone keeps 15% of the whole mid band.
+        assert!((result(0.0) - 0.415).abs() < 2e-3, "{}", result(0.0));
+        // "Tạo khối" 100 keeps all the shape, still drops 85% of the grain.
+        assert!((result(100.0) - 0.483).abs() < 2e-3, "{}", result(100.0));
+    }
+
+    #[test]
+    fn settings_saved_before_volume_and_texture_read_them_as_zero() {
+        let mut old = serde_json::to_value(PortraitSettings::default()).unwrap();
+        let map = old.as_object_mut().unwrap();
+        map.remove("volume");
+        map.remove("texture");
+        let read: PortraitSettings = serde_json::from_value(old).unwrap();
+        assert_eq!((read.volume, read.texture), (0.0, 0.0));
+        assert_eq!(read.smooth, PortraitSettings::default().smooth);
+    }
+
+    #[test]
+    fn pore_texture_neither_brightens_nor_darkens_the_skin() {
+        for period in [1.0f32, 1.7, 2.5, 4.0] {
+            let n = 400;
+            let values: Vec<f32> = (0..n * n)
+                .map(|k| pores((k % n) as f32, (k / n) as f32, period))
+                .collect();
+            let mean = values.iter().sum::<f32>() / values.len() as f32;
+            let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32;
+            assert!(mean.abs() < 0.03, "period {period}: mean {mean}");
+            assert!(
+                var.sqrt() > 0.15 && var.sqrt() < 0.6,
+                "period {period}: sd {}",
+                var.sqrt()
+            );
+            assert!(values.iter().all(|v| v.abs() <= 2.0));
+        }
+        assert_eq!(pores(10.0, 20.0, 2.0), pores(10.0, 20.0, 2.0));
+    }
+
+    /// Opt-in visual probe: IAI_PORTRAIT_FORM_PROBE is a folder of photos;
+    /// each gets `form_<name>.png`: as shot | smooth 100 | + Tạo khối 60 |
+    /// + Vân da 60, cropped to face 0.
+    #[test]
+    #[ignore]
+    fn probe_form_and_texture() {
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_FORM_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let volume: f32 = std::env::var("IAI_FORM_VOLUME")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60.0);
+        let texture: f32 = std::env::var("IAI_FORM_TEXTURE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60.0);
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name.starts_with("form_") || !(name.ends_with(".jpg") || name.ends_with(".png")) {
+                continue;
+            }
+            let rgba = image::open(&path).unwrap().to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let rgba = rgba.into_raw();
+            let model = super::super::analyze(&rgba, w, h, false, None, &|_| {}).unwrap();
+            let enabled = vec![true; model.faces.len()];
+            let smooth = PortraitSettings {
+                smooth: 100.0,
+                ..PortraitSettings::NEUTRAL
+            };
+            let shaped = PortraitSettings { volume, ..smooth };
+            let textured = PortraitSettings { texture, ..shaped };
+            let full = |settings: &PortraitSettings| {
+                let mut out = rgba.clone();
+                if let Some((r, px)) = render(&rgba, &model, settings, &enabled, &[]) {
+                    for y in 0..r.h as usize {
+                        let o = ((r.y as usize + y) * w as usize + r.x as usize) * 4;
+                        out[o..o + r.w as usize * 4]
+                            .copy_from_slice(&px[y * r.w as usize * 4..(y + 1) * r.w as usize * 4]);
+                    }
+                }
+                out
+            };
+            let views = [rgba.clone(), full(&smooth), full(&shaped), full(&textured)];
+            let r = model.faces[0].region;
+            let mut sheet = image::RgbaImage::new(r.w * 4 + 30, r.h);
+            for (k, view) in views.iter().enumerate() {
+                for y in 0..r.h {
+                    for x in 0..r.w {
+                        let o = (((r.y + y) * w + r.x + x) * 4) as usize;
+                        sheet.put_pixel(
+                            k as u32 * (r.w + 10) + x,
+                            y,
+                            image::Rgba([view[o], view[o + 1], view[o + 2], 255]),
+                        );
+                    }
+                }
+            }
+            sheet.save(dir.join(format!("form_{name}.png"))).unwrap();
+            println!(
+                "{name}: face {}x{}, extent {:.0}",
+                r.w, r.h, model.faces[0].extent
+            );
+        }
+    }
 
     #[test]
     fn brows_stay_as_shot_unless_their_own_sliders_move() {

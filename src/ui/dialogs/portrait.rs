@@ -455,6 +455,18 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     );
                     let skin = vec![
                         ("Làm mịn da", &mut s.smooth, "Mịn da nhưng giữ vân lỗ chân lông", Amount),
+                        (
+                            "Tạo khối",
+                            &mut s.volume,
+                            "Giữ khối mặt (sống mũi, cánh mũi, nếp má, gò má) khi làm mịn mạnh — kéo cao khi da bị bệt",
+                            Amount,
+                        ),
+                        (
+                            "Vân da",
+                            &mut s.texture,
+                            "Thêm vân lỗ chân lông cho da bệt (ảnh điện thoại, độ phân giải thấp, làm mịn mạnh)",
+                            Amount,
+                        ),
                         ("Đều màu da", &mut s.even_tone, "Giảm mảng đỏ, loang màu", Amount),
                         ("Giảm bóng dầu", &mut s.shine, "Dịu các vùng bóng loáng", Amount),
                         ("Sáng da", &mut s.brighten, "Da sáng hơn, giữ màu", Amount),
