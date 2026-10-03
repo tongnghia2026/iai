@@ -402,7 +402,8 @@ impl App {
                     .fixes()
                     .and_then(|fixes| correct::fix_lut(&model.light, &fixes));
                 let look = settings.studio_look();
-                looks::preview_graded(&src, w, h, retouched, fix.as_ref(), look)
+                let clip = model.clip.as_ref();
+                looks::preview_graded(&src, w, h, retouched, fix.as_ref(), look, clip)
             };
             let _ = tx.send(rendered);
         });
@@ -599,7 +600,7 @@ impl App {
         }
         let mut full = looks::with_retouch(&src, w, Some((region, pixels)));
         let look = look.as_ref().map(|(lut, strength)| (lut, *strength));
-        looks::grade(&mut full, fix.as_ref(), look);
+        looks::grade(&mut full, w, fix.as_ref(), look, model.clip.as_ref());
         let recipe = Arc::new(PortraitRecipe::new(
             layer_id,
             (w, h),
@@ -748,6 +749,11 @@ impl App {
         );
         if !model.parts_used {
             line.push_str(" · chỉ dùng mốc mặt");
+        }
+        // The AI detail is on for a new photo: say why the preview is about
+        // to sharpen.
+        if session.detail_rx.is_some() {
+            line.push_str(" · đang tạo chi tiết AI…");
         }
         let hair = model.faces.iter().any(|face| !face.hair_region.is_empty());
         (line, true, faces, hair)
@@ -1069,7 +1075,13 @@ mod tests {
         app.set_portrait_preview(PortraitSettings::default(), on.clone(), true, false);
         wait_for_preview(&mut app);
 
-        app.apply_portrait(PortraitSettings::default(), on).unwrap();
+        // Skin sliders alone leave the photo's corner as it is.
+        let skin_only = PortraitSettings {
+            smooth: 40.0,
+            blemish: 60.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        app.apply_portrait(skin_only, on).unwrap();
         let canvas = &app.docs.documents[0].canvas;
         assert_eq!(canvas.layer_stack.layers.len(), 2);
         assert_eq!(canvas.layer_stack.layers[1].name, RESULT_LAYER);

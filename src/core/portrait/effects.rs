@@ -24,6 +24,8 @@ use crate::core::develop_scene::{build_scene_tone_for, BaseLook, SceneToneData, 
 /// brows, hair brightness) -100..100, and the colour pickers (`*_hue`) are
 /// target hues in degrees, 0..360, applied by the matching `*_tint` amount.
 /// Brows have only their own sliders, all 0 by default: they stay as shot.
+/// A new photo starts with the corrections of "Sửa màu & sáng", the "Trong
+/// trẻo" look and the AI detail on.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PortraitSettings {
@@ -79,6 +81,15 @@ pub struct PortraitSettings {
     pub brow_sharpen: f32,
     pub brow_hue: f32,
     pub brow_tint: f32,
+    /// "Giảm màu": how much colour is taken out of the hair, the irises and
+    /// the brows (dyed hair, coloured lenses, tinted brows), 0..100, before
+    /// any of their own tints goes on.
+    #[serde(default)]
+    pub hair_fade: f32,
+    #[serde(default)]
+    pub iris_fade: f32,
+    #[serde(default)]
+    pub brow_fade: f32,
     /// Face shape, -100..100 (0 = as shot); see [`FaceShape`].
     pub face_slim: f32,
     pub chin_length: f32,
@@ -99,7 +110,9 @@ pub struct PortraitSettings {
     pub body_legs: f32,
     pub body_leg_length: f32,
     /// "Màu studio": the look (index into [`StudioLook::ALL`], 0 = none) and
-    /// how much of it is mixed in, 0..100.
+    /// how much of it is mixed in, 0..100. A layer saved before looks
+    /// existed has none.
+    #[serde(default)]
     pub look: u8,
     pub look_strength: f32,
 }
@@ -110,12 +123,12 @@ impl Default for PortraitSettings {
             smooth: 40.0,
             volume: 30.0,
             texture: 0.0,
-            ai_detail: 0.0,
-            fix_cast: 0.0,
+            ai_detail: 60.0,
+            fix_cast: AUTO_FIX.cast,
             fix_warmth: 0.0,
-            fix_exposure: 0.0,
-            fix_haze: 0.0,
-            even_light: 0.0,
+            fix_exposure: AUTO_FIX.exposure,
+            fix_haze: AUTO_FIX.haze,
+            even_light: AUTO_FIX.even_light,
             even_tone: 25.0,
             shine: 20.0,
             brighten: 0.0,
@@ -139,6 +152,9 @@ impl Default for PortraitSettings {
             brow_sharpen: 0.0,
             brow_hue: 25.0,
             brow_tint: 0.0,
+            hair_fade: 0.0,
+            iris_fade: 0.0,
+            brow_fade: 0.0,
             face_slim: 0.0,
             chin_length: 0.0,
             eye_size: 0.0,
@@ -155,13 +171,29 @@ impl Default for PortraitSettings {
             body_arms: 0.0,
             body_legs: 0.0,
             body_leg_length: 0.0,
-            look: 0,
+            look: StudioLook::Clear.index(),
             look_strength: DEFAULT_LOOK_STRENGTH,
         }
     }
 }
 
 pub const DEFAULT_LOOK_STRENGTH: f32 = 70.0;
+
+/// What "Tự động" sets the "Sửa màu & sáng" sliders to: the usual amounts
+/// for a phone photo, and where a new photo starts.
+pub struct AutoFix {
+    pub cast: f32,
+    pub exposure: f32,
+    pub haze: f32,
+    pub even_light: f32,
+}
+
+pub const AUTO_FIX: AutoFix = AutoFix {
+    cast: 100.0,
+    exposure: 80.0,
+    haze: 60.0,
+    even_light: 60.0,
+};
 
 impl PortraitSettings {
     pub const NEUTRAL: Self = Self {
@@ -197,6 +229,9 @@ impl PortraitSettings {
         brow_sharpen: 0.0,
         brow_hue: 25.0,
         brow_tint: 0.0,
+        hair_fade: 0.0,
+        iris_fade: 0.0,
+        brow_fade: 0.0,
         face_slim: 0.0,
         chin_length: 0.0,
         eye_size: 0.0,
@@ -249,6 +284,9 @@ impl PortraitSettings {
             brow_sharpen: u(self.brow_sharpen),
             brow_hue: self.brow_hue.rem_euclid(360.0),
             brow_tint: u(self.brow_tint),
+            hair_fade: u(self.hair_fade),
+            iris_fade: u(self.iris_fade),
+            brow_fade: u(self.brow_fade),
             ..*self
         }
     }
@@ -323,7 +361,18 @@ impl PortraitSettings {
     }
 
     fn hair_active(&self) -> bool {
-        self.hair_brightness != 0.0 || self.hair_tint > 0.0
+        self.hair_brightness != 0.0 || self.hair_tint > 0.0 || self.hair_fade > 0.0
+    }
+
+    /// The "Sửa màu & sáng" sliders at their usual amounts ("Tự động").
+    pub fn with_auto_fix(self) -> Self {
+        Self {
+            fix_cast: AUTO_FIX.cast,
+            fix_exposure: AUTO_FIX.exposure,
+            fix_haze: AUTO_FIX.haze,
+            even_light: AUTO_FIX.even_light,
+            ..self
+        }
     }
 }
 
@@ -573,6 +622,12 @@ fn hsl_to_rgb(hsl: [f32; 3]) -> [f32; 3] {
     [r + m, g + m, b + m]
 }
 
+/// `c` with `amount` (0..1) of its colour taken out, at the same brightness.
+fn faded(c: [f32; 3], amount: f32) -> [f32; 3] {
+    let (y, chroma) = split(c);
+    join(y, chroma.map(|v| v * (1.0 - amount.clamp(0.0, 1.0))))
+}
+
 /// Recolour to `hue` (degrees) keeping lightness, with at least `saturation`
 /// so even grey-brown features take the colour.
 fn colourise(c: [f32; 3], hue: f32, saturation: f32) -> [f32; 3] {
@@ -698,6 +753,10 @@ fn retouch_pixel(
         let (y, c) = split(out);
         out = join(y * (1.0 + 0.18 * iris), c.map(|v| v * (1.0 + 0.35 * iris)));
     }
+    let iris_fade = face.iris[f] as f32 / 255.0 * s.iris_fade;
+    if iris_fade > 0.0 {
+        out = faded(out, iris_fade);
+    }
     let iris_tint = face.iris[f] as f32 / 255.0 * s.iris_tint;
     if iris_tint > 0.0 {
         let tinted = colourise(out, s.iris_hue, 0.5);
@@ -764,6 +823,10 @@ fn retouch_brow(
     if area <= 0.0 {
         return out;
     }
+    if s.brow_fade > 0.0 {
+        // The hairs fully, the skin between them a little.
+        out = faded(out, s.brow_fade * (0.25 * area + 0.75 * hair));
+    }
     if s.brow_tint > 0.0 && hair > 0.0 {
         let dyed = colourise(out, s.brow_hue, 0.3);
         for k in 0..3 {
@@ -824,7 +887,7 @@ fn recolour_hair(
         let target = (l + offset + local_detail_boost(l, base, offset)).clamp(0.0, 1.0);
         apply_luma_target(&mut r, &mut g, &mut b, target);
     }
-    let mut out = [r, g, b];
+    let mut out = faded([r, g, b], s.hair_fade);
     if s.hair_tint > 0.0 {
         let dyed = colourise(out, s.hair_hue, 0.35);
         for k in 0..3 {
@@ -1227,11 +1290,23 @@ mod tests {
     fn settings_saved_before_volume_and_texture_read_them_as_zero() {
         let mut old = serde_json::to_value(PortraitSettings::default()).unwrap();
         let map = old.as_object_mut().unwrap();
-        map.remove("volume");
-        map.remove("texture");
-        map.remove("ai_detail");
+        for later in [
+            "volume",
+            "texture",
+            "ai_detail",
+            "fix_cast",
+            "fix_exposure",
+            "fix_haze",
+            "even_light",
+            "look",
+            "hair_fade",
+        ] {
+            map.remove(later);
+        }
         let read: PortraitSettings = serde_json::from_value(old).unwrap();
         assert_eq!((read.volume, read.texture, read.ai_detail), (0.0, 0.0, 0.0));
+        assert!(read.fixes().is_none() && read.studio_look().is_none());
+        assert_eq!((read.even_light, read.hair_fade), (0.0, 0.0));
         assert_eq!(read.smooth, PortraitSettings::default().smooth);
     }
 
@@ -1493,9 +1568,24 @@ mod tests {
     }
 
     #[test]
+    fn a_new_photo_starts_corrected_with_the_clear_look_and_ai_detail() {
+        let new = PortraitSettings::default();
+        let fixes = new.fixes().expect("corrections on");
+        assert_eq!((fixes.cast, fixes.exposure, fixes.haze), (1.0, 0.8, 0.6));
+        assert_eq!((new.even_light, new.ai_detail), (60.0, 60.0));
+        assert_eq!(new.studio_look(), Some((StudioLook::Clear, 0.7)));
+        // "Tự động" sets the same corrections on a photo that had none.
+        let auto = PortraitSettings::NEUTRAL.with_auto_fix();
+        assert_eq!(
+            (auto.fixes(), auto.even_light),
+            (new.fixes(), new.even_light)
+        );
+    }
+
+    #[test]
     fn corrections_are_off_until_a_slider_moves() {
-        assert!(PortraitSettings::default().fixes().is_none());
         assert!(PortraitSettings::NEUTRAL.fixes().is_none());
+        assert!(PortraitSettings::NEUTRAL.studio_look().is_none());
         let fixes = PortraitSettings {
             fix_cast: 80.0,
             fix_warmth: -50.0,
@@ -1566,7 +1656,7 @@ mod tests {
             let full = |settings: &PortraitSettings| {
                 let retouched = render(&rgba, &model, settings, &enabled, &[]);
                 let fix = settings.fixes().and_then(|f| fix_lut(&stats, &f));
-                match preview_graded(&rgba, w, h, retouched, fix.as_ref(), None) {
+                match preview_graded(&rgba, w, h, retouched, fix.as_ref(), None, None) {
                     Some((r, px)) if r.w == w && r.h == h => px,
                     Some((r, px)) => {
                         let mut out = rgba.clone();
@@ -1607,6 +1697,7 @@ mod tests {
     fn brows_stay_as_shot_unless_their_own_sliders_move() {
         for s in [PortraitSettings::default(), PortraitSettings::NEUTRAL] {
             assert_eq!((s.brows, s.brow_sharpen, s.brow_tint), (0.0, 0.0, 0.0));
+            assert_eq!((s.brow_fade, s.hair_fade, s.iris_fade), (0.0, 0.0, 0.0));
         }
     }
 
@@ -1640,6 +1731,27 @@ mod tests {
         let kept = recolour_hair(skin, tone(skin), lift.as_ref(), &lighter);
         assert!((tone(kept) - tone(skin)).abs() < 0.01, "{kept:?}");
         assert!(hair_lift(0.0).is_none() && hair_lift(-0.5).is_none());
+    }
+
+    #[test]
+    fn fading_takes_the_colour_out_and_keeps_the_brightness() {
+        let dyed = [0.55f32, 0.25, 0.15];
+        let grey = faded(dyed, 1.0);
+        assert!((grey[0] - grey[1]).abs() < 1e-6 && (grey[1] - grey[2]).abs() < 1e-6);
+        assert!((luma(grey) - luma(dyed)).abs() < 1e-6);
+        let half = faded(dyed, 0.5);
+        assert!((half[0] - (dyed[0] + grey[0]) * 0.5).abs() < 1e-6);
+        assert_eq!(faded(dyed, 0.0), dyed);
+
+        // Dyed hair loses its colour before a new tint goes on.
+        let fade = PortraitSettings {
+            hair_fade: 100.0,
+            ..PortraitSettings::NEUTRAL
+        }
+        .unit();
+        assert!(fade.hair_active());
+        let out = recolour_hair(dyed, luma(dyed), None, &fade);
+        assert!((out[0] - out[2]).abs() < 1e-5, "{out:?}");
     }
 
     #[test]

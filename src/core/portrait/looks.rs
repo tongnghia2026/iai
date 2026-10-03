@@ -5,6 +5,7 @@
 
 use rayon::prelude::*;
 
+use super::analysis::Clip;
 use super::geometry::Region;
 use crate::core::develop::srgb_to_linear;
 
@@ -401,8 +402,8 @@ impl LookLut {
 
 /// The whole layer `src` (`width × height`) with the retouch `rendered`
 /// written in, then the corrections `fix`, then `look` mixed in at its
-/// strength (0..1): what the preview shows. `rendered` unchanged when there
-/// is neither.
+/// strength (0..1), both within the selection `clip` if there is one: what
+/// the preview shows. `rendered` unchanged when there is neither.
 pub fn preview_graded(
     src: &[u8],
     width: u32,
@@ -410,6 +411,7 @@ pub fn preview_graded(
     rendered: Option<(Region, Vec<u8>)>,
     fix: Option<&LookLut>,
     look: Option<(StudioLook, f32)>,
+    clip: Option<&Clip>,
 ) -> Option<(Region, Vec<u8>)> {
     let look = look.and_then(|(look, strength)| Some((LookLut::new(look)?, strength)));
     if fix.is_none() && look.is_none() {
@@ -418,8 +420,10 @@ pub fn preview_graded(
     let mut full = with_retouch(src, width, rendered);
     grade(
         &mut full,
+        width,
         fix,
         look.as_ref().map(|(lut, strength)| (lut, *strength)),
+        clip,
     );
     Some((
         Region {
@@ -433,14 +437,44 @@ pub fn preview_graded(
 }
 
 /// The corrections `fix` in full, then `look` at its strength, over straight
-/// RGBA in place.
-pub fn grade(rgba: &mut [u8], fix: Option<&LookLut>, look: Option<(&LookLut, f32)>) {
-    if let Some(fix) = fix {
-        fix.apply(rgba, 1.0);
-    }
-    if let Some((look, strength)) = look {
-        look.apply(rgba, strength);
-    }
+/// RGBA (`width` wide) in place; with a selection `clip`, only as far as it
+/// reaches, like the retouch.
+pub fn grade(
+    rgba: &mut [u8],
+    width: u32,
+    fix: Option<&LookLut>,
+    look: Option<(&LookLut, f32)>,
+    clip: Option<&Clip>,
+) {
+    let Some(clip) = clip else {
+        if let Some(fix) = fix {
+            fix.apply(rgba, 1.0);
+        }
+        if let Some((look, strength)) = look {
+            look.apply(rgba, strength);
+        }
+        return;
+    };
+    let width = width as usize;
+    rgba.par_chunks_exact_mut(4)
+        .enumerate()
+        .for_each(|(i, px)| {
+            let inside = clip.at((i % width) as u32, (i / width) as u32);
+            if px[3] == 0 || inside <= 0.0 {
+                return;
+            }
+            let mut graded = [px[0], px[1], px[2], px[3]];
+            if let Some(fix) = fix {
+                fix.apply(&mut graded, 1.0);
+            }
+            if let Some((look, strength)) = look {
+                look.apply(&mut graded, strength);
+            }
+            for c in 0..3 {
+                let v = px[c] as f32 + (graded[c] as f32 - px[c] as f32) * inside;
+                px[c] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        });
 }
 
 /// `src` with the retouched region written over it.
@@ -465,8 +499,8 @@ mod tests {
         assert!(LookLut::new(StudioLook::None).is_none());
         let src = vec![10u8, 20, 30, 255];
         let none = Some((StudioLook::None, 1.0));
-        assert!(preview_graded(&src, 1, 1, None, None, none).is_none());
-        assert!(preview_graded(&src, 1, 1, None, None, None).is_none());
+        assert!(preview_graded(&src, 1, 1, None, None, none, None).is_none());
+        assert!(preview_graded(&src, 1, 1, None, None, None, None).is_none());
     }
 
     #[test]
@@ -526,6 +560,29 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_bounds_the_look() {
+        let lut = LookLut::new(StudioLook::Warm).unwrap();
+        // Two pixels; the selection holds the first in full, the second not.
+        let src = [180u8, 140, 120, 255, 180, 140, 120, 255];
+        let clip = Clip {
+            region: Region {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+            mask: vec![255],
+        };
+        let mut whole = src;
+        grade(&mut whole, 2, None, Some((&lut, 1.0)), None);
+        let mut bounded = src;
+        grade(&mut bounded, 2, None, Some((&lut, 1.0)), Some(&clip));
+        assert_ne!(&whole[4..], &src[4..]);
+        assert_eq!(&bounded[..4], &whole[..4], "inside: as without a selection");
+        assert_eq!(&bounded[4..], &src[4..], "outside: untouched");
+    }
+
+    #[test]
     fn strength_mixes_and_alpha_stays() {
         let lut = LookLut::new(StudioLook::Warm).unwrap();
         let src = [180u8, 140, 120, 128, 50, 60, 70, 0];
@@ -551,8 +608,16 @@ mod tests {
             h: 1,
         };
         let rendered = Some((region, vec![10u8; 2 * 4]));
-        let (out_region, out) =
-            preview_graded(&src, 4, 4, rendered, None, Some((StudioLook::Natural, 1.0))).unwrap();
+        let (out_region, out) = preview_graded(
+            &src,
+            4,
+            4,
+            rendered,
+            None,
+            Some((StudioLook::Natural, 1.0)),
+            None,
+        )
+        .unwrap();
         assert_eq!((out_region.w, out_region.h), (4, 4));
         assert!(out[(4 + 1) * 4] < 40, "retouched pixel kept under the look");
         assert!(out[0] > 150);

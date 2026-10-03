@@ -27,6 +27,7 @@ enum Group {
     Shape,
     Body,
     Eyes,
+    Nose,
     Mouth,
     Brows,
     Hair,
@@ -106,15 +107,6 @@ fn group(
         body(ui);
         ui.add_space(4.0);
     }
-}
-
-fn sub_title(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new(title)
-            .size(10.5)
-            .color(egui::Color32::from_gray(150)),
-    );
 }
 
 /// A small note inside a group: grey, or orange for a warning.
@@ -478,12 +470,6 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             "Thêm vân lỗ chân lông cho da bệt (ảnh điện thoại, độ phân giải thấp, làm mịn mạnh)",
                             Amount,
                         ),
-                        (
-                            "Chi tiết mặt (AI)",
-                            &mut s.ai_detail,
-                            "AI vẽ lại chi tiết cả khuôn mặt và tóc (da, mắt, mi, lông mày, môi, sợi tóc) cho ảnh mờ, nhiễu, ảnh điện thoại, ảnh nhỏ — màu, sáng tối và dáng mặt vẫn là của ảnh. Da sau AI rất sạch: kéo thêm \"Vân da\" nếu muốn có lỗ chân lông. Lần đầu kéo, app chạy AI vài giây cho mỗi khuôn mặt",
-                            Amount,
-                        ),
                         ("Đều màu da", &mut s.even_tone, "Giảm mảng đỏ, loang màu", Amount),
                         ("Giảm bóng dầu", &mut s.shine, "Dịu các vùng bóng loáng", Amount),
                         ("Sáng da", &mut s.brighten, "Da sáng hơn, giữ màu", Amount),
@@ -494,18 +480,9 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             Amount,
                         ),
                         ("Quầng thâm", &mut s.dark_circles, "Làm sáng vùng dưới mắt", Amount),
-                        (
-                            "Sống mũi cao",
-                            &mut s.nose_bridge,
-                            "Tạo khối: sáng dọc sống mũi, tối nhẹ hai bên",
-                            Amount,
-                        ),
                     ];
                     group(ui, shown, &mut next, Group::Skin, "Da", at_work(&skin), |ui| {
-                        rows(ui, ready, skin);
-                        if let Some((note, warning)) = &data.dialogs.portrait_detail {
-                            note_line(ui, note, *warning);
-                        }
+                        rows(ui, ready, skin)
                     });
                     let face = vec![
                         (
@@ -533,54 +510,8 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             TwoSided,
                         ),
                     ];
-                    let eyes_nose = vec![
-                        (
-                            "Mắt to",
-                            &mut s.eye_size,
-                            "Phải: mắt to hơn — trái: mắt nhỏ lại",
-                            TwoSided,
-                        ),
-                        (
-                            "Mắt nghiêng",
-                            &mut s.eye_tilt,
-                            "Phải: đuôi mắt xếch lên — trái: đuôi mắt cụp xuống",
-                            TwoSided,
-                        ),
-                        (
-                            "Mũi thon",
-                            &mut s.nose_slim,
-                            "Phải: cánh mũi hẹp lại — trái: mũi rộng hơn",
-                            TwoSided,
-                        ),
-                    ];
-                    let mouth = vec![
-                        (
-                            "Rộng miệng",
-                            &mut s.mouth_width,
-                            "Phải: miệng rộng hơn — trái: miệng hẹp lại",
-                            TwoSided,
-                        ),
-                        (
-                            "Cười",
-                            &mut s.smile,
-                            "Phải: khóe miệng nhếch lên (cười) — trái: khóe miệng trễ xuống (mếu)",
-                            TwoSided,
-                        ),
-                        (
-                            "Môi dày",
-                            &mut s.lip_fullness,
-                            "Phải: môi dày hơn — trái: môi mỏng lại",
-                            TwoSided,
-                        ),
-                    ];
-                    let reshaping = at_work(&face) || at_work(&eyes_nose) || at_work(&mouth);
-                    group(ui, shown, &mut next, Group::Shape, "Dáng mặt", reshaping, |ui| {
-                        sub_title(ui, "Khuôn mặt");
-                        rows(ui, ready, face);
-                        sub_title(ui, "Mắt & mũi");
-                        rows(ui, ready, eyes_nose);
-                        sub_title(ui, "Miệng");
-                        rows(ui, ready, mouth);
+                    group(ui, shown, &mut next, Group::Shape, "Dáng mặt", at_work(&face), |ui| {
+                        rows(ui, ready, face)
                     });
                     let body = vec![
                         (
@@ -627,8 +558,26 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         rows(ui, ready, body)
                     });
                     let eyes = vec![
+                        (
+                            "Mắt to",
+                            &mut s.eye_size,
+                            "Phải: mắt to hơn — trái: mắt nhỏ lại",
+                            TwoSided,
+                        ),
+                        (
+                            "Mắt nghiêng",
+                            &mut s.eye_tilt,
+                            "Phải: đuôi mắt xếch lên — trái: đuôi mắt cụp xuống",
+                            TwoSided,
+                        ),
                         ("Trắng mắt", &mut s.eye_white, "Lòng trắng mắt sáng, bớt đỏ", Amount),
                         ("Sáng tròng mắt", &mut s.iris, "Tròng mắt sáng và trong hơn", Amount),
+                        (
+                            "Giảm màu tròng mắt",
+                            &mut s.iris_fade,
+                            "Bớt màu của tròng mắt (kính áp tròng màu) về màu trung tính — 0 = giữ nguyên",
+                            Amount,
+                        ),
                         (
                             "Màu tròng mắt",
                             &mut s.iris_hue,
@@ -640,11 +589,46 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     group(ui, shown, &mut next, Group::Eyes, "Mắt", at_work(&eyes), |ui| {
                         rows(ui, ready, eyes)
                     });
+                    let nose = vec![
+                        (
+                            "Mũi thon",
+                            &mut s.nose_slim,
+                            "Phải: cánh mũi hẹp lại — trái: mũi rộng hơn",
+                            TwoSided,
+                        ),
+                        (
+                            "Sống mũi cao",
+                            &mut s.nose_bridge,
+                            "Tạo khối: sáng dọc sống mũi, tối nhẹ hai bên",
+                            Amount,
+                        ),
+                    ];
+                    group(ui, shown, &mut next, Group::Nose, "Mũi", at_work(&nose), |ui| {
+                        rows(ui, ready, nose)
+                    });
                     let lips = vec![
                         (
-                            "Đậm môi",
+                            "Rộng miệng",
+                            &mut s.mouth_width,
+                            "Phải: miệng rộng hơn — trái: miệng hẹp lại",
+                            TwoSided,
+                        ),
+                        (
+                            "Cười",
+                            &mut s.smile,
+                            "Phải: khóe miệng nhếch lên (cười) — trái: khóe miệng trễ xuống (mếu)",
+                            TwoSided,
+                        ),
+                        (
+                            "Môi dày",
+                            &mut s.lip_fullness,
+                            "Phải: môi dày hơn — trái: môi mỏng lại",
+                            TwoSided,
+                        ),
+                        (
+                            "Đậm / giảm màu môi",
                             &mut s.lip_saturation,
-                            "Trái: môi nhạt màu — phải: môi đậm, tươi",
+                            "Trái: giảm màu môi (son đậm nhạt bớt) — phải: môi đậm, tươi hơn",
                             TwoSided,
                         ),
                         (
@@ -662,7 +646,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         ("Phủ màu môi", &mut s.lip_tint, "0 = giữ màu môi thật", Amount),
                         ("Trắng răng", &mut s.teeth, "Răng trắng, bớt ố vàng", Amount),
                     ];
-                    group(ui, shown, &mut next, Group::Mouth, "Môi & răng", at_work(&lips), |ui| {
+                    group(ui, shown, &mut next, Group::Mouth, "Miệng, môi & răng", at_work(&lips), |ui| {
                         rows(ui, ready, lips)
                     });
                     let brows = vec![
@@ -676,6 +660,12 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             "Độ nét",
                             &mut s.brow_sharpen,
                             "0 = giữ nguyên — sợi lông mày rõ nét hơn",
+                            Amount,
+                        ),
+                        (
+                            "Giảm màu lông mày",
+                            &mut s.brow_fade,
+                            "Bớt màu của lông mày (lông mày nhuộm, xăm ngả nâu đỏ) về màu trung tính — 0 = giữ nguyên",
                             Amount,
                         ),
                         (
@@ -702,6 +692,12 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             TwoSided,
                         ),
                         (
+                            "Giảm màu tóc",
+                            &mut s.hair_fade,
+                            "Bớt màu của tóc nhuộm (vàng, đỏ, nâu) về màu trung tính — 0 = giữ nguyên. Kéo thêm \"Sáng tóc\" sang trái để ra tóc đen",
+                            Amount,
+                        ),
+                        (
                             "Màu tóc",
                             &mut s.hair_hue,
                             "Chọn màu nhuộm trên dải — cần kéo \"Phủ màu tóc\" để thấy",
@@ -722,14 +718,25 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         }
                         rows(ui, ready && hair, hair_rows)
                     });
-                    let detail = vec![(
-                        "Tăng nét",
-                        &mut s.sharpen,
-                        "Mắt, mi, môi nét hơn (không đụng da và lông mày)",
-                        Amount,
-                    )];
+                    let detail = vec![
+                        (
+                            "Chi tiết mặt (AI)",
+                            &mut s.ai_detail,
+                            "AI vẽ lại chi tiết cả khuôn mặt và tóc (da, mắt, mi, lông mày, môi, sợi tóc) cho ảnh mờ, nhiễu, ảnh điện thoại, ảnh nhỏ — màu, sáng tối và dáng mặt vẫn là của ảnh. Da sau AI rất sạch: kéo thêm \"Vân da\" nếu muốn có lỗ chân lông. Ảnh vốn đã nét thì kéo thấp lại. App chạy AI vài giây cho mỗi khuôn mặt",
+                            Amount,
+                        ),
+                        (
+                            "Tăng nét",
+                            &mut s.sharpen,
+                            "Mắt, mi, môi nét hơn (không đụng da và lông mày)",
+                            Amount,
+                        ),
+                    ];
                     group(ui, shown, &mut next, Group::Detail, "Chi tiết", at_work(&detail), |ui| {
-                        rows(ui, ready, detail)
+                        rows(ui, ready, detail);
+                        if let Some((note, warning)) = &data.dialogs.portrait_detail {
+                            note_line(ui, note, *warning);
+                        }
                     });
                     let fix = vec![
                         (
@@ -768,16 +775,13 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         ui.add_enabled_ui(ready, |ui| {
                             auto_fix = ui
                                 .button("Tự động")
-                                .on_hover_text("Đặt các thanh ở mức thường dùng cho ảnh điện thoại bị ám màu, tối, đục — rồi chỉnh lại từng thanh nếu cần")
+                                .on_hover_text("Đặt lại các thanh về mức thường dùng cho ảnh điện thoại bị ám màu, tối, đục (mức một ảnh mới bắt đầu) — rồi chỉnh lại từng thanh nếu cần")
                                 .clicked();
                         });
                         rows(ui, ready, fix)
                     });
                     if auto_fix {
-                        s.fix_cast = 100.0;
-                        s.fix_exposure = 80.0;
-                        s.fix_haze = 60.0;
-                        s.even_light = 60.0;
+                        s = s.with_auto_fix();
                     }
                     let look_on = s.look != 0;
                     group(ui, shown, &mut next, Group::Look, "Màu studio", look_on, |ui| {
