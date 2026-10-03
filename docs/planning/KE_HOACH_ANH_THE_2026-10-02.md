@@ -162,3 +162,35 @@ mặt mất khối; muốn thêm "tạo khối" khi làm mịn và "tạo vân d
 Chủ test OK toàn bộ. Chủ bỏ, không làm: phím tắt riêng, râu dài = cằm, chống cụt tóc khi tắt
 nền trắng, so ảnh Select Subject; portable + push chờ chủ bảo riêng.
 **Việc kế tiếp (phiên mới):** "Chi tiết da AI" bằng GFPGAN có sẵn trong Chỉnh chân dung.
+
+## Đợt 8 (03/10 tối): "Chi tiết mặt (AI)" trong Chỉnh chân dung
+
+Chủ: bù chi tiết bằng AI cho ảnh độ phân giải thấp / ảnh ĐT bị bệt, bổ sung cho "Vân da".
+
+- Model: GFPGAN v1.4 có sẵn (`models/gfpgan`, Apache-2.0), chạy CPU, một lần cho mỗi mặt
+  (2,5–4,5 s), **lười**: chỉ chạy khi thanh rời 0 (như phân tích dáng người); mặt bật thêm
+  sau thì chạy bù; Áp dụng / mở lại layer "Chân dung" tự chờ hoặc chạy lại.
+- [x] `FaceRestorer` (`core/ai/retouch.rs`): căn mặt theo 5 mốc lấy từ Face Mesh (tâm hai
+  mắt, đỉnh mũi, hai khóe miệng) về khung 512; mặt lớn hơn khung thì lấy trung bình vùng.
+  Phần chạy model tách thành hàm dùng chung với Auto Retouch (hành vi Auto Retouch không đổi).
+- [x] `core/portrait/ai_detail.rs`: mỗi mặt giữ 2 lớp chi tiết RGB ở khung 512 (~7 MB, không
+  phụ thuộc cỡ ảnh): của AI và của ảnh (cái bị thay) = phần mà blur 8 px bỏ đi, mờ dần 24 px
+  ở mép khung; kèm viền mặt (FACE_OVAL).
+- [x] Trộn (`effects.rs`): thanh **thay** dải chi tiết của ảnh bằng dải của AI
+  (`+ a·(AI − kept·ảnh)`), không cộng chồng. Màu, sáng tối, khối mặt vẫn là của ảnh nên không
+  thành "mặt AI". Trên da `kept` = phần chi tiết ảnh còn lại sau Làm mịn; đốm mụn đã xóa thì
+  không thay. Trong viền mặt áp cho mọi thứ (mắt, mi, lông mày, môi, kính, râu); ngoài viền
+  chỉ áp trên da (cổ, tai).
+- [x] Thanh "Chi tiết mặt (AI)" trong nhóm Da (sau "Vân da"), mặc định 0; dòng ghi chú khi
+  AI đang chạy / thiếu model / lỗi. Layer cũ đọc 0.
+- Thử (probe `IAI_PORTRAIT_DETAIL_PROBE`, ảnh ở `tmp/anh-the/ai-detail*`):
+  - Bản đầu "cộng thêm chi tiết AI" (luma, 4 px, chỉ nơi ảnh thiếu) → viền mắt, nếp da nặng,
+    nhiễu còn nguyên → bỏ. "Thay dải" cho mặt sạch, nét, tự nhiên.
+  - Ảnh mẫu chủ (mờ): mắt, mi, sống mũi, cánh mũi, môi nét lên; ảnh nhiễu: da sạch hẳn kể cả
+    khi Làm mịn thấp; mặt 138 px: được vẽ lại rõ.
+  - GFPGAN gần như **không vẽ lỗ chân lông** (da rất sạch) → muốn có vân da thì kéo thêm
+    "Vân da": hai thanh bổ sung nhau.
+  - Ảnh vốn nét: thanh 100 thay nếp nhăn, mắt bằng bản AI vẽ (mịn hơn, hơi khác người thật)
+    → chú thích ghi rõ dành cho ảnh mờ / nhiễu / nhỏ.
+  - Tóc và nền ngoài mặt không đổi (ảnh nhiễu nặng: mặt sạch, tóc còn nhiễu).
+- [ ] Build Release, chủ test.
