@@ -4,6 +4,7 @@ mod filter;
 mod id_photo;
 mod portrait;
 mod print;
+mod print_sheet;
 mod scan_cleanup;
 mod select_ops;
 mod session;
@@ -15,6 +16,7 @@ pub(crate) use filter::*;
 pub(crate) use id_photo::*;
 pub(crate) use portrait::*;
 pub(crate) use print::*;
+pub(crate) use print_sheet::*;
 pub(crate) use scan_cleanup::*;
 pub(crate) use select_ops::*;
 pub(crate) use session::*;
@@ -57,6 +59,34 @@ fn prefs_path() -> PathBuf {
         PathBuf::from(".")
     };
     base.join("prefs.json")
+}
+
+/// One remembered value of prefs.json.
+fn load_pref<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+    let s = std::fs::read_to_string(prefs_path()).ok()?;
+    let v = serde_json::from_str::<serde_json::Value>(&s).ok()?;
+    serde_json::from_value(v[key].clone()).ok()
+}
+
+/// Remember one value in prefs.json, keeping the others.
+fn save_pref<T: Serialize>(key: &str, value: &T) {
+    let path = prefs_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut prefs = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+    if !prefs.is_object() {
+        prefs = serde_json::Value::Object(Default::default());
+    }
+    if let (Some(map), Ok(v)) = (prefs.as_object_mut(), serde_json::to_value(value)) {
+        map.insert(key.to_string(), v);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&prefs) {
+        let _ = std::fs::write(path, json);
+    }
 }
 
 /// Remembered `.icc` path of the last CMYK conversion (prefs.json key

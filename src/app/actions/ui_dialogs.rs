@@ -300,8 +300,8 @@ impl App {
         if actions.ai.retouch_cancel {
             self.cancel_active_ai();
         }
-        if let Some((paper, kind, gap)) = actions.doc.impose_sheet.take() {
-            self.do_impose_sheet(paper, kind, gap);
+        if let Some((sheet, options)) = actions.doc.impose_sheet.take() {
+            self.do_impose_sheet(sheet, options);
         }
     }
 
@@ -598,17 +598,8 @@ impl App {
             self.cancel_portrait();
         }
         if let Some((settings, faces)) = actions.dialogs.apply_portrait.take() {
-            match self.apply_portrait(settings, faces) {
-                Ok(updated) => {
-                    self.shell.ui.show_portrait_dialog = false;
-                    self.shell.status_msg = if updated {
-                        "Chỉnh chân dung: đã cập nhật layer \"Chân dung\"".to_string()
-                    } else {
-                        "Chỉnh chân dung: đã thêm layer \"Chân dung\"".to_string()
-                    };
-                }
-                Err(message) => self.shell.status_msg = message,
-            }
+            let sheet = actions.dialogs.portrait_sheet.take();
+            self.finish_portrait_dialog(settings, faces, sheet);
         }
         if std::mem::take(&mut actions.dialogs.cancel_scan_cleanup_dialog) {
             self.shell.ui.show_scan_cleanup_dialog = false;

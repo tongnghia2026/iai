@@ -109,10 +109,6 @@ pub struct AiPanelState {
     /// Tidy flyaway hair while preserving the original hairstyle.
     pub id_tidy_hair: bool,
 
-    // ---- "Xếp ảnh in" sheet composer ----
-    /// Cutting gap between placed photos, in pixels at sheet DPI.
-    pub impose_gap_px: u32,
-
     /// Offline CPU/ONNX Auto Retouch controls. Kept with the existing AI panel
     /// state so the settings persist in the same UI snapshot contract.
     pub retouch: retouch::RetouchConfig,
@@ -150,7 +146,6 @@ impl Default for AiPanelState {
             id_tie_color: 0,
             id_tie_pattern: 0,
             id_tidy_hair: false,
-            impose_gap_px: 10,
             retouch: retouch::RetouchConfig::default(),
         }
     }

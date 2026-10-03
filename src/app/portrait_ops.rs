@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use super::portrait_brush::PortraitBrush;
 use super::render::CanvasEvent;
 use super::state::App;
+use crate::core::imposition::{Sheet, SheetOptions};
 use crate::core::layer::Layer;
 use crate::core::portrait::correct;
 use crate::core::portrait::looks::{self, LookLut};
@@ -533,6 +534,31 @@ impl App {
     /// nothing of the unretouched one shows (or prints) around a reshaped
     /// face. A reopened "Chân dung" layer is updated in place. Returns
     /// whether a layer was updated rather than added.
+    /// "Áp dụng" of the dialog: the retouch lands in its layer and the
+    /// dialog closes; then, when "Xếp ảnh in" asked for one, the result is
+    /// laid out on that print sheet.
+    pub(crate) fn finish_portrait_dialog(
+        &mut self,
+        settings: PortraitSettings,
+        enabled: Vec<bool>,
+        sheet: Option<(Sheet, SheetOptions)>,
+    ) {
+        match self.apply_portrait(settings, enabled) {
+            Ok(updated) => {
+                self.shell.ui.show_portrait_dialog = false;
+                self.shell.status_msg = if updated {
+                    "Chỉnh chân dung: đã cập nhật layer \"Chân dung\"".to_string()
+                } else {
+                    "Chỉnh chân dung: đã thêm layer \"Chân dung\"".to_string()
+                };
+                if let Some((sheet, options)) = sheet {
+                    self.do_impose_sheet(sheet, options);
+                }
+            }
+            Err(message) => self.shell.status_msg = message,
+        }
+    }
+
     pub(crate) fn apply_portrait(
         &mut self,
         settings: PortraitSettings,
@@ -1023,6 +1049,51 @@ mod tests {
         app.docs.documents[0].canvas.layer_stack.layers[0]
             .tiles
             .flatten()
+    }
+
+    #[test]
+    fn a_sheet_asked_in_the_dialog_applies_the_retouch_then_lays_it_out() {
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        app.shell.ui.show_portrait_dialog = true;
+        app.begin_portrait().unwrap();
+        let started = Instant::now();
+        let faces = loop {
+            app.poll_portrait();
+            let (status, ready, faces, _) = app.portrait_dialog_state();
+            if ready {
+                break faces.len();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(180),
+                "analysis hung: {status}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let settings = PortraitSettings {
+            smooth: 50.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        app.finish_portrait_dialog(
+            settings,
+            vec![true; faces],
+            Some((Sheet::Mixed, SheetOptions::default())),
+        );
+        // The dialog closed over its "Chân dung" layer, and the sheet is a
+        // new document in front.
+        assert!(!app.shell.ui.show_portrait_dialog && app.shell.portrait.is_none());
+        assert_eq!((app.docs.documents.len(), app.docs.active_doc_idx), (2, 1));
+        let photo = &app.docs.documents[0].canvas.layer_stack.layers;
+        assert!(photo.iter().any(|l| l.name == "Chân dung"));
+        let sheet = &app.docs.documents[1];
+        assert_eq!(sheet.title, "Trang 13×18 — 6 tấm 3×4 + 2 tấm 4×6");
+        assert_eq!(sheet.canvas.layer_stack.layers.len(), 11);
+        assert!(
+            app.shell.status_msg.starts_with("Đã xếp trang"),
+            "{}",
+            app.shell.status_msg
+        );
     }
 
     #[test]

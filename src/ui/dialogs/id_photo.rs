@@ -9,31 +9,11 @@ use crate::core::id_photo::{IdPhotoOptions, DEFAULT_WIDEN, MAX_WIDEN};
 const PREFS_KEY: &str = "id_photo";
 
 fn load_options() -> IdPhotoOptions {
-    std::fs::read_to_string(prefs_path())
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| serde_json::from_value::<IdPhotoOptions>(v[PREFS_KEY].clone()).ok())
-        .unwrap_or_default()
+    load_pref(PREFS_KEY).unwrap_or_default()
 }
 
 fn save_options(options: IdPhotoOptions) {
-    let path = prefs_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let mut value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-    if !value.is_object() {
-        value = serde_json::Value::Object(Default::default());
-    }
-    if let (Some(map), Ok(v)) = (value.as_object_mut(), serde_json::to_value(options)) {
-        map.insert(PREFS_KEY.to_string(), v);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&value) {
-        let _ = std::fs::write(path, json);
-    }
+    save_pref(PREFS_KEY, &options);
 }
 
 pub(crate) fn id_photo_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {

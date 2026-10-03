@@ -139,12 +139,10 @@ pub struct DocumentIntent {
     pub jump_history: Option<usize>,
     pub canvas_resize: Option<(u32, u32, i32, i32)>,
     pub image_resize: Option<(u32, u32, f32)>,
-    /// "Xếp ảnh in": duplicate the active photo onto a print sheet
-    /// (paper, photo kind, gap in px at sheet DPI).
+    /// "Xếp ảnh in": lay the active photo out on a print sheet.
     pub impose_sheet: Option<(
-        crate::core::imposition::Paper,
-        crate::core::imposition::PhotoKind,
-        u32,
+        crate::core::imposition::Sheet,
+        crate::core::imposition::SheetOptions,
     )>,
     pub set_canvas_unit: Option<Unit>,
     /// Page ▸ Bleed: set the default page bleed of the active document, in mm
@@ -826,6 +824,11 @@ pub struct DialogIntent {
     pub cancel_portrait_dialog: bool,
     /// Apply the portrait retouch as a new layer.
     pub apply_portrait: Option<(crate::core::portrait::PortraitSettings, Vec<bool>)>,
+    /// With `apply_portrait`: then lay the result out on this print sheet.
+    pub portrait_sheet: Option<(
+        crate::core::imposition::Sheet,
+        crate::core::imposition::SheetOptions,
+    )>,
     /// Pick the mask the "Tô vùng" brush paints (`Some(None)` puts it away).
     pub set_portrait_brush: Option<Option<crate::core::portrait::brush::MaskTarget>>,
     /// Undo / redo a "Tô vùng" stroke.

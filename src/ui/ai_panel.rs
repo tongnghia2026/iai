@@ -347,7 +347,9 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         "Nhân bản ảnh đang mở thành trang in 600dpi — mỗi tấm một layer.",
                         true,
                         |ui| {
-                            impose_section(ui, data, &mut st, &mut changed, actions);
+                            if let Some(sheet) = super::dialogs::print_sheet_section(ui, data) {
+                                actions.doc.impose_sheet = Some(sheet);
+                            }
                         },
                     );
 
@@ -1553,71 +1555,6 @@ fn id_photo_section(
             .weak(),
         );
     }
-}
-
-/// "Xếp ảnh in": duplicate the open (pre-cropped) photo onto a 10×15 / 13×18
-/// print sheet at 600dpi — one layer per copy, laid out by core/imposition.
-fn impose_section(
-    ui: &mut egui::Ui,
-    data: &UiData,
-    st: &mut AiPanelState,
-    changed: &mut bool,
-    actions: &mut UiActions,
-) {
-    use crate::core::imposition::{self, Paper, PhotoKind};
-
-    let detected = if data.doc.has_doc {
-        PhotoKind::detect(data.doc.canvas_w, data.doc.canvas_h, data.doc.canvas_dpi)
-    } else {
-        None
-    };
-    let info = match detected {
-        Some(kind) => format!(
-            "Ảnh hiện tại: {} ({}×{} px @{:.0}dpi)",
-            kind.label(),
-            data.doc.canvas_w,
-            data.doc.canvas_h,
-            data.doc.canvas_dpi
-        ),
-        None if data.doc.has_doc => {
-            "Ảnh hiện tại không đúng cỡ 3×4 (2.8×3.8cm) / 4×6 — vẫn xếp được, ảnh sẽ được co về đúng ô."
-                .to_string()
-        }
-        None => "Hãy mở ảnh đã crop trước.".to_string(),
-    };
-    ui.label(egui::RichText::new(info).small().weak());
-
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Khe cắt").small().weak());
-        let mut gap = st.impose_gap_px as i64;
-        let r = ui.add(egui::DragValue::new(&mut gap).range(0..=100).suffix(" px"));
-        if r.changed() {
-            st.impose_gap_px = gap.clamp(0, 100) as u32;
-            *changed = true;
-        }
-    });
-
-    let gap = st.impose_gap_px;
-    let jobs: [(Paper, PhotoKind); 3] = [
-        (Paper::P10x15, PhotoKind::Id3x4),
-        (Paper::P13x18, PhotoKind::Id3x4),
-        (Paper::P13x18, PhotoKind::Id4x6),
-    ];
-    for (paper, kind) in jobs {
-        let count = imposition::layout(paper, kind, gap).placements.len();
-        let label = format!("Xếp {} — {} tấm {}", paper.label(), count, kind.label());
-        let btn = egui::Button::new(egui::RichText::new(label).strong())
-            .min_size(egui::vec2(ui.available_width(), 26.0));
-        if ui.add_enabled(data.doc.has_doc && count > 0, btn).clicked() {
-            actions.ai.set_ai_panel = Some(st.clone());
-            actions.doc.impose_sheet = Some((paper, kind, gap));
-        }
-    }
-    ui.label(
-        egui::RichText::new("Mỗi tấm là một layer riêng — dùng Move tool để tự sắp xếp lại.")
-            .small()
-            .weak(),
-    );
 }
 
 fn dispatch_prompt(st: &mut AiPanelState, prompt: &str, use_bridge: bool, actions: &mut UiActions) {

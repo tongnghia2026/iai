@@ -34,6 +34,7 @@ enum Group {
     Detail,
     Fix,
     Look,
+    Sheet,
 }
 
 /// A group's header bar: caret, title and, when something in the group is
@@ -395,6 +396,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let mut do_apply = enter_pressed && ready;
     let mut do_cancel = esc_pressed;
     let mut open = true;
+    let mut sheet = None;
 
     let default_pos = document_side_dialog_pos(ctx, data, 320.0, 96.0);
     egui::Window::new("Chỉnh chân dung")
@@ -792,6 +794,14 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     group(ui, shown, &mut next, Group::Look, "Màu studio", look_on, |ui| {
                         look_section(ui, ready, &mut s)
                     });
+                    group(ui, shown, &mut next, Group::Sheet, "Xếp ảnh in", false, |ui| {
+                        note_line(
+                            ui,
+                            "Bấm một trang bên dưới: app áp dụng chỉnh chân dung rồi xếp ảnh ra trang in mới.",
+                            false,
+                        );
+                        ui.add_enabled_ui(ready, |ui| sheet = print_sheet_section(ui, data));
+                    });
                 });
 
             ui.add_space(8.0);
@@ -833,6 +843,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     if !open {
         do_cancel = true;
     }
+    do_apply |= sheet.is_some();
     ctx.data_mut(|d| {
         d.insert_temp(settings_id, s);
         d.insert_temp(faces_id, faces.clone());
@@ -851,6 +862,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
 
     if do_apply {
         actions.dialogs.apply_portrait = Some((s, faces));
+        actions.dialogs.portrait_sheet = sheet;
     } else if do_cancel {
         actions.dialogs.cancel_portrait_dialog = true;
     } else {
