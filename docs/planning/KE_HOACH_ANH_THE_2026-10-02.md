@@ -333,8 +333,9 @@ nền xanh `(5, 148, 242)`, dưới là 2 tấm 4×6 nằm ngang nền trắng v
   suốt bên trên, đúng kiểu "Làm ảnh thẻ" để lại) thì mỗi cỡ được đặt lên nền riêng — mặc định
   **3×4 xanh, 4×6 trắng**, đổi được bằng hai hàng nút "Nền 3×4 / Nền 4×6". Ảnh phẳng (ảnh AI
   trả về, ảnh chưa tách nền) giữ nguyên nền của nó và thanh trạng thái báo rõ.
-- [x] **Viền cắt** đỏ 4 px (0,17 mm) quanh ảnh nền trắng (nền trắng do chọn, hoặc ảnh phẳng có
-  mép trắng): vẽ trong khe cắt, không lấn vào ảnh; khe < 2 px thì vẽ đè lên mép ảnh.
+- [x] **Viền cắt** đỏ **2 px** (0,08 mm) quanh ảnh nền trắng (nền trắng do chọn, hoặc ảnh phẳng
+  có mép trắng): vẽ trong khe cắt, không lấn vào ảnh; khe < 4 px thì vẽ đè lên mép ảnh. (Bản
+  đầu 4 px, chủ thấy to quá → 2 px.)
 - [x] **"Xếp ảnh in" trong Chỉnh chân dung**: nhóm cuối của hộp thoại; bấm một trang = Áp dụng
   rồi xếp ra trang in mới. Cùng một đoạn giao diện với AI Image Studio
   (`ui/dialogs/print_sheet.rs`); khe cắt và nền nhớ trong prefs.json (khóa `print_sheet`).
@@ -344,4 +345,5 @@ nền xanh `(5, 148, 242)`, dưới là 2 tấm 4×6 nằm ngang nền trắng v
 - [x] Probe `IAI_PRINT_SHEET_PROBE` (`tmp/anh-the/xep-in`): ảnh → Làm ảnh thẻ → trang hỗn hợp.
 - Thấy khi thử (chưa sửa, lỗi có từ trước của "Làm ảnh thẻ"): ảnh sát mép trên (`khach_1.jpg`)
   để lại một vạch mờ cách mép trên ảnh thẻ ~8 px — chỗ khung vượt khỏi ảnh gốc.
-- [ ] Build Release, chủ test.
+- [x] Build Release, chủ test đợt 14: **OK**, chỉ yêu cầu viền mảnh lại còn 2 px (đã sửa).
+- [ ] Build Release, chủ xem lại viền 2 px.
