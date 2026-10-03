@@ -676,6 +676,8 @@ impl App {
                     .map(|layer| layer_ui_type(&layer.layer_type).to_string())
                     .collect(),
             );
+            self.shell.ui_data_cache.layer_is_portrait =
+                std::sync::Arc::new(layers.iter().map(|l| l.portrait.is_some()).collect());
             self.shell.ui_data_cache.layer_is_background =
                 std::sync::Arc::new(layers.iter().map(|l| l.is_background).collect());
             self.shell.ui_data_cache.layer_lock_alpha =
@@ -1171,6 +1173,7 @@ impl App {
                 layer_paint_targets: self.shell.ui_data_cache.layer_paint_targets.clone(),
                 layer_mask_linked: self.shell.ui_data_cache.layer_mask_linked.clone(),
                 layer_types: self.shell.ui_data_cache.layer_types.clone(),
+                layer_is_portrait: self.shell.ui_data_cache.layer_is_portrait.clone(),
                 layer_is_background: self.shell.ui_data_cache.layer_is_background.clone(),
                 layer_lock_alpha: self.shell.ui_data_cache.layer_lock_alpha.clone(),
                 layer_selected: self.shell.ui_data_cache.layer_selected.clone(),

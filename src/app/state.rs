@@ -1244,6 +1244,8 @@ pub struct UiDataCache {
     pub layer_paint_targets: std::sync::Arc<Vec<crate::core::layer::PaintTarget>>,
     pub layer_mask_linked: std::sync::Arc<Vec<bool>>,
     pub layer_types: std::sync::Arc<Vec<String>>,
+    /// Made by Chỉnh chân dung (double-click reopens it).
+    pub layer_is_portrait: std::sync::Arc<Vec<bool>>,
     pub layer_is_background: std::sync::Arc<Vec<bool>>,
     pub layer_lock_alpha: std::sync::Arc<Vec<bool>>,
     pub layer_selected: std::sync::Arc<Vec<bool>>,

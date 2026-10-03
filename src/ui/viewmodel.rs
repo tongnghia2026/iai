@@ -109,6 +109,8 @@ pub struct LayerViewModel {
     pub layer_paint_targets: std::sync::Arc<Vec<PaintTarget>>,
     pub layer_mask_linked: std::sync::Arc<Vec<bool>>,
     pub layer_types: std::sync::Arc<Vec<String>>,
+    /// Made by Chỉnh chân dung: a double-click reopens it there.
+    pub layer_is_portrait: std::sync::Arc<Vec<bool>>,
     pub layer_is_background: std::sync::Arc<Vec<bool>>,
     pub layer_lock_alpha: std::sync::Arc<Vec<bool>>,
     pub layer_selected: std::sync::Arc<Vec<bool>>,
@@ -802,6 +804,7 @@ impl Default for UiData {
                 layer_paint_targets: std::sync::Arc::new(vec![PaintTarget::Pixels]),
                 layer_mask_linked: std::sync::Arc::new(vec![true]),
                 layer_types: std::sync::Arc::new(vec!["Raster".to_string()]),
+                layer_is_portrait: std::sync::Arc::new(vec![false]),
                 layer_is_background: std::sync::Arc::new(vec![true]),
                 layer_lock_alpha: std::sync::Arc::new(vec![false]),
                 layer_selected: std::sync::Arc::new(vec![true]),

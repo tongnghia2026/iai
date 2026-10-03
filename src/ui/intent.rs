@@ -807,6 +807,9 @@ pub struct DialogIntent {
     pub show_scan_cleanup_dialog: Option<bool>,
     /// Open/close the "Chỉnh chân dung" dialog.
     pub show_portrait_dialog: Option<bool>,
+    /// Reopen the "Chân dung" layer at this index in Chỉnh chân dung
+    /// (double-click in the Layers panel).
+    pub edit_portrait_layer: Option<usize>,
     /// Open/close the "Làm ảnh thẻ" dialog.
     pub show_id_photo_dialog: Option<bool>,
     /// Make the ID photo with these options.

@@ -2739,6 +2739,12 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
         .unwrap_or("Raster");
     let depth = data.layers.layer_depths.get(idx).copied().unwrap_or(0);
     let is_group = layer_type == "Group";
+    let is_portrait = data
+        .layers
+        .layer_is_portrait
+        .get(idx)
+        .copied()
+        .unwrap_or(false);
     let expanded = data.layers.layer_expanded.get(idx).copied().unwrap_or(true);
     let is_clipped = data
         .layers
@@ -3006,6 +3012,14 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
         } else if layer_type == "Text" {
             if !on_eye {
                 actions.tool.edit_text_layer = Some(idx);
+            }
+        } else if is_portrait {
+            // Like an adjustment layer: reopen what made it.
+            let on_icon = on_eye
+                || mask_thumb_rect.is_some_and(|r| r.contains(pos))
+                || link_rect.is_some_and(|r| r.contains(pos));
+            if !on_icon {
+                actions.dialogs.edit_portrait_layer = Some(idx);
             }
         } else {
             let on_icon = on_eye

@@ -179,6 +179,23 @@ impl App {
         Ok(())
     }
 
+    /// Make the "Chân dung" layer at `idx` the active one and reopen it in
+    /// the dialog (a double-click on it in the Layers panel).
+    pub(crate) fn reopen_portrait_layer(&mut self, idx: usize) -> Result<(), String> {
+        let stack = &mut self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack;
+        if stack.layers.get(idx).is_none_or(|l| l.portrait.is_none()) {
+            return Err("Layer này không phải layer \"Chân dung\"".to_string());
+        }
+        for (i, layer) in stack.layers.iter_mut().enumerate() {
+            layer.selected = i == idx;
+        }
+        stack.active_idx = idx;
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        self.begin_portrait()
+    }
+
     /// Collect a finished analysis or preview render; keep repainting while
     /// either runs so the progress line and the preview stay live.
     pub(crate) fn poll_portrait(&mut self) {
@@ -1160,6 +1177,15 @@ mod tests {
         assert!(layers(&app)[1].visible, "shown again on cancel");
         assert_eq!(layers(&app)[1].tiles.flatten(), first_pixels);
         assert_eq!(app.docs.documents[0].canvas.undo_count(), undo_after_first);
+
+        // A double-click on its row reopens it whichever layer is active; any
+        // other layer is refused.
+        app.docs.documents[0].canvas.layer_stack.active_idx = 0;
+        app.reopen_portrait_layer(1).unwrap();
+        assert_eq!(app.docs.documents[0].canvas.layer_stack.active_idx, 1);
+        assert!(app.shell.portrait.as_ref().unwrap().reopened.is_some());
+        app.cancel_portrait();
+        assert!(app.reopen_portrait_layer(0).is_err());
 
         // Reopened from the photo beneath: OK updates the layer in place.
         app.docs.documents[0].canvas.layer_stack.active_idx = 0;

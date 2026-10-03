@@ -560,6 +560,12 @@ impl App {
         if let Some(options) = actions.dialogs.run_id_photo.take() {
             self.run_id_photo(options);
         }
+        if let Some(idx) = actions.dialogs.edit_portrait_layer.take() {
+            match self.reopen_portrait_layer(idx) {
+                Ok(()) => self.shell.ui.show_portrait_dialog = true,
+                Err(message) => self.shell.status_msg = message,
+            }
+        }
         if let Some(open) = actions.dialogs.show_portrait_dialog.take() {
             if open {
                 match self.begin_portrait() {
