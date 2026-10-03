@@ -193,4 +193,36 @@ Chủ: bù chi tiết bằng AI cho ảnh độ phân giải thấp / ảnh ĐT 
   - Ảnh vốn nét: thanh 100 thay nếp nhăn, mắt bằng bản AI vẽ (mịn hơn, hơi khác người thật)
     → chú thích ghi rõ dành cho ảnh mờ / nhiễu / nhỏ.
   - Tóc và nền ngoài mặt không đổi (ảnh nhiễu nặng: mặt sạch, tóc còn nhiễu).
+- [x] Build Release, chủ test đợt 8: **OK**.
+
+## Đợt 9 (03/10 khuya): "Sửa màu & sáng" + AI cho tóc
+
+Chủ: khách gửi ảnh điện thoại bị ám màu (xanh, vàng do đèn và kệ hàng xung quanh), mờ, đục,
+thiếu sáng, sáng không đều — 6 bộ "Màu studio" không sửa được ám màu môi trường; và cần AI
+xử lý tóc cho ảnh mờ. Ảnh thử: `tmp/anh-the/am-mau` (ảnh khách + 2 ảnh giả lập), probe
+`IAI_PORTRAIT_FIX_PROBE`.
+
+- [x] Nhóm mới **"Sửa màu & sáng"** trong Chỉnh chân dung (trước "Màu studio"), mặc định 0,
+  có nút **"Tự động"** (Khử ám màu 100, Cân sáng 80, Khử đục 60, Đều sáng mặt 50):
+  - **Khử ám màu**: đo ám màu từ chính da mặt (`core/portrait/correct.rs`). Da mọi tông nằm
+    gần một tia trong không gian (ln R/G, ln B/G); lệch ngang tia = ám màu (xanh lá, vàng,
+    xanh dương, hồng) → khử hết; lệch dọc tia (cam ↔ lam) lẫn với da đậm/nhạt nên chỉ khử
+    40%. Cân trắng kiểu "thế giới xám" sẽ sai vì cảnh toàn kệ xanh.
+  - **Ấm / lạnh**: chỉnh tay phần còn lại (trục cam ↔ lam mà máy không tự đo chắc được).
+  - **Cân sáng**: đưa độ sáng da về mức chuẩn (0,42 tuyến tính), −0,6…+2 EV, vùng sáng nén
+    mềm nên trắng không cháy và vẫn là trắng.
+  - **Khử đục**: trừ lớp "màn" đo ở 1% điểm tối nhất (tối đa 0,04) + thêm tương phản.
+  - **Đều sáng mặt**: khớp một mặt phẳng vào ln(độ sáng) của da trong mặt, trừ độ nghiêng đó
+    (trái/phải, trên/dưới); mắt, lông mày, môi đi theo da.
+  - Ba thanh đầu + Ấm/lạnh nướng vào một LUT 33³ cho cả layer (như Màu studio, chạy trước
+    look); layer "Chân dung" khi đó giữ cả ảnh. Layer cũ đọc 0.
+- [x] **Tóc trong "Chi tiết mặt (AI)"**: GFPGAN vẽ lại cả tóc trong khung của nó, đẹp hơn
+  Real-ESRGAN (x4plus: ~27 s cho vùng 360×270, general-x4v3: bệt) và không tốn thêm thời gian
+  → dùng luôn cho vùng tóc (mask tóc Sapiens). Tóc vượt khung chuẩn (chỏm cao, tóc dài): chạy
+  thêm một lượt GFPGAN khung rộng (mặt nhỏ tới 60%, +3–4 s), chỉ khi >3% tóc nằm ngoài.
+- Thử: ảnh khách — da hết xanh-vàng, áo và hộp sữa về đúng màu; ảnh giả lập vàng-đục-mờ —
+  màu về gần ảnh gốc, tóc rõ sợi tới chỏm.
+- Còn hạn chế: ảnh thứ hai chủ dán trong chat không lưu thành file nên chưa thử trực tiếp;
+  ám cam (đèn dây tóc) chỉ tự khử một phần — dùng thanh Ấm / lạnh; tóc dài quá khung rộng thì
+  phần xa vẫn mờ; nền ngoài người không được làm nét.
 - [ ] Build Release, chủ test.
