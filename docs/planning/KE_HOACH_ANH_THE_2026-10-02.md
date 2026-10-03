@@ -155,4 +155,10 @@ mặt mất khối; muốn thêm "tạo khối" khi làm mịn và "tạo vân d
 - [x] Bấm đúp dòng layer "Chân dung" trong bảng Layer (trừ icon mắt/mask) → chọn layer đó và
   mở lại Chỉnh chân dung với đúng thông số/mặt/mask đã tô — như layer điều chỉnh. Đổi tên
   vẫn ở menu chuột phải. (`layer_is_portrait` trong view model, `reopen_portrait_layer`.)
-- [ ] Build Release, chủ test đợt 7.
+- [x] Build Release, chủ test đợt 7: **OK**.
+
+## Kết thúc (03/10 tối)
+
+Chủ test OK toàn bộ. Chủ bỏ, không làm: phím tắt riêng, râu dài = cằm, chống cụt tóc khi tắt
+nền trắng, so ảnh Select Subject; portable + push chờ chủ bảo riêng.
+**Việc kế tiếp (phiên mới):** "Chi tiết da AI" bằng GFPGAN có sẵn trong Chỉnh chân dung.
