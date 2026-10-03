@@ -656,9 +656,9 @@ pub struct SkinLayers {
     pub(super) cheek_luma: f32,
     /// Forehead-to-chin extent of the face, in pixels.
     pub(super) extent: f32,
-    /// How the light falls off across the face: the slope of ln(brightness)
-    /// per pixel along x and y, about a centre in image pixels.
-    pub(super) light: [f32; 4],
+    /// Broad brightness (0..1) of the face's well-lit skin, which shaded
+    /// skin is measured against; 0 when it could not be read.
+    pub(super) lit: f32,
 }
 
 impl SkinLayers {
@@ -752,14 +752,7 @@ fn split_skin(
         .map(|(b, &m)| smoothstep(0.55, 0.92, b[0]) * m)
         .collect();
 
-    let light = light_tilt(
-        &low2,
-        &interior,
-        region,
-        face,
-        tone_rows(points, face, e),
-        e,
-    );
+    let lit = lit_skin(&broad, &interior, region, face, tone_rows(points, face, e));
     let layers = SkinLayers {
         region,
         mask: skin.par_iter().map(|&m| to_u8(m)).collect(),
@@ -777,7 +770,7 @@ fn split_skin(
         mean,
         cheek_luma,
         extent: e,
-        light,
+        lit,
     };
     SkinSplit {
         low1: region.crop(&low1, face),
@@ -787,67 +780,34 @@ fn split_skin(
     }
 }
 
-/// The most the light's tilt may change brightness across one face extent,
-/// in ln units: steeper is not light but the face's own shading.
-const LIGHT_TILT_LIMIT: f32 = 1.0;
-
-/// How the light falls off across a face: a plane fitted to the log of the
-/// skin's smoothed brightness (`low`, over the skin `region`), well inside
-/// the skin and within the first `rows` rows of the `face` region. Returns
-/// its slope per pixel along x and y and the centre it turns about.
-fn light_tilt(
-    low: &[[f32; 3]],
-    interior: &[f32],
-    region: Region,
-    face: Region,
-    rows: usize,
-    e: f32,
-) -> [f32; 4] {
-    let fw = face.w as usize;
-    let samples = |visit: &mut dyn FnMut(f64, f64, f64, f64)| {
-        for k in 0..rows * fw {
-            let i = region.index_of(face, k);
-            let weight = interior[i] as f64;
-            if weight > 0.0 {
-                let (x, y) = (face.x as usize + k % fw, face.y as usize + k / fw);
-                let z = luma(low[i]).max(0.02).ln() as f64;
-                visit(weight, x as f64, y as f64, z);
-            }
+/// The brightness of the face's well-lit skin: the 70th percentile of the
+/// skin's broad brightness (`broad`, over the skin `region`), well inside
+/// the skin and within the first `rows` rows of the `face` region. Shaded
+/// skin (under the chin, the neck, the side away from the lamp) is measured
+/// against it. 0 without enough skin.
+fn lit_skin(broad: &[u16], interior: &[f32], region: Region, face: Region, rows: usize) -> f32 {
+    let mut histogram = [0.0f64; 256];
+    let mut total = 0.0f64;
+    for k in 0..rows * face.w as usize {
+        let i = region.index_of(face, k);
+        let weight = interior[i] as f64;
+        if weight > 0.0 {
+            histogram[(broad[i] >> 8) as usize] += weight;
+            total += weight;
         }
-    };
-    let (mut total, mut sx, mut sy, mut sz) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-    samples(&mut |w, x, y, z| {
-        total += w;
-        sx += w * x;
-        sy += w * y;
-        sz += w * z;
-    });
+    }
     if total < 50.0 {
-        return [0.0; 4];
+        return 0.0;
     }
-    let (cx, cy, cz) = (sx / total, sy / total, sz / total);
-    let (mut sxx, mut sxy, mut syy, mut sxz, mut syz) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
-    samples(&mut |w, x, y, z| {
-        let (dx, dy, dz) = (x - cx, y - cy, z - cz);
-        sxx += w * dx * dx;
-        sxy += w * dx * dy;
-        syy += w * dy * dy;
-        sxz += w * dx * dz;
-        syz += w * dy * dz;
-    });
-    let det = sxx * syy - sxy * sxy;
-    if det.abs() < 1e-6 {
-        return [0.0; 4];
-    }
-    let mut slope = [
-        ((sxz * syy - syz * sxy) / det) as f32,
-        ((syz * sxx - sxz * sxy) / det) as f32,
-    ];
-    let (size, limit) = (slope[0].hypot(slope[1]), LIGHT_TILT_LIMIT / e.max(1.0));
-    if size > limit {
-        slope = slope.map(|v| v * limit / size);
-    }
-    [slope[0], slope[1], cx as f32, cy as f32]
+    let mut seen = 0.0;
+    let level = histogram
+        .iter()
+        .position(|&w| {
+            seen += w;
+            seen >= 0.7 * total
+        })
+        .unwrap_or(255);
+    (level as f32 + 0.5) / 256.0
 }
 
 impl PortraitModel {

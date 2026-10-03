@@ -757,9 +757,9 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             Amount,
                         ),
                         (
-                            "Đều sáng mặt",
+                            "Đều sáng da",
                             &mut s.even_light,
-                            "Cân lại khi ánh sáng lệch một bên hoặc trên sáng dưới tối trên khuôn mặt",
+                            "Nâng sáng vùng da khuất đèn (dưới cằm, cổ, nửa mặt bên tối) lên gần bằng trán và má — cho ảnh đèn chiếu từ trên xuống hoặc lệch một bên",
                             Amount,
                         ),
                     ];
@@ -777,7 +777,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         s.fix_cast = 100.0;
                         s.fix_exposure = 80.0;
                         s.fix_haze = 60.0;
-                        s.even_light = 50.0;
+                        s.even_light = 60.0;
                     }
                     let look_on = s.look != 0;
                     group(ui, shown, &mut next, Group::Look, "Màu studio", look_on, |ui| {

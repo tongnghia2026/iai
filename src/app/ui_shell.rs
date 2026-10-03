@@ -75,6 +75,9 @@ pub struct UiShell {
     pub(in crate::app) scan_preview: Option<ScanPreviewSession>,
     /// Session of the "Chỉnh chân dung" dialog (analysis + live preview).
     pub(in crate::app) portrait: Option<crate::app::portrait_ops::PortraitSession>,
+    /// The last portrait analysis, kept so reopening the same photo does not
+    /// run the models again.
+    pub(in crate::app) portrait_cache: Option<crate::app::portrait_ops::PortraitCache>,
     /// The "Làm ảnh thẻ" job (and its wait for the background model).
     pub(in crate::app) id_photo: crate::app::id_photo_ops::IdPhotoSession,
     pub(in crate::app) user_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,

@@ -38,10 +38,15 @@ pub struct PortraitSession {
     /// Where the layer sits on the canvas.
     pub offset: (i32, i32),
     pub original_tiles: TileMap,
+    /// Whether the layer was shown before the dialog opened: a hidden one
+    /// (the photo under an applied "Chân dung" layer) is shown meanwhile.
+    source_visible: bool,
     pub src: Arc<Vec<u8>>,
     /// Latest progress line from the analysis worker.
     pub progress: Arc<Mutex<String>>,
-    pub rx: Option<Receiver<Result<PortraitModel, String>>>,
+    pub rx: Option<Receiver<Result<Arc<PortraitModel>, String>>>,
+    /// The analysis came from the last session on this photo.
+    reused: bool,
     pub model: Option<Arc<PortraitModel>>,
     pub error: Option<String>,
     /// What the dialog last asked to see, and what the canvas shows now.
@@ -65,6 +70,42 @@ pub struct PortraitSession {
     /// once (the faces once the analysis has found them again).
     pub restore_settings: Option<PortraitSettings>,
     pub restore_faces: Option<Vec<bool>>,
+}
+
+/// The analysis of the last session, with what it was made from: the same
+/// layer pixels and selection give the same analysis, so a reopened layer
+/// starts at once, with its AI detail and bodies too.
+pub struct PortraitCache {
+    doc_id: crate::core::document::DocumentId,
+    layer_id: u32,
+    size: (u32, u32),
+    src: Arc<Vec<u8>>,
+    model: Arc<PortraitModel>,
+}
+
+impl PortraitCache {
+    /// The kept analysis, if it was made from this very layer content and
+    /// selection.
+    fn matching(
+        &self,
+        doc_id: crate::core::document::DocumentId,
+        layer_id: u32,
+        size: (u32, u32),
+        src: &[u8],
+        clip: Option<&portrait::Clip>,
+    ) -> Option<Arc<PortraitModel>> {
+        let same_clip = match (self.model.clip.as_ref(), clip) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.region == b.region && a.mask == b.mask,
+            _ => false,
+        };
+        (self.doc_id == doc_id
+            && self.layer_id == layer_id
+            && self.size == size
+            && same_clip
+            && self.src[..] == *src)
+            .then(|| Arc::clone(&self.model))
+    }
 }
 
 /// A "Chân dung" layer reopened for more edits: hidden while the dialog
@@ -118,7 +159,16 @@ impl App {
         }
         let progress = Arc::new(Mutex::new("Đang chuẩn bị…".to_string()));
         let (tx, rx) = mpsc::channel();
-        {
+        let doc_id = self.docs.documents[idx].id;
+        let kept = self
+            .shell
+            .portrait_cache
+            .as_ref()
+            .and_then(|c| c.matching(doc_id, layer.id, (w, h), &src, clip.as_ref()));
+        let reused = kept.is_some();
+        if let Some(model) = kept {
+            let _ = tx.send(Ok(model));
+        } else {
             let src = Arc::clone(&src);
             let progress = Arc::clone(&progress);
             let prefer_gpu = crate::core::ai::ort_ep::prefer_gpu();
@@ -128,11 +178,13 @@ impl App {
                         *slot = line;
                     }
                 };
-                let _ = tx.send(portrait::analyze(&src, w, h, prefer_gpu, clip, &report));
+                let analysed = portrait::analyze(&src, w, h, prefer_gpu, clip, &report);
+                let _ = tx.send(analysed.map(Arc::new));
             });
         }
         let layer_id = layer.id;
         let original_tiles = layer.tiles.clone();
+        let source_visible = layer.visible;
         // The reopened layer would cover the preview drawn on the photo.
         let reopened = reopen.map(|(result_idx, recipe)| {
             let canvas = &mut self.docs.documents[idx].canvas;
@@ -155,19 +207,27 @@ impl App {
                 .map_or_else(PortraitSettings::default, |r| r.recipe.settings),
         );
         let restore_faces = reopened.is_none().then(Vec::new);
-        if reopened.is_some() {
+        // The preview is drawn on the photo layer: it has to show.
+        if !source_visible {
+            let canvas = &mut self.docs.documents[idx].canvas;
+            canvas.layer_stack.layers[source_idx].visible = true;
+            canvas.layer_revision += 1;
+        }
+        if reopened.is_some() || !source_visible {
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         }
         self.shell.portrait = Some(PortraitSession {
-            doc_id: self.docs.documents[idx].id,
+            doc_id,
             layer_id,
             w,
             h,
             offset,
             original_tiles,
+            source_visible,
             src,
             progress,
             rx: Some(rx),
+            reused,
             model: None,
             error: None,
             wanted: None,
@@ -235,7 +295,6 @@ impl App {
         });
         match finished {
             Some(Ok(model)) => {
-                let model = Arc::new(model);
                 session.model = Some(Arc::clone(&model));
                 let restored = session.reopened.as_ref().map(|r| r.recipe.restore(&model));
                 if let Some(restored) = restored {
@@ -412,6 +471,18 @@ impl App {
         {
             doc.canvas
                 .restore_layer_tiles(session.layer_id, session.original_tiles);
+            if !session.source_visible {
+                if let Some(layer) = doc
+                    .canvas
+                    .layer_stack
+                    .layers
+                    .iter_mut()
+                    .find(|l| l.id == session.layer_id)
+                {
+                    layer.visible = false;
+                }
+                doc.canvas.layer_revision += 1;
+            }
             if let Some(reopened) = &session.reopened {
                 if let Some(layer) = doc
                     .canvas
@@ -425,19 +496,41 @@ impl App {
                 doc.canvas.layer_revision += 1;
             }
         }
-        self.apply_canvas_event(if session.reopened.is_some() {
+        self.apply_canvas_event(if session.reopened.is_some() || !session.source_visible {
             CanvasEvent::LayerStructureChanged
         } else {
             CanvasEvent::LayerPixelsChanged
         });
+        if let Some(model) = session.model {
+            self.shell.portrait_cache = Some(PortraitCache {
+                doc_id: session.doc_id,
+                layer_id: session.layer_id,
+                size: (session.w, session.h),
+                src: session.src,
+                model,
+            });
+        }
         if let Some(window) = &self.win.window {
             window.request_redraw();
         }
     }
 
-    /// Add the retouch as a new layer above the source (only the changed
-    /// pixels are opaque, so layer opacity scales the whole retouch) with its
-    /// recipe, or update the reopened "Chân dung" layer in place. Returns
+    /// Drop the kept analysis of a document that is closing.
+    pub(crate) fn forget_portrait_analysis(&mut self, doc_id: crate::core::document::DocumentId) {
+        if self
+            .shell
+            .portrait_cache
+            .as_ref()
+            .is_some_and(|c| c.doc_id == doc_id)
+        {
+            self.shell.portrait_cache = None;
+        }
+    }
+
+    /// Add the retouched photo as a new layer above the source, with its
+    /// recipe, and hide the source: the new layer holds the whole photo, so
+    /// nothing of the unretouched one shows (or prints) around a reshaped
+    /// face. A reopened "Chân dung" layer is updated in place. Returns
     /// whether a layer was updated rather than added.
     pub(crate) fn apply_portrait(
         &mut self,
@@ -488,37 +581,25 @@ impl App {
         else {
             return Err("Không có khuôn mặt nào được chọn".to_string());
         };
-        let mut patch = vec![0u8; pixels.len()];
-        let mut changed = false;
-        for row in 0..region.h as usize {
-            for col in 0..region.w as usize {
-                let o = (row * region.w as usize + col) * 4;
-                let s = ((region.y as usize + row) * w as usize + region.x as usize + col) * 4;
-                if pixels[o..o + 3] != src[s..s + 3] {
-                    patch[o..o + 3].copy_from_slice(&pixels[o..o + 3]);
-                    patch[o + 3] = src[s + 3];
-                    changed = true;
-                }
-            }
-        }
-        // The corrections and a studio look recolour the whole photo, so the
-        // layer then holds all of it: retouch, corrections and the look at
-        // its strength, in one layer.
+        let row = region.w as usize * 4;
+        let changed = (0..region.h as usize).any(|y| {
+            let s = ((region.y as usize + y) * w as usize + region.x as usize) * 4;
+            pixels[y * row..(y + 1) * row] != src[s..s + row]
+        });
+        // The layer holds the whole photo: the retouch, then the corrections
+        // and the studio look at its strength.
         let fix = settings
             .fixes()
             .and_then(|fixes| correct::fix_lut(&model.light, &fixes));
         let look = settings
             .studio_look()
             .and_then(|(look, strength)| Some((LookLut::new(look)?, strength)));
-        let graded = (fix.is_some() || look.is_some()).then(|| {
-            let mut full = looks::with_retouch(&src, w, Some((region, pixels.clone())));
-            let look = look.as_ref().map(|(lut, strength)| (lut, *strength));
-            looks::grade(&mut full, fix.as_ref(), look);
-            full
-        });
-        if !changed && reopened.is_none() && graded.is_none() {
+        if !changed && reopened.is_none() && fix.is_none() && look.is_none() {
             return Err("Các thanh trượt đang ở 0 — ảnh không đổi".to_string());
         }
+        let mut full = looks::with_retouch(&src, w, Some((region, pixels)));
+        let look = look.as_ref().map(|(lut, strength)| (lut, *strength));
+        looks::grade(&mut full, fix.as_ref(), look);
         let recipe = Arc::new(PortraitRecipe::new(
             layer_id,
             (w, h),
@@ -544,14 +625,7 @@ impl App {
         // old background hidden).
         let source_mask = canvas.layer_stack.layers[source_idx].mask.clone();
         let (cw, ch) = (canvas.width, canvas.height);
-        let tiles = match graded {
-            Some(full) => TileMap::from_rgba(&full, w, h),
-            None => {
-                let mut tiles = TileMap::new(w, h);
-                tiles.write_region(region.x, region.y, region.w, region.h, &patch);
-                tiles
-            }
-        };
+        let tiles = TileMap::from_rgba(&full, w, h);
         let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
             RESULT_LAYER,
             &canvas.layer_stack,
@@ -583,6 +657,15 @@ impl App {
                 set_result_mask(layer, source_mask);
             }
             canvas.layer_stack.active_idx = new_idx;
+        }
+        // The photo under it would show around a reshaped face, and print.
+        if let Some(source) = canvas
+            .layer_stack
+            .layers
+            .iter_mut()
+            .find(|l| l.id == layer_id)
+        {
+            source.visible = false;
         }
         cmd.capture_after(&canvas.layer_stack, cw, ch);
         canvas.record(Box::new(cmd));
@@ -644,8 +727,13 @@ impl App {
             .map(|face| !model.parts_used || face.trusted())
             .collect();
         let seconds = model.timings.iter().sum::<u128>() as f32 / 1000.0;
+        let analysed = if session.reused {
+            "dùng lại phân tích lần trước".to_string()
+        } else {
+            format!("phân tích {seconds:.1} s")
+        };
         let mut line = format!(
-            "{}{}Tìm thấy {} khuôn mặt · phân tích {seconds:.1} s",
+            "{}{}Tìm thấy {} khuôn mặt · {analysed}",
             if session.reopened.is_some() {
                 "Chỉnh tiếp layer \"Chân dung\" · "
             } else {
@@ -705,11 +793,28 @@ impl App {
                 true,
             ));
         }
-        model
+        let failed = model
             .faces
             .iter()
             .find_map(|face| face.ai_detail.get()?.as_ref().err())
-            .map(|error| (format!("Không tạo được chi tiết (AI): {error}"), true))
+            .map(|error| (format!("Không tạo được chi tiết (AI): {error}"), true));
+        if failed.is_some() {
+            return failed;
+        }
+        // Hair is found by the part model alone: without it the AI detail
+        // stops at the face, which is worth saying once the slider is on.
+        let on = session
+            .wanted
+            .as_ref()
+            .is_some_and(|key| key.0.ai_detail > 0.0);
+        let no_hair = model.faces.iter().all(|f| f.hair_region.is_empty());
+        (on && no_hair).then(|| {
+            (
+                "AI chỉ làm nét khuôn mặt: chưa nhận ra tóc (cần model tách vùng models\\sapiens2-seg)"
+                    .to_string(),
+                false,
+            )
+        })
     }
 
     /// Dialog view of a reopened layer: whether one is reopened, and the
@@ -901,6 +1006,13 @@ mod tests {
         }
     }
 
+    /// Whether the "Chân dung" layer differs from the photo under it at
+    /// (x, y): it holds the whole photo, retouched.
+    fn changed_at(app: &App, x: u32, y: u32) -> bool {
+        let layers = &app.docs.documents[0].canvas.layer_stack.layers;
+        layers[1].tiles.get_pixel(x, y) != layers[0].tiles.get_pixel(x, y)
+    }
+
     fn photo_pixels(app: &App) -> Vec<u8> {
         app.docs.documents[0].canvas.layer_stack.layers[0]
             .tiles
@@ -964,6 +1076,18 @@ mod tests {
         assert_eq!(photo_pixels(&app), original, "the photo layer is untouched");
         assert_eq!(canvas.undo_count(), undo_before + 1);
         assert!(app.shell.portrait.is_none());
+        // The new layer holds the whole photo and the photo under it is
+        // hidden, so none of it shows or prints; undo brings it back.
+        let layers = &canvas.layer_stack.layers;
+        assert!(!layers[0].visible && layers[1].visible);
+        assert_eq!(
+            layers[1].tiles.get_pixel(0, 0),
+            layers[0].tiles.get_pixel(0, 0)
+        );
+        app.docs.documents[0].canvas.undo();
+        let layers = &app.docs.documents[0].canvas.layer_stack.layers;
+        assert_eq!(layers.len(), 1);
+        assert!(layers[0].visible, "shown again by undo");
     }
 
     #[test]
@@ -1233,15 +1357,14 @@ mod tests {
             ..PortraitSettings::default()
         };
         app.apply_portrait(strong, vec![true]).unwrap();
-        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
         let mut inside = 0;
         for y in (0..h).step_by(4) {
             for x in (0..w).step_by(4) {
-                let alpha = layer.tiles.get_pixel(x, y).3;
+                let changed = changed_at(&app, x, y);
                 if x >= x0 && x < x1 && y >= y0 && y < y1 {
-                    inside += (alpha > 0) as u32;
+                    inside += changed as u32;
                 } else {
-                    assert_eq!(alpha, 0, "changed outside the selection at {x},{y}");
+                    assert!(!changed, "changed outside the selection at {x},{y}");
                 }
             }
         }
@@ -1292,10 +1415,18 @@ mod tests {
         assert!(recipe.faces[0].skin.is_none());
         let first_pixels = layers(&app)[1].tiles.flatten();
 
+        assert!(!layers(&app)[0].visible, "the photo is hidden once applied");
+
         // Reopened from the "Chân dung" layer (active after OK): sliders,
-        // faces and the painted hair come back; the layer hides meanwhile.
-        analysed(&mut app).unwrap();
+        // faces and the painted hair come back; the layer hides meanwhile
+        // and the photo shows, to carry the preview. The analysis is the
+        // one already made: no model runs again.
+        let reanalysed = analysed(&mut app).unwrap();
+        assert!(Arc::ptr_eq(&reanalysed, &model), "the analysis is reused");
+        let (status, ..) = app.portrait_dialog_state();
+        assert!(status.contains("dùng lại"), "{status}");
         assert!(!layers(&app)[1].visible, "hidden while previewing");
+        assert!(layers(&app)[0].visible, "the photo shows meanwhile");
         let (reopened, settings, restored) = app.portrait_restore();
         assert!(reopened);
         assert_eq!(settings, Some(first));
@@ -1308,6 +1439,7 @@ mod tests {
         assert!(status.starts_with("Chỉnh tiếp"), "{status}");
         app.cancel_portrait();
         assert!(layers(&app)[1].visible, "shown again on cancel");
+        assert!(!layers(&app)[0].visible, "and the photo hidden again");
         assert_eq!(layers(&app)[1].tiles.flatten(), first_pixels);
         assert_eq!(app.docs.documents[0].canvas.undo_count(), undo_after_first);
 
@@ -1330,7 +1462,7 @@ mod tests {
         assert!(app.apply_portrait(second, faces).unwrap(), "updated");
         let after = layers(&app);
         assert_eq!(after.len(), 2);
-        assert!(after[1].visible);
+        assert!(after[1].visible && !after[0].visible);
         let recipe = after[1].portrait.clone().unwrap();
         assert_eq!(recipe.settings, second);
         assert_eq!(recipe.faces[0].hair.as_ref().unwrap().mask[k], 255);
@@ -1424,7 +1556,7 @@ mod tests {
         assert_eq!(recipe.faces[0].brows.as_ref().unwrap().mask[spot], 255);
         assert!(recipe.faces[0].skin.is_none(), "no skin was painted");
         assert!(
-            layers[1].tiles.get_pixel(at.0 as u32, at.1 as u32).3 > 0,
+            changed_at(&app, at.0 as u32, at.1 as u32),
             "the painted brow was darkened"
         );
 
@@ -1484,12 +1616,12 @@ mod tests {
         let edge = body.shape.waist.expect("his waist").start;
 
         assert!(!app.apply_portrait(waist, faces).unwrap(), "added");
-        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
         assert!(
-            layer.tiles.get_pixel(edge[0] as u32, edge[1] as u32).3 > 0,
+            changed_at(&app, edge[0] as u32, edge[1] as u32),
             "the waist's edge moved"
         );
-        assert_eq!(layer.tiles.get_pixel(w / 2, 2).3, 0, "above the head stays");
+        assert!(!changed_at(&app, w / 2, 2), "above the head stays");
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
         let recipe = layer.portrait.clone().expect("recipe kept");
         assert_eq!(recipe.settings.body_shape(), waist.body_shape());
     }
@@ -1525,7 +1657,11 @@ mod tests {
             Some(("Đang tạo chi tiết bằng AI…".to_string(), false))
         );
         let started = Instant::now();
-        while !made(&model) || app.portrait_detail_note().is_some() {
+        let busy = |app: &App| {
+            app.portrait_detail_note()
+                .is_some_and(|(note, _)| note.starts_with("Đang"))
+        };
+        while !made(&model) || busy(&app) {
             assert!(
                 started.elapsed() < Duration::from_secs(240),
                 "AI detail hung"
@@ -1538,16 +1674,11 @@ mod tests {
         assert_ne!(photo_pixels(&app), plain, "the preview gained the detail");
 
         assert!(!app.apply_portrait(detail, faces).unwrap(), "added");
-        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
         let nose = model.faces[0].mesh.points[4];
-        let near = (-6i32..=6).any(|d| {
-            layer
-                .tiles
-                .get_pixel((nose[0] as i32 + d) as u32, nose[1] as u32)
-                .3
-                > 0
-        });
+        let near =
+            (-6i32..=6).any(|d| changed_at(&app, (nose[0] as i32 + d) as u32, nose[1] as u32));
         assert!(near, "the skin by the nose took the detail");
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
         let recipe = layer.portrait.clone().expect("recipe kept");
         assert_eq!(recipe.settings.ai_detail, 100.0);
     }
@@ -1571,14 +1702,11 @@ mod tests {
         };
         let faces = vec![true; model.faces.len()];
         assert!(!app.apply_portrait(shape, faces).unwrap(), "added");
-        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
         for (p, what) in [(jaw, "the jaw"), (mouth, "the mouth corner")] {
-            assert!(
-                layer.tiles.get_pixel(p[0] as u32, p[1] as u32).3 > 0,
-                "{what} moved"
-            );
+            assert!(changed_at(&app, p[0] as u32, p[1] as u32), "{what} moved");
         }
-        assert_eq!(layer.tiles.get_pixel(0, 0).3, 0, "the corner stays");
+        assert!(!changed_at(&app, 0, 0), "the corner stays");
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
         let recipe = layer.portrait.clone().expect("recipe kept");
         assert_eq!(recipe.settings.face_shape(), shape.face_shape());
     }

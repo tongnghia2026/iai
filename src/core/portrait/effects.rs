@@ -52,8 +52,8 @@ pub struct PortraitSettings {
     pub fix_exposure: f32,
     #[serde(default)]
     pub fix_haze: f32,
-    /// "Đều sáng mặt": how much of the light's tilt across the face is
-    /// evened out.
+    /// "Đều sáng da": how far skin in shade (under the chin, the neck, the
+    /// side away from the lamp) is lifted toward the face's lit skin.
     #[serde(default)]
     pub even_light: f32,
     pub even_tone: f32,
@@ -351,22 +351,32 @@ fn ai_detail_swap(s: &PortraitSettings, detail: &DetailAt, kept: f32) -> [f32; 3
     std::array::from_fn(|k| s.ai_detail * (detail.model[k] - kept * detail.photo[k]))
 }
 
-/// What "Đều sáng mặt" multiplies pixel `i` of the skin region by: the
-/// light's tilt across the face taken back out. Past the face (neck,
-/// shoulders) the tilt holds at its value at the face's edge.
+/// Shade this shallow (ln of brightness) is the face's own modelling (eye
+/// sockets, the sides of the nose) and is left alone by "Đều sáng da".
+const EVEN_TOLERANCE: f32 = 0.12;
+/// At 100, how much of the shade beyond that is lifted, and how much of
+/// what is brighter than the lit skin is eased.
+const EVEN_LIFT: f32 = 0.9;
+const EVEN_EASE: f32 = 0.35;
+/// The most it changes brightness, in ln units.
+const EVEN_LIMIT: f32 = 1.2;
+
+/// What "Đều sáng da" multiplies pixel `i` of the skin region by: skin in
+/// shade (under the chin, the neck, the side away from the lamp) is lifted
+/// toward the face's lit skin, and brighter skin eased a little toward it.
+/// It follows the skin's broad brightness, so texture and edges keep their
+/// contrast.
 fn even_light_gain(skin: &SkinLayers, s: &PortraitSettings, i: usize) -> f32 {
-    if s.even_light <= 0.0 {
+    if s.even_light <= 0.0 || skin.lit <= 0.0 {
         return 1.0;
     }
-    let [gx, gy, cx, cy] = skin.light;
-    let w = skin.region.w as usize;
-    let (x, y) = (
-        (skin.region.x as usize + i % w) as f32,
-        (skin.region.y as usize + i / w) as f32,
-    );
-    let reach = 0.7 * skin.extent;
-    let (dx, dy) = ((x - cx).clamp(-reach, reach), (y - cy).clamp(-reach, reach));
-    (-s.even_light * (gx * dx + gy * dy)).exp()
+    let broad = (skin.broad[i] as f32 / 65535.0).max(0.02);
+    let shade = (skin.lit / broad).ln();
+    let beyond = shade - EVEN_TOLERANCE * (shade / EVEN_TOLERANCE).tanh();
+    let share = if beyond > 0.0 { EVEN_LIFT } else { EVEN_EASE };
+    (s.even_light * share * beyond)
+        .clamp(-EVEN_LIMIT, EVEN_LIMIT)
+        .exp()
 }
 
 /// Pore spacing for a face `extent` pixels from forehead to chin: about 1/350
@@ -1189,7 +1199,7 @@ mod tests {
             mean: [0.4; 3],
             cheek_luma: 0.4,
             extent: 300.0,
-            light: [0.0; 4],
+            lit: 0.0,
         }
     }
 
@@ -1444,16 +1454,19 @@ mod tests {
     }
 
     #[test]
-    fn even_light_takes_the_tilt_back_out_and_holds_past_the_face() {
-        // Light falling off to the right: ln(brightness) drops 0.002 a pixel.
+    fn even_light_lifts_shaded_skin_toward_the_lit_skin() {
+        let u16v = |v: f32| (v * 65535.0).round() as u16;
+        // Lit skin at 0.6; a cheek at it, an eye socket a little darker, the
+        // neck far darker, a hot forehead brighter.
         let skin = SkinLayers {
             region: Region {
                 x: 0,
                 y: 0,
-                w: 601,
+                w: 4,
                 h: 1,
             },
-            light: [-0.002, 0.0, 300.0, 0.0],
+            broad: vec![u16v(0.6), u16v(0.56), u16v(0.3), u16v(0.75)],
+            lit: 0.6,
             ..one_pixel_skin()
         };
         let s = PortraitSettings {
@@ -1461,19 +1474,22 @@ mod tests {
             ..PortraitSettings::NEUTRAL
         }
         .unit();
-        assert_eq!(even_light_gain(&skin, &s, 300), 1.0);
-        // 100 pixels to the dim side: brightened by what the tilt took.
-        assert!((even_light_gain(&skin, &s, 400) - 0.2f32.exp()).abs() < 1e-5);
-        assert!((even_light_gain(&skin, &s, 200) - (-0.2f32).exp()).abs() < 1e-5);
-        // Past 0.7 of the face's extent (300) the gain holds.
-        assert_eq!(
-            even_light_gain(&skin, &s, 600),
-            even_light_gain(&skin, &s, 510)
-        );
-        assert_eq!(
-            even_light_gain(&skin, &PortraitSettings::NEUTRAL.unit(), 400),
-            1.0
-        );
+        let gain = |i: usize| even_light_gain(&skin, &s, i);
+        assert!((gain(0) - 1.0).abs() < 1e-4);
+        assert!(gain(1) < 1.01, "the face's own shading stays: {}", gain(1));
+        // The neck comes most of the way up to the lit skin, not past it.
+        assert!(0.3 * gain(2) > 0.5 && 0.3 * gain(2) < 0.6, "{}", gain(2));
+        assert!(gain(3) < 1.0 && gain(3) > 0.9, "{}", gain(3));
+        // Half the slider, about half the lift; none without a reading.
+        let half = PortraitSettings {
+            even_light: 50.0,
+            ..PortraitSettings::NEUTRAL
+        }
+        .unit();
+        let part = even_light_gain(&skin, &half, 2);
+        assert!((part.ln() - 0.5 * gain(2).ln()).abs() < 1e-4);
+        let unread = SkinLayers { lit: 0.0, ..skin };
+        assert_eq!(even_light_gain(&unread, &s, 2), 1.0);
     }
 
     #[test]
@@ -1492,7 +1508,7 @@ mod tests {
 
     /// Opt-in visual probe: IAI_PORTRAIT_FIX_PROBE is a folder of photos;
     /// each gets `fix_<name>.png`, the whole photo: as shot | Khử ám màu
-    /// 100 | + Cân sáng 80 | + Khử đục 60 | + Đều sáng mặt 50 and the
+    /// 100 | + Cân sáng 80 | + Khử đục 60 | + Đều sáng da 60 and the
     /// default retouch | + Chi tiết mặt (AI) 100.
     #[test]
     #[ignore]
@@ -1516,11 +1532,11 @@ mod tests {
             let enabled = vec![true; model.faces.len()];
             let stats = model.light;
             println!(
-                "{name}: skin {:?}, cast {:?}, veil {:?}, tilt {:?}",
+                "{name}: skin {:?}, cast {:?}, veil {:?}, lit {:?}",
                 stats.skin,
                 stats.cast(),
                 stats.veil,
-                model.faces[0].skin.light
+                model.faces[0].skin.lit
             );
             super::super::ai_detail::analyze_details(&rgba, &model, &enabled);
             let cast = PortraitSettings {
@@ -1540,7 +1556,7 @@ mod tests {
                 fix_cast: 100.0,
                 fix_exposure: 80.0,
                 fix_haze: 60.0,
-                even_light: 50.0,
+                even_light: 60.0,
                 ..d
             };
             let ai = PortraitSettings {

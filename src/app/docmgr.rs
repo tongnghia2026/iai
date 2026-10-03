@@ -208,6 +208,7 @@ impl App {
             self.forget_document_webview_state(removed_id);
         }
         let removed = self.docs.documents.remove(idx);
+        self.forget_portrait_analysis(removed.id);
         self.jobs.ai_engine.abandon_doc_job(removed.id.0);
         self.jobs.ext.remove_doc_jobs(removed.id.0);
         self.jobs

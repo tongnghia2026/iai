@@ -1830,6 +1830,7 @@ impl App {
                 filter_preview: None,
                 scan_preview: None,
                 portrait: None,
+                portrait_cache: None,
                 id_photo: Default::default(),
                 user_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all()),
                 develop_presets: std::sync::Arc::new(
