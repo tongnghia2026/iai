@@ -31,6 +31,7 @@ enum Group {
     Brows,
     Hair,
     Detail,
+    Fix,
     Look,
 }
 
@@ -480,7 +481,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         (
                             "Chi tiết mặt (AI)",
                             &mut s.ai_detail,
-                            "AI vẽ lại chi tiết cả khuôn mặt (da, mắt, mi, lông mày, môi) cho ảnh mờ, nhiễu, ảnh điện thoại, ảnh nhỏ — màu, sáng tối và dáng mặt vẫn là của ảnh. Da sau AI rất sạch: kéo thêm \"Vân da\" nếu muốn có lỗ chân lông. Lần đầu kéo, app chạy AI vài giây cho mỗi khuôn mặt",
+                            "AI vẽ lại chi tiết cả khuôn mặt và tóc (da, mắt, mi, lông mày, môi, sợi tóc) cho ảnh mờ, nhiễu, ảnh điện thoại, ảnh nhỏ — màu, sáng tối và dáng mặt vẫn là của ảnh. Da sau AI rất sạch: kéo thêm \"Vân da\" nếu muốn có lỗ chân lông. Lần đầu kéo, app chạy AI vài giây cho mỗi khuôn mặt",
                             Amount,
                         ),
                         ("Đều màu da", &mut s.even_tone, "Giảm mảng đỏ, loang màu", Amount),
@@ -730,6 +731,54 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     group(ui, shown, &mut next, Group::Detail, "Chi tiết", at_work(&detail), |ui| {
                         rows(ui, ready, detail)
                     });
+                    let fix = vec![
+                        (
+                            "Khử ám màu",
+                            &mut s.fix_cast,
+                            "Tự đo ám màu từ chính màu da khuôn mặt rồi khử cho cả ảnh (ám xanh, vàng do đèn, tường, kệ hàng xung quanh)",
+                            Amount,
+                        ),
+                        (
+                            "Ấm / lạnh",
+                            &mut s.fix_warmth,
+                            "Chỉnh tay thêm nếu ảnh còn ngả màu — trái: lạnh hơn, phải: ấm hơn",
+                            TwoSided,
+                        ),
+                        (
+                            "Cân sáng",
+                            &mut s.fix_exposure,
+                            "Đưa độ sáng da mặt về mức chuẩn: ảnh thiếu sáng sáng lên, ảnh quá sáng dịu lại",
+                            Amount,
+                        ),
+                        (
+                            "Khử đục",
+                            &mut s.fix_haze,
+                            "Lấy lại màu đen và độ trong cho ảnh bị đục, bạc màu, thiếu tương phản",
+                            Amount,
+                        ),
+                        (
+                            "Đều sáng mặt",
+                            &mut s.even_light,
+                            "Cân lại khi ánh sáng lệch một bên hoặc trên sáng dưới tối trên khuôn mặt",
+                            Amount,
+                        ),
+                    ];
+                    let mut auto_fix = false;
+                    group(ui, shown, &mut next, Group::Fix, "Sửa màu & sáng", at_work(&fix), |ui| {
+                        ui.add_enabled_ui(ready, |ui| {
+                            auto_fix = ui
+                                .button("Tự động")
+                                .on_hover_text("Đặt các thanh ở mức thường dùng cho ảnh điện thoại bị ám màu, tối, đục — rồi chỉnh lại từng thanh nếu cần")
+                                .clicked();
+                        });
+                        rows(ui, ready, fix)
+                    });
+                    if auto_fix {
+                        s.fix_cast = 100.0;
+                        s.fix_exposure = 80.0;
+                        s.fix_haze = 60.0;
+                        s.even_light = 50.0;
+                    }
                     let look_on = s.look != 0;
                     group(ui, shown, &mut next, Group::Look, "Màu studio", look_on, |ui| {
                         look_section(ui, ready, &mut s)

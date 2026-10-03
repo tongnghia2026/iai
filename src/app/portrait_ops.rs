@@ -15,6 +15,7 @@ use super::portrait_brush::PortraitBrush;
 use super::render::CanvasEvent;
 use super::state::App;
 use crate::core::layer::Layer;
+use crate::core::portrait::correct;
 use crate::core::portrait::looks::{self, LookLut};
 use crate::core::portrait::{
     self, FaceEdits, PortraitModel, PortraitRecipe, PortraitSettings, Region,
@@ -338,12 +339,11 @@ impl App {
                 portrait::render_masks(&src, &model, &settings, &enabled, &edits)
             } else {
                 let retouched = portrait::render(&src, &model, &settings, &enabled, &edits);
-                match settings.studio_look() {
-                    Some((look, strength)) => {
-                        looks::preview_with_look(&src, w, h, retouched, look, strength)
-                    }
-                    None => retouched,
-                }
+                let fix = settings
+                    .fixes()
+                    .and_then(|fixes| correct::fix_lut(&model.light, &fixes));
+                let look = settings.studio_look();
+                looks::preview_graded(&src, w, h, retouched, fix.as_ref(), look)
             };
             let _ = tx.send(rendered);
         });
@@ -501,13 +501,20 @@ impl App {
                 }
             }
         }
-        // A studio look recolours the whole photo, so the layer then holds
-        // all of it: retouch and look at its strength, in one layer.
-        let graded = settings.studio_look().and_then(|(look, strength)| {
-            let lut = LookLut::new(look)?;
+        // The corrections and a studio look recolour the whole photo, so the
+        // layer then holds all of it: retouch, corrections and the look at
+        // its strength, in one layer.
+        let fix = settings
+            .fixes()
+            .and_then(|fixes| correct::fix_lut(&model.light, &fixes));
+        let look = settings
+            .studio_look()
+            .and_then(|(look, strength)| Some((LookLut::new(look)?, strength)));
+        let graded = (fix.is_some() || look.is_some()).then(|| {
             let mut full = looks::with_retouch(&src, w, Some((region, pixels.clone())));
-            lut.apply(&mut full, strength);
-            Some(full)
+            let look = look.as_ref().map(|(lut, strength)| (lut, *strength));
+            looks::grade(&mut full, fix.as_ref(), look);
+            full
         });
         if !changed && reopened.is_none() && graded.is_none() {
             return Err("Các thanh trượt đang ở 0 — ảnh không đổi".to_string());
@@ -1127,6 +1134,48 @@ mod tests {
             .apply(&mut expected, 0.5);
         assert_eq!(&result.tiles.flatten()[..4], &expected[..]);
         assert_ne!(&expected[..3], &original[..3]);
+    }
+
+    #[test]
+    fn corrections_recolour_the_whole_layer_before_the_look() {
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        let original = photo_pixels(&app);
+        let model = analysed(&mut app).unwrap();
+        let faces = vec![true; model.faces.len()];
+        assert!(model.light.skin.is_some(), "skin was measured");
+        let settings = PortraitSettings {
+            fix_cast: 100.0,
+            fix_warmth: 40.0,
+            fix_exposure: 100.0,
+            fix_haze: 60.0,
+            look: StudioLook::Warm.index(),
+            look_strength: 50.0,
+            ..PortraitSettings::NEUTRAL
+        };
+
+        // The preview shows them over the whole photo.
+        app.set_portrait_preview(settings, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        let shown = photo_pixels(&app);
+        assert_ne!(&shown[..3], &original[..3], "far from the face too");
+
+        // Applied: one layer, the corrections in full under half the look.
+        app.apply_portrait(settings, faces).unwrap();
+        let layers = &app.docs.documents[0].canvas.layer_stack.layers;
+        let result = layers.last().unwrap();
+        assert_eq!(result.name, RESULT_LAYER);
+        let fix = correct::fix_lut(&model.light, &settings.fixes().unwrap()).unwrap();
+        let mut expected = original[..4].to_vec();
+        fix.apply(&mut expected, 1.0);
+        LookLut::new(StudioLook::Warm)
+            .unwrap()
+            .apply(&mut expected, 0.5);
+        assert_eq!(&result.tiles.flatten()[..4], &expected[..]);
+        assert_eq!(&shown[..4], &expected[..], "as the preview showed");
+        let recipe = result.portrait.clone().expect("recipe kept");
+        assert_eq!(recipe.settings.fixes(), settings.fixes());
     }
 
     #[test]

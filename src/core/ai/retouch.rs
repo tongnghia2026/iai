@@ -840,7 +840,8 @@ impl FaceRestorer {
     }
 
     /// Restore the face whose eye centres, nose tip and mouth corners (the
-    /// image's left one first) are `landmarks`, in pixels of `rgba`.
+    /// image's left one first) are `landmarks`, in pixels of `rgba`, in the
+    /// framing the model was trained on.
     pub fn restore(
         &mut self,
         rgba: &[u8],
@@ -848,10 +849,28 @@ impl FaceRestorer {
         height: u32,
         landmarks: &[[f32; 2]; 5],
     ) -> Result<RestoredFace, String> {
+        let t = SimilarityTransform::fit(landmarks, &FACE_ALIGNMENT_TARGET)?;
+        self.restore_framed(rgba, width, height, [t.a, t.b, t.tx, t.ty])
+    }
+
+    /// Restore the square of `rgba` that `square_from_photo` maps the photo
+    /// to (see [`RestoredFace::square_from_photo`]): a framing of the
+    /// caller's choice, such as a wider one that takes in more hair.
+    pub fn restore_framed(
+        &mut self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        square_from_photo: [f32; 4],
+    ) -> Result<RestoredFace, String> {
         if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
             return Err("GFPGAN: invalid image".to_string());
         }
-        let transform = SimilarityTransform::fit(landmarks, &FACE_ALIGNMENT_TARGET)?;
+        let [a, b, tx, ty] = square_from_photo;
+        if a * a + b * b <= f32::EPSILON {
+            return Err("GFPGAN: invalid framing".to_string());
+        }
+        let transform = SimilarityTransform { a, b, tx, ty };
         let side = FACE_ALIGNMENT_SIDE as usize;
         // A face larger than the square is averaged down, not point sampled;
         // past the photo's edge its last pixels repeat.

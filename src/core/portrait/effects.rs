@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::ai_detail::DetailAt;
 use super::analysis::{luma, BrowLayers, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
 use super::body::BodySliders;
+use super::correct::Fixes;
 use super::geometry::Region;
 use super::looks::StudioLook;
 use super::reshape::{reshape, FaceShape};
@@ -40,6 +41,21 @@ pub struct PortraitSettings {
     /// [`super::ai_detail`]).
     #[serde(default)]
     pub ai_detail: f32,
+    /// "Sửa màu & sáng", the corrections of [`super::correct`]: how much of
+    /// the measured cast, dimness and haze is taken out (0..100) and a
+    /// manual cooler / warmer trim (-100..100).
+    #[serde(default)]
+    pub fix_cast: f32,
+    #[serde(default)]
+    pub fix_warmth: f32,
+    #[serde(default)]
+    pub fix_exposure: f32,
+    #[serde(default)]
+    pub fix_haze: f32,
+    /// "Đều sáng mặt": how much of the light's tilt across the face is
+    /// evened out.
+    #[serde(default)]
+    pub even_light: f32,
     pub even_tone: f32,
     pub shine: f32,
     pub brighten: f32,
@@ -95,6 +111,11 @@ impl Default for PortraitSettings {
             volume: 30.0,
             texture: 0.0,
             ai_detail: 0.0,
+            fix_cast: 0.0,
+            fix_warmth: 0.0,
+            fix_exposure: 0.0,
+            fix_haze: 0.0,
+            even_light: 0.0,
             even_tone: 25.0,
             shine: 20.0,
             brighten: 0.0,
@@ -148,6 +169,11 @@ impl PortraitSettings {
         volume: 0.0,
         texture: 0.0,
         ai_detail: 0.0,
+        fix_cast: 0.0,
+        fix_warmth: 0.0,
+        fix_exposure: 0.0,
+        fix_haze: 0.0,
+        even_light: 0.0,
         even_tone: 0.0,
         shine: 0.0,
         brighten: 0.0,
@@ -199,6 +225,7 @@ impl PortraitSettings {
             volume: u(self.volume),
             texture: u(self.texture),
             ai_detail: u(self.ai_detail),
+            even_light: u(self.even_light),
             even_tone: u(self.even_tone),
             shine: u(self.shine),
             brighten: u(self.brighten),
@@ -231,6 +258,17 @@ impl PortraitSettings {
         let look = StudioLook::from_index(self.look);
         let strength = (self.look_strength / 100.0).clamp(0.0, 1.0);
         (look != StudioLook::None && strength > 0.0).then_some((look, strength))
+    }
+
+    /// The corrections of "Sửa màu & sáng" that are on, if any.
+    pub fn fixes(&self) -> Option<Fixes> {
+        let fixes = Fixes {
+            cast: (self.fix_cast / 100.0).clamp(0.0, 1.0),
+            warmth: (self.fix_warmth / 100.0).clamp(-1.0, 1.0),
+            exposure: (self.fix_exposure / 100.0).clamp(0.0, 1.0),
+            haze: (self.fix_haze / 100.0).clamp(0.0, 1.0),
+        };
+        (!fixes.is_neutral()).then_some(fixes)
     }
 
     /// The face shape sliders.
@@ -311,6 +349,24 @@ fn keep_fine(s: &PortraitSettings, inside: f32) -> f32 {
 /// goes.
 fn ai_detail_swap(s: &PortraitSettings, detail: &DetailAt, kept: f32) -> [f32; 3] {
     std::array::from_fn(|k| s.ai_detail * (detail.model[k] - kept * detail.photo[k]))
+}
+
+/// What "Đều sáng mặt" multiplies pixel `i` of the skin region by: the
+/// light's tilt across the face taken back out. Past the face (neck,
+/// shoulders) the tilt holds at its value at the face's edge.
+fn even_light_gain(skin: &SkinLayers, s: &PortraitSettings, i: usize) -> f32 {
+    if s.even_light <= 0.0 {
+        return 1.0;
+    }
+    let [gx, gy, cx, cy] = skin.light;
+    let w = skin.region.w as usize;
+    let (x, y) = (
+        (skin.region.x as usize + i % w) as f32,
+        (skin.region.y as usize + i / w) as f32,
+    );
+    let reach = 0.7 * skin.extent;
+    let (dx, dy) = ((x - cx).clamp(-reach, reach), (y - cy).clamp(-reach, reach));
+    (-s.even_light * (gx * dx + gy * dy)).exp()
 }
 
 /// Pore spacing for a face `extent` pixels from forehead to chin: about 1/350
@@ -569,6 +625,10 @@ fn retouch_pixel(
                 }
             }
         }
+        let light = even_light_gain(skin, s, i);
+        if light != 1.0 {
+            r = r.map(|v| v * light);
+        }
         if let Some(detail) = &ai {
             // Smoothing has taken part of the photo's detail already. A
             // healed spot has its donor's instead: no swap there.
@@ -607,6 +667,14 @@ fn retouch_pixel(
     let Some(f) = f else {
         return out;
     };
+    let brow = brow_index(face.region, brows, f);
+    let light = even_light_gain(skin, s, i);
+    if light != 1.0 {
+        // Eyes, brows and lips take the evened light with the skin around.
+        let feature = face.detail[f].max(brow.map_or(0, |b| brows.area[b])) as f32 / 255.0;
+        let share = (feature - m).max(0.0);
+        out = out.map(|v| v * (1.0 + (light - 1.0) * share));
+    }
     let white = face.eye_white[f] as f32 / 255.0 * s.eye_white;
     if white > 0.0 {
         let (y, c) = split(out);
@@ -648,7 +716,7 @@ fn retouch_pixel(
             out[k] += (coloured[k] - out[k]) * lips;
         }
     }
-    if let Some(b) = brow_index(face.region, brows, f) {
+    if let Some(b) = brow {
         out = retouch_brow(brows, s, b, src, out, from_u16(face.soft[f]));
     }
     let crisp = face.detail[f] as f32 / 255.0 * s.sharpen;
@@ -830,7 +898,14 @@ fn retouch(
     edits: &[FaceEdits],
 ) -> Option<(Region, Vec<u8>)> {
     let s = settings.unit();
-    let union = union_region(model, enabled, s.hair_active())?;
+    // Hair takes its own sliders, and the AI detail where the model saw it.
+    let hair_detail = s.ai_detail > 0.0
+        && model
+            .faces
+            .iter()
+            .any(|f| !f.hair.is_empty() && matches!(f.ai_detail.get(), Some(Ok(_))));
+    let hair_pass = s.hair_active() || hair_detail;
+    let union = union_region(model, enabled, hair_pass)?;
     let width = model.width as usize;
     let (uw, uh) = (union.w as usize, union.h as usize);
     let mut out = vec![0u8; uw * uh * 4];
@@ -892,8 +967,9 @@ fn retouch(
                 }
             });
     }
-    if s.hair_active() {
+    if hair_pass {
         let lift = hair_lift(s.hair_brightness);
+        let recolour = s.hair_active();
         for (index, (face, _)) in model
             .faces
             .iter()
@@ -902,6 +978,12 @@ fn retouch(
             .filter(|(_, (face, &on))| on && !face.hair.is_empty())
         {
             let hair = hair_of(face, edits.get(index));
+            let skin = skin_of(face, edits.get(index));
+            let detail = face
+                .ai_detail
+                .get()
+                .and_then(|d| d.as_ref().ok())
+                .filter(|_| s.ai_detail > 0.0);
             let r = face.hair_region;
             let (hw, hx, hy) = (
                 r.w as usize,
@@ -921,12 +1003,30 @@ fn retouch(
                         if weight <= 0.0 {
                             continue;
                         }
-                        let src = pixel(r.x as usize + col, r.y as usize + row);
-                        let base = face.hair_base[k] as f32 / 65535.0;
-                        let res = recolour_hair(src, base, lift.as_ref(), &s);
+                        let (x, y) = (r.x as usize + col, r.y as usize + row);
                         let cell = &mut line[hx + col];
-                        for k in 0..3 {
-                            cell[k] += (res[k] - src[k]) * weight;
+                        if recolour {
+                            let src = pixel(x, y);
+                            let base = face.hair_base[k] as f32 / 65535.0;
+                            let res = recolour_hair(src, base, lift.as_ref(), &s);
+                            for k in 0..3 {
+                                cell[k] += (res[k] - src[k]) * weight;
+                            }
+                        }
+                        if let Some(d) = detail.and_then(|d| d.hair_at(x as u32, y as u32)) {
+                            // The skin pass has swapped the skin's share and
+                            // what lies inside the face outline.
+                            let m = skin
+                                .region
+                                .index_at(x as u32, y as u32)
+                                .map_or(0.0, |i| skin.mask[i] as f32 / 255.0);
+                            let share = (weight - m.max(d.face)).max(0.0);
+                            if share > 0.0 {
+                                let add = ai_detail_swap(&s, &d, 1.0);
+                                for k in 0..3 {
+                                    cell[k] += add[k] * share;
+                                }
+                            }
                         }
                     }
                 });
@@ -1089,6 +1189,7 @@ mod tests {
             mean: [0.4; 3],
             cheek_luma: 0.4,
             extent: 300.0,
+            light: [0.0; 4],
         }
     }
 
@@ -1339,6 +1440,150 @@ mod tests {
                 "{name}: face {}x{}, extent {:.0}",
                 r.w, r.h, model.faces[0].extent
             );
+        }
+    }
+
+    #[test]
+    fn even_light_takes_the_tilt_back_out_and_holds_past_the_face() {
+        // Light falling off to the right: ln(brightness) drops 0.002 a pixel.
+        let skin = SkinLayers {
+            region: Region {
+                x: 0,
+                y: 0,
+                w: 601,
+                h: 1,
+            },
+            light: [-0.002, 0.0, 300.0, 0.0],
+            ..one_pixel_skin()
+        };
+        let s = PortraitSettings {
+            even_light: 100.0,
+            ..PortraitSettings::NEUTRAL
+        }
+        .unit();
+        assert_eq!(even_light_gain(&skin, &s, 300), 1.0);
+        // 100 pixels to the dim side: brightened by what the tilt took.
+        assert!((even_light_gain(&skin, &s, 400) - 0.2f32.exp()).abs() < 1e-5);
+        assert!((even_light_gain(&skin, &s, 200) - (-0.2f32).exp()).abs() < 1e-5);
+        // Past 0.7 of the face's extent (300) the gain holds.
+        assert_eq!(
+            even_light_gain(&skin, &s, 600),
+            even_light_gain(&skin, &s, 510)
+        );
+        assert_eq!(
+            even_light_gain(&skin, &PortraitSettings::NEUTRAL.unit(), 400),
+            1.0
+        );
+    }
+
+    #[test]
+    fn corrections_are_off_until_a_slider_moves() {
+        assert!(PortraitSettings::default().fixes().is_none());
+        assert!(PortraitSettings::NEUTRAL.fixes().is_none());
+        let fixes = PortraitSettings {
+            fix_cast: 80.0,
+            fix_warmth: -50.0,
+            ..PortraitSettings::NEUTRAL
+        }
+        .fixes()
+        .unwrap();
+        assert_eq!((fixes.cast, fixes.warmth, fixes.haze), (0.8, -0.5, 0.0));
+    }
+
+    /// Opt-in visual probe: IAI_PORTRAIT_FIX_PROBE is a folder of photos;
+    /// each gets `fix_<name>.png`, the whole photo: as shot | Khử ám màu
+    /// 100 | + Cân sáng 80 | + Khử đục 60 | + Đều sáng mặt 50 and the
+    /// default retouch | + Chi tiết mặt (AI) 100.
+    #[test]
+    #[ignore]
+    fn probe_fix() {
+        use super::super::correct::fix_lut;
+        use super::super::looks::preview_graded;
+        let Ok(dir) = std::env::var("IAI_PORTRAIT_FIX_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name.starts_with("fix_") || name.starts_with("py_") || !name.ends_with(".jpg") {
+                continue;
+            }
+            let rgba = image::open(&path).unwrap().to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let rgba = rgba.into_raw();
+            let model = super::super::analyze(&rgba, w, h, false, None, &|_| {}).unwrap();
+            let enabled = vec![true; model.faces.len()];
+            let stats = model.light;
+            println!(
+                "{name}: skin {:?}, cast {:?}, veil {:?}, tilt {:?}",
+                stats.skin,
+                stats.cast(),
+                stats.veil,
+                model.faces[0].skin.light
+            );
+            super::super::ai_detail::analyze_details(&rgba, &model, &enabled);
+            let cast = PortraitSettings {
+                fix_cast: 100.0,
+                ..PortraitSettings::NEUTRAL
+            };
+            let lit = PortraitSettings {
+                fix_exposure: 80.0,
+                ..cast
+            };
+            let clear = PortraitSettings {
+                fix_haze: 60.0,
+                ..lit
+            };
+            let d = PortraitSettings::default();
+            let even = PortraitSettings {
+                fix_cast: 100.0,
+                fix_exposure: 80.0,
+                fix_haze: 60.0,
+                even_light: 50.0,
+                ..d
+            };
+            let ai = PortraitSettings {
+                ai_detail: 100.0,
+                ..even
+            };
+            let full = |settings: &PortraitSettings| {
+                let retouched = render(&rgba, &model, settings, &enabled, &[]);
+                let fix = settings.fixes().and_then(|f| fix_lut(&stats, &f));
+                match preview_graded(&rgba, w, h, retouched, fix.as_ref(), None) {
+                    Some((r, px)) if r.w == w && r.h == h => px,
+                    Some((r, px)) => {
+                        let mut out = rgba.clone();
+                        for y in 0..r.h as usize {
+                            let o = ((r.y as usize + y) * w as usize + r.x as usize) * 4;
+                            out[o..o + r.w as usize * 4].copy_from_slice(
+                                &px[y * r.w as usize * 4..(y + 1) * r.w as usize * 4],
+                            );
+                        }
+                        out
+                    }
+                    None => rgba.clone(),
+                }
+            };
+            let views = [
+                rgba.clone(),
+                full(&cast),
+                full(&lit),
+                full(&clear),
+                full(&even),
+                full(&ai),
+            ];
+            let mut sheet = image::RgbaImage::new((w + 8) * 3, (h + 8) * 2);
+            for (k, view) in views.iter().enumerate() {
+                let tile = image::RgbaImage::from_raw(w, h, view.clone()).unwrap();
+                image::imageops::replace(
+                    &mut sheet,
+                    &tile,
+                    ((k as u32 % 3) * (w + 8)) as i64,
+                    ((k as u32 / 3) * (h + 8)) as i64,
+                );
+            }
+            sheet.save(dir.join(format!("fix_{name}.png"))).unwrap();
         }
     }
 

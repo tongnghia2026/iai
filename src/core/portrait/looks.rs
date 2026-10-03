@@ -197,7 +197,7 @@ impl StudioLook {
     }
 }
 
-fn linear_to_srgb(v: f32) -> f32 {
+pub(super) fn linear_to_srgb(v: f32) -> f32 {
     let v = v.max(0.0);
     if v <= 0.003_130_8 {
         v * 12.92
@@ -324,7 +324,8 @@ impl Grade {
     }
 }
 
-/// A look baked into a 33³ LUT over sRGB.
+/// A colour change baked into a 33³ LUT over sRGB: a look, or the
+/// corrections of [`super::correct`].
 pub struct LookLut {
     data: Vec<[f32; 3]>,
 }
@@ -335,18 +336,21 @@ impl LookLut {
     /// `None` for [`StudioLook::None`].
     pub fn new(look: StudioLook) -> Option<Self> {
         let grade = look.grade()?;
+        Some(Self::from_fn(|c| grade.apply(c)))
+    }
+
+    /// The LUT of `change`, which takes and gives sRGB 0..1.
+    pub fn from_fn(change: impl Fn([f32; 3]) -> [f32; 3] + Sync) -> Self {
         let n = LUT_SIDE;
         let step = 1.0 / (n - 1) as f32;
         let data = (0..n * n * n)
             .into_par_iter()
             .map(|i| {
                 let (r, g, b) = (i % n, i / n % n, i / (n * n));
-                grade
-                    .apply([r as f32 * step, g as f32 * step, b as f32 * step])
-                    .map(|v| v * 255.0)
+                change([r as f32 * step, g as f32 * step, b as f32 * step]).map(|v| v * 255.0)
             })
             .collect();
-        Some(Self { data })
+        Self { data }
     }
 
     /// Trilinear lookup; 0..255 in and out.
@@ -396,21 +400,27 @@ impl LookLut {
 }
 
 /// The whole layer `src` (`width × height`) with the retouch `rendered`
-/// written in and `look` mixed in at `strength` (0..1): what the preview
-/// shows. `rendered` unchanged when there is no look.
-pub fn preview_with_look(
+/// written in, then the corrections `fix`, then `look` mixed in at its
+/// strength (0..1): what the preview shows. `rendered` unchanged when there
+/// is neither.
+pub fn preview_graded(
     src: &[u8],
     width: u32,
     height: u32,
     rendered: Option<(Region, Vec<u8>)>,
-    look: StudioLook,
-    strength: f32,
+    fix: Option<&LookLut>,
+    look: Option<(StudioLook, f32)>,
 ) -> Option<(Region, Vec<u8>)> {
-    let Some(lut) = LookLut::new(look).filter(|_| strength > 0.0) else {
+    let look = look.and_then(|(look, strength)| Some((LookLut::new(look)?, strength)));
+    if fix.is_none() && look.is_none() {
         return rendered;
-    };
+    }
     let mut full = with_retouch(src, width, rendered);
-    lut.apply(&mut full, strength);
+    grade(
+        &mut full,
+        fix,
+        look.as_ref().map(|(lut, strength)| (lut, *strength)),
+    );
     Some((
         Region {
             x: 0,
@@ -420,6 +430,17 @@ pub fn preview_with_look(
         },
         full,
     ))
+}
+
+/// The corrections `fix` in full, then `look` at its strength, over straight
+/// RGBA in place.
+pub fn grade(rgba: &mut [u8], fix: Option<&LookLut>, look: Option<(&LookLut, f32)>) {
+    if let Some(fix) = fix {
+        fix.apply(rgba, 1.0);
+    }
+    if let Some((look, strength)) = look {
+        look.apply(rgba, strength);
+    }
 }
 
 /// `src` with the retouched region written over it.
@@ -443,7 +464,9 @@ mod tests {
     fn none_has_no_lut_and_leaves_the_preview_alone() {
         assert!(LookLut::new(StudioLook::None).is_none());
         let src = vec![10u8, 20, 30, 255];
-        assert!(preview_with_look(&src, 1, 1, None, StudioLook::None, 1.0).is_none());
+        let none = Some((StudioLook::None, 1.0));
+        assert!(preview_graded(&src, 1, 1, None, None, none).is_none());
+        assert!(preview_graded(&src, 1, 1, None, None, None).is_none());
     }
 
     #[test]
@@ -529,7 +552,7 @@ mod tests {
         };
         let rendered = Some((region, vec![10u8; 2 * 4]));
         let (out_region, out) =
-            preview_with_look(&src, 4, 4, rendered, StudioLook::Natural, 1.0).unwrap();
+            preview_graded(&src, 4, 4, rendered, None, Some((StudioLook::Natural, 1.0))).unwrap();
         assert_eq!((out_region.w, out_region.h), (4, 4));
         assert!(out[(4 + 1) * 4] < 40, "retouched pixel kept under the look");
         assert!(out[0] > 150);
