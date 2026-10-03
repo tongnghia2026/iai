@@ -313,4 +313,35 @@ Develop".
   Không làm vậy thì kéo tối sẽ lộ viền sáng quanh lông mày, môi, chân mũi (thấy trên
   `brick_woman.jpg` ở −100).
 - [x] Probe `IAI_PORTRAIT_SKIN_TONE_PROBE` (`tmp/anh-the/sang-da`): 0 | 50 | 100 | −50 | −100.
+- [x] Build Release, chủ test đợt 13: **OK**.
+
+## Đợt 14 (03/10 khuya): Xếp ảnh in ngay trong Chỉnh chân dung, trang 3×4 + 4×6
+
+Chủ sau khi test đợt 13 (kèm ảnh mẫu trang in): đưa phần "Xếp ảnh in" của AI Image Studio vào
+cửa sổ Chỉnh chân dung; thêm một hàng xếp cả hai loại như mẫu; ảnh 4×6 nền trắng có viền để
+nhận ra khi cắt bằng kéo. Chia việc: ảnh quá khó → AI Image Studio (Gemini / ChatGPT); ảnh
+chụp đẹp hoặc không có mạng → Làm ảnh thẻ + Chỉnh chân dung là đủ.
+
+Đo ảnh mẫu (1444×2000): đúng là giấy **13×18**, 111,5 px/cm; 6 tấm 3×4 nằm ngang (2 hàng × 3)
+nền xanh `(5, 148, 242)`, dưới là 2 tấm 4×6 nằm ngang nền trắng viền đỏ; lề trái = lề trên
+≈ 0,47 cm; khe ≈ 10 px ở 600 dpi; nửa dưới tờ giấy để trống.
+
+- [x] **Trang hỗn hợp** `Sheet::Mixed` (`core/imposition.rs`): 13×18, 6 tấm 3×4 trên 2 tấm 4×6,
+  canh như mẫu (hàng 4×6 nằm giữa, khối 3×4 canh trái theo nó, lề trên = lề trái). Thành nút
+  thứ tư: "Xếp 13×18 — 6 tấm 3×4 + 2 tấm 4×6". Mỗi cỡ một nhóm layer riêng.
+- [x] **Đổi nền theo cỡ**: ảnh đã tách người (Background một màu phẳng + người có vùng trong
+  suốt bên trên, đúng kiểu "Làm ảnh thẻ" để lại) thì mỗi cỡ được đặt lên nền riêng — mặc định
+  **3×4 xanh, 4×6 trắng**, đổi được bằng hai hàng nút "Nền 3×4 / Nền 4×6". Ảnh phẳng (ảnh AI
+  trả về, ảnh chưa tách nền) giữ nguyên nền của nó và thanh trạng thái báo rõ.
+- [x] **Viền cắt** đỏ 4 px (0,17 mm) quanh ảnh nền trắng (nền trắng do chọn, hoặc ảnh phẳng có
+  mép trắng): vẽ trong khe cắt, không lấn vào ảnh; khe < 2 px thì vẽ đè lên mép ảnh.
+- [x] **"Xếp ảnh in" trong Chỉnh chân dung**: nhóm cuối của hộp thoại; bấm một trang = Áp dụng
+  rồi xếp ra trang in mới. Cùng một đoạn giao diện với AI Image Studio
+  (`ui/dialogs/print_sheet.rs`); khe cắt và nền nhớ trong prefs.json (khóa `print_sheet`).
+- [x] Tấm 4×6 lấy từ ảnh đã cắt 3×4 nên bị cắt bớt ~5% mỗi bên và phóng 1,58 lần (≈ 380 ppi):
+  đủ in, kém nét hơn tấm 3×4 một chút. Muốn nét hơn phải cho "Làm ảnh thẻ" cắt ở cỡ lớn — chưa
+  làm.
+- [x] Probe `IAI_PRINT_SHEET_PROBE` (`tmp/anh-the/xep-in`): ảnh → Làm ảnh thẻ → trang hỗn hợp.
+- Thấy khi thử (chưa sửa, lỗi có từ trước của "Làm ảnh thẻ"): ảnh sát mép trên (`khach_1.jpg`)
+  để lại một vạch mờ cách mép trên ảnh thẻ ~8 px — chỗ khung vượt khỏi ảnh gốc.
 - [ ] Build Release, chủ test.
