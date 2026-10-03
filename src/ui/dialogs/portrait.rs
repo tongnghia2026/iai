@@ -2,7 +2,7 @@
 //! under-eye, eye and teeth sliders with a live canvas preview, like the
 //! Filter/Levels dialogs, and a brush ("Tô vùng") to fix the skin, hair and
 //! brow areas before sliding, and studio colour looks. Áp dụng adds the
-//! retouch as a new layer (and the look as its own layer above); Hủy restores.
+//! retouch (look included) as one new layer; Hủy restores.
 
 use super::*;
 use crate::core::portrait::brush::MaskTarget;
@@ -203,7 +203,7 @@ fn look_section(ui: &mut egui::Ui, ready: bool, s: &mut PortraitSettings) {
     let strength = vec![(
         "Độ đậm",
         &mut s.look_strength,
-        "Thành opacity của layer \"Màu studio\" — chỉnh lại trong bảng Layer lúc nào cũng được",
+        "Pha bộ màu vào ảnh mạnh hay nhẹ (gộp chung vào layer \"Chân dung\")",
         Kind::Amount,
     )];
     rows(ui, ready && current != StudioLook::None, strength);
@@ -734,7 +734,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     .on_hover_text(if data.dialogs.portrait_reopened {
                         "Cập nhật layer \"Chân dung\" đang chỉnh tiếp"
                     } else {
-                        "Thêm kết quả thành layer mới \"Chân dung\" (có chọn Màu studio thì thêm layer \"Màu studio\" ngay trên, độ đậm = opacity). Mở lại để chỉnh tiếp: chọn layer đó rồi vào Chỉnh chân dung"
+                        "Thêm kết quả (cả Màu studio nếu có chọn) thành layer mới \"Chân dung\". Mở lại để chỉnh tiếp: chọn layer đó rồi vào Chỉnh chân dung"
                     })
                     .clicked()
                 {

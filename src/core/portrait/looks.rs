@@ -1,7 +1,7 @@
 //! "Màu studio": finished colour looks for portraits (Chỉnh chân dung). Each
 //! look is a fixed grade — white balance and exposure in linear light, then
 //! a skin-tone tweak, saturation, a tone curve and split toning — baked into
-//! a 3D LUT. Applied on its own layer, its strength is that layer's opacity.
+//! a 3D LUT, mixed in at the chosen strength.
 
 use rayon::prelude::*;
 

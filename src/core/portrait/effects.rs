@@ -69,7 +69,7 @@ pub struct PortraitSettings {
     pub body_legs: f32,
     pub body_leg_length: f32,
     /// "Màu studio": the look (index into [`StudioLook::ALL`], 0 = none) and
-    /// its strength 0..100, the opacity of the layer it lands on.
+    /// how much of it is mixed in, 0..100.
     pub look: u8,
     pub look_strength: f32,
 }

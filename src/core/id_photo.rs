@@ -237,9 +237,11 @@ pub struct IdPhotoPlan {
     pub notes: Vec<String>,
 }
 
-/// Find the face (in `clip` when given; the largest when several), frame it
-/// and, when asked, cut the person out with `segment` (an RGBA region in, a
-/// soft mask of the same size out). `progress` gets short status lines.
+/// Cut the person out with `segment` (an RGBA image in, a soft mask of the
+/// same size out) on the whole photo first — the model works best seeing the
+/// whole person, as Select Subject does — then find the face on that person
+/// (in `clip` when given; the largest when several) and frame it.
+/// `progress` gets short status lines.
 pub fn prepare(
     rgba: &[u8],
     width: u32,
@@ -255,11 +257,24 @@ pub fn prepare(
     if !options.crop && !options.white_background {
         return Err("chưa chọn việc nào (cắt khung / nền trắng)".to_string());
     }
+    let person_mask = if options.white_background {
+        progress("Đang tách người khỏi nền…".to_string());
+        let mask = segment(rgba, width, height)?;
+        if mask.len() != width as usize * height as usize {
+            return Err("mask tách nền sai kích thước".to_string());
+        }
+        Some(mask)
+    } else {
+        None
+    };
     progress("Đang tìm khuôn mặt…".to_string());
-    let meshes = match clip {
+    let mut meshes = match clip {
         Some(clip) => super::portrait::analysis::faces_in(rgba, width, height, clip)?,
         None => face_mesh::detect(rgba, width, height)?,
     };
+    if let Some(mask) = &person_mask {
+        keep_faces_on_people(&mut meshes, mask, width, height);
+    }
     let face = meshes
         .iter()
         .max_by(|a, b| a.frame().1.total_cmp(&b.frame().1))
@@ -294,7 +309,6 @@ pub fn prepare(
     }
 
     let cutout = if options.white_background {
-        progress("Đang tách người khỏi nền…".to_string());
         let region = match &frame {
             // Room for the frame to rise over a tall hairdo.
             Some(f) => {
@@ -312,10 +326,8 @@ pub fn prepare(
             return Err("khung nằm ngoài ảnh".to_string());
         }
         let mut pixels = copy_region(rgba, width, region);
-        let mut mask = segment(&pixels, region.w, region.h)?;
-        if mask.len() != region.len() {
-            return Err("mask tách nền sai kích thước".to_string());
-        }
+        let full = person_mask.as_deref().unwrap_or_default();
+        let mut mask = copy_mask_region(full, width, region);
         if let Some(face) = &face {
             keep_person(&mut mask, region, face.nose);
         }
@@ -353,6 +365,31 @@ pub fn prepare(
         cutout,
         notes,
     })
+}
+
+fn copy_mask_region(mask: &[u8], width: u32, region: Region) -> Vec<u8> {
+    let mut out = Vec::with_capacity(region.len());
+    for y in region.y..region.y + region.h {
+        let o = (y * width + region.x) as usize;
+        out.extend_from_slice(&mask[o..o + region.w as usize]);
+    }
+    out
+}
+
+/// Drop faces that are not on a segmented person (a poster or photo on the
+/// wall behind), unless that would drop them all (a poor mask).
+fn keep_faces_on_people(meshes: &mut Vec<FaceMesh>, mask: &[u8], width: u32, height: u32) {
+    let on_person = |mesh: &FaceMesh| {
+        let [x, y] = FaceMarks::from_mesh(mesh).nose;
+        x >= 0.0
+            && y >= 0.0
+            && (x as u32) < width
+            && (y as u32) < height
+            && mask[y as usize * width as usize + x as usize] >= 128
+    };
+    if meshes.iter().any(on_person) {
+        meshes.retain(on_person);
+    }
 }
 
 fn copy_region(rgba: &[u8], width: u32, region: Region) -> Vec<u8> {
@@ -1025,6 +1062,32 @@ mod tests {
         let (frame, widen) = fit_frame(&face, &options, aspect(), 1000, 600);
         assert_eq!(widen, 0.0);
         assert_eq!(frame, reference);
+    }
+
+    fn mesh_with_nose_at(x: f32, y: f32) -> FaceMesh {
+        FaceMesh {
+            points: vec![[x, y, 0.0]; face_mesh::LANDMARK_COUNT],
+            presence: 1.0,
+        }
+    }
+
+    #[test]
+    fn faces_off_the_person_are_dropped_unless_all_are() {
+        let (w, h) = (100u32, 50u32);
+        let mut mask = vec![0u8; (w * h) as usize];
+        for y in 0..50 {
+            for x in 0..50 {
+                mask[y * 100 + x] = 255;
+            }
+        }
+        let mut meshes = vec![mesh_with_nose_at(20.0, 20.0), mesh_with_nose_at(80.0, 20.0)];
+        keep_faces_on_people(&mut meshes, &mask, w, h);
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(meshes[0].points[NOSE_TIP][0], 20.0);
+        // Nobody on the mask: keep them rather than lose the face.
+        let mut meshes = vec![mesh_with_nose_at(80.0, 20.0)];
+        keep_faces_on_people(&mut meshes, &mask, w, h);
+        assert_eq!(meshes.len(), 1);
     }
 
     #[test]
