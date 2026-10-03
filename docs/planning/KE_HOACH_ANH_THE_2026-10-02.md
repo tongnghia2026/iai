@@ -267,4 +267,30 @@ Chủ sau khi test đợt 10:
   màu môi" (trái = giảm màu), không thêm thanh trùng.
 - [x] Có vùng chọn thì Sửa màu & sáng và Màu studio chỉ áp trong vùng chọn (như phần chỉnh da);
   trước đây look áp cả layer — giờ bật mặc định nên phải theo vùng chọn.
+- [x] Build Release, chủ test đợt 11: **OK**.
+
+## Đợt 12 (03/10 khuya): thanh màu mắt / tóc / lông mày hai chiều, mắt phủ cả lòng trắng
+
+Chủ sau khi test đợt 11: "giảm màu tròng mắt mặc định là 0 nên không giảm thêm được, gặp mắt
+đỏ là không giảm được; cho phủ luôn phần trắng mắt vì có người đau mắt đỏ toàn mắt; giảm màu
+tóc cũng tương tự".
+
+- [x] Ba thanh "Giảm màu …" (0..100, kéo phải mới giảm) đổi thành thanh **hai chiều** như
+  "Đậm / giảm màu môi": **trái = giảm màu** (−100 = hết màu, giữ độ sáng), **phải = đậm màu**
+  (+100 = màu đậm thêm 80%). Tên mới: "Đậm / giảm màu mắt", "Đậm / giảm màu tóc", "Đậm / giảm
+  màu lông mày" (`eye_saturation`, `hair_saturation`, `brow_saturation`).
+- [x] **Giảm màu mắt phủ cả mắt**: tròng mắt + toàn bộ khe mắt ngoài tròng (`FaceModel.sclera`,
+  không lọc theo độ sáng như mask "Trắng mắt", nên lòng trắng đỏ sẫm vẫn được phủ). Lòng trắng
+  khử đỏ theo luật riêng (`whitened`): máu chỉ làm tối kênh lục và lam, nên mức trắng thật nằm
+  gần kênh sáng nhất hơn là độ sáng trung bình → nâng 75% về phía đó, không để lại mảng xám.
+  Tròng mắt vẫn giảm màu giữ nguyên độ sáng (đồng tử đỏ do flash thành xám tối). Chiều đậm màu
+  chỉ áp cho tròng.
+- [x] **Giảm màu về đúng màu xám của ảnh**: ảnh ám màu thì "Khử ám màu" chạy sau phần chỉnh
+  mặt, nên giảm màu về R=G=B rồi khử ám sẽ ra lòng trắng / tóc ngả tím-xanh (thấy rõ trên
+  `khach_1.jpg`). Giờ mắt, tóc, lông mày giảm / đậm màu quanh trục xám mà cân trắng sẽ đưa về
+  trung tính (`correct::grey_axis`, tính từ Khử ám màu + Ấm / lạnh đang đặt) → sau khi khử ám
+  là xám thật. Không khử ám thì như cũ.
+- [x] File / layer lưu bằng bản đợt 11 (`hair_fade`, `iris_fade`, `brow_fade` 0..100) mở ra
+  thành nửa trái của thanh mới (`PortraitSettings::from_saved`).
+- [x] Probe `IAI_PORTRAIT_EYE_PROBE` (`tmp/anh-the/mat-do`): mắt thật và mắt đỏ giả lập.
 - [ ] Build Release, chủ test.
