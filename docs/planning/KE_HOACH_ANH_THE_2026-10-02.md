@@ -129,3 +129,23 @@ Crop preset 3×4 chủ vẫn dùng tay.
 - Phím tắt riêng cho "Làm ảnh thẻ" (bảng phím tắt bắt buộc có phím mặc định).
 - Râu dài: AI coi đáy râu là cằm → mặt nhỏ hơn chuẩn một chút.
 - Chưa có chống cụt tóc khi tắt "nền trắng" (cần mask người).
+
+## Đợt 6 (03/10): Tạo khối + Vân da trong Chỉnh chân dung
+
+Chủ: ảnh độ phân giải thấp / nhiều mụn / thiếu sáng nhiều noise → kéo Làm mịn da cao thì
+mặt mất khối; muốn thêm "tạo khối" khi làm mịn và "tạo vân da" bù cho ảnh ĐT bị bệt.
+
+- Nguyên nhân: làm mịn bỏ 85% tầng giữa (r1≈e/220 … r2≈e/28), tầng này chứa cả khối mặt
+  (sống mũi, cánh mũi, nếp má, hốc mắt) — thấy rõ mũi biến mất ở làm mịn 100.
+- [x] Tách tầng giữa tại ≈e/80 (band `form` trong SkinLayers): **"Tạo khối"** giữ sáng-tối
+  của nửa thô (khối), không giữ màu (mảng đỏ mụn vẫn đều), nửa mịn (sần/noise) vẫn bỏ; thêm
+  nhẹ khối lớn (broad − huge, huge ≈ e/2,5). Mặc định 30.
+- [x] Làm mịn gần 100 bỏ thêm tầng vân mịn (noise ĐT): 0,15·s + 0,45·s³.
+- [x] **"Vân da"**: vân lỗ chân lông tổng hợp (value noise, chu kỳ ≈ e/350, ≥1 px), chỉ trên
+  da, mạnh ở tông giữa, trung bình 0 (không đổi độ sáng). Mặc định 0.
+- Thử: ảnh mẫu chủ + 2 ảnh hạ độ phân giải/thêm noise (`tmp/anh-the/form`, probe
+  `IAI_PORTRAIT_FORM_PROBE`): làm mịn 100 mất mũi → Tạo khối 80 khối trở lại, noise vẫn sạch;
+  Vân da 50 hết cảm giác nhựa.
+- Chưa làm: chi tiết da bằng AI (GFPGAN có sẵn trong models, Auto Retouch đã có đường
+  "texture transfer") — làm nếu chủ thấy Vân da tổng hợp chưa đủ.
+- [ ] Build Release, chủ test đợt 6.
