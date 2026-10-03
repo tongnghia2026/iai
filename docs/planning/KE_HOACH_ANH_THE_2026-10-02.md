@@ -99,7 +99,16 @@ Crop preset 3×4 chủ vẫn dùng tay.
 - [x] Chỉnh chân dung: ảnh mới **luôn bắt đầu từ thông số Mặc định** (trước đây hộp thoại
   giữ thông số ảnh trước → bóp mặt, son, màu studio bị áp sang người khác). Mở lại layer
   "Chân dung" cũ vẫn khôi phục thông số của chính nó.
-- [ ] Build Release, chủ test đợt 4.
+- [x] Build Release, chủ test đợt 4.
+
+## Đợt 5 (03/10)
+
+- [x] Đảo quy trình theo chủ: **tách nền trên toàn ảnh trước** (như Select Subject; trước
+  đây chạy BiRefNet trên vùng cắt quanh mặt → model không thấy cả người, tách kém hơn)
+  → tìm mặt (chỉ nhận mặt nằm trên người đã tách) → crop → Chỉnh chân dung.
+- [x] Màu studio **gộp chung vào layer "Chân dung"** (không còn layer màu riêng); "Độ đậm"
+  = mức pha màu vào layer đó.
+- [ ] Build Release, chủ test đợt 5.
 
 ## Kết quả đo thử (02/10)
 
