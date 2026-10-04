@@ -2584,11 +2584,17 @@ impl App {
     /// open. These stay open while the user zooms/pans to inspect the result, so
     /// they do NOT block view navigation (only editing/painting).
     pub fn is_preview_dialog_open(&self) -> bool {
+        self.held_preview_open() || self.portrait_under_way()
+    }
+
+    /// The preview dialogs that keep the canvas until applied or cancelled.
+    /// Auto retouch is not one: its preview gives way to a command from
+    /// outside (see `yield_portrait`).
+    fn held_preview_open(&self) -> bool {
         self.shell.ui.show_adjustment_dialog
             || self.shell.ui.show_filter_dialog
             || self.shell.ui.show_develop_dialog
             || self.shell.ui.show_scan_cleanup_dialog
-            || self.portrait_under_way()
     }
 
     /// Bug 7: True when Crop (with an active selection) or Free Transform is active.
@@ -2608,6 +2614,11 @@ impl App {
     /// welcome screen and the exit/close save prompts are exempt — they are
     /// themselves navigation/resolution surfaces.
     pub fn modal_lock_active(&self) -> bool {
+        self.locked_beside_retouch() || self.portrait_under_way()
+    }
+
+    /// `modal_lock_active` but for a retouch Auto retouch has under way.
+    pub(crate) fn locked_beside_retouch(&self) -> bool {
         // The Develop stage's second OS window is modal over the main window
         // (Track D): while it is open the main window is soft-locked — canvas
         // actions are refused (bell) until Develop closes.
@@ -2618,7 +2629,7 @@ impl App {
             || self.edit.show_refine_panel
             || (self.edit.tools.active_id() == ToolId::PerspectiveCrop
                 && self.edit.tools.perspective_crop().has_quad())
-            || self.is_preview_dialog_open()
+            || self.held_preview_open()
             || (self.is_blocking_modal()
                 && !self.shell.ui.show_welcome
                 && !self.shell.ui.show_exit_dialog
@@ -2750,6 +2761,12 @@ impl App {
     /// Start an app exit from a user gesture (window close / File > Exit). Returns
     /// true only when the caller should exit immediately.
     pub fn request_app_exit(&mut self) -> bool {
+        // A retouch previewed lands in its layer, to be saved with the rest.
+        // One still being made holds the app: its workers are not to be
+        // cut off while they load their models.
+        if self.portrait_on_show() {
+            self.yield_portrait();
+        }
         if self.block_exit_if_active_operation() {
             return false;
         }

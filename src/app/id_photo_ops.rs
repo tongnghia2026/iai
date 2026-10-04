@@ -132,6 +132,18 @@ impl App {
         self.shell.id_photo = IdPhotoSession::default();
     }
 
+    /// Stop the work under way. The photo already made stays, and can
+    /// still be framed again.
+    pub(crate) fn stop_id_photo(&mut self) {
+        let session = &mut self.shell.id_photo;
+        let running = session.job.take().is_some() | session.waiting.take().is_some();
+        session.next = None;
+        session.retouch_due = None;
+        if running {
+            session.set("Đã dừng làm ảnh thẻ", false);
+        }
+    }
+
     /// The ID photo kept, when the active document still is that photo.
     fn kept_id_photo(&self) -> Option<&Kept> {
         let doc = self.docs.documents.get(self.docs.active_doc_idx)?;

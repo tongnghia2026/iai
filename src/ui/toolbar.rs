@@ -152,10 +152,15 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let active_visible = tool_visible_in_context(context, data.tool.active_tool);
 
     // A layer-context change must never leave a hidden destructive tool active.
-    // Modal sessions own their tool until commit/cancel, so defer the fallback.
+    // Modal sessions own their tool until commit/cancel, so defer the fallback;
+    // so does a retouch under way in Auto retouch, which a tool picked applies.
     let active_blocked_by_background =
         background_locked && tool_writes_layer(data.tool.active_tool);
-    if (!active_visible || active_blocked_by_background) && !data.chrome.is_tool_modal {
+    let retouching = data.dialogs.portrait_session || data.dialogs.id_photo_busy;
+    if (!active_visible || active_blocked_by_background)
+        && !data.chrome.is_tool_modal
+        && !retouching
+    {
         actions.tool.select_tool = Some(ToolId::Move);
     }
 

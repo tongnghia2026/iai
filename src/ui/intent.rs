@@ -89,7 +89,7 @@ pub enum FlowTextFocus {
 
 /// File/document commands: open/save/export, undo/redo, resize, tabs,
 /// colour-mode conversion, view zoom, clipboard.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct DocumentIntent {
     /// Create a lightweight flowing-text document in a normal application tab.
     pub new_flow_text_document: bool,
@@ -246,7 +246,7 @@ pub struct DocumentIntent {
     pub hovered_doc: Option<usize>,
 }
 /// Layer panel commands.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct LayerIntent {
     pub align_layers: Option<LayerAlign>,
     pub distribute_layers: Option<LayerDistribute>,
@@ -318,7 +318,7 @@ pub struct LayerIntent {
     pub set_paint_target: Option<(usize, PaintTarget)>,
 }
 /// Tool selection, options-bar edits, transform/crop/text session commands.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct ToolIntent {
     pub select_tool: Option<ToolId>,
     /// Align the multi-selected Path nodes (Node options bar): the axis to snap on
@@ -534,7 +534,7 @@ pub enum PdfBatchOperation {
     Text,
 }
 
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct SelectionIntent {
     pub clear_selection_pixels: bool,
     /// Multi-page PDF: open the page-count dialog for the current rectangular
@@ -616,7 +616,7 @@ pub struct SelectionIntent {
     pub selection_ctx_menu_close: bool,
 }
 /// Develop commands: scrub, apply/cancel, presets, local masks, Auto.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct DevelopIntent {
     pub open_develop_dialog: bool,
     pub set_develop_settings: Option<DevelopSettings>,
@@ -643,7 +643,7 @@ pub struct DevelopIntent {
     pub develop_auto: bool,
 }
 /// Print/proof commands.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct PrintIntent {
     /// View ▸ Proof Colors toggle.
     pub toggle_proof_colors: bool,
@@ -683,7 +683,7 @@ pub struct PrintIntent {
 /// A batch text-formatting request from the "Định dạng chữ hàng loạt" dialog.
 /// Every field is optional — `None` means "leave this attribute unchanged".
 /// Applied across every text layer in the active document as one undo step.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct TextBatchFormat {
     /// Scope of the font swap: `None` = all fonts, `Some(storage_name)` = only
     /// text currently using that font. Relevant only when `set_font` is set.
@@ -720,7 +720,7 @@ pub enum VectorStyleTarget {
 
 /// Batch style change for vector layers. Scope flags classify each vector
 /// layer independently; optional style fields leave the existing value alone.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub struct VectorBatchStyle {
     pub target: VectorStyleTarget,
     pub include_arrows: bool,
@@ -741,7 +741,7 @@ impl VectorBatchStyle {
 }
 
 /// Open/confirm/cancel for the modal dialogs and their scratch edits.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct DialogIntent {
     pub open_paint_color_dialog: Option<u8>,
     /// Open the paint-colour dialog for `target` pre-seeded with a specific
@@ -917,7 +917,7 @@ pub enum LibrarySelect {
 }
 
 /// Library grid commands (Track B): folder browse, selection, open.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct LibraryIntent {
     /// Header "Choose Folder" — open the deferred folder picker.
     pub open_folder: bool,
@@ -935,7 +935,7 @@ pub struct LibraryIntent {
     pub visible_thumbs: Vec<std::path::PathBuf>,
 }
 /// Channels panel commands.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct ChannelsIntent {
     /// Channels panel row click: target view + additive (Ctrl/Shift held).
     pub select_channel_row: Option<(crate::core::channels::ChannelView, bool)>,
@@ -949,7 +949,7 @@ pub struct ChannelsIntent {
     pub duplicate_alpha_channel: Option<usize>,
 }
 /// AI panel commands and extension-bridge runs.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct AiIntent {
     // AI Gemini panel (see ui/ai_panel.rs).
     /// Write the edited panel buffers back to UiState.
@@ -1010,6 +1010,253 @@ pub struct UiActions {
     pub ai: AiIntent,
     /// Preferences edits, applied + persisted by the app.
     pub settings: SettingsIntent,
+}
+
+impl UiActions {
+    /// Whether the frame asks for more than the Auto retouch dialog asks
+    /// itself and than looking at the photo does: a command from outside the
+    /// dialog, which the retouch it previews gives way to. A field counts as
+    /// one until it is listed here.
+    pub fn reaches_past_retouch(&self) -> bool {
+        let doc = DocumentIntent {
+            set_flow_text_layout: self.doc.set_flow_text_layout,
+            fit_to_screen: self.doc.fit_to_screen,
+            zoom_in: self.doc.zoom_in,
+            zoom_out: self.doc.zoom_out,
+            zoom_100: self.doc.zoom_100,
+            hovered_doc: self.doc.hovered_doc,
+            ..Default::default()
+        };
+        let layers = LayerIntent {
+            toggle_group_expanded: self.layers.toggle_group_expanded,
+            ..Default::default()
+        };
+        let tool = ToolIntent {
+            // A tool picked has its own rule (`App::portrait_tool_picked`).
+            select_tool: self.tool.select_tool,
+            consume_text_focus: self.tool.consume_text_focus,
+            text_drag_handle_hovered: self.tool.text_drag_handle_hovered,
+            text_panel_hovered: self.tool.text_panel_hovered,
+            brush_popup_close: self.tool.brush_popup_close,
+            transform_ctx_menu_close: self.tool.transform_ctx_menu_close,
+            object_ctx_menu_close: self.tool.object_ctx_menu_close,
+            ..Default::default()
+        };
+        let sel = SelectionIntent {
+            set_refine_brush_size: self.sel.set_refine_brush_size,
+            set_refine_brush_hardness: self.sel.set_refine_brush_hardness,
+            set_refine_brush_mode: self.sel.set_refine_brush_mode,
+            selection_ctx_menu_close: self.sel.selection_ctx_menu_close,
+            ..Default::default()
+        };
+        let print = PrintIntent {
+            toggle_proof_colors: self.print.toggle_proof_colors,
+            toggle_gamut_warning: self.print.toggle_gamut_warning,
+            set_proof_target: self.print.set_proof_target.clone(),
+            load_proof_profile: self.print.load_proof_profile,
+            display_cms_off: self.print.display_cms_off,
+            display_cms_from_system: self.print.display_cms_from_system,
+            display_cms_load: self.print.display_cms_load,
+            ..Default::default()
+        };
+        let dialogs = DialogIntent {
+            paint_dialog_hovered: self.dialogs.paint_dialog_hovered,
+            show_portrait_dialog: self.dialogs.show_portrait_dialog,
+            start_portrait_retouch: self.dialogs.start_portrait_retouch,
+            set_portrait_side: self.dialogs.set_portrait_side,
+            run_id_photo: self.dialogs.run_id_photo,
+            set_portrait_preview: self.dialogs.set_portrait_preview.clone(),
+            cancel_portrait_dialog: self.dialogs.cancel_portrait_dialog,
+            apply_portrait: self.dialogs.apply_portrait.clone(),
+            portrait_sheet: self.dialogs.portrait_sheet,
+            set_portrait_brush: self.dialogs.set_portrait_brush,
+            portrait_brush_undo: self.dialogs.portrait_brush_undo,
+            portrait_brush_redo: self.dialogs.portrait_brush_redo,
+            portrait_restored: self.dialogs.portrait_restored,
+            show_preferences: self.dialogs.show_preferences,
+            ..Default::default()
+        };
+        let ai = AiIntent {
+            set_ai_panel: self.ai.set_ai_panel.clone(),
+            toggle_ai_panel: self.ai.toggle_ai_panel,
+            ai_save_key: self.ai.ai_save_key,
+            ai_cancel_active: self.ai.ai_cancel_active,
+            retouch_cancel: self.ai.retouch_cancel,
+            ..Default::default()
+        };
+        self.doc != doc
+            || self.layers != layers
+            || self.tool != tool
+            || self.sel != sel
+            || self.develop != DevelopIntent::default()
+            || self.print != print
+            || self.dialogs != dialogs
+            || self.chrome.show_welcome == Some(true)
+            || self.chrome.show_library == Some(true)
+            || self.library != LibraryIntent::default()
+            || self.channels != ChannelsIntent::default()
+            || self.ai != ai
+    }
+
+    /// The retouch of the photo at `photo` was applied to the layer now at
+    /// `retouched`, and stands for the photo from here on. When that layer
+    /// is `added` to the stack, what the frame asks of a layer by its place
+    /// there is asked of that same layer still, and what it asks of the
+    /// photo is asked of the retouched one.
+    pub fn retarget_layers(&mut self, photo: usize, retouched: usize, added: bool) {
+        let layers = &mut self.layers;
+        // Applying settled which of the two shows.
+        let shown = |idx: usize| idx == photo || (!added && idx == retouched);
+        if layers.toggle_visible.is_some_and(shown) {
+            layers.toggle_visible = None;
+        }
+        if !added {
+            return;
+        }
+        let moved = |idx: &mut usize| {
+            if *idx == photo {
+                *idx = retouched;
+            } else if *idx >= retouched {
+                *idx += 1;
+            }
+        };
+        for idx in [
+            &mut layers.duplicate_layer,
+            &mut layers.remove_layer,
+            &mut layers.rasterize_layer,
+            &mut layers.convert_to_curves,
+            &mut layers.text_to_curves,
+            &mut layers.load_layer_selection,
+            &mut layers.toggle_visible,
+            &mut layers.toggle_lock,
+            &mut layers.toggle_lock_alpha,
+            &mut layers.unlock_background_layer,
+            &mut layers.move_layer_up,
+            &mut layers.move_layer_down,
+            &mut layers.merge_down,
+            &mut layers.merge_group,
+            &mut layers.ungroup,
+            &mut layers.toggle_group_expanded,
+            &mut layers.add_mask_white,
+            &mut layers.add_mask_black,
+            &mut layers.delete_mask,
+            &mut layers.apply_mask,
+            &mut layers.toggle_mask_enabled,
+            &mut layers.toggle_mask_link,
+            &mut layers.invert_active,
+            &mut self.tool.edit_text_layer,
+            &mut self.dialogs.edit_adjustment_layer,
+            &mut self.dialogs.edit_portrait_layer,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            moved(idx);
+        }
+        if let Some((idx, ..)) = &mut layers.select_layer {
+            moved(idx);
+        }
+        if let Some((idx, _)) = &mut layers.set_opacity {
+            moved(idx);
+        }
+        if let Some((idx, _)) = &mut layers.set_blend_mode {
+            moved(idx);
+        }
+        if let Some((idx, _)) = &mut layers.set_paint_target {
+            moved(idx);
+        }
+        if let Some((from, to)) = &mut layers.move_layer_to {
+            moved(from);
+            moved(to);
+        }
+        if let Some((_, idx)) = &mut self.dialogs.show_rename_dialog {
+            moved(idx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod retouch_gate_tests {
+    use super::*;
+
+    fn asked(set: impl FnOnce(&mut UiActions)) -> bool {
+        let mut actions = UiActions::default();
+        set(&mut actions);
+        actions.reaches_past_retouch()
+    }
+
+    #[test]
+    fn only_a_command_from_outside_reaches_past_the_retouch() {
+        assert!(!UiActions::default().reaches_past_retouch());
+        // What the dialog asks itself, and looking at the photo.
+        let sliders = crate::core::portrait::PortraitSettings::default();
+        assert!(!asked(
+            |a| a.dialogs.set_portrait_preview = Some((sliders, vec![true], true, false))
+        ));
+        assert!(!asked(
+            |a| a.dialogs.apply_portrait = Some((sliders, vec![true]))
+        ));
+        assert!(!asked(|a| a.dialogs.cancel_portrait_dialog = true));
+        assert!(!asked(|a| a.dialogs.start_portrait_retouch = true));
+        assert!(!asked(|a| a.sel.set_refine_brush_size = Some(40.0)));
+        assert!(!asked(|a| a.doc.zoom_in = true));
+        assert!(!asked(|a| a.doc.hovered_doc = Some(1)));
+        assert!(!asked(|a| a.chrome.toggle_layer_panel = true));
+        assert!(!asked(|a| a.tool.select_tool = Some(ToolId::Brush)));
+        assert!(!asked(|a| a.dialogs.show_preferences = Some(true)));
+        assert!(!asked(|a| a.ai.toggle_ai_panel = Some(true)));
+        // Anything else is a command.
+        assert!(asked(|a| a.layers.add_layer = true));
+        assert!(asked(|a| a.layers.select_layer = Some((0, false, false))));
+        assert!(asked(|a| a.doc.cut = true));
+        assert!(asked(|a| a.doc.save = true));
+        assert!(asked(|a| a.doc.switch_doc = Some(1)));
+        assert!(asked(
+            |a| a.dialogs.open_adjustment_dialog = Some(AdjustmentType::default_levels())
+        ));
+        assert!(asked(|a| a.dialogs.auto_levels = true));
+        assert!(asked(|a| a.dialogs.edit_portrait_layer = Some(1)));
+        assert!(asked(|a| a.print.show_print_dialog = Some(true)));
+        assert!(asked(|a| a.sel.select_all = true));
+        assert!(asked(|a| a.tool.start_transform = true));
+        assert!(asked(|a| a.tool.brush_size = Some(12.0)));
+        assert!(asked(|a| a.ai.ai_run = Some(String::new())));
+        assert!(asked(|a| a.channels.new_alpha_channel = true));
+        assert!(asked(|a| a.chrome.show_welcome = Some(true)));
+    }
+
+    #[test]
+    fn a_layer_asked_for_by_its_place_is_that_layer_still_once_the_retouch_has_its_own() {
+        // The photo at 1, its retouch added at 2: the layers above moved up
+        // one, and what was asked of the photo is asked of the retouch.
+        let mut a = UiActions::default();
+        a.layers.set_opacity = Some((1, 0.5));
+        a.layers.remove_layer = Some(3);
+        a.layers.select_layer = Some((0, false, true));
+        a.layers.move_layer_to = Some((2, 0));
+        a.layers.toggle_visible = Some(1);
+        a.dialogs.edit_adjustment_layer = Some(2);
+        a.retarget_layers(1, 2, true);
+        assert_eq!(a.layers.set_opacity, Some((2, 0.5)));
+        assert_eq!(a.layers.remove_layer, Some(4));
+        assert_eq!(a.layers.select_layer, Some((0, false, true)));
+        assert_eq!(a.layers.move_layer_to, Some((3, 0)));
+        assert_eq!(a.dialogs.edit_adjustment_layer, Some(3));
+        // Applying hid the photo for its retouch: its eye is not asked again.
+        assert_eq!(a.layers.toggle_visible, None);
+
+        // A retouch updated in its layer moves nothing; the eye of either
+        // of the two is settled, another layer's is not.
+        let mut a = UiActions::default();
+        a.layers.set_opacity = Some((2, 0.5));
+        a.layers.toggle_visible = Some(2);
+        a.retarget_layers(1, 2, false);
+        assert_eq!(a.layers.set_opacity, Some((2, 0.5)));
+        assert_eq!(a.layers.toggle_visible, None);
+        a.layers.toggle_visible = Some(3);
+        a.retarget_layers(1, 2, false);
+        assert_eq!(a.layers.toggle_visible, Some(3));
+    }
 }
 
 #[cfg(test)]

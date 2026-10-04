@@ -293,6 +293,9 @@ impl App {
                                 self.deny_cmyk_tool(active_tool);
                                 return;
                             }
+                            // The tool works on a retouch applied, not on
+                            // its preview.
+                            self.portrait_pressed();
 
                             // Grab an existing guide with the Move tool (before any
                             // tool press): drag to reposition, drop off-canvas to delete.

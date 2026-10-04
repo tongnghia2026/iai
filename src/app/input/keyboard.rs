@@ -155,9 +155,7 @@ impl App {
             match command {
                 Some(Command::ToolHand | Command::ToolZoom) => view_tool_key = true,
                 Some(command) if command.id().starts_with("tool.") => {
-                    if !self.portrait_tool_picked(command == Command::ToolCrop) {
-                        return;
-                    }
+                    self.portrait_tool_picked(command == Command::ToolCrop);
                 }
                 _ => {}
             }
@@ -186,7 +184,14 @@ impl App {
                     self.custom_command_for(physical_key),
                     Some(Command::FitScreen | Command::ZoomActual)
                 );
-            if !is_view_shortcut {
+            // The other previews keep every key but the view ones; a retouch
+            // previewed by Auto retouch gives way to a command.
+            let passes = if self.portrait_yields() {
+                self.portrait_key_passes(physical_key, is_view_shortcut)
+            } else {
+                is_view_shortcut
+            };
+            if !passes {
                 return;
             }
         }
@@ -1344,6 +1349,78 @@ impl App {
             w.request_redraw();
         }
         true
+    }
+
+    /// A key pressed while only a retouch under way holds the canvas (see
+    /// `portrait_yields`), `view` when it is a view shortcut. Returns whether
+    /// it goes on to what it is bound to: a key that edits does once the
+    /// retouch is applied (`yield_portrait`), one that only looks does as it
+    /// is. Ctrl+Z gives the preview up instead; Enter and Esc are the
+    /// dialog's.
+    pub(in crate::app) fn portrait_key_passes(
+        &mut self,
+        physical_key: PhysicalKey,
+        view: bool,
+    ) -> bool {
+        let PhysicalKey::Code(code) = physical_key else {
+            return view;
+        };
+        // Typed into a field (a value, a name, a prompt), Ctrl+A or Ctrl+V
+        // is that field's and no command.
+        if self.win.egui_ctx.egui_wants_keyboard_input() {
+            return view;
+        }
+        let input = &self.edit.input;
+        let (ctrl, shift, alt) = (input.ctrl_held, input.shift_held, input.alt_held);
+        let command = self
+            .pressed_chord(physical_key)
+            .and_then(|c| self.shell.keymap.command_for(c));
+        let edits = match command {
+            Some(Command::EditUndo) => {
+                self.drop_portrait_preview();
+                self.redraw_main();
+                return false;
+            }
+            Some(Command::EditRedo) => return false,
+            Some(
+                Command::EditCopy
+                | Command::Preferences
+                | Command::ToggleRulers
+                | Command::FitScreen
+                | Command::ZoomActual
+                | Command::ToolHand
+                | Command::ToolZoom,
+            ) => return true,
+            Some(_) => true,
+            // The keys that edit without being a command of the keymap.
+            None => match code {
+                KeyCode::Delete | KeyCode::Backspace => true,
+                KeyCode::ArrowUp
+                | KeyCode::ArrowDown
+                | KeyCode::ArrowLeft
+                | KeyCode::ArrowRight => {
+                    let doc = &self.docs.documents[self.docs.active_doc_idx];
+                    self.edit.tools.active_id() == ToolId::Move || doc.canvas.selection.active
+                }
+                KeyCode::NumpadAdd => !ctrl,
+                KeyCode::Equal => shift && !ctrl,
+                KeyCode::F5 | KeyCode::F6 | KeyCode::F7 => shift,
+                KeyCode::KeyD | KeyCode::KeyE | KeyCode::KeyG | KeyCode::KeyQ => ctrl,
+                KeyCode::KeyR => ctrl && alt,
+                KeyCode::KeyX => ctrl && shift,
+                _ => false,
+            },
+        };
+        if edits {
+            self.yield_portrait();
+            self.redraw_main();
+            return true;
+        }
+        // Tip size, the paint colours and the proof view change no pixel.
+        view || matches!(
+            code,
+            KeyCode::BracketLeft | KeyCode::BracketRight | KeyCode::KeyX | KeyCode::KeyD
+        ) || (code == KeyCode::KeyY && ctrl)
     }
 
     fn refine_panel_key(

@@ -143,14 +143,12 @@ impl App {
                         self.sync_cursor(event_loop);
                     }
                 }
-                Some(id) => {
-                    if !self.portrait_tool_picked(id == ToolId::Crop) {
-                        actions.tool.select_tool = None;
-                    }
-                }
+                Some(id) => self.portrait_tool_picked(id == ToolId::Crop),
                 None => {}
             }
         }
+        // So has any other command from outside the dialog.
+        self.portrait_gives_way(&mut actions);
 
         // Strict modal lock (standard design-app behavior): while a modal
         // operation or dialog is open, features outside its scope are refused

@@ -1610,6 +1610,7 @@ fn portrait_to_json(
         "settings": serde_json::to_value(recipe.settings).unwrap_or(serde_json::Value::Null),
         "clip": recipe.clip.as_ref().map(|c| region(c.region)),
         "faces": faces,
+        "made": recipe.made,
     })
 }
 
@@ -1709,6 +1710,7 @@ fn read_portrait<R: Read + Seek>(
         settings: crate::core::portrait::PortraitSettings::from_saved(v["settings"].clone())?,
         clip,
         faces,
+        made: v["made"].as_u64(),
     })
 }
 
@@ -3068,7 +3070,11 @@ mod tests {
             hair_tint: 20.0,
             ..PortraitSettings::default()
         };
-        canvas.layer_stack.layers[idx].portrait = Some(std::sync::Arc::new(PortraitRecipe {
+        let retouched = &mut canvas.layer_stack.layers[idx];
+        retouched.tiles.set_pixel(3, 4, 10, 20, 30, 255);
+        let made = retouched.tiles.content_hash();
+        retouched.portrait = Some(std::sync::Arc::new(PortraitRecipe {
+            made: Some(made),
             source: photo,
             source_size: (40, 30),
             settings,
@@ -3118,6 +3124,12 @@ mod tests {
             .expect("recipe round-trips");
         assert_eq!(back.source, loaded.layer_stack.layers[0].id);
         assert_eq!(back.source_size, (40, 30));
+        // The layer opened again is still what the recipe made.
+        assert_eq!(
+            back.made,
+            Some(loaded.layer_stack.layers[1].tiles.content_hash())
+        );
+        assert_eq!(back.made, Some(made));
         assert_eq!(back.settings, settings);
         let clip = back.clip.as_ref().expect("selection kept");
         assert_eq!(

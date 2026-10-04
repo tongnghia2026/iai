@@ -845,7 +845,46 @@ pub fn build(
 
     let mut actions = UiActions::default();
 
-    let full_output = egui_ctx.run_ui(raw_input, |ctx| {
+    let full_output = egui_ctx.run_ui(raw_input, |ui| frame(ui, data, &mut actions));
+
+    let cursor_icon = full_output.platform_output.cursor_icon;
+    if let Some(state) = egui_state {
+        state.handle_platform_output(window, full_output.platform_output);
+    }
+
+    if actions.chrome.window_minimize {
+        window.set_minimized(true);
+    }
+    if actions.chrome.window_maximize_toggle {
+        window.set_maximized(!window.is_maximized());
+    }
+    if actions.chrome.window_drag {
+        let _ = window.drag_window();
+    }
+
+    let primitives = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+
+    let repaint_delay = full_output
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .map(|v| v.repaint_delay)
+        .unwrap_or(std::time::Duration::MAX);
+
+    (
+        primitives,
+        full_output.textures_delta,
+        actions,
+        repaint_delay,
+        cursor_icon,
+    )
+}
+
+/// One frame of the main window's UI: every panel, dialog and overlay, and
+/// what they ask for in `out`.
+#[allow(deprecated)]
+pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
+    let mut actions = std::mem::take(out);
+    let mut draw = || {
         // Theme is applied on-change from the app loop (see RedrawRequested), not
         // every frame — the custom chrome reads `theme_mode.palette()` directly.
 
@@ -3919,38 +3958,9 @@ pub fn build(
                 }
             }
         }
-    });
-
-    let cursor_icon = full_output.platform_output.cursor_icon;
-    if let Some(state) = egui_state {
-        state.handle_platform_output(window, full_output.platform_output);
-    }
-
-    if actions.chrome.window_minimize {
-        window.set_minimized(true);
-    }
-    if actions.chrome.window_maximize_toggle {
-        window.set_maximized(!window.is_maximized());
-    }
-    if actions.chrome.window_drag {
-        let _ = window.drag_window();
-    }
-
-    let primitives = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
-
-    let repaint_delay = full_output
-        .viewport_output
-        .get(&egui::ViewportId::ROOT)
-        .map(|v| v.repaint_delay)
-        .unwrap_or(std::time::Duration::MAX);
-
-    (
-        primitives,
-        full_output.textures_delta,
-        actions,
-        repaint_delay,
-        cursor_icon,
-    )
+    };
+    draw();
+    *out = actions;
 }
 
 fn paint_contrast_polyline(painter: &egui::Painter, pts: &[egui::Pos2], phase: f32) {

@@ -42,7 +42,7 @@ pub enum StrokeLocation {
 }
 
 /// Parameters for stroking the active selection (Edit ▸ Stroke dialog).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StrokeParams {
     /// Straight-alpha RGBA8 stroke color (alpha here is the color's own alpha).
     pub color: [u8; 4],

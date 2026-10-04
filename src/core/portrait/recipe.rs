@@ -59,6 +59,10 @@ pub struct PortraitRecipe {
     pub settings: PortraitSettings,
     pub clip: Option<Clip>,
     pub faces: Vec<SavedFace>,
+    /// Identity of the layer's pixels as the retouch left them
+    /// (`TileMap::content_hash`): a layer worked on since is no longer what
+    /// the recipe makes. `None` in a recipe saved before this was kept.
+    pub made: Option<u64>,
 }
 
 /// A face of a new analysis with what the recipe kept for it: on or off,
@@ -114,6 +118,7 @@ impl PortraitRecipe {
             settings,
             clip: model.clip.clone(),
             faces,
+            made: None,
         }
     }
 

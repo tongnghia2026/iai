@@ -1084,9 +1084,9 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         egui::Button::new(format!("{}  Áp dụng", ph::CHECK)),
                     )
                     .on_hover_text(if data.dialogs.portrait_reopened {
-                        "Cập nhật layer \"Chân dung\" đang chỉnh tiếp. Chọn một công cụ khác lúc đang xem trước cũng áp dụng, bảng vẫn mở"
+                        "Cập nhật layer \"Chân dung\" đang chỉnh tiếp. Dùng công cụ hoặc lệnh khác lúc đang xem trước cũng áp dụng, bảng vẫn mở"
                     } else {
-                        "Thêm kết quả (cả Màu studio nếu có chọn) thành layer mới \"Chân dung\". Mở lại để chỉnh tiếp: chọn layer đó rồi vào Auto retouch"
+                        "Thêm kết quả (cả Màu studio nếu có chọn) thành layer mới \"Chân dung\". Dùng công cụ hoặc lệnh khác lúc đang xem trước cũng áp dụng, bảng vẫn mở; bấm Tự động làm đẹp để chỉnh tiếp"
                     })
                     .clicked()
                 {

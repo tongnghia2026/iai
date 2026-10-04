@@ -130,11 +130,10 @@ impl App {
         // The paint-colour and Color Range dialogs own the canvas as an
         // eyedropper surface: the pointer over the canvas must NOT read as UI,
         // or the eyedropper cursor and hover sampling are suppressed.
-        // A retouch previewed by Auto retouch is looked at with the view
-        // tools: they keep the canvas.
-        let viewing_retouch = self.portrait_under_way()
-            && !self.is_blocking_modal()
-            && matches!(self.edit.tools.active_id(), ToolId::Hand | ToolId::Zoom);
+        // A retouch under way in Auto retouch leaves the canvas to the view
+        // tools, and once on show to any tool (its press applies it).
+        let viewing_retouch =
+            self.portrait_under_way() && !self.is_blocking_modal() && self.portrait_frees_canvas();
         let modal_ui = self.is_modal_open()
             && !self.shell.ui.show_paint_color_dialog
             && !self.shell.ui.show_color_range_dialog
@@ -717,6 +716,7 @@ impl ApplicationHandler for App {
             };
             if new_key {
                 if *state == ElementState::Pressed && !repeat && !self.shell.ui.show_new_dialog {
+                    self.yield_portrait();
                     if self.modal_lock_active() {
                         self.deny_modal_action();
                     } else {
@@ -1057,6 +1057,7 @@ impl ApplicationHandler for App {
             WindowEvent::DroppedFile(path) => {
                 // Strict modal lock: opening documents is refused while a
                 // modal operation is in progress.
+                self.yield_portrait();
                 if self.modal_lock_active() {
                     self.deny_modal_action();
                     return;

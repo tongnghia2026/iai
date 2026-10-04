@@ -67,7 +67,7 @@ impl WarpMode {
 }
 
 /// Brush parameters edited from the Warp panel.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WarpParams {
     pub mode: WarpMode,
     /// Brush diameter in layer pixels.

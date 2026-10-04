@@ -276,6 +276,33 @@ impl TileMap {
         hash
     }
 
+    /// Identity of the 8-bit pixels themselves, whatever their tiles'
+    /// revisions: the same pixels give the same value after an undo, or
+    /// saved and opened again. A tile that holds nothing reads as absent.
+    pub fn content_hash(&self) -> u64 {
+        let mut tiles: Vec<(i32, i32, &Tile)> = self
+            .tiles
+            .iter()
+            .map(|(pos, tile)| (pos.x, pos.y, tile.as_ref()))
+            .collect();
+        tiles.sort_unstable_by_key(|&(x, y, _)| (x, y));
+        let mut hash = 0xcbf29ce484222325u64;
+        let mut mix = |value: u64| hash = (hash ^ value).wrapping_mul(0x100000001b3);
+        mix(self.width as u64);
+        mix(self.height as u64);
+        for (x, y, tile) in tiles {
+            if tile.pixels.iter().all(|&b| b == 0) {
+                continue;
+            }
+            mix(x as u32 as u64);
+            mix(y as u32 as u64);
+            for word in tile.pixels.chunks_exact(8) {
+                mix(u64::from_le_bytes(word.try_into().expect("8 bytes")));
+            }
+        }
+        hash
+    }
+
     /// Box-downsample this map by 2× into a new `TileMap` (ceil dimensions),
     /// averaging each 2×2 source block in premultiplied-alpha space so alpha
     /// edges stay correct. Only the 8-bit display mirror is produced — this is

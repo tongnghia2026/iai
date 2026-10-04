@@ -22,6 +22,8 @@ use crate::core::portrait::{
     self, FaceEdits, PortraitModel, PortraitRecipe, PortraitSettings, Region,
 };
 use crate::core::tile::TileMap;
+use crate::tools::ToolId;
+use crate::ui::UiActions;
 
 const RESULT_LAYER: &str = "Chân dung";
 
@@ -309,47 +311,140 @@ impl App {
             && (self.shell.portrait.is_some() || self.id_photo_busy())
     }
 
-    /// A tool other than the view ones was picked with the dialog open. A
-    /// retouch under way is applied as it stands first, so the tool works on
-    /// what shows; the dialog stays open. Returns whether the tool may be
-    /// taken up; it may not while work is still running.
-    pub(crate) fn portrait_tool_picked(&mut self, crop: bool) -> bool {
-        if self.portrait_under_way() && !self.end_portrait_for_tool() {
-            return false;
-        }
-        if crop {
-            self.lock_crop_to_id_photo();
-        }
-        true
+    /// Whether a retouch under way is all that holds the canvas. It gives
+    /// way to any command from outside the dialog (`yield_portrait`), so
+    /// nothing outside is locked meanwhile.
+    pub(crate) fn portrait_yields(&self) -> bool {
+        self.portrait_under_way() && !self.is_blocking_modal() && !self.locked_beside_retouch()
     }
 
-    fn end_portrait_for_tool(&mut self) -> bool {
-        if self.id_photo_busy() {
-            self.shell.status_msg = "Đang làm ảnh thẻ — đợi xong rồi hãy dùng công cụ".to_string();
-            return false;
+    /// A command from outside the dialog, with only its retouch holding the
+    /// canvas: the retouch previewed is applied as it stands, so the command
+    /// works on what shows, and work still running (the face being found,
+    /// an ID photo being made) is given up. The dialog stays open, holding
+    /// the canvas no more. Returns the places in the layer stack of the
+    /// photo and of the retouch applied.
+    pub(crate) fn yield_portrait(&mut self) -> Option<(usize, usize)> {
+        if !self.portrait_yields() {
+            return None;
         }
-        let asked = match self.shell.portrait.as_ref() {
-            Some(session) if session.model.is_none() && session.error.is_none() => {
-                self.shell.status_msg =
-                    "Đang nhận diện khuôn mặt — đợi xong rồi hãy dùng công cụ".to_string();
-                return false;
-            }
-            Some(session) => session.asked.clone(),
-            None => None,
+        let making = self.id_photo_busy();
+        let (layers, finding, asked) = match self.shell.portrait.as_ref() {
+            Some(session) => (
+                Some((
+                    session.doc_id,
+                    session.layer_id,
+                    session.reopened.as_ref().map(|r| r.layer_id),
+                )),
+                session.model.is_none() && session.error.is_none(),
+                session.asked.clone(),
+            ),
+            None => (None, false, None),
         };
         let applied =
-            asked.is_some_and(|(settings, enabled)| self.apply_portrait(settings, enabled).is_ok());
-        // The dialog stays, with nothing under way: the ID photo's framing
-        // can no longer be done again either, the document has moved on.
+            asked.and_then(|(settings, enabled)| self.apply_portrait(settings, enabled).ok());
+        // The ID photo's framing can no longer be done again either, the
+        // document moves on.
         self.cancel_portrait();
         self.close_id_photo();
         self.shell.portrait_error = None;
-        self.shell.status_msg = if applied {
-            "Auto retouch: đã áp dụng vào layer \"Chân dung\"".to_string()
-        } else {
-            "Auto retouch: không có gì để áp dụng".to_string()
-        };
-        true
+        self.shell.status_msg = match applied {
+            Some(_) => "Auto retouch: đã áp dụng vào layer \"Chân dung\"",
+            None if finding => "Auto retouch: đã dừng nhận diện khuôn mặt",
+            None if making => "Auto retouch: đã dừng làm ảnh thẻ",
+            None => "Auto retouch: không có gì để áp dụng",
+        }
+        .to_string();
+        applied?;
+        let (doc_id, photo, reopened) = layers?;
+        let doc = &self.docs.documents[self.docs.active_doc_idx];
+        let stack = &doc.canvas.layer_stack;
+        let place = |id: u32| stack.layers.iter().position(|l| l.id == id);
+        // A new layer is the active one.
+        let retouched = reopened.map_or(Some(stack.active_idx), place)?;
+        (doc.id == doc_id).then_some((place(photo)?, retouched))
+    }
+
+    /// What the frame asks from outside the dialog while only its retouch
+    /// holds the canvas. Undo gives the preview up (a "Tô vùng" stroke
+    /// first); any other command has the retouch applied, then runs on it
+    /// (`yield_portrait`).
+    pub(crate) fn portrait_gives_way(&mut self, actions: &mut UiActions) {
+        if !self.portrait_yields() {
+            return;
+        }
+        // Asked for again from a menu, the dialog is already here.
+        if actions.dialogs.show_portrait_dialog == Some(true) {
+            actions.dialogs.show_portrait_dialog = None;
+        }
+        let doc = &mut actions.doc;
+        if doc.undo || doc.redo {
+            let forward = !doc.undo;
+            (doc.undo, doc.redo) = (false, false);
+            if self.portrait_painting() {
+                self.portrait_brush_step(forward);
+            } else if !forward {
+                self.drop_portrait_preview();
+            }
+        } else if doc.jump_history.is_some() {
+            self.drop_portrait_preview();
+        } else if actions.reaches_past_retouch() {
+            let count = |app: &App| {
+                let doc = &app.docs.documents[app.docs.active_doc_idx];
+                doc.canvas.layer_stack.layers.len()
+            };
+            let before = count(self);
+            if let Some((photo, retouched)) = self.yield_portrait() {
+                actions.retarget_layers(photo, retouched, count(self) > before);
+            }
+        }
+    }
+
+    /// Ctrl+Z from outside the dialog: the preview is given up rather than
+    /// applied and then undone, and work still running is stopped. The
+    /// dialog stays open; an ID photo already made stays too, one more
+    /// Ctrl+Z away.
+    pub(crate) fn drop_portrait_preview(&mut self) {
+        self.cancel_portrait();
+        self.stop_id_photo();
+        self.shell.portrait_error = None;
+        self.shell.status_msg = "Auto retouch: đã bỏ phần xem trước".to_string();
+    }
+
+    /// A tool other than the view ones was picked with the dialog open: a
+    /// command from outside like any other. The dialog stays open.
+    pub(crate) fn portrait_tool_picked(&mut self, crop: bool) {
+        self.yield_portrait();
+        if crop && !self.portrait_under_way() {
+            self.lock_crop_to_id_photo();
+        }
+    }
+
+    /// Whether the retouch that gives way is on show: the face found (or
+    /// not), no worker of the analysis or of an ID photo still running.
+    pub(crate) fn portrait_on_show(&self) -> bool {
+        let found = |s: &PortraitSession| s.model.is_some() || s.error.is_some();
+        self.portrait_yields()
+            && !self.id_photo_busy()
+            && self.shell.portrait.as_ref().is_some_and(found)
+    }
+
+    /// Whether the tool in hand gets the canvas while the dialog holds it:
+    /// the view tools always, any other once the retouch is on show (its
+    /// press then applies it, see `portrait_pressed`). A stray press is not
+    /// to stop the face being found or an ID photo being made.
+    pub(crate) fn portrait_frees_canvas(&self) -> bool {
+        matches!(self.edit.tools.active_id(), ToolId::Hand | ToolId::Zoom)
+            || self.portrait_on_show()
+    }
+
+    /// The tool in hand was pressed on the canvas: any but a view tool and
+    /// the dialog's own brush has the retouch applied first.
+    pub(crate) fn portrait_pressed(&mut self) {
+        let view = matches!(self.edit.tools.active_id(), ToolId::Hand | ToolId::Zoom);
+        if !view && !self.portrait_painting() {
+            self.yield_portrait();
+        }
     }
 
     /// An ID photo cropped again stays the print it is: the Crop tool is set
@@ -771,14 +866,10 @@ impl App {
         let mut full = looks::with_retouch(&src, w, Some((region, pixels)));
         let look = look.as_ref().map(|(lut, strength)| (lut, *strength));
         looks::grade(&mut full, w, fix.as_ref(), look, model.clip.as_ref());
-        let recipe = Arc::new(PortraitRecipe::new(
-            layer_id,
-            (w, h),
-            settings,
-            &model,
-            &enabled,
-            &edits,
-        ));
+        let tiles = TileMap::from_rgba(&full, w, h);
+        let mut recipe = PortraitRecipe::new(layer_id, (w, h), settings, &model, &enabled, &edits);
+        recipe.made = Some(tiles.content_hash());
+        let recipe = Arc::new(recipe);
         let Some(idx) = self.docs.documents.iter().position(|d| d.id == doc_id) else {
             return Err("Tài liệu đã đóng".to_string());
         };
@@ -796,7 +887,6 @@ impl App {
         // old background hidden).
         let source_mask = canvas.layer_stack.layers[source_idx].mask.clone();
         let (cw, ch) = (canvas.width, canvas.height);
-        let tiles = TileMap::from_rgba(&full, w, h);
         let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
             RESULT_LAYER,
             &canvas.layer_stack,
@@ -1078,16 +1168,30 @@ fn reopen_target(
             Ok(())
         }
     };
+    // Reopened, a layer is made again from the photo: one worked on since
+    // its retouch (painted, adjusted) would lose that work.
+    let as_made = |result: usize, recipe: &PortraitRecipe| {
+        recipe
+            .made
+            .is_none_or(|made| layers[result].tiles.content_hash() == made)
+    };
     // A "Chân dung" layer whose photo is gone or no longer its size (cropped
-    // since) cannot be reopened: it is retouched as a photo of its own.
+    // since), or that was worked on since, cannot be reopened: it is
+    // retouched as a photo of its own.
     if let Some(recipe) = layers.get(active).and_then(|l| l.portrait.clone()) {
-        if let Some(source) = made_from(active, &recipe) {
+        if let Some(source) = made_from(active, &recipe).filter(|_| as_made(active, &recipe)) {
             unlocked(active)?;
             return Ok((source, Some((active, recipe))));
         }
     }
     if let Some(recipe) = layers.get(active + 1).and_then(|l| l.portrait.clone()) {
         if made_from(active + 1, &recipe) == Some(active) {
+            if !as_made(active + 1, &recipe) {
+                return Err(
+                    "Layer \"Chân dung\" phía trên đã được sửa thêm — chọn layer đó để chỉnh tiếp"
+                        .to_string(),
+                );
+            }
             unlocked(active + 1)?;
             return Ok((active, Some((active + 1, recipe))));
         }
@@ -1473,9 +1577,9 @@ mod tests {
         assert!(!app.portrait_under_way() && !app.modal_lock_active());
         app.begin_portrait().unwrap();
         assert!(app.portrait_under_way() && app.modal_lock_active());
-        // While the face is being found the tool is refused, nothing is lost.
-        assert!(!app.portrait_tool_picked(true));
-        assert!(app.shell.ui.show_portrait_dialog && app.shell.portrait.is_some());
+        // A tool picked while the face is being found stops the finding.
+        app.portrait_tool_picked(true);
+        assert!(app.shell.ui.show_portrait_dialog && app.shell.portrait.is_none());
         let model = analysed(&mut app).unwrap();
         app.set_portrait_preview(
             PortraitSettings::default(),
@@ -1487,7 +1591,7 @@ mod tests {
 
         // The retouch as it stands lands in its layer; the dialog stays
         // open and holds the canvas no more.
-        assert!(app.portrait_tool_picked(true));
+        app.portrait_tool_picked(true);
         assert!(app.shell.ui.show_portrait_dialog && app.shell.portrait.is_none());
         assert!(!app.portrait_under_way() && !app.modal_lock_active());
         let canvas = &mut app.docs.documents[0].canvas;
@@ -1519,6 +1623,133 @@ mod tests {
         app.cancel_portrait();
     }
 
+    #[test]
+    fn a_command_from_outside_applies_the_previewed_retouch_and_runs_on_it() {
+        use winit::keyboard::{KeyCode, PhysicalKey};
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        let original = photo_pixels(&app);
+        app.shell.ui.show_portrait_dialog = true;
+        let previewed = |app: &mut App, settings: PortraitSettings| {
+            let model = analysed(app).unwrap();
+            let on = vec![true; model.faces.len()];
+            app.set_portrait_preview(settings, on, true, false);
+            wait_for_preview(app);
+        };
+        previewed(&mut app, PortraitSettings::default());
+        assert_ne!(photo_pixels(&app), original, "preview shows the retouch");
+        // On show, the tool in hand gets the canvas.
+        app.edit.tools.select(ToolId::Brush);
+        app.win.cursor_ownership.pointer_inside = true;
+        let view = &mut app.edit.view;
+        (view.zoom, view.offset_x, view.offset_y) = (1.0, 300.0, 200.0);
+        app.refresh_pointer_ui_state(600.0, 400.0);
+        assert!(!app.edit.input.was_over_ui);
+
+        // Ctrl+Z gives the preview up: nothing is added, nothing undone.
+        let mut actions = UiActions::default();
+        actions.doc.undo = true;
+        app.portrait_gives_way(&mut actions);
+        assert!(!actions.doc.undo && app.shell.portrait.is_none());
+        assert!(app.shell.ui.show_portrait_dialog);
+        assert_eq!((layer_count(&app), undo_count(&app)), (1, 0));
+        assert_eq!(photo_pixels(&app), original);
+
+        // The Layers panel asks for the photo at half opacity: the retouch
+        // lands in its layer, the dialog stays open, and the ask is of that
+        // layer.
+        previewed(&mut app, PortraitSettings::default());
+        let mut actions = UiActions::default();
+        actions.layers.set_opacity = Some((0, 0.5));
+        app.portrait_gives_way(&mut actions);
+        assert!(app.shell.portrait.is_none() && app.shell.ui.show_portrait_dialog);
+        assert!(!app.modal_lock_active());
+        assert_eq!((layer_count(&app), undo_count(&app)), (2, 1));
+        assert_eq!(actions.layers.set_opacity, Some((1, 0.5)));
+        let layers = &app.docs.documents[0].canvas.layer_stack.layers;
+        assert_eq!(layers[1].name, RESULT_LAYER);
+        assert!(!layers[0].visible && layers[1].visible);
+        assert_eq!(photo_pixels(&app), original, "the photo layer is untouched");
+        let applied = layers[1].tiles.flatten();
+        assert_ne!(applied, original);
+
+        // Taken up again, that layer is updated in place by a press of the
+        // brush in hand...
+        let stronger = PortraitSettings {
+            smooth: 90.0,
+            ..PortraitSettings::default()
+        };
+        previewed(&mut app, stronger);
+        assert!(app.shell.portrait.as_ref().unwrap().reopened.is_some());
+        app.portrait_pressed();
+        assert!(app.shell.portrait.is_none() && app.shell.ui.show_portrait_dialog);
+        assert_eq!((layer_count(&app), undo_count(&app)), (2, 2));
+        let layers = &app.docs.documents[0].canvas.layer_stack.layers;
+        assert_ne!(layers[1].tiles.flatten(), applied);
+
+        // ...by Ctrl+L, which goes on to Levels...
+        previewed(&mut app, PortraitSettings::default());
+        app.edit.input.ctrl_held = true;
+        assert!(app.portrait_key_passes(PhysicalKey::Code(KeyCode::KeyL), false));
+        app.edit.input.ctrl_held = false;
+        assert!(app.shell.portrait.is_none());
+        assert_eq!((layer_count(&app), undo_count(&app)), (2, 3));
+
+        // ...and by its own eye in the Layers panel, hidden while the
+        // preview shows on the photo: applying shows it, the click is spent.
+        previewed(&mut app, stronger);
+        let mut actions = UiActions::default();
+        actions.layers.toggle_visible = Some(1);
+        app.portrait_gives_way(&mut actions);
+        assert_eq!(actions.layers.toggle_visible, None);
+        let layers = &app.docs.documents[0].canvas.layer_stack.layers;
+        assert!(!layers[0].visible && layers[1].visible);
+        assert_eq!(layer_count(&app), 2);
+
+        // The view tools look without applying.
+        previewed(&mut app, PortraitSettings::default());
+        app.edit.tools.select(ToolId::Hand);
+        app.portrait_pressed();
+        assert!(app.shell.portrait.is_some());
+        app.cancel_portrait();
+
+        // Worked on since (a stroke, an adjustment), the layer is not made
+        // again from the photo over that work: it is retouched as a photo
+        // of its own, from nothing. Undone, it reopens as before.
+        let canvas = &mut app.docs.documents[0].canvas;
+        let result = canvas.layer_stack.layers[1].id;
+        let was = canvas.layer_stack.layers[1].tiles.clone();
+        canvas.layer_stack.layers[1]
+            .tiles
+            .set_pixel(5, 5, 1, 2, 3, 255);
+        analysed(&mut app).unwrap();
+        let session = app.shell.portrait.as_ref().unwrap();
+        assert!(session.reopened.is_none());
+        assert_eq!(session.layer_id, result);
+        assert_eq!(session.restore_settings, Some(PortraitSettings::NEUTRAL));
+        app.cancel_portrait();
+        // The photo under it does not reopen it either, and says why.
+        let stack = &mut app.docs.documents[0].canvas.layer_stack;
+        stack.active_idx = 0;
+        let refused = app.begin_portrait().unwrap_err();
+        assert!(refused.contains("đã được sửa thêm"), "{refused}");
+        let stack = &mut app.docs.documents[0].canvas.layer_stack;
+        stack.layers[1].tiles = was;
+        stack.active_idx = 1;
+        previewed(&mut app, PortraitSettings::default());
+        let session = app.shell.portrait.as_ref().unwrap();
+        assert_eq!(session.reopened.as_ref().map(|r| r.layer_id), Some(result));
+
+        // Leaving the app applies the retouch on show too, to be saved
+        // with the rest.
+        let undone = undo_count(&app);
+        assert!(app.portrait_on_show());
+        app.request_app_exit();
+        assert!(app.shell.portrait.is_none());
+        assert_eq!((layer_count(&app), undo_count(&app)), (2, undone + 1));
+    }
+
     /// An app whose one document is a blank `w × h` photo at `ppi`.
     fn app_with_blank(w: u32, h: u32, ppi: f32) -> App {
         let mut app = App::new();
@@ -1538,7 +1769,7 @@ mod tests {
         // tool is set to the photo's own pixels and resolution.
         let mut app = app_with_blank(PRINT_PX.0, PRINT_PX.1, PRINT_PPI);
         app.shell.ui.show_portrait_dialog = true;
-        assert!(app.portrait_tool_picked(true));
+        app.portrait_tool_picked(true);
         assert!(app.shell.ui.show_portrait_dialog);
         let crop = app.edit.tools.crop();
         assert!(crop.mode == CropMode::FixedSize);
@@ -1552,12 +1783,281 @@ mod tests {
         // any other tool picked on an ID photo.
         let mut app = app_with_blank(800, 600, 72.0);
         app.shell.ui.show_portrait_dialog = true;
-        assert!(app.portrait_tool_picked(true));
+        app.portrait_tool_picked(true);
         assert!(app.edit.tools.crop().mode != CropMode::FixedSize);
         let mut app = app_with_blank(PRINT_PX.0, PRINT_PX.1, PRINT_PPI);
         app.shell.ui.show_portrait_dialog = true;
-        assert!(app.portrait_tool_picked(false));
+        app.portrait_tool_picked(false);
         assert!(app.edit.tools.crop().mode != CropMode::FixedSize);
+    }
+
+    /// Start a retouch whose face is still being found, with no worker
+    /// behind it: a test that ends while one loads its models can hang the
+    /// process on its way out.
+    fn being_found(app: &mut App) {
+        let doc = &app.docs.documents[0];
+        let stack = &doc.canvas.layer_stack;
+        let layer = &stack.layers[stack.active_idx];
+        let (_tx, rx) = mpsc::channel();
+        app.shell.portrait = Some(PortraitSession {
+            doc_id: doc.id,
+            layer_id: layer.id,
+            w: layer.width,
+            h: layer.height,
+            offset: layer.offset,
+            original_tiles: layer.tiles.clone(),
+            source_visible: layer.visible,
+            src: Arc::new(layer.flatten_tiles()),
+            progress: Arc::new(Mutex::new(String::new())),
+            rx: Some(rx),
+            reused: false,
+            model: None,
+            error: None,
+            asked: None,
+            wanted: None,
+            shown: None,
+            rendering: None,
+            body_rx: None,
+            detail_rx: None,
+            edits: Vec::new(),
+            edit_rev: 0,
+            brush: PortraitBrush::default(),
+            reopened: None,
+            restore_settings: None,
+            restore_faces: None,
+        });
+    }
+
+    fn undo_count(app: &App) -> usize {
+        app.docs.documents[0].canvas.undo_count()
+    }
+
+    fn layer_count(app: &App) -> usize {
+        app.docs.documents[0].canvas.layer_stack.layers.len()
+    }
+
+    #[test]
+    fn work_still_running_gives_way_to_a_command_and_ctrl_z_without_a_trace() {
+        let mut app = app_with_blank(64, 64, 72.0);
+        app.shell.ui.show_portrait_dialog = true;
+        being_found(&mut app);
+        // Only the retouch holds the canvas: nothing outside is locked.
+        assert!(app.modal_lock_active() && !app.locked_beside_retouch());
+        assert!(app.portrait_yields());
+        // The app is not left while a worker loads its models.
+        assert!(!app.portrait_on_show());
+        assert_eq!(app.exit_blocking_operation(), Some("live preview"));
+        assert!(!app.collect_ui_data().chrome.is_tool_modal);
+        // A stray press is not to stop the face being found: the canvas is
+        // left to the view tools meanwhile.
+        let canvas_is_the_tools = |app: &mut App, tool: ToolId| {
+            app.edit.tools.select(tool);
+            app.win.cursor_ownership.pointer_inside = true;
+            let view = &mut app.edit.view;
+            (view.zoom, view.offset_x, view.offset_y) = (10.0, 300.0, 200.0);
+            app.refresh_pointer_ui_state(600.0, 400.0);
+            !app.edit.input.was_over_ui
+        };
+        assert!(!canvas_is_the_tools(&mut app, ToolId::Brush));
+        assert!(canvas_is_the_tools(&mut app, ToolId::Hand));
+
+        // What the dialog asks itself, and looking at the photo, leave it be.
+        let mut actions = UiActions::default();
+        actions.doc.zoom_in = true;
+        actions.dialogs.set_portrait_preview =
+            Some((PortraitSettings::default(), Vec::new(), true, false));
+        actions.dialogs.show_portrait_dialog = Some(true);
+        app.portrait_gives_way(&mut actions);
+        assert!(app.shell.portrait.is_some());
+        assert_eq!(actions.dialogs.show_portrait_dialog, None, "already open");
+
+        // A command stops the finding and runs; the dialog stays.
+        let mut actions = UiActions::default();
+        actions.layers.add_layer = true;
+        app.portrait_gives_way(&mut actions);
+        assert!(app.shell.portrait.is_none() && app.shell.ui.show_portrait_dialog);
+        assert!(actions.layers.add_layer);
+        assert!(!app.modal_lock_active());
+        assert_eq!((layer_count(&app), undo_count(&app)), (1, 0));
+        assert!(
+            app.shell.status_msg.contains("dừng nhận diện"),
+            "{}",
+            app.shell.status_msg
+        );
+
+        // Ctrl+Z gives the work up and undoes nothing; redo is not for it.
+        for (undo, kept) in [(false, true), (true, false)] {
+            being_found(&mut app);
+            let mut actions = UiActions::default();
+            (actions.doc.undo, actions.doc.redo) = (undo, !undo);
+            app.portrait_gives_way(&mut actions);
+            assert!(!actions.doc.undo && !actions.doc.redo);
+            assert_eq!(app.shell.portrait.is_some(), kept);
+            assert!(app.shell.ui.show_portrait_dialog);
+            app.cancel_portrait();
+        }
+
+        // Under another operation's lock the retouch gives way to nothing.
+        being_found(&mut app);
+        app.shell.ui.show_adjustment_dialog = true;
+        assert!(!app.portrait_yields());
+        assert!(app.collect_ui_data().chrome.is_tool_modal);
+        let mut actions = UiActions::default();
+        actions.layers.add_layer = true;
+        app.portrait_gives_way(&mut actions);
+        assert_eq!(app.yield_portrait(), None);
+        assert!(app.shell.portrait.is_some());
+        app.shell.ui.show_adjustment_dialog = false;
+        app.cancel_portrait();
+    }
+
+    #[test]
+    fn a_key_that_edits_goes_on_once_the_retouch_gave_way_and_the_rest_leave_it() {
+        use winit::keyboard::{KeyCode, PhysicalKey};
+        let mut app = app_with_blank(64, 64, 72.0);
+        app.shell.ui.show_portrait_dialog = true;
+        let key = |app: &mut App, ctrl: bool, code: KeyCode| {
+            if app.shell.portrait.is_none() {
+                being_found(app);
+            }
+            app.edit.input.ctrl_held = ctrl;
+            let passes = app.portrait_key_passes(PhysicalKey::Code(code), false);
+            (passes, app.shell.portrait.is_some())
+        };
+        // Enter and Esc are the dialog's, an unbound key is nobody's.
+        for code in [KeyCode::Enter, KeyCode::Escape, KeyCode::F9, KeyCode::Tab] {
+            assert_eq!(key(&mut app, false, code), (false, true), "{code:?}");
+        }
+        // Copy, the tip size and the paint colours change no pixel.
+        assert_eq!(key(&mut app, true, KeyCode::KeyC), (true, true));
+        for code in [KeyCode::BracketLeft, KeyCode::KeyX, KeyCode::KeyD] {
+            assert_eq!(key(&mut app, false, code), (true, true), "{code:?}");
+        }
+        // Arrows move nothing with this tool and no selection.
+        app.edit.tools.select(ToolId::Brush);
+        assert_eq!(key(&mut app, false, KeyCode::ArrowLeft), (false, true));
+        // Typed into a field, Ctrl+A and Ctrl+V are the field's.
+        let field = egui::Id::new("a value being typed");
+        app.win.egui_ctx.memory_mut(|m| m.request_focus(field));
+        assert!(app.win.egui_ctx.egui_wants_keyboard_input());
+        for code in [KeyCode::KeyA, KeyCode::KeyV] {
+            assert_eq!(key(&mut app, true, code), (false, true), "{code:?}");
+        }
+        app.win.egui_ctx.memory_mut(|m| m.surrender_focus(field));
+        // Ctrl+L, Ctrl+M, Ctrl+X, Ctrl+V, Delete, Ctrl+E: the work under
+        // way gives way and the key goes on to its command.
+        for (ctrl, code) in [
+            (true, KeyCode::KeyL),
+            (true, KeyCode::KeyM),
+            (true, KeyCode::KeyX),
+            (true, KeyCode::KeyV),
+            (false, KeyCode::Delete),
+            (true, KeyCode::KeyE),
+        ] {
+            assert_eq!(key(&mut app, ctrl, code), (true, false), "{code:?}");
+            assert!(app.shell.ui.show_portrait_dialog);
+        }
+        app.edit.tools.select(ToolId::Move);
+        assert_eq!(key(&mut app, false, KeyCode::ArrowLeft), (true, false));
+        // Ctrl+Z gives the work up and is spent on that; redo does nothing.
+        assert_eq!(key(&mut app, true, KeyCode::KeyZ), (false, false));
+        app.edit.input.shift_held = true;
+        assert_eq!(key(&mut app, true, KeyCode::KeyZ), (false, true));
+        app.edit.input.shift_held = false;
+        assert_eq!(undo_count(&app), 0);
+        app.cancel_portrait();
+    }
+
+    #[test]
+    fn a_frame_nobody_touches_asks_nothing_from_outside_the_dialog() {
+        let mut app = app_with_blank(800, 600, 72.0);
+        app.shell.ui.show_portrait_dialog = true;
+        being_found(&mut app);
+        let ctx = app.win.egui_ctx.clone();
+        ctx.set_fonts(crate::ui::snapshot::fonts());
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let at_rest = |app: &mut App, rest: egui::Pos2, what: &str| {
+            for _ in 0..3 {
+                let data = app.collect_ui_data();
+                let mut actions = UiActions::default();
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: vec![egui::Event::PointerMoved(rest)],
+                    ..Default::default()
+                };
+                let _ = ctx.run_ui(input, |ui| crate::ui::frame(ui, &data, &mut actions));
+                assert!(actions.dialogs.set_portrait_preview.is_some(), "drawn");
+                assert!(
+                    !actions.reaches_past_retouch() && actions.tool.select_tool.is_none(),
+                    "a frame at rest on {rest:?} ({what}) reads as a command"
+                );
+                app.portrait_gives_way(&mut actions);
+                assert!(app.shell.portrait.is_some());
+            }
+        };
+        // The pointer resting on the menus, the toolbar, the canvas, the
+        // panels on the right and the status bar; then with the AI panel and
+        // every docked panel open.
+        let rests = [
+            egui::pos2(120.0, 12.0),
+            egui::pos2(18.0, 300.0),
+            egui::pos2(600.0, 450.0),
+            egui::pos2(1300.0, 300.0),
+            egui::pos2(1300.0, 700.0),
+            egui::pos2(700.0, 890.0),
+        ];
+        for panels in [false, true] {
+            if panels {
+                let ui = &mut app.shell.ui;
+                ui.show_ai_panel = true;
+                ui.show_history_panel = true;
+                ui.show_info_panel = true;
+                ui.show_channels_panel = true;
+                ui.show_color_panel = true;
+                ui.show_rulers = true;
+            }
+            for rest in rests {
+                at_rest(&mut app, rest, if panels { "panels" } else { "plain" });
+            }
+        }
+        // Each tool in hand, the pointer on its options bar and on the
+        // canvas: none is given up for another, none sets an option.
+        for tool in [
+            ToolId::Brush,
+            ToolId::Eraser,
+            ToolId::Pencil,
+            ToolId::Move,
+            ToolId::Crop,
+            ToolId::Zoom,
+            ToolId::Hand,
+            ToolId::Fill,
+            ToolId::Gradient,
+            ToolId::Eyedropper,
+            ToolId::SelectionRect,
+            ToolId::SelectionEllipse,
+            ToolId::Lasso,
+            ToolId::PolygonLasso,
+            ToolId::SmartSelect,
+            ToolId::Clone,
+            ToolId::Text,
+            ToolId::Shape,
+            ToolId::Repair,
+            ToolId::PerspectiveCrop,
+            ToolId::Pen,
+            ToolId::Smudge,
+            ToolId::Dodge,
+            ToolId::Burn,
+            ToolId::Patch,
+            ToolId::Node,
+            ToolId::VectorBrush,
+            ToolId::Arrow,
+        ] {
+            app.edit.tools.select(tool);
+            for rest in [egui::pos2(300.0, 42.0), egui::pos2(600.0, 450.0)] {
+                at_rest(&mut app, rest, tool.name());
+            }
+        }
+        app.cancel_portrait();
     }
 
     #[test]
