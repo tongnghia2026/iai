@@ -517,3 +517,36 @@ cái", muốn đứng yên; Chỉnh chân dung thì không bị.
 - Tôi chưa nhìn tận mắt hiện tượng nháy trên app thật; hai nguyên nhân trên là thứ đọc code và
   test giả lập tìm ra.
 - [ ] Build Release, chủ test.
+
+## Đợt 22 (04/10): ô số lên cùng dòng với tên thanh như PTS, đang gõ vẫn kéo được ngay
+
+Chủ gửi ảnh mục Light của PTS: tên thanh bên trái và ô số bên phải nằm chung một dòng, thanh
+kéo chạy hết chiều ngang ở dòng dưới; muốn Develop và Chỉnh chân dung như vậy để đỡ tốn chiều
+ngang. Kèm một lỗi: đã bấm vào ô số rồi thì không nhấn kéo thanh được, phải Enter hoặc Esc
+trước.
+
+- [x] **Bố cục hàng thanh kéo kiểu PTS** (`widgets::stacked_slider`, dùng chung cho Develop,
+  Chỉnh chân dung, Làm ảnh thẻ, Refine Selection): dòng trên là tên + ô số (ô cao 17 px, sát
+  phải), dòng dưới là thanh kéo chạy từ mép trái tên tới mép phải ô số. Trước đây thanh bị ép
+  giữa cột tên 92 px và ô số nên chỉ dài khoảng nửa hàng. Chiều cao hàng giữ nguyên 33 px nên
+  không mục nào dài thêm. Tên quá dài ở hàng hẹp thì bị cắt trước ô số, không đè lên.
+- [x] **Đang gõ trong ô số mà nhấn chỗ khác thì nhận số ngay và cú nhấn đó có tác dụng luôn**
+  (kéo thanh, bấm thanh, bấm thanh khác). Hai nguyên nhân:
+  1. egui chỉ cho ô nhập nhả focus khi có "cú bấm" (nhấn rồi nhả tại chỗ); nhấn rồi kéo không
+     phải cú bấm nên ô vẫn mở, và hàng đang có ô mở thì bỏ qua mọi thao tác kéo. Một cú bấm đơn
+     lên thanh cũng chỉ đóng ô, phải bấm lần hai thanh mới chạy. Sửa: hễ có nút chuột nhấn xuống
+     ngoài ô thì hàng tự nhận số đang gõ, đóng ô, rồi xử lý cú nhấn như bình thường.
+  2. Ô nhập nằm trong một `new_child`, mà `new_child` lấy một id tự động của ui cha, nên mọi
+     widget phía dưới đổi id mỗi khi ô hiện / ẩn; cú nhấn làm ô đóng rơi vào id của khung hình
+     trước, không còn tồn tại, và thanh bên dưới không nhận được thao tác kéo. Sửa: khi không có
+     ô nhập vẫn lấy một id (`skip_ahead_auto_ids(1)`) để id các hàng đứng yên.
+- Test (cả ba hỏng trước khi sửa): `a_drag_on_the_track_while_typing_takes_the_typed_value_and_drags_at_once`,
+  `a_click_on_the_track_while_typing_moves_the_slider_with_that_click`,
+  `a_drag_on_another_slider_while_typing_ends_the_typing_too` trong `widgets.rs`; trong bảng
+  Develop thật: `a_drag_while_typing_in_a_value_box_needs_no_enter_first`.
+- Đã tự xem ảnh probe (`tmp/ui/truoc` so với `tmp/ui/sau`); probe Develop có thêm
+  `develop_detail.png` (mục Detail + Effects).
+- Chiều rộng bảng Develop (360) và hộp thoại Chỉnh chân dung (320) chưa đổi; thanh kéo nay dài
+  gần gấp đôi nên có thể thu hẹp bảng nếu chủ muốn ảnh rộng hơn.
+- Code `1c9a0c6`; bản test `target/release/iai.exe` (build 04/10 17:32).
+- [ ] Build Release, chủ test.
