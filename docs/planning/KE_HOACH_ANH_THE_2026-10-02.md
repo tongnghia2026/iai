@@ -549,4 +549,5 @@ trước.
 - Chiều rộng bảng Develop (360) và hộp thoại Chỉnh chân dung (320) chưa đổi; thanh kéo nay dài
   gần gấp đôi nên có thể thu hẹp bảng nếu chủ muốn ảnh rộng hơn.
 - Code `1c9a0c6`; bản test `target/release/iai.exe` (build 04/10 17:32).
-- [ ] Build Release, chủ test.
+- [x] Build Release, chủ test đợt 22: **OK** (04/10), kèm việc của đợt 23 (gộp Làm ảnh thẻ vào
+  Chỉnh chân dung; chủ muốn xem bản vẽ trước, duyệt rồi mới làm).
