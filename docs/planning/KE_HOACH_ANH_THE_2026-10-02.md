@@ -364,4 +364,29 @@ Chủ chọn hai việc trong danh sách "còn gì đáng làm" (mục 2 và 4).
   `bleached` trong `effects.rs`), như thanh giảm màu mắt / tóc ở đợt 12: ảnh ám màu sau "Khử
   ám màu" không còn ngả xanh ở lòng trắng và răng. Ảnh không khử ám thì y như cũ.
 - Việc còn lại và kế hoạch tiếp: `docs/planning/KE_HOACH_TIEP_THEO_2026-10-04.md`.
+- [x] Build Release, chủ test đợt 15: **OK** (04/10).
+
+## Đợt 16 (04/10): tấm 4×6 nét hơn, dọn bản build cũ
+
+Chủ sau khi test đợt 15: "tiếp tục, Tấm 4×6 nét hơn" và "Dọn bản build cũ" (mục 1.1 và 1.5
+của `KE_HOACH_TIEP_THEO_2026-10-04.md`).
+
+- [x] **"Làm ảnh thẻ" cắt ở 1043×1417 px** (trước là 661×898), in ra vẫn đúng 2,8×3,8 cm
+  (≈ 947 ppi): `PRINT_PX` / `PRINT_PPI` trong `core/id_photo.rs` (bỏ `output_size()`). Cao
+  bằng đúng ô 4×6 ở 600 dpi (1417 px) và cùng tỉ lệ với ô 3×4. Khung hình, tỉ lệ mặt không đổi.
+- [x] **Trang in** (`stamp` trong `app/actions/impose.rs`): tấm 4×6 lấy thẳng điểm ảnh của
+  ảnh thẻ (cắt giữa 1043 → 945, không lấy mẫu lại); tấm 3×4 thu 1043 → 661. Ảnh thẻ cũ
+  661×898 @ 600 và ảnh cắt tay vẫn xếp được như trước.
+- [x] Hộp thoại ghi "2,8×3,8 cm · 1043×1417 px"; "Xếp ảnh in" vẫn nhận ra ảnh là 3×4 vì nhận
+  theo cm.
+- Không đổi: preset Crop "Ảnh thẻ 3×4 (2.8×3.8cm 600dpi)" vẫn 661×898 (cắt tay).
+- Đo trên 4 ảnh (`IAI_ID_PHOTO_PROBE`, `tmp/anh-the/net-4x6`, dựng lại ô 4×6 / 3×4 như `stamp`
+  rồi đo chi tiết mịn — trung bình |Laplacian| vùng mặt, sau / trước):
+  - Ô 4×6: `gray_man` (khung 1488×2021 px trên ảnh gốc) **2,16 lần**; `beard_glasses` (cận mặt)
+    **1,54 lần**; `la_woman` (khung 663×901) 1,10; `khach_1` (khung 710×964) 1,06. Ảnh gốc mà
+    khung mặt chưa tới ~1000 px thì không có thêm chi tiết để lấy — đúng như dự tính.
+  - Ô 3×4: 0,94–1,00 lần, nhìn bằng mắt không khác (`so_3x4_*.png`).
+- [x] **Dọn `target`** (38 GB → xem `KE_HOACH_TIEP_THEO`): xóa `portrait-a3`, `portrait-b1`,
+  `portrait-test`, `probe`, `tmp` và `debug`; giữ `release`. `debug` dựng lại sạch khi chạy
+  test. Hai ảnh so sánh cũ nằm lẫn trong `target/portrait-test` chuyển sang `tmp/so-sanh-cu`.
 - [ ] Build Release, chủ test.

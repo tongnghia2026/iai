@@ -7,37 +7,31 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
 
 - Nhánh `feat/vector-core-foundation`; mọi thứ **commit local, chưa push** (push gần nhất
   02/10 @ `d1f4acb`). Chỉ push khi chủ bảo.
-- Bản test đợt 15: **`target\release\iai-dot15.exe`** (build 04/10 09:30, có
-  `--features canvas-editor-webview`). `target\release\iai.exe` vẫn là bản đợt 14 vì lúc build chủ
-  đang mở app nên file bị khóa; phiên sau build lại bình thường khi app đã đóng.
+- Bản test đợt 16: **`target\release\iai.exe`** (build 04/10 10:55, có
+  `--features canvas-editor-webview`). Bản `iai-dot15.exe` đã xóa.
 - Bản portable `dist\iAi-portable` vẫn là bản 02/10 — thiếu mọi thứ làm từ 03/10.
-- Chủ đã test OK: đợt 8–14 (Chi tiết mặt AI, Sửa màu & sáng, mặc định mới, thanh màu hai
-  chiều, Sáng da = Midtones, Xếp ảnh in + trang 13×18 hỗn hợp, viền cắt 2 px).
-- **Chờ chủ test — đợt 15 (04/10):** hết vạch mờ ở mép ảnh thẻ; "Trắng mắt" / "Trắng răng"
-  không ngả xanh trên ảnh ám màu.
+- Chủ đã test OK: đợt 8–15 (Chi tiết mặt AI, Sửa màu & sáng, mặc định mới, thanh màu hai
+  chiều, Sáng da = Midtones, Xếp ảnh in + trang 13×18 hỗn hợp, viền cắt 2 px, hết vạch mờ ở
+  mép ảnh thẻ, Trắng mắt / Trắng răng).
+- **Chờ chủ test — đợt 16 (04/10):** "Làm ảnh thẻ" cắt 1043×1417 px để tấm 4×6 trên trang in
+  nét hơn (mục 1.1).
 
 Cách chia việc chủ đã chốt: ảnh quá khó → AI Image Studio (Gemini / ChatGPT); ảnh chụp đẹp
 hoặc không có mạng → Làm ảnh thẻ + Chỉnh chân dung + Xếp ảnh in.
 
 ## 1. Việc đề nghị làm tiếp (theo thứ tự)
 
-### 1.1 Tấm 4×6 nét hơn — cần chủ đồng ý trước khi làm
+### 1.1 Tấm 4×6 nét hơn — ĐÃ LÀM (đợt 16, 04/10), chờ chủ test
 
-Hiện "Làm ảnh thẻ" cắt ảnh về 661×898 px (3×4 @ 600 ppi). Tấm 4×6 trên trang in được phóng
-1,58 lần từ ảnh đó (≈ 380 ppi) rồi cắt bớt ~5% mỗi bên → kém nét hơn tấm 3×4.
+Chủ đồng ý 04/10 ("tiếp tục, Tấm 4×6 nét hơn"). "Làm ảnh thẻ" nay cắt ở **1043×1417 px**, vẫn
+là 2,8×3,8 cm (≈ 947 ppi); tấm 4×6 lấy thẳng điểm ảnh, tấm 3×4 thu nhỏ khi xếp trang. Chi
+tiết và số đo: mục "Đợt 16" trong `KE_HOACH_ANH_THE_2026-10-02.md`.
 
-Cách đề nghị: cho "Làm ảnh thẻ" cắt ở **1043×1417 px**, vẫn là 2,8×3,8 cm (≈ 946 ppi).
-
-- Tấm 4×6 lấy thẳng điểm ảnh (cắt giữa 1043 → 945, không phóng).
-- Tấm 3×4 thu nhỏ 1043 → 661 khi xếp trang (nét hơn hiện tại).
-- Khung hình, tỉ lệ mặt giữ nguyên như chủ đã duyệt.
-- Phải đổi: `output_size()` / `PRINT_PPI` trong `src/core/id_photo.rs`, dòng chữ trong hộp
-  thoại ("600 ppi · 661×898 px"), các test đang so 661×898. `PhotoKind::detect` nhận cỡ theo
-  cm nên không phải sửa.
-- **Điểm phải hỏi chủ:** "661×898 @ 600 ppi" là cỡ chủ đã chốt ngày 02/10 (trùng preset Crop
-  "Ảnh thẻ 3×4"). Đổi cỡ tệp thì ảnh thẻ lưu riêng sẽ là 1043×1417. Ảnh gốc nhỏ (mặt dưới
-  ~900 px) thì không được lợi gì.
-- Kiểm: probe `IAI_PRINT_SHEET_PROBE` (`tmp/anh-the/xep-in`), so độ nét tấm 4×6 trước / sau.
+- Preset Crop "Ảnh thẻ 3×4 (2.8×3.8cm 600dpi)" (cắt tay) vẫn 661×898 — chưa đổi, chủ chưa yêu
+  cầu.
+- "Chỉnh chân dung" trên ảnh thẻ cỡ mới (2,5 lần số điểm ảnh): đã thử làm mịn da / Tạo khối /
+  Vân da bằng probe `IAI_PORTRAIT_FORM_PROBE` (`tmp/anh-the/net-4x6/chan-dung`), kết quả giống
+  cỡ cũ. Chưa thử "Chi tiết mặt (AI)" và Dáng mặt ở cỡ mới.
 
 ### 1.2 Push + làm mới portable — chỉ khi chủ bảo
 
@@ -59,11 +53,11 @@ lớn; hỏi chủ có cần cho việc ở tiệm không rồi mới làm.
 - Overlay egui bán trong suốt bị tối; nhiều overlay không chia `pixels_per_point` (lệch khi
   DPI ≠ 100%).
 
-### 1.5 Dọn thư mục `target` (38 GB) — cần chủ nói rõ "xóa"
+### 1.5 Dọn thư mục `target` — ĐÃ LÀM (04/10)
 
-Phần lớn là bản build thử cũ: `target\portrait-a3`, `portrait-b1`, `portrait-test`, `probe`,
-`tmp`, `debug`. Giữ `target\release`. Chưa xóa gì; chủ mới trả lời "ok" chung chung nên
-phải hỏi lại trước khi xóa.
+Chủ bảo 04/10 "Dọn bản build cũ". Đã xóa `target\portrait-a3`, `portrait-b1`,
+`portrait-test`, `probe`, `tmp`, `debug` (≈ 35 GB); giữ `target\release`. `debug` dựng lại
+sạch khi chạy test (≈ 3 GB thay cho 18 GB). Ổ C: trống 127 GB → ≈ 158 GB.
 
 ## 2. Đang chờ chủ test (đã build từ trước)
 
