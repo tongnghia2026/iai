@@ -7,21 +7,25 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
 
 - Nhánh `feat/vector-core-foundation`; mọi thứ **commit local, chưa push** (push gần nhất
   02/10 @ `d1f4acb`). Chỉ push khi chủ bảo.
-- Bản test đợt 16: **`target\release\iai.exe`** (build 04/10 10:55, có
-  `--features canvas-editor-webview`). Bản `iai-dot15.exe` đã xóa.
+- Bản test đợt 17: **`target\release\iai-dot17.exe`** (build 04/10 12:28, có
+  `--features canvas-editor-webview`). `target\release\iai.exe` vẫn là bản đợt 16 vì lúc build
+  chủ đang mở nó nên không ghi đè được; app đóng rồi thì build lại bình thường.
+- **Chờ chủ test — đợt 17 (04/10):** hàng "Công thức" trong Chỉnh chân dung; phím `[` `]` với
+  Smudge / Dodge / Burn; Pencil vẽ đúng cỡ và màu; Smart Fill (AI) giữ vân ảnh.
 - Bản portable `dist\iAi-portable` vẫn là bản 02/10 — thiếu mọi thứ làm từ 03/10.
 - Chủ đã test OK: đợt 8–15 (Chi tiết mặt AI, Sửa màu & sáng, mặc định mới, thanh màu hai
   chiều, Sáng da = Midtones, Xếp ảnh in + trang 13×18 hỗn hợp, viền cắt 2 px, hết vạch mờ ở
   mép ảnh thẻ, Trắng mắt / Trắng răng).
-- **Chờ chủ test — đợt 16 (04/10):** "Làm ảnh thẻ" cắt 1043×1417 px để tấm 4×6 trên trang in
-  nét hơn (mục 1.1).
+- Chủ test OK đợt 16 (04/10): "Làm ảnh thẻ" cắt 1043×1417 px, tấm 4×6 nét hơn (mục 1.1).
+- Chủ chốt 04/10: crop sau khi Áp dụng làm layer "Chân dung" không mở lại được → **bỏ qua,
+  coi là tính năng**, không sửa.
 
 Cách chia việc chủ đã chốt: ảnh quá khó → AI Image Studio (Gemini / ChatGPT); ảnh chụp đẹp
 hoặc không có mạng → Làm ảnh thẻ + Chỉnh chân dung + Xếp ảnh in.
 
 ## 1. Việc đề nghị làm tiếp (theo thứ tự)
 
-### 1.1 Tấm 4×6 nét hơn — ĐÃ LÀM (đợt 16, 04/10), chờ chủ test
+### 1.1 Tấm 4×6 nét hơn — XONG (đợt 16, 04/10), chủ test OK
 
 Chủ đồng ý 04/10 ("tiếp tục, Tấm 4×6 nét hơn"). "Làm ảnh thẻ" nay cắt ở **1043×1417 px**, vẫn
 là 2,8×3,8 cm (≈ 947 ppi); tấm 4×6 lấy thẳng điểm ảnh, tấm 3×4 thu nhỏ khi xếp trang. Chi
@@ -33,25 +37,34 @@ tiết và số đo: mục "Đợt 16" trong `KE_HOACH_ANH_THE_2026-10-02.md`.
   Vân da bằng probe `IAI_PORTRAIT_FORM_PROBE` (`tmp/anh-the/net-4x6/chan-dung`), kết quả giống
   cỡ cũ. Chưa thử "Chi tiết mặt (AI)" và Dáng mặt ở cỡ mới.
 
-### 1.2 Push + làm mới portable — chỉ khi chủ bảo
+### 1.2 Push + làm mới portable — chủ trả lời 04/10: "Chưa, để sau"
 
 - Trước khi push: `cargo fmt --check` và `cargo test --lib` (xem mục 3 về cách chạy test).
 - Portable: quy trình trong ghi chú `project_iai_portable_package.md` (exe có Canvas Editor,
   LICENSE / THIRD_PARTY / docs, `BUILD_INFO.txt` ghi ngày, commit, SHA-256).
 - Có portable mới thì chủ mới test được "hiển thị trong trẻo" trên máy khác (mục 2).
 
-### 1.3 Lưu công thức chân dung + áp hàng loạt (Phase 4 của kế hoạch kiểu Evoto)
+### 1.3 Lưu công thức chân dung — ĐÃ LÀM phần lưu / nạp (đợt 17), chờ chủ test
+
+Chủ chọn 04/10: **chỉ lưu / nạp công thức**; phần "áp cho các tab đang mở" và "chạy cả thư
+mục" KHÔNG làm (chưa cần ở tiệm) — đừng tự làm, đừng đề xuất lại trừ khi chủ hỏi. Chi tiết:
+mục "Đợt 17" trong `KE_HOACH_ANH_THE_2026-10-02.md`. Nguyên văn mục cũ:
 
 `docs/planning/KE_HOACH_CHAN_DUNG_KIEU_EVOTO_2026-09-29.md`, mục Phase 4: lưu / nạp bộ thông
 số; "áp cho các tab đang mở"; "chạy cả thư mục → xuất JPEG" (chạy nền, tiến độ, Hủy). Việc
 lớn; hỏi chủ có cần cho việc ở tiệm không rồi mới làm.
 
-### 1.4 Lỗi nhỏ ghi từ 25/09 — kiểm lại còn hay không rồi mới sửa
+### 1.4 Lỗi nhỏ ghi từ 25/09 — hai lỗi ĐÃ SỬA (04/10), còn một
 
-- Phím `[` `]` (và `Shift`) đổi nhầm cỡ Brush khi đang cầm Smudge / Dodge / Burn / Pencil.
-- Edit ▸ Smart Fill (AI) chưa dùng `refine_fill` như Repair Brush.
-- Overlay egui bán trong suốt bị tối; nhiều overlay không chia `pixels_per_point` (lệch khi
-  DPI ≠ 100%).
+- [x] Phím `[` `]` (và `Shift`) nay đổi cỡ / độ cứng của đúng công cụ đang cầm: Smudge, Dodge,
+  Burn, Quick Selection (trước đều đổi nhầm Brush) — `092b2e2`. Cùng lúc sửa **Pencil**: nó
+  hiện thanh tùy chọn của Brush nhưng lại vẽ bằng cỡ / màu riêng không bao giờ được đặt (luôn
+  5 px, màu đen); nay vẽ đúng cỡ, độ mờ và màu của Brush, nét cứng.
+- [x] Edit ▸ Smart Fill (AI) nay khôi phục vân ảnh ở độ phân giải đầy đủ như Repair Brush
+  (`refine_fill`) — `5295d34`. Đo trên cảnh thử: độ hạt trong vùng lấp 13,6 → 21,3 (ảnh thật
+  23,2).
+- [ ] Overlay egui bán trong suốt bị tối; nhiều overlay không chia `pixels_per_point` (lệch khi
+  DPI ≠ 100%). Chưa làm: cần màn hình đặt tỉ lệ khác 100% để thấy và kiểm.
 
 ### 1.5 Dọn thư mục `target` — ĐÃ LÀM (04/10)
 

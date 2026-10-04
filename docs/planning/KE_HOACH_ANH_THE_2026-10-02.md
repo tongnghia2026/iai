@@ -389,4 +389,26 @@ của `KE_HOACH_TIEP_THEO_2026-10-04.md`).
 - [x] **Dọn `target`** (38 GB → xem `KE_HOACH_TIEP_THEO`): xóa `portrait-a3`, `portrait-b1`,
   `portrait-test`, `probe`, `tmp` và `debug`; giữ `release`. `debug` dựng lại sạch khi chạy
   test. Hai ảnh so sánh cũ nằm lẫn trong `target/portrait-test` chuyển sang `tmp/so-sanh-cu`.
+- [x] Build Release, chủ test đợt 16: **OK** (04/10).
+- Chủ thấy khi test: Áp dụng Chỉnh chân dung rồi mới Crop thì bấm đúp layer "Chân dung" không
+  mở lại được (layer nhớ kích thước layer ảnh gốc; crop làm đổi kích thước → báo "Không còn
+  layer ảnh gốc"). **Chủ chốt 04/10: bỏ qua, coi là tính năng — không sửa, đừng đề xuất lại.**
+  Cách dùng: crop trước rồi chỉnh, hoặc Ctrl+Z về trước lúc crop.
+
+## Đợt 17 (04/10): lưu / nạp công thức chân dung, hai lỗi nhỏ
+
+Chủ sau khi test đợt 16: "kế hoạch còn lại gì thì tiếp tục làm". Hỏi lại hai điểm, chủ chọn:
+phần công thức **chỉ làm lưu / nạp** (không làm chạy hàng loạt); push + portable **chưa, để sau**.
+
+- [x] **"Công thức" trong Chỉnh chân dung** (`ui/dialogs/portrait.rs`): một hàng ngay dưới dòng
+  trạng thái — ô chọn công thức đã lưu, nút "Lưu…" (gõ tên rồi Enter / Lưu; trùng tên thì ghi
+  đè), nút thùng rác xóa công thức đang chọn. Công thức = toàn bộ thanh kéo của hộp thoại
+  (kể cả Màu studio, Sửa màu & sáng, Dáng mặt). Ô chọn tự hiện tên công thức nào trùng khớp
+  với các thanh đang đặt. Lưu trong prefs.json (khóa `portrait_presets`). Ảnh mới vẫn bắt đầu
+  từ mặc định như chủ đã chốt; muốn dùng công thức thì chọn.
+- [x] Phím `[` `]` đổi đúng cỡ / độ cứng công cụ đang cầm (Smudge, Dodge, Burn, Quick
+  Selection); Pencil vẽ đúng cỡ, độ mờ, màu của Brush (`092b2e2`).
+- [x] Edit ▸ Smart Fill (AI) giữ vân ảnh ở độ phân giải đầy đủ (`5295d34`).
+- Chưa nhìn tận mắt hàng "Công thức" trên màn hình (bố cục tính theo bề rộng 320 px của hộp
+  thoại); test tự động chỉ kiểm lưu / ghi đè / đọc lại và vẽ không lỗi.
 - [ ] Build Release, chủ test.

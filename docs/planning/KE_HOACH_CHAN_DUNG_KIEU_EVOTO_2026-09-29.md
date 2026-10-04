@@ -249,9 +249,10 @@ Quy ước checklist: `[ ]` chưa làm · `[~]` đã code, chưa qua cổng nghi
 
 ### Phase 4 — Công thức + đồng bộ hàng loạt
 
-- [ ] Lưu/nạp công thức chân dung (preset).
+- [x] Lưu/nạp công thức chân dung (preset) — 04/10, hàng "Công thức" trong hộp thoại.
 - [ ] "Áp công thức cho các tab đang mở" và "Chạy cả thư mục → xuất JPEG",
-      chạy nền, có tiến độ + Huỷ; mỗi ảnh tự nhận mặt lại.
+      chạy nền, có tiến độ + Huỷ; mỗi ảnh tự nhận mặt lại. **Chủ chốt 04/10: chưa cần,
+      không làm.**
 - **Cổng**: 100 ảnh chạy không lỗi, RAM ổn định.
 
 ### Phase 5 — Tuỳ chọn, làm sau
