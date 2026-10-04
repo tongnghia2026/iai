@@ -14,6 +14,8 @@ pub mod library;
 pub mod menubar;
 pub mod panels;
 pub mod refine_select;
+#[cfg(test)]
+pub(crate) mod snapshot;
 pub mod statusbar;
 pub mod tabbar;
 pub mod theme;

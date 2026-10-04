@@ -514,6 +514,7 @@ impl ApplicationHandler for App {
                 "Đang khởi tạo icon...".to_string(),
             ));
             egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+            crate::ui::theme::add_bold_font(&mut fonts);
             beat();
             let _ = tx.send(crate::app::state::StartupProgress::Log(
                 "Hoàn tất!".to_string(),

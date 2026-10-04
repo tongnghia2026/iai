@@ -245,3 +245,47 @@ pub fn save_theme_mode(mode: ThemeMode) {
         let _ = std::fs::write(&path, json);
     }
 }
+
+/// The family of the bold UI face (group and section titles).
+pub const BOLD_FAMILY: &str = "ui_bold";
+
+/// Register the bold UI face as [`BOLD_FAMILY`], backed by the regular
+/// family's fonts (icons, other scripts). On a system without a bold file
+/// the family is the regular one.
+pub fn add_bold_font(fonts: &mut egui::FontDefinitions) {
+    let mut faces = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    for path in [
+        "C:/Windows/Fonts/segoeuib.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ] {
+        if let Ok(data) = std::fs::read(path) {
+            fonts.font_data.insert(
+                BOLD_FAMILY.to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(data)),
+            );
+            faces.insert(0, BOLD_FAMILY.to_owned());
+            break;
+        }
+    }
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(BOLD_FAMILY.into()), faces);
+}
+
+/// The bold UI font at `size`; the regular one while the bold family is not
+/// installed (before the fonts load, and in a bare test context).
+pub fn bold_font(ctx: &Context, size: f32) -> egui::FontId {
+    let family = egui::FontFamily::Name(BOLD_FAMILY.into());
+    let bound = ctx.fonts(|f| f.definitions().families.contains_key(&family));
+    let family = if bound {
+        family
+    } else {
+        egui::FontFamily::Proportional
+    };
+    egui::FontId::new(size, family)
+}

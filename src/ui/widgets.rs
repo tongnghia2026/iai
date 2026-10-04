@@ -56,6 +56,71 @@ pub(crate) fn sample_gradient(colors: &[Color32], t: f32) -> Color32 {
 
 const LABEL_W: f32 = 84.0;
 const VALUE_W: f32 = 42.0;
+/// Height of a stacked slider row (label over the track, value box right).
+pub const STACKED_ROW_H: f32 = 33.0;
+
+/// What a row or a header gains under the pointer.
+fn row_glow() -> Color32 {
+    Color32::from_white_alpha(22)
+}
+
+/// The header bar of a collapsible group, shared by Chỉnh chân dung and
+/// Develop: icon, bold title, a dot while something in the group is at work,
+/// and the caret. It lights up under the pointer; a click toggles the group.
+pub fn section_header(
+    ui: &mut egui::Ui,
+    icon: &str,
+    title: &str,
+    open: bool,
+    active: bool,
+) -> egui::Response {
+    use egui_phosphor::regular as ph;
+    // See `stacked_slider` for why the visible width bounds the row.
+    let visible_w = (ui.clip_rect().right() - ui.cursor().left()).max(1.0);
+    let width = ui.available_width().min(visible_w).max(1.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
+    let visuals = ui.visuals();
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, visuals.faint_bg_color);
+    if response.hovered() {
+        painter.rect_filled(rect, 4.0, row_glow());
+    }
+    let bright = visuals.strong_text_color();
+    painter.text(
+        rect.left_center() + egui::vec2(10.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        egui::FontId::proportional(16.0),
+        bright,
+    );
+    painter.text(
+        rect.left_center() + egui::vec2(34.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        super::theme::bold_font(ui.ctx(), 14.0),
+        bright,
+    );
+    let caret = if open {
+        ph::CARET_DOWN
+    } else {
+        ph::CARET_RIGHT
+    };
+    painter.text(
+        rect.right_center() - egui::vec2(10.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        caret,
+        egui::FontId::proportional(12.0),
+        visuals.weak_text_color(),
+    );
+    if active {
+        painter.circle_filled(
+            rect.right_center() - egui::vec2(34.0, 0.0),
+            3.5,
+            Color32::from_rgb(90, 170, 255),
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
 
 /// Track-position easing exponent for the Exposure slider. `> 1` expands the
 /// near-neutral part of the track so small drags there change exposure gently
@@ -273,8 +338,22 @@ fn stacked_slider(
     // of the track are laid out beyond the Develop side panel and clipped.
     let visible_w = (ui.clip_rect().right() - ui.cursor().left()).max(1.0);
     let row_w = ui.available_width().min(visible_w).max(1.0);
-    let (rect, mut response) =
-        ui.allocate_exact_size(egui::vec2(row_w, 33.0), egui::Sense::click_and_drag());
+    let (rect, mut response) = ui.allocate_exact_size(
+        egui::vec2(row_w, STACKED_ROW_H),
+        egui::Sense::click_and_drag(),
+    );
+    // Each slider is a row of its own: a hairline under it, and it lights up
+    // under the pointer.
+    let lit = ui.is_enabled() && (response.dragged() || ui.rect_contains_pointer(rect));
+    if lit {
+        ui.painter().rect_filled(rect, 3.0, row_glow());
+    }
+    let gap = ui.spacing().item_spacing.y;
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() + gap * 0.5,
+        egui::Stroke::new(1.0_f32, Color32::from_white_alpha(10)),
+    );
 
     let precise = (max - min) <= 12.0;
     let value_text = if precise {
@@ -282,8 +361,9 @@ fn stacked_slider(
     } else {
         format!("{:.0}", *value)
     };
+    // Clear of the scroll bar that floats over the right edge.
     let value_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.right() - VALUE_W, rect.top() + 14.0),
+        egui::pos2(rect.right() - VALUE_W - 8.0, rect.top() + 13.0),
         egui::vec2(VALUE_W, 18.0),
     );
     let track_left = (rect.left() + 92.0).min(value_rect.left() - 64.0);
@@ -325,14 +405,31 @@ fn stacked_slider(
     }
 
     paint_gradient_slider(ui, track_rect, to_pos(*value), min, max, colors);
-    let font = egui::FontId::proportional(12.5);
+    let font = egui::FontId::proportional(11.5);
     let color = ui.visuals().text_color();
     ui.painter().text(
-        egui::pos2(rect.left() + 8.0, rect.top() + 1.0),
+        egui::pos2(rect.left() + 8.0, rect.top() + 2.0),
         egui::Align2::LEFT_TOP,
         label,
         font.clone(),
         color,
+    );
+    // The value sits in a box: it is a field, a click types into it.
+    let over_value = lit && ui.rect_contains_pointer(value_rect);
+    if over_value {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+    }
+    let outline = if over_value {
+        ui.visuals().selection.stroke.color
+    } else {
+        Color32::from_white_alpha(26)
+    };
+    ui.painter().rect(
+        value_rect,
+        3.0,
+        ui.visuals().extreme_bg_color,
+        egui::Stroke::new(1.0_f32, outline),
+        egui::StrokeKind::Inside,
     );
     if let Some(mut text) = ui.ctx().data_mut(|d| d.get_temp::<String>(edit_id)) {
         let out = ui.put(

@@ -236,7 +236,7 @@ pub(crate) fn develop_panel_contents(
                 }
             });
             ui.add_space(4.0);
-            let out = section(ui, data, SEC_SCOPES, "Scopes", |ui| {
+            let out = section(ui, data, SEC_SCOPES, ph::WAVEFORM, "Scopes", |ui| {
                 scopes_ui(
                     ui,
                     data.develop.develop_scopes.as_ref(),
@@ -249,7 +249,7 @@ pub(crate) fn develop_panel_contents(
             });
             note_section(out, SEC_SCOPES, actions);
 
-            let out = section(ui, data, SEC_PRESETS, "Presets", |ui| {
+            let out = section(ui, data, SEC_PRESETS, ph::BOOKMARKS, "Presets", |ui| {
                 ui.horizontal(|ui| {
                     let mut apply_idx: Option<usize> = None;
                     let mut del_idx: Option<usize> = None;
@@ -308,7 +308,7 @@ pub(crate) fn develop_panel_contents(
             });
             note_section(out, SEC_PRESETS, actions);
 
-            let out = section(ui, data, SEC_LIGHT, "Light", |ui| {
+            let out = section(ui, data, SEC_LIGHT, ph::SUN, "Light", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Tone Mapping");
                     egui::ComboBox::from_id_salt("develop_tone_map_mode")
@@ -391,7 +391,7 @@ pub(crate) fn develop_panel_contents(
             });
             note_section(out, SEC_LIGHT, actions);
 
-            let out = section(ui, data, SEC_COLOR, "Color", |ui| {
+            let out = section(ui, data, SEC_COLOR, ph::PALETTE, "Color", |ui| {
                 changed |= slider_row(
                     ui,
                     "Temperature",
@@ -440,65 +440,76 @@ pub(crate) fn develop_panel_contents(
 
             // Detail mirrors Camera Raw: three main sliders, each with a
             // disclosure triangle for its modifiers (collapsed by default).
-            let out = section(ui, data, SEC_DETAIL, "Detail", |ui| {
-                changed |= detail_group(
-                    ui,
-                    "sharpen",
-                    "Sharpening",
-                    |s| &mut s.sharpening,
-                    0.0..=150.0,
-                    |ui, s| {
-                        let mut c = slider_row(ui, "Radius", &mut s.sharpen_radius, 0.5..=3.0);
-                        c |= slider_row(ui, "Detail", &mut s.sharpen_detail, 0.0..=100.0);
-                        c |= slider_row(ui, "Masking", &mut s.sharpen_masking, 0.0..=100.0);
-                        c
-                    },
-                    &mut settings,
-                );
-                changed |= detail_group(
-                    ui,
-                    "nr",
-                    "Noise Reduction",
-                    |s| &mut s.noise_reduction,
-                    0.0..=100.0,
-                    |ui, s| {
-                        let mut c =
-                            slider_row(ui, "Detail", &mut s.noise_reduction_detail, 0.0..=100.0);
-                        c |= slider_row(
-                            ui,
-                            "Contrast",
-                            &mut s.noise_reduction_contrast,
-                            0.0..=100.0,
-                        );
-                        c
-                    },
-                    &mut settings,
-                );
-                changed |= detail_group(
-                    ui,
-                    "cnr",
-                    "Color Noise Reduction",
-                    |s| &mut s.color_noise_reduction,
-                    0.0..=100.0,
-                    |ui, s| {
-                        let mut c =
-                            slider_row(ui, "Detail", &mut s.color_noise_detail, 0.0..=100.0);
-                        c |= slider_row(
-                            ui,
-                            "Smoothness",
-                            &mut s.color_noise_smoothness,
-                            0.0..=100.0,
-                        );
-                        c
-                    },
-                    &mut settings,
-                );
-            });
+            let out = section(
+                ui,
+                data,
+                SEC_DETAIL,
+                ph::MAGNIFYING_GLASS_PLUS,
+                "Detail",
+                |ui| {
+                    changed |= detail_group(
+                        ui,
+                        "sharpen",
+                        "Sharpening",
+                        |s| &mut s.sharpening,
+                        0.0..=150.0,
+                        |ui, s| {
+                            let mut c = slider_row(ui, "Radius", &mut s.sharpen_radius, 0.5..=3.0);
+                            c |= slider_row(ui, "Detail", &mut s.sharpen_detail, 0.0..=100.0);
+                            c |= slider_row(ui, "Masking", &mut s.sharpen_masking, 0.0..=100.0);
+                            c
+                        },
+                        &mut settings,
+                    );
+                    changed |= detail_group(
+                        ui,
+                        "nr",
+                        "Noise Reduction",
+                        |s| &mut s.noise_reduction,
+                        0.0..=100.0,
+                        |ui, s| {
+                            let mut c = slider_row(
+                                ui,
+                                "Detail",
+                                &mut s.noise_reduction_detail,
+                                0.0..=100.0,
+                            );
+                            c |= slider_row(
+                                ui,
+                                "Contrast",
+                                &mut s.noise_reduction_contrast,
+                                0.0..=100.0,
+                            );
+                            c
+                        },
+                        &mut settings,
+                    );
+                    changed |= detail_group(
+                        ui,
+                        "cnr",
+                        "Color Noise Reduction",
+                        |s| &mut s.color_noise_reduction,
+                        0.0..=100.0,
+                        |ui, s| {
+                            let mut c =
+                                slider_row(ui, "Detail", &mut s.color_noise_detail, 0.0..=100.0);
+                            c |= slider_row(
+                                ui,
+                                "Smoothness",
+                                &mut s.color_noise_smoothness,
+                                0.0..=100.0,
+                            );
+                            c
+                        },
+                        &mut settings,
+                    );
+                },
+            );
             note_section(out, SEC_DETAIL, actions);
 
             // Presence/Effects: Texture and Definition (clarity) are creative
             // local-contrast tools, not Detail — grouped here with Defog/Vignette.
-            let out = section(ui, data, SEC_EFFECTS, "Effects", |ui| {
+            let out = section(ui, data, SEC_EFFECTS, ph::SPARKLE, "Effects", |ui| {
                 changed |= slider_row(
                     ui,
                     "Texture",
@@ -526,7 +537,7 @@ pub(crate) fn develop_panel_contents(
             });
             note_section(out, SEC_EFFECTS, actions);
 
-            let out = section(ui, data, SEC_CURVE, "Curve", |ui| {
+            let out = section(ui, data, SEC_CURVE, ph::CHART_LINE, "Curve", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Master Curve");
                     changed |= ui
@@ -574,7 +585,7 @@ pub(crate) fn develop_panel_contents(
             });
             note_section(out, SEC_CURVE, actions);
 
-            let out = section(ui, data, SEC_MIXER, "Color Mixer", |ui| {
+            let out = section(ui, data, SEC_MIXER, ph::FADERS, "Color Mixer", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Adjust");
                     egui::ComboBox::from_id_salt("develop_mixer_mode")
@@ -662,9 +673,16 @@ pub(crate) fn develop_panel_contents(
             });
             note_section(out, SEC_MIXER, actions);
 
-            let out = section(ui, data, SEC_LOCALS, "Local Masks", |ui| {
-                local_masks_ui(ui, data, actions, &mut settings, &mut changed);
-            });
+            let out = section(
+                ui,
+                data,
+                SEC_LOCALS,
+                ph::SELECTION_BACKGROUND,
+                "Local Masks",
+                |ui| {
+                    local_masks_ui(ui, data, actions, &mut settings, &mut changed);
+                },
+            );
             note_section(out, SEC_LOCALS, actions);
         });
 
@@ -718,6 +736,33 @@ fn stable_viewport_for_panel(screen: egui::Rect) -> bool {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the panel is drawn into
+    /// `develop.png` there, Light and Color open, the pointer on a row.
+    #[test]
+    #[ignore]
+    #[allow(deprecated)]
+    fn probe_panel_snapshot() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        let mut data = UiData::default();
+        data.develop.develop_sections_open = [false; DEV_PANEL_SECTIONS];
+        data.develop.develop_sections_open[SEC_LIGHT] = true;
+        data.develop.develop_sections_open[SEC_COLOR] = true;
+        let hover = egui::pos2(300.0, 232.0);
+        let image = crate::ui::snapshot::render(480.0, 900.0, 1.5, Some(hover), |ctx| {
+            egui::SidePanel::right("develop_snapshot")
+                .exact_width(340.0)
+                .show(ctx, |ui| {
+                    let mut actions = UiActions::default();
+                    develop_panel_contents(ui, &data, &mut actions, 860.0);
+                });
+        });
+        image
+            .save(std::path::Path::new(&dir).join("develop.png"))
+            .unwrap();
+    }
 
     #[allow(deprecated)] // Exercise the same panel host as the Develop window.
     fn frame(
@@ -1198,24 +1243,24 @@ fn section(
     ui: &mut egui::Ui,
     data: &UiData,
     idx: usize,
+    icon: &str,
     title: &str,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) -> Option<bool> {
     let open_pref = data.develop.develop_sections_open[idx];
     let id = ui.make_persistent_id(("develop_section", idx));
-    let state =
+    let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open_pref);
-    state
-        .show_header(ui, |ui| {
-            ui.label(egui::RichText::new(title).strong());
-        })
-        .body(|ui| {
-            ui.add_space(2.0);
-            add_contents(ui);
-            ui.add_space(4.0);
-        });
-    let open_now = egui::collapsing_header::CollapsingState::load(ui.ctx(), id)
-        .map_or(open_pref, |s| s.is_open());
+    ui.add_space(3.0);
+    if crate::ui::widgets::section_header(ui, icon, title, state.is_open(), false).clicked() {
+        state.toggle(ui);
+    }
+    state.show_body_unindented(ui, |ui| {
+        ui.add_space(2.0);
+        add_contents(ui);
+        ui.add_space(4.0);
+    });
+    let open_now = state.is_open();
     (open_now != open_pref).then_some(open_now)
 }
 
@@ -1259,9 +1304,12 @@ fn detail_group(
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         let slider_w = (ui.available_width() - 18.0).max(60.0);
-        ui.allocate_ui(egui::vec2(slider_w, 33.0), |ui| {
-            changed |= slider_row(ui, label, amount(settings), range);
-        });
+        ui.allocate_ui(
+            egui::vec2(slider_w, crate::ui::widgets::STACKED_ROW_H),
+            |ui| {
+                changed |= slider_row(ui, label, amount(settings), range);
+            },
+        );
         let icon = if open {
             ph::CARET_DOWN
         } else {

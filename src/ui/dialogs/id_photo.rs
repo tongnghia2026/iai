@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::core::id_photo::{IdPhotoOptions, DEFAULT_WIDEN, MAX_WIDEN, PRINT_PX};
+use egui_phosphor::regular as ph;
 
 const PREFS_KEY: &str = "id_photo";
 const PRESET_KEY: &str = "id_photo_preset";
@@ -68,24 +69,33 @@ pub(crate) fn id_photo_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                 );
                 ui.add_enabled_ui(options.crop, |ui| {
                     ui.horizontal(|ui| {
-                        ui.add_space(22.0);
-                        ui.label("Khung rộng hơn mẫu:");
-                        let mut percent = options.widen * 100.0;
-                        ui.add(
-                            egui::Slider::new(&mut percent, 0.0..=MAX_WIDEN * 100.0)
-                                .step_by(1.0)
-                                .show_value(false),
-                        );
-                        ui.label(format!("{percent:.0}%"));
-                        options.widen = percent / 100.0;
-                        if (options.widen - DEFAULT_WIDEN).abs() > 1e-3
-                            && ui
-                                .small_button("Mặc định")
-                                .on_hover_text("Rộng hơn mẫu 10%")
-                                .clicked()
-                        {
-                            options.widen = DEFAULT_WIDEN;
-                        }
+                        ui.add_space(14.0);
+                        ui.vertical(|ui| {
+                            // The app's own slider (drag, or click the box
+                            // and type), in whole percent.
+                            let mut percent = (options.widen * 100.0).round();
+                            let track = [70u8, 130, 200].map(egui::Color32::from_gray);
+                            crate::ui::widgets::dev_slider_stacked_resp(
+                                ui,
+                                "Khung rộng hơn mẫu (%)",
+                                &mut percent,
+                                0.0..=MAX_WIDEN * 100.0,
+                                &track,
+                                1.0,
+                            );
+                            options.widen = percent.round() / 100.0;
+                            if (options.widen - DEFAULT_WIDEN).abs() > 1e-3
+                                && ui
+                                    .small_button(format!(
+                                        "{} Mặc định",
+                                        ph::ARROW_COUNTER_CLOCKWISE
+                                    ))
+                                    .on_hover_text("Rộng hơn mẫu 10%")
+                                    .clicked()
+                            {
+                                options.widen = DEFAULT_WIDEN;
+                            }
+                        });
                     });
                     ui.horizontal(|ui| {
                         ui.add_space(22.0);
@@ -150,12 +160,15 @@ pub(crate) fn id_photo_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
             ui.horizontal(|ui| {
                 let can_run = !busy && (options.crop || options.white_background);
                 if ui
-                    .add_enabled(can_run, egui::Button::new("  Làm ảnh thẻ  "))
+                    .add_enabled(
+                        can_run,
+                        egui::Button::new(format!("{}  Làm ảnh thẻ", ph::IDENTIFICATION_CARD)),
+                    )
                     .clicked()
                 {
                     run = true;
                 }
-                if ui.button("Đóng").clicked() {
+                if ui.button(format!("{}  Đóng", ph::X)).clicked() {
                     close = true;
                 }
             });
@@ -187,6 +200,32 @@ pub(crate) fn id_photo_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the dialog is drawn into
+    /// `anh_the.png` there.
+    #[test]
+    #[ignore]
+    fn probe_dialog_snapshot() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        let data = UiData::default();
+        let image = crate::ui::snapshot::render(520.0, 420.0, 1.5, None, |ctx| {
+            ctx.data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::new("portrait_presets"),
+                    crate::core::portrait::presets::built_in(),
+                );
+                d.insert_temp(egui::Id::new(PRESET_KEY), "Ảnh thẻ nữ".to_string());
+                d.insert_temp(egui::Id::new("id_photo_options"), IdPhotoOptions::default());
+            });
+            let mut actions = UiActions::default();
+            id_photo_dialog(ctx, &data, &mut actions);
+        });
+        image
+            .save(std::path::Path::new(&dir).join("anh_the.png"))
+            .unwrap();
+    }
 
     #[test]
     fn the_dialog_draws_with_its_presets_and_asks_for_nothing_untouched() {

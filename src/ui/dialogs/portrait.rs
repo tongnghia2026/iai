@@ -66,7 +66,7 @@ fn preset_row(
             };
             egui::ComboBox::from_id_salt("portrait_preset")
                 .selected_text(shown)
-                .width(130.0)
+                .width(118.0)
                 .show_ui(ui, |ui| {
                     for (i, preset) in presets.iter().enumerate() {
                         if ui
@@ -80,7 +80,7 @@ fn preset_row(
                 .response
                 .on_hover_text("Nạp lại bộ thanh kéo đã lưu");
             if ui
-                .button("Lưu…")
+                .button(format!("{} Lưu…", ph::FLOPPY_DISK))
                 .on_hover_text(
                     "Lưu các thanh đang chỉnh thành một công thức, để dùng lại cho ảnh khác",
                 )
@@ -155,47 +155,24 @@ enum Group {
     Sheet,
 }
 
-/// A group's header bar: caret, title and, when something in the group is
-/// at work, a dot on the right.
-fn group_header(ui: &mut egui::Ui, title: &str, open: bool, active: bool) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
-    let visuals = ui.visuals();
-    let fill = if response.hovered() {
-        visuals.widgets.hovered.weak_bg_fill
-    } else {
-        visuals.widgets.inactive.weak_bg_fill
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, 3.0, fill);
-    let text = egui::Color32::from_rgb(210, 210, 210);
-    let caret = if open {
-        ph::CARET_DOWN
-    } else {
-        ph::CARET_RIGHT
-    };
-    painter.text(
-        rect.left_center() + egui::vec2(8.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        caret,
-        egui::FontId::proportional(12.0),
-        text,
-    );
-    painter.text(
-        rect.left_center() + egui::vec2(26.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        title,
-        egui::FontId::proportional(12.5),
-        text,
-    );
-    if active {
-        painter.circle_filled(
-            rect.right_center() - egui::vec2(12.0, 0.0),
-            3.5,
-            egui::Color32::from_rgb(90, 170, 255),
-        );
+impl Group {
+    fn icon(self) -> &'static str {
+        match self {
+            Group::Brush => ph::PAINT_BRUSH,
+            Group::Skin => ph::SPARKLE,
+            Group::Shape => ph::SMILEY,
+            Group::Body => ph::PERSON,
+            Group::Eyes => ph::EYE,
+            Group::Nose => ph::TRIANGLE,
+            Group::Mouth => ph::TOOTH,
+            Group::Brows => ph::RAINBOW,
+            Group::Hair => ph::SCISSORS,
+            Group::Detail => ph::MAGNIFYING_GLASS_PLUS,
+            Group::Fix => ph::SUN,
+            Group::Look => ph::PALETTE,
+            Group::Sheet => ph::PRINTER,
+        }
     }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// One group: its header, and its contents while it is the open group
@@ -211,7 +188,8 @@ fn group(
     body: impl FnOnce(&mut egui::Ui),
 ) {
     ui.add_space(3.0);
-    if group_header(ui, title, shown == Some(id), active).clicked() {
+    let open = shown == Some(id);
+    if crate::ui::widgets::section_header(ui, id.icon(), title, open, active).clicked() {
         *next = if shown == Some(id) { None } else { Some(id) };
     }
     if shown == Some(id) {
@@ -900,7 +878,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     group(ui, shown, &mut next, Group::Fix, "Sửa màu & sáng", at_work(&fix), |ui| {
                         ui.add_enabled_ui(ready, |ui| {
                             auto_fix = ui
-                                .button("Tự động")
+                                .button(format!("{} Tự động", ph::MAGIC_WAND))
                                 .on_hover_text("Đặt lại các thanh về mức thường dùng cho ảnh điện thoại bị ám màu, tối, đục (mức một ảnh mới bắt đầu) — rồi chỉnh lại từng thanh nếu cần")
                                 .clicked();
                         });
@@ -925,10 +903,16 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.small_button("Mặc định").clicked() {
+                if ui
+                    .small_button(format!("{} Mặc định", ph::ARROW_COUNTER_CLOCKWISE))
+                    .clicked()
+                {
                     s = PortraitSettings::default();
                 }
-                if ui.small_button("Về 0").clicked() {
+                if ui
+                    .small_button(format!("{} Về 0", ph::NUMBER_CIRCLE_ZERO))
+                    .clicked()
+                {
                     s = PortraitSettings::NEUTRAL;
                 }
                 ui.checkbox(&mut preview, "Xem trước")
@@ -943,7 +927,10 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
             ui.separator();
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(ready, egui::Button::new("  Áp dụng  "))
+                    .add_enabled(
+                        ready,
+                        egui::Button::new(format!("{}  Áp dụng", ph::CHECK)),
+                    )
                     .on_hover_text(if data.dialogs.portrait_reopened {
                         "Cập nhật layer \"Chân dung\" đang chỉnh tiếp"
                     } else {
@@ -953,7 +940,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                 {
                     do_apply = true;
                 }
-                if ui.button("Hủy").clicked() {
+                if ui.button(format!("{}  Hủy", ph::X)).clicked() {
                     do_cancel = true;
                 }
             });
@@ -995,6 +982,38 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the dialog is drawn into
+    /// `chan_dung_<group>.png` there, one group open, the pointer on a row.
+    #[test]
+    #[ignore]
+    fn probe_dialog_snapshots() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        let mut data = UiData::default();
+        data.dialogs.portrait_ready = true;
+        data.dialogs.portrait_status = "Đã nhận 1 khuôn mặt".to_string();
+        data.dialogs.portrait_faces = vec![true];
+        data.dialogs.portrait_hair = true;
+        for (name, open, hover) in [
+            ("dong", None, egui::pos2(260.0, 215.0)),
+            ("da", Some(Group::Skin), egui::pos2(260.0, 330.0)),
+            ("mat", Some(Group::Eyes), egui::pos2(420.0, 420.0)),
+        ] {
+            let image = crate::ui::snapshot::render(460.0, 860.0, 1.5, Some(hover), |ctx| {
+                ctx.data_mut(|d| {
+                    d.insert_temp(egui::Id::new(PRESETS_KEY), presets::built_in());
+                    d.insert_temp(egui::Id::new("portrait_group"), open);
+                });
+                let mut actions = UiActions::default();
+                portrait_dialog(ctx, &data, &mut actions);
+            });
+            image
+                .save(std::path::Path::new(&dir).join(format!("chan_dung_{name}.png")))
+                .unwrap();
+        }
+    }
 
     #[test]
     fn the_preset_row_draws_and_keeps_everything_until_asked() {
