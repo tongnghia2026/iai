@@ -664,6 +664,13 @@ fn balanced(c: [f32; 3], grey: [f32; 3], change: impl Fn([f32; 3]) -> [f32; 3]) 
     std::array::from_fn(|k| out[k] * grey[k])
 }
 
+/// A white feature (the white of an eye, teeth) brighter by `lift` with
+/// `fade` of its colour taken out.
+fn bleached(c: [f32; 3], lift: f32, fade: f32) -> [f32; 3] {
+    let (y, chroma) = split(c);
+    join(y * (1.0 + lift), chroma.map(|v| v * (1.0 - fade)))
+}
+
 /// How far a reddened eye white is lifted from its luma toward its brightest
 /// channel as its colour goes.
 const WHITE_LIFT: f32 = 0.75;
@@ -824,11 +831,7 @@ fn retouch_pixel(
     }
     let white = face.eye_white[f] as f32 / 255.0 * s.eye_white;
     if white > 0.0 {
-        let (y, c) = split(out);
-        out = join(
-            y * (1.0 + 0.15 * white),
-            c.map(|v| v * (1.0 - 0.75 * white)),
-        );
+        out = balanced(out, grey, |c| bleached(c, 0.15 * white, 0.75 * white));
     }
     let iris = face.iris[f] as f32 / 255.0 * s.iris;
     if iris > 0.0 {
@@ -848,8 +851,7 @@ fn retouch_pixel(
     }
     let teeth = face.teeth[f] as f32 / 255.0 * s.teeth;
     if teeth > 0.0 {
-        let (y, c) = split(out);
-        out = join(y * (1.0 + 0.1 * teeth), c.map(|v| v * (1.0 - 0.8 * teeth)));
+        out = balanced(out, grey, |c| bleached(c, 0.1 * teeth, 0.8 * teeth));
     }
     let lips = face.lips[f] as f32 / 255.0;
     if lips > 0.0 && (s.lip_saturation != 0.0 || s.lip_tint > 0.0 || s.lip_brightness != 0.0) {
@@ -1933,6 +1935,29 @@ mod tests {
         let out = whitened(clear, 1.0);
         assert!((luma(out) - luma(clear)).abs() < 0.03, "{out:?}");
         assert_eq!(whitened(sore, 0.0), sore);
+    }
+
+    #[test]
+    fn eye_whites_and_teeth_whiten_toward_the_photos_grey() {
+        let stained = [0.80f32, 0.74, 0.52];
+        // Without a cast, as before: brighter, most of the colour gone.
+        let plain = bleached(stained, 0.1, 0.8);
+        assert!((luma(plain) - 1.1 * luma(stained)).abs() < 1e-6);
+        assert!((plain[0] - plain[2] - 0.2 * (stained[0] - stained[2])).abs() < 1e-6);
+        assert_eq!(
+            balanced(stained, [1.0; 3], |c| bleached(c, 0.1, 0.8)),
+            plain
+        );
+        // Under a yellow cast the photo's grey is yellow: the tooth keeps
+        // that much yellow, which the white balance then takes out, instead
+        // of going past it to blue.
+        let grey = [1.05f32, 1.0, 0.8];
+        let cast = balanced(stained, grey, |c| bleached(c, 0.1, 1.0));
+        assert!(
+            (cast[0] / grey[0] - cast[2] / grey[2]).abs() < 1e-6,
+            "{cast:?}"
+        );
+        assert!(cast[2] < cast[0], "{cast:?}");
     }
 
     #[test]
