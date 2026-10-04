@@ -808,14 +808,12 @@ pub struct DialogIntent {
     /// Reopen the "Chân dung" layer at this index in Chỉnh chân dung
     /// (double-click in the Layers panel).
     pub edit_portrait_layer: Option<usize>,
-    /// Open/close the "Làm ảnh thẻ" dialog.
-    pub show_id_photo_dialog: Option<bool>,
-    /// Make the ID photo with these options; Chỉnh chân dung, when it opens
-    /// after, starts from these sliders (a preset) instead of its defaults.
-    pub run_id_photo: Option<(
-        crate::core::id_photo::IdPhotoOptions,
-        Option<crate::core::portrait::PortraitSettings>,
-    )>,
+    /// Open the "Chỉnh chân dung" dialog on its Ảnh thẻ side.
+    pub open_id_photo: bool,
+    /// Show the dialog's Ảnh thẻ side (true) or its Chân dung one.
+    pub set_portrait_side: Option<bool>,
+    /// Make the ID photo as asked, or make the one just made again.
+    pub run_id_photo: Option<crate::core::id_photo::IdPhotoRequest>,
     /// Live-preview request: sliders, faces switched on, preview on/off, and
     /// whether to tint the detected areas instead.
     pub set_portrait_preview: Option<(

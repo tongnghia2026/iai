@@ -463,9 +463,13 @@ pub struct DialogViewModel {
     pub show_vector_style_dialog: bool,
     /// "Làm sạch bản scan" dialog is open.
     pub show_scan_cleanup_dialog: bool,
-    /// "Chỉnh chân dung" dialog is open, its status line, whether the analysis
-    /// is ready for previews, and per face whether the part masks are trusted.
+    /// "Chỉnh chân dung" dialog is open, on its Ảnh thẻ side or its Chân
+    /// dung one, whether a retouch is under way, its status line, whether
+    /// the analysis is ready for previews, and per face whether the part
+    /// masks are trusted.
     pub show_portrait_dialog: bool,
+    pub portrait_id_side: bool,
+    pub portrait_session: bool,
     pub portrait_status: String,
     pub portrait_ready: bool,
     pub portrait_faces: Vec<bool>,
@@ -488,12 +492,13 @@ pub struct DialogViewModel {
     pub portrait_reopened: bool,
     pub portrait_restore_settings: Option<crate::core::portrait::PortraitSettings>,
     pub portrait_restore_faces: Option<Vec<bool>>,
-    /// "Làm ảnh thẻ" dialog is open, its status line, whether that line is
-    /// an error, and whether a job (or its model download) is running.
-    pub show_id_photo_dialog: bool,
+    /// The Ảnh thẻ side: its status line, whether that line is an error,
+    /// whether a job (or its model download) is running, and whether the
+    /// document holds the ID photo made, to frame again.
     pub id_photo_status: String,
     pub id_photo_error: bool,
     pub id_photo_busy: bool,
+    pub id_photo_made: bool,
     /// Active document is a multi-page PDF session (enables page-scope options).
     pub scan_is_pdf: bool,
     /// PDF page count (1 for a plain image), for the scan-cleanup scope UI.
@@ -1049,6 +1054,8 @@ impl Default for UiData {
                 show_vector_style_dialog: false,
                 show_scan_cleanup_dialog: false,
                 show_portrait_dialog: false,
+                portrait_id_side: false,
+                portrait_session: false,
                 portrait_status: String::new(),
                 portrait_ready: false,
                 portrait_faces: Vec::new(),
@@ -1060,10 +1067,10 @@ impl Default for UiData {
                 portrait_brush_redo: false,
                 portrait_overlay: None,
                 portrait_reopened: false,
-                show_id_photo_dialog: false,
                 id_photo_status: String::new(),
                 id_photo_error: false,
                 id_photo_busy: false,
+                id_photo_made: false,
                 portrait_restore_settings: None,
                 portrait_restore_faces: None,
                 scan_is_pdf: false,

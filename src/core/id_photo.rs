@@ -1,29 +1,52 @@
-//! "Làm ảnh thẻ" (Image ▸ Làm ảnh thẻ…): frame a 3×4 ID photo — 2.8×3.8 cm,
-//! as shops cut it — from the face's eye line and chin, levelled by the eyes,
-//! and cut the person out onto white.
+//! "Làm ảnh thẻ" (the Ảnh thẻ side of Chỉnh chân dung): frame an ID photo —
+//! 2×3, 3×4 (2.8×3.8 cm, as shops cut it) or 4×6 — from the face's eye line
+//! and chin, levelled by the eyes, and cut the person out onto white or blue.
 //!
 //! The proportions come from the owner's reference print (661×898 px): eye
 //! line 33.6% and chin 56.7% of the way down, face centred. The frame is that
 //! reference widened a little (the owner trims tighter by hand when wanted).
+//!
+//! The models' work (`analyse`) is kept apart from the framing (`plan`), so
+//! a framing the owner does not like is done again at once.
 
 use super::ai::face_mesh::{self, FaceMesh};
 use super::canvas::Canvas;
 use super::command::LayerStructureCommand;
+use super::imposition::{Backdrop, PhotoKind, SHEET_DPI};
 use super::portrait::{Clip, Region};
 use super::tile::TileMap;
 
 pub const PRINT_CM: [f32; 2] = [2.8, 3.8];
-/// The print in pixels: the shops' 661×898 (600 ppi) made as tall as a 4×6 cm
-/// print on a 600 ppi sheet, so that print takes these pixels as they are and
-/// only the 3×4 is scaled down.
+/// The 3×4 print in pixels: the shops' 661×898 (600 ppi) made as tall as a
+/// 4×6 cm print on a 600 ppi sheet, so that print takes these pixels as they
+/// are and only the 3×4 is scaled down.
 pub const PRINT_PX: (u32, u32) = (1043, 1417);
 /// The resolution at which `PRINT_PX` prints as tall as `PRINT_CM`.
 pub const PRINT_PPI: f32 = PRINT_PX.1 as f32 * 2.54 / PRINT_CM[1];
 pub const DEFAULT_WIDEN: f32 = 0.10;
 pub const MAX_WIDEN: f32 = 0.40;
 pub const ORIGINAL_LAYER: &str = "Ảnh gốc";
-const BACKGROUND_STEP: &str = "Nền trắng";
+const BACKGROUND_STEP: &str = "Nền ảnh thẻ";
 const UNDO_LABEL: &str = "Làm ảnh thẻ";
+
+/// The crop for a print of `size`, in pixels. Every size is as tall as a
+/// 4×6 cm print on the sheet, so a sheet of any size takes these pixels as
+/// they are or only scales them down.
+pub fn print_px(size: PhotoKind) -> (u32, u32) {
+    match size {
+        PhotoKind::Id3x4 => PRINT_PX,
+        PhotoKind::Id2x3 | PhotoKind::Id4x6 => PhotoKind::Id4x6.cell_px(),
+    }
+}
+
+/// The resolution at which `print_px(size)` prints at the size's centimetres.
+pub fn print_ppi(size: PhotoKind) -> f32 {
+    match size {
+        PhotoKind::Id2x3 => SHEET_DPI * 2.0,
+        PhotoKind::Id3x4 => PRINT_PPI,
+        PhotoKind::Id4x6 => SHEET_DPI,
+    }
+}
 
 /// Eye line and chin, as fractions of the reference frame's height.
 const EYE_DOWN: f32 = 0.3359;
@@ -47,24 +70,47 @@ const NOSE_TIP: usize = 1;
 #[serde(default)]
 pub struct IdPhotoOptions {
     pub crop: bool,
+    /// The print the crop is for.
+    pub size: PhotoKind,
     /// How much larger than the reference framing (0.10 = 10%).
     pub widen: f32,
     pub straighten: bool,
-    pub white_background: bool,
-    /// Open Chỉnh chân dung on the result.
-    pub then_portrait: bool,
+    /// Cut the person out and lay them on `backdrop`.
+    #[serde(alias = "white_background")]
+    pub cut_out: bool,
+    pub backdrop: Backdrop,
 }
 
 impl Default for IdPhotoOptions {
     fn default() -> Self {
         Self {
             crop: true,
+            size: PhotoKind::Id3x4,
             widen: DEFAULT_WIDEN,
             straighten: true,
-            white_background: true,
-            then_portrait: true,
+            cut_out: true,
+            backdrop: Backdrop::White,
         }
     }
+}
+
+/// What the panel asks for: the photo to make, the owner's correction of its
+/// framing, and the sliders the retouch starts from once it is made.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IdPhotoRequest {
+    pub options: IdPhotoOptions,
+    pub nudge: Nudge,
+    pub settings: Option<super::portrait::PortraitSettings>,
+}
+
+/// The owner's correction of the framing the app chose: how far the person
+/// moves right and down in the picture (fractions of its height) and turns
+/// clockwise (degrees).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Nudge {
+    pub right: f32,
+    pub down: f32,
+    pub turn: f32,
 }
 
 /// The landmarks the framing is measured from.
@@ -161,6 +207,17 @@ impl Frame {
         self.centre[1] -= down[1] * by;
         self
     }
+
+    /// The frame that shows the person moved and turned by `nudge`: it goes
+    /// the other way itself.
+    pub fn nudged(mut self, nudge: Nudge) -> Self {
+        let (along, down) = self.axes();
+        let (du, dv) = (-nudge.right * self.height, -nudge.down * self.height);
+        self.centre[0] += along[0] * du + down[0] * dv;
+        self.centre[1] += along[1] * du + down[1] * dv;
+        self.angle -= nudge.turn.to_radians();
+        self
+    }
 }
 
 /// The reference framing of `face`, `widen` larger around the middle of eyes
@@ -232,31 +289,55 @@ pub struct Cutout {
 pub struct IdPhotoPlan {
     pub frame: Option<Frame>,
     pub cutout: Option<Cutout>,
+    /// The print the frame is cropped for.
+    pub size: PhotoKind,
+    /// What the cut-out is laid on.
+    pub backdrop: Backdrop,
     /// Short Vietnamese remarks for the status line.
     pub notes: Vec<String>,
 }
 
+/// What the models find in a photo: the costly part of an ID photo, kept so
+/// the framing can be done again at once.
+pub struct Analysis {
+    pub width: u32,
+    pub height: u32,
+    /// The framed person's soft mask over the whole photo, when one was
+    /// asked for.
+    pub person: Option<Vec<u8>>,
+    /// The face framed: the largest found.
+    pub face: Option<FaceMarks>,
+    in_selection: bool,
+    notes: Vec<String>,
+}
+
+fn whole(width: u32, height: u32) -> Region {
+    Region {
+        x: 0,
+        y: 0,
+        w: width,
+        h: height,
+    }
+}
+
 /// Cut the person out with `segment` (an RGBA image in, a soft mask of the
-/// same size out) on the whole photo first — the model works best seeing the
-/// whole person, as Select Subject does — then find the face on that person
-/// (in `clip` when given; the largest when several) and frame it.
+/// same size out) on the whole photo when `cut_out` — the model works best
+/// seeing the whole person, as Select Subject does — then find the face on
+/// that person (in `clip` when given; the largest when several).
 /// `progress` gets short status lines.
-pub fn prepare(
+pub fn analyse(
     rgba: &[u8],
     width: u32,
     height: u32,
     clip: Option<&Clip>,
-    options: &IdPhotoOptions,
+    cut_out: bool,
     segment: &mut dyn FnMut(&[u8], u32, u32) -> Result<Vec<u8>, String>,
     progress: &dyn Fn(String),
-) -> Result<IdPhotoPlan, String> {
+) -> Result<Analysis, String> {
     if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
         return Err("ảnh không hợp lệ".to_string());
     }
-    if !options.crop && !options.white_background {
-        return Err("chưa chọn việc nào (cắt khung / nền trắng)".to_string());
-    }
-    let person_mask = if options.white_background {
+    let mut person = if cut_out {
         progress("Đang tách người khỏi nền…".to_string());
         let mask = segment(rgba, width, height)?;
         if mask.len() != width as usize * height as usize {
@@ -271,7 +352,7 @@ pub fn prepare(
         Some(clip) => super::portrait::analysis::faces_in(rgba, width, height, clip)?,
         None => face_mesh::detect(rgba, width, height)?,
     };
-    if let Some(mask) = &person_mask {
+    if let Some(mask) = &person {
         keep_faces_on_people(&mut meshes, mask, width, height);
     }
     let face = meshes
@@ -279,90 +360,146 @@ pub fn prepare(
         .max_by(|a, b| a.frame().1.total_cmp(&b.frame().1))
         .map(FaceMarks::from_mesh);
     let mut notes = Vec::new();
-    if face.is_none() && options.crop {
-        return Err(if clip.is_some() {
-            "không tìm thấy khuôn mặt nào trong vùng chọn".to_string()
-        } else {
-            "không tìm thấy khuôn mặt nào".to_string()
-        });
-    }
     if meshes.len() > 1 {
         notes.push(format!(
             "ảnh có {} khuôn mặt, đã lấy mặt lớn nhất (muốn người khác thì khoanh vùng chọn quanh người đó)",
             meshes.len()
         ));
     }
+    if let (Some(mask), Some(face)) = (&mut person, &face) {
+        keep_person(mask, whole(width, height), face.nose);
+    }
+    Ok(Analysis {
+        width,
+        height,
+        person,
+        face,
+        in_selection: clip.is_some(),
+        notes,
+    })
+}
 
-    let aspect = PRINT_PX.0 as f32 / PRINT_PX.1 as f32;
+/// Frame the face `found` in the photo as `options` ask, moved by `nudge`,
+/// and cut the person out around that frame.
+pub fn plan(
+    rgba: &[u8],
+    found: &Analysis,
+    options: &IdPhotoOptions,
+    nudge: Nudge,
+    progress: &dyn Fn(String),
+) -> Result<IdPhotoPlan, String> {
+    let (width, height) = (found.width, found.height);
+    if rgba.len() != width as usize * height as usize * 4 {
+        return Err("ảnh không hợp lệ".to_string());
+    }
+    if !options.crop && !options.cut_out {
+        return Err("chưa chọn việc nào (cắt khung / tách nền)".to_string());
+    }
+    let person = found.person.as_deref();
+    if options.cut_out && person.is_none() {
+        return Err("chưa tách người khỏi nền".to_string());
+    }
+    if found.face.is_none() && options.crop {
+        return Err(if found.in_selection {
+            "không tìm thấy khuôn mặt nào trong vùng chọn".to_string()
+        } else {
+            "không tìm thấy khuôn mặt nào".to_string()
+        });
+    }
+    let mut notes = found.notes.clone();
+
+    let (print_w, print_h) = print_px(options.size);
+    let aspect = print_w as f32 / print_h as f32;
     let mut frame = None;
-    if let (true, Some(face)) = (options.crop, face.as_ref()) {
-        let (fitted, widen) = fit_frame(face, options, aspect, width, height);
+    if let (true, Some(face)) = (options.crop, found.face.as_ref()) {
+        let (mut fitted, widen) = fit_frame(face, options, aspect, width, height);
         if widen + 0.005 < options.widen {
             notes.push(format!(
                 "ảnh gốc chật nên khung chỉ rộng hơn mẫu {:.0}%",
                 widen * 100.0
             ));
         }
-        frame = Some(fitted);
+        // Room over a tall hairdo.
+        if let Some(mask) = person {
+            let reach = fitted.height * (MAX_HEAD_RAISE + 0.07);
+            let around = Region::around(fitted.corners().into_iter(), [reach; 4], width, height);
+            if let Some(top) = head_top(&fitted, face, mask, width, around) {
+                let want = MIN_HEAD_ROOM * fitted.height - top;
+                if want > 0.0 {
+                    fitted = fitted.raised(want.min(MAX_HEAD_RAISE * fitted.height));
+                }
+            }
+        }
+        frame = Some(fitted.nudged(nudge));
     }
 
-    let cutout = if options.white_background {
-        let region = match &frame {
-            // Room for the frame to rise over a tall hairdo.
-            Some(f) => {
-                let grow = f.height * (MAX_HEAD_RAISE + 0.07);
-                Region::around(f.corners().into_iter(), [grow; 4], width, height)
+    let cutout = match person.filter(|_| options.cut_out) {
+        Some(full) => {
+            let region = match &frame {
+                Some(f) => {
+                    let grow = f.height * 0.07;
+                    Region::around(f.corners().into_iter(), [grow; 4], width, height)
+                }
+                None => whole(width, height),
+            };
+            if region.is_empty() {
+                return Err("khung nằm ngoài ảnh".to_string());
             }
-            None => Region {
-                x: 0,
-                y: 0,
-                w: width,
-                h: height,
-            },
-        };
-        if region.is_empty() {
-            return Err("khung nằm ngoài ảnh".to_string());
+            let mut pixels = copy_region(rgba, width, region);
+            let mask = copy_mask_region(full, width, region);
+            if !mask.iter().any(|&m| m >= 128) {
+                return Err("không tách được người khỏi nền".to_string());
+            }
+            progress("Đang làm sạch viền tóc…".to_string());
+            let original = pixels.clone();
+            decontaminate(&mut pixels, &mask, region.w, region.h);
+            Some(Cutout {
+                region,
+                rgba: pixels,
+                mask,
+                original,
+            })
         }
-        let mut pixels = copy_region(rgba, width, region);
-        let full = person_mask.as_deref().unwrap_or_default();
-        let mut mask = copy_mask_region(full, width, region);
-        if let Some(face) = &face {
-            keep_person(&mut mask, region, face.nose);
-        }
-        if !mask.iter().any(|&m| m >= 128) {
-            return Err("không tách được người khỏi nền".to_string());
-        }
-        progress("Đang làm sạch viền tóc…".to_string());
-        let original = pixels.clone();
-        decontaminate(&mut pixels, &mask, region.w, region.h);
-        Some(Cutout {
-            region,
-            rgba: pixels,
-            mask,
-            original,
-        })
-    } else {
-        None
+        None => None,
     };
 
-    if let (Some(f), Some(cut), Some(face)) = (frame.as_mut(), &cutout, &face) {
-        if let Some(top) = head_top(f, face, &cut.mask, cut.region) {
-            let want = MIN_HEAD_ROOM * f.height - top;
-            if want > 0.0 {
-                *f = f.raised(want.min(MAX_HEAD_RAISE * f.height));
-            }
-        }
-    }
     if let Some(f) = &frame {
         if !f.bottom_inside(width, height) {
-            notes.push("ảnh gốc thiếu phần vai, chỗ thiếu để trắng".to_string());
+            notes.push("ảnh gốc thiếu phần vai, chỗ thiếu để trống".to_string());
         }
     }
     Ok(IdPhotoPlan {
         frame,
         cutout,
+        size: options.size,
+        backdrop: options.backdrop,
         notes,
     })
+}
+
+/// `analyse`, then `plan` as the app first frames the photo.
+pub fn prepare(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    clip: Option<&Clip>,
+    options: &IdPhotoOptions,
+    segment: &mut dyn FnMut(&[u8], u32, u32) -> Result<Vec<u8>, String>,
+    progress: &dyn Fn(String),
+) -> Result<IdPhotoPlan, String> {
+    if !options.crop && !options.cut_out {
+        return Err("chưa chọn việc nào (cắt khung / tách nền)".to_string());
+    }
+    let found = analyse(
+        rgba,
+        width,
+        height,
+        clip,
+        options.cut_out,
+        segment,
+        progress,
+    )?;
+    plan(rgba, &found, options, Nudge::default(), progress)
 }
 
 fn copy_mask_region(mask: &[u8], width: u32, region: Region) -> Vec<u8> {
@@ -401,20 +538,28 @@ fn copy_region(rgba: &[u8], width: u32, region: Region) -> Vec<u8> {
 }
 
 /// Distance from the frame's top down to the highest masked pixel above the
-/// eyes within a face width or so of the centre line.
-fn head_top(frame: &Frame, face: &FaceMarks, mask: &[u8], region: Region) -> Option<f32> {
+/// eyes within a face width or so of the centre line. `mask` covers a photo
+/// `width` wide; only `region` of it is looked at.
+fn head_top(
+    frame: &Frame,
+    face: &FaceMarks,
+    mask: &[u8],
+    width: u32,
+    region: Region,
+) -> Option<f32> {
     let reach = face.width * 0.75;
     let eye_v = frame.local(face.eyes)[1];
     let mut top: Option<f32> = None;
-    for (i, &m) in mask.iter().enumerate() {
-        if m < 128 {
-            continue;
-        }
-        let x = region.x as f32 + (i as u32 % region.w) as f32 + 0.5;
-        let y = region.y as f32 + (i as u32 / region.w) as f32 + 0.5;
-        let [u, v] = frame.local([x, y]);
-        if v < eye_v && (u - frame.width * 0.5).abs() <= reach && top.is_none_or(|t| v < t) {
-            top = Some(v);
+    for y in region.y..region.y + region.h {
+        let row = (y * width) as usize;
+        for x in region.x..region.x + region.w {
+            if mask[row + x as usize] < 128 {
+                continue;
+            }
+            let [u, v] = frame.local([x as f32 + 0.5, y as f32 + 0.5]);
+            if v < eye_v && (u - frame.width * 0.5).abs() <= reach && top.is_none_or(|t| v < t) {
+                top = Some(v);
+            }
         }
     }
     top
@@ -689,10 +834,10 @@ fn box_sum(src: &[[f32; 4]], cols: usize, rows: usize, r: usize) -> Vec<[f32; 4]
 
 /// Apply `plan` as one undo step: the person twice on top — "Ảnh gốc" (the
 /// untouched photo behind a black mask, to paint details back in) under the
-/// cut-out — then the crop (levelled, resampled to `PRINT_PX`), then the
-/// cut-out's mask pressed into its alpha like Ctrl+J with a
-/// selection ("Layer 1", no mask), the background turned white and the older
-/// layers hidden.
+/// cut-out — then the crop (levelled, resampled to the print's pixels), then
+/// the cut-out's mask pressed into its alpha like Ctrl+J with a
+/// selection ("Layer 1", no mask), the background filled with the backdrop
+/// and the older layers hidden.
 pub fn apply(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
     if plan.frame.is_none() && plan.cutout.is_none() {
         return Err("không có gì để làm".to_string());
@@ -705,10 +850,15 @@ pub fn apply(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
 }
 
 fn apply_steps(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
+    // A photo that keeps its own background has white where it ends.
+    let fill = match &plan.cutout {
+        Some(_) => plan.backdrop.rgb(),
+        None => [255; 3],
+    };
     let added = plan.cutout.map(|cut| add_person_layers(canvas, cut));
 
     if let Some(frame) = plan.frame {
-        let (out_w, out_h) = PRINT_PX;
+        let (out_w, out_h) = print_px(plan.size);
         let cropped = canvas.crop_transformed_with_background(
             frame.centre[0],
             frame.centre[1],
@@ -720,18 +870,59 @@ fn apply_steps(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
             0.0,
             -frame.angle,
             true,
-            [255, 255, 255, 255],
+            [fill[0], fill[1], fill[2], 255],
         );
         if !cropped {
             return Err("không cắt được ảnh".to_string());
         }
-        canvas.metadata.resolution_ppi = PRINT_PPI;
+        canvas.metadata.resolution_ppi = print_ppi(plan.size);
     }
 
     if let Some(added) = added {
-        finish_layers(canvas, added);
+        finish_layers(canvas, added, fill);
     }
     Ok(())
+}
+
+/// The photo's backdrop, when it is one: a visible Background layer of one
+/// flat opaque colour at the bottom, with something above it.
+fn plain_background(canvas: &Canvas) -> Option<[u8; 3]> {
+    let layers = &canvas.layer_stack.layers;
+    let background = layers.first().filter(|l| l.is_background && l.visible)?;
+    if layers.len() < 2 {
+        return None;
+    }
+    let fill = background.flatten_tiles();
+    let first = fill.get(0..4).filter(|px| px[3] == 255)?;
+    fill.chunks_exact(4)
+        .all(|px| px == first)
+        .then(|| [first[0], first[1], first[2]])
+}
+
+/// Lay a cut-out person on `backdrop` instead of the plain colour it stands
+/// on, as one undo step. Returns whether the photo has such a backdrop and
+/// it changed.
+pub fn set_backdrop(canvas: &mut Canvas, backdrop: Backdrop) -> bool {
+    let [r, g, b] = backdrop.rgb();
+    if plain_background(canvas).is_none_or(|now| now == [r, g, b]) {
+        return false;
+    }
+    // Only the Background's own pixels go into history: the layers above may
+    // be showing a retouch preview that is not theirs to keep.
+    let layer = &mut canvas.layer_stack.layers[0];
+    let mut step = super::command::DeltaSnapshot::capture_before(
+        &layer.tiles,
+        layer.id,
+        super::layer::PaintTarget::Pixels,
+    );
+    layer.tiles = TileMap::new_solid(layer.width, layer.height, r, g, b, 255);
+    step.capture_after(&layer.tiles);
+    canvas.record(Box::new(super::command::PaintCommand::new(
+        BACKGROUND_STEP,
+        step,
+    )));
+    canvas.layer_revision += 1;
+    true
 }
 
 /// Multiply the layer's alpha by its mask and drop the mask; the colours
@@ -800,9 +991,9 @@ fn add_person_layers(canvas: &mut Canvas, cut: Cutout) -> PersonLayers {
 }
 
 /// Press the cut-out's mask into its alpha, fill the background layer (the
-/// bottom one when none is marked) with white and hide every other layer
+/// bottom one when none is marked) with `fill` and hide every other layer
 /// under the person: their pixels are in the person layers already.
-fn finish_layers(canvas: &mut Canvas, added: PersonLayers) {
+fn finish_layers(canvas: &mut Canvas, added: PersonLayers, fill: [u8; 3]) {
     let mut cmd = LayerStructureCommand::capture_before(
         BACKGROUND_STEP,
         &canvas.layer_stack,
@@ -830,7 +1021,7 @@ fn finish_layers(canvas: &mut Canvas, added: PersonLayers) {
             continue;
         }
         if Some(i) == background {
-            layer.tiles = TileMap::new_white(w, h);
+            layer.tiles = TileMap::new_solid(w, h, fill[0], fill[1], fill[2], 255);
             (layer.width, layer.height, layer.offset) = (w, h, (0, 0));
             layer.mask = None;
             layer.mask_active = false;
@@ -842,12 +1033,12 @@ fn finish_layers(canvas: &mut Canvas, added: PersonLayers) {
     if background.is_none() {
         let person_id = added[1];
         let id = stack.add_layer(w, h);
-        let mut white = stack.layers.remove(id);
-        white.name = "Background".to_string();
-        white.parent_id = None;
-        white.tiles = TileMap::new_white(w, h);
-        white.selected = false;
-        stack.layers.insert(0, white);
+        let mut plain = stack.layers.remove(id);
+        plain.name = "Background".to_string();
+        plain.parent_id = None;
+        plain.tiles = TileMap::new_solid(w, h, fill[0], fill[1], fill[2], 255);
+        plain.selected = false;
+        stack.layers.insert(0, plain);
         if let Some(idx) = stack.layers.iter().position(|l| l.id == person_id) {
             stack.active_idx = idx;
             stack.layers[idx].selected = true;
@@ -1020,11 +1211,11 @@ mod tests {
         // Hair reaching 2% of the frame height below its top.
         let hair = frame.at(0.0, frame.height * 0.02)[1];
         let mask = person_mask(&face, w, h, hair);
-        let top = head_top(&frame, &face, &mask, region).unwrap();
+        let top = head_top(&frame, &face, &mask, w, region).unwrap();
         assert!((top - frame.height * 0.02).abs() < 2.0, "{top}");
         // A normal head leaves room above it.
         let mask = person_mask(&face, w, h, frame.at(0.0, frame.height * 0.15)[1]);
-        let top = head_top(&frame, &face, &mask, region).unwrap();
+        let top = head_top(&frame, &face, &mask, w, region).unwrap();
         assert!(top > MIN_HEAD_ROOM * frame.height);
     }
 
@@ -1191,6 +1382,8 @@ mod tests {
                 mask,
                 original: pixels,
             }),
+            size: PhotoKind::Id3x4,
+            backdrop: Backdrop::White,
             notes: Vec::new(),
         };
         apply(&mut canvas, plan).unwrap();
@@ -1246,6 +1439,8 @@ mod tests {
                 mask,
                 original: cut,
             }),
+            size: PhotoKind::Id3x4,
+            backdrop: Backdrop::White,
             notes: Vec::new(),
         };
         let layers_before = canvas.layer_stack.layers.len();
@@ -1299,6 +1494,160 @@ mod tests {
         assert_eq!(layers.len(), layers_before);
         assert!(layers[1].visible);
         assert_eq!(layers[0].tiles.get_pixel(300, 400), (90, 120, 200, 255));
+    }
+
+    #[test]
+    fn every_print_is_as_tall_as_a_4x6_and_prints_at_its_own_centimetres() {
+        for size in PhotoKind::ALL {
+            let (w, h) = print_px(size);
+            assert_eq!(h, PhotoKind::Id4x6.cell_px().1, "{size:?}");
+            assert_eq!(PhotoKind::detect(w, h, print_ppi(size)), Some(size));
+        }
+        assert_eq!(print_px(PhotoKind::Id2x3), print_px(PhotoKind::Id4x6));
+    }
+
+    #[test]
+    fn a_nudge_moves_and_turns_the_person_in_the_picture() {
+        let face = moved(reference_face(), 250.0, 250.0);
+        let frame = frame_for(&face, 0.1, false, aspect());
+        let nudge = Nudge {
+            right: 0.05,
+            down: -0.02,
+            turn: 0.0,
+        };
+        let (before, after) = (frame.local(face.eyes), frame.nudged(nudge).local(face.eyes));
+        assert!((after[0] - before[0] - 0.05 * frame.height).abs() < 0.01);
+        assert!((after[1] - before[1] + 0.02 * frame.height).abs() < 0.01);
+        // Clockwise: what was level with the centre on its right goes down.
+        let turned = frame.nudged(Nudge {
+            turn: 10.0,
+            ..Nudge::default()
+        });
+        let right_of_centre = [frame.centre[0] + 100.0, frame.centre[1]];
+        let [u, v] = turned.local(right_of_centre);
+        assert!((u - turned.width * 0.5 - 100.0 * 10f32.to_radians().cos()).abs() < 0.01);
+        assert!((v - turned.height * 0.5 - 100.0 * 10f32.to_radians().sin()).abs() < 0.01);
+    }
+
+    /// A green photo of a brown person, and what the models would find in it.
+    fn photo_and_analysis(cut_out: bool) -> (Vec<u8>, Analysis) {
+        let (w, h) = (1200u32, 1500u32);
+        let face = moved(reference_face(), 250.0, 250.0);
+        let mask = person_mask(&face, w, h, face.eyes[1] - 200.0);
+        let mut pixels = [20u8, 120, 60, 255].repeat((w * h) as usize);
+        for (px, &m) in pixels.chunks_exact_mut(4).zip(&mask) {
+            if m == 255 {
+                px[..3].copy_from_slice(&[90, 60, 40]);
+            }
+        }
+        let found = Analysis {
+            width: w,
+            height: h,
+            person: cut_out.then_some(mask),
+            face: Some(face),
+            in_selection: false,
+            notes: Vec::new(),
+        };
+        (pixels, found)
+    }
+
+    fn pixel(canvas: &Canvas, x: f32, y: f32) -> [u8; 3] {
+        let flat = canvas.flatten_for_export();
+        let o = (y as usize * canvas.width as usize + x as usize) * 4;
+        [flat[o], flat[o + 1], flat[o + 2]]
+    }
+
+    #[test]
+    fn a_kept_analysis_frames_again_at_another_size_backdrop_and_place() {
+        let (pixels, found) = photo_and_analysis(true);
+        let face = found.face.unwrap();
+        let (w, h) = (found.width, found.height);
+        let options = IdPhotoOptions {
+            size: PhotoKind::Id4x6,
+            backdrop: Backdrop::Blue,
+            straighten: false,
+            ..Default::default()
+        };
+        let first = plan(&pixels, &found, &options, Nudge::default(), &|_| {}).unwrap();
+        let frame = first.frame.unwrap();
+        assert!((frame.width / frame.height - 2.0 / 3.0).abs() < 1e-3);
+        let mut canvas = Canvas::from_rgba(pixels.clone(), w, h);
+        apply(&mut canvas, first).unwrap();
+        assert_eq!((canvas.width, canvas.height), (945, 1417));
+        assert_eq!(canvas.metadata.resolution_ppi, 600.0);
+        assert_eq!(pixel(&canvas, 5.0, 5.0), Backdrop::Blue.rgb());
+        let on_print = |frame: &Frame, p: [f32; 2]| {
+            let [u, v] = frame.local(p);
+            (u * 1417.0 / frame.height, v * 1417.0 / frame.height)
+        };
+        let (x, y) = on_print(&frame, face.nose);
+        assert_eq!(pixel(&canvas, x, y), [90, 60, 40]);
+
+        // The backdrop alone changes, as a step of its own.
+        assert!(set_backdrop(&mut canvas, Backdrop::White));
+        assert_eq!(pixel(&canvas, 5.0, 5.0), [255; 3]);
+        assert_eq!(pixel(&canvas, x, y), [90, 60, 40]);
+        assert!(!set_backdrop(&mut canvas, Backdrop::White), "no change");
+
+        // Both undone, the same analysis frames the person further right,
+        // for a 2×3 this time.
+        assert!(canvas.undo().is_some() && canvas.undo().is_some());
+        assert_eq!((canvas.width, canvas.height), (w, h));
+        let nudge = Nudge {
+            right: 0.1,
+            ..Nudge::default()
+        };
+        let options = IdPhotoOptions {
+            size: PhotoKind::Id2x3,
+            ..options
+        };
+        let again = plan(&pixels, &found, &options, nudge, &|_| {}).unwrap();
+        let shifted = again.frame.unwrap();
+        let moved_by = shifted.local(face.nose)[0] - frame.local(face.nose)[0];
+        assert!((moved_by - 0.1 * frame.height).abs() < 0.5, "{moved_by}");
+        apply(&mut canvas, again).unwrap();
+        assert_eq!((canvas.width, canvas.height), (945, 1417));
+        assert_eq!(canvas.metadata.resolution_ppi, 1200.0);
+        let (x, y) = on_print(&shifted, face.nose);
+        assert_eq!(pixel(&canvas, x, y), [90, 60, 40]);
+        assert_eq!(pixel(&canvas, 5.0, 5.0), Backdrop::Blue.rgb());
+    }
+
+    #[test]
+    fn a_photo_that_keeps_its_background_is_only_cropped() {
+        let (pixels, found) = photo_and_analysis(false);
+        let (w, h) = (found.width, found.height);
+        let options = IdPhotoOptions {
+            cut_out: false,
+            backdrop: Backdrop::Blue,
+            ..Default::default()
+        };
+        let cropped = plan(&pixels, &found, &options, Nudge::default(), &|_| {}).unwrap();
+        assert!(cropped.cutout.is_none());
+        let mut canvas = Canvas::from_rgba(pixels.clone(), w, h);
+        apply(&mut canvas, cropped).unwrap();
+        assert_eq!((canvas.width, canvas.height), PRINT_PX);
+        assert_eq!(canvas.layer_stack.layers.len(), 1);
+        assert_eq!(pixel(&canvas, 5.0, 5.0), [20, 120, 60]);
+        // A photo is no backdrop to recolour.
+        assert!(!set_backdrop(&mut canvas, Backdrop::Blue));
+
+        // Cutting out needs the mask the analysis did not make.
+        let wanted = IdPhotoOptions {
+            cut_out: true,
+            ..options
+        };
+        assert!(plan(&pixels, &found, &wanted, Nudge::default(), &|_| {}).is_err());
+        // Old prefs said "white_background".
+        let old: IdPhotoOptions =
+            serde_json::from_str("{\"white_background\": false, \"then_portrait\": true}").unwrap();
+        assert_eq!(
+            old,
+            IdPhotoOptions {
+                cut_out: false,
+                ..Default::default()
+            }
+        );
     }
 
     /// Opt-in visual probe: set IAI_ID_PHOTO_PROBE to a folder of photos;

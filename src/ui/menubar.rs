@@ -575,7 +575,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             ))
                             .clicked()
                         {
-                            actions.dialogs.show_id_photo_dialog = Some(true);
+                            actions.dialogs.open_id_photo = true;
                             ui.close();
                         }
                         ui.separator();

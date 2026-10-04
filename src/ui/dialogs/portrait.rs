@@ -1,10 +1,14 @@
-//! "Chỉnh chân dung" dialog (Image ▸ Chỉnh chân dung…): skin, blemish,
-//! under-eye, eye and teeth sliders with a live canvas preview, like the
-//! Filter/Levels dialogs, and a brush ("Tô vùng") to fix the skin, hair and
-//! brow areas before sliding, and studio colour looks. Áp dụng adds the
+//! "Chỉnh chân dung" dialog (Image ▸ Chỉnh chân dung… / Làm ảnh thẻ…): skin,
+//! blemish, under-eye, eye and teeth sliders with a live canvas preview, like
+//! the Filter/Levels dialogs, and a brush ("Tô vùng") to fix the skin, hair
+//! and brow areas before sliding, and studio colour looks. Áp dụng adds the
 //! retouch (look included) as one new layer; Hủy restores. Sets of sliders
-//! are kept by name ("Công thức") in prefs.json (key `portrait_presets`);
-//! "Làm ảnh thẻ" offers them too.
+//! are kept by name ("Công thức") in prefs.json (key `portrait_presets`).
+//!
+//! Two tiles at the top choose its side. "Chân dung" retouches the photo as
+//! it is. "Ảnh thẻ" (see `id_photo`) first makes the ID photo, cropped and
+//! on a plain backdrop, with the presets as chips, then the same sliders
+//! work on that.
 
 use super::*;
 use crate::core::portrait::brush::MaskTarget;
@@ -176,6 +180,61 @@ impl Group {
             Group::Sheet => ph::PRINTER,
         })
     }
+}
+
+/// One of the two tiles at the top of the dialog: an icon over a name,
+/// filled while it is the side shown.
+fn side_tile(
+    ui: &mut egui::Ui,
+    width: f32,
+    icon: &str,
+    name: &str,
+    chosen: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 46.0), egui::Sense::click());
+    let visuals = ui.visuals();
+    let (fill, stroke, text) = if chosen {
+        (
+            visuals.selection.bg_fill,
+            visuals.selection.stroke.color,
+            visuals.strong_text_color(),
+        )
+    } else if response.hovered() {
+        (
+            visuals.widgets.hovered.weak_bg_fill,
+            visuals.widgets.hovered.bg_stroke.color,
+            visuals.text_color(),
+        )
+    } else {
+        (
+            visuals.widgets.inactive.weak_bg_fill,
+            visuals.widgets.noninteractive.bg_stroke.color,
+            visuals.text_color(),
+        )
+    };
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        5.0,
+        fill,
+        egui::Stroke::new(1.0_f32, stroke),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center_top() + egui::vec2(0.0, 5.0),
+        egui::Align2::CENTER_TOP,
+        icon,
+        egui::FontId::proportional(18.0),
+        text,
+    );
+    painter.text(
+        rect.center_bottom() - egui::vec2(0.0, 5.0),
+        egui::Align2::CENTER_BOTTOM,
+        name,
+        crate::ui::theme::bold_font(ui.ctx(), 13.0),
+        text,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// One group: its header, and its contents while it is the open group
@@ -459,9 +518,17 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let group_id = egui::Id::new("portrait_group");
     let presets_id = egui::Id::new(PRESETS_KEY);
     let naming_id = egui::Id::new("portrait_preset_naming");
+    let open_id = egui::Id::new("portrait_dialog_open");
     let mut presets = kept_presets(ctx);
     let mut naming: Option<String> = ctx.data_mut(|d| d.get_temp(naming_id).unwrap_or(None));
     let mut s: PortraitSettings = ctx.data_mut(|d| d.get_temp(settings_id).unwrap_or_default());
+    let id_side = data.dialogs.portrait_id_side;
+    // The Ảnh thẻ side opens with no retouch under way: its sliders start
+    // from the preset used last.
+    let opened = !ctx.data_mut(|d| d.get_temp::<bool>(open_id).unwrap_or(false));
+    if opened && id_side && !data.dialogs.portrait_session && !data.dialogs.id_photo_made {
+        s = super::id_photo::starting_settings(&presets);
+    }
     let mut preview: bool = ctx.data_mut(|d| d.get_temp(preview_id).unwrap_or(true));
     let mut masks: bool = ctx.data_mut(|d| d.get_temp(masks_id).unwrap_or(false));
     // Every group starts closed; opening one closes the rest.
@@ -514,15 +581,44 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
             ui.horizontal(|ui| {
-                if !ready && !data.dialogs.portrait_status.starts_with("Không") {
-                    ui.spinner();
+                let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                for (side, icon, name) in [
+                    (true, ph::IDENTIFICATION_CARD, "Ảnh thẻ"),
+                    (false, ph::USER_CIRCLE, "Chân dung"),
+                ] {
+                    if side_tile(ui, width, icon, name, id_side == side).clicked()
+                        && id_side != side
+                    {
+                        actions.dialogs.set_portrait_side = Some(side);
+                    }
                 }
-                ui.label(
-                    egui::RichText::new(&data.dialogs.portrait_status)
-                        .size(11.0)
-                        .color(egui::Color32::from_gray(170)),
-                );
             });
+            ui.add_space(4.0);
+            if id_side {
+                super::id_photo::id_photo_section(ui, data, actions, &mut s, &presets);
+                ui.add_space(2.0);
+                ui.separator();
+            }
+            if data.dialogs.portrait_session {
+                ui.horizontal(|ui| {
+                    if !ready && !data.dialogs.portrait_status.starts_with("Không") {
+                        ui.spinner();
+                    }
+                    ui.label(
+                        egui::RichText::new(&data.dialogs.portrait_status)
+                            .size(11.0)
+                            .color(egui::Color32::from_gray(170)),
+                    );
+                });
+            } else if !id_side && !data.dialogs.id_photo_busy {
+                ui.label(
+                    egui::RichText::new(
+                        "Không chỉnh được layer này — hãy chọn layer ảnh (không khóa).",
+                    )
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(220, 150, 90)),
+                );
+            }
             if face_count > 1 {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
@@ -545,13 +641,17 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         .color(egui::Color32::from_rgb(220, 150, 90)),
                 );
             }
-            ui.add_space(4.0);
-            if preset_row(ui, ready, &mut s, &mut presets, &mut naming, leave_naming) {
-                save_pref(PRESETS_KEY, &presets);
+            if !id_side {
+                ui.add_space(4.0);
+                if preset_row(ui, ready, &mut s, &mut presets, &mut naming, leave_naming) {
+                    save_pref(PRESETS_KEY, &presets);
+                }
             }
 
+            // The Ảnh thẻ side's own controls take room above the groups.
+            let room = ctx.content_rect().height() * 0.62 - if id_side { 230.0 } else { 0.0 };
             egui::ScrollArea::vertical()
-                .max_height(ctx.content_rect().height() * 0.62)
+                .max_height(room.max(120.0))
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     use Kind::*;
@@ -966,6 +1066,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
         d.insert_temp(preview_id, preview);
         d.insert_temp(masks_id, masks);
         d.insert_temp(presets_id, presets);
+        d.insert_temp(open_id, !(do_apply || do_cancel));
         if do_apply || do_cancel {
             d.remove_temp::<Option<Group>>(group_id);
             d.remove_temp::<Option<String>>(naming_id);
@@ -1001,17 +1102,50 @@ mod tests {
         let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
             return;
         };
-        let mut data = UiData::default();
-        data.dialogs.portrait_ready = true;
-        data.dialogs.portrait_status = "Đã nhận 1 khuôn mặt".to_string();
-        data.dialogs.portrait_faces = vec![true];
-        data.dialogs.portrait_hair = true;
-        for (name, open, hover) in [
-            ("dong", None, egui::pos2(260.0, 215.0)),
-            ("da", Some(Group::Skin), egui::pos2(260.0, 330.0)),
-            ("mieng", Some(Group::Mouth), egui::pos2(420.0, 420.0)),
+        // The Chân dung side, then the Ảnh thẻ side before its photo is
+        // made and after.
+        for (name, open, hover, id_side, made) in [
+            ("dong", None, egui::pos2(260.0, 215.0), false, false),
+            (
+                "da",
+                Some(Group::Skin),
+                egui::pos2(260.0, 330.0),
+                false,
+                false,
+            ),
+            (
+                "mieng",
+                Some(Group::Mouth),
+                egui::pos2(420.0, 420.0),
+                false,
+                false,
+            ),
+            ("anh_the", None, egui::pos2(260.0, 250.0), true, false),
+            (
+                "anh_the_xong",
+                Some(Group::Sheet),
+                egui::pos2(260.0, 250.0),
+                true,
+                true,
+            ),
         ] {
-            let image = crate::ui::snapshot::render(460.0, 860.0, 1.5, Some(hover), |ctx| {
+            let mut data = UiData::default();
+            data.doc.has_doc = true;
+            data.dialogs.portrait_id_side = id_side;
+            data.dialogs.id_photo_made = made;
+            if !id_side || made {
+                data.dialogs.portrait_session = true;
+                data.dialogs.portrait_ready = true;
+                data.dialogs.portrait_status = "Đã nhận 1 khuôn mặt".to_string();
+                data.dialogs.portrait_faces = vec![true];
+                data.dialogs.portrait_hair = true;
+            }
+            if made {
+                data.dialogs.id_photo_status =
+                    "Làm ảnh thẻ xong: 2,8×3,8 cm, 1043×1417 px, nền trắng".to_string();
+                (data.doc.canvas_w, data.doc.canvas_h, data.doc.canvas_dpi) = (1043, 1417, 947.2);
+            }
+            let image = crate::ui::snapshot::render(460.0, 1000.0, 1.5, Some(hover), |ctx| {
                 ctx.data_mut(|d| {
                     d.insert_temp(egui::Id::new(PRESETS_KEY), presets::built_in());
                     d.insert_temp(egui::Id::new("portrait_group"), open);
@@ -1026,9 +1160,81 @@ mod tests {
     }
 
     #[test]
+    fn a_tile_asks_for_the_other_side_and_each_side_shows_its_own_controls() {
+        let ctx = egui::Context::default();
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(460.0, 1000.0));
+        let draw = |data: &UiData, events: Vec<egui::Event>| {
+            let mut actions = UiActions::default();
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::new(PRESETS_KEY), presets::built_in());
+                });
+                portrait_dialog(ui.ctx(), data, &mut actions);
+            });
+            (output, actions)
+        };
+        let find = |output: &egui::FullOutput, label: &str| -> Option<egui::Pos2> {
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.pos + egui::vec2(4.0, 5.0))
+                    }
+                    _ => None,
+                })
+        };
+        let click = |data: &UiData, at: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            draw(data, vec![egui::Event::PointerMoved(at)]);
+            draw(data, vec![button(true)]);
+            draw(data, vec![button(false)]).1
+        };
+        let settle = |data: &UiData| {
+            for _ in 0..8 {
+                draw(data, vec![]);
+            }
+            draw(data, vec![]).0
+        };
+
+        // The Ảnh thẻ side: its chips and button, no "Công thức" row.
+        data.dialogs.portrait_id_side = true;
+        let output = settle(&data);
+        assert!(find(&output, "Nền").is_some() && find(&output, "Cỡ").is_some());
+        assert!(find(&output, "Công thức").is_none());
+        // Its own tile asks for nothing, the other one for its side.
+        let asked = click(&data, find(&output, "Ảnh thẻ").unwrap());
+        assert!(asked.dialogs.set_portrait_side.is_none());
+        let asked = click(&data, find(&output, "Chân dung").unwrap());
+        assert_eq!(asked.dialogs.set_portrait_side, Some(false));
+
+        // The Chân dung side: the row of presets, none of the ID photo's.
+        data.dialogs.portrait_id_side = false;
+        data.dialogs.portrait_session = true;
+        let output = settle(&data);
+        assert!(find(&output, "Công thức").is_some());
+        assert!(find(&output, "Nền").is_none() && find(&output, "Cỡ").is_none());
+        let asked = click(&data, find(&output, "Ảnh thẻ").unwrap());
+        assert_eq!(asked.dialogs.set_portrait_side, Some(true));
+    }
+
+    #[test]
     fn esc_and_enter_in_a_value_box_act_on_the_value_not_on_the_dialog() {
         let ctx = egui::Context::default();
         let mut data = UiData::default();
+        data.dialogs.portrait_session = true;
         data.dialogs.portrait_ready = true;
         data.dialogs.portrait_faces = vec![true];
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(460.0, 860.0));

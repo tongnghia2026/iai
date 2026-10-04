@@ -370,10 +370,10 @@ pub struct UiState {
     pub show_vector_style_dialog: bool,
     /// "Làm sạch bản scan" dialog (Image ▸ Làm sạch bản scan…).
     pub show_scan_cleanup_dialog: bool,
-    /// "Chỉnh chân dung" dialog (Image ▸ Chỉnh chân dung…).
+    /// "Chỉnh chân dung" dialog (Image ▸ Chỉnh chân dung… / Làm ảnh thẻ…).
     pub show_portrait_dialog: bool,
-    /// "Làm ảnh thẻ" dialog (Image ▸ Làm ảnh thẻ…).
-    pub show_id_photo_dialog: bool,
+    /// The dialog shows its "Ảnh thẻ" side rather than "Chân dung".
+    pub portrait_id_side: bool,
     pub vector_style_target: crate::ui::intent::VectorStyleTarget,
     pub show_resize_dialog: bool,
     pub show_image_size_dialog: bool,
@@ -1696,7 +1696,7 @@ impl App {
                     show_vector_style_dialog: false,
                     show_scan_cleanup_dialog: false,
                     show_portrait_dialog: false,
-                    show_id_photo_dialog: false,
+                    portrait_id_side: false,
                     vector_style_target: crate::ui::intent::VectorStyleTarget::Document,
                     show_resize_dialog: false,
                     show_image_size_dialog: false,
@@ -2588,7 +2588,6 @@ impl App {
             || self.shell.ui.show_develop_dialog
             || self.shell.ui.show_scan_cleanup_dialog
             || self.shell.ui.show_portrait_dialog
-            || self.shell.ui.show_id_photo_dialog
     }
 
     /// Bug 7: True when Crop (with an active selection) or Free Transform is active.

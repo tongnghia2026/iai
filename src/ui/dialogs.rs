@@ -13,7 +13,6 @@ mod vector_style;
 pub(crate) use adjustment::*;
 pub(crate) use document::*;
 pub(crate) use filter::*;
-pub(crate) use id_photo::*;
 pub(crate) use portrait::*;
 pub(crate) use print::*;
 pub(crate) use print_sheet::*;
@@ -61,8 +60,12 @@ fn prefs_path() -> PathBuf {
     base.join("prefs.json")
 }
 
-/// One remembered value of prefs.json.
+/// One remembered value of prefs.json. Tests neither read nor write the
+/// owner's file.
 fn load_pref<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+    if cfg!(test) {
+        return None;
+    }
     let s = std::fs::read_to_string(prefs_path()).ok()?;
     let v = serde_json::from_str::<serde_json::Value>(&s).ok()?;
     serde_json::from_value(v[key].clone()).ok()
@@ -70,6 +73,9 @@ fn load_pref<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
 
 /// Remember one value in prefs.json, keeping the others.
 fn save_pref<T: Serialize>(key: &str, value: &T) {
+    if cfg!(test) {
+        return;
+    }
     let path = prefs_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -197,9 +203,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     }
     if data.dialogs.show_portrait_dialog {
         portrait_dialog(ctx, data, actions);
-    }
-    if data.dialogs.show_id_photo_dialog {
-        id_photo_dialog(ctx, data, actions);
     }
     if data.dialogs.show_resize_dialog {
         resize_dialog(ctx, data, actions);

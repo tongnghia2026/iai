@@ -261,6 +261,19 @@ impl App {
         Ok(())
     }
 
+    /// Show the dialog's Ảnh thẻ side or its Chân dung one. The latter
+    /// retouches the photo as it is: the retouch starts if none is under way
+    /// or about to be.
+    pub(crate) fn set_portrait_side(&mut self, id_side: bool) {
+        self.shell.ui.portrait_id_side = id_side;
+        if id_side || self.shell.portrait.is_some() || self.id_photo_state().busy {
+            return;
+        }
+        if let Err(message) = self.begin_portrait() {
+            self.shell.status_msg = message;
+        }
+    }
+
     /// Make the "Chân dung" layer at `idx` the active one and reopen it in
     /// the dialog (a double-click on it in the Layers panel).
     pub(crate) fn reopen_portrait_layer(&mut self, idx: usize) -> Result<(), String> {
@@ -561,6 +574,7 @@ impl App {
         match self.apply_portrait(settings, enabled) {
             Ok(updated) => {
                 self.shell.ui.show_portrait_dialog = false;
+                self.close_id_photo();
                 self.shell.status_msg = if updated {
                     "Chỉnh chân dung: đã cập nhật layer \"Chân dung\"".to_string()
                 } else {
@@ -739,13 +753,9 @@ impl App {
     /// preview yet, per face whether its part masks are trusted, and whether
     /// any hair was found.
     pub(crate) fn portrait_dialog_state(&self) -> (String, bool, Vec<bool>, bool) {
+        // No retouch yet: the Ảnh thẻ side before its photo is made.
         let Some(session) = self.shell.portrait.as_ref() else {
-            return (
-                "Không chỉnh được layer này".to_string(),
-                false,
-                Vec::new(),
-                false,
-            );
+            return (String::new(), false, Vec::new(), false);
         };
         if let Some(error) = &session.error {
             return (

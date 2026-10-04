@@ -171,4 +171,86 @@ mod tests {
         }
         assert!(asked.is_none());
     }
+
+    #[test]
+    fn a_button_asks_for_the_sheet_of_its_size_and_paper() {
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        let ctx = egui::Context::default();
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                egui::Id::new("print_sheet_options"),
+                SheetOptions::default(),
+            )
+        });
+        let mut draw = |events: Vec<egui::Event>| {
+            let mut asked = None;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                ui.set_max_width(300.0);
+                asked = print_sheet_section(ui, &data);
+            });
+            (output, asked)
+        };
+        draw(vec![]);
+        let (output, _) = draw(vec![]);
+        // Each count stands once: 2×3 on 10×15 is the only sheet of 21.
+        for (count, sheet) in [
+            ("21 tấm", Sheet::Grid(Paper::P10x15, PhotoKind::Id2x3)),
+            ("32 tấm", Sheet::Grid(Paper::P13x18, PhotoKind::Id2x3)),
+            ("4 tấm", Sheet::Grid(Paper::P10x15, PhotoKind::Id4x6)),
+            ("Ghép 13×18: 6 tấm 3×4 + 2 tấm 4×6", Sheet::Mixed),
+        ] {
+            let at = output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text() == count => {
+                        Some(text.pos + egui::vec2(4.0, 5.0))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no {count}"));
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            draw(vec![egui::Event::PointerMoved(at)]);
+            draw(vec![button(true)]);
+            let (_, asked) = draw(vec![button(false)]);
+            assert_eq!(asked.map(|(sheet, _)| sheet), Some(sheet), "{count}");
+        }
+    }
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the section is drawn into
+    /// `xep_anh_in.png` there.
+    #[test]
+    #[ignore]
+    fn probe_dialog_snapshot_of_the_print_sheet_section() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        (data.doc.canvas_w, data.doc.canvas_h, data.doc.canvas_dpi) = (945, 1417, 1200.0);
+        let image = crate::ui::snapshot::render(340.0, 330.0, 1.5, None, |ctx| {
+            #[allow(deprecated)]
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.set_max_width(304.0);
+                print_sheet_section(ui, &data);
+            });
+        });
+        image
+            .save(std::path::Path::new(&dir).join("xep_anh_in.png"))
+            .unwrap();
+    }
 }

@@ -43,7 +43,7 @@ pub(crate) fn render(
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
     let mut textures: HashMap<egui::TextureId, egui::ColorImage> = HashMap::new();
     let mut last = None;
-    for _ in 0..4 {
+    for _ in 0..10 {
         let mut input = egui::RawInput {
             screen_rect: Some(screen),
             ..Default::default()
