@@ -7,12 +7,13 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
 
 - Nhánh `feat/vector-core-foundation`; mọi thứ **commit local, chưa push** (push gần nhất
   02/10 @ `d1f4acb`). Chỉ push khi chủ bảo.
-- Bản test đợt 19: **`target\release\iai.exe`** (build 04/10 14:56, có
+- Bản test đợt 20: **`target\release\iai.exe`** (build 04/10 15:51, có
   `--features canvas-editor-webview`).
 - Chủ test OK đợt 18 (04/10): ô "Công thức" trong Làm ảnh thẻ, năm công thức có sẵn, bỏ chú
   thích nổi trên thanh kéo.
-- **Chờ chủ test — đợt 19 (04/10):** giao diện mới của Chỉnh chân dung / Develop / Làm ảnh
-  thẻ (tiêu đề nhóm đậm có icon, hàng thanh kéo sáng lên khi rê chuột, ô nhập số có khung).
+- Chủ test OK đợt 19 (04/10): giao diện mới của Chỉnh chân dung / Develop / Làm ảnh thẻ.
+- **Chờ chủ test — đợt 20 (04/10):** bấm vào ô số của thanh kéo để gõ (hết nhảy lên mức tối
+  đa); Develop chỉ mở một mục; icon môi cho nhóm Miệng.
 - Đợt 17 chủ chưa nói rõ: phím `[` `]` với Smudge / Dodge / Burn; Pencil vẽ đúng cỡ và màu;
   Smart Fill (AI) giữ vân ảnh.
 - Bản portable `dist\iAi-portable` vẫn là bản 02/10 — thiếu mọi thứ làm từ 03/10.
