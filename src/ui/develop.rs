@@ -862,7 +862,8 @@ mod layout_tests {
             .find(|(text, _)| text == "0")
             .map(|(_, pos)| pos + egui::vec2(3.0, 5.0))
             .expect("Exposure's value");
-        let track = egui::pos2(label.x + 150.0, value_box.y);
+        // The track is the line under the label and the value box.
+        let track = egui::pos2(label.x + 150.0, value_box.y + 17.0);
         let header = text_at(&output, "Color") + egui::vec2(4.0, 6.0);
         // Whether any frame of a press and release at `at` asked for drag mode.
         let pressed_as_a_drag = |at: egui::Pos2| {
@@ -913,6 +914,110 @@ mod layout_tests {
             assert!(ctx.egui_wants_keyboard_input(), "the field is open");
             assert_eq!(rows.map(|label| text_at(&output, label)), before);
         }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn a_drag_while_typing_in_a_value_box_needs_no_enter_first() {
+        let ctx = egui::Context::default();
+        let mut data = UiData::default();
+        data.develop.develop_sections_open = DEFAULT_SECTIONS_OPEN;
+        // One frame; the settings it asks for are the app's for the next.
+        // Returns the texts painted, in order, and whether the preview was
+        // put in drag mode.
+        let mut draw = |events: Vec<egui::Event>| {
+            let mut actions = UiActions::default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(420.0, 900.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ctx| {
+                egui::SidePanel::right("develop_typing_test")
+                    .exact_width(340.0)
+                    .show(ctx, |ui| {
+                        develop_panel_contents(ui, &data, &mut actions, 860.0);
+                    });
+            });
+            if let Some(settings) = actions.develop.set_develop_settings.take() {
+                data.develop.develop_settings = settings;
+            }
+            let texts: Vec<(String, egui::Pos2)> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some((text.galley.text().to_string(), text.pos)),
+                    _ => None,
+                })
+                .collect();
+            (
+                texts,
+                actions.develop.develop_controls_pointer_down,
+                data.develop.develop_settings.clone(),
+            )
+        };
+        draw(vec![]);
+        let (texts, ..) = draw(vec![]);
+        // A row paints its label, then its value: the first "0" after it.
+        let row = |label: &str| {
+            let mut after = texts.iter().skip_while(|(text, _)| text != label);
+            let label_at = after.next().unwrap_or_else(|| panic!("no {label}")).1;
+            let value_box = after.find(|(text, _)| text == "0").expect("its value").1;
+            let value_box = value_box + egui::vec2(3.0, 5.0);
+            (value_box, egui::pos2(label_at.x + 40.0, value_box.y + 17.0))
+        };
+        let (contrast_box, contrast_track) = row("Contrast");
+        let (_, highlights_track) = row("Highlights");
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // A click in Contrast's value box, then `text` typed, with no Enter.
+        let type_in_contrast = |text: &str| {
+            [
+                egui::Event::PointerMoved(contrast_box),
+                button(contrast_box, true),
+                button(contrast_box, false),
+                egui::Event::Text(text.to_string()),
+            ]
+        };
+
+        // Typing in Contrast, then straight to a drag on Highlights.
+        for event in type_in_contrast("30") {
+            draw(vec![event]);
+        }
+        assert!(ctx.egui_wants_keyboard_input(), "the field is open");
+        let to = highlights_track + egui::vec2(60.0, 0.0);
+        draw(vec![egui::Event::PointerMoved(highlights_track)]);
+        let (_, drag_mode, settings) = draw(vec![button(highlights_track, true)]);
+        assert!(drag_mode, "a press on a track is a drag");
+        assert_eq!(settings.contrast, 30.0, "the press takes what was typed");
+        let before = settings.highlights;
+        let (.., settings) = draw(vec![egui::Event::PointerMoved(to)]);
+        assert!(settings.highlights != before, "the drag moves Highlights");
+        let dragged_to = settings.highlights;
+        let (.., settings) = draw(vec![button(to, false)]);
+        assert_eq!(settings.highlights, dragged_to);
+        assert_eq!(settings.contrast, 30.0);
+
+        // Typing in Contrast, then a drag on Contrast's own track.
+        for event in type_in_contrast("55") {
+            draw(vec![event]);
+        }
+        assert!(ctx.egui_wants_keyboard_input(), "the field is open");
+        let to = contrast_track + egui::vec2(60.0, 0.0);
+        draw(vec![egui::Event::PointerMoved(contrast_track)]);
+        let (.., settings) = draw(vec![button(contrast_track, true)]);
+        assert_eq!(settings.contrast, 55.0, "the press takes what was typed");
+        draw(vec![egui::Event::PointerMoved(to)]);
+        let (.., settings) = draw(vec![button(to, false)]);
+        let contrast = settings.contrast;
+        assert!(contrast < 0.0, "the drag moves Contrast: {contrast}");
     }
 
     #[test]
@@ -978,7 +1083,8 @@ mod layout_tests {
     }
 
     /// Opt-in: IAI_UI_SNAPSHOT is a folder; the panel is drawn into
-    /// `develop.png` there, Light and Color open, the pointer on a row.
+    /// `develop.png` there, Light and Color open, the pointer on a row, and
+    /// into `develop_detail.png` with Detail and Effects open.
     #[test]
     #[ignore]
     #[allow(deprecated)]
@@ -986,22 +1092,28 @@ mod layout_tests {
         let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
             return;
         };
-        let mut data = UiData::default();
-        data.develop.develop_sections_open = [false; DEV_PANEL_SECTIONS];
-        data.develop.develop_sections_open[SEC_LIGHT] = true;
-        data.develop.develop_sections_open[SEC_COLOR] = true;
-        let hover = egui::pos2(300.0, 232.0);
-        let image = crate::ui::snapshot::render(480.0, 900.0, 1.5, Some(hover), |ctx| {
-            egui::SidePanel::right("develop_snapshot")
-                .exact_width(340.0)
-                .show(ctx, |ui| {
-                    let mut actions = UiActions::default();
-                    develop_panel_contents(ui, &data, &mut actions, 860.0);
-                });
-        });
-        image
-            .save(std::path::Path::new(&dir).join("develop.png"))
-            .unwrap();
+        for (name, open) in [
+            ("develop", [SEC_LIGHT, SEC_COLOR]),
+            ("develop_detail", [SEC_DETAIL, SEC_EFFECTS]),
+        ] {
+            let mut data = UiData::default();
+            data.develop.develop_sections_open = [false; DEV_PANEL_SECTIONS];
+            for section in open {
+                data.develop.develop_sections_open[section] = true;
+            }
+            let hover = egui::pos2(300.0, 232.0);
+            let image = crate::ui::snapshot::render(480.0, 900.0, 1.5, Some(hover), |ctx| {
+                egui::SidePanel::right("develop_snapshot")
+                    .exact_width(340.0)
+                    .show(ctx, |ui| {
+                        let mut actions = UiActions::default();
+                        develop_panel_contents(ui, &data, &mut actions, 860.0);
+                    });
+            });
+            image
+                .save(std::path::Path::new(&dir).join(format!("{name}.png")))
+                .unwrap();
+        }
     }
 
     #[allow(deprecated)] // Exercise the same panel host as the Develop window.

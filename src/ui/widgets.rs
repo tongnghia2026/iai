@@ -87,7 +87,7 @@ pub(crate) fn sample_gradient(colors: &[Color32], t: f32) -> Color32 {
 
 const LABEL_W: f32 = 84.0;
 const VALUE_W: f32 = 42.0;
-/// Height of a stacked slider row (label over the track, value box right).
+/// Height of a stacked slider row (label and value box over the track).
 pub const STACKED_ROW_H: f32 = 33.0;
 
 /// What a row or a header gains under the pointer.
@@ -395,6 +395,19 @@ pub fn dev_slider_stacked_log_resp(
     )
 }
 
+/// Take the number typed into a value box, held to `min..=max`; whether it
+/// changed `value`. Text that is no number changes nothing.
+fn take_typed(text: &str, min: f32, max: f32, value: &mut f32) -> bool {
+    let Ok(typed) = text.trim().replace(',', ".").parse::<f32>() else {
+        return false;
+    };
+    if !typed.is_finite() || (*value - typed.clamp(min, max)).abs() <= f32::EPSILON {
+        return false;
+    }
+    *value = typed.clamp(min, max);
+    true
+}
+
 fn stacked_slider(
     ui: &mut egui::Ui,
     label: &str,
@@ -429,32 +442,24 @@ fn stacked_slider(
         egui::Stroke::new(1.0_f32, Color32::from_white_alpha(10)),
     );
 
-    let precise = (max - min) <= 12.0;
-    let value_text = if precise {
-        format!("{:.1}", *value)
-    } else {
-        format!("{:.0}", *value)
-    };
-    // Clear of the scroll bar that floats over the right edge.
+    // Photoshop's row: the label and the value box share the upper line and
+    // the track runs the row's whole width under them. Both stay clear of
+    // the scroll bar that floats over the right edge.
     let value_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.right() - VALUE_W - 8.0, rect.top() + 13.0),
-        egui::vec2(VALUE_W, 18.0),
+        egui::pos2(rect.right() - VALUE_W - 8.0, rect.top() + 1.0),
+        egui::vec2(VALUE_W, 17.0),
     );
-    let track_left = (rect.left() + 92.0).min(value_rect.left() - 64.0);
     let track_rect = egui::Rect::from_min_max(
-        egui::pos2(track_left, rect.top() + 15.0),
-        egui::pos2(value_rect.left() - 8.0, rect.top() + 33.0),
+        egui::pos2(rect.left() + 8.0, rect.top() + 18.0),
+        egui::pos2(value_rect.right(), rect.bottom()),
     );
 
     // Direct numeric entry: clicking the value box swaps it for a text field.
-    // Enter or clicking away commits (clamped to the range), Esc discards.
+    // Enter or a press anywhere else commits (clamped to the range), Esc
+    // discards.
     let edit_id = response.id.with("value_edit");
     let te_id = edit_id.with("te");
     let focus_id = edit_id.with("focus");
-    let editing = ui
-        .ctx()
-        .data_mut(|d| d.get_temp::<String>(edit_id))
-        .is_some();
     // Keyed off the press ORIGIN so a drag that started on the track keeps
     // driving the slider past the box, and one that started in the box never
     // yanks the slider to its maximum. egui forgets the origin as the button
@@ -467,6 +472,27 @@ fn stacked_slider(
     if pressed_in_value_box {
         note_plain_press(ui.ctx());
     }
+    // A press anywhere else ends the typing there and then, and goes on to
+    // drag or click what it landed on, this row's track included. Left to
+    // egui the field holds the keyboard until a click, and a drag is not
+    // one: the sliders stayed deaf until Enter or Esc.
+    if ui.input(|i| i.pointer.any_pressed()) && !pressed_in_value_box {
+        if let Some(text) = ui.ctx().data_mut(|d| d.remove_temp::<String>(edit_id)) {
+            ui.memory_mut(|m| m.surrender_focus(te_id));
+            if take_typed(&text, min, max, value) {
+                response.mark_changed();
+            }
+        }
+    }
+    let editing = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<String>(edit_id))
+        .is_some();
+    let value_text = if (max - min) <= 12.0 {
+        format!("{:.1}", *value)
+    } else {
+        format!("{:.0}", *value)
+    };
 
     if !editing && (response.dragged() || response.clicked()) {
         if response.clicked() && pressed_in_value_box {
@@ -489,9 +515,14 @@ fn stacked_slider(
     paint_gradient_slider(ui, track_rect, to_pos(*value), min, max, colors);
     let font = egui::FontId::proportional(11.5);
     let color = ui.visuals().text_color();
-    ui.painter().text(
-        egui::pos2(rect.left() + 8.0, rect.top() + 2.0),
-        egui::Align2::LEFT_TOP,
+    // A label too long for a narrow row stops short of the value box.
+    let label_room = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(value_rect.left() - 6.0, track_rect.top()),
+    );
+    ui.painter().with_clip_rect(label_room).text(
+        egui::pos2(track_rect.left(), value_rect.center().y),
+        egui::Align2::LEFT_CENTER,
         label,
         font.clone(),
         color,
@@ -542,22 +573,18 @@ fn stacked_slider(
         }
         if out.lost_focus() || !(opening || out.has_focus()) {
             ui.ctx().data_mut(|d| d.remove::<String>(edit_id));
-            // Esc = discard; any other way out (Enter, click away) commits.
-            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                if let Ok(v) = text.trim().replace(',', ".").parse::<f32>() {
-                    let v = if v.is_finite() {
-                        v.clamp(min, max)
-                    } else {
-                        *value
-                    };
-                    if (*value - v).abs() > f32::EPSILON {
-                        *value = v;
-                        response.mark_changed();
-                    }
-                }
+            // Esc = discard; any other way out (Enter, Tab) commits.
+            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) && take_typed(&text, min, max, value)
+            {
+                response.mark_changed();
             }
         }
     } else {
+        // The field's child takes one of this ui's automatic ids. Take it
+        // without the field too, or every widget below changes id as the
+        // field comes and goes, and a press that closes it lands on an id
+        // that is no longer there.
+        ui.skip_ahead_auto_ids(1);
         ui.painter().text(
             value_rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -688,7 +715,7 @@ mod value_box_tests {
         let ctx = egui::Context::default();
         let mut value = 40.0f32;
         let row = frame(&ctx, &mut value, vec![]);
-        let in_box = egui::pos2(row.right() - 8.0 - VALUE_W * 0.5, row.top() + 22.0);
+        let in_box = egui::pos2(row.right() - 8.0 - VALUE_W * 0.5, row.top() + 9.0);
         frame(&ctx, &mut value, vec![egui::Event::PointerMoved(in_box)]);
         frame(&ctx, &mut value, vec![click(in_box, true)]);
         frame(&ctx, &mut value, vec![click(in_box, false)]);
@@ -719,12 +746,109 @@ mod value_box_tests {
         let ctx = egui::Context::default();
         let mut value = 40.0f32;
         let row = frame(&ctx, &mut value, vec![]);
-        // The track runs from 92 px in to 8 px short of the value box.
-        let (left, right) = (row.left() + 92.0, row.right() - 8.0 - VALUE_W - 8.0);
-        let quarter = egui::pos2(left + (right - left) * 0.25, row.top() + 24.0);
+        // The track runs under the label and the box, 8 px in at each end.
+        let (left, right) = (row.left() + 8.0, row.right() - 8.0);
+        let quarter = egui::pos2(left + (right - left) * 0.25, row.top() + 26.0);
         frame(&ctx, &mut value, vec![egui::Event::PointerMoved(quarter)]);
         frame(&ctx, &mut value, vec![click(quarter, true)]);
         frame(&ctx, &mut value, vec![click(quarter, false)]);
         assert!((value - 25.0).abs() < 0.5, "{value}");
+    }
+
+    /// A point on the track of `row`, `t` of the way along it.
+    fn on_track(row: egui::Rect, t: f32) -> egui::Pos2 {
+        let (left, right) = (row.left() + 8.0, row.right() - 8.0);
+        egui::pos2(left + (right - left) * t, row.top() + 26.0)
+    }
+
+    /// Click the value box of `row` and type `text` into it, with no Enter.
+    fn type_in_box(ctx: &egui::Context, value: &mut f32, row: egui::Rect, text: &str) {
+        let in_box = egui::pos2(row.right() - 8.0 - VALUE_W * 0.5, row.top() + 9.0);
+        frame(ctx, value, vec![egui::Event::PointerMoved(in_box)]);
+        frame(ctx, value, vec![click(in_box, true)]);
+        frame(ctx, value, vec![click(in_box, false)]);
+        frame(ctx, value, vec![egui::Event::Text(text.to_string())]);
+        assert!(ctx.egui_wants_keyboard_input(), "the field is open");
+    }
+
+    #[test]
+    fn a_drag_on_the_track_while_typing_takes_the_typed_value_and_drags_at_once() {
+        let ctx = egui::Context::default();
+        let mut value = 40.0f32;
+        let row = frame(&ctx, &mut value, vec![]);
+        type_in_box(&ctx, &mut value, row, "75");
+        assert_eq!(value, 40.0);
+
+        // No Enter, no Esc: the press itself ends the typing.
+        let (from, to) = (on_track(row, 0.25), on_track(row, 0.5));
+        frame(&ctx, &mut value, vec![egui::Event::PointerMoved(from)]);
+        frame(&ctx, &mut value, vec![click(from, true)]);
+        assert_eq!(value, 75.0, "the press takes what was typed");
+        assert!(!ctx.egui_wants_keyboard_input(), "the field is closed");
+        frame(&ctx, &mut value, vec![egui::Event::PointerMoved(to)]);
+        assert!((value - 50.0).abs() < 0.5, "the drag moves it: {value}");
+        frame(&ctx, &mut value, vec![click(to, false)]);
+        assert!((value - 50.0).abs() < 0.5, "{value}");
+    }
+
+    #[test]
+    fn a_click_on_the_track_while_typing_moves_the_slider_with_that_click() {
+        let ctx = egui::Context::default();
+        let mut value = 40.0f32;
+        let row = frame(&ctx, &mut value, vec![]);
+        type_in_box(&ctx, &mut value, row, "75");
+        let quarter = on_track(row, 0.25);
+        frame(&ctx, &mut value, vec![egui::Event::PointerMoved(quarter)]);
+        frame(&ctx, &mut value, vec![click(quarter, true)]);
+        frame(&ctx, &mut value, vec![click(quarter, false)]);
+        assert!((value - 25.0).abs() < 0.5, "{value}");
+    }
+
+    #[test]
+    fn a_drag_on_another_slider_while_typing_ends_the_typing_too() {
+        let ctx = egui::Context::default();
+        let (mut first, mut second) = (40.0f32, 10.0f32);
+        let mut rows = [egui::Rect::NOTHING; 2];
+        let mut draw = |first: &mut f32, second: &mut f32, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 200.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let track = [Color32::DARK_GRAY, Color32::LIGHT_GRAY];
+                rows[0] = dev_slider_stacked_resp(ui, "Một", first, 0.0..=100.0, &track, 1.0).rect;
+                rows[1] = dev_slider_stacked_resp(ui, "Hai", second, 0.0..=100.0, &track, 1.0).rect;
+            });
+            rows
+        };
+        let rows = draw(&mut first, &mut second, vec![]);
+        let in_box = egui::pos2(rows[0].right() - 8.0 - VALUE_W * 0.5, rows[0].top() + 9.0);
+        for events in [
+            vec![egui::Event::PointerMoved(in_box)],
+            vec![click(in_box, true)],
+            vec![click(in_box, false)],
+            vec![egui::Event::Text("75".to_string())],
+        ] {
+            draw(&mut first, &mut second, events);
+        }
+        assert!(ctx.egui_wants_keyboard_input(), "the field is open");
+
+        let (from, to) = (on_track(rows[1], 0.25), on_track(rows[1], 0.5));
+        draw(
+            &mut first,
+            &mut second,
+            vec![egui::Event::PointerMoved(from)],
+        );
+        draw(&mut first, &mut second, vec![click(from, true)]);
+        assert_eq!(first, 75.0, "the press takes what was typed");
+        assert!(!ctx.egui_wants_keyboard_input(), "the field is closed");
+        draw(&mut first, &mut second, vec![egui::Event::PointerMoved(to)]);
+        draw(&mut first, &mut second, vec![click(to, false)]);
+        assert!((second - 50.0).abs() < 0.5, "{second}");
+        assert_eq!(first, 75.0);
     }
 }
