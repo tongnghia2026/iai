@@ -700,4 +700,76 @@ lên layer ảnh. Công cụ khác mà chạy lúc đó sẽ ghi bản xem trư�
 - Chưa kiểm được bằng test: nút công cụ, phím tắt và Hand / Zoom trên cửa sổ thật.
 - Code `d03d422`; bản test `target/release/iai.exe` (build 04/10 21:33; bản tạm
   `iai-dot25.exe` của đợt 25 đã xóa).
+- [x] Build Release, chủ test đợt 26: **OK** (04/10 khuya), kèm việc của đợt 27.
+
+## Đợt 27 (04/10 khuya giao, làm phiên sau): bảng Auto retouch mở mà vẫn dùng được mọi lệnh và bảng Layer
+
+Lời chủ: "tôi muốn quá trình mở bảng phải làm được các tool chỉnh ảnh khác bao gồm ctrl+x,
+ctrl+l, ctrl+m,..... sử dụng được cả bảng layer luôn". Mục đích chủ nói rõ: tự động làm đẹp
+xong, còn chỗ nào chưa ưng thì sửa tay một chút bằng công cụ khác là in được; "thay vì giữ bản
+xem trước như hiện tại, nếu user muốn chỉnh thêm 1 chút ở tool khác thì áp dụng cái đã được auto
+đẹp sẵn thành 1 layer cố định".
+
+Quy tắc chung (`App::portrait_yields`, `yield_portrait`): lúc chỉ có bản xem trước của Auto
+retouch đang giữ ảnh thì không khóa gì nữa; **hễ có lệnh từ ngoài bảng thì app áp dụng phần làm
+đẹp đang có thành layer "Chân dung" (bảng vẫn mở), rồi lệnh chạy trên layer đó**. Các bảng xem
+trước khác (Levels, Curves, Filter, Develop, Làm sạch scan) vẫn khóa như cũ.
+
+- [x] **Phím tắt** (`portrait_key_passes`): Ctrl+X, Ctrl+V, Ctrl+L, Ctrl+M, Ctrl+U, Ctrl+B,
+  Ctrl+I, Ctrl+T, Ctrl+J, Ctrl+A, Ctrl+D, Ctrl+E, Ctrl+G, Ctrl+S, Ctrl+P, Delete, phím mũi tên
+  (khi đang cầm Move hoặc có vùng chọn)… đều áp dụng rồi chạy. Không áp dụng (chỉ xem / chỉ đổi
+  cài đặt): phóng to thu nhỏ, Ctrl+0 / Ctrl+1, thước, Space, Ctrl+C, Ctrl+K, `[` `]`, X, D,
+  Ctrl+Y. Enter / Esc vẫn là Áp dụng / Hủy của bảng. Phím không gán lệnh nào thì bỏ qua như cũ.
+  Đang gõ trong một ô (ô số của thanh kéo, ô tên công thức, ô lời nhắc AI) thì Ctrl+A / Ctrl+V
+  là của ô đó, không tính là lệnh.
+- [x] **Menu, bảng Layer, thanh tab, thanh trang, History, Channels, AI Image Studio**: bật lại
+  lúc đang xem trước. App nhận ra "lệnh ngoài bảng" bằng cách so cả gói yêu cầu của khung hình
+  (`UiActions::reaches_past_retouch`): chỉ những gì chính bảng Auto retouch gửi và những gì
+  thuần xem (phóng to, bật tắt bảng, rê chuột qua tab…) mới không tính; **trường mới thêm sau
+  này mặc định tính là lệnh** (an toàn). Lệnh nhắm layer theo vị trí trong bảng Layer (độ mờ,
+  chế độ hòa trộn, xóa, gộp, đổi tên…) được dời theo layer "Chân dung" vừa chen vào, và lệnh
+  nhắm ảnh gốc được chuyển sang layer đã làm đẹp (`UiActions::retarget_layers`).
+- [x] **Bấm thẳng lên ảnh** bằng công cụ đang cầm (`portrait_pressed`): áp dụng rồi công cụ chạy
+  ngay cú bấm đó. Cú bấm chỉ để chốt ô số đang gõ không tính (lúc đó ô số còn giữ bàn phím nên
+  ảnh chưa nhận chuột). Hand / Zoom vẫn chỉ xem, không áp dụng.
+- [x] **Ctrl+Z / Edit ▸ Undo lúc đang xem trước** = bỏ phần xem trước, bảng vẫn mở, không hoàn
+  tác gì của ảnh (`drop_portrait_preview`); đang bật cọ "Tô vùng" thì vẫn là hoàn tác nét tô.
+  Bấm một mốc trong bảng History cũng bỏ xem trước rồi nhảy tới mốc đó. Redo lúc đó không làm gì.
+- [x] **Đang nhận diện khuôn mặt hoặc đang làm ảnh thẻ** mà có lệnh ngoài bảng (kể cả chọn
+  công cụ): app dừng việc đang chạy rồi cho lệnh chạy (đợt 26 từ chối kèm lời nhắc). Riêng cú
+  bấm lên ảnh lúc này vẫn không có tác dụng, để một cú bấm vô tình không làm mất 4–10 giây đang
+  chờ.
+- [x] **Tắt app, kéo thả file vào, Ctrl+N** lúc đang xem trước: cũng áp dụng trước (trước đây
+  tắt app bị chặn "Finish or cancel live preview"); tắt app thì sau đó hỏi lưu như thường.
+  Riêng tắt app lúc **còn đang nhận diện khuôn mặt / đang làm ảnh thẻ** thì vẫn bị chặn như cũ
+  (`portrait_on_show`): tiến trình thoát đúng lúc luồng AI đang nạp model có thể kẹt lại lúc
+  thoát — đã gặp thật ở tiến trình test của đợt này.
+- [x] **Tôi tự thêm (chủ không yêu cầu, đã báo)**: layer "Chân dung" đã được sửa tay sau khi áp
+  dụng (tô, Levels, Curves…) thì bấm "Tự động làm đẹp" lần nữa sẽ **không** mở lại công thức cũ
+  (mở lại là dựng lại từ ảnh gốc, đè mất phần sửa tay) mà làm đẹp tiếp trên chính layer đó như
+  một ảnh mới, thanh từ 0 — cùng cách với layer đã crop ở đợt 25. Chưa sửa gì (hoặc đã Ctrl+Z
+  hết phần sửa) thì vẫn mở lại đúng các thanh cũ như đợt 26. Nhận biết bằng dấu vân tay điểm
+  ảnh lưu trong công thức (`PortraitRecipe::made`, `TileMap::content_hash`), ghi cả vào file
+  `.iai`; file cũ không có dấu thì coi như chưa sửa.
+- Đổi kèm: thanh công cụ không còn tự chuyển về Move lúc đang làm đẹp (việc tự chuyển đó sẽ bị
+  tính là "chọn công cụ" và tự áp dụng). `ui::build` tách phần dựng một khung hình ra
+  `ui::frame` để test chạy được cả giao diện không cần cửa sổ.
+- Test: `a_command_from_outside_applies_the_previewed_retouch_and_runs_on_it` (ảnh thật: Ctrl+Z
+  bỏ xem trước, bảng Layer đổi độ mờ, bấm bằng cọ, Ctrl+L, mắt của layer, Hand không áp dụng,
+  layer đã sửa tay không bị dựng lại), `work_still_running_gives_way_to_a_command_and_ctrl_z_without_a_trace`,
+  `a_key_that_edits_goes_on_once_the_retouch_gave_way_and_the_rest_leave_it`,
+  `a_frame_nobody_touches_asks_nothing_from_outside_the_dialog` (dựng cả giao diện với từng
+  công cụ, chuột đứng yên ở nhiều chỗ: không được tự áp dụng — đã thử gỡ chốt ở thanh công cụ
+  thì test này bắt được), `only_a_command_from_outside_reaches_past_the_retouch`,
+  `a_layer_asked_for_by_its_place_is_that_layer_still_once_the_retouch_has_its_own`,
+  `portrait_recipe_round_trips_with_its_masks` (dấu vân tay còn đúng sau lưu / mở lại).
+  Test `asking_for_the_crop_tool_…` sửa một ý: chọn công cụ lúc đang nhận diện nay dừng nhận diện.
+- Ghi chú kỹ thuật: test nào mở phiên làm đẹp rồi kết thúc ngay phải dùng phiên giả
+  `being_found` (không chạy luồng AI). Tiến trình test thoát lúc luồng nhận diện đang nạp model
+  thì kẹt lại, không kill được, và khóa file exe test (`cargo test` báo `LNK1104`); đổi tên file
+  bị khóa trong `target/debug/deps` là build lại được.
+- Chưa kiểm được bằng test (cần cửa sổ thật, chờ chủ thử): bấm thật vào menu / bảng Layer /
+  ảnh, và phím tắt gõ thật.
+- Test đầy đủ qua (1919 + 22). Code `0b5a416`; bản test `target/release/iai.exe` (build 04/10
+  23:50, đã mở thử lên được).
 - [ ] Build Release, chủ test.
