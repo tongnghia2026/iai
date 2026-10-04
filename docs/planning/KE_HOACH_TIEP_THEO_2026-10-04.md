@@ -7,8 +7,8 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
 
 - Nhánh `feat/vector-core-foundation`; mọi thứ **commit local, chưa push** (push gần nhất
   02/10 @ `d1f4acb`). Chỉ push khi chủ bảo.
-- Bản test đợt 18: **`target\release\iai.exe`** (build 04/10 13:55, có
-  `--features canvas-editor-webview`). Bản `iai-dot17.exe` đã xóa.
+- Bản test đợt 19: **`target\release\iai.exe`** (build 04/10 14:56, có
+  `--features canvas-editor-webview`).
 - Chủ test OK đợt 18 (04/10): ô "Công thức" trong Làm ảnh thẻ, năm công thức có sẵn, bỏ chú
   thích nổi trên thanh kéo.
 - **Chờ chủ test — đợt 19 (04/10):** giao diện mới của Chỉnh chân dung / Develop / Làm ảnh
