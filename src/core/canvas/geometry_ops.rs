@@ -850,13 +850,14 @@ impl Canvas {
             layer.offset = (0, 0);
 
             if let Some(mask) = &mut layer.mask {
-                mask.tiles = Self::resample_into_tiles_footprint(
+                mask.tiles = Self::resample_footprint(
                     &mask.tiles,
                     out_w,
                     out_h,
                     &map,
                     background.map(|_| [255, 255, 255, 255]),
                     footprint,
+                    true,
                 );
                 mask.width = out_w;
                 mask.height = out_h;
@@ -1032,6 +1033,25 @@ impl Canvas {
         background: Option<[u8; 4]>,
         footprint: f32,
     ) -> crate::core::tile::TileMap {
+        Self::resample_footprint(src, out_w, out_h, map, background, footprint, false)
+    }
+
+    /// [`Self::resample_into_tiles_footprint`], and for a layer mask with
+    /// `keep_edge`: an output pixel the source covers in part takes the
+    /// source's own value there instead of a blend toward `background`. A
+    /// mask blended toward white at its edge shows the layer's edge pixels
+    /// through even where it hides them (a faint line along the photo's edge
+    /// when a crop reaches past it).
+    #[allow(clippy::too_many_arguments)]
+    fn resample_footprint(
+        src: &crate::core::tile::TileMap,
+        out_w: u32,
+        out_h: u32,
+        map: impl Fn(f32, f32) -> (f32, f32) + Sync,
+        background: Option<[u8; 4]>,
+        footprint: f32,
+        keep_edge: bool,
+    ) -> crate::core::tile::TileMap {
         use rayon::prelude::*;
         let taps = if footprint.is_finite() {
             footprint.round().clamp(1.0, 5.0) as usize
@@ -1116,6 +1136,9 @@ impl Canvas {
                             for c in 0..cw as usize {
                                 let u = (bx + c as u32) as f32 + 0.5;
                                 let (mut rr, mut gg, mut bb, mut aa) = sample16(u, v);
+                                if keep_edge && aa > 0 {
+                                    aa = u16::MAX;
+                                }
                                 if let Some([br, bg, bb_bg, ba]) = background {
                                     // Background is an 8-bit fill colour; lift to 16 bits.
                                     let (br, bg, bb_bg, ba) = (
@@ -1166,6 +1189,9 @@ impl Canvas {
                             for c in 0..cw as usize {
                                 let u = (bx + c as u32) as f32 + 0.5;
                                 let (mut rr, mut gg, mut bb, mut aa) = sample8(u, v);
+                                if keep_edge && aa > 0 {
+                                    aa = u8::MAX;
+                                }
                                 if let Some([br, bg, bb_bg, ba]) = background {
                                     let src_a = aa as f32 / 255.0;
                                     let bg_a = ba as f32 / 255.0;

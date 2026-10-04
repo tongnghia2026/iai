@@ -1150,6 +1150,55 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_past_the_photos_edge_leaves_no_line_of_the_old_background() {
+        // A dark photo with nobody kept at its top, and a frame that reaches
+        // past its top and left edges by a fraction of an output pixel.
+        let (w, h) = (1000u32, 1300u32);
+        let pixels = [40u8, 60, 30, 255].repeat((w * h) as usize);
+        let mut canvas = Canvas::from_rgba(pixels.clone(), w, h);
+        let region = Region { x: 0, y: 0, w, h };
+        let mut mask = vec![0u8; region.len()];
+        for y in 500..h as usize {
+            for x in 300..700usize {
+                mask[y * w as usize + x] = 255;
+            }
+        }
+        let height = 1000.0;
+        let frame = Frame {
+            centre: [height * aspect() / 2.0 - 20.7, height / 2.0 - 30.3],
+            width: height * aspect(),
+            height,
+            angle: 0.0,
+        };
+        let plan = IdPhotoPlan {
+            frame: Some(frame),
+            cutout: Some(Cutout {
+                region,
+                rgba: pixels.clone(),
+                mask,
+                original: pixels,
+            }),
+            notes: Vec::new(),
+        };
+        apply(&mut canvas, plan).unwrap();
+        let (out_w, out_h) = output_size();
+        let flat = canvas.flatten_for_export();
+        // The top third holds no person: white throughout, also along the
+        // rows and columns where the photo begins.
+        let mut darkest = 255u8;
+        for y in 0..out_h / 3 {
+            for x in 0..out_w {
+                let o = ((y * out_w + x) * 4) as usize;
+                darkest = darkest.min(flat[o].min(flat[o + 1]).min(flat[o + 2]));
+            }
+        }
+        assert_eq!(darkest, 255, "the old background shows through");
+        // The person is there below.
+        let o = (((out_h - 5) * out_w + out_w / 2) * 4) as usize;
+        assert_eq!(&flat[o..o + 3], &[40, 60, 30]);
+    }
+
+    #[test]
     fn apply_stacks_person_over_the_original_on_white_in_one_undo() {
         let (w, h) = (1000u32, 1300u32);
         let mut pixels = vec![0u8; (w * h * 4) as usize];
