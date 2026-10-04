@@ -3,42 +3,43 @@
 //! Filter/Levels dialogs, and a brush ("Tô vùng") to fix the skin, hair and
 //! brow areas before sliding, and studio colour looks. Áp dụng adds the
 //! retouch (look included) as one new layer; Hủy restores. Sets of sliders
-//! can be kept by name ("Công thức") in prefs.json (key `portrait_presets`).
+//! are kept by name ("Công thức") in prefs.json (key `portrait_presets`);
+//! "Làm ảnh thẻ" offers them too.
 
 use super::*;
 use crate::core::portrait::brush::MaskTarget;
 use crate::core::portrait::looks::StudioLook;
+use crate::core::portrait::presets::{self, Preset};
 use crate::core::portrait::PortraitSettings;
 use crate::core::selection::RefineBrushMode;
 use egui_phosphor::regular as ph;
 
 const PRESETS_KEY: &str = "portrait_presets";
+/// Which round of built-in presets prefs.json has been given.
+const BUILT_IN_KEY: &str = "portrait_presets_built_in";
 const PRESET_NAME_FIELD: &str = "portrait_preset_name";
 
-/// "Công thức": a set of sliders kept under a name.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-struct Preset {
-    name: String,
-    settings: PortraitSettings,
-}
-
+/// The kept presets; an install that has not had the built-in ones yet is
+/// given them first.
 fn load_presets() -> Vec<Preset> {
-    load_pref(PRESETS_KEY).unwrap_or_default()
+    let mut kept: Vec<Preset> = load_pref(PRESETS_KEY).unwrap_or_default();
+    if load_pref::<u32>(BUILT_IN_KEY).unwrap_or(0) < presets::BUILT_IN_ROUND {
+        presets::add_built_in(&mut kept);
+        save_pref(PRESETS_KEY, &kept);
+        save_pref(BUILT_IN_KEY, &presets::BUILT_IN_ROUND);
+    }
+    kept
 }
 
-/// Keep `settings` under `name`, in place of the preset of that name.
-fn keep_preset(presets: &mut Vec<Preset>, name: &str, settings: PortraitSettings) {
-    let name = name.trim();
-    if name.is_empty() {
-        return;
+/// The kept presets, read from prefs.json once and held in memory after.
+pub(super) fn kept_presets(ctx: &egui::Context) -> Vec<Preset> {
+    let id = egui::Id::new(PRESETS_KEY);
+    if let Some(kept) = ctx.data_mut(|d| d.get_temp(id)) {
+        return kept;
     }
-    match presets.iter_mut().find(|p| p.name == name) {
-        Some(preset) => preset.settings = settings,
-        None => presets.push(Preset {
-            name: name.to_string(),
-            settings,
-        }),
-    }
+    let kept = load_presets();
+    ctx.data_mut(|d| d.insert_temp(id, kept.clone()));
+    kept
 }
 
 /// The "Công thức" row: load a kept set of sliders, keep the current one
@@ -117,7 +118,7 @@ fn preset_row(
             done |= ui.button("Thôi").clicked();
         });
         if keep && !name.trim().is_empty() {
-            keep_preset(presets, name, *s);
+            presets::keep(presets, name, *s);
             changed = true;
             done = true;
         }
@@ -194,14 +195,7 @@ fn group_header(ui: &mut egui::Ui, title: &str, open: bool, active: bool) -> egu
             egui::Color32::from_rgb(90, 170, 255),
         );
     }
-    let tip = if active {
-        "Có thanh đang chỉnh trong nhóm này"
-    } else {
-        "Bấm để mở / đóng nhóm"
-    };
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tip)
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// One group: its header, and its contents while it is the open group
@@ -258,7 +252,8 @@ fn rainbow() -> [egui::Color32; 7] {
     ]
 }
 
-/// A slider row: label, value, tooltip, kind.
+/// A slider row: label, value, what it does, kind. The note is for the
+/// reader of this file: popping up over every slider cluttered the dialog.
 type Row<'a> = (&'a str, &'a mut f32, &'a str, Kind);
 
 /// Whether any slider (not a colour picker) is away from 0.
@@ -331,15 +326,14 @@ fn look_section(ui: &mut egui::Ui, ready: bool, s: &mut PortraitSettings) {
 }
 
 fn rows(ui: &mut egui::Ui, enabled: bool, items: Vec<Row>) {
-    for (label, value, tip, kind) in items {
+    for (label, value, _, kind) in items {
         let (range, colours): (_, Vec<egui::Color32>) = match kind {
             Kind::Amount => (0.0..=100.0, slider_colors().to_vec()),
             Kind::TwoSided => (-100.0..=100.0, slider_colors().to_vec()),
             Kind::Hue => (0.0..=360.0, rainbow().to_vec()),
         };
         ui.add_enabled_ui(enabled, |ui| {
-            crate::ui::widgets::dev_slider_stacked_resp(ui, label, value, range, &colours, 1.0)
-                .on_hover_text(tip);
+            crate::ui::widgets::dev_slider_stacked_resp(ui, label, value, range, &colours, 1.0);
         });
     }
 }
@@ -429,7 +423,6 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
             1.0..=1000.0,
             &slider_colors(),
         )
-        .on_hover_text("Đường kính cọ (px) — phím [ ]")
         .changed()
         {
             actions.sel.set_refine_brush_size = Some(size);
@@ -443,7 +436,6 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
             &slider_colors(),
             1.0,
         )
-        .on_hover_text("0 = mép cọ mềm — Shift + [ ]")
         .changed()
         {
             actions.sel.set_refine_brush_hardness = Some(hardness / 100.0);
@@ -484,11 +476,9 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let preview_id = egui::Id::new("portrait_preview");
     let masks_id = egui::Id::new("portrait_masks");
     let group_id = egui::Id::new("portrait_group");
-    let presets_id = egui::Id::new("portrait_presets");
+    let presets_id = egui::Id::new(PRESETS_KEY);
     let naming_id = egui::Id::new("portrait_preset_naming");
-    let mut presets: Vec<Preset> = ctx
-        .data_mut(|d| d.get_temp(presets_id))
-        .unwrap_or_else(load_presets);
+    let mut presets = kept_presets(ctx);
     let mut naming: Option<String> = ctx.data_mut(|d| d.get_temp(naming_id).unwrap_or(None));
     let mut s: PortraitSettings = ctx.data_mut(|d| d.get_temp(settings_id).unwrap_or_default());
     let mut preview: bool = ctx.data_mut(|d| d.get_temp(preview_id).unwrap_or(true));
@@ -1005,33 +995,6 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_preset_is_kept_by_name_and_read_back() {
-        let mut presets = Vec::new();
-        let soft = PortraitSettings {
-            smooth: 30.0,
-            ..PortraitSettings::NEUTRAL
-        };
-        keep_preset(&mut presets, "  Nữ ", soft);
-        keep_preset(&mut presets, "Nam", PortraitSettings::default());
-        keep_preset(&mut presets, "  ", soft);
-        let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Nữ", "Nam"]);
-        // The same name again replaces what it kept.
-        let softer = PortraitSettings {
-            smooth: 60.0,
-            ..soft
-        };
-        keep_preset(&mut presets, "Nữ", softer);
-        assert_eq!((presets.len(), presets[0].settings), (2, softer));
-        let json = serde_json::to_string(&presets).unwrap();
-        assert_eq!(serde_json::from_str::<Vec<Preset>>(&json).unwrap(), presets);
-        // A preset kept before a slider existed reads that slider's default.
-        let old: Vec<Preset> =
-            serde_json::from_str(r#"[{"name":"Cũ","settings":{"smooth":40.0}}]"#).unwrap();
-        assert_eq!(old[0].settings.smooth, 40.0);
-    }
 
     #[test]
     fn the_preset_row_draws_and_keeps_everything_until_asked() {

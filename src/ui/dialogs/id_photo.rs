@@ -1,12 +1,14 @@
 //! "Làm ảnh thẻ" dialog (Image ▸ Làm ảnh thẻ…): one click turns a portrait
 //! into a 3×4 ID photo (2.8×3.8 cm) framed from the eyes and chin,
 //! levelled, with the person on its own layer over white. The options are
-//! remembered in prefs.json (key `id_photo`).
+//! remembered in prefs.json (key `id_photo`), and the "Công thức" Chỉnh chân
+//! dung then opens with (key `id_photo_preset`).
 
 use super::*;
 use crate::core::id_photo::{IdPhotoOptions, DEFAULT_WIDEN, MAX_WIDEN, PRINT_PX};
 
 const PREFS_KEY: &str = "id_photo";
+const PRESET_KEY: &str = "id_photo_preset";
 
 fn load_options() -> IdPhotoOptions {
     load_pref(PREFS_KEY).unwrap_or_default()
@@ -21,6 +23,12 @@ pub(crate) fn id_photo_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let mut options: IdPhotoOptions = ctx
         .data_mut(|d| d.get_temp(id))
         .unwrap_or_else(load_options);
+    // The preset Chỉnh chân dung opens with, by name; none = its defaults.
+    let preset_id = egui::Id::new(PRESET_KEY);
+    let mut preset: String = ctx
+        .data_mut(|d| d.get_temp(preset_id))
+        .unwrap_or_else(|| load_pref(PRESET_KEY).unwrap_or_default());
+    let presets = super::portrait::kept_presets(ctx);
     let busy = data.dialogs.id_photo_busy;
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let can_run = !busy && (options.crop || options.white_background);
@@ -93,6 +101,31 @@ pub(crate) fn id_photo_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     "Background thành trắng; người tách ra \"Layer 1\" (như Ctrl+J với vùng chọn), bên dưới là \"Ảnh gốc\" (mask đen — tô trắng để lấy lại chi tiết)",
                 );
                 ui.checkbox(&mut options.then_portrait, "Xong thì mở Chỉnh chân dung");
+                ui.add_enabled_ui(options.then_portrait, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(22.0);
+                        ui.label("Công thức:");
+                        // A deleted preset falls back to the defaults.
+                        let chosen = presets.iter().find(|p| p.name == preset);
+                        egui::ComboBox::from_id_salt(PRESET_KEY)
+                            .selected_text(chosen.map_or("Mặc định", |p| p.name.as_str()))
+                            .width(170.0)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(chosen.is_none(), "Mặc định").clicked() {
+                                    preset.clear();
+                                }
+                                for p in &presets {
+                                    if ui.selectable_label(p.name == preset, &p.name).clicked() {
+                                        preset = p.name.clone();
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Cắt xong, Chỉnh chân dung mở ra với sẵn công thức này. Sửa, lưu, xóa công thức trong hộp thoại Chỉnh chân dung",
+                            );
+                    });
+                });
             });
 
             let status = &data.dialogs.id_photo_status;
@@ -132,12 +165,53 @@ pub(crate) fn id_photo_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     if !open {
         close = true;
     }
-    ctx.data_mut(|d| d.insert_temp(id, options));
+    ctx.data_mut(|d| {
+        d.insert_temp(id, options);
+        d.insert_temp(preset_id, preset.clone());
+    });
+    if run || close {
+        save_options(options);
+        save_pref(PRESET_KEY, &preset);
+    }
     if run {
-        save_options(options);
-        actions.dialogs.run_id_photo = Some(options);
+        let settings = presets
+            .iter()
+            .find(|p| options.then_portrait && p.name == preset)
+            .map(|p| p.settings);
+        actions.dialogs.run_id_photo = Some((options, settings));
     } else if close {
-        save_options(options);
         actions.dialogs.show_id_photo_dialog = Some(false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_dialog_draws_with_its_presets_and_asks_for_nothing_untouched() {
+        let ctx = egui::Context::default();
+        // What the portrait dialog holds in memory; prefs.json is not written.
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                egui::Id::new("portrait_presets"),
+                crate::core::portrait::presets::built_in(),
+            );
+            d.insert_temp(egui::Id::new(PRESET_KEY), "Ảnh thẻ nữ".to_string());
+            d.insert_temp(egui::Id::new("id_photo_options"), IdPhotoOptions::default());
+        });
+        let data = UiData::default();
+        let mut actions = UiActions::default();
+        for _ in 0..2 {
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                id_photo_dialog(ui.ctx(), &data, &mut actions);
+            });
+        }
+        assert!(actions.dialogs.run_id_photo.is_none());
+        assert!(actions.dialogs.show_id_photo_dialog.is_none());
+        let kept: String = ctx
+            .data_mut(|d| d.get_temp(egui::Id::new(PRESET_KEY)))
+            .unwrap();
+        assert_eq!(kept, "Ảnh thẻ nữ");
     }
 }

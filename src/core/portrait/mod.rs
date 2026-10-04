@@ -12,6 +12,7 @@ pub mod correct;
 pub mod effects;
 pub mod geometry;
 pub mod looks;
+pub mod presets;
 pub mod recipe;
 pub mod reshape;
 mod skin_mask;

@@ -810,8 +810,12 @@ pub struct DialogIntent {
     pub edit_portrait_layer: Option<usize>,
     /// Open/close the "Làm ảnh thẻ" dialog.
     pub show_id_photo_dialog: Option<bool>,
-    /// Make the ID photo with these options.
-    pub run_id_photo: Option<crate::core::id_photo::IdPhotoOptions>,
+    /// Make the ID photo with these options; Chỉnh chân dung, when it opens
+    /// after, starts from these sliders (a preset) instead of its defaults.
+    pub run_id_photo: Option<(
+        crate::core::id_photo::IdPhotoOptions,
+        Option<crate::core::portrait::PortraitSettings>,
+    )>,
     /// Live-preview request: sliders, faces switched on, preview on/off, and
     /// whether to tint the detected areas instead.
     pub set_portrait_preview: Option<(

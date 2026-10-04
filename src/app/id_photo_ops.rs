@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use super::render::CanvasEvent;
 use super::state::App;
 use crate::core::id_photo::{self, IdPhotoOptions, IdPhotoPlan};
+use crate::core::portrait::PortraitSettings;
 use crate::core::select_subject::{SelectSubjectEngine, SelectSubjectModel, SubjectStatus};
 
 const SEGMENT_MODEL: SelectSubjectModel = SelectSubjectModel::BiRefNetTiny;
@@ -17,6 +18,9 @@ const SEGMENT_MODEL: SelectSubjectModel = SelectSubjectModel::BiRefNetTiny;
 pub struct IdPhotoJob {
     doc_id: crate::core::document::DocumentId,
     options: IdPhotoOptions,
+    /// The sliders Chỉnh chân dung opens with after (a preset), if not its
+    /// defaults.
+    preset: Option<PortraitSettings>,
     size: (u32, u32),
     progress: Arc<Mutex<String>>,
     rx: Receiver<Result<IdPhotoPlan, String>>,
@@ -34,7 +38,7 @@ pub struct IdPhotoState {
 pub struct IdPhotoSession {
     job: Option<IdPhotoJob>,
     /// Waiting for the background model download, then runs with these.
-    waiting: Option<IdPhotoOptions>,
+    waiting: Option<(IdPhotoOptions, Option<PortraitSettings>)>,
     state: IdPhotoState,
 }
 
@@ -66,19 +70,23 @@ impl App {
 
     /// Start the job on the active document (or queue it behind the model
     /// download).
-    pub(crate) fn run_id_photo(&mut self, options: IdPhotoOptions) {
+    pub(crate) fn run_id_photo(
+        &mut self,
+        options: IdPhotoOptions,
+        preset: Option<PortraitSettings>,
+    ) {
         if self.shell.id_photo.job.is_some() {
             return;
         }
         if options.white_background && !SelectSubjectEngine::model_path_for(SEGMENT_MODEL).is_file()
         {
             self.download_segment_model();
-            self.shell.id_photo.waiting = Some(options);
+            self.shell.id_photo.waiting = Some((options, preset));
             self.shell.id_photo.set(self.segment_model_status(), false);
             return;
         }
         self.shell.id_photo.waiting = None;
-        if let Err(e) = self.start_id_photo(options) {
+        if let Err(e) = self.start_id_photo(options, preset) {
             self.shell
                 .id_photo
                 .set(format!("Không làm được: {e}"), true);
@@ -113,7 +121,11 @@ impl App {
         }
     }
 
-    fn start_id_photo(&mut self, options: IdPhotoOptions) -> Result<(), String> {
+    fn start_id_photo(
+        &mut self,
+        options: IdPhotoOptions,
+        preset: Option<PortraitSettings>,
+    ) -> Result<(), String> {
         let idx = self.docs.active_doc_idx;
         let canvas = &mut self.docs.documents[idx].canvas;
         if canvas.is_cmyk() {
@@ -169,6 +181,7 @@ impl App {
         self.shell.id_photo.job = Some(IdPhotoJob {
             doc_id: self.docs.documents[idx].id,
             options,
+            preset,
             size: (w, h),
             progress,
             rx,
@@ -180,9 +193,9 @@ impl App {
     /// Every frame: start a job whose model has arrived, collect a finished
     /// one and apply it.
     pub(crate) fn poll_id_photo(&mut self) {
-        if let Some(options) = self.shell.id_photo.waiting {
+        if let Some((options, preset)) = self.shell.id_photo.waiting {
             match self.segment_model_state() {
-                Some(SubjectStatus::Ready) => self.run_id_photo(options),
+                Some(SubjectStatus::Ready) => self.run_id_photo(options, preset),
                 Some(SubjectStatus::Error(_)) => {
                     self.shell.id_photo.waiting = None;
                     let line = self.segment_model_status();
@@ -215,7 +228,7 @@ impl App {
                 let active = self.docs.documents[self.docs.active_doc_idx].id == job.doc_id;
                 if job.options.then_portrait && active {
                     // Straight on to retouching the person: sliders, then OK.
-                    match self.begin_portrait() {
+                    match self.begin_portrait_from(job.preset) {
                         Ok(()) => self.shell.ui.show_portrait_dialog = true,
                         Err(e) => {
                             message = format!("{message} — chưa mở được Chỉnh chân dung: {e}")

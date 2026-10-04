@@ -246,6 +246,21 @@ impl App {
         Ok(())
     }
 
+    /// `begin_portrait` on a new photo, its sliders starting from `settings`
+    /// (a preset) rather than the defaults. A reopened layer keeps its own.
+    pub(crate) fn begin_portrait_from(
+        &mut self,
+        settings: Option<PortraitSettings>,
+    ) -> Result<(), String> {
+        self.begin_portrait()?;
+        if let (Some(settings), Some(session)) = (settings, self.shell.portrait.as_mut()) {
+            if session.reopened.is_none() {
+                session.restore_settings = Some(settings);
+            }
+        }
+        Ok(())
+    }
+
     /// Make the "Chân dung" layer at `idx` the active one and reopen it in
     /// the dialog (a double-click on it in the Layers panel).
     pub(crate) fn reopen_portrait_layer(&mut self, idx: usize) -> Result<(), String> {
@@ -1277,6 +1292,27 @@ mod tests {
             layer.tiles.get_pixel(x, y).3 > 0,
             "the painted hair at the face centre was retouched"
         );
+    }
+
+    #[test]
+    fn a_preset_given_at_the_start_is_what_the_dialog_opens_with() {
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        let preset = PortraitSettings {
+            smooth: 55.0,
+            ..PortraitSettings::default()
+        };
+        app.begin_portrait_from(Some(preset)).unwrap();
+        assert_eq!(
+            app.portrait_restore(),
+            (false, Some(preset), Some(Vec::new()))
+        );
+        app.cancel_portrait();
+        // Without one, the defaults.
+        app.begin_portrait_from(None).unwrap();
+        assert_eq!(app.portrait_restore().1, Some(PortraitSettings::default()));
+        app.cancel_portrait();
     }
 
     fn analysed(app: &mut App) -> Result<Arc<PortraitModel>, String> {

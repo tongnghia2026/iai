@@ -557,8 +557,8 @@ impl App {
                 self.close_id_photo();
             }
         }
-        if let Some(options) = actions.dialogs.run_id_photo.take() {
-            self.run_id_photo(options);
+        if let Some((options, preset)) = actions.dialogs.run_id_photo.take() {
+            self.run_id_photo(options, preset);
         }
         if let Some(idx) = actions.dialogs.edit_portrait_layer.take() {
             match self.reopen_portrait_layer(idx) {
