@@ -1,4 +1,4 @@
-//! "Làm ảnh thẻ" (the Ảnh thẻ side of Chỉnh chân dung): frame an ID photo —
+//! "Làm ảnh thẻ" (the Ảnh thẻ side of Auto retouch): frame an ID photo —
 //! 2×3, 3×4 (2.8×3.8 cm, as shops cut it) or 4×6 — from the face's eye line
 //! and chin, levelled by the eyes, and cut the person out onto white or blue.
 //!

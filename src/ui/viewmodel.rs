@@ -463,10 +463,10 @@ pub struct DialogViewModel {
     pub show_vector_style_dialog: bool,
     /// "Làm sạch bản scan" dialog is open.
     pub show_scan_cleanup_dialog: bool,
-    /// "Chỉnh chân dung" dialog is open, on its Ảnh thẻ side or its Chân
-    /// dung one, whether a retouch is under way, its status line, whether
-    /// the analysis is ready for previews, and per face whether the part
-    /// masks are trusted.
+    /// "Auto retouch" dialog is open, on its Ảnh thẻ side or its Chân
+    /// dung one, whether a retouch is under way, its status line (with no
+    /// retouch: why one could not start), whether the analysis is ready
+    /// for previews, and per face whether the part masks are trusted.
     pub show_portrait_dialog: bool,
     pub portrait_id_side: bool,
     pub portrait_session: bool,

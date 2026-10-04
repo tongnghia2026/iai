@@ -803,13 +803,13 @@ pub struct DialogIntent {
     pub apply_vector_style: Option<VectorBatchStyle>,
     /// Open/close the "Làm sạch bản scan" dialog.
     pub show_scan_cleanup_dialog: Option<bool>,
-    /// Open/close the "Chỉnh chân dung" dialog.
+    /// Open/close the "Auto retouch" dialog. Opening analyses nothing.
     pub show_portrait_dialog: Option<bool>,
+    /// "Tự động làm đẹp": analyse the photo and start the retouch.
+    pub start_portrait_retouch: bool,
     /// Reopen the "Chân dung" layer at this index in Chỉnh chân dung
     /// (double-click in the Layers panel).
     pub edit_portrait_layer: Option<usize>,
-    /// Open the "Chỉnh chân dung" dialog on its Ảnh thẻ side.
-    pub open_id_photo: bool,
     /// Show the dialog's Ảnh thẻ side (true) or its Chân dung one.
     pub set_portrait_side: Option<bool>,
     /// Make the ID photo as asked, or make the one just made again.

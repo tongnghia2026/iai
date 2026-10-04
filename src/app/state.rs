@@ -370,7 +370,7 @@ pub struct UiState {
     pub show_vector_style_dialog: bool,
     /// "Làm sạch bản scan" dialog (Image ▸ Làm sạch bản scan…).
     pub show_scan_cleanup_dialog: bool,
-    /// "Chỉnh chân dung" dialog (Image ▸ Chỉnh chân dung… / Làm ảnh thẻ…).
+    /// "Auto retouch" dialog (Image ▸ Auto retouch…).
     pub show_portrait_dialog: bool,
     /// The dialog shows its "Ảnh thẻ" side rather than "Chân dung".
     pub portrait_id_side: bool,
@@ -1830,6 +1830,7 @@ impl App {
                 filter_preview: None,
                 scan_preview: None,
                 portrait: None,
+                portrait_error: None,
                 portrait_cache: None,
                 id_photo: Default::default(),
                 user_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all()),

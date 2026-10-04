@@ -1,4 +1,4 @@
-//! The "Ảnh thẻ" side of Chỉnh chân dung: one click turns a portrait into an
+//! The "Ảnh thẻ" side of the Auto retouch dialog: one click turns a portrait into an
 //! ID photo (2×3, 3×4 or 4×6) framed from the eyes and chin, levelled, with
 //! the person on its own layer over white or blue; the retouch sliders below
 //! then work on it. Once it is made, changing the size, the framing or the

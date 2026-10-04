@@ -1070,10 +1070,10 @@ fn offline_retouch_section(
     if ui
         .add_enabled(
             data.doc.has_doc,
-            egui::Button::new("Chỉnh chân dung…").min_size(egui::vec2(ui.available_width(), 26.0)),
+            egui::Button::new("Auto retouch…").min_size(egui::vec2(ui.available_width(), 26.0)),
         )
         .on_hover_text(
-            "Làm mịn da, xóa mụn, quầng thâm, trắng mắt, trắng răng — xem trực tiếp trên ảnh",
+            "Làm ảnh thẻ, làm mịn da, xóa mụn, quầng thâm, trắng mắt, trắng răng — xem trực tiếp trên ảnh",
         )
         .clicked()
     {

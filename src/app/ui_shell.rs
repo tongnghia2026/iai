@@ -73,8 +73,11 @@ pub struct UiShell {
     pub(in crate::app) filter_preview: Option<FilterPreviewSession>,
     /// Live-preview session for the "Làm sạch bản scan" dialog.
     pub(in crate::app) scan_preview: Option<ScanPreviewSession>,
-    /// Session of the "Chỉnh chân dung" dialog (analysis + live preview).
+    /// Session of the "Auto retouch" dialog (analysis + live preview).
     pub(in crate::app) portrait: Option<crate::app::portrait_ops::PortraitSession>,
+    /// Why the retouch asked for in the dialog could not start, for the
+    /// dialog to show.
+    pub(in crate::app) portrait_error: Option<String>,
     /// The last portrait analysis, kept so reopening the same photo does not
     /// run the models again.
     pub(in crate::app) portrait_cache: Option<crate::app::portrait_ops::PortraitCache>,

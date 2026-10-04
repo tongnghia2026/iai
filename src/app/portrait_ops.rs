@@ -1,4 +1,4 @@
-//! "Chỉnh chân dung" (Image ▸ Chỉnh chân dung…): skin, blemish, under-eye, eye
+//! "Auto retouch" (Image ▸ Auto retouch…), its Chân dung side: skin, blemish, under-eye, eye
 //! and teeth retouching with a live canvas preview. The photo is analysed once
 //! on a worker thread (`core::portrait::analyze`); each slider change then only
 //! recombines the cached layers of the analysis, also on a worker so dragging
@@ -127,7 +127,7 @@ impl App {
         self.docs.documents[idx].canvas.selection.refresh_bbox();
         let canvas = &self.docs.documents[idx].canvas;
         if canvas.is_cmyk() {
-            return Err("Chỉnh chân dung chưa hỗ trợ chế độ CMYK".to_string());
+            return Err("Auto retouch chưa hỗ trợ chế độ CMYK".to_string());
         }
         let (source_idx, reopen) =
             reopen_target(&canvas.layer_stack.layers, canvas.layer_stack.active_idx)?;
@@ -261,17 +261,46 @@ impl App {
         Ok(())
     }
 
-    /// Show the dialog's Ảnh thẻ side or its Chân dung one. The latter
-    /// retouches the photo as it is: the retouch starts if none is under way
-    /// or about to be.
-    pub(crate) fn set_portrait_side(&mut self, id_side: bool) {
-        self.shell.ui.portrait_id_side = id_side;
-        if id_side || self.shell.portrait.is_some() || self.id_photo_state().busy {
+    /// Open the dialog. Nothing is analysed until the owner asks ("Tự động
+    /// làm đẹp", or "Làm ảnh thẻ"): opening only shows it. A "Chân dung"
+    /// layer picked to be edited further is the exception, reopened at once.
+    pub(crate) fn open_portrait_dialog(&mut self) {
+        self.cancel_portrait();
+        self.close_id_photo();
+        self.shell.portrait_error = None;
+        self.shell.ui.show_portrait_dialog = true;
+        let stack = &self.docs.documents[self.docs.active_doc_idx]
+            .canvas
+            .layer_stack;
+        let reopening = matches!(
+            reopen_target(&stack.layers, stack.active_idx),
+            Ok((_, Some(_)))
+        );
+        if reopening {
+            self.shell.ui.portrait_id_side = false;
+            self.start_portrait_retouch();
+        }
+    }
+
+    /// "Tự động làm đẹp": analyse the photo and retouch it from the usual
+    /// sliders. Why it could not start is kept for the dialog.
+    pub(crate) fn start_portrait_retouch(&mut self) {
+        if self.shell.portrait.is_some() || self.id_photo_state().busy {
             return;
         }
-        if let Err(message) = self.begin_portrait() {
-            self.shell.status_msg = message;
+        self.shell.portrait_error = self.begin_portrait().err();
+        if let Some(message) = &self.shell.portrait_error {
+            self.shell.status_msg = message.clone();
         }
+    }
+
+    /// Close the dialog: the retouch under way is given up, an ID photo
+    /// made stays (Ctrl+Z undoes it).
+    pub(crate) fn close_portrait_dialog(&mut self) {
+        self.shell.ui.show_portrait_dialog = false;
+        self.shell.portrait_error = None;
+        self.cancel_portrait();
+        self.close_id_photo();
     }
 
     /// Make the "Chân dung" layer at `idx` the active one and reopen it in
@@ -573,12 +602,11 @@ impl App {
     ) {
         match self.apply_portrait(settings, enabled) {
             Ok(updated) => {
-                self.shell.ui.show_portrait_dialog = false;
-                self.close_id_photo();
+                self.close_portrait_dialog();
                 self.shell.status_msg = if updated {
-                    "Chỉnh chân dung: đã cập nhật layer \"Chân dung\"".to_string()
+                    "Auto retouch: đã cập nhật layer \"Chân dung\"".to_string()
                 } else {
-                    "Chỉnh chân dung: đã thêm layer \"Chân dung\"".to_string()
+                    "Auto retouch: đã thêm layer \"Chân dung\"".to_string()
                 };
                 if let Some((sheet, options)) = sheet {
                     self.do_impose_sheet(sheet, options);
@@ -595,7 +623,7 @@ impl App {
     ) -> Result<bool, String> {
         let (doc_id, layer_id, w, h, src, model, reopened) = {
             let Some(session) = self.shell.portrait.as_ref() else {
-                return Err("Chưa mở chỉnh chân dung".to_string());
+                return Err("Chưa bấm Tự động làm đẹp".to_string());
             };
             let Some(model) = session.model.clone() else {
                 return Err("Đang phân tích ảnh — đợi xong rồi bấm Áp dụng".to_string());
@@ -753,9 +781,10 @@ impl App {
     /// preview yet, per face whether its part masks are trusted, and whether
     /// any hair was found.
     pub(crate) fn portrait_dialog_state(&self) -> (String, bool, Vec<bool>, bool) {
-        // No retouch yet: the Ảnh thẻ side before its photo is made.
+        // No retouch yet: none was asked for, or it could not start.
         let Some(session) = self.shell.portrait.as_ref() else {
-            return (String::new(), false, Vec::new(), false);
+            let line = self.shell.portrait_error.clone().unwrap_or_default();
+            return (line, false, Vec::new(), false);
         };
         if let Some(error) = &session.error {
             return (

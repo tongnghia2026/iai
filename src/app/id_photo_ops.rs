@@ -1,4 +1,4 @@
-//! "Làm ảnh thẻ" (the Ảnh thẻ side of Chỉnh chân dung): runs `core::id_photo`
+//! "Làm ảnh thẻ" (the Ảnh thẻ side of Auto retouch): runs `core::id_photo`
 //! on a worker (BiRefNet for the backdrop, then the face mesh) against what
 //! the document shows, and applies the result as one undo step when it lands.
 //! When the background model is missing it is downloaded first and the job
@@ -6,8 +6,8 @@
 //!
 //! What the models found is kept while the panel is open: asking again with
 //! another size, framing or nudge undoes the photo made and frames it anew
-//! from that, without running the models again. The retouch (Chỉnh chân
-//! dung's sliders) then starts over on the new photo, a moment after the last
+//! from that, without running the models again. The retouch (the dialog's
+//! sliders) then starts over on the new photo, a moment after the last
 //! change so that a run of nudges analyses the face once.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};

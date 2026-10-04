@@ -555,15 +555,11 @@ impl App {
         if let Some(params) = actions.dialogs.set_scan_cleanup_preview.take() {
             self.update_scan_preview(params);
         }
-        if std::mem::take(&mut actions.dialogs.open_id_photo) {
-            // The Ảnh thẻ side: nothing is analysed until the photo is made.
-            self.cancel_portrait();
-            self.close_id_photo();
-            self.shell.ui.portrait_id_side = true;
-            self.shell.ui.show_portrait_dialog = true;
-        }
         if let Some(id_side) = actions.dialogs.set_portrait_side.take() {
-            self.set_portrait_side(id_side);
+            self.shell.ui.portrait_id_side = id_side;
+        }
+        if std::mem::take(&mut actions.dialogs.start_portrait_retouch) {
+            self.start_portrait_retouch();
         }
         if let Some(asked) = actions.dialogs.run_id_photo.take() {
             self.run_id_photo(asked);
@@ -572,6 +568,7 @@ impl App {
             match self.reopen_portrait_layer(idx) {
                 Ok(()) => {
                     self.close_id_photo();
+                    self.shell.portrait_error = None;
                     self.shell.ui.portrait_id_side = false;
                     self.shell.ui.show_portrait_dialog = true;
                 }
@@ -579,18 +576,10 @@ impl App {
             }
         }
         if let Some(open) = actions.dialogs.show_portrait_dialog.take() {
-            self.close_id_photo();
             if open {
-                match self.begin_portrait() {
-                    Ok(()) => {
-                        self.shell.ui.portrait_id_side = false;
-                        self.shell.ui.show_portrait_dialog = true;
-                    }
-                    Err(message) => self.shell.status_msg = message,
-                }
+                self.open_portrait_dialog();
             } else {
-                self.shell.ui.show_portrait_dialog = false;
-                self.cancel_portrait();
+                self.close_portrait_dialog();
             }
         }
         if let Some(target) = actions.dialogs.set_portrait_brush.take() {
@@ -610,9 +599,7 @@ impl App {
             self.set_portrait_preview(settings, faces, preview, masks);
         }
         if std::mem::take(&mut actions.dialogs.cancel_portrait_dialog) {
-            self.shell.ui.show_portrait_dialog = false;
-            self.cancel_portrait();
-            self.close_id_photo();
+            self.close_portrait_dialog();
         }
         if let Some((settings, faces)) = actions.dialogs.apply_portrait.take() {
             let sheet = actions.dialogs.portrait_sheet.take();
@@ -1114,23 +1101,29 @@ mod portrait_side_tests {
     use crate::core::canvas::Canvas;
 
     #[test]
-    fn the_id_photo_side_opens_with_no_retouch_and_the_portrait_side_starts_one() {
+    fn the_dialog_opens_idle_and_retouches_only_when_asked() {
         let mut app = App::new();
         app.shell.ui.show_welcome = false;
         let grey = [128u8, 128, 128, 255].repeat(64 * 64);
         app.docs.documents[0].canvas = Canvas::from_rgba(grey, 64, 64);
         let mut actions = UiActions::default();
 
-        actions.dialogs.open_id_photo = true;
+        // Opening shows the dialog and analyses nothing, on either side.
+        actions.dialogs.show_portrait_dialog = Some(true);
         app.handle_misc_dialog_actions(&mut actions);
-        assert!(app.shell.ui.show_portrait_dialog && app.shell.ui.portrait_id_side);
+        assert!(app.shell.ui.show_portrait_dialog);
         assert!(app.shell.portrait.is_none(), "nothing is analysed yet");
+        for id_side in [true, false] {
+            actions.dialogs.set_portrait_side = Some(id_side);
+            app.handle_misc_dialog_actions(&mut actions);
+            assert_eq!(app.shell.ui.portrait_id_side, id_side);
+            assert!(app.shell.portrait.is_none());
+        }
 
-        // The other tile retouches the photo as it is.
-        actions.dialogs.set_portrait_side = Some(false);
+        // "Tự động làm đẹp" starts the retouch; a tile leaves it under way.
+        actions.dialogs.start_portrait_retouch = true;
         app.handle_misc_dialog_actions(&mut actions);
-        assert!(!app.shell.ui.portrait_id_side && app.shell.portrait.is_some());
-        // Back on the first tile the retouch stays under way.
+        assert!(app.shell.portrait.is_some());
         actions.dialogs.set_portrait_side = Some(true);
         app.handle_misc_dialog_actions(&mut actions);
         assert!(app.shell.ui.portrait_id_side && app.shell.portrait.is_some());
@@ -1139,12 +1132,18 @@ mod portrait_side_tests {
         app.handle_misc_dialog_actions(&mut actions);
         assert!(!app.shell.ui.show_portrait_dialog && app.shell.portrait.is_none());
 
-        // "Chỉnh chân dung…" opens on its own side whatever was last shown.
-        app.shell.ui.portrait_id_side = true;
+        // A layer that cannot be retouched says why in the dialog.
+        app.docs.documents[0].canvas.layer_stack.layers[0].locked = true;
+        app.docs.documents[0].canvas.layer_stack.layers[0].is_background = false;
         actions.dialogs.show_portrait_dialog = Some(true);
         app.handle_misc_dialog_actions(&mut actions);
-        assert!(app.shell.ui.show_portrait_dialog && !app.shell.ui.portrait_id_side);
-        assert!(app.shell.portrait.is_some());
-        app.cancel_portrait();
+        actions.dialogs.start_portrait_retouch = true;
+        app.handle_misc_dialog_actions(&mut actions);
+        assert!(app.shell.ui.show_portrait_dialog && app.shell.portrait.is_none());
+        let (line, ready, ..) = app.portrait_dialog_state();
+        assert!(!ready && line.contains("layer ảnh"), "{line}");
+        actions.dialogs.cancel_portrait_dialog = true;
+        app.handle_misc_dialog_actions(&mut actions);
+        assert!(app.portrait_dialog_state().0.is_empty());
     }
 }

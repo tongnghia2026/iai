@@ -1,14 +1,15 @@
-//! "Chỉnh chân dung" dialog (Image ▸ Chỉnh chân dung… / Làm ảnh thẻ…): skin,
-//! blemish, under-eye, eye and teeth sliders with a live canvas preview, like
-//! the Filter/Levels dialogs, and a brush ("Tô vùng") to fix the skin, hair
-//! and brow areas before sliding, and studio colour looks. Áp dụng adds the
-//! retouch (look included) as one new layer; Hủy restores. Sets of sliders
-//! are kept by name ("Công thức") in prefs.json (key `portrait_presets`).
+//! "Auto retouch" dialog (Image ▸ Auto retouch…): skin, blemish, under-eye,
+//! eye and teeth sliders with a live canvas preview, like the Filter/Levels
+//! dialogs, and a brush ("Tô vùng") to fix the skin, hair and brow areas
+//! before sliding, and studio colour looks. Áp dụng adds the retouch (look
+//! included) as one new layer; Hủy restores. Sets of sliders are kept by
+//! name ("Công thức") in prefs.json (key `portrait_presets`).
 //!
-//! Two tiles at the top choose its side. "Chân dung" retouches the photo as
-//! it is. "Ảnh thẻ" (see `id_photo`) first makes the ID photo, cropped and
-//! on a plain backdrop, with the presets as chips, then the same sliders
-//! work on that.
+//! Two tiles at the top choose its side; the one used last is remembered
+//! (key `portrait_side`). Opening the dialog analyses nothing. "Chân dung"
+//! retouches the photo as it is once "Tự động làm đẹp" is pressed. "Ảnh
+//! thẻ" (see `id_photo`) first makes the ID photo, cropped and on a plain
+//! backdrop, with the presets as chips, then the same sliders work on that.
 
 use super::*;
 use crate::core::portrait::brush::MaskTarget;
@@ -22,6 +23,8 @@ const PRESETS_KEY: &str = "portrait_presets";
 /// Which round of built-in presets prefs.json has been given.
 const BUILT_IN_KEY: &str = "portrait_presets_built_in";
 const PRESET_NAME_FIELD: &str = "portrait_preset_name";
+/// Whether the dialog was last on its Ảnh thẻ side.
+const SIDE_KEY: &str = "portrait_side";
 
 /// The kept presets; an install that has not had the built-in ones yet is
 /// given them first.
@@ -522,12 +525,21 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let mut presets = kept_presets(ctx);
     let mut naming: Option<String> = ctx.data_mut(|d| d.get_temp(naming_id).unwrap_or(None));
     let mut s: PortraitSettings = ctx.data_mut(|d| d.get_temp(settings_id).unwrap_or_default());
-    let id_side = data.dialogs.portrait_id_side;
-    // The Ảnh thẻ side opens with no retouch under way: its sliders start
-    // from the preset used last.
+    let mut id_side = data.dialogs.portrait_id_side;
+    // The dialog opens with no retouch under way, on the side used last. The
+    // Ảnh thẻ side's sliders start from the preset used last, the Chân dung
+    // side's from the usual ones.
     let opened = !ctx.data_mut(|d| d.get_temp::<bool>(open_id).unwrap_or(false));
-    if opened && id_side && !data.dialogs.portrait_session && !data.dialogs.id_photo_made {
-        s = super::id_photo::starting_settings(&presets);
+    if opened && !data.dialogs.portrait_session && !data.dialogs.id_photo_made {
+        if let Some(last) = load_pref::<bool>(SIDE_KEY).filter(|&last| last != id_side) {
+            id_side = last;
+            actions.dialogs.set_portrait_side = Some(last);
+        }
+        s = if id_side {
+            super::id_photo::starting_settings(&presets)
+        } else {
+            PortraitSettings::default()
+        };
     }
     let mut preview: bool = ctx.data_mut(|d| d.get_temp(preview_id).unwrap_or(true));
     let mut masks: bool = ctx.data_mut(|d| d.get_temp(masks_id).unwrap_or(false));
@@ -569,7 +581,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let mut sheet = None;
 
     let default_pos = document_side_dialog_pos(ctx, data, 320.0, 96.0);
-    egui::Window::new("Chỉnh chân dung")
+    egui::Window::new("Auto retouch")
         .collapsible(false)
         .resizable(false)
         .movable(true)
@@ -590,6 +602,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         && id_side != side
                     {
                         actions.dialogs.set_portrait_side = Some(side);
+                        save_pref(SIDE_KEY, &side);
                     }
                 }
             });
@@ -610,14 +623,29 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             .color(egui::Color32::from_gray(170)),
                     );
                 });
-            } else if !id_side && !data.dialogs.id_photo_busy {
-                ui.label(
-                    egui::RichText::new(
-                        "Không chỉnh được layer này — hãy chọn layer ảnh (không khóa).",
-                    )
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(220, 150, 90)),
+            } else if !id_side {
+                // Nothing is analysed until asked.
+                let button = egui::Button::new(
+                    egui::RichText::new(format!("{}  Tự động làm đẹp", ph::MAGIC_WAND)).strong(),
                 );
+                ui.add_enabled_ui(data.doc.has_doc && !data.dialogs.id_photo_busy, |ui| {
+                    if ui
+                        .add_sized([ui.available_width(), 28.0], button)
+                        .on_hover_text(
+                            "App nhận diện khuôn mặt rồi làm đẹp theo mức thường dùng; sau đó kéo các thanh bên dưới để chỉnh thêm",
+                        )
+                        .clicked()
+                    {
+                        actions.dialogs.start_portrait_retouch = true;
+                    }
+                });
+                if !data.dialogs.portrait_status.is_empty() {
+                    ui.label(
+                        egui::RichText::new(&data.dialogs.portrait_status)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(220, 150, 90)),
+                    );
+                }
             }
             if face_count > 1 {
                 ui.add_space(4.0);
@@ -1044,7 +1072,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     .on_hover_text(if data.dialogs.portrait_reopened {
                         "Cập nhật layer \"Chân dung\" đang chỉnh tiếp"
                     } else {
-                        "Thêm kết quả (cả Màu studio nếu có chọn) thành layer mới \"Chân dung\". Mở lại để chỉnh tiếp: chọn layer đó rồi vào Chỉnh chân dung"
+                        "Thêm kết quả (cả Màu studio nếu có chọn) thành layer mới \"Chân dung\". Mở lại để chỉnh tiếp: chọn layer đó rồi vào Auto retouch"
                     })
                     .clicked()
                 {
@@ -1121,6 +1149,7 @@ mod tests {
                 false,
             ),
             ("anh_the", None, egui::pos2(260.0, 250.0), true, false),
+            ("cho", None, egui::pos2(260.0, 250.0), false, false),
             (
                 "anh_the_xong",
                 Some(Group::Sheet),
@@ -1133,7 +1162,7 @@ mod tests {
             data.doc.has_doc = true;
             data.dialogs.portrait_id_side = id_side;
             data.dialogs.id_photo_made = made;
-            if !id_side || made {
+            if (!id_side && name != "cho") || made {
                 data.dialogs.portrait_session = true;
                 data.dialogs.portrait_ready = true;
                 data.dialogs.portrait_status = "Đã nhận 1 khuôn mặt".to_string();
@@ -1220,12 +1249,23 @@ mod tests {
         let asked = click(&data, find(&output, "Chân dung").unwrap());
         assert_eq!(asked.dialogs.set_portrait_side, Some(false));
 
-        // The Chân dung side: the row of presets, none of the ID photo's.
+        // The Chân dung side: the row of presets, none of the ID photo's,
+        // and the retouch starts only by its button.
         data.dialogs.portrait_id_side = false;
-        data.dialogs.portrait_session = true;
         let output = settle(&data);
         assert!(find(&output, "Công thức").is_some());
         assert!(find(&output, "Nền").is_none() && find(&output, "Cỡ").is_none());
+        let button = format!("{}  Tự động làm đẹp", ph::MAGIC_WAND);
+        let (_, idle) = draw(&data, vec![]);
+        assert!(!idle.dialogs.start_portrait_retouch);
+        let asked = click(&data, find(&output, &button).expect("the button"));
+        assert!(asked.dialogs.start_portrait_retouch);
+        // Under way, the button gives way to the status line.
+        data.dialogs.portrait_session = true;
+        data.dialogs.portrait_status = "Đang tìm khuôn mặt…".to_string();
+        let output = settle(&data);
+        assert!(find(&output, &button).is_none());
+        assert!(find(&output, "Đang tìm khuôn mặt…").is_some());
         let asked = click(&data, find(&output, "Ảnh thẻ").unwrap());
         assert_eq!(asked.dialogs.set_portrait_side, Some(true));
     }
