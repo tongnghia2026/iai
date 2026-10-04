@@ -346,4 +346,4 @@ nền xanh `(5, 148, 242)`, dưới là 2 tấm 4×6 nằm ngang nền trắng v
 - Thấy khi thử (chưa sửa, lỗi có từ trước của "Làm ảnh thẻ"): ảnh sát mép trên (`khach_1.jpg`)
   để lại một vạch mờ cách mép trên ảnh thẻ ~8 px — chỗ khung vượt khỏi ảnh gốc.
 - [x] Build Release, chủ test đợt 14: **OK**, chỉ yêu cầu viền mảnh lại còn 2 px (đã sửa).
-- [ ] Build Release, chủ xem lại viền 2 px.
+- [x] Build Release, chủ xem lại viền 2 px: **OK** (04/10).
