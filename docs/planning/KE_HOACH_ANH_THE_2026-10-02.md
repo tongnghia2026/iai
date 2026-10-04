@@ -584,8 +584,29 @@ Thiết kế tôi chốt (phần chủ giao "tự tính toán"):
 
 Việc:
 
-- [ ] Lõi xếp trang: `PhotoKind::Id2x3`, xanh #0090FF, đủ trang cho hai giấy, trang một cỡ theo nền ảnh.
-- [ ] Lõi ảnh thẻ: cỡ + màu nền trong `IdPhotoOptions`, phân tích tách khỏi lập khung, dịch khung.
-- [ ] App: giữ phân tích, cắt lại (hoàn tác + áp lại), tô lại nền, khởi động phân tích chân dung sau lần chỉnh cuối.
-- [ ] Giao diện: bảng gộp hai ô, bỏ hộp thoại "Làm ảnh thẻ" riêng, bảng nút Xếp ảnh in.
-- [ ] Probe ảnh + test giả lập; test đầy đủ; build Release, chủ test.
+- [x] Lõi xếp trang (`29766a5`): `PhotoKind::Id2x3` (472×709 px ở 600 dpi), xanh #0090FF, đủ
+  trang cho hai giấy, trang một cỡ theo nền ảnh. Số tấm với khe cắt 10 px: 2×3 = 21 (10×15) /
+  32 (13×18); 3×4 = 10 / 18; 4×6 = 4 / 8; trang ghép 13×18 = 6 tấm 3×4 + 2 tấm 4×6.
+- [x] Lõi ảnh thẻ (`00387a9`): `IdPhotoOptions` có `size` + `backdrop`, `cut_out` thay
+  `white_background` (prefs cũ vẫn đọc được); `analyse` (AI, giữ lại) tách khỏi `plan` (lập
+  khung, nhanh); `Nudge` dịch / xoay người trong khung; `set_backdrop` đổi nền bằng một bước
+  hoàn tác riêng chỉ đụng lớp Background.
+- [x] App (`00387a9`, `id_photo_ops.rs`): giữ ảnh gốc + phân tích trong lúc bảng mở (`Kept`);
+  yêu cầu mới thì hoàn tác các bước ảnh thẻ rồi áp khung mới; đổi nền chỉ tô lại; phân tích chân
+  dung khởi động lại 0,6 s sau lần chỉnh cuối, từ đúng các thanh đang có. Yêu cầu tới lúc đang
+  chạy thì xếp hàng, lấy cái mới nhất.
+- [x] Giao diện (`00387a9`): hai ô ở đầu `portrait_dialog`; mục Ảnh thẻ ở
+  `dialogs/id_photo.rs` (`id_photo_section`); hàng "Khung" (← → ↑ ↓ xoay trái / phải, Đặt lại)
+  hiện sau khi ảnh đã làm, mỗi lần bấm dịch 2% chiều cao ảnh hoặc xoay 0,5°; Xếp ảnh in thành
+  bảng nút cỡ × giấy. Hai mục menu cũ cùng mở bảng này, mỗi mục một ô.
+- [x] Probe ảnh (`tmp/ui/sau`: `chan_dung_anh_the.png`, `chan_dung_anh_the_xong.png`,
+  `xep_anh_in.png`) + test giả lập; test thật trên ảnh mẫu
+  `an_id_photo_is_framed_again_from_what_was_kept` (làm → cắt lại → đổi nền → cắt lại; cắt lại
+  ~1,2 s ở bản debug, không chạy AI). Test đầy đủ qua (1915 + 15).
+- Ghi chú kỹ thuật: công cụ probe (`ui/snapshot.rs`) nay chạy 10 khung hình thay vì 4 — cửa sổ
+  egui cao cần vài khung mới ổn định kích thước, 4 khung làm phần cuối bảng trống. Test không
+  còn đọc / ghi `prefs.json` thật (`load_pref` / `save_pref` bỏ qua khi `cfg!(test)`).
+- Chưa làm (không ai yêu cầu, ghi lại để khỏi quên): kéo thả khung trực tiếp trên ảnh (hiện là
+  nút mũi tên); nền "Theo ảnh" cho trang ghép.
+- Bản test `target/release/iai.exe` (build 04/10 18:53).
+- [ ] Build Release, chủ test.
