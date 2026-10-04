@@ -668,4 +668,36 @@ dụng màu hiện tại luôn là hết lệch; muốn chỉnh thêm thì chạ
 - Chưa kiểm được bằng test: hai chỗ gọi (bấm nút công cụ, phím tắt) cần cửa sổ thật — chờ chủ thử.
 - Code `ad67fcf`; bản test `target/release/iai-dot25.exe` (build 04/10 20:58 — chủ đang mở
   `iai.exe` nên bản mới chép ra tên khác).
+- [x] Build Release, chủ test đợt 25: chủ không báo lỗi, nêu tiếp việc đợt 26 (04/10).
+
+## Đợt 26 (04/10 khuya): bảng Auto retouch mở mà vẫn dùng được mọi công cụ
+
+Lời chủ: "bên bảng AI Image Studio khi bảng đang mở vẫn có thể sử dụng được tất cả các tool
+khác, tôi muốn Auto retouch cũng làm được như vậy".
+
+Khác biệt gốc: AI Image Studio không vẽ gì tạm lên ảnh; Auto retouch thì vẽ bản xem trước thẳng
+lên layer ảnh. Công cụ khác mà chạy lúc đó sẽ ghi bản xem trước vào lịch sử như ảnh thật. Nên:
+
+- [x] **Bảng chỉ "giữ" ảnh khi có việc đang chạy** (`App::portrait_under_way`: đang xem trước
+  làm đẹp, hoặc đang làm ảnh thẻ). Bảng mở mà chưa chạy gì (vừa mở, sau khi áp dụng) thì
+  không khóa gì: công cụ, menu, phím tắt, đổi tab, mở file đều dùng bình thường. Khi đó Enter /
+  Esc cũng không còn thuộc về bảng (để chốt / bỏ khung crop); nút "Hủy" ghi là "Đóng".
+- [x] **Đang xem trước mà chọn công cụ khác** (nút trên thanh công cụ hoặc phím tắt của công
+  cụ): app áp dụng phần làm đẹp đang có thành layer "Chân dung", **bảng vẫn mở**, rồi công cụ
+  dùng được (`portrait_tool_picked`, thay cho `leave_portrait_for_crop` của đợt 25 — đợt 25
+  đóng bảng, nay không đóng). Crop trên ảnh cỡ ảnh thẻ vẫn tự khóa cỡ.
+- [x] **Hand và Zoom** là công cụ xem: chọn và dùng được ngay lúc đang xem trước, không áp dụng gì.
+- [x] **Muốn chỉnh tiếp sau khi dùng công cụ**: bấm "Tự động làm đẹp" — layer "Chân dung" vừa
+  áp dụng được mở lại với đúng các thanh cũ, không phân tích lại (dùng kết quả đã giữ).
+- Cố ý KHÔNG làm: bấm thẳng lên ảnh lúc đang xem trước thì vẫn không có tác dụng (phải chọn
+  công cụ trước). Lý do: bấm ra ngoài ô số là cách chốt số đang gõ (đợt 22); nếu cú bấm đó vừa
+  áp dụng làm đẹp vừa vẽ một nét thì dễ hỏng ảnh ngoài ý muốn. Các lệnh menu khác lúc đang xem
+  trước vẫn cần Áp dụng / Hủy trước như cũ.
+- Test: `asking_for_the_crop_tool_…` (ảnh thật: bảng không khóa khi rảnh, khóa khi đang chạy,
+  chọn công cụ thì áp dụng + bảng vẫn mở, "Tự động làm đẹp" mở lại đúng layer),
+  `the_crop_tool_keeps_an_id_photo_the_print_it_is`,
+  `open_and_idle_the_dialog_leaves_enter_and_esc_to_the_tools`. Test đầy đủ qua.
+- Chưa kiểm được bằng test: nút công cụ, phím tắt và Hand / Zoom trên cửa sổ thật.
+- Code `d03d422`; bản test `target/release/iai.exe` (build 04/10 21:33; bản tạm
+  `iai-dot25.exe` của đợt 25 đã xóa).
 - [ ] Build Release, chủ test.
