@@ -405,22 +405,36 @@ impl ToolManager {
     }
 
     pub fn cursor_size(&self) -> f32 {
+        // See `pencil_follows_brush`.
+        if self.active == ToolId::Pencil {
+            return self.brush.cursor_size();
+        }
         self.tool_dyn(self.active).cursor_size()
+    }
+
+    /// The Pencil has no options of its own: it draws with the Brush's size,
+    /// opacity and colour, hard-edged.
+    fn pencil_follows_brush(&mut self) {
+        if self.active == ToolId::Pencil {
+            let brush = &self.brush.settings;
+            (self.pencil.size, self.pencil.opacity, self.pencil.color) =
+                (brush.size, brush.opacity, brush.color);
+        }
     }
 
     /// Radius of the brush ring in canvas px. With `normal_tip` a soft tip's
     /// ring sits on its 50 % contour (Photoshop's Normal Brush Tip), so the
     /// faint outer part of a dab paints past it.
     pub fn cursor_ring_radius(&self, normal_tip: bool) -> f32 {
-        let tool = self.tool_dyn(self.active);
-        let r = tool.cursor_size();
-        match tool.tip_hardness() {
+        let r = self.cursor_size();
+        match self.tool_dyn(self.active).tip_hardness() {
             Some(h) if normal_tip => r * brush::soft_round_half_radius(h),
             _ => r,
         }
     }
 
     pub fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
+        self.pencil_follows_brush();
         let id = self.active;
         let resp = self.tool_dyn_mut(id).on_press(event, ctx);
         self.last_event = Some(event);
@@ -428,6 +442,7 @@ impl ToolManager {
     }
 
     pub fn on_drag(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
+        self.pencil_follows_brush();
         let id = self.active;
         let prev = self.last_event.unwrap_or(event);
         let resp = self.tool_dyn_mut(id).on_drag(event, &prev, ctx);

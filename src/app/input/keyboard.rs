@@ -802,75 +802,12 @@ impl App {
             PhysicalKey::Code(KeyCode::KeyJ) if pressed && !self.edit.input.ctrl_held => {
                 self.run_default(Command::ToolRepair, event_loop, repeat);
             }
-            PhysicalKey::Code(KeyCode::BracketLeft) if pressed && !self.edit.input.shift_held => {
-                if self.edit.show_refine_panel {
-                    let size = self.edit.tools.refine_brush().size;
-                    self.edit.tools.refine_brush_mut().size =
-                        (size - clone_bracket_step(size, false)).max(1.0);
-                } else if self.edit.tools.active_id() == ToolId::Eraser {
-                    self.edit.tools.eraser_mut().size =
-                        (self.edit.tools.eraser().size - 2.0).max(1.0);
-                } else if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair) {
-                    let size = self.edit.tools.clone_like().size;
-                    self.edit.tools.clone_like_mut().size =
-                        (size - clone_bracket_step(size, false)).max(1.0);
+            PhysicalKey::Code(code @ (KeyCode::BracketLeft | KeyCode::BracketRight)) if pressed => {
+                let grow = code == KeyCode::BracketRight;
+                if self.edit.input.shift_held {
+                    self.bracket_tip_hardness(grow);
                 } else {
-                    self.edit.tools.brush_mut().settings.size =
-                        (self.edit.tools.brush().settings.size - 2.0).max(1.0);
-                }
-                self.win.last_cursor_radius = 0;
-                self.sync_cursor(event_loop);
-            }
-            PhysicalKey::Code(KeyCode::BracketRight) if pressed && !self.edit.input.shift_held => {
-                if self.edit.show_refine_panel {
-                    let size = self.edit.tools.refine_brush().size;
-                    self.edit.tools.refine_brush_mut().size =
-                        (size + clone_bracket_step(size, true)).min(1000.0);
-                } else if self.edit.tools.active_id() == ToolId::Eraser {
-                    self.edit.tools.eraser_mut().size =
-                        (self.edit.tools.eraser().size + 2.0).min(5000.0);
-                } else if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair) {
-                    let size = self.edit.tools.clone_like().size;
-                    self.edit.tools.clone_like_mut().size =
-                        (size + clone_bracket_step(size, true)).min(5000.0);
-                } else {
-                    self.edit.tools.brush_mut().settings.size =
-                        (self.edit.tools.brush().settings.size + 2.0).min(300.0);
-                }
-                self.win.last_cursor_radius = 0;
-                self.sync_cursor(event_loop);
-            }
-            PhysicalKey::Code(KeyCode::BracketLeft) if pressed && self.edit.input.shift_held => {
-                if self.edit.show_refine_panel {
-                    self.edit.tools.refine_brush_mut().hardness =
-                        (self.edit.tools.refine_brush().hardness - 0.1).max(0.0);
-                } else if self.edit.tools.active_id() == ToolId::Eraser {
-                    self.edit.tools.eraser_mut().hardness =
-                        (self.edit.tools.eraser().hardness - 0.1).max(0.0);
-                } else if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair) {
-                    let t = self.edit.tools.clone_like_mut();
-                    t.hardness = (t.hardness - 0.25).max(0.0);
-                } else {
-                    self.edit.tools.brush_mut().settings.hardness =
-                        (self.edit.tools.brush().settings.hardness - 0.1).max(0.0);
-                }
-                // A soft tip's ring follows its hardness (Normal Brush Tip).
-                self.win.last_cursor_radius = 0;
-                self.sync_cursor(event_loop);
-            }
-            PhysicalKey::Code(KeyCode::BracketRight) if pressed && self.edit.input.shift_held => {
-                if self.edit.show_refine_panel {
-                    self.edit.tools.refine_brush_mut().hardness =
-                        (self.edit.tools.refine_brush().hardness + 0.1).min(1.0);
-                } else if self.edit.tools.active_id() == ToolId::Eraser {
-                    self.edit.tools.eraser_mut().hardness =
-                        (self.edit.tools.eraser().hardness + 0.1).min(1.0);
-                } else if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair) {
-                    let t = self.edit.tools.clone_like_mut();
-                    t.hardness = (t.hardness + 0.25).min(1.0);
-                } else {
-                    self.edit.tools.brush_mut().settings.hardness =
-                        (self.edit.tools.brush().settings.hardness + 0.1).min(1.0);
+                    self.bracket_tip_size(grow);
                 }
                 // A soft tip's ring follows its hardness (Normal Brush Tip).
                 self.win.last_cursor_radius = 0;
@@ -1179,6 +1116,87 @@ pub(in crate::app) fn key_name(code: KeyCode) -> Option<KeyName> {
 }
 
 impl App {
+    /// `[` / `]`: resize the tip of the tool in hand.
+    fn bracket_tip_size(&mut self, grow: bool) {
+        let moved = |size: f32, step: f32, max: f32| {
+            if grow {
+                (size + step).min(max)
+            } else {
+                (size - step).max(1.0)
+            }
+        };
+        let stepped = |size: f32, max: f32| moved(size, clone_bracket_step(size, grow), max);
+        let nudged = |size: f32, max: f32| moved(size, 2.0, max);
+        let tools = &mut self.edit.tools;
+        if self.edit.show_refine_panel {
+            let tool = tools.refine_brush_mut();
+            tool.size = stepped(tool.size, 1000.0);
+            return;
+        }
+        match tools.active_id() {
+            ToolId::Eraser => {
+                let tool = tools.eraser_mut();
+                tool.size = nudged(tool.size, 5000.0);
+            }
+            ToolId::Clone | ToolId::Repair => {
+                let tool = tools.clone_like_mut();
+                tool.size = stepped(tool.size, 5000.0);
+            }
+            ToolId::Smudge => {
+                let tool = tools.smudge_mut();
+                tool.size = stepped(tool.size, 5000.0);
+            }
+            ToolId::Dodge | ToolId::Burn => {
+                let tool = tools.dodge_burn_mut();
+                tool.size = stepped(tool.size, 5000.0);
+            }
+            ToolId::SmartSelect => {
+                let tool = tools.wand_mut();
+                tool.brush_size = stepped(tool.brush_size, 2000.0);
+            }
+            _ => {
+                let settings = &mut tools.brush_mut().settings;
+                settings.size = nudged(settings.size, 300.0);
+            }
+        }
+    }
+
+    /// `Shift+[` / `Shift+]`: soften / harden the tip of the tool in hand.
+    fn bracket_tip_hardness(&mut self, grow: bool) {
+        let moved =
+            |hardness: f32, step: f32| (hardness + if grow { step } else { -step }).clamp(0.0, 1.0);
+        let tools = &mut self.edit.tools;
+        if self.edit.show_refine_panel {
+            let tool = tools.refine_brush_mut();
+            tool.hardness = moved(tool.hardness, 0.1);
+            return;
+        }
+        match tools.active_id() {
+            ToolId::Eraser => {
+                let tool = tools.eraser_mut();
+                tool.hardness = moved(tool.hardness, 0.1);
+            }
+            ToolId::Clone | ToolId::Repair => {
+                let tool = tools.clone_like_mut();
+                tool.hardness = moved(tool.hardness, 0.25);
+            }
+            ToolId::Smudge => {
+                let tool = tools.smudge_mut();
+                tool.hardness = moved(tool.hardness, 0.25);
+            }
+            ToolId::Dodge | ToolId::Burn => {
+                let tool = tools.dodge_burn_mut();
+                tool.hardness = moved(tool.hardness, 0.25);
+            }
+            // The Quick Selection brush has no hardness.
+            ToolId::SmartSelect => {}
+            _ => {
+                let settings = &mut tools.brush_mut().settings;
+                settings.hardness = moved(settings.hardness, 0.1);
+            }
+        }
+    }
+
     fn redraw_main(&self) {
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -1733,5 +1751,83 @@ mod tests {
         ] {
             assert_eq!(key_name(code), None, "{code:?}");
         }
+    }
+
+    #[test]
+    fn brackets_resize_the_tool_in_hand_not_the_brush() {
+        let mut app = App::new();
+        let settings = &app.edit.tools.brush().settings;
+        let brush = (settings.size, settings.hardness);
+        let tools = &mut app.edit.tools;
+        tools.smudge_mut().size = 40.0;
+        tools.smudge_mut().hardness = 0.5;
+        tools.wand_mut().brush_size = 40.0;
+
+        app.edit.tools.select(ToolId::Smudge);
+        app.bracket_tip_size(true);
+        app.bracket_tip_hardness(false);
+        let smudge = app.edit.tools.smudge();
+        assert_eq!((smudge.size, smudge.hardness), (45.0, 0.25));
+
+        for (tool, grow, size, hardness) in [
+            (ToolId::Dodge, false, 35.0, 0.75),
+            (ToolId::Burn, true, 45.0, 0.75),
+        ] {
+            // Dodge and Burn each keep their own tip.
+            app.edit.tools.select(tool);
+            app.edit.tools.dodge_burn_mut().size = 40.0;
+            app.edit.tools.dodge_burn_mut().hardness = 0.5;
+            app.bracket_tip_size(grow);
+            app.bracket_tip_hardness(true);
+            let t = app.edit.tools.dodge_burn();
+            assert_eq!((t.size, t.hardness), (size, hardness), "{tool:?}");
+        }
+
+        app.edit.tools.select(ToolId::SmartSelect);
+        app.bracket_tip_size(true);
+        app.bracket_tip_hardness(true);
+        assert_eq!(app.edit.tools.wand().brush_size, 45.0);
+
+        let after = &app.edit.tools.brush().settings;
+        assert_eq!((after.size, after.hardness), brush);
+
+        // The Brush itself, and a size past the keys' ceiling only comes down.
+        app.edit.tools.select(ToolId::Brush);
+        app.bracket_tip_size(true);
+        assert_eq!(app.edit.tools.brush().settings.size, brush.0 + 2.0);
+        app.edit.tools.brush_mut().settings.size = 800.0;
+        app.bracket_tip_size(false);
+        assert_eq!(app.edit.tools.brush().settings.size, 798.0);
+    }
+
+    #[test]
+    fn pencil_draws_with_the_brush_size_and_colour() {
+        use crate::tools::{PointerEvent, ToolCtx};
+        let mut app = App::new();
+        let (w, h) = (120u32, 120u32);
+        app.docs.documents[0].canvas =
+            crate::core::canvas::Canvas::from_rgba(vec![255; (w * h * 4) as usize], w, h);
+        app.edit.tools.select(ToolId::Pencil);
+        app.edit.tools.brush_mut().settings.size = 40.0;
+        app.edit.tools.brush_mut().settings.color = [200, 30, 30, 255];
+        assert_eq!(app.edit.tools.cursor_size(), 20.0);
+        // The keys resize what the Pencil draws with.
+        app.bracket_tip_size(true);
+        assert_eq!(app.edit.tools.cursor_size(), 21.0);
+        {
+            let (fg, bg) = ([200, 30, 30, 255], [255; 4]);
+            let mut ctx = ToolCtx::new(&mut app.docs.documents[0], fg, bg, 1.0, 0.0, 0.0);
+            app.edit
+                .tools
+                .on_press(PointerEvent::new(60.0, 60.0), &mut ctx);
+            app.edit
+                .tools
+                .on_release(PointerEvent::new(60.0, 60.0), &mut ctx);
+            ctx.canvas_mut().end_stroke();
+        }
+        let tiles = &app.docs.documents[0].canvas.active_layer().tiles;
+        assert_eq!(tiles.get_pixel(60, 60), (200, 30, 30, 255));
+        assert_eq!(tiles.get_pixel(75, 60), (200, 30, 30, 255));
+        assert_eq!(tiles.get_pixel(95, 60), (255, 255, 255, 255));
     }
 }
