@@ -1602,6 +1602,30 @@ mod quality_tests {
         }
     }
 
+    /// Needs the local LaMa model; run with `--ignored`: the selection fill
+    /// (Edit ▸ Smart Fill) gives the hole the photo's grain, as the Repair
+    /// Brush does, not the model's smooth 512 px one.
+    #[test]
+    #[ignore]
+    fn ai_selection_fill_keeps_the_grain() {
+        if !crate::core::lama::is_available() {
+            return;
+        }
+        let (w, h) = (480usize, 400usize);
+        let truth = two_backgrounds(w, h);
+        let mut img = truth.clone();
+        let hole = paint_disc(&mut img, w, h, (240.0, 200.0), 70.0);
+        let mut canvas = crate::core::canvas::Canvas::from_rgba(img, w as u32, h as u32);
+        assert!(canvas.smart_fill_fill_hole(hole.clone(), true, false));
+        let filled = canvas.active_layer().tiles.flatten();
+        let (got, want) = (detail(&filled, &hole, w), detail(&truth, &hole, w));
+        println!(
+            "rms={:.1} detail={got:.1} (truth {want:.1})",
+            rms(&filled, &truth, &hole)
+        );
+        assert!(got > want * 0.6, "{got} vs {want}");
+    }
+
     #[test]
     fn spot_fill_heals_the_whole_soft_footprint() {
         let (w, h) = (96usize, 96usize);

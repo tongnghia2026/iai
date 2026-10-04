@@ -494,7 +494,11 @@ impl Canvas {
             return false;
         }
         let used_ai = allow_ai && crate::core::lama::inpaint(&mut buf, lw, lh, &hole);
-        if !used_ai {
+        if used_ai {
+            // LaMa works at 512 px and smooths grain: bring the photo's own
+            // texture back at full resolution, as the Repair Brush does.
+            crate::core::smart_fill::refine_fill(&mut buf, lw, lh, &hole);
+        } else {
             let ok = if seamless {
                 crate::core::smart_fill::fill_seamless(&mut buf, lw, lh, &hole)
             } else {
