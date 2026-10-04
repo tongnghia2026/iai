@@ -41,6 +41,23 @@ pub(crate) fn typing_in_a_field(ctx: &egui::Context, id: egui::Id) -> bool {
     now || before
 }
 
+const PLAIN_PRESS: &str = "plain_press_pass";
+
+/// Note that the press held this frame is on a control through which no
+/// drag changes a value: a slider's value box, a group's header.
+fn note_plain_press(ctx: &egui::Context) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(PLAIN_PRESS), pass));
+}
+
+/// Whether the press held this frame is on such a control (call after the
+/// controls are drawn). Develop leaves its preview alone for one: switching
+/// to the drag preview and back, with nothing dragged, only blinks the image.
+pub(crate) fn plain_press(ctx: &egui::Context) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.get_temp::<u64>(egui::Id::new(PLAIN_PRESS))) == Some(pass)
+}
+
 /// Linear interpolate two colours (premultiplied-agnostic), `t` in 0..1.
 pub(crate) fn mix_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
@@ -128,6 +145,9 @@ pub fn section_header<'a>(
     let visible_w = (ui.clip_rect().right() - ui.cursor().left()).max(1.0);
     let width = ui.available_width().min(visible_w).max(1.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
+    if response.is_pointer_button_down_on() {
+        note_plain_press(ui.ctx());
+    }
     let visuals = ui.visuals();
     let painter = ui.painter();
     painter.rect_filled(rect, 4.0, visuals.faint_bg_color);
@@ -444,6 +464,9 @@ fn stacked_slider(
         .input(|i| i.pointer.press_origin())
         .or_else(|| response.interact_pointer_pos())
         .is_some_and(|p| value_rect.contains(p));
+    if pressed_in_value_box {
+        note_plain_press(ui.ctx());
+    }
 
     if !editing && (response.dragged() || response.clicked()) {
         if response.clicked() && pressed_in_value_box {
@@ -491,8 +514,12 @@ fn stacked_slider(
         egui::StrokeKind::Inside,
     );
     if let Some(mut text) = ui.ctx().data_mut(|d| d.get_temp::<String>(edit_id)) {
-        let out = ui.put(
-            value_rect,
+        // In a child of its own: `ui.put` would move this row's cursor up to
+        // the field's bottom edge, and every row below would jump with it.
+        let mut field = ui.new_child(egui::UiBuilder::new().max_rect(value_rect).layout(
+            egui::Layout::centered_and_justified(egui::Direction::TopDown),
+        ));
+        let out = field.add(
             egui::TextEdit::singleline(&mut text)
                 .id(te_id)
                 .font(font)

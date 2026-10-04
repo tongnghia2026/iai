@@ -769,6 +769,11 @@ pub(crate) fn develop_panel_contents(
     if changed {
         actions.develop.set_develop_settings = Some(settings);
     }
+    // A press that drags no value (a value box to type in, a section header)
+    // leaves the preview as it is.
+    if crate::ui::widgets::plain_press(ui.ctx()) {
+        actions.develop.develop_controls_pointer_down = false;
+    }
     (apply, cancel)
 }
 
@@ -806,6 +811,108 @@ mod layout_tests {
             only_one_open([false; DEV_PANEL_SECTIONS]),
             [false; DEV_PANEL_SECTIONS]
         );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn only_a_press_on_a_slider_track_puts_the_preview_in_drag_mode() {
+        let ctx = egui::Context::default();
+        let mut data = UiData::default();
+        data.develop.develop_sections_open = DEFAULT_SECTIONS_OPEN;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 900.0));
+        let draw = |events: Vec<egui::Event>| {
+            let mut actions = UiActions::default();
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ctx| {
+                egui::SidePanel::right("develop_press_test")
+                    .exact_width(340.0)
+                    .show(ctx, |ui| {
+                        develop_panel_contents(ui, &data, &mut actions, 860.0);
+                    });
+            });
+            (output, actions)
+        };
+        let text_at = |output: &egui::FullOutput, label: &str| -> egui::Pos2 {
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no {label}"))
+        };
+        draw(vec![]);
+        let (output, _) = draw(vec![]);
+        // A row paints its label, then its value: Exposure's is the first
+        // "0" after its label.
+        let label = text_at(&output, "Exposure");
+        let value_box = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((text.galley.text().to_string(), text.pos)),
+                _ => None,
+            })
+            .skip_while(|(text, _)| text != "Exposure")
+            .find(|(text, _)| text == "0")
+            .map(|(_, pos)| pos + egui::vec2(3.0, 5.0))
+            .expect("Exposure's value");
+        let track = egui::pos2(label.x + 150.0, value_box.y);
+        let header = text_at(&output, "Color") + egui::vec2(4.0, 6.0);
+        // Whether any frame of a press and release at `at` asked for drag mode.
+        let pressed_as_a_drag = |at: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let mut any = false;
+            for events in [
+                vec![egui::Event::PointerMoved(at)],
+                vec![button(true)],
+                vec![],
+                vec![button(false)],
+                vec![],
+            ] {
+                any |= draw(events).1.develop.develop_controls_pointer_down;
+            }
+            // Leave a field the click may have opened.
+            draw(vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            any
+        };
+        assert!(pressed_as_a_drag(track), "a press on the track is a drag");
+        assert!(!pressed_as_a_drag(value_box), "a click in the value box");
+        assert!(!pressed_as_a_drag(header), "a click on a section header");
+
+        // The field that opens in the value box moves nothing around it.
+        let rows = ["Exposure", "Contrast", "Blacks"];
+        let before = rows.map(|label| text_at(&draw(vec![]).0, label));
+        let button = |pressed| egui::Event::PointerButton {
+            pos: value_box,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(vec![egui::Event::PointerMoved(value_box)]);
+        draw(vec![button(true)]);
+        draw(vec![button(false)]);
+        for _ in 0..3 {
+            let output = draw(vec![]).0;
+            assert!(ctx.egui_wants_keyboard_input(), "the field is open");
+            assert_eq!(rows.map(|label| text_at(&output, label)), before);
+        }
     }
 
     #[test]
