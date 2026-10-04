@@ -3,7 +3,7 @@
 //! in prefs.json (key `print_sheet`).
 
 use super::*;
-use crate::core::imposition::{Backdrop, PhotoKind, Sheet, SheetOptions};
+use crate::core::imposition::{Backdrop, Paper, PhotoKind, Sheet, SheetOptions};
 
 const PREFS_KEY: &str = "print_sheet";
 
@@ -34,7 +34,7 @@ pub(crate) fn print_sheet_section(
             data.doc.canvas_dpi
         ),
         None if data.doc.has_doc => {
-            "Ảnh hiện tại không đúng cỡ 3×4 (2.8×3.8cm) / 4×6 — vẫn xếp được, ảnh sẽ được co về đúng ô."
+            "Ảnh hiện tại không đúng cỡ 2×3 / 3×4 (2,8×3,8 cm) / 4×6 — vẫn xếp được, ảnh sẽ được co về đúng ô."
                 .to_string()
         }
         None => "Hãy mở ảnh đã crop trước.".to_string(),
@@ -48,6 +48,71 @@ pub(crate) fn print_sheet_section(
         options.gap = gap.clamp(0, 100) as u32;
         settled |= r.drag_stopped() || r.lost_focus();
     });
+
+    // One button per size and paper: the row is the size, the column the
+    // paper, the button says how many copies fit.
+    let mut chosen = None;
+    let label_w = 30.0;
+    let spacing = ui.spacing().item_spacing.x;
+    let button_w = ((ui.available_width() - label_w - 2.0 * spacing) / 2.0).max(40.0);
+    ui.horizontal(|ui| {
+        ui.allocate_space(egui::vec2(label_w, 1.0));
+        for paper in Paper::ALL {
+            ui.allocate_ui_with_layout(
+                egui::vec2(button_w, 14.0),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Giấy {}", paper.label()))
+                            .small()
+                            .weak(),
+                    );
+                },
+            );
+        }
+    });
+    for kind in PhotoKind::ALL {
+        ui.horizontal(|ui| {
+            ui.add_sized([label_w, 24.0], egui::Label::new(kind.label()));
+            for paper in Paper::ALL {
+                let sheet = Sheet::Grid(paper, kind);
+                let count = sheet.count(options.gap);
+                let text = if count > 0 {
+                    format!("{count} tấm")
+                } else {
+                    "—".to_string()
+                };
+                let button = egui::Button::new(egui::RichText::new(text).strong())
+                    .min_size(egui::vec2(button_w, 24.0));
+                if ui
+                    .add_enabled(data.doc.has_doc && count > 0, button)
+                    .clicked()
+                {
+                    chosen = Some(sheet);
+                }
+            }
+        });
+    }
+    ui.label(
+        egui::RichText::new("Trang một cỡ in đúng nền của ảnh.")
+            .small()
+            .weak(),
+    );
+
+    ui.add_space(4.0);
+    let copies = Sheet::Mixed.copies(options.gap);
+    let text = match &copies {
+        Some(copies) => format!("Ghép {}: {copies}", Sheet::Mixed.paper().label()),
+        None => "Không ghép được — khe cắt quá lớn".to_string(),
+    };
+    let button = egui::Button::new(egui::RichText::new(text).strong())
+        .min_size(egui::vec2(ui.available_width(), 24.0));
+    if ui
+        .add_enabled(data.doc.has_doc && copies.is_some(), button)
+        .clicked()
+    {
+        chosen = Some(Sheet::Mixed);
+    }
     ui.horizontal_wrapped(|ui| {
         for (label, backdrop) in [
             ("Nền 3×4", &mut options.backdrop_3x4),
@@ -68,25 +133,8 @@ pub(crate) fn print_sheet_section(
     })
     .response
     .on_hover_text(
-        "Đổi nền được khi người đã tách khỏi nền (Làm ảnh thẻ có tích \"Tách người ra layer riêng\"). Ảnh chưa tách nền thì giữ nguyên nền của ảnh",
+        "Trang ghép đặt người lên nền riêng của từng cỡ khi người đã tách khỏi nền. Ảnh chưa tách nền thì giữ nguyên nền của ảnh",
     );
-
-    let mut chosen = None;
-    for sheet in Sheet::ALL {
-        let label = sheet.label(options.gap);
-        let text = match &label {
-            Some(label) => format!("Xếp {label}"),
-            None => "Không xếp được — khe cắt quá lớn".to_string(),
-        };
-        let btn = egui::Button::new(egui::RichText::new(text).strong())
-            .min_size(egui::vec2(ui.available_width(), 26.0));
-        if ui
-            .add_enabled(data.doc.has_doc && label.is_some(), btn)
-            .clicked()
-        {
-            chosen = Some(sheet);
-        }
-    }
     ui.label(
         egui::RichText::new(
             "Ảnh nền trắng có viền đỏ để cắt. Mỗi tấm là một layer riêng — dùng Move tool để tự sắp xếp lại.",

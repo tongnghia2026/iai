@@ -5,9 +5,10 @@
 // so, and stamped into a NEW white 600dpi document: one layer per copy, one
 // group per size, so the user can move/delete/duplicate prints by hand.
 //
-// A person cut out over a plain Background layer (as "Làm ảnh thẻ" leaves the
-// photo) is laid on each size's own backdrop, and photos on white get a
-// cutting line around them.
+// A sheet of one size prints the photo on the background it has. On the mixed
+// sheet a person cut out over a plain Background layer (as "Làm ảnh thẻ"
+// leaves the photo) is laid on each size's own backdrop. Photos on white get
+// a cutting line around them.
 
 use crate::app::render::CanvasEvent;
 use crate::app::state::App;
@@ -136,16 +137,19 @@ impl App {
         if src_w == 0 || src_h == 0 {
             return;
         }
-        let person = cut_out(src);
+        let mixed = sheet == Sheet::Mixed;
+        let person = if mixed { cut_out(src) } else { None };
         let flat = src.flatten_for_export();
         let mut stamps = Vec::with_capacity(blocks.len());
         for block in &blocks {
-            let backdrop = options.backdrop(block.kind);
             let (rgba, on_white) = match &person {
-                Some(person) => (
-                    imposition::over_backdrop(person, backdrop.rgb()),
-                    Some(backdrop == Backdrop::White),
-                ),
+                Some(person) => {
+                    let backdrop = options.backdrop(block.kind);
+                    (
+                        imposition::over_backdrop(person, backdrop.rgb()),
+                        Some(backdrop == Backdrop::White),
+                    )
+                }
                 None => (flat.clone(), None),
             };
             let Some(photo) = image::RgbaImage::from_raw(src_w, src_h, rgba) else {
@@ -236,7 +240,7 @@ impl App {
                 cropped.join(" và ")
             ));
         }
-        if person.is_none() {
+        if mixed && person.is_none() {
             message.push_str(" — ảnh chưa tách nền nên giữ nguyên nền của ảnh");
         }
         self.shell.status_msg = message;
@@ -415,19 +419,87 @@ mod tests {
         let (w, h) = PhotoKind::Id3x4.cell_px();
         let grey = [120u8, 130, 140, 255].repeat((w * h) as usize);
         app.docs.documents[0].canvas = Canvas::from_rgba(grey, w, h);
-        app.do_impose_sheet(Sheet::Grid(Paper::P10x15, PhotoKind::Id3x4), options);
+        app.do_impose_sheet(Sheet::Mixed, options);
         let doc = &app.docs.documents[app.docs.active_doc_idx];
-        assert_eq!(doc.title, "Trang 10×15 — 10 tấm 3×4");
         let sheet = doc.canvas.flatten_for_export();
-        let block = &Sheet::Grid(Paper::P10x15, PhotoKind::Id3x4).blocks(options.gap)[0];
-        let (x, y) = block.layout.placements[0];
-        let o = (((y + 1) * doc.canvas.width + x + 1) * 4) as usize;
-        assert_eq!(&sheet[o..o + 3], &[120, 130, 140]);
+        for block in Sheet::Mixed.blocks(options.gap) {
+            let (x, y) = block.layout.placements[0];
+            let o = (((y + 1) * doc.canvas.width + x + 1) * 4) as usize;
+            assert_eq!(&sheet[o..o + 3], &[120, 130, 140]);
+        }
         assert!(
             app.shell.status_msg.contains("giữ nguyên nền"),
             "{}",
             app.shell.status_msg
         );
+    }
+
+    #[test]
+    fn a_sheet_of_one_size_prints_the_photo_on_the_background_it_has() {
+        // Whatever "Xếp ảnh in" remembers for the mixed sheet.
+        let options = SheetOptions {
+            backdrop_3x4: Backdrop::White,
+            backdrop_4x6: Backdrop::White,
+            ..SheetOptions::default()
+        };
+        let blue = Backdrop::Blue.rgb();
+        for (sheet, title) in [
+            (
+                Sheet::Grid(Paper::P10x15, PhotoKind::Id2x3),
+                "Trang 10×15 — 21 tấm 2×3",
+            ),
+            (
+                Sheet::Grid(Paper::P10x15, PhotoKind::Id4x6),
+                "Trang 10×15 — 4 tấm 4×6",
+            ),
+        ] {
+            let mut app = App::new();
+            app.shell.ui.show_welcome = false;
+            let mut photo = id_photo();
+            let (w, h) = (photo.width, photo.height);
+            photo.layer_stack.layers[0].tiles =
+                TileMap::new_solid(w, h, blue[0], blue[1], blue[2], 255);
+            photo.pixels_stale = true;
+            app.docs.documents[0].canvas = photo;
+            app.do_impose_sheet(sheet, options);
+
+            let doc = &app.docs.documents[app.docs.active_doc_idx];
+            assert_eq!(doc.title, title);
+            let pixels = doc.canvas.flatten_for_export();
+            let layout = &sheet.blocks(options.gap)[0].layout;
+            assert_eq!(layout.placements.len(), sheet.count(options.gap));
+            for &(x, y) in &layout.placements {
+                let o = (((y + 1) * doc.canvas.width + x + 1) * 4) as usize;
+                assert_eq!(&pixels[o..o + 3], &blue, "{title}");
+            }
+            assert!(
+                !app.shell.status_msg.contains("giữ nguyên nền"),
+                "{}",
+                app.shell.status_msg
+            );
+        }
+
+        // On white the photo is white, with its cutting line.
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.docs.documents[0].canvas = id_photo();
+        let sheet = Sheet::Grid(Paper::P13x18, PhotoKind::Id3x4);
+        app.do_impose_sheet(
+            sheet,
+            SheetOptions {
+                backdrop_3x4: Backdrop::Blue,
+                ..options
+            },
+        );
+        let doc = &app.docs.documents[app.docs.active_doc_idx];
+        let pixels = doc.canvas.flatten_for_export();
+        let (x, y) = sheet.blocks(options.gap)[0].layout.placements[0];
+        let at = |x: u32, y: u32| {
+            let o = ((y * doc.canvas.width + x) * 4) as usize;
+            [pixels[o], pixels[o + 1], pixels[o + 2]]
+        };
+        assert_eq!(at(x + 1, y + 1), [255; 3]);
+        assert_eq!(at(x - 2, y + 30), BORDER_RGB);
     }
     /// Opt-in visual probe: IAI_PRINT_SHEET_PROBE is a folder of portraits;
     /// each is made an ID photo ("Làm ảnh thẻ"), laid out on the mixed sheet

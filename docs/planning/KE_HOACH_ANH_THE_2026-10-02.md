@@ -551,3 +551,41 @@ trước.
 - Code `1c9a0c6`; bản test `target/release/iai.exe` (build 04/10 17:32).
 - [x] Build Release, chủ test đợt 22: **OK** (04/10), kèm việc của đợt 23 (gộp Làm ảnh thẻ vào
   Chỉnh chân dung; chủ muốn xem bản vẽ trước, duyệt rồi mới làm).
+
+## Đợt 23 (04/10 tối): gộp "Làm ảnh thẻ" vào "Chỉnh chân dung", nền xanh, cỡ 2×3 / 4×6, cắt lại
+
+Chủ muốn một bảng thay cho hai: trên cùng hai ô chức năng — **Ảnh thẻ** (ô tích nền xanh / nền
+trắng, nam / nữ / trẻ em…) và **Chân dung** (không tách nền, y như cũ). Tôi vẽ phác, chủ duyệt
+04/10 kèm các ý sau (đây là yêu cầu của chủ, không phải suy đoán của tôi):
+
+- Lưu / xóa công thức **giữ nguyên** ở ô Chân dung; ô Ảnh thẻ chỉ chọn.
+- Màu nền xanh: **#0090FF**.
+- Thêm cỡ cắt **4×6** và **2×3**; Xếp ảnh in cũng có hai cỡ này. Chủ chỉ có hai loại giấy:
+  **10×15** và **13×18 cm**; số tấm mỗi trang tôi tự tính.
+- Sau khi app tự cắt và tự chỉnh màu, nếu khung cắt lệch thì **cho cắt lại ngay khi bảng đang mở**.
+
+Thiết kế tôi chốt (phần chủ giao "tự tính toán"):
+
+- **Một hộp thoại** `portrait_dialog`, hai ô ở đầu. Mục menu "Làm ảnh thẻ…" mở ở ô Ảnh thẻ
+  (chưa phân tích chân dung), "Chỉnh chân dung…" mở ở ô Chân dung (phân tích ngay như cũ).
+- **Ô Ảnh thẻ**: Nền (Trắng / Xanh / Giữ nền gốc) · Mẫu (các công thức, dạng ô bấm) · Cỡ (2×3 /
+  3×4 / 4×6 / Không cắt) · Xoay thẳng theo mắt · Khung rộng hơn mẫu (%) · nút "Làm ảnh thẻ".
+  Bỏ ô tích "Xong thì mở Chỉnh chân dung" (giờ là cùng một bảng).
+- **Cỡ cắt** đều cao 1417 px để trang in nào cũng lấy được điểm ảnh gốc: 3×4 = 1043×1417
+  (2,8×3,8 cm, 947 ppi, như cũ); 4×6 = 945×1417 (600 ppi); 2×3 = 945×1417 (1200 ppi, in ra 2×3 cm).
+- **Cắt lại**: lần chạy đầu giữ lại mask tách nền + mốc mặt (phần AI tốn giây). Sau đó đổi Cỡ,
+  Khung rộng hơn, Xoay thẳng hay bấm các nút dịch khung (lên / xuống / trái / phải / xoay) thì
+  app hoàn tác bước ảnh thẻ rồi cắt lại từ mask đã giữ, không chạy AI lại; phân tích chân dung
+  chạy lại sau lần chỉnh cuối, các thanh kéo giữ nguyên. Đổi Nền chỉ tô lại lớp nền.
+- **Xếp ảnh in**: bảng nút 3 cỡ × 2 giấy + trang ghép 13×18 (6 tấm 3×4 + 2 tấm 4×6). Trang một
+  cỡ in **đúng nền của ảnh** (chọn ở ô Nền); riêng trang ghép vẫn chọn nền riêng từng cỡ.
+  (Trước đây mọi trang đều lấy nền theo ô "Nền 3×4 / Nền 4×6" của Xếp ảnh in — đổi vì giờ ảnh
+  đã có nền chọn sẵn, in ra khác màu trên màn hình là dễ in hỏng.)
+
+Việc:
+
+- [ ] Lõi xếp trang: `PhotoKind::Id2x3`, xanh #0090FF, đủ trang cho hai giấy, trang một cỡ theo nền ảnh.
+- [ ] Lõi ảnh thẻ: cỡ + màu nền trong `IdPhotoOptions`, phân tích tách khỏi lập khung, dịch khung.
+- [ ] App: giữ phân tích, cắt lại (hoàn tác + áp lại), tô lại nền, khởi động phân tích chân dung sau lần chỉnh cuối.
+- [ ] Giao diện: bảng gộp hai ô, bỏ hộp thoại "Làm ảnh thẻ" riêng, bảng nút Xếp ảnh in.
+- [ ] Probe ảnh + test giả lập; test đầy đủ; build Release, chủ test.

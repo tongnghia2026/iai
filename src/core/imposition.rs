@@ -3,7 +3,7 @@
 // Pure layout math. Paper/photo presets are fixed pixel sizes at SHEET_DPI so
 // the printed result is exact; the grid tries both orientations and keeps the
 // one that fits more copies (ID shops lay 3×4 prints sideways: 10 per 10×15,
-// 18 per 13×18). A mixed sheet holds both sizes. The app layer
+// 18 per 13×18). A mixed sheet holds two sizes. The app layer
 // (app/actions/impose.rs) turns a sheet into a new document with one layer
 // per copy so the user can rearrange by hand.
 
@@ -27,6 +27,8 @@ pub enum Paper {
 }
 
 impl Paper {
+    pub const ALL: [Paper; 2] = [Paper::P10x15, Paper::P13x18];
+
     /// Sheet size in pixels at `SHEET_DPI`, portrait.
     pub fn size_px(self) -> (u32, u32) {
         match self {
@@ -43,8 +45,10 @@ impl Paper {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PhotoKind {
+    /// 2×3 cm.
+    Id2x3,
     /// "3×4" ID photo as shops actually cut it: 2.8×3.8 cm.
     Id3x4,
     /// Full-size 4×6 cm photo.
@@ -52,9 +56,12 @@ pub enum PhotoKind {
 }
 
 impl PhotoKind {
+    pub const ALL: [PhotoKind; 3] = [PhotoKind::Id2x3, PhotoKind::Id3x4, PhotoKind::Id4x6];
+
     /// Photo cell in pixels at `SHEET_DPI`, portrait (before any rotation).
     pub fn cell_px(self) -> (u32, u32) {
         match self {
+            PhotoKind::Id2x3 => (472, 709),  // 2 × 3 cm
             PhotoKind::Id3x4 => (661, 898),  // 2.8 × 3.8 cm
             PhotoKind::Id4x6 => (945, 1417), // 4 × 6 cm
         }
@@ -62,6 +69,7 @@ impl PhotoKind {
 
     pub fn label(self) -> &'static str {
         match self {
+            PhotoKind::Id2x3 => "2×3",
             PhotoKind::Id3x4 => "3×4",
             PhotoKind::Id4x6 => "4×6",
         }
@@ -70,6 +78,7 @@ impl PhotoKind {
     /// Physical cell size in centimetres.
     pub fn cell_cm(self) -> (f32, f32) {
         match self {
+            PhotoKind::Id2x3 => (2.0, 3.0),
             PhotoKind::Id3x4 => (2.8, 3.8),
             PhotoKind::Id4x6 => (4.0, 6.0),
         }
@@ -83,7 +92,7 @@ impl PhotoKind {
         }
         let (w_cm, h_cm) = (w as f32 / dpi * 2.54, h as f32 / dpi * 2.54);
         const TOL_CM: f32 = 0.12;
-        for kind in [PhotoKind::Id3x4, PhotoKind::Id4x6] {
+        for kind in PhotoKind::ALL {
             let (cw, ch) = kind.cell_cm();
             if (w_cm - cw).abs() <= TOL_CM && (h_cm - ch).abs() <= TOL_CM {
                 return Some(kind);
@@ -104,7 +113,7 @@ impl Backdrop {
     pub fn rgb(self) -> [u8; 3] {
         match self {
             Backdrop::White => [255, 255, 255],
-            Backdrop::Blue => [5, 148, 242],
+            Backdrop::Blue => [0, 144, 255],
         }
     }
 
@@ -117,7 +126,8 @@ impl Backdrop {
 }
 
 /// What "Xếp ảnh in" remembers: the cutting gap between copies (px at
-/// [`SHEET_DPI`]) and each size's backdrop.
+/// [`SHEET_DPI`]) and, for the mixed sheet, each size's backdrop. A sheet of
+/// one size prints the photo on the background it has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SheetOptions {
@@ -137,10 +147,11 @@ impl Default for SheetOptions {
 }
 
 impl SheetOptions {
+    /// The mixed sheet's backdrop for `kind`.
     pub fn backdrop(&self, kind: PhotoKind) -> Backdrop {
         match kind {
-            PhotoKind::Id3x4 => self.backdrop_3x4,
             PhotoKind::Id4x6 => self.backdrop_4x6,
+            PhotoKind::Id2x3 | PhotoKind::Id3x4 => self.backdrop_3x4,
         }
     }
 }
@@ -162,9 +173,12 @@ pub struct Block {
 }
 
 impl Sheet {
-    pub const ALL: [Sheet; 4] = [
+    pub const ALL: [Sheet; 7] = [
+        Sheet::Grid(Paper::P10x15, PhotoKind::Id2x3),
+        Sheet::Grid(Paper::P13x18, PhotoKind::Id2x3),
         Sheet::Grid(Paper::P10x15, PhotoKind::Id3x4),
         Sheet::Grid(Paper::P13x18, PhotoKind::Id3x4),
+        Sheet::Grid(Paper::P10x15, PhotoKind::Id4x6),
         Sheet::Grid(Paper::P13x18, PhotoKind::Id4x6),
         Sheet::Mixed,
     ];
@@ -192,14 +206,28 @@ impl Sheet {
             .collect()
     }
 
-    /// "13×18 — 6 tấm 3×4 + 2 tấm 4×6"; `None` when nothing fits.
-    pub fn label(self, gap: u32) -> Option<String> {
-        let blocks = self.blocks(gap);
-        let parts: Vec<String> = blocks
+    /// "6 tấm 3×4 + 2 tấm 4×6"; `None` when nothing fits.
+    pub fn copies(self, gap: u32) -> Option<String> {
+        let parts: Vec<String> = self
+            .blocks(gap)
             .iter()
             .map(|b| format!("{} tấm {}", b.layout.placements.len(), b.kind.label()))
             .collect();
-        (!parts.is_empty()).then(|| format!("{} — {}", self.paper().label(), parts.join(" + ")))
+        (!parts.is_empty()).then(|| parts.join(" + "))
+    }
+
+    /// "13×18 — 6 tấm 3×4 + 2 tấm 4×6"; `None` when nothing fits.
+    pub fn label(self, gap: u32) -> Option<String> {
+        self.copies(gap)
+            .map(|copies| format!("{} — {copies}", self.paper().label()))
+    }
+
+    /// How many copies the sheet holds.
+    pub fn count(self, gap: u32) -> usize {
+        self.blocks(gap)
+            .iter()
+            .map(|b| b.layout.placements.len())
+            .sum()
     }
 }
 
@@ -404,9 +432,47 @@ mod tests {
     }
 
     #[test]
+    fn every_size_has_a_sheet_on_both_papers() {
+        // What fits with the usual gap; 2×3 and 3×4 lie sideways.
+        let counts: Vec<(usize, bool)> = Sheet::ALL
+            .iter()
+            .filter_map(|sheet| match *sheet {
+                Sheet::Grid(paper, kind) => {
+                    let l = layout(paper, kind, 10);
+                    Some((l.placements.len(), l.rotated))
+                }
+                Sheet::Mixed => None,
+            })
+            .collect();
+        assert_eq!(
+            counts,
+            vec![
+                (21, true),
+                (32, true),
+                (10, true),
+                (18, true),
+                (4, false),
+                (8, true)
+            ]
+        );
+        assert_eq!(Sheet::Grid(Paper::P10x15, PhotoKind::Id2x3).count(10), 21);
+        assert_eq!(Sheet::Mixed.count(10), 8);
+        assert_eq!(
+            Sheet::Grid(Paper::P10x15, PhotoKind::Id4x6)
+                .label(10)
+                .as_deref(),
+            Some("10×15 — 4 tấm 4×6")
+        );
+        assert_eq!(
+            Sheet::Mixed.copies(10).as_deref(),
+            Some("6 tấm 3×4 + 2 tấm 4×6")
+        );
+    }
+
+    #[test]
     fn placements_stay_inside_the_sheet() {
-        for paper in [Paper::P10x15, Paper::P13x18] {
-            for kind in [PhotoKind::Id3x4, PhotoKind::Id4x6] {
+        for paper in Paper::ALL {
+            for kind in PhotoKind::ALL {
                 for gap in [0u32, 10, 100] {
                     let (pw, ph) = paper.size_px();
                     let l = layout(paper, kind, gap);
@@ -493,7 +559,8 @@ mod tests {
         let cut_out = [200u8, 0, 0, 255, 200, 0, 0, 128, 9, 9, 9, 0];
         let blue = over_backdrop(&cut_out, Backdrop::Blue.rgb());
         assert_eq!(&blue[0..4], &[200, 0, 0, 255]);
-        assert_eq!(&blue[8..12], &[5, 148, 242, 255]);
+        // The owner's blue, #0090FF.
+        assert_eq!(&blue[8..12], &[0, 144, 255, 255]);
         assert!(blue[4] > 95 && blue[4] < 110 && blue[6] > 115, "{blue:?}");
 
         let white = over_backdrop(&[0u8; 4 * 6], Backdrop::White.rgb());
@@ -532,6 +599,7 @@ mod tests {
         assert_eq!(PhotoKind::detect(661, 898, 600.0), Some(PhotoKind::Id3x4));
         assert_eq!(PhotoKind::detect(331, 449, 300.0), Some(PhotoKind::Id3x4));
         assert_eq!(PhotoKind::detect(945, 1417, 600.0), Some(PhotoKind::Id4x6));
+        assert_eq!(PhotoKind::detect(472, 709, 600.0), Some(PhotoKind::Id2x3));
         assert_eq!(PhotoKind::detect(4000, 6000, 72.0), None);
         assert_eq!(PhotoKind::detect(661, 898, 0.0), None);
     }
