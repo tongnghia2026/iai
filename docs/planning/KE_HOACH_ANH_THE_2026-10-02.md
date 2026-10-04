@@ -494,4 +494,26 @@ mục kia; icon cái răng đổi thành miệng hoặc môi.
   chạy, nên phải nhớ trạng thái của khung hình trước). Test
   `esc_and_enter_in_a_value_box_act_on_the_value_not_on_the_dialog`.
 - Đã tự xem ảnh probe (`tmp/ui/sau`); hành vi bấm / gõ kiểm bằng test giả lập chuột và phím.
+- [x] Build Release, chủ test đợt 20: **OK** (04/10), kèm một việc của đợt 21.
+
+## Đợt 21 (04/10): bấm vào ô số ở Develop thì cửa sổ nháy
+
+Chủ sau khi test đợt 20: ở cửa sổ Develop, bấm vào ô nhập số thì giao diện "nháy nhẹ một
+cái", muốn đứng yên; Chỉnh chân dung thì không bị.
+
+- [x] **Ảnh xem trước của Develop không còn nháy khi bấm ô số** — nguyên nhân riêng của
+  Develop: hễ nhấn chuột lên một điều khiển, panel báo "đang kéo" và app chuyển ảnh xem trước
+  sang đường dựng nhanh, nhả chuột thì dựng lại bản chính xác
+  (`set_develop_controls_pointer_down`). Đúng cho việc kéo thanh; bấm vào ô số thì không kéo
+  gì, chỉ thấy ảnh và dòng "Preview: …" nháy. Sửa: cú nhấn bắt đầu trong ô số hoặc trên tiêu đề
+  mục được đánh dấu (`widgets::note_plain_press` / `plain_press`), và panel không báo "đang
+  kéo" cho nó. Bấm tiêu đề mục để mở / đóng cũng hết nháy.
+- [x] **Các hàng bên dưới không còn nhích 2 px khi ô nhập hiện ra** (cả Develop lẫn Chỉnh chân
+  dung): `ui.put` kéo con trỏ bố cục của hàng lên mép dưới ô nhập; nay ô nhập nằm trong một
+  `new_child` riêng, không đụng bố cục.
+- Test `only_a_press_on_a_slider_track_puts_the_preview_in_drag_mode` (hỏng trước khi sửa ở cả
+  hai điểm): nhấn trên rãnh thanh = "đang kéo"; bấm ô số / tiêu đề = không; vị trí các hàng
+  trước và trong lúc gõ giống hệt nhau.
+- Tôi chưa nhìn tận mắt hiện tượng nháy trên app thật; hai nguyên nhân trên là thứ đọc code và
+  test giả lập tìm ra.
 - [ ] Build Release, chủ test.
