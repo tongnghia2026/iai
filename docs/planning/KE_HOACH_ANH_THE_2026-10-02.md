@@ -347,3 +347,21 @@ nền xanh `(5, 148, 242)`, dưới là 2 tấm 4×6 nằm ngang nền trắng v
   để lại một vạch mờ cách mép trên ảnh thẻ ~8 px — chỗ khung vượt khỏi ảnh gốc.
 - [x] Build Release, chủ test đợt 14: **OK**, chỉ yêu cầu viền mảnh lại còn 2 px (đã sửa).
 - [x] Build Release, chủ xem lại viền 2 px: **OK** (04/10).
+
+## Đợt 15 (04/10): hết vạch mờ ở mép ảnh thẻ, Trắng mắt / Trắng răng theo xám của ảnh
+
+Chủ chọn hai việc trong danh sách "còn gì đáng làm" (mục 2 và 4).
+
+- [x] **Vạch mờ ở mép ảnh thẻ** (thấy trên `khach_1.jpg`, in ra sẽ lộ): khi khung ảnh thẻ
+  vượt khỏi mép ảnh gốc, bước cắt lấy mẫu lại mặt nạ của layer với nền trắng (= hiện) cho phần
+  ngoài ảnh. Đúng hàng điểm ảnh sát mép, mặt nạ bị trộn về phía trắng trong khi điểm ảnh còn
+  nửa đục → lộ một vệt nền cũ (cả ở "Layer 1" lẫn "Ảnh gốc"). Sửa trong
+  `Canvas::resample_footprint` (`core/canvas/geometry_ops.rs`): mặt nạ giữ nguyên giá trị ở
+  mép của chính nó (`keep_edge`), chỉ phần nằm hẳn ngoài mới là trắng. Áp cho mọi lệnh Crop
+  có layer mang mặt nạ. Test `a_frame_past_the_photos_edge_leaves_no_line_of_the_old_background`
+  (hỏng khi bỏ bản sửa). Đo lại trên trang in từ `khach_1.jpg`: hết vạch.
+- [x] **"Trắng mắt" / "Trắng răng"** giảm màu quanh trục xám của ảnh (`balanced` +
+  `bleached` trong `effects.rs`), như thanh giảm màu mắt / tóc ở đợt 12: ảnh ám màu sau "Khử
+  ám màu" không còn ngả xanh ở lòng trắng và răng. Ảnh không khử ám thì y như cũ.
+- Việc còn lại và kế hoạch tiếp: `docs/planning/KE_HOACH_TIEP_THEO_2026-10-04.md`.
+- [ ] Build Release, chủ test.
