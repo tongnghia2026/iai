@@ -411,4 +411,28 @@ phần công thức **chỉ làm lưu / nạp** (không làm chạy hàng loạt
 - [x] Edit ▸ Smart Fill (AI) giữ vân ảnh ở độ phân giải đầy đủ (`5295d34`).
 - Chưa nhìn tận mắt hàng "Công thức" trên màn hình (bố cục tính theo bề rộng 320 px của hộp
   thoại); test tự động chỉ kiểm lưu / ghi đè / đọc lại và vẽ không lỗi.
+- [x] Build Release (`iai-dot17.exe`); chủ đã dùng hàng "Công thức" và yêu cầu tiếp đợt 18.
+  Chủ chưa nói gì về phím `[` `]`, Pencil, Smart Fill.
+
+## Đợt 18 (04/10): công thức ngay trong "Làm ảnh thẻ", công thức có sẵn, bỏ chú thích thanh kéo
+
+Chủ sau khi dùng đợt 17: đặt công thức ở bảng Làm ảnh thẻ luôn, cắt xong tự áp vào; làm sẵn
+vài công thức (thông số tôi tự quyết, chủ sẽ chỉnh và lưu lại sau); ở Chỉnh chân dung bỏ
+chú thích hiện ra mỗi khi rê chuột vào thanh kéo ("rất rối").
+
+- [x] **"Công thức" trong Làm ảnh thẻ** (`ui/dialogs/id_photo.rs`): ô chọn ngay dưới "Xong thì
+  mở Chỉnh chân dung" — "Mặc định" hoặc một công thức đã lưu; nhớ lựa chọn trong prefs.json
+  (khóa `id_photo_preset`). Cắt xong, Chỉnh chân dung mở ra với sẵn các thanh của công thức
+  đó (xem trước hiện ngay), chủ chỉ còn bấm Áp dụng hoặc một trang ở "Xếp ảnh in"
+  (`App::begin_portrait_from`). Tôi chọn "nạp sẵn vào hộp thoại" chứ không tự bấm Áp dụng
+  thay chủ, để còn chỉnh thêm và xếp trang in ngay tại đó.
+- [x] **Năm công thức có sẵn** (`core/portrait/presets.rs`), không cái nào đổi dáng mặt (là
+  ảnh thẻ): "Ảnh thẻ nữ" (mịn hơn, sáng da nhẹ, môi tươi), "Ảnh thẻ nam" (giữ vân da, nét
+  hơn), "Trẻ em" (rất nhẹ), "Lớn tuổi" (mịn + giữ khối, quầng thâm, răng), "Nhẹ, tự nhiên".
+  Cấp một lần cho mỗi máy (prefs.json khóa `portrait_presets_built_in`): chủ sửa / xóa thì
+  không bị cấp lại; công thức chủ đã lưu trùng tên được giữ nguyên.
+- [x] **Chỉnh chân dung không còn chú thích nổi** trên các thanh kéo, thanh cỡ cọ / độ cứng và
+  tiêu đề nhóm. Còn chú thích ở nút bấm, ô tích, ô màu studio (ít khi rê qua).
+- Probe `IAI_PORTRAIT_PRESET_PROBE` (`tmp/anh-the/cong-thuc`): ảnh gốc | từng công thức có
+  sẵn. Đã xem trên 2 ảnh thẻ: tự nhiên, khác nhau vừa phải, không lỗi.
 - [ ] Build Release, chủ test.

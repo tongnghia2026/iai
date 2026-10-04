@@ -7,11 +7,12 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
 
 - Nhánh `feat/vector-core-foundation`; mọi thứ **commit local, chưa push** (push gần nhất
   02/10 @ `d1f4acb`). Chỉ push khi chủ bảo.
-- Bản test đợt 17: **`target\release\iai-dot17.exe`** (build 04/10 12:28, có
-  `--features canvas-editor-webview`). `target\release\iai.exe` vẫn là bản đợt 16 vì lúc build
-  chủ đang mở nó nên không ghi đè được; app đóng rồi thì build lại bình thường.
-- **Chờ chủ test — đợt 17 (04/10):** hàng "Công thức" trong Chỉnh chân dung; phím `[` `]` với
-  Smudge / Dodge / Burn; Pencil vẽ đúng cỡ và màu; Smart Fill (AI) giữ vân ảnh.
+- Bản test đợt 18: **`target\release\iai.exe`** (build 04/10 13:55, có
+  `--features canvas-editor-webview`). Bản `iai-dot17.exe` đã xóa.
+- **Chờ chủ test — đợt 18 (04/10):** ô "Công thức" trong Làm ảnh thẻ (cắt xong, Chỉnh chân
+  dung mở với sẵn công thức đó); năm công thức có sẵn; bỏ chú thích nổi trên thanh kéo.
+- Đợt 17 chủ chưa nói rõ: phím `[` `]` với Smudge / Dodge / Burn; Pencil vẽ đúng cỡ và màu;
+  Smart Fill (AI) giữ vân ảnh.
 - Bản portable `dist\iAi-portable` vẫn là bản 02/10 — thiếu mọi thứ làm từ 03/10.
 - Chủ đã test OK: đợt 8–15 (Chi tiết mặt AI, Sửa màu & sáng, mặc định mới, thanh màu hai
   chiều, Sáng da = Midtones, Xếp ảnh in + trang 13×18 hỗn hợp, viền cắt 2 px, hết vạch mờ ở
