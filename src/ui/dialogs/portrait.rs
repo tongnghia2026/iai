@@ -2,7 +2,8 @@
 //! under-eye, eye and teeth sliders with a live canvas preview, like the
 //! Filter/Levels dialogs, and a brush ("Tô vùng") to fix the skin, hair and
 //! brow areas before sliding, and studio colour looks. Áp dụng adds the
-//! retouch (look included) as one new layer; Hủy restores.
+//! retouch (look included) as one new layer; Hủy restores. Sets of sliders
+//! can be kept by name ("Công thức") in prefs.json (key `portrait_presets`).
 
 use super::*;
 use crate::core::portrait::brush::MaskTarget;
@@ -10,6 +11,122 @@ use crate::core::portrait::looks::StudioLook;
 use crate::core::portrait::PortraitSettings;
 use crate::core::selection::RefineBrushMode;
 use egui_phosphor::regular as ph;
+
+const PRESETS_KEY: &str = "portrait_presets";
+const PRESET_NAME_FIELD: &str = "portrait_preset_name";
+
+/// "Công thức": a set of sliders kept under a name.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Preset {
+    name: String,
+    settings: PortraitSettings,
+}
+
+fn load_presets() -> Vec<Preset> {
+    load_pref(PRESETS_KEY).unwrap_or_default()
+}
+
+/// Keep `settings` under `name`, in place of the preset of that name.
+fn keep_preset(presets: &mut Vec<Preset>, name: &str, settings: PortraitSettings) {
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    match presets.iter_mut().find(|p| p.name == name) {
+        Some(preset) => preset.settings = settings,
+        None => presets.push(Preset {
+            name: name.to_string(),
+            settings,
+        }),
+    }
+}
+
+/// The "Công thức" row: load a kept set of sliders, keep the current one
+/// under a name (`naming` holds the name while it is typed; `leave` closes
+/// that field), or delete the one in use. Returns whether `presets` changed.
+fn preset_row(
+    ui: &mut egui::Ui,
+    ready: bool,
+    s: &mut PortraitSettings,
+    presets: &mut Vec<Preset>,
+    naming: &mut Option<String>,
+    leave: bool,
+) -> bool {
+    let mut changed = false;
+    // The preset in use is the one the sliders stand at.
+    let current = presets.iter().position(|p| p.settings == *s);
+    ui.add_enabled_ui(ready, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Công thức");
+            let shown = match current {
+                Some(i) => presets[i].name.as_str(),
+                None if presets.is_empty() => "Chưa lưu",
+                None => "Chọn…",
+            };
+            egui::ComboBox::from_id_salt("portrait_preset")
+                .selected_text(shown)
+                .width(130.0)
+                .show_ui(ui, |ui| {
+                    for (i, preset) in presets.iter().enumerate() {
+                        if ui
+                            .selectable_label(Some(i) == current, &preset.name)
+                            .clicked()
+                        {
+                            *s = preset.settings;
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Nạp lại bộ thanh kéo đã lưu");
+            if ui
+                .button("Lưu…")
+                .on_hover_text(
+                    "Lưu các thanh đang chỉnh thành một công thức, để dùng lại cho ảnh khác",
+                )
+                .clicked()
+            {
+                *naming = Some(current.map_or_else(String::new, |i| presets[i].name.clone()));
+                ui.memory_mut(|m| m.request_focus(egui::Id::new(PRESET_NAME_FIELD)));
+            }
+            if ui
+                .add_enabled(current.is_some(), egui::Button::new(ph::TRASH))
+                .on_hover_text("Xóa công thức đang chọn")
+                .clicked()
+            {
+                if let Some(i) = current {
+                    presets.remove(i);
+                    changed = true;
+                }
+            }
+        });
+    });
+    if let Some(name) = naming {
+        let (mut keep, mut done) = (false, leave);
+        ui.horizontal(|ui| {
+            let field = ui.add(
+                egui::TextEdit::singleline(name)
+                    .id(egui::Id::new(PRESET_NAME_FIELD))
+                    .desired_width(180.0)
+                    .hint_text("Tên, vd. Nữ, Nam, Trẻ em"),
+            );
+            keep = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            keep |= ui
+                .add_enabled(!name.trim().is_empty(), egui::Button::new("Lưu"))
+                .on_hover_text("Trùng tên thì ghi đè công thức cũ")
+                .clicked();
+            done |= ui.button("Thôi").clicked();
+        });
+        if keep && !name.trim().is_empty() {
+            keep_preset(presets, name, *s);
+            changed = true;
+            done = true;
+        }
+        if done {
+            *naming = None;
+        }
+    }
+    changed
+}
 
 fn slider_colors() -> [egui::Color32; 3] {
     [
@@ -367,6 +484,12 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let preview_id = egui::Id::new("portrait_preview");
     let masks_id = egui::Id::new("portrait_masks");
     let group_id = egui::Id::new("portrait_group");
+    let presets_id = egui::Id::new("portrait_presets");
+    let naming_id = egui::Id::new("portrait_preset_naming");
+    let mut presets: Vec<Preset> = ctx
+        .data_mut(|d| d.get_temp(presets_id))
+        .unwrap_or_else(load_presets);
+    let mut naming: Option<String> = ctx.data_mut(|d| d.get_temp(naming_id).unwrap_or(None));
     let mut s: PortraitSettings = ctx.data_mut(|d| d.get_temp(settings_id).unwrap_or_default());
     let mut preview: bool = ctx.data_mut(|d| d.get_temp(preview_id).unwrap_or(true));
     let mut masks: bool = ctx.data_mut(|d| d.get_temp(masks_id).unwrap_or(false));
@@ -393,8 +516,10 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
 
     let ready = data.dialogs.portrait_ready;
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    // While a preset is being named, Esc leaves the name field, not the dialog.
+    let leave_naming = esc_pressed && naming.is_some();
     let mut do_apply = enter_pressed && ready;
-    let mut do_cancel = esc_pressed;
+    let mut do_cancel = esc_pressed && !leave_naming;
     let mut open = true;
     let mut sheet = None;
 
@@ -441,6 +566,10 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         .size(10.0)
                         .color(egui::Color32::from_rgb(220, 150, 90)),
                 );
+            }
+            ui.add_space(4.0);
+            if preset_row(ui, ready, &mut s, &mut presets, &mut naming, leave_naming) {
+                save_pref(PRESETS_KEY, &presets);
             }
 
             egui::ScrollArea::vertical()
@@ -849,10 +978,13 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
         d.insert_temp(faces_id, faces.clone());
         d.insert_temp(preview_id, preview);
         d.insert_temp(masks_id, masks);
+        d.insert_temp(presets_id, presets);
         if do_apply || do_cancel {
             d.remove_temp::<Option<Group>>(group_id);
+            d.remove_temp::<Option<String>>(naming_id);
         } else {
             d.insert_temp(group_id, next);
+            d.insert_temp(naming_id, naming);
         }
     });
     // The brush paints only while its group is open.
@@ -867,5 +999,76 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
         actions.dialogs.cancel_portrait_dialog = true;
     } else {
         actions.dialogs.set_portrait_preview = Some((s, faces, preview, masks));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_preset_is_kept_by_name_and_read_back() {
+        let mut presets = Vec::new();
+        let soft = PortraitSettings {
+            smooth: 30.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        keep_preset(&mut presets, "  Nữ ", soft);
+        keep_preset(&mut presets, "Nam", PortraitSettings::default());
+        keep_preset(&mut presets, "  ", soft);
+        let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Nữ", "Nam"]);
+        // The same name again replaces what it kept.
+        let softer = PortraitSettings {
+            smooth: 60.0,
+            ..soft
+        };
+        keep_preset(&mut presets, "Nữ", softer);
+        assert_eq!((presets.len(), presets[0].settings), (2, softer));
+        let json = serde_json::to_string(&presets).unwrap();
+        assert_eq!(serde_json::from_str::<Vec<Preset>>(&json).unwrap(), presets);
+        // A preset kept before a slider existed reads that slider's default.
+        let old: Vec<Preset> =
+            serde_json::from_str(r#"[{"name":"Cũ","settings":{"smooth":40.0}}]"#).unwrap();
+        assert_eq!(old[0].settings.smooth, 40.0);
+    }
+
+    #[test]
+    fn the_preset_row_draws_and_keeps_everything_until_asked() {
+        let ctx = egui::Context::default();
+        let mut s = PortraitSettings::default();
+        let mut presets = vec![Preset {
+            name: "Nữ".to_string(),
+            settings: s,
+        }];
+        let mut naming = Some("Nam".to_string());
+        for _ in 0..2 {
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                assert!(!preset_row(
+                    ui,
+                    true,
+                    &mut s,
+                    &mut presets,
+                    &mut naming,
+                    false
+                ));
+            });
+        }
+        assert_eq!(
+            (presets.len(), naming.as_deref(), s),
+            (1, Some("Nam"), PortraitSettings::default())
+        );
+        // Esc leaves the name field and keeps nothing.
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            assert!(!preset_row(
+                ui,
+                true,
+                &mut s,
+                &mut presets,
+                &mut naming,
+                true
+            ));
+        });
+        assert_eq!((presets.len(), naming), (1, None));
     }
 }
