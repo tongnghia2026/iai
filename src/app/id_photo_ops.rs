@@ -251,8 +251,8 @@ impl App {
             self.apply_canvas_event(CanvasEvent::SelectionChanged);
         }
         let mut message = if cropped {
-            let (w, h) = id_photo::output_size();
-            format!("Làm ảnh thẻ xong: {w}×{h} px, 600 ppi (Ctrl+Z để hoàn tác)")
+            let (w, h) = id_photo::PRINT_PX;
+            format!("Làm ảnh thẻ xong: 2,8×3,8 cm, {w}×{h} px (Ctrl+Z để hoàn tác)")
         } else {
             "Làm ảnh thẻ xong: đã tách người lên nền trắng (Ctrl+Z để hoàn tác)".to_string()
         };

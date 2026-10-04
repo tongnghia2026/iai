@@ -1,10 +1,10 @@
 //! "Làm ảnh thẻ" dialog (Image ▸ Làm ảnh thẻ…): one click turns a portrait
-//! into a 3×4 ID photo (2.8×3.8 cm, 600 ppi) framed from the eyes and chin,
+//! into a 3×4 ID photo (2.8×3.8 cm) framed from the eyes and chin,
 //! levelled, with the person on its own layer over white. The options are
 //! remembered in prefs.json (key `id_photo`).
 
 use super::*;
-use crate::core::id_photo::{IdPhotoOptions, DEFAULT_WIDEN, MAX_WIDEN};
+use crate::core::id_photo::{IdPhotoOptions, DEFAULT_WIDEN, MAX_WIDEN, PRINT_PX};
 
 const PREFS_KEY: &str = "id_photo";
 
@@ -50,9 +50,13 @@ pub(crate) fn id_photo_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
             ui.add_space(10.0);
 
             ui.add_enabled_ui(!busy, |ui| {
+                let (w, h) = PRINT_PX;
                 ui.checkbox(
                     &mut options.crop,
-                    "Cắt cỡ 3×4 (2,8×3,8 cm · 600 ppi · 661×898 px)",
+                    format!("Cắt cỡ 3×4 (2,8×3,8 cm · {w}×{h} px)"),
+                )
+                .on_hover_text(
+                    "Cắt dư điểm ảnh để tấm 4×6 trên trang in cũng nét như tấm 3×4; in ra vẫn đúng 2,8×3,8 cm",
                 );
                 ui.add_enabled_ui(options.crop, |ui| {
                     ui.horizontal(|ui| {

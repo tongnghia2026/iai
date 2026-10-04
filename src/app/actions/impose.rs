@@ -63,13 +63,20 @@ fn stamp(
     let src_ratio = src_w as f32 / src_h as f32;
     let cell_ratio = cell_w as f32 / cell_h as f32;
     let cropped = (src_ratio - cell_ratio).abs() / cell_ratio > 0.02;
-    let img = if (src_w, src_h) != (cell_w, cell_h) {
-        let s = (cell_w as f32 / src_w as f32).max(cell_h as f32 / src_h as f32);
-        let (fw, fh) = (
-            ((src_w as f32 * s).round() as u32).max(cell_w),
-            ((src_h as f32 * s).round() as u32).max(cell_h),
-        );
-        let scaled = image::imageops::resize(&photo, fw, fh, image::imageops::FilterType::Lanczos3);
+    let s = (cell_w as f32 / src_w as f32).max(cell_h as f32 / src_h as f32);
+    let (fw, fh) = (
+        ((src_w as f32 * s).round() as u32).max(cell_w),
+        ((src_h as f32 * s).round() as u32).max(cell_h),
+    );
+    // A photo already at the cell's scale gives its own pixels.
+    let scaled = if (fw, fh) == (src_w, src_h) {
+        photo
+    } else {
+        image::imageops::resize(&photo, fw, fh, image::imageops::FilterType::Lanczos3)
+    };
+    let img = if (fw, fh) == (cell_w, cell_h) {
+        scaled
+    } else {
         image::imageops::crop_imm(
             &scaled,
             (fw - cell_w) / 2,
@@ -78,8 +85,6 @@ fn stamp(
             cell_h,
         )
         .to_image()
-    } else {
-        photo
     };
     let mut rgba = img.into_raw();
     let (mut w, mut h, mut pad) = (cell_w, cell_h, 0);
@@ -244,14 +249,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::id_photo::{PRINT_PPI, PRINT_PX};
     use crate::core::imposition::{Paper, BORDER_RGB};
 
     /// A 3×4 photo as "Làm ảnh thẻ" leaves it: a white Background and the
     /// person (a block from a third down, the middle half) cut out above it.
     fn id_photo() -> Canvas {
-        let (w, h) = PhotoKind::Id3x4.cell_px();
+        let (w, h) = PRINT_PX;
         let mut canvas = Canvas::new(w, h);
-        canvas.metadata.resolution_ppi = SHEET_DPI;
+        canvas.metadata.resolution_ppi = PRINT_PPI;
         canvas.layer_stack.layers[0].is_background = true;
         let mut person = vec![0u8; (w * h * 4) as usize];
         for y in h / 3..h {
@@ -311,6 +317,31 @@ mod tests {
         let tight = stamp(white, PhotoKind::Id3x4, None, 0, false);
         assert_eq!((tight.size, tight.pad), ((w, h), 0));
         assert_eq!(&tight.tiles.flatten()[0..3], &BORDER_RGB);
+    }
+
+    #[test]
+    fn an_id_photo_gives_the_4x6_its_own_pixels_and_the_3x4_all_of_itself() {
+        // Single-pixel detail, which any resampling would smear.
+        let (w, h) = PRINT_PX;
+        let fine = image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([
+                (x % 251) as u8,
+                (y % 241) as u8,
+                ((x + y) % 2 * 255) as u8,
+                255,
+            ])
+        });
+        let (cell_w, cell_h) = PhotoKind::Id4x6.cell_px();
+        let large = stamp(fine.clone(), PhotoKind::Id4x6, Some(false), 10, false);
+        assert_eq!((large.size, large.cropped), ((cell_w, cell_h), true));
+        let middle = image::imageops::crop_imm(&fine, (w - cell_w) / 2, 0, cell_w, cell_h);
+        assert!(large.tiles.flatten() == middle.to_image().into_raw());
+
+        let small = stamp(fine, PhotoKind::Id3x4, Some(false), 10, false);
+        assert_eq!(
+            (small.size, small.cropped),
+            (PhotoKind::Id3x4.cell_px(), false)
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
-//! "Làm ảnh thẻ" (Image ▸ Làm ảnh thẻ…): frame a 3×4 ID photo — 2.8×3.8 cm at
-//! 600 ppi, as shops cut it — from the face's eye line and chin, levelled by
-//! the eyes, and cut the person out onto white.
+//! "Làm ảnh thẻ" (Image ▸ Làm ảnh thẻ…): frame a 3×4 ID photo — 2.8×3.8 cm,
+//! as shops cut it — from the face's eye line and chin, levelled by the eyes,
+//! and cut the person out onto white.
 //!
 //! The proportions come from the owner's reference print (661×898 px): eye
 //! line 33.6% and chin 56.7% of the way down, face centred. The frame is that
@@ -13,7 +13,12 @@ use super::portrait::{Clip, Region};
 use super::tile::TileMap;
 
 pub const PRINT_CM: [f32; 2] = [2.8, 3.8];
-pub const PRINT_PPI: f32 = 600.0;
+/// The print in pixels: the shops' 661×898 (600 ppi) made as tall as a 4×6 cm
+/// print on a 600 ppi sheet, so that print takes these pixels as they are and
+/// only the 3×4 is scaled down.
+pub const PRINT_PX: (u32, u32) = (1043, 1417);
+/// The resolution at which `PRINT_PX` prints as tall as `PRINT_CM`.
+pub const PRINT_PPI: f32 = PRINT_PX.1 as f32 * 2.54 / PRINT_CM[1];
 pub const DEFAULT_WIDEN: f32 = 0.10;
 pub const MAX_WIDEN: f32 = 0.40;
 pub const ORIGINAL_LAYER: &str = "Ảnh gốc";
@@ -37,12 +42,6 @@ const CHIN: usize = 152;
 const RIGHT_CHEEK: usize = 234;
 const LEFT_CHEEK: usize = 454;
 const NOSE_TIP: usize = 1;
-
-/// Output size in pixels of the print size at `PRINT_PPI` (661×898).
-pub fn output_size() -> (u32, u32) {
-    let px = |cm: f32| (cm / 2.54 * PRINT_PPI).round() as u32;
-    (px(PRINT_CM[0]), px(PRINT_CM[1]))
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -294,8 +293,7 @@ pub fn prepare(
         ));
     }
 
-    let (out_w, out_h) = output_size();
-    let aspect = out_w as f32 / out_h as f32;
+    let aspect = PRINT_PX.0 as f32 / PRINT_PX.1 as f32;
     let mut frame = None;
     if let (true, Some(face)) = (options.crop, face.as_ref()) {
         let (fitted, widen) = fit_frame(face, options, aspect, width, height);
@@ -691,8 +689,8 @@ fn box_sum(src: &[[f32; 4]], cols: usize, rows: usize, r: usize) -> Vec<[f32; 4]
 
 /// Apply `plan` as one undo step: the person twice on top — "Ảnh gốc" (the
 /// untouched photo behind a black mask, to paint details back in) under the
-/// cut-out — then the crop (levelled, resampled to the print size, 600 ppi),
-/// then the cut-out's mask pressed into its alpha like Ctrl+J with a
+/// cut-out — then the crop (levelled, resampled to `PRINT_PX`), then the
+/// cut-out's mask pressed into its alpha like Ctrl+J with a
 /// selection ("Layer 1", no mask), the background turned white and the older
 /// layers hidden.
 pub fn apply(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
@@ -710,7 +708,7 @@ fn apply_steps(canvas: &mut Canvas, plan: IdPhotoPlan) -> Result<(), String> {
     let added = plan.cutout.map(|cut| add_person_layers(canvas, cut));
 
     if let Some(frame) = plan.frame {
-        let (out_w, out_h) = output_size();
+        let (out_w, out_h) = PRINT_PX;
         let cropped = canvas.crop_transformed_with_background(
             frame.centre[0],
             frame.centre[1],
@@ -893,13 +891,28 @@ mod tests {
     }
 
     fn aspect() -> f32 {
-        let (w, h) = output_size();
+        let (w, h) = PRINT_PX;
         w as f32 / h as f32
     }
 
     #[test]
-    fn print_size_is_the_shops_3x4() {
-        assert_eq!(output_size(), (661, 898));
+    fn print_size_is_the_shops_3x4_as_tall_as_a_4x6_on_the_sheet() {
+        use crate::core::imposition::PhotoKind;
+        let (small, large) = (PhotoKind::Id3x4.cell_px(), PhotoKind::Id4x6.cell_px());
+        // The 4×6 cell is cut out of it unscaled.
+        assert_eq!(PRINT_PX.1, large.1);
+        assert!(PRINT_PX.0 >= large.0);
+        // The 3×4 cell is all of it, scaled down.
+        let scale = small.1 as f32 / PRINT_PX.1 as f32;
+        assert_eq!((PRINT_PX.0 as f32 * scale).round() as u32, small.0);
+        // On paper it is still 2.8×3.8 cm.
+        assert_eq!(
+            PhotoKind::detect(PRINT_PX.0, PRINT_PX.1, PRINT_PPI),
+            Some(PhotoKind::Id3x4)
+        );
+        for (px, cm) in [(PRINT_PX.0, PRINT_CM[0]), (PRINT_PX.1, PRINT_CM[1])] {
+            assert!((px as f32 / PRINT_PPI * 2.54 - cm).abs() < 0.01);
+        }
     }
 
     #[test]
@@ -1181,7 +1194,7 @@ mod tests {
             notes: Vec::new(),
         };
         apply(&mut canvas, plan).unwrap();
-        let (out_w, out_h) = output_size();
+        let (out_w, out_h) = PRINT_PX;
         let flat = canvas.flatten_for_export();
         // The top third holds no person: white throughout, also along the
         // rows and columns where the photo begins.
@@ -1237,7 +1250,7 @@ mod tests {
         };
         let layers_before = canvas.layer_stack.layers.len();
         apply(&mut canvas, plan).unwrap();
-        assert_eq!((canvas.width, canvas.height), output_size());
+        assert_eq!((canvas.width, canvas.height), PRINT_PX);
         assert_eq!(canvas.metadata.resolution_ppi, PRINT_PPI);
         let layers = &canvas.layer_stack.layers;
         let names: Vec<&str> = layers.iter().map(|l| l.name.as_str()).collect();
@@ -1250,14 +1263,19 @@ mod tests {
         assert!(!layers[1].visible);
         // "Ảnh gốc" waits behind a black mask; the cut-out is a plain layer
         // whose alpha holds the person only, like Ctrl+J with a selection.
+        // Where the photo's points land on the print.
+        let scale = frame.height / PRINT_PX.1 as f32;
+        let on_print = |p: [f32; 2]| {
+            let [u, v] = frame.local(p);
+            ((u / scale) as u32, (v / scale) as u32)
+        };
+        let (px, py) = on_print([330.0, 730.0]);
         let original = &layers[layers.len() - 2];
-        assert_eq!(mask_value(original.mask.as_ref().unwrap(), 330, 700), 0);
+        assert_eq!(mask_value(original.mask.as_ref().unwrap(), px, py), 0);
         let person = layers.last().unwrap();
-        assert_eq!((person.width, person.height), output_size());
+        assert_eq!((person.width, person.height), PRINT_PX);
         assert!(person.mask.is_none());
-        let scale = frame.height / output_size().1 as f32;
-        let [u, v] = frame.local([120.0, 100.0]);
-        let (ox, oy) = ((u / scale) as u32, (v / scale) as u32);
+        let (ox, oy) = on_print([120.0, 100.0]);
         let hidden = person.tiles.get_pixel(ox, oy);
         assert_eq!(hidden.3, 0, "at {ox},{oy}");
         assert_eq!(
@@ -1265,7 +1283,7 @@ mod tests {
             &[90, 120, 200],
             "colour kept"
         );
-        assert_eq!(person.tiles.get_pixel(330, 700).3, 255);
+        assert_eq!(person.tiles.get_pixel(px, py).3, 255);
         canvas.ensure_pixels();
         let at = |x: u32, y: u32| {
             let i = (y as usize * canvas.width as usize + x as usize) * 4;
@@ -1273,7 +1291,7 @@ mod tests {
         };
         assert_eq!(at(5, 5), [255, 255, 255]);
         assert_eq!(at(ox, oy), [255, 255, 255]);
-        assert_eq!(at(330, 700), [90, 120, 200]);
+        assert_eq!(at(px, py), [90, 120, 200]);
 
         assert!(canvas.undo().is_some());
         assert_eq!((canvas.width, canvas.height), (w, h));
@@ -1284,7 +1302,7 @@ mod tests {
     }
 
     /// Opt-in visual probe: set IAI_ID_PHOTO_PROBE to a folder of photos;
-    /// each gets `idphoto_<name>.png` (the finished 661×898 print) beside it.
+    /// each gets `idphoto_<name>.png` (the finished print) beside it.
     #[test]
     #[ignore]
     fn probe_id_photos() {
