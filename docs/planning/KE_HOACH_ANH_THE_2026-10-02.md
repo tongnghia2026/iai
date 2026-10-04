@@ -636,4 +636,36 @@ thẻ".
   `a_tile_asks_for_the_other_side_and_each_side_shows_its_own_controls` (nút chỉ có khi chưa
   chạy, bấm mới gửi yêu cầu). Probe `chan_dung_cho.png`. Test đầy đủ qua (1915 + 15).
 - Code `689f844`; bản test `target/release/iai.exe` (build 04/10 19:47).
+- [x] Build Release, chủ test đợt 24: chủ không báo lỗi, giao tiếp việc đợt 25 (04/10).
+
+## Đợt 25 (04/10 tối): bấm Crop tool khi bảng Auto retouch đang mở
+
+Chủ hỏi trước "làm cái này khó không, chỉ trả lời": tôi nêu phương án giữ bảng mở, crop xong
+tự chạy lại làm đẹp. Chủ chọn cách đơn giản hơn (lời chủ): có lúc cần crop lại trước khi in vì
+auto crop bị nghiêng hoặc mất góc do ảnh không đủ lớn; **bấm vào Crop tool thì hệ thống tự áp
+dụng màu hiện tại luôn là hết lệch; muốn chỉnh thêm thì chạy lại mask cũng được**.
+
+- [x] **Bấm Crop tool (thanh công cụ hoặc phím tắt) khi bảng đang mở**
+  (`App::leave_portrait_for_crop`): app áp dụng phần làm đẹp đang có thành layer "Chân dung",
+  đóng bảng, rồi chuyển sang Crop tool. Chưa có gì để áp dụng (bảng chưa chạy, thanh ở 0) thì
+  chỉ đóng bảng. Đang nhận diện khuôn mặt hoặc đang làm ảnh thẻ thì từ chối kèm lời nhắc ở
+  thanh trạng thái, không mất gì.
+- [x] **Ảnh thẻ crop lại vẫn đúng cỡ in**: nếu ảnh đang là cỡ ảnh thẻ (2×3 / 3×4 / 4×6 theo
+  kích thước + độ phân giải), Crop tool tự đặt Fixed Size bằng đúng số điểm ảnh và độ phân giải
+  của ảnh (vd. 1043×1417 px @947). Ảnh khác thì giữ nguyên cài đặt Crop của chủ. Tôi tự thêm,
+  chủ không yêu cầu — không khóa thì crop tay ra cỡ lệch, trang in phải cắt bớt.
+- [x] **Crop xong muốn chỉnh thêm**: mở lại Auto retouch ▸ Tự động làm đẹp. Layer "Chân dung"
+  đã bị crop không còn khớp công thức cũ nên trước đây báo "Không còn layer ảnh gốc…"; nay
+  được chỉnh như một ảnh mới — nhận diện lại, **các thanh bắt đầu từ 0** vì ảnh đã làm đẹp rồi
+  (`reopen_target`, `begin_portrait`). Việc này thay cho quyết định cũ "crop rồi không mở lại
+  được = tính năng": vẫn không mở lại công thức cũ, nhưng chỉnh tiếp được.
+- [x] **Xếp ảnh in khi bảng chưa chạy làm đẹp**: bấm một trang là xếp ảnh như đang có (trước
+  phải có phiên làm đẹp sẵn sàng mới bấm được). Cần cho luồng crop lại rồi in.
+- Test: `asking_for_the_crop_tool_applies_the_retouch_and_the_cropped_photo_is_retouched_anew`
+  (ảnh thật), `the_crop_tool_keeps_an_id_photo_the_print_it_is`,
+  `a_sheet_asked_with_no_retouch_under_way_lays_out_the_photo_as_it_is`,
+  `a_sheet_can_be_asked_for_with_no_retouch_under_way` (giao diện). Test đầy đủ qua (1916 + 18).
+- Chưa kiểm được bằng test: hai chỗ gọi (bấm nút công cụ, phím tắt) cần cửa sổ thật — chờ chủ thử.
+- Code `ad67fcf`; bản test `target/release/iai-dot25.exe` (build 04/10 20:58 — chủ đang mở
+  `iai.exe` nên bản mới chép ra tên khác).
 - [ ] Build Release, chủ test.
