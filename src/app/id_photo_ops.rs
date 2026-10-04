@@ -115,12 +115,16 @@ impl App {
                 state.status = line.clone();
             }
         }
-        // Until the retouch has started on the photo just made, work is
-        // still to come.
-        state.busy =
-            session.job.is_some() || session.waiting.is_some() || session.retouch_due.is_some();
+        state.busy = self.id_photo_busy();
         state.made = self.kept_id_photo().is_some();
         state
+    }
+
+    /// Whether an ID photo is being made. Until the retouch has started on
+    /// the photo just made, work is still to come.
+    pub(crate) fn id_photo_busy(&self) -> bool {
+        let session = &self.shell.id_photo;
+        session.job.is_some() || session.waiting.is_some() || session.retouch_due.is_some()
     }
 
     pub(crate) fn close_id_photo(&mut self) {

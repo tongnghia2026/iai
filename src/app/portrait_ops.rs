@@ -301,19 +301,37 @@ impl App {
         }
     }
 
-    /// The Crop tool was asked for with the dialog open: the retouch as it
-    /// stands is applied and the dialog closed, so that what is cropped is
-    /// what shows. Returns whether the tool may be taken up; it may not
-    /// while work is still running.
-    pub(crate) fn leave_portrait_for_crop(&mut self) -> bool {
-        if self.id_photo_state().busy {
-            self.shell.status_msg = "Đang làm ảnh thẻ — đợi xong rồi hãy crop".to_string();
+    /// Whether the dialog holds the canvas: a retouch is previewed on it, or
+    /// an ID photo is being made. Open and idle it holds nothing, and every
+    /// tool and command works as with any other panel.
+    pub(crate) fn portrait_under_way(&self) -> bool {
+        self.shell.ui.show_portrait_dialog
+            && (self.shell.portrait.is_some() || self.id_photo_busy())
+    }
+
+    /// A tool other than the view ones was picked with the dialog open. A
+    /// retouch under way is applied as it stands first, so the tool works on
+    /// what shows; the dialog stays open. Returns whether the tool may be
+    /// taken up; it may not while work is still running.
+    pub(crate) fn portrait_tool_picked(&mut self, crop: bool) -> bool {
+        if self.portrait_under_way() && !self.end_portrait_for_tool() {
+            return false;
+        }
+        if crop {
+            self.lock_crop_to_id_photo();
+        }
+        true
+    }
+
+    fn end_portrait_for_tool(&mut self) -> bool {
+        if self.id_photo_busy() {
+            self.shell.status_msg = "Đang làm ảnh thẻ — đợi xong rồi hãy dùng công cụ".to_string();
             return false;
         }
         let asked = match self.shell.portrait.as_ref() {
             Some(session) if session.model.is_none() && session.error.is_none() => {
                 self.shell.status_msg =
-                    "Đang nhận diện khuôn mặt — đợi xong rồi hãy crop".to_string();
+                    "Đang nhận diện khuôn mặt — đợi xong rồi hãy dùng công cụ".to_string();
                 return false;
             }
             Some(session) => session.asked.clone(),
@@ -321,13 +339,16 @@ impl App {
         };
         let applied =
             asked.is_some_and(|(settings, enabled)| self.apply_portrait(settings, enabled).is_ok());
-        self.close_portrait_dialog();
+        // The dialog stays, with nothing under way: the ID photo's framing
+        // can no longer be done again either, the document has moved on.
+        self.cancel_portrait();
+        self.close_id_photo();
+        self.shell.portrait_error = None;
         self.shell.status_msg = if applied {
-            "Auto retouch: đã áp dụng vào layer \"Chân dung\" — giờ crop được".to_string()
+            "Auto retouch: đã áp dụng vào layer \"Chân dung\"".to_string()
         } else {
-            "Đã đóng Auto retouch — giờ crop được".to_string()
+            "Auto retouch: không có gì để áp dụng".to_string()
         };
-        self.lock_crop_to_id_photo();
         true
     }
 
@@ -1447,10 +1468,13 @@ mod tests {
         let Some(mut app) = app_with_photo() else {
             return;
         };
+        // Open and idle, the dialog holds nothing.
         app.shell.ui.show_portrait_dialog = true;
+        assert!(!app.portrait_under_way() && !app.modal_lock_active());
         app.begin_portrait().unwrap();
+        assert!(app.portrait_under_way() && app.modal_lock_active());
         // While the face is being found the tool is refused, nothing is lost.
-        assert!(!app.leave_portrait_for_crop());
+        assert!(!app.portrait_tool_picked(true));
         assert!(app.shell.ui.show_portrait_dialog && app.shell.portrait.is_some());
         let model = analysed(&mut app).unwrap();
         app.set_portrait_preview(
@@ -1461,9 +1485,11 @@ mod tests {
         );
         wait_for_preview(&mut app);
 
-        // The retouch as it stands lands in its layer and the dialog closes.
-        assert!(app.leave_portrait_for_crop());
-        assert!(!app.shell.ui.show_portrait_dialog && app.shell.portrait.is_none());
+        // The retouch as it stands lands in its layer; the dialog stays
+        // open and holds the canvas no more.
+        assert!(app.portrait_tool_picked(true));
+        assert!(app.shell.ui.show_portrait_dialog && app.shell.portrait.is_none());
+        assert!(!app.portrait_under_way() && !app.modal_lock_active());
         let canvas = &mut app.docs.documents[0].canvas;
         let result = canvas.layer_stack.layers[1].id;
         assert_eq!(canvas.layer_stack.layers.len(), 2);
@@ -1471,6 +1497,13 @@ mod tests {
         assert!(canvas.layer_stack.layers[1].portrait.is_some());
         // The photo is no ID print: the Crop tool is left as it was.
         assert!(app.edit.tools.crop().mode != crate::tools::crop::CropMode::FixedSize);
+
+        // "Tự động làm đẹp" again takes that layer up where it was left.
+        app.start_portrait_retouch();
+        let session = app.shell.portrait.as_ref().unwrap();
+        assert_eq!(session.reopened.as_ref().map(|r| r.layer_id), Some(result));
+        assert_eq!(session.restore_settings, Some(PortraitSettings::default()));
+        app.cancel_portrait();
 
         // Cropped, the layer is no longer what its recipe was made on: it is
         // retouched as the photo it now is, from nothing.
@@ -1501,12 +1534,12 @@ mod tests {
     fn the_crop_tool_keeps_an_id_photo_the_print_it_is() {
         use crate::core::id_photo::{PRINT_PPI, PRINT_PX};
         use crate::tools::crop::CropMode;
-        // The dialog open and idle on an ID photo: it closes, and the tool
-        // is set to the photo's own pixels and resolution.
+        // The dialog open and idle on an ID photo: it stays, and the Crop
+        // tool is set to the photo's own pixels and resolution.
         let mut app = app_with_blank(PRINT_PX.0, PRINT_PX.1, PRINT_PPI);
         app.shell.ui.show_portrait_dialog = true;
-        assert!(app.leave_portrait_for_crop());
-        assert!(!app.shell.ui.show_portrait_dialog);
+        assert!(app.portrait_tool_picked(true));
+        assert!(app.shell.ui.show_portrait_dialog);
         let crop = app.edit.tools.crop();
         assert!(crop.mode == CropMode::FixedSize);
         assert_eq!(
@@ -1515,10 +1548,15 @@ mod tests {
         );
         assert_eq!(crop.dpi, PRINT_PPI);
 
-        // Any other photo leaves the tool as the owner set it.
+        // Any other photo leaves the tool as the owner set it, and so does
+        // any other tool picked on an ID photo.
         let mut app = app_with_blank(800, 600, 72.0);
         app.shell.ui.show_portrait_dialog = true;
-        assert!(app.leave_portrait_for_crop());
+        assert!(app.portrait_tool_picked(true));
+        assert!(app.edit.tools.crop().mode != CropMode::FixedSize);
+        let mut app = app_with_blank(PRINT_PX.0, PRINT_PX.1, PRINT_PPI);
+        app.shell.ui.show_portrait_dialog = true;
+        assert!(app.portrait_tool_picked(false));
         assert!(app.edit.tools.crop().mode != CropMode::FixedSize);
     }
 

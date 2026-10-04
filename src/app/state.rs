@@ -2588,7 +2588,7 @@ impl App {
             || self.shell.ui.show_filter_dialog
             || self.shell.ui.show_develop_dialog
             || self.shell.ui.show_scan_cleanup_dialog
-            || self.shell.ui.show_portrait_dialog
+            || self.portrait_under_way()
     }
 
     /// Bug 7: True when Crop (with an active selection) or Free Transform is active.

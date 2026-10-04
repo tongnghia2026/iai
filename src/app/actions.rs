@@ -129,17 +129,27 @@ impl App {
         // Off-thread crisp-Path display overlay bakes (zoom-bucket changes).
         self.poll_display_bake();
 
-        // A crop tool asked for while Auto retouch is open: the retouch as
-        // it stands is applied and the dialog closes first, so the crop is of
-        // what shows.
-        if self.shell.ui.show_portrait_dialog
-            && matches!(
-                actions.tool.select_tool,
-                Some(crate::tools::ToolId::Crop | crate::tools::ToolId::PerspectiveCrop)
-            )
-            && !self.leave_portrait_for_crop()
-        {
-            actions.tool.select_tool = None;
+        // A tool picked while Auto retouch is open. The view tools leave a
+        // retouch under way alone; any other has it applied as it stands
+        // first (the dialog stays open), so the tool works on what shows.
+        if self.shell.ui.show_portrait_dialog {
+            use crate::tools::ToolId;
+            match actions.tool.select_tool {
+                Some(id @ (ToolId::Hand | ToolId::Zoom)) => {
+                    if self.portrait_under_way() {
+                        actions.tool.select_tool = None;
+                        self.edit.tools.select(id);
+                        self.edit.arrow_multi_layer = None;
+                        self.sync_cursor(event_loop);
+                    }
+                }
+                Some(id) => {
+                    if !self.portrait_tool_picked(id == ToolId::Crop) {
+                        actions.tool.select_tool = None;
+                    }
+                }
+                None => {}
+            }
         }
 
         // Strict modal lock (standard design-app behavior): while a modal

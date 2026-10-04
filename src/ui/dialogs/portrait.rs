@@ -5,6 +5,11 @@
 //! included) as one new layer; Hủy restores. Sets of sliders are kept by
 //! name ("Công thức") in prefs.json (key `portrait_presets`).
 //!
+//! The dialog is a panel, not a modal one: open and idle it leaves every
+//! tool and command free. Only while a retouch is previewed (or an ID photo
+//! is being made) does it hold the canvas; picking a tool then applies the
+//! retouch as it stands and leaves the dialog open.
+//!
 //! Two tiles at the top choose its side; the one used last is remembered
 //! (key `portrait_side`). Opening the dialog analyses nothing. "Chân dung"
 //! retouches the photo as it is once "Tự động làm đẹp" is pressed. "Ảnh
@@ -568,7 +573,11 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     // While a value or a preset's name is being typed, Esc and Enter belong
     // to that field: Esc leaves it and the dialog, with its sliders, stays.
     let typing = crate::ui::widgets::typing_in_a_field(ctx, egui::Id::new("portrait_typing"));
-    let (enter_pressed, esc_pressed) = if typing {
+    // Open and idle the dialog is a panel beside the tools: Enter and Esc
+    // are theirs (a crop to commit or give up). With a retouch previewed or
+    // an ID photo being made they are Áp dụng and Hủy.
+    let under_way = data.dialogs.portrait_session || data.dialogs.id_photo_busy;
+    let (enter_pressed, esc_pressed) = if typing || !under_way {
         (false, false)
     } else {
         consume_dialog_enter_escape(ctx)
@@ -1075,7 +1084,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         egui::Button::new(format!("{}  Áp dụng", ph::CHECK)),
                     )
                     .on_hover_text(if data.dialogs.portrait_reopened {
-                        "Cập nhật layer \"Chân dung\" đang chỉnh tiếp. Bấm Crop tool lúc bảng đang mở cũng áp dụng rồi cho crop"
+                        "Cập nhật layer \"Chân dung\" đang chỉnh tiếp. Chọn một công cụ khác lúc đang xem trước cũng áp dụng, bảng vẫn mở"
                     } else {
                         "Thêm kết quả (cả Màu studio nếu có chọn) thành layer mới \"Chân dung\". Mở lại để chỉnh tiếp: chọn layer đó rồi vào Auto retouch"
                     })
@@ -1083,7 +1092,13 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                 {
                     do_apply = true;
                 }
-                if ui.button(format!("{}  Hủy", ph::X)).clicked() {
+                // With no retouch to give up it only closes the dialog.
+                let leave = if data.dialogs.portrait_session {
+                    "Hủy"
+                } else {
+                    "Đóng"
+                };
+                if ui.button(format!("{}  {leave}", ph::X)).clicked() {
                     do_cancel = true;
                 }
             });
@@ -1338,6 +1353,59 @@ mod tests {
         data.dialogs.portrait_ready = true;
         data.dialogs.portrait_faces = vec![true];
         assert_eq!(asks(&data), wanted);
+    }
+
+    #[test]
+    fn open_and_idle_the_dialog_leaves_enter_and_esc_to_the_tools() {
+        let ctx = egui::Context::default();
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(460.0, 1000.0));
+        let draw = |data: &UiData, events: Vec<egui::Event>| {
+            let mut actions = UiActions::default();
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::new(PRESETS_KEY), presets::built_in());
+                });
+                portrait_dialog(ui.ctx(), data, &mut actions);
+            });
+            (output, actions)
+        };
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let has = |output: &egui::FullOutput, label: &str| {
+            output.shapes.iter().any(|clipped| {
+                matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == label)
+            })
+        };
+        for _ in 0..8 {
+            draw(&data, vec![]);
+        }
+        // Idle: neither key is the dialog's, and its button only closes.
+        for pressed in [egui::Key::Escape, egui::Key::Enter] {
+            let (_, actions) = draw(&data, vec![key(pressed)]);
+            assert!(!actions.dialogs.cancel_portrait_dialog);
+            assert!(actions.dialogs.apply_portrait.is_none());
+        }
+        let (output, _) = draw(&data, vec![]);
+        assert!(has(&output, &format!("{}  Đóng", ph::X)));
+
+        // A retouch under way: Esc gives it up, the button says so.
+        data.dialogs.portrait_session = true;
+        let (output, _) = draw(&data, vec![]);
+        assert!(has(&output, &format!("{}  Hủy", ph::X)));
+        let (_, actions) = draw(&data, vec![key(egui::Key::Escape)]);
+        assert!(actions.dialogs.cancel_portrait_dialog);
     }
 
     #[test]

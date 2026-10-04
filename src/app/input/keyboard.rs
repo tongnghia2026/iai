@@ -144,38 +144,48 @@ impl App {
         if self.portrait_painting() && self.portrait_brush_key(event_loop, physical_key, pressed) {
             return;
         }
-        // The Crop key with Auto retouch open: its retouch is applied and it
-        // closes first; the key then takes up the tool below.
+        // A tool's key with Auto retouch open: the view tools are taken up
+        // as they are; any other first has a retouch under way applied (see
+        // `portrait_tool_picked`). The key then takes up its tool below.
+        let mut view_tool_key = false;
         if pressed && !repeat && self.shell.ui.show_portrait_dialog {
             let command = self
                 .pressed_chord(physical_key)
                 .and_then(|chord| self.shell.keymap.command_for(chord));
-            if command == Some(Command::ToolCrop) && !self.leave_portrait_for_crop() {
-                return;
+            match command {
+                Some(Command::ToolHand | Command::ToolZoom) => view_tool_key = true,
+                Some(command) if command.id().starts_with("tool.") => {
+                    if !self.portrait_tool_picked(command == Command::ToolCrop) {
+                        return;
+                    }
+                }
+                _ => {}
             }
         }
         if pressed && self.is_preview_dialog_open() {
-            let is_view_shortcut = matches!(
-                physical_key,
-                PhysicalKey::Code(KeyCode::Equal)
-                    | PhysicalKey::Code(KeyCode::Minus)
-                    | PhysicalKey::Code(KeyCode::NumpadAdd)
-                    | PhysicalKey::Code(KeyCode::NumpadSubtract)
-                    | PhysicalKey::Code(KeyCode::Digit0)
-                    | PhysicalKey::Code(KeyCode::Numpad0)
-                    | PhysicalKey::Code(KeyCode::Digit1)
-                    | PhysicalKey::Code(KeyCode::Numpad1)
-                    | PhysicalKey::Code(KeyCode::Space)
-                    | PhysicalKey::Code(KeyCode::ControlLeft)
-                    | PhysicalKey::Code(KeyCode::ControlRight)
-                    | PhysicalKey::Code(KeyCode::ShiftLeft)
-                    | PhysicalKey::Code(KeyCode::ShiftRight)
-                    | PhysicalKey::Code(KeyCode::AltLeft)
-                    | PhysicalKey::Code(KeyCode::AltRight)
-            ) || matches!(
-                self.custom_command_for(physical_key),
-                Some(Command::FitScreen | Command::ZoomActual)
-            );
+            let is_view_shortcut = view_tool_key
+                || matches!(
+                    physical_key,
+                    PhysicalKey::Code(KeyCode::Equal)
+                        | PhysicalKey::Code(KeyCode::Minus)
+                        | PhysicalKey::Code(KeyCode::NumpadAdd)
+                        | PhysicalKey::Code(KeyCode::NumpadSubtract)
+                        | PhysicalKey::Code(KeyCode::Digit0)
+                        | PhysicalKey::Code(KeyCode::Numpad0)
+                        | PhysicalKey::Code(KeyCode::Digit1)
+                        | PhysicalKey::Code(KeyCode::Numpad1)
+                        | PhysicalKey::Code(KeyCode::Space)
+                        | PhysicalKey::Code(KeyCode::ControlLeft)
+                        | PhysicalKey::Code(KeyCode::ControlRight)
+                        | PhysicalKey::Code(KeyCode::ShiftLeft)
+                        | PhysicalKey::Code(KeyCode::ShiftRight)
+                        | PhysicalKey::Code(KeyCode::AltLeft)
+                        | PhysicalKey::Code(KeyCode::AltRight)
+                )
+                || matches!(
+                    self.custom_command_for(physical_key),
+                    Some(Command::FitScreen | Command::ZoomActual)
+                );
             if !is_view_shortcut {
                 return;
             }

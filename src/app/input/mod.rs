@@ -130,10 +130,16 @@ impl App {
         // The paint-colour and Color Range dialogs own the canvas as an
         // eyedropper surface: the pointer over the canvas must NOT read as UI,
         // or the eyedropper cursor and hover sampling are suppressed.
+        // A retouch previewed by Auto retouch is looked at with the view
+        // tools: they keep the canvas.
+        let viewing_retouch = self.portrait_under_way()
+            && !self.is_blocking_modal()
+            && matches!(self.edit.tools.active_id(), ToolId::Hand | ToolId::Zoom);
         let modal_ui = self.is_modal_open()
             && !self.shell.ui.show_paint_color_dialog
             && !self.shell.ui.show_color_range_dialog
-            && !self.portrait_painting();
+            && !self.portrait_painting()
+            && !viewing_retouch;
         // Tools/states that legitimately act on the gray pasteboard outside the
         // page. Brush-like tools need their center to cross the page edge so they
         // can paint cleanly up to it; the actual pixel writes remain canvas-clipped.
