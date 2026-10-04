@@ -609,4 +609,31 @@ Việc:
 - Chưa làm (không ai yêu cầu, ghi lại để khỏi quên): kéo thả khung trực tiếp trên ảnh (hiện là
   nút mũi tên); nền "Theo ảnh" cho trang ghép.
 - Bản test `target/release/iai.exe` (build 04/10 18:53).
+- [x] Build Release, chủ test đợt 23: **OK** (04/10), kèm việc của đợt 24.
+
+## Đợt 24 (04/10 tối): mở bảng không tự làm đẹp, đổi tên "Auto retouch", bỏ mục menu Làm ảnh thẻ
+
+Chủ sau khi test đợt 23: mở ô Chân dung là app tự chạy làm đẹp ngay, rồi nếu làm ảnh thẻ thì
+lại làm đẹp lần hai. Chủ muốn: thêm nút "tự động làm đẹp" ở ô Chân dung, bấm mới chạy; mở bảng
+lần đầu chỉ hiện bảng, không làm gì; "đổi tên thành Auto retouch, xóa menu Image ▸ chỉnh ảnh
+thẻ".
+
+- [x] **Mở bảng không phân tích gì** (`App::open_portrait_dialog`). Ô Chân dung có nút
+  "Tự động làm đẹp" (`start_portrait_retouch`): bấm mới nhận diện khuôn mặt và làm đẹp theo mức
+  thường dùng; khi đang chạy, nút nhường chỗ cho dòng trạng thái. Bấm ô để đổi qua lại không
+  còn tự khởi động gì. Ngoại lệ giữ như cũ: đang chọn layer "Chân dung" đã áp dụng (hoặc bấm
+  đúp nó ở bảng Layer) thì mở lại để chỉnh tiếp ngay.
+- [x] **Ô Ảnh thẻ không đổi**: bấm "Làm ảnh thẻ" thì cắt, tách nền rồi làm đẹp theo Mẫu — nay
+  là lần làm đẹp duy nhất.
+- [x] **Layer không chỉnh được** (khóa, không phải ảnh, CMYK…): lý do hiện ngay dưới nút, không
+  chỉ ở thanh trạng thái (`shell.portrait_error`).
+- [x] **Tên**: bảng và mục menu thành "Auto retouch" (Image ▸ Auto retouch…; nút ở bảng AI cũng
+  vậy); bỏ mục Image ▸ Làm ảnh thẻ…. Tôi hiểu "đổi tên" là đổi tên bảng / mục menu, còn nút mới
+  giữ chữ "Tự động làm đẹp" như chủ gọi — chờ chủ xác nhận. Lưu ý: bảng AI đã có mục riêng tên
+  "AI Auto Retouch" (tính năng khác).
+- [x] **Nhớ ô dùng lần trước** (prefs `portrait_side`), vì chỉ còn một mục menu.
+- Test: `the_dialog_opens_idle_and_retouches_only_when_asked` (app),
+  `a_tile_asks_for_the_other_side_and_each_side_shows_its_own_controls` (nút chỉ có khi chưa
+  chạy, bấm mới gửi yêu cầu). Probe `chan_dung_cho.png`. Test đầy đủ qua (1915 + 15).
+- Code `689f844`; bản test `target/release/iai.exe` (build 04/10 19:47).
 - [ ] Build Release, chủ test.
