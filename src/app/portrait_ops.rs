@@ -50,6 +50,8 @@ pub struct PortraitSession {
     reused: bool,
     pub model: Option<Arc<PortraitModel>>,
     pub error: Option<String>,
+    /// The sliders and faces the dialog last sent, as sent.
+    asked: Option<(PortraitSettings, Vec<bool>)>,
     /// What the dialog last asked to see, and what the canvas shows now.
     pub wanted: Option<PreviewKey>,
     pub shown: Option<PreviewKey>,
@@ -137,6 +139,10 @@ impl App {
         if (!layer.is_background && layer.locked) || !layer.is_raster() {
             return Err("Hãy chọn layer ảnh (không khóa) để chỉnh chân dung".to_string());
         }
+        // A "Chân dung" layer that is no longer what its recipe was made on
+        // (cropped since) is retouched as the photo it now is. It holds a
+        // retouch already: more is added from nothing.
+        let retouched = reopen.is_none() && layer.portrait.is_some();
         let (w, h) = (layer.width, layer.height);
         let offset = layer.offset;
         let clip = if canvas.selection.active {
@@ -202,11 +208,11 @@ impl App {
         // A reopened layer brings back its own sliders; a new photo starts
         // from the defaults, never from the last photo's (not everyone wants
         // a slimmer face or lipstick).
-        let restore_settings = Some(
-            reopened
-                .as_ref()
-                .map_or_else(PortraitSettings::default, |r| r.recipe.settings),
-        );
+        let restore_settings = Some(match &reopened {
+            Some(reopened) => reopened.recipe.settings,
+            None if retouched => PortraitSettings::NEUTRAL,
+            None => PortraitSettings::default(),
+        });
         let restore_faces = reopened.is_none().then(Vec::new);
         // The preview is drawn on the photo layer: it has to show.
         if !source_visible {
@@ -231,6 +237,7 @@ impl App {
             reused,
             model: None,
             error: None,
+            asked: None,
             wanted: None,
             shown: None,
             rendering: None,
@@ -292,6 +299,56 @@ impl App {
         if let Some(message) = &self.shell.portrait_error {
             self.shell.status_msg = message.clone();
         }
+    }
+
+    /// The Crop tool was asked for with the dialog open: the retouch as it
+    /// stands is applied and the dialog closed, so that what is cropped is
+    /// what shows. Returns whether the tool may be taken up; it may not
+    /// while work is still running.
+    pub(crate) fn leave_portrait_for_crop(&mut self) -> bool {
+        if self.id_photo_state().busy {
+            self.shell.status_msg = "Đang làm ảnh thẻ — đợi xong rồi hãy crop".to_string();
+            return false;
+        }
+        let asked = match self.shell.portrait.as_ref() {
+            Some(session) if session.model.is_none() && session.error.is_none() => {
+                self.shell.status_msg =
+                    "Đang nhận diện khuôn mặt — đợi xong rồi hãy crop".to_string();
+                return false;
+            }
+            Some(session) => session.asked.clone(),
+            None => None,
+        };
+        let applied =
+            asked.is_some_and(|(settings, enabled)| self.apply_portrait(settings, enabled).is_ok());
+        self.close_portrait_dialog();
+        self.shell.status_msg = if applied {
+            "Auto retouch: đã áp dụng vào layer \"Chân dung\" — giờ crop được".to_string()
+        } else {
+            "Đã đóng Auto retouch — giờ crop được".to_string()
+        };
+        self.lock_crop_to_id_photo();
+        true
+    }
+
+    /// An ID photo cropped again stays the print it is: the Crop tool is set
+    /// to the document's own pixel size and resolution.
+    fn lock_crop_to_id_photo(&mut self) {
+        let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+        let (w, h, dpi) = (canvas.width, canvas.height, canvas.metadata.resolution_ppi);
+        if crate::core::imposition::PhotoKind::detect(w, h, dpi).is_none() {
+            return;
+        }
+        self.edit
+            .tools
+            .crop_mut()
+            .apply_preset(&crate::tools::crop::CropPreset {
+                name: String::new(),
+                width: w as f32,
+                height: h as f32,
+                unit: crate::core::units::Unit::Pixels,
+                dpi,
+            });
     }
 
     /// Close the dialog: the retouch under way is given up, an ID photo
@@ -386,6 +443,7 @@ impl App {
         masks: bool,
     ) {
         if let Some(session) = self.shell.portrait.as_mut() {
+            session.asked = Some((settings, enabled.clone()));
             session.wanted = Some((settings, enabled, preview, masks, 0));
         }
         self.refresh_portrait_preview();
@@ -600,7 +658,11 @@ impl App {
         enabled: Vec<bool>,
         sheet: Option<(Sheet, SheetOptions)>,
     ) {
-        match self.apply_portrait(settings, enabled) {
+        let applied = self.apply_portrait(settings, enabled);
+        // A sheet asked for with no retouch to apply (none under way, or
+        // every slider at 0) lays out the photo as it is.
+        let as_it_is = sheet.is_some() && self.shell.portrait.is_none();
+        match applied {
             Ok(updated) => {
                 self.close_portrait_dialog();
                 self.shell.status_msg = if updated {
@@ -608,11 +670,15 @@ impl App {
                 } else {
                     "Auto retouch: đã thêm layer \"Chân dung\"".to_string()
                 };
-                if let Some((sheet, options)) = sheet {
-                    self.do_impose_sheet(sheet, options);
-                }
             }
-            Err(message) => self.shell.status_msg = message,
+            Err(_) if as_it_is && !self.id_photo_state().busy => self.close_portrait_dialog(),
+            Err(message) => {
+                self.shell.status_msg = message;
+                return;
+            }
+        }
+        if let Some((sheet, options)) = sheet {
+            self.do_impose_sheet(sheet, options);
         }
     }
 
@@ -991,11 +1057,13 @@ fn reopen_target(
             Ok(())
         }
     };
+    // A "Chân dung" layer whose photo is gone or no longer its size (cropped
+    // since) cannot be reopened: it is retouched as a photo of its own.
     if let Some(recipe) = layers.get(active).and_then(|l| l.portrait.clone()) {
-        unlocked(active)?;
-        let source = made_from(active, &recipe)
-            .ok_or_else(|| "Không còn layer ảnh gốc của layer \"Chân dung\" này".to_string())?;
-        return Ok((source, Some((active, recipe))));
+        if let Some(source) = made_from(active, &recipe) {
+            unlocked(active)?;
+            return Ok((source, Some((active, recipe))));
+        }
     }
     if let Some(recipe) = layers.get(active + 1).and_then(|l| l.portrait.clone()) {
         if made_from(active + 1, &recipe) == Some(active) {
@@ -1372,6 +1440,112 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
             app.poll_portrait();
         }
+    }
+
+    #[test]
+    fn asking_for_the_crop_tool_applies_the_retouch_and_the_cropped_photo_is_retouched_anew() {
+        let Some(mut app) = app_with_photo() else {
+            return;
+        };
+        app.shell.ui.show_portrait_dialog = true;
+        app.begin_portrait().unwrap();
+        // While the face is being found the tool is refused, nothing is lost.
+        assert!(!app.leave_portrait_for_crop());
+        assert!(app.shell.ui.show_portrait_dialog && app.shell.portrait.is_some());
+        let model = analysed(&mut app).unwrap();
+        app.set_portrait_preview(
+            PortraitSettings::default(),
+            vec![true; model.faces.len()],
+            true,
+            false,
+        );
+        wait_for_preview(&mut app);
+
+        // The retouch as it stands lands in its layer and the dialog closes.
+        assert!(app.leave_portrait_for_crop());
+        assert!(!app.shell.ui.show_portrait_dialog && app.shell.portrait.is_none());
+        let canvas = &mut app.docs.documents[0].canvas;
+        let result = canvas.layer_stack.layers[1].id;
+        assert_eq!(canvas.layer_stack.layers.len(), 2);
+        assert_eq!(canvas.layer_stack.layers[1].name, RESULT_LAYER);
+        assert!(canvas.layer_stack.layers[1].portrait.is_some());
+        // The photo is no ID print: the Crop tool is left as it was.
+        assert!(app.edit.tools.crop().mode != crate::tools::crop::CropMode::FixedSize);
+
+        // Cropped, the layer is no longer what its recipe was made on: it is
+        // retouched as the photo it now is, from nothing.
+        let canvas = &mut app.docs.documents[0].canvas;
+        let (w, h) = (canvas.width, canvas.height);
+        assert!(canvas.crop(20, 20, w - 40, h - 40, true));
+        app.begin_portrait().unwrap();
+        let session = app.shell.portrait.as_ref().unwrap();
+        assert!(session.reopened.is_none());
+        assert_eq!(session.layer_id, result);
+        assert_eq!((session.w, session.h), (w - 40, h - 40));
+        assert_eq!(session.restore_settings, Some(PortraitSettings::NEUTRAL));
+        app.cancel_portrait();
+    }
+
+    /// An app whose one document is a blank `w × h` photo at `ppi`.
+    fn app_with_blank(w: u32, h: u32, ppi: f32) -> App {
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        let grey = [128u8, 128, 128, 255].repeat((w * h) as usize);
+        let mut canvas = Canvas::from_rgba(grey, w, h);
+        canvas.metadata.resolution_ppi = ppi;
+        app.docs.documents[0].canvas = canvas;
+        app
+    }
+
+    #[test]
+    fn the_crop_tool_keeps_an_id_photo_the_print_it_is() {
+        use crate::core::id_photo::{PRINT_PPI, PRINT_PX};
+        use crate::tools::crop::CropMode;
+        // The dialog open and idle on an ID photo: it closes, and the tool
+        // is set to the photo's own pixels and resolution.
+        let mut app = app_with_blank(PRINT_PX.0, PRINT_PX.1, PRINT_PPI);
+        app.shell.ui.show_portrait_dialog = true;
+        assert!(app.leave_portrait_for_crop());
+        assert!(!app.shell.ui.show_portrait_dialog);
+        let crop = app.edit.tools.crop();
+        assert!(crop.mode == CropMode::FixedSize);
+        assert_eq!(
+            crop.fixed_size_pixels(PRINT_PX.0, PRINT_PX.1),
+            (PRINT_PX.0 as f32, PRINT_PX.1 as f32)
+        );
+        assert_eq!(crop.dpi, PRINT_PPI);
+
+        // Any other photo leaves the tool as the owner set it.
+        let mut app = app_with_blank(800, 600, 72.0);
+        app.shell.ui.show_portrait_dialog = true;
+        assert!(app.leave_portrait_for_crop());
+        assert!(app.edit.tools.crop().mode != CropMode::FixedSize);
+    }
+
+    #[test]
+    fn a_sheet_asked_with_no_retouch_under_way_lays_out_the_photo_as_it_is() {
+        use crate::core::imposition::{Paper, PhotoKind};
+        let (w, h) = PhotoKind::Id3x4.cell_px();
+        let mut app = app_with_blank(w, h, 600.0);
+        app.shell.ui.show_portrait_dialog = true;
+        let sheet = Sheet::Grid(Paper::P10x15, PhotoKind::Id3x4);
+        app.finish_portrait_dialog(
+            PortraitSettings::default(),
+            Vec::new(),
+            Some((sheet, SheetOptions::default())),
+        );
+        assert!(!app.shell.ui.show_portrait_dialog);
+        assert_eq!(app.docs.documents.len(), 2);
+        assert_eq!(
+            app.docs.documents[app.docs.active_doc_idx].title,
+            "Trang 10×15 — 10 tấm 3×4"
+        );
+        // Without a sheet there is nothing to apply and the dialog stays.
+        let mut app = app_with_blank(w, h, 600.0);
+        app.shell.ui.show_portrait_dialog = true;
+        app.finish_portrait_dialog(PortraitSettings::default(), Vec::new(), None);
+        assert!(app.shell.ui.show_portrait_dialog);
+        assert_eq!(app.docs.documents.len(), 1);
     }
 
     #[test]

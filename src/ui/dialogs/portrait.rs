@@ -1032,10 +1032,15 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     group(ui, shown, &mut next, Group::Sheet, "Xếp ảnh in", false, |ui| {
                         note_line(
                             ui,
-                            "Bấm một trang bên dưới: app áp dụng chỉnh chân dung rồi xếp ảnh ra trang in mới.",
+                            "Bấm một trang bên dưới: app áp dụng phần làm đẹp (nếu có) rồi xếp ảnh ra trang in mới.",
                             false,
                         );
-                        ui.add_enabled_ui(ready, |ui| sheet = print_sheet_section(ui, data));
+                        // With no retouch under way the photo is laid out
+                        // as it is.
+                        let idle = !data.dialogs.portrait_session && !data.dialogs.id_photo_busy;
+                        ui.add_enabled_ui(ready || idle, |ui| {
+                            sheet = print_sheet_section(ui, data)
+                        });
                     });
                 });
 
@@ -1070,7 +1075,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         egui::Button::new(format!("{}  Áp dụng", ph::CHECK)),
                     )
                     .on_hover_text(if data.dialogs.portrait_reopened {
-                        "Cập nhật layer \"Chân dung\" đang chỉnh tiếp"
+                        "Cập nhật layer \"Chân dung\" đang chỉnh tiếp. Bấm Crop tool lúc bảng đang mở cũng áp dụng rồi cho crop"
                     } else {
                         "Thêm kết quả (cả Màu studio nếu có chọn) thành layer mới \"Chân dung\". Mở lại để chỉnh tiếp: chọn layer đó rồi vào Auto retouch"
                     })
@@ -1268,6 +1273,71 @@ mod tests {
         assert!(find(&output, "Đang tìm khuôn mặt…").is_some());
         let asked = click(&data, find(&output, "Ảnh thẻ").unwrap());
         assert_eq!(asked.dialogs.set_portrait_side, Some(true));
+    }
+
+    #[test]
+    fn a_sheet_can_be_asked_for_with_no_retouch_under_way() {
+        use crate::core::imposition::{Paper, PhotoKind, Sheet, SheetOptions};
+        let ctx = egui::Context::default();
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(460.0, 1000.0));
+        let draw = |data: &UiData, events: Vec<egui::Event>| {
+            let mut actions = UiActions::default();
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::new(PRESETS_KEY), presets::built_in());
+                    d.insert_temp(egui::Id::new("portrait_group"), Some(Group::Sheet));
+                    d.insert_temp(
+                        egui::Id::new("print_sheet_options"),
+                        SheetOptions::default(),
+                    );
+                });
+                portrait_dialog(ui.ctx(), data, &mut actions);
+            });
+            (output, actions)
+        };
+        // Whether a click on the "18 tấm" button (3×4 on 13×18) asks for it.
+        let asks = |data: &UiData| {
+            let mut output = draw(data, vec![]).0;
+            for _ in 0..40 {
+                output = draw(data, vec![]).0;
+            }
+            let at = output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "18 tấm" => {
+                        Some(text.pos + egui::vec2(4.0, 5.0))
+                    }
+                    _ => None,
+                })
+                .expect("the 18 tấm button");
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            draw(data, vec![egui::Event::PointerMoved(at)]);
+            draw(data, vec![button(true)]);
+            let (_, actions) = draw(data, vec![button(false)]);
+            actions.dialogs.portrait_sheet.map(|(sheet, _)| sheet)
+        };
+        let wanted = Some(Sheet::Grid(Paper::P13x18, PhotoKind::Id3x4));
+        // Idle: the photo is laid out as it is.
+        assert_eq!(asks(&data), wanted);
+        // A retouch still analysing has to finish first.
+        data.dialogs.portrait_session = true;
+        assert_eq!(asks(&data), None);
+        data.dialogs.portrait_ready = true;
+        data.dialogs.portrait_faces = vec![true];
+        assert_eq!(asks(&data), wanted);
     }
 
     #[test]

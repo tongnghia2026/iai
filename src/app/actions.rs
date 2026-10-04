@@ -129,6 +129,19 @@ impl App {
         // Off-thread crisp-Path display overlay bakes (zoom-bucket changes).
         self.poll_display_bake();
 
+        // A crop tool asked for while Auto retouch is open: the retouch as
+        // it stands is applied and the dialog closes first, so the crop is of
+        // what shows.
+        if self.shell.ui.show_portrait_dialog
+            && matches!(
+                actions.tool.select_tool,
+                Some(crate::tools::ToolId::Crop | crate::tools::ToolId::PerspectiveCrop)
+            )
+            && !self.leave_portrait_for_crop()
+        {
+            actions.tool.select_tool = None;
+        }
+
         // Strict modal lock (standard design-app behavior): while a modal
         // operation or dialog is open, features outside its scope are refused
         // with the system bell until the user commits or cancels.

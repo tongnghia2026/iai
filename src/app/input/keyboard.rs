@@ -144,6 +144,16 @@ impl App {
         if self.portrait_painting() && self.portrait_brush_key(event_loop, physical_key, pressed) {
             return;
         }
+        // The Crop key with Auto retouch open: its retouch is applied and it
+        // closes first; the key then takes up the tool below.
+        if pressed && !repeat && self.shell.ui.show_portrait_dialog {
+            let command = self
+                .pressed_chord(physical_key)
+                .and_then(|chord| self.shell.keymap.command_for(chord));
+            if command == Some(Command::ToolCrop) && !self.leave_portrait_for_crop() {
+                return;
+            }
+        }
         if pressed && self.is_preview_dialog_open() {
             let is_view_shortcut = matches!(
                 physical_key,
