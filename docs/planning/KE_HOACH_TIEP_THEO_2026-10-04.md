@@ -7,7 +7,9 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
 
 - Nhánh `feat/vector-core-foundation`; mọi thứ **commit local, chưa push** (push gần nhất
   02/10 @ `d1f4acb`). Chỉ push khi chủ bảo.
-- Bản test: `target\release\iai.exe` (build có `--features canvas-editor-webview`).
+- Bản test đợt 15: **`target\release\iai-dot15.exe`** (build 04/10 09:30, có
+  `--features canvas-editor-webview`). `target\release\iai.exe` vẫn là bản đợt 14 vì lúc build chủ
+  đang mở app nên file bị khóa; phiên sau build lại bình thường khi app đã đóng.
 - Bản portable `dist\iAi-portable` vẫn là bản 02/10 — thiếu mọi thứ làm từ 03/10.
 - Chủ đã test OK: đợt 8–14 (Chi tiết mặt AI, Sửa màu & sáng, mặc định mới, thanh màu hai
   chiều, Sáng da = Midtones, Xếp ảnh in + trang 13×18 hỗn hợp, viền cắt 2 px).
