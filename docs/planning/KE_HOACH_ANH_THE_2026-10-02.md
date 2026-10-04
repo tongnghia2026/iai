@@ -435,4 +435,32 @@ chú thích hiện ra mỗi khi rê chuột vào thanh kéo ("rất rối").
   tiêu đề nhóm. Còn chú thích ở nút bấm, ô tích, ô màu studio (ít khi rê qua).
 - Probe `IAI_PORTRAIT_PRESET_PROBE` (`tmp/anh-the/cong-thuc`): ảnh gốc | từng công thức có
   sẵn. Đã xem trên 2 ảnh thẻ: tự nhiên, khác nhau vừa phải, không lỗi.
+- [x] Build Release, chủ test đợt 18: **OK** (04/10).
+
+## Đợt 19 (04/10): giao diện Chỉnh chân dung / Develop / Làm ảnh thẻ
+
+Chủ sau khi test đợt 18: tên nhóm (Da, Mắt, Miệng…) chữ lớn và đậm hơn, chữ thanh kéo bên
+trong nhỏ hơn; mỗi tính năng là một hàng riêng, rê chuột qua thì sáng lên; bảng Develop
+cũng vậy, thêm việc cho nhập số ở từng thanh kéo; icon và thanh kéo ở Làm ảnh thẻ, Chỉnh
+chân dung dùng Phosphor cho đồng bộ.
+
+- [x] **Tiêu đề nhóm dùng chung** (`widgets::section_header`): thanh cao 30 px có nền, icon
+  Phosphor, tên nhóm chữ **đậm 14 px** (font Segoe UI Bold, họ font `ui_bold` đăng ký trong
+  `theme::add_bold_font`), chấm xanh khi nhóm đang có thanh được chỉnh, mũi tên bên phải; rê
+  chuột thì sáng lên; bấm cả thanh để mở / đóng. Dùng cho 13 nhóm của Chỉnh chân dung và 9
+  mục của Develop (trước đây Develop phải bấm đúng mũi tên nhỏ).
+- [x] **Hàng thanh kéo** (`widgets::stacked_slider`, dùng chung cho Chỉnh chân dung, Develop
+  và các hộp thoại khác dùng kiểu thanh này): tên thanh 11,5 px (trước 12,5), vạch ngăn mảnh
+  giữa các hàng, cả hàng sáng lên khi rê chuột / đang kéo.
+- [x] **Nhập số**: ô giá trị bên phải mỗi thanh nay có khung như ô nhập, rê vào đổi con trỏ
+  chữ và viền xanh; bấm vào gõ số, Enter hoặc bấm ra ngoài để nhận, Esc để bỏ. (Việc bấm vào
+  số để gõ đã có sẵn từ trước nhưng không có dấu hiệu nào cho thấy.)
+- [x] **Làm ảnh thẻ**: thanh "Khung rộng hơn mẫu (%)" đổi sang thanh kéo của app (gõ số
+  được); nút có icon Phosphor. Chỉnh chân dung: nút Áp dụng / Hủy / Mặc định / Về 0 / Lưu… /
+  Tự động có icon.
+- [x] Công cụ tự xem giao diện: `src/ui/snapshot.rs` (chỉ khi test) vẽ một hộp thoại ra PNG
+  không cần cửa sổ hay GPU. Chạy: đặt `IAI_UI_SNAPSHOT` là thư mục rồi
+  `cargo test --lib -- --ignored probe_dialog_snapshot probe_panel_snapshot`. Ảnh trước / sau
+  ở `tmp/ui/truoc`, `tmp/ui/sau`.
+- Tôi tự chọn icon từng nhóm (Phosphor không có hình mũi, lông mày: dùng tam giác, vòng cung).
 - [ ] Build Release, chủ test.

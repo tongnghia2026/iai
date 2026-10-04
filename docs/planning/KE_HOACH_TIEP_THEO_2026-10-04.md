@@ -9,8 +9,10 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
   02/10 @ `d1f4acb`). Chỉ push khi chủ bảo.
 - Bản test đợt 18: **`target\release\iai.exe`** (build 04/10 13:55, có
   `--features canvas-editor-webview`). Bản `iai-dot17.exe` đã xóa.
-- **Chờ chủ test — đợt 18 (04/10):** ô "Công thức" trong Làm ảnh thẻ (cắt xong, Chỉnh chân
-  dung mở với sẵn công thức đó); năm công thức có sẵn; bỏ chú thích nổi trên thanh kéo.
+- Chủ test OK đợt 18 (04/10): ô "Công thức" trong Làm ảnh thẻ, năm công thức có sẵn, bỏ chú
+  thích nổi trên thanh kéo.
+- **Chờ chủ test — đợt 19 (04/10):** giao diện mới của Chỉnh chân dung / Develop / Làm ảnh
+  thẻ (tiêu đề nhóm đậm có icon, hàng thanh kéo sáng lên khi rê chuột, ô nhập số có khung).
 - Đợt 17 chủ chưa nói rõ: phím `[` `]` với Smudge / Dodge / Burn; Pencil vẽ đúng cỡ và màu;
   Smart Fill (AI) giữ vân ảnh.
 - Bản portable `dist\iAi-portable` vẫn là bản 02/10 — thiếu mọi thứ làm từ 03/10.
