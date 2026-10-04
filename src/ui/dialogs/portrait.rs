@@ -111,6 +111,7 @@ fn preset_row(
                     .hint_text("Tên, vd. Nữ, Nam, Trẻ em"),
             );
             keep = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            done |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape));
             keep |= ui
                 .add_enabled(!name.trim().is_empty(), egui::Button::new("Lưu"))
                 .on_hover_text("Trùng tên thì ghi đè công thức cũ")
@@ -156,22 +157,24 @@ enum Group {
 }
 
 impl Group {
-    fn icon(self) -> &'static str {
-        match self {
+    fn icon(self) -> crate::ui::widgets::HeaderIcon<'static> {
+        use crate::ui::widgets::HeaderIcon;
+        HeaderIcon::Glyph(match self {
             Group::Brush => ph::PAINT_BRUSH,
             Group::Skin => ph::SPARKLE,
             Group::Shape => ph::SMILEY,
             Group::Body => ph::PERSON,
             Group::Eyes => ph::EYE,
             Group::Nose => ph::TRIANGLE,
-            Group::Mouth => ph::TOOTH,
+            // Phosphor has no mouth.
+            Group::Mouth => return HeaderIcon::Lips,
             Group::Brows => ph::RAINBOW,
             Group::Hair => ph::SCISSORS,
             Group::Detail => ph::MAGNIFYING_GLASS_PLUS,
             Group::Fix => ph::SUN,
             Group::Look => ph::PALETTE,
             Group::Sheet => ph::PRINTER,
-        }
+        })
     }
 }
 
@@ -483,8 +486,15 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     faces.resize(face_count, true);
 
     let ready = data.dialogs.portrait_ready;
-    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
-    // While a preset is being named, Esc leaves the name field, not the dialog.
+    // While a value or a preset's name is being typed, Esc and Enter belong
+    // to that field: Esc leaves it and the dialog, with its sliders, stays.
+    let typing = crate::ui::widgets::typing_in_a_field(ctx, egui::Id::new("portrait_typing"));
+    let (enter_pressed, esc_pressed) = if typing {
+        (false, false)
+    } else {
+        consume_dialog_enter_escape(ctx)
+    };
+    // With the name row open, Esc closes the row, not the dialog.
     let leave_naming = esc_pressed && naming.is_some();
     let mut do_apply = enter_pressed && ready;
     let mut do_cancel = esc_pressed && !leave_naming;
@@ -999,7 +1009,7 @@ mod tests {
         for (name, open, hover) in [
             ("dong", None, egui::pos2(260.0, 215.0)),
             ("da", Some(Group::Skin), egui::pos2(260.0, 330.0)),
-            ("mat", Some(Group::Eyes), egui::pos2(420.0, 420.0)),
+            ("mieng", Some(Group::Mouth), egui::pos2(420.0, 420.0)),
         ] {
             let image = crate::ui::snapshot::render(460.0, 860.0, 1.5, Some(hover), |ctx| {
                 ctx.data_mut(|d| {
@@ -1013,6 +1023,89 @@ mod tests {
                 .save(std::path::Path::new(&dir).join(format!("chan_dung_{name}.png")))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn esc_and_enter_in_a_value_box_act_on_the_value_not_on_the_dialog() {
+        let ctx = egui::Context::default();
+        let mut data = UiData::default();
+        data.dialogs.portrait_ready = true;
+        data.dialogs.portrait_faces = vec![true];
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(460.0, 860.0));
+        let draw = |events: Vec<egui::Event>| {
+            let mut actions = UiActions::default();
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::new(PRESETS_KEY), Vec::<Preset>::new());
+                    d.insert_temp(egui::Id::new("portrait_group"), Some(Group::Skin));
+                });
+                portrait_dialog(ui.ctx(), &data, &mut actions);
+            });
+            (output, actions)
+        };
+        let smooth = |actions: &UiActions| {
+            let (settings, ..) = actions.dialogs.set_portrait_preview.clone().unwrap();
+            settings.smooth
+        };
+        for _ in 0..3 {
+            draw(vec![]);
+        }
+        // "Làm mịn da" starts at 40: its value box is where that number is.
+        let (output, actions) = draw(vec![]);
+        assert_eq!(smooth(&actions), 40.0);
+        let in_box = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == "40" => {
+                    Some(text.pos + egui::vec2(3.0, 5.0))
+                }
+                _ => None,
+            })
+            .expect("the value 40");
+        let button = |pressed| egui::Event::PointerButton {
+            pos: in_box,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let click = || {
+            draw(vec![egui::Event::PointerMoved(in_box)]);
+            draw(vec![button(true)]);
+            draw(vec![button(false)])
+        };
+
+        // Typed, then given up with Esc: the value stays and so does the dialog.
+        let (_, actions) = click();
+        assert_eq!(smooth(&actions), 40.0, "the click dragged the slider");
+        draw(vec![egui::Event::Text("77".to_string())]);
+        let (_, actions) = draw(vec![key(egui::Key::Escape)]);
+        assert!(!actions.dialogs.cancel_portrait_dialog);
+        assert_eq!(smooth(&actions), 40.0);
+
+        // Typed, then Enter: the value is taken and nothing is applied yet.
+        click();
+        draw(vec![egui::Event::Text("77".to_string())]);
+        let (_, actions) = draw(vec![key(egui::Key::Enter)]);
+        assert!(actions.dialogs.apply_portrait.is_none());
+        assert_eq!(smooth(&actions), 77.0);
+
+        // With no field in use, Esc closes the dialog as before.
+        draw(vec![]);
+        let (_, actions) = draw(vec![key(egui::Key::Escape)]);
+        assert!(actions.dialogs.cancel_portrait_dialog);
     }
 
     #[test]

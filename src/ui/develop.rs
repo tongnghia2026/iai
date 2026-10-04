@@ -23,9 +23,52 @@ const SEC_LOCALS: usize = 7;
 const SEC_SCOPES: usize = 8;
 pub const DEV_PANEL_SECTIONS: usize = 9;
 
-/// The pre-D4 `default_open` flags, used until the user first toggles a header.
-pub const DEFAULT_SECTIONS_OPEN: [bool; DEV_PANEL_SECTIONS] =
-    [false, true, false, false, false, false, true, false, true];
+/// Which section is open until the user first toggles a header: Light.
+pub const DEFAULT_SECTIONS_OPEN: [bool; DEV_PANEL_SECTIONS] = {
+    let mut open = [false; DEV_PANEL_SECTIONS];
+    open[SEC_LIGHT] = true;
+    open
+};
+
+/// The sections top to bottom, as the panel draws them.
+const SECTION_ORDER: [usize; DEV_PANEL_SECTIONS] = [
+    SEC_SCOPES,
+    SEC_PRESETS,
+    SEC_LIGHT,
+    SEC_COLOR,
+    SEC_DETAIL,
+    SEC_EFFECTS,
+    SEC_CURVE,
+    SEC_MIXER,
+    SEC_LOCALS,
+];
+
+/// One section is open at a time, as in Chỉnh chân dung: opening `idx`
+/// closes the others; closing it leaves them all closed.
+pub fn set_section_open(sections: &mut [bool; DEV_PANEL_SECTIONS], idx: usize, open: bool) {
+    if idx >= DEV_PANEL_SECTIONS {
+        return;
+    }
+    if open {
+        *sections = [false; DEV_PANEL_SECTIONS];
+    }
+    sections[idx] = open;
+}
+
+/// Of several open sections (prefs saved before one-at-a-time) keep one:
+/// Light when it is among them, else the topmost.
+fn only_one_open(sections: [bool; DEV_PANEL_SECTIONS]) -> [bool; DEV_PANEL_SECTIONS] {
+    let keep = if sections[SEC_LIGHT] {
+        Some(SEC_LIGHT)
+    } else {
+        SECTION_ORDER.into_iter().find(|&i| sections[i])
+    };
+    let mut one = [false; DEV_PANEL_SECTIONS];
+    if let Some(i) = keep {
+        one[i] = true;
+    }
+    one
+}
 
 /// Saved open/closed state of the panel sections (prefs.json
 /// `develop_sections_open`); missing/short entries fall back to the defaults.
@@ -43,7 +86,7 @@ pub fn load_sections_open() -> [bool; DEV_PANEL_SECTIONS] {
             *slot = v;
         }
     }
-    open
+    only_one_open(open)
 }
 
 /// Persist the section collapse state (merge-into-object, like the theme).
@@ -80,12 +123,12 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let pos_x =
         (screen.max.x - data.chrome.panel_r_w - PANEL_W - 12.0).max(data.chrome.toolbar_w + 36.0);
     let mut open = true;
-    let esc_pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-    let enter_pressed = if ctx.egui_wants_keyboard_input() {
-        false
-    } else {
-        ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-    };
+    // While a value is being typed, Esc and Enter belong to that field: Esc
+    // leaves it and the panel, with its sliders, stays.
+    let typing = crate::ui::widgets::typing_in_a_field(ctx, egui::Id::new("develop_typing"));
+    let pressed = |key| !typing && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+    let esc_pressed = pressed(egui::Key::Escape);
+    let enter_pressed = pressed(egui::Key::Enter);
     let mut apply = enter_pressed;
     let mut cancel = esc_pressed;
 
@@ -737,6 +780,96 @@ fn stable_viewport_for_panel(screen: egui::Rect) -> bool {
 mod layout_tests {
     use super::*;
 
+    #[test]
+    fn one_section_is_open_at_a_time() {
+        let mut sections = DEFAULT_SECTIONS_OPEN;
+        assert_eq!(sections.iter().filter(|&&o| o).count(), 1);
+        assert!(sections[SEC_LIGHT]);
+        set_section_open(&mut sections, SEC_COLOR, true);
+        let open: Vec<usize> = (0..DEV_PANEL_SECTIONS).filter(|&i| sections[i]).collect();
+        assert_eq!(open, [SEC_COLOR]);
+        // Closing the open one leaves none; an index out of range is ignored.
+        set_section_open(&mut sections, SEC_COLOR, false);
+        set_section_open(&mut sections, DEV_PANEL_SECTIONS, true);
+        assert_eq!(sections, [false; DEV_PANEL_SECTIONS]);
+
+        // Prefs saved with several open: Light wins, else the topmost.
+        let mut several = [false; DEV_PANEL_SECTIONS];
+        for i in [SEC_SCOPES, SEC_LIGHT, SEC_MIXER] {
+            several[i] = true;
+        }
+        assert_eq!(only_one_open(several), DEFAULT_SECTIONS_OPEN);
+        several[SEC_LIGHT] = false;
+        let one = only_one_open(several);
+        assert!(one[SEC_SCOPES] && one.iter().filter(|&&o| o).count() == 1);
+        assert_eq!(
+            only_one_open([false; DEV_PANEL_SECTIONS]),
+            [false; DEV_PANEL_SECTIONS]
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn a_click_on_a_closed_header_asks_to_open_it_and_the_panel_follows_the_app() {
+        let ctx = egui::Context::default();
+        let mut data = UiData::default();
+        data.develop.develop_sections_open = DEFAULT_SECTIONS_OPEN;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 900.0));
+        let draw = |data: &UiData, events: Vec<egui::Event>| {
+            let mut actions = UiActions::default();
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ctx| {
+                egui::SidePanel::right("develop_accordion_test")
+                    .exact_width(340.0)
+                    .show(ctx, |ui| {
+                        develop_panel_contents(ui, data, &mut actions, 860.0);
+                    });
+            });
+            (output, actions)
+        };
+        let text_at = |output: &egui::FullOutput, label: &str| -> Option<egui::Pos2> {
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.pos + egui::vec2(4.0, 6.0))
+                    }
+                    _ => None,
+                })
+        };
+        let (output, _) = draw(&data, vec![]);
+        // Light is open (its first slider shows), Color is not.
+        assert!(text_at(&output, "Exposure").is_some());
+        assert!(text_at(&output, "Temperature").is_none());
+        let color = text_at(&output, "Color").expect("the Color header");
+        let button = |pressed| egui::Event::PointerButton {
+            pos: color,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(&data, vec![egui::Event::PointerMoved(color)]);
+        draw(&data, vec![button(true)]);
+        let (_, actions) = draw(&data, vec![button(false)]);
+        assert_eq!(
+            actions.develop.set_develop_section_open,
+            Some((SEC_COLOR, true))
+        );
+        // The app opens Color and with it closes Light; the panel shows that.
+        set_section_open(&mut data.develop.develop_sections_open, SEC_COLOR, true);
+        let mut output = draw(&data, vec![]).0;
+        for _ in 0..40 {
+            output = draw(&data, vec![]).0;
+        }
+        assert!(text_at(&output, "Temperature").is_some());
+        assert!(text_at(&output, "Exposure").is_none());
+    }
+
     /// Opt-in: IAI_UI_SNAPSHOT is a folder; the panel is drawn into
     /// `develop.png` there, Light and Color open, the pointer on a row.
     #[test]
@@ -1251,6 +1384,8 @@ fn section(
     let id = ui.make_persistent_id(("develop_section", idx));
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open_pref);
+    // The app holds which section is open: opening one there closes the rest.
+    state.set_open(open_pref);
     ui.add_space(3.0);
     if crate::ui::widgets::section_header(ui, icon, title, state.is_open(), false).clicked() {
         state.toggle(ui);

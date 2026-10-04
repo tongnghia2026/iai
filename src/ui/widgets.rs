@@ -27,6 +27,20 @@ pub(crate) fn focus_field_select_all(ui: &egui::Ui, response: &egui::Response) {
     state.store(ui.ctx(), id);
 }
 
+/// Whether a text field had the keyboard as this frame or the last began:
+/// then Esc and Enter are that field's, not the dialog's around it. egui
+/// drops the focus on Esc before the frame's UI runs, so the frame of the
+/// Esc itself no longer shows it; the last frame's answer is kept under `id`.
+pub(crate) fn typing_in_a_field(ctx: &egui::Context, id: egui::Id) -> bool {
+    let now = ctx.egui_wants_keyboard_input();
+    let before = ctx.data_mut(|d| {
+        let before = d.get_temp::<bool>(id).unwrap_or(false);
+        d.insert_temp(id, now);
+        before
+    });
+    now || before
+}
+
 /// Linear interpolate two colours (premultiplied-agnostic), `t` in 0..1.
 pub(crate) fn mix_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
@@ -64,12 +78,47 @@ fn row_glow() -> Color32 {
     Color32::from_white_alpha(22)
 }
 
+/// A header's icon: a Phosphor glyph, or one drawn here in the same line
+/// style where Phosphor has none.
+#[derive(Clone, Copy)]
+pub enum HeaderIcon<'a> {
+    Glyph(&'a str),
+    Lips,
+}
+
+impl<'a> From<&'a str> for HeaderIcon<'a> {
+    fn from(glyph: &'a str) -> Self {
+        HeaderIcon::Glyph(glyph)
+    }
+}
+
+/// A closed mouth, 16 px wide around `centre`: the upper lip's bow, the lower
+/// lip, and the line between them.
+fn paint_lips(painter: &egui::Painter, centre: egui::Pos2, colour: Color32) {
+    let stroke = egui::Stroke::new(1.3_f32, colour);
+    let at = |x: f32, y: f32| centre + egui::vec2(x, y);
+    let curve = |from: egui::Pos2, pull: egui::Pos2, to: egui::Pos2| {
+        painter.add(egui::epaint::QuadraticBezierShape::from_points_stroke(
+            [from, pull, to],
+            false,
+            Color32::TRANSPARENT,
+            stroke,
+        ));
+    };
+    let (left, right) = (at(-7.5, 0.0), at(7.5, 0.0));
+    let dip = at(0.0, -2.6);
+    curve(left, at(-3.6, -6.4), dip);
+    curve(dip, at(3.6, -6.4), right);
+    curve(left, at(0.0, 10.4), right);
+    curve(left, at(0.0, 2.2), right);
+}
+
 /// The header bar of a collapsible group, shared by Chỉnh chân dung and
 /// Develop: icon, bold title, a dot while something in the group is at work,
 /// and the caret. It lights up under the pointer; a click toggles the group.
-pub fn section_header(
+pub fn section_header<'a>(
     ui: &mut egui::Ui,
-    icon: &str,
+    icon: impl Into<HeaderIcon<'a>>,
     title: &str,
     open: bool,
     active: bool,
@@ -86,13 +135,18 @@ pub fn section_header(
         painter.rect_filled(rect, 4.0, row_glow());
     }
     let bright = visuals.strong_text_color();
-    painter.text(
-        rect.left_center() + egui::vec2(10.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        icon,
-        egui::FontId::proportional(16.0),
-        bright,
-    );
+    match icon.into() {
+        HeaderIcon::Glyph(glyph) => {
+            painter.text(
+                rect.left_center() + egui::vec2(10.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                glyph,
+                egui::FontId::proportional(16.0),
+                bright,
+            );
+        }
+        HeaderIcon::Lips => paint_lips(painter, rect.left_center() + egui::vec2(18.0, 0.0), bright),
+    }
     painter.text(
         rect.left_center() + egui::vec2(34.0, 0.0),
         egui::Align2::LEFT_CENTER,
@@ -376,22 +430,27 @@ fn stacked_slider(
     // Enter or clicking away commits (clamped to the range), Esc discards.
     let edit_id = response.id.with("value_edit");
     let te_id = edit_id.with("te");
+    let focus_id = edit_id.with("focus");
     let editing = ui
         .ctx()
         .data_mut(|d| d.get_temp::<String>(edit_id))
         .is_some();
     // Keyed off the press ORIGIN so a drag that started on the track keeps
     // driving the slider past the box, and one that started in the box never
-    // yanks the slider to its maximum.
+    // yanks the slider to its maximum. egui forgets the origin as the button
+    // comes up, which is the frame of the click: there the click's own
+    // position stands in.
     let pressed_in_value_box = ui
         .input(|i| i.pointer.press_origin())
+        .or_else(|| response.interact_pointer_pos())
         .is_some_and(|p| value_rect.contains(p));
 
     if !editing && (response.dragged() || response.clicked()) {
         if response.clicked() && pressed_in_value_box {
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(edit_id, value_text.clone()));
-            ui.ctx().memory_mut(|m| m.request_focus(te_id));
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(edit_id, value_text.clone());
+                d.insert_temp(focus_id, true);
+            });
         } else if !pressed_in_value_box {
             if let Some(pos) = response.interact_pointer_pos() {
                 let t = ((pos.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
@@ -439,10 +498,22 @@ fn stacked_slider(
                 .font(font)
                 .margin(egui::vec2(2.0, 1.0)),
         );
+        // The field takes the focus once it exists, the number selected so
+        // typing replaces it. Asked for before the field is made, on the
+        // frame of the click, the focus is given up at once: egui has a
+        // focused widget the click did not land on let go, and this field
+        // was not there yet when the click was aimed.
+        let opening = ui
+            .ctx()
+            .data_mut(|d| d.remove_temp::<bool>(focus_id))
+            .unwrap_or(false);
+        if opening {
+            focus_field_select_all(ui, &out);
+        }
         if out.changed() {
             ui.ctx().data_mut(|d| d.insert_temp(edit_id, text.clone()));
         }
-        if out.lost_focus() {
+        if out.lost_focus() || !(opening || out.has_focus()) {
             ui.ctx().data_mut(|d| d.remove::<String>(edit_id));
             // Esc = discard; any other way out (Enter, click away) commits.
             if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -541,4 +612,92 @@ fn paint_gradient_slider(
         ui.visuals().text_color(),
         egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
     ));
+}
+
+#[cfg(test)]
+mod value_box_tests {
+    use super::*;
+
+    /// One frame of a lone stacked slider on a 400 × 200 screen; returns the
+    /// row's rectangle.
+    fn frame(ctx: &egui::Context, value: &mut f32, events: Vec<egui::Event>) -> egui::Rect {
+        let mut row = egui::Rect::NOTHING;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 200.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let track = [Color32::DARK_GRAY, Color32::LIGHT_GRAY];
+            row = dev_slider_stacked_resp(ui, "Thử", value, 0.0..=100.0, &track, 1.0).rect;
+        });
+        row
+    }
+
+    fn click(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn a_click_in_the_value_box_types_a_value_and_never_moves_the_slider() {
+        let ctx = egui::Context::default();
+        let mut value = 40.0f32;
+        let row = frame(&ctx, &mut value, vec![]);
+        let in_box = egui::pos2(row.right() - 8.0 - VALUE_W * 0.5, row.top() + 22.0);
+        frame(&ctx, &mut value, vec![egui::Event::PointerMoved(in_box)]);
+        frame(&ctx, &mut value, vec![click(in_box, true)]);
+        frame(&ctx, &mut value, vec![click(in_box, false)]);
+        assert_eq!(value, 40.0, "the click dragged the slider");
+        // The box is a text field with its number selected: typing replaces
+        // it, Enter takes the value.
+        frame(&ctx, &mut value, vec![egui::Event::Text("75".to_string())]);
+        assert_eq!(value, 40.0, "nothing is taken before Enter");
+        frame(&ctx, &mut value, vec![key(egui::Key::Enter)]);
+        assert_eq!(value, 75.0);
+
+        // Again, out of range and given up with Esc: nothing changes.
+        frame(&ctx, &mut value, vec![click(in_box, true)]);
+        frame(&ctx, &mut value, vec![click(in_box, false)]);
+        frame(&ctx, &mut value, vec![egui::Event::Text("5".to_string())]);
+        frame(&ctx, &mut value, vec![key(egui::Key::Escape)]);
+        assert_eq!(value, 75.0);
+        // A typed value past the range stops at its end.
+        frame(&ctx, &mut value, vec![click(in_box, true)]);
+        frame(&ctx, &mut value, vec![click(in_box, false)]);
+        frame(&ctx, &mut value, vec![egui::Event::Text("250".to_string())]);
+        frame(&ctx, &mut value, vec![key(egui::Key::Enter)]);
+        assert_eq!(value, 100.0);
+    }
+
+    #[test]
+    fn a_click_on_the_track_still_moves_the_slider() {
+        let ctx = egui::Context::default();
+        let mut value = 40.0f32;
+        let row = frame(&ctx, &mut value, vec![]);
+        // The track runs from 92 px in to 8 px short of the value box.
+        let (left, right) = (row.left() + 92.0, row.right() - 8.0 - VALUE_W - 8.0);
+        let quarter = egui::pos2(left + (right - left) * 0.25, row.top() + 24.0);
+        frame(&ctx, &mut value, vec![egui::Event::PointerMoved(quarter)]);
+        frame(&ctx, &mut value, vec![click(quarter, true)]);
+        frame(&ctx, &mut value, vec![click(quarter, false)]);
+        assert!((value - 25.0).abs() < 0.5, "{value}");
+    }
 }

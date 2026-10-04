@@ -351,7 +351,11 @@ impl App {
             if idx < crate::ui::develop::DEV_PANEL_SECTIONS
                 && self.dev.develop_sections_open[idx] != open
             {
-                self.dev.develop_sections_open[idx] = open;
+                crate::ui::develop::set_section_open(
+                    &mut self.dev.develop_sections_open,
+                    idx,
+                    open,
+                );
                 crate::ui::develop::save_sections_open(&self.dev.develop_sections_open);
             }
         }
