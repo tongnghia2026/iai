@@ -1,17 +1,28 @@
 //! "Xếp ảnh in": the section that lays the open photo out on a print sheet,
-//! shown in the AI panel and in Chỉnh chân dung. Its options are remembered
-//! in prefs.json (key `print_sheet`).
+//! or a folder of photos on as many sheets as it takes, shown in the AI
+//! panel and in Auto retouch. Its options are remembered in prefs.json (key
+//! `print_sheet`).
 
 use super::*;
-use crate::core::imposition::{Backdrop, Paper, PhotoKind, Sheet, SheetOptions};
+use crate::core::imposition::{
+    Backdrop, FolderSheets, Paper, PhotoKind, Sheet, SheetOptions, MAX_FOLDER_COPIES,
+};
 
 const PREFS_KEY: &str = "print_sheet";
 
-/// The section. Returns the sheet to make once one of its buttons is clicked.
-pub(crate) fn print_sheet_section(
-    ui: &mut egui::Ui,
-    data: &UiData,
-) -> Option<(Sheet, SheetOptions)> {
+/// What a click in the section asks for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SheetAsk {
+    /// The open photo on one sheet.
+    Photo(Sheet, SheetOptions),
+    /// Choose the folder of photos.
+    PickFolder,
+    /// The chosen folder's photos, on as many sheets as they take.
+    Folder(FolderSheets, SheetOptions),
+}
+
+/// The section. Returns what was asked for once one of its buttons is clicked.
+pub(crate) fn print_sheet_section(ui: &mut egui::Ui, data: &UiData) -> Option<SheetAsk> {
     let id = egui::Id::new("print_sheet_options");
     let saved: SheetOptions = ui
         .ctx()
@@ -143,13 +154,137 @@ pub(crate) fn print_sheet_section(
         .weak(),
     );
 
+    ui.add_space(6.0);
+    ui.separator();
+    let folder = folder_block(ui, data, &mut options, &mut settled);
+
     if options != saved {
         ui.ctx().data_mut(|d| d.insert_temp(id, options));
     }
-    if settled || chosen.is_some() {
+    if settled || chosen.is_some() || folder.is_some() {
         save_pref(PREFS_KEY, &options);
     }
-    chosen.map(|sheet| (sheet, options))
+    match (chosen, folder) {
+        (Some(sheet), _) => Some(SheetAsk::Photo(sheet, options)),
+        (None, Some(FolderClick::Pick)) => Some(SheetAsk::PickFolder),
+        (None, Some(FolderClick::Paper(paper))) => Some(SheetAsk::Folder(
+            FolderSheets {
+                paper,
+                kind: options.folder_kind,
+                copies: options.folder_copies,
+            },
+            options,
+        )),
+        (None, None) => None,
+    }
+}
+
+enum FolderClick {
+    Pick,
+    Paper(Paper),
+}
+
+/// "Xếp cả thư mục": the folder, how many prints of each person and at what
+/// size, then one button per paper saying how many sheets it takes.
+fn folder_block(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    options: &mut SheetOptions,
+    settled: &mut bool,
+) -> Option<FolderClick> {
+    let mut clicked = None;
+    ui.label(egui::RichText::new("Xếp cả thư mục").strong());
+    ui.label(
+        egui::RichText::new("Thư mục ảnh thẻ đã làm xong, mỗi ảnh một người.")
+            .small()
+            .weak(),
+    );
+    ui.horizontal(|ui| {
+        if ui
+            .button(format!("{}  Chọn thư mục…", ph::FOLDER_OPEN))
+            .clicked()
+        {
+            clicked = Some(FolderClick::Pick);
+        }
+        let chosen = match &data.dialogs.print_folder {
+            Some((name, 0)) => format!("{name} — không có ảnh"),
+            Some((name, photos)) => format!("{name} — {photos} ảnh"),
+            None => "chưa chọn".to_string(),
+        };
+        ui.add(egui::Label::new(egui::RichText::new(chosen).small()).truncate());
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("Mỗi người").small().weak());
+        let mut copies = options.folder_copies as i64;
+        let r = ui.add(
+            egui::DragValue::new(&mut copies)
+                .range(1..=MAX_FOLDER_COPIES as i64)
+                .suffix(" tấm"),
+        );
+        options.folder_copies = copies.clamp(1, MAX_FOLDER_COPIES as i64) as u32;
+        *settled |= r.drag_stopped() || r.lost_focus();
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Cỡ").small().weak());
+        for kind in PhotoKind::ALL {
+            if ui
+                .selectable_label(options.folder_kind == kind, kind.label())
+                .clicked()
+            {
+                options.folder_kind = kind;
+                *settled = true;
+            }
+        }
+    });
+
+    let photos = data
+        .dialogs
+        .print_folder
+        .as_ref()
+        .map_or(0, |(_, photos)| *photos);
+    let spacing = ui.spacing().item_spacing.x;
+    let button_w = ((ui.available_width() - spacing) / 2.0).max(40.0);
+    ui.horizontal(|ui| {
+        for paper in Paper::ALL {
+            let ask = FolderSheets {
+                paper,
+                kind: options.folder_kind,
+                copies: options.folder_copies,
+            };
+            let sheets = ask.sheets(photos, options.gap);
+            let text = match sheets {
+                0 => format!("Giấy {}", paper.label()),
+                sheets => format!("{} — {sheets} tờ", paper.label()),
+            };
+            let button = egui::Button::new(egui::RichText::new(text).strong())
+                .min_size(egui::vec2(button_w, 24.0));
+            if ui.add_enabled(sheets > 0, button).clicked() {
+                clicked = Some(FolderClick::Paper(paper));
+            }
+        }
+    });
+    let per_sheet = |paper| {
+        FolderSheets {
+            paper,
+            kind: options.folder_kind,
+            copies: options.folder_copies,
+        }
+        .per_sheet(options.gap)
+    };
+    let prints = photos * options.folder_copies as usize;
+    let fits = format!(
+        "Tờ 10×15 xếp {} tấm, tờ 13×18 xếp {} tấm.",
+        per_sheet(Paper::P10x15),
+        per_sheet(Paper::P13x18)
+    );
+    let note = match photos {
+        0 => fits,
+        _ => format!(
+            "{prints} tấm {}. {fits} Mỗi tờ mở thành một tab.",
+            options.folder_kind.label()
+        ),
+    };
+    ui.label(egui::RichText::new(note).small().weak());
+    clicked
 }
 
 #[cfg(test)]
@@ -227,8 +362,88 @@ mod tests {
             draw(vec![egui::Event::PointerMoved(at)]);
             draw(vec![button(true)]);
             let (_, asked) = draw(vec![button(false)]);
-            assert_eq!(asked.map(|(sheet, _)| sheet), Some(sheet), "{count}");
+            assert!(
+                matches!(asked, Some(SheetAsk::Photo(asked, _)) if asked == sheet),
+                "{count}"
+            );
         }
+    }
+
+    #[test]
+    fn the_folder_buttons_say_how_many_sheets_and_ask_for_them() {
+        let mut data = UiData::default();
+        let ctx = egui::Context::default();
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                egui::Id::new("print_sheet_options"),
+                SheetOptions::default(),
+            )
+        });
+        let draw = |data: &UiData, events: Vec<egui::Event>| {
+            let mut asked = None;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                ui.set_max_width(300.0);
+                asked = print_sheet_section(ui, data);
+            });
+            (output, asked)
+        };
+        let find = |output: &egui::FullOutput, label: &str| -> Option<egui::Pos2> {
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text().contains(label) => {
+                        Some(text.pos + egui::vec2(4.0, 5.0))
+                    }
+                    _ => None,
+                })
+        };
+        let click = |data: &UiData, at: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            draw(data, vec![egui::Event::PointerMoved(at)]);
+            draw(data, vec![button(true)]);
+            draw(data, vec![button(false)]).1
+        };
+
+        // No folder yet: the papers wait, the folder can be chosen.
+        draw(&data, vec![]);
+        let (output, _) = draw(&data, vec![]);
+        assert!(find(&output, "chưa chọn").is_some());
+        let paper = find(&output, "Giấy 13×18").expect("the paper button");
+        assert_eq!(click(&data, paper), None);
+        let pick = find(&output, "Chọn thư mục").expect("the folder button");
+        assert_eq!(click(&data, pick), Some(SheetAsk::PickFolder));
+
+        // Eighteen people, two prints each.
+        data.dialogs.print_folder = Some(("ht".to_string(), 18));
+        draw(&data, vec![]);
+        let (output, _) = draw(&data, vec![]);
+        assert!(find(&output, "ht — 18 ảnh").is_some());
+        assert!(find(&output, "36 tấm 3×4").is_some());
+        assert!(find(&output, "10×15 — 4 tờ").is_some());
+        let paper = find(&output, "13×18 — 2 tờ").expect("the 13×18 button");
+        let ask = FolderSheets {
+            paper: Paper::P13x18,
+            kind: PhotoKind::Id3x4,
+            copies: 2,
+        };
+        assert_eq!(
+            click(&data, paper),
+            Some(SheetAsk::Folder(ask, SheetOptions::default()))
+        );
     }
 
     /// Opt-in: IAI_UI_SNAPSHOT is a folder; the section is drawn into
@@ -242,7 +457,8 @@ mod tests {
         let mut data = UiData::default();
         data.doc.has_doc = true;
         (data.doc.canvas_w, data.doc.canvas_h, data.doc.canvas_dpi) = (945, 1417, 1200.0);
-        let image = crate::ui::snapshot::render(340.0, 330.0, 1.5, None, |ctx| {
+        data.dialogs.print_folder = Some(("ht".to_string(), 18));
+        let image = crate::ui::snapshot::render(340.0, 470.0, 1.5, None, |ctx| {
             #[allow(deprecated)]
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.set_max_width(304.0);

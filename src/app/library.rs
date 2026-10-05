@@ -537,7 +537,7 @@ impl App {
         let parent = crate::file_io::dialog_parent(window);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            if let Some(dir) = crate::file_io::dialog_pick_folder(parent) {
+            if let Some(dir) = crate::file_io::dialog_pick_folder(parent, "Choose Folder") {
                 let _ = tx.send(crate::file_io::FileDialogResult::PickedFolder(dir));
             }
         });

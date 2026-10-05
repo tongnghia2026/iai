@@ -499,6 +499,8 @@ pub struct DialogViewModel {
     pub id_photo_error: bool,
     pub id_photo_busy: bool,
     pub id_photo_made: bool,
+    /// The folder chosen in "Xếp ảnh in": its name and how many photos it holds.
+    pub print_folder: Option<(String, usize)>,
     /// Active document is a multi-page PDF session (enables page-scope options).
     pub scan_is_pdf: bool,
     /// PDF page count (1 for a plain image), for the scan-cleanup scope UI.
@@ -1071,6 +1073,7 @@ impl Default for UiData {
                 id_photo_error: false,
                 id_photo_busy: false,
                 id_photo_made: false,
+                print_folder: None,
                 portrait_restore_settings: None,
                 portrait_restore_faces: None,
                 scan_is_pdf: false,

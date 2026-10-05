@@ -83,6 +83,8 @@ pub struct UiShell {
     pub(in crate::app) portrait_cache: Option<crate::app::portrait_ops::PortraitCache>,
     /// The "Làm ảnh thẻ" job (and its wait for the background model).
     pub(in crate::app) id_photo: crate::app::id_photo_ops::IdPhotoSession,
+    /// The folder of photos chosen in "Xếp ảnh in".
+    pub(in crate::app) print_folder: Option<crate::app::actions::impose::PrintFolder>,
     pub(in crate::app) user_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
     /// Named Develop slider sets saved by the user (develop_presets.json).
     pub(in crate::app) develop_presets: std::sync::Arc<Vec<crate::core::presets::DevelopPreset>>,

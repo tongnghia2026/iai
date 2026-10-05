@@ -1403,6 +1403,9 @@ impl App {
                             w.request_redraw();
                         }
                     }
+                    file_io::FileDialogResult::PickedPrintFolder(dir) => {
+                        self.set_print_folder(dir);
+                    }
                     file_io::FileDialogResult::InsertPdfPages {
                         document_id,
                         position,

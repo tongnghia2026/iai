@@ -303,6 +303,12 @@ impl App {
         if let Some((sheet, options)) = actions.doc.impose_sheet.take() {
             self.do_impose_sheet(sheet, options);
         }
+        if std::mem::take(&mut actions.doc.pick_print_folder) {
+            self.pick_print_folder();
+        }
+        if let Some((ask, options)) = actions.doc.impose_folder.take() {
+            self.do_impose_folder(ask, options);
+        }
     }
 
     /// Develop-panel outputs shared by both hosts of the panel UI: the main

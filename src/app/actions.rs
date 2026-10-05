@@ -9,7 +9,7 @@ mod clipboard;
 mod develop;
 mod edit_ops;
 mod filters;
-mod impose;
+pub(in crate::app) mod impose;
 mod print;
 mod refine;
 mod ui_chrome;

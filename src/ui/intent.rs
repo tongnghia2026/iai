@@ -144,6 +144,13 @@ pub struct DocumentIntent {
         crate::core::imposition::Sheet,
         crate::core::imposition::SheetOptions,
     )>,
+    /// "Xếp ảnh in": choose the folder of photos to lay out.
+    pub pick_print_folder: bool,
+    /// "Xếp ảnh in": lay the chosen folder's photos out on print sheets.
+    pub impose_folder: Option<(
+        crate::core::imposition::FolderSheets,
+        crate::core::imposition::SheetOptions,
+    )>,
     pub set_canvas_unit: Option<Unit>,
     /// Page ▸ Bleed: set the default page bleed of the active document, in mm
     /// (one undoable step). Drawn by the artboard sheet overlay.
@@ -1025,6 +1032,8 @@ impl UiActions {
             zoom_out: self.doc.zoom_out,
             zoom_100: self.doc.zoom_100,
             hovered_doc: self.doc.hovered_doc,
+            // Choosing a folder lays nothing out yet.
+            pick_print_folder: self.doc.pick_print_folder,
             ..Default::default()
         };
         let layers = LayerIntent {
@@ -1205,7 +1214,18 @@ mod retouch_gate_tests {
         assert!(!asked(|a| a.tool.select_tool = Some(ToolId::Brush)));
         assert!(!asked(|a| a.dialogs.show_preferences = Some(true)));
         assert!(!asked(|a| a.ai.toggle_ai_panel = Some(true)));
+        // Choosing the folder to lay out makes no sheet yet.
+        assert!(!asked(|a| a.doc.pick_print_folder = true));
         // Anything else is a command.
+        assert!(asked(|a| {
+            use crate::core::imposition::{FolderSheets, Paper, PhotoKind};
+            let folder = FolderSheets {
+                paper: Paper::P13x18,
+                kind: PhotoKind::Id3x4,
+                copies: 2,
+            };
+            a.doc.impose_folder = Some((folder, Default::default()));
+        }));
         assert!(asked(|a| a.layers.add_layer = true));
         assert!(asked(|a| a.layers.select_layer = Some((0, false, false))));
         assert!(asked(|a| a.doc.cut = true));

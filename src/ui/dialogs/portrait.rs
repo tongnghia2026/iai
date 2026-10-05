@@ -588,6 +588,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
     let mut do_cancel = esc_pressed && !leave_naming;
     let mut open = true;
     let mut sheet = None;
+    let mut folder = None;
 
     let default_pos = document_side_dialog_pos(ctx, data, 320.0, 96.0);
     egui::Window::new("Auto retouch")
@@ -1048,7 +1049,14 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         // as it is.
                         let idle = !data.dialogs.portrait_session && !data.dialogs.id_photo_busy;
                         ui.add_enabled_ui(ready || idle, |ui| {
-                            sheet = print_sheet_section(ui, data)
+                            match print_sheet_section(ui, data) {
+                                Some(SheetAsk::Photo(asked, options)) => {
+                                    sheet = Some((asked, options));
+                                }
+                                // The folder is no part of this photo: its
+                                // sheets are asked of the app, not the dialog.
+                                asked => folder = asked,
+                            }
                         });
                     });
                 });
@@ -1128,6 +1136,11 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
         actions.dialogs.set_portrait_brush = Some(None);
     }
 
+    match folder {
+        Some(SheetAsk::PickFolder) => actions.doc.pick_print_folder = true,
+        Some(SheetAsk::Folder(ask, options)) => actions.doc.impose_folder = Some((ask, options)),
+        _ => {}
+    }
     if do_apply {
         actions.dialogs.apply_portrait = Some((s, faces));
         actions.dialogs.portrait_sheet = sheet;

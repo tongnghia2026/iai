@@ -78,6 +78,8 @@ pub enum FileDialogResult {
     Export(crate::formats::ExportFormat, PathBuf),
     /// A folder chosen in the Library grid browser (Track B) → scan for images.
     PickedFolder(PathBuf),
+    /// A folder of photos chosen in "Xếp ảnh in", to lay out on print sheets.
+    PickedPrintFolder(PathBuf),
     /// Files selected for insertion into an existing multi-page PDF document.
     InsertPdfPages {
         document_id: crate::core::document::DocumentId,
@@ -199,9 +201,9 @@ pub fn dialog_insert_pdf_pages(parent: Option<DialogParent>) -> Option<Vec<PathB
     dialog.pick_files()
 }
 
-/// Pick a folder for the Library grid browser. CALL ON A WORKER THREAD.
-pub fn dialog_pick_folder(parent: Option<DialogParent>) -> Option<PathBuf> {
-    let mut dialog = rfd::FileDialog::new().set_title("Choose Folder");
+/// Pick a folder (the Library grid browser, "Xếp ảnh in"). CALL ON A WORKER THREAD.
+pub fn dialog_pick_folder(parent: Option<DialogParent>, title: &str) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title(title);
     if let Some(p) = parent {
         dialog = dialog.set_parent(&p);
     }

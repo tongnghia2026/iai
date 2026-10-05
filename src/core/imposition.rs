@@ -3,7 +3,8 @@
 // Pure layout math. Paper/photo presets are fixed pixel sizes at SHEET_DPI so
 // the printed result is exact; the grid tries both orientations and keeps the
 // one that fits more copies (ID shops lay 3×4 prints sideways: 10 per 10×15,
-// 18 per 13×18). A mixed sheet holds two sizes. The app layer
+// 18 per 13×18). A mixed sheet holds two sizes; a folder of photos fills as
+// many sheets as it takes, a few copies of each. The app layer
 // (app/actions/impose.rs) turns a sheet into a new document with one layer
 // per copy so the user can rearrange by hand.
 
@@ -126,14 +127,17 @@ impl Backdrop {
 }
 
 /// What "Xếp ảnh in" remembers: the cutting gap between copies (px at
-/// [`SHEET_DPI`]) and, for the mixed sheet, each size's backdrop. A sheet of
-/// one size prints the photo on the background it has.
+/// [`SHEET_DPI`]), for the mixed sheet each size's backdrop, and for a folder
+/// of photos their size and how many prints of each. A sheet of one size
+/// prints the photo on the background it has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SheetOptions {
     pub gap: u32,
     pub backdrop_3x4: Backdrop,
     pub backdrop_4x6: Backdrop,
+    pub folder_kind: PhotoKind,
+    pub folder_copies: u32,
 }
 
 impl Default for SheetOptions {
@@ -142,6 +146,8 @@ impl Default for SheetOptions {
             gap: 10,
             backdrop_3x4: Backdrop::Blue,
             backdrop_4x6: Backdrop::White,
+            folder_kind: PhotoKind::Id3x4,
+            folder_copies: 2,
         }
     }
 }
@@ -228,6 +234,58 @@ impl Sheet {
             .iter()
             .map(|b| b.layout.placements.len())
             .sum()
+    }
+}
+
+/// The most prints of each photo a folder can ask for.
+pub const MAX_FOLDER_COPIES: u32 = 20;
+
+/// A folder of photos, one person each, on as many sheets of one paper as it
+/// takes: `copies` prints of every photo, all of one size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FolderSheets {
+    pub paper: Paper,
+    pub kind: PhotoKind,
+    pub copies: u32,
+}
+
+impl FolderSheets {
+    /// Prints one sheet holds.
+    pub fn per_sheet(self, gap: u32) -> usize {
+        layout(self.paper, self.kind, gap).placements.len()
+    }
+
+    /// Sheets that `photos` photos take; 0 when a sheet holds none.
+    pub fn sheets(self, photos: usize, gap: u32) -> usize {
+        match self.per_sheet(gap) {
+            0 => 0,
+            per_sheet => (photos * self.copies as usize).div_ceil(per_sheet),
+        }
+    }
+}
+
+/// The order in which a sheet's cells are filled when every photo comes in
+/// `copies`: along the rows, or down the columns when only a column holds
+/// whole sets, so that one person's prints lie side by side and the end of a
+/// line does not part them.
+pub fn fill_order(layout: &Layout, copies: usize) -> Vec<usize> {
+    let cells = layout.placements.len();
+    let Some(&(_, top)) = layout.placements.first() else {
+        return Vec::new();
+    };
+    let cols = layout
+        .placements
+        .iter()
+        .take_while(|&&(_, y)| y == top)
+        .count();
+    let rows = cells / cols;
+    let whole = |line: usize| copies > 0 && line % copies == 0;
+    if !whole(cols) && whole(rows) {
+        (0..cols)
+            .flat_map(|c| (0..rows).map(move |r| r * cols + c))
+            .collect()
+    } else {
+        (0..cells).collect()
     }
 }
 
@@ -584,10 +642,65 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_takes_as_many_sheets_as_its_prints_need() {
+        let on = |paper| FolderSheets {
+            paper,
+            kind: PhotoKind::Id3x4,
+            copies: 2,
+        };
+        // Eighteen people, two prints each.
+        assert_eq!(on(Paper::P13x18).per_sheet(10), 18);
+        assert_eq!(on(Paper::P13x18).sheets(18, 10), 2);
+        assert_eq!(on(Paper::P10x15).sheets(18, 10), 4);
+        assert_eq!(on(Paper::P10x15).sheets(5, 10), 1);
+        assert_eq!(on(Paper::P10x15).sheets(0, 10), 0);
+        // A gap that leaves room for one print: a sheet each.
+        let apart = FolderSheets {
+            kind: PhotoKind::Id4x6,
+            ..on(Paper::P10x15)
+        };
+        assert_eq!(apart.per_sheet(3000), 1);
+        assert_eq!(apart.sheets(3, 3000), 6);
+    }
+
+    #[test]
+    fn a_persons_prints_lie_together_on_the_sheet() {
+        // Two across: each row is one person's pair.
+        let narrow = layout(Paper::P10x15, PhotoKind::Id3x4, 10);
+        assert_eq!(fill_order(&narrow, 2), (0..10).collect::<Vec<_>>());
+        // Three across, six down: pairs run down the columns.
+        let wide = layout(Paper::P13x18, PhotoKind::Id3x4, 10);
+        let order = fill_order(&wide, 2);
+        assert_eq!(&order[..7], &[0, 3, 6, 9, 12, 15, 1]);
+        for pair in order.chunks(2) {
+            let (a, b) = (wide.placements[pair[0]], wide.placements[pair[1]]);
+            assert_eq!(a.0, b.0, "one column");
+            assert_eq!(b.1 - a.1, wide.cell_h + 10, "one under the other");
+        }
+        // Three of each fill a row; four fit neither way: along the rows.
+        assert_eq!(fill_order(&wide, 3), (0..18).collect::<Vec<_>>());
+        assert_eq!(fill_order(&wide, 4), (0..18).collect::<Vec<_>>());
+        // Every cell once, whatever the count.
+        for copies in 0..8 {
+            let mut cells = fill_order(&wide, copies);
+            cells.sort_unstable();
+            assert_eq!(cells, (0..18).collect::<Vec<_>>());
+        }
+        let none = Layout {
+            placements: Vec::new(),
+            cell_w: 1,
+            cell_h: 1,
+            rotated: false,
+        };
+        assert!(fill_order(&none, 2).is_empty());
+    }
+
+    #[test]
     fn sheet_options_read_back_and_default_to_blue_3x4_white_4x6() {
         let d = SheetOptions::default();
         assert_eq!(d.backdrop(PhotoKind::Id3x4), Backdrop::Blue);
         assert_eq!(d.backdrop(PhotoKind::Id4x6), Backdrop::White);
+        assert_eq!((d.folder_kind, d.folder_copies), (PhotoKind::Id3x4, 2));
         let partial: SheetOptions = serde_json::from_str("{\"gap\": 20}").unwrap();
         assert_eq!(partial, SheetOptions { gap: 20, ..d });
         let json = serde_json::to_string(&d).unwrap();

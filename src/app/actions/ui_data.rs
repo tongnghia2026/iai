@@ -1815,6 +1815,11 @@ impl App {
                 id_photo_error: id_photo.error,
                 id_photo_busy: id_photo.busy,
                 id_photo_made: id_photo.made,
+                print_folder: self
+                    .shell
+                    .print_folder
+                    .as_ref()
+                    .map(|folder| (folder.name(), folder.photos.len())),
                 scan_is_pdf: self
                     .docs
                     .documents

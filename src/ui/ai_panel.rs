@@ -344,11 +344,19 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     section(
                         ui,
                         "Xếp ảnh in",
-                        "Nhân bản ảnh đang mở thành trang in 600dpi — mỗi tấm một layer.",
+                        "Nhân bản ảnh đang mở, hoặc xếp cả thư mục ảnh, thành trang in 600dpi — mỗi tấm một layer.",
                         true,
                         |ui| {
-                            if let Some(sheet) = super::dialogs::print_sheet_section(ui, data) {
-                                actions.doc.impose_sheet = Some(sheet);
+                            use super::dialogs::SheetAsk;
+                            match super::dialogs::print_sheet_section(ui, data) {
+                                Some(SheetAsk::Photo(sheet, options)) => {
+                                    actions.doc.impose_sheet = Some((sheet, options));
+                                }
+                                Some(SheetAsk::PickFolder) => actions.doc.pick_print_folder = true,
+                                Some(SheetAsk::Folder(ask, options)) => {
+                                    actions.doc.impose_folder = Some((ask, options));
+                                }
+                                None => {}
                             }
                         },
                     );

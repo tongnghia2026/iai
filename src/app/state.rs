@@ -1833,6 +1833,7 @@ impl App {
                 portrait_error: None,
                 portrait_cache: None,
                 id_photo: Default::default(),
+                print_folder: None,
                 user_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all()),
                 develop_presets: std::sync::Arc::new(
                     crate::core::presets::DevelopPreset::load_all(),
