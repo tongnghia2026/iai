@@ -772,4 +772,6 @@ trước khác (Levels, Curves, Filter, Develop, Làm sạch scan) vẫn khóa n
   ảnh, và phím tắt gõ thật.
 - Test đầy đủ qua (1919 + 22). Code `0b5a416`; bản test `target/release/iai.exe` (build 04/10
   23:50, đã mở thử lên được).
-- [ ] Build Release, chủ test.
+- [x] Build Release, chủ test đợt 27: **OK** (05/10). Chủ không nói gì thêm về ba điều tôi tự
+  quyết (Ctrl+Z bỏ xem trước; có lệnh thì dừng nhận diện; layer đã sửa tay không mở lại công
+  thức cũ) — giữ nguyên như đã làm.

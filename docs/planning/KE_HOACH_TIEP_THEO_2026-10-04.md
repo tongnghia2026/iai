@@ -7,8 +7,13 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
 
 - Nhánh `feat/vector-core-foundation`; mọi thứ **commit local, chưa push** (push gần nhất
   02/10 @ `d1f4acb`). Chỉ push khi chủ bảo.
-- Bản test đợt 21: **`target\release\iai.exe`** (build 04/10 16:23, có
-  `--features canvas-editor-webview`).
+- **Cập nhật 05/10:** các đợt 22–27 đã xong, chủ test OK tới đợt 27 (bảng Auto retouch: gộp
+  Làm ảnh thẻ + Chỉnh chân dung, không khóa công cụ, lúc đang xem trước dùng lệnh nào ngoài
+  bảng thì app tự áp dụng thành layer "Chân dung" rồi chạy). Chi tiết từng đợt:
+  `KE_HOACH_ANH_THE_2026-10-02.md`. Bản test hiện tại: **`target\release\iai.exe`** (build
+  04/10 23:50, gồm đợt 27). Không còn việc nào đang làm dở; việc mới chờ chủ nêu.
+- Bản test đợt 21: `target\release\iai.exe` (build 04/10 16:23, có
+  `--features canvas-editor-webview`) — đã bị các bản sau thay.
 - Chủ test OK đợt 18 (04/10): ô "Công thức" trong Làm ảnh thẻ, năm công thức có sẵn, bỏ chú
   thích nổi trên thanh kéo.
 - Chủ test OK đợt 19 (04/10): giao diện mới của Chỉnh chân dung / Develop / Làm ảnh thẻ.
