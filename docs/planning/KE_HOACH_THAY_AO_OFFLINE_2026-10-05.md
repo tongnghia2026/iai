@@ -139,53 +139,80 @@ không phụ thuộc card. Điểm cổ – vai của **từng áo** tìm bằng
   trong Photoshop). App phải tự tô da ở đó — phần khó nhất, sẽ thử trên ảnh thật trước.
 - Bộ phôi là hàng sưu tầm (có thư mục ghi nguồn một trang chia sẻ PSD), không rõ bản quyền:
   **kho áo chỉ nằm trên máy tiệm, không đưa vào kho mã công khai hay bản iAi phát hành**. Bản
-  phát hành có thư viện trống và nút nhập.
+  phát hành không kèm áo nào; ai dùng thì mở file áo của chính mình.
 
-## 5. Các đợt (sửa 05/10 sau khi có kho áo — chờ duyệt)
+### Cách làm chủ chốt 05/10: mở sẵn file áo, kéo áo vào một khung, app tự căn
+
+Lời chủ: "mẫu áo thì có quá nhiều, bây giờ tôi muốn mở sẵn file áo lên cho khách lựa chọn;
+khách lựa xong chúng ta kéo mẫu áo vào 1 khung sau đó là việc của app tự động căn chỉnh được
+không". → Bỏ bước "nhập kho" và "thư viện ô ảnh" tôi đề xuất trước đó: chính các file Photoshop
+là bảng mẫu cho khách xem.
+
+**Đã kiểm 05/10:** bộ đọc PSD sẵn có của app (`src/formats/psd.rs`) mở được file áo của chủ với
+**đủ từng lớp**: `Áo sơ mi nam.psd` 28 lớp, `Comple nam.psd` 62, `Áo dài.psd` 65,
+`SO MI VIP NAM.psd` 116; mỗi file 1–4 giây ở bản debug. Thử bằng lệnh test tạm (đã gỡ), chưa
+nhìn trên cửa sổ thật. Không phải viết bộ đọc nào.
+
+Luồng làm việc:
+
+1. Mở file áo (ví dụ `Comple nam.psd`) thành một tab như mọi ảnh khác, để sẵn cả ngày. Khách
+   nhìn cả bảng áo trên màn hình như trong Photoshop.
+2. Ô Ảnh thẻ của bảng Auto retouch có thêm **khung "Áo"** ("Kéo áo vào đây"). Bảng này vốn nổi
+   và vẫn mở khi đổi tab.
+3. Khách chọn xong, chủ **kéo cái áo đó từ tab file áo thả vào khung "Áo"** (hoặc bấm đúp vào
+   áo). File áo không bị xê dịch, không bị tính là đã sửa.
+4. App tự quay về ảnh thẻ, **đặt áo đúng cổ – vai – cỡ** thành layer "Áo" riêng. Khung hiện hình
+   cái áo đang dùng; thả áo khác vào thì thay tại chỗ.
+5. Khung "Áo" là một lựa chọn như Nền / Mẫu / Cỡ: áo nằm trong khung được giữ cho các ảnh sau
+   (cả lớp học mặc cùng một áo thì chỉ kéo một lần) cho tới khi bấm "Bỏ áo". Ảnh chưa làm thì
+   "Làm ảnh thẻ tự động" mặc áo luôn; ảnh làm rồi thì thả áo là mặc ngay.
+
+## 5. Các đợt (sửa lần hai 05/10 theo cách làm của chủ — chờ duyệt)
 
 Mỗi đợt xong đều build Release cho chủ test như lệ thường.
 
-### Đợt 31 — Nhập kho áo và ảnh ghép thử
+### Đợt 31 — Tự căn áo, và ảnh ghép thử cho chủ xem trước
 
-- [ ] Đọc file Photoshop: tách từng lớp thành một áo (ảnh PNG nền trong suốt), bỏ lớp nền, lớp
-  trùng, lớp không phải áo (ảnh mẫu có người, mảnh vụn).
-- [ ] Tự tìm điểm neo của từng áo từ hình dáng lớp: hai đỉnh cổ áo, đáy khoảng hở cổ, hai vai.
-  Áo nào tìm không chắc thì đánh dấu để chủ xem lại.
-- [ ] Thư viện trên máy, xếp nhóm theo tên file: Sơ mi nam / Sơ mi nữ / Comple nam / Comple nữ /
-  Áo dài / Quân phục / Khác.
-- [ ] **Ảnh ghép thử cho chủ xem trước khi làm giao diện**: 5–10 ảnh thẻ thật × vài áo mỗi
-  nhóm, kèm ảnh trước / sau. Cần chủ cho thư mục ảnh thẻ để thử (dùng lại
+Phần quyết định được hay không là app căn có đúng không, nên làm và cho chủ xem phần này trước
+khi làm khung kéo thả.
+
+- [ ] Tìm điểm neo của một áo từ hình dáng lớp: hai đỉnh cổ áo, đáy khoảng hở cổ, hai vai.
+- [ ] Tìm cằm, hai mép cổ, hai vai của khách bằng các bộ nhận diện sẵn có.
+- [ ] Đặt áo (dời, phóng, xoay nhẹ theo vai); xóa phần áo cũ lòi ra ngoài áo mới; tóc xõa
+  trước vai nằm trên áo.
+- [ ] **Ảnh ghép thử**: 5–10 ảnh thẻ thật × vài áo mỗi loại (sơ mi, comple, áo dài), ảnh
+  trước / sau gửi chủ. Cần chủ cho thư mục ảnh thẻ để thử (dùng lại
   `C:\Users\Admin\Downloads\ht` nếu chủ đồng ý).
 - Đạt khi: chủ xem ảnh ghép thử và thấy đáng làm tiếp.
 
-### Đợt 32 — Ghép áo ngay trong ô Ảnh thẻ
+### Đợt 32 — Khung "Áo" và kéo thả
 
-- [ ] Hàng "Áo" trong ô Ảnh thẻ: "Giữ áo gốc" | "Chọn áo…" (mở thư viện dạng ô ảnh, theo nhóm).
-- [ ] App tự đặt áo theo cổ – vai, áo thành layer "Áo" riêng; bấm áo khác thì thay tại chỗ.
-- [ ] Xóa phần áo cũ lòi ra ngoài áo mới; tóc xõa trước vai nằm trên áo.
-- [ ] Nút chỉnh tay: lên / xuống / trái / phải, to / nhỏ, xoay (như hàng "Khung"), "Đặt lại".
-- [ ] Nút "Nhập kho áo…" (chọn thư mục hoặc file Photoshop) để chủ nạp thêm áo sau này.
-- [ ] Chạy được với "Xếp ảnh in" và "Xếp cả thư mục" như ảnh thẻ thường.
+- [ ] Khung "Áo" trong ô Ảnh thẻ; nhận áo kéo từ tab file áo, hoặc bấm đúp vào áo.
+- [ ] Thả xong app về tab ảnh thẻ và mặc áo; layer "Áo" riêng; thả áo khác thì thay.
+- [ ] File áo giữ nguyên sau khi kéo (áo về chỗ cũ, không hỏi lưu khi đóng).
+- [ ] Nút chỉnh tay: lên / xuống / trái / phải, to / nhỏ, xoay (như hàng "Khung"), "Đặt lại",
+  "Bỏ áo".
+- [ ] Áo trong khung giữ cho ảnh sau; chạy được với "Xếp ảnh in" và "Xếp cả thư mục".
 
 ### Đợt 33 — Hoàn thiện cho giống ghép tay
 
 - [ ] Tô da ở khoảng hở cổ khi cổ áo cũ lộ ra hoặc áo cũ che mất cổ, đúng màu da của khách.
 - [ ] Bóng nhẹ dưới cằm; độ sáng và sắc màu áo khớp với ảnh; làm nét áo sau khi phóng.
-- [ ] Trẻ em: tự thu nhỏ vai áo theo người. Nhớ các áo dùng gần đây / đánh dấu áo hay dùng.
+- [ ] Trẻ em: tự thu nhỏ vai áo theo người.
 
 ### Để sau, chỉ làm khi chủ bảo
 
-- Tóc và phụ kiện trong cùng kho (dây chuyền, huy chương, cầu vai, khăn xếp): ghép theo cùng
-  cách đặt bằng điểm neo.
-- "Lưu áo từ ảnh" (cắt áo từ ảnh đã thay bằng Gemini / ChatGPT) để thêm áo mới vào thư viện.
+- Tóc và phụ kiện trong cùng kho (dây chuyền, huy chương, cầu vai, khăn xếp): kéo vào cùng
+  kiểu, app tự đặt theo điểm neo.
+- Thư viện ô ảnh, "Lưu áo từ ảnh" (cắt áo từ ảnh Gemini / ChatGPT): bỏ khỏi kế hoạch, chủ đã
+  có đủ áo và muốn dùng thẳng file Photoshop.
 - Hướng B (FLUX.2 klein 4B offline) và việc dạy thêm model: **gác**; đo thử khi chủ muốn hoặc
   khi tiệm có card ≥ 8 GB.
 
 ## 6. Việc cần chủ quyết
 
-1. Duyệt các đợt 31–33 ở trên (ghép từ kho áo có sẵn, không dùng model tạo ảnh) không?
+1. Duyệt các đợt 31–33 ở trên không?
 2. Thư mục ảnh thẻ để ghép thử: dùng `C:\Users\Admin\Downloads\ht` được không, hay thư mục khác?
-3. Nhóm nào cần trước: tôi định làm sơ mi + comple + áo dài trước, quân phục sau.
 
 ## 7. Rủi ro và điều chưa biết
 
@@ -207,13 +234,16 @@ Mỗi đợt xong đều build Release cho chủ test như lệ thường.
   478 điểm mặt (`core/ai/face_mesh.rs`), 33 điểm thân gồm hai vai (`core/ai/pose.rs`), 29 lớp
   thân thể gồm áo và tóc (`core/ai/body_parts.rs`, Sapiens2), khử màu nền dính vào tóc
   (`id_photo::decontaminate`), bóp lưới (`core/portrait/reshape.rs`), LaMa, Real-ESRGAN.
-- Đọc kho Photoshop: `Cargo.toml` chưa có thư viện đọc PSD. Kho của chủ chỉ có lớp ảnh thường
-  (bản ghi lớp: khung, 4 kênh, tên; đã dò bằng một kịch bản Python chỉ đọc phần đầu file) nên
-  một bộ đọc tối thiểu là đủ: phần đầu, bản ghi lớp, dữ liệu kênh thô / RLE (PackBits). Hai
-  file cất lớp trong khối `Lr16` thì bỏ qua hoặc làm sau. Nhập một lần ra PNG, lúc ghép không
-  đọc PSD nữa. Tên lớp chỉ là "Layer 23" → đặt tên áo theo tên file + số thứ tự.
-- Kho áo đặt trong thư mục dữ liệu người dùng (`%APPDATA%/IAI/…`), không vào repo, không vào
-  `dist/iAi-portable`.
+- Đọc file Photoshop: **đã có sẵn** — `src/formats/psd.rs` (`PsdImporter`, bộ đọc tự viết) dựng
+  lại đủ chồng lớp (tên, vị trí, độ mờ, mask, nhóm); đã thử trên 4 file áo của chủ. (Ghi chú
+  trước đó của tôi "chưa có thư viện đọc PSD" là sai: tôi chỉ tìm trong `Cargo.toml`.) Hai
+  file `Untitled-4.psd`, `z8033…-Recovered.psd` chưa thử.
+- Kéo thả: clipboard lớp vốn dùng chung giữa các tab (`app/actions/clipboard.rs`); Move tool có
+  tự chọn lớp dưới con trỏ. Kéo từ canvas vào khung của bảng nổi là việc mới: phải nhận biết
+  lúc thả trên khung, hủy cú dời lớp, không làm file áo thành "đã sửa". Viết test giả lập chuột
+  trước (xem ghi chú bẫy nhập liệu egui).
+- File áo của chủ không vào repo, không vào `dist/iAi-portable`; áo đã thả vào khung được chép
+  vào tài liệu ảnh thẻ (và nhớ trong `%APPDATA%/IAI/…` để dùng cho ảnh sau).
 - Áo mẫu: PNG + tệp nhỏ ghi điểm neo (hai mép cổ, hõm cổ, hai vai) và nhóm. Đặt áo bằng phép
   đồng dạng theo cổ – vai, sau đó bóp lưới nhẹ theo độ dốc vai.
 - Thứ tự lớp: nền → người (đã xóa phần thân dưới đường cổ nằm ngoài áo) → áo → tóc phía trước.
