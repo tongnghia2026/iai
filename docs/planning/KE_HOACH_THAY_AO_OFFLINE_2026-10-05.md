@@ -1,6 +1,9 @@
 # Kế hoạch: thay áo cho ảnh thẻ, chạy offline (05/10/2026)
 
 **Trạng thái: CHỜ CHỦ DUYỆT.** Phiên 05/10 chỉ tìm hiểu và lập kế hoạch, chưa viết dòng code nào.
+Cuối phiên chủ đưa kho áo Photoshop có sẵn → kế hoạch chuyển sang **ghép từ kho áo đó, không
+dùng model tạo ảnh** (mục "Kho áo có sẵn của chủ" và mục 5); phần tìm model ở mục 3 giữ lại
+làm tư liệu.
 
 ## 1. Việc chủ giao
 
@@ -102,59 +105,87 @@ Tôi đã trả lời (chủ chưa phản hồi):
 cho việc dạy model). Ảnh khách là dữ liệu cá nhân: nếu đưa lên máy thuê hoặc phát hành model
 kèm app thì chỉ dùng phần từ cằm trở xuống (không có mặt).
 
-## 5. Các đợt (chờ duyệt)
+### Kho áo có sẵn của chủ (05/10) — đổi hẳn điểm xuất phát
+
+Lời chủ: "đây là kho áo tôi có sẵn; trước đây tôi dùng để ghép thủ công trong pts; có tận dụng
+được cái này mà không cần AI không" — `C:\Users\Admin\Documents\D_DATA\ÁO SƠ MI GHÉP ẢNH THẺ`.
+
+Tôi đã mở xem (chỉ đọc, không sửa gì): 494 file, 1,9 GB, trong đó 471 file Photoshop.
+
+- **Áo**: mỗi file chứa nhiều áo, **mỗi áo là một lớp ảnh riêng trên nền trong suốt**, đã khoét
+  sẵn khoảng hở cổ; RGB 8 bit, 4 kênh (có kênh trong suốt), không có lớp thông minh, lớp chữ
+  hay nhóm, không lớp nào bị ẩn → đọc thẳng được. Mỗi áo rộng khoảng 600–700 px.
+  - Sơ mi nam: `SO MI VIP NAM.psd` 115 áo (đã gồm 27 áo của `Áo sơ mi nam.psd`), `AO Nam.psd` ~18.
+  - Sơ mi nữ: `Áo sơ mi nữ.psd` ~30 (có hai bản trùng), `Ao Nu.psd` ~6.
+  - Comple nam: `Comple nam.psd` 61, `Mau comple.psd` 27, `Mau comple_nam+nu.psd` 30.
+  - Comple nữ: 19. Áo dài: 64, áo dài the 8, áo bà ba 2.
+  - Quân phục / ngành: `Quân phục.psd` 33, `Quan Phuc.psd` 80, `quanphuc 1…7` (có file trùng).
+- **Phụ kiện**: dây chuyền, trang sức, huy chương – huy hiệu, cầu vai, khăn xếp, lông mi, ghế.
+- **Tóc**: `Toc nam.psd` 45 kiểu; tóc nữ khoảng 435 file, mỗi file một kiểu (bối, dài, ngắn,
+  ngang vai).
+- Hai file (`Untitled-4.psd`, `z8033…-Recovered.psd`) cất lớp theo kiểu khác, chưa đọc.
+
+Kết luận: **dùng được, và không cần model tạo ảnh nào**. Đây đúng là thư viện áo của hướng A,
+tốt hơn phương án lấy áo từ ảnh Gemini: có sẵn vài trăm áo đã cắt sạch. App chỉ dùng lại bộ tìm
+mặt – cổ – vai đang chạy trong "Làm ảnh thẻ tự động" để biết đặt áo ở đâu; không tải thêm gì,
+không phụ thuộc card. Điểm cổ – vai của **từng áo** tìm bằng hình học từ chính hình dáng lớp
+(hai đỉnh cổ áo và chỗ lõm ở giữa), không cần AI.
+
+Điều phải nói trước:
+
+- Áo rộng 600–700 px, ảnh thẻ app làm ra rộng 1043 px → áo phải phóng lên khoảng 1,3–1,5 lần:
+  đủ cho ảnh 3×4, 4×6, nhưng soi kỹ sẽ mềm hơn mặt một chút.
+- Cổ áo cũ của khách có thể lộ ra trong khoảng hở cổ của áo mới (chỗ trước đây phải tẩy tay
+  trong Photoshop). App phải tự tô da ở đó — phần khó nhất, sẽ thử trên ảnh thật trước.
+- Bộ phôi là hàng sưu tầm (có thư mục ghi nguồn một trang chia sẻ PSD), không rõ bản quyền:
+  **kho áo chỉ nằm trên máy tiệm, không đưa vào kho mã công khai hay bản iAi phát hành**. Bản
+  phát hành có thư viện trống và nút nhập.
+
+## 5. Các đợt (sửa 05/10 sau khi có kho áo — chờ duyệt)
 
 Mỗi đợt xong đều build Release cho chủ test như lệ thường.
 
-### Đợt 31 — Thử nghiệm, chưa đụng giao diện (1 phiên)
+### Đợt 31 — Nhập kho áo và ảnh ghép thử
 
-Mục đích: có ảnh thật cho chủ xem trước khi bỏ công làm giao diện.
+- [ ] Đọc file Photoshop: tách từng lớp thành một áo (ảnh PNG nền trong suốt), bỏ lớp nền, lớp
+  trùng, lớp không phải áo (ảnh mẫu có người, mảnh vụn).
+- [ ] Tự tìm điểm neo của từng áo từ hình dáng lớp: hai đỉnh cổ áo, đáy khoảng hở cổ, hai vai.
+  Áo nào tìm không chắc thì đánh dấu để chủ xem lại.
+- [ ] Thư viện trên máy, xếp nhóm theo tên file: Sơ mi nam / Sơ mi nữ / Comple nam / Comple nữ /
+  Áo dài / Quân phục / Khác.
+- [ ] **Ảnh ghép thử cho chủ xem trước khi làm giao diện**: 5–10 ảnh thẻ thật × vài áo mỗi
+  nhóm, kèm ảnh trước / sau. Cần chủ cho thư mục ảnh thẻ để thử (dùng lại
+  `C:\Users\Admin\Downloads\ht` nếu chủ đồng ý).
+- Đạt khi: chủ xem ảnh ghép thử và thấy đáng làm tiếp.
 
-- [ ] **Thử hướng A**: dựng bản thử ghép áo (chỉ chạy bằng lệnh thử, chưa có nút) trên 5–10 ảnh
-  thẻ thật với 3 áo mẫu (sơ mi, vest + cà vạt, áo dài). Gửi chủ ảnh trước / sau.
-- [ ] **Đo hướng B**: tải stable-diffusion.cpp + FLUX.2 klein 4B bản nén (model khoảng 3 GB, bộ
-  đọc lời tả khoảng 3 GB, bộ giải mã ảnh khoảng 0,3 GB — tải từ GitHub và Hugging Face vào thư
-  mục riêng ngoài kho mã), chạy trên chính các ảnh đó. Báo chủ: mỗi ảnh mất bao lâu, ảnh ra
-  thế nào, tỷ lệ phải chạy lại.
-- Cần từ chủ: một thư mục 5–10 ảnh thẻ (dùng lại `C:\Users\Admin\Downloads\ht` nếu chủ đồng ý)
-  và vài ảnh đã thay áo bằng Gemini / ChatGPT mà chủ ưng (hoặc bộ phôi áo có sẵn) để lấy áo mẫu.
-- Đạt khi: chủ xem ảnh và chọn làm tiếp A, A + B, hay dừng.
+### Đợt 32 — Ghép áo ngay trong ô Ảnh thẻ
 
-### Đợt 32 — Thư viện áo và "Lưu áo từ ảnh"
-
-- [ ] Thư mục thư viện áo trên máy (nhóm: Sơ mi / Vest / Áo dài / Khác), xem dạng ô ảnh nhỏ.
-- [ ] Nút "Lưu áo từ ảnh" (ảnh đang mở): app tự cắt áo, tự tìm điểm cổ – vai, hỏi tên và nhóm.
-  Dùng được cho ảnh Gemini / ChatGPT vừa làm xong lẫn file PNG có sẵn.
-- [ ] Xóa, đổi tên áo trong thư viện.
-
-### Đợt 33 — Ghép áo vào ảnh thẻ
-
-- [ ] Hàng "Áo" trong ô Ảnh thẻ: "Giữ áo gốc" | "Chọn áo…" (mở thư viện).
-- [ ] App tự đặt áo theo cổ – vai, áo thành layer "Áo" riêng; đổi áo khác thì thay tại chỗ.
-- [ ] Xóa phần áo cũ lòi ra ngoài áo mới; tóc xõa trước vai nằm trên áo; bóng nhẹ dưới cằm;
-  độ sáng áo khớp ảnh.
+- [ ] Hàng "Áo" trong ô Ảnh thẻ: "Giữ áo gốc" | "Chọn áo…" (mở thư viện dạng ô ảnh, theo nhóm).
+- [ ] App tự đặt áo theo cổ – vai, áo thành layer "Áo" riêng; bấm áo khác thì thay tại chỗ.
+- [ ] Xóa phần áo cũ lòi ra ngoài áo mới; tóc xõa trước vai nằm trên áo.
 - [ ] Nút chỉnh tay: lên / xuống / trái / phải, to / nhỏ, xoay (như hàng "Khung"), "Đặt lại".
-- [ ] Cùng chạy được với "Xếp ảnh in" và "Xếp cả thư mục" như ảnh thẻ thường.
+- [ ] Nút "Nhập kho áo…" (chọn thư mục hoặc file Photoshop) để chủ nạp thêm áo sau này.
+- [ ] Chạy được với "Xếp ảnh in" và "Xếp cả thư mục" như ảnh thẻ thường.
 
-### Đợt 34 — Hoàn thiện
+### Đợt 33 — Hoàn thiện cho giống ghép tay
 
-- [ ] Áo cổ thấp, hoặc áo cũ cổ cao che cổ: vẽ da cổ / ngực theo đúng màu da của khách.
-- [ ] Đổi màu áo, màu cà vạt ngay trên áo mẫu (một áo mẫu ra nhiều màu, đỡ phải lưu nhiều áo).
-- [ ] Trẻ em: tự thu nhỏ vai áo theo người.
+- [ ] Tô da ở khoảng hở cổ khi cổ áo cũ lộ ra hoặc áo cũ che mất cổ, đúng màu da của khách.
+- [ ] Bóng nhẹ dưới cằm; độ sáng và sắc màu áo khớp với ảnh; làm nét áo sau khi phóng.
+- [ ] Trẻ em: tự thu nhỏ vai áo theo người. Nhớ các áo dùng gần đây / đánh dấu áo hay dùng.
 
-### Đợt 35 — (Tùy chọn, chỉ làm nếu chủ duyệt sau đợt 31) "Thay áo bằng AI — offline"
+### Để sau, chỉ làm khi chủ bảo
 
-- [ ] Gói tải thêm khoảng 6 GB, không nhét vào bản portable mặc định.
-- [ ] Nút chạy nền có thanh tiến độ và Hủy; trong lúc chạy vẫn làm việc khác được trong app.
-- [ ] Chỉ lấy phần áo dán lại; mặt và tóc giữ nguyên. Kết quả ưng thì "Lưu áo từ ảnh" được luôn.
+- Tóc và phụ kiện trong cùng kho (dây chuyền, huy chương, cầu vai, khăn xếp): ghép theo cùng
+  cách đặt bằng điểm neo.
+- "Lưu áo từ ảnh" (cắt áo từ ảnh đã thay bằng Gemini / ChatGPT) để thêm áo mới vào thư viện.
+- Hướng B (FLUX.2 klein 4B offline) và việc dạy thêm model: **gác**; đo thử khi chủ muốn hoặc
+  khi tiệm có card ≥ 8 GB.
 
 ## 6. Việc cần chủ quyết
 
-1. Duyệt đề xuất "A làm chính, B đo thử trước" không?
-2. Chủ có sẵn bộ phôi áo (PNG / PSD) hay ảnh đã thay áo bằng Gemini mà ưng không? Nếu có, cho
-   đường dẫn thư mục; nếu chưa, đợt 31 tôi sẽ nhờ chủ làm 3–5 ảnh bằng Gemini lúc có mạng.
-3. Tiệm có tính nâng card màn hình (≥ 8 GB) không? Nếu không thì hướng B gần như chỉ là "chữa
-   cháy vài phút một ảnh"; nếu có thì B (và cả FASHN VTON 1.5) đáng làm nghiêm túc.
+1. Duyệt các đợt 31–33 ở trên (ghép từ kho áo có sẵn, không dùng model tạo ảnh) không?
+2. Thư mục ảnh thẻ để ghép thử: dùng `C:\Users\Admin\Downloads\ht` được không, hay thư mục khác?
+3. Nhóm nào cần trước: tôi định làm sơ mi + comple + áo dài trước, quân phục sau.
 
 ## 7. Rủi ro và điều chưa biết
 
@@ -176,6 +207,13 @@ Mục đích: có ảnh thật cho chủ xem trước khi bỏ công làm giao d
   478 điểm mặt (`core/ai/face_mesh.rs`), 33 điểm thân gồm hai vai (`core/ai/pose.rs`), 29 lớp
   thân thể gồm áo và tóc (`core/ai/body_parts.rs`, Sapiens2), khử màu nền dính vào tóc
   (`id_photo::decontaminate`), bóp lưới (`core/portrait/reshape.rs`), LaMa, Real-ESRGAN.
+- Đọc kho Photoshop: `Cargo.toml` chưa có thư viện đọc PSD. Kho của chủ chỉ có lớp ảnh thường
+  (bản ghi lớp: khung, 4 kênh, tên; đã dò bằng một kịch bản Python chỉ đọc phần đầu file) nên
+  một bộ đọc tối thiểu là đủ: phần đầu, bản ghi lớp, dữ liệu kênh thô / RLE (PackBits). Hai
+  file cất lớp trong khối `Lr16` thì bỏ qua hoặc làm sau. Nhập một lần ra PNG, lúc ghép không
+  đọc PSD nữa. Tên lớp chỉ là "Layer 23" → đặt tên áo theo tên file + số thứ tự.
+- Kho áo đặt trong thư mục dữ liệu người dùng (`%APPDATA%/IAI/…`), không vào repo, không vào
+  `dist/iAi-portable`.
 - Áo mẫu: PNG + tệp nhỏ ghi điểm neo (hai mép cổ, hõm cổ, hai vai) và nhóm. Đặt áo bằng phép
   đồng dạng theo cổ – vai, sau đó bóp lưới nhẹ theo độ dốc vai.
 - Thứ tự lớp: nền → người (đã xóa phần thân dưới đường cổ nằm ngoài áo) → áo → tóc phía trước.
