@@ -1,3 +1,4 @@
+mod journal;
 mod keyboard;
 mod pointer;
 mod redraw;
@@ -571,6 +572,7 @@ impl ApplicationHandler for App {
             .as_ref()
             .is_some_and(|w| w.id() == id)
         {
+            let _work = crate::diag::ui_work(crate::diag::Phase::of(&event, true));
             self.develop_window_event(event_loop, event);
             return;
         }
@@ -585,6 +587,14 @@ impl ApplicationHandler for App {
         {
             return;
         }
+
+        // Flight recorder: the watcher process times this handler from here to
+        // its return, and the journal keeps a line for what the user just did.
+        let _work = crate::diag::ui_work(crate::diag::Phase::of(&event, false));
+        if self.journal_mark_key(&event) {
+            return;
+        }
+        self.journal_input(&event);
 
         // Track ownership before egui/modal handlers can consume the event.
         // Entered has no position; wait for CursorMoved rather than reusing the
@@ -1240,6 +1250,20 @@ impl ApplicationHandler for App {
     /// Called when the event queue is empty — the right place to set ControlFlow.
     /// Without this, winit defaults to Poll → spin loop → 12-14% idle CPU.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let _work = crate::diag::ui_work(crate::diag::Phase::Wait);
+        // The flight recorder's scripted self-test (IAI_DIAG_SELFTEST) needs
+        // frames to keep coming and ends the loop itself. Never set in real use.
+        if let Some(quit) = crate::diag::selftest_pending() {
+            if quit {
+                // Poll, or the loop would sleep on its way out until a message came.
+                event_loop.set_control_flow(ControlFlow::Poll);
+                event_loop.exit();
+                return;
+            }
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
         if self.win.window_visible && !self.win.window_focused {
             if let Some(until) = self.win.startup_focus_until {
                 let now = std::time::Instant::now();

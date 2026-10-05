@@ -913,6 +913,8 @@ pub struct ChromeIntent {
     pub toggle_lock_guides: bool,
     pub toggle_snap: bool,
     pub clear_guides: bool,
+    /// Help ▸ mark a problem in the flight recorder's journal.
+    pub mark_problem: bool,
     pub cursor_left: bool,
     pub cursor_entered: bool,
     pub window_minimize: bool,

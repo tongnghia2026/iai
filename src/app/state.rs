@@ -2643,8 +2643,8 @@ impl App {
     /// explain in the status bar.
     pub(crate) fn deny_modal_action(&mut self) {
         // Diagnostic: which lock rang the bell.
-        eprintln!(
-            "iai[bell]: denied — transform={} commit_pending={} warp={} crop_sel={} text_edit={} refine={} develop_window={} pdf_export={} preview_dialog={} blocking_modal={}",
+        let locks = format!(
+            "denied — transform={} commit_pending={} warp={} crop_sel={} text_edit={} refine={} develop_window={} pdf_export={} preview_dialog={} blocking_modal={}",
             self.edit.transform_state.is_some(),
             self.edit.pending_transform_commit.is_some(),
             self.edit.warp_state.is_some(),
@@ -2656,6 +2656,8 @@ impl App {
             self.is_preview_dialog_open(),
             self.is_blocking_modal(),
         );
+        eprintln!("iai[bell]: {locks}");
+        crate::diag::note("bell", &locks);
         self.shell.status_msg =
             "Finish or cancel the current operation first (✓ / ✗ / Esc)".to_string();
         self.shell.ui.modal_flash_until =

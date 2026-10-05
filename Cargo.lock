@@ -2725,6 +2725,7 @@ dependencies = [
  "rayon",
  "reqwest",
  "rfd",
+ "rustc-demangle",
  "serde",
  "serde_json",
  "socket2",

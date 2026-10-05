@@ -74,6 +74,9 @@ impl App {
             self.edit.tools.arrow_mut().snap_enabled = on;
             self.edit.tools.pen_mut().snap_enabled = on;
         }
+        if actions.chrome.mark_problem {
+            self.journal_mark();
+        }
         if actions.chrome.clear_guides {
             self.docs.documents[self.docs.active_doc_idx].guides.clear();
             self.edit.guide_op = None;

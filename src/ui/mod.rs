@@ -824,6 +824,16 @@ fn consume_chord(input: &mut egui::InputState, chord: crate::app::commands::KeyC
     hit
 }
 
+/// Where a pointer button went down in this frame's input, if one did.
+pub(crate) fn pointer_press(input: &egui::RawInput) -> Option<egui::Pos2> {
+    input.events.iter().find_map(|event| match event {
+        egui::Event::PointerButton {
+            pos, pressed: true, ..
+        } => Some(*pos),
+        _ => None,
+    })
+}
+
 #[allow(deprecated)]
 pub fn build(
     egui_ctx: &egui::Context,
@@ -844,10 +854,19 @@ pub fn build(
     };
 
     let mut actions = UiActions::default();
+    let pressed_at = pointer_press(&raw_input);
 
     let full_output = egui_ctx.run_ui(raw_input, |ui| frame(ui, data, &mut actions));
 
     let cursor_icon = full_output.platform_output.cursor_icon;
+    // Clicks and value edits, as egui reports them, go to the flight recorder;
+    // so does the text under a press, which is all a hand-painted control has.
+    for event in &full_output.platform_output.events {
+        crate::diag::widget_event(event);
+    }
+    if let Some(at) = pressed_at.filter(|_| egui_ctx.is_pointer_over_egui()) {
+        crate::diag::pressed_text(&full_output.shapes, at);
+    }
     if let Some(state) = egui_state {
         state.handle_platform_output(window, full_output.platform_output);
     }

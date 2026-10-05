@@ -403,7 +403,9 @@ impl App {
                 // Diagnostic: clipboard read + layer insert + upload on the UI thread.
                 let ms = t0.elapsed().as_millis();
                 if ms >= 30 {
-                    eprintln!("iai[perf]: paste clipboard image {ms} ms (read {t_read} ms)");
+                    let text = format!("paste clipboard image {ms} ms (read {t_read} ms)");
+                    eprintln!("iai[perf]: {text}");
+                    crate::diag::note("perf", &text);
                 }
                 return;
             }

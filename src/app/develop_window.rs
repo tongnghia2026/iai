@@ -802,6 +802,7 @@ impl App {
             Some(state) => state.take_egui_input(&window),
             None => return,
         };
+        let pressed_at = crate::ui::pointer_press(&raw_input);
 
         // Right-hand panel hosting the real Develop controls; the central area is
         // left unpainted so the canvas shows through (Camera-Raw layout).
@@ -1095,6 +1096,12 @@ impl App {
             }
         });
 
+        for event in &full_output.platform_output.events {
+            crate::diag::widget_event(event);
+        }
+        if let Some(at) = pressed_at.filter(|_| ctx.is_pointer_over_egui()) {
+            crate::diag::pressed_text(&full_output.shapes, at);
+        }
         if let Some(state) = &mut self.win.develop_egui_state {
             state.handle_platform_output(&window, full_output.platform_output);
         }

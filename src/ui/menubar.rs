@@ -1529,6 +1529,23 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             keyboard_shortcuts_list(ui, pal, &data.keymap);
                         });
                         ui.separator();
+                        // The flight recorder (`crate::diag`): mark the moment
+                        // something went wrong, or fetch its files.
+                        if ui
+                            .add(
+                                egui::Button::new("Đánh dấu lỗi vừa gặp")
+                                    .shortcut_text("Ctrl+Shift+F12"),
+                            )
+                            .clicked()
+                        {
+                            actions.chrome.mark_problem = true;
+                            ui.close();
+                        }
+                        if ui.button("Mở thư mục nhật ký lỗi").clicked() {
+                            crate::diag::open_folder();
+                            ui.close();
+                        }
+                        ui.separator();
                         // AGPL asks that users can reach the program's source; expose
                         // the repository and the license text directly from the app.
                         if ui.button("Source Code").on_hover_text(IAI_REPO_URL).clicked() {

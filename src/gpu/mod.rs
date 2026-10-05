@@ -203,6 +203,16 @@ impl GpuState {
         })?;
 
         let adapter_info = adapter.get_info();
+        crate::diag::note(
+            "gpu",
+            &format!(
+                "{} ({:?}, {:?}), driver {}",
+                adapter_info.name,
+                adapter_info.device_type,
+                adapter_info.backend,
+                adapter_info.driver_info
+            ),
+        );
         let ai_candidate = match adapter_info.device_type {
             wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::VirtualGpu => true,
             wgpu::DeviceType::IntegratedGpu => {

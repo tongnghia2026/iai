@@ -32,6 +32,7 @@ pub fn log_crash(text: &str) {
             .unwrap_or(0);
         let _ = writeln!(f, "[{ts}] {text}");
     }
+    crate::diag::note("crash", text);
 }
 
 /// Native error dialog (no winit/egui dependency — works even before the GPU/window is up).
@@ -72,6 +73,9 @@ pub fn install_panic_handler() {
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "unknown panic".to_string());
         let full = format!("iAi panicked at {location}\n{msg}");
+        // The journal takes the stack as well; `log_crash` then repeats the
+        // message there, which is harmless.
+        crate::diag::panic(&full);
         log_crash(&full);
         report_fatal(&full);
         default_hook(info);

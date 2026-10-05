@@ -31,13 +31,15 @@ fn init_thread_pool() {
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(crate::core::hw::rayon_threads())
         .build_global();
-    eprintln!(
-        "iai: {:?} tier — {} cores, {:.1} GiB RAM, {} rayon threads",
+    let summary = format!(
+        "{:?} tier — {} cores, {:.1} GiB RAM, {} rayon threads",
         hw.tier,
         hw.logical_cores,
         hw.total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
         crate::core::hw::rayon_threads(),
     );
+    eprintln!("iai: {summary}");
+    crate::diag::note("hw", &summary);
 }
 
 /// Run IAI to completion. Blocks until the event loop exits.
@@ -59,7 +61,10 @@ pub fn run() -> Result<(), BootstrapError> {
     if !startup_files.is_empty() {
         app.start_load_paths(startup_files);
     }
-    event_loop
+    let ended = event_loop
         .run_app(&mut app)
-        .map_err(BootstrapError::EventLoop)
+        .map_err(BootstrapError::EventLoop);
+    // Before `app` is dropped: a teardown that hangs is then seen as one.
+    crate::diag::exiting();
+    ended
 }

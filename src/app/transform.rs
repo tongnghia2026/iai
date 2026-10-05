@@ -996,6 +996,7 @@ impl App {
         let ms = t0.elapsed().as_millis();
         if ms >= 30 {
             eprintln!("iai[perf]: begin_transform {ms} ms");
+            crate::diag::note("perf", &format!("begin_transform {ms} ms"));
         }
     }
 
@@ -1313,11 +1314,13 @@ impl App {
             let t0 = std::time::Instant::now();
             let result = bake_transform_commit(doc_id, ts, interpolation);
             // Diagnostic: the modal lock holds until this bake lands.
-            eprintln!(
-                "iai[perf]: transform bake {} ms (ok={})",
+            let text = format!(
+                "transform bake {} ms (ok={})",
                 t0.elapsed().as_millis(),
                 result.is_ok()
             );
+            eprintln!("iai[perf]: {text}");
+            crate::diag::note("perf", &text);
             let _ = tx.send(result);
         });
         if let Some(w) = &self.win.window {

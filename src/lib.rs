@@ -21,6 +21,7 @@ pub mod app;
 pub mod bootstrap;
 pub mod core;
 pub mod crash;
+pub mod diag;
 pub mod event_bus;
 pub mod extension;
 pub mod file_io;

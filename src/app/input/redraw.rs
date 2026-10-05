@@ -142,6 +142,7 @@ impl App {
         self.poll_ext_bridge();
 
         self.update_refine_overlay_tex();
+        let t_polls = frame_t0.elapsed();
 
         // Background jobs above must still make progress while minimized, but
         // never build egui or acquire/present a hidden surface. A degenerate egui
@@ -381,11 +382,13 @@ impl App {
         if let Some(dev) = &self.win.develop_window {
             dev.request_redraw();
         }
-        let frame_ms = frame_t0.elapsed().as_millis();
-        if frame_ms >= 200 {
+        // Each mark is the time into the frame at which that stage was done.
+        let frame = frame_t0.elapsed();
+        let breakdown = || {
             let ms = |t: Option<std::time::Duration>| t.map_or(-1, |d| d.as_millis() as i64);
-            eprintln!(
-                "iai[perf]: slow frame {frame_ms} ms (ui@{} actions@{} render@{}) transform={} commit_pending={} canvas={}x{}",
+            format!(
+                "polls@{} ui@{} actions@{} render@{}; transform={} commit_pending={} canvas={}x{}",
+                t_polls.as_millis(),
                 ms(t_ui),
                 ms(t_actions),
                 ms(t_render),
@@ -393,8 +396,17 @@ impl App {
                 self.edit.pending_transform_commit.is_some(),
                 self.docs.documents[self.docs.active_doc_idx].canvas.width,
                 self.docs.documents[self.docs.active_doc_idx].canvas.height,
+            )
+        };
+        if frame.as_millis() >= 200 {
+            eprintln!(
+                "iai[perf]: slow frame {} ms ({})",
+                frame.as_millis(),
+                breakdown()
             );
         }
+        self.journal_frame_state();
+        crate::diag::frame(frame, breakdown);
         self.win.rendering = false;
     }
 
