@@ -21,6 +21,7 @@ pub mod connector;
 pub mod develop;
 pub mod develop2;
 pub mod develop_scene;
+pub mod garment;
 pub mod gateway;
 pub mod geometry;
 pub mod hw;

@@ -1,9 +1,9 @@
 # Kế hoạch: thay áo cho ảnh thẻ, chạy offline (05/10/2026)
 
-**Trạng thái: CHỜ CHỦ DUYỆT.** Phiên 05/10 chỉ tìm hiểu và lập kế hoạch, chưa viết dòng code nào.
-Cuối phiên chủ đưa kho áo Photoshop có sẵn → kế hoạch chuyển sang **ghép từ kho áo đó, không
-dùng model tạo ảnh** (mục "Kho áo có sẵn của chủ" và mục 5); phần tìm model ở mục 3 giữ lại
-làm tư liệu.
+**Trạng thái: CHỦ ĐÃ DUYỆT 05/10, đang làm.** Đợt 31 (app tự căn áo + ảnh ghép thử) xong phần
+code, **chờ chủ xem ảnh ghép thử** rồi mới sang đợt 32. Cách làm chủ chốt: mở sẵn file áo
+Photoshop của tiệm, kéo áo vào khung "Áo", app tự căn — **không dùng model tạo ảnh** (mục "Kho
+áo có sẵn của chủ" và mục 5); phần tìm model ở mục 3 giữ lại làm tư liệu.
 
 ## 1. Việc chủ giao
 
@@ -176,14 +176,43 @@ Mỗi đợt xong đều build Release cho chủ test như lệ thường.
 Phần quyết định được hay không là app căn có đúng không, nên làm và cho chủ xem phần này trước
 khi làm khung kéo thả.
 
-- [ ] Tìm điểm neo của một áo từ hình dáng lớp: hai đỉnh cổ áo, đáy khoảng hở cổ, hai vai.
-- [ ] Tìm cằm, hai mép cổ, hai vai của khách bằng các bộ nhận diện sẵn có.
-- [ ] Đặt áo (dời, phóng, xoay nhẹ theo vai); xóa phần áo cũ lòi ra ngoài áo mới; tóc xõa
-  trước vai nằm trên áo.
-- [ ] **Ảnh ghép thử**: 5–10 ảnh thẻ thật × vài áo mỗi loại (sơ mi, comple, áo dài), ảnh
-  trước / sau gửi chủ. Cần chủ cho thư mục ảnh thẻ để thử (dùng lại
-  `C:\Users\Admin\Downloads\ht` nếu chủ đồng ý).
-- Đạt khi: chủ xem ảnh ghép thử và thấy đáng làm tiếp.
+Chủ duyệt 05/10 ("ok duyệt; bắt đầu làm đi"). Làm ngay trong ngày, lõi ở `src/core/garment.rs`:
+
+- [x] Điểm neo của áo từ hình dáng lớp (`Garment::collar`): hai đỉnh cổ áo và đáy khoảng hở
+  cổ. Thử trên 5 file của chủ: tìm được ở 27/27 sơ mi nam, 30/30 sơ mi nữ, 61/61 comple nam,
+  19/19 comple nữ, 64/64 áo dài.
+- [x] Cổ của khách (`neck_of`): đi dọc đường viền thân từ hàm xuống, chỗ hẹp nhất là cổ, chỗ
+  bắt đầu loe ra là chân cổ (hoặc mép cổ áo đang mặc) — đỉnh cổ áo mới đặt vào đó. Bên nào tóc
+  che thì lấy số đo bên kia; tóc che cả hai thì lấy theo tỷ lệ khuôn mặt.
+- [x] Đặt áo (`Placement::fit`): dời + phóng theo bề ngang cổ, nghiêng theo vai tối đa 4°. Áo
+  có hai đỉnh cổ lệch nhau không bị coi là áo vẽ nghiêng. Áo ngắn hơn khung ảnh: kéo dài phần
+  dưới cổ tối đa 25%, chưa đủ thì phóng cả áo tối đa 35%.
+- [x] Mặc (`dress`): xóa áo cũ dưới đường cổ áo mới (chỉ giữ tóc); áo cũ nhô lên trên đường đó
+  (đỉnh cổ áo, cổ áo khoác) cũng xóa, chỗ nằm trên cổ thì thay bằng da; khoảng hở cổ của áo mới
+  được tô da lấy từ chính cổ của khách, sậm dần sát mép áo; tóc xõa nằm trên áo, mép tóc phân
+  biệt với áo cũ bằng màu (nhãn tóc của model lệch vài điểm ảnh).
+- [x] **Ảnh ghép thử**: 6 ảnh thẻ trong `C:\Users\Admin\Downloads\ht` × 10 áo (2 áo mỗi file),
+  chạy qua đúng luồng "Làm ảnh thẻ tự động" rồi mới mặc áo. Kết quả ở `tmp\thay-ao\ket-qua\`
+  (thư mục không vào kho mã): mỗi ảnh một tấm `_<tên>.jpg` gồm ảnh gốc và 10 áo, kèm từng ảnh
+  cỡ đầy đủ.
+- Test: 9 bài trong `core::garment` (tìm cổ áo, khoảng hở cổ, cổ người, bên bị tóc che, đặt áo
+  tới đáy ảnh, mặc áo, áo cũ nhô lên, tóc phân biệt bằng màu, tô lan màu). Lệnh xem thử:
+  `IAI_GARMENT_PROBE` (thư mục ảnh) + `IAI_GARMENT_PSD` (các file áo, cách nhau `;`) +
+  `IAI_GARMENT_OUT` (+ `IAI_GARMENT_PICK`) với `cargo test --lib -- --ignored probe_dressed_photos`.
+- Thời gian mặc một áo ở bản debug khoảng 1,4 giây (bản Release sẽ nhanh hơn nhiều; chưa đo).
+
+Còn thô, để đợt 33:
+
+- Da tô ở khoảng hở cổ là màu phẳng: áo cổ sâu (sơ mi nữ, comple nữ) không có xương đòn, nếp
+  cổ; nhìn cỡ ảnh thẻ thì ổn, soi 100% thì thấy.
+- Khách mặc áo cổ cao che hết cổ: cổ được vẽ lại bằng da phẳng, thẳng theo bề ngang cổ còn lộ.
+- Áo phải phóng 1,4–2,4 lần (không phải 1,3–1,5 như tôi ước ban đầu: phôi áo vẽ cho ảnh 3×4
+  ở 300 ppi, ảnh thẻ của app lớn hơn nhiều) → mép áo hơi răng cưa, vải mềm hơn mặt.
+- Còn vài mẩu nhỏ quanh cổ ở ảnh khó: khe nền giữa cổ và tóc, đốm áo cũ sát đỉnh cổ áo.
+- Chưa có: bóng dưới cằm, khớp sáng / màu áo với ảnh, nút chỉnh tay.
+- Một áo trong `Comple nam.psd` có dòng chữ tên tiệm ảnh in sẵn ở góc dưới — của file gốc.
+
+- Đạt khi: chủ xem ảnh ghép thử và thấy đáng làm tiếp. **Chờ chủ xem.**
 
 ### Đợt 32 — Khung "Áo" và kéo thả
 
