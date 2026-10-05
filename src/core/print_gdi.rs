@@ -487,6 +487,28 @@ pub fn print_bands(
     dpi: f32,
     layout: &PrintLayout,
     copies: u32,
+    next_band: impl FnMut(u32, u32) -> Result<Vec<u8>, String>,
+) -> Result<(), String> {
+    print_bands_to(
+        printer, settings, doc_name, None, img_w, img_h, dpi, layout, copies, next_band,
+    )
+}
+
+/// [`print_bands`], with the device's output sent to the file `output` when
+/// one is named. That is what lets a test drive a real device context
+/// ("Microsoft Print to PDF") with no dialog and no paper.
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn print_bands_to(
+    printer: &str,
+    settings: Option<&PrinterSettings>,
+    doc_name: &str,
+    output: Option<&std::path::Path>,
+    img_w: u32,
+    img_h: u32,
+    dpi: f32,
+    layout: &PrintLayout,
+    copies: u32,
     mut next_band: impl FnMut(u32, u32) -> Result<Vec<u8>, String>,
 ) -> Result<(), String> {
     if img_w == 0 || img_h == 0 {
@@ -511,10 +533,13 @@ pub fn print_bands(
         }
     }
     let name = wide(doc_name);
+    let output = output.map(|path| wide(&path.to_string_lossy()));
     let di = ffi::DocInfoW {
         cb_size: std::mem::size_of::<ffi::DocInfoW>() as i32,
         doc_name: name.as_ptr(),
-        output: std::ptr::null(),
+        output: output
+            .as_ref()
+            .map_or(std::ptr::null(), |path| path.as_ptr()),
         datatype: std::ptr::null(),
         fw_type: 0,
     };
@@ -614,6 +639,40 @@ pub fn print_bands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drives the real GDI path from a worker thread, the way the app prints,
+    /// into a file through the "Microsoft Print to PDF" device. It needs that
+    /// printer, so it is run by hand:
+    /// `cargo test --lib print_gdi -- --ignored`.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn a_page_prints_from_a_worker_thread_through_a_real_device() {
+        let out = std::env::temp_dir().join(format!("iai_print_probe_{}.pdf", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let target = out.clone();
+        let result = std::thread::spawn(move || {
+            let (w, h) = (300u32, 200u32);
+            print_bands_to(
+                "Microsoft Print to PDF",
+                None,
+                "iAi print probe",
+                Some(&target),
+                w,
+                h,
+                300.0,
+                &PrintLayout::default(),
+                2,
+                |_, rows| Ok(vec![200u8; (w * rows * 4) as usize]),
+            )
+        })
+        .join()
+        .expect("the worker ran to its end");
+        let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(result, Ok(()));
+        assert!(size > 1000, "the device wrote {size} bytes");
+    }
 
     /// EPSON photo printer, 10×15 cm paper at 720 dpi with ~3 mm margins —
     /// the exact setup that exposed the Foxit fit-to-margins shrink.

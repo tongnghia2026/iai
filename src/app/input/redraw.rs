@@ -44,6 +44,7 @@ impl App {
 
         self.poll_file_dialog(event_loop);
         self.poll_pdf_export();
+        self.poll_print_job();
         self.poll_flow_text_image();
         self.poll_mail_merge_data();
         self.poll_mail_merge_export();

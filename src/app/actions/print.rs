@@ -44,6 +44,35 @@ impl App {
         }
     }
 
+    /// Hear from the print worker. A sheet that went out closes the dialog;
+    /// one the device refused goes round again, next frame, through the PDF
+    /// handler (`handle_color_print_actions` takes `print_gdi_failed`).
+    pub(in crate::app) fn poll_print_job(&mut self) {
+        let Some(rx) = self.jobs.pending_print.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                self.shell.status_msg = "Sent to printer".to_string();
+                self.shell.ui.show_print_dialog = false;
+            }
+            Ok(Err(e)) => self.jobs.print_gdi_failed = Some(e),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.jobs.pending_print = Some(rx);
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.jobs.print_gdi_failed = Some("the print worker stopped".to_string());
+            }
+        }
+        // The frame that shows this must be a full one, not a reuse of the
+        // last UI under the marching ants.
+        self.win.ants_redraw_pending = false;
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
     /// Start the selected driver's property sheet away from the winit thread.
     /// The HWND remains the native owner, so Windows keeps the sheet in front
     /// and restores focus correctly when it closes.
@@ -225,5 +254,81 @@ impl App {
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::state::App;
+
+    #[test]
+    fn a_print_that_went_out_closes_the_dialog_and_one_refused_is_kept_for_the_pdf_route() {
+        let mut app = App::new();
+        app.shell.ui.show_print_dialog = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.jobs.pending_print = Some(rx);
+
+        // Still on its way: nothing changes, and the app will not exit under it.
+        app.poll_print_job();
+        assert!(app.jobs.pending_print.is_some());
+        assert!(app.shell.ui.show_print_dialog);
+        assert_eq!(app.exit_blocking_operation(), Some("the print being sent"));
+
+        tx.send(Ok(())).unwrap();
+        app.poll_print_job();
+        assert!(app.jobs.pending_print.is_none());
+        assert!(!app.shell.ui.show_print_dialog);
+        assert_eq!(app.shell.status_msg, "Sent to printer");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.jobs.pending_print = Some(rx);
+        tx.send(Err("out of paper".to_string())).unwrap();
+        app.poll_print_job();
+        assert!(app.jobs.pending_print.is_none());
+        assert_eq!(app.jobs.print_gdi_failed.as_deref(), Some("out of paper"));
+    }
+
+    /// The whole hand-off with a real GDI call in the worker: a device that
+    /// does not exist is refused there, off this thread, and the refusal is
+    /// what comes back. (The PDF route that follows would hand a file to the
+    /// system's PDF program, so the test stops short of it.)
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn printing_runs_on_a_worker_and_reports_a_device_that_refuses() {
+        let mut app = App::new();
+        app.shell.print_selected_printer = "iAi test: no such printer".to_string();
+        app.shell.ui.show_print_dialog = true;
+        let mut actions = crate::ui::UiActions::default();
+        actions.print.print_send = true;
+        app.handle_color_print_actions(&mut actions);
+        assert!(app.jobs.pending_print.is_some(), "the job went to a worker");
+        assert_eq!(app.shell.status_msg, "Sending to printer…");
+
+        // A second click while it is on its way starts nothing new.
+        app.handle_color_print_actions(&mut actions);
+        assert_eq!(app.shell.status_msg, "Still sending the previous print…");
+
+        let began = std::time::Instant::now();
+        while app.jobs.pending_print.is_some() {
+            assert!(began.elapsed().as_secs() < 30, "the worker never answered");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.poll_print_job();
+        }
+        assert!(app.jobs.print_gdi_failed.is_some());
+        assert!(
+            app.shell.ui.show_print_dialog,
+            "a refused print keeps the dialog"
+        );
+    }
+
+    #[test]
+    fn a_print_worker_that_died_is_treated_as_a_refusal() {
+        let mut app = App::new();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        app.jobs.pending_print = Some(rx);
+        drop(tx);
+        app.poll_print_job();
+        assert!(app.jobs.pending_print.is_none());
+        assert!(app.jobs.print_gdi_failed.is_some());
     }
 }

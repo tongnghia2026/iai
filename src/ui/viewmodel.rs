@@ -444,6 +444,8 @@ pub struct PrintViewModel {
     pub print_refreshing: bool,
     /// A native printer-driver property sheet is currently open.
     pub print_settings_open: bool,
+    /// A sheet is on its way to the printer; one at a time.
+    pub print_sending: bool,
     pub print_preview_image: Option<std::sync::Arc<egui::ColorImage>>,
     /// Loaded printer ICC profile name for app-managed print colour ("" = printer
     /// manages colour).
@@ -1053,6 +1055,7 @@ impl Default for UiData {
                 print_copies: 1,
                 print_refreshing: false,
                 print_settings_open: false,
+                print_sending: false,
                 print_preview_image: None,
                 print_printer_profile_name: String::new(),
             },

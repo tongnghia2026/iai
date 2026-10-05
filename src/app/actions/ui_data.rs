@@ -1777,6 +1777,7 @@ impl App {
                 print_copies: self.shell.print_copies,
                 print_refreshing: self.jobs.pending_printer_refresh.is_some(),
                 print_settings_open: self.jobs.pending_printer_settings.is_some(),
+                print_sending: self.jobs.pending_print.is_some(),
                 print_preview_image,
                 print_printer_profile_name: self.shell.print_printer_profile_name.clone(),
             },

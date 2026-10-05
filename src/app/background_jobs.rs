@@ -183,6 +183,14 @@ pub struct BackgroundJobs {
             Result<Option<crate::core::print_gdi::PrinterSettings>, String>,
         )>,
     >,
+    /// A sheet on its way to the printer through GDI, off the winit thread:
+    /// opening the device, the spooler's StartDoc and the band conversion take
+    /// a few hundred milliseconds a sheet, more with copies. Carries `Ok`, or
+    /// why the device refused.
+    pub(in crate::app) pending_print: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Why a direct print failed in its worker; the next frame sends the page
+    /// through the PDF handler instead.
+    pub(in crate::app) print_gdi_failed: Option<String>,
     /// Off-thread Shape rasterization in flight. See [`ShapeBakeInFlight`].
     pub(in crate::app) shape_bake: Option<ShapeBakeInFlight>,
     /// Off-thread Path (vector) rasterization in flight — used by the live

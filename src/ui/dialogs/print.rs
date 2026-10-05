@@ -22,6 +22,7 @@ pub(crate) fn print_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
     let print_layout = print_layout_for_selected_printer(data, layout);
     let can_print = !data.print.print_refreshing
         && !data.print.print_settings_open
+        && !data.print.print_sending
         && !data.print.print_printers.is_empty();
     let default_size = egui::vec2(980.0, 540.0);
     let screen = ctx.content_rect();

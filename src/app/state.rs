@@ -1638,6 +1638,8 @@ impl App {
                 ext_uploads: Vec::new(),
                 ext_decodes: Vec::new(),
                 pending_printer_settings: None,
+                pending_print: None,
+                print_gdi_failed: None,
                 shape_bake: None,
                 path_bake: None,
                 path_bake_next: None,
@@ -2677,6 +2679,10 @@ impl App {
         }
         if self.jobs.pending_pdf_export.is_some() {
             return Some("PDF export");
+        }
+        // Leaving now would cut the job off before the spooler has all of it.
+        if self.jobs.pending_print.is_some() {
+            return Some("the print being sent");
         }
         if self.edit.transform_state.is_some() || self.edit.pending_transform_commit.is_some() {
             return Some("Free Transform");

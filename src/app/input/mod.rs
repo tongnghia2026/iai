@@ -1220,6 +1220,7 @@ impl ApplicationHandler for App {
             || self.jobs.pending_file_dialog.is_some()
             || self.jobs.pending_pdf_export.is_some()
             || self.jobs.pending_printer_settings.is_some()
+            || self.jobs.pending_print.is_some()
             || !self.jobs.pending_loads.is_empty()
             || self
                 .shell
@@ -1334,6 +1335,7 @@ impl ApplicationHandler for App {
                 || self.jobs.pending_pdf_export.is_some()
                 || self.jobs.pending_pdf_page_insert.is_some()
                 || self.jobs.pending_printer_settings.is_some()
+                || self.jobs.pending_print.is_some()
                 || !self.jobs.pending_loads.is_empty()
                 || self.edit.pending_transform_commit.is_some()
                 || self.jobs.select_subject.is_busy()
@@ -1376,6 +1378,7 @@ impl ApplicationHandler for App {
             || self.jobs.pending_pdf_export.is_some()
             || self.jobs.pending_pdf_page_insert.is_some()
             || self.jobs.pending_printer_settings.is_some()
+            || self.jobs.pending_print.is_some()
             || !self.jobs.pending_loads.is_empty()
             || self.edit.pending_transform_commit.is_some()
             || self.jobs.select_subject.is_busy()

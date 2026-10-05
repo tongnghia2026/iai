@@ -194,7 +194,16 @@ impl App {
                 }
             }
         }
-        if actions.print.print_save_pdf || actions.print.print_send {
+        // A direct print its worker could not make comes back here, a frame
+        // later, for the PDF route (see `poll_print_job`).
+        let gdi_failed = self.jobs.print_gdi_failed.take();
+        let mut print_send = actions.print.print_send;
+        if print_send && self.jobs.pending_print.is_some() {
+            // One sheet at a time; the dialog's Print button is off meanwhile.
+            self.shell.status_msg = "Still sending the previous print…".to_string();
+            print_send = false;
+        }
+        if actions.print.print_save_pdf || print_send || gdi_failed.is_some() {
             self.sync_brush_gpu_to_cpu();
             let (cw, ch) = {
                 let c = &self.docs.documents[self.docs.active_doc_idx].canvas;
@@ -226,21 +235,19 @@ impl App {
                 // PDF handlers (Foxit/Acrobat) rescale pages to the printer
                 // margins, so prints came out smaller than their physical size.
                 // The PDF handler route stays as a fallback (and off-Windows).
+                //
+                // The job itself runs on a worker: opening the device, the
+                // spooler's StartDoc and the bands took 0.15-0.45 s a sheet on
+                // this thread, and more with every copy. What the worker needs
+                // of the document is taken here; `poll_print_job` hears how it
+                // went.
                 #[cfg(target_os = "windows")]
-                let gdi_result: Option<Result<(), String>> = if actions.print.print_send {
+                if print_send && gdi_failed.is_none() {
                     let doc_name = self.docs.documents[self.docs.active_doc_idx].title.clone();
                     let flat = crate::core::canvas::Canvas::fits_flat_buffer(cw, ch).then(|| {
-                        let mut rgba = self.docs.documents[self.docs.active_doc_idx]
+                        self.docs.documents[self.docs.active_doc_idx]
                             .canvas
-                            .export_flat();
-                        if let Some(pp) = &printer_profile {
-                            crate::core::cms::convert_srgb_to_rgb_profile(
-                                &mut rgba,
-                                pp,
-                                layout.intent.to_lcms(),
-                            );
-                        }
-                        rgba
+                            .export_flat()
                     });
                     let mut stack = if flat.is_none() {
                         Some(
@@ -254,45 +261,56 @@ impl App {
                     };
                     let profile = printer_profile.clone();
                     let intent = layout.intent.to_lcms();
-                    Some(crate::core::print_gdi::print_bands(
-                        &self.shell.print_selected_printer,
-                        self.shell.print_driver_settings.as_ref(),
-                        &doc_name,
-                        cw,
-                        ch,
-                        dpi,
-                        &layout,
-                        self.shell.print_copies,
-                        move |y, rows| {
-                            if let Some(flat) = &flat {
-                                let start = (y as usize) * (cw as usize) * 4;
-                                let len = (rows as usize) * (cw as usize) * 4;
-                                Ok(flat[start..start + len].to_vec())
-                            } else {
-                                let stack = stack.as_mut().expect("streamed path has a stack");
-                                let mut band = stack.flatten_band(cw, ch, y, rows);
-                                if let Some(pp) = &profile {
-                                    crate::core::cms::convert_srgb_to_rgb_profile(
-                                        &mut band, pp, intent,
-                                    );
+                    let printer = self.shell.print_selected_printer.clone();
+                    let settings = self.shell.print_driver_settings.clone();
+                    let copies = self.shell.print_copies;
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.jobs.pending_print = Some(rx);
+                    self.shell.status_msg = "Sending to printer…".to_string();
+                    std::thread::spawn(move || {
+                        let mut flat = flat;
+                        if let (Some(rgba), Some(pp)) = (flat.as_mut(), &profile) {
+                            crate::core::cms::convert_srgb_to_rgb_profile(rgba, pp, intent);
+                        }
+                        let result = crate::core::print_gdi::print_bands(
+                            &printer,
+                            settings.as_ref(),
+                            &doc_name,
+                            cw,
+                            ch,
+                            dpi,
+                            &layout,
+                            copies,
+                            move |y, rows| {
+                                if let Some(flat) = &flat {
+                                    let start = (y as usize) * (cw as usize) * 4;
+                                    let len = (rows as usize) * (cw as usize) * 4;
+                                    Ok(flat[start..start + len].to_vec())
+                                } else {
+                                    let stack = stack.as_mut().expect("streamed path has a stack");
+                                    let mut band = stack.flatten_band(cw, ch, y, rows);
+                                    if let Some(pp) = &profile {
+                                        crate::core::cms::convert_srgb_to_rgb_profile(
+                                            &mut band, pp, intent,
+                                        );
+                                    }
+                                    Ok(band)
                                 }
-                                Ok(band)
-                            }
-                        },
-                    ))
-                } else {
-                    None
-                };
-                #[cfg(not(target_os = "windows"))]
-                let gdi_result: Option<Result<(), String>> = None;
-
-                if matches!(gdi_result, Some(Ok(()))) {
-                    self.shell.status_msg = "Sent to printer".to_string();
+                            },
+                        );
+                        let _ = tx.send(result);
+                    });
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
                     if !actions.print.print_save_pdf {
-                        self.shell.ui.show_print_dialog = false;
+                        return;
                     }
                 }
-                let send_via_pdf = actions.print.print_send && !matches!(gdi_result, Some(Ok(())));
+                // Why the direct route failed, when this frame is its fallback.
+                let gdi_result: Option<Result<(), String>> = gdi_failed.map(Err);
+                let send_via_pdf =
+                    gdi_result.is_some() || (cfg!(not(target_os = "windows")) && print_send);
                 if !actions.print.print_save_pdf && !send_via_pdf {
                     return;
                 }
