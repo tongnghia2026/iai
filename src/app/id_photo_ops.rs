@@ -459,13 +459,28 @@ impl App {
         let cropped = made.plan.frame.is_some();
         let cut_out = made.plan.cutout.is_some();
         let notes = made.plan.notes.join("; ");
+        let began = Instant::now();
         let applied = id_photo::apply(canvas, made.plan);
+        let pixels = began.elapsed();
         let revision = canvas.history_revision();
         // As after a Crop commit: this event owns the canvas-size bookkeeping
         // (GPU texture, refit, recomposite).
         if idx == self.docs.active_doc_idx {
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
             self.apply_canvas_event(CanvasEvent::SelectionChanged);
+        }
+        // All of it on the UI thread, like a Crop commit: keep what it cost.
+        let total = began.elapsed();
+        if total.as_millis() >= 30 {
+            crate::diag::note(
+                "perf",
+                &format!(
+                    "id photo applied in {} ms (pixels {} ms, screen {} ms)",
+                    total.as_millis(),
+                    pixels.as_millis(),
+                    (total - pixels).as_millis()
+                ),
+            );
         }
         applied?;
         self.shell.id_photo.kept = Some(Kept {

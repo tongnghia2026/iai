@@ -119,6 +119,7 @@ impl App {
             gpu.compositor.crop_preview = None;
             gpu.compositor.crop_preview_background = None;
         }
+        let began = std::time::Instant::now();
         {
             let mut ctx = crate::extension::tool::ToolCtx::new(
                 &mut self.docs.documents[self.docs.active_doc_idx],
@@ -130,6 +131,7 @@ impl App {
             );
             self.edit.tools.active_on_confirm(&mut ctx);
         }
+        let pixels = began.elapsed();
         // ALL canvas-size bookkeeping (GPU texture resize, compositor
         // invalidation, re-fit, recomposite) lives in apply_canvas_event now —
         // the SAME path undo/redo take. The old inline copy here pre-called
@@ -139,6 +141,23 @@ impl App {
         // switch (the "2nd crop onward doesn't update" bug).
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.apply_canvas_event(CanvasEvent::SelectionChanged);
+        // The crop resamples on this thread; a commit by Enter runs inside
+        // the key handler, where no frame timing sees it. Keep what it cost.
+        let total = began.elapsed();
+        if total.as_millis() >= 30 {
+            let canvas = &self.docs.documents[self.docs.active_doc_idx].canvas;
+            crate::diag::note(
+                "perf",
+                &format!(
+                    "crop committed in {} ms (pixels {} ms, screen {} ms) to {}x{}",
+                    total.as_millis(),
+                    pixels.as_millis(),
+                    (total - pixels).as_millis(),
+                    canvas.width,
+                    canvas.height
+                ),
+            );
+        }
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }

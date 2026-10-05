@@ -741,7 +741,7 @@ struct Incident {
     rounds: u32,
     next_thread: usize,
     threads: Vec<OtherThread>,
-    threads_listed: Instant,
+    threads_listed: Option<Instant>,
 }
 
 struct Watcher {
@@ -964,11 +964,12 @@ impl Watcher {
     }
 
     fn open_incident(&mut self, now: Instant) -> Incident {
+        // A stall may be over in a fifth of a second: the UI thread's stack is
+        // taken before anything that costs time, or the report has no sample.
+        let first = self.stack_of(self.ui_thread, UI_STACK_BYTES);
         // DLLs loaded since the last look (AI runtimes come in late).
         unsafe { SymRefreshModuleList(self.process) };
         self.incidents += 1;
-        let mut threads = Vec::new();
-        self.list_threads(&mut threads);
         Incident {
             no: self.incidents,
             began: now,
@@ -976,12 +977,13 @@ impl Watcher {
             cpu_at_start: self.cpu_time(),
             system_at_start: Self::system_times(),
             stalls: Vec::new(),
-            ui: Vec::new(),
+            ui: first.into_iter().collect(),
             others: Vec::new(),
             rounds: 0,
             next_thread: 0,
-            threads,
-            threads_listed: now,
+            // Listed when the other threads are first gone round.
+            threads: Vec::new(),
+            threads_listed: None,
         }
     }
 
@@ -1042,9 +1044,12 @@ impl Watcher {
                 .last_others
                 .is_none_or(|at| now.duration_since(at) >= others_gap)
         {
-            if now.duration_since(incident.threads_listed) >= Duration::from_secs(2) {
+            if incident
+                .threads_listed
+                .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(2))
+            {
                 self.list_threads(&mut incident.threads);
-                incident.threads_listed = now;
+                incident.threads_listed = Some(now);
             }
             let round =
                 self.sample_others(&incident.threads, &mut incident.next_thread, OTHERS_BUDGET);
