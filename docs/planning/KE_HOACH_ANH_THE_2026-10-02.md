@@ -874,4 +874,6 @@ Việc:
   (`ext_bridge::…server_completes_websocket_handshake`, tiến trình kẹt từ 04/10 còn giữ cổng
   47821). Code `0e69efa`; bản test `target\release\iai.exe` (build 05/10 10:05; chưa mở thử
   trên cửa sổ thật).
-- [ ] Build Release, chủ test.
+- [x] Build Release, chủ test đợt 29: **OK** (05/10). Chủ khen ô "Mỗi người N tấm" (chủ chỉ
+  nêu "mỗi người 2 hình", tôi làm thành ô chỉnh được) và không nói gì thêm về các điểm tôi tự
+  chốt (mỗi tờ một tab, thứ tự theo tên file, giới hạn 24 tờ…) — giữ nguyên.

@@ -7,11 +7,11 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
 
 - Nhánh `feat/vector-core-foundation`; mọi thứ **commit local, chưa push** (push gần nhất
   02/10 @ `d1f4acb`). Chỉ push khi chủ bảo.
-- **Cập nhật 05/10:** các đợt 22–27 đã xong, chủ test OK tới đợt 27 (bảng Auto retouch: gộp
-  Làm ảnh thẻ + Chỉnh chân dung, không khóa công cụ, lúc đang xem trước dùng lệnh nào ngoài
-  bảng thì app tự áp dụng thành layer "Chân dung" rồi chạy). Chi tiết từng đợt:
+- **Cập nhật 05/10 trưa:** các đợt 22–29 đã xong, chủ test OK tới đợt 29 (mới nhất: thanh
+  cuộn bảng Develop — đợt 28; xếp cả thư mục ảnh thẻ lên giấy in — đợt 29). Chi tiết từng đợt:
   `KE_HOACH_ANH_THE_2026-10-02.md`. Bản test hiện tại: **`target\release\iai.exe`** (build
-  04/10 23:50, gồm đợt 27). Không còn việc nào đang làm dở; việc mới chờ chủ nêu.
+  05/10 10:05, gồm đợt 29). Không còn việc nào đang làm dở; chủ bảo qua hội thoại mới làm việc
+  khác, chưa nêu việc gì.
 - Bản test đợt 21: `target\release\iai.exe` (build 04/10 16:23, có
   `--features canvas-editor-webview`) — đã bị các bản sau thay.
 - Chủ test OK đợt 18 (04/10): ô "Công thức" trong Làm ảnh thẻ, năm công thức có sẵn, bỏ chú
@@ -20,9 +20,8 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
 - Chủ test OK đợt 20 (04/10): gõ số vào ô của thanh kéo; Develop chỉ mở một mục; icon môi.
 - Chủ test OK đợt 21 (05/10): bấm vào ô số ở Develop không còn nháy.
 - Chủ test OK đợt 28 (05/10, `9708eb3`): thanh cuộn của bảng Develop có làn riêng sát mép phải.
-- **Chờ chủ test — đợt 29 (05/10):** khối "Xếp cả thư mục" trong mục Xếp ảnh in — thư mục ảnh
-  thẻ của khách, mỗi người N tấm, lên giấy 10×15 / 13×18, mỗi tờ một tab (mục "Đợt 29" trong
-  `KE_HOACH_ANH_THE_2026-10-02.md`).
+- Chủ test OK đợt 29 (05/10, `0e69efa`): khối "Xếp cả thư mục" trong mục Xếp ảnh in — thư mục
+  ảnh thẻ của khách, mỗi người N tấm, lên giấy 10×15 / 13×18, mỗi tờ một tab.
 - Chủ test OK đợt 17 (05/10): phím `[` `]` với Smudge / Dodge / Burn; Pencil vẽ đúng cỡ và màu;
   Smart Fill (AI) giữ vân ảnh; lưu / nạp công thức chân dung.
 - Bản portable `dist\iAi-portable` vẫn là bản 02/10 — thiếu mọi thứ làm từ 03/10.
@@ -91,7 +90,6 @@ sạch khi chạy test (≈ 3 GB thay cho 18 GB). Ổ C: trống 127 GB → ≈ 
   Subject chạy GPU, tự lùi CPU khi lỗi; ba lỗi canvas lớn (xuất RAW lớn ra JPEG, hút màu toàn
   ảnh, Alt+Delete).
 - Còn chờ: hiển thị trong trẻo trên máy khác (cần portable mới).
-- Còn chờ: đợt 29 — xếp cả thư mục ảnh thẻ lên giấy in (05/10).
 
 ## 3. Ghi chú kỹ thuật cho phiên sau
 
