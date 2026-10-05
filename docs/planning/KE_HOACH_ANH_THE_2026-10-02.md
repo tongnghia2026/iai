@@ -818,4 +818,60 @@ hàng dài thêm 8 px — vị trí thanh cuộn đổi theo mục đang mở.
   lại vì không đụng tới. Code `9708eb3`; bản test **`target\release\iai-dot28.exe`** (build
   05/10 09:14 — lúc build chủ đang mở `target\release\iai.exe` nên không ghi đè được; chưa mở
   thử bản mới để khỏi chen vào phiên chủ đang dùng).
+- [x] Build Release, chủ test đợt 28: **OK** (05/10), kèm việc của đợt 29.
+
+## Đợt 29 (05/10): xếp cả thư mục ảnh thẻ lên giấy in, mỗi người vài tấm
+
+Lời chủ: "tạo thêm 1 nút xếp ảnh in cho tôi; bài toán như sau: khách gửi 1 thư mục gồm nhiều ảnh
+thẻ đã chỉnh sửa sẵn, khách yêu cầu in mỗi người 2 hình, tôi có 2 loại giấy in là 10x15 và
+13x18cm; đây là thư mục ảnh khách gửi hãy lấy nó và test luôn: C:\Users\Admin\Downloads\ht".
+Thư mục đó: 18 ảnh (17 PNG 1086×1448, 1 JPG 961×1280), đều tỷ lệ 3:4, nền xanh, tên file là
+tên người.
+
+Phần chủ giao tôi tự chốt (đã báo chủ):
+
+- **Chỗ đặt nút**: khối "Xếp cả thư mục" ở cuối mục "Xếp ảnh in" (có ở cả bảng AI Image Studio
+  lẫn bảng Auto retouch): nút "Chọn thư mục…", ô "Mỗi người N tấm" (mặc định 2, tối đa 20), Cỡ
+  2×3 / 3×4 / 4×6 (mặc định 3×4), rồi hai nút giấy ghi sẵn số tờ cần — "10×15 — 4 tờ",
+  "13×18 — 2 tờ" — để chủ chọn loại giấy ít hao nhất. Số tấm / cỡ / khe cắt nhớ trong prefs.json.
+- **Mỗi tờ một tab** ("ht — tờ 1/2 (13×18, 3×4)"), tab đầu được mở ra; in từng tab như trang
+  "Xếp ảnh in" cũ. Mỗi tấm vẫn là một layer riêng, **tên layer là tên file** (tên người), tấm
+  thứ hai thêm "(2)".
+- **Hai tấm của một người nằm cạnh nhau**: xếp theo hàng; riêng khi một hàng không chứa trọn bộ
+  mà một cột thì có (13×18: 3 cột × 6 hàng, mỗi người 2 tấm) thì xếp dọc theo cột
+  (`imposition::fill_order`). Người xếp theo tên file, số trong tên so theo giá trị (2 trước 10).
+- Chỉ lấy ảnh nằm ngay trong thư mục (png / jpg / jpeg / jfif / bmp / tif / webp), không vào thư
+  mục con. Ảnh lệch tỷ lệ so với cỡ đã chọn thì cắt giữa cho vừa ô và báo số ảnh bị cắt; file
+  không đọc được thì bỏ qua và nêu tên; ảnh nền trắng có viền đỏ như cũ. Quá 24 tờ thì từ chối,
+  bảo chia thư mục (mỗi tờ là một tài liệu 30–50 MB trong RAM).
+- Đang xem trước ở bảng Auto retouch mà bấm nút giấy: theo luật đợt 27, app áp dụng phần làm
+  đẹp thành layer "Chân dung" rồi mới xếp; riêng "Chọn thư mục…" không tính là lệnh.
+
+Việc:
+
+- [x] Lõi (`core/imposition.rs`): `FolderSheets` (giấy, cỡ, số tấm) + `per_sheet` / `sheets`,
+  `fill_order`, `SheetOptions` thêm `folder_kind` / `folder_copies`.
+- [x] App (`app/actions/impose.rs`): `PrintFolder`, `folder_photos` + `by_name`, `read_photo`
+  (đọc như lúc mở file, có quản lý màu), `do_impose_folder` (đọc + co ảnh song song),
+  `sheet_canvas` + `open_sheets` dùng chung với trang một ảnh; hộp chọn thư mục chạy ở luồng
+  riêng như Library (`FileDialogResult::PickedPrintFolder`).
+- [x] Giao diện (`ui/dialogs/print_sheet.rs`): `folder_block`, mục trả về `SheetAsk`
+  (`Photo` / `PickFolder` / `Folder`).
+- [x] Thử trên thư mục của khách (probe `IAI_FOLDER_SHEET_PROBE` + `IAI_FOLDER_SHEET_OUT`, ảnh
+  ra `tmp/xep-thu-muc/`): 18 ảnh × 2 = 36 tấm 3×4 → **2 tờ 13×18 kín cả hai**, hoặc **4 tờ
+  10×15, tờ cuối trống 4 ô**; đã xem ảnh từng tờ, hai tấm mỗi người nằm cạnh nhau, không ảnh nào
+  bị báo lệch tỷ lệ.
+- Test: `a_folder_takes_as_many_sheets_as_its_prints_need`,
+  `a_persons_prints_lie_together_on_the_sheet`, `file_names_sort_as_a_person_reads_them`,
+  `a_folder_is_laid_out_two_of_each_person_side_by_side` (thư mục tạm: thứ tự, từng ô, tên layer,
+  file hỏng bị bỏ qua, tờ đầu thế chỗ trang chào), `a_folder_with_no_photo_or_too_many_makes_no_sheet`,
+  `the_folder_buttons_say_how_many_sheets_and_ask_for_them` (bấm giả lập), thêm hai ý vào
+  `only_a_command_from_outside_reaches_past_the_retouch`.
+- Chưa kiểm được bằng test (cần cửa sổ thật, chờ chủ thử): hộp chọn thư mục của Windows, và
+  thời gian chạy ở bản Release (bản debug: đọc + co 18 ảnh ~3,5 s; app đứng yên trong lúc đó,
+  chưa có thanh tiến độ).
+- Test: 1928 qua + 22 bài `app::portrait_ops` / `id_photo_ops` qua; 1 hỏng không liên quan
+  (`ext_bridge::…server_completes_websocket_handshake`, tiến trình kẹt từ 04/10 còn giữ cổng
+  47821). Code `0e69efa`; bản test `target\release\iai.exe` (build 05/10 10:05; chưa mở thử
+  trên cửa sổ thật).
 - [ ] Build Release, chủ test.

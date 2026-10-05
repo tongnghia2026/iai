@@ -18,10 +18,11 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
   thích nổi trên thanh kéo.
 - Chủ test OK đợt 19 (04/10): giao diện mới của Chỉnh chân dung / Develop / Làm ảnh thẻ.
 - Chủ test OK đợt 20 (04/10): gõ số vào ô của thanh kéo; Develop chỉ mở một mục; icon môi.
-- Chủ test OK đợt 21 (05/10): bấm vào ô số ở Develop không còn nháy. Chủ nêu tiếp: thanh cuộn
-  của bảng Develop hiện lên đè vào ô số → **đợt 28 (05/10, `9708eb3`), chờ chủ test** (mục
-  "Đợt 28" trong `KE_HOACH_ANH_THE_2026-10-02.md`). Bản test: **`target\release\iai-dot28.exe`**
-  (build 05/10 09:14).
+- Chủ test OK đợt 21 (05/10): bấm vào ô số ở Develop không còn nháy.
+- Chủ test OK đợt 28 (05/10, `9708eb3`): thanh cuộn của bảng Develop có làn riêng sát mép phải.
+- **Chờ chủ test — đợt 29 (05/10):** khối "Xếp cả thư mục" trong mục Xếp ảnh in — thư mục ảnh
+  thẻ của khách, mỗi người N tấm, lên giấy 10×15 / 13×18, mỗi tờ một tab (mục "Đợt 29" trong
+  `KE_HOACH_ANH_THE_2026-10-02.md`).
 - Chủ test OK đợt 17 (05/10): phím `[` `]` với Smudge / Dodge / Burn; Pencil vẽ đúng cỡ và màu;
   Smart Fill (AI) giữ vân ảnh; lưu / nạp công thức chân dung.
 - Bản portable `dist\iAi-portable` vẫn là bản 02/10 — thiếu mọi thứ làm từ 03/10.
@@ -90,7 +91,7 @@ sạch khi chạy test (≈ 3 GB thay cho 18 GB). Ổ C: trống 127 GB → ≈ 
   Subject chạy GPU, tự lùi CPU khi lỗi; ba lỗi canvas lớn (xuất RAW lớn ra JPEG, hút màu toàn
   ảnh, Alt+Delete).
 - Còn chờ: hiển thị trong trẻo trên máy khác (cần portable mới).
-- Còn chờ: đợt 28 — thanh cuộn của bảng Develop (05/10).
+- Còn chờ: đợt 29 — xếp cả thư mục ảnh thẻ lên giấy in (05/10).
 
 ## 3. Ghi chú kỹ thuật cho phiên sau
 
