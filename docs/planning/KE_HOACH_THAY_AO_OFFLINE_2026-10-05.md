@@ -79,6 +79,29 @@ giây). **B chỉ đo thử trước** trên vài ảnh thật để chủ nhìn
 mới quyết có làm hay không. Hai hướng dùng chung thư viện áo nên công làm A không bị bỏ đi nếu
 sau này thêm B.
 
+### Ý của chủ 05/10: tự huấn luyện model từ kho ảnh thẻ mẫu
+
+Lời chủ: "tôi có rất nhiều ảnh thẻ mẫu; tôi muốn tự training 1 model chuyên ghép áo được không".
+Tôi đã trả lời (chủ chưa phản hồi):
+
+- **Huấn luyện từ số không**: không làm nổi — model mặc thử nhỏ nhất (FASHN VTON 1.5) học từ 18
+  triệu cặp ảnh trên dàn máy lớn.
+- **Dạy thêm cho model có sẵn (LoRA)** bằng ảnh của tiệm: làm được. Tài liệu của hãng ghi FLUX.2
+  klein 4B cần card từ 12 GB và 32 GB RAM, chạy 1–3 giờ; card 2 GB của tiệm không huấn luyện
+  được → phải thuê máy trên mạng vài giờ hoặc mua card. Được lợi về **chất lượng** (ra đúng kiểu
+  vest, áo dài, ánh sáng ảnh thẻ của tiệm), **không được lợi về tốc độ**: chạy vẫn là model gốc,
+  trên máy tiệm vẫn vài phút một ảnh.
+- **Dùng kho ảnh làm thư viện áo cho hướng A, không cần huấn luyện**: app tự cắt áo từ từng ảnh
+  mẫu kèm điểm cổ – vai; với khách mới, app chọn trong hàng trăm áo cái nào khớp cổ – vai nhất
+  rồi mới ghép. Càng nhiều ảnh mẫu thì càng dễ có áo vừa, và chạy tức thì trên máy hiện tại.
+  Đây là cách tận dụng kho ảnh có lợi nhất lúc này, và bộ áo đã cắt chính là dữ liệu cần có nếu
+  sau này dạy thêm cho model.
+
+Điều chưa biết, cần chủ cho biết: có khoảng bao nhiêu ảnh; ảnh là ảnh đã mặc sẵn vest / sơ mi /
+áo dài hay có cả **cặp** "ảnh gốc khách mặc áo thường + ảnh đã thay áo" (cặp như vậy quý nhất
+cho việc dạy model). Ảnh khách là dữ liệu cá nhân: nếu đưa lên máy thuê hoặc phát hành model
+kèm app thì chỉ dùng phần từ cằm trở xuống (không có mặt).
+
 ## 5. Các đợt (chờ duyệt)
 
 Mỗi đợt xong đều build Release cho chủ test như lệ thường.
