@@ -443,7 +443,9 @@ impl App {
             let steps = kept
                 .filter(|k| k.doc_id == job.doc_id && k.revision == canvas.history_revision())
                 .map(|k| k.steps)
-                .ok_or_else(|| "ảnh đã đổi từ lúc làm ảnh thẻ — bấm Làm ảnh thẻ lại".to_string())?;
+                .ok_or_else(|| {
+                    "ảnh đã đổi từ lúc làm ảnh thẻ — bấm Làm ảnh thẻ tự động lại".to_string()
+                })?;
             for _ in 0..steps {
                 canvas.undo();
             }

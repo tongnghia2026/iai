@@ -877,3 +877,31 @@ Việc:
 - [x] Build Release, chủ test đợt 29: **OK** (05/10). Chủ khen ô "Mỗi người N tấm" (chủ chỉ
   nêu "mỗi người 2 hình", tôi làm thành ô chỉnh được) và không nói gì thêm về các điểm tôi tự
   chốt (mỗi tờ một tab, thứ tự theo tên file, giới hạn 24 tờ…) — giữ nguyên.
+
+## Đợt 30 (05/10): nút lựa chọn ở ô Ảnh thẻ to, kín hàng; nút "Làm ảnh thẻ tự động" màu xanh
+
+Lời chủ (kèm ảnh chụp ô Ảnh thẻ): "mấy cái nút lựa chọn này bé quá, khó nhìn, trong khung vẫn
+còn khoảng trống, hãy phóng to lên 1 chút, lấp đầy khoảng trống và làm nổi bật cho dễ nhìn; nút
+làm ảnh thẻ đổi tên thành: Làm ảnh thẻ tự động và cái ô đó chuyển thành màu xanh cho nổi bật".
+
+- [x] Ba hàng Nền / Mẫu / Cỡ (`ui/dialogs/id_photo.rs`, `chip_row`): nút cao 28 (trước ~22),
+  chữ 13,5 (trước 12), **giãn đều cho kín bề ngang bảng**; nút đang chọn tô xanh, viền sáng, chữ
+  trắng đậm (trước chỉ xám nhạt hơn một chút). Hàng nào không đủ chỗ thì xuống dòng **dưới các
+  nút, không lùi về dưới nhãn**, và chia đều số nút giữa các dòng (`chip_lines`: 5 mẫu → 3 + 2,
+  không còn 4 + 1). Bề rộng đo bằng chữ đậm nên chọn nút khác không làm các nút xê dịch. Nhãn
+  hàng 12,5, sáng hơn, canh trái.
+- [x] Nút chính đổi tên **"Làm ảnh thẻ tự động"**, nền xanh dương, chữ trắng đậm 15, cao 38
+  (trước 28, không nền); rê chuột sáng lên, nhấn sậm lại. Câu báo lỗi nhắc tên nút
+  (`id_photo_ops.rs`) đổi theo.
+- [x] Hàng "Khung" (sau khi có ảnh): sáu nút mũi tên 28×26 (trước 26×22) cho cùng cỡ.
+- Tôi tự chốt (đã báo chủ): "màu xanh" = **xanh dương** (cùng màu ô "Xanh" và chấm xanh của các
+  mục); nếu chủ muốn xanh lá thì đổi ba hằng `BLUE*` trong `id_photo.rs`. Nút "Tự động làm đẹp"
+  bên ô Chân dung chưa đổi (chủ không nhắc).
+- Đã tự nhìn bằng ảnh probe (`chan_dung_anh_the.png`, `chan_dung_anh_the_xong.png`). Test mới:
+  `chips_take_as_few_lines_as_hold_them_and_share_them_evenly`; bài bấm giả lập
+  `the_photo_is_asked_for_by_its_button_and_then_by_every_change` tìm nút theo tên mới.
+- Test: 1929 qua + 22 bài `app::portrait_ops` / `id_photo_ops` qua (chạy từng bài một); 1 hỏng
+  không liên quan (`ext_bridge::…server_completes_websocket_handshake`: cổng 47821 đang có app
+  của chủ và tiến trình kẹt từ 04/10 giữ).
+- [ ] Bản test `target\release\iai-dot30.exe` (build 05/10 11:47; tên riêng vì lúc build chủ
+  đang mở `target\release\iai.exe` bản 10:05 nên không ghi đè được). Chờ chủ test.

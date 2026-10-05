@@ -21,6 +21,7 @@ const NUDGE_ID: &str = "id_photo_nudge";
 /// turn, in degrees.
 const NUDGE_STEP: f32 = 0.02;
 const TURN_STEP: f32 = 0.5;
+const MAKE_LABEL: &str = "Làm ảnh thẻ tự động";
 
 /// The sliders the Ảnh thẻ side opens with: the preset used last, if it is
 /// still kept.
@@ -42,40 +43,220 @@ fn chip_name(name: &str) -> String {
     }
 }
 
-/// A choice among a few: a framed button, filled while it is the one chosen.
-fn chip(ui: &mut egui::Ui, chosen: bool, text: &str) -> bool {
-    ui.add(egui::Button::new(egui::RichText::new(text).size(12.0)).selected(chosen))
-        .clicked()
+const LABEL_WIDTH: f32 = 38.0;
+const CHIP_HEIGHT: f32 = 28.0;
+const CHIP_GAP: f32 = 6.0;
+const CHIP_PADDING: f32 = 9.0;
+const CHIP_TEXT: f32 = 13.5;
+const SWATCH: f32 = 13.0;
+/// The blue of what is chosen and of the button that makes the photo.
+const BLUE: egui::Color32 = egui::Color32::from_rgb(30, 110, 220);
+const BLUE_HOVERED: egui::Color32 = egui::Color32::from_rgb(52, 130, 238);
+const BLUE_PRESSED: egui::Color32 = egui::Color32::from_rgb(24, 92, 188);
+const BLUE_EDGE: egui::Color32 = egui::Color32::from_rgb(120, 185, 255);
+
+/// A choice among a few: its text, whether it is the one chosen, and the
+/// colour of the square before its text, if it has one.
+struct Chip<'a> {
+    text: &'a str,
+    chosen: bool,
+    swatch: Option<[u8; 3]>,
 }
 
-/// `chip` with a square of `colour` before its text.
-fn colour_chip(ui: &mut egui::Ui, chosen: bool, text: &str, colour: [u8; 3]) -> bool {
-    let response = ui.add(
-        egui::Button::new(egui::RichText::new(format!("     {text}")).size(12.0)).selected(chosen),
-    );
-    let square = egui::Rect::from_center_size(
-        egui::pos2(response.rect.left() + 12.0, response.rect.center().y),
-        egui::vec2(11.0, 11.0),
-    );
-    ui.painter().rect(
-        square,
-        2.0,
-        egui::Color32::from_rgb(colour[0], colour[1], colour[2]),
-        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(110)),
-        egui::StrokeKind::Inside,
-    );
-    response.clicked()
+impl<'a> Chip<'a> {
+    fn new(text: &'a str, chosen: bool) -> Self {
+        Self {
+            text,
+            chosen,
+            swatch: None,
+        }
+    }
+}
+
+/// Chips of these widths in lines no wider than `width`: as few lines as
+/// hold them, and those as even as they go. Each line is a range of chips.
+fn chip_lines(widths: &[f32], width: f32) -> Vec<std::ops::Range<usize>> {
+    let pack = |limit: f32| {
+        let mut lines = Vec::new();
+        let (mut start, mut used) = (0, 0.0);
+        for (i, w) in widths.iter().enumerate() {
+            let longer = used + CHIP_GAP + w;
+            if i > start && longer > limit {
+                lines.push(start..i);
+                (start, used) = (i, *w);
+            } else {
+                used = if i == start { *w } else { longer };
+            }
+        }
+        if start < widths.len() {
+            lines.push(start..widths.len());
+        }
+        lines
+    };
+    let count = pack(width).len();
+    // The narrowest limit that takes no more lines evens them out.
+    let (mut low, mut high) = (0.0, width);
+    for _ in 0..16 {
+        let middle = (low + high) / 2.0;
+        if pack(middle).len() <= count {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    pack(high)
 }
 
 fn row_label(ui: &mut egui::Ui, text: &str) {
-    ui.add_sized(
-        [36.0, 20.0],
-        egui::Label::new(
-            egui::RichText::new(text)
-                .size(11.5)
-                .color(egui::Color32::from_gray(170)),
-        ),
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(LABEL_WIDTH, CHIP_HEIGHT), egui::Sense::hover());
+    ui.painter().text(
+        rect.left_center() + egui::vec2(2.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::FontId::proportional(12.5),
+        egui::Color32::from_gray(185),
     );
+}
+
+/// One chip in `rect`: blue while it is the one chosen.
+fn paint_chip(ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, chip: &Chip) {
+    let visuals = ui.visuals();
+    let (fill, edge, colour) = if chip.chosen {
+        (BLUE, BLUE_EDGE, egui::Color32::WHITE)
+    } else if response.hovered() {
+        (
+            visuals.widgets.hovered.weak_bg_fill,
+            egui::Color32::from_gray(150),
+            visuals.strong_text_color(),
+        )
+    } else {
+        (
+            visuals.faint_bg_color,
+            egui::Color32::from_gray(112),
+            visuals.text_color(),
+        )
+    };
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect(
+        rect,
+        5.0,
+        fill,
+        egui::Stroke::new(1.0_f32, edge),
+        egui::StrokeKind::Inside,
+    );
+    let font = if chip.chosen {
+        crate::ui::theme::bold_font(ui.ctx(), CHIP_TEXT)
+    } else {
+        egui::FontId::proportional(CHIP_TEXT)
+    };
+    let text = painter.layout_no_wrap(chip.text.to_owned(), font, colour);
+    let before = chip.swatch.map_or(0.0, |_| SWATCH + 6.0);
+    let mut left = (rect.center().x - (before + text.size().x) / 2.0).max(rect.left() + 4.0);
+    if let Some(c) = chip.swatch {
+        let square = egui::Rect::from_min_size(
+            egui::pos2(left, rect.center().y - SWATCH / 2.0),
+            egui::vec2(SWATCH, SWATCH),
+        );
+        painter.rect(
+            square,
+            2.0,
+            egui::Color32::from_rgb(c[0], c[1], c[2]),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(235)),
+            egui::StrokeKind::Outside,
+        );
+        left += before;
+    }
+    let top = rect.center().y - text.size().y / 2.0;
+    painter.galley(egui::pos2(left, top), text, colour);
+}
+
+/// A row of choices: its name, then its chips stretched to fill the width,
+/// on as many lines as they need. Returns the chip clicked and the row.
+fn chip_row(ui: &mut egui::Ui, label: &str, chips: &[Chip]) -> (Option<usize>, egui::Response) {
+    let mut clicked = None;
+    let row = ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(CHIP_GAP, CHIP_GAP);
+        row_label(ui, label);
+        let width = ui.available_width();
+        // Measured in bold: choosing a chip must not move the others.
+        let bold = crate::ui::theme::bold_font(ui.ctx(), CHIP_TEXT);
+        let natural: Vec<f32> = chips
+            .iter()
+            .map(|chip| {
+                let text = ui.painter().layout_no_wrap(
+                    chip.text.to_owned(),
+                    bold.clone(),
+                    egui::Color32::WHITE,
+                );
+                let before = chip.swatch.map_or(0.0, |_| SWATCH + 6.0);
+                (before + text.size().x + 2.0 * CHIP_PADDING).min(width)
+            })
+            .collect();
+        ui.vertical(|ui| {
+            for line in chip_lines(&natural, width) {
+                let gaps = CHIP_GAP * (line.len() - 1) as f32;
+                let spare = width - gaps - natural[line.clone()].iter().sum::<f32>();
+                let each = (spare / line.len() as f32).max(0.0);
+                ui.horizontal(|ui| {
+                    for i in line {
+                        let size = egui::vec2(natural[i] + each, CHIP_HEIGHT);
+                        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                        paint_chip(ui, rect, &response, &chips[i]);
+                        if response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            clicked = Some(i);
+                        }
+                    }
+                });
+            }
+        });
+    });
+    (clicked, row.response)
+}
+
+/// The button that makes the photo: the one thing to press here, in blue.
+fn make_button(ui: &mut egui::Ui) -> egui::Response {
+    let size = egui::vec2(ui.available_width(), 38.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let fill = if response.is_pointer_button_down_on() {
+        BLUE_PRESSED
+    } else if response.hovered() {
+        BLUE_HOVERED
+    } else {
+        BLUE
+    };
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        6.0,
+        fill,
+        egui::Stroke::new(1.0_f32, BLUE_EDGE),
+        egui::StrokeKind::Inside,
+    );
+    let white = egui::Color32::WHITE;
+    let icon = painter.layout_no_wrap(
+        ph::IDENTIFICATION_CARD.to_string(),
+        egui::FontId::proportional(19.0),
+        white,
+    );
+    let name = painter.layout_no_wrap(
+        MAKE_LABEL.to_string(),
+        crate::ui::theme::bold_font(ui.ctx(), 15.0),
+        white,
+    );
+    let left = rect.center().x - (icon.size().x + 8.0 + name.size().x) / 2.0;
+    let after_icon = left + icon.size().x + 8.0;
+    let middle = rect.center().y;
+    painter.galley(egui::pos2(left, middle - icon.size().y / 2.0), icon, white);
+    painter.galley(
+        egui::pos2(after_icon, middle - name.size().y / 2.0),
+        name,
+        white,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The Ảnh thẻ side's own controls, above the retouch groups. `settings` are
@@ -105,46 +286,52 @@ pub(super) fn id_photo_section(
     // A change that is over: a chip clicked, a slider let go, a nudge.
     let mut settled = false;
 
-    ui.horizontal_wrapped(|ui| {
-        row_label(ui, "Nền");
-        for backdrop in [Backdrop::White, Backdrop::Blue] {
-            let chosen = options.cut_out && options.backdrop == backdrop;
-            if colour_chip(ui, chosen, backdrop.label(), backdrop.rgb()) {
-                (options.cut_out, options.backdrop) = (true, backdrop);
-                settled = true;
-            }
+    let backdrops = [Backdrop::White, Backdrop::Blue];
+    let mut chips: Vec<Chip> = backdrops
+        .iter()
+        .map(|backdrop| Chip {
+            text: backdrop.label(),
+            chosen: options.cut_out && options.backdrop == *backdrop,
+            swatch: Some(backdrop.rgb()),
+        })
+        .collect();
+    chips.push(Chip::new("Giữ nền gốc", !options.cut_out));
+    if let (Some(i), _) = chip_row(ui, "Nền", &chips) {
+        match backdrops.get(i) {
+            Some(backdrop) => (options.cut_out, options.backdrop) = (true, *backdrop),
+            None => options.cut_out = false,
         }
-        if chip(ui, !options.cut_out, "Giữ nền gốc") {
-            options.cut_out = false;
-            settled = true;
-        }
-    });
-    ui.horizontal_wrapped(|ui| {
-        row_label(ui, "Mẫu");
-        for preset in presets {
-            if chip(ui, preset.settings == *settings, &chip_name(&preset.name)) {
-                *settings = preset.settings;
-                save_pref(PRESET_KEY, &preset.name);
-            }
-        }
-    })
-    .response
-    .on_hover_text(
+        settled = true;
+    }
+
+    let names: Vec<String> = presets.iter().map(|p| chip_name(&p.name)).collect();
+    let chips: Vec<Chip> = presets
+        .iter()
+        .zip(&names)
+        .map(|(preset, name)| Chip::new(name, preset.settings == *settings))
+        .collect();
+    let (clicked, row) = chip_row(ui, "Mẫu", &chips);
+    row.on_hover_text(
         "Bộ thanh kéo chỉnh chân dung dùng cho ảnh này. Sửa, lưu, xóa mẫu ở ô Chân dung",
     );
-    ui.horizontal_wrapped(|ui| {
-        row_label(ui, "Cỡ");
-        for size in PhotoKind::ALL {
-            if chip(ui, options.crop && options.size == size, size.label()) {
-                (options.crop, options.size) = (true, size);
-                settled = true;
-            }
+    if let Some(preset) = clicked.and_then(|i| presets.get(i)) {
+        *settings = preset.settings;
+        save_pref(PRESET_KEY, &preset.name);
+    }
+
+    let mut chips: Vec<Chip> = PhotoKind::ALL
+        .iter()
+        .map(|size| Chip::new(size.label(), options.crop && options.size == *size))
+        .collect();
+    chips.push(Chip::new("Không cắt", !options.crop));
+    if let (Some(i), _) = chip_row(ui, "Cỡ", &chips) {
+        match PhotoKind::ALL.get(i) {
+            Some(size) => (options.crop, options.size) = (true, *size),
+            None => options.crop = false,
         }
-        if chip(ui, !options.crop, "Không cắt") {
-            options.crop = false;
-            settled = true;
-        }
-    });
+        settled = true;
+    }
+    ui.add_space(2.0);
     ui.add_enabled_ui(options.crop, |ui| {
         if ui
             .checkbox(&mut options.straighten, "Xoay thẳng theo đường mắt")
@@ -183,7 +370,7 @@ pub(super) fn id_photo_section(
                     (ph::ARROW_COUNTER_CLOCKWISE, "Xoay trái", 0.0, 0.0, -1.0),
                     (ph::ARROW_CLOCKWISE, "Xoay phải", 0.0, 0.0, 1.0),
                 ] {
-                    let arrow = egui::Button::new(icon).min_size(egui::vec2(26.0, 22.0));
+                    let arrow = egui::Button::new(icon).min_size(egui::vec2(28.0, 26.0));
                     if ui.add(arrow).on_hover_text(tip).clicked() {
                         nudge.right += right * NUDGE_STEP;
                         nudge.down += down * NUDGE_STEP;
@@ -207,11 +394,9 @@ pub(super) fn id_photo_section(
         // The photo is there: what changes frames it again.
         settled && can_run
     } else {
-        let button = egui::Button::new(
-            egui::RichText::new(format!("{}  Làm ảnh thẻ", ph::IDENTIFICATION_CARD)).strong(),
-        );
+        ui.add_space(2.0);
         ui.add_enabled_ui(can_run && !busy && data.doc.has_doc, |ui| {
-            ui.add_sized([ui.available_width(), 28.0], button)
+            make_button(ui)
                 .on_hover_text(
                     "Cắt theo mắt và cằm, tách người lên nền đã chọn rồi chỉnh chân dung theo mẫu. Có vùng chọn thì chỉ lấy người trong vùng chọn",
                 )
@@ -258,6 +443,19 @@ pub(super) fn id_photo_section(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chips_take_as_few_lines_as_hold_them_and_share_them_evenly() {
+        // One line while they fit, the gaps between them counted.
+        assert_eq!(chip_lines(&[50.0, 50.0, 50.0], 162.0), vec![0..3]);
+        assert_eq!(chip_lines(&[50.0, 50.0, 50.0], 161.0), vec![0..2, 2..3]);
+        // Five that need two lines go three and two, not four and one.
+        let lines = chip_lines(&[44.0, 54.0, 69.0, 76.0, 109.0], 276.0);
+        assert_eq!(lines, vec![0..3, 3..5]);
+        // One wider than the row has a line of its own.
+        assert_eq!(chip_lines(&[300.0, 40.0], 276.0), vec![0..1, 1..2]);
+        assert!(chip_lines(&[], 276.0).is_empty());
+    }
 
     #[test]
     fn a_presets_chip_drops_the_words_every_one_shares() {
@@ -344,11 +542,7 @@ mod tests {
         assert_eq!(settings, male.settings);
 
         // The button asks for all of it.
-        let button = text_at(
-            &output,
-            &format!("{}  Làm ảnh thẻ", ph::IDENTIFICATION_CARD),
-        );
-        let asked = click(&ctx, &data, &mut settings, button);
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, MAKE_LABEL));
         let request = asked.dialogs.run_id_photo.expect("the photo");
         assert_eq!(
             (
