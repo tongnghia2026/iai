@@ -393,6 +393,7 @@ impl App {
                     self.shell.id_photo.retouch_due =
                         Some((Instant::now() + delay, job.asked.settings));
                 }
+                self.garment_after_id_photo(job.doc_id, job.asked.settings);
                 if let Some(next) = self.shell.id_photo.next.take() {
                     self.run_id_photo(next);
                 }
@@ -412,7 +413,8 @@ impl App {
         let Some((at, settings)) = self.shell.id_photo.retouch_due else {
             return;
         };
-        if Instant::now() < at {
+        // The garment goes on first: the retouch is of the person dressed.
+        if Instant::now() < at || self.garment_busy() {
             self.request_repaint();
             return;
         }
@@ -492,6 +494,37 @@ impl App {
             message.push_str(&notes);
         }
         Ok(message)
+    }
+
+    /// Whether the retouch is about to start on the photo just made.
+    pub(crate) fn retouch_is_due(&self) -> bool {
+        self.shell.id_photo.retouch_due.is_some()
+    }
+
+    /// Start the retouch over on what the document now shows, from
+    /// `settings`, while the dialog is open.
+    pub(crate) fn retouch_after(&mut self, settings: Option<PortraitSettings>) {
+        if self.shell.ui.show_portrait_dialog {
+            self.shell.id_photo.retouch_due = Some((Instant::now(), settings));
+        }
+    }
+
+    /// Work on the ID photo kept took `steps` more history entries, from
+    /// revision `before` to `after`: they are undone with it when it is
+    /// framed again.
+    pub(crate) fn id_photo_took(
+        &mut self,
+        doc_id: crate::core::document::DocumentId,
+        before: u64,
+        steps: usize,
+        after: u64,
+    ) {
+        if let Some(kept) = &mut self.shell.id_photo.kept {
+            if kept.doc_id == doc_id && kept.revision == before {
+                kept.steps += steps;
+                kept.revision = after;
+            }
+        }
     }
 
     fn request_repaint(&self) {

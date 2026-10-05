@@ -821,6 +821,16 @@ pub struct DialogIntent {
     pub set_portrait_side: Option<bool>,
     /// Make the ID photo as asked, or make the one just made again.
     pub run_id_photo: Option<crate::core::id_photo::IdPhotoRequest>,
+    /// The "Áo" box as the dialog shows it this frame: its rectangle
+    /// ([x0, y0, x1, y1], window points) and the sliders a retouch starts
+    /// over from when a garment dropped there is put on.
+    pub garment_box: Option<([f32; 4], crate::core::portrait::PortraitSettings)>,
+    /// Take the active layer as the garment and put it on the photo.
+    pub take_garment: Option<crate::core::portrait::PortraitSettings>,
+    /// Empty the box and take the garment off the photo.
+    pub remove_garment: Option<crate::core::portrait::PortraitSettings>,
+    /// Hand the photo's garment layer to Free Transform.
+    pub adjust_garment: bool,
     /// Live-preview request: sliders, faces switched on, preview on/off, and
     /// whether to tint the detected areas instead.
     pub set_portrait_preview: Option<(
@@ -1074,6 +1084,9 @@ impl UiActions {
             start_portrait_retouch: self.dialogs.start_portrait_retouch,
             set_portrait_side: self.dialogs.set_portrait_side,
             run_id_photo: self.dialogs.run_id_photo,
+            garment_box: self.dialogs.garment_box,
+            take_garment: self.dialogs.take_garment,
+            remove_garment: self.dialogs.remove_garment,
             set_portrait_preview: self.dialogs.set_portrait_preview.clone(),
             cancel_portrait_dialog: self.dialogs.cancel_portrait_dialog,
             apply_portrait: self.dialogs.apply_portrait.clone(),
@@ -1216,6 +1229,10 @@ mod retouch_gate_tests {
         assert!(!asked(|a| a.ai.toggle_ai_panel = Some(true)));
         // Choosing the folder to lay out makes no sheet yet.
         assert!(!asked(|a| a.doc.pick_print_folder = true));
+        // A garment put on or taken off starts the retouch over itself.
+        assert!(!asked(|a| a.dialogs.garment_box = Some(([0.0; 4], sliders))));
+        assert!(!asked(|a| a.dialogs.take_garment = Some(sliders)));
+        assert!(!asked(|a| a.dialogs.remove_garment = Some(sliders)));
         // Anything else is a command.
         assert!(asked(|a| {
             use crate::core::imposition::{FolderSheets, Paper, PhotoKind};
@@ -1236,6 +1253,8 @@ mod retouch_gate_tests {
         ));
         assert!(asked(|a| a.dialogs.auto_levels = true));
         assert!(asked(|a| a.dialogs.edit_portrait_layer = Some(1)));
+        // Transforming the garment by hand is work on another layer.
+        assert!(asked(|a| a.dialogs.adjust_garment = true));
         assert!(asked(|a| a.print.show_print_dialog = Some(true)));
         assert!(asked(|a| a.sel.select_all = true));
         assert!(asked(|a| a.tool.start_transform = true));

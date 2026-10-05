@@ -1,7 +1,8 @@
 # Kế hoạch: thay áo cho ảnh thẻ, chạy offline (05/10/2026)
 
-**Trạng thái: CHỦ ĐÃ DUYỆT 05/10, đang làm.** Đợt 31 (app tự căn áo + ảnh ghép thử) xong phần
-code, **chờ chủ xem ảnh ghép thử** rồi mới sang đợt 32. Cách làm chủ chốt: mở sẵn file áo
+**Trạng thái: CHỦ ĐÃ DUYỆT 05/10, đang làm.** Đợt 31 (app tự căn áo) chủ xem ảnh thử: "ok; làm
+tiếp". **Đợt 32 (khung "Áo", kéo thả, ba layer riêng) xong code, chờ chủ test trên bản build.**
+Cách làm chủ chốt: mở sẵn file áo
 Photoshop của tiệm, kéo áo vào khung "Áo", app tự căn — **không dùng model tạo ảnh** (mục "Kho
 áo có sẵn của chủ" và mục 5); phần tìm model ở mục 3 giữ lại làm tư liệu.
 
@@ -212,16 +213,50 @@ Còn thô, để đợt 33:
 - Chưa có: bóng dưới cằm, khớp sáng / màu áo với ảnh, nút chỉnh tay.
 - Một áo trong `Comple nam.psd` có dòng chữ tên tiệm ảnh in sẵn ở góc dưới — của file gốc.
 
-- Đạt khi: chủ xem ảnh ghép thử và thấy đáng làm tiếp. **Chờ chủ xem.**
+- [x] Chủ xem ảnh ghép thử 05/10: **"ok; làm tiếp"**, kèm yêu cầu: "nhớ là áo là 1 layer
+  riêng, cái nào tự động chạy chưa chuẩn người dùng có thể tùy ý chỉnh lại".
 
 ### Đợt 32 — Khung "Áo" và kéo thả
 
-- [ ] Khung "Áo" trong ô Ảnh thẻ; nhận áo kéo từ tab file áo, hoặc bấm đúp vào áo.
-- [ ] Thả xong app về tab ảnh thẻ và mặc áo; layer "Áo" riêng; thả áo khác thì thay.
-- [ ] File áo giữ nguyên sau khi kéo (áo về chỗ cũ, không hỏi lưu khi đóng).
-- [ ] Nút chỉnh tay: lên / xuống / trái / phải, to / nhỏ, xoay (như hàng "Khung"), "Đặt lại",
-  "Bỏ áo".
-- [ ] Áo trong khung giữ cho ảnh sau; chạy được với "Xếp ảnh in" và "Xếp cả thư mục".
+Làm 05/10, ngay sau khi chủ bảo làm tiếp. App: `src/app/garment_ops.rs`; giao diện: hàng "Áo"
+trong `src/ui/dialogs/id_photo.rs`; lõi `core/garment.rs` đổi sang trả ba lớp.
+
+- [x] **Ba layer riêng** đặt trên các layer cũ của ảnh (layer cũ được ẩn đi, không xóa):
+  - "Người": người đã bỏ áo cũ, có da ở khoảng hở cổ và **da lót thêm một quãng dưới áo** để
+    dời áo bằng tay không lộ lỗ thủng;
+  - **"Áo": nguyên cái áo, không bị cắt chỗ nào** (kể cả phần tràn ra ngoài khung ảnh) — dời,
+    phóng, xoay bằng Move hoặc Ctrl+T như mọi layer;
+  - "Tóc trên áo": tóc xõa nằm trên áo, là layer riêng nên áo dời đi tóc vẫn đúng chỗ (chỉ có
+    khi tóc thật sự phủ lên áo).
+  Một bước Ctrl+Z là về như trước khi mặc.
+- [x] Khung "Áo" trong ô Ảnh thẻ: ô hình cái áo đang giữ + ba nút "Chỉnh áo" (chọn layer Áo và
+  vào Free Transform), "Bỏ áo" (trả ảnh về như chưa mặc, làm trống ô), "Lấy áo đang chọn"
+  (thay cho kéo thả: bấm vào áo trong file áo rồi bấm nút).
+- [x] **Kéo thả**: đang ở tab file áo, dùng công cụ Move kéo một cái áo thả lên hàng "Áo" của
+  bảng → app lấy lớp đó làm áo, trả cái áo về chỗ cũ trên file áo (file áo không bị tính là đã
+  sửa), chuyển sang tab ảnh và mặc. Ảnh được mặc: ảnh đang mặc áo, nếu không thì ảnh thẻ xem
+  gần nhất (tài liệu có nền một màu và ít layer).
+- [x] Áo trong khung được giữ: bấm "Làm ảnh thẻ tự động" ở ảnh sau là mặc luôn, xong mới bắt
+  đầu chỉnh chân dung (trên layer "Người"). Đổi Cỡ / Khung làm lại ảnh thì áo được mặc lại.
+- [x] Thử áo khác trên cùng ảnh: không chạy lại model (kết quả nhận diện cổ – tóc được giữ),
+  áo mới thay áo cũ tại chỗ.
+- [x] Ảnh đã mặc áo ở phiên trước (lưu rồi mở lại) vẫn nhận ra nhờ tên layer: "Chỉnh áo",
+  "Bỏ áo", đổi áo đều chạy.
+- [x] Lớp không có khoảng hở cổ (nền, hình khác) bị từ chối kèm lời báo.
+- Khác kế hoạch: **không làm hàng nút mũi tên** cho áo. Theo ý chủ "tùy ý chỉnh lại", nút
+  "Chỉnh áo" đưa thẳng layer Áo vào Free Transform (dời / phóng / xoay tự do), mạnh hơn mũi tên.
+  Bấm đúp vào áo cũng chưa làm (đã có kéo thả và nút "Lấy áo đang chọn").
+- Luật có sẵn vẫn giữ: đổi tab là app áp dụng phần chỉnh chân dung đang xem thành layer; mặc
+  áo sau đó thì "Người" gồm luôn phần chỉnh ấy.
+- Test: `core::garment` 9 bài; `app::garment_ops` 7 bài (lấy áo → ba layer + hoàn tác; đổi áo
+  và bỏ áo; lớp không có cổ; kéo thả lên khung và file áo về như cũ; nhận ảnh đã mặc từ phiên
+  trước; Free Transform; và một bài chạy model thật: làm ảnh thẻ có áo trong khung → mặc →
+  chỉnh chân dung trên "Người" → đổi khung → mặc lại); bảng: bài bấm giả lập các nút của hàng
+  "Áo"; cổng "lệnh ngoài bảng" thêm bốn ý.
+- Chưa kiểm được bằng test (cần cửa sổ thật, chờ chủ thử): cú kéo thả bằng chuột thật từ canvas
+  lên bảng nổi, và Free Transform trên layer Áo sau khi mặc.
+- Biết trước: nếu đổi màu / độ sáng tóc bằng thanh "Tóc" sau khi mặc áo thì phần tóc nằm trên
+  áo (layer "Tóc trên áo") không đổi theo — kéo áo vào lại để làm mới.
 
 ### Đợt 33 — Hoàn thiện cho giống ghép tay
 

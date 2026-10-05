@@ -570,6 +570,16 @@ impl App {
         if let Some(asked) = actions.dialogs.run_id_photo.take() {
             self.run_id_photo(asked);
         }
+        self.set_garment_box(actions.dialogs.garment_box.take());
+        if let Some(settings) = actions.dialogs.take_garment.take() {
+            self.take_garment(Some(settings));
+        }
+        if let Some(settings) = actions.dialogs.remove_garment.take() {
+            self.remove_garment(Some(settings));
+        }
+        if std::mem::take(&mut actions.dialogs.adjust_garment) {
+            self.adjust_garment();
+        }
         if let Some(idx) = actions.dialogs.edit_portrait_layer.take() {
             match self.reopen_portrait_layer(idx) {
                 Ok(()) => {

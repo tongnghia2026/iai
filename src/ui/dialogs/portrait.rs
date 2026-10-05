@@ -1203,6 +1203,13 @@ mod tests {
                 data.dialogs.portrait_hair = true;
             }
             if made {
+                // The box as it holds a garment the photo wears (the font
+                // atlas stands in for the garment's picture).
+                data.dialogs.garment_thumb = Some(egui::TextureId::default());
+                data.dialogs.garment_worn = true;
+                data.dialogs.garment_status =
+                    "Đã mặc áo \"Layer 23\". Áo là layer riêng: bấm Chỉnh áo để dời, phóng, xoay"
+                        .to_string();
                 data.dialogs.id_photo_status =
                     "Làm ảnh thẻ xong: 2,8×3,8 cm, 1043×1417 px, nền trắng".to_string();
                 (data.doc.canvas_w, data.doc.canvas_h, data.doc.canvas_dpi) = (1043, 1417, 947.2);

@@ -49,6 +49,8 @@ const CHIP_GAP: f32 = 6.0;
 const CHIP_PADDING: f32 = 9.0;
 const CHIP_TEXT: f32 = 13.5;
 const SWATCH: f32 = 13.0;
+/// The side of the box that shows the garment held.
+const GARMENT_BOX: f32 = 54.0;
 /// The blue of what is chosen and of the button that makes the photo.
 const BLUE: egui::Color32 = egui::Color32::from_rgb(30, 110, 220);
 const BLUE_HOVERED: egui::Color32 = egui::Color32::from_rgb(52, 130, 238);
@@ -217,6 +219,118 @@ fn chip_row(ui: &mut egui::Ui, label: &str, chips: &[Chip]) -> (Option<usize>, e
     (clicked, row.response)
 }
 
+/// The "Áo" row: the box a garment is dragged onto from the shop's sheet
+/// (it shows the one it holds), and what can be done with that garment. The
+/// whole row is where a garment may be let go.
+fn garment_row(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    actions: &mut UiActions,
+    settings: &PortraitSettings,
+) {
+    let held = data.dialogs.garment_thumb;
+    let busy = data.dialogs.garment_busy;
+    let row = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = CHIP_GAP;
+        row_label(ui, "Áo");
+        let side = egui::vec2(GARMENT_BOX, GARMENT_BOX);
+        let (rect, _) = ui.allocate_exact_size(side, egui::Sense::hover());
+        let edge = match held {
+            Some(_) => BLUE_EDGE,
+            None => egui::Color32::from_gray(112),
+        };
+        ui.painter().rect(
+            rect,
+            5.0,
+            ui.visuals().extreme_bg_color,
+            egui::Stroke::new(1.0_f32, edge),
+            egui::StrokeKind::Inside,
+        );
+        match held {
+            Some(picture) => {
+                let whole = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                ui.painter()
+                    .image(picture, rect.shrink(3.0), whole, egui::Color32::WHITE);
+            }
+            None => {
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    ph::T_SHIRT,
+                    egui::FontId::proportional(24.0),
+                    egui::Color32::from_gray(130),
+                );
+            }
+        }
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            let line = match held {
+                Some(_) => "Áo này được giữ cho các ảnh sau",
+                None => "Mở file áo, kéo cái áo khách chọn thả vào đây",
+            };
+            ui.label(
+                egui::RichText::new(line)
+                    .size(12.0)
+                    .color(egui::Color32::from_gray(185)),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                if data.dialogs.garment_worn
+                    && ui
+                        .add_enabled(!busy, egui::Button::new("Chỉnh áo"))
+                        .on_hover_text(
+                            "Dời, phóng, xoay áo bằng tay như Ctrl+T; Enter để xong. Áo là một layer riêng",
+                        )
+                        .clicked()
+                {
+                    actions.dialogs.adjust_garment = true;
+                }
+                if held.is_some()
+                    && ui
+                        .add_enabled(!busy, egui::Button::new("Bỏ áo"))
+                        .on_hover_text("Lấy áo khỏi ô này và khỏi ảnh đang mở")
+                        .clicked()
+                {
+                    actions.dialogs.remove_garment = Some(*settings);
+                }
+                if ui
+                    .add_enabled(
+                        !busy && data.doc.has_doc,
+                        egui::Button::new("Lấy áo đang chọn"),
+                    )
+                    .on_hover_text(
+                        "Dùng thay cho kéo thả: bấm vào một cái áo trong file áo rồi bấm nút này",
+                    )
+                    .clicked()
+                {
+                    actions.dialogs.take_garment = Some(*settings);
+                }
+            });
+        });
+    });
+    let zone = row.response.rect;
+    actions.dialogs.garment_box =
+        Some(([zone.min.x, zone.min.y, zone.max.x, zone.max.y], *settings));
+    let status = &data.dialogs.garment_status;
+    if busy || !status.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            if busy {
+                ui.spinner();
+            }
+            let colour = if data.dialogs.garment_error {
+                egui::Color32::from_rgb(220, 90, 80)
+            } else {
+                egui::Color32::from_gray(170)
+            };
+            ui.label(
+                egui::RichText::new(status.as_str())
+                    .size(11.0)
+                    .color(colour),
+            );
+        });
+    }
+}
+
 /// The button that makes the photo: the one thing to press here, in blue.
 fn make_button(ui: &mut egui::Ui) -> egui::Response {
     let size = egui::vec2(ui.available_width(), 38.0);
@@ -331,6 +445,7 @@ pub(super) fn id_photo_section(
         }
         settled = true;
     }
+    garment_row(ui, data, actions, settings);
     ui.add_space(2.0);
     ui.add_enabled_ui(options.crop, |ui| {
         if ui
@@ -517,6 +632,52 @@ mod tests {
         frame(ctx, data, settings, vec![egui::Event::PointerMoved(at)]);
         frame(ctx, data, settings, vec![button(true)]);
         frame(ctx, data, settings, vec![button(false)]).1
+    }
+
+    #[test]
+    fn the_garment_row_shows_its_box_and_asks_what_its_buttons_say() {
+        let ctx = egui::Context::default();
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(OPTIONS_ID), IdPhotoOptions::default()));
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        let mut settings = PortraitSettings::default();
+        let written = |output: &egui::FullOutput, label: &str| {
+            output.shapes.iter().any(|clipped| {
+                matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text().trim() == label)
+            })
+        };
+        frame(&ctx, &data, &mut settings, vec![]);
+        let (output, actions) = frame(&ctx, &data, &mut settings, vec![]);
+        // Where a garment may be let go: the whole row, told every frame.
+        let (zone, sliders) = actions.dialogs.garment_box.expect("the box");
+        assert_eq!(sliders, settings);
+        assert!(zone[2] - zone[0] > 200.0 && zone[3] - zone[1] >= GARMENT_BOX);
+        // Empty, the box only offers to take the layer picked.
+        assert!(!written(&output, "Bỏ áo") && !written(&output, "Chỉnh áo"));
+        let asked = click(
+            &ctx,
+            &data,
+            &mut settings,
+            text_at(&output, "Lấy áo đang chọn"),
+        );
+        assert_eq!(asked.dialogs.take_garment, Some(settings));
+        assert!(asked.dialogs.remove_garment.is_none() && !asked.dialogs.adjust_garment);
+
+        // Holding a garment the photo wears, it can be adjusted or let go.
+        data.dialogs.garment_thumb = Some(egui::TextureId::default());
+        data.dialogs.garment_worn = true;
+        frame(&ctx, &data, &mut settings, vec![]);
+        let (output, _) = frame(&ctx, &data, &mut settings, vec![]);
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, "Chỉnh áo"));
+        assert!(asked.dialogs.adjust_garment);
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, "Bỏ áo"));
+        assert_eq!(asked.dialogs.remove_garment, Some(settings));
+        // While it is being put on, nothing is asked.
+        data.dialogs.garment_busy = true;
+        frame(&ctx, &data, &mut settings, vec![]);
+        let (output, _) = frame(&ctx, &data, &mut settings, vec![]);
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, "Bỏ áo"));
+        assert!(asked.dialogs.remove_garment.is_none());
     }
 
     #[test]

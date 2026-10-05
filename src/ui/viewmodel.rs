@@ -499,6 +499,15 @@ pub struct DialogViewModel {
     pub id_photo_error: bool,
     pub id_photo_busy: bool,
     pub id_photo_made: bool,
+    /// The "Áo" box: the garment in it (its picture and name), whether
+    /// the photo wears it, whether it is being put on, and its status
+    /// line with whether that is an error.
+    pub garment_thumb: Option<egui::TextureId>,
+    pub garment_name: String,
+    pub garment_worn: bool,
+    pub garment_busy: bool,
+    pub garment_status: String,
+    pub garment_error: bool,
     /// The folder chosen in "Xếp ảnh in": its name and how many photos it holds.
     pub print_folder: Option<(String, usize)>,
     /// Active document is a multi-page PDF session (enables page-scope options).
@@ -1073,6 +1082,12 @@ impl Default for UiData {
                 id_photo_error: false,
                 id_photo_busy: false,
                 id_photo_made: false,
+                garment_thumb: None,
+                garment_name: String::new(),
+                garment_worn: false,
+                garment_busy: false,
+                garment_status: String::new(),
+                garment_error: false,
                 print_folder: None,
                 portrait_restore_settings: None,
                 portrait_restore_faces: None,

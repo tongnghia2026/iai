@@ -33,6 +33,14 @@ const MAX_OVERSIZE: f32 = 1.35;
 const RIM_SHADE: f32 = 0.25;
 /// Garment pixels the opening's skin runs on under the garment's edge.
 const OPENING_LAP: usize = 3;
+/// How far around the opening, in eye-to-chin lengths, the person has skin
+/// under the garment.
+const UNDERLAY: f32 = 0.25;
+/// Photo pixels over the collar's line from which hair counts as falling
+/// over the garment.
+const HAIR_RISE: f32 = 8.0;
+/// Pixels of hair on the garment below which no hair layer is made.
+const HAIR_MEETS: usize = 64;
 /// How sure the labels must be of clothes for them to count as clothes.
 const CLOTHES: u8 = 77;
 
@@ -494,6 +502,49 @@ impl Cloth {
         ]
     }
 
+    /// The whole garment as it lies on a photo of `photo` (width, height):
+    /// a piece as large as the garment laid, reaching the photo's bottom
+    /// where the garment is short of it.
+    fn laid(&self, placement: &Placement, photo: (usize, usize)) -> Piece {
+        let (gw, gh) = (self.width as f32, self.height as f32);
+        let corners = [[0.0, 0.0], [gw, 0.0], [0.0, gh], [gw, gh]].map(|g| placement.to_photo(g));
+        let least = |axis: usize| corners.iter().map(|c| c[axis]).fold(f32::MAX, f32::min);
+        let most = |axis: usize| corners.iter().map(|c| c[axis]).fold(f32::MIN, f32::max);
+        // No wider than three photos: a garment laid absurdly large is cut.
+        let (limit_w, limit_h) = (photo.0 as f32 * 3.0, photo.1 as f32 * 3.0);
+        let x0 = least(0).floor().max(-limit_w) - 1.0;
+        let y0 = least(1).floor().max(-limit_h) - 1.0;
+        let x1 = most(0).ceil().min(limit_w * 2.0) + 1.0;
+        let y1 = most(1).ceil().max(photo.1 as f32).min(limit_h * 2.0) + 1.0;
+        let (width, height) = ((x1 - x0).max(1.0) as usize, (y1 - y0).max(1.0) as usize);
+        let mut rgba = vec![0u8; width * height * 4];
+        rgba.par_chunks_mut(width * 4)
+            .enumerate()
+            .for_each(|(y, row)| {
+                for x in 0..width {
+                    let at = [x0 + x as f32 + 0.5, y0 + y as f32 + 0.5];
+                    let [gx, gy] = placement.to_garment(at);
+                    // Under the photo nothing runs on.
+                    if at[1] > photo.1 as f32 && gy > self.height as f32 {
+                        continue;
+                    }
+                    let [r, g, b, a] = self.colour_at(gx, gy);
+                    if a > 0.0 {
+                        row[x * 4] = (r / a).round() as u8;
+                        row[x * 4 + 1] = (g / a).round() as u8;
+                        row[x * 4 + 2] = (b / a).round() as u8;
+                        row[x * 4 + 3] = (a * 255.0).round() as u8;
+                    }
+                }
+            });
+        Piece {
+            rgba,
+            width: width as u32,
+            height: height as u32,
+            offset: (x0 as i32, y0 as i32),
+        }
+    }
+
     /// How far inside the opening a point of the garment is, 0..1.
     fn opening_at(&self, x: f32, y: f32) -> f32 {
         let (w, h) = (self.width as i32, self.height as i32);
@@ -569,15 +620,30 @@ fn smoothstep(from: f32, to: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The photo's two layers once dressed, each straight-alpha RGBA of its size.
-pub struct Dressed {
-    /// The person: the old clothes gone, skin laid in the collar's opening.
-    pub person: Vec<u8>,
-    /// The garment in place, cut away where hair falls over it.
-    pub garment: Vec<u8>,
+/// A layer that need not be the photo's size: straight-alpha RGBA with its
+/// corner at `offset` on the photo.
+pub struct Piece {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub offset: (i32, i32),
 }
 
-/// Dress `person` (the cut-out layer of the photo `figure` was read from) in
+/// The dressed photo's layers, bottom to top. The garment is whole and on
+/// its own so it can be moved, scaled and turned by hand afterwards: the
+/// person has skin a little way on under it, and the hair that falls over it
+/// lies over it as a layer of its own.
+pub struct Dressed {
+    /// The person, the photo's size: the old clothes gone, skin laid in the
+    /// collar's opening.
+    pub person: Vec<u8>,
+    pub garment: Piece,
+    /// The hair from the collar's line down, the photo's size; `None` when
+    /// none of it falls over the garment.
+    pub hair: Option<Vec<u8>>,
+}
+
+/// Dress `person` (the cut-out of the photo `figure` was read from) in
 /// `garment`, lying as `placement` says.
 pub fn dress(
     person: &[u8],
@@ -605,7 +671,6 @@ pub fn dress(
         gx >= collar.left[0] && gx <= collar.right[0]
     };
     let hair = hair_matte(person, figure, unit, &under_line);
-    let hair_over = |i: usize| hair[i];
     // Skin is believed only well inside what the labels call skin: their
     // edge runs a few pixels over the clothes beside it.
     let labelled: Vec<f32> = (0..w * h)
@@ -650,30 +715,28 @@ pub fn dress(
         (None, None) => in_neck(x, y),
     };
 
-    // The garment and its opening over the photo.
-    let mut laid = vec![0u8; w * h * 4];
+    // Where the garment covers the photo, and its opening there.
+    let mut cover = vec![0.0f32; w * h];
     let mut opening = vec![0.0f32; w * h];
-    laid.par_chunks_mut(w * 4)
+    cover
+        .par_chunks_mut(w)
         .zip(opening.par_chunks_mut(w))
         .enumerate()
-        .for_each(|(y, (row, open_row))| {
+        .for_each(|(y, (cover_row, open_row))| {
             for x in 0..w {
                 let [gx, gy] = placement.to_garment([x as f32 + 0.5, y as f32 + 0.5]);
-                let [r, g, b, a] = cloth.colour_at(gx, gy);
-                let shown = a * (1.0 - hair_over(y * w + x));
-                if a > 0.0 {
-                    row[x * 4] = (r / a).round() as u8;
-                    row[x * 4 + 1] = (g / a).round() as u8;
-                    row[x * 4 + 2] = (b / a).round() as u8;
-                    row[x * 4 + 3] = (shown * 255.0).round() as u8;
-                }
+                cover_row[x] = cloth.colour_at(gx, gy)[3];
                 open_row[x] = cloth.opening_at(gx, gy);
             }
         });
-
     // How deep inside the opening each pixel lies: 1 well inside, about
     // half at its rim.
     let deep = box_blur(&opening, w, h, ((unit * 0.05) as usize).max(2));
+    // Skin runs on under the garment around the opening, so a garment moved
+    // by hand uncovers skin, not a hole.
+    // (Any of the opening inside the blur's square leaves a little in it.)
+    let around = box_blur(&opening, w, h, ((unit * UNDERLAY) as usize).max(2));
+    let laid_at = |i: usize| opening[i].max(smoothstep(0.0003, 0.004, around[i]) * cover[i]);
 
     // Skin for the opening, and for the neck where old clothes rose over
     // it: spread from the neck's own over the box that holds both.
@@ -681,7 +744,7 @@ pub fn dress(
     for y in 0..h {
         for x in 0..w {
             let i = y * w + x;
-            if opening[i] > 0.0 || (risen[i] > 0.0 && on_neck(x, y)) {
+            if laid_at(i) > 0.0 || (risen[i] > 0.0 && on_neck(x, y)) {
                 let b = bounds.get_or_insert([x, y, x, y]);
                 *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
             }
@@ -711,8 +774,8 @@ pub fn dress(
     let mut edge: Option<[usize; 4]> = None;
     for y in 0..h {
         for x in 0..w {
-            let hair = hair_over(y * w + x);
-            if hair > 0.0 && hair < 1.0 && under_line(x, y) > -1.0 {
+            let hair = hair[y * w + x];
+            if hair > 0.0 && hair < 1.0 && under_line(x, y) > -HAIR_RISE {
                 let b = edge.get_or_insert([x, y, x, y]);
                 *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
             }
@@ -735,67 +798,89 @@ pub fn dress(
     };
 
     let mut out = person.to_vec();
-    out.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
-        for x in 0..w {
-            let i = y * w + x;
-            let under = under_line(x, y);
-            let below = smoothstep(-1.0, 1.0, under);
-            let gone = risen[i] * (1.0 - below);
-            if below <= 0.0 && gone <= 0.0 {
-                continue;
-            }
-            let hair = hair_over(i);
-            let inside = opening[i];
-            let px = &mut row[x * 4..x * 4 + 4];
-            let alpha = px[3] as f32 / 255.0;
-            let mut colour = [px[0] as f32, px[1] as f32, px[2] as f32];
-            if let (true, Some(strand)) = (hair > 0.0 && hair < 1.0, strand_at(x, y)) {
-                let own = sure_hair(i);
-                for c in 0..3 {
-                    colour[c] = strand[c] * (1.0 - own) + colour[c] * own;
+    let mut over = vec![0u8; w * h * 4];
+    out.par_chunks_mut(w * 4)
+        .zip(over.par_chunks_mut(w * 4))
+        .enumerate()
+        .for_each(|(y, (row, over_row))| {
+            for x in 0..w {
+                let i = y * w + x;
+                let under = under_line(x, y);
+                let below = smoothstep(-1.0, 1.0, under);
+                let gone = risen[i] * (1.0 - below);
+                let strand = hair[i] * smoothstep(-HAIR_RISE, 0.0, under);
+                if below <= 0.0 && gone <= 0.0 && strand <= 0.0 {
+                    continue;
                 }
-            }
-            // Under the line, outside the opening only hair stays; inside
-            // it skin is laid where the person shows none.
-            let mut kept = alpha * hair;
-            if let (true, Some((fill, weight))) = (inside > 0.0, skin_at(x, y)) {
-                let own = weight.max(hair * alpha);
-                let rim = ((1.0 - deep[i]) * 2.0).clamp(0.0, 1.0);
-                let shade = 1.0 - RIM_SHADE * rim;
-                for c in 0..3 {
-                    let laid_in = fill[c] * shade * (1.0 - own) + colour[c] * own;
-                    colour[c] += (laid_in - colour[c]) * inside;
-                }
-                kept += (1.0 - kept) * inside;
-            }
-            let mut after = alpha + (kept - alpha) * below;
-            let mut shown = [0.0f32; 3];
-            for c in 0..3 {
-                shown[c] = px[c] as f32 + (colour[c] - px[c] as f32) * below;
-            }
-            // Over the line the old clothes that rose are gone: skin takes
-            // their place on the neck, nothing beside it.
-            if gone > 0.0 {
-                match skin_at(x, y).filter(|_| on_neck(x, y)) {
-                    Some((fill, _)) => {
-                        for c in 0..3 {
-                            shown[c] += (fill[c] - shown[c]) * gone;
-                        }
-                        after += (1.0 - after) * gone;
+                let hair = hair[i];
+                let inside = laid_at(i);
+                let px = &mut row[x * 4..x * 4 + 4];
+                let alpha = px[3] as f32 / 255.0;
+                let mut colour = [px[0] as f32, px[1] as f32, px[2] as f32];
+                if let (true, Some(strand)) = (hair > 0.0 && hair < 1.0, strand_at(x, y)) {
+                    let own = sure_hair(i);
+                    for c in 0..3 {
+                        colour[c] = strand[c] * (1.0 - own) + colour[c] * own;
                     }
-                    None => after *= 1.0 - gone,
                 }
+                // The hair as it lies over the garment.
+                if strand > 0.0 {
+                    for c in 0..3 {
+                        over_row[x * 4 + c] = colour[c].round().clamp(0.0, 255.0) as u8;
+                    }
+                    over_row[x * 4 + 3] = (strand * alpha * 255.0).round() as u8;
+                }
+                if below <= 0.0 && gone <= 0.0 {
+                    continue;
+                }
+                // Under the line, outside the opening only hair stays; inside
+                // it skin is laid where the person shows none.
+                let mut kept = alpha * hair;
+                if let (true, Some((fill, weight))) = (inside > 0.0, skin_at(x, y)) {
+                    let own = weight.max(hair * alpha);
+                    let rim = ((1.0 - deep[i]) * 2.0).clamp(0.0, 1.0);
+                    let shade = 1.0 - RIM_SHADE * rim;
+                    for c in 0..3 {
+                        let laid_in = fill[c] * shade * (1.0 - own) + colour[c] * own;
+                        colour[c] += (laid_in - colour[c]) * inside;
+                    }
+                    kept += (1.0 - kept) * inside;
+                }
+                let mut after = alpha + (kept - alpha) * below;
+                let mut shown = [0.0f32; 3];
+                for c in 0..3 {
+                    shown[c] = px[c] as f32 + (colour[c] - px[c] as f32) * below;
+                }
+                // Over the line the old clothes that rose are gone: skin takes
+                // their place on the neck, nothing beside it.
+                if gone > 0.0 {
+                    match skin_at(x, y).filter(|_| on_neck(x, y)) {
+                        Some((fill, _)) => {
+                            for c in 0..3 {
+                                shown[c] += (fill[c] - shown[c]) * gone;
+                            }
+                            after += (1.0 - after) * gone;
+                        }
+                        None => after *= 1.0 - gone,
+                    }
+                }
+                for c in 0..3 {
+                    px[c] = shown[c].round().clamp(0.0, 255.0) as u8;
+                }
+                px[3] = (after * 255.0).round().clamp(0.0, 255.0) as u8;
             }
-            for c in 0..3 {
-                px[c] = shown[c].round().clamp(0.0, 255.0) as u8;
-            }
-            px[3] = (after * 255.0).round().clamp(0.0, 255.0) as u8;
-        }
-    });
+        });
+    // Hair that nowhere meets the garment needs no layer over it.
+    let meets = over
+        .chunks_exact(4)
+        .zip(&cover)
+        .filter(|(px, cover)| px[3] >= SOLID && **cover >= 0.5)
+        .count();
 
     Dressed {
         person: out,
-        garment: laid,
+        garment: cloth.laid(placement, (w, h)),
+        hair: (meets >= HAIR_MEETS).then_some(over),
     }
 }
 
@@ -994,6 +1079,88 @@ fn risen_clothes(
     soft
 }
 
+impl Garment {
+    /// A garment from a layer's pixels: the picture cut to what it holds.
+    /// `None` when it holds nothing.
+    pub fn trimmed(rgba: &[u8], width: u32, height: u32) -> Option<Self> {
+        let (w, h) = (width as usize, height as usize);
+        if w == 0 || rgba.len() != w * h * 4 {
+            return None;
+        }
+        let shows = |x: usize, y: usize| rgba[(y * w + x) * 4 + 3] >= 8;
+        let top = (0..h).find(|&y| (0..w).any(|x| shows(x, y)))?;
+        let bottom = (top..h).rfind(|&y| (0..w).any(|x| shows(x, y)))?;
+        let left = (0..w).find(|&x| (top..=bottom).any(|y| shows(x, y)))?;
+        let right = (left..w).rfind(|&x| (top..=bottom).any(|y| shows(x, y)))?;
+        let mut cut = Vec::with_capacity((right - left + 1) * (bottom - top + 1) * 4);
+        for y in top..=bottom {
+            cut.extend_from_slice(&rgba[(y * w + left) * 4..(y * w + right + 1) * 4]);
+        }
+        Some(Self {
+            rgba: cut,
+            width: (right - left + 1) as u32,
+            height: (bottom - top + 1) as u32,
+        })
+    }
+}
+
+/// What dressing a photo needs of its person, read once by the models: kept,
+/// it lays another garment at once.
+pub struct Fitting {
+    pub figure: Figure,
+    pub face: FaceMarks,
+    pub neck: Neck,
+}
+
+impl Fitting {
+    /// Read the person of a cut-out photo: `person` is its straight-alpha
+    /// RGBA, shown to the models over `backdrop`. `progress` gets short
+    /// status lines.
+    pub fn read(
+        person: &[u8],
+        width: u32,
+        height: u32,
+        backdrop: [u8; 3],
+        prefer_gpu: bool,
+        progress: &dyn Fn(String),
+    ) -> Result<Self, String> {
+        use super::ai::{body_parts::Segmenter, face_mesh};
+
+        if width == 0 || person.len() != width as usize * height as usize * 4 {
+            return Err("ảnh không hợp lệ".to_string());
+        }
+        let shown = super::imposition::over_backdrop(person, backdrop);
+        progress("Đang tìm khuôn mặt…".to_string());
+        let meshes = face_mesh::detect(&shown, width, height)?;
+        let mesh = meshes
+            .iter()
+            .max_by(|a, b| a.frame().1.total_cmp(&b.frame().1))
+            .ok_or_else(|| "không tìm thấy khuôn mặt nào".to_string())?;
+        progress("Đang tìm cổ, tóc và áo…".to_string());
+        let labels = Segmenter::load(prefer_gpu)?.segment_face(&shown, width, height, mesh)?;
+        let matte: Vec<u8> = person.chunks_exact(4).map(|px| px[3]).collect();
+        let figure = Figure::read(&labels, &matte, width, height);
+        let face = FaceMarks::from_mesh(mesh);
+        let neck = neck_of(&figure, &face);
+        Ok(Self { figure, face, neck })
+    }
+
+    /// The photo's layers with `person` (now, as the photo shows it) dressed
+    /// in `garment`.
+    pub fn dress(&self, person: &[u8], garment: &Garment, collar: &Collar) -> Dressed {
+        let photo = (self.figure.width, self.figure.height);
+        let placement = Placement::fit(collar, garment.height, &self.neck, photo);
+        dress(
+            person,
+            &self.figure,
+            &self.face,
+            garment,
+            collar,
+            &placement,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,12 +1339,42 @@ mod tests {
         let laid = px(&dressed.person, 200, 400);
         assert_eq!(laid[3], 255);
         assert!(laid[0] > 150 && laid[1] > 110 && laid[1] < 200, "{laid:?}");
-        // The hair that falls over the shoulder stays, and shows through
-        // the garment.
+        // The hair that falls over the shoulder stays, and lies over the
+        // garment as a layer of its own; over the collar's line that layer
+        // is clear.
+        let hair = dressed.hair.as_deref().expect("hair over the garment");
         assert_eq!(px(&dressed.person, 135, 480), [10, 10, 10, 255]);
-        assert_eq!(px(&dressed.garment, 135, 480)[3], 0);
-        // The garment covers the shoulder beside it.
-        assert_eq!(px(&dressed.garment, 280, 520), [240, 240, 250, 255]);
+        assert_eq!(px(hair, 135, 480), [10, 10, 10, 255]);
+        assert_eq!(px(hair, 135, 300)[3], 0);
+        // The garment is whole: it covers the shoulder, lies under the hair
+        // and reaches the photo's bottom.
+        assert_eq!(piece_px(&dressed.garment, 280, 520), [240, 240, 250, 255]);
+        assert_eq!(piece_px(&dressed.garment, 135, 480), [240, 240, 250, 255]);
+        assert_eq!(piece_px(&dressed.garment, 200, 599), [240, 240, 250, 255]);
+        assert!(
+            dressed.garment.offset.0 <= 5,
+            "{:?}",
+            dressed.garment.offset
+        );
+        // Around the opening the person has skin under the garment.
+        let under = px(&dressed.person, 200, 455);
+        assert_eq!(under[3], 255);
+        assert!(under[0] > 120 && under[2] < 160, "{under:?}");
+    }
+
+    /// The alpha of a piece at a point of the photo.
+    fn piece_px(piece: &Piece, x: usize, y: usize) -> [u8; 4] {
+        let (px, py) = (x as i32 - piece.offset.0, y as i32 - piece.offset.1);
+        if px < 0 || py < 0 || px >= piece.width as i32 || py >= piece.height as i32 {
+            return [0; 4];
+        }
+        let i = (py as usize * piece.width as usize + px as usize) * 4;
+        [
+            piece.rgba[i],
+            piece.rgba[i + 1],
+            piece.rgba[i + 2],
+            piece.rgba[i + 3],
+        ]
     }
 
     /// The person of `figure`: skin where skin is, black hair, a red top.
@@ -1251,12 +1448,16 @@ mod tests {
         let placement = Placement::fit(&collar, shirt.height, &neck, (figure.width, figure.height));
         let dressed = dress(&person, &figure, &face, &shirt, &collar, &placement);
         let alpha = |buffer: &[u8], x: usize, y: usize| buffer[(y * w + x) * 4 + 3];
-        // The top the labels took for hair is gone and the garment shows
-        // there; the hair itself stays over the garment.
-        assert_eq!(alpha(&dressed.person, 166, 450), 0);
-        assert_eq!(alpha(&dressed.garment, 166, 450), 255);
-        assert_eq!(alpha(&dressed.person, 160, 450), 255);
-        assert_eq!(alpha(&dressed.garment, 160, 450), 0);
+        // The top the labels took for hair is gone, and is no hair to lie
+        // over the garment; the hair itself is.
+        let hair = dressed.hair.expect("hair over the garment");
+        assert_eq!(alpha(&dressed.person, 166, 500), 0);
+        assert_eq!(alpha(&hair, 166, 500), 0);
+        assert_eq!(alpha(&dressed.person, 160, 500), 255);
+        assert_eq!(alpha(&hair, 160, 500), 255);
+        // The garment is whole under both.
+        assert_eq!(piece_px(&dressed.garment, 166, 500)[3], 255);
+        assert_eq!(piece_px(&dressed.garment, 160, 500)[3], 255);
     }
 
     fn over(base: &mut [u8], layer: &[u8]) {
@@ -1436,7 +1637,14 @@ mod tests {
                 let dressed = dress(&person, &figure, &face, garment, collar, &placement);
                 let mut flat = plain.clone();
                 over(&mut flat, &dressed.person);
-                over(&mut flat, &dressed.garment);
+                let laid: Vec<u8> = (0..h as usize)
+                    .flat_map(|y| (0..w as usize).map(move |x| (x, y)))
+                    .flat_map(|(x, y)| piece_px(&dressed.garment, x, y))
+                    .collect();
+                over(&mut flat, &laid);
+                if let Some(hair) = &dressed.hair {
+                    over(&mut flat, hair);
+                }
                 println!(
                     "    {label}: x{:.2}, stretch {:.2}, {} ms",
                     placement.scale,

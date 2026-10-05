@@ -83,6 +83,8 @@ pub struct UiShell {
     pub(in crate::app) portrait_cache: Option<crate::app::portrait_ops::PortraitCache>,
     /// The "Làm ảnh thẻ" job (and its wait for the background model).
     pub(in crate::app) id_photo: crate::app::id_photo_ops::IdPhotoSession,
+    /// The garment in the "Áo" box, and the photo that wears it.
+    pub(in crate::app) garment: crate::app::garment_ops::GarmentSession,
     /// The folder of photos chosen in "Xếp ảnh in".
     pub(in crate::app) print_folder: Option<crate::app::actions::impose::PrintFolder>,
     pub(in crate::app) user_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,

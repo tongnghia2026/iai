@@ -929,6 +929,11 @@ impl App {
         } else {
             Default::default()
         };
+        let garment = if self.shell.ui.show_portrait_dialog {
+            self.garment_state()
+        } else {
+            Default::default()
+        };
         let portrait_state = if self.shell.ui.show_portrait_dialog {
             self.portrait_dialog_state()
         } else {
@@ -1815,6 +1820,12 @@ impl App {
                 id_photo_error: id_photo.error,
                 id_photo_busy: id_photo.busy,
                 id_photo_made: id_photo.made,
+                garment_thumb: garment.thumb,
+                garment_name: garment.name,
+                garment_worn: garment.worn,
+                garment_busy: garment.busy,
+                garment_status: garment.status,
+                garment_error: garment.error,
                 print_folder: self
                     .shell
                     .print_folder

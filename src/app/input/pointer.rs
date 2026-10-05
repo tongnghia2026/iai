@@ -30,6 +30,9 @@ impl App {
         button: MouseButton,
     ) {
         let pressed = state == ElementState::Pressed;
+        if button == MouseButton::Left && !pressed {
+            self.note_garment_drop();
+        }
         if self.shell.ui.show_paint_color_dialog {
             if button == MouseButton::Left {
                 if pressed && !self.edit.input.is_over_ui {
