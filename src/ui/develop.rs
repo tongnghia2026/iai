@@ -155,6 +155,28 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     }
 }
 
+/// Width of the lane down the panel's right edge that is the scroll bar's
+/// alone: no row reaches into it, so the bar covers no value box and a press at
+/// the end of a track never lands on it.
+const SCROLL_LANE: f32 = 8.0;
+
+/// The panel's scroll bar: thin, in sight while there is more to scroll to,
+/// a little wider and brighter under the pointer.
+fn panel_scroll_style() -> egui::style::ScrollStyle {
+    egui::style::ScrollStyle {
+        bar_width: 6.0,
+        floating_width: 3.0,
+        bar_outer_margin: 1.0,
+        handle_min_length: 28.0,
+        dormant_handle_opacity: 0.3,
+        active_handle_opacity: 0.45,
+        interact_handle_opacity: 0.85,
+        active_background_opacity: 0.0,
+        interact_background_opacity: 0.35,
+        ..egui::style::ScrollStyle::floating()
+    }
+}
+
 /// Build the Develop control sections + action row into `ui`, cloning the
 /// current settings and pushing any change through `actions.develop.set_develop_settings`.
 /// Shared by the in-canvas dialog (`build`) and the Develop window (D2). Returns
@@ -191,11 +213,38 @@ pub(crate) fn develop_panel_contents(
     let scroll_h =
         (ui.available_height().min(max_panel_h) - footer_h - 6.0 - ui.spacing().item_spacing.y)
             .max(0.0);
+    // The scroll bar has a lane of its own down the right edge, in the host's
+    // margin as far as there is one. Laid out in a child so that rows asking
+    // for more width than there is widen neither the lane nor the footer.
+    let rows_w = ui.available_width();
+    let reach = (ui.clip_rect().right() - ui.max_rect().right()).clamp(0.0, SCROLL_LANE);
+    let scroll_rect =
+        egui::Rect::from_min_size(ui.cursor().min, egui::vec2(rows_w + reach, scroll_h));
+    let mut scroll_ui = ui.new_child(egui::UiBuilder::new().max_rect(scroll_rect));
+    scroll_ui.set_clip_rect(
+        scroll_ui
+            .clip_rect()
+            .intersect(egui::Rect::everything_left_of(scroll_rect.right())),
+    );
+    scroll_ui.spacing_mut().scroll = panel_scroll_style();
+    ui.allocate_rect(
+        egui::Rect::from_min_size(scroll_rect.min, egui::vec2(rows_w, scroll_h)),
+        egui::Sense::hover(),
+    );
     egui::ScrollArea::vertical()
         .max_height(scroll_h)
         .min_scrolled_height(0.0)
         .auto_shrink([false, false])
-        .show(ui, |ui| {
+        .content_margin(egui::Margin {
+            right: SCROLL_LANE as i8,
+            ..egui::Margin::ZERO
+        })
+        .show(&mut scroll_ui, |ui| {
+            // No row paints or takes a press in the lane.
+            ui.set_clip_rect(
+                ui.clip_rect()
+                    .intersect(egui::Rect::everything_left_of(ui.max_rect().right())),
+            );
             ui.horizontal(|ui| {
                 ui.label("Preview");
                 let (text, color) = if data.develop.develop_preview_settled {
@@ -597,8 +646,9 @@ pub(crate) fn develop_panel_contents(
                             "Luminance",
                         )
                         .changed();
-                    ui.label("RGB tabs remain per-channel");
                 });
+                // On a line of its own: beside the modes it ran off the panel.
+                ui.label("RGB tabs remain per-channel");
                 changed |=
                     curve_editor_ui(ui, &mut settings, data.develop.develop_histogram.as_deref());
                 changed |= slider_row(
@@ -1116,6 +1166,76 @@ mod layout_tests {
         }
     }
 
+    /// Opt-in: the panel as the Develop window hosts it, at the window's
+    /// default height and maximised on a 1080p screen, the pointer at the
+    /// right end of a row.
+    #[test]
+    #[ignore]
+    #[allow(deprecated)]
+    fn probe_window_panel_snapshot() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        for (name, height, hover_x) in [
+            ("mac_dinh", 894.0, 460.0 - 20.0),
+            ("mac_dinh_tren_thanh_cuon", 894.0, 460.0 - 4.0),
+            ("phong_to", 1017.0, 460.0 - 20.0),
+        ] {
+            for (section_name, section) in [
+                ("light", SEC_LIGHT),
+                ("curve", SEC_CURVE),
+                ("mixer", SEC_MIXER),
+            ] {
+                let mut data = raw_data();
+                data.develop.develop_sections_open = [false; DEV_PANEL_SECTIONS];
+                data.develop.develop_sections_open[section] = true;
+                let hover = egui::pos2(hover_x, 420.0);
+                let image = crate::ui::snapshot::render(460.0, height, 2.0, Some(hover), |ctx| {
+                    egui::SidePanel::right("develop_window_snapshot")
+                        .exact_width(360.0)
+                        .resizable(false)
+                        .show(ctx, |ui| {
+                            ui.add_space(6.0);
+                            ui.add_enabled_ui(false, |ui| {
+                                egui::ComboBox::from_label("Profile")
+                                    .selected_text("iAi Standard")
+                                    .show_ui(ui, |_ui| {});
+                            });
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                let _ = ui.button("Fit");
+                                let _ = ui.button("100%");
+                                ui.label("33%");
+                                ui.label("· scroll=zoom, mid-drag=pan");
+                            });
+                            ui.separator();
+                            let mut actions = UiActions::default();
+                            let panel_h = ui.available_height();
+                            develop_panel_contents(ui, &data, &mut actions, panel_h);
+                        });
+                });
+                image
+                    .save(
+                        std::path::Path::new(&dir)
+                            .join(format!("develop_cua_so_{name}_{section_name}.png")),
+                    )
+                    .unwrap();
+            }
+        }
+        // The dialog that stands in when the window cannot open.
+        let mut data = raw_data();
+        data.develop.show_develop_dialog = true;
+        data.develop.develop_sections_open = DEFAULT_SECTIONS_OPEN;
+        let hover = egui::pos2(300.0, 420.0);
+        let image = crate::ui::snapshot::render(700.0, 700.0, 2.0, Some(hover), |ctx| {
+            let mut actions = UiActions::default();
+            build(ctx, &data, &mut actions);
+        });
+        image
+            .save(std::path::Path::new(&dir).join("develop_hop_thoai.png"))
+            .unwrap();
+    }
+
     #[allow(deprecated)] // Exercise the same panel host as the Develop window.
     fn frame(
         ctx: &egui::Context,
@@ -1193,6 +1313,159 @@ mod layout_tests {
         data.develop.develop_exif = Some("Camera model · 100 mm · f/8 · 1/250 s · ISO 200 — metadata that wraps onto another line".into());
         data.develop.develop_sections_open = [true; DEV_PANEL_SECTIONS];
         data
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Where the first `label` is painted.
+    fn text_pos(output: &egui::FullOutput, label: &str) -> Option<egui::Pos2> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos),
+                _ => None,
+            })
+    }
+
+    /// The value box of the row named `label`: the box around the first "0"
+    /// painted after the label.
+    fn value_box(output: &egui::FullOutput, label: &str) -> egui::Rect {
+        let value = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((text.galley.text().to_string(), text.pos)),
+                _ => None,
+            })
+            .skip_while(|(text, _)| text != label)
+            .find(|(text, _)| text == "0")
+            .map(|(_, pos)| pos + egui::vec2(3.0, 5.0))
+            .unwrap_or_else(|| panic!("no value for {label}"));
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.contains(value) && rect.rect.height() < 20.0 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .unwrap_or_else(|| panic!("no value box for {label}"))
+    }
+
+    /// A panel too short for its rows, so it scrolls: Light open.
+    fn scrolling_panel() -> (egui::Context, UiData, f32) {
+        let mut data = raw_data();
+        data.develop.develop_sections_open = DEFAULT_SECTIONS_OPEN;
+        (egui::Context::default(), data, 600.0)
+    }
+
+    #[test]
+    fn a_press_at_the_end_of_a_track_is_the_sliders_not_the_scroll_bars() {
+        let (ctx, data, height) = scrolling_panel();
+        frame(&ctx, height, &data, vec![]);
+        let (output, ..) = frame(&ctx, height, &data, vec![]);
+        let value = value_box(&output, "Contrast");
+        // The track runs under the value box, to its right edge.
+        let end = egui::pos2(value.right() - 1.0, value.bottom() + 8.0);
+        frame(&ctx, height, &data, vec![egui::Event::PointerMoved(end)]);
+        frame(&ctx, height, &data, vec![press(end, true)]);
+        let (_, actions, _) = frame(&ctx, height, &data, vec![press(end, false)]);
+        let contrast = actions
+            .develop
+            .set_develop_settings
+            .expect("the click moves Contrast")
+            .contrast;
+        assert!(
+            contrast > 95.0,
+            "Contrast at the end of its track: {contrast}"
+        );
+    }
+
+    #[test]
+    fn no_row_reaches_into_the_scroll_bars_lane() {
+        // Curve's rows ask for more width than the panel has.
+        for section in [SEC_LIGHT, SEC_CURVE] {
+            let (ctx, mut data, height) = scrolling_panel();
+            data.develop.develop_sections_open = [false; DEV_PANEL_SECTIONS];
+            data.develop.develop_sections_open[section] = true;
+            for _ in 0..3 {
+                frame(&ctx, height, &data, vec![]);
+            }
+            let (output, ..) = frame(&ctx, height, &data, vec![]);
+            let lane = 960.0 - SCROLL_LANE;
+            for label in ["Scopes", "Presets", "Light"] {
+                let clip = output
+                    .shapes
+                    .iter()
+                    .find_map(|clipped| match &clipped.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => {
+                            Some(clipped.clip_rect)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("no {label}"));
+                assert!(
+                    clip.right() <= lane,
+                    "section {section}: {label} may paint to {}, the lane starts at {lane}",
+                    clip.right()
+                );
+            }
+            // The footer keeps the panel's margin.
+            assert!(footer_button(&output, "Cancel").right() <= lane);
+        }
+    }
+
+    #[test]
+    fn a_click_at_the_edge_of_a_value_box_types_into_it() {
+        let (ctx, data, height) = scrolling_panel();
+        frame(&ctx, height, &data, vec![]);
+        let (output, ..) = frame(&ctx, height, &data, vec![]);
+        let value = value_box(&output, "Contrast");
+        let edge = egui::pos2(value.right() - 1.5, value.center().y);
+        frame(&ctx, height, &data, vec![egui::Event::PointerMoved(edge)]);
+        frame(&ctx, height, &data, vec![press(edge, true)]);
+        frame(&ctx, height, &data, vec![press(edge, false)]);
+        frame(&ctx, height, &data, vec![]);
+        assert!(ctx.egui_wants_keyboard_input(), "the field is open");
+    }
+
+    #[test]
+    fn a_drag_down_the_panels_right_edge_scrolls_whatever_is_open() {
+        // Curve's rows ask for more width than the panel has.
+        for section in [SEC_LIGHT, SEC_CURVE, SEC_MIXER] {
+            let (ctx, mut data, height) = scrolling_panel();
+            data.develop.develop_sections_open = [false; DEV_PANEL_SECTIONS];
+            data.develop.develop_sections_open[section] = true;
+            for _ in 0..3 {
+                frame(&ctx, height, &data, vec![]);
+            }
+            let (output, ..) = frame(&ctx, height, &data, vec![]);
+            let before = text_pos(&output, "Scopes").expect("the Scopes header").y;
+            let from = egui::pos2(960.0 - 4.0, 200.0);
+            let to = from + egui::vec2(0.0, 80.0);
+            frame(&ctx, height, &data, vec![egui::Event::PointerMoved(from)]);
+            frame(&ctx, height, &data, vec![press(from, true)]);
+            frame(&ctx, height, &data, vec![egui::Event::PointerMoved(to)]);
+            frame(&ctx, height, &data, vec![press(to, false)]);
+            let (output, ..) = frame(&ctx, height, &data, vec![]);
+            let after = text_pos(&output, "Scopes").map_or(f32::NEG_INFINITY, |pos| pos.y);
+            assert!(
+                after < before - 20.0,
+                "section {section}: Scopes went from {before} to {after}"
+            );
+        }
     }
 
     #[test]
