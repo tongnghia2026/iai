@@ -1,8 +1,8 @@
 # Kế hoạch: thay áo cho ảnh thẻ, chạy offline (05/10/2026)
 
-**Trạng thái: CHỦ ĐÃ DUYỆT 05/10, đang làm.** Đợt 31 (app tự căn áo) chủ xem ảnh thử: "ok; làm
-tiếp". **Đợt 32 (khung "Áo", kéo thả, ba layer riêng) xong code, chờ chủ test trên bản build.**
-Cách làm chủ chốt: mở sẵn file áo
+**Trạng thái (05/10 chiều): đợt 31 và 32 CHỦ TEST OK.** Việc kế tiếp: chủ muốn **chỉnh lại quy
+trình** ("vẫn có 1 vài điểm bị vấp"), chưa nêu điểm nào — hỏi chủ ở đầu phiên sau; đợt 33 chưa
+làm. Cách làm chủ chốt: mở sẵn file áo
 Photoshop của tiệm, kéo áo vào khung "Áo", app tự căn — **không dùng model tạo ảnh** (mục "Kho
 áo có sẵn của chủ" và mục 5); phần tìm model ở mục 3 giữ lại làm tư liệu.
 
@@ -253,8 +253,13 @@ trong `src/ui/dialogs/id_photo.rs`; lõi `core/garment.rs` đổi sang trả ba 
   trước; Free Transform; và một bài chạy model thật: làm ảnh thẻ có áo trong khung → mặc →
   chỉnh chân dung trên "Người" → đổi khung → mặc lại); bảng: bài bấm giả lập các nút của hàng
   "Áo"; cổng "lệnh ngoài bảng" thêm bốn ý.
-- Chưa kiểm được bằng test (cần cửa sổ thật, chờ chủ thử): cú kéo thả bằng chuột thật từ canvas
-  lên bảng nổi, và Free Transform trên layer Áo sau khi mặc.
+- [x] Chủ test đợt 32 trên `target\release\iai.exe` (05/10 14:55): **"đã test ok"** — gồm cả
+  hai chỗ tôi chưa kiểm được trên cửa sổ thật (kéo thả bằng chuột thật lên bảng nổi, Free
+  Transform trên layer Áo); chủ không báo lỗi nào ở đó.
+- **Việc kế tiếp chủ nêu ngay sau đó (05/10):** "tôi cần chỉnh lại quy trình, quy trình hiện
+  tại nó vẫn có 1 vài điểm bị vấp" — chủ CHƯA nói vấp ở điểm nào, sẽ nêu ở hội thoại sau. Đầu
+  phiên sau hỏi chủ các điểm đó rồi mới làm; đợt 33 (hoàn thiện cổ / bóng / nét) xếp sau việc
+  chỉnh quy trình trừ khi chủ bảo khác.
 - Biết trước: nếu đổi màu / độ sáng tóc bằng thanh "Tóc" sau khi mặc áo thì phần tóc nằm trên
   áo (layer "Tóc trên áo") không đổi theo — kéo áo vào lại để làm mới.
 
