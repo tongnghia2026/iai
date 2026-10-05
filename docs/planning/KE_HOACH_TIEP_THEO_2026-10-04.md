@@ -18,10 +18,12 @@ Bàn giao cho phiên làm việc mới. Lịch sử chi tiết các đợt 1–1
   thích nổi trên thanh kéo.
 - Chủ test OK đợt 19 (04/10): giao diện mới của Chỉnh chân dung / Develop / Làm ảnh thẻ.
 - Chủ test OK đợt 20 (04/10): gõ số vào ô của thanh kéo; Develop chỉ mở một mục; icon môi.
-- **Chờ chủ test — đợt 21 (04/10):** bấm vào ô số ở Develop không còn làm ảnh / giao diện
-  nháy; các hàng không nhích khi ô nhập hiện ra.
-- Đợt 17 chủ chưa nói rõ: phím `[` `]` với Smudge / Dodge / Burn; Pencil vẽ đúng cỡ và màu;
-  Smart Fill (AI) giữ vân ảnh.
+- Chủ test OK đợt 21 (05/10): bấm vào ô số ở Develop không còn nháy. Chủ nêu tiếp: thanh cuộn
+  của bảng Develop hiện lên đè vào ô số → **đợt 28 (05/10, `9708eb3`), chờ chủ test** (mục
+  "Đợt 28" trong `KE_HOACH_ANH_THE_2026-10-02.md`). Bản test: **`target\release\iai-dot28.exe`**
+  (build 05/10 09:14).
+- Chủ test OK đợt 17 (05/10): phím `[` `]` với Smudge / Dodge / Burn; Pencil vẽ đúng cỡ và màu;
+  Smart Fill (AI) giữ vân ảnh; lưu / nạp công thức chân dung.
 - Bản portable `dist\iAi-portable` vẫn là bản 02/10 — thiếu mọi thứ làm từ 03/10.
 - Chủ đã test OK: đợt 8–15 (Chi tiết mặt AI, Sửa màu & sáng, mặc định mới, thanh màu hai
   chiều, Sáng da = Midtones, Xếp ảnh in + trang 13×18 hỗn hợp, viền cắt 2 px, hết vạch mờ ở
@@ -54,7 +56,7 @@ tiết và số đo: mục "Đợt 16" trong `KE_HOACH_ANH_THE_2026-10-02.md`.
   LICENSE / THIRD_PARTY / docs, `BUILD_INFO.txt` ghi ngày, commit, SHA-256).
 - Có portable mới thì chủ mới test được "hiển thị trong trẻo" trên máy khác (mục 2).
 
-### 1.3 Lưu công thức chân dung — ĐÃ LÀM phần lưu / nạp (đợt 17), chờ chủ test
+### 1.3 Lưu công thức chân dung — ĐÃ LÀM phần lưu / nạp (đợt 17), chủ test OK 05/10
 
 Chủ chọn 04/10: **chỉ lưu / nạp công thức**; phần "áp cho các tab đang mở" và "chạy cả thư
 mục" KHÔNG làm (chưa cần ở tiệm) — đừng tự làm, đừng đề xuất lại trừ khi chủ hỏi. Chi tiết:
@@ -84,10 +86,11 @@ sạch khi chạy test (≈ 3 GB thay cho 18 GB). Ổ C: trống 127 GB → ≈ 
 
 ## 2. Đang chờ chủ test (đã build từ trước)
 
-- Select ▸ Color Range: con trỏ ống hút, bỏ picker (`d2fe039`).
-- Select Subject chạy GPU, tự lùi CPU khi lỗi.
-- Ba lỗi canvas lớn (xuất RAW lớn ra JPEG, hút màu toàn ảnh, Alt+Delete).
-- Hiển thị trong trẻo trên máy khác (cần portable mới).
+- Chủ test OK 05/10: Select ▸ Color Range (con trỏ ống hút, bỏ picker, `d2fe039`); Select
+  Subject chạy GPU, tự lùi CPU khi lỗi; ba lỗi canvas lớn (xuất RAW lớn ra JPEG, hút màu toàn
+  ảnh, Alt+Delete).
+- Còn chờ: hiển thị trong trẻo trên máy khác (cần portable mới).
+- Còn chờ: đợt 28 — thanh cuộn của bảng Develop (05/10).
 
 ## 3. Ghi chú kỹ thuật cho phiên sau
 
@@ -103,6 +106,12 @@ sạch khi chạy test (≈ 3 GB thay cho 18 GB). Ổ C: trống 127 GB → ≈ 
   `\` (đã dính hai lần).
 - Chưa thử trên ảnh thật: đau mắt đỏ (mới thử mắt đỏ giả lập). Chưa nhìn tận mắt bố cục
   nhóm "Xếp ảnh in" trong hộp thoại Chỉnh chân dung (chủ đã test OK).
+- 05/10: tiến trình test kẹt từ 04/10 (`iai-0bef52141f521433.exe`, PID 21468, `taskkill /F`
+  không ăn) còn giữ cổng 47821 của cầu nối extension: test
+  `ext_bridge::tests::server_completes_websocket_handshake` hỏng với "connection refused" cho
+  tới khi máy khởi động lại — không phải lỗi code. Cùng lý do, app thật mở lúc này không nhận
+  được kết nối từ extension Chrome (AI Image Studio qua Gemini / ChatGPT). Khởi động lại máy
+  là hết; sau đó xóa `target/debug/deps/iai-0bef52141f521433.stuck.exe`.
 
 ## 4. Chủ đã gác — không tự làm, không nhắc lại nhiều
 

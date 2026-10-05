@@ -516,7 +516,7 @@ cái", muốn đứng yên; Chỉnh chân dung thì không bị.
   trước và trong lúc gõ giống hệt nhau.
 - Tôi chưa nhìn tận mắt hiện tượng nháy trên app thật; hai nguyên nhân trên là thứ đọc code và
   test giả lập tìm ra.
-- [ ] Build Release, chủ test.
+- [x] Build Release, chủ test: **hết nháy** (05/10). Chủ nêu tiếp chuyện thanh cuộn → đợt 28.
 
 ## Đợt 22 (04/10): ô số lên cùng dòng với tên thanh như PTS, đang gõ vẫn kéo được ngay
 
@@ -775,3 +775,47 @@ trước khác (Levels, Curves, Filter, Develop, Làm sạch scan) vẫn khóa n
 - [x] Build Release, chủ test đợt 27: **OK** (05/10). Chủ không nói gì thêm về ba điều tôi tự
   quyết (Ctrl+Z bỏ xem trước; có lệnh thì dừng nhận diện; layer đã sửa tay không mở lại công
   thức cũ) — giữ nguyên như đã làm.
+
+## Đợt 28 (05/10): thanh cuộn của bảng Develop không còn đè lên ô số
+
+Lời chủ sau khi test đợt 21 (hết nháy): "thanh cuộn bên phải mỗi khi di chuyển chuột gần ô số
+hoặc kéo max lỡ dính vô nó hiện lên rất vướng khi đang ở cửa sổ mặc định; hãy dời ra xa hơn
+hoặc thu nhỏ nó lại; nếu phóng to cửa sổ lên full màn hình thì nó bị tràn ra ngoài màn hình và
+biến mất".
+
+Nguyên nhân (đã vẽ thử bảng ở đúng cỡ cửa sổ của máy chủ, 1574×894 và phóng to 1920×1017, rồi
+mới sửa): thanh cuộn là loại "nổi" mặc định của egui — bình thường mảnh 2 px, chuột vào dải
+10 px sát mép phải của vùng cuộn thì nở ra 10 px. Dải đó nằm **đè lên** đầu phải của các hàng:
+che mép ô số và đoạn cuối của rãnh kéo, và cú nhấn ở đó bị thanh cuộn nhận mất (kéo thanh về
+mức tối đa thì bảng lại cuộn). Ngoài ra hễ một hàng đòi rộng hơn bảng (dòng "Master Curve …
+RGB tabs remain per-channel" của mục Curve) thì egui dời thanh cuộn ra sát mép cửa sổ và các
+hàng dài thêm 8 px — vị trí thanh cuộn đổi theo mục đang mở.
+
+- [x] **Thanh cuộn có làn riêng sát mép phải cửa sổ** (`SCROLL_LANE` = 8 px, đúng phần lề cũ
+  của bảng nên các hàng không hẹp đi): không hàng nào vẽ hay nhận chuột trong làn đó. Từ mép
+  ô số tới thanh cuộn nay cách 10 px (trước đè lên nhau 2 px).
+- [x] **Thanh cuộn nhỏ lại** (`panel_scroll_style`): bình thường 3 px và luôn thấy mờ khi còn
+  nội dung để cuộn; chuột vào đúng làn thì rộng 6 px (trước 10 px) và sáng lên. Rê chuột trên
+  ô số hay cuối rãnh kéo không còn làm nó nở ra.
+- [x] **Vị trí thanh cuộn không còn phụ thuộc mục đang mở**: vùng cuộn nằm trong một `new_child`
+  có bề rộng cố định, hàng nào đòi rộng hơn thì bị cắt ở mép làn chứ không đẩy thanh cuộn hay
+  hàng nút Reset / Open Image / Cancel. Dòng chữ "RGB tabs remain per-channel" của mục Curve
+  xuống một dòng riêng (trước bị cắt cụt ở mép bảng).
+- Về chuyện "phóng to thì biến mất": ở cỡ 1920×1017 với mục Light mở, cả bảng vừa đủ chiều cao
+  nên không còn gì để cuộn — thanh cuộn ẩn đi, không phải bị tràn ra ngoài. Mở mục dài (Color
+  Mixer…) thì nó hiện lại ở sát mép phải. Tôi kết luận vậy từ bản vẽ thử, chưa nhìn trên cửa sổ
+  thật đang phóng to.
+- Test (hai cái đầu hỏng trước khi sửa): `a_press_at_the_end_of_a_track_is_the_sliders_not_the_scroll_bars`,
+  `a_click_at_the_edge_of_a_value_box_types_into_it`, `no_row_reaches_into_the_scroll_bars_lane`,
+  `a_drag_down_the_panels_right_edge_scrolls_whatever_is_open`. Probe mới
+  `probe_window_panel_snapshot` vẽ bảng đúng như cửa sổ Develop chứa nó (hai cỡ cửa sổ, ba mục,
+  chuột trên ô số / trên thanh cuộn) và hộp thoại dự phòng.
+- Chỉ sửa bảng Develop. Bảng Auto retouch và Refine Selection dùng cùng kiểu hàng với thanh cuộn
+  mặc định — chủ chưa báo vướng nên chưa đụng.
+- Test: 1922 qua, 1 hỏng không liên quan (`ext_bridge::…server_completes_websocket_handshake`:
+  tiến trình test kẹt từ 04/10 còn giữ cổng 47821, xem mục 3 của
+  `KE_HOACH_TIEP_THEO_2026-10-04.md`); các bài `app::portrait_ops` / `id_photo_ops` không chạy
+  lại vì không đụng tới. Code `9708eb3`; bản test **`target\release\iai-dot28.exe`** (build
+  05/10 09:14 — lúc build chủ đang mở `target\release\iai.exe` nên không ghi đè được; chưa mở
+  thử bản mới để khỏi chen vào phiên chủ đang dùng).
+- [ ] Build Release, chủ test.
