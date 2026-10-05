@@ -214,10 +214,10 @@ impl App {
             let _ = canvas.convert_to_cmyk(crate::core::canvas::CmykProfile::Naive);
         }
 
-        let mut doc = crate::core::document::Document::new(id, w, h);
-        doc.canvas = canvas;
+        // `from_canvas`, not `new` then a swap: `new` would build and flatten
+        // a second blank canvas of this size only to have it replaced.
+        let mut doc = crate::core::document::Document::from_canvas(id, canvas, None);
         doc.title = name.clone();
-        doc.path = None;
 
         if self.has_only_welcome_placeholder() {
             self.docs.documents[0] = doc;

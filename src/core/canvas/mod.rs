@@ -503,18 +503,24 @@ impl Canvas {
     }
 
     pub fn new(width: u32, height: u32) -> Self {
+        let mut canvas = Self::new_unflattened(width, height);
+        canvas.ensure_pixels();
+        canvas.pixels_stale = false;
+        canvas
+    }
+
+    /// [`Self::new`] for a canvas about to be given its layers: the flat
+    /// composite is left for [`Self::ensure_pixels`] to make once they are in,
+    /// rather than made now of the blank page and thrown away. On a sheet of
+    /// prints that is a whole-page flatten saved.
+    pub fn new_unflattened(width: u32, height: u32) -> Self {
         let layer_stack = LayerStack::new(width, height);
-        let pixels = if Self::fits_flat_buffer(width, height) {
-            layer_stack.flatten(width, height)
-        } else {
-            Vec::new()
-        };
         let selection = Selection::new(width, height);
         Self {
             width,
             height,
-            pixels,
-            pixels_stale: false,
+            pixels: Vec::new(),
+            pixels_stale: true,
             layer_stack,
             layer_revision: fresh_layer_revision(),
             selection,

@@ -231,7 +231,8 @@ struct Print<'a> {
 /// group commands).
 fn sheet_canvas(paper: Paper, groups: &[(String, Vec<Print>)]) -> Canvas {
     let (paper_w, paper_h) = paper.size_px();
-    let mut canvas = Canvas::new(paper_w, paper_h);
+    // Flattened once, below, with the prints on it.
+    let mut canvas = Canvas::new_unflattened(paper_w, paper_h);
     canvas.metadata.resolution_ppi = SHEET_DPI;
     let stack = &mut canvas.layer_stack;
     stack.layers[0].is_background = true;
@@ -278,10 +279,10 @@ impl App {
         for (i, (canvas, title)) in sheets.into_iter().enumerate() {
             let id = crate::core::document::DocumentId(self.docs.next_doc_id);
             self.docs.next_doc_id += 1;
-            let mut doc = crate::core::document::Document::new(id, canvas.width, canvas.height);
-            doc.canvas = canvas;
+            // `from_canvas`, not `new` then a swap: `new` builds and flattens
+            // a blank page of the sheet's size only to have it replaced.
+            let mut doc = crate::core::document::Document::from_canvas(id, canvas, None);
             doc.title = title;
-            doc.path = None;
             if over_welcome && i == 0 {
                 self.docs.documents[0] = doc;
             } else {
