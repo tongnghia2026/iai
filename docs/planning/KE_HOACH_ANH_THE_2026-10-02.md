@@ -903,5 +903,10 @@ làm ảnh thẻ đổi tên thành: Làm ảnh thẻ tự động và cái ô �
 - Test: 1929 qua + 22 bài `app::portrait_ops` / `id_photo_ops` qua (chạy từng bài một); 1 hỏng
   không liên quan (`ext_bridge::…server_completes_websocket_handshake`: cổng 47821 đang có app
   của chủ và tiến trình kẹt từ 04/10 giữ).
-- [ ] Bản test `target\release\iai-dot30.exe` (build 05/10 11:47; tên riêng vì lúc build chủ
-  đang mở `target\release\iai.exe` bản 10:05 nên không ghi đè được). Chờ chủ test.
+- [x] Bản test `target\release\iai-dot30.exe` (build 05/10 11:47; tên riêng vì lúc build chủ
+  đang mở `target\release\iai.exe` bản 10:05 nên không ghi đè được). Chủ test đợt 30: **OK**
+  (05/10), không nói gì về hai điểm tôi tự chốt (xanh dương; nút "Tự động làm đẹp" để nguyên)
+  — giữ nguyên.
+
+Việc kế tiếp chủ giao 05/10: thay áo cho ảnh thẻ chạy offline — kế hoạch chờ duyệt ở
+`KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (các đợt 31–35).
