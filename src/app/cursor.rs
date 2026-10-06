@@ -33,6 +33,45 @@ impl CursorOwnership {
     }
 }
 
+/// Whether input that just arrived shows the window focused although no
+/// `Focused(true)` said so. winit's can go missing: a printer driver's
+/// property sheet, owned by the window but run on another thread, may close
+/// without one, and a window believed unfocused ignores the pointer over the
+/// canvas (`CursorOwnership::can_control`). `in_front` asks the system, and
+/// only when it has to.
+pub(super) fn focus_went_unsaid(
+    focused: bool,
+    is_input: bool,
+    in_front: impl FnOnce() -> bool,
+) -> bool {
+    !focused && is_input && in_front()
+}
+
+/// Whether the system itself has `window` in front, holding the keyboard:
+/// what winit's `Focused(true)` reports. Only Windows is asked.
+pub(super) fn system_says_focused(window: &winit::window::Window) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = window.window_handle() else {
+            return false;
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return false;
+        };
+        let hwnd = handle.hwnd.get() as _;
+        // SAFETY: both calls only read the system's own state.
+        unsafe { GetForegroundWindow() == hwnd && GetFocus() == hwnd }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        false
+    }
+}
+
 pub(super) fn apply_ui_cursor(window: &winit::window::Window, icon: egui::CursorIcon) {
     let native = native_ui_cursor(icon);
     window.set_cursor_visible(native.is_some());
@@ -115,6 +154,27 @@ mod tests {
             cursor.pointer_inside = true; // A fresh position permits re-entry.
             assert_eq!(cursor.update(true, false), CursorUpdate::Apply);
         }
+    }
+
+    /// After a printer driver's own settings window closed, no `Focused(true)`
+    /// came and the canvas ignored the pointer until Alt+Tab: input in a
+    /// window the system has in front makes it focused again.
+    #[test]
+    fn input_in_the_window_in_front_makes_up_for_a_focus_event_that_never_came() {
+        let never = || -> bool { panic!("the system is asked only when it has to be") };
+        // Focused, or no input: nothing to make up for.
+        assert!(!focus_went_unsaid(true, true, never));
+        assert!(!focus_went_unsaid(false, false, never));
+        // Believed unfocused: the system's word decides.
+        assert!(focus_went_unsaid(false, true, || true));
+        assert!(!focus_went_unsaid(false, true, || false));
+
+        // What it costs to stay unfocused: the pointer over the canvas is
+        // not the app's, whatever tool is in hand.
+        let mut cursor = CursorOwnership::default();
+        cursor.pointer_inside = true;
+        assert!(!cursor.can_control(false, false));
+        assert!(cursor.can_control(true, false));
     }
 
     #[test]

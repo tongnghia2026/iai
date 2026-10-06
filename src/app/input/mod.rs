@@ -596,6 +596,26 @@ impl ApplicationHandler for App {
         }
         self.journal_input(&event);
 
+        // A Focused(true) that never came (see `focus_went_unsaid`) would
+        // leave the canvas deaf to the pointer: input the window gets while
+        // the system has it in front says it is focused all the same.
+        let is_input = matches!(
+            event,
+            WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::KeyboardInput { .. }
+        );
+        let in_front = || {
+            let window = self.win.window.as_ref();
+            window.is_some_and(|w| crate::app::cursor::system_says_focused(w))
+        };
+        if crate::app::cursor::focus_went_unsaid(self.win.window_focused, is_input, in_front) {
+            self.win.window_focused = true;
+            self.win.startup_focus_until = None;
+            self.win.surface_retry_at = None;
+            crate::diag::note("window", "focused (the system says so; no event came)");
+        }
+
         // Track ownership before egui/modal handlers can consume the event.
         // Entered has no position; wait for CursorMoved rather than reusing the
         // previous canvas coordinates (possibly underneath a new dialog).
