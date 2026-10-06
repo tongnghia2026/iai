@@ -1602,6 +1602,7 @@ fn portrait_to_json(
                 "hair": f.hair.as_ref().map(|m| region(m.region)),
                 "brows": f.brows.as_ref().map(|m| region(m.region)),
                 "clothes": f.clothes.as_ref().map(|m| region(m.region)),
+                "neck": f.neck.as_ref().map(|m| region(m.region)),
             })
         })
         .collect();
@@ -1631,6 +1632,7 @@ fn write_portrait_masks(
             ("hair", &face.hair),
             ("brows", &face.brows),
             ("clothes", &face.clothes),
+            ("neck", &face.neck),
         ] {
             if let Some(m) = mask {
                 masks.push((format!("{f}_{what}"), &m.mask, m.region));
@@ -1705,6 +1707,7 @@ fn read_portrait<R: Read + Seek>(
             hair: saved("hair"),
             brows: saved("brows"),
             clothes: saved("clothes"),
+            neck: saved("neck"),
         });
     }
     Some(PortraitRecipe {
@@ -3103,6 +3106,10 @@ mod tests {
                         region: region(0, 12, 30, 18),
                         mask: ramp(540),
                     }),
+                    neck: Some(SavedMask {
+                        region: region(1, 1, 9, 7),
+                        mask: ramp(63).into_iter().rev().collect(),
+                    }),
                 },
                 SavedFace {
                     centre: [30.0, 9.0],
@@ -3115,6 +3122,7 @@ mod tests {
                     }),
                     brows: None,
                     clothes: None,
+                    neck: None,
                 },
             ],
         }));
@@ -3165,6 +3173,12 @@ mod tests {
             (region(0, 12, 30, 18), ramp(540))
         );
         assert!(b.clothes.is_none());
+        let neck = a.neck.as_ref().expect("neck mask");
+        assert_eq!(
+            (neck.region, neck.mask.clone()),
+            (region(1, 1, 9, 7), ramp(63).into_iter().rev().collect())
+        );
+        assert!(b.neck.is_none());
 
         // Without its photo the recipe is dropped, the pixels stay.
         canvas.layer_stack.layers.remove(0);

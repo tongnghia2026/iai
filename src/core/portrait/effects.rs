@@ -13,6 +13,7 @@ use super::clothes::{ClothesArea, ClothesDetail, ClothesLook};
 use super::correct::{grey_axis, Fixes};
 use super::geometry::Region;
 use super::looks::StudioLook;
+use super::neck::NeckAt;
 use super::reshape::{reshape, FaceShape};
 use crate::core::color::luminance_f32;
 use crate::core::develop::{
@@ -44,6 +45,11 @@ pub struct PortraitSettings {
     /// [`super::ai_detail`]).
     #[serde(default)]
     pub ai_detail: f32,
+    /// "Da cổ": how far the neck's skin takes the detail the face restore
+    /// model draws there, and has its tone and light evened (see
+    /// [`super::neck`]). At 0 the neck stays as it is.
+    #[serde(default)]
+    pub neck: f32,
     /// "Sửa màu & sáng", the corrections of [`super::correct`]: how much of
     /// the measured cast, dimness and haze is taken out (0..100) and a
     /// manual cooler / warmer trim (-100..100).
@@ -139,6 +145,7 @@ impl Default for PortraitSettings {
             volume: 30.0,
             texture: 0.0,
             ai_detail: 60.0,
+            neck: 0.0,
             fix_cast: AUTO_FIX.cast,
             fix_warmth: 0.0,
             fix_exposure: AUTO_FIX.exposure,
@@ -219,6 +226,7 @@ impl PortraitSettings {
         volume: 0.0,
         texture: 0.0,
         ai_detail: 0.0,
+        neck: 0.0,
         fix_cast: 0.0,
         fix_warmth: 0.0,
         fix_exposure: 0.0,
@@ -300,6 +308,7 @@ impl PortraitSettings {
             volume: u(self.volume),
             texture: u(self.texture),
             ai_detail: u(self.ai_detail),
+            neck: u(self.neck),
             even_light: u(self.even_light),
             even_tone: u(self.even_tone),
             shine: u(self.shine),
@@ -408,6 +417,17 @@ impl PortraitSettings {
         }
     }
 
+    /// These settings (as [`Self::unit`] gives them) where "Da cổ" acts at
+    /// `amount` (0..1): the skin's tone and light evened further.
+    fn on_neck(&self, amount: f32) -> Self {
+        let more = |now: f32, share: f32| now + (1.0 - now) * share * amount;
+        Self {
+            even_tone: more(self.even_tone, NECK_TONE),
+            even_light: more(self.even_light, NECK_LIGHT),
+            ..*self
+        }
+    }
+
     fn hair_active(&self) -> bool {
         self.hair_brightness != 0.0 || self.hair_tint > 0.0 || self.hair_saturation != 0.0
     }
@@ -428,6 +448,14 @@ impl PortraitSettings {
 const VOLUME_GAIN: f32 = 0.45;
 /// Luminance swing of "Vân da" at 100.
 const TEXTURE_GAIN: f32 = 0.10;
+
+/// What "Da cổ" at 100 adds on the neck of "Đều màu da" and of "Đều sáng
+/// da" (short of all: a neck is a little darker than its face), and how much
+/// it levels the patches of light and shade between the detail and the
+/// neck's broad light, which cloned or smudged skin leaves.
+const NECK_TONE: f32 = 0.7;
+const NECK_LIGHT: f32 = 0.6;
+const NECK_LEVEL: f32 = 0.7;
 
 /// What smoothing leaves of the skin's mid band.
 fn keep_mid(s: &PortraitSettings, inside: f32) -> f32 {
@@ -725,10 +753,116 @@ struct Shared {
     skin_tone: Option<SceneToneData>,
 }
 
+/// What the skin sliders make of skin-region pixel `i` (pixel `f` of the
+/// face region when it lies there), before the skin mask weighs it. `neck`
+/// is the neck's detail here with how far "Da cổ" acts (0..1): its tone and
+/// light are then evened further, its patches of light and shade levelled
+/// and the model's detail swapped in.
+#[allow(clippy::too_many_arguments)]
+fn skin_colour(
+    face: &FaceModel,
+    skin: &SkinLayers,
+    s: &PortraitSettings,
+    shared: &Shared,
+    i: usize,
+    f: Option<usize>,
+    src: [f32; 3],
+    fetch: &dyn Fn(isize, isize) -> [f32; 3],
+    ai: Option<&DetailAt>,
+    neck: Option<(&NeckAt, f32)>,
+) -> [f32; 3] {
+    let near = neck.map_or(0.0, |(_, near)| near);
+    let evened;
+    let s = if near > 0.0 {
+        evened = s.on_neck(near);
+        &evened
+    } else {
+        s
+    };
+    let m = skin.mask[i] as f32 / 255.0;
+    let inside = skin.interior[i] as f32 / 255.0;
+    let l1 = from_u16(skin.low1[i]);
+    let l2 = from_u16(skin.low2[i]);
+    let under = f.map_or(0.0, |f| skin.under_eye[f] as f32 / 255.0);
+    let mut r = skin_result(skin, s, i, under, src, l1, l2, inside);
+    let cover = f.map_or(0.0, |f| face.spot_cover[f] as f32 / 255.0);
+    let mut healed = 0.0;
+    if let Some(f) = f.filter(|_| s.blemish > 0.0 && cover > 0.0) {
+        let score = face.spot_score[f] as f32 / BLEMISH_SCALE;
+        let threshold = 1.5 - 1.15 * s.blemish;
+        let spot = smoothstep(threshold * 0.85, threshold * 1.15, score) * cover * inside;
+        healed = spot;
+        if spot > 0.0 {
+            // Heal like a healing brush: borrow the texture of nearby clean
+            // skin, shifted to the colour around this spot.
+            let here = from_u16(face.heal_base[f]);
+            let [dx, dy] = face.donor[f];
+            let (healed, healed_l1) = if dx == 0 && dy == 0 {
+                (here, here)
+            } else {
+                let (dx, dy) = (dx as isize, dy as isize);
+                let qf = (f as isize + dy * face.region.w as isize + dx) as usize;
+                let qi = (i as isize + dy * skin.region.w as isize + dx) as usize;
+                let shift = sub(here, from_u16(face.heal_base[qf]));
+                (
+                    add(fetch(dx, dy), shift),
+                    add(from_u16(skin.low1[qi]), shift),
+                )
+            };
+            let fixed = skin_result(skin, s, i, under, healed, healed_l1, l2, inside);
+            for k in 0..3 {
+                r[k] += (fixed[k] - r[k]) * spot;
+            }
+        }
+    }
+    if near > 0.0 {
+        let level = skin.broad[i] as f32 / 65535.0 - luma(l2);
+        r = r.map(|v| v + NECK_LEVEL * near * level);
+    }
+    let light = even_light_gain(skin, s, i);
+    if light != 1.0 {
+        r = r.map(|v| v * light);
+    }
+    // Smoothing has taken part of the photo's detail already. A healed spot
+    // has its donor's instead: no swap there.
+    let kept = 0.5 * (keep_mid(s, inside) + keep_fine(s, inside));
+    if let Some(detail) = ai {
+        let add = ai_detail_swap(s, detail, kept);
+        for k in 0..3 {
+            r[k] += add[k] * (1.0 - healed);
+        }
+    }
+    if let Some((neck, near)) = neck.filter(|_| near > 0.0) {
+        // The pixel takes the smoothing, and what "Chi tiết mặt (AI)" has
+        // swapped under the chin, by the skin mask.
+        let left = 1.0 - m * ai.map_or(0.0, |d| s.ai_detail * d.cover);
+        let add = neck.swap(1.0 - m * (1.0 - kept));
+        for k in 0..3 {
+            r[k] += add[k] * near * left * (1.0 - healed);
+        }
+    }
+    if let Some(tone) = &shared.skin_tone {
+        // Read at the skin's tone around, as the evened light left it.
+        r = midtoned(r, l2.map(|v| v * light), tone);
+    }
+    let contour = f.map_or(0.0, |f| face.nose[f] as f32 / 127.0 * s.nose_bridge);
+    if contour != 0.0 {
+        // Shade lightly: the sides only need to hint at depth.
+        let gain = if contour > 0.0 {
+            0.18 * contour
+        } else {
+            0.03 * contour
+        };
+        r = r.map(|v| v * (1.0 + gain));
+    }
+    r
+}
+
 /// The retouched colour of skin-region pixel `i`, which is pixel `f` of the
 /// face region when it lies there. `src` is the photo in 0..1; `fetch(dx,
 /// dy)` reads the photo at an offset from this pixel; `ai` is the restore
-/// model's detail here, once made.
+/// model's detail here, once made, and `neck` its detail where "Da cổ" acts
+/// on the neck's skin.
 #[allow(clippy::too_many_arguments)]
 fn retouch_pixel(
     face: &FaceModel,
@@ -741,75 +875,25 @@ fn retouch_pixel(
     src: [f32; 3],
     fetch: &dyn Fn(isize, isize) -> [f32; 3],
     ai: Option<DetailAt>,
+    neck: Option<NeckAt>,
 ) -> [f32; 3] {
     let m = skin.mask[i] as f32 / 255.0;
     let ai = ai.filter(|_| s.ai_detail > 0.0);
     let mut out = src;
-    let l2 = from_u16(skin.low2[i]);
-    if m > 0.0 {
-        let inside = skin.interior[i] as f32 / 255.0;
-        let l1 = from_u16(skin.low1[i]);
-        let under = f.map_or(0.0, |f| skin.under_eye[f] as f32 / 255.0);
-        let mut r = skin_result(skin, s, i, under, src, l1, l2, inside);
-        let cover = f.map_or(0.0, |f| face.spot_cover[f] as f32 / 255.0);
-        let mut healed = 0.0;
-        if let Some(f) = f.filter(|_| s.blemish > 0.0 && cover > 0.0) {
-            let score = face.spot_score[f] as f32 / BLEMISH_SCALE;
-            let threshold = 1.5 - 1.15 * s.blemish;
-            let spot = smoothstep(threshold * 0.85, threshold * 1.15, score) * cover * inside;
-            healed = spot;
-            if spot > 0.0 {
-                // Heal like a healing brush: borrow the texture of nearby clean
-                // skin, shifted to the colour around this spot.
-                let here = from_u16(face.heal_base[f]);
-                let [dx, dy] = face.donor[f];
-                let (healed, healed_l1) = if dx == 0 && dy == 0 {
-                    (here, here)
-                } else {
-                    let (dx, dy) = (dx as isize, dy as isize);
-                    let qf = (f as isize + dy * face.region.w as isize + dx) as usize;
-                    let qi = (i as isize + dy * skin.region.w as isize + dx) as usize;
-                    let shift = sub(here, from_u16(face.heal_base[qf]));
-                    (
-                        add(fetch(dx, dy), shift),
-                        add(from_u16(skin.low1[qi]), shift),
-                    )
-                };
-                let fixed = skin_result(skin, s, i, under, healed, healed_l1, l2, inside);
-                for k in 0..3 {
-                    r[k] += (fixed[k] - r[k]) * spot;
-                }
-            }
-        }
-        let light = even_light_gain(skin, s, i);
-        if light != 1.0 {
-            r = r.map(|v| v * light);
-        }
-        if let Some(detail) = &ai {
-            // Smoothing has taken part of the photo's detail already. A
-            // healed spot has its donor's instead: no swap there.
-            let kept = 0.5 * (keep_mid(s, inside) + keep_fine(s, inside));
-            let add = ai_detail_swap(s, detail, kept);
-            for k in 0..3 {
-                r[k] += add[k] * (1.0 - healed);
-            }
-        }
-        if let Some(tone) = &shared.skin_tone {
-            // Read at the skin's tone around, as the evened light left it.
-            r = midtoned(r, l2.map(|v| v * light), tone);
-        }
-        let contour = f.map_or(0.0, |f| face.nose[f] as f32 / 127.0 * s.nose_bridge);
-        if contour != 0.0 {
-            // Shade lightly: the sides only need to hint at depth.
-            let gain = if contour > 0.0 {
-                0.18 * contour
-            } else {
-                0.03 * contour
-            };
-            r = r.map(|v| v * (1.0 + gain));
-        }
+    let near = neck.as_ref().map_or(0.0, |n| n.weight * s.neck);
+    if m > 0.0 || near > 0.0 {
+        let plain = skin_colour(face, skin, s, shared, i, f, src, fetch, ai.as_ref(), None);
         for k in 0..3 {
-            out[k] = src[k] + m * (r[k] - src[k]);
+            out[k] = src[k] + m * (plain[k] - src[k]);
+        }
+        if let Some(neck) = neck.as_ref().filter(|_| near > 0.0) {
+            // "Da cổ" changes the neck by its own weight, whatever the skin
+            // mask holds there: the brush may have added to the neck.
+            let on = Some((neck, near));
+            let evened = skin_colour(face, skin, s, shared, i, f, src, fetch, ai.as_ref(), on);
+            for k in 0..3 {
+                out[k] += evened[k] - plain[k];
+            }
         }
     }
     if let Some(detail) = &ai {
@@ -1046,6 +1130,9 @@ pub struct FaceEdits {
     pub hair: Option<Arc<Vec<u8>>>,
     pub brows: Option<Arc<BrowLayers>>,
     pub clothes: Option<Arc<ClothesArea>>,
+    /// How far each pixel of the skin region is neck skin for "Da cổ", in
+    /// place of what [`super::neck::NeckDetail`] found.
+    pub neck: Option<Arc<Vec<u8>>>,
 }
 
 fn skin_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> &'a SkinLayers {
@@ -1177,7 +1264,16 @@ fn retouch(
         let skin = skin_of(face, edits.get(index));
         let brows = brows_of(face, edits.get(index));
         let detail = face.ai_detail.get().and_then(|d| d.as_ref().ok());
+        let neck = face
+            .neck
+            .get()
+            .and_then(|n| n.as_ref().ok())
+            .filter(|_| s.neck > 0.0);
         let r = skin.region;
+        let painted_neck = edits
+            .get(index)
+            .and_then(|e| e.neck.as_deref())
+            .filter(|mask| mask.len() == r.len());
         let (sw, sx, sy) = (
             r.w as usize,
             (r.x - union.x) as usize,
@@ -1194,7 +1290,14 @@ fn retouch(
                     let i = row * sw + col;
                     let (x, y) = (r.x as usize + col, r.y as usize + row);
                     let f = face.region.index_at(x as u32, y as u32);
-                    if f.is_none() && skin.mask[i] == 0 {
+                    let neck = neck.and_then(|n| {
+                        let weight = match painted_neck {
+                            Some(mask) => mask[i] as f32 / 255.0,
+                            None => n.found(i, skin.interior[i]),
+                        };
+                        (weight > 0.0).then(|| n.at(x as u32, y as u32, weight))
+                    });
+                    if f.is_none() && skin.mask[i] == 0 && neck.is_none() {
                         continue;
                     }
                     let src = pixel(x, y);
@@ -1202,7 +1305,8 @@ fn retouch(
                         pixel((x as isize + dx) as usize, (y as isize + dy) as usize)
                     };
                     let ai = detail.and_then(|d| d.at(x as u32, y as u32));
-                    let res = retouch_pixel(face, skin, brows, &s, &shared, i, f, src, &fetch, ai);
+                    let res =
+                        retouch_pixel(face, skin, brows, &s, &shared, i, f, src, &fetch, ai, neck);
                     let cell = &mut line[sx + col];
                     for k in 0..3 {
                         cell[k] += res[k] - src[k];
@@ -1554,6 +1658,7 @@ mod tests {
             model: [0.05, 0.04, 0.03],
             photo: [-0.02, 0.01, 0.0],
             face: 1.0,
+            cover: 1.0,
         };
         let at = |amount: f32| {
             PortraitSettings {

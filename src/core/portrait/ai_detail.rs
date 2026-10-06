@@ -15,7 +15,7 @@ const SIDE: usize = RestoredFace::SIDE;
 /// Detail is what a blur this wide removes, in pixels of the model's square.
 const DETAIL_SIGMA: f32 = 8.0;
 /// The detail fades out over this many pixels at the square's edge.
-const EDGE_FADE: f32 = 24.0;
+pub(super) const EDGE_FADE: f32 = 24.0;
 /// The soft edge of the face outline, in face extents.
 const OUTLINE_FEATHER: f32 = 0.06;
 const NOSE_TIP: usize = 1;
@@ -32,7 +32,7 @@ const FACE_CORE: (f32, f32) = (128.0, 384.0);
 
 /// One run of the model: the detail it drew over its square, and the photo's
 /// own there.
-struct Frame {
+pub(super) struct Frame {
     /// Photo pixel (x, y) lies at (a·x − b·y + tx, b·x + a·y + ty) in the
     /// square.
     to_square: [f32; 4],
@@ -46,15 +46,15 @@ struct Frame {
 /// A [`Frame`] read at one photo pixel: the two details, already faded
 /// toward the square's edge, how much of the pixel the frame covers (0..1)
 /// and the pixel's share of an extra map over the square.
-struct Sample {
-    model: [f32; 3],
-    photo: [f32; 3],
-    cover: f32,
+pub(super) struct Sample {
+    pub model: [f32; 3],
+    pub photo: [f32; 3],
+    pub cover: f32,
     extra: f32,
 }
 
 impl Frame {
-    fn new(restored: &RestoredFace) -> Self {
+    pub(super) fn new(restored: &RestoredFace) -> Self {
         Self {
             to_square: restored.square_from_photo(),
             taps: (restored.scale().ceil() as usize).clamp(1, 4),
@@ -63,12 +63,12 @@ impl Frame {
         }
     }
 
-    fn to_square(&self, x: f32, y: f32) -> (f32, f32) {
+    pub(super) fn to_square(&self, x: f32, y: f32) -> (f32, f32) {
         let [a, b, tx, ty] = self.to_square;
         (a * x - b * y + tx, b * x + a * y + ty)
     }
 
-    fn at(&self, x: u32, y: u32, extra: Option<&[f32]>) -> Option<Sample> {
+    pub(super) fn at(&self, x: u32, y: u32, extra: Option<&[f32]>) -> Option<Sample> {
         let last = (SIDE - 1) as f32;
         let n = self.taps;
         let mut sum = Sample {
@@ -134,12 +134,14 @@ pub struct FaceDetail {
 }
 
 /// [`FaceDetail`] at one photo pixel: the model's RGB detail, the photo's
-/// own that it replaces, and how far inside the face outline the pixel lies.
+/// own that it replaces, how far inside the face outline the pixel lies and
+/// how much of it the model's square covers (the details are faded by it).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct DetailAt {
     pub model: [f32; 3],
     pub photo: [f32; 3],
     pub face: f32,
+    pub cover: f32,
 }
 
 impl FaceDetail {
@@ -150,6 +152,7 @@ impl FaceDetail {
             model: s.model,
             photo: s.photo,
             face: s.extra,
+            cover: s.cover,
         })
     }
 
@@ -165,18 +168,19 @@ impl FaceDetail {
             model: [0.0; 3],
             photo: [0.0; 3],
             face: 0.0,
+            cover: 0.0,
         };
-        let mut covered = 0.0;
         if let Some(near) = near {
             (out.model, out.photo, out.face) = (near.model, near.photo, near.extra);
-            covered = near.cover;
+            out.cover = near.cover;
         }
         if let Some(far) = far {
-            let rest = 1.0 - covered;
+            let rest = 1.0 - out.cover;
             for c in 0..3 {
                 out.model[c] += far.model[c] * rest;
                 out.photo[c] += far.photo[c] * rest;
             }
+            out.cover += far.cover * rest;
         }
         Some(out)
     }
@@ -213,7 +217,7 @@ pub fn analyze_details(rgba: &[u8], model: &PortraitModel, wanted: &[bool]) {
 
 /// The five points the model aligns a face by: eye centres, nose tip and
 /// mouth corners, the image's left one first.
-fn landmarks(face: &FaceModel) -> [[f32; 2]; 5] {
+pub(super) fn landmarks(face: &FaceModel) -> [[f32; 2]; 5] {
     let points = &face.mesh.points;
     let at = |k: usize| [points[k][0], points[k][1]];
     let centre = |ring: &[u16]| {

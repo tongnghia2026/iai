@@ -1,7 +1,8 @@
 //! What a "Chân dung" layer was made with, kept on the layer so Chỉnh chân
 //! dung can reopen it: the sliders, which faces were on, the masks painted
-//! with "Tô vùng" (skin as painted, before an edited brow takes its share)
-//! and the selection the analysis kept to. The analysis itself
+//! with "Tô vùng" (skin as painted, before an edited brow takes its share;
+//! the neck's skin over the skin region) and the selection the analysis kept
+//! to. The analysis itself
 //! is not kept; reopening runs it again and lays the painted masks over it.
 
 use super::analysis::{Clip, PortraitModel};
@@ -50,6 +51,8 @@ pub struct SavedFace {
     pub hair: Option<SavedMask>,
     pub brows: Option<SavedMask>,
     pub clothes: Option<SavedMask>,
+    /// The neck's skin for "Da cổ" as painted, over the skin region.
+    pub neck: Option<SavedMask>,
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +79,7 @@ pub struct RestoredFace {
     pub hair: Option<Vec<u8>>,
     pub brows: Option<Vec<u8>>,
     pub clothes: Option<SavedMask>,
+    pub neck: Option<Vec<u8>>,
 }
 
 /// Faces further apart than this, in face sizes, are different faces.
@@ -116,6 +120,10 @@ impl PortraitRecipe {
                     clothes: edit.and_then(|e| e.clothes.as_ref()).map(|c| SavedMask {
                         region: c.region,
                         mask: c.mask().to_vec(),
+                    }),
+                    neck: edit.and_then(|e| e.neck.as_ref()).map(|n| SavedMask {
+                        region: face.skin.region(),
+                        mask: n.to_vec(),
                     }),
                 }
             })
@@ -160,6 +168,7 @@ impl PortraitRecipe {
                         hair: None,
                         brows: None,
                         clothes: None,
+                        neck: None,
                     };
                 };
                 used[j] = true;
@@ -180,6 +189,11 @@ impl PortraitRecipe {
                         m.onto(analysed.region(), analysed.area())
                     }),
                     clothes: saved.clothes.clone(),
+                    // Painted whole: none of it is the analysis's to fill in.
+                    neck: saved.neck.as_ref().map(|m| {
+                        let region = face.skin.region();
+                        m.onto(region, &vec![0; region.len()])
+                    }),
                 }
             })
             .collect()

@@ -1810,6 +1810,11 @@ impl App {
                 } else {
                     None
                 },
+                portrait_neck: if self.shell.ui.show_portrait_dialog {
+                    self.portrait_neck_note()
+                } else {
+                    None
+                },
                 portrait_clothes: if self.shell.ui.show_portrait_dialog {
                     self.portrait_clothes_note()
                 } else {

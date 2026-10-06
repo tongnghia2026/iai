@@ -482,6 +482,9 @@ pub struct DialogViewModel {
     pub portrait_body: Option<(String, bool)>,
     /// The same for the AI face detail, shown in the skin group.
     pub portrait_detail: Option<(String, bool)>,
+    /// The same for the neck's skin, shown under "Da cổ" and with the brush
+    /// that paints it.
+    pub portrait_neck: Option<(String, bool)>,
     /// A note for the clothes group of the portrait dialog, and whether it
     /// is a warning.
     pub portrait_clothes: Option<(String, bool)>,
@@ -1079,6 +1082,7 @@ impl Default for UiData {
                 portrait_hair: false,
                 portrait_body: None,
                 portrait_detail: None,
+                portrait_neck: None,
                 portrait_clothes: None,
                 portrait_brush: None,
                 portrait_brush_undo: false,

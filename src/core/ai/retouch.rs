@@ -849,8 +849,15 @@ impl FaceRestorer {
         height: u32,
         landmarks: &[[f32; 2]; 5],
     ) -> Result<RestoredFace, String> {
+        let framing = Self::framing(landmarks)?;
+        self.restore_framed(rgba, width, height, framing)
+    }
+
+    /// The framing the model was trained on for a face with these
+    /// `landmarks`, as [`RestoredFace::square_from_photo`] gives it.
+    pub fn framing(landmarks: &[[f32; 2]; 5]) -> Result<[f32; 4], String> {
         let t = SimilarityTransform::fit(landmarks, &FACE_ALIGNMENT_TARGET)?;
-        self.restore_framed(rgba, width, height, [t.a, t.b, t.tx, t.ty])
+        Ok([t.a, t.b, t.tx, t.ty])
     }
 
     /// Restore the square of `rgba` that `square_from_photo` maps the photo

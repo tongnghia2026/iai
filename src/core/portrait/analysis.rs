@@ -117,6 +117,9 @@ pub struct FaceModel {
     /// The restore model's detail for this face, made once "Chi tiết mặt
     /// (AI)" is first used (see [`super::ai_detail::analyze_details`]).
     pub ai_detail: std::sync::OnceLock<Result<super::ai_detail::FaceDetail, String>>,
+    /// Where this face's neck lies and the restore model's detail there,
+    /// made once "Da cổ" is first used (see [`super::neck::analyze_necks`]).
+    pub neck: std::sync::OnceLock<Result<super::neck::NeckDetail, String>>,
     /// What the part model read around this face, kept while it is trusted:
     /// the clothes are found in it later.
     pub(super) parts: Option<PartLabels>,
@@ -2210,6 +2213,7 @@ fn build_face(
         detail,
         soft,
         ai_detail: std::sync::OnceLock::new(),
+        neck: std::sync::OnceLock::new(),
         parts: parts.filter(|_| trusted).cloned(),
         clothes_area: std::sync::OnceLock::new(),
         clothes: std::sync::OnceLock::new(),

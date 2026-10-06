@@ -29,8 +29,8 @@ const RESULT_LAYER: &str = "Chân dung";
 
 /// What the preview shows: settings, faces on, retouch on, areas tinted, and
 /// a revision of what they act on: the brush edits, how many faces have
-/// their clothes found, their clothes drawn and their AI detail, and whether
-/// bodies are analysed.
+/// their clothes found, their clothes drawn, their neck's detail and their AI
+/// detail, and whether bodies are analysed.
 type PreviewKey = (PortraitSettings, Vec<bool>, bool, bool, u64);
 type Rendered = Option<(Region, Vec<u8>)>;
 
@@ -66,6 +66,10 @@ pub struct PortraitSession {
     /// The AI face detail being made on a worker (started by "Chi tiết mặt
     /// (AI)" leaving 0); it fills the faces' detail, then signals.
     detail_rx: Option<Receiver<()>>,
+    /// The neck's AI detail being made on a worker (started by "Da cổ"
+    /// leaving 0 or the brush picking the neck); it fills the faces' necks,
+    /// then signals.
+    neck_rx: Option<Receiver<()>>,
     /// The clothes being found on a worker (started by a clothes slider
     /// leaving rest, the tinted areas or the brush asking for them); it
     /// fills the faces' clothes areas, then signals.
@@ -257,6 +261,7 @@ impl App {
             rendering: None,
             body_rx: None,
             detail_rx: None,
+            neck_rx: None,
             area_rx: None,
             clothes_rx: None,
             enlarged,
@@ -518,10 +523,11 @@ impl App {
             || session.rendering.is_some()
             || session.body_rx.is_some()
             || session.detail_rx.is_some()
+            || session.neck_rx.is_some()
             || session.area_rx.is_some()
             || session.clothes_rx.is_some();
-        // Bodies analysed, AI detail made, clothes found or drawn: the
-        // preview redraws with them.
+        // Bodies analysed, AI detail made, necks or clothes found or drawn:
+        // the preview redraws with them.
         let done = |rx: &Option<Receiver<()>>| {
             rx.as_ref()
                 .is_some_and(|rx| !matches!(rx.try_recv(), Err(TryRecvError::Empty)))
@@ -533,6 +539,10 @@ impl App {
         let details_done = done(&session.detail_rx);
         if details_done {
             session.detail_rx = None;
+        }
+        let necks_done = done(&session.neck_rx);
+        if necks_done {
+            session.neck_rx = None;
         }
         let clothes_done = done(&session.clothes_rx);
         if clothes_done {
@@ -566,7 +576,10 @@ impl App {
         if areas_done || clothes_done {
             self.clothes_found();
         }
-        if bodies_done || details_done || clothes_done || areas_done {
+        if necks_done {
+            self.neck_found();
+        }
+        if bodies_done || details_done || necks_done || clothes_done || areas_done {
             self.refresh_portrait_preview();
         }
         self.poll_portrait_brush();
@@ -614,6 +627,9 @@ impl App {
                 .filter(|f| f.ai_detail.get().is_some())
                 .count()
         });
+        let necks = session.model.as_ref().map_or(0, |m| {
+            m.faces.iter().filter(|f| f.neck.get().is_some()).count()
+        });
         let clothes = session.model.as_ref().map_or(0, |m| {
             m.faces.iter().filter(|f| f.clothes.get().is_some()).count()
         });
@@ -647,6 +663,15 @@ impl App {
             {
                 session.area_rx = Some(start_clothes_search(&session.src, &model, &enabled));
             }
+            // The neck is found, and its detail made, for its slider and for
+            // the brush; one run of the face model at a time.
+            if (settings.neck > 0.0 || session.brush.wants_neck())
+                && session.neck_rx.is_none()
+                && session.detail_rx.is_none()
+                && lacks_neck(&model, &enabled)
+            {
+                session.neck_rx = Some(start_neck_analysis(&session.src, &model, &enabled));
+            }
         }
         if let Some(key) = session.wanted.as_mut() {
             key.3 &= !painting;
@@ -655,6 +680,7 @@ impl App {
             key.4 = (session.edit_rev << 32)
                 | ((areas as u64) << 24)
                 | ((clothes as u64) << 16)
+                | ((necks as u64) << 8)
                 | ((details as u64) << 1)
                 | bodies as u64;
             // The brush paints the face as shot: show it unreshaped meanwhile.
@@ -939,6 +965,15 @@ impl App {
                 let _ = start_detail_analysis(&src, &model, &enabled).recv();
             }
         }
+        // "Da cổ" needs the neck of every face on, the same way.
+        if settings.neck > 0.0 {
+            if let Some(rx) = self.shell.portrait.as_mut().and_then(|s| s.neck_rx.take()) {
+                let _ = rx.recv();
+            }
+            if lacks_neck(&model, &enabled) {
+                let _ = start_neck_analysis(&src, &model, &enabled).recv();
+            }
+        }
         self.cancel_portrait();
         let Some((region, pixels)) = portrait::render(&src, &model, &settings, &enabled, &edits)
         else {
@@ -1109,6 +1144,9 @@ impl App {
         if session.detail_rx.is_some() {
             line.push_str(" · đang tạo chi tiết AI…");
         }
+        if session.neck_rx.is_some() {
+            line.push_str(" · đang làm da cổ…");
+        }
         if session.clothes_rx.is_some() {
             line.push_str(" · đang làm nét áo…");
         } else if session.area_rx.is_some() {
@@ -1180,6 +1218,32 @@ impl App {
                 false,
             )
         })
+    }
+
+    /// A note under "Da cổ", and whether it is a warning: the neck's detail
+    /// being made, or why it could not be.
+    pub(crate) fn portrait_neck_note(&self) -> Option<(String, bool)> {
+        let session = self.shell.portrait.as_ref()?;
+        let model = session.model.as_ref()?;
+        if session.neck_rx.is_some() {
+            return Some(("Đang tìm da cổ và tạo chi tiết bằng AI…".to_string(), false));
+        }
+        let asked = session.brush.wants_neck()
+            || session.wanted.as_ref().is_some_and(|key| key.0.neck > 0.0);
+        if !asked {
+            return None;
+        }
+        if !crate::core::ai::retouch::FaceRestorer::installed() {
+            return Some((
+                "Da cổ cần model GFPGAN (models\\gfpgan) — chưa cài".to_string(),
+                true,
+            ));
+        }
+        model
+            .faces
+            .iter()
+            .find_map(|face| face.neck.get()?.as_ref().err())
+            .map(|error| (format!("Không làm được da cổ: {error}"), true))
     }
 
     /// A note for the dialog's clothes group, and whether it is a warning:
@@ -1276,6 +1340,41 @@ fn lacks_detail(model: &PortraitModel, enabled: &[bool]) -> bool {
         .iter()
         .zip(enabled.iter().chain(std::iter::repeat(&true)))
         .any(|(face, &on)| on && face.ai_detail.get().is_none())
+}
+
+/// Whether a face that is on has no neck found yet.
+fn lacks_neck(model: &PortraitModel, enabled: &[bool]) -> bool {
+    model
+        .faces
+        .iter()
+        .zip(enabled.iter().chain(std::iter::repeat(&true)))
+        .any(|(face, &on)| on && face.neck.get().is_none())
+}
+
+/// Find the neck of `model`'s faces that are on and make its AI detail, on a
+/// worker; the receiver hears once the faces hold it.
+fn start_neck_analysis(
+    src: &Arc<Vec<u8>>,
+    model: &Arc<PortraitModel>,
+    enabled: &[bool],
+) -> Receiver<()> {
+    let (tx, rx) = mpsc::channel();
+    let (src, model, enabled) = (Arc::clone(src), Arc::clone(model), enabled.to_vec());
+    std::thread::spawn(move || {
+        let began = std::time::Instant::now();
+        portrait::neck::analyze_necks(&src, &model, &enabled);
+        crate::diag::note(
+            "perf",
+            &format!(
+                "portrait neck detail made in {} ms ({} x {})",
+                began.elapsed().as_millis(),
+                model.width,
+                model.height
+            ),
+        );
+        let _ = tx.send(());
+    });
+    rx
 }
 
 /// Whether a face that is on has not had its clothes looked for yet.
@@ -2039,6 +2138,7 @@ mod tests {
             rendering: None,
             body_rx: None,
             detail_rx: None,
+            neck_rx: None,
             area_rx: None,
             clothes_rx: None,
             enlarged: 1.0,
@@ -2877,6 +2977,157 @@ mod tests {
         let session = app.shell.portrait.as_ref().unwrap();
         assert_eq!(session.edits[0].clothes.as_ref().unwrap().mask()[k], 0);
         assert_eq!(app.portrait_restore().1, Some(darker));
+    }
+
+    #[test]
+    fn the_neck_takes_its_detail_on_first_use_where_the_brush_leaves_it() {
+        use crate::core::portrait::brush::MaskTarget;
+        use crate::core::refine::{MaskBrushEvent, StampOp};
+        let Some(mut app) = app_with_customer() else {
+            return;
+        };
+        if !crate::core::ai::retouch::FaceRestorer::installed() {
+            return;
+        }
+        let model = analysed(&mut app).unwrap();
+        let faces = vec![true; model.faces.len()];
+        let found = |model: &PortraitModel| model.faces[0].neck.get().is_some();
+        app.set_portrait_preview(PortraitSettings::NEUTRAL, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        assert!(!found(&model), "not before the slider moves");
+        assert_eq!(app.portrait_neck_note(), None);
+        let plain = photo_pixels(&app);
+
+        // The slider leaving 0 starts the model; the preview follows.
+        let neck = PortraitSettings {
+            neck: 100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        app.set_portrait_preview(neck, faces.clone(), true, false);
+        assert_eq!(
+            app.portrait_neck_note(),
+            Some(("Đang tìm da cổ và tạo chi tiết bằng AI…".to_string(), false))
+        );
+        let started = Instant::now();
+        while !found(&model) || app.portrait_neck_note().is_some() {
+            assert!(
+                started.elapsed() < Duration::from_secs(240),
+                "the neck hung"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            app.poll_portrait();
+        }
+        wait_for_preview(&mut app);
+        assert_ne!(photo_pixels(&app), plain, "the preview shows the neck");
+        let face = &model.faces[0];
+        assert!(
+            face.ai_detail.get().is_none(),
+            "the face's detail is not made"
+        );
+        let skin_region = face.skin.region();
+        let mask = face.neck.get().unwrap().as_ref().unwrap().mask(&face.skin);
+        // Two points well inside the neck: one to rub out, one to keep.
+        let solid: Vec<(u32, u32)> = (0..mask.len())
+            .filter(|&i| mask[i] == 255)
+            .map(|i| {
+                (
+                    skin_region.x + (i % skin_region.w as usize) as u32,
+                    skin_region.y + (i / skin_region.w as usize) as u32,
+                )
+            })
+            .collect();
+        assert!(solid.len() > 2000, "a neck was found: {}", solid.len());
+        let (top, bottom) = (solid[0].1, solid[solid.len() - 1].1);
+        let middle_of = |row: u32| {
+            let columns: Vec<u32> = solid.iter().filter(|p| p.1 == row).map(|p| p.0).collect();
+            (columns[columns.len() / 2], row)
+        };
+        let rubbed = middle_of(top + (bottom - top) / 3);
+        let kept = middle_of(top + (bottom - top) * 3 / 4);
+        let radius = face.extent * 0.05;
+        assert!((kept.1 - rubbed.1) as f32 > 3.0 * radius);
+        let k = skin_region.index_at(rubbed.0, rubbed.1).unwrap();
+        let j = skin_region.index_at(kept.0, kept.1).unwrap();
+        // And one below it that the skin mask does not hold: the shirt.
+        let column = middle_of(bottom).0;
+        let skin_at = |y: u32| skin_region.index_at(column, y).map(|i| face.skin.mask()[i]);
+        let below = (bottom..skin_region.y + skin_region.h)
+            .find(|&y| skin_at(y) == Some(0))
+            .expect("the skin ends above its region's end");
+        let added = (column, below + (2.0 * radius) as u32);
+        let a = skin_region
+            .index_at(added.0, added.1)
+            .expect("inside the skin's region");
+        assert_eq!((face.skin.mask()[a], mask[a]), (0, 0));
+
+        // The brush shows the neck as found, takes a patch out of it and
+        // adds one the skin mask never held.
+        app.set_portrait_brush_target(Some(MaskTarget::Neck));
+        let queue = app.docs.documents[0].canvas.mask_brush.as_mut().unwrap();
+        for (op, at) in [(StampOp::Subtract, rubbed), (StampOp::Add, added)] {
+            queue.push(MaskBrushEvent::Begin(op));
+            queue.push(MaskBrushEvent::Dabs {
+                points: vec![(at.0 as f32, at.1 as f32)],
+                radius,
+                hardness: 1.0,
+            });
+            queue.push(MaskBrushEvent::End);
+        }
+        app.poll_portrait_brush();
+        app.set_portrait_brush_target(None);
+        let session = app.shell.portrait.as_ref().unwrap();
+        let painted = session.edits[0].neck.as_ref().expect("the neck as painted");
+        assert_eq!((painted[k], painted[j], painted[a]), (0, 255, 255));
+
+        assert!(!app.apply_portrait(neck, faces.clone()).unwrap(), "added");
+        let around =
+            |at: (u32, u32)| (-4i32..=4).any(|d| changed_at(&app, (at.0 as i32 + d) as u32, at.1));
+        assert!(around(kept), "the neck took the detail");
+        assert!(
+            !changed_at(&app, rubbed.0, rubbed.1),
+            "the patch is as shot"
+        );
+        assert!(around(added), "what the brush added is neck too");
+        // Not a pixel of the face moved.
+        let outline: Vec<[f32; 2]> = crate::core::portrait::geometry::FACE_OVAL
+            .iter()
+            .map(|&p| {
+                let p = face.mesh.points[p as usize];
+                [p[0], p[1]]
+            })
+            .collect();
+        let inside = |x: u32, y: u32| {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let mut hit = false;
+            let mut last = outline[outline.len() - 1];
+            for &point in &outline {
+                if (point[1] > py) != (last[1] > py)
+                    && px < (last[0] - point[0]) * (py - point[1]) / (last[1] - point[1]) + point[0]
+                {
+                    hit = !hit;
+                }
+                last = point;
+            }
+            hit
+        };
+        let r = face.region;
+        let moved = (r.y..r.y + r.h)
+            .flat_map(|y| (r.x..r.x + r.w).map(move |x| (x, y)))
+            .filter(|&(x, y)| inside(x, y) && changed_at(&app, x, y))
+            .count();
+        assert_eq!(moved, 0, "the face is as shot");
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
+        let recipe = layer.portrait.clone().expect("recipe kept");
+        assert_eq!(recipe.settings, neck);
+        assert_eq!(recipe.faces[0].neck.as_ref().unwrap().mask[k], 0);
+
+        // Reopened, the painted neck comes back with the slider.
+        let again = analysed(&mut app).unwrap();
+        assert!(Arc::ptr_eq(&again, &model), "the analysis is reused");
+        let session = app.shell.portrait.as_ref().unwrap();
+        let painted = session.edits[0].neck.as_ref().expect("the neck kept");
+        assert_eq!((painted[k], painted[j], painted[a]), (0, 255, 255));
+        assert_eq!(app.portrait_restore().1, Some(neck));
     }
 
     #[test]

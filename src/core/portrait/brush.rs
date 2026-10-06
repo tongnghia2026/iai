@@ -1,5 +1,5 @@
-//! The dialog's "Tô vùng" brush: edits one face's skin, hair, brow or
-//! clothes mask.
+//! The dialog's "Tô vùng" brush: edits one face's skin, hair, brow, clothes
+//! or neck mask.
 //! Add and Subtract paint plainly; Smart grades each pixel by colour against
 //! the area being painted and the rest around the brush
 //! (`core::smart_brush`).
@@ -16,6 +16,8 @@ pub enum MaskTarget {
     Hair,
     Brows,
     Clothes,
+    /// The neck's skin, where "Da cổ" acts.
+    Neck,
 }
 
 /// A mask being painted, in its own region of the analysed image.

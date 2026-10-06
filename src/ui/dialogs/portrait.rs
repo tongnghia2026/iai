@@ -436,6 +436,11 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
                     "Áo",
                     "Tô thêm / bớt vùng áo mà các thanh \"Áo\" tác động (hiện màu xanh lục). App tìm áo vài giây khi bấm lần đầu",
                 ),
+                (
+                    Some(MaskTarget::Neck),
+                    "Da cổ",
+                    "Tô thêm / bớt vùng da cổ mà thanh \"Da cổ\" tác động (hiện màu xanh dương). App tìm da cổ vài giây khi bấm lần đầu",
+                ),
             ];
             for (target, label, tip) in targets {
                 let enabled = target != Some(MaskTarget::Hair) || d.portrait_hair;
@@ -466,6 +471,12 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
                 .as_ref()
                 .filter(|(note, _)| note.starts_with("Đang tìm") || note.starts_with("Không tìm"));
             if let Some((note, warning)) = finding {
+                note_line(ui, note, *warning);
+            }
+        }
+        // So is the neck.
+        if d.portrait_brush == Some(MaskTarget::Neck) {
+            if let Some((note, warning)) = &d.portrait_neck {
                 note_line(ui, note, *warning);
             }
         }
@@ -771,9 +782,18 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             Amount,
                         ),
                         ("Quầng thâm", &mut s.dark_circles, "Làm sáng vùng dưới mắt", Amount),
+                        (
+                            "Da cổ",
+                            &mut s.neck,
+                            "AI vẽ lại vân da riêng vùng cổ (dưới đường hàm tới mép áo) và làm đều màu, đều sáng ở đó — cho cổ vừa mặc áo ghép, vừa sửa tay bằng Clone / Smudge, hoặc cổ mềm hơn mặt. Mặt không đổi. App chạy AI vài giây khi kéo lần đầu",
+                            Amount,
+                        ),
                     ];
                     group(ui, shown, &mut next, Group::Skin, "Da", at_work(&skin), |ui| {
-                        rows(ui, ready, skin)
+                        rows(ui, ready, skin);
+                        if let Some((note, warning)) = &data.dialogs.portrait_neck {
+                            note_line(ui, note, *warning);
+                        }
                     });
                     let face = vec![
                         (
@@ -1377,6 +1397,55 @@ mod tests {
         let shown = texts(&data);
         assert!(has(&shown, "Ảnh đã ghép áo: áo ghép đã nét sẵn."));
         assert!(!has(&shown, first));
+    }
+
+    #[test]
+    fn the_skin_group_ends_with_the_neck_and_the_brush_paints_it_too() {
+        let ctx = egui::Context::default();
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        data.dialogs.portrait_session = true;
+        data.dialogs.portrait_ready = true;
+        data.dialogs.portrait_faces = vec![true];
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(460.0, 1000.0));
+        let texts_in = |data: &UiData, group: Group| -> Vec<String> {
+            let mut shown = Vec::new();
+            for _ in 0..8 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(egui::Id::new(PRESETS_KEY), presets::built_in());
+                        d.insert_temp(egui::Id::new("portrait_group"), Some(group));
+                    });
+                    let mut actions = UiActions::default();
+                    portrait_dialog(ui.ctx(), data, &mut actions);
+                });
+                shown = output
+                    .shapes
+                    .iter()
+                    .filter_map(|clipped| match &clipped.shape {
+                        egui::Shape::Text(text) => Some(text.galley.text().to_string()),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            shown
+        };
+        let has = |shown: &[String], text: &str| shown.iter().any(|t| t == text);
+
+        let skin = texts_in(&data, Group::Skin);
+        assert!(has(&skin, "Quầng thâm") && has(&skin, "Da cổ"), "{skin:?}");
+        // While the neck is found, the group says so; the brush as well.
+        let finding = "Đang tìm da cổ và tạo chi tiết bằng AI…";
+        data.dialogs.portrait_neck = Some((finding.to_string(), false));
+        assert!(has(&texts_in(&data, Group::Skin), finding));
+        let brush = texts_in(&data, Group::Brush);
+        assert!(has(&brush, "Da cổ") && !has(&brush, finding), "{brush:?}");
+        data.dialogs.portrait_brush = Some(MaskTarget::Neck);
+        assert!(has(&texts_in(&data, Group::Brush), finding));
     }
 
     #[test]

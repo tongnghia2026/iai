@@ -1,12 +1,12 @@
 //! "Tô vùng" in Chỉnh chân dung: the Refine Brush paints one face's skin,
-//! hair, brow or clothes mask (`core::portrait::brush`), with undo inside
+//! hair, brow, clothes or neck mask (`core::portrait::brush`), with undo inside
 //! the dialog and a tinted overlay of the mask being painted. After each
 //! stroke the preview re-renders from the edited masks: hair at once, brows
 //! once their layers are rebuilt (quick, a small region), skin once its
 //! dependent layers are rebuilt on a worker, clothes once the light across
 //! them is read again. Brow takes precedence over skin, so a brow stroke
-//! rebuilds the skin too. The clothes are found only when asked for: until
-//! they are, the brush has nothing of theirs to paint.
+//! rebuilds the skin too. The clothes and the neck are found only when asked
+//! for: until they are, the brush has nothing of theirs to paint.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -66,6 +66,9 @@ pub struct PortraitBrush {
     /// Clothes masks a reopened layer kept, per face, to lay over the
     /// clothes once those are found.
     kept_clothes: HashMap<usize, SavedMask>,
+    /// Neck masks a reopened layer kept, per face: the preview uses them at
+    /// once, the brush paints on from them once the neck is found.
+    kept_neck: HashMap<usize, Vec<u8>>,
     pub overlay: Option<PortraitOverlay>,
 }
 
@@ -87,6 +90,11 @@ impl PortraitBrush {
     pub fn wants_clothes(&self) -> bool {
         self.target == Some(MaskTarget::Clothes) || !self.kept_clothes.is_empty()
     }
+
+    /// Whether the neck is wanted before its slider asks: to paint it.
+    pub fn wants_neck(&self) -> bool {
+        self.target == Some(MaskTarget::Neck)
+    }
 }
 
 /// The clothes of face `face` as found, once they are.
@@ -97,26 +105,34 @@ fn found_clothes(model: &PortraitModel, face: usize) -> Option<&ClothesArea> {
         .and_then(|found| found.as_ref().ok())
 }
 
+/// Whether the neck of face `face` has been found.
+fn neck_found(model: &PortraitModel, face: usize) -> bool {
+    matches!(model.faces[face].neck.get(), Some(Ok(_)))
+}
+
+const NOWHERE: Region = Region {
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+};
+
 fn region_of(model: &PortraitModel, face: usize, target: MaskTarget) -> Region {
     let f = &model.faces[face];
     match target {
         MaskTarget::Skin => f.skin.region(),
+        // The neck is painted over the skin's region, once it is found.
+        MaskTarget::Neck if neck_found(model, face) => f.skin.region(),
+        MaskTarget::Neck => NOWHERE,
         MaskTarget::Hair => f.hair_region,
         MaskTarget::Brows => f.brow_layers().region(),
-        MaskTarget::Clothes => found_clothes(model, face).map_or(
-            Region {
-                x: 0,
-                y: 0,
-                w: 0,
-                h: 0,
-            },
-            |clothes| clothes.region,
-        ),
+        MaskTarget::Clothes => found_clothes(model, face).map_or(NOWHERE, |clothes| clothes.region),
     }
 }
 
 /// A face's mask as painted, else as analysed. (Every edit comes from a
-/// paint; skin is the mask before an edited brow takes its share.)
+/// paint; skin is the mask before an edited brow takes its share. The neck
+/// is always a paint: `neck_paint` makes one of what was found.)
 fn painted_mask<'a>(
     model: &'a PortraitModel,
     paints: &'a HashMap<(usize, MaskTarget), MaskPaint>,
@@ -132,6 +148,7 @@ fn painted_mask<'a>(
         MaskTarget::Hair => f.hair_mask(),
         MaskTarget::Brows => f.brow_layers().area(),
         MaskTarget::Clothes => found_clothes(model, face).map_or(&[], |clothes| clothes.mask()),
+        MaskTarget::Neck => &[],
     }
 }
 
@@ -315,6 +332,10 @@ impl App {
         let Some(face) = stroke.face else {
             return;
         };
+        if target == MaskTarget::Neck && !brush.paints.contains_key(&(face, target)) {
+            // Paints are made when the neck is found: none means none found.
+            return;
+        }
         let paint = brush.paints.entry((face, target)).or_insert_with(|| {
             let now = painted_mask(&model, &HashMap::new(), face, target).to_vec();
             MaskPaint::new(region_of(&model, face, target), now)
@@ -462,6 +483,19 @@ impl App {
             if let Some(clothes) = saved.clothes {
                 session.brush.kept_clothes.insert(face, clothes);
             }
+            if let Some(neck) = saved.neck {
+                let region = region_of(&model, face, MaskTarget::Skin);
+                if neck.len() == region.len() {
+                    if session.edits.len() < model.faces.len() {
+                        session
+                            .edits
+                            .resize(model.faces.len(), FaceEdits::default());
+                    }
+                    session.edits[face].neck = Some(Arc::new(neck.clone()));
+                    session.edit_rev += 1;
+                    session.brush.kept_neck.insert(face, neck);
+                }
+            }
             for (target, mask) in [
                 (MaskTarget::Skin, saved.skin),
                 (MaskTarget::Hair, saved.hair),
@@ -492,6 +526,50 @@ impl App {
             }
         }
         self.clothes_found();
+        self.neck_found();
+    }
+
+    /// The necks were found (or may have been): give the brush each one to
+    /// paint on from, as a reopened layer kept it or else as found.
+    pub(super) fn neck_found(&mut self) {
+        let Some(session) = self.shell.portrait.as_mut() else {
+            return;
+        };
+        let Some(model) = session.model.clone() else {
+            return;
+        };
+        let mut made = false;
+        for face in 0..model.faces.len() {
+            let key = (face, MaskTarget::Neck);
+            if session.brush.paints.contains_key(&key) {
+                continue;
+            }
+            let Some(Ok(neck)) = model.faces[face].neck.get() else {
+                continue;
+            };
+            let skin = &model.faces[face].skin;
+            let region = skin.region();
+            let mask = match session.brush.kept_neck.remove(&face) {
+                Some(kept) if kept.len() == region.len() => kept,
+                // As the skin stands now, painted or not.
+                _ => {
+                    let skin = session
+                        .edits
+                        .get(face)
+                        .and_then(|e| e.skin.as_deref())
+                        .unwrap_or(skin);
+                    neck.mask(skin)
+                }
+            };
+            session
+                .brush
+                .paints
+                .insert(key, MaskPaint::new(region, mask));
+            made = true;
+        }
+        if made && session.brush.target == Some(MaskTarget::Neck) {
+            self.rebuild_portrait_overlay();
+        }
     }
 
     /// The clothes were found (or may have been): lay the masks a reopened
@@ -572,6 +650,11 @@ impl App {
                 session.edit_rev += 1;
                 self.refresh_portrait_preview();
             }
+            MaskTarget::Neck => {
+                session.edits[face].neck = Some(Arc::new(paint.mask.clone()));
+                session.edit_rev += 1;
+                self.refresh_portrait_preview();
+            }
         }
     }
 
@@ -631,6 +714,11 @@ impl App {
                         session.edits[face].skin = Some(Arc::new(layers));
                         session.edit_rev += 1;
                         done = true;
+                        // A neck not painted yet follows the skin: the
+                        // brush is given it anew.
+                        if session.edits[face].neck.is_none() {
+                            session.brush.paints.remove(&(face, MaskTarget::Neck));
+                        }
                     }
                 }
                 Err(TryRecvError::Empty) => session.brush.skin_jobs.push((face, generation, rx)),
@@ -638,6 +726,7 @@ impl App {
             }
         }
         if done {
+            self.neck_found();
             self.refresh_portrait_preview();
         }
     }
@@ -757,6 +846,7 @@ fn overlay_pixels(
         MaskTarget::Hair => [150, 60, 255],
         MaskTarget::Brows => [255, 230, 0],
         MaskTarget::Clothes => [0, 150, 130],
+        MaskTarget::Neck => [40, 130, 255],
     };
     let lut: Vec<egui::Color32> = (0..256)
         .map(|m| {
