@@ -178,9 +178,14 @@ Làm 06/10. Lõi: `src/core/portrait/clothes.rs`; chạy model: `Upscaler` trong
 - [x] "Hiện vùng nhận diện" tô vùng áo màu xanh lục (sau khi đã kéo "Nét áo").
 - [x] App tự chọn cỡ cho AI xem (mục 5.2); thời gian chạy ghi vào "hộp đen" (dòng `perf`).
 - [x] "Công thức" lưu và nạp thanh mới; công thức cũ đọc là 0.
+- [x] Menu nào vừa mở thì tự cuộn vào tầm nhìn (không trượt): thêm menu "Áo" làm nội dung
+      menu cuối "Xếp ảnh in" bị đẩy xuống dưới vùng cuộn trên màn hình thấp. Áp dụng cho mọi
+      menu của bảng; menu dài hơn vùng nhìn thì cuộn tới đầu menu.
 - Test: 5 bài lõi (vùng áo, cỡ cho xem, đo độ nhòe mép, ảnh AI trả về giữ tông của ảnh, chỉ
   điểm ảnh áo đổi); 1 bài nhãn "đồ đang mặc"; 1 bài bảng (menu "Áo", ảnh đã ghép áo); 1 bài
-  chạy model thật trong app (kéo thanh → chạy nền → Áp dụng: áo đổi, mặt không đổi điểm nào).
+  chạy model thật trong app trên `tmp/anh-the/am-mau/khach_1.jpg` (kéo thanh → chạy nền → Áp
+  dụng: áo đổi, mặt không đổi điểm nào). Cả bộ: nhóm nhẹ 2002 qua; nhóm `app::portrait_ops`
+  (chạy từng bài) 21 qua.
   Lệnh xem ảnh thử: `IAI_PORTRAIT_CLOTHES_PROBE=<thư mục ảnh>` với
   `cargo test --lib -- --ignored probe_clothes --nocapture` (ảnh tên `..._x1.6.png` = đã phóng
   1,6 lần).
