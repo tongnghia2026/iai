@@ -377,25 +377,45 @@ làm được việc này, nhưng phải đổi ô mới thấy.)
   nhận diện lại vài giây).
 - [x] Chủ test 06/10 tối trên `target\release\iai.exe` (build 15:35): **"đã test ok"**.
 
-### Đợt 38 — Ô "Áo" tiện hơn (CHƯA LÀM — việc kế tiếp)
+### Đợt 38 — Ô "Áo" tiện hơn (làm 06/10 tối — CHỜ CHỦ TEST)
 
 Ba việc chủ nêu 06/10 tối, đều ở hàng "Áo" của ô Ảnh thẻ (`garment_row` trong
 `src/ui/dialogs/id_photo.rs`, app `src/app/garment_ops.rs`):
 
-- [ ] **Nút mở file áo** ngay cạnh ô Áo: mở hộp chọn file để trỏ tới file áo của tiệm (PSD…)
-      và mở lên thành một tab. Nên nhớ thư mục lần trước (kho áo của chủ:
-      `Documents\D_DATA\ÁO SƠ MI GHÉP ẢNH THẺ\…\VEST CHAN DUNG`). Lưu ý luật egui của dự án:
-      hộp chọn file `rfd` phải gọi ngoài frame và `set_parent`.
-- [ ] **Sau "Lấy áo đang chọn" tự nhảy về ảnh cần thay áo**; đang làm nhiều ảnh thì về **ảnh
-      mới mở gần nhất**. Hiện nay app nhảy về một ảnh nào đó nhưng không chắc đúng ảnh: nhật ký
-      06/10 lúc 15:01:27 cho thấy chủ vừa mở ảnh mới ở tab 7, bấm "Lấy áo đang chọn" ở tab áo
-      thì app mặc áo lên **tab 3** (ảnh cũ đã làm xong) → phải tìm xem `take_garment` chọn
-      tài liệu theo cách nào và đổi sang "ảnh mở / dùng gần nhất không phải file áo".
-- [ ] **Nút "Đổi áo khác"**: bấm là nhảy sang tab file áo để chọn mẫu khác (tab file áo đã lấy
-      lần trước; nếu file đó đã đóng thì mở lại, hoặc mở hộp chọn file).
-- Việc phải quyết khi làm (tôi tự quyết rồi báo chủ): "ảnh mới mở gần nhất" tính theo lần mở
-  hay lần được chọn gần nhất; có mặc áo ngay lên ảnh đó hay chỉ nhảy về (hiện nay là mặc
-  ngay); file áo nào là "tab file áo" khi chủ mở nhiều file áo.
+- [x] **Nút "Mở file áo"** (có hình thư mục) ở hàng Áo: mở hộp chọn file, chọn một hay nhiều
+      file áo của tiệm → mỗi file mở thành một tab; file đang mở sẵn thì app chỉ nhảy tới tab
+      đó. Hộp chọn file mở sẵn **thư mục của file áo dùng lần trước**. App nhớ 12 file áo gần
+      nhất qua các lần mở app (`prefs.json`, mục `garment_sheets`). Bấm nút mà hủy hộp chọn
+      file thì không có gì đổi.
+- [x] **Sau "Lấy áo đang chọn" (hay kéo thả áo vào ô) app quay về đúng ảnh**: ảnh **vừa xem
+      ngay trước khi sang tab file áo** — ảnh vừa mở chính là ảnh đó. Gốc lỗi cũ (nhật ký 06/10
+      lúc 14:58:09): chủ vừa mở ảnh ở tab 3 rồi sang file áo, bấm "Lấy áo đang chọn" thì app
+      mặc áo lên **tab 1** vì app ưu tiên "ảnh đã mặc áo lần trước" → đã bỏ luật ưu tiên đó.
+      Ảnh quay về đã tách nền (đã làm ảnh thẻ) thì mặc áo ngay như trước; ảnh mới mở, chưa
+      làm ảnh thẻ thì app nhảy về và nhắc "Bấm Làm ảnh thẻ tự động — áo sẽ được mặc luôn".
+      App bỏ qua các tab không phải ảnh khách: file áo (đã từng lấy áo ở đó, hoặc mở bằng nút
+      "Mở file áo", kể cả ở lần mở app trước), trang xếp ảnh in (các ảnh in nằm trong nhóm),
+      file trên 16 layer chưa mặc áo, file chữ và PDF.
+- [x] **Nút "Đổi áo khác"** (hiện khi ô đang giữ áo hoặc ảnh đang mặc áo): nhảy sang tab file
+      áo xem gần nhất. File áo đã đóng thì app mở lại file đó; chưa nhớ file nào thì mở hộp
+      chọn file. Chọn áo khác xong bấm "Lấy áo đang chọn" là app quay về ảnh vừa rời.
+- Việc tôi tự quyết: (1) "ảnh mới mở gần nhất" = ảnh **được xem gần nhất** không phải file áo
+  (ảnh vừa mở là ảnh vừa xem; chủ bấm sang một ảnh cũ rồi mới sang file áo thì áo vào ảnh
+  cũ đó — đúng với cái chủ đang nhìn). (2) Vẫn mặc áo ngay khi quay về. (3) Mở nhiều file
+  áo thì "Đổi áo khác" về file áo xem gần nhất. (4) Lúc sang file áo app tự cầm công cụ
+  **Move** để bấm chọn áo (đang cầm Smudge / Eraser mà bấm vào file áo sẽ làm hỏng áo mẫu);
+  quay về ảnh thì vẫn là Move. (5) "Đổi áo khác" rời ảnh như bấm sang tab khác: phần chỉnh
+  chân dung đang xem trước được áp dụng (luật đợt 27); "Mở file áo" chỉ áp dụng khi chủ đã
+  chọn file xong. (6) Hai nút mờ đi trong lúc đang làm ảnh thẻ / đang mặc áo.
+- Hàng Áo nay có hai dòng nút: dòng trên là việc với cái áo đang có ("Chỉnh áo", "Đổi áo
+  khác", "Bỏ áo"), dòng dưới là lấy áo ("Mở file áo", "Lấy áo đang chọn").
+- Test: 7 bài mới trong `garment_ops.rs` (áo vào ảnh xem gần nhất chứ không vào ảnh đã mặc
+  áo trước đó; ảnh chưa tách nền chỉ được nhảy về, áo chờ trong ô; bỏ qua file áo / trang in
+  / file nhiều layer; "Đổi áo khác" sang đúng file áo rồi lấy áo thì quay về ảnh; ảnh đã mặc
+  áo không bị nhận nhầm là file áo; nhớ file áo theo thứ tự mới nhất trước; file áo mở từ ô
+  được nhận ra và mở lại khi đã đóng), bài bảng (hai nút mới hỏi đúng việc, mờ đúng lúc), bài
+  luật đợt 27.
+- [ ] Chủ test.
 
 ### Đợt 39 — Viền áo khớp với da (CHƯA CÓ THIẾT KẾ — làm ảnh thử trước)
 
@@ -550,3 +570,16 @@ sau mỗi lần chủ chỉnh tay, dùng chung đường "Chỉnh tiếp ảnh n
   1×3×512×512 trong −1..1, đầu ra thứ nhất −1..1). Khung thử: mắt trái / phải về (193, 240) /
   (319, 240) × hệ số cỡ, rồi dời theo chiều dọc.
 - Test: `app::portrait_ops` chạy riêng `--test-threads=1`.
+- **Đợt 38** (`garment_ops.rs`): `photo_to_dress` = tài liệu đầu tiên trong `doc_mru` (trừ file
+  nguồn) mà `may_be_dressed`: đang mặc áo, hoặc không quá `MOST_PHOTO_LAYERS` (16) layer,
+  không có nhóm, không phải `is_garment_sheet`, không phải file chữ / PDF / nhiều trang. Luật
+  cũ "ưu tiên `GarmentSession.worn`" đã bỏ. File áo được biết qua `GarmentSession.sheets` (id
+  tài liệu đã lấy áo, `note_garment_sheet` — ảnh đang mặc áo thì không ghi) và `sheet_files`
+  (`OnceCell<SheetFiles>`: đọc `prefs.json` mục `garment_sheets` khi cần lần đầu, khóa so sánh
+  là `normalized_path_key`). `pick_garment_sheets` → `FileDialogResult::OpenedGarmentSheets` →
+  `open_garment_sheets` (`yield_portrait`, nhớ file, cầm Move, `start_load_paths`);
+  `change_garment` → `open_garment_sheet` (file áo đang mở, theo `doc_mru`) / mở lại file /
+  hộp chọn file. `DialogIntent.open_garment_sheet` không vượt qua phiên chỉnh chân dung (chưa
+  mở gì), `change_garment` thì có. `load_pref` / `save_pref` của `ui/dialogs.rs` nay
+  `pub(crate)` để phần app dùng. Bài test mở file thật qua `poll_loads` sẽ ghi vào
+  `catalog.json` của chủ → các bài ở đây không gọi `poll_loads`.
