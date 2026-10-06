@@ -1,4 +1,4 @@
-# Kế hoạch: vùng "Áo" (làm nét + cân sáng) và nút "Làm lại da cổ" (06/10/2026)
+# Kế hoạch: menu "Áo" và thanh "Da cổ" (06/10/2026 — sửa lần 2 theo ý chủ)
 
 **Trạng thái: CHỜ CHỦ DUYỆT. Chưa viết dòng code nào.** Nối tiếp
 `KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (đợt 31, 32 chủ test OK). Kế hoạch này thay cho "đợt 33"
@@ -6,233 +6,242 @@ ghi ở đó.
 
 ## 1. Việc chủ giao
 
-Lời chủ 06/10: "phần mặt, tóc,.... đã ok; tôi cần thêm 1 model nhận diện, khoanh vùng áo để làm
-nét và cân bằng ánh sáng; ngoài ra: sau khi thay áo xong user điều chỉnh smudge, clone,... các
-phần ở da cổ thì cần thêm 1 nút chạy lại chi tiết da, cân bằng ánh sáng chỉ ở vùng cổ; hãy lên
-kế hoạch cho tôi đọc".
+Lời chủ 06/10, lần đầu: "phần mặt, tóc,.... đã ok; tôi cần thêm 1 model nhận diện, khoanh vùng
+áo để làm nét và cân bằng ánh sáng; ngoài ra: sau khi thay áo xong user điều chỉnh smudge,
+clone,... các phần ở da cổ thì cần thêm 1 nút chạy lại chi tiết da, cân bằng ánh sáng chỉ ở
+vùng cổ; hãy lên kế hoạch cho tôi đọc".
 
-Tôi hiểu thành hai việc:
+Lời chủ 06/10, sau khi đọc bản đầu: "tạo thêm 1 menu áo riêng, trong đó có thanh kéo tăng nét,
+thanh điều chỉnh ánh sáng áo,... phần da cổ tạo thêm 1 thanh kéo ở menu da; phần chạy lại chi
+tiết da, làm nét da cổ tận dụng luôn model chi tiết mặt (AI) - nhưng thay vì cho chạy lại toàn
+bộ khuôn mặt thì chỉ chạy vùng da cổ (tại vì da mặt trước đó đã được làm nét rồi, nếu chạy thêm
+lần nữa sẽ bị làm nét lần 2); đối với phần tăng nét cho áo thì chủ yếu dùng để chạy nét đối với
+áo khách mặc mà họ tự chụp bằng điện thoại nên mờ - hoặc những tấm ảnh cũ phục hồi, còn áo ghép
+thì đã nét sẵn nên không cần làm nét nữa; điều chỉnh lại kế hoạch cho tôi đọc".
 
-- **A. Vùng "Áo"**: app nhận ra cái áo trong ảnh như đang nhận ra da, tóc, lông mày; rồi làm nét
-  và cân sáng riêng cho áo. Tôi hiểu là áp dụng cho **cả áo khách đang mặc sẵn lẫn áo ghép** —
-  nếu chủ chỉ cần một trong hai thì báo, việc sẽ gọn hơn.
-- **B. Nút "Làm lại da cổ"**: sau khi mặc áo, chủ sửa tay chỗ cổ bằng Smudge, Clone… thì bấm
-  một nút để app trả lại vân da và làm đều sáng, **chỉ trong vùng cổ**, không đụng lại mặt.
+## 2. Chủ đã chốt gì ở lần sửa này
 
-## 2. Tóm tắt
+| Việc | Bản đầu | Nay (theo chủ) |
+|---|---|---|
+| Chỗ đặt các thanh của áo | Nhóm "Áo" | **Menu "Áo" riêng**: thanh tăng nét, thanh ánh sáng áo… |
+| Da cổ | Một nút ở hàng "Áo" | **Một thanh kéo "Da cổ" trong menu "Da"** |
+| Cách làm chi tiết da cổ | Vân da tự tạo / mượn da má | **Dùng luôn model "Chi tiết mặt (AI)", chỉ lấy vùng da cổ** |
+| Tăng nét áo dùng cho | Cả áo mặc sẵn lẫn áo ghép | **Chỉ áo khách mặc sẵn** (ảnh điện thoại mờ, ảnh cũ phục hồi); áo ghép không làm nét |
 
-1. **Không phải tải model mới để nhận diện áo.** Model Sapiens2 đang dùng cho da và tóc vốn đã
-   có sẵn nhãn "Áo", "Quần / váy", "Phụ kiện"; app chỉ chưa đem ra dùng. Tôi đã chạy thử trên 4
-   ảnh khách thật, áo được khoanh gọn (mục 3). Áo ghép thì còn dễ hơn: nó là layer riêng nên
-   vùng áo chính xác tuyệt đối.
-2. **Làm nét áo**: đề xuất dùng bộ làm nét sẵn có của Develop, giới hạn trong vùng áo — tức
-   thì, không bịa chi tiết, chữ trên bảng tên và logo không bị méo. Bản dùng AI (Real-ESRGAN)
-   tôi sẽ làm ảnh so sánh để chủ nhìn rồi mới quyết có thêm hay không, vì nó chậm trên máy tiệm.
-3. **Cân sáng áo**: nâng phần áo khuất đèn cho đều với phần sáng, giữ nguyên hoa văn và nếp
-   vải; thêm một thanh chỉnh tay sáng / tối riêng cho áo. Áo ghép còn được tự khớp độ sáng với
-   mặt và nhận chung "Màu studio" (hiện nay màu studio chỉ áp lên người, không áp lên áo ghép).
-4. **Nút "Làm lại da cổ"** nằm ở hàng "Áo": một lần bấm, vài giây, một bước Ctrl+Z.
-5. Làm thành **ba đợt**: ảnh thử trước cho chủ xem → vùng "Áo" trong app → nút da cổ.
+## 3. Tóm tắt
 
-## 3. Hiện trạng (đã kiểm 06/10)
+1. **Khoanh vùng áo không cần tải model mới**: Sapiens2 đang dùng cho da và tóc đã có sẵn nhãn
+   "Áo". Đã thử trên ảnh khách thật.
+2. **Thanh "Da cổ" làm được đúng như chủ nói**: tôi đã thử cho model "Chi tiết mặt (AI)" nhìn
+   một khung có cả cổ, trên 2 ảnh đã mặc áo — da cổ đang phẳng lì có lại vân da mịn, mỗi lượt
+   khoảng 1,8 giây. App chỉ lấy phần chi tiết ở cổ; **mặt giữ nguyên từng điểm ảnh** nên không
+   bị nét lần hai. Ảnh xem: `tmp\vung-ao\da-co-thu-AI.jpg`.
+3. **Model "Chi tiết mặt (AI)" không dùng được cho áo**: cũng trong lần thử đó nó vẽ méo hoa văn
+   cổ áo và vẽ viền lạ lên áo trắng. Vậy tăng nét áo phải đi đường khác — đây là **chỗ duy nhất
+   có thể phải thêm một model** (loại phục hồi ảnh Real-ESRGAN), vì việc chủ cần là cứu áo mờ
+   trong ảnh điện thoại và ảnh cũ. Thêm hay không, bản nào, quyết bằng ảnh thử ở đợt 33.
+4. Làm thành **ba đợt**: ảnh thử → menu "Áo" → thanh "Da cổ".
 
-- **Thử nhận diện áo**: chạy riêng model Sapiens2 đang cài trên 4 ảnh trong
-  `C:\Users\Admin\Downloads\ht` (3 áo sơ mi trắng, 1 áo thun xanh có logo và bảng tên). Kết quả:
-  áo được khoanh gọn cả hai vai và cổ áo; tóc dài xõa trước áo không bị lẫn vào áo; bảng tên
-  được nhận là "Phụ kiện"; khoảng da hở trong cổ áo được nhận là "Thân" (da), tách khỏi áo. Mỗi
-  ảnh khoảng 1,7 giây bằng CPU — và lúc chỉnh chân dung app **đã chạy model này sẵn rồi**, nên
-  thêm vùng áo không làm chờ lâu hơn. Ảnh xem: `tmp\vung-ao\nhan-dien-ao-thu.jpg` (áo tô màu
-  xanh lơ, da cam / hồng, tóc tím, phụ kiện vàng).
-  - Giới hạn của lần thử: mới 4 ảnh, model chạy trên cả khung ảnh chứ chưa qua đúng đường cắt
-    của app; chưa thử vest tối trên nền tối, áo dài, áo cùng màu với nền, trẻ em.
-- **Áo ghép hiện nay** (`tmp\vung-ao\co-va-ao-hien-nay.jpg`, cắt từ ảnh ghép thử đợt 31): áo mềm
-  hơn mặt vì phôi áo phải phóng 1,4–2,4 lần; áo trắng gần như loá mất nếp vải; da tô ở khoảng
-  hở cổ là màu phẳng, không có vân da, không có bóng dưới cằm.
-- **Các bước làm đẹp hiện có chỉ chạy trên da, tóc, mắt, môi, lông mày.** Áo khách mặc sẵn chỉ
-  hưởng phần "Sửa màu & sáng" chung cả ảnh; áo ghép (layer "Áo") không hưởng gì cả.
-- **Model làm nét bằng AI**: thư mục `models\realesrgan` hiện đang trống (chỉ có file hướng
-  dẫn). Số đo cũ ngày 03/10: bản Real-ESRGAN đẹp nhất mất khoảng 27 giây cho một vùng 360×270 —
-  ước cho cả vùng áo của một ảnh thẻ là vài phút (ước lượng, chưa đo). Bản nhẹ nhanh hơn nhiều
-  nhưng hôm đó thử trên tóc thì bị bệt; trên vải chưa thử.
+## 4. Đã kiểm 06/10
 
-## 4. Phần A — Vùng "Áo"
+- **Khoanh vùng áo**: chạy model Sapiens2 đang cài trên 4 ảnh trong `C:\Users\Admin\Downloads\ht`
+  (3 sơ mi trắng, 1 áo thun xanh có logo và bảng tên). Áo được khoanh gọn hai vai và cổ áo; tóc
+  dài xõa trước áo không lẫn vào áo; bảng tên ra nhãn "Phụ kiện"; da hở trong cổ áo ra nhãn da.
+  Khoảng 1,7 giây mỗi ảnh — và lúc chỉnh chân dung app đã chạy model này sẵn rồi, nên không chờ
+  thêm. Ảnh xem: `tmp\vung-ao\nhan-dien-ao-thu.jpg`.
+  - Giới hạn: mới 4 ảnh dễ; chưa thử vest tối trên nền tối, áo dài, áo trùng màu nền, trẻ em.
+- **Model "Chi tiết mặt (AI)" trên da cổ**: chạy model đang cài (`models\gfpgan`) trên 2 ảnh
+  ghép thử của đợt 31, với khung hình dời xuống cho cổ lọt vào.
+  - Mặt chiếm khoảng 80% cỡ thường của khung: da cổ có vân mịn, sạch, hợp với da mặt.
+  - Mặt chỉ còn 60%: vân da cổ ra thô, lốm đốm như râu — không dùng được. Tức là **cỡ và vị trí
+    khung phải chọn kỹ**; sẽ dò trên ảnh thật ở đợt 33.
+  - Trong cả hai khung, model làm hỏng phần áo nằm trong khung (hoa văn, mép cổ áo) → vùng lấy
+    chi tiết phải dừng trước mép áo, và model này không dùng cho áo.
+  - Giới hạn: mới 2 ảnh, cổ là da tô phẳng của app chứ chưa phải cổ chủ đã Smudge / Clone.
+- **Áo ghép hiện nay** (`tmp\vung-ao\co-va-ao-hien-nay.jpg`): da tô ở khoảng hở cổ là màu
+  phẳng, không vân da, không bóng dưới cằm — đúng chỗ thanh "Da cổ" sẽ xử lý.
+- **Luật sẵn có của app (đợt 25)**: layer "Chân dung" đã bị sửa tay thì khi bấm "Tự động làm
+  đẹp" app coi nó là ảnh mới, **mọi thanh bắt đầu từ 0**. Thanh "Da cổ" dựa vào đúng luật này.
+- **Model phục hồi ảnh cho áo**: thư mục `models\realesrgan` đang trống. Số đo cũ 03/10 (trên
+  tóc): bản đẹp nhất khoảng 27 giây cho vùng 360×270; bản nhẹ nhanh hơn nhiều nhưng tóc bị bệt.
+  Trên vải chưa thử lần nào.
 
-### 4.1. Nhận diện
+## 5. Menu "Áo"
 
-- **Áo khách mặc sẵn**: lấy nhãn "Áo" + "Quần / váy" + "Phụ kiện" của Sapiens2, rồi gọt mép cho
-  sát bằng chính đường viền tách người và màu ảnh (cách đang làm với tóc), để mép vùng áo không
-  lem ra nền hay lên cổ.
-- **Áo ghép**: vùng áo = đúng layer "Áo". Không chạy model, không sai mép.
-- Nhận sai thì sửa tay được: mục "Tô vùng" có thêm lựa chọn **"Áo"** bên cạnh Da / Tóc / Lông
-  mày; "Hiện vùng nhận diện" tô thêm vùng áo bằng một màu riêng.
+Một menu riêng trong bảng Chỉnh chân dung, đặt sau "Tóc". Ba thanh, không gắn chú thích nổi.
 
-### 4.2. Làm nét áo
+### 5.1. Khoanh vùng
 
-Thanh **"Nét áo"** (0–100).
+- Áo khách mặc sẵn: nhãn "Áo" + "Quần / váy" + "Phụ kiện" của Sapiens2, gọt mép cho sát theo
+  đường viền tách người và màu ảnh (cách đang làm với tóc).
+- Nhận sai thì sửa tay: "Tô vùng" có thêm lựa chọn **"Áo"**; "Hiện vùng nhận diện" tô vùng áo
+  bằng một màu riêng.
 
-- Cách đề xuất: bộ làm nét của Develop ▸ Detail (đã đo khớp Camera Raw), chỉ chạy trong vùng áo,
-  không tạo viền sáng ở mép áo – nền. Nét lên ở cổ áo, ve áo, hàng cúc, đường may, sợi vải.
-  Tức thì; lần nào cũng ra như nhau; chữ bảng tên, logo, phù hiệu giữ đúng nét thật.
-- Với **áo ghép**: mức nét tự tăng theo độ phóng (áo phóng càng nhiều thì bù nét càng nhiều),
-  và mép áo được làm mượt lại cho hết răng cưa.
-- Bản AI (Real-ESRGAN): "vẽ" lại sợi vải cho ảnh rất mờ, nhưng chậm, và AI loại này hay làm méo
-  chữ nhỏ (bảng tên, logo đồng phục). Tôi **không đưa vào app ngay**; ở đợt 33 tôi làm ảnh so
-  sánh hai cách kèm thời gian chạy thật, chủ nhìn rồi quyết.
+### 5.2. Thanh "Nét áo" (0–100)
 
-### 4.3. Cân sáng áo
+- **Chỉ tác động lên áo khách đang mặc trong ảnh.** Ảnh đã ghép áo thì thanh này mờ đi, kèm một
+  dòng "Áo ghép đã nét sẵn".
+- Dùng cho: ảnh khách tự chụp bằng điện thoại bị mờ, ảnh cũ phục hồi.
+- Cách làm — hai ứng viên, chọn bằng ảnh thử:
+  1. **Bộ làm nét của Develop** chạy riêng trong vùng áo. Tức thì, không bịa chi tiết, chữ bảng
+     tên và logo giữ đúng. Yếu điểm: áo mờ nặng thì chỉ nét mép, không "có lại" sợi vải.
+  2. **Model phục hồi ảnh (Real-ESRGAN)**: vẽ lại chi tiết vải cho ảnh mờ — đúng loại ảnh chủ
+     nêu. Chạy kiểu "Chi tiết mặt (AI)": thanh rời số 0 thì app chạy model một lần ở nền, sau đó
+     kéo thanh là thấy ngay; app chỉ lấy phần chi tiết, màu và sáng tối vẫn của ảnh. Yếu điểm:
+     phải thêm một file model (bản nhẹ khoảng 5 MB, bản đẹp khoảng 67 MB; giấy phép cho bán),
+     chạy bằng CPU nên có thể chậm, và loại AI này hay làm méo chữ nhỏ (bảng tên, logo).
+- Tôi chưa chọn trước: đợt 33 làm tấm so sánh cả hai trên **ảnh mờ thật của chủ**, ghi thời
+  gian chạy thật trên máy tiệm. Nếu bản AI nhẹ vừa nhanh vừa đẹp thì dùng nó; nếu không thì
+  dùng Develop, AI để dành cho ảnh mờ nặng.
 
-- Thanh **"Đều sáng áo"** (0–100): một bên vai tối, phần áo khuất đèn, áo sậm dần xuống dưới →
-  nâng cho đều với phần được chiếu sáng. Chỉ sửa độ sáng theo mảng lớn nên hoa văn, sọc, nếp
-  gấp, ranh giới áo vest – sơ mi – cà vạt giữ nguyên.
-- Thanh **"Sáng áo"** (hai chiều): trái tối hơn, phải sáng hơn, chỉ riêng áo — không đụng mặt,
-  tóc, nền.
-- Áo trắng bị loá: kéo lại nếp vải (sẽ xem trên ảnh thử có đáng làm không).
-- Riêng **áo ghép**: tự khớp độ sáng của áo với mặt khách, và nhận chung "Màu studio" đang chọn
-  để người và áo cùng một tông.
+### 5.3. Thanh "Sáng áo" (hai chiều) và "Đều sáng áo" (0–100)
 
-### 4.4. Giao diện
+- **Sáng áo**: trái tối hơn, phải sáng hơn — chỉ riêng áo, không đụng mặt, tóc, nền.
+- **Đều sáng áo**: một bên vai tối, phần áo khuất đèn → nâng cho đều với phần được chiếu sáng.
+  Chỉ sửa theo mảng lớn nên hoa văn, sọc, nếp gấp, ranh giới vest – sơ mi – cà vạt giữ nguyên.
+- Với **áo ghép**: hai thanh này tác động lên layer "Áo" (chỉnh sáng áo cho hợp với mặt). Áo
+  ghép không bị làm nét, không bị đổi gì khác. *Phần này làm cuối cùng và chỉ làm nếu chủ cần —
+  xem mục 8, câu 3.*
 
-- Bảng Chỉnh chân dung có thêm nhóm **"Áo"** (đặt sau nhóm "Tóc") với ba thanh: Nét áo, Đều
-  sáng áo, Sáng áo. Không gắn chú thích nổi lên thanh.
-- "Làm ảnh thẻ tự động" và "Tự động làm đẹp" áp luôn mức mặc định của ba thanh này — không thêm
-  cú bấm nào vào quy trình. Mức mặc định tôi đề xuất sau khi có ảnh thử, chủ chốt.
-- "Công thức" đã lưu từ trước đọc ba thanh mới là 0 (ảnh cũ mở lại không tự đổi).
+### 5.4. Mặc định
 
-### 4.5. Ảnh đã thay áo
+Cả ba thanh bắt đầu từ **0** (áo giữ nguyên như chụp), chủ kéo khi cần — vì tăng nét áo chỉ
+dùng cho ảnh mờ, ảnh cũ. "Công thức" đã lưu từ trước đọc ba thanh là 0. Sau khi dùng thật, chủ
+muốn mức nào tự chạy trong "Làm ảnh thẻ tự động" thì đổi mặc định sau.
 
-Ba thanh nhóm "Áo" tác động lên layer "Áo". Bản áo chưa chỉnh được giữ lại bên dưới (ẩn), nên
-kéo thanh lại nhiều lần hay bấm "Chỉnh áo" (dời / phóng / xoay) thì áo không bị mờ dần hay nét
-chồng nét. Áo vẫn là một layer riêng, chủ vẫn sửa tay tùy ý như đã chốt ở đợt 32.
+## 6. Thanh "Da cổ" trong menu "Da"
 
-## 5. Phần B — Nút "Làm lại da cổ"
+Một thanh **"Da cổ"** (0–100, mặc định 0), đặt cuối menu "Da".
 
-**Vị trí**: hàng "Áo" của ô Ảnh thẻ, cạnh "Chỉnh áo" và "Bỏ áo". Bảng này vẫn mở trong lúc chủ
-dùng Smudge, Clone.
+### 6.1. Kéo thanh thì app làm gì
 
-**Cách dùng**: mặc áo → sửa tay chỗ cổ (Smudge, Clone, Repair…) → bấm **"Làm lại da cổ"**.
+1. **Tìm vùng da cổ**: phần da từ dưới đường hàm xuống tới mép áo, gồm cả khoảng da hở trong
+   cổ áo; trừ tóc; dừng trước mép áo. Mép vùng mềm dần ở đường hàm.
+2. **Chạy model "Chi tiết mặt (AI)" một lần** (khi thanh rời số 0, chạy nền vài giây) trên một
+   khung hình có cả cổ. Model vẫn phải nhìn thấy khuôn mặt thì mới chạy đúng, nhưng app **chỉ
+   lấy phần chi tiết nằm trong vùng da cổ**. Mặt, tóc, áo không nhận gì từ lượt chạy này — mặt
+   không bị làm nét lần hai.
+3. **Cân sáng vùng cổ**: xóa mảng sáng – tối loang lổ do Clone / Smudge, đưa màu da cổ về đúng
+   màu da mặt, giữ cổ tối hơn mặt một chút như thật.
+4. Thanh càng cao thì chi tiết AI và độ đều sáng ở cổ càng nhiều; 0 là cổ giữ nguyên.
 
-**App làm gì khi bấm:**
+### 6.2. Cách dùng sau khi thay áo
 
-1. Tìm lại **vùng cổ** trên ảnh đang thấy: phần da từ dưới đường hàm xuống tới mép áo, gồm cả
-   khoảng da hở trong cổ áo; trừ tóc và trừ phần áo che. Mép vùng được làm mềm ở đường hàm để
-   **mặt không bị đụng lại** (mặt đã làm đẹp rồi, làm lần nữa sẽ bệt).
-2. **Cân sáng**: xóa các mảng sáng – tối loang lổ do Clone / Smudge để lại; đưa màu da cổ về
-   đúng màu da mặt của khách; giữ cổ tối hơn mặt một chút như thật. Nếu cổ bị phẳng lì (do tô
-   lại) thì thêm bóng nhẹ dưới cằm.
-3. **Chi tiết da**: đo độ mịn / vân da ở má (như đang hiển thị), rồi trả lại vân da cho những
-   chỗ ở cổ bị Smudge làm trơn, tới khi cổ và mặt cùng một độ mịn.
-4. Ghi thẳng vào layer chủ vừa sửa ("Chân dung" nếu có, không thì "Người"), **một bước Ctrl+Z**.
+Mặc áo → sửa tay chỗ cổ trên layer "Chân dung" (Smudge, Clone, Repair…) → bấm "Tự động làm đẹp"
+để chỉnh tiếp (các thanh đều về 0 vì ảnh đã làm đẹp rồi) → kéo **"Da cổ"** → "Áp dụng". Chỉ
+vùng cổ đổi; một bước Ctrl+Z.
 
-**Chi tiết khác:**
+### 6.3. Chi tiết khác
 
-- Chạy nền khoảng vài giây (phải tìm lại mặt và cổ vì điểm ảnh đã đổi), app không khựng; có
-  dòng báo "Đang làm lại da cổ…".
-- **Có vùng chọn** thì chỉ làm trong vùng chọn — chủ khoanh đúng chỗ vừa sửa cũng được, kể cả
-  chỗ da ngực ở áo cổ sâu.
-- Ảnh không thay áo cũng bấm được (vùng cổ tính tới mép áo đang mặc).
-- Nút này **không tự vẽ lại** chỗ còn sót áo cũ hay lỗ thủng — đó vẫn là việc của Clone /
-  Repair. Nó chỉ làm cho chỗ đã sửa tay "liền" lại với da xung quanh.
-- AI vẽ chi tiết mặt (GFPGAN) không dùng được cho cổ: nó chỉ biết vẽ khuôn mặt. Vân da cổ lấy
-  theo da thật của chính khách hoặc bộ "Vân da" sẵn có — chọn cách nào xem trên ảnh thử.
+- Ảnh mới (chưa sửa tay) cũng kéo được: hiện nay khung của model chỉ tới ngay dưới cằm, nên ảnh
+  điện thoại mờ thường ra **mặt nét mà cổ vẫn mềm** — thanh này làm cổ theo kịp mặt.
+- Có vùng chọn thì chỉ làm trong vùng chọn (luật chung của bảng).
+- Vùng da nhận sai thì sửa bằng "Tô vùng ▸ Da" như hiện nay.
+- Thanh này **không tự vẽ lại** chỗ còn sót áo cũ hay lỗ thủng — đó vẫn là việc của Clone /
+  Repair. Nó làm cho chỗ đã sửa tay "liền" với da xung quanh.
+- Chỉ một thanh như chủ yêu cầu. Nếu khi test chủ muốn chỉnh riêng "chi tiết" và "đều sáng" ở
+  cổ thì tách thành hai thanh sau.
 
-## 6. Các đợt
+## 7. Các đợt
 
 Mỗi đợt xong đều build Release và đưa đường dẫn file chạy thật cho chủ test như lệ thường.
 
 ### Đợt 33 — Ảnh thử (chưa đổi giao diện)
 
-- [ ] Vùng áo trên 6 ảnh trong `Downloads\ht` + các ảnh khó chủ đưa thêm (vest tối, áo dài,
-      trẻ em): ảnh tô màu vùng nhận diện.
-- [ ] Làm nét áo: tấm so sánh *gốc / Develop / AI bản nhẹ / AI bản đẹp*, ghi thời gian chạy
-      thật trên máy tiệm — cho cả áo mặc sẵn lẫn áo ghép.
-- [ ] Cân sáng áo: tấm so sánh trước / sau ở hai mức; áo ghép trước / sau khi khớp sáng và
-      nhận Màu studio.
-- [ ] Da cổ: tấm so sánh trước / sau trên file chủ đã sửa tay (mục 7, câu 3).
-- [ ] Chủ xem ảnh, chốt: có dùng AI làm nét không; mức mặc định của ba thanh; cách lấy vân da cổ.
+- [ ] Vùng áo trên ảnh khó (vest tối, áo dài, áo trùng màu nền, trẻ em): ảnh tô màu vùng áo.
+- [ ] "Nét áo" trên ảnh điện thoại mờ và ảnh cũ của chủ: tấm so sánh *gốc / Develop / AI bản
+      nhẹ / AI bản đẹp*, kèm thời gian chạy thật; soi riêng chữ bảng tên và logo.
+- [ ] "Sáng áo", "Đều sáng áo": trước / sau ở hai mức.
+- [ ] "Da cổ": trên file chủ đã sửa tay; dò cỡ khung cho vân da đẹp nhất; ba mức thanh.
+- [ ] Chủ xem ảnh, chốt: "Nét áo" dùng cách nào (có thêm model không); cỡ khung của "Da cổ".
 
-### Đợt 34 — Vùng "Áo" trong app
+### Đợt 34 — Menu "Áo"
 
 - [ ] Vùng áo trong phần nhận diện; "Tô vùng ▸ Áo"; màu trong "Hiện vùng nhận diện".
-- [ ] Nhóm "Áo" với ba thanh; mặc định theo chốt ở đợt 33; chạy trong "Làm ảnh thẻ tự động".
-- [ ] Áo ghép: ba thanh tác động lên layer "Áo", tự bù nét theo độ phóng, mượt mép, khớp sáng,
-      nhận Màu studio; giữ bản áo gốc để chỉnh lại không hỏng dần.
+- [ ] Menu "Áo": Nét áo (chỉ áo mặc sẵn; mờ đi khi ảnh đã ghép áo), Sáng áo, Đều sáng áo.
 - [ ] Test tự động + ảnh probe giao diện; chủ test.
+- [ ] (Nếu chủ cần) Sáng áo / Đều sáng áo cho layer áo ghép.
 
-### Đợt 35 — Nút "Làm lại da cổ"
+### Đợt 35 — Thanh "Da cổ"
 
-- [ ] Vùng cổ (đường hàm → mép áo, trừ tóc, theo vùng chọn nếu có).
-- [ ] Cân sáng + trả vân da trong vùng cổ; bóng dưới cằm khi cổ phẳng.
-- [ ] Nút ở hàng "Áo", chạy nền, một bước hoàn tác; ghi vào "hộp đen" thời gian chạy.
-- [ ] Test tự động; chủ test.
+- [ ] Vùng da cổ (đường hàm → mép áo, trừ tóc).
+- [ ] Lượt chạy riêng của model "Chi tiết mặt (AI)" cho cổ, chạy nền một lần khi thanh rời 0.
+- [ ] Cân sáng vùng cổ; thanh "Da cổ" trong menu "Da"; ghi thời gian chạy vào "hộp đen".
+- [ ] Test tự động (có bài kiểm mặt không đổi điểm ảnh nào); chủ test.
 
-Đợt 34 và 35 không phụ thuộc nhau — chủ cần nút da cổ trước thì đổi thứ tự được.
+Đợt 34 và 35 không phụ thuộc nhau. Thanh "Da cổ" gọn hơn và model đã có sẵn — chủ muốn có
+trước thì đổi thứ tự được.
 
-### Để sau (từ "đợt 33" cũ, chỉ làm khi chủ bảo)
+### Để sau, chỉ làm khi chủ bảo
 
 - App tự tô da cổ đẹp hơn ngay lúc mặc áo (cổ áo cũ che cổ, áo cổ sâu thiếu xương đòn).
 - Trẻ em: tự thu nhỏ vai áo theo người.
 - Đổi màu tóc sau khi mặc áo thì layer "Tóc trên áo" đổi theo.
 
-## 7. Việc cần chủ quyết
+## 8. Việc cần chủ quyết
 
-1. Duyệt ba đợt 33–35 không? Làm theo thứ tự trên hay nút da cổ trước?
-2. "Làm nét + cân sáng áo": tôi làm cho **cả áo mặc sẵn lẫn áo ghép** — đúng ý chủ không?
-3. Cho tôi đường dẫn **2–3 file đã mặc áo và đã sửa tay chỗ cổ** (lưu `.iai` ngay sau khi
-   Smudge / Clone, trước khi làm gì khác) để thử nút da cổ trên đúng kiểu sửa của chủ. Không có
-   thì tôi phải tự giả lập vết sửa, kém sát thực tế.
-4. Hôm 05/10 chủ nói quy trình thay áo "vẫn có 1 vài điểm bị vấp". Hai việc trong kế hoạch này
-   đã là hết các điểm đó chưa, hay còn điểm nào khác?
-5. Ảnh khó cho vùng áo (vest tối trên nền tối, áo dài, áo trùng màu nền): chủ có sẵn thì cho
-   đường dẫn thư mục.
+1. Duyệt ba đợt 33–35 không? Menu "Áo" trước hay thanh "Da cổ" trước?
+2. Cho tôi đường dẫn ảnh mẫu để thử cho sát thực tế:
+   - 3–5 **ảnh khách tự chụp điện thoại, áo mờ**, và 2–3 **ảnh cũ phục hồi**;
+   - 2–3 **file `.iai` đã mặc áo và đã sửa tay chỗ cổ** (lưu ngay sau khi Smudge / Clone).
+3. "Sáng áo" và "Đều sáng áo" có cần tác động lên **áo ghép** không, hay áo ghép để nguyên
+   hoàn toàn? (Tôi đang để là có, làm cuối.)
+4. Nếu ảnh thử cho thấy áo mờ phải dùng AI mới cứu được: chủ có đồng ý **thêm một model** cho
+   việc này không? (Xem ảnh so sánh ở đợt 33 rồi quyết cũng được.)
+5. Hôm 05/10 chủ nói quy trình thay áo "vẫn có 1 vài điểm bị vấp" — hai việc này đã hết các
+   điểm đó chưa?
 
-## 8. Rủi ro và điều chưa biết
+## 9. Rủi ro và điều chưa biết
 
-- Nhận diện áo mới thử trên 4 ảnh dễ (áo sáng trên nền xanh / trắng). Áo tối trên nền tối, áo
-  trùng màu nền, khăn quàng, tóc dài phủ kín vai có thể khoanh thiếu — vì vậy có "Tô vùng ▸ Áo"
-  và phải thử thêm ở đợt 33.
+- **"Nét áo" cho ảnh mờ nặng là phần chưa chắc nhất.** Làm nét kiểu Develop không cứu được ảnh
+  mất nét; AI cứu được nhưng chưa có số đo thời gian trên vải, và có thể méo chữ nhỏ. Đợt 33
+  mới có câu trả lời; có thể kết quả là "ảnh mờ quá mức này thì vẫn nên đưa qua AI Image Studio".
+- "Da cổ" mới thử trên 2 ảnh, và kết quả phụ thuộc cỡ khung (80% đẹp, 60% xấu). Người cổ dài,
+  áo cổ sâu, mặt nghiêng có thể cần khung khác — phải dò ở đợt 33.
+- Vân da AI vẽ là vân "hợp lý", không phải đúng từng lỗ chân lông cũ của khách ở chỗ đó. Model
+  đôi khi thêm vài chấm nhỏ như nốt ruồi; thanh thấp thì ít thấy.
+- Khoanh vùng áo mới thử trên ảnh dễ. Áo tối trên nền tối, áo trùng màu nền, khăn quàng có thể
+  khoanh thiếu — vì vậy có "Tô vùng ▸ Áo".
 - "Đều sáng áo" phải phân biệt *tối do khuất đèn* với *tối do vải sẫm màu* (vest đen cạnh sơ mi
-  trắng). Cách làm là chỉ sửa theo mảng lớn và theo từng loại vải; nếu trên ảnh thử vẫn làm bạc
-  áo sẫm thì mức mặc định sẽ để thấp.
-- Làm nét kiểu Develop không cứu được ảnh áo mờ nặng (rung tay, mất nét) — chỉ AI mới "vẽ" lại,
-  với cái giá là chậm và có thể méo chữ. Chủ quyết sau khi xem ảnh so sánh.
-- Thời gian bản AI là số ước từ một lần đo cũ trên tóc; đợt 33 mới có số thật.
-- Khớp sáng áo ghép với mặt là ước đoán từ độ sáng da và cổ áo trắng; phôi áo chụp ánh sáng
-  khác hẳn (đèn gắt, bóng đổ ngược hướng) thì chỉ khớp được mức sáng, không đổi được hướng sáng.
-- Nút da cổ dựa vào việc app tìm lại được mặt sau khi chủ sửa tay — bình thường không vấn đề vì
-  chủ chỉ sửa ở cổ. Sửa quá rộng lên hàm thì vùng cổ có thể lệch; khi đó dùng vùng chọn.
-- Vân da trả lại là vân "hợp lý", không phải đúng từng lỗ chân lông cũ của khách ở chỗ đó.
+  trắng); nếu trên ảnh thử nó làm bạc áo sẫm thì giới hạn lại biên độ.
+- "Da cổ" cần app tìm lại được mặt sau khi chủ sửa tay — bình thường không vấn đề vì chủ chỉ
+  sửa ở cổ.
 
-## 9. Ghi chú kỹ thuật cho phiên sau
+## 10. Ghi chú kỹ thuật cho phiên sau
 
 - Nhãn Sapiens2 (`src/core/ai/body_parts.rs`, `CLASS_NAMES`): 23 "Áo", 13 "Quần/váy", 1 "Phụ
-  kiện", 22 "Thân" (da trần), 3 "Mặt + cổ" (không tách riêng cổ → vùng cổ phải cắt bằng đường
-  hàm của face mesh). `PART_GROUPS` hiện có 8 nhóm, chưa có nhóm áo; `garment::Figure.other`
-  đang tính "áo" bằng 1 − tổng các nhóm. Thêm nhóm thứ 9 `GROUP_CLOTHES` từ softmax.
-- Mẫu để làm theo cho vùng áo: cách dựng mask tóc + `hair_region` + `hair_base` trong
-  `portrait/analysis.rs`; `masked_blur`, `gate_by_colour`, `edge_aware_base`; lượt tóc trong
-  `effects::retouch`. Thêm `FaceEdits.clothes`, `brush` thêm mục tiêu thứ tư, `SavedFace.clothes`
-  trong `recipe.rs` (field mới `#[serde(default)]`).
-- Thanh mới trong `PortraitSettings`: `clothes_sharpen`, `clothes_even`, `clothes_brightness`
-  (đều `#[serde(default)]`, `NEUTRAL` = 0, có trong `unit()`); "Sáng áo" dùng lại `skin_tone` /
-  `midtoned` (Midtones của Develop) như "Sáng da".
-- Làm nét: `develop::local_detail_boost` trong vùng áo, dải nền tính bằng `masked_blur` theo
-  mask áo để không có viền ở mép.
-- Đều sáng áo: khớp mặt bậc thấp (phẳng / bậc hai) của ln độ sáng theo từng cụm màu vải, giới
-  hạn biên độ; không dùng nguyên `even_light_gain` (nó giả định một mức "được chiếu" duy nhất,
-  đúng cho da, sai cho áo nhiều màu).
-- Áo ghép: xem trước layer thứ hai bằng `preview_layer_tiles(layer_id, tiles)` (đã có, đang dùng
-  cho layer nguồn). Bù nét theo `Placement.scale`; mượt mép alpha trong `Cloth::laid`. Giữ bản
-  áo gốc: cân nhắc layer ẩn kiểu nguồn của "Chân dung" hoặc lưu trong recipe của layer — chọn
-  khi đọc kỹ `apply_portrait` / `Worn`. Màu studio: `looks::grade` trên layer "Áo".
-- Da cổ: dùng lại `PortraitModel::skin_layers_from` với mask = vùng cổ, đọc `mean` / `lit` /
-  độ lớn dải `src − low1` từ da mặt của ảnh hiện tại; vân da: `pores()` hoặc mượn dải mịn từ má
-  (kiểu donor của "Xóa mụn"). Chạy trên luồng nền (bài học hộp đen 05/10), ghi dòng `perf`.
-  Layer đích: "Chân dung" đang hiện → "Người" → layer đang chọn. `Fitting` cũ không dùng lại
-  được vì điểm ảnh đã đổi; face mesh + Sapiens2 chạy lại.
-- Real-ESRGAN: checkpoint `.pth` ở `tmp/model-checkpoints` (general-x4v3, x2plus, x4plus), môi
-  trường xuất ONNX ở `tmp/model-export-env`; đường chạy sẵn `run_realesrgan_detail` trong
-  `core/ai/retouch.rs`. Giấy phép BSD-3. Chỉ dùng cho ảnh so sánh ở đợt 33 cho tới khi chủ chốt.
-- Lệnh thử nhanh ngoài app (06/10): Python + onnxruntime đọc
-  `%APPDATA%\iAi\models\sapiens2-seg\sapiens2_seg_0.4b_512x384.onnx`, đầu vào `pixel_values`
-  1×3×512×384 chuẩn hóa ImageNet, đầu ra `logits` 1×29×512×384.
-- Test: `app::portrait_ops` chạy riêng `--test-threads=1`; test model thật của garment cũng vậy.
+  kiện", 22 "Thân" (da trần), 3 "Mặt + cổ" (không tách riêng cổ → vùng cổ cắt bằng đường hàm
+  của face mesh). `PART_GROUPS` có 8 nhóm, chưa có nhóm áo (`garment::Figure.other` đang lấy
+  1 − tổng các nhóm) → thêm nhóm thứ 9 `GROUP_CLOTHES` từ softmax.
+- Vùng áo: làm theo mẫu mask tóc (`hair_region`, `hair_base` trong `portrait/analysis.rs`;
+  `masked_blur`, `gate_by_colour`, `edge_aware_base`; lượt tóc trong `effects::retouch`). Thêm
+  `FaceEdits.clothes`, mục tiêu cọ thứ tư trong `brush.rs`, `SavedFace.clothes` trong
+  `recipe.rs` (`#[serde(default)]`).
+- Thanh mới trong `PortraitSettings` (đều `#[serde(default)]`, `NEUTRAL` và mặc định = 0, có
+  trong `unit()`): `clothes_sharpen`, `clothes_brightness` (hai chiều; dùng lại `skin_tone` /
+  `midtoned`), `clothes_even`, `neck` ("Da cổ").
+- "Đều sáng áo": khớp mặt bậc thấp của ln độ sáng theo từng cụm màu vải, giới hạn biên độ;
+  không dùng nguyên `even_light_gain` (nó giả định một mức "được chiếu" duy nhất).
+- "Nét áo" kiểu Develop: `develop::local_detail_boost`, nền tính bằng `masked_blur` theo mask
+  áo. Kiểu AI: theo đúng công thức "thay dải chi tiết" của `ai_detail.rs` (ảnh + a·(AI −
+  kept·ảnh)), chạy lười qua `OnceLock` như `FaceModel.ai_detail`; đường chạy model sẵn có
+  `run_realesrgan_detail` trong `core/ai/retouch.rs`; checkpoint `.pth` ở `tmp/model-checkpoints`
+  (general-x4v3, x2plus, x4plus), môi trường xuất ONNX ở `tmp/model-export-env`; giấy phép
+  BSD-3. Loại "Phụ kiện" (bảng tên) khỏi vùng AI nếu chữ bị méo.
+- "Da cổ": thêm `FaceDetail.neck: Option<Frame>` làm bằng `FaceRestorer::restore_framed` với
+  khung dời xuống (`ai_detail.rs` đã có `wider_framing` cho tóc, `WIDEST` = 0,6 — cổ cần khoảng
+  0,8, xem mục 4). Trong `retouch_pixel`: phần cổ = mask da × (1 − trong đường viền mặt) × dưới
+  hàm; chi tiết lấy từ khung cổ thay cho `detail.at`; **không cộng** với "Chi tiết mặt (AI)" ở
+  chỗ hai khung chồng nhau (lấy phần lớn hơn). Cân sáng cổ: `even_light_gain` + phần đều màu
+  của `skin_result`, nhân với trọng số cổ và thanh `neck`. Model chạy trên ảnh hiện tại của
+  layer (sau khi sửa tay), CPU, luồng nền như `start_detail_analysis` trong `portrait_ops.rs`.
+- Luật thanh về 0 cho layer đã sửa tay: `begin_portrait` (`retouched` → `PortraitSettings::
+  NEUTRAL`), `reopen_target` / `as_made` trong `portrait_ops.rs`.
+- Áo ghép (nếu làm phần sáng): xem trước layer thứ hai bằng `preview_layer_tiles(layer_id,
+  tiles)`; giữ bản áo gốc để kéo lại thanh không hỏng dần.
+- Thử nhanh ngoài app (06/10, Python + onnxruntime): Sapiens2
+  `%APPDATA%\iAi\models\sapiens2-seg\…512x384.onnx` (đầu vào `pixel_values` 1×3×512×384, chuẩn
+  hóa ImageNet); model mặt `%APPDATA%\iAi\models\gfpgan\RestoreFormer_PP.onnx` (đầu vào `input`
+  1×3×512×512 trong −1..1, đầu ra thứ nhất −1..1). Khung thử: mắt trái / phải về (193, 240) /
+  (319, 240) × hệ số cỡ, rồi dời theo chiều dọc.
+- Test: `app::portrait_ops` chạy riêng `--test-threads=1`.
