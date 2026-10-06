@@ -1,8 +1,8 @@
 # Kế hoạch: menu "Áo" và thanh "Da cổ" (06/10/2026 — sửa lần 2 theo ý chủ)
 
-**Trạng thái (06/10 chiều muộn): đợt 33–36 CHỦ TEST OK (đợt 35: thanh "Da cổ" + cọ "Tô vùng
-▸ Da cổ"; đợt 36: "Sáng áo" / "Đều sáng áo" cho áo ghép). Chủ báo một chỗ vấp → đợt 37 (nút
-"Chỉnh tiếp ảnh này" ở ô Ảnh thẻ) ĐÃ LÀM XONG, CHỜ CHỦ TEST.**
+**Trạng thái (06/10 tối): đợt 33–37 CHỦ TEST OK HẾT. VIỆC KẾ TIẾP (chủ bảo làm ở hội thoại
+mới): đợt 38 — ba việc cho ô "Áo" (nút mở file áo, tự quay về đúng ảnh, nút "Đổi áo khác");
+rồi đợt 39 — viền áo khớp với da (chưa có thiết kế, làm ảnh thử trước). Xem mục 7.**
 Nối tiếp `KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (đợt 31, 32 chủ test OK); kế hoạch này thay
 cho "đợt 33" ghi ở đó.
 
@@ -39,6 +39,15 @@ Lời chủ 06/10 chiều muộn, sau khi test đợt 35 + 36: "đã test ok; nh
 tự động ghép xong - người dùng thấy chưa đạt - họ chỉnh lại cổ áo cho đạt - smud, ctrl+t xoay,
 tô lại vùng da cổ auto lấy thiếu.... xong muốn chạy lại da cổ thì bị khóa - phải bấm chạy lại
 ảnh thẻ thì hệ thống lại ghép và chạy lại từ đầu".
+
+Lời chủ 06/10 tối, sau khi test đợt 37: "đã test ok; ở ngay cạnh ô thay áo có thêm nút mở thư
+mục để user trỏ tới file áo để mở lên; sau khi bấm nút lấy áo đang chọn xong thì phải tự nhảy
+về ảnh đang cần thay áo, nếu chỉnh nhiều ảnh thì quay về ảnh mới mở gần nhất; có thêm nút đổi
+áo khác khi bấm vào thì tự nhảy qua tab file áo để chọn lại mẫu áo khác; phần da cổ đã tạm ổn -
+tôi ước có thêm tính năng tự động chạy lại phần viền áo cho nó khớp với da sau khi người dùng
+đã tự chỉnh tay xong, hiện tại nhìn khá giả trân - áo chỉ là 1 layer chồng bên trên chứ chưa
+thật sự liên kết như mặc áo thật; phiên này chỉ lưu bộ nhớ, cập nhật kế hoạch; qua hội thoại
+mới làm tiếp".
 
 ## 2. Chủ đã chốt gì ở lần sửa này
 
@@ -366,7 +375,57 @@ làm được việc này, nhưng phải đổi ô mới thấy.)
 - Còn nguyên (đúng luật đợt 27, chủ đã duyệt): mỗi lần đụng công cụ ngoài bảng thì phần đang
   xem được áp dụng và các thanh khóa lại; muốn kéo tiếp thì bấm "Chỉnh tiếp ảnh này" (chờ app
   nhận diện lại vài giây).
-- [ ] Chủ test.
+- [x] Chủ test 06/10 tối trên `target\release\iai.exe` (build 15:35): **"đã test ok"**.
+
+### Đợt 38 — Ô "Áo" tiện hơn (CHƯA LÀM — việc kế tiếp)
+
+Ba việc chủ nêu 06/10 tối, đều ở hàng "Áo" của ô Ảnh thẻ (`garment_row` trong
+`src/ui/dialogs/id_photo.rs`, app `src/app/garment_ops.rs`):
+
+- [ ] **Nút mở file áo** ngay cạnh ô Áo: mở hộp chọn file để trỏ tới file áo của tiệm (PSD…)
+      và mở lên thành một tab. Nên nhớ thư mục lần trước (kho áo của chủ:
+      `Documents\D_DATA\ÁO SƠ MI GHÉP ẢNH THẺ\…\VEST CHAN DUNG`). Lưu ý luật egui của dự án:
+      hộp chọn file `rfd` phải gọi ngoài frame và `set_parent`.
+- [ ] **Sau "Lấy áo đang chọn" tự nhảy về ảnh cần thay áo**; đang làm nhiều ảnh thì về **ảnh
+      mới mở gần nhất**. Hiện nay app nhảy về một ảnh nào đó nhưng không chắc đúng ảnh: nhật ký
+      06/10 lúc 15:01:27 cho thấy chủ vừa mở ảnh mới ở tab 7, bấm "Lấy áo đang chọn" ở tab áo
+      thì app mặc áo lên **tab 3** (ảnh cũ đã làm xong) → phải tìm xem `take_garment` chọn
+      tài liệu theo cách nào và đổi sang "ảnh mở / dùng gần nhất không phải file áo".
+- [ ] **Nút "Đổi áo khác"**: bấm là nhảy sang tab file áo để chọn mẫu khác (tab file áo đã lấy
+      lần trước; nếu file đó đã đóng thì mở lại, hoặc mở hộp chọn file).
+- Việc phải quyết khi làm (tôi tự quyết rồi báo chủ): "ảnh mới mở gần nhất" tính theo lần mở
+  hay lần được chọn gần nhất; có mặc áo ngay lên ảnh đó hay chỉ nhảy về (hiện nay là mặc
+  ngay); file áo nào là "tab file áo" khi chủ mở nhiều file áo.
+
+### Đợt 39 — Viền áo khớp với da (CHƯA CÓ THIẾT KẾ — làm ảnh thử trước)
+
+Điều chủ thấy: áo ghép "nhìn khá giả trân — chỉ là một layer chồng bên trên chứ chưa thật sự
+liên kết như mặc áo thật". Điều chủ ước: sau khi tự chỉnh tay xong (dời / xoay áo, Smudge cổ,
+tô da), có tính năng **tự động chạy lại phần viền áo cho khớp với da**. "Da cổ" thì chủ đánh
+giá tạm ổn.
+
+Chưa biết cách nào cho ra kết quả thật mắt → theo lệ các đợt, **làm ảnh thử trước rồi mới
+viết code**. Các hướng tôi định thử (ý của tôi, chủ chưa duyệt):
+
+1. **Bóng tiếp xúc**: bóng mềm của mép cổ áo đổ lên da cổ (và của cằm lên áo), hướng theo ánh
+   sáng đo được trên mặt — thứ làm áo "nằm trên người" rõ nhất. Hiện app chỉ làm sậm nhẹ da ở
+   vành khoảng hở cổ lúc mặc áo (`RIM_SHADE` trong `core/garment.rs`), không theo vị trí áo
+   sau khi chủ dời / xoay.
+2. **Mép áo**: mép layer áo đang sắc như cắt giấy → làm mềm theo độ nét của ảnh, bỏ viền sáng
+   / viền nền còn dính ở mép áo của file tiệm.
+3. **Khớp sáng và màu giữa áo và người**: áo studio sáng đều, ảnh khách lệch sáng / ám màu →
+   đưa hướng sáng và tông của áo về gần ảnh (đã có sẵn phép đo độ dốc sáng `light_of` và hai
+   thanh sáng áo ghép để tận dụng).
+4. **Da tô dưới mép áo** tính lại theo vị trí áo hiện tại (sau khi áo bị dời, chỗ hở ra đang là
+   dải da sậm phẳng).
+
+Câu hỏi cho chủ khi bắt đầu đợt này (không chặn việc làm ảnh thử): chỗ nào làm chủ thấy "giả"
+nhất — mép áo sắc quá, thiếu bóng, hay lệch sáng / lệch màu? Cho xin 2–3 ảnh chủ đã chỉnh tay
+xong mà vẫn thấy giả để thử đúng ca.
+
+Nút bấm dự kiến: một nút / một thanh trong menu "Áo" (ví dụ "Khớp viền áo"), chạy lại được
+sau mỗi lần chủ chỉnh tay, dùng chung đường "Chỉnh tiếp ảnh này". Áo vẫn là layer riêng để
+"Chỉnh áo" tiếp được.
 
 ### Để sau, chỉ làm khi chủ bảo
 
