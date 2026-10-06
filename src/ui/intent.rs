@@ -831,9 +831,10 @@ pub struct DialogIntent {
     pub remove_garment: Option<crate::core::portrait::PortraitSettings>,
     /// Hand the photo's garment layer to Free Transform.
     pub adjust_garment: bool,
-    /// Make the shade between the garment and the person again, from the
-    /// photo as it is now.
-    pub fit_garment_seam: bool,
+    /// Finish a dressed photo set right by hand: make the shade between the
+    /// garment and the person again and retouch the neck, its "Da cổ" at
+    /// this much (0: the usual).
+    pub finish_dressed: Option<f32>,
     /// Ask for the shop's sheet of garments and open it in a tab.
     pub open_garment_sheet: bool,
     /// Show the sheet the garment came from, to pick another there.
@@ -1267,9 +1268,9 @@ mod retouch_gate_tests {
         assert!(asked(|a| a.dialogs.auto_levels = true));
         assert!(asked(|a| a.dialogs.edit_portrait_layer = Some(1)));
         // Transforming the garment by hand is work on another layer, and
-        // so is making its shade again.
+        // finishing the dressed photo works on it as it shows.
         assert!(asked(|a| a.dialogs.adjust_garment = true));
-        assert!(asked(|a| a.dialogs.fit_garment_seam = true));
+        assert!(asked(|a| a.dialogs.finish_dressed = Some(60.0)));
         // Going to the sheet of garments leaves the photo, as its tab does.
         assert!(asked(|a| a.dialogs.change_garment = true));
         assert!(asked(|a| a.print.show_print_dialog = Some(true)));

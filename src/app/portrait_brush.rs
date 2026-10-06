@@ -530,12 +530,29 @@ impl App {
     }
 
     /// The necks were found (or may have been): give the brush each one to
-    /// paint on from, as a reopened layer kept it or else as found.
+    /// paint on from, as a reopened layer kept it or else as found. Under a
+    /// garment laid over the person the neck found runs to the garment's
+    /// edge, and is the retouch's as if painted so.
     pub(super) fn neck_found(&mut self) {
-        let Some(session) = self.shell.portrait.as_mut() else {
+        let Some(session) = self.shell.portrait.as_ref() else {
             return;
         };
         let Some(model) = session.model.clone() else {
+            return;
+        };
+        let waits = |face: &usize| {
+            !session
+                .brush
+                .paints
+                .contains_key(&(*face, MaskTarget::Neck))
+                && neck_found(&model, *face)
+        };
+        if !(0..model.faces.len()).any(|face| waits(&face)) {
+            return;
+        }
+        let across = session.w as usize;
+        let cover = self.garment_cover(session.doc_id, session.offset, session.w, session.h);
+        let Some(session) = self.shell.portrait.as_mut() else {
             return;
         };
         let mut made = false;
@@ -558,7 +575,26 @@ impl App {
                         .get(face)
                         .and_then(|e| e.skin.as_deref())
                         .unwrap_or(skin);
-                    neck.mask(skin)
+                    match &cover {
+                        Some(cover) => {
+                            let over: Vec<u8> = (region.y as usize..(region.y + region.h) as usize)
+                                .flat_map(|y| {
+                                    let row = y * across + region.x as usize;
+                                    cover[row..row + region.w as usize].iter().copied()
+                                })
+                                .collect();
+                            let mask = neck.mask_beside(skin, &over);
+                            if session.edits.len() < model.faces.len() {
+                                session
+                                    .edits
+                                    .resize(model.faces.len(), FaceEdits::default());
+                            }
+                            session.edits[face].neck = Some(Arc::new(mask.clone()));
+                            session.edit_rev += 1;
+                            mask
+                        }
+                        None => neck.mask(skin),
+                    }
                 }
             };
             session

@@ -30,6 +30,9 @@ const JAW_FEATHER: f32 = 0.06;
 /// Rows of the usual square between which what lies beside the face starts
 /// to count: from the mouth's line down, below the ears.
 const BESIDE_FROM: (f32, f32) = (350.0, 390.0);
+/// Beside a garment laid over the person the neck is all of the skin this
+/// far from the garment, in face extents.
+const BESIDE_GARMENT: f32 = 0.05;
 /// The most the model's detail may differ from the photo's, 0..1 of white:
 /// pores and fine lines pass, a crease or a glint it draws along a seam of
 /// mended skin is held back.
@@ -90,6 +93,24 @@ impl NeckDetail {
             .collect()
     }
 
+    /// [`mask`](Self::mask) for a person under a garment laid over them, its
+    /// alpha over the skin's region being `cover`. Beside the garment and
+    /// under it the neck is all of the skin, not only what lies deep inside
+    /// it: the skin's own edge is out of sight there, and what shows of the
+    /// neck runs to the garment's edge.
+    pub fn mask_beside(&self, skin: &SkinLayers, cover: &[u8]) -> Vec<u8> {
+        let mut mask = self.mask(skin);
+        if skin.region != self.region || cover.len() != mask.len() {
+            return mask;
+        }
+        let reach = (BESIDE_GARMENT * skin.extent).max(2.0);
+        let beside = beside_garment(&self.area, &skin.mask, cover, self.region.w as usize, reach);
+        for (found, beside) in mask.iter_mut().zip(beside) {
+            *found = (*found).max(beside);
+        }
+        mask
+    }
+
     /// The neck at image pixel (x, y), which is neck skin by `weight`
     /// (0..1). Past what the model saw there is no detail to swap.
     pub(super) fn at(&self, x: u32, y: u32, weight: f32) -> NeckAt {
@@ -103,6 +124,22 @@ impl NeckDetail {
             photo,
         }
     }
+}
+
+/// How far each pixel is neck for lying beside a garment or under it: where
+/// the neck is (`area`), all of the `skin` no farther than about `reach`
+/// pixels from what the garment covers (`cover`, its alpha), each a plane
+/// `width` across.
+fn beside_garment(area: &[u8], skin: &[u8], cover: &[u8], width: usize, reach: f32) -> Vec<u8> {
+    let plane: Vec<f32> = cover.iter().map(|&a| a as f32 / 255.0).collect();
+    let near = crate::core::seam::soft(&plane, width, cover.len() / width.max(1), reach);
+    (0..cover.len())
+        .into_par_iter()
+        .map(|i| {
+            let beside = smoothstep(0.02, 0.25, near[i]);
+            (area[i] as f32 * skin[i] as f32 / 255.0 * beside).round() as u8
+        })
+        .collect()
 }
 
 /// The neck's framing for a face whose usual one is `close`: the face at
@@ -281,6 +318,28 @@ mod tests {
     }
 
     #[test]
+    fn beside_a_garment_and_under_it_the_neck_is_all_of_the_skin() {
+        // A neck everywhere, skin in the left 60 columns of 100, a garment
+        // over the rows from 50 down.
+        let (w, h) = (100usize, 100usize);
+        let area = vec![255u8; w * h];
+        let skin: Vec<u8> = (0..w * h)
+            .map(|i| if i % w < 60 { 255 } else { 0 })
+            .collect();
+        let cover: Vec<u8> = (0..w * h)
+            .map(|i| if i / w >= 50 { 255 } else { 0 })
+            .collect();
+        let beside = beside_garment(&area, &skin, &cover, w, 5.0);
+        let at = |x: usize, y: usize| beside[y * w + x];
+        assert_eq!(at(30, 48), 255, "skin at the garment's edge");
+        assert_eq!(at(30, 70), 255, "skin under the garment");
+        assert_eq!(at(30, 20), 0, "skin far from the garment");
+        assert_eq!(at(80, 48), 0, "no skin, at the garment's edge");
+        // It fades out over the reach.
+        assert!(at(30, 42) > 0 && at(30, 42) < 255, "{}", at(30, 42));
+    }
+
+    #[test]
     fn the_models_detail_is_held_near_the_photos() {
         let at = |model: f32, photo: f32| NeckAt {
             weight: 1.0,
@@ -327,7 +386,11 @@ mod tests {
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_string_lossy().to_string();
-            let skip = name.starts_with("neck_") || name.starts_with('_');
+            let skip = name.starts_with("neck_")
+                || name.starts_with("xong_")
+                || name.starts_with('_')
+                || name.contains(".ao.")
+                || name.contains(".nguoi.");
             if skip || !(name.ends_with(".jpg") || name.ends_with(".png")) {
                 continue;
             }
@@ -417,6 +480,59 @@ mod tests {
             println!(
                 "{name}: {covered} px of neck, {face_changed} px of the face changed, {seconds:.1} s"
             );
+            // A flat photo with its garment's and its person's alpha beside
+            // it (`<name>.ao.png`, `<name>.nguoi.png`): as it is finished
+            // once set right by hand, whole, `xong_<name>.jpg`.
+            let plane = |of: &str| {
+                let path = dir.join(format!("{name}.{of}.png"));
+                let plane = image::open(path).ok()?.to_luma8().into_raw();
+                (plane.len() == (w * h) as usize).then_some(plane)
+            };
+            if let (Some(garment), Some(person)) = (plane("ao"), plane("nguoi")) {
+                let cover: Vec<u8> = (r.y..r.y + r.h)
+                    .flat_map(|y| (r.x..r.x + r.w).map(move |x| (x, y)))
+                    .map(|(x, y)| garment[(y * w + x) as usize])
+                    .collect();
+                let edits = vec![super::super::effects::FaceEdits {
+                    neck: Some(std::sync::Arc::new(neck.mask_beside(skin, &cover))),
+                    ..Default::default()
+                }];
+                let mut out = rgba.clone();
+                if let Some((u, px)) = render(&rgba, &model, &with(60.0), &enabled, &edits) {
+                    for y in 0..u.h as usize {
+                        let o = ((u.y as usize + y) * w as usize + u.x as usize) * 4;
+                        out[o..o + u.w as usize * 4]
+                            .copy_from_slice(&px[y * u.w as usize * 4..(y + 1) * u.w as usize * 4]);
+                    }
+                }
+                let alone = |alpha: &[u8]| -> Vec<u8> {
+                    alpha.iter().flat_map(|&a| [0, 0, 0, a]).collect()
+                };
+                let shade = crate::core::seam::shade(&alone(&person), &alone(&garment), None, w, h);
+                if let Some(shade) = shade {
+                    for (px, shade) in out.chunks_exact_mut(4).zip(shade.chunks_exact(4)) {
+                        let a = shade[3] as f32 / 255.0;
+                        for c in 0..3 {
+                            let left = 1.0 - a * (1.0 - shade[c] as f32 / 255.0);
+                            px[c] = (px[c] as f32 * left).round() as u8;
+                        }
+                    }
+                }
+                let mut pair = image::RgbImage::new(w * 2 + 12, h);
+                for (k, pixels) in [&rgba, &out].into_iter().enumerate() {
+                    for y in 0..h {
+                        for x in 0..w {
+                            let o = ((y * w + x) * 4) as usize;
+                            pair.put_pixel(
+                                k as u32 * (w + 12) + x,
+                                y,
+                                image::Rgb([pixels[o], pixels[o + 1], pixels[o + 2]]),
+                            );
+                        }
+                    }
+                }
+                pair.save(dir.join(format!("xong_{name}.jpg"))).unwrap();
+            }
             let mut views = vec![rgba.clone(), half, full, tinted];
             for &(share, top) in &ways {
                 let other = neck_detail(&mut restorer, &rgba, w, h, face, share, top).unwrap();

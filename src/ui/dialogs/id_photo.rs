@@ -23,10 +23,33 @@ const NUDGE_STEP: f32 = 0.02;
 const TURN_STEP: f32 = 0.5;
 const MAKE_LABEL: &str = "Làm ảnh thẻ tự động";
 const OPEN_SHEET_LABEL: &str = "Mở file áo";
-const FIT_SEAM_LABEL: &str = "Khớp viền áo";
+const FINISH_LABEL: &str = "Chạy lại da cổ, viền áo";
 
 /// The sliders the Ảnh thẻ side opens with: the preset used last, if it is
 /// still kept.
+/// The side's sliders, set aside while a retouch started here goes on with a
+/// photo already made ("Chỉnh tiếp ảnh này", "Chạy lại da cổ, viền áo")
+/// and has the dialog's sliders: with them, whether that retouch has begun.
+/// The dialog gives them back when it ends, so the next photo is made from
+/// them and not from what that retouch was left at.
+pub(super) const ASIDE_KEY: &str = "id_photo_sliders_aside";
+
+/// Set `settings` aside for such a retouch, unless some already are.
+pub(super) fn set_aside(ctx: &egui::Context, settings: PortraitSettings) {
+    let id = egui::Id::new(ASIDE_KEY);
+    ctx.data_mut(|d| {
+        if d.get_temp::<(PortraitSettings, bool)>(id).is_none() {
+            d.insert_temp(id, (settings, false));
+        }
+    });
+}
+
+/// The sliders a photo is made from: those set aside, else the dialog's.
+fn making_from(ctx: &egui::Context, settings: &PortraitSettings) -> PortraitSettings {
+    ctx.data_mut(|d| d.get_temp::<(PortraitSettings, bool)>(egui::Id::new(ASIDE_KEY)))
+        .map_or(*settings, |(aside, _)| aside)
+}
+
 pub(super) fn starting_settings(presets: &[Preset]) -> PortraitSettings {
     let name: String = load_pref(PRESET_KEY).unwrap_or_default();
     presets
@@ -295,13 +318,18 @@ fn garment_row(
                     }
                     if worn
                         && ui
-                            .add_enabled(!busy, egui::Button::new(FIT_SEAM_LABEL))
+                            .add_enabled(
+                                !busy && !data.dialogs.id_photo_busy,
+                                egui::Button::new(FINISH_LABEL),
+                            )
                             .on_hover_text(
-                                "Sau khi sửa tay chỗ cổ hay dời áo: làm lại bóng của cổ áo trên da và của tóc, cằm trên áo cho khớp ảnh đang có. Bóng nằm ở layer riêng \"Viền áo\"",
+                                "Bấm sau khi đã chỉnh tay xong (dời, xoay, nắn áo, Smudge, Eraser…): app nhận lại vùng da cổ và mép áo như ảnh đang có, làm đều màu và thêm vân da cho da cổ tới sát mép áo, làm lại bóng viền áo (layer \"Viền áo\")",
                             )
                             .clicked()
                     {
-                        actions.dialogs.fit_garment_seam = true;
+                        let usual = making_from(ui.ctx(), settings);
+                        set_aside(ui.ctx(), usual);
+                        actions.dialogs.finish_dressed = Some(usual.neck);
                     }
                     if ui
                         .add_enabled(may_leave, egui::Button::new("Đổi áo khác"))
@@ -593,7 +621,7 @@ pub(super) fn id_photo_section(
         actions.dialogs.run_id_photo = Some(IdPhotoRequest {
             options,
             nudge,
-            settings: Some(*settings),
+            settings: Some(making_from(&ctx, settings)),
         });
     }
 }
@@ -720,9 +748,10 @@ mod tests {
         frame(&ctx, &data, &mut settings, vec![]);
         let (output, _) = frame(&ctx, &data, &mut settings, vec![]);
         let asked = click(&ctx, &data, &mut settings, text_at(&output, "Chỉnh áo"));
-        assert!(asked.dialogs.adjust_garment && !asked.dialogs.fit_garment_seam);
-        let asked = click(&ctx, &data, &mut settings, text_at(&output, FIT_SEAM_LABEL));
-        assert!(asked.dialogs.fit_garment_seam && !asked.dialogs.adjust_garment);
+        assert!(asked.dialogs.adjust_garment && asked.dialogs.finish_dressed.is_none());
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, FINISH_LABEL));
+        assert_eq!(asked.dialogs.finish_dressed, Some(settings.neck));
+        assert!(!asked.dialogs.adjust_garment);
         let asked = click(&ctx, &data, &mut settings, text_at(&output, "Bỏ áo"));
         assert_eq!(asked.dialogs.remove_garment, Some(settings));
         let asked = click(&ctx, &data, &mut settings, text_at(&output, "Đổi áo khác"));

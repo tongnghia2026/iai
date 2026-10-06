@@ -4,16 +4,22 @@
 //!
 //! The garment is dragged from its sheet onto the box (or taken with the
 //! box's button) and kept there for the photos that follow. The photo it is
-//! put on gets its layers over those it had, which are hidden: "Người"
-//! (the person, old clothes gone), "Áo" (the garment, whole, to move or
-//! transform by hand), "Viền áo" (the shade the two cast on each other,
-//! multiplied in) and "Tóc trên áo" when hair falls over it. What the
-//! models read of the person is kept, so another garment is laid at once.
+//! put on gets one layer more, on top: "Áo", the garment whole, moved, scaled
+//! and turned to the neck. Nothing else of the photo is touched: the owner
+//! sets the garment right by hand (Free Transform, Smudge, Eraser) and mends
+//! the neck under it. What the models read of the person is kept, so another
+//! garment is laid at once.
 //!
-//! "Viền áo" is made from the outlines of the layers around it
-//! (`core::seam`), so it is made again when they change: by itself once the
-//! garment has been moved or transformed, as part of that step, and when
-//! asked ("Khớp viền áo") after the person was worked on by hand.
+//! "Chạy lại da cổ, viền áo" then finishes the photo as the owner left it:
+//! "Viền áo", the shade the garment and the person cast on each other
+//! (`core::seam`), is made in a layer multiplied in over the garment, and a
+//! retouch of the person starts with "Da cổ" on, its neck reaching the
+//! garment's edge. Once it has a shade, a garment moved or transformed takes
+//! it along as part of that step.
+//!
+//! Photos dressed before the garment was simply laid on hold more: "Người"
+//! (the person, old clothes gone, over the layers it stood for, hidden) and
+//! "Tóc trên áo". They are still known by those layers.
 //!
 //! "Sáng áo" and "Đều sáng áo" of Chỉnh chân dung relight the garment's
 //! layer. What it was before they did is kept here ([`Relit`]), so the
@@ -36,7 +42,7 @@ use crate::core::blend::BlendMode;
 use crate::core::canvas::Canvas;
 use crate::core::command::LayerStructureCommand;
 use crate::core::document::DocumentId;
-use crate::core::garment::{Collar, Dressed, Fitting, Garment};
+use crate::core::garment::{Collar, Fitting, Garment, Piece};
 use crate::core::portrait::PortraitSettings;
 use crate::core::tile::TileMap;
 use crate::tools::ToolId;
@@ -46,7 +52,10 @@ pub const GARMENT_LAYER: &str = "Áo";
 pub const HAIR_LAYER: &str = "Tóc trên áo";
 pub const SEAM_LAYER: &str = "Viền áo";
 const DRESS_STEP: &str = "Mặc áo";
-const SEAM_STEP: &str = "Khớp viền áo";
+const SEAM_STEP: &str = "Viền áo";
+/// "Da cổ" of the retouch that finishes a dressed photo, when the sliders
+/// asked with it have none.
+const NECK_BY_DEFAULT: f32 = 60.0;
 const UNDRESS_STEP: &str = "Bỏ áo";
 /// The longer side of the garment's picture in the box.
 const THUMB: u32 = 128;
@@ -108,21 +117,33 @@ struct Picked {
     thumb: egui::TextureHandle,
 }
 
-/// What dressing put in a document: its layers, and the layers they stand
+/// What a garment put on a photo left in its document: its layer, and the
+/// shade's over it. `person`, `hair` and `hidden` are of a photo dressed
+/// before the garment was simply laid on: the person with the old clothes
+/// taken off, the hair laid over the garment, and the layers those stood
 /// for, hidden.
 #[derive(Clone)]
 struct Worn {
     doc_id: DocumentId,
-    person: u32,
     garment: u32,
     seam: Option<u32>,
+    person: Option<u32>,
     hair: Option<u32>,
     hidden: Vec<u32>,
 }
 
 impl Worn {
+    /// The layers that go when the garment is taken off.
     fn layers(&self) -> Vec<u32> {
-        [Some(self.person), Some(self.garment), self.seam, self.hair]
+        [Some(self.garment), self.seam, self.person, self.hair]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    /// The layers that lie over the person.
+    fn over(&self) -> Vec<u32> {
+        [Some(self.garment), self.seam, self.hair]
             .into_iter()
             .flatten()
             .collect()
@@ -154,7 +175,7 @@ struct Job {
     revision: u64,
     retouch: Option<Option<PortraitSettings>>,
     progress: Arc<Mutex<String>>,
-    rx: Receiver<Result<(Arc<Fitting>, Dressed), String>>,
+    rx: Receiver<Result<(Arc<Fitting>, Piece), String>>,
 }
 
 /// A layer of a sheet let go over the box, to be taken on the next frame:
@@ -170,7 +191,8 @@ pub struct GarmentSession {
     picked: Option<Picked>,
     /// The person as the models read them, of this document at this size.
     fitting: Option<(DocumentId, (u32, u32), Arc<Fitting>)>,
-    worn: Option<Worn>,
+    /// The layer of the garment laid on each document in this session.
+    laid: HashMap<DocumentId, u32>,
     job: Option<Job>,
     dropped: Option<Dropped>,
     /// Where the panel shows the box (window points) and the sliders the
@@ -276,18 +298,63 @@ impl App {
         self.worn_in(doc_id).map(|worn| worn.garment)
     }
 
+    /// How much of each pixel the garment document `doc_id` wears covers, over
+    /// a layer `width` by `height` whose corner lies at `offset` on the
+    /// canvas. `None` when it wears none.
+    pub(in crate::app) fn garment_cover(
+        &self,
+        doc_id: DocumentId,
+        offset: (i32, i32),
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<u8>> {
+        let garment = self.garment_layer(doc_id)?;
+        let doc = self.docs.documents.iter().find(|d| d.id == doc_id)?;
+        let layer = doc
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == garment)?;
+        let rgba = layer.flatten_tiles();
+        let (gw, gh) = (layer.width as i64, layer.height as i64);
+        if rgba.len() as i64 != gw * gh * 4 {
+            return None;
+        }
+        let (dx, dy) = (
+            (offset.0 - layer.offset.0) as i64,
+            (offset.1 - layer.offset.1) as i64,
+        );
+        let mut cover = vec![0u8; width as usize * height as usize];
+        for (y, row) in cover.chunks_exact_mut(width as usize).enumerate() {
+            let gy = y as i64 + dy;
+            if gy < 0 || gy >= gh {
+                continue;
+            }
+            for (x, alpha) in row.iter_mut().enumerate() {
+                let gx = x as i64 + dx;
+                if gx >= 0 && gx < gw {
+                    *alpha = rgba[((gy * gw + gx) * 4 + 3) as usize];
+                }
+            }
+        }
+        Some(cover)
+    }
+
     /// In a photo that wears a garment, the place in the layer stack of
-    /// what shows of the person: the topmost visible layer from theirs up
-    /// to the garment's (their own layer, or the last retouch of it).
+    /// what shows of the person: the topmost visible layer under the
+    /// garment's (their own layer, or the last retouch of it).
     pub(in crate::app) fn dressed_person_shown(&self, doc_id: DocumentId) -> Option<usize> {
         let worn = self.worn_in(doc_id)?;
         let doc = self.docs.documents.iter().find(|d| d.id == doc_id)?;
         let layers = &doc.canvas.layer_stack.layers;
-        let person = layers.iter().position(|l| l.id == worn.person)?;
         let garment = layers.iter().position(|l| l.id == worn.garment)?;
-        (person..garment)
-            .rev()
-            .find(|&at| layers[at].visible && layers[at].is_raster())
+        (0..garment).rev().find(|&at| {
+            let layer = &layers[at];
+            // A person dressed the old way may be the photo's one layer.
+            let theirs = !layer.is_background || Some(layer.id) == worn.person;
+            layer.visible && layer.is_raster() && theirs
+        })
     }
 
     /// What the garment in `layer` of `doc_id` was before it was relit, if
@@ -332,34 +399,43 @@ impl App {
         let session = &mut self.shell.garment;
         session.relit.retain(|(doc, _), _| *doc != doc_id);
         session.shaded.remove(&doc_id);
+        session.laid.remove(&doc_id);
         session.sheets.retain(|sheet| *sheet != doc_id);
     }
 
-    /// What dressing left in document `doc_id`, while its layers are there.
-    /// A photo dressed before this session (saved, opened again) is known
-    /// by its layers' names.
+    /// What a garment put on document `doc_id` left there, while something
+    /// of the person shows under it. A photo dressed before this session
+    /// (saved, opened again) is known by its layers' names: a visible "Áo"
+    /// over a photo on its backdrop, in a document that is no sheet of
+    /// garments.
     fn worn_in(&self, doc_id: DocumentId) -> Option<Worn> {
-        let doc = self.docs.documents.iter().find(|d| d.id == doc_id)?;
-        let layers = &doc.canvas.layer_stack.layers;
-        let kept = self.shell.garment.worn.as_ref().filter(|worn| {
-            worn.doc_id == doc_id
-                && worn
-                    .layers()
+        let idx = self.docs.documents.iter().position(|d| d.id == doc_id)?;
+        let layers = &self.docs.documents[idx].canvas.layer_stack.layers;
+        let laid = self.shell.garment.laid.get(&doc_id);
+        let garment = match laid.and_then(|id| layers.iter().position(|l| l.id == *id)) {
+            Some(at) => at,
+            None => {
+                let at = layers
                     .iter()
-                    .all(|id| layers.iter().any(|l| l.id == *id))
-        });
-        if let Some(worn) = kept {
-            return Some(worn.clone());
-        }
-        let garment = layers
-            .iter()
-            .rposition(|l| l.visible && l.name == GARMENT_LAYER)?;
-        // The person's layer is hidden once a retouch of it lies over it:
-        // something of the person must show under the garment.
+                    .rposition(|l| l.visible && l.name == GARMENT_LAYER)?;
+                let dressed_before = layers[..at].iter().any(|l| l.name == PERSON_LAYER);
+                let on_a_backdrop = layers.first().is_some_and(|l| l.is_background && l.visible);
+                if !dressed_before && (!on_a_backdrop || self.is_garment_sheet(idx)) {
+                    return None;
+                }
+                at
+            }
+        };
         let person = layers[..garment]
             .iter()
-            .rposition(|l| l.name == PERSON_LAYER)?;
-        if !layers[person..garment].iter().any(|l| l.visible) {
+            .rposition(|l| l.name == PERSON_LAYER);
+        let shows = match person {
+            Some(at) => layers[at..garment].iter().any(|l| l.visible),
+            None => layers[..garment]
+                .iter()
+                .any(|l| l.visible && !l.is_background),
+        };
+        if !shows {
             return None;
         }
         let over = |name: &str| {
@@ -370,15 +446,17 @@ impl App {
         };
         Some(Worn {
             doc_id,
-            person: layers[person].id,
             garment: layers[garment].id,
             seam: over(SEAM_LAYER),
+            person: person.map(|at| layers[at].id),
             hair: over(HAIR_LAYER),
-            hidden: layers[..person]
-                .iter()
-                .filter(|l| !l.is_background && !l.visible)
-                .map(|l| l.id)
-                .collect(),
+            hidden: person.map_or_else(Vec::new, |at| {
+                layers[..at]
+                    .iter()
+                    .filter(|l| !l.is_background && !l.visible)
+                    .map(|l| l.id)
+                    .collect()
+            }),
         })
     }
 
@@ -651,12 +729,7 @@ impl App {
         })?;
         let over: Vec<u32> = self
             .worn_in(doc.id)
-            .map(|worn| {
-                [Some(worn.garment), worn.seam, worn.hair]
-                    .into_iter()
-                    .flatten()
-                    .collect()
-            })
+            .map(|worn| worn.over())
             .unwrap_or_default();
         let mut above = canvas.layer_stack.clone();
         above.layers[0].visible = false;
@@ -721,8 +794,8 @@ impl App {
             .filter(|(doc, of, _)| *doc == doc_id && *of == size)
             .map(|(_, _, fitting)| Arc::clone(fitting));
         if let Some(fitting) = kept {
-            let dressed = fitting.dress(&person, &garment, &collar);
-            self.apply_dressed(doc_id, dressed, retouch);
+            let piece = fitting.lay(&garment, &collar);
+            self.put_on(doc_id, piece, retouch);
             return;
         }
         let progress = Arc::new(Mutex::new("Đang chuẩn bị mặc áo…".to_string()));
@@ -738,9 +811,9 @@ impl App {
                 };
                 let read = Fitting::read(&person, size.0, size.1, backdrop, prefer_gpu, &report);
                 let done = read.map(|fitting| {
-                    report("Đang mặc áo…".to_string());
-                    let dressed = fitting.dress(&person, &garment, &collar);
-                    (Arc::new(fitting), dressed)
+                    report("Đang đặt áo…".to_string());
+                    let piece = fitting.lay(&garment, &collar);
+                    (Arc::new(fitting), piece)
                 });
                 let _ = tx.send(done);
             });
@@ -803,10 +876,10 @@ impl App {
                     .garment
                     .set("Ảnh đã đổi trong lúc mặc áo — kéo áo vào lại", true);
             }
-            Ok((fitting, dressed)) => {
+            Ok((fitting, piece)) => {
                 let size = (fitting.figure.width, fitting.figure.height);
                 self.shell.garment.fitting = Some((job.doc_id, size, fitting));
-                self.apply_dressed(job.doc_id, dressed, job.retouch);
+                self.put_on(job.doc_id, piece, job.retouch);
             }
             Err(e) => {
                 self.shell
@@ -822,22 +895,23 @@ impl App {
         }
     }
 
-    /// Lay the dressed photo's layers over those it had, as one undo step:
-    /// the layers of a last dressing go, what shows of the person is hidden
-    /// (its pixels are in "Người" now).
-    fn apply_dressed(
+    /// Lay the garment over the photo, a layer of its own on top, as one
+    /// undo step. A garment laid before goes, with its shade and the hair
+    /// laid over it. Nothing else of the photo is touched: the old clothes,
+    /// the neck and the hair are the owner's to set right by hand.
+    fn put_on(
         &mut self,
         doc_id: DocumentId,
-        dressed: Dressed,
+        piece: Piece,
         retouch: Option<Option<PortraitSettings>>,
     ) {
         let Some(idx) = self.docs.documents.iter().position(|d| d.id == doc_id) else {
             return;
         };
-        let (old, mut hidden) = match self.worn_in(doc_id) {
-            Some(worn) => (worn.layers(), worn.hidden.clone()),
-            None => (Vec::new(), Vec::new()),
-        };
+        let old = self
+            .worn_in(doc_id)
+            .map(|worn| worn.over())
+            .unwrap_or_default();
         let canvas = &mut self.docs.documents[idx].canvas;
         let (before, steps) = (canvas.history_revision(), canvas.undo_count());
         let (width, height) = (canvas.width, canvas.height);
@@ -845,49 +919,25 @@ impl App {
             LayerStructureCommand::capture_before(DRESS_STEP, &canvas.layer_stack, width, height);
         let stack = &mut canvas.layer_stack;
         stack.layers.retain(|l| !old.contains(&l.id));
+        // add_layer inserts above the active layer and makes it active.
+        stack.active_idx = stack.layers.len().saturating_sub(1);
+        let at = stack.add_layer(piece.width, piece.height);
+        let layer = &mut stack.layers[at];
+        layer.name = GARMENT_LAYER.to_string();
+        layer.parent_id = None;
+        layer.tiles = TileMap::from_rgba(&piece.rgba, piece.width, piece.height);
+        layer.offset = piece.offset;
+        let garment = layer.id;
+        // The person stays the layer worked on: the retouch is theirs.
+        let person = (0..at).rev().find(|&under| {
+            let layer = &stack.layers[under];
+            layer.visible && layer.is_raster() && !layer.is_background
+        });
         for layer in &mut stack.layers {
             layer.selected = false;
-            if layer.visible && !layer.is_background {
-                layer.visible = false;
-                hidden.push(layer.id);
-            }
         }
-        stack.active_idx = stack.layers.len().saturating_sub(1);
-        let mut add = |name: &str, rgba: &[u8], w: u32, h: u32, offset: (i32, i32)| {
-            // add_layer inserts above the active layer and makes it active.
-            let at = stack.add_layer(w, h);
-            let layer = &mut stack.layers[at];
-            layer.name = name.to_string();
-            layer.parent_id = None;
-            layer.tiles = TileMap::from_rgba(rgba, w, h);
-            layer.offset = offset;
-            layer.id
-        };
-        let person = add(PERSON_LAYER, &dressed.person, width, height, (0, 0));
-        let piece = &dressed.garment;
-        let garment = add(
-            GARMENT_LAYER,
-            &piece.rgba,
-            piece.width,
-            piece.height,
-            piece.offset,
-        );
-        let seam = dressed
-            .shade
-            .as_deref()
-            .map(|rgba| add(SEAM_LAYER, rgba, width, height, (0, 0)));
-        let hair = dressed
-            .hair
-            .as_deref()
-            .map(|rgba| add(HAIR_LAYER, rgba, width, height, (0, 0)));
-        if let Some(layer) = stack.layers.iter_mut().find(|l| Some(l.id) == seam) {
-            layer.blend_mode = BlendMode::Multiply;
-        }
-        // The person stays the layer worked on: the retouch is theirs.
-        if let Some(at) = stack.layers.iter().position(|l| l.id == person) {
-            stack.active_idx = at;
-            stack.layers[at].selected = true;
-        }
+        stack.active_idx = person.unwrap_or(at);
+        stack.layers[stack.active_idx].selected = true;
         cmd.capture_after(&canvas.layer_stack, width, height);
         canvas.record(Box::new(cmd));
         canvas.layer_revision += 1;
@@ -895,16 +945,10 @@ impl App {
             canvas.history_revision(),
             canvas.undo_count().saturating_sub(steps),
         );
-        self.shell.garment.worn = Some(Worn {
-            doc_id,
-            person,
-            garment,
-            seam,
-            hair,
-            hidden,
-        });
-        // The shade is this garment's as it lies.
-        self.shell.garment.shaded.remove(&doc_id);
+        let session = &mut self.shell.garment;
+        session.laid.insert(doc_id, garment);
+        // The shade is asked for once the garment lies as the owner wants.
+        session.shaded.remove(&doc_id);
         self.id_photo_took(doc_id, before, taken, after);
         if idx == self.docs.active_doc_idx {
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
@@ -917,7 +961,9 @@ impl App {
             .map(|p| p.name.clone())
             .unwrap_or_default();
         self.shell.garment.set(
-            format!("Đã mặc áo \"{name}\". Áo là layer riêng: bấm Chỉnh áo để dời, phóng, xoay"),
+            format!(
+                "Đã đặt áo \"{name}\" lên ảnh. Chỉnh tay cho vừa (Chỉnh áo, Smudge, Eraser…), xong bấm \"Chạy lại da cổ, viền áo\""
+            ),
             false,
         );
         self.shell.status_msg = "Đã mặc áo (Ctrl+Z để hoàn tác)".to_string();
@@ -927,18 +973,17 @@ impl App {
     }
 
     /// Empty the box, and take the garment off the active document: its
-    /// layers go and the layers they stood for show again.
+    /// layer goes, with its shade. A photo dressed before the garment was
+    /// simply laid on gets back the layers its person stood for.
     pub(crate) fn remove_garment(&mut self, settings: Option<PortraitSettings>) {
         self.shell.garment.picked = None;
         self.shell.garment.set("", false);
         let idx = self.docs.active_doc_idx;
         let doc_id = self.docs.documents[idx].id;
-        let Some((ours, hidden)) = self
-            .worn_in(doc_id)
-            .map(|worn| (worn.layers(), worn.hidden.clone()))
-        else {
+        let Some(worn) = self.worn_in(doc_id) else {
             return;
         };
+        let (ours, hidden) = (worn.layers(), worn.hidden.clone());
         let previewed = self
             .shell
             .portrait
@@ -953,12 +998,11 @@ impl App {
         let mut cmd =
             LayerStructureCommand::capture_before(UNDRESS_STEP, &canvas.layer_stack, width, height);
         let stack = &mut canvas.layer_stack;
-        // What was made of the dressed person since (a retouch applied) is
-        // of a person that is no longer there: it is hidden.
-        let person = stack
-            .layers
-            .iter()
-            .position(|l| ours.first() == Some(&l.id));
+        // What was made of a person with the old clothes taken off (a
+        // retouch applied) is of a person that is no longer there: hidden.
+        let person = worn
+            .person
+            .and_then(|id| stack.layers.iter().position(|l| l.id == id));
         for layer in stack
             .layers
             .iter_mut()
@@ -968,6 +1012,11 @@ impl App {
                 layer.visible = false;
             }
         }
+        let worked_on = stack
+            .layers
+            .get(stack.active_idx)
+            .map(|l| l.id)
+            .filter(|id| !ours.contains(id));
         stack.layers.retain(|l| !ours.contains(&l.id));
         let mut top = None;
         for (at, layer) in stack.layers.iter_mut().enumerate() {
@@ -977,7 +1026,9 @@ impl App {
                 top = Some(at);
             }
         }
-        stack.active_idx = top.unwrap_or(stack.layers.len().saturating_sub(1));
+        stack.active_idx = top
+            .or_else(|| stack.layers.iter().position(|l| Some(l.id) == worked_on))
+            .unwrap_or(stack.layers.len().saturating_sub(1));
         if let Some(layer) = stack.layers.get_mut(stack.active_idx) {
             layer.selected = true;
         }
@@ -988,7 +1039,7 @@ impl App {
             canvas.history_revision(),
             canvas.undo_count().saturating_sub(steps),
         );
-        self.shell.garment.worn = None;
+        self.shell.garment.laid.remove(&doc_id);
         self.id_photo_took(doc_id, before, taken, after);
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.shell.status_msg = "Đã bỏ áo (Ctrl+Z để hoàn tác)".to_string();
@@ -1018,8 +1069,8 @@ impl App {
     /// Make the shade between the garment and the person of document `idx`
     /// again, from its layers as they are now: "Viền áo", over the garment.
     /// `follows` makes it part of the step recorded last (the garment's move
-    /// it answers); otherwise it is a step of its own. Whether the photo
-    /// changed.
+    /// it answers); otherwise it is a step of its own, asked for, and a
+    /// layer the owner had hidden shows again. Whether the photo changed.
     fn fit_seam(&mut self, idx: usize, follows: bool) -> bool {
         let Some((worn, lying)) = self.garment_lying(idx) else {
             return false;
@@ -1052,7 +1103,9 @@ impl App {
         let same = match (&shade, had) {
             (None, None) => true,
             (Some(made), Some(had)) => {
-                had.offset == (0, 0) && had.tiles.content_hash() == made.content_hash()
+                had.offset == (0, 0)
+                    && (had.visible || follows)
+                    && had.tiles.content_hash() == made.content_hash()
             }
             _ => false,
         };
@@ -1088,7 +1141,7 @@ impl App {
             layer.tiles = tiles;
             layer.blend_mode = BlendMode::Multiply;
             if let Some(old) = &old {
-                (layer.opacity, layer.visible) = (old.opacity, old.visible);
+                (layer.opacity, layer.visible) = (old.opacity, old.visible || !follows);
             }
             seam = Some(layer.id);
         }
@@ -1117,40 +1170,42 @@ impl App {
             canvas.record(Box::new(cmd));
         }
         canvas.layer_revision += 1;
-        if let Some(kept) = self
-            .shell
-            .garment
-            .worn
-            .as_mut()
-            .filter(|kept| kept.doc_id == doc_id)
-        {
-            kept.seam = seam;
-        }
         if idx == self.docs.active_doc_idx {
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         }
         true
     }
 
-    /// "Khớp viền áo": the person or the garment of the active document was
-    /// worked on by hand, and the shade between them is made again.
-    pub(crate) fn fit_garment_seam(&mut self) {
+    /// "Chạy lại da cổ, viền áo": the owner has set the garment and the neck
+    /// of the active document right by hand. The shade between the garment
+    /// and the person is made again from the layers as they are, and a
+    /// retouch of the person as they show starts with only "Da cổ" on (at
+    /// `neck`, or the usual when that is none): it is looked at and applied
+    /// like any other.
+    pub(crate) fn finish_dressed(&mut self, neck: f32) {
         let idx = self.docs.active_doc_idx;
         let doc_id = self.docs.documents[idx].id;
-        if self.shell.garment.job.is_some() || self.worn_in(doc_id).is_none() {
+        if self.shell.garment.job.is_some()
+            || self.shell.portrait.is_some()
+            || self.id_photo_state().busy
+            || self.worn_in(doc_id).is_none()
+        {
             return;
         }
         self.sync_brush_gpu_to_cpu();
-        let (line, status) = if self.fit_seam(idx, false) {
-            (
-                "Đã khớp lại viền áo với da và tóc như ảnh đang có",
-                "Đã khớp viền áo (Ctrl+Z để hoàn tác)",
-            )
-        } else {
-            ("Viền áo đã khớp với ảnh đang có", "Viền áo đã khớp")
-        };
-        self.shell.garment.set(line, false);
-        self.shell.status_msg = status.to_string();
+        self.fit_seam(idx, false);
+        let neck = if neck > 0.0 { neck } else { NECK_BY_DEFAULT };
+        match self.retouch_neck(neck) {
+            Ok(()) => self.shell.garment.set(
+                "Đã làm lại viền áo. Đang làm da cổ — xem trên ảnh; chỉnh thanh Da cổ bên ô Chân dung nếu cần, vừa ý thì bấm Áp dụng",
+                false,
+            ),
+            Err(e) => self
+                .shell
+                .garment
+                .set(format!("Đã làm lại viền áo; chưa làm được da cổ: {e}"), true),
+        }
+        self.shell.status_msg = "Đã làm lại viền áo (Ctrl+Z để hoàn tác)".to_string();
     }
 
     /// Every frame: a garment moved, scaled, turned or relit since its shade
@@ -1177,7 +1232,9 @@ impl App {
         if last == lying || worn.seam.is_none() || canvas.can_redo() {
             return;
         }
-        self.fit_seam(idx, canvas.can_undo());
+        if canvas.can_undo() {
+            self.fit_seam(idx, true);
+        }
     }
 
     /// The shade put out of sight for a transform of its garment shows
@@ -1251,13 +1308,7 @@ impl App {
         {
             session.fitting = None;
         }
-        if session
-            .worn
-            .as_ref()
-            .is_some_and(|worn| worn.doc_id == doc_id)
-        {
-            session.worn = None;
-        }
+        session.laid.remove(&doc_id);
         let active = self.docs.documents[self.docs.active_doc_idx].id == doc_id;
         if active && self.shell.garment.picked.is_some() {
             self.dress_photo(settings);
@@ -1402,37 +1453,49 @@ mod tests {
         (name.to_string(), false)
     }
 
+    fn layer_named(app: &App, name: &str) -> usize {
+        app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.name == name)
+            .unwrap()
+    }
+
     #[test]
-    fn a_garment_taken_from_the_sheet_goes_on_the_photo_as_layers_of_its_own() {
+    fn a_garment_taken_from_the_sheet_is_laid_over_the_photo_and_nothing_else_is_touched() {
         let mut app = shop();
         let undo_before = app.docs.documents[0].canvas.undo_count();
+        let person = app.docs.documents[0].canvas.layer_stack.layers[1]
+            .tiles
+            .content_hash();
         app.take_garment(None);
 
-        // The photo is looked at again, dressed.
+        // The photo is looked at again, the garment over it.
         assert_eq!(app.docs.active_doc_idx, 0);
         let state = app.garment_state();
         assert!(!state.error, "{}", state.status);
         assert!(state.thumb.is_some() && state.worn);
         assert_eq!(
             names(&app, 0),
-            vec![
-                on("Background"),
-                off("Layer 1"),
-                on(PERSON_LAYER),
-                on(GARMENT_LAYER),
-                on(SEAM_LAYER)
-            ]
+            vec![on("Background"), on("Layer 1"), on(GARMENT_LAYER)]
         );
+        // The person stays the layer worked on, and holds what it held.
         let stack = &app.docs.documents[0].canvas.layer_stack;
-        assert_eq!(stack.layers[stack.active_idx].name, PERSON_LAYER);
-        // The shirt covers the shoulder; beside it the old top is gone and
-        // the backdrop shows; the face is as it was.
+        assert_eq!(stack.layers[stack.active_idx].name, "Layer 1");
+        assert_eq!(stack.layers[1].tiles.content_hash(), person);
+        // The shirt covers the shoulder and the face is as it was; the old
+        // top still shows in the collar's opening and beside the collar,
+        // the owner's to mend.
         assert_eq!(shown(&app, 0, 280, 520), [SHIRT[0], SHIRT[1], SHIRT[2]]);
-        assert_eq!(shown(&app, 0, 399, 590), BACKDROP);
         assert_eq!(shown(&app, 0, 200, 200), [220, 170, 140]);
-        // The garment layer is the whole garment, far larger than what the
-        // collar's opening shows of the person.
-        let garment = &app.docs.documents[0].canvas.layer_stack.layers[3];
+        assert_eq!(shown(&app, 0, 200, 400), [200, 0, 0]);
+        assert_eq!(shown(&app, 0, 300, 400), [200, 0, 0]);
+        // No shade is made until it is asked for.
+        assert!(seam(&app).is_none());
+        // The garment layer is the whole garment.
+        let garment = &app.docs.documents[0].canvas.layer_stack.layers[2];
         assert!(
             garment.width > 380 && garment.height > 230,
             "{}x{}",
@@ -1452,24 +1515,23 @@ mod tests {
     fn another_garment_takes_the_place_of_the_one_worn_and_none_gives_the_photo_back() {
         let mut app = shop();
         app.take_garment(None);
-        // Back on the sheet, the shirt is taken again.
+        app.fit_seam(0, false);
+        // Back on the sheet, the shirt is taken again: the garment laid
+        // before goes, with its shade.
         app.switch_to_doc(1);
         app.take_garment(None);
         assert_eq!(
             names(&app, 0),
-            vec![
-                on("Background"),
-                off("Layer 1"),
-                on(PERSON_LAYER),
-                on(GARMENT_LAYER),
-                on(SEAM_LAYER)
-            ]
+            vec![on("Background"), on("Layer 1"), on(GARMENT_LAYER)]
         );
         assert_eq!(shown(&app, 0, 280, 520), [SHIRT[0], SHIRT[1], SHIRT[2]]);
 
+        app.fit_seam(0, false);
         app.remove_garment(None);
         assert_eq!(names(&app, 0), vec![on("Background"), on("Layer 1")]);
         assert_eq!(shown(&app, 0, 280, 520), [200, 0, 0]);
+        let stack = &app.docs.documents[0].canvas.layer_stack;
+        assert_eq!(stack.layers[stack.active_idx].name, "Layer 1");
         let state = app.garment_state();
         assert!(state.thumb.is_none() && !state.worn);
     }
@@ -1488,6 +1550,55 @@ mod tests {
         app.cancel_transform();
         app.remove_garment(None);
         assert_eq!(names(&app, 0), vec![on("Background"), on("Layer 1")]);
+        // A sheet of garments is no dressed photo, whatever its layers are
+        // called.
+        let sheet = &mut app.docs.documents[1].canvas.layer_stack;
+        sheet.layers[1].name = GARMENT_LAYER.to_string();
+        assert!(app.worn_in(app.docs.documents[1].id).is_none());
+        app.shell.garment.sheets.push(app.docs.documents[1].id);
+        let background = &mut app.docs.documents[1].canvas.layer_stack.layers[0];
+        background.visible = true;
+        assert!(app.worn_in(app.docs.documents[1].id).is_none());
+    }
+
+    #[test]
+    fn a_photo_dressed_before_the_garment_was_simply_laid_on_gets_its_layers_back() {
+        let mut app = shop();
+        app.switch_to_doc(0);
+        // As dressing left a photo then: the person with the old clothes
+        // taken off over the photo's own layer, hidden, and the hair laid
+        // over the garment.
+        let canvas = &mut app.docs.documents[0].canvas;
+        let stack = &mut canvas.layer_stack;
+        stack.layers[1].visible = false;
+        stack.active_idx = 1;
+        for name in [PERSON_LAYER, GARMENT_LAYER, SEAM_LAYER, HAIR_LAYER] {
+            let at = stack.add_layer(400, 600);
+            stack.layers[at].name = name.to_string();
+            stack.layers[at].tiles = TileMap::new_solid(400, 600, 9, 9, 9, 255);
+        }
+        let doc_id = app.docs.documents[0].id;
+        assert!(app.garment_state().worn);
+        assert_eq!(
+            app.dressed_person_shown(doc_id),
+            Some(layer_named(&app, PERSON_LAYER))
+        );
+        app.remove_garment(None);
+        assert_eq!(names(&app, 0), vec![on("Background"), on("Layer 1")]);
+        app.docs.documents[0].canvas.undo();
+        // Another garment laid on it keeps that person, and takes the old
+        // garment's hair and shade with the garment.
+        app.switch_to_doc(1);
+        app.take_garment(None);
+        assert_eq!(
+            names(&app, 0),
+            vec![
+                on("Background"),
+                off("Layer 1"),
+                on(PERSON_LAYER),
+                on(GARMENT_LAYER)
+            ]
+        );
     }
 
     #[test]
@@ -1496,13 +1607,8 @@ mod tests {
         app.take_garment(None);
         app.shell.garment = GarmentSession::default();
         // A retouch applied: its layer shows over the person's, now hidden.
+        let person = layer_named(&app, "Layer 1");
         let canvas = &mut app.docs.documents[0].canvas;
-        let person = canvas
-            .layer_stack
-            .layers
-            .iter()
-            .position(|l| l.name == PERSON_LAYER)
-            .unwrap();
         canvas.layer_stack.active_idx = person;
         let retouch = canvas.layer_stack.add_layer(400, 600);
         canvas.layer_stack.layers[retouch].name = "Chân dung".to_string();
@@ -1624,22 +1730,14 @@ mod tests {
         assert!(state.worn && !state.error, "{}", state.status);
         let layers = names(&app, 0);
         assert!(
-            layers.contains(&on(PERSON_LAYER)) && layers.contains(&on(GARMENT_LAYER)),
+            layers.last() == Some(&on(GARMENT_LAYER)) && !layers.contains(&on(PERSON_LAYER)),
             "{layers:?}"
         );
-        // The retouch is of the person dressed, and the photo can still be
-        // framed again.
+        // The retouch is of the person under the garment, and the photo can
+        // still be framed again.
         let stack = &app.docs.documents[0].canvas.layer_stack;
         let retouched = app.shell.portrait.as_ref().unwrap().layer_id;
-        assert_eq!(
-            stack
-                .layers
-                .iter()
-                .find(|l| l.id == retouched)
-                .unwrap()
-                .name,
-            PERSON_LAYER
-        );
+        assert_eq!(stack.layers[stack.layers.len() - 2].id, retouched);
         assert!(app.id_photo_state().made);
 
         asked.nudge.down = 0.02;
@@ -1692,14 +1790,15 @@ mod tests {
     fn the_garment_and_the_person_shade_each_other_in_a_layer_over_the_garment() {
         let mut app = shop();
         app.take_garment(None);
+        assert!(app.fit_seam(0, false));
         let (at, _) = seam(&app).expect("a shade layer");
         let layers = &app.docs.documents[0].canvas.layer_stack.layers;
         assert_eq!(layers[at - 1].name, GARMENT_LAYER);
         assert_eq!(layers[at].blend_mode, BlendMode::Multiply);
-        // The collar's opening holds skin from row 360 down, 20 either side
-        // of the middle at row 400: beside the garment's edge it is shaded,
-        // and the garment beside the skin too; the face and the shoulder far
-        // from the neck are not.
+        // The garment's opening is 20 either side of the middle at row 400:
+        // what shows of the person beside the garment's edge there is
+        // shaded, and the garment beside it too; the face and the shoulder
+        // far from the neck are not.
         assert!(
             shade_at(&app, 181, 400) > 90,
             "{}",
@@ -1724,6 +1823,14 @@ mod tests {
     fn a_garment_moved_takes_its_shade_along_in_the_same_step() {
         let mut app = shop();
         app.take_garment(None);
+        // Until a shade was asked for, a garment moved has none to take.
+        app.poll_garment();
+        move_garment(&mut app, (0, 5));
+        app.poll_garment();
+        assert!(seam(&app).is_none());
+        move_garment(&mut app, (0, -5));
+
+        app.fit_seam(0, false);
         app.poll_garment();
         let (_, laid) = seam(&app).unwrap();
         let beside = shade_at(&app, 181, 400);
@@ -1764,17 +1871,52 @@ mod tests {
     }
 
     #[test]
-    fn the_shade_is_made_again_when_asked_after_the_person_was_worked_on() {
+    fn a_photo_set_right_by_hand_is_finished_with_its_shade_and_its_neck() {
         let mut app = shop();
         app.take_garment(None);
+        // The garment is left the layer worked on, as after "Chỉnh áo".
+        let garment = layer_named(&app, GARMENT_LAYER);
+        let stack = &mut app.docs.documents[0].canvas.layer_stack;
+        stack.active_idx = garment;
+        let steps = app.docs.documents[0].canvas.undo_count();
+
+        app.finish_dressed(0.0);
+        // The shade is made, a step of its own.
         assert!(shade_at(&app, 184, 400) > 20);
-        // The skin beside the garment's edge is rubbed out by hand.
+        let canvas = &app.docs.documents[0].canvas;
+        assert_eq!(canvas.undo_count(), steps + 1);
+        assert_eq!(canvas.history_entries().last().unwrap().label, SEAM_STEP);
+        // And a retouch of the person under the garment begins, with only
+        // "Da cổ" on.
+        let person = canvas.layer_stack.layers[layer_named(&app, "Layer 1")].id;
+        let session = app.shell.portrait.as_ref().expect("a retouch of the neck");
+        assert_eq!(session.layer_id, person);
+        assert_eq!(
+            session.restore_settings,
+            Some(PortraitSettings {
+                neck: NECK_BY_DEFAULT,
+                ..PortraitSettings::NEUTRAL
+            })
+        );
+        let state = app.garment_state();
+        assert!(
+            !state.error && state.status.contains("da cổ"),
+            "{}",
+            state.status
+        );
+        // While that retouch is under way nothing more is asked.
+        app.finish_dressed(0.0);
+        assert_eq!(app.docs.documents[0].canvas.undo_count(), steps + 1);
+        app.cancel_portrait();
+
+        // The skin beside the garment's edge is rubbed out by hand: asked
+        // again, the shade is made for what shows now, at the neck asked.
         let canvas = &mut app.docs.documents[0].canvas;
         let person = canvas
             .layer_stack
             .layers
             .iter_mut()
-            .find(|l| l.name == PERSON_LAYER)
+            .find(|l| l.name == "Layer 1")
             .unwrap();
         let mut rgba = person.flatten_tiles();
         for y in 390..410 {
@@ -1783,28 +1925,26 @@ mod tests {
             }
         }
         person.tiles = TileMap::from_rgba(&rgba, 400, 600);
-        let steps = canvas.undo_count();
-        // Nothing follows that by itself: the shade is asked for.
+        // Nothing follows that by itself.
         app.poll_garment();
         assert!(shade_at(&app, 184, 400) > 20);
-
-        app.fit_garment_seam();
+        app.finish_dressed(35.0);
         assert_eq!(shade_at(&app, 184, 400), 0);
-        let canvas = &app.docs.documents[0].canvas;
-        assert_eq!(canvas.undo_count(), steps + 1);
-        assert_eq!(canvas.history_entries().last().unwrap().label, SEAM_STEP);
-        let stack = &canvas.layer_stack;
-        assert_eq!(stack.layers[stack.active_idx].name, PERSON_LAYER);
-        // Asked again with nothing changed, it is no step.
-        app.fit_garment_seam();
-        assert_eq!(app.docs.documents[0].canvas.undo_count(), steps + 1);
-        assert!(app.garment_state().status.contains("đã khớp"));
+        assert_eq!(app.docs.documents[0].canvas.undo_count(), steps + 2);
+        let session = app.shell.portrait.as_ref().unwrap();
+        assert_eq!(session.restore_settings.map(|s| s.neck), Some(35.0));
+        app.cancel_portrait();
+        // Asked once more with nothing changed, the shade is no new step.
+        app.finish_dressed(35.0);
+        assert_eq!(app.docs.documents[0].canvas.undo_count(), steps + 2);
+        app.cancel_portrait();
     }
 
     #[test]
-    fn a_photo_whose_shade_was_thrown_away_gets_one_only_when_asked() {
+    fn a_shade_thrown_away_or_hidden_comes_back_only_when_asked() {
         let mut app = shop();
         app.take_garment(None);
+        app.fit_seam(0, false);
         app.poll_garment();
         let (at, _) = seam(&app).unwrap();
         app.docs.documents[0].canvas.layer_stack.layers.remove(at);
@@ -1813,19 +1953,25 @@ mod tests {
         assert!(seam(&app).is_none());
         assert!(app.garment_state().worn);
 
-        app.fit_garment_seam();
+        app.fit_seam(0, false);
         let (at, _) = seam(&app).unwrap();
         let layers = &app.docs.documents[0].canvas.layer_stack.layers;
         assert_eq!(layers[at - 1].name, GARMENT_LAYER);
         assert!(shade_at(&app, 181, 430) > 90);
-        // A layer dimmed by hand stays dimmed when it is made again.
-        app.docs.documents[0].canvas.layer_stack.layers[at].opacity = 0.5;
+        // A layer dimmed and hidden by hand stays so when it follows the
+        // garment, and shows again when it is asked for.
+        let layer = &mut app.docs.documents[0].canvas.layer_stack.layers[at];
+        (layer.opacity, layer.visible) = (0.5, false);
         move_garment(&mut app, (0, -30));
         app.poll_garment();
         let (at, _) = seam(&app).unwrap();
         let layer = &app.docs.documents[0].canvas.layer_stack.layers[at];
-        assert_eq!(layer.opacity, 0.5);
+        assert_eq!((layer.opacity, layer.visible), (0.5, false));
         assert!(shade_at(&app, 181, 400) > 90);
+        assert!(app.fit_seam(0, false));
+        let (at, _) = seam(&app).unwrap();
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[at];
+        assert_eq!((layer.opacity, layer.visible), (0.5, true));
         // Taking the garment off takes the shade with it.
         app.remove_garment(None);
         assert_eq!(names(&app, 0), vec![on("Background"), on("Layer 1")]);
@@ -1835,6 +1981,7 @@ mod tests {
     fn the_garment_worn_is_handed_to_free_transform() {
         let mut app = shop();
         app.take_garment(None);
+        app.fit_seam(0, false);
         app.adjust_garment();
         let stack = &app.docs.documents[0].canvas.layer_stack;
         assert_eq!(stack.layers[stack.active_idx].name, GARMENT_LAYER);
@@ -1876,13 +2023,7 @@ mod tests {
         assert!(state.worn && !state.error, "{}", state.status);
         assert_eq!(
             names(&app, second),
-            vec![
-                on("Background"),
-                off("Layer 1"),
-                on(PERSON_LAYER),
-                on(GARMENT_LAYER),
-                on(SEAM_LAYER)
-            ]
+            vec![on("Background"), on("Layer 1"), on(GARMENT_LAYER)]
         );
         assert_eq!(names(&app, 0), first, "the photo done before is left alone");
 

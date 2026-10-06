@@ -1270,8 +1270,17 @@ impl Fitting {
         Ok(Self { figure, face, neck })
     }
 
+    /// `garment` as it lies on the person: moved, scaled and turned to their
+    /// neck, and nothing of the photo touched.
+    pub fn lay(&self, garment: &Garment, collar: &Collar) -> Piece {
+        let photo = (self.figure.width, self.figure.height);
+        let placement = Placement::fit(collar, garment.height, &self.neck, photo);
+        Cloth::of(garment, collar).laid(&placement, (photo.0 as usize, photo.1 as usize))
+    }
+
     /// The photo's layers with `person` (now, as the photo shows it) dressed
-    /// in `garment`.
+    /// in `garment`: the old clothes taken off, skin laid in the collar's
+    /// opening, the hair over the garment.
     pub fn dress(&self, person: &[u8], garment: &Garment, collar: &Collar) -> Dressed {
         let photo = (self.figure.width, self.figure.height);
         let placement = Placement::fit(collar, garment.height, &self.neck, photo);
@@ -1924,17 +1933,39 @@ mod tests {
                         .ok()
                         .and_then(|v| v.parse::<f32>().ok())
                     {
-                        use crate::core::portrait::{analyze, neck::analyze_necks, render};
+                        use crate::core::portrait::{
+                            analyze, neck::analyze_necks, render, FaceEdits,
+                        };
                         let model = analyze(&dressed.person, w, h, false, None, &|_| {}).unwrap();
                         let enabled = vec![true; model.faces.len()];
                         analyze_necks(&dressed.person, &model, &enabled);
+                        // The neck reaches the garment's edge, as the app
+                        // has it for a photo that wears one.
+                        let edits: Vec<FaceEdits> = model
+                            .faces
+                            .iter()
+                            .map(|face| {
+                                let mut edit = FaceEdits::default();
+                                if let Some(Ok(neck)) = face.neck.get() {
+                                    let r = face.skin.region();
+                                    let cover: Vec<u8> = (r.y..r.y + r.h)
+                                        .flat_map(|y| (r.x..r.x + r.w).map(move |x| (x, y)))
+                                        .map(|(x, y)| laid[((y * w + x) * 4 + 3) as usize])
+                                        .collect();
+                                    edit.neck = Some(std::sync::Arc::new(
+                                        neck.mask_beside(&face.skin, &cover),
+                                    ));
+                                }
+                                edit
+                            })
+                            .collect();
                         let settings = crate::core::portrait::PortraitSettings {
                             neck,
                             ..crate::core::portrait::PortraitSettings::NEUTRAL
                         };
                         let mut out_px = dressed.person.clone();
                         if let Some((u, px)) =
-                            render(&dressed.person, &model, &settings, &enabled, &[])
+                            render(&dressed.person, &model, &settings, &enabled, &edits)
                         {
                             let (uw, ww) = (u.w as usize * 4, w as usize * 4);
                             for y in 0..u.h as usize {

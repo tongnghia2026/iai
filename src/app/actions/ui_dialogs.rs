@@ -580,8 +580,8 @@ impl App {
         if std::mem::take(&mut actions.dialogs.adjust_garment) {
             self.adjust_garment();
         }
-        if std::mem::take(&mut actions.dialogs.fit_garment_seam) {
-            self.fit_garment_seam();
+        if let Some(neck) = actions.dialogs.finish_dressed.take() {
+            self.finish_dressed(neck);
         }
         if std::mem::take(&mut actions.dialogs.open_garment_sheet) {
             self.pick_garment_sheets();

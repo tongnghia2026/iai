@@ -101,7 +101,7 @@ fn turned(plane: &[f32], width: usize, height: usize) -> Vec<f32> {
 }
 
 /// A plane blurred about as a Gaussian of deviation `sigma` would.
-fn soft(plane: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+pub(crate) fn soft(plane: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
     // Three passes of a box `2r + 1` wide have a variance of `r (r + 1)`.
     let radius = (((4.0 * sigma * sigma + 1.0).sqrt() - 1.0) * 0.5).round() as usize;
     let mut rows = plane.to_vec();

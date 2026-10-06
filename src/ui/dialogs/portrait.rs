@@ -634,6 +634,20 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
         ));
     }
     faces.resize(face_count, true);
+    // Sliders set aside for a retouch that went on with a photo already
+    // made come back once it has ended (or never began).
+    let aside_id = egui::Id::new(super::id_photo::ASIDE_KEY);
+    let aside = ctx.data_mut(|d| d.get_temp::<(PortraitSettings, bool)>(aside_id));
+    if let Some((usual, begun)) = aside {
+        if d.portrait_session {
+            ctx.data_mut(|d| d.insert_temp(aside_id, (usual, true)));
+        } else {
+            if begun {
+                s = usual;
+            }
+            ctx.data_mut(|d| d.remove::<(PortraitSettings, bool)>(aside_id));
+        }
+    }
 
     let ready = data.dialogs.portrait_ready;
     // While a value or a preset's name is being typed, Esc and Enter belong
@@ -736,6 +750,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                     )
                     .clicked()
                 {
+                    super::id_photo::set_aside(ctx, s);
                     actions.dialogs.start_portrait_retouch = true;
                 }
                 if !data.dialogs.portrait_status.is_empty() {
@@ -1380,7 +1395,7 @@ mod tests {
                 data.dialogs.garment_thumb = Some(egui::TextureId::default());
                 data.dialogs.garment_worn = true;
                 data.dialogs.garment_status =
-                    "Đã mặc áo \"Layer 23\". Áo là layer riêng: bấm Chỉnh áo để dời, phóng, xoay"
+                    "Đã đặt áo \"Layer 23\" lên ảnh. Chỉnh tay cho vừa (Chỉnh áo, Smudge, Eraser…), xong bấm \"Chạy lại da cổ, viền áo\""
                         .to_string();
                 data.dialogs.id_photo_status =
                     "Làm ảnh thẻ xong: 2,8×3,8 cm, 1043×1417 px, nền trắng".to_string();
@@ -1528,9 +1543,32 @@ mod tests {
         };
         draw(&data, vec![egui::Event::PointerMoved(at)]);
         draw(&data, vec![press(true)]);
+        let sliders = || -> PortraitSettings {
+            ctx.data_mut(|d| d.get_temp(egui::Id::new("portrait_settings")))
+                .unwrap()
+        };
+        let usual = sliders();
         let asked = draw(&data, vec![press(false)]).1;
         assert!(asked.dialogs.start_portrait_retouch);
         assert!(asked.dialogs.run_id_photo.is_none());
+
+        // That retouch goes on from sliders at rest; when it ends the side
+        // has the sliders it had, for the next photo to be made from.
+        assert_ne!(usual, PortraitSettings::NEUTRAL);
+        data.dialogs.portrait_session = true;
+        data.dialogs.portrait_restore_settings = Some(PortraitSettings::NEUTRAL);
+        draw(&data, vec![]);
+        data.dialogs.portrait_restore_settings = None;
+        draw(&data, vec![]);
+        assert_eq!(sliders(), PortraitSettings::NEUTRAL);
+        data.dialogs.portrait_session = false;
+        draw(&data, vec![]);
+        assert_eq!(sliders(), usual);
+        // A retouch that never began leaves them alone.
+        super::super::id_photo::set_aside(&ctx, PortraitSettings::NEUTRAL);
+        draw(&data, vec![]);
+        draw(&data, vec![]);
+        assert_eq!(sliders(), usual);
     }
 
     #[test]

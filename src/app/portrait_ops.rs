@@ -525,6 +525,29 @@ impl App {
         }
     }
 
+    /// Start a retouch of the person of a dressed photo with only "Da cổ" on,
+    /// at `neck`: what finishes the photo once its garment lies right. A
+    /// "Chân dung" layer still as its sliders made it is reopened with them,
+    /// its "Da cổ" at `neck` at least.
+    pub(in crate::app) fn retouch_neck(&mut self, neck: f32) -> Result<(), String> {
+        self.aim_at_the_dressed_person();
+        let only = PortraitSettings {
+            neck,
+            ..PortraitSettings::NEUTRAL
+        };
+        let started = self.begin_portrait_from(Some(only));
+        if let Some(settings) = self
+            .shell
+            .portrait
+            .as_mut()
+            .and_then(|session| session.restore_settings.as_mut())
+        {
+            settings.neck = settings.neck.max(neck);
+        }
+        self.shell.portrait_error = started.as_ref().err().cloned();
+        started
+    }
+
     /// A dressed photo's retouch is the person's, whatever layer was worked
     /// on last (the garment after "Chỉnh áo", the hair over it): the layer
     /// that shows the person becomes the active one.
@@ -797,6 +820,8 @@ impl App {
                     session.restore_faces = Some(restored.iter().map(|f| f.enabled).collect());
                     self.restore_portrait_masks(restored);
                 }
+                // Necks an analysis kept from before brings found already.
+                self.neck_found();
                 self.refresh_portrait_preview();
             }
             Some(Err(error)) => session.error = Some(error),
@@ -3660,6 +3685,76 @@ mod tests {
         assert_eq!(app.portrait_restore().1, Some(PortraitSettings::NEUTRAL));
         let stack = &app.docs.documents[0].canvas.layer_stack;
         assert_eq!(stack.layers[stack.active_idx].id, retouch_id);
+    }
+
+    #[test]
+    fn the_neck_of_a_dressed_photo_runs_to_the_garments_edge() {
+        let Some((mut app, garment, _, _)) = dressed_customer() else {
+            return;
+        };
+        if !crate::core::ai::retouch::FaceRestorer::installed() {
+            return;
+        }
+        // The retouch that finishes a dressed photo: only "Da cổ" is on.
+        // Returns the analysis and the neck as that retouch reads it.
+        let finish = |app: &mut App| -> (Arc<PortraitModel>, Vec<u8>) {
+            app.retouch_neck(60.0).unwrap();
+            let started = Instant::now();
+            let waited = |what: &str| {
+                assert!(started.elapsed() < Duration::from_secs(240), "{what} hung");
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            while app.shell.portrait.as_ref().unwrap().model.is_none() {
+                waited("the analysis");
+                app.poll_portrait();
+            }
+            let model = app.shell.portrait.as_ref().unwrap().model.clone().unwrap();
+            let settings = app.portrait_restore().1.expect("the sliders to start from");
+            assert_eq!(
+                settings,
+                PortraitSettings {
+                    neck: 60.0,
+                    ..PortraitSettings::NEUTRAL
+                }
+            );
+            app.set_portrait_preview(settings, vec![true; model.faces.len()], true, false);
+            while model.faces[0].neck.get().is_none() || app.portrait_neck_note().is_some() {
+                waited("the neck");
+                app.poll_portrait();
+            }
+            app.poll_portrait();
+            let session = app.shell.portrait.as_ref().unwrap();
+            let read = session.edits[0]
+                .neck
+                .as_ref()
+                .expect("the neck, as painted");
+            (model, read.to_vec())
+        };
+        let (model, far) = finish(&mut app);
+        let face = &model.faces[0];
+        let found = face.neck.get().unwrap().as_ref().unwrap().mask(&face.skin);
+        assert!(far.iter().zip(&found).all(|(read, found)| read >= found));
+        app.cancel_portrait();
+
+        // The garment is moved up until its edge crosses the neck: beside it
+        // the neck is all of the skin, not only what lies deep inside it.
+        let region = face.skin.region();
+        let rows: Vec<u32> = (0..found.len())
+            .filter(|&i| found[i] == 255)
+            .map(|i| region.y + i as u32 / region.w)
+            .collect();
+        let middle = (rows.iter().min().unwrap() + rows.iter().max().unwrap()) / 2;
+        let layers = &mut app.docs.documents[0].canvas.layer_stack.layers;
+        let layer = layers.iter_mut().find(|l| l.id == garment).unwrap();
+        layer.offset.1 = middle as i32;
+        let (_, near) = finish(&mut app);
+        assert!(near.iter().zip(&found).all(|(read, found)| read >= found));
+        let more = near
+            .iter()
+            .zip(&found)
+            .filter(|(read, found)| **read > found.saturating_add(40))
+            .count();
+        assert!(more > 50, "{more} pixels more beside the garment");
     }
 
     #[test]
