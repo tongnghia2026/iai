@@ -1,8 +1,8 @@
 # Kế hoạch: menu "Áo" và thanh "Da cổ" (06/10/2026 — sửa lần 2 theo ý chủ)
 
-**Trạng thái (06/10 tối): đợt 33–37 CHỦ TEST OK HẾT. VIỆC KẾ TIẾP (chủ bảo làm ở hội thoại
-mới): đợt 38 — ba việc cho ô "Áo" (nút mở file áo, tự quay về đúng ảnh, nút "Đổi áo khác");
-rồi đợt 39 — viền áo khớp với da (chưa có thiết kế, làm ảnh thử trước). Xem mục 7.**
+**Trạng thái (06/10 khuya): đợt 33–38 CHỦ TEST OK HẾT. Đợt 39 — viền áo khớp với da — ĐÃ
+LÀM, CHỜ CHỦ TEST: layer "Viền áo" (bóng giữa áo và người), tự đi theo áo, nút "Khớp viền
+áo". Xem mục 7.**
 Nối tiếp `KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (đợt 31, 32 chủ test OK); kế hoạch này thay
 cho "đợt 33" ghi ở đó.
 
@@ -426,35 +426,93 @@ máy in TOSHIBA, mọi công cụ bỏ qua chuyển động chuột (khung crop 
 khác rồi quay lại — driver đóng hộp mà không trả bàn phím cho cửa sổ app. Đã sửa (`df37cfc`,
 `0294a77`), chủ test OK 19:12.
 
-### Đợt 39 — Viền áo khớp với da (CHƯA CÓ THIẾT KẾ — làm ảnh thử trước)
+### Đợt 39 — Viền áo khớp với da (làm 06/10 khuya — CHỜ CHỦ TEST)
 
 Điều chủ thấy: áo ghép "nhìn khá giả trân — chỉ là một layer chồng bên trên chứ chưa thật sự
 liên kết như mặc áo thật". Điều chủ ước: sau khi tự chỉnh tay xong (dời / xoay áo, Smudge cổ,
-tô da), có tính năng **tự động chạy lại phần viền áo cho khớp với da**. "Da cổ" thì chủ đánh
-giá tạm ổn.
+tô da), có tính năng **tự động chạy lại phần viền áo cho khớp với da**.
 
-Chưa biết cách nào cho ra kết quả thật mắt → theo lệ các đợt, **làm ảnh thử trước rồi mới
-viết code**. Các hướng tôi định thử (ý của tôi, chủ chưa duyệt):
+**Ảnh thử trước khi viết code** (4 ảnh khách trong `Downloads\ht`, 6 cái áo của ba file
+`Ao Nu.psd`, `SO MI VIP NAM.psd`, `Mau comple.psd`): thứ làm áo "nằm trên người" rõ nhất là
+**bóng** — cổ áo đang không đổ chút bóng nào lên da, cổ trông như dán phẳng sau áo. Soi ở mức
+phóng 5 lần còn thấy ba lỗi nhỏ ngay chỗ cổ gặp hai đầu cổ áo. Cả hai đã làm.
 
-1. **Bóng tiếp xúc**: bóng mềm của mép cổ áo đổ lên da cổ (và của cằm lên áo), hướng theo ánh
-   sáng đo được trên mặt — thứ làm áo "nằm trên người" rõ nhất. Hiện app chỉ làm sậm nhẹ da ở
-   vành khoảng hở cổ lúc mặc áo (`RIM_SHADE` trong `core/garment.rs`), không theo vị trí áo
-   sau khi chủ dời / xoay.
-2. **Mép áo**: mép layer áo đang sắc như cắt giấy → làm mềm theo độ nét của ảnh, bỏ viền sáng
-   / viền nền còn dính ở mép áo của file tiệm.
-3. **Khớp sáng và màu giữa áo và người**: áo studio sáng đều, ảnh khách lệch sáng / ám màu →
-   đưa hướng sáng và tông của áo về gần ảnh (đã có sẵn phép đo độ dốc sáng `light_of` và hai
-   thanh sáng áo ghép để tận dụng).
-4. **Da tô dưới mép áo** tính lại theo vị trí áo hiện tại (sau khi áo bị dời, chỗ hở ra đang là
-   dải da sậm phẳng).
+- [x] **Layer mới "Viền áo"**, nằm ngay trên layer "Áo", dưới "Tóc trên áo", chế độ hòa trộn
+      Multiply. Nó chứa: đường sẫm mảnh chỗ mép áo chạm da và bóng mềm quanh đó; bóng của cổ,
+      cằm lên cổ áo; bóng của tóc lên áo. App tạo nó ngay lúc mặc áo (chung một bước Ctrl+Z
+      "Mặc áo"). Layer "Áo" và layer người không bị đổi điểm ảnh nào.
+- [x] Bóng chỉ dựa vào **đường viền** của người, áo và tóc, không dựa vào màu. Nên làm đẹp
+      da, "Da cổ", "Sáng áo", Smudge / Clone trong lòng da không làm nó sai; chỉ khi hình dạng
+      đổi (áo dời chỗ, da bị xóa bớt / tô thêm ở mép) mới cần làm lại.
+- [x] **Tự đi theo áo**: dời, phóng, xoay áo ("Chỉnh áo", Ctrl+T, công cụ Move, phím mũi tên)
+      xong là bóng được làm lại ngay, **chung một bước Ctrl+Z** với lần dời đó — Ctrl+Z một
+      lần là cả áo lẫn bóng về chỗ cũ. Trong lúc đang "Chỉnh áo", bóng tạm ẩn để khỏi nằm lại
+      chỗ cũ; Enter hay Esc xong thì hiện lại.
+- [x] **Nút "Khớp viền áo"** ở hàng "Áo" của ô Ảnh thẻ (cạnh "Chỉnh áo", hiện khi ảnh đang
+      mặc áo): sau khi sửa tay chỗ cổ làm đổi đường viền (xóa bớt da thò ra, tô thêm da, kéo
+      Smudge ở mép) thì bấm để làm lại bóng theo ảnh đang có. Một bước Ctrl+Z riêng, tên
+      "Khớp viền áo". Không có gì đổi thì nút báo "Viền áo đã khớp với ảnh đang có" và không
+      thêm bước nào. Đang xem trước phần chỉnh chân dung mà bấm thì phần đang xem được áp dụng
+      trước (luật đợt 27), rồi bóng mới được làm theo ảnh đã áp dụng.
+- [x] Muốn bóng nhạt hơn: giảm Opacity của layer "Viền áo" — app giữ nguyên mức đó (và giữ
+      nguyên việc layer đang ẩn / hiện) mỗi lần làm lại. Xóa hẳn layer thì app **không tự tạo
+      lại**; bấm "Khớp viền áo" là có lại. Vẽ thêm bóng bằng cọ đen mềm lên layer này cũng
+      được, nhưng lần làm lại sau sẽ thay bằng bóng của app.
+- [x] "Bỏ áo" và mặc áo khác: layer "Viền áo" đi theo layer "Áo" (bỏ cùng, làm mới cùng).
+      Ảnh đã mặc áo lưu từ trước, mở lại: app nhận ra layer "Viền áo" theo tên, mọi thứ trên
+      vẫn chạy. Ảnh mặc áo từ bản cũ (chưa có layer này): bấm "Khớp viền áo" là có.
+- [x] **Sửa kèm lúc mặc áo**, chỗ cổ gặp hai đầu cổ áo:
+      1. hết ô da nhỏ thò ra ngoài cạnh đầu cổ áo (cổ áo nhọn, dốc xuống);
+      2. hết đường kẻ ngang mảnh ngang tầm cổ áo (vệt áo cũ còn sót 13–25% ở đúng một hàng
+         điểm ảnh, và màu áo cũ lẫn vào hàng da đầu tiên);
+      3. cổ hẹp hơn khoảng hở cổ áo một chút thì da **loe dần** từ mép cổ xuống đầu cổ áo,
+         thay cho bậc vuông; chỗ hở rộng quá 15% chiều dài mắt–cằm thì để nguyên.
 
-Câu hỏi cho chủ khi bắt đầu đợt này (không chặn việc làm ảnh thử): chỗ nào làm chủ thấy "giả"
-nhất — mép áo sắc quá, thiếu bóng, hay lệch sáng / lệch màu? Cho xin 2–3 ảnh chủ đã chỉnh tay
-xong mà vẫn thấy giả để thử đúng ca.
+Việc tôi tự quyết:
+- Tên layer "Viền áo" và tên nút "Khớp viền áo" (lấy theo chữ chủ dùng).
+- Bóng để ở layer riêng thay vì tô thẳng vào da hay vào áo: chủ tắt / giảm / xóa được, và
+  app làm lại bao nhiêu lần cũng không làm da hay áo "mòn" đi.
+- Độ đậm: mép chạm đậm nhất khoảng 40%, bóng mềm quanh đó 34%, bóng người lên áo 14–20%,
+  bóng tóc lên áo 40%; bề rộng tính theo cỡ cổ áo đang nằm trên ảnh (ảnh lớn bóng rộng theo).
+  Bóng trên da ngả nâu đỏ, trên vải ngả xám.
+- Sửa tay **không** tự làm lại bóng sau từng nét cọ (mỗi nét sẽ thành hai bước Ctrl+Z, và
+  app khựng nhẹ sau mỗi nét) — chỉ áo dời chỗ mới tự làm; sửa tay xong thì bấm nút.
 
-Nút bấm dự kiến: một nút / một thanh trong menu "Áo" (ví dụ "Khớp viền áo"), chạy lại được
-sau mỗi lần chủ chỉnh tay, dùng chung đường "Chỉnh tiếp ảnh này". Áo vẫn là layer riêng để
-"Chỉnh áo" tiếp được.
+Chưa làm trong đợt này (làm khi chủ thấy cần):
+- **Khớp sáng / màu của áo với ảnh** (hướng 3 của bản trước): chưa có cách đo đáng tin trên
+  ảnh thẻ; hiện đã có hai thanh "Sáng áo" / "Đều sáng áo" cho áo ghép.
+- **Mép áo của file tiệm**: áo bị phóng 2–3 lần nên mép hơi nhòe, vest sẫm có quầng mờ trên
+  nền xanh. Chưa đụng.
+- **Tóc sau vai bị cắt ngang** ở tầm cổ áo khi áo mới hẹp vai hơn áo cũ (ảnh tóc dài), và
+  **mẩu cổ áo cũ còn sót** phía trên đường cổ áo: vẫn phải xóa tay.
+- Bóng không theo hướng đèn của ảnh (hai bên cổ đậm như nhau).
+
+Test: 5 bài lõi `core::seam` (bóng trên da sát mép áo và không có ở xa; bóng người trên áo;
+bóng tóc trên áo; không áo / không người thì không có layer; ảnh lớn tính trên lưới thưa ra
+bóng như ảnh nhỏ), 1 bài lịch sử (bước gộp vào bước trước được Ctrl+Z cùng; lần lưu trước đó
+đọc là "chưa lưu"), 5 bài trong app `app::garment_ops` (mặc áo có layer "Viền áo" Multiply
+ngay trên "Áo", làm tối đúng chỗ; dời áo thì bóng theo trong cùng bước, Ctrl+Z / Ctrl+Y đủ
+cả hai, không chèn gì khi còn bước để làm lại; sửa tay rồi bấm nút là một bước riêng, bấm lần
+nữa không thêm bước; xóa layer thì không tự tạo lại, bấm nút tạo lại, Opacity giữ nguyên, "Bỏ
+áo" bỏ luôn; "Chỉnh áo" ẩn bóng và hiện lại khi xong), bài bảng (nút mới hỏi đúng việc).
+Lệnh xem ảnh thử như đợt 36 (`probe_dressed_photos`): mỗi áo ra thêm `..__vien.jpg` (có bóng)
+và, với `IAI_GARMENT_NECK=60`, `..__da_co_vien.jpg` (như chủ thấy sau "Da cổ" 60).
+
+Kết quả test 06/10 khuya: nhóm nhẹ 2006 bài qua, riêng
+`an_id_photo_is_framed_again_from_what_was_kept` hết 120 giây chờ khi chạy chung cả nhóm
+(bài chạy model, đã biết là chập chờn lúc máy đầy tải) và qua khi chạy riêng; nhóm
+`app::portrait_ops` chạy từng bài 26 qua.
+
+Ảnh xem trước / sau (vùng cổ, đúng cỡ điểm ảnh; "trước" là bản app đang dùng với "Da cổ" 60,
+riêng áo của `Ao Nu.psd` thì "trước" là bản mới khi chưa có bóng):
+`tmp\vien-ao\xem\vien-ao-1-nu-vest-ca-vat.jpg` … `vien-ao-9-toc-dai-so-mi-trang.jpg`, và
+`vien-ao-10-toc-dai-so-mi-trang-ca-nguoi.jpg` (cả người, thấy bóng tóc trên áo trắng).
+
+Chưa đo: thời gian làm lại bóng trên bản Release (bản debug 0,2 giây cho ảnh thẻ 1043×1417;
+ảnh "Không cắt" cỡ lớn sẽ lâu hơn theo số điểm ảnh — ước lượng của tôi nửa giây đến một giây
+cho ảnh trên 12 triệu điểm ảnh, mỗi lần dời áo).
+
+- [ ] Chủ test trên `target\release\iai.exe` (build 06/10 21:59, code ở commit `3f058d3`).
 
 ### Để sau, chỉ làm khi chủ bảo
 
@@ -579,6 +637,32 @@ sau mỗi lần chủ chỉnh tay, dùng chung đường "Chỉnh tiếp ảnh n
   1×3×512×512 trong −1..1, đầu ra thứ nhất −1..1). Khung thử: mắt trái / phải về (193, 240) /
   (319, 240) × hệ số cỡ, rồi dời theo chiều dọc.
 - Test: `app::portrait_ops` chạy riêng `--test-threads=1`.
+- **Đợt 39 — "Viền áo"** (`core/seam.rs`, `garment_ops.rs`): `seam::shade(person, garment,
+  hair, w, h)` chỉ đọc alpha của ba ảnh cỡ ảnh thẻ, trả RGBA để nhân (Multiply): màu = phần
+  còn lại của màu dưới bóng đậm nhất (`ON_SKIN` nâu đỏ, `ON_CLOTH` xám, trộn theo phần bóng
+  rơi lên da / lên vải), alpha = độ đậm. Năm trường mờ Gauss (3 lượt box) của alpha áo và của
+  "người không bị áo che": `TOUCH` 0,012 / `AROUND` 0,07 (áo → da), `BESIDE` 0,05 / `THROWN`
+  0,09 rơi xuống `DROP` 0,06 (người → áo), `HAIR` 0,04 — đều theo `unit` = bề ngang hai đầu
+  cổ áo đang nằm trên ảnh / `NECK_SPAN` 0,83 (đo trên 4 ảnh: mắt–cằm ≈ 1,06–1,31 lần bề ngang
+  cổ), không có cổ áo thì 0,23 chiều cao ảnh; `unit × TOUCH ≥ 3 px` thì tính trên lưới nửa cỡ.
+  Bản debug 180–245 ms cho ảnh 1043×1417. `Dressed.shade` do `dress()` tính;
+  `Piece::on_photo`. App: `SEAM_LAYER`, `Worn.seam` (nhận theo tên, phía trên layer "Áo"),
+  `fit_seam(idx, follows)` (tách người / áo / tóc bằng cách ẩn các layer khác rồi `flatten`;
+  bỏ layer cũ, thêm layer mới ngay trên "Áo", giữ `opacity` / `visible` / layer đang chọn;
+  kết quả trùng `content_hash` thì không ghi bước), `follow_garment` chạy mỗi khung hình khi
+  `work_under_way()` (= `autosave_must_wait`) sai: so `Lying { layer, offset,
+  revision_fingerprint }` với lần làm bóng trước (`GarmentSession.shaded`; lần đầu thấy thì
+  coi như đã khớp), **không làm khi còn bước để redo**, không làm khi ảnh không có layer
+  "Viền áo". Gộp bước: `Canvas::record_onto_last` → `CommandHistory::push_onto_last` (gói
+  bước cuối + lệnh mới vào `CompoundCommand` mang tên bước cuối, `EditId` mới nên lần lưu
+  trước đọc dirty; có redo / đang trong group / chưa có bước nào thì ghi thành bước riêng).
+  "Chỉnh áo" ẩn layer bóng (`seam_held`), `show_seam_again` hiện lại khi hết transform — việc
+  ẩn / hiện này không vào lịch sử (lệnh transform chỉ chụp layer áo).
+  `dress()`: `opening()` ngoài hai đầu cổ áo chỉ lấy phần dưới mép áo (`line.max(top[x])`);
+  `gone = risen × (1 − smoothstep(1, 2, under))` và trộn theo trọng số "phần cũ còn lại" /
+  "phần mới đặt lên" (trước đây hai lần mờ nhân nhau để sót `b(1−b)` ≤ 25% áo cũ ở đúng hàng
+  cổ áo); `neck_flare` (`FLARE_REACH` 0,15, `FLARE_RUN` 0,7) đặt da *phía sau* những gì đang
+  có, trong tam giác từ mỗi đầu cổ áo lên tới mép phần người còn lại ở hàng `line − 2`.
 - **Đợt 38** (`garment_ops.rs`): `photo_to_dress` = tài liệu đầu tiên trong `doc_mru` (trừ file
   nguồn) mà `may_be_dressed`: đang mặc áo, hoặc không quá `MOST_PHOTO_LAYERS` (16) layer,
   không có nhóm, không phải `is_garment_sheet`, không phải file chữ / PDF / nhiều trang. Luật
