@@ -959,6 +959,17 @@ impl Canvas {
         kind.outcome(revision, is_dirty)
     }
 
+    /// [`record`](Self::record) for a change that only follows the step
+    /// recorded last (a layer derived from the others, made again): it joins
+    /// that step, so one undo takes both back.
+    pub fn record_onto_last(
+        &mut self,
+        cmd: Box<dyn crate::core::command::Command>,
+    ) -> ChangeOutcome {
+        let (revision, is_dirty) = self.cmd_history.record_onto_last(cmd);
+        ChangeKind::LayerStructure.outcome(revision, is_dirty)
+    }
+
     /// Run a command and record it ONLY if it succeeds.
     ///
     /// A command that fails leaves the document untouched and never enters

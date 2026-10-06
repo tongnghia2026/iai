@@ -23,6 +23,7 @@ const NUDGE_STEP: f32 = 0.02;
 const TURN_STEP: f32 = 0.5;
 const MAKE_LABEL: &str = "Làm ảnh thẻ tự động";
 const OPEN_SHEET_LABEL: &str = "Mở file áo";
+const FIT_SEAM_LABEL: &str = "Khớp viền áo";
 
 /// The sliders the Ảnh thẻ side opens with: the preset used last, if it is
 /// still kept.
@@ -291,6 +292,16 @@ fn garment_row(
                             .clicked()
                     {
                         actions.dialogs.adjust_garment = true;
+                    }
+                    if worn
+                        && ui
+                            .add_enabled(!busy, egui::Button::new(FIT_SEAM_LABEL))
+                            .on_hover_text(
+                                "Sau khi sửa tay chỗ cổ hay dời áo: làm lại bóng của cổ áo trên da và của tóc, cằm trên áo cho khớp ảnh đang có. Bóng nằm ở layer riêng \"Viền áo\"",
+                            )
+                            .clicked()
+                    {
+                        actions.dialogs.fit_garment_seam = true;
                     }
                     if ui
                         .add_enabled(may_leave, egui::Button::new("Đổi áo khác"))
@@ -709,7 +720,9 @@ mod tests {
         frame(&ctx, &data, &mut settings, vec![]);
         let (output, _) = frame(&ctx, &data, &mut settings, vec![]);
         let asked = click(&ctx, &data, &mut settings, text_at(&output, "Chỉnh áo"));
-        assert!(asked.dialogs.adjust_garment);
+        assert!(asked.dialogs.adjust_garment && !asked.dialogs.fit_garment_seam);
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, FIT_SEAM_LABEL));
+        assert!(asked.dialogs.fit_garment_seam && !asked.dialogs.adjust_garment);
         let asked = click(&ctx, &data, &mut settings, text_at(&output, "Bỏ áo"));
         assert_eq!(asked.dialogs.remove_garment, Some(settings));
         let asked = click(&ctx, &data, &mut settings, text_at(&output, "Đổi áo khác"));

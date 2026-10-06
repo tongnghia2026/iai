@@ -6,6 +6,7 @@
 //! mutation therefore passes through
 //! [`Canvas::record`](super::Canvas::record) /
 //! [`Canvas::record_as`](super::Canvas::record_as) /
+//! [`Canvas::record_onto_last`](super::Canvas::record_onto_last) /
 //! [`Canvas::execute`](super::Canvas::execute). That "one door" is now a
 //! compiler guarantee, not a convention: the field is unreachable from outside,
 //! and the only mutator exposed here appends to history.
@@ -33,6 +34,13 @@ impl HistoryGate {
     /// re-reading state.
     pub fn record(&mut self, cmd: Box<dyn Command>) -> (u64, bool) {
         self.history.push(cmd);
+        (self.history.revision(), self.history.is_dirty())
+    }
+
+    /// [`record`](Self::record), folded into the step recorded last: one
+    /// undo takes both back.
+    pub fn record_onto_last(&mut self, cmd: Box<dyn Command>) -> (u64, bool) {
+        self.history.push_onto_last(cmd);
         (self.history.revision(), self.history.is_dirty())
     }
 

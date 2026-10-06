@@ -278,6 +278,11 @@ impl App {
         self.autosave_active_project();
     }
 
+    /// Something is being worked on that has not landed in the document yet.
+    pub(in crate::app) fn work_under_way(&self) -> bool {
+        self.autosave_must_wait()
+    }
+
     fn autosave_must_wait(&self) -> bool {
         self.edit.input.painting
             || !self.edit.pending_stroke_inputs.is_empty()

@@ -37,6 +37,7 @@ pub mod quick_select;
 pub mod raw_spill;
 pub mod refine;
 pub mod scan_cleanup;
+pub mod seam;
 pub mod selection;
 pub mod settings;
 pub mod shape;

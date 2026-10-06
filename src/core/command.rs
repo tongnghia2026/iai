@@ -989,6 +989,27 @@ impl CommandHistory {
         }
     }
 
+    /// Fold `cmd` into the step recorded last, so one undo takes both back:
+    /// for a change that only follows that step (a layer derived from the
+    /// others, made again). With no such step, or one that could be redone
+    /// past, it is a step of its own.
+    ///
+    /// The folded step is a new state: a save made before it reads dirty.
+    pub fn push_onto_last(&mut self, cmd: Box<dyn Command>) {
+        if self.pending_group.is_some() || !self.redo_stack.is_empty() {
+            return self.push(cmd);
+        }
+        let Some(last) = self.undo_stack.pop_back() else {
+            return self.push(cmd);
+        };
+        self.total_memory_bytes = self
+            .total_memory_bytes
+            .saturating_sub(last.cmd.memory_bytes());
+        let mut both = CompoundCommand::new(last.cmd.label());
+        both.commands = vec![last.cmd, cmd];
+        self.push_to_stack(Box::new(both));
+    }
+
     /// Undo: pop from undo_stack, call undo(), push onto redo_stack.
     ///
     /// A command that fails to undo is put back untouched, so a failed step
@@ -1872,6 +1893,31 @@ mod tests {
             history.is_dirty(),
             "once the saved edit is evicted the state is unreachable → dirty"
         );
+    }
+
+    #[test]
+    fn a_change_folded_into_the_last_step_is_undone_with_it() {
+        let mut history = CommandHistory::new();
+        let (mut stack, mut w, mut h_) = (LayerStack::new(4, 4), 4, 4);
+        edit(&mut history, "Move");
+        history.mark_saved();
+        let memory = history.total_memory_bytes();
+        history.push_onto_last(Box::new(NoopCommand("Follow")));
+        // Still one step, under the name of what it follows, and a state
+        // the save before it does not hold.
+        assert_eq!(history.undo_count(), 1);
+        assert_eq!(history.history_entries()[1].label, "Move");
+        assert_eq!(history.total_memory_bytes(), memory + 1);
+        assert!(history.is_dirty());
+        let mut ctx = empty_context(&mut stack, &mut w, &mut h_);
+        assert!(history.undo(&mut ctx));
+        assert_eq!((history.undo_count(), history.redo_count()), (0, 1));
+        assert!(history.is_dirty());
+
+        // With a step to redo, or none to follow, it is a step of its own.
+        history.push_onto_last(Box::new(NoopCommand("Alone")));
+        assert_eq!((history.undo_count(), history.redo_count()), (1, 0));
+        assert_eq!(history.history_entries()[1].label, "Alone");
     }
 
     #[test]

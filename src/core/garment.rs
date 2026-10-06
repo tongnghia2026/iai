@@ -43,6 +43,10 @@ const HAIR_RISE: f32 = 8.0;
 const HAIR_MEETS: usize = 64;
 /// How sure the labels must be of clothes for them to count as clothes.
 const CLOTHES: u8 = 77;
+/// The neck widens to a collar's point no farther from its edge than this,
+/// in eye-to-chin lengths, and by this many pixels for each pixel of height.
+const FLARE_REACH: f32 = 0.15;
+const FLARE_RUN: f32 = 0.7;
 
 /// A garment as the shop keeps it: straight-alpha RGBA, the neck cut away.
 #[derive(Clone)]
@@ -143,11 +147,13 @@ impl Garment {
         );
         let line = collar.top().round() as usize;
         for x in x0.saturating_sub(OPENING_LAP)..=(x1 + OPENING_LAP).min(w - 1) {
-            // Beside the collar's points only the lap under the line counts.
+            // Beside the collar's points only the lap under the garment's
+            // edge counts: a collar that falls away from its point leaves the
+            // photo bare there.
             let from = if (x0..=x1).contains(&x) {
                 line.saturating_sub(OPENING_LAP)
             } else {
-                line
+                line.max(top[x])
             };
             for y in from..(top[x] + OPENING_LAP).min(h) {
                 plane[y * w + x] = 255;
@@ -629,6 +635,28 @@ pub struct Piece {
     pub offset: (i32, i32),
 }
 
+impl Piece {
+    /// The piece as it lies on a photo `width` by `height`: the photo's
+    /// straight-alpha RGBA.
+    pub fn on_photo(&self, width: u32, height: u32) -> Vec<u8> {
+        let (w, h) = (width as i64, height as i64);
+        let (pw, ph) = (self.width as i64, self.height as i64);
+        let (ox, oy) = (self.offset.0 as i64, self.offset.1 as i64);
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        let (x0, x1) = (ox.max(0), (ox + pw).min(w));
+        if x0 >= x1 {
+            return out;
+        }
+        for y in oy.max(0)..(oy + ph).min(h) {
+            let from = (((y - oy) * pw + x0 - ox) * 4) as usize;
+            let to = ((y * w + x0) * 4) as usize;
+            let run = ((x1 - x0) * 4) as usize;
+            out[to..to + run].copy_from_slice(&self.rgba[from..from + run]);
+        }
+        out
+    }
+}
+
 /// The dressed photo's layers, bottom to top. The garment is whole and on
 /// its own so it can be moved, scaled and turned by hand afterwards: the
 /// person has skin a little way on under it, and the hair that falls over it
@@ -638,6 +666,9 @@ pub struct Dressed {
     /// collar's opening.
     pub person: Vec<u8>,
     pub garment: Piece,
+    /// The shade the garment and the person cast on each other, the photo's
+    /// size; `None` when there is none.
+    pub shade: Option<Vec<u8>>,
     /// The hair from the collar's line down, the photo's size; `None` when
     /// none of it falls over the garment.
     pub hair: Option<Vec<u8>>,
@@ -807,7 +838,9 @@ pub fn dress(
                 let i = y * w + x;
                 let under = under_line(x, y);
                 let below = smoothstep(-1.0, 1.0, under);
-                let gone = risen[i] * (1.0 - below);
+                // Old clothes that rose are gone through the line's own rows
+                // too: fading there against `below` would leave a line of them.
+                let gone = risen[i] * (1.0 - smoothstep(1.0, 2.0, under));
                 let strand = hair[i] * smoothstep(-HAIR_RISE, 0.0, under);
                 if below <= 0.0 && gone <= 0.0 && strand <= 0.0 {
                     continue;
@@ -846,23 +879,31 @@ pub fn dress(
                     }
                     kept += (1.0 - kept) * inside;
                 }
-                let mut after = alpha + (kept - alpha) * below;
-                let mut shown = [0.0f32; 3];
-                for c in 0..3 {
-                    shown[c] = px[c] as f32 + (colour[c] - px[c] as f32) * below;
+                // What is left of the pixel as it was, and what is laid on
+                // it. The old clothes that rose are gone: skin takes their
+                // place on the neck, nothing beside it.
+                let on_the_neck = if gone > 0.0 && on_neck(x, y) {
+                    skin_at(x, y)
+                } else {
+                    None
+                };
+                let mut left = alpha * (1.0 - below);
+                if on_the_neck.is_none() {
+                    left *= 1.0 - gone;
                 }
-                // Over the line the old clothes that rose are gone: skin takes
-                // their place on the neck, nothing beside it.
-                if gone > 0.0 {
-                    match skin_at(x, y).filter(|_| on_neck(x, y)) {
-                        Some((fill, _)) => {
-                            for c in 0..3 {
-                                shown[c] += (fill[c] - shown[c]) * gone;
-                            }
-                            after += (1.0 - after) * gone;
-                        }
-                        None => after *= 1.0 - gone,
+                let laid = kept * below;
+                let mut after = left + laid;
+                let mut shown = [px[0] as f32, px[1] as f32, px[2] as f32];
+                if after > 0.0 {
+                    for c in 0..3 {
+                        shown[c] = (shown[c] * left + colour[c] * laid) / after;
                     }
+                }
+                if let Some((fill, _)) = on_the_neck {
+                    for c in 0..3 {
+                        shown[c] += (fill[c] - shown[c]) * gone;
+                    }
+                    after += (1.0 - after) * gone;
                 }
                 for c in 0..3 {
                     px[c] = shown[c].round().clamp(0.0, 255.0) as u8;
@@ -870,6 +911,30 @@ pub fn dress(
                 px[3] = (after * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         });
+    // The neck widens to the collar's points: skin behind what is there.
+    // What is there by now is the person without the old clothes.
+    let stays = |i: usize| out[i * 4 + 3] >= SOLID;
+    let line = collar.top();
+    let points = [collar.left[0], collar.right[0]].map(|x| placement.to_photo([x, line]));
+    let flare = neck_flare(&stays, (w, h), points, unit, &under_line);
+    for (i, cover) in flare {
+        let Some((fill, _)) = skin_at(i % w, i / w) else {
+            continue;
+        };
+        let px = &mut out[i * 4..i * 4 + 4];
+        let own = px[3] as f32 / 255.0;
+        let laid = (1.0 - own) * cover;
+        let after = own + laid;
+        if laid <= 0.0 {
+            continue;
+        }
+        for c in 0..3 {
+            px[c] = ((px[c] as f32 * own + fill[c] * laid) / after)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        }
+        px[3] = (after * 255.0).round() as u8;
+    }
     // Hair that nowhere meets the garment needs no layer over it.
     let meets = over
         .chunks_exact(4)
@@ -877,11 +942,71 @@ pub fn dress(
         .filter(|(px, cover)| px[3] >= SOLID && **cover >= 0.5)
         .count();
 
+    let garment = cloth.laid(placement, (w, h));
+    let hair = (meets >= HAIR_MEETS).then_some(over);
+    let shade = super::seam::shade(
+        &out,
+        &garment.on_photo(figure.width, figure.height),
+        hair.as_deref(),
+        figure.width,
+        figure.height,
+    );
     Dressed {
         person: out,
-        garment: cloth.laid(placement, (w, h)),
-        hair: (meets >= HAIR_MEETS).then_some(over),
+        garment,
+        shade,
+        hair,
     }
+}
+
+/// Where the neck widens to the collar's points over the collar's line: the
+/// wedge from each point (`points`, on the photo: left, right) up to the edge
+/// of what `stays` of the person just over the line. Each pixel of it with
+/// how much of it the wedge covers. A side whose edge is at the point, or
+/// too far from it to be the neck's, has none.
+fn neck_flare(
+    stays: &dyn Fn(usize) -> bool,
+    (w, h): (usize, usize),
+    points: [[f32; 2]; 2],
+    unit: f32,
+    under_line: &dyn Fn(usize, usize) -> f32,
+) -> Vec<(usize, f32)> {
+    let reach = (unit * FLARE_REACH) as i32;
+    let mut wedge = Vec::new();
+    for (point, inward) in points.into_iter().zip([1i32, -1]) {
+        let (px, py) = (point[0].floor() as i32, point[1].round() as i32 - 2);
+        if py < 0 || py >= h as i32 {
+            continue;
+        }
+        let edge = (0..=reach).find(|d| {
+            let x = px + d * inward;
+            x >= 0 && x < w as i32 && stays(py as usize * w + x as usize)
+        });
+        let Some(span) = edge.filter(|span| *span >= 2) else {
+            continue;
+        };
+        let rise = (span as f32 / FLARE_RUN).ceil() as i32 + 2;
+        for y in (py + 2 - rise).max(0)..(py + 4).min(h as i32) {
+            for d in 0..=span + 1 {
+                let x = px + d * inward;
+                if x < 0 || x >= w as i32 {
+                    continue;
+                }
+                let (x, y) = (x as usize, y as usize);
+                let under = under_line(x, y);
+                if under > 1.0 {
+                    continue;
+                }
+                // How far past the wedge's slanted side the pixel lies.
+                let along = (x as f32 + 0.5 - point[0]) * inward as f32;
+                let cover = (along + under.min(0.0) * FLARE_RUN + 0.5).clamp(0.0, 1.0);
+                if cover > 0.0 {
+                    wedge.push((y * w + x, cover));
+                }
+            }
+        }
+    }
+    wedge
 }
 
 /// A plane blurred over squares `2 * radius + 1` across, as 0..1.
@@ -1215,6 +1340,10 @@ mod tests {
         assert_eq!(at(100, 55), 0, "the garment itself");
         assert_eq!(at(100, 5), 0, "over the collar's line");
         assert_eq!(at(60, 30), 0, "beside the collar");
+        // Beside a point the collar falls away from, only what lies under
+        // the garment's edge: two columns out the edge is at row 12.
+        assert_eq!(at(78, 11), 0, "bare beside the point");
+        assert_eq!(at(78, 13), 255, "under the edge beside the point");
     }
 
     /// A photo 400x600 of a head (rows 100..300), a neck 80 wide to row 360
@@ -1429,6 +1558,75 @@ mod tests {
     }
 
     #[test]
+    fn the_neck_widens_to_the_points_of_a_collar_a_little_wider_than_it() {
+        let shirt = shirt();
+        let collar = shirt.collar().unwrap();
+        let (figure, face) = figure(false);
+        let w = figure.width as usize;
+        let person = painted(&figure);
+        let alpha = |buffer: &[u8], x: usize, y: usize| buffer[(y * w + x) * 4 + 3];
+        let laid = |left: f32, right: f32| {
+            let neck = Neck {
+                left: [left, 350.0],
+                right: [right, 350.0],
+            };
+            let placement =
+                Placement::fit(&collar, shirt.height, &neck, (figure.width, figure.height));
+            dress(&person, &figure, &face, &shirt, &collar, &placement).person
+        };
+        // The neck's edge is at 160; the collar's point lies 10 further out,
+        // on row 350. The wedge between them holds skin, up to the slant
+        // from the point; over the slant the photo is bare as before.
+        let wide = laid(150.0, 250.0);
+        assert_eq!(alpha(&person, 156, 346), 0);
+        assert_eq!(alpha(&wide, 156, 346), 255);
+        assert_eq!(alpha(&wide, 243, 346), 255);
+        let skin = &wide[(346 * w + 156) * 4..(346 * w + 156) * 4 + 3];
+        assert!(skin[0] > 150 && skin[2] < 190, "{skin:?}");
+        assert_eq!(alpha(&wide, 152, 340), 0);
+        assert_eq!(alpha(&wide, 156, 330), 0);
+        // No row of the line is left half bare under the wedge.
+        for y in 348..353 {
+            assert_eq!(alpha(&wide, 157, y), 255, "row {y}");
+        }
+        // A collar far wider than the neck is not the neck's to reach.
+        let far = laid(120.0, 280.0);
+        assert_eq!(alpha(&far, 156, 346), 0);
+        assert_eq!(alpha(&far, 126, 346), 0);
+    }
+
+    #[test]
+    fn old_clothes_leave_no_line_where_the_collars_line_cuts_them() {
+        let shirt = shirt();
+        let collar = shirt.collar().unwrap();
+        let (figure, face) = figure(false);
+        let w = figure.width as usize;
+        let person = painted(&figure);
+        let neck = neck_of(&figure, &face);
+        let placement = Placement::fit(&collar, shirt.height, &neck, (figure.width, figure.height));
+        let dressed = dress(&person, &figure, &face, &shirt, &collar, &placement);
+        let cover = dressed.garment.on_photo(figure.width, figure.height);
+        // The old top crosses the line beside the neck. Around the line,
+        // what is not under the garment there is skin, whole, or as good as
+        // nothing: no row of the top is left at a quarter of itself, and
+        // none of its red in the skin.
+        let line = neck.left[1].round() as usize;
+        for y in line - 3..=line + 3 {
+            for x in (140..159).chain(242..260) {
+                let i = (y * w + x) * 4;
+                if cover[i + 3] > 0 {
+                    continue;
+                }
+                let px = &dressed.person[i..i + 4];
+                assert!(
+                    px[3] < 16 || (px[3] == 255 && px[1] > 120),
+                    "({x}, {y}): {px:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn hair_is_told_from_the_clothes_beside_it_by_its_colour() {
         let shirt = shirt();
         let collar = shirt.collar().unwrap();
@@ -1469,13 +1667,28 @@ mod tests {
         }
     }
 
+    fn multiply(base: &mut [u8], layer: &[u8]) {
+        for (under, px) in base.chunks_exact_mut(3).zip(layer.chunks_exact(4)) {
+            let a = px[3] as f32 / 255.0;
+            for c in 0..3 {
+                let left = 1.0 - a * (1.0 - px[c] as f32 / 255.0);
+                under[c] = (under[c] as f32 * left).round() as u8;
+            }
+        }
+    }
+
     /// Opt-in visual probe. IAI_GARMENT_PROBE is a folder of ID photos,
     /// IAI_GARMENT_PSD the shop's garment files (`;` between them),
     /// IAI_GARMENT_OUT where the results go: each photo dressed in
-    /// IAI_GARMENT_PICK garments of every file (4 unless given), and a sheet
+    /// IAI_GARMENT_PICK garments of every file (4 unless given) without its
+    /// shade (`..jpg`) and with it (`..__vien.jpg`), and a sheet
     /// `_<photo>.jpg` of the photo beside them. With IAI_GARMENT_LAYERS the
-    /// person's layer of each is kept too (`..__nguoi.png`), and the
-    /// garment's (`..__ao.png`).
+    /// layers of each are kept too: the person's (`..__nguoi.png`, and
+    /// `..__nguoi_da_co.png` as a retouch with "Da cổ" at IAI_GARMENT_NECK
+    /// leaves it, the whole photo then being `..__da_co_vien.jpg`), the
+    /// garment's (`..__ao.png`; `..__ao_anh.png` as it lies on the photo)
+    /// and the hair's over it (`..__toc.png`). A garment as wide as its
+    /// sheet is taken only with IAI_GARMENT_WIDE.
     #[test]
     #[ignore]
     fn probe_dressed_photos() {
@@ -1507,7 +1720,9 @@ mod tests {
                 .layers
                 .iter()
                 .enumerate()
-                .filter(|(_, layer)| layer.width < canvas.width * 9 / 10)
+                .filter(|(_, layer)| {
+                    layer.width < canvas.width * 9 / 10 || std::env::var("IAI_GARMENT_WIDE").is_ok()
+                })
                 .filter_map(|(i, layer)| {
                     let garment = Garment {
                         rgba: layer.tiles.flatten(),
@@ -1657,6 +1872,20 @@ mod tests {
                 panel
                     .save(out.join(format!("{name}__{label}.jpg")))
                     .unwrap();
+                // The same with the shade between the two.
+                if let Some(shade) = &dressed.shade {
+                    let mut flat = plain.clone();
+                    over(&mut flat, &dressed.person);
+                    over(&mut flat, &laid);
+                    multiply(&mut flat, shade);
+                    if let Some(hair) = &dressed.hair {
+                        over(&mut flat, hair);
+                    }
+                    image::RgbImage::from_raw(w, h, flat)
+                        .unwrap()
+                        .save(out.join(format!("{name}__{label}__vien.jpg")))
+                        .unwrap();
+                }
                 if std::env::var("IAI_GARMENT_LAYERS").is_ok() {
                     // The person's layer as the retouch is given it, and the
                     // garment's as its light sliders are.
@@ -1669,6 +1898,69 @@ mod tests {
                         .unwrap()
                         .save(out.join(format!("{name}__{label}__ao.png")))
                         .unwrap();
+                    // The garment and the hair over it as they lie on the
+                    // photo, and where the face is.
+                    image::RgbaImage::from_raw(w, h, laid.clone())
+                        .unwrap()
+                        .save(out.join(format!("{name}__{label}__ao_anh.png")))
+                        .unwrap();
+                    if let Some(hair) = &dressed.hair {
+                        image::RgbaImage::from_raw(w, h, hair.clone())
+                            .unwrap()
+                            .save(out.join(format!("{name}__{label}__toc.png")))
+                            .unwrap();
+                    }
+                    let [r, g, b] = options.backdrop.rgb();
+                    std::fs::write(
+                        out.join(format!("{name}__{label}.txt")),
+                        format!(
+                            "eyes {} {}\nchin {} {}\nwidth {}\nbackdrop {r} {g} {b}\n",
+                            face.eyes[0], face.eyes[1], face.chin[0], face.chin[1], face.width
+                        ),
+                    )
+                    .unwrap();
+                    // The person as the retouch leaves the neck.
+                    if let Some(neck) = std::env::var("IAI_GARMENT_NECK")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok())
+                    {
+                        use crate::core::portrait::{analyze, neck::analyze_necks, render};
+                        let model = analyze(&dressed.person, w, h, false, None, &|_| {}).unwrap();
+                        let enabled = vec![true; model.faces.len()];
+                        analyze_necks(&dressed.person, &model, &enabled);
+                        let settings = crate::core::portrait::PortraitSettings {
+                            neck,
+                            ..crate::core::portrait::PortraitSettings::NEUTRAL
+                        };
+                        let mut out_px = dressed.person.clone();
+                        if let Some((u, px)) =
+                            render(&dressed.person, &model, &settings, &enabled, &[])
+                        {
+                            let (uw, ww) = (u.w as usize * 4, w as usize * 4);
+                            for y in 0..u.h as usize {
+                                let o = (u.y as usize + y) * ww + u.x as usize * 4;
+                                out_px[o..o + uw].copy_from_slice(&px[y * uw..(y + 1) * uw]);
+                            }
+                        }
+                        // The photo as the owner sees it after that retouch.
+                        let mut flat = plain.clone();
+                        over(&mut flat, &out_px);
+                        over(&mut flat, &laid);
+                        if let Some(shade) = &dressed.shade {
+                            multiply(&mut flat, shade);
+                        }
+                        if let Some(hair) = &dressed.hair {
+                            over(&mut flat, hair);
+                        }
+                        image::RgbImage::from_raw(w, h, flat)
+                            .unwrap()
+                            .save(out.join(format!("{name}__{label}__da_co_vien.jpg")))
+                            .unwrap();
+                        image::RgbaImage::from_raw(w, h, out_px)
+                            .unwrap()
+                            .save(out.join(format!("{name}__{label}__nguoi_da_co.png")))
+                            .unwrap();
+                    }
                 }
                 panels.push(panel);
             }
