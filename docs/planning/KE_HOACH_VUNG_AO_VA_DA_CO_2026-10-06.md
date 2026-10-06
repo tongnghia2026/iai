@@ -1,7 +1,8 @@
 # Kế hoạch: menu "Áo" và thanh "Da cổ" (06/10/2026 — sửa lần 2 theo ý chủ)
 
-**Trạng thái (06/10): đợt 33 "Nét áo" CHỦ TEST OK. ĐỢT 34 (Tô vùng ▸ Áo, "Sáng áo", "Đều
-sáng áo") ĐÃ CODE XONG — CHỜ CHỦ TEST.** Thanh "Da cổ" (đợt 35) chưa làm.
+**Trạng thái (06/10 trưa): đợt 33 "Nét áo" và đợt 34 (Tô vùng ▸ Áo, "Sáng áo", "Đều sáng
+áo") CHỦ TEST OK. VIỆC KẾ TIẾP: đợt 35 — thanh "Da cổ" (chưa làm)**; chủ bảo làm tiếp phần còn
+lại ở hội thoại mới.
 Nối tiếp `KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (đợt 31, 32 chủ test OK); kế hoạch này thay
 cho "đợt 33" ghi ở đó.
 
@@ -24,6 +25,9 @@ Lời chủ 06/10, lần ba: "làm nét áo trước, tại vì khách hàng kh�
 áo, họ muốn giữ nguyên áo đang mặc nhưng họ lại chụp bằng điện thoại độ phân giải thấp".
 
 Lời chủ 06/10, sau khi test đợt 33: "đã test ok; tiếp tục đợt 34".
+
+Lời chủ 06/10, sau khi test đợt 34: "đã test ok; lưu bộ nhớ qua hội thoại mới làm tiếp phần còn
+lại".
 
 ## 2. Chủ đã chốt gì ở lần sửa này
 
@@ -227,7 +231,8 @@ Làm 06/10, ngay sau khi chủ bảo làm tiếp.
 - Biết trước: kéo "Sáng áo" mạnh thì mép áo (sát cổ, sát nền) có thể hiện một viền mảnh vì
   mép vùng áo là mép mềm — sửa bằng "Tô vùng ▸ Áo", hoặc tôi làm mép vùng áo bám màu ảnh ở đợt
   sau nếu chủ thấy vướng.
-- [ ] Chủ test.
+- [x] Chủ test 06/10 trên `target\release\iai.exe` (build 10:49): **"đã test ok"**. Chủ không
+  nêu gì thêm về viền mép áo hay áo ghép.
 
 ### Đợt 35 — Thanh "Da cổ"
 
@@ -248,7 +253,7 @@ Làm 06/10, ngay sau khi chủ bảo làm tiếp.
 ## 8. Việc cần chủ quyết
 
 1. ~~Menu "Áo" trước hay "Da cổ" trước?~~ Chủ chốt 06/10: nét áo trước (đợt 33, test OK), rồi
-   đợt 34 (đã làm). Còn lại: đợt 35 thanh "Da cổ".
+   đợt 34 (test OK). Còn lại: đợt 35 thanh "Da cổ" — chủ bảo làm tiếp ở hội thoại mới.
 2. Cho tôi đường dẫn ảnh mẫu để thử cho sát thực tế:
    - vài **ảnh khách tự chụp điện thoại, áo mờ**, và 2–3 **ảnh cũ phục hồi** — "Nét áo" mới thử
      trên ảnh của một khách;
