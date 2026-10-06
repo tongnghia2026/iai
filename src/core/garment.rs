@@ -1474,7 +1474,8 @@ mod tests {
     /// IAI_GARMENT_OUT where the results go: each photo dressed in
     /// IAI_GARMENT_PICK garments of every file (4 unless given), and a sheet
     /// `_<photo>.jpg` of the photo beside them. With IAI_GARMENT_LAYERS the
-    /// person's layer of each is kept too (`..__nguoi.png`).
+    /// person's layer of each is kept too (`..__nguoi.png`), and the
+    /// garment's (`..__ao.png`).
     #[test]
     #[ignore]
     fn probe_dressed_photos() {
@@ -1657,10 +1658,16 @@ mod tests {
                     .save(out.join(format!("{name}__{label}.jpg")))
                     .unwrap();
                 if std::env::var("IAI_GARMENT_LAYERS").is_ok() {
-                    // The person's layer as the retouch is given it.
+                    // The person's layer as the retouch is given it, and the
+                    // garment's as its light sliders are.
                     image::RgbaImage::from_raw(w, h, dressed.person.clone())
                         .unwrap()
                         .save(out.join(format!("{name}__{label}__nguoi.png")))
+                        .unwrap();
+                    let piece = &dressed.garment;
+                    image::RgbaImage::from_raw(piece.width, piece.height, piece.rgba.clone())
+                        .unwrap()
+                        .save(out.join(format!("{name}__{label}__ao.png")))
                         .unwrap();
                 }
                 panels.push(panel);

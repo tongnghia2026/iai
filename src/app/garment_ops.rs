@@ -8,7 +8,12 @@
 //! (the person, old clothes gone), "Áo" (the garment, whole, to move or
 //! transform by hand) and "Tóc trên áo" when hair falls over it. What the
 //! models read of the person is kept, so another garment is laid at once.
+//!
+//! "Sáng áo" and "Đều sáng áo" of Chỉnh chân dung relight the garment's
+//! layer. What it was before they did is kept here ([`Relit`]), so the
+//! sliders can be moved again without the garment wearing out.
 
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
@@ -60,6 +65,16 @@ impl Worn {
     }
 }
 
+/// A garment's layer before "Sáng áo" and "Đều sáng áo" changed it, with the
+/// sliders that made what it holds now (`made`, its tiles' content hash). A
+/// layer worked on since (moved, scaled, painted) is no longer that: it is
+/// relit from what it has become.
+pub(in crate::app) struct Relit {
+    pub base: TileMap,
+    pub look: (f32, f32),
+    pub made: u64,
+}
+
 struct Job {
     doc_id: DocumentId,
     /// The history's revision when the person was read.
@@ -88,6 +103,8 @@ pub struct GarmentSession {
     /// Where the panel shows the box (window points) and the sliders the
     /// retouch starts over from, while it is on show.
     drop_box: Option<([f32; 4], PortraitSettings)>,
+    /// Garments relit, by document and layer.
+    relit: HashMap<(DocumentId, u32), Relit>,
     status: String,
     error: bool,
 }
@@ -164,6 +181,55 @@ impl App {
     /// Where the panel shows the box this frame, if it does.
     pub(crate) fn set_garment_box(&mut self, shown: Option<([f32; 4], PortraitSettings)>) {
         self.shell.garment.drop_box = shown;
+    }
+
+    /// The layer of the garment document `doc_id` wears, if it wears one.
+    pub(in crate::app) fn garment_layer(&self, doc_id: DocumentId) -> Option<u32> {
+        self.worn_in(doc_id).map(|worn| worn.garment)
+    }
+
+    /// What the garment in `layer` of `doc_id` was before it was relit, if
+    /// its layer still holds what the relight made.
+    pub(in crate::app) fn garment_relit(&self, doc_id: DocumentId, layer: u32) -> Option<&Relit> {
+        let made = self
+            .docs
+            .documents
+            .iter()
+            .find(|d| d.id == doc_id)?
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == layer)?
+            .tiles
+            .content_hash();
+        self.shell
+            .garment
+            .relit
+            .get(&(doc_id, layer))
+            .filter(|relit| relit.made == made)
+    }
+
+    /// Keep what a garment was before its relight, or forget it (`None`:
+    /// the layer is as laid again).
+    pub(in crate::app) fn set_garment_relit(
+        &mut self,
+        doc_id: DocumentId,
+        layer: u32,
+        relit: Option<Relit>,
+    ) {
+        match relit {
+            Some(relit) => self.shell.garment.relit.insert((doc_id, layer), relit),
+            None => self.shell.garment.relit.remove(&(doc_id, layer)),
+        };
+    }
+
+    /// Document `doc_id` is closing: its garments are no longer kept.
+    pub(crate) fn forget_garment_light(&mut self, doc_id: DocumentId) {
+        self.shell
+            .garment
+            .relit
+            .retain(|(doc, _), _| *doc != doc_id);
     }
 
     /// What dressing left in document `doc_id`, while its layers are there.
@@ -677,6 +743,9 @@ impl App {
         let Some(garment) = self.worn_in(doc_id).map(|worn| worn.garment) else {
             return;
         };
+        // What a retouch under way shows of the garment's light is the
+        // garment's from here on: it is that garment which is transformed.
+        self.settle_garment_light();
         let stack = &mut self.docs.documents[idx].canvas.layer_stack;
         let Some(at) = stack.layers.iter().position(|l| l.id == garment) else {
             return;

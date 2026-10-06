@@ -15,8 +15,9 @@
 //! photo's size, and only what is finer than the cloth's shading is taken
 //! from it: tone and colour stay the photo's.
 //!
-//! A garment laid on from a shop's sheet is a layer of its own and never
-//! comes here.
+//! A garment laid on from a shop's sheet is a layer of its own: it is sharp
+//! as it is and no mask is needed to find it. [`LaidGarment`] reads the light
+//! across it and relights the whole of it by the same two sliders.
 
 use image::imageops::{resize, FilterType};
 use rayon::prelude::*;
@@ -350,6 +351,62 @@ impl ClothesArea {
                     }
                 }
             });
+    }
+}
+
+/// A garment laid on from a sheet, a layer of its own (straight RGBA): the
+/// light across it as it was laid. "Sáng áo" and "Đều sáng áo" relight
+/// every pixel of it that shows.
+pub struct LaidGarment {
+    light: Light,
+}
+
+impl LaidGarment {
+    /// Read the light across the garment `rgba`, `width` x `height`.
+    pub fn read(rgba: &[u8], width: u32, height: u32) -> Self {
+        let region = Region {
+            x: 0,
+            y: 0,
+            w: width,
+            h: height,
+        };
+        if region.is_empty() || rgba.len() != region.len() * 4 {
+            return Self {
+                light: Light::default(),
+            };
+        }
+        let shows: Vec<u8> = rgba.chunks_exact(4).map(|px| px[3]).collect();
+        Self {
+            light: ClothesArea::new(rgba, width, region, shows).light,
+        }
+    }
+
+    /// The garment `rgba` (`width` pixels a row, the one that was read)
+    /// made lighter or darker by `brightness` (-100..100) with its light
+    /// evened by `even` (0..100). Alpha stays as it is.
+    pub fn relit(&self, rgba: &[u8], width: u32, brightness: f32, even: f32) -> Vec<u8> {
+        let stops = (brightness / 100.0).clamp(-1.0, 1.0) * BRIGHTNESS_STOPS;
+        let even = (even / 100.0).clamp(0.0, 1.0);
+        let mut out = rgba.to_vec();
+        if width == 0 || (stops == 0.0 && even <= 0.0) {
+            return out;
+        }
+        out.par_chunks_mut(width as usize * 4)
+            .enumerate()
+            .for_each(|(y, line)| {
+                for (x, px) in line.chunks_exact_mut(4).enumerate() {
+                    if px[3] == 0 {
+                        continue;
+                    }
+                    let gain = self.light.evened(even, x as f32 + 0.5, y as f32 + 0.5);
+                    let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
+                    let lit = relit(c, gain, stops);
+                    for k in 0..3 {
+                        px[k] = (lit[k] * 255.0).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            });
+        out
     }
 }
 
@@ -765,6 +822,96 @@ mod tests {
             .collect();
         let area = ClothesArea::new(&rgba, w, whole(w, h), vec![255; (w * h) as usize]);
         (rgba, area)
+    }
+
+    /// Opt-in visual probe: IAI_GARMENT_LIGHT_PROBE is a folder of garment
+    /// layers (RGBA `.png`). Each gets `light_<name>.jpg` on a white ground:
+    /// as laid | "Sáng áo" -60 | +60 | "Đều sáng áo" 100.
+    #[test]
+    #[ignore]
+    fn probe_garment_light() {
+        let Ok(dir) = std::env::var("IAI_GARMENT_LIGHT_PROBE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !name.ends_with(".png") {
+                continue;
+            }
+            let garment = image::open(&path).unwrap().to_rgba8();
+            let (w, h) = garment.dimensions();
+            let rgba = garment.into_raw();
+            let laid = LaidGarment::read(&rgba, w, h);
+            println!("{name}: {w}x{h}, light {:?}", laid.light);
+            let views = [
+                rgba.clone(),
+                laid.relit(&rgba, w, -60.0, 0.0),
+                laid.relit(&rgba, w, 60.0, 0.0),
+                laid.relit(&rgba, w, 0.0, 100.0),
+            ];
+            let mut sheet = image::RgbImage::from_pixel((w + 8) * 4, h, image::Rgb([255; 3]));
+            for (k, view) in views.iter().enumerate() {
+                for (i, px) in view.chunks_exact(4).enumerate() {
+                    let a = px[3] as f32 / 255.0;
+                    let over = |v: u8| (v as f32 * a + 255.0 * (1.0 - a)).round() as u8;
+                    sheet.put_pixel(
+                        k as u32 * (w + 8) + i as u32 % w,
+                        i as u32 / w,
+                        image::Rgb([over(px[0]), over(px[1]), over(px[2])]),
+                    );
+                }
+            }
+            sheet
+                .save(dir.join(format!("light_{}.jpg", name.trim_end_matches(".png"))))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_garment_laid_on_is_relit_whole_and_keeps_its_alpha() {
+        // A garment over the middle of its layer, dimmer toward the right;
+        // around it nothing shows.
+        let (w, h) = (240u32, 160u32);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                let shows = (20..220).contains(&x) && (10..150).contains(&y);
+                let v = (200.0 * (-0.004 * x as f32).exp()) as u8;
+                [v, v, v.saturating_add(10), if shows { 255 } else { 0 }]
+            })
+            .collect();
+        let laid = LaidGarment::read(&rgba, w, h);
+        let px = |pixels: &[u8], x: u32, y: u32| {
+            let o = ((y * w + x) * 4) as usize;
+            [pixels[o], pixels[o + 1], pixels[o + 2], pixels[o + 3]]
+        };
+        // At rest it is as laid.
+        assert_eq!(laid.relit(&rgba, w, 0.0, 0.0), rgba);
+        // Darker: what shows is darker, what does not is as it was.
+        let darker = laid.relit(&rgba, w, -100.0, 0.0);
+        assert!(px(&darker, 120, 80)[0] < px(&rgba, 120, 80)[0] - 40);
+        assert_eq!(px(&darker, 120, 80)[3], 255);
+        assert_eq!(px(&darker, 5, 5), px(&rgba, 5, 5));
+        // Lighter never burns out.
+        let lighter = laid.relit(&rgba, w, 100.0, 0.0);
+        assert!(px(&lighter, 40, 80)[0] > px(&rgba, 40, 80)[0]);
+        assert!(px(&lighter, 40, 80)[0] < 255);
+        // Evened: the dim side comes up toward the lit one.
+        let evened = laid.relit(&rgba, w, 0.0, 100.0);
+        let gap = |pixels: &[u8]| px(pixels, 40, 80)[0] as i32 - px(pixels, 200, 80)[0] as i32;
+        assert!(
+            gap(&evened) < gap(&rgba) / 2,
+            "{} {}",
+            gap(&evened),
+            gap(&rgba)
+        );
+        // A layer that is not what was read is left alone.
+        assert_eq!(
+            LaidGarment::read(&rgba[..40], w, h).relit(&rgba, w, 0.0, 0.0),
+            rgba
+        );
     }
 
     #[test]

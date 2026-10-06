@@ -443,7 +443,12 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
                 ),
             ];
             for (target, label, tip) in targets {
-                let enabled = target != Some(MaskTarget::Hair) || d.portrait_hair;
+                // A garment worn is a whole layer: there is no area to paint.
+                let enabled = match target {
+                    Some(MaskTarget::Hair) => d.portrait_hair,
+                    Some(MaskTarget::Clothes) => !d.garment_worn,
+                    _ => true,
+                };
                 let response = ui
                     .add_enabled_ui(enabled, |ui| {
                         ui.selectable_label(d.portrait_brush == target, label)
@@ -1029,13 +1034,13 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         }
                         rows(ui, ready && hair, hair_rows)
                     });
-                    let clothes = vec![
-                        (
-                            "Nét áo",
-                            &mut s.clothes_sharpen,
-                            "AI vẽ lại cho nét cái áo khách đang mặc trong ảnh (ảnh điện thoại mờ, ảnh cũ phục hồi) — màu và sáng tối vẫn là của ảnh. Ảnh áo đã nét thì để 0. Không tác động lên áo ghép",
-                            Amount,
-                        ),
+                    let sharpen = vec![(
+                        "Nét áo",
+                        &mut s.clothes_sharpen,
+                        "AI vẽ lại cho nét cái áo khách đang mặc trong ảnh (ảnh điện thoại mờ, ảnh cũ phục hồi) — màu và sáng tối vẫn là của ảnh. Ảnh áo đã nét thì để 0. Không tác động lên áo ghép",
+                        Amount,
+                    )];
+                    let light = vec![
                         (
                             "Sáng áo",
                             &mut s.clothes_brightness,
@@ -1050,13 +1055,18 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         ),
                     ];
                     // A garment laid on from a sheet is sharp as it is, and a
-                    // layer of its own.
+                    // layer of its own: the two sliders of the light are its.
                     let dressed = data.dialogs.garment_worn;
-                    let clothes_active = !dressed && at_work(&clothes);
+                    let clothes_active = (!dressed && at_work(&sharpen)) || at_work(&light);
                     group(ui, shown, &mut next, Group::Clothes, "Áo", clothes_active, |ui| {
-                        rows(ui, ready && !dressed, clothes);
+                        rows(ui, ready && !dressed, sharpen);
+                        rows(ui, ready, light);
                         if dressed {
-                            note_line(ui, "Ảnh đã ghép áo: áo ghép đã nét sẵn.", false);
+                            note_line(
+                                ui,
+                                "Ảnh đã ghép áo: hai thanh sáng chỉnh áo ghép; áo ghép đã nét sẵn.",
+                                false,
+                            );
                         } else if let Some((note, warning)) = &data.dialogs.portrait_clothes {
                             note_line(ui, note, *warning);
                         }
@@ -1288,6 +1298,13 @@ mod tests {
                 false,
                 false,
             ),
+            (
+                "ao_ghep",
+                Some(Group::Clothes),
+                egui::pos2(260.0, 560.0),
+                false,
+                false,
+            ),
             ("anh_the", None, egui::pos2(260.0, 250.0), true, false),
             ("cho", None, egui::pos2(260.0, 250.0), false, false),
             (
@@ -1312,6 +1329,10 @@ mod tests {
                     "Lần đầu kéo thanh, app tìm áo rồi làm nét vài giây.".to_string(),
                     false,
                 ));
+            }
+            if name == "ao_ghep" {
+                data.dialogs.garment_worn = true;
+                data.dialogs.portrait_clothes = None;
             }
             if made {
                 // The box as it holds a garment the photo wears (the font
@@ -1392,10 +1413,15 @@ mod tests {
         data.dialogs.portrait_clothes = Some((first.to_string(), false));
         assert!(!has(&texts_in(&data, Group::Brush), first));
         data.dialogs.portrait_brush = None;
-        // A garment from a sheet is sharp as it is: the group says so.
+        // A garment from a sheet is sharp as it is, and its light is the two
+        // sliders': the group says so.
         data.dialogs.garment_worn = true;
         let shown = texts(&data);
-        assert!(has(&shown, "Ảnh đã ghép áo: áo ghép đã nét sẵn."));
+        assert!(has(
+            &shown,
+            "Ảnh đã ghép áo: hai thanh sáng chỉnh áo ghép; áo ghép đã nét sẵn."
+        ));
+        assert!(has(&shown, "Sáng áo") && has(&shown, "Đều sáng áo"));
         assert!(!has(&shown, first));
     }
 

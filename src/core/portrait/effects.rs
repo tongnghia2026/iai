@@ -343,6 +343,17 @@ impl PortraitSettings {
         }
     }
 
+    /// These settings with the clothes as shot: for a person whose garment
+    /// is a layer of its own.
+    pub fn without_clothes(&self) -> Self {
+        Self {
+            clothes_sharpen: 0.0,
+            clothes_brightness: 0.0,
+            clothes_even: 0.0,
+            ..*self
+        }
+    }
+
     /// Whether a clothes slider is away from rest: the clothes must be found.
     pub fn clothes_active(&self) -> bool {
         self.clothes_sharpen > 0.0 || self.clothes_even > 0.0 || self.clothes_brightness != 0.0

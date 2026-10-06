@@ -33,6 +33,66 @@ const RESULT_LAYER: &str = "Chân dung";
 /// detail, and whether bodies are analysed.
 type PreviewKey = (PortraitSettings, Vec<bool>, bool, bool, u64);
 type Rendered = Option<(Region, Vec<u8>)>;
+/// A garment's pixels as relit for the preview, with the sliders ("Sáng áo",
+/// "Đều sáng áo") they were made at.
+type RelitGarment = Option<((f32, f32), Vec<u8>)>;
+
+const GARMENT_LIGHT_STEP: &str = "Sáng áo";
+
+/// What "Áp dụng" did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Applied {
+    /// The retouch went into a new "Chân dung" layer.
+    Added,
+    /// It went into the "Chân dung" layer that was reopened.
+    Updated,
+    /// Only the garment the photo wears changed: its layer took it.
+    Garment,
+}
+
+/// The garment a dressed photo wears, a layer of its own, while "Sáng áo"
+/// and "Đều sáng áo" relight it.
+struct WornGarment {
+    layer_id: u32,
+    /// The layer's tiles when the session took it: put back when the
+    /// session is given up.
+    original: TileMap,
+    /// The garment before any relight, which the sliders work from, and the
+    /// sliders that made `original` of it.
+    base_tiles: TileMap,
+    base: Arc<Vec<u8>>,
+    size: (u32, u32),
+    start: (f32, f32),
+    laid: Arc<portrait::LaidGarment>,
+    /// The sliders the canvas shows the garment at; `None` for `original`.
+    shown: Option<(f32, f32)>,
+}
+
+impl WornGarment {
+    /// The layer's tiles at `look`; `None` when that is what it holds.
+    fn relit(&self, look: (f32, f32)) -> Option<TileMap> {
+        if look == self.start {
+            return None;
+        }
+        if look == (0.0, 0.0) {
+            return Some(self.base_tiles.clone());
+        }
+        let (w, h) = self.size;
+        let pixels = self.laid.relit(&self.base, w, look.0, look.1);
+        Some(TileMap::from_rgba(&pixels, w, h))
+    }
+
+    /// `settings` as a session on this garment starts with them: the two
+    /// sliders of its light where the garment stands, "Nét áo" at rest.
+    fn starting(&self, settings: PortraitSettings) -> PortraitSettings {
+        PortraitSettings {
+            clothes_sharpen: 0.0,
+            clothes_brightness: self.start.0,
+            clothes_even: self.start.1,
+            ..settings
+        }
+    }
+}
 
 pub struct PortraitSession {
     pub doc_id: crate::core::document::DocumentId,
@@ -59,7 +119,13 @@ pub struct PortraitSession {
     pub wanted: Option<PreviewKey>,
     pub shown: Option<PreviewKey>,
     /// The preview render running on a worker, and what it will show.
-    rendering: Option<(PreviewKey, Receiver<Rendered>)>,
+    rendering: Option<(PreviewKey, Receiver<(Rendered, RelitGarment)>)>,
+    /// Whether the photo wears a garment laid on from a sheet: the person's
+    /// layer then takes none of the clothes sliders.
+    dressed: bool,
+    /// That garment, whose light the clothes' two light sliders are, while
+    /// the session holds it (not while it is being transformed).
+    garment: Option<WornGarment>,
     /// The body analysis running on a worker (started by the first body
     /// slider moved); it fills the model's bodies, then signals.
     body_rx: Option<Receiver<()>>,
@@ -225,10 +291,17 @@ impl App {
         // A reopened layer brings back its own sliders; a new photo starts
         // from the defaults, never from the last photo's (not everyone wants
         // a slimmer face or lipstick).
-        let restore_settings = Some(match &reopened {
+        let dressed = self.garment_layer(doc_id).is_some();
+        let garment = self.worn_garment(doc_id);
+        let restore_settings = match &reopened {
             Some(reopened) => reopened.recipe.settings,
             None if retouched => PortraitSettings::NEUTRAL,
             None => PortraitSettings::default(),
+        };
+        let restore_settings = Some(match &garment {
+            Some(garment) => garment.starting(restore_settings),
+            None if dressed => restore_settings.without_clothes(),
+            None => restore_settings,
         });
         let restore_faces = reopened.is_none().then(Vec::new);
         // The preview is drawn on the photo layer: it has to show.
@@ -259,6 +332,8 @@ impl App {
             wanted: None,
             shown: None,
             rendering: None,
+            dressed,
+            garment,
             body_rx: None,
             detail_rx: None,
             neck_rx: None,
@@ -284,10 +359,136 @@ impl App {
         self.begin_portrait()?;
         if let (Some(settings), Some(session)) = (settings, self.shell.portrait.as_mut()) {
             if session.reopened.is_none() {
-                session.restore_settings = Some(settings);
+                session.restore_settings = Some(match &session.garment {
+                    Some(garment) => garment.starting(settings),
+                    None if session.dressed => settings.without_clothes(),
+                    None => settings,
+                });
             }
         }
         Ok(())
+    }
+
+    /// The garment document `doc_id` wears, as a session relights it: from
+    /// what it was before its last relight while its layer still holds that
+    /// one, else from what the layer holds now.
+    fn worn_garment(&self, doc_id: crate::core::document::DocumentId) -> Option<WornGarment> {
+        let layer_id = self.garment_layer(doc_id)?;
+        let doc = self.docs.documents.iter().find(|d| d.id == doc_id)?;
+        let layer = doc
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == layer_id && l.is_raster())?;
+        let size = (layer.width, layer.height);
+        let original = layer.tiles.clone();
+        let (base_tiles, start) = match self.garment_relit(doc_id, layer_id) {
+            Some(relit) => (relit.base.clone(), relit.look),
+            None => (original.clone(), (0.0, 0.0)),
+        };
+        let base = base_tiles.flatten();
+        if size.0 == 0 || base.len() != size.0 as usize * size.1 as usize * 4 {
+            return None;
+        }
+        let laid = portrait::LaidGarment::read(&base, size.0, size.1);
+        Some(WornGarment {
+            layer_id,
+            original,
+            base_tiles,
+            base: Arc::new(base),
+            size,
+            start,
+            laid: Arc::new(laid),
+            shown: None,
+        })
+    }
+
+    /// The garment is about to be worked on outside the retouch (moved,
+    /// scaled, turned): what the retouch shows of its light lands in its
+    /// layer first, a step of its own, and the session lets the garment go
+    /// until it is taken again (`take_garment_again`).
+    pub(in crate::app) fn settle_garment_light(&mut self) {
+        let Some(session) = self.shell.portrait.as_mut() else {
+            return;
+        };
+        let Some(garment) = session.garment.take() else {
+            return;
+        };
+        let doc_id = session.doc_id;
+        let Some(look) = garment.shown else {
+            return;
+        };
+        let Some(idx) = self.docs.documents.iter().position(|d| d.id == doc_id) else {
+            return;
+        };
+        let canvas = &mut self.docs.documents[idx].canvas;
+        let Some(shown) = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == garment.layer_id)
+            .map(|l| l.tiles.clone())
+        else {
+            return;
+        };
+        if canvas.commit_layer_tiles_change(
+            garment.layer_id,
+            garment.original,
+            shown,
+            GARMENT_LIGHT_STEP,
+        ) {
+            self.keep_garment_light(doc_id, garment.layer_id, garment.base_tiles, look);
+            if idx == self.docs.active_doc_idx {
+                self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+            }
+        }
+    }
+
+    /// Note that the garment in `layer` now holds `base` relit at `look`.
+    fn keep_garment_light(
+        &mut self,
+        doc_id: crate::core::document::DocumentId,
+        layer: u32,
+        base: TileMap,
+        look: (f32, f32),
+    ) {
+        let made = self
+            .docs
+            .documents
+            .iter()
+            .find(|d| d.id == doc_id)
+            .and_then(|d| d.canvas.layer_stack.layers.iter().find(|l| l.id == layer))
+            .map(|l| l.tiles.content_hash());
+        let relit = made
+            .filter(|_| look != (0.0, 0.0))
+            .map(|made| super::garment_ops::Relit { base, look, made });
+        self.set_garment_relit(doc_id, layer, relit);
+    }
+
+    /// A session that let its garment go takes it again once nothing else
+    /// works on it, as the garment now is; the two sliders of its light go
+    /// where it stands.
+    fn take_garment_again(&mut self) {
+        let Some(session) = self.shell.portrait.as_ref() else {
+            return;
+        };
+        if session.garment.is_some() || self.edit.transform_state.is_some() {
+            return;
+        }
+        let Some(garment) = self.worn_garment(session.doc_id) else {
+            return;
+        };
+        let Some(session) = self.shell.portrait.as_mut() else {
+            return;
+        };
+        if let Some((settings, _)) = session.asked {
+            let look = (settings.clothes_brightness, settings.clothes_even);
+            if look != garment.start || settings.clothes_sharpen != 0.0 {
+                session.restore_settings = Some(garment.starting(settings));
+            }
+        }
+        session.garment = Some(garment);
     }
 
     /// Open the dialog. Nothing is analysed until the owner asks ("Tự động
@@ -369,13 +570,15 @@ impl App {
         self.close_id_photo();
         self.shell.portrait_error = None;
         self.shell.status_msg = match applied {
+            Some(Applied::Garment) => "Auto retouch: đã chỉnh sáng áo ghép",
             Some(_) => "Auto retouch: đã áp dụng vào layer \"Chân dung\"",
             None if finding => "Auto retouch: đã dừng nhận diện khuôn mặt",
             None if making => "Auto retouch: đã dừng làm ảnh thẻ",
             None => "Auto retouch: không có gì để áp dụng",
         }
         .to_string();
-        applied?;
+        // With only the garment changed there is no retouched layer.
+        applied.filter(|applied| *applied != Applied::Garment)?;
         let (doc_id, photo, reopened) = layers?;
         let doc = &self.docs.documents[self.docs.active_doc_idx];
         let stack = &doc.canvas.layer_stack;
@@ -612,6 +815,7 @@ impl App {
     /// While the brush paints, its overlay shows the mask instead of the
     /// tinted areas.
     pub(super) fn refresh_portrait_preview(&mut self) {
+        self.take_garment_again();
         let idx = self.docs.active_doc_idx;
         let Some(session) = self.shell.portrait.as_mut() else {
             return;
@@ -646,8 +850,12 @@ impl App {
             .as_ref()
             .map(|key| (key.0, key.1.clone(), key.3));
         if let (Some(model), Some((settings, enabled, masks))) = (session.model.clone(), asked) {
-            let wanted = settings.clothes_active() || masks || session.brush.wants_clothes();
-            if settings.clothes_sharpen > 0.0 {
+            // A garment worn is a layer of its own: the person's layer has
+            // no clothes to find.
+            let dressed = session.dressed;
+            let wanted =
+                !dressed && (settings.clothes_active() || masks || session.brush.wants_clothes());
+            if settings.clothes_sharpen > 0.0 && !dressed {
                 if session.clothes_rx.is_none() && lacks_clothes(&model, &enabled) {
                     session.clothes_rx = Some(start_clothes_analysis(
                         &session.src,
@@ -712,14 +920,29 @@ impl App {
             session.detail_rx = Some(start_detail_analysis(&session.src, &model, &enabled));
         }
         if !preview && !masks {
-            self.show_portrait_preview(key, None);
+            self.show_portrait_preview(key, None, None);
             return;
         }
+        // The garment worn takes the clothes' light, when that is not what
+        // the canvas shows of it already; the person's layer none of it.
+        let look = (settings.clothes_brightness, settings.clothes_even);
+        let relight = session
+            .garment
+            .as_ref()
+            .filter(|g| !masks && look != g.start && g.shown != Some(look))
+            .map(|g| (Arc::clone(&g.base), Arc::clone(&g.laid), g.size.0));
+        let settings = if session.dressed {
+            settings.without_clothes()
+        } else {
+            settings
+        };
         let src = Arc::clone(&session.src);
         let edits = session.edits.clone();
         let (w, h) = (session.w, session.h);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
+            let garment =
+                relight.map(|(base, laid, width)| (look, laid.relit(&base, width, look.0, look.1)));
             let rendered = if masks {
                 portrait::render_masks(&src, &model, &settings, &enabled, &edits)
             } else {
@@ -731,7 +954,7 @@ impl App {
                 let clip = model.clip.as_ref();
                 looks::preview_graded(&src, w, h, retouched, fix.as_ref(), look, clip)
             };
-            let _ = tx.send(rendered);
+            let _ = tx.send((rendered, garment));
         });
         session.rendering = Some((key, rx));
     }
@@ -746,8 +969,8 @@ impl App {
             return;
         };
         match rx.try_recv() {
-            Ok(rendered) => {
-                self.show_portrait_preview(key, rendered);
+            Ok((rendered, garment)) => {
+                self.show_portrait_preview(key, rendered, garment);
                 self.refresh_portrait_preview();
             }
             Err(TryRecvError::Empty) => session.rendering = Some((key, rx)),
@@ -755,7 +978,7 @@ impl App {
         }
     }
 
-    fn show_portrait_preview(&mut self, key: PreviewKey, rendered: Rendered) {
+    fn show_portrait_preview(&mut self, key: PreviewKey, rendered: Rendered, relit: RelitGarment) {
         let Some(session) = self.shell.portrait.as_mut() else {
             return;
         };
@@ -772,7 +995,32 @@ impl App {
             tiles.write_region(region.x, region.y, region.w, region.h, &pixels);
         }
         let layer_id = session.layer_id;
+        // The garment as the sliders shown have it: relit, or as the session
+        // found it when the preview is off, the areas are tinted or the
+        // sliders are back where it stands.
+        let (settings, preview, masks) = (key.0, key.2, key.3);
+        let look = (settings.clothes_brightness, settings.clothes_even);
+        let garment = session.garment.as_mut().and_then(|g| {
+            let target = (preview && !masks && look != g.start).then_some(look);
+            if target == g.shown {
+                return None;
+            }
+            let tiles = match (target, relit) {
+                (None, _) => g.original.clone(),
+                (Some(target), Some((made, pixels))) if made == target => {
+                    TileMap::from_rgba(&pixels, g.size.0, g.size.1)
+                }
+                // Not made for these sliders: the next render brings it.
+                (Some(_), _) => return None,
+            };
+            g.shown = target;
+            Some((g.layer_id, tiles))
+        });
         session.shown = Some(key);
+        let canvas = &mut self.docs.documents[idx].canvas;
+        if let Some((garment, tiles)) = garment {
+            canvas.preview_layer_tiles(garment, tiles);
+        }
         self.docs.documents[idx]
             .canvas
             .preview_layer_tiles(layer_id, tiles);
@@ -796,6 +1044,10 @@ impl App {
             .iter_mut()
             .find(|d| d.id == session.doc_id)
         {
+            if let Some(garment) = session.garment.filter(|g| g.shown.is_some()) {
+                doc.canvas
+                    .restore_layer_tiles(garment.layer_id, garment.original);
+            }
             doc.canvas
                 .restore_layer_tiles(session.layer_id, session.original_tiles);
             if !session.source_visible {
@@ -873,13 +1125,14 @@ impl App {
         // every slider at 0) lays out the photo as it is.
         let as_it_is = sheet.is_some() && self.shell.portrait.is_none();
         match applied {
-            Ok(updated) => {
+            Ok(applied) => {
                 self.close_portrait_dialog();
-                self.shell.status_msg = if updated {
-                    "Auto retouch: đã cập nhật layer \"Chân dung\"".to_string()
-                } else {
-                    "Auto retouch: đã thêm layer \"Chân dung\"".to_string()
-                };
+                self.shell.status_msg = match applied {
+                    Applied::Updated => "Auto retouch: đã cập nhật layer \"Chân dung\"",
+                    Applied::Added => "Auto retouch: đã thêm layer \"Chân dung\"",
+                    Applied::Garment => "Auto retouch: đã chỉnh sáng áo ghép",
+                }
+                .to_string();
             }
             Err(_) if as_it_is && !self.id_photo_state().busy => self.close_portrait_dialog(),
             Err(message) => {
@@ -896,7 +1149,7 @@ impl App {
         &mut self,
         settings: PortraitSettings,
         enabled: Vec<bool>,
-    ) -> Result<bool, String> {
+    ) -> Result<Applied, String> {
         let (doc_id, layer_id, w, h, src, model, reopened, enlarged) = {
             let Some(session) = self.shell.portrait.as_ref() else {
                 return Err("Chưa bấm Tự động làm đẹp".to_string());
@@ -915,14 +1168,40 @@ impl App {
                 session.enlarged,
             )
         };
-        // The clothes sliders, and a clothes mask kept by a reopened layer,
-        // need the clothes found, and "Nét áo" needs them drawn: wait for a
-        // run under way (it may be for other faces), then make the rest.
-        let kept = self
+        // A garment worn takes the clothes' light, in its own layer; the
+        // person's layer, whose own clothes are gone, none of the clothes'.
+        let garment = self
             .shell
             .portrait
             .as_ref()
-            .is_some_and(|s| s.brush.wants_clothes());
+            .and_then(|s| s.garment.as_ref())
+            .map(|g| {
+                let look = (settings.clothes_brightness, settings.clothes_even);
+                let relit = g.relit(look);
+                (
+                    g.layer_id,
+                    g.original.clone(),
+                    g.base_tiles.clone(),
+                    look,
+                    relit,
+                )
+            });
+        let dressed = self.shell.portrait.as_ref().is_some_and(|s| s.dressed);
+        let recipe_settings = settings;
+        let settings = if dressed {
+            settings.without_clothes()
+        } else {
+            settings
+        };
+        // The clothes sliders, and a clothes mask kept by a reopened layer,
+        // need the clothes found, and "Nét áo" needs them drawn: wait for a
+        // run under way (it may be for other faces), then make the rest.
+        let kept = !dressed
+            && self
+                .shell
+                .portrait
+                .as_ref()
+                .is_some_and(|s| s.brush.wants_clothes());
         if settings.clothes_active() || kept {
             let running = self
                 .shell
@@ -992,14 +1271,37 @@ impl App {
         let look = settings
             .studio_look()
             .and_then(|(look, strength)| Some((LookLut::new(look)?, strength)));
+        let relit = garment
+            .as_ref()
+            .and_then(|(layer, before, base, look, relit)| {
+                Some((*layer, before.clone(), base.clone(), *look, relit.clone()?))
+            });
         if !changed && reopened.is_none() && fix.is_none() && look.is_none() {
-            return Err("Các thanh trượt đang ở 0 — ảnh không đổi".to_string());
+            // The garment alone changed: its layer takes it, and no layer is
+            // added for a person who is as before.
+            let Some((layer, before, base, look, after)) = relit else {
+                return Err("Các thanh trượt đang ở 0 — ảnh không đổi".to_string());
+            };
+            let Some(idx) = self.docs.documents.iter().position(|d| d.id == doc_id) else {
+                return Err("Tài liệu đã đóng".to_string());
+            };
+            let canvas = &mut self.docs.documents[idx].canvas;
+            if !canvas.commit_layer_tiles_change(layer, before, after, GARMENT_LIGHT_STEP) {
+                return Err("Layer áo không còn".to_string());
+            }
+            self.keep_garment_light(doc_id, layer, base, look);
+            if idx == self.docs.active_doc_idx {
+                self.upload_full();
+                self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+            }
+            return Ok(Applied::Garment);
         }
         let mut full = looks::with_retouch(&src, w, Some((region, pixels)));
         let look = look.as_ref().map(|(lut, strength)| (lut, *strength));
         looks::grade(&mut full, w, fix.as_ref(), look, model.clip.as_ref());
         let tiles = TileMap::from_rgba(&full, w, h);
-        let mut recipe = PortraitRecipe::new(layer_id, (w, h), settings, &model, &enabled, &edits);
+        let mut recipe =
+            PortraitRecipe::new(layer_id, (w, h), recipe_settings, &model, &enabled, &edits);
         recipe.made = Some(tiles.content_hash());
         let recipe = Arc::new(recipe);
         let Some(idx) = self.docs.documents.iter().position(|d| d.id == doc_id) else {
@@ -1060,14 +1362,29 @@ impl App {
         {
             source.visible = false;
         }
+        // The garment relit, in the same step.
+        let mut relit_kept = None;
+        if let Some((layer, _, base, look, after)) = relit {
+            if let Some(garment) = canvas.layer_stack.layers.iter_mut().find(|l| l.id == layer) {
+                garment.tiles = after;
+                relit_kept = Some((layer, base, look));
+            }
+        }
         cmd.capture_after(&canvas.layer_stack, cw, ch);
         canvas.record(Box::new(cmd));
         canvas.layer_revision += 1;
+        if let Some((layer, base, look)) = relit_kept {
+            self.keep_garment_light(doc_id, layer, base, look);
+        }
         if idx == self.docs.active_doc_idx {
             self.upload_full();
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         }
-        Ok(result_idx.is_some())
+        Ok(if result_idx.is_some() {
+            Applied::Updated
+        } else {
+            Applied::Added
+        })
     }
 
     /// The brush edits with every stroke's skin rebuilt (waits for workers
@@ -1251,6 +1568,10 @@ impl App {
     pub(crate) fn portrait_clothes_note(&self) -> Option<(String, bool)> {
         let session = self.shell.portrait.as_ref()?;
         let model = session.model.as_ref()?;
+        // A garment worn is a layer of its own: nothing is looked for.
+        if session.dressed {
+            return None;
+        }
         if session.clothes_rx.is_some() {
             return Some(("Đang tìm áo và làm nét bằng AI…".to_string(), false));
         }
@@ -2136,6 +2457,8 @@ mod tests {
             wanted: None,
             shown: None,
             rendering: None,
+            dressed: false,
+            garment: None,
             body_rx: None,
             detail_rx: None,
             neck_rx: None,
@@ -2599,7 +2922,10 @@ mod tests {
             ..PortraitSettings::NEUTRAL
         };
         let faces = vec![true; model.faces.len()];
-        assert!(!app.apply_portrait(first, faces.clone()).unwrap(), "added");
+        assert_eq!(
+            app.apply_portrait(first, faces.clone()).unwrap(),
+            Applied::Added
+        );
         let layers = |app: &App| app.docs.documents[0].canvas.layer_stack.layers.clone();
         let undo_after_first = app.docs.documents[0].canvas.undo_count();
         let recipe = layers(&app)[1].portrait.clone().expect("recipe kept");
@@ -2652,7 +2978,7 @@ mod tests {
             hair_tint: 40.0,
             ..first
         };
-        assert!(app.apply_portrait(second, faces).unwrap(), "updated");
+        assert_eq!(app.apply_portrait(second, faces).unwrap(), Applied::Updated);
         let after = layers(&app);
         assert_eq!(after.len(), 2);
         assert!(after[1].visible && !after[0].visible);
@@ -2743,7 +3069,7 @@ mod tests {
             brows: 100.0,
             ..PortraitSettings::NEUTRAL
         };
-        assert!(!app.apply_portrait(darker, faces).unwrap(), "added");
+        assert_eq!(app.apply_portrait(darker, faces).unwrap(), Applied::Added);
         let layers = &app.docs.documents[0].canvas.layer_stack.layers;
         let recipe = layers[1].portrait.clone().expect("recipe kept");
         assert_eq!(recipe.faces[0].brows.as_ref().unwrap().mask[spot], 255);
@@ -2808,7 +3134,7 @@ mod tests {
         let body = bodies[0].as_ref().expect("the man's body");
         let edge = body.shape.waist.expect("his waist").start;
 
-        assert!(!app.apply_portrait(waist, faces).unwrap(), "added");
+        assert_eq!(app.apply_portrait(waist, faces).unwrap(), Applied::Added);
         assert!(
             changed_at(&app, edge[0] as u32, edge[1] as u32),
             "the waist's edge moved"
@@ -2866,7 +3192,7 @@ mod tests {
         assert!(model.faces[0].ai_detail.get().unwrap().is_ok());
         assert_ne!(photo_pixels(&app), plain, "the preview gained the detail");
 
-        assert!(!app.apply_portrait(detail, faces).unwrap(), "added");
+        assert_eq!(app.apply_portrait(detail, faces).unwrap(), Applied::Added);
         let nose = model.faces[0].mesh.points[4];
         let near =
             (-6i32..=6).any(|d| changed_at(&app, (nose[0] as i32 + d) as u32, nose[1] as u32));
@@ -2958,7 +3284,10 @@ mod tests {
             clothes_brightness: -100.0,
             ..PortraitSettings::NEUTRAL
         };
-        assert!(!app.apply_portrait(darker, faces.clone()).unwrap(), "added");
+        assert_eq!(
+            app.apply_portrait(darker, faces.clone()).unwrap(),
+            Applied::Added
+        );
         assert!(changed_at(&app, kept.0, kept.1), "the shirt went darker");
         assert!(
             !changed_at(&app, rubbed.0, rubbed.1),
@@ -3079,7 +3408,10 @@ mod tests {
         let painted = session.edits[0].neck.as_ref().expect("the neck as painted");
         assert_eq!((painted[k], painted[j], painted[a]), (0, 255, 255));
 
-        assert!(!app.apply_portrait(neck, faces.clone()).unwrap(), "added");
+        assert_eq!(
+            app.apply_portrait(neck, faces.clone()).unwrap(),
+            Applied::Added
+        );
         let around =
             |at: (u32, u32)| (-4i32..=4).any(|d| changed_at(&app, (at.0 as i32 + d) as u32, at.1));
         assert!(around(kept), "the neck took the detail");
@@ -3128,6 +3460,190 @@ mod tests {
         let painted = session.edits[0].neck.as_ref().expect("the neck kept");
         assert_eq!((painted[k], painted[j], painted[a]), (0, 255, 255));
         assert_eq!(app.portrait_restore().1, Some(neck));
+    }
+
+    /// The customer's photo wearing a garment from a sheet: the photo is the
+    /// layer "Người", and a plain garment, dimmer toward the right, the
+    /// layer "Áo" over its lower part. Returns the garment's layer and its
+    /// pixels as laid, with their width.
+    fn dressed_customer() -> Option<(App, u32, Vec<u8>, u32)> {
+        use super::super::garment_ops::{GARMENT_LAYER, PERSON_LAYER};
+        let mut app = app_with_customer()?;
+        let canvas = &mut app.docs.documents[0].canvas;
+        let (w, h) = (canvas.width, canvas.height);
+        canvas.layer_stack.layers[0].name = PERSON_LAYER.to_string();
+        let (gw, gh) = (w / 2, h / 4);
+        let pixels: Vec<u8> = (0..gw * gh)
+            .flat_map(|i| {
+                let x = i % gw;
+                let shows = x >= 10 && x < gw - 10;
+                let v = 190 - (x * 60 / gw) as u8;
+                [v, v, v + 8, if shows { 255 } else { 0 }]
+            })
+            .collect();
+        let at = canvas.layer_stack.add_layer(gw, gh);
+        let layer = &mut canvas.layer_stack.layers[at];
+        layer.name = GARMENT_LAYER.to_string();
+        layer.tiles = TileMap::from_rgba(&pixels, gw, gh);
+        layer.offset = ((w / 4) as i32, (h * 3 / 4) as i32);
+        layer.selected = false;
+        let garment = layer.id;
+        // The person is the layer worked on.
+        canvas.layer_stack.active_idx = 0;
+        canvas.layer_stack.layers[0].selected = true;
+        Some((app, garment, pixels, gw))
+    }
+
+    fn garment_px(app: &App, garment: u32, x: u32, y: u32) -> [u8; 4] {
+        let layers = &app.docs.documents[0].canvas.layer_stack.layers;
+        let layer = layers.iter().find(|l| l.id == garment).unwrap();
+        layer.tiles.get_pixel(x, y).into()
+    }
+
+    #[test]
+    fn a_garment_worn_takes_the_clothes_light_and_can_be_relit_again() {
+        let Some((mut app, garment, laid, gw)) = dressed_customer() else {
+            return;
+        };
+        let doc_id = app.docs.documents[0].id;
+        let model = analysed(&mut app).unwrap();
+        let faces = vec![true; model.faces.len()];
+        let at = |app: &App| garment_px(app, garment, 60, 40);
+        let as_laid = at(&app);
+        let light = |s: PortraitSettings| (s.clothes_brightness, s.clothes_even, s.clothes_sharpen);
+        // A photo taken up for the first time would start from the usual
+        // sliders: the garment's light stands at rest.
+        assert_eq!(app.portrait_restore().1.map(light), Some((0.0, 0.0, 0.0)));
+        app.set_portrait_preview(PortraitSettings::NEUTRAL, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        let photo = photo_pixels(&app);
+
+        // "Sáng áo" darkens the garment in the preview, and nothing of the
+        // person's layer, whose own clothes are not even looked for.
+        let darker = PortraitSettings {
+            clothes_brightness: -100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        app.set_portrait_preview(darker, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        assert!(at(&app)[0] < as_laid[0] - 40, "{:?}", at(&app));
+        assert_eq!(photo_pixels(&app), photo, "the person's layer stays");
+        assert!(model.faces[0].clothes_area.get().is_none());
+        assert_eq!(app.portrait_clothes_note(), None);
+        // With the preview off the garment shows as laid.
+        app.set_portrait_preview(darker, faces.clone(), false, false);
+        wait_for_preview(&mut app);
+        assert_eq!(at(&app), as_laid);
+        app.set_portrait_preview(darker, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+
+        // Applied, only the garment's layer changes, in one step.
+        let canvas = &app.docs.documents[0].canvas;
+        let (layers, steps) = (canvas.layer_stack.layers.len(), canvas.undo_count());
+        assert_eq!(
+            app.apply_portrait(darker, faces.clone()).unwrap(),
+            Applied::Garment
+        );
+        let canvas = &app.docs.documents[0].canvas;
+        assert_eq!(canvas.layer_stack.layers.len(), layers, "no layer is added");
+        assert_eq!(canvas.undo_count(), steps + 1);
+        assert!(at(&app)[0] < as_laid[0] - 40);
+        assert_eq!(garment_px(&app, garment, 2, 40)[3], 0, "what hides stays");
+
+        // Taken up again the slider stands where it was left, and half of
+        // it is made of the garment as laid, not of the darker one.
+        analysed(&mut app).unwrap();
+        assert_eq!(
+            app.portrait_restore().1.map(light),
+            Some((-100.0, 0.0, 0.0))
+        );
+        let half = PortraitSettings {
+            clothes_brightness: -50.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        app.set_portrait_preview(half, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        let gh = laid.len() as u32 / 4 / gw;
+        let expected = portrait::LaidGarment::read(&laid, gw, gh).relit(&laid, gw, -50.0, 0.0);
+        let o = ((40 * gw + 60) * 4) as usize;
+        assert_eq!(at(&app)[..], expected[o..o + 4]);
+        assert_eq!(
+            app.apply_portrait(half, faces.clone()).unwrap(),
+            Applied::Garment
+        );
+        assert_eq!(at(&app)[..], expected[o..o + 4]);
+
+        // Back at rest the garment is as laid, and nothing is kept of it.
+        analysed(&mut app).unwrap();
+        assert_eq!(
+            app.apply_portrait(PortraitSettings::NEUTRAL, faces.clone())
+                .unwrap(),
+            Applied::Garment
+        );
+        assert_eq!(at(&app), as_laid);
+        assert!(app.garment_relit(doc_id, garment).is_none());
+
+        // With a retouch of the person too, both land in one step.
+        analysed(&mut app).unwrap();
+        let both = PortraitSettings {
+            smooth: 80.0,
+            clothes_brightness: 60.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        let steps = app.docs.documents[0].canvas.undo_count();
+        assert_eq!(app.apply_portrait(both, faces).unwrap(), Applied::Added);
+        assert_eq!(app.docs.documents[0].canvas.undo_count(), steps + 1);
+        assert!(at(&app)[0] > as_laid[0], "the garment is lighter");
+        app.docs.documents[0].canvas.undo();
+        assert_eq!(at(&app), as_laid, "undone with the retouch");
+    }
+
+    #[test]
+    fn a_garment_about_to_be_transformed_keeps_the_light_it_shows() {
+        let Some((mut app, garment, _, _)) = dressed_customer() else {
+            return;
+        };
+        let model = analysed(&mut app).unwrap();
+        let faces = vec![true; model.faces.len()];
+        let at = |app: &App| garment_px(app, garment, 60, 40);
+        let as_laid = at(&app);
+        let darker = PortraitSettings {
+            clothes_brightness: -100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        app.set_portrait_preview(darker, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        let shown = at(&app);
+        assert!(shown[0] < as_laid[0] - 40);
+
+        // What shows becomes the garment's own, a step of its own, and the
+        // session lets the garment go.
+        let steps = app.docs.documents[0].canvas.undo_count();
+        app.settle_garment_light();
+        assert_eq!(app.docs.documents[0].canvas.undo_count(), steps + 1);
+        assert_eq!(at(&app), shown);
+        let session = app.shell.portrait.as_ref().unwrap();
+        assert!(session.garment.is_none() && session.dressed);
+
+        // Nothing was done to it after all: the session takes it again
+        // where it stands, and giving the session up leaves it so.
+        app.set_portrait_preview(darker, faces.clone(), true, false);
+        let session = app.shell.portrait.as_ref().unwrap();
+        assert_eq!(
+            session.garment.as_ref().map(|g| g.start),
+            Some((-100.0, 0.0))
+        );
+        app.cancel_portrait();
+        assert_eq!(at(&app), shown);
+
+        // Worked on since (here, painted), it is relit from what it now is:
+        // the sliders start at rest.
+        let layers = &mut app.docs.documents[0].canvas.layer_stack.layers;
+        let layer = layers.iter_mut().find(|l| l.id == garment).unwrap();
+        layer.tiles.set_pixel(5, 5, 1, 2, 3, 255);
+        analysed(&mut app).unwrap();
+        let start = app.portrait_restore().1.unwrap();
+        assert_eq!((start.clothes_brightness, start.clothes_even), (0.0, 0.0));
     }
 
     #[test]
@@ -3182,7 +3698,7 @@ mod tests {
             .collect();
         assert!(!worn.is_empty(), "no clothes found");
 
-        assert!(!app.apply_portrait(sharp, faces).unwrap(), "added");
+        assert_eq!(app.apply_portrait(sharp, faces).unwrap(), Applied::Added);
         let redrawn = worn.iter().any(|clothes| {
             let r = clothes.region;
             (0..r.len()).step_by(7).any(|i| {
@@ -3221,7 +3737,7 @@ mod tests {
             ..PortraitSettings::NEUTRAL
         };
         let faces = vec![true; model.faces.len()];
-        assert!(!app.apply_portrait(shape, faces).unwrap(), "added");
+        assert_eq!(app.apply_portrait(shape, faces).unwrap(), Applied::Added);
         for (p, what) in [(jaw, "the jaw"), (mouth, "the mouth corner")] {
             assert!(changed_at(&app, p[0] as u32, p[1] as u32), "{what} moved");
         }
