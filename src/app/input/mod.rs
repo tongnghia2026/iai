@@ -597,23 +597,42 @@ impl ApplicationHandler for App {
         self.journal_input(&event);
 
         // A Focused(true) that never came (see `focus_went_unsaid`) would
-        // leave the canvas deaf to the pointer: input the window gets while
-        // the system has it in front says it is focused all the same.
-        let is_input = matches!(
+        // leave the canvas deaf to the pointer: a press in the window, or a
+        // move over it while the system has it in front, says it is focused
+        // all the same. egui heard the Focused(false) too.
+        let pressed = matches!(
             event,
-            WindowEvent::CursorMoved { .. }
-                | WindowEvent::MouseInput { .. }
-                | WindowEvent::KeyboardInput { .. }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } | WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    ..
+                },
+                is_synthetic: false,
+                ..
+            }
         );
+        let moved = matches!(event, WindowEvent::CursorMoved { .. });
         let in_front = || {
             let window = self.win.window.as_ref();
-            window.is_some_and(|w| crate::app::cursor::system_says_focused(w))
+            window.is_some_and(|w| crate::app::cursor::is_in_front(w))
         };
-        if crate::app::cursor::focus_went_unsaid(self.win.window_focused, is_input, in_front) {
+        let focused = self.win.window_focused;
+        if crate::app::cursor::focus_went_unsaid(focused, pressed, moved, in_front) {
             self.win.window_focused = true;
             self.win.startup_focus_until = None;
             self.win.surface_retry_at = None;
-            crate::diag::note("window", "focused (the system says so; no event came)");
+            if let (Some(state), Some(window)) = (&mut self.win.egui_state, &self.win.window) {
+                let _ = state.on_window_event(window, &WindowEvent::Focused(true));
+            }
+            let why = if pressed {
+                "a press in the window"
+            } else {
+                "the system has it in front"
+            };
+            crate::diag::note("window", &format!("focused (no event came; {why})"));
         }
 
         // Track ownership before egui/modal handlers can consume the event.

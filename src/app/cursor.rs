@@ -37,38 +37,107 @@ impl CursorOwnership {
 /// `Focused(true)` said so. winit's can go missing: a printer driver's
 /// property sheet, owned by the window but run on another thread, may close
 /// without one, and a window believed unfocused ignores the pointer over the
-/// canvas (`CursorOwnership::can_control`). `in_front` asks the system, and
-/// only when it has to.
+/// canvas (`CursorOwnership::can_control`). A button or key `pressed` in the
+/// window is the user at work in it; a pointer that only `moved` over it is
+/// not, unless the system has the window `in_front` (asked only then).
 pub(super) fn focus_went_unsaid(
     focused: bool,
-    is_input: bool,
+    pressed: bool,
+    moved: bool,
     in_front: impl FnOnce() -> bool,
 ) -> bool {
-    !focused && is_input && in_front()
+    !focused && (pressed || (moved && in_front()))
 }
 
-/// Whether the system itself has `window` in front, holding the keyboard:
-/// what winit's `Focused(true)` reports. Only Windows is asked.
-pub(super) fn system_says_focused(window: &winit::window::Window) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
-        use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let Ok(handle) = window.window_handle() else {
-            return false;
-        };
-        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-            return false;
-        };
-        let hwnd = handle.hwnd.get() as _;
-        // SAFETY: both calls only read the system's own state.
-        unsafe { GetForegroundWindow() == hwnd && GetFocus() == hwnd }
+#[cfg(target_os = "windows")]
+mod system {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetActiveWindow, GetFocus, IsWindowEnabled, SetFocus,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+    };
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    fn hwnd_of(window: &winit::window::Window) -> Option<HWND> {
+        match window.window_handle().ok()?.as_raw() {
+            RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as HWND),
+            _ => None,
+        }
     }
+
+    pub fn is_in_front(window: &winit::window::Window) -> bool {
+        // SAFETY: reads the system's own state.
+        hwnd_of(window).is_some_and(|hwnd| unsafe { GetForegroundWindow() } == hwnd)
+    }
+
+    /// Which window is in front, active and focused, as the journal says it.
+    fn held(hwnd: HWND) -> String {
+        let which = |other: HWND| match other {
+            w if w == hwnd => "ours",
+            w if w.is_null() => "none",
+            _ => "another",
+        };
+        // SAFETY: all four only read the system's own state.
+        unsafe {
+            format!(
+                "front {}, active {}, focus {}, enabled {}",
+                which(GetForegroundWindow()),
+                which(GetActiveWindow()),
+                which(GetFocus()),
+                IsWindowEnabled(hwnd) != 0
+            )
+        }
+    }
+
+    pub fn take_keyboard_back(window: &winit::window::Window) -> Option<String> {
+        let hwnd = hwnd_of(window)?;
+        let before = held(hwnd);
+        // SAFETY: plain calls on this thread's own window; `front` is only
+        // asked which process it belongs to.
+        unsafe {
+            let front = GetForegroundWindow();
+            let this_app = front == hwnd || front.is_null() || {
+                let mut process = 0;
+                GetWindowThreadProcessId(front, &mut process);
+                process == GetCurrentProcessId()
+            };
+            if this_app {
+                if front != hwnd {
+                    SetForegroundWindow(hwnd);
+                }
+                SetFocus(hwnd);
+            }
+        }
+        Some(format!("{before} -> {}", held(hwnd)))
+    }
+}
+
+/// Whether the system has `window` in front. Only Windows is asked.
+pub(super) fn is_in_front(window: &winit::window::Window) -> bool {
+    #[cfg(target_os = "windows")]
+    return system::is_in_front(window);
     #[cfg(not(target_os = "windows"))]
     {
         let _ = window;
         false
+    }
+}
+
+/// A native window of this app that stood before `window` (a printer
+/// driver's property sheet) is gone: put `window` in front again and hand it
+/// the keyboard, which a sheet run on another thread may close without
+/// doing. Nothing is taken from another program the user went to meanwhile.
+/// Returns what the system held before and after, for the journal.
+pub(super) fn take_keyboard_back(window: &winit::window::Window) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    return system::take_keyboard_back(window);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        None
     }
 }
 
@@ -157,17 +226,20 @@ mod tests {
     }
 
     /// After a printer driver's own settings window closed, no `Focused(true)`
-    /// came and the canvas ignored the pointer until Alt+Tab: input in a
-    /// window the system has in front makes it focused again.
+    /// came and the canvas ignored the pointer until Alt+Tab: a press in the
+    /// window, or a move over it while the system has it in front, makes it
+    /// focused again.
     #[test]
-    fn input_in_the_window_in_front_makes_up_for_a_focus_event_that_never_came() {
+    fn input_in_the_window_makes_up_for_a_focus_event_that_never_came() {
         let never = || -> bool { panic!("the system is asked only when it has to be") };
         // Focused, or no input: nothing to make up for.
-        assert!(!focus_went_unsaid(true, true, never));
-        assert!(!focus_went_unsaid(false, false, never));
-        // Believed unfocused: the system's word decides.
-        assert!(focus_went_unsaid(false, true, || true));
-        assert!(!focus_went_unsaid(false, true, || false));
+        assert!(!focus_went_unsaid(true, true, true, never));
+        assert!(!focus_went_unsaid(false, false, false, never));
+        // A press is the user at work in the window, whatever the system says.
+        assert!(focus_went_unsaid(false, true, false, never));
+        // A move alone is not: the system's word decides.
+        assert!(focus_went_unsaid(false, false, true, || true));
+        assert!(!focus_went_unsaid(false, false, true, || false));
 
         // What it costs to stay unfocused: the pointer over the canvas is
         // not the app's, whatever tool is in hand.

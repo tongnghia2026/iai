@@ -37,10 +37,22 @@ impl App {
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 self.jobs.pending_printer_settings = Some(rx);
+                return;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.shell.status_msg = "Printer settings dialog stopped unexpectedly".to_string();
             }
+        }
+        // The sheet is gone. Run on its own thread, it may have closed
+        // without handing the keyboard back (the TOSHIBA driver's does): no
+        // Focused(true) then comes, and the canvas stays deaf to the pointer.
+        if let Some(held) = self
+            .win
+            .window
+            .as_ref()
+            .and_then(|w| crate::app::cursor::take_keyboard_back(w))
+        {
+            crate::diag::note("window", &format!("printer settings closed: {held}"));
         }
     }
 
