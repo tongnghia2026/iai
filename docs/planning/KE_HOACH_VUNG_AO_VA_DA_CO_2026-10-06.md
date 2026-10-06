@@ -525,7 +525,8 @@ Chưa đo: thời gian làm lại bóng trên bản Release (bản debug 0,2 gi�
 ảnh "Không cắt" cỡ lớn sẽ lâu hơn theo số điểm ảnh — ước lượng của tôi nửa giây đến một giây
 cho ảnh trên 12 triệu điểm ảnh, mỗi lần dời áo).
 
-- [ ] Chủ test trên `target\release\iai.exe` (build 06/10 21:59, code ở commit `3f058d3`).
+- [x] Chủ thử bản build 06/10 21:59 (commit `3f058d3`) lúc 22:18–22:25 → đổi cách làm, xem
+      đợt 39b.
 
 ### Đợt 39b — Ghép áo chỉ đặt layer áo; một nút "Chạy lại da cổ, viền áo" (làm 06/10 khuya — CHỜ CHỦ TEST)
 
@@ -594,7 +595,9 @@ layer người, bấm lại không thêm bước thừa; bóng theo áo; bóng b
 nút), 1 bài chạy model thật trong `portrait_ops` (ảnh khách mặc một áo dựng sẵn: da cổ sát mép
 áo được lấy thêm sau khi áo được dời lên ngang cổ), bài bảng (nút mới; các thanh của mẫu trở
 lại sau lượt chỉnh). Kết quả 06/10 khuya: nhóm nhẹ 2009 qua; nhóm `app::portrait_ops` chạy
-từng bài: xem dòng cuối mục này.
+từng bài 27 qua.
+
+- [ ] Chủ test trên `target\release\iai.exe` (build 06/10 23:26, code ở commit `9ad161d`).
 
 ### Để sau, chỉ làm khi chủ bảo
 
