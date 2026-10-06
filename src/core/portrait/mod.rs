@@ -8,6 +8,7 @@ pub mod analysis;
 mod blur;
 pub mod body;
 pub mod brush;
+pub mod clothes;
 pub mod correct;
 pub mod effects;
 pub mod geometry;

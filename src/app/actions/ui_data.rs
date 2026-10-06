@@ -1810,6 +1810,11 @@ impl App {
                 } else {
                     None
                 },
+                portrait_clothes: if self.shell.ui.show_portrait_dialog {
+                    self.portrait_clothes_note()
+                } else {
+                    None
+                },
                 portrait_brush: portrait_brush.0,
                 portrait_brush_undo: portrait_brush.1,
                 portrait_brush_redo: portrait_brush.2,

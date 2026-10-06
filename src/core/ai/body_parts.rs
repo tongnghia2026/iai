@@ -378,6 +378,42 @@ impl PartLabels {
         cut >= 6
     }
 
+    /// How far image point (x, y) is something worn (clothes, shoes, what is
+    /// carried): what is none of the groups, where the model looked.
+    pub fn worn_at(&self, x: f32, y: f32) -> f32 {
+        if !self.covers(x, y) {
+            return 0.0;
+        }
+        (1.0 - self.groups_at(x, y).iter().sum::<f32>()).clamp(0.0, 1.0)
+    }
+
+    /// Whether what is worn runs off the sides or bottom of everything the
+    /// model looked at where the image goes on, so a look at the whole body
+    /// finds more of it.
+    pub fn worn_cut_off(&self, width: u32, height: u32) -> bool {
+        let (crop, groups) = match &self.wide {
+            Some(wide) => (&wide.crop, &wide.groups),
+            None => (&self.crop, &self.groups),
+        };
+        let margin = 2.0 * crop.scale();
+        let rim = (0..INPUT_H)
+            .step_by(2)
+            .flat_map(|v| [(1, v), (INPUT_W - 2, v)])
+            .chain((0..INPUT_W).step_by(2).map(|u| (u, INPUT_H - 2)));
+        let cut = rim
+            .filter(|&(u, v)| {
+                let [x, y] = crop.to_image(u as f32 + 0.5, v as f32 + 0.5);
+                let inside = x > margin
+                    && y > margin
+                    && x < width as f32 - margin
+                    && y < height as f32 - margin;
+                let known: u32 = groups[v * INPUT_W + u].iter().map(|&g| g as u32).sum();
+                inside && known < 128
+            })
+            .count();
+        cut >= 6
+    }
+
     /// An upright crop around the body, wider than the head crop, within
     /// the image and `frame`; None when it would not see clearly more.
     fn wider(&self, width: u32, height: u32, frame: Option<[f32; 4]>) -> Option<PartCrop> {
@@ -833,6 +869,41 @@ mod tests {
             .collect();
         assert!(ramp.windows(2).all(|p| p[0] < p[1]), "{ramp:?}");
         assert!(ramp[0] > 0 && ramp[3] < 255, "{ramp:?}");
+    }
+
+    /// Labels over an upright crop 384 wide whose top left is the image's:
+    /// backdrop above row 300, something worn from there down.
+    fn dressed_labels() -> PartLabels {
+        let mut groups = vec![[0u8; PART_GROUPS]; INPUT_W * INPUT_H];
+        for g in &mut groups[..300 * INPUT_W] {
+            g[GROUP_BACKDROP] = 255;
+        }
+        PartLabels {
+            crop: PartCrop {
+                cx: INPUT_W as f32 * 0.5,
+                cy: INPUT_H as f32 * 0.5,
+                width: INPUT_W as f32,
+                angle: 0.0,
+            },
+            labels: vec![0; INPUT_W * INPUT_H],
+            groups,
+            face: ([192.0, 150.0], 120.0),
+            agreement: 1.0,
+            wide: None,
+            skin_tone: None,
+        }
+    }
+
+    #[test]
+    fn what_is_none_of_the_groups_is_worn_where_the_model_looked() {
+        let labels = dressed_labels();
+        assert_eq!(labels.worn_at(100.0, 100.0), 0.0, "backdrop");
+        assert_eq!(labels.worn_at(100.0, 400.0), 1.0, "clothes");
+        assert_eq!(labels.worn_at(100.0, 600.0), 0.0, "past the crop");
+        // The clothes reach the crop's bottom: cut off where the image goes
+        // on below it, not where the crop ends with the image.
+        assert!(labels.worn_cut_off(INPUT_W as u32, 900));
+        assert!(!labels.worn_cut_off(INPUT_W as u32, INPUT_H as u32));
     }
 
     #[test]

@@ -482,6 +482,9 @@ pub struct DialogViewModel {
     pub portrait_body: Option<(String, bool)>,
     /// The same for the AI face detail, shown in the skin group.
     pub portrait_detail: Option<(String, bool)>,
+    /// A note for the clothes group of the portrait dialog, and whether it
+    /// is a warning.
+    pub portrait_clothes: Option<(String, bool)>,
     /// The "Tô vùng" brush: the mask it paints, whether its strokes can be
     /// undone / redone, and the tinted mask over the canvas (texture and
     /// canvas-pixel rect).
@@ -1076,6 +1079,7 @@ impl Default for UiData {
                 portrait_hair: false,
                 portrait_body: None,
                 portrait_detail: None,
+                portrait_clothes: None,
                 portrait_brush: None,
                 portrait_brush_undo: false,
                 portrait_brush_redo: false,

@@ -29,7 +29,7 @@ const RESULT_LAYER: &str = "Chân dung";
 
 /// What the preview shows: settings, faces on, retouch on, areas tinted, and
 /// a revision of what they act on: the brush edits, how many faces have
-/// their AI detail and whether bodies are analysed.
+/// their clothes drawn and their AI detail, and whether bodies are analysed.
 type PreviewKey = (PortraitSettings, Vec<bool>, bool, bool, u64);
 type Rendered = Option<(Region, Vec<u8>)>;
 
@@ -65,6 +65,12 @@ pub struct PortraitSession {
     /// The AI face detail being made on a worker (started by "Chi tiết mặt
     /// (AI)" leaving 0); it fills the faces' detail, then signals.
     detail_rx: Option<Receiver<()>>,
+    /// The clothes being found and drawn sharp on a worker (started by "Nét
+    /// áo" leaving 0); it fills the faces' clothes, then signals.
+    clothes_rx: Option<Receiver<()>>,
+    /// How many times the photo was enlarged from what was shot (an ID photo
+    /// cropped from a small one); 1 when it was not, or it is not known.
+    enlarged: f32,
     /// Masks painted with the brush, per face, and their revision.
     pub edits: Vec<FaceEdits>,
     pub edit_rev: u64,
@@ -225,6 +231,7 @@ impl App {
         if reopened.is_some() || !source_visible {
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         }
+        let enlarged = self.id_photo_enlarged(doc_id);
         self.shell.portrait = Some(PortraitSession {
             doc_id,
             layer_id,
@@ -245,6 +252,8 @@ impl App {
             rendering: None,
             body_rx: None,
             detail_rx: None,
+            clothes_rx: None,
+            enlarged,
             edits: Vec::new(),
             edit_rev: 0,
             brush: PortraitBrush::default(),
@@ -502,8 +511,10 @@ impl App {
         let busy = session.rx.is_some()
             || session.rendering.is_some()
             || session.body_rx.is_some()
-            || session.detail_rx.is_some();
-        // Bodies analysed, or AI detail made: the preview redraws with them.
+            || session.detail_rx.is_some()
+            || session.clothes_rx.is_some();
+        // Bodies analysed, AI detail made or clothes drawn: the preview
+        // redraws with them.
         let done = |rx: &Option<Receiver<()>>| {
             rx.as_ref()
                 .is_some_and(|rx| !matches!(rx.try_recv(), Err(TryRecvError::Empty)))
@@ -515,6 +526,10 @@ impl App {
         let details_done = done(&session.detail_rx);
         if details_done {
             session.detail_rx = None;
+        }
+        let clothes_done = done(&session.clothes_rx);
+        if clothes_done {
+            session.clothes_rx = None;
         }
         let finished = session.rx.take().and_then(|rx| match rx.try_recv() {
             Ok(result) => Some(result),
@@ -537,7 +552,7 @@ impl App {
             Some(Err(error)) => session.error = Some(error),
             None => {}
         }
-        if bodies_done || details_done {
+        if bodies_done || details_done || clothes_done {
             self.refresh_portrait_preview();
         }
         self.poll_portrait_brush();
@@ -585,10 +600,17 @@ impl App {
                 .filter(|f| f.ai_detail.get().is_some())
                 .count()
         });
+        let clothes = session.model.as_ref().map_or(0, |m| {
+            m.faces.iter().filter(|f| f.clothes.get().is_some()).count()
+        });
         if let Some(key) = session.wanted.as_mut() {
             key.3 &= !painting;
-            // Analysed bodies and AI detail change what the same sliders show.
-            key.4 = (session.edit_rev << 32) | ((details as u64) << 1) | bodies as u64;
+            // Analysed bodies, AI detail and drawn clothes change what the
+            // same sliders show.
+            key.4 = (session.edit_rev << 32)
+                | ((clothes as u64) << 16)
+                | ((details as u64) << 1)
+                | bodies as u64;
             // The brush paints the face as shot: show it unreshaped meanwhile.
             if painting {
                 key.0 = key.0.without_shape();
@@ -616,6 +638,17 @@ impl App {
         if settings.ai_detail > 0.0 && session.detail_rx.is_none() && lacks_detail(&model, &enabled)
         {
             session.detail_rx = Some(start_detail_analysis(&session.src, &model, &enabled));
+        }
+        if settings.clothes_sharpen > 0.0
+            && session.clothes_rx.is_none()
+            && lacks_clothes(&model, &enabled)
+        {
+            session.clothes_rx = Some(start_clothes_analysis(
+                &session.src,
+                &model,
+                &enabled,
+                session.enlarged,
+            ));
         }
         if !preview && !masks {
             self.show_portrait_preview(key, None);
@@ -803,7 +836,7 @@ impl App {
         settings: PortraitSettings,
         enabled: Vec<bool>,
     ) -> Result<bool, String> {
-        let (doc_id, layer_id, w, h, src, model, reopened) = {
+        let (doc_id, layer_id, w, h, src, model, reopened, enlarged) = {
             let Some(session) = self.shell.portrait.as_ref() else {
                 return Err("Chưa bấm Tự động làm đẹp".to_string());
             };
@@ -818,6 +851,7 @@ impl App {
                 Arc::clone(&session.src),
                 model,
                 session.reopened.as_ref().map(|r| r.layer_id),
+                session.enlarged,
             )
         };
         let edits = self.finished_portrait_edits();
@@ -840,6 +874,20 @@ impl App {
             }
             if lacks_detail(&model, &enabled) {
                 let _ = start_detail_analysis(&src, &model, &enabled).recv();
+            }
+        }
+        // "Nét áo" needs the clothes of every face on, the same way.
+        if settings.clothes_sharpen > 0.0 {
+            if let Some(rx) = self
+                .shell
+                .portrait
+                .as_mut()
+                .and_then(|s| s.clothes_rx.take())
+            {
+                let _ = rx.recv();
+            }
+            if lacks_clothes(&model, &enabled) {
+                let _ = start_clothes_analysis(&src, &model, &enabled, enlarged).recv();
             }
         }
         self.cancel_portrait();
@@ -1012,6 +1060,9 @@ impl App {
         if session.detail_rx.is_some() {
             line.push_str(" · đang tạo chi tiết AI…");
         }
+        if session.clothes_rx.is_some() {
+            line.push_str(" · đang làm nét áo…");
+        }
         let hair = model.faces.iter().any(|face| !face.hair_region.is_empty());
         (line, true, faces, hair)
     }
@@ -1080,6 +1131,40 @@ impl App {
         })
     }
 
+    /// A note for the dialog's clothes group, and whether it is a warning:
+    /// the clothes being drawn, or why they could not be.
+    pub(crate) fn portrait_clothes_note(&self) -> Option<(String, bool)> {
+        let session = self.shell.portrait.as_ref()?;
+        let model = session.model.as_ref()?;
+        if session.clothes_rx.is_some() {
+            return Some(("Đang tìm áo và làm nét bằng AI…".to_string(), false));
+        }
+        if !crate::core::ai::retouch::Upscaler::installed() {
+            return Some((
+                "Nét áo cần model Real-ESRGAN (models\\realesrgan) — chưa cài".to_string(),
+                true,
+            ));
+        }
+        let failed = model
+            .faces
+            .iter()
+            .find_map(|face| face.clothes.get()?.as_ref().err())
+            .map(|error| (format!("Không làm nét được áo: {error}"), true));
+        if failed.is_some() {
+            return failed;
+        }
+        model
+            .faces
+            .iter()
+            .all(|face| face.clothes.get().is_none())
+            .then(|| {
+                (
+                    "Lần đầu kéo thanh, app tìm áo rồi làm nét vài giây.".to_string(),
+                    false,
+                )
+            })
+    }
+
     /// Dialog view of a reopened layer: whether one is reopened, and the
     /// saved sliders and faces the dialog has not taken yet.
     pub(crate) fn portrait_restore(&self) -> (bool, Option<PortraitSettings>, Option<Vec<bool>>) {
@@ -1129,6 +1214,43 @@ fn lacks_detail(model: &PortraitModel, enabled: &[bool]) -> bool {
         .iter()
         .zip(enabled.iter().chain(std::iter::repeat(&true)))
         .any(|(face, &on)| on && face.ai_detail.get().is_none())
+}
+
+/// Whether a face that is on has no clothes drawn yet.
+fn lacks_clothes(model: &PortraitModel, enabled: &[bool]) -> bool {
+    model
+        .faces
+        .iter()
+        .zip(enabled.iter().chain(std::iter::repeat(&true)))
+        .any(|(face, &on)| on && face.clothes.get().is_none())
+}
+
+/// Find and draw the clothes of `model`'s faces that are on, on a worker;
+/// the receiver hears once the faces hold them.
+fn start_clothes_analysis(
+    src: &Arc<Vec<u8>>,
+    model: &Arc<PortraitModel>,
+    enabled: &[bool],
+    enlarged: f32,
+) -> Receiver<()> {
+    let (tx, rx) = mpsc::channel();
+    let (src, model, enabled) = (Arc::clone(src), Arc::clone(model), enabled.to_vec());
+    let prefer_gpu = crate::core::ai::ort_ep::prefer_gpu();
+    std::thread::spawn(move || {
+        let began = std::time::Instant::now();
+        portrait::clothes::analyze_clothes(&src, &model, &enabled, prefer_gpu, enlarged);
+        crate::diag::note(
+            "perf",
+            &format!(
+                "portrait clothes drawn in {} ms ({} x {}, enlarged {enlarged:.2})",
+                began.elapsed().as_millis(),
+                model.width,
+                model.height
+            ),
+        );
+        let _ = tx.send(());
+    });
+    rx
 }
 
 /// Make the AI detail of `model`'s faces that are on, on a worker; the
@@ -1819,6 +1941,8 @@ mod tests {
             rendering: None,
             body_rx: None,
             detail_rx: None,
+            clothes_rx: None,
+            enlarged: 1.0,
             edits: Vec::new(),
             edit_rev: 0,
             brush: PortraitBrush::default(),
@@ -2551,6 +2675,87 @@ mod tests {
         let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
         let recipe = layer.portrait.clone().expect("recipe kept");
         assert_eq!(recipe.settings.ai_detail, 100.0);
+    }
+
+    #[test]
+    fn clothes_are_drawn_on_first_use_and_the_faces_stay_as_shot() {
+        // A customer's phone photo, in a polo shirt.
+        let path = std::path::Path::new("tmp/anh-the/am-mau/khach_1.jpg");
+        if !path.is_file()
+            || crate::core::ai::face_mesh::model_path().is_none()
+            || crate::core::ai::body_parts::model_path().is_none()
+            || !crate::core::ai::retouch::Upscaler::installed()
+        {
+            return;
+        }
+        let image = image::open(path).unwrap().to_rgba8();
+        let (w, h) = image.dimensions();
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.docs.documents[0].canvas = Canvas::from_rgba(image.into_raw(), w, h);
+        app.shell.ui.show_portrait_dialog = true;
+        let model = analysed(&mut app).unwrap();
+        let faces = vec![true; model.faces.len()];
+        let made = |model: &PortraitModel| model.faces.iter().all(|f| f.clothes.get().is_some());
+        assert!(!made(&model), "not before the slider moves");
+        assert_eq!(
+            app.portrait_clothes_note(),
+            Some((
+                "Lần đầu kéo thanh, app tìm áo rồi làm nét vài giây.".to_string(),
+                false
+            ))
+        );
+
+        // The slider leaving 0 starts the search and the model.
+        let sharp = PortraitSettings {
+            clothes_sharpen: 100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        app.set_portrait_preview(sharp, faces.clone(), true, false);
+        assert_eq!(
+            app.portrait_clothes_note(),
+            Some(("Đang tìm áo và làm nét bằng AI…".to_string(), false))
+        );
+        let started = Instant::now();
+        let busy = |app: &App| {
+            app.portrait_clothes_note()
+                .is_some_and(|(note, _)| note.starts_with("Đang"))
+        };
+        while !made(&model) || busy(&app) {
+            assert!(
+                started.elapsed() < Duration::from_secs(240),
+                "the clothes hung"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            app.poll_portrait();
+        }
+        wait_for_preview(&mut app);
+        let worn: Vec<_> = model
+            .faces
+            .iter()
+            .filter_map(|face| face.clothes.get()?.as_ref().ok())
+            .collect();
+        assert!(!worn.is_empty(), "no clothes found");
+
+        assert!(!app.apply_portrait(sharp, faces).unwrap(), "added");
+        let redrawn = worn.iter().any(|clothes| {
+            let r = clothes.region;
+            (0..r.len()).step_by(7).any(|i| {
+                clothes.mask()[i] == 255
+                    && changed_at(&app, r.x + i as u32 % r.w, r.y + i as u32 / r.w)
+            })
+        });
+        assert!(redrawn, "the clothes took the model's picture");
+        for face in &model.faces {
+            let nose = face.mesh.points[4];
+            assert!(
+                !changed_at(&app, nose[0] as u32, nose[1] as u32),
+                "a face is as shot"
+            );
+        }
+        let layer = &app.docs.documents[0].canvas.layer_stack.layers[1];
+        let recipe = layer.portrait.clone().expect("recipe kept");
+        assert_eq!(recipe.settings.clothes_sharpen, 100.0);
     }
 
     #[test]

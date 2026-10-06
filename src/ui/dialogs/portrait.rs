@@ -162,6 +162,7 @@ enum Group {
     Mouth,
     Brows,
     Hair,
+    Clothes,
     Detail,
     Fix,
     Look,
@@ -182,6 +183,7 @@ impl Group {
             Group::Mouth => return HeaderIcon::Lips,
             Group::Brows => ph::RAINBOW,
             Group::Hair => ph::SCISSORS,
+            Group::Clothes => ph::T_SHIRT,
             Group::Detail => ph::MAGNIFYING_GLASS_PLUS,
             Group::Fix => ph::SUN,
             Group::Look => ph::PALETTE,
@@ -245,9 +247,13 @@ fn side_tile(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Where the group drawn open last frame is kept, to tell one just opened.
+const GROUP_SEEN: &str = "portrait_group_seen";
+
 /// One group: its header, and its contents while it is the open group
 /// (`shown`, as of the start of the frame). A click on the header opens it
-/// in `next`, closing the others, or closes it.
+/// in `next`, closing the others, or closes it. A group just opened is
+/// brought into view at once: one low in the list opens below the fold.
 fn group(
     ui: &mut egui::Ui,
     shown: Option<Group>,
@@ -259,13 +265,30 @@ fn group(
 ) {
     ui.add_space(3.0);
     let open = shown == Some(id);
-    if crate::ui::widgets::section_header(ui, id.icon(), title, open, active).clicked() {
+    let header = crate::ui::widgets::section_header(ui, id.icon(), title, open, active);
+    if header.clicked() {
         *next = if shown == Some(id) { None } else { Some(id) };
     }
     if shown == Some(id) {
         ui.add_space(2.0);
         body(ui);
         ui.add_space(4.0);
+        let seen: Option<Group> = ui
+            .ctx()
+            .data_mut(|d| d.get_temp(egui::Id::new(GROUP_SEEN)).unwrap_or(None));
+        if seen != Some(id) {
+            let whole = egui::Rect::from_min_max(
+                header.rect.min,
+                egui::pos2(header.rect.max.x, ui.min_rect().max.y),
+            );
+            // All of it when it fits, else from its header down.
+            let (rect, align) = if whole.height() <= ui.clip_rect().height() {
+                (whole, None)
+            } else {
+                (header.rect, Some(egui::Align::TOP))
+            };
+            ui.scroll_to_rect_animation(rect, align, egui::style::ScrollAnimation::none());
+        }
     }
 }
 
@@ -970,6 +993,24 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         }
                         rows(ui, ready && hair, hair_rows)
                     });
+                    let clothes = vec![(
+                        "Nét áo",
+                        &mut s.clothes_sharpen,
+                        "AI vẽ lại cho nét cái áo khách đang mặc trong ảnh (ảnh điện thoại mờ, ảnh cũ phục hồi) — màu và sáng tối vẫn là của ảnh. Ảnh áo đã nét thì để 0. Không tác động lên áo ghép",
+                        Amount,
+                    )];
+                    // A garment laid on from a sheet is sharp as it is, and a
+                    // layer of its own.
+                    let dressed = data.dialogs.garment_worn;
+                    let clothes_active = !dressed && at_work(&clothes);
+                    group(ui, shown, &mut next, Group::Clothes, "Áo", clothes_active, |ui| {
+                        rows(ui, ready && !dressed, clothes);
+                        if dressed {
+                            note_line(ui, "Ảnh đã ghép áo: áo ghép đã nét sẵn.", false);
+                        } else if let Some((note, warning)) = &data.dialogs.portrait_clothes {
+                            note_line(ui, note, *warning);
+                        }
+                    });
                     let detail = vec![
                         (
                             "Chi tiết mặt (AI)",
@@ -1080,7 +1121,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
             });
             ui.add_enabled_ui(ready, |ui| {
                 ui.checkbox(&mut masks, "Hiện vùng nhận diện").on_hover_text(
-                    "Tô màu vùng app nhận ra: da đỏ, quầng mắt cam, lòng trắng xanh lá, tròng xanh dương, lông mày vàng, môi hồng, răng xanh ngọc, tóc tím",
+                    "Tô màu vùng app nhận ra: da đỏ, quầng mắt cam, lòng trắng xanh lá, tròng xanh dương, lông mày vàng, môi hồng, răng xanh ngọc, tóc tím, áo xanh lục (sau khi kéo Nét áo)",
                 );
             });
             ui.add_space(6.0);
@@ -1125,9 +1166,11 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
         d.insert_temp(open_id, !(do_apply || do_cancel));
         if do_apply || do_cancel {
             d.remove_temp::<Option<Group>>(group_id);
+            d.remove_temp::<Option<Group>>(egui::Id::new(GROUP_SEEN));
             d.remove_temp::<Option<String>>(naming_id);
         } else {
             d.insert_temp(group_id, next);
+            d.insert_temp(egui::Id::new(GROUP_SEEN), shown);
             d.insert_temp(naming_id, naming);
         }
     });
@@ -1181,6 +1224,13 @@ mod tests {
                 false,
                 false,
             ),
+            (
+                "ao",
+                Some(Group::Clothes),
+                egui::pos2(260.0, 560.0),
+                false,
+                false,
+            ),
             ("anh_the", None, egui::pos2(260.0, 250.0), true, false),
             ("cho", None, egui::pos2(260.0, 250.0), false, false),
             (
@@ -1201,6 +1251,10 @@ mod tests {
                 data.dialogs.portrait_status = "Đã nhận 1 khuôn mặt".to_string();
                 data.dialogs.portrait_faces = vec![true];
                 data.dialogs.portrait_hair = true;
+                data.dialogs.portrait_clothes = Some((
+                    "Lần đầu kéo thanh, app tìm áo rồi làm nét vài giây.".to_string(),
+                    false,
+                ));
             }
             if made {
                 // The box as it holds a garment the photo wears (the font
@@ -1226,6 +1280,55 @@ mod tests {
                 .save(std::path::Path::new(&dir).join(format!("chan_dung_{name}.png")))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn the_clothes_group_holds_its_slider_and_a_garment_laid_on_needs_none() {
+        let ctx = egui::Context::default();
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        data.dialogs.portrait_session = true;
+        data.dialogs.portrait_ready = true;
+        data.dialogs.portrait_faces = vec![true];
+        let first = "Lần đầu kéo thanh, app tìm áo rồi làm nét vài giây.";
+        data.dialogs.portrait_clothes = Some((first.to_string(), false));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(460.0, 1000.0));
+        let texts = |data: &UiData| -> Vec<String> {
+            let mut shown = Vec::new();
+            for _ in 0..8 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(egui::Id::new(PRESETS_KEY), presets::built_in());
+                        d.insert_temp(egui::Id::new("portrait_group"), Some(Group::Clothes));
+                    });
+                    let mut actions = UiActions::default();
+                    portrait_dialog(ui.ctx(), data, &mut actions);
+                });
+                shown = output
+                    .shapes
+                    .iter()
+                    .filter_map(|clipped| match &clipped.shape {
+                        egui::Shape::Text(text) => Some(text.galley.text().to_string()),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            shown
+        };
+        let has = |shown: &[String], text: &str| shown.iter().any(|t| t == text);
+
+        let shown = texts(&data);
+        assert!(has(&shown, "Áo") && has(&shown, "Nét áo"), "{shown:?}");
+        assert!(has(&shown, first));
+        // A garment from a sheet is sharp as it is: the group says so.
+        data.dialogs.garment_worn = true;
+        let shown = texts(&data);
+        assert!(has(&shown, "Ảnh đã ghép áo: áo ghép đã nét sẵn."));
+        assert!(!has(&shown, first));
     }
 
     #[test]

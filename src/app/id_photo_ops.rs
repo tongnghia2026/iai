@@ -56,6 +56,8 @@ struct Kept {
     found: Arc<Analysis>,
     options: IdPhotoOptions,
     nudge: Nudge,
+    /// How many times the crop was enlarged to the print's pixels.
+    enlarged: f32,
     /// History entries it took (the photo, then each change of backdrop),
     /// and the history's revision after the last of them.
     steps: usize,
@@ -459,6 +461,9 @@ impl App {
         let cropped = made.plan.frame.is_some();
         let cut_out = made.plan.cutout.is_some();
         let notes = made.plan.notes.join("; ");
+        let enlarged = made.plan.frame.as_ref().map_or(1.0, |frame| {
+            id_photo::print_px(made.plan.size).0 as f32 / frame.width.max(1.0)
+        });
         let began = Instant::now();
         let applied = id_photo::apply(canvas, made.plan);
         let pixels = began.elapsed();
@@ -489,6 +494,7 @@ impl App {
             found: made.found,
             options,
             nudge: job.asked.nudge,
+            enlarged,
             steps: 1,
             revision,
         });
@@ -509,6 +515,34 @@ impl App {
             message.push_str(&notes);
         }
         Ok(message)
+    }
+
+    /// How many times the ID photo document `doc_id` holds was enlarged from
+    /// what was shot to its print's pixels: 1 when it holds none, was
+    /// cropped from more pixels than the print has, or is no longer that
+    /// size.
+    pub(crate) fn id_photo_enlarged(&self, doc_id: crate::core::document::DocumentId) -> f32 {
+        let Some(kept) = self
+            .shell
+            .id_photo
+            .kept
+            .as_ref()
+            .filter(|kept| kept.doc_id == doc_id)
+        else {
+            return 1.0;
+        };
+        let print = id_photo::print_px(kept.options.size);
+        let same_size = self
+            .docs
+            .documents
+            .iter()
+            .find(|doc| doc.id == doc_id)
+            .is_some_and(|doc| (doc.canvas.width, doc.canvas.height) == print);
+        if same_size {
+            kept.enlarged.max(1.0)
+        } else {
+            1.0
+        }
     }
 
     /// Whether the retouch is about to start on the photo just made.

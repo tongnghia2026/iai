@@ -923,6 +923,100 @@ impl FaceRestorer {
     }
 }
 
+/// A Real-ESRGAN model on its own, for callers that mix its picture in
+/// themselves (the clothes of Chỉnh chân dung). On the CPU, as
+/// [`FaceRestorer`].
+pub struct Upscaler {
+    session: ort::session::Session,
+    input_name: String,
+}
+
+impl Upscaler {
+    /// The models it runs, the one preferred first: the x2 RRDB keeps cloth
+    /// and stitching natural at a few seconds a garment, the small general
+    /// model is faster and flatter, the x4 RRDB the slowest.
+    const CHOICES: [ModelId; 3] = [
+        ModelId::RealesrganRrdbX2,
+        ModelId::RealesrganGeneral,
+        ModelId::RealesrganRrdb,
+    ];
+
+    /// Whether a model file is in place (its checksum is read on `load`).
+    pub fn installed() -> bool {
+        Self::CHOICES.iter().any(|&id| model_path(id).is_file())
+    }
+
+    pub fn load() -> Result<Self, String> {
+        let runner = Self::CHOICES
+            .into_iter()
+            .map(LocalOnnxRunner::new)
+            .find(|runner| runner.available())
+            .ok_or_else(|| "thiếu model làm nét (models\\realesrgan)".to_string())?;
+        let session = runner.build_session("Real-ESRGAN")?;
+        let input_name = session
+            .inputs()
+            .first()
+            .map(|input| input.name().to_string())
+            .unwrap_or_else(|| "input".to_string());
+        Ok(Self {
+            session,
+            input_name,
+        })
+    }
+
+    /// `rgb` (0..1, `width` x `height`, row by row) drawn larger: the
+    /// picture, and how many times larger each way the model made it.
+    pub fn run(
+        &mut self,
+        rgb: &[[f32; 3]],
+        width: usize,
+        height: usize,
+    ) -> Result<(Vec<[f32; 3]>, usize), String> {
+        if width == 0 || height == 0 || rgb.len() != width * height {
+            return Err("Real-ESRGAN: invalid image".to_string());
+        }
+        // The x2 model folds pixels in pairs: an odd side repeats its last
+        // row or column.
+        let (padded_w, padded_h) = (width + width % 2, height + height % 2);
+        let plane = padded_w * padded_h;
+        let mut chw = vec![0.0f32; plane * 3];
+        for y in 0..padded_h {
+            for x in 0..padded_w {
+                let pixel = rgb[y.min(height - 1) * width + x.min(width - 1)];
+                for (channel, value) in pixel.into_iter().enumerate() {
+                    chw[channel * plane + y * padded_w + x] = value;
+                }
+            }
+        }
+        let tensor = ort::value::Tensor::<f32>::from_array((
+            [1i64, 3, padded_h as i64, padded_w as i64],
+            chw,
+        ))
+        .map_err(|e| format!("Real-ESRGAN input tensor: {e}"))?;
+        let outputs = self
+            .session
+            .run(ort::inputs![self.input_name.as_str() => tensor])
+            .map_err(|e| format!("Real-ESRGAN inference: {e}"))?;
+        let (_, data) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| format!("Real-ESRGAN output tensor: {e}"))?;
+        let scale = ((data.len() / (plane * 3)) as f64).sqrt().round() as usize;
+        if scale == 0 || data.len() != plane * 3 * scale * scale {
+            return Err("Real-ESRGAN output contract mismatch".to_string());
+        }
+        let (out_w, out_plane, stride) = (width * scale, plane * scale * scale, padded_w * scale);
+        let mut out = vec![[0.0f32; 3]; out_w * height * scale];
+        out.par_chunks_mut(out_w).enumerate().for_each(|(y, line)| {
+            for (x, pixel) in line.iter_mut().enumerate() {
+                let i = y * stride + x;
+                *pixel =
+                    std::array::from_fn(|channel| data[channel * out_plane + i].clamp(0.0, 1.0));
+            }
+        });
+        Ok((out, scale))
+    }
+}
+
 fn class_membership(
     classes: &[u8],
     width: u32,

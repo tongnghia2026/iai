@@ -117,6 +117,12 @@ pub struct FaceModel {
     /// The restore model's detail for this face, made once "Chi tiết mặt
     /// (AI)" is first used (see [`super::ai_detail::analyze_details`]).
     pub ai_detail: std::sync::OnceLock<Result<super::ai_detail::FaceDetail, String>>,
+    /// What the part model read around this face, kept while it is trusted:
+    /// the clothes are found in it later.
+    pub(super) parts: Option<PartLabels>,
+    /// This person's clothes as an upscaling model draws them, made once
+    /// "Nét áo" is first used (see [`super::clothes::analyze_clothes`]).
+    pub clothes: std::sync::OnceLock<Result<super::clothes::ClothesDetail, String>>,
 }
 
 impl FaceModel {
@@ -2200,6 +2206,8 @@ fn build_face(
         detail,
         soft,
         ai_detail: std::sync::OnceLock::new(),
+        parts: parts.filter(|_| trusted).cloned(),
+        clothes: std::sync::OnceLock::new(),
     }
 }
 

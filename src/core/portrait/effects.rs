@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::ai_detail::DetailAt;
 use super::analysis::{luma, BrowLayers, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
 use super::body::BodySliders;
+use super::clothes::ClothesDetail;
 use super::correct::{grey_axis, Fixes};
 use super::geometry::Region;
 use super::looks::StudioLook;
@@ -118,6 +119,11 @@ pub struct PortraitSettings {
     #[serde(default)]
     pub look: u8,
     pub look_strength: f32,
+    /// "Nét áo": how far the clothes worn in the photo are the ones an
+    /// upscaling model draws sharp (see [`super::clothes`]). Left at 0 for a
+    /// photo whose clothes are sharp as shot.
+    #[serde(default)]
+    pub clothes_sharpen: f32,
 }
 
 impl Default for PortraitSettings {
@@ -176,6 +182,7 @@ impl Default for PortraitSettings {
             body_leg_length: 0.0,
             look: StudioLook::Clear.index(),
             look_strength: DEFAULT_LOOK_STRENGTH,
+            clothes_sharpen: 0.0,
         }
     }
 }
@@ -253,6 +260,7 @@ impl PortraitSettings {
         body_leg_length: 0.0,
         look: 0,
         look_strength: DEFAULT_LOOK_STRENGTH,
+        clothes_sharpen: 0.0,
     };
 
     /// The settings a layer was saved with. The one-sided "Giảm màu" sliders
@@ -309,6 +317,7 @@ impl PortraitSettings {
             hair_saturation: both(self.hair_saturation),
             eye_saturation: both(self.eye_saturation),
             brow_saturation: both(self.brow_saturation),
+            clothes_sharpen: u(self.clothes_sharpen),
             ..*self
         }
     }
@@ -1035,20 +1044,33 @@ fn hair_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> &'a [u8] {
         .map_or(&face.hair[..], |h| &h[..])
 }
 
+/// The clothes of `face` as the upscaling model drew them, once made.
+fn clothes_of(face: &FaceModel) -> Option<&ClothesDetail> {
+    face.clothes.get().and_then(|c| c.as_ref().ok())
+}
+
 /// The smallest rectangle holding every enabled face's skin region (which
-/// holds its face region), and their hair regions when `hair` is set.
-pub fn union_region(model: &PortraitModel, enabled: &[bool], hair: bool) -> Option<Region> {
+/// holds its face region), their hair regions when `hair` is set and their
+/// clothes' when `clothes` is.
+pub fn union_region(
+    model: &PortraitModel,
+    enabled: &[bool],
+    hair: bool,
+    clothes: bool,
+) -> Option<Region> {
     model
         .faces
         .iter()
         .zip(enabled.iter().chain(std::iter::repeat(&true)))
         .filter(|(face, &on)| on && !face.region.is_empty())
         .map(|(face, _)| {
-            let r = face.skin.region;
+            let mut r = face.skin.region;
             if hair {
-                r.union(face.hair_region)
-            } else {
-                r
+                r = r.union(face.hair_region);
+            }
+            match clothes_of(face).filter(|_| clothes) {
+                Some(worn) => r.union(worn.region),
+                None => r,
             }
         })
         .reduce(|a, b| a.union(b))
@@ -1095,7 +1117,7 @@ fn retouch(
             .iter()
             .any(|f| !f.hair.is_empty() && matches!(f.ai_detail.get(), Some(Ok(_))));
     let hair_pass = s.hair_active() || hair_detail;
-    let union = union_region(model, enabled, hair_pass)?;
+    let union = union_region(model, enabled, hair_pass, s.clothes_sharpen > 0.0)?;
     let width = model.width as usize;
     let (uw, uh) = (union.w as usize, union.h as usize);
     let mut out = vec![0u8; uw * uh * 4];
@@ -1222,6 +1244,18 @@ fn retouch(
                 });
         }
     }
+    if s.clothes_sharpen > 0.0 {
+        for (face, _) in model
+            .faces
+            .iter()
+            .zip(enabled.iter().chain(std::iter::repeat(&true)))
+            .filter(|(_, &on)| on)
+        {
+            if let Some(clothes) = clothes_of(face) {
+                clothes.lay(&mut delta, union, s.clothes_sharpen, &pixel);
+            }
+        }
+    }
     let clip = model.clip.as_ref();
     out.par_chunks_mut(4)
         .zip(delta.par_iter())
@@ -1238,8 +1272,9 @@ fn retouch(
 }
 
 /// The photo with each detected area tinted (skin red, under-eye orange,
-/// eye whites green, irises blue, brows yellow, lips pink, teeth cyan), so the
-/// user can see where every slider acts; reshaped like the retouch.
+/// eye whites green, irises blue, brows yellow, lips pink, teeth cyan, hair
+/// violet, and the clothes teal once "Nét áo" has found them), so the user
+/// can see where every slider acts; reshaped like the retouch.
 pub fn render_masks(
     rgba: &[u8],
     model: &PortraitModel,
@@ -1264,7 +1299,7 @@ fn tint_masks(
     enabled: &[bool],
     edits: &[FaceEdits],
 ) -> Option<(Region, Vec<u8>)> {
-    let union = union_region(model, enabled, true)?;
+    let union = union_region(model, enabled, true, true)?;
     let width = model.width as usize;
     let uw = union.w as usize;
     let mut out = vec![0u8; uw * union.h as usize * 4];
@@ -1286,6 +1321,30 @@ fn tint_masks(
             hair_of(face, edits.get(index)),
             brows_of(face, edits.get(index)),
         );
+        if let Some(clothes) = clothes_of(face) {
+            let r = clothes.region;
+            let (cx, cy) = ((r.x - union.x) as usize, (r.y - union.y) as usize);
+            out.par_chunks_mut(uw * 4)
+                .skip(cy)
+                .take(r.h as usize)
+                .enumerate()
+                .for_each(|(row, line)| {
+                    for col in 0..r.w as usize {
+                        let inside = model
+                            .clip
+                            .as_ref()
+                            .map_or(1.0, |c| c.at(r.x + col as u32, r.y + row as u32));
+                        let level = clothes.mask()[row * r.w as usize + col];
+                        let a = level as f32 / 255.0 * 0.55 * inside;
+                        if a > 0.0 {
+                            let px = &mut line[(cx + col) * 4..(cx + col) * 4 + 3];
+                            for (k, colour) in [0.0f32, 150.0, 130.0].iter().enumerate() {
+                                px[k] = (px[k] as f32 * (1.0 - a) + colour * a).round() as u8;
+                            }
+                        }
+                    }
+                });
+        }
         let hr = face.hair_region;
         if !hair.is_empty() {
             let (hx, hy) = ((hr.x - union.x) as usize, (hr.y - union.y) as usize);
