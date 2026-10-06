@@ -1,5 +1,8 @@
 # Kế hoạch: thay áo cho ảnh thẻ, chạy offline (05/10/2026)
 
+**06/10: việc kế tiếp chủ đã nêu (vùng "Áo" để làm nét + cân sáng, nút "Làm lại da cổ") — xem
+`KE_HOACH_VUNG_AO_VA_DA_CO_2026-10-06.md`, kế hoạch đó thay cho "đợt 33" ở dưới.**
+
 **Trạng thái (05/10 chiều): đợt 31 và 32 CHỦ TEST OK.** Việc kế tiếp: chủ muốn **chỉnh lại quy
 trình** ("vẫn có 1 vài điểm bị vấp"), chưa nêu điểm nào — hỏi chủ ở đầu phiên sau; đợt 33 chưa
 làm. Cách làm chủ chốt: mở sẵn file áo
