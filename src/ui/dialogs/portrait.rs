@@ -409,6 +409,17 @@ fn rows(ui: &mut egui::Ui, enabled: bool, items: Vec<Row>) {
     }
 }
 
+/// Whether the Ảnh thẻ side offers to go on with the retouch of the photo
+/// that is there: no retouch or ID photo is under way, and the photo was
+/// retouched or dressed before.
+fn can_go_on(data: &UiData) -> bool {
+    let d = &data.dialogs;
+    data.doc.has_doc
+        && !d.id_photo_busy
+        && !d.id_photo_made
+        && (d.garment_worn || data.layers.layer_is_portrait.iter().any(|&made| made))
+}
+
 /// "Tô vùng": which area the brush paints, then its mode, size and hardness.
 fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, ready: bool) {
     let d = &data.dialogs;
@@ -704,6 +715,29 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         actions.dialogs.start_portrait_retouch = true;
                     }
                 });
+                if !data.dialogs.portrait_status.is_empty() {
+                    ui.label(
+                        egui::RichText::new(&data.dialogs.portrait_status)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(220, 150, 90)),
+                    );
+                }
+            } else if can_go_on(data) {
+                // A photo made and retouched before, then worked on by hand:
+                // its retouch goes on from what it is now, nothing is made
+                // again.
+                let button = egui::Button::new(
+                    egui::RichText::new(format!("{}  Chỉnh tiếp ảnh này", ph::MAGIC_WAND)).strong(),
+                );
+                if ui
+                    .add_sized([ui.available_width(), 28.0], button)
+                    .on_hover_text(
+                        "Mở lại các thanh để chỉnh tiếp trên ảnh đang có (đã sửa tay, đã dời áo…): không làm lại ảnh thẻ, không ghép lại áo. Ảnh đã sửa tay thì các thanh bắt đầu từ 0",
+                    )
+                    .clicked()
+                {
+                    actions.dialogs.start_portrait_retouch = true;
+                }
                 if !data.dialogs.portrait_status.is_empty() {
                     ui.label(
                         egui::RichText::new(&data.dialogs.portrait_status)
@@ -1306,6 +1340,7 @@ mod tests {
                 false,
             ),
             ("anh_the", None, egui::pos2(260.0, 250.0), true, false),
+            ("anh_the_tiep", None, egui::pos2(260.0, 250.0), true, false),
             ("cho", None, egui::pos2(260.0, 250.0), false, false),
             (
                 "anh_the_xong",
@@ -1333,6 +1368,11 @@ mod tests {
             if name == "ao_ghep" {
                 data.dialogs.garment_worn = true;
                 data.dialogs.portrait_clothes = None;
+            }
+            if name == "anh_the_tiep" {
+                // Dressed and retouched before, no retouch under way.
+                data.dialogs.garment_worn = true;
+                data.dialogs.garment_thumb = Some(egui::TextureId::default());
             }
             if made {
                 // The box as it holds a garment the photo wears (the font
@@ -1423,6 +1463,74 @@ mod tests {
         ));
         assert!(has(&shown, "Sáng áo") && has(&shown, "Đều sáng áo"));
         assert!(!has(&shown, first));
+    }
+
+    #[test]
+    fn the_id_side_offers_to_go_on_with_a_photo_retouched_or_dressed_before() {
+        let ctx = egui::Context::default();
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        data.dialogs.portrait_id_side = true;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(460.0, 1000.0));
+        let draw = |data: &UiData, events: Vec<egui::Event>| {
+            let mut actions = UiActions::default();
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::new(PRESETS_KEY), presets::built_in());
+                });
+                portrait_dialog(ui.ctx(), data, &mut actions);
+            });
+            (output, actions)
+        };
+        let button = |data: &UiData| -> Option<egui::Pos2> {
+            for _ in 0..8 {
+                draw(data, vec![]);
+            }
+            draw(data, vec![])
+                .0
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text)
+                        if text.galley.text().ends_with("Chỉnh tiếp ảnh này") =>
+                    {
+                        Some(text.pos + egui::vec2(4.0, 5.0))
+                    }
+                    _ => None,
+                })
+        };
+        // A photo as opened has nothing to go on with.
+        assert_eq!(button(&data), None);
+        // One dressed, or holding a retouch, has; not while a retouch or an
+        // ID photo is under way.
+        data.layers.layer_is_portrait = std::sync::Arc::new(vec![false, true]);
+        assert!(button(&data).is_some());
+        data.layers.layer_is_portrait = std::sync::Arc::new(vec![false]);
+        data.dialogs.garment_worn = true;
+        let at = button(&data).expect("the button");
+        data.dialogs.id_photo_busy = true;
+        assert_eq!(button(&data), None);
+        data.dialogs.id_photo_busy = false;
+        data.dialogs.portrait_session = true;
+        assert_eq!(button(&data), None);
+        data.dialogs.portrait_session = false;
+        // Clicked, it asks for the retouch, not for the photo to be made.
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(&data, vec![egui::Event::PointerMoved(at)]);
+        draw(&data, vec![press(true)]);
+        let asked = draw(&data, vec![press(false)]).1;
+        assert!(asked.dialogs.start_portrait_retouch);
+        assert!(asked.dialogs.run_id_photo.is_none());
     }
 
     #[test]

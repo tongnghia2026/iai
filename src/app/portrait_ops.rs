@@ -518,10 +518,36 @@ impl App {
         if self.shell.portrait.is_some() || self.id_photo_state().busy {
             return;
         }
+        self.aim_at_the_dressed_person();
         self.shell.portrait_error = self.begin_portrait().err();
         if let Some(message) = &self.shell.portrait_error {
             self.shell.status_msg = message.clone();
         }
+    }
+
+    /// A dressed photo's retouch is the person's, whatever layer was worked
+    /// on last (the garment after "Chỉnh áo", the hair over it): the layer
+    /// that shows the person becomes the active one.
+    fn aim_at_the_dressed_person(&mut self) {
+        if self.edit.transform_state.is_some() {
+            return;
+        }
+        let idx = self.docs.active_doc_idx;
+        let doc_id = self.docs.documents[idx].id;
+        let Some(shown) = self.dressed_person_shown(doc_id) else {
+            return;
+        };
+        let canvas = &mut self.docs.documents[idx].canvas;
+        if canvas.layer_stack.active_idx == shown {
+            return;
+        }
+        for layer in &mut canvas.layer_stack.layers {
+            layer.selected = false;
+        }
+        canvas.layer_stack.active_idx = shown;
+        canvas.layer_stack.layers[shown].selected = true;
+        canvas.layer_revision += 1;
+        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
     }
 
     /// Whether the dialog holds the canvas: a retouch is previewed on it, or
@@ -3596,6 +3622,44 @@ mod tests {
         assert!(at(&app)[0] > as_laid[0], "the garment is lighter");
         app.docs.documents[0].canvas.undo();
         assert_eq!(at(&app), as_laid, "undone with the retouch");
+    }
+
+    #[test]
+    fn a_dressed_photo_mended_by_hand_is_retouched_on_from_what_shows_of_the_person() {
+        let Some((mut app, garment, _, _)) = dressed_customer() else {
+            return;
+        };
+        let model = analysed(&mut app).unwrap();
+        let faces = vec![true; model.faces.len()];
+        let smooth = PortraitSettings {
+            smooth: 80.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        assert_eq!(app.apply_portrait(smooth, faces).unwrap(), Applied::Added);
+        // The retouch is mended by hand, then the garment is worked on: its
+        // layer is the active one.
+        let stack = &mut app.docs.documents[0].canvas.layer_stack;
+        let retouch = stack
+            .layers
+            .iter()
+            .position(|l| l.portrait.is_some())
+            .expect("the retouch's layer");
+        let retouch_id = stack.layers[retouch].id;
+        stack.layers[retouch].tiles.set_pixel(5, 5, 1, 2, 3, 255);
+        stack.active_idx = stack.layers.iter().position(|l| l.id == garment).unwrap();
+
+        // Asked to go on, the retouch is of what shows of the person, from
+        // sliders at rest, and the garment is the session's again.
+        app.shell.ui.show_portrait_dialog = true;
+        app.start_portrait_retouch();
+        assert_eq!(app.shell.portrait_error, None);
+        let session = app.shell.portrait.as_ref().expect("a retouch under way");
+        assert_eq!(session.layer_id, retouch_id);
+        assert!(session.dressed && session.garment.is_some());
+        assert!(session.reopened.is_none(), "it is no longer what was made");
+        assert_eq!(app.portrait_restore().1, Some(PortraitSettings::NEUTRAL));
+        let stack = &app.docs.documents[0].canvas.layer_stack;
+        assert_eq!(stack.layers[stack.active_idx].id, retouch_id);
     }
 
     #[test]

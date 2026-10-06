@@ -1,8 +1,8 @@
 # Kế hoạch: menu "Áo" và thanh "Da cổ" (06/10/2026 — sửa lần 2 theo ý chủ)
 
-**Trạng thái (06/10 chiều): đợt 33 "Nét áo" và đợt 34 (Tô vùng ▸ Áo, "Sáng áo", "Đều sáng
-áo") CHỦ TEST OK. Đợt 35 (thanh "Da cổ" + cọ "Tô vùng ▸ Da cổ") và đợt 36 ("Sáng áo" / "Đều
-sáng áo" cho áo ghép) ĐÃ LÀM XONG, CHỜ CHỦ TEST.**
+**Trạng thái (06/10 chiều muộn): đợt 33–36 CHỦ TEST OK (đợt 35: thanh "Da cổ" + cọ "Tô vùng
+▸ Da cổ"; đợt 36: "Sáng áo" / "Đều sáng áo" cho áo ghép). Chủ báo một chỗ vấp → đợt 37 (nút
+"Chỉnh tiếp ảnh này" ở ô Ảnh thẻ) ĐÃ LÀM XONG, CHỜ CHỦ TEST.**
 Nối tiếp `KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (đợt 31, 32 chủ test OK); kế hoạch này thay
 cho "đợt 33" ghi ở đó.
 
@@ -34,6 +34,11 @@ Lời chủ 06/10 chiều, trả lời hai câu tôi hỏi khi đang làm đợt
   để lấy thêm hoặc xóa bớt vùng da cổ nếu tự động nhận diện sai".
 - "Sáng áo" / "Đều sáng áo" cho áo ghép: "Có, mở ra cho phép tác động cả áo ghép, user có nhu
   cầu thì có thể tùy ý chỉnh theo ý thích".
+
+Lời chủ 06/10 chiều muộn, sau khi test đợt 35 + 36: "đã test ok; nhưng bị vấp 1 chỗ, sau khi
+tự động ghép xong - người dùng thấy chưa đạt - họ chỉnh lại cổ áo cho đạt - smud, ctrl+t xoay,
+tô lại vùng da cổ auto lấy thiếu.... xong muốn chạy lại da cổ thì bị khóa - phải bấm chạy lại
+ảnh thẻ thì hệ thống lại ghép và chạy lại từ đầu".
 
 ## 2. Chủ đã chốt gì ở lần sửa này
 
@@ -314,7 +319,7 @@ app: `portrait_ops.rs`, `portrait_brush.rs`; bảng: `ui/dialogs/portrait.rs`.
   có đổi, **không điểm ảnh nào trong đường viền mặt đổi** → mở lại vẫn còn vùng đã tô).
   Lệnh xem ảnh thử: `IAI_PORTRAIT_NECK_PROBE=<thư mục ảnh>` với
   `cargo test --lib -- --ignored probe_neck --nocapture`.
-- [ ] Chủ test.
+- [x] Chủ test 06/10: **"đã test ok"**.
 
 ### Đợt 36 — "Sáng áo" / "Đều sáng áo" cho áo ghép
 
@@ -332,6 +337,35 @@ Làm 06/10, ngay sau lời chủ. Lõi: `LaidGarment` trong `src/core/portrait/c
   Lệnh xem ảnh thử: `IAI_GARMENT_LIGHT_PROBE=<thư mục layer áo .png>` với
   `cargo test --lib -- --ignored probe_garment_light --nocapture` (layer áo lấy bằng
   `IAI_GARMENT_LAYERS=1` của lệnh `probe_dressed_photos`).
+- [x] Chủ test 06/10: **"đã test ok"**, kèm một chỗ vấp → đợt 37.
+
+### Đợt 37 — Chỉnh tiếp sau khi sửa tay, không làm lại ảnh thẻ
+
+Làm 06/10, ngay sau lời chủ. Nhật ký thao tác của app ("hộp đen", phiên 13:47) cho thấy đúng
+chỗ vấp: ở ô **Ảnh thẻ**, sau "Làm ảnh thẻ tự động" app mặc áo và xem trước phần chỉnh chân
+dung; chủ vừa đụng công cụ khác (chọn layer, Smudge, Move, Eraser…) là app áp dụng phần đang
+xem (luật đợt 27) và các thanh khóa lại. Ở ô Ảnh thẻ lúc đó chỉ còn nút "Làm ảnh thẻ tự động"
+— bấm là làm lại từ đầu, mất phần sửa tay. (Nút "Tự động làm đẹp" có sẵn bên ô **Chân dung**
+làm được việc này, nhưng phải đổi ô mới thấy.)
+
+- [x] Ô Ảnh thẻ có thêm nút **"Chỉnh tiếp ảnh này"**, ngay dưới "Làm ảnh thẻ tự động". Nút hiện
+      khi ảnh đang mở đã ghép áo hoặc đã có layer "Chân dung", và không có việc gì đang chạy.
+      Bấm là các thanh mở lại trên ảnh đang có: **không làm lại ảnh thẻ, không ghép lại áo**.
+      Ảnh đã sửa tay thì các thanh bắt đầu từ 0 (luật đợt 25) — kéo "Da cổ" rồi "Áp dụng".
+- [x] Ảnh đã ghép áo: dù layer đang chọn là "Áo" (vừa "Chỉnh áo" / Ctrl+T xong) hay "Tóc trên
+      áo", "Chỉnh tiếp ảnh này" và "Tự động làm đẹp" đều tự nhắm vào layer đang hiện người
+      (layer "Chân dung" mới nhất, hoặc "Người") — trước đây app báo "không tìm thấy khuôn mặt".
+- [x] Sửa kèm: ảnh ghép áo không phải ảnh vừa ghép sau cùng trong phiên (chủ làm nhiều tab), sau
+      khi đã áp dụng chỉnh chân dung thì layer "Người" bị ẩn và app **không còn nhận ra ảnh đó
+      đã ghép áo** ("Chỉnh áo", "Bỏ áo", hai thanh sáng áo ghép không dùng được). Nay app nhận
+      ra miễn là còn một layer của người đang hiện bên dưới layer "Áo".
+- Test: bảng (nút hiện đúng lúc, bấm thì xin chỉnh tiếp chứ không xin làm ảnh thẻ), nhận ra
+  ảnh ghép áo có layer "Người" ẩn dưới layer chỉnh, 1 bài trong app trên ảnh khách thật (áp
+  dụng chỉnh → sửa tay layer "Chân dung" → chọn layer "Áo" → chỉnh tiếp: phiên mở đúng trên
+  layer "Chân dung", các thanh ở 0, áo ghép vẫn thuộc phiên).
+- Còn nguyên (đúng luật đợt 27, chủ đã duyệt): mỗi lần đụng công cụ ngoài bảng thì phần đang
+  xem được áp dụng và các thanh khóa lại; muốn kéo tiếp thì bấm "Chỉnh tiếp ảnh này" (chờ app
+  nhận diện lại vài giây).
 - [ ] Chủ test.
 
 ### Để sau, chỉ làm khi chủ bảo
@@ -342,8 +376,8 @@ Làm 06/10, ngay sau lời chủ. Lõi: `LaidGarment` trong `src/core/portrait/c
 
 ## 8. Việc cần chủ quyết
 
-1. ~~Menu "Áo" trước hay "Da cổ" trước?~~ Chủ chốt 06/10: nét áo trước (đợt 33, test OK), rồi
-   đợt 34 (test OK), rồi đợt 35 (đã làm).
+1. ~~Menu "Áo" trước hay "Da cổ" trước?~~ Chủ chốt 06/10: nét áo trước (đợt 33), rồi đợt 34,
+   35, 36 — đều đã test OK.
 2. Cho tôi đường dẫn ảnh mẫu để thử cho sát thực tế: vài **ảnh khách tự chụp điện thoại, áo
    mờ**, và 2–3 **ảnh cũ phục hồi** — "Nét áo" mới thử trên ảnh của một khách.
    ~~File `.iai` đã mặc áo và đã sửa tay chỗ cổ~~: chủ trả lời 06/10 là không có → "Da cổ" thử

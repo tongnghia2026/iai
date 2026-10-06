@@ -188,6 +188,20 @@ impl App {
         self.worn_in(doc_id).map(|worn| worn.garment)
     }
 
+    /// In a photo that wears a garment, the place in the layer stack of
+    /// what shows of the person: the topmost visible layer from theirs up
+    /// to the garment's (their own layer, or the last retouch of it).
+    pub(in crate::app) fn dressed_person_shown(&self, doc_id: DocumentId) -> Option<usize> {
+        let worn = self.worn_in(doc_id)?;
+        let doc = self.docs.documents.iter().find(|d| d.id == doc_id)?;
+        let layers = &doc.canvas.layer_stack.layers;
+        let person = layers.iter().position(|l| l.id == worn.person)?;
+        let garment = layers.iter().position(|l| l.id == worn.garment)?;
+        (person..garment)
+            .rev()
+            .find(|&at| layers[at].visible && layers[at].is_raster())
+    }
+
     /// What the garment in `layer` of `doc_id` was before it was relit, if
     /// its layer still holds what the relight made.
     pub(in crate::app) fn garment_relit(&self, doc_id: DocumentId, layer: u32) -> Option<&Relit> {
@@ -251,9 +265,14 @@ impl App {
         let garment = layers
             .iter()
             .rposition(|l| l.visible && l.name == GARMENT_LAYER)?;
+        // The person's layer is hidden once a retouch of it lies over it:
+        // something of the person must show under the garment.
         let person = layers[..garment]
             .iter()
-            .rposition(|l| l.visible && l.name == PERSON_LAYER)?;
+            .rposition(|l| l.name == PERSON_LAYER)?;
+        if !layers[person..garment].iter().any(|l| l.visible) {
+            return None;
+        }
         Some(Worn {
             doc_id,
             person: layers[person].id,
@@ -1011,6 +1030,33 @@ mod tests {
         app.cancel_transform();
         app.remove_garment(None);
         assert_eq!(names(&app, 0), vec![on("Background"), on("Layer 1")]);
+    }
+
+    #[test]
+    fn a_dressed_photo_is_known_with_its_person_under_a_retouch() {
+        let mut app = shop();
+        app.take_garment(None);
+        app.shell.garment = GarmentSession::default();
+        // A retouch applied: its layer shows over the person's, now hidden.
+        let canvas = &mut app.docs.documents[0].canvas;
+        let person = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.name == PERSON_LAYER)
+            .unwrap();
+        canvas.layer_stack.active_idx = person;
+        let retouch = canvas.layer_stack.add_layer(400, 600);
+        canvas.layer_stack.layers[retouch].name = "Chân dung".to_string();
+        canvas.layer_stack.layers[person].visible = false;
+        let doc_id = app.docs.documents[0].id;
+        assert!(app.garment_state().worn);
+        // What shows of the person is that retouch, whatever is active.
+        assert_eq!(app.dressed_person_shown(doc_id), Some(retouch));
+        // With nothing of the person showing, the photo is not dressed.
+        app.docs.documents[0].canvas.layer_stack.layers[retouch].visible = false;
+        assert!(!app.garment_state().worn);
+        assert_eq!(app.dressed_person_shown(doc_id), None);
     }
 
     #[test]
