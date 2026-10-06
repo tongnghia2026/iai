@@ -22,6 +22,7 @@ const NUDGE_ID: &str = "id_photo_nudge";
 const NUDGE_STEP: f32 = 0.02;
 const TURN_STEP: f32 = 0.5;
 const MAKE_LABEL: &str = "Làm ảnh thẻ tự động";
+const OPEN_SHEET_LABEL: &str = "Mở file áo";
 
 /// The sliders the Ảnh thẻ side opens with: the preset used last, if it is
 /// still kept.
@@ -220,8 +221,9 @@ fn chip_row(ui: &mut egui::Ui, label: &str, chips: &[Chip]) -> (Option<usize>, e
 }
 
 /// The "Áo" row: the box a garment is dragged onto from the shop's sheet
-/// (it shows the one it holds), and what can be done with that garment. The
-/// whole row is where a garment may be let go.
+/// (it shows the one it holds), what can be done with that garment, and
+/// under it how another is got: the sheet's file opened, and the layer
+/// picked there taken. The whole row is where a garment may be let go.
 fn garment_row(
     ui: &mut egui::Ui,
     data: &UiData,
@@ -230,6 +232,9 @@ fn garment_row(
 ) {
     let held = data.dialogs.garment_thumb;
     let busy = data.dialogs.garment_busy;
+    let worn = data.dialogs.garment_worn;
+    // Going to a sheet leaves the photo: not while it is being made.
+    let may_leave = !busy && !data.dialogs.id_photo_busy;
     let row = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = CHIP_GAP;
         row_label(ui, "Áo");
@@ -273,25 +278,52 @@ fn garment_row(
                     .size(12.0)
                     .color(egui::Color32::from_gray(185)),
             );
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-                if data.dialogs.garment_worn
-                    && ui
-                        .add_enabled(!busy, egui::Button::new("Chỉnh áo"))
+            let gap = egui::vec2(4.0, 4.0);
+            if held.is_some() || worn {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = gap;
+                    if worn
+                        && ui
+                            .add_enabled(!busy, egui::Button::new("Chỉnh áo"))
+                            .on_hover_text(
+                                "Dời, phóng, xoay áo bằng tay như Ctrl+T; Enter để xong. Áo là một layer riêng",
+                            )
+                            .clicked()
+                    {
+                        actions.dialogs.adjust_garment = true;
+                    }
+                    if ui
+                        .add_enabled(may_leave, egui::Button::new("Đổi áo khác"))
                         .on_hover_text(
-                            "Dời, phóng, xoay áo bằng tay như Ctrl+T; Enter để xong. Áo là một layer riêng",
+                            "Sang tab file áo để chọn cái khác. Chọn xong bấm Lấy áo đang chọn, app tự quay về ảnh",
                         )
                         .clicked()
+                    {
+                        actions.dialogs.change_garment = true;
+                    }
+                    if held.is_some()
+                        && ui
+                            .add_enabled(!busy, egui::Button::new("Bỏ áo"))
+                            .on_hover_text("Lấy áo khỏi ô này và khỏi ảnh đang mở")
+                            .clicked()
+                    {
+                        actions.dialogs.remove_garment = Some(*settings);
+                    }
+                });
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = gap;
+                if ui
+                    .add_enabled(
+                        may_leave,
+                        egui::Button::new(format!("{}  {OPEN_SHEET_LABEL}", ph::FOLDER_OPEN)),
+                    )
+                    .on_hover_text(
+                        "Chọn file áo của tiệm để mở thành một tab. App mở sẵn thư mục của file áo dùng lần trước",
+                    )
+                    .clicked()
                 {
-                    actions.dialogs.adjust_garment = true;
-                }
-                if held.is_some()
-                    && ui
-                        .add_enabled(!busy, egui::Button::new("Bỏ áo"))
-                        .on_hover_text("Lấy áo khỏi ô này và khỏi ảnh đang mở")
-                        .clicked()
-                {
-                    actions.dialogs.remove_garment = Some(*settings);
+                    actions.dialogs.open_garment_sheet = true;
                 }
                 if ui
                     .add_enabled(
@@ -299,7 +331,7 @@ fn garment_row(
                         egui::Button::new("Lấy áo đang chọn"),
                     )
                     .on_hover_text(
-                        "Dùng thay cho kéo thả: bấm vào một cái áo trong file áo rồi bấm nút này",
+                        "Dùng thay cho kéo thả: bấm vào một cái áo trong file áo rồi bấm nút này. App tự quay về ảnh vừa xem trước đó và mặc áo lên",
                     )
                     .clicked()
                 {
@@ -652,8 +684,10 @@ mod tests {
         let (zone, sliders) = actions.dialogs.garment_box.expect("the box");
         assert_eq!(sliders, settings);
         assert!(zone[2] - zone[0] > 200.0 && zone[3] - zone[1] >= GARMENT_BOX);
-        // Empty, the box only offers to take the layer picked.
+        // Empty, the box only offers to get a garment: its sheet opened,
+        // the layer picked there taken.
         assert!(!written(&output, "Bỏ áo") && !written(&output, "Chỉnh áo"));
+        assert!(!written(&output, "Đổi áo khác"));
         let asked = click(
             &ctx,
             &data,
@@ -662,8 +696,14 @@ mod tests {
         );
         assert_eq!(asked.dialogs.take_garment, Some(settings));
         assert!(asked.dialogs.remove_garment.is_none() && !asked.dialogs.adjust_garment);
+        assert!(!asked.dialogs.open_garment_sheet && !asked.dialogs.change_garment);
+        let open_sheet = format!("{}  {OPEN_SHEET_LABEL}", ph::FOLDER_OPEN);
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, &open_sheet));
+        assert!(asked.dialogs.open_garment_sheet);
+        assert!(asked.dialogs.take_garment.is_none() && !asked.dialogs.change_garment);
 
-        // Holding a garment the photo wears, it can be adjusted or let go.
+        // Holding a garment the photo wears, it can be adjusted, changed
+        // for another or let go.
         data.dialogs.garment_thumb = Some(egui::TextureId::default());
         data.dialogs.garment_worn = true;
         frame(&ctx, &data, &mut settings, vec![]);
@@ -672,12 +712,25 @@ mod tests {
         assert!(asked.dialogs.adjust_garment);
         let asked = click(&ctx, &data, &mut settings, text_at(&output, "Bỏ áo"));
         assert_eq!(asked.dialogs.remove_garment, Some(settings));
-        // While it is being put on, nothing is asked.
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, "Đổi áo khác"));
+        assert!(asked.dialogs.change_garment && !asked.dialogs.open_garment_sheet);
+        // The photo is not left while it is being made.
+        data.dialogs.id_photo_busy = true;
+        frame(&ctx, &data, &mut settings, vec![]);
+        let (output, _) = frame(&ctx, &data, &mut settings, vec![]);
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, "Đổi áo khác"));
+        assert!(!asked.dialogs.change_garment);
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, &open_sheet));
+        assert!(!asked.dialogs.open_garment_sheet);
+        data.dialogs.id_photo_busy = false;
+        // While the garment is being put on, nothing is asked.
         data.dialogs.garment_busy = true;
         frame(&ctx, &data, &mut settings, vec![]);
         let (output, _) = frame(&ctx, &data, &mut settings, vec![]);
         let asked = click(&ctx, &data, &mut settings, text_at(&output, "Bỏ áo"));
         assert!(asked.dialogs.remove_garment.is_none());
+        let asked = click(&ctx, &data, &mut settings, text_at(&output, "Đổi áo khác"));
+        assert!(!asked.dialogs.change_garment);
     }
 
     #[test]

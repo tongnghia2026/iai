@@ -831,6 +831,10 @@ pub struct DialogIntent {
     pub remove_garment: Option<crate::core::portrait::PortraitSettings>,
     /// Hand the photo's garment layer to Free Transform.
     pub adjust_garment: bool,
+    /// Ask for the shop's sheet of garments and open it in a tab.
+    pub open_garment_sheet: bool,
+    /// Show the sheet the garment came from, to pick another there.
+    pub change_garment: bool,
     /// Live-preview request: sliders, faces switched on, preview on/off, and
     /// whether to tint the detected areas instead.
     pub set_portrait_preview: Option<(
@@ -1089,6 +1093,8 @@ impl UiActions {
             garment_box: self.dialogs.garment_box,
             take_garment: self.dialogs.take_garment,
             remove_garment: self.dialogs.remove_garment,
+            // Choosing a sheet's file opens nothing yet.
+            open_garment_sheet: self.dialogs.open_garment_sheet,
             set_portrait_preview: self.dialogs.set_portrait_preview.clone(),
             cancel_portrait_dialog: self.dialogs.cancel_portrait_dialog,
             apply_portrait: self.dialogs.apply_portrait.clone(),
@@ -1235,6 +1241,8 @@ mod retouch_gate_tests {
         assert!(!asked(|a| a.dialogs.garment_box = Some(([0.0; 4], sliders))));
         assert!(!asked(|a| a.dialogs.take_garment = Some(sliders)));
         assert!(!asked(|a| a.dialogs.remove_garment = Some(sliders)));
+        // Choosing a sheet of garments' file opens nothing yet.
+        assert!(!asked(|a| a.dialogs.open_garment_sheet = true));
         // Anything else is a command.
         assert!(asked(|a| {
             use crate::core::imposition::{FolderSheets, Paper, PhotoKind};
@@ -1257,6 +1265,8 @@ mod retouch_gate_tests {
         assert!(asked(|a| a.dialogs.edit_portrait_layer = Some(1)));
         // Transforming the garment by hand is work on another layer.
         assert!(asked(|a| a.dialogs.adjust_garment = true));
+        // Going to the sheet of garments leaves the photo, as its tab does.
+        assert!(asked(|a| a.dialogs.change_garment = true));
         assert!(asked(|a| a.print.show_print_dialog = Some(true)));
         assert!(asked(|a| a.sel.select_all = true));
         assert!(asked(|a| a.tool.start_transform = true));

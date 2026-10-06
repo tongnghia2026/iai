@@ -580,6 +580,12 @@ impl App {
         if std::mem::take(&mut actions.dialogs.adjust_garment) {
             self.adjust_garment();
         }
+        if std::mem::take(&mut actions.dialogs.open_garment_sheet) {
+            self.pick_garment_sheets();
+        }
+        if std::mem::take(&mut actions.dialogs.change_garment) {
+            self.change_garment();
+        }
         if let Some(idx) = actions.dialogs.edit_portrait_layer.take() {
             match self.reopen_portrait_layer(idx) {
                 Ok(()) => {

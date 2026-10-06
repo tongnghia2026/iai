@@ -12,11 +12,18 @@
 //! "Sáng áo" and "Đều sáng áo" of Chỉnh chân dung relight the garment's
 //! layer. What it was before they did is kept here ([`Relit`]), so the
 //! sliders can be moved again without the garment wearing out.
+//!
+//! The box also opens the shop's sheets ("Mở file áo") and goes back to the
+//! one a garment came from ("Đổi áo khác"). A garment taken there goes on
+//! the photo looked at last; the sheets' files are remembered in prefs.json
+//! (key `garment_sheets`), so they are never mistaken for that photo.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
+use super::file_ops::normalized_path_key;
 use super::render::CanvasEvent;
 use super::state::App;
 use crate::core::canvas::Canvas;
@@ -34,8 +41,55 @@ const DRESS_STEP: &str = "Mặc áo";
 const UNDRESS_STEP: &str = "Bỏ áo";
 /// The longer side of the garment's picture in the box.
 const THUMB: u32 = 128;
-/// A photo has few layers over its backdrop; a sheet of garments has many.
-const MOST_PHOTO_LAYERS: usize = 6;
+/// A photo worked on has this many layers at most; a sheet of garments the
+/// app has yet to see one taken from has more.
+const MOST_PHOTO_LAYERS: usize = 16;
+const SHEETS_KEY: &str = "garment_sheets";
+/// How many of the shop's sheets are remembered.
+const MOST_SHEETS: usize = 12;
+const PICK_HINT: &str =
+    "Bấm vào cái áo khách chọn rồi bấm Lấy áo đang chọn, hoặc kéo áo thả vào ô này";
+
+/// The files garments came from, the last one first, each with the key an
+/// open document of it is known by.
+#[derive(Default)]
+struct SheetFiles(Vec<(String, PathBuf)>);
+
+impl SheetFiles {
+    fn load() -> Self {
+        let files: Vec<PathBuf> = crate::ui::dialogs::load_pref(SHEETS_KEY).unwrap_or_default();
+        Self(
+            files
+                .into_iter()
+                .map(|file| (normalized_path_key(&file), file))
+                .collect(),
+        )
+    }
+
+    fn files(&self) -> impl Iterator<Item = &PathBuf> {
+        self.0.iter().map(|(_, file)| file)
+    }
+
+    fn holds(&self, path: &Path) -> bool {
+        let key = normalized_path_key(path);
+        self.0.iter().any(|(known, _)| *known == key)
+    }
+
+    /// Put `paths` first, the first of them foremost.
+    fn remember(&mut self, paths: &[PathBuf]) {
+        let before: Vec<PathBuf> = self.files().cloned().collect();
+        for path in paths.iter().rev() {
+            let key = normalized_path_key(path);
+            self.0.retain(|(known, _)| *known != key);
+            self.0.insert(0, (key, path.clone()));
+        }
+        self.0.truncate(MOST_SHEETS);
+        let files: Vec<&PathBuf> = self.files().collect();
+        if !files.iter().copied().eq(before.iter()) {
+            crate::ui::dialogs::save_pref(SHEETS_KEY, &files);
+        }
+    }
+}
 
 /// The garment in the box.
 struct Picked {
@@ -105,6 +159,11 @@ pub struct GarmentSession {
     drop_box: Option<([f32; 4], PortraitSettings)>,
     /// Garments relit, by document and layer.
     relit: HashMap<(DocumentId, u32), Relit>,
+    /// The documents garments were taken from.
+    sheets: Vec<DocumentId>,
+    /// The shop's sheets by their files, read from prefs.json when first
+    /// asked for.
+    sheet_files: std::cell::OnceCell<SheetFiles>,
     status: String,
     error: bool,
 }
@@ -113,6 +172,17 @@ impl GarmentSession {
     fn set(&mut self, status: impl Into<String>, error: bool) {
         self.status = status.into();
         self.error = error;
+    }
+
+    fn sheet_files(&self) -> &SheetFiles {
+        self.sheet_files.get_or_init(SheetFiles::load)
+    }
+
+    fn remember_sheets(&mut self, paths: &[PathBuf]) {
+        self.sheet_files();
+        if let Some(files) = self.sheet_files.get_mut() {
+            files.remember(paths);
+        }
     }
 }
 
@@ -141,13 +211,6 @@ fn backdrop_of(canvas: &Canvas) -> Option<[u8; 3]> {
     fill.chunks_exact(4)
         .all(|px| px == first)
         .then(|| [first[0], first[1], first[2]])
-}
-
-/// Whether a document looks like a photo a garment can go on: a person over
-/// a plain backdrop, in a few layers.
-fn is_photo(canvas: &Canvas) -> bool {
-    let layers = &canvas.layer_stack.layers;
-    layers.len() >= 2 && layers.len() <= MOST_PHOTO_LAYERS + 1 && backdrop_of(canvas).is_some()
 }
 
 impl App {
@@ -238,12 +301,12 @@ impl App {
         };
     }
 
-    /// Document `doc_id` is closing: its garments are no longer kept.
+    /// Document `doc_id` is closing: its garments are no longer kept, and it
+    /// is no sheet to go back to.
     pub(crate) fn forget_garment_light(&mut self, doc_id: DocumentId) {
-        self.shell
-            .garment
-            .relit
-            .retain(|(doc, _), _| *doc != doc_id);
+        let session = &mut self.shell.garment;
+        session.relit.retain(|(doc, _), _| *doc != doc_id);
+        session.sheets.retain(|sheet| *sheet != doc_id);
     }
 
     /// What dressing left in document `doc_id`, while its layers are there.
@@ -314,9 +377,9 @@ impl App {
         });
     }
 
-    /// Take the active layer of the active document as the garment, then put
-    /// it on the photo: the document an ID photo was last made in, or else
-    /// the one last looked at that is a photo.
+    /// Take the active layer of the active document as the garment, then
+    /// show the photo it is for (`photo_to_dress`) and put it on. A photo
+    /// with no plain backdrop yet is shown and waits for its ID photo.
     pub(crate) fn take_garment(&mut self, settings: Option<PortraitSettings>) {
         let source = self.docs.active_doc_idx;
         let picked = {
@@ -376,35 +439,173 @@ impl App {
         };
         let source_id = self.docs.documents[source].id;
         self.shell.garment.picked = Some(picked);
-        match self.photo_to_dress(source_id) {
-            Some(target) => {
-                self.switch_to_doc(target);
-                if self.docs.active_doc_idx == target {
-                    self.dress_photo(settings);
-                }
-            }
-            None => self.shell.garment.set(
+        self.note_garment_sheet(source);
+        let Some(target) = self.photo_to_dress(source_id) else {
+            self.shell.garment.set(
                 "Đã lấy áo. Mở ảnh rồi bấm Làm ảnh thẻ tự động — áo sẽ được mặc luôn",
                 false,
-            ),
+            );
+            return;
+        };
+        self.switch_to_doc(target);
+        if self.docs.active_doc_idx != target {
+            return;
+        }
+        if backdrop_of(&self.docs.documents[target].canvas).is_some() {
+            self.dress_photo(settings);
+        } else {
+            self.shell.garment.set(
+                "Đã lấy áo. Bấm Làm ảnh thẻ tự động (nền Trắng hoặc Xanh) — áo sẽ được mặc luôn",
+                false,
+            );
         }
     }
 
-    /// The document to dress, other than the sheet `source` the garment came
-    /// from: the one that wears a garment already, or the photo last looked at.
-    fn photo_to_dress(&self, source: DocumentId) -> Option<usize> {
-        let position = |id: DocumentId| self.docs.documents.iter().position(|d| d.id == id);
-        if let Some(worn) = self.shell.garment.worn.as_ref() {
-            if worn.doc_id != source && self.worn_in(worn.doc_id).is_some() {
-                return position(worn.doc_id);
-            }
+    /// A garment came from the document at `idx`: it is a sheet of garments,
+    /// the one to go back to for another. A dressed photo whose own garment
+    /// was taken is not.
+    fn note_garment_sheet(&mut self, idx: usize) {
+        let doc = &self.docs.documents[idx];
+        let (id, path) = (doc.id, doc.path.clone());
+        if self.worn_in(id).is_some() {
+            return;
         }
+        let session = &mut self.shell.garment;
+        if !session.sheets.contains(&id) {
+            session.sheets.push(id);
+        }
+        if let Some(path) = path {
+            session.remember_sheets(&[path]);
+        }
+    }
+
+    /// Whether the document at `idx` is known as a sheet of garments: one
+    /// was taken from it, or its file was opened as one, now or before.
+    fn is_garment_sheet(&self, idx: usize) -> bool {
+        let doc = &self.docs.documents[idx];
+        let session = &self.shell.garment;
+        session.sheets.contains(&doc.id)
+            || doc
+                .path
+                .as_deref()
+                .is_some_and(|path| session.sheet_files().holds(path))
+    }
+
+    /// Whether the document at `idx` may be a photo to put a garment on: it
+    /// wears one, or it is one picture in a few layers, none of them a group
+    /// (a sheet of prints keeps its prints in groups), and no known sheet.
+    fn may_be_dressed(&self, idx: usize) -> bool {
+        let doc = &self.docs.documents[idx];
+        if self.worn_in(doc.id).is_some() {
+            return true;
+        }
+        let layers = &doc.canvas.layer_stack.layers;
+        !self.is_garment_sheet(idx)
+            && !doc.is_flow_text()
+            && doc.pdf_page.is_none()
+            && doc.pages.is_empty()
+            && layers.len() <= MOST_PHOTO_LAYERS
+            && !layers.iter().any(|l| l.is_group())
+    }
+
+    /// The document a garment taken from the sheet `source` is for: the one
+    /// looked at last that may be a photo. With several photos open that is
+    /// the one opened or shown just before the sheet, not one dressed before.
+    fn photo_to_dress(&self, source: DocumentId) -> Option<usize> {
         self.docs
             .doc_mru
             .iter()
             .filter(|id| **id != source)
-            .filter_map(|id| position(*id))
-            .find(|idx| is_photo(&self.docs.documents[*idx].canvas))
+            .filter_map(|id| self.docs.documents.iter().position(|d| d.id == *id))
+            .find(|idx| self.may_be_dressed(*idx))
+    }
+
+    /// A sheet is about to show: the Move tool picks a garment there by a
+    /// click, and the box says what to do with it.
+    fn ready_to_pick_a_garment(&mut self) {
+        if !self.is_tool_modal_active() {
+            self.edit.tools.select(ToolId::Move);
+            self.edit.arrow_multi_layer = None;
+        }
+        self.shell.garment.set(PICK_HINT, false);
+    }
+
+    /// The sheet to go back to for another garment, if one is open: the one
+    /// looked at last (a sheet opened with others may never have been).
+    fn open_garment_sheet(&self) -> Option<usize> {
+        self.docs
+            .doc_mru
+            .iter()
+            .filter_map(|id| self.docs.documents.iter().position(|d| d.id == *id))
+            .chain(0..self.docs.documents.len())
+            .find(|idx| self.is_garment_sheet(*idx))
+    }
+
+    /// "Đổi áo khác": show the sheet the garment came from, to pick another
+    /// there. A sheet closed since is opened again; with none remembered the
+    /// owner is asked for the file.
+    pub(crate) fn change_garment(&mut self) {
+        if self.modal_lock_active() {
+            self.deny_modal_action();
+            return;
+        }
+        if let Some(sheet) = self.open_garment_sheet() {
+            self.ready_to_pick_a_garment();
+            self.switch_to_doc(sheet);
+            return;
+        }
+        let session = &self.shell.garment;
+        let file = session.sheet_files().files().find(|file| file.is_file());
+        match file.cloned() {
+            Some(file) => self.open_garment_sheets(vec![file]),
+            None => self.pick_garment_sheets(),
+        }
+    }
+
+    /// "Mở file áo": ask for the shop's sheets, in the folder of the one
+    /// used last. The answer comes back through `poll_file_dialog`, to
+    /// [`Self::open_garment_sheets`]; until then nothing changes.
+    pub(crate) fn pick_garment_sheets(&mut self) {
+        if self.locked_beside_retouch() {
+            self.deny_modal_action();
+            return;
+        }
+        if self.jobs.pending_file_dialog.is_some() {
+            return;
+        }
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let parent = crate::file_io::dialog_parent(window);
+        let session = &self.shell.garment;
+        let folder = session
+            .sheet_files()
+            .files()
+            .next()
+            .and_then(|file| file.parent())
+            .map(Path::to_path_buf);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let picked = crate::file_io::dialog_open_garment_sheets(parent, folder);
+            if let Some(paths) = picked.filter(|paths| !paths.is_empty()) {
+                let _ = tx.send(crate::file_io::FileDialogResult::OpenedGarmentSheets(paths));
+            }
+        });
+        self.jobs.pending_file_dialog = Some(rx);
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Open the shop's sheets `paths`, each in a tab of its own (one open
+    /// already is shown), known as sheets of garments from here on. The
+    /// photo is left: a retouch previewed on it is applied as it stands, as
+    /// when another tab is shown.
+    pub(crate) fn open_garment_sheets(&mut self, paths: Vec<PathBuf>) {
+        self.yield_portrait();
+        self.shell.garment.remember_sheets(&paths);
+        self.ready_to_pick_a_garment();
+        self.start_load_paths(paths);
     }
 
     /// The person of the active document as it shows, without its backdrop
@@ -1137,13 +1338,14 @@ mod tests {
         app.shell.ui.show_portrait_dialog = true;
         app.open_new_doc_tab();
         app.docs.documents[1].canvas = sheet();
-        // No photo to put it on yet: the garment waits in the box.
+        // The photo is not cut out yet: it is shown, and the garment waits
+        // in the box for its ID photo.
         app.take_garment(None);
-        assert_eq!(app.docs.active_doc_idx, 1);
+        assert_eq!(app.docs.active_doc_idx, 0);
         let state = app.garment_state();
         assert!(state.thumb.is_some() && !state.error, "{}", state.status);
+        assert!(!state.worn && !state.busy);
 
-        app.switch_to_doc(0);
         let mut asked = IdPhotoRequest {
             options: IdPhotoOptions::default(),
             nudge: Nudge::default(),
@@ -1207,5 +1409,203 @@ mod tests {
         let stack = &app.docs.documents[0].canvas.layer_stack;
         assert_eq!(stack.layers[stack.active_idx].name, GARMENT_LAYER);
         assert!(app.edit.transform_state.is_some());
+    }
+
+    /// One more tab, looked at, holding `canvas`.
+    fn open_tab(app: &mut App, canvas: Canvas) -> usize {
+        app.open_new_doc_tab();
+        let idx = app.docs.active_doc_idx;
+        app.docs.documents[idx].canvas = canvas;
+        idx
+    }
+
+    #[test]
+    fn a_garment_goes_on_the_photo_looked_at_last_not_on_one_dressed_before() {
+        let mut app = shop();
+        app.take_garment(None);
+        let first = names(&app, 0);
+        // A second customer's photo is opened, then the sheet shown again.
+        let (canvas, fitting) = photo();
+        let second = open_tab(&mut app, canvas);
+        let id = app.docs.documents[second].id;
+        app.shell.garment.fitting = Some((id, (400, 600), Arc::new(fitting)));
+        app.switch_to_doc(1);
+        app.take_garment(None);
+
+        assert_eq!(app.docs.active_doc_idx, second);
+        let state = app.garment_state();
+        assert!(state.worn && !state.error, "{}", state.status);
+        assert_eq!(
+            names(&app, second),
+            vec![
+                on("Background"),
+                off("Layer 1"),
+                on(PERSON_LAYER),
+                on(GARMENT_LAYER)
+            ]
+        );
+        assert_eq!(names(&app, 0), first, "the photo done before is left alone");
+
+        // Shown again before the sheet, the first photo is the one dressed.
+        let first_id = app.docs.documents[0].id;
+        app.shell.garment.fitting = Some((first_id, (400, 600), Arc::new(photo().1)));
+        app.switch_to_doc(0);
+        app.switch_to_doc(1);
+        app.take_garment(None);
+        assert_eq!(app.docs.active_doc_idx, 0);
+        assert!(!app.garment_busy());
+    }
+
+    #[test]
+    fn a_photo_with_no_plain_backdrop_yet_is_shown_and_the_garment_waits_for_it() {
+        let mut app = shop();
+        // As shot: one layer, no two rows of it alike.
+        let shot: Vec<u8> = (0..400 * 600)
+            .flat_map(|i| [(i / 400 % 256) as u8, 120, 90, 255])
+            .collect();
+        let raw = open_tab(&mut app, Canvas::from_rgba(shot, 400, 600));
+        let layers = names(&app, raw);
+        app.switch_to_doc(1);
+        app.take_garment(None);
+
+        assert_eq!(app.docs.active_doc_idx, raw);
+        let state = app.garment_state();
+        assert!(state.thumb.is_some() && !state.worn, "{}", state.status);
+        assert!(!state.busy && !state.error, "{}", state.status);
+        assert!(state.status.contains("Làm ảnh thẻ tự động"));
+        assert_eq!(names(&app, raw), layers);
+        assert_eq!(names(&app, 0), vec![on("Background"), on("Layer 1")]);
+    }
+
+    #[test]
+    fn sheets_of_garments_and_of_prints_are_passed_over_for_the_photo() {
+        let mut app = shop();
+        // A sheet kept as a file garments came from before.
+        let known = open_tab(&mut app, sheet());
+        let file = PathBuf::from("kho-ao/vest-nu.psd");
+        app.docs.documents[known].path = Some(file.clone());
+        app.shell.garment.remember_sheets(&[file]);
+        // One never used, which only its many layers tell from a photo.
+        let mut many = sheet();
+        for _ in 0..MOST_PHOTO_LAYERS {
+            many.layer_stack.add_layer(20, 20);
+        }
+        open_tab(&mut app, many);
+        // A sheet of prints: its prints are in a group.
+        let mut prints = sheet();
+        prints
+            .layer_stack
+            .layers
+            .push(crate::core::layer::Layer::new_group(90, "3×4", 600, 400));
+        open_tab(&mut app, prints);
+
+        app.switch_to_doc(1);
+        app.take_garment(None);
+        assert_eq!(app.docs.active_doc_idx, 0);
+        let state = app.garment_state();
+        assert!(state.worn && !state.error, "{}", state.status);
+    }
+
+    #[test]
+    fn another_garment_is_picked_on_the_sheet_the_last_one_came_from() {
+        let mut app = shop();
+        app.take_garment(None);
+        app.edit.tools.select(ToolId::Brush);
+        app.change_garment();
+        // The sheet shows, with the tool that picks a garment by a click.
+        assert_eq!(app.docs.active_doc_idx, 1);
+        assert_eq!(app.edit.tools.active_id(), ToolId::Move);
+        let state = app.garment_state();
+        assert!(
+            !state.error && state.status == PICK_HINT,
+            "{}",
+            state.status
+        );
+        // Taken there, the garment goes on the photo it was asked from.
+        app.take_garment(None);
+        assert_eq!(app.docs.active_doc_idx, 0);
+        assert!(app.garment_state().worn);
+
+        // The sheet closed and no file of it kept: its file is asked for
+        // (there is no window here to ask in), the photo stays.
+        app.close_doc_confirmed(1);
+        app.change_garment();
+        assert_eq!(app.docs.documents.len(), 1);
+        assert!(app.jobs.pending_file_dialog.is_none());
+        assert!(app.garment_state().worn);
+    }
+
+    #[test]
+    fn a_dressed_photo_whose_own_garment_is_taken_is_no_sheet() {
+        let mut app = shop();
+        app.take_garment(None);
+        // "Lấy áo đang chọn" pressed on the photo, its garment layer picked.
+        let stack = &mut app.docs.documents[0].canvas.layer_stack;
+        stack.active_idx = stack
+            .layers
+            .iter()
+            .position(|l| l.name == GARMENT_LAYER)
+            .unwrap();
+        app.take_garment(None);
+        assert!(!app.is_garment_sheet(0) && app.is_garment_sheet(1));
+        assert_eq!(app.docs.active_doc_idx, 0);
+        assert!(app.may_be_dressed(0) && !app.may_be_dressed(1));
+    }
+
+    #[test]
+    fn the_files_of_sheets_are_kept_latest_first() {
+        let file = |n: usize| PathBuf::from(format!("kho-ao/mau-{n}.psd"));
+        let mut files = SheetFiles::default();
+        files.remember(&[file(1), file(2)]);
+        files.remember(&[file(3)]);
+        files.remember(&[file(2)]);
+        let kept: Vec<PathBuf> = files.files().cloned().collect();
+        assert_eq!(kept, vec![file(2), file(3), file(1)]);
+        assert!(files.holds(&file(3)) && !files.holds(&file(9)));
+        for n in 10..40 {
+            files.remember(&[file(n)]);
+        }
+        assert_eq!(files.files().count(), MOST_SHEETS);
+        assert_eq!(files.files().next(), Some(&file(39)));
+    }
+
+    /// A sheet's file chosen from the box is shown (here it is open
+    /// already), is known as a sheet from then on, and is the one "Đổi áo
+    /// khác" goes back to: its tab, or its file once that tab is closed.
+    #[test]
+    fn a_sheet_asked_for_from_the_box_is_shown_and_known_as_one() {
+        let dir = std::env::temp_dir().join(format!("iai-garment-sheet-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("ao.png");
+        image::RgbaImage::from_pixel(64, 48, image::Rgba([240, 240, 250, 255]))
+            .save(&file)
+            .unwrap();
+        let mut app = shop();
+        let opened = open_tab(&mut app, sheet());
+        app.docs.documents[opened].path = Some(file.clone());
+        app.docs.documents[opened].file_modified_at =
+            crate::core::document::file_modified_at(&file);
+        app.switch_to_doc(0);
+        assert!(!app.is_garment_sheet(opened));
+
+        app.edit.tools.select(ToolId::Brush);
+        app.open_garment_sheets(vec![file.clone()]);
+        assert_eq!(app.docs.active_doc_idx, opened);
+        assert!(app.is_garment_sheet(opened) && !app.may_be_dressed(opened));
+        assert_eq!(app.edit.tools.active_id(), ToolId::Move);
+        assert_eq!(app.garment_state().status, PICK_HINT);
+
+        // From the photo, the sheet looked at last is the one gone back to.
+        app.switch_to_doc(0);
+        app.change_garment();
+        assert_eq!(app.docs.active_doc_idx, opened);
+
+        // Its tab closed, its file is opened again.
+        app.close_doc_confirmed(opened);
+        app.switch_to_doc(0);
+        assert!(app.jobs.pending_loads.is_empty());
+        app.change_garment();
+        assert_eq!(app.jobs.pending_loads.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

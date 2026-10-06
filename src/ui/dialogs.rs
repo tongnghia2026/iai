@@ -62,7 +62,7 @@ fn prefs_path() -> PathBuf {
 
 /// One remembered value of prefs.json. Tests neither read nor write the
 /// owner's file.
-fn load_pref<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+pub(crate) fn load_pref<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
     if cfg!(test) {
         return None;
     }
@@ -72,7 +72,7 @@ fn load_pref<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
 }
 
 /// Remember one value in prefs.json, keeping the others.
-fn save_pref<T: Serialize>(key: &str, value: &T) {
+pub(crate) fn save_pref<T: Serialize>(key: &str, value: &T) {
     if cfg!(test) {
         return;
     }
