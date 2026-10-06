@@ -377,7 +377,7 @@ làm được việc này, nhưng phải đổi ô mới thấy.)
   nhận diện lại vài giây).
 - [x] Chủ test 06/10 tối trên `target\release\iai.exe` (build 15:35): **"đã test ok"**.
 
-### Đợt 38 — Ô "Áo" tiện hơn (làm 06/10 tối — CHỜ CHỦ TEST)
+### Đợt 38 — Ô "Áo" tiện hơn (làm 06/10 tối — CHỦ TEST OK)
 
 Ba việc chủ nêu 06/10 tối, đều ở hàng "Áo" của ô Ảnh thẻ (`garment_row` trong
 `src/ui/dialogs/id_photo.rs`, app `src/app/garment_ops.rs`):
@@ -415,7 +415,16 @@ Ba việc chủ nêu 06/10 tối, đều ở hàng "Áo" của ô Ảnh thẻ (`
   áo không bị nhận nhầm là file áo; nhớ file áo theo thứ tự mới nhất trước; file áo mở từ ô
   được nhận ra và mở lại khi đã đóng), bài bảng (hai nút mới hỏi đúng việc, mờ đúng lúc), bài
   luật đợt 27.
-- [ ] Chủ test.
+- [x] Chủ test 06/10 tối (bản build 18:28): **"đã test ok"**. Nhật ký 20:07–20:09: "Mở file áo"
+      mở `Ao Nu.psd` thành tab mới → "Lấy áo đang chọn" quay về đúng ảnh và mặc áo (tab trang
+      xếp ảnh in nằm giữa được bỏ qua) → "Đổi áo khác" sang lại tab file áo → lấy áo khác,
+      quay về ảnh; ảnh mới mở chưa làm ảnh thẻ thì áo chờ trong ô và được mặc sau "Làm ảnh
+      thẻ tự động".
+
+Sửa kèm trong buổi 06/10 (không thuộc việc thay áo): sau khi đóng hộp "Print Settings…" của
+máy in TOSHIBA, mọi công cụ bỏ qua chuyển động chuột (khung crop "đơ") tới khi chuyển cửa sổ
+khác rồi quay lại — driver đóng hộp mà không trả bàn phím cho cửa sổ app. Đã sửa (`df37cfc`,
+`0294a77`), chủ test OK 19:12.
 
 ### Đợt 39 — Viền áo khớp với da (CHƯA CÓ THIẾT KẾ — làm ảnh thử trước)
 
