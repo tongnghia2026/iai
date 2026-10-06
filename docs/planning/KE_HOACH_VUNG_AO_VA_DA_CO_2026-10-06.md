@@ -1,8 +1,8 @@
 # Kế hoạch: menu "Áo" và thanh "Da cổ" (06/10/2026 — sửa lần 2 theo ý chủ)
 
-**Trạng thái (06/10 khuya): đợt 33–38 CHỦ TEST OK HẾT. Đợt 39 — viền áo khớp với da — ĐÃ
-LÀM, CHỜ CHỦ TEST: layer "Viền áo" (bóng giữa áo và người), tự đi theo áo, nút "Khớp viền
-áo". Xem mục 7.**
+**Trạng thái (06/10 khuya): đợt 33–38 CHỦ TEST OK HẾT. Đợt 39 chủ đã thử và ĐỔI CÁCH LÀM →
+đợt 39b ĐÃ LÀM, CHỜ CHỦ TEST: ghép áo chỉ đặt layer áo lên trên đúng chỗ cổ; chủ chỉnh tay
+xong bấm một nút "Chạy lại da cổ, viền áo". Xem mục 7.**
 Nối tiếp `KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (đợt 31, 32 chủ test OK); kế hoạch này thay
 cho "đợt 33" ghi ở đó.
 
@@ -48,6 +48,13 @@ tôi ước có thêm tính năng tự động chạy lại phần viền áo ch
 đã tự chỉnh tay xong, hiện tại nhìn khá giả trân - áo chỉ là 1 layer chồng bên trên chứ chưa
 thật sự liên kết như mặc áo thật; phiên này chỉ lưu bộ nhớ, cập nhật kế hoạch; qua hội thoại
 mới làm tiếp".
+
+Lời chủ 06/10 khuya, sau khi thử bản đợt 39 (kèm một ảnh đã chỉnh tay xong): "chỉnh lại 1
+chút; tôi muốn chức năng ghép áo chỉ cần đè lớp layer áo lên trên, tìm điểm đặt là dc; ngoài
+ra ko cần chỉnh gì thêm-người dùng sẽ tự xoay, nắn lại, smudge, eracer,.....sau khi user chỉnh
+xong sẽ bấm nút chạy lại da cổ và viền áo, hệ thống sẽ tự nhận diện và chạy lại mượt da, mượt
+viền theo vị trí user đã sửa là ok; ví dụ ảnh tôi gửi kèm là tôi đã chỉnh hết rồi, chỉ còn lại
+viền cổ áo và da cổ chưa đều màu và chưa có vân da thôi".
 
 ## 2. Chủ đã chốt gì ở lần sửa này
 
@@ -426,7 +433,13 @@ máy in TOSHIBA, mọi công cụ bỏ qua chuyển động chuột (khung crop 
 khác rồi quay lại — driver đóng hộp mà không trả bàn phím cho cửa sổ app. Đã sửa (`df37cfc`,
 `0294a77`), chủ test OK 19:12.
 
-### Đợt 39 — Viền áo khớp với da (làm 06/10 khuya — CHỜ CHỦ TEST)
+### Đợt 39 — Viền áo khớp với da (làm 06/10 khuya; chủ thử rồi đổi cách làm → đợt 39b)
+
+*Các gạch đầu dòng của đợt này ghi lại bản build 21:59. Chủ thử bản đó lúc 22:18–22:25 rồi
+đổi cách làm (đợt 39b bên dưới): từ bản 39b, app KHÔNG còn tự tạo layer "Viền áo" lúc mặc
+áo, không còn nút "Khớp viền áo", và các chỗ "sửa kèm lúc mặc áo" không còn chạy trong app
+(app không còn tự xóa áo cũ / tô da). Phần bóng, phần "tự đi theo áo" và phần gộp bước Ctrl+Z
+vẫn dùng nguyên.*
 
 Điều chủ thấy: áo ghép "nhìn khá giả trân — chỉ là một layer chồng bên trên chứ chưa thật sự
 liên kết như mặc áo thật". Điều chủ ước: sau khi tự chỉnh tay xong (dời / xoay áo, Smudge cổ,
@@ -513,6 +526,75 @@ Chưa đo: thời gian làm lại bóng trên bản Release (bản debug 0,2 gi�
 cho ảnh trên 12 triệu điểm ảnh, mỗi lần dời áo).
 
 - [ ] Chủ test trên `target\release\iai.exe` (build 06/10 21:59, code ở commit `3f058d3`).
+
+### Đợt 39b — Ghép áo chỉ đặt layer áo; một nút "Chạy lại da cổ, viền áo" (làm 06/10 khuya — CHỜ CHỦ TEST)
+
+Nhật ký thao tác của app phiên 22:18–22:25 cho thấy đúng cách chủ làm: sau khi app tự ghép,
+chủ dời áo bằng Move, Ctrl+T áo, chọn 6 layer Ctrl+T cùng lúc, Smudge hai bên cổ, rồi xuất
+JPEG — không bấm "Khớp viền áo" lần nào. Tức là mọi thứ app tự làm lúc ghép đều bị chủ sửa
+lại bằng tay; chủ chỉ cần app đặt áo đúng chỗ và lo phần hoàn thiện sau cùng.
+
+- [x] **Ghép áo = chỉ thêm một layer "Áo" lên trên cùng**, đã dời / phóng / xoay cho khớp cổ.
+      App không xóa áo cũ, không tô da vào khoảng hở cổ, không tách layer tóc, không tạo bóng.
+      Layer người giữ nguyên từng điểm ảnh và vẫn là layer đang chọn. Một bước Ctrl+Z "Mặc áo".
+      Mặc áo khác: áo cũ (và bóng của nó) đi, phần chủ đã sửa tay trên người còn nguyên. "Bỏ
+      áo": bỏ layer áo và layer bóng, không đụng gì khác.
+- [x] **Nút "Chạy lại da cổ, viền áo"** ở hàng Áo, cạnh "Chỉnh áo" (thay nút "Khớp viền áo"),
+      bấm sau khi đã chỉnh tay xong. App nhìn ảnh như đang có rồi làm hai việc:
+      1. **Viền áo**: làm lại layer bóng "Viền áo" theo đúng chỗ áo và da đang nằm (một bước
+         Ctrl+Z "Viền áo"; layer đang bị ẩn thì hiện lại, Opacity giữ nguyên).
+      2. **Da cổ**: mở một lượt chỉnh trên phần người đang hiện dưới áo, chỉ bật thanh "Da cổ"
+         (các thanh khác ở 0 nên mặt không bị làm đẹp lần hai). Kết quả hiện ngay trên ảnh
+         như mọi lượt xem trước: vừa ý thì "Áp dụng" (hoặc cứ làm việc khác, app tự áp dụng
+         theo luật đợt 27); muốn đậm / nhạt hơn thì kéo thanh "Da cổ" bên ô Chân dung.
+- [x] **Da cổ chạy sát tới mép áo**: bình thường vùng da cổ lùi vào trong mép da một chút
+      (để tránh mép tóc, mép cổ áo thật). Với ảnh có layer "Áo", ở sát mép áo và dưới áo app
+      lấy trọn phần da — nên dải da sát viền cổ áo cũng được đều màu và có vân da, không còn
+      sót một viền chưa xử lý.
+- [x] Mức "Da cổ" của nút = mức trong mẫu ảnh thẻ đang chọn ở hàng "Mẫu"; mẫu để 0 thì dùng 60.
+- [x] **Các thanh của mẫu không bị lượt chỉnh này làm đổi**: xong lượt "Da cổ" (áp dụng hay
+      hủy), các thanh của ô Ảnh thẻ trở lại đúng mẫu đang dùng, để ảnh khách sau bấm "Làm ảnh
+      thẻ tự động" vẫn chạy theo mẫu. Sửa luôn cùng lỗi này cho nút "Chỉnh tiếp ảnh này" (trước
+      đây sau khi bấm nút đó các thanh đứng ở 0 cho tới khi chọn lại mẫu).
+- [x] Bóng vẫn **tự đi theo áo** sau khi đã có layer "Viền áo" (dời / xoay áo → bóng làm lại,
+      chung bước Ctrl+Z; đang "Chỉnh áo" thì bóng tạm ẩn). Chưa bấm nút lần nào thì chưa có
+      bóng và không có gì tự chạy.
+- [x] Ảnh ghép áo từ các bản trước (có layer "Người", "Tóc trên áo") mở lại vẫn dùng được:
+      nút mới chạy trên layer "Người" / "Chân dung" đang hiện; "Bỏ áo" trả lại ảnh như trước.
+
+Việc tôi tự quyết:
+- Nhãn nút lấy theo chữ chủ dùng.
+- "Da cổ" hiện dưới dạng xem trước rồi mới áp dụng (như mọi lượt chỉnh), không ghi thẳng vào
+  ảnh: chủ nhìn được trước / sau bằng ô "Xem trước" và chỉnh được mức.
+- Lúc mặc áo không tạo bóng (đúng chữ "ngoài ra không cần chỉnh gì thêm"); bóng chỉ có sau khi
+  bấm nút.
+- Code tự xóa áo cũ / tô da / tách tóc của các đợt trước **còn giữ trong lõi** (không còn được
+  app gọi, vẫn có test) — phòng khi chủ muốn có lại; chủ chốt cách mới rồi thì gỡ.
+
+Thử trên chính ảnh chủ gửi (ảnh JPEG đã gộp, nên tôi phải tự tách tạm vùng áo và vùng người
+bằng màu — mép bóng vì vậy hơi răng cưa, trong app mép lấy từ layer "Áo" thật nên mịn):
+`tmp\vien-ao\xem\anh-cua-chu-vung-co.jpg` (vùng cổ) và `anh-cua-chu-ca-anh.jpg` (cả ảnh), trái
+là ảnh chủ gửi, phải là sau khi "chạy lại da cổ, viền áo" với Da cổ 60.
+
+Điều chưa chắc:
+- Vùng da cổ vẫn do app nhận diện trên **layer người** (không nhìn layer áo). Chỗ chủ Smudge /
+  Clone da đè lên áo cũ mà app không coi là da thì "Da cổ" bỏ sót chỗ đó — sửa bằng "Tô vùng ▸
+  Da cổ". Chưa có ảnh nhiều layer thật của chủ để thử (ảnh gửi là JPEG đã gộp).
+- Bấm nút nhiều lần trên cùng một ảnh: mỗi lần "Áp dụng" sau khi có sửa tay thêm một layer
+  "Chân dung" (như nút "Chỉnh tiếp ảnh này" vẫn làm).
+- Tóc phải nằm trên áo (tóc dài xõa trước vai) giờ là việc của chủ (xóa bớt layer áo chỗ đó);
+  bóng tóc lên áo chỉ có với ảnh ghép kiểu cũ còn layer "Tóc trên áo".
+
+Test: lõi — `Fitting::lay` qua các bài app; `beside_garment` (da sát mép áo và dưới áo được
+lấy trọn, xa áo thì không, không phải da thì không). App `garment_ops` 20 bài (mặc áo chỉ thêm
+một layer, layer người không đổi điểm nào, áo cũ còn thấy ở chỗ áo mới không che; mặc áo khác
+/ bỏ áo; nhận ra ảnh ghép áo theo tên layer, file áo không bị nhận nhầm; ảnh ghép kiểu cũ lấy
+lại được các layer; nút mới làm bóng thành một bước rồi mở lượt chỉnh chỉ có "Da cổ" trên đúng
+layer người, bấm lại không thêm bước thừa; bóng theo áo; bóng bị xóa / ẩn chỉ có lại khi bấm
+nút), 1 bài chạy model thật trong `portrait_ops` (ảnh khách mặc một áo dựng sẵn: da cổ sát mép
+áo được lấy thêm sau khi áo được dời lên ngang cổ), bài bảng (nút mới; các thanh của mẫu trở
+lại sau lượt chỉnh). Kết quả 06/10 khuya: nhóm nhẹ 2009 qua; nhóm `app::portrait_ops` chạy
+từng bài: xem dòng cuối mục này.
 
 ### Để sau, chỉ làm khi chủ bảo
 
@@ -663,6 +745,25 @@ cho ảnh trên 12 triệu điểm ảnh, mỗi lần dời áo).
   "phần mới đặt lên" (trước đây hai lần mờ nhân nhau để sót `b(1−b)` ≤ 25% áo cũ ở đúng hàng
   cổ áo); `neck_flare` (`FLARE_REACH` 0,15, `FLARE_RUN` 0,7) đặt da *phía sau* những gì đang
   có, trong tam giác từ mỗi đầu cổ áo lên tới mép phần người còn lại ở hàng `line − 2`.
+- **Đợt 39b** (`garment_ops.rs`, `portrait_ops.rs`, `portrait_brush.rs`, `ui/dialogs`):
+  `Fitting::lay` (chỉ `Placement::fit` + `Cloth::laid`); `put_on` thêm layer "Áo" trên cùng,
+  layer đang chọn = layer raster hiện trên cùng dưới áo; `GarmentSession.laid:
+  HashMap<DocumentId, layer áo>`; `worn_in` = layer áo đã đặt trong phiên, hoặc theo tên (layer
+  "Áo" đang hiện + có layer "Người" bên dưới, hoặc tài liệu có Background đang hiện và không
+  phải file áo đã biết) + có gì đó của người đang hiện; `Worn.person / hair / hidden` chỉ còn
+  cho ảnh ghép kiểu cũ. `finish_dressed(neck)` = `fit_seam(idx, false)` rồi
+  `retouch_neck(neck)` (`aim_at_the_dressed_person` + `begin_portrait_from(NEUTRAL + neck)`,
+  layer "Chân dung" còn nguyên thì reopen với `neck` ít nhất bằng mức xin). `fit_seam`: xin
+  đích danh (`follows == false`) thì layer bóng đang ẩn được hiện lại. Da cổ sát mép áo:
+  `NeckDetail::mask_beside(skin, cover)` = max(`mask`, `area × skin.mask × gần áo`) với "gần
+  áo" = alpha áo làm mờ `BESIDE_GARMENT` 0,05 × cỡ mặt; `neck_found` (app) gọi nó khi
+  `garment_cover(doc, offset, w, h)` có áo, và gán luôn `session.edits[face].neck` (như thể
+  đã tô) — `neck_found` nay cũng chạy khi kết quả phân tích lấy lại từ lần trước đã có sẵn cổ.
+  Thanh của mẫu: `id_photo::ASIDE_KEY` giữ `(PortraitSettings, đã bắt đầu)` trong egui temp,
+  hộp thoại trả lại khi `portrait_session` tắt; "Làm ảnh thẻ tự động" bấm giữa chừng dùng mẫu
+  đang để dành (`making_from`). `dress()` và phần xóa áo cũ / tô da còn trong
+  `core/garment.rs`, chỉ probe và test gọi. Probe cổ: ảnh phẳng kèm `<tên>.ao.png` +
+  `<tên>.nguoi.png` (alpha áo, alpha người) ra `xong_<tên>.jpg`.
 - **Đợt 38** (`garment_ops.rs`): `photo_to_dress` = tài liệu đầu tiên trong `doc_mru` (trừ file
   nguồn) mà `may_be_dressed`: đang mặc áo, hoặc không quá `MOST_PHOTO_LAYERS` (16) layer,
   không có nhóm, không phải `is_garment_sheet`, không phải file chữ / PDF / nhiều trang. Luật
