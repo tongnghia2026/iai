@@ -431,6 +431,11 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
                     "Lông mày",
                     "Tô thêm / bớt vùng lông mày mà các thanh \"Lông mày\" tác động (hiện màu vàng). Vùng lông mày không bị làm mịn da",
                 ),
+                (
+                    Some(MaskTarget::Clothes),
+                    "Áo",
+                    "Tô thêm / bớt vùng áo mà các thanh \"Áo\" tác động (hiện màu xanh lục). App tìm áo vài giây khi bấm lần đầu",
+                ),
             ];
             for (target, label, tip) in targets {
                 let enabled = target != Some(MaskTarget::Hair) || d.portrait_hair;
@@ -452,6 +457,17 @@ fn brush_section(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, read
         });
         if d.portrait_brush.is_none() {
             return;
+        }
+        // The clothes are found when first asked for: say so while the
+        // brush has none to paint yet, or why it never will.
+        if d.portrait_brush == Some(MaskTarget::Clothes) {
+            let finding = d
+                .portrait_clothes
+                .as_ref()
+                .filter(|(note, _)| note.starts_with("Đang tìm") || note.starts_with("Không tìm"));
+            if let Some((note, warning)) = finding {
+                note_line(ui, note, *warning);
+            }
         }
         // Brows are a soft shape around sparse hairs: painted plainly.
         let smart = d.portrait_brush != Some(MaskTarget::Brows);
@@ -993,12 +1009,26 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                         }
                         rows(ui, ready && hair, hair_rows)
                     });
-                    let clothes = vec![(
-                        "Nét áo",
-                        &mut s.clothes_sharpen,
-                        "AI vẽ lại cho nét cái áo khách đang mặc trong ảnh (ảnh điện thoại mờ, ảnh cũ phục hồi) — màu và sáng tối vẫn là của ảnh. Ảnh áo đã nét thì để 0. Không tác động lên áo ghép",
-                        Amount,
-                    )];
+                    let clothes = vec![
+                        (
+                            "Nét áo",
+                            &mut s.clothes_sharpen,
+                            "AI vẽ lại cho nét cái áo khách đang mặc trong ảnh (ảnh điện thoại mờ, ảnh cũ phục hồi) — màu và sáng tối vẫn là của ảnh. Ảnh áo đã nét thì để 0. Không tác động lên áo ghép",
+                            Amount,
+                        ),
+                        (
+                            "Sáng áo",
+                            &mut s.clothes_brightness,
+                            "Trái: áo tối hơn (áo trắng bị loá hiện lại nếp vải) — phải: áo sáng hơn mà không cháy trắng. Chỉ riêng áo, không đụng mặt, tóc, nền",
+                            TwoSided,
+                        ),
+                        (
+                            "Đều sáng áo",
+                            &mut s.clothes_even,
+                            "Nâng phần áo khuất đèn (một bên vai tối, áo sậm dần xuống dưới) cho đều với phần được chiếu sáng — hoa văn, nếp vải, ranh giới các lớp áo giữ nguyên",
+                            Amount,
+                        ),
+                    ];
                     // A garment laid on from a sheet is sharp as it is, and a
                     // layer of its own.
                     let dressed = data.dialogs.garment_worn;
@@ -1121,7 +1151,7 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
             });
             ui.add_enabled_ui(ready, |ui| {
                 ui.checkbox(&mut masks, "Hiện vùng nhận diện").on_hover_text(
-                    "Tô màu vùng app nhận ra: da đỏ, quầng mắt cam, lòng trắng xanh lá, tròng xanh dương, lông mày vàng, môi hồng, răng xanh ngọc, tóc tím, áo xanh lục (sau khi kéo Nét áo)",
+                    "Tô màu vùng app nhận ra: da đỏ, quầng mắt cam, lòng trắng xanh lá, tròng xanh dương, lông mày vàng, môi hồng, răng xanh ngọc, tóc tím, áo xanh lục",
                 );
             });
             ui.add_space(6.0);
@@ -1231,6 +1261,13 @@ mod tests {
                 false,
                 false,
             ),
+            (
+                "to_vung",
+                Some(Group::Brush),
+                egui::pos2(260.0, 300.0),
+                false,
+                false,
+            ),
             ("anh_the", None, egui::pos2(260.0, 250.0), true, false),
             ("cho", None, egui::pos2(260.0, 250.0), false, false),
             (
@@ -1283,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn the_clothes_group_holds_its_slider_and_a_garment_laid_on_needs_none() {
+    fn the_clothes_group_holds_its_sliders_and_a_garment_laid_on_needs_none() {
         let ctx = egui::Context::default();
         let mut data = UiData::default();
         data.doc.has_doc = true;
@@ -1293,7 +1330,7 @@ mod tests {
         let first = "Lần đầu kéo thanh, app tìm áo rồi làm nét vài giây.";
         data.dialogs.portrait_clothes = Some((first.to_string(), false));
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(460.0, 1000.0));
-        let texts = |data: &UiData| -> Vec<String> {
+        let texts_in = |data: &UiData, group: Group| -> Vec<String> {
             let mut shown = Vec::new();
             for _ in 0..8 {
                 let input = egui::RawInput {
@@ -1303,7 +1340,7 @@ mod tests {
                 let output = ctx.run_ui(input, |ui| {
                     ui.ctx().data_mut(|d| {
                         d.insert_temp(egui::Id::new(PRESETS_KEY), presets::built_in());
-                        d.insert_temp(egui::Id::new("portrait_group"), Some(Group::Clothes));
+                        d.insert_temp(egui::Id::new("portrait_group"), Some(group));
                     });
                     let mut actions = UiActions::default();
                     portrait_dialog(ui.ctx(), data, &mut actions);
@@ -1319,11 +1356,22 @@ mod tests {
             }
             shown
         };
+        let texts = |data: &UiData| texts_in(data, Group::Clothes);
         let has = |shown: &[String], text: &str| shown.iter().any(|t| t == text);
 
         let shown = texts(&data);
         assert!(has(&shown, "Áo") && has(&shown, "Nét áo"), "{shown:?}");
+        assert!(has(&shown, "Sáng áo") && has(&shown, "Đều sáng áo"));
         assert!(has(&shown, first));
+        // The brush paints them too, and says so while they are looked for.
+        let finding = "Đang tìm áo…";
+        data.dialogs.portrait_brush = Some(MaskTarget::Clothes);
+        data.dialogs.portrait_clothes = Some((finding.to_string(), false));
+        let brush = texts_in(&data, Group::Brush);
+        assert!(has(&brush, "Lông mày") && has(&brush, finding), "{brush:?}");
+        data.dialogs.portrait_clothes = Some((first.to_string(), false));
+        assert!(!has(&texts_in(&data, Group::Brush), first));
+        data.dialogs.portrait_brush = None;
         // A garment from a sheet is sharp as it is: the group says so.
         data.dialogs.garment_worn = true;
         let shown = texts(&data);

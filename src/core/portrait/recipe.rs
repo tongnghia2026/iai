@@ -18,7 +18,7 @@ pub struct SavedMask {
 impl SavedMask {
     /// This mask laid over `analysed` (the mask of `region`): painted values
     /// where the two regions meet, the analysis elsewhere.
-    fn onto(&self, region: Region, analysed: &[u8]) -> Vec<u8> {
+    pub fn onto(&self, region: Region, analysed: &[u8]) -> Vec<u8> {
         let mut out = analysed.to_vec();
         let (s, r) = (self.region, region);
         if self.mask.len() != s.len() || out.len() != r.len() {
@@ -49,6 +49,7 @@ pub struct SavedFace {
     pub skin: Option<SavedMask>,
     pub hair: Option<SavedMask>,
     pub brows: Option<SavedMask>,
+    pub clothes: Option<SavedMask>,
 }
 
 #[derive(Clone, Debug)]
@@ -66,12 +67,15 @@ pub struct PortraitRecipe {
 }
 
 /// A face of a new analysis with what the recipe kept for it: on or off,
-/// and its painted masks over the new regions.
+/// and its painted masks over the new regions. The clothes are found only
+/// when asked for, so their mask comes as it was saved, to lay over them
+/// then.
 pub struct RestoredFace {
     pub enabled: bool,
     pub skin: Option<Vec<u8>>,
     pub hair: Option<Vec<u8>>,
     pub brows: Option<Vec<u8>>,
+    pub clothes: Option<SavedMask>,
 }
 
 /// Faces further apart than this, in face sizes, are different faces.
@@ -108,6 +112,10 @@ impl PortraitRecipe {
                     brows: edit.and_then(|e| e.brows.as_ref()).map(|b| SavedMask {
                         region: b.region(),
                         mask: b.area().to_vec(),
+                    }),
+                    clothes: edit.and_then(|e| e.clothes.as_ref()).map(|c| SavedMask {
+                        region: c.region,
+                        mask: c.mask().to_vec(),
                     }),
                 }
             })
@@ -151,6 +159,7 @@ impl PortraitRecipe {
                         skin: None,
                         hair: None,
                         brows: None,
+                        clothes: None,
                     };
                 };
                 used[j] = true;
@@ -170,6 +179,7 @@ impl PortraitRecipe {
                         let analysed = face.brow_layers();
                         m.onto(analysed.region(), analysed.area())
                     }),
+                    clothes: saved.clothes.clone(),
                 }
             })
             .collect()

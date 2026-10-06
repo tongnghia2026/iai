@@ -1,7 +1,7 @@
 # Kế hoạch: menu "Áo" và thanh "Da cổ" (06/10/2026 — sửa lần 2 theo ý chủ)
 
-**Trạng thái (06/10): ĐỢT 33 "NÉT ÁO" ĐÃ CODE XONG — CHỜ CHỦ TEST.** Chủ bảo làm nét áo trước
-(mục 1, lời thứ ba). Phần còn lại của menu "Áo" (đợt 34) và thanh "Da cổ" (đợt 35) chưa làm.
+**Trạng thái (06/10): đợt 33 "Nét áo" CHỦ TEST OK. ĐỢT 34 (Tô vùng ▸ Áo, "Sáng áo", "Đều
+sáng áo") ĐÃ CODE XONG — CHỜ CHỦ TEST.** Thanh "Da cổ" (đợt 35) chưa làm.
 Nối tiếp `KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (đợt 31, 32 chủ test OK); kế hoạch này thay
 cho "đợt 33" ghi ở đó.
 
@@ -22,6 +22,8 @@ thì đã nét sẵn nên không cần làm nét nữa; điều chỉnh lại k�
 
 Lời chủ 06/10, lần ba: "làm nét áo trước, tại vì khách hàng không phải lúc nào cũng thay, ghép
 áo, họ muốn giữ nguyên áo đang mặc nhưng họ lại chụp bằng điện thoại độ phân giải thấp".
+
+Lời chủ 06/10, sau khi test đợt 33: "đã test ok; tiếp tục đợt 34".
 
 ## 2. Chủ đã chốt gì ở lần sửa này
 
@@ -113,12 +115,16 @@ Một menu riêng trong bảng Chỉnh chân dung, đặt sau "Tóc". Ba thanh, 
 
 ### 5.3. Thanh "Sáng áo" (hai chiều) và "Đều sáng áo" (0–100)
 
-- **Sáng áo**: trái tối hơn, phải sáng hơn — chỉ riêng áo, không đụng mặt, tóc, nền.
-- **Đều sáng áo**: một bên vai tối, phần áo khuất đèn → nâng cho đều với phần được chiếu sáng.
-  Chỉ sửa theo mảng lớn nên hoa văn, sọc, nếp gấp, ranh giới vest – sơ mi – cà vạt giữ nguyên.
-- Với **áo ghép**: hai thanh này tác động lên layer "Áo" (chỉnh sáng áo cho hợp với mặt). Áo
-  ghép không bị làm nét, không bị đổi gì khác. *Phần này làm cuối cùng và chỉ làm nếu chủ cần —
-  xem mục 8, câu 3.*
+- **Sáng áo**: trái tối hơn, phải sáng hơn — chỉ riêng áo, không đụng mặt, tóc, nền. Kéo
+  sang trái là giảm sáng đều (áo trắng bị loá hiện lại nếp vải; kéo nhiều thì áo trắng ngả
+  xám). Kéo sang phải thì áo sáng dần về trắng mà không cháy, nếp vải vẫn còn. Hết thanh là
+  khoảng 1,25 khẩu.
+- **Đều sáng áo**: một bên vai tối, áo sậm dần xuống dưới → nâng cho đều với phần được chiếu
+  sáng. App đo **độ dốc sáng** trên cả cái áo (bỏ qua mép vải, hoa văn, nếp gấp) rồi bù lại
+  theo đúng độ dốc đó, nên hoa văn, sọc, ranh giới vest – sơ mi – cà vạt giữ nguyên. Phần
+  khuất được nâng tối đa khoảng 1,3 khẩu.
+- Hai thanh này không phải chờ AI: app chỉ cần tìm vùng áo (gần như tức thì với ảnh thẻ).
+- Với **áo ghép**: **chưa làm**. Ảnh đã ghép áo thì cả ba thanh mờ đi (mục 8, câu 3).
 
 ### 5.4. Mặc định
 
@@ -192,15 +198,36 @@ Làm 06/10. Lõi: `src/core/portrait/clothes.rs`; chạy model: `Upscaler` trong
 - Ảnh trước / sau đi qua đúng đường xử lý của app: `tmp\vung-ao\net-ao-truoc-sau-chu-theu.jpg`,
   `net-ao-truoc-sau-hang-cuc.jpg`, `net-ao-truoc-sau-ao-trang.jpg`.
 - Chưa làm trong đợt này: "Tô vùng ▸ Áo" (sửa tay vùng áo) — sang đợt 34.
-- [ ] Chủ test.
+- [x] Chủ test 06/10: **"đã test ok"**.
 
 ### Đợt 34 — Phần còn lại của menu "Áo"
 
-- [ ] "Tô vùng ▸ Áo": sửa tay vùng áo khi app nhận sai.
-- [ ] Thanh "Sáng áo" và "Đều sáng áo"; ảnh thử trước / sau ở hai mức cho chủ xem trước.
-- [ ] Vùng áo trên ảnh khó (vest tối, áo dài, áo trùng màu nền, trẻ em): ảnh tô màu vùng áo.
-- [ ] Test tự động + ảnh probe giao diện; chủ test.
-- [ ] (Nếu chủ cần) Sáng áo / Đều sáng áo cho layer áo ghép.
+Làm 06/10, ngay sau khi chủ bảo làm tiếp.
+
+- [x] **Tách "vùng áo" khỏi phần chạy AI**: vùng áo giờ được tìm riêng (ảnh thẻ: gần như tức
+      thì), nên cọ và hai thanh sáng không phải chờ "Nét áo".
+- [x] **"Tô vùng ▸ Áo"**: thêm lựa chọn "Áo" cạnh Da / Tóc / Lông mày; tô Thêm / Bớt / Thông
+      minh như các vùng khác, Ctrl+Z trong bảng, vùng áo hiện màu xanh lục. Bấm lần đầu app
+      tìm áo (có dòng "Đang tìm áo…"). Vùng áo đã tô được lưu theo layer "Chân dung" và theo
+      file `.iai`, mở lại vẫn còn.
+- [x] **Thanh "Sáng áo"** (hai chiều) và **"Đều sáng áo"** (mục 5.3), mặc định 0, có trong
+      "Công thức".
+- [x] "Hiện vùng nhận diện" tô vùng áo ngay khi tích (không cần kéo "Nét áo" trước).
+- [x] Ảnh thử trước / sau qua đúng đường xử lý của app, trên ảnh cố ý làm tối bên phải:
+      `tmp\vung-ao\sang-ao-ao-mot-mau.jpg`, `sang-ao-vest.jpg`, `sang-ao-ao-trang.jpg` — mỗi tấm
+      bốn ô: gốc / Đều sáng áo 100 / Sáng áo −60 / Sáng áo +60. Độ dốc app đo khớp độ dốc tôi
+      cố ý tạo (áo trắng: tạo 0,56, đo 0,57).
+- Test thêm: 3 bài lõi (đo độ dốc sáng qua ranh giới áo sẫm – áo sáng và bù lại; sáng hơn
+  không cháy, tối hơn giảm đúng số khẩu; chỉ điểm ảnh áo đổi), file `.iai` giữ vùng áo đã tô,
+  bảng có đủ ba thanh và lựa chọn cọ "Áo", 1 bài chạy model thật trong app (chọn cọ Áo → app
+  tìm áo → tô bớt một mảng → "Sáng áo" chỉ đổi phần áo còn lại, mặt không đổi → Áp dụng → mở
+  lại vẫn còn vùng đã tô).
+- Chưa làm: vùng áo trên ảnh khó (vest tối trên nền tối, áo dài, áo trùng màu nền, trẻ em) —
+  chưa có ảnh mẫu; hai thanh sáng cho layer áo ghép (mục 8, câu 3).
+- Biết trước: kéo "Sáng áo" mạnh thì mép áo (sát cổ, sát nền) có thể hiện một viền mảnh vì
+  mép vùng áo là mép mềm — sửa bằng "Tô vùng ▸ Áo", hoặc tôi làm mép vùng áo bám màu ảnh ở đợt
+  sau nếu chủ thấy vướng.
+- [ ] Chủ test.
 
 ### Đợt 35 — Thanh "Da cổ"
 
@@ -220,14 +247,15 @@ Làm 06/10. Lõi: `src/core/portrait/clothes.rs`; chạy model: `Upscaler` trong
 
 ## 8. Việc cần chủ quyết
 
-1. ~~Menu "Áo" trước hay "Da cổ" trước?~~ Chủ chốt 06/10: làm nét áo trước (đã làm, đợt 33).
-   Sau khi test "Nét áo": làm tiếp đợt 34 hay đợt 35 trước?
+1. ~~Menu "Áo" trước hay "Da cổ" trước?~~ Chủ chốt 06/10: nét áo trước (đợt 33, test OK), rồi
+   đợt 34 (đã làm). Còn lại: đợt 35 thanh "Da cổ".
 2. Cho tôi đường dẫn ảnh mẫu để thử cho sát thực tế:
    - vài **ảnh khách tự chụp điện thoại, áo mờ**, và 2–3 **ảnh cũ phục hồi** — "Nét áo" mới thử
      trên ảnh của một khách;
    - 2–3 **file `.iai` đã mặc áo và đã sửa tay chỗ cổ** (lưu ngay sau khi Smudge / Clone).
 3. "Sáng áo" và "Đều sáng áo" có cần tác động lên **áo ghép** không, hay áo ghép để nguyên
-   hoàn toàn? (Tôi đang để là có, làm cuối.)
+   hoàn toàn? Chủ chưa trả lời nên đợt 34 **chưa làm** phần này: ảnh đã ghép áo thì ba thanh
+   mờ đi.
 4. ~~Có đồng ý thêm một model cho nét áo không?~~ Không phải thêm: model đã có sẵn trên máy.
 5. Hôm 05/10 chủ nói quy trình thay áo "vẫn có 1 vài điểm bị vấp" — hai việc này đã hết các
    điểm đó chưa?
@@ -248,8 +276,11 @@ Làm 06/10. Lõi: `src/core/portrait/clothes.rs`; chạy model: `Upscaler` trong
   đôi khi thêm vài chấm nhỏ như nốt ruồi; thanh thấp thì ít thấy.
 - Khoanh vùng áo mới thử trên ảnh dễ. Áo tối trên nền tối, áo trùng màu nền, khăn quàng có thể
   khoanh thiếu — vì vậy có "Tô vùng ▸ Áo".
-- "Đều sáng áo" phải phân biệt *tối do khuất đèn* với *tối do vải sẫm màu* (vest đen cạnh sơ mi
-  trắng); nếu trên ảnh thử nó làm bạc áo sẫm thì giới hạn lại biên độ.
+- "Đều sáng áo" chỉ bù **một độ dốc đều** trên cả cái áo (tối dần sang một bên, tối dần xuống
+  dưới). Bóng đổ cục bộ (bóng cằm trên cổ áo, bóng tay) không được sửa. Mới thử trên ảnh tôi
+  cố ý làm tối một bên, chưa có ảnh khách bị lệch sáng thật.
+- Ảnh chụp đèn từ trên xuống thì áo vốn sậm dần xuống dưới: "Đều sáng áo" sẽ nâng phần dưới
+  lên — đúng ý với ảnh thẻ, nhưng kéo hết thanh có thể làm áo trông phẳng.
 - "Da cổ" cần app tìm lại được mặt sau khi chủ sửa tay — bình thường không vấn đề vì chủ chỉ
   sửa ở cổ.
 
@@ -268,15 +299,26 @@ Làm 06/10. Lõi: `src/core/portrait/clothes.rs`; chạy model: `Upscaler` trong
   trong `effects::retouch`. `Upscaler` (`core/ai/retouch.rs`) thử lần lượt x2plus →
   general-x4v3 → x4plus, tự đọc hệ số phóng từ đầu ra, chạy CPU. Mức phóng của ảnh thẻ:
   `Kept.enlarged` → `App::id_photo_enlarged` → `PortraitSession.enlarged`.
-- Còn lại cho đợt 34: `FaceEdits.clothes`, mục tiêu cọ thứ tư trong `brush.rs`,
-  `SavedFace.clothes` trong `recipe.rs` (`#[serde(default)]`); mask áo hiện chỉ có sau khi
-  thanh "Nét áo" được dùng (làm lười), cọ cần mask ngay → tách phần dựng mask khỏi phần chạy
-  model.
+- **Đã làm ở đợt 34**: `ClothesArea` (vùng áo trên cả vùng nhãn đã nhìn + `bounds` + `Light`)
+  nằm ở `FaceModel.clothes_area` (làm lười bằng `analyze_clothes_areas`, gọi khi một thanh áo
+  rời nghỉ, khi tích "Hiện vùng nhận diện", khi cọ chọn Áo, hoặc khi layer mở lại có vùng áo
+  đã tô); `ClothesDetail` chỉ còn ảnh AI, vẽ rộng hơn `bounds` 0,25 cỡ mặt để phần cọ tô thêm
+  gần đó cũng có nét. `FaceEdits.clothes: Option<Arc<ClothesArea>>` (`with_mask` đo lại sáng),
+  `MaskTarget::Clothes`, `SavedFace.clothes` + mục `{f}_clothes` trong `.iai`. App:
+  `PortraitSession.area_rx`, `start_clothes_search`, `PortraitBrush.kept_clothes` +
+  `App::clothes_found` (đặt vùng áo đã lưu lên vùng vừa tìm). `ClothesArea::lay` làm cả ba
+  việc theo thứ tự: nét → đều sáng → sáng / tối.
+- "Đều sáng áo" (`light_of`): **trung vị độ dốc** của ln độ sáng tuyến tính giữa các ô lưới
+  thô đầy áo (bỏ qua mép vải vì chúng là thiểu số, nếp gấp nghiêng cả hai phía). Đã thử và bỏ:
+  chia vải thành hai lớp theo độ sáng (Otsu) rồi khớp mặt phẳng chung — một bên khuất đèn bị
+  coi là "vải khác" và nuốt mất độ dốc. Mức "được chiếu" = phân vị 75 của mặt phẳng; nâng 0,9,
+  hạ 0,35, giới hạn ±0,9 ln.
+- "Sáng áo" (`relit`): tối = nhân ánh sáng tuyến tính; sáng = 1 − (1 − y)^(2^khẩu) trên độ
+  sáng, giữ tỷ lệ kênh màu. Không dùng Midtones của Develop như "Sáng da": áo trắng (phổ biến
+  nhất ở ảnh thẻ) gần như không nhúc nhích với Midtones.
 - Thanh trong `PortraitSettings` (đều `#[serde(default)]`, `NEUTRAL` và mặc định = 0, có trong
-  `unit()`): `clothes_sharpen` (đã có); còn `clothes_brightness` (hai chiều; dùng lại
-  `skin_tone` / `midtoned`), `clothes_even`, `neck` ("Da cổ").
-- "Đều sáng áo": khớp mặt bậc thấp của ln độ sáng theo từng cụm màu vải, giới hạn biên độ;
-  không dùng nguyên `even_light_gain` (nó giả định một mức "được chiếu" duy nhất).
+  `unit()`): `clothes_sharpen`, `clothes_brightness`, `clothes_even` (đã có); còn `neck`
+  ("Da cổ").
 - Số đo "Nét áo" 06/10 (CPU máy tiệm, vùng áo 1043×650 của ảnh thẻ): general-x4v3 4,7 s ở cỡ
   nguyên / 1,2 s ở nửa cỡ; x2plus 15,5 s / 3,6 s; x4plus nửa cỡ 15,4 s. Bài học: cho xem ở nửa
   cỡ một ảnh còn nguyên cỡ gốc làm hỏng chữ cao ~12 px; tỷ lệ năng lượng các dải tần không

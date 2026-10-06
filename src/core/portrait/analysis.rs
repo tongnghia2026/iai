@@ -120,8 +120,12 @@ pub struct FaceModel {
     /// What the part model read around this face, kept while it is trusted:
     /// the clothes are found in it later.
     pub(super) parts: Option<PartLabels>,
-    /// This person's clothes as an upscaling model draws them, made once
-    /// "Nét áo" is first used (see [`super::clothes::analyze_clothes`]).
+    /// Where this person's clothes lie and the light across them, found
+    /// once a clothes slider, the brush or the tinted areas first ask (see
+    /// [`super::clothes::analyze_clothes_areas`]).
+    pub clothes_area: std::sync::OnceLock<Result<super::clothes::ClothesArea, String>>,
+    /// The clothes as an upscaling model draws them, made once "Nét áo" is
+    /// first used (see [`super::clothes::analyze_clothes`]).
     pub clothes: std::sync::OnceLock<Result<super::clothes::ClothesDetail, String>>,
 }
 
@@ -2207,6 +2211,7 @@ fn build_face(
         soft,
         ai_detail: std::sync::OnceLock::new(),
         parts: parts.filter(|_| trusted).cloned(),
+        clothes_area: std::sync::OnceLock::new(),
         clothes: std::sync::OnceLock::new(),
     }
 }

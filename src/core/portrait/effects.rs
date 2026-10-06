@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::ai_detail::DetailAt;
 use super::analysis::{luma, BrowLayers, FaceModel, PortraitModel, SkinLayers, BLEMISH_SCALE};
 use super::body::BodySliders;
-use super::clothes::ClothesDetail;
+use super::clothes::{ClothesArea, ClothesDetail, ClothesLook};
 use super::correct::{grey_axis, Fixes};
 use super::geometry::Region;
 use super::looks::StudioLook;
@@ -124,6 +124,12 @@ pub struct PortraitSettings {
     /// photo whose clothes are sharp as shot.
     #[serde(default)]
     pub clothes_sharpen: f32,
+    /// "Sáng áo", -100..100: the clothes darker or lighter, and "Đều sáng
+    /// áo": how far the slope of the light across them is taken out.
+    #[serde(default)]
+    pub clothes_brightness: f32,
+    #[serde(default)]
+    pub clothes_even: f32,
 }
 
 impl Default for PortraitSettings {
@@ -183,6 +189,8 @@ impl Default for PortraitSettings {
             look: StudioLook::Clear.index(),
             look_strength: DEFAULT_LOOK_STRENGTH,
             clothes_sharpen: 0.0,
+            clothes_brightness: 0.0,
+            clothes_even: 0.0,
         }
     }
 }
@@ -261,6 +269,8 @@ impl PortraitSettings {
         look: 0,
         look_strength: DEFAULT_LOOK_STRENGTH,
         clothes_sharpen: 0.0,
+        clothes_brightness: 0.0,
+        clothes_even: 0.0,
     };
 
     /// The settings a layer was saved with. The one-sided "Giảm màu" sliders
@@ -318,8 +328,15 @@ impl PortraitSettings {
             eye_saturation: both(self.eye_saturation),
             brow_saturation: both(self.brow_saturation),
             clothes_sharpen: u(self.clothes_sharpen),
+            clothes_brightness: both(self.clothes_brightness),
+            clothes_even: u(self.clothes_even),
             ..*self
         }
+    }
+
+    /// Whether a clothes slider is away from rest: the clothes must be found.
+    pub fn clothes_active(&self) -> bool {
+        self.clothes_sharpen > 0.0 || self.clothes_even > 0.0 || self.clothes_brightness != 0.0
     }
 
     /// The chosen studio look and its strength 0..1, when one is on.
@@ -1028,6 +1045,7 @@ pub struct FaceEdits {
     pub skin_paint: Option<Arc<Vec<u8>>>,
     pub hair: Option<Arc<Vec<u8>>>,
     pub brows: Option<Arc<BrowLayers>>,
+    pub clothes: Option<Arc<ClothesArea>>,
 }
 
 fn skin_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> &'a SkinLayers {
@@ -1044,32 +1062,40 @@ fn hair_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> &'a [u8] {
         .map_or(&face.hair[..], |h| &h[..])
 }
 
+/// Where the clothes of `face` lie, as painted or else as found, once found.
+fn clothes_of<'a>(face: &'a FaceModel, edit: Option<&'a FaceEdits>) -> Option<&'a ClothesArea> {
+    edit.and_then(|e| e.clothes.as_deref())
+        .or_else(|| face.clothes_area.get().and_then(|c| c.as_ref().ok()))
+}
+
 /// The clothes of `face` as the upscaling model drew them, once made.
-fn clothes_of(face: &FaceModel) -> Option<&ClothesDetail> {
+fn drawn_clothes(face: &FaceModel) -> Option<&ClothesDetail> {
     face.clothes.get().and_then(|c| c.as_ref().ok())
 }
 
 /// The smallest rectangle holding every enabled face's skin region (which
 /// holds its face region), their hair regions when `hair` is set and their
-/// clothes' when `clothes` is.
+/// clothes when `clothes` is.
 pub fn union_region(
     model: &PortraitModel,
     enabled: &[bool],
+    edits: &[FaceEdits],
     hair: bool,
     clothes: bool,
 ) -> Option<Region> {
     model
         .faces
         .iter()
+        .enumerate()
         .zip(enabled.iter().chain(std::iter::repeat(&true)))
-        .filter(|(face, &on)| on && !face.region.is_empty())
-        .map(|(face, _)| {
+        .filter(|((_, face), &on)| on && !face.region.is_empty())
+        .map(|((index, face), _)| {
             let mut r = face.skin.region;
             if hair {
                 r = r.union(face.hair_region);
             }
-            match clothes_of(face).filter(|_| clothes) {
-                Some(worn) => r.union(worn.region),
+            match clothes_of(face, edits.get(index)).filter(|_| clothes) {
+                Some(worn) => r.union(worn.bounds()),
                 None => r,
             }
         })
@@ -1117,7 +1143,12 @@ fn retouch(
             .iter()
             .any(|f| !f.hair.is_empty() && matches!(f.ai_detail.get(), Some(Ok(_))));
     let hair_pass = s.hair_active() || hair_detail;
-    let union = union_region(model, enabled, hair_pass, s.clothes_sharpen > 0.0)?;
+    let clothes = ClothesLook {
+        sharpen: s.clothes_sharpen,
+        even: s.clothes_even,
+        brightness: s.clothes_brightness,
+    };
+    let union = union_region(model, enabled, edits, hair_pass, !clothes.at_rest())?;
     let width = model.width as usize;
     let (uw, uh) = (union.w as usize, union.h as usize);
     let mut out = vec![0u8; uw * uh * 4];
@@ -1244,15 +1275,16 @@ fn retouch(
                 });
         }
     }
-    if s.clothes_sharpen > 0.0 {
-        for (face, _) in model
+    if !clothes.at_rest() {
+        for (index, (face, _)) in model
             .faces
             .iter()
             .zip(enabled.iter().chain(std::iter::repeat(&true)))
-            .filter(|(_, &on)| on)
+            .enumerate()
+            .filter(|(_, (_, &on))| on)
         {
-            if let Some(clothes) = clothes_of(face) {
-                clothes.lay(&mut delta, union, s.clothes_sharpen, &pixel);
+            if let Some(worn) = clothes_of(face, edits.get(index)) {
+                worn.lay(&mut delta, union, &clothes, drawn_clothes(face), &pixel);
             }
         }
     }
@@ -1273,7 +1305,7 @@ fn retouch(
 
 /// The photo with each detected area tinted (skin red, under-eye orange,
 /// eye whites green, irises blue, brows yellow, lips pink, teeth cyan, hair
-/// violet, and the clothes teal once "Nét áo" has found them), so the user
+/// violet, and the clothes teal once they are found), so the user
 /// can see where every slider acts; reshaped like the retouch.
 pub fn render_masks(
     rgba: &[u8],
@@ -1299,7 +1331,7 @@ fn tint_masks(
     enabled: &[bool],
     edits: &[FaceEdits],
 ) -> Option<(Region, Vec<u8>)> {
-    let union = union_region(model, enabled, true, true)?;
+    let union = union_region(model, enabled, edits, true, true)?;
     let width = model.width as usize;
     let uw = union.w as usize;
     let mut out = vec![0u8; uw * union.h as usize * 4];
@@ -1321,8 +1353,8 @@ fn tint_masks(
             hair_of(face, edits.get(index)),
             brows_of(face, edits.get(index)),
         );
-        if let Some(clothes) = clothes_of(face) {
-            let r = clothes.region;
+        if let Some(clothes) = clothes_of(face, edits.get(index)) {
+            let r = clothes.bounds();
             let (cx, cy) = ((r.x - union.x) as usize, (r.y - union.y) as usize);
             out.par_chunks_mut(uw * 4)
                 .skip(cy)
@@ -1330,11 +1362,12 @@ fn tint_masks(
                 .enumerate()
                 .for_each(|(row, line)| {
                     for col in 0..r.w as usize {
-                        let inside = model
-                            .clip
-                            .as_ref()
-                            .map_or(1.0, |c| c.at(r.x + col as u32, r.y + row as u32));
-                        let level = clothes.mask()[row * r.w as usize + col];
+                        let (x, y) = (r.x + col as u32, r.y + row as u32);
+                        let inside = model.clip.as_ref().map_or(1.0, |c| c.at(x, y));
+                        let level = clothes
+                            .region
+                            .index_at(x, y)
+                            .map_or(0, |k| clothes.mask()[k]);
                         let a = level as f32 / 255.0 * 0.55 * inside;
                         if a > 0.0 {
                             let px = &mut line[(cx + col) * 4..(cx + col) * 4 + 3];
