@@ -1,8 +1,8 @@
 # Kế hoạch: menu "Áo" và thanh "Da cổ" (06/10/2026 — sửa lần 2 theo ý chủ)
 
-**Trạng thái (06/10 khuya): đợt 33–38 CHỦ TEST OK HẾT. Đợt 39 chủ đã thử và ĐỔI CÁCH LÀM →
-đợt 39b ĐÃ LÀM, CHỜ CHỦ TEST: ghép áo chỉ đặt layer áo lên trên đúng chỗ cổ; chủ chỉnh tay
-xong bấm một nút "Chạy lại da cổ, viền áo". Xem mục 7.**
+**Trạng thái (07/10 sáng): đợt 33–38 và đợt 39b CHỦ TEST OK HẾT. Cách làm đã chốt: ghép áo
+chỉ đặt layer áo lên trên đúng chỗ cổ; chủ chỉnh tay xong bấm một nút "Chạy lại da cổ, viền
+áo". Việc kế tiếp chủ chưa nêu ("qua hội thoại mới làm tiếp") — xem cuối mục 7.**
 Nối tiếp `KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (đợt 31, 32 chủ test OK); kế hoạch này thay
 cho "đợt 33" ghi ở đó.
 
@@ -55,6 +55,8 @@ ra ko cần chỉnh gì thêm-người dùng sẽ tự xoay, nắn lại, smudge
 xong sẽ bấm nút chạy lại da cổ và viền áo, hệ thống sẽ tự nhận diện và chạy lại mượt da, mượt
 viền theo vị trí user đã sửa là ok; ví dụ ảnh tôi gửi kèm là tôi đã chỉnh hết rồi, chỉ còn lại
 viền cổ áo và da cổ chưa đều màu và chưa có vân da thôi".
+
+Lời chủ 07/10 sáng, sau khi test đợt 39b: "đã test ok; lưu bộ nhớ qua hội thoại mới làm tiếp".
 
 ## 2. Chủ đã chốt gì ở lần sửa này
 
@@ -528,7 +530,7 @@ cho ảnh trên 12 triệu điểm ảnh, mỗi lần dời áo).
 - [x] Chủ thử bản build 06/10 21:59 (commit `3f058d3`) lúc 22:18–22:25 → đổi cách làm, xem
       đợt 39b.
 
-### Đợt 39b — Ghép áo chỉ đặt layer áo; một nút "Chạy lại da cổ, viền áo" (làm 06/10 khuya — CHỜ CHỦ TEST)
+### Đợt 39b — Ghép áo chỉ đặt layer áo; một nút "Chạy lại da cổ, viền áo" (làm 06/10 khuya — CHỦ TEST OK 07/10)
 
 Nhật ký thao tác của app phiên 22:18–22:25 cho thấy đúng cách chủ làm: sau khi app tự ghép,
 chủ dời áo bằng Move, Ctrl+T áo, chọn 6 layer Ctrl+T cùng lúc, Smudge hai bên cổ, rồi xuất
@@ -597,7 +599,18 @@ nút), 1 bài chạy model thật trong `portrait_ops` (ảnh khách mặc một
 lại sau lượt chỉnh). Kết quả 06/10 khuya: nhóm nhẹ 2009 qua; nhóm `app::portrait_ops` chạy
 từng bài 27 qua.
 
-- [ ] Chủ test trên `target\release\iai.exe` (build 06/10 23:26, code ở commit `9ad161d`).
+- [x] Chủ test 07/10 sáng trên `target\release\iai.exe` (build 06/10 23:26, code ở commit
+      `9ad161d`): **"đã test ok"**. Nhật ký 06:57–08:58: ba ảnh khách, mỗi ảnh mặc áo → chỉnh
+      tay → bấm "Chạy lại da cổ, viền áo" → "Áp dụng" → xuất JPEG.
+
+Việc có thể làm tiếp (chủ chưa chọn việc nào — hỏi chủ ở đầu phiên sau):
+- Gỡ hẳn phần tự xóa áo cũ / tô da / tách tóc khỏi `core/garment.rs` (app không còn gọi; chủ
+  đã chốt cách mới bằng lần test này).
+- Các mục "Để sau" ngay dưới, và các mục "Chưa làm" của đợt 39 (khớp sáng / màu áo với ảnh,
+  mép áo file tiệm bị nhòe, bóng theo hướng đèn).
+- Thấy trong nhật ký 07/10 lúc 07:52:39, không thuộc việc thay áo và chủ không báo: app khựng
+  0,95 giây một lần, ở chỗ kiểm tra file model của AI Auto Retouch
+  (`core::ai::retouch::model_file_status_at` chạy trên luồng giao diện).
 
 ### Để sau, chỉ làm khi chủ bảo
 
