@@ -31,12 +31,13 @@ const PRESET_NAME_FIELD: &str = "portrait_preset_name";
 /// Whether the dialog was last on its Ảnh thẻ side.
 const SIDE_KEY: &str = "portrait_side";
 
-/// The kept presets; an install that has not had the built-in ones yet is
-/// given them first.
+/// The kept presets; an install that has not had this round of the built-in
+/// ones yet is brought up to it first.
 fn load_presets() -> Vec<Preset> {
     let mut kept: Vec<Preset> = load_pref(PRESETS_KEY).unwrap_or_default();
-    if load_pref::<u32>(BUILT_IN_KEY).unwrap_or(0) < presets::BUILT_IN_ROUND {
-        presets::add_built_in(&mut kept);
+    let had = load_pref::<u32>(BUILT_IN_KEY).unwrap_or(0);
+    if had < presets::BUILT_IN_ROUND {
+        kept = presets::bring_up(&kept, had);
         save_pref(PRESETS_KEY, &kept);
         save_pref(BUILT_IN_KEY, &presets::BUILT_IN_ROUND);
     }

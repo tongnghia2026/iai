@@ -11,9 +11,10 @@ pub struct Preset {
     pub settings: PortraitSettings,
 }
 
-/// Bumped when `built_in` gains presets, so an install that already took an
-/// earlier round is given the new ones once (and deleted ones stay deleted).
-pub const BUILT_IN_ROUND: u32 = 1;
+/// Bumped when `built_in` gains presets or changes those it has, so an
+/// install that already took an earlier round is brought up once
+/// ([`bring_up`]). Round 2: "Sống mũi cao" stands at 30, not at rest.
+pub const BUILT_IN_ROUND: u32 = 2;
 
 /// The presets an install starts with. None changes the face's shape: they
 /// are for ID photos.
@@ -117,6 +118,36 @@ pub fn add_built_in(presets: &mut Vec<Preset>) {
     }
 }
 
+/// The built-in presets as round 1 gave them: "Sống mũi cao" at rest.
+fn built_in_round_1() -> Vec<Preset> {
+    let mut presets = built_in();
+    for preset in &mut presets {
+        preset.settings.nose_bridge = 0.0;
+    }
+    presets
+}
+
+/// Bring an install's presets from the round it `had` (0: none yet) up to
+/// this one. A new install is given the built-in presets. One that has them
+/// keeps what it deleted deleted and what the owner changed as changed; a
+/// preset still exactly as an earlier round gave it becomes what it is now.
+pub fn bring_up(presets: &[Preset], had: u32) -> Vec<Preset> {
+    let mut presets = presets.to_vec();
+    if had == 0 {
+        add_built_in(&mut presets);
+    } else if had < 2 {
+        for (was, now) in built_in_round_1().into_iter().zip(built_in()) {
+            let untouched = presets
+                .iter_mut()
+                .find(|kept| kept.name == was.name && kept.settings == was.settings);
+            if let Some(kept) = untouched {
+                kept.settings = now.settings;
+            }
+        }
+    }
+    presets
+}
+
 /// Keep `settings` under `name`, in place of the preset of that name.
 pub fn keep(presets: &mut Vec<Preset>, name: &str, settings: PortraitSettings) {
     let name = name.trim();
@@ -176,7 +207,6 @@ mod tests {
                 s.eye_size,
                 s.eye_tilt,
                 s.nose_slim,
-                s.nose_bridge,
                 s.mouth_width,
                 s.smile,
                 s.lip_fullness,
@@ -266,5 +296,64 @@ mod tests {
         let once = presets.clone();
         add_built_in(&mut presets);
         assert_eq!(presets, once);
+    }
+
+    #[test]
+    fn an_install_is_brought_up_without_undoing_what_its_owner_did() {
+        // A new install is given every built-in preset as it is now.
+        let fresh = bring_up(&[], 0);
+        assert_eq!(fresh, built_in());
+        assert!(fresh.iter().all(|p| p.settings.nose_bridge == 30.0));
+
+        // An install of round 1: one preset as given, one the owner changed,
+        // one they deleted, and one of their own.
+        let given = built_in_round_1();
+        assert!(given.iter().all(|p| p.settings.nose_bridge == 0.0));
+        let changed = PortraitSettings {
+            smooth: 77.0,
+            ..given[1].settings
+        };
+        let mine = Preset {
+            name: "Của tiệm".to_string(),
+            settings: PortraitSettings::NEUTRAL,
+        };
+        let kept = vec![
+            given[0].clone(),
+            Preset {
+                name: given[1].name.clone(),
+                settings: changed,
+            },
+            mine.clone(),
+        ];
+        let up = bring_up(&kept, 1);
+        assert_eq!(up.len(), 3, "what was deleted stays deleted");
+        assert_eq!(up[0], built_in()[0], "as given: it is what it is now");
+        assert_eq!(up[1].settings, changed, "the owner's change stays");
+        assert_eq!(up[2], mine);
+        // Brought up already, nothing more is done.
+        assert_eq!(bring_up(&up, BUILT_IN_ROUND), up);
+    }
+
+    /// Opt-in: IAI_PRESETS_PROBE is a prefs.json; says what bringing its
+    /// presets up from round 1 would change. Nothing is written.
+    #[test]
+    #[ignore]
+    fn probe_bring_up() {
+        let Ok(path) = std::env::var("IAI_PRESETS_PROBE") else {
+            return;
+        };
+        let prefs: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let kept: Vec<Preset> = serde_json::from_value(prefs["portrait_presets"].clone()).unwrap();
+        let up = bring_up(&kept, 1);
+        for (was, now) in kept.iter().zip(&up) {
+            println!(
+                "{}: nose bridge {} -> {}{}",
+                was.name,
+                was.settings.nose_bridge,
+                now.settings.nose_bridge,
+                if was == now { " (kept as it is)" } else { "" }
+            );
+        }
     }
 }

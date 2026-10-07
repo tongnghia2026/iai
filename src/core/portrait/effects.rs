@@ -169,7 +169,7 @@ impl Default for PortraitSettings {
             lip_brightness: 0.0,
             sharpen: 20.0,
             brows: 0.0,
-            nose_bridge: 0.0,
+            nose_bridge: 30.0,
             iris_hue: 200.0,
             iris_tint: 0.0,
             lip_tint: 0.0,
