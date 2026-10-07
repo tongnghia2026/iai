@@ -2,9 +2,10 @@
 
 **Trạng thái (07/10 trưa): đợt 33–38 và đợt 39b CHỦ TEST OK HẾT. Cách làm đã chốt: ghép áo
 chỉ đặt layer áo lên trên đúng chỗ cổ; chủ chỉnh tay xong bấm một nút "Chạy lại da cổ, viền
-áo". ĐỢT 40 (07/10, theo lời chủ "tiếp tục làm 3 việc này"): gỡ code ghép kiểu cũ, mép áo
-sắc, bóng theo hướng đèn, thanh "Khớp áo với ảnh", hết khựng khi bấm nút "AI" — ĐÃ LÀM XONG,
-CHỜ CHỦ TEST (xem cuối mục 7).**
+áo". ĐỢT 40 (gỡ code ghép kiểu cũ, mép áo sắc, bóng theo hướng đèn, thanh "Khớp áo với ảnh",
+hết khựng khi bấm nút "AI") — CHỦ TEST OK 07/10 trưa. ĐỢT 41 (07/10 chiều: "Sống mũi cao" mặc
+định 30; Select Subject không nạp lại model mỗi lần) — ĐÃ LÀM XONG, CHỜ CHỦ TEST (cuối mục
+7).**
 Nối tiếp `KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (đợt 31, 32 chủ test OK); kế hoạch này thay
 cho "đợt 33" ghi ở đó.
 
@@ -614,7 +615,7 @@ Việc có thể làm tiếp (07/10 chủ bảo "tiếp tục làm 3 việc này
   0,95 giây một lần, ở chỗ kiểm tra file model của AI Auto Retouch
   (`core::ai::retouch::model_file_status_at` chạy trên luồng giao diện).
 
-### Đợt 40 — Gỡ code ghép kiểu cũ; mép áo sắc; bóng theo hướng đèn; áo ăn theo sáng / màu của ảnh; hết khựng nút "AI" (làm 07/10 — CHỜ CHỦ TEST)
+### Đợt 40 — Gỡ code ghép kiểu cũ; mép áo sắc; bóng theo hướng đèn; áo ăn theo sáng / màu của ảnh; hết khựng nút "AI" (làm 07/10 — CHỦ TEST OK 07/10 trưa)
 
 Lời chủ 07/10: dán lại ba việc tôi nêu ở cuối đợt 39b rồi viết "(tiếp tục làm 3 việc này)".
 
@@ -729,10 +730,65 @@ Lệnh xem ảnh thử: như đợt 36 (`IAI_GARMENT_PROBE` / `_PSD` / `_OUT` / 
 `_LAYERS`), thêm `IAI_GARMENT_MATCH=<0..100>` (ra `..__xong.jpg`) và `IAI_GARMENT_NECK`; mỗi áo
 in ra mức phóng và hướng đèn đọc được.
 
-- [ ] Chủ test bản `target\dot40\release\iai.exe` (build 07/10 10:28, code ở commit
-      `501831f`, có `--features canvas-editor-webview`). Build ra thư mục riêng vì lúc build
-      app của chủ đang mở (`target\release\iai.exe` vẫn là bản 06/10 23:26, chưa có đợt
-      40). Chủ test OK thì build lại vào `target\release` và xóa `target\dot40` (2,6 GB).
+- [x] Chủ test bản `target\dot40\release\iai.exe` (build 07/10 10:28, code ở commit
+      `501831f`) từ 11:55: **"đã test ok"**. Chủ không nhận xét gì thêm về mép áo, bóng hay
+      thanh "Khớp áo với ảnh".
+
+### Đợt 41 — "Sống mũi cao" mặc định 30; Select Subject không nạp lại model mỗi lần (làm 07/10 chiều — CHỜ CHỦ TEST)
+
+Lời chủ 07/10 trưa: "đã test ok; chỉnh thanh sống mũi cao, để mặc định là 30; fix lỗi phải load
+lại model vào bộ nhớ khi chạy select subject (hình như cứ mỗi lần chạy là phải load lại hoặc
+đổi sang ảnh khác cũng load lại model rất mất thời gian)".
+
+**Thanh "Sống mũi cao" mặc định 30**
+
+- [x] Mặc định của thanh (lúc bấm "Tự động làm đẹp" trên ảnh mới, và trong các mẫu gốc của
+      app) từ 0 lên 30.
+- [x] **Năm mẫu ảnh thẻ chủ đang dùng** ("Ảnh thẻ nữ", "Ảnh thẻ nam", "Trẻ em", "Lớn tuổi",
+      "Nhẹ, tự nhiên") vẫn là mẫu gốc của app, đang để 0: lần đầu mở bản mới, mẫu nào **còn y
+      nguyên như app đã cho** sẽ nhận mức 30. Mẫu chủ đã tự sửa, mẫu chủ tự đặt tên, mẫu chủ
+      đã xóa: giữ nguyên, không đụng. (Đã thử trên chính file cài đặt của chủ, không ghi gì:
+      cả năm mẫu đều lên 30.)
+- Ảnh đã chỉnh từ trước không đổi: layer "Chân dung" cũ giữ đúng mức nó được làm.
+
+**Select Subject không nạp lại model mỗi lần**
+
+Đo trên máy tiệm (model BiRefNet, ảnh thẻ 1086×1448): mỗi lần chạy app **nạp model từ đĩa
+mất khoảng 2,5 giây** rồi **tính khoảng 7 giây**. Bản cũ cố ý bỏ model sau mỗi lần chạy vì nếu
+giữ theo kiểu thường thì app ngậm luôn phần bộ nhớ tạm của nó: 7,5 GB sau lần chạy đầu, 15,8 GB
+sau lần thứ hai.
+
+- [x] Model được nạp **một lần trong mỗi phiên** rồi giữ lại (chiếm khoảng 0,3 GB). Lần chạy
+      sau — kể cả sang ảnh khác, tab khác — chạy ngay, không còn dòng "loading BiRefNet into
+      memory...".
+- [x] Phần bộ nhớ tạm lúc tính (khoảng 7,5 GB) được trả lại ngay khi tính xong, nên giữ model
+      không làm app phình ra.
+- [x] **"Làm ảnh thẻ tự động" dùng chung model đã giữ đó** (trước đây cũng nạp lại mỗi ảnh):
+      mỗi ảnh thẻ bớt được khoảng 2,5 giây; "Xếp cả thư mục" cũng vậy.
+- [x] Model YOLO (lựa chọn thứ hai của Select Subject) vốn đã được giữ; nay dùng chung một
+      cách giữ.
+- Phần tính 7 giây là thời gian model chạy trên CPU, không rút được bằng cách này (đã thử đổi
+  số luồng 6 / 8 / 10 / 16: như nhau; card GTX 1050 2 GB không đủ bộ nhớ cho model này). Vậy
+  một lần Select Subject từ khoảng 10 giây còn khoảng 7 giây; lần đầu tiên của phiên vẫn
+  khoảng 10 giây.
+
+Việc tôi tự quyết: các mẫu gốc chưa bị sửa được nâng "Sống mũi cao" lên 30 (để chủ thấy đúng
+mức mới ở ô Ảnh thẻ, nơi chủ làm việc); model giữ suốt phiên, không tự bỏ khi để lâu không dùng.
+
+Điều chưa làm / biết trước:
+- Các model khác (tách vùng tóc / da Sapiens2, lưới mặt, "Chi tiết mặt (AI)", "Nét áo") vẫn nạp
+  lại mỗi lần dùng — chủ chưa nêu, chưa đo.
+- Số đo thời gian lấy lúc chủ đang dùng máy nên dao động (một lần tính 5–10 giây tùy lúc).
+
+Test: `core::portrait::presets` (bản cài mới nhận mẫu có 30; bản cài cũ: mẫu còn nguyên được
+nâng, mẫu đã sửa / đã xóa / tự đặt giữ nguyên; nâng rồi không nâng lại), `core::select_subject`
+(model dựng một lần, lần sau là chính nó; chạy xong vẫn giữ; hỏng thì bỏ để dựng lại). Lệnh đo:
+`IAI_SUBJECT_PROBE=<ảnh>` (+ `IAI_SUBJECT_PAUSE=<giây>`) với `probe_session_reuse` — ba lần
+chạy: lần đầu có nạp, sau mỗi lần app giữ 0,33 GB (đỉnh 7,6 GB lúc tính).
+
+- [ ] Chủ test bản `target\release\iai.exe` (build 07/10 12:53, code ở commit `e62dea1`, có
+      `--features canvas-editor-webview`; gồm cả đợt 40). `target\dot40` đã xóa: bản chạy duy
+      nhất lại là `target\release\iai.exe`.
 
 ### Để sau, chỉ làm khi chủ bảo
 
@@ -931,6 +987,19 @@ in ra mức phóng và hướng đèn đọc được.
   Option<(f32, f32)>`. Nút "AI": `retouch::unverified_models()` trả `(danh sách, còn đang
   tính?)`, chỉ hỏi `model_artifact_known` (không đọc file), file chưa biết thì một luồng nền
   tính (`MODEL_CHECK_RUNNING`), bảng xin vẽ lại sau 200 ms.
+- **Đợt 41**: `PortraitSettings::default().nose_bridge` = 30 (`NEUTRAL` vẫn 0);
+  `presets::BUILT_IN_ROUND` = 2, `bring_up(presets, had)`: `had == 0` → `add_built_in`; `had
+  < 2` → mẫu trùng tên + trùng hết thông số với `built_in_round_1()` (mẫu hiện tại với
+  `nose_bridge` 0) nhận thông số hiện tại; không thêm lại mẫu đã xóa (`add_built_in` chỉ còn
+  cho bản cài mới). `ui/dialogs/portrait.rs::load_presets` gọi nó theo `portrait_presets_built_in`
+  trong prefs.json. Select Subject (`core/select_subject.rs`): `kept_sessions()` (một phiên ORT
+  cho mỗi file model, toàn tiến trình), `session_for` / `kept_session` / `forget_session`,
+  `run_kept` (GPU hỏng → chặn GPU, dựng lại trên CPU; phiên hỏng thì bỏ), dùng chung cho
+  `run_async` và `segment_blocking`; phiên CPU dựng với `with_memory_pattern(false)` (có
+  pattern thì lần chạy lại xin thêm 1 GB); mỗi lần chạy dùng `RunOptions` có
+  `memory.enable_memory_arena_shrinkage = cpu:0` (giữ arena: 7,5 → 15,8 GB; tắt arena: giữ
+  0,31 GB nhưng model chậm hơn ~30%; shrink: 0,33 GB, nhanh như có arena). `ModelSpec.
+  cache_session` và `SelectSubjectEngine.session` đã bỏ.
 - **Đợt 38** (`garment_ops.rs`): `photo_to_dress` = tài liệu đầu tiên trong `doc_mru` (trừ file
   nguồn) mà `may_be_dressed`: đang mặc áo, hoặc không quá `MOST_PHOTO_LAYERS` (16) layer,
   không có nhóm, không phải `is_garment_sheet`, không phải file chữ / PDF / nhiều trang. Luật
