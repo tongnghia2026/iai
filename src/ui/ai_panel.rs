@@ -985,10 +985,13 @@ fn offline_retouch_section(
             .color(egui::Color32::from_rgb(220, 130, 90))
     };
     ui.label(model_label);
-    let mut custom_features: Vec<&str> = crate::core::ai::retouch::unverified_models()
-        .iter()
-        .map(|m| m.id.feature_label())
-        .collect();
+    let (custom, checking) = crate::core::ai::retouch::unverified_models();
+    if checking {
+        // The model files are being hashed on a worker: look again shortly.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
+    }
+    let mut custom_features: Vec<&str> = custom.iter().map(|m| m.id.feature_label()).collect();
     custom_features.sort();
     custom_features.dedup();
     if !custom_features.is_empty() {

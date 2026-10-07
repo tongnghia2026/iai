@@ -1070,28 +1070,41 @@ fn face_iou(first: &FaceDetection, second: &FaceDetection) -> f32 {
 
 type ModelValidationCache = HashMap<PathBuf, (u64, u128, bool)>;
 static MODEL_VALIDATION_CACHE: OnceLock<Mutex<ModelValidationCache>> = OnceLock::new();
+/// A worker is hashing the model files the panel asked about.
+static MODEL_CHECK_RUNNING: AtomicBool = AtomicBool::new(false);
 
-fn model_artifact_is_valid(id: ModelId, path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
+/// A model file's length and modification time: what its checksum is
+/// remembered by. `None` when there is no such file.
+fn model_artifact_stamp(path: &Path) -> Option<(u64, u128)> {
+    let metadata = path.metadata().ok().filter(|m| m.is_file())?;
     let modified = metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let cache = MODEL_VALIDATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(cache) = cache.lock() {
-        if let Some((length, cached_modified, valid)) = cache.get(path) {
-            if *length == metadata.len() && *cached_modified == modified {
-                return *valid;
-            }
-        }
+    Some((metadata.len(), modified))
+}
+
+/// Whether the file at `path` is its slot's checksummed default, as far as
+/// that is known without reading it: `None` until it has been hashed.
+fn model_artifact_known(path: &Path) -> Option<bool> {
+    let stamp = model_artifact_stamp(path)?;
+    let cache = MODEL_VALIDATION_CACHE.get()?.lock().ok()?;
+    let (length, modified, valid) = cache.get(path)?;
+    ((*length, *modified) == stamp).then_some(*valid)
+}
+
+/// Hashes the whole file the first time it is asked about: hundreds of
+/// megabytes for the larger models, so never on the UI thread.
+fn model_artifact_is_valid(id: ModelId, path: &Path) -> bool {
+    let Some((length, modified)) = model_artifact_stamp(path) else {
+        return false;
+    };
+    if let Some(valid) = model_artifact_known(path) {
+        return valid;
     }
+    let cache = MODEL_VALIDATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     let valid = (|| -> Result<bool, std::io::Error> {
         let mut file = File::open(path)?;
@@ -1113,7 +1126,7 @@ fn model_artifact_is_valid(id: ModelId, path: &Path) -> bool {
     })()
     .unwrap_or(false);
     if let Ok(mut cache) = cache.lock() {
-        cache.insert(path.to_path_buf(), (metadata.len(), modified, valid));
+        cache.insert(path.to_path_buf(), (length, modified, valid));
     }
     valid
 }
@@ -2738,11 +2751,35 @@ pub fn missing_required_models() -> Vec<ModelMetadata> {
 
 /// Slots currently backed by a user-supplied (unverified) custom model, so the
 /// UI can flag that the result and its licensing are the user's responsibility.
-pub fn unverified_models() -> Vec<ModelMetadata> {
-    model_metadata()
-        .into_iter()
-        .filter(|m| model_file_status(m.id) == ModelFileStatus::Custom)
-        .collect()
+///
+/// Safe to ask every frame: no model file is read here. A file whose checksum
+/// is not known yet is hashed on a worker and left out until that is done;
+/// the flag says the list may still grow.
+pub fn unverified_models() -> (Vec<ModelMetadata>, bool) {
+    let mut custom = Vec::new();
+    let mut unknown = Vec::new();
+    // Only an open slot can hold a custom model.
+    for id in ModelId::ALL.iter().copied().filter(|id| id.allows_custom()) {
+        let path = model_path(id);
+        if !path.is_file() {
+            continue;
+        }
+        match model_artifact_known(&path) {
+            Some(false) => custom.push(ModelMetadata::for_id(id)),
+            Some(true) => {}
+            None => unknown.push((id, path)),
+        }
+    }
+    let checking = !unknown.is_empty();
+    if checking && !MODEL_CHECK_RUNNING.swap(true, Ordering::AcqRel) {
+        std::thread::spawn(move || {
+            for (id, path) in unknown {
+                model_artifact_is_valid(id, &path);
+            }
+            MODEL_CHECK_RUNNING.store(false, Ordering::Release);
+        });
+    }
+    (custom, checking)
 }
 
 pub fn manifest_template() -> Vec<ModelManifest> {
@@ -4693,6 +4730,25 @@ mod tests {
         assert!(ModelId::ALL
             .iter()
             .all(|id| id.expected_sha256().len() == 64));
+    }
+
+    #[test]
+    fn a_model_file_is_not_known_until_it_was_hashed() {
+        let path = std::env::temp_dir().join(format!(
+            "iai-model-check-{}-{:?}.onnx",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"not the checksummed model").unwrap();
+        // Asking what is known reads nothing, so it has no answer yet.
+        assert_eq!(model_artifact_known(&path), None);
+        assert!(!model_artifact_is_valid(ModelId::Gfpgan, &path));
+        assert_eq!(model_artifact_known(&path), Some(false));
+        // A file that changed is not the one that was hashed.
+        std::fs::write(&path, b"another file altogether, and a longer one").unwrap();
+        assert_eq!(model_artifact_known(&path), None);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(model_artifact_known(&path), None);
     }
 
     #[test]
