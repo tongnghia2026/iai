@@ -15,6 +15,12 @@ Quy ước giữ nguyên như mọi đợt trước:
 - Mỗi đợt xong: `cargo fmt --check` + `cargo test --lib` → commit local → build Release
   `cargo build --release --features canvas-editor-webview` → mời chủ test bằng đường dẫn
   `C:\Users\Admin\Documents\IAI\target\release\iai.exe`. Chỉ push khi chủ bảo.
+- Cách chạy test cho đúng: `cargo test --lib` chạy cả bộ song song sẽ làm khoảng 23 bài của
+  `app::portrait_ops`, `app::id_photo_ops`, `app::garment_ops` báo "analysis hung" — nhiều
+  model AI chạy cùng lúc nên quá 180 giây chờ, không phải lỗi code. Chạy cả bộ trước, rồi
+  chạy lại riêng các bài hỏng kiểu đó bằng `cargo test --lib -- --test-threads=1 --exact
+  <tên bài>`. Đo 07/10 tại `526a402`: chạy song song 2.018 qua, 23 hết giờ, 48 bỏ qua; 23
+  bài đó chạy từng bài một thì qua hết (305 giây). QC-8 có mục sửa gốc chuyện này.
 - Không gọi nhiều agent.
 - Hồi quy phần cũ thì dừng việc mới, sửa hồi quy trước.
 - Đợt 41 của ảnh thẻ ("Sống mũi cao" 30, Select Subject giữ model) vẫn đang chờ chủ test —
@@ -334,6 +340,11 @@ nguyên văn. Trước và sau đều chạy `cargo test --lib`. Phần giao di�
   cáo QC ghi nhầm chỗ này là nên bỏ.
 - 100 bài test đang `#[ignore]`: rà lý do từng bài; bài nào chỉ vì nặng thì giữ, bài nào vì
   hỏng thì sửa hoặc xóa.
+- Cho các bài test chạy model AI (hàm `analysed` và `app_with_photo` trong
+  `src/app/portrait_ops.rs`, cùng các bài tương tự ở `id_photo_ops.rs`, `garment_ops.rs`)
+  xếp hàng qua một khóa chung, để `cargo test --lib` qua trọn trong một lần chạy thay vì 23
+  bài hết giờ chờ (xem mục 0).
+- 5 cảnh báo biên dịch ở code test (`unused_mut`…): sửa.
 
 ### QC-9 — khung chung cho việc chạy nền (mục 10)
 
@@ -397,4 +408,6 @@ Hơn 45 hàm trên 250 dòng còn lại: tách khi có việc đụng tới, kh�
 
 ## 7. Nhật ký
 
-- 07/10 chiều: lập kế hoạch. `cargo fmt --check` sạch. Chưa làm đợt nào.
+- 07/10 chiều: lập kế hoạch. `cargo fmt --check` sạch. `cargo test --lib --locked` trước khi
+  push: 2.018 qua + 23 hết giờ chờ khi chạy song song; 23 bài đó chạy lại từng bài một đều
+  qua. Chưa làm đợt nào.
