@@ -1,8 +1,10 @@
 # Kế hoạch: menu "Áo" và thanh "Da cổ" (06/10/2026 — sửa lần 2 theo ý chủ)
 
-**Trạng thái (07/10 sáng): đợt 33–38 và đợt 39b CHỦ TEST OK HẾT. Cách làm đã chốt: ghép áo
+**Trạng thái (07/10 trưa): đợt 33–38 và đợt 39b CHỦ TEST OK HẾT. Cách làm đã chốt: ghép áo
 chỉ đặt layer áo lên trên đúng chỗ cổ; chủ chỉnh tay xong bấm một nút "Chạy lại da cổ, viền
-áo". Việc kế tiếp chủ chưa nêu ("qua hội thoại mới làm tiếp") — xem cuối mục 7.**
+áo". ĐỢT 40 (07/10, theo lời chủ "tiếp tục làm 3 việc này"): gỡ code ghép kiểu cũ, mép áo
+sắc, bóng theo hướng đèn, thanh "Khớp áo với ảnh", hết khựng khi bấm nút "AI" — ĐÃ LÀM XONG,
+CHỜ CHỦ TEST (xem cuối mục 7).**
 Nối tiếp `KE_HOACH_THAY_AO_OFFLINE_2026-10-05.md` (đợt 31, 32 chủ test OK); kế hoạch này thay
 cho "đợt 33" ghi ở đó.
 
@@ -603,7 +605,7 @@ từng bài 27 qua.
       `9ad161d`): **"đã test ok"**. Nhật ký 06:57–08:58: ba ảnh khách, mỗi ảnh mặc áo → chỉnh
       tay → bấm "Chạy lại da cổ, viền áo" → "Áp dụng" → xuất JPEG.
 
-Việc có thể làm tiếp (chủ chưa chọn việc nào — hỏi chủ ở đầu phiên sau):
+Việc có thể làm tiếp (07/10 chủ bảo "tiếp tục làm 3 việc này" → cả ba đã làm ở đợt 40):
 - Gỡ hẳn phần tự xóa áo cũ / tô da / tách tóc khỏi `core/garment.rs` (app không còn gọi; chủ
   đã chốt cách mới bằng lần test này).
 - Các mục "Để sau" ngay dưới, và các mục "Chưa làm" của đợt 39 (khớp sáng / màu áo với ảnh,
@@ -611,6 +613,126 @@ Việc có thể làm tiếp (chủ chưa chọn việc nào — hỏi chủ ở
 - Thấy trong nhật ký 07/10 lúc 07:52:39, không thuộc việc thay áo và chủ không báo: app khựng
   0,95 giây một lần, ở chỗ kiểm tra file model của AI Auto Retouch
   (`core::ai::retouch::model_file_status_at` chạy trên luồng giao diện).
+
+### Đợt 40 — Gỡ code ghép kiểu cũ; mép áo sắc; bóng theo hướng đèn; áo ăn theo sáng / màu của ảnh; hết khựng nút "AI" (làm 07/10 — CHỜ CHỦ TEST)
+
+Lời chủ 07/10: dán lại ba việc tôi nêu ở cuối đợt 39b rồi viết "(tiếp tục làm 3 việc này)".
+
+**Việc 1 — gỡ hẳn phần ghép áo kiểu cũ**
+
+- [x] Gỡ khỏi `core/garment.rs` toàn bộ phần tự xóa áo cũ, tô da vào khoảng hở cổ, tách tóc
+      (khoảng 1.250 dòng code và 7 bài test của riêng nó). App đã không gọi phần này từ đợt
+      39b nên **cách dùng không đổi gì**. Còn lại trong file: tìm cổ áo, tìm cổ người, đặt áo.
+- [x] Ảnh ghép áo từ các bản cũ (có layer "Người", "Tóc trên áo") mở lại vẫn nhận ra và vẫn
+      "Bỏ áo" / "Chạy lại da cổ, viền áo" được như trước — phần đó nằm ở chỗ khác, không gỡ.
+- [x] Lệnh xem ảnh thử (`probe_dressed_photos`) viết lại theo đúng cách app đang làm: đặt áo →
+      bóng viền áo → (tùy chọn) khớp sáng / màu và da cổ.
+
+**Việc 2a — mép áo của file tiệm hết nhòe, hết quầng** (app tự làm ngay lúc đặt áo)
+
+Đo trên áo thật của tiệm: áo bị phóng 1,3–3,3 lần nên dải mờ ở mép rộng 4–6 điểm ảnh (chỗ
+rộng nhất 15); vest sẫm còn có một viền sáng bám theo mép (màu nền cũ của ảnh chụp áo còn dính
+ở các điểm ảnh ngoài cùng).
+
+- [x] **Mép áo sắc lại**: áo phóng lớn bao nhiêu lần thì mép được làm dốc lại bấy nhiêu, nên
+      mép trên ảnh thẻ sắc đúng như mép trong file áo khi xem ở 100%. Mép vẫn nằm đúng chỗ cũ.
+      Chỗ áo cố ý trong mờ (vải mỏng) và phần bên trong áo không bị đụng tới.
+- [x] **Hết viền màu lạ quanh mép**: màu của các điểm ảnh sát mép được lấy lại từ vải ngay
+      bên trong (vest sẫm hết viền sáng trên nền xanh; sơ mi trắng hết viền xám).
+- [x] Đây là việc của riêng layer "Áo" lúc đặt lên; ảnh và người vẫn không bị đụng điểm nào
+      (đúng điều chủ chốt ở đợt 39b). Áo không được "làm nét" bên trong (chủ đã chốt áo ghép
+      không làm nét).
+
+**Việc 2b — bóng viền áo ngả theo hướng đèn** (trong nút "Chạy lại da cổ, viền áo")
+
+- [x] App đọc hướng đèn từ chính da mặt + cổ phía trên cổ áo: so từng điểm da bên trái với
+      điểm đối xứng bên phải. Bên nào sáng hơn rõ thì đèn ở bên đó.
+- [x] Đèn lệch một bên thì bóng ngả sang bên kia: mép cổ áo phía đèn đổ bóng lên da đậm hơn,
+      phía khuất nhạt hơn; bóng cằm / cổ trên áo và bóng tóc trên áo lệch sang phía khuất.
+      Đèn chiếu thẳng (đa số ảnh thẻ) thì bóng y như bản trước.
+- [x] Không đọc được (ảnh đen trắng, tóc che một bên mặt, da quá tối) → coi như đèn chiếu
+      thẳng, bóng đối xứng như cũ.
+- [x] Hướng đèn chia 8 nấc mỗi bên, nên làm đẹp da một chút không làm bóng nhảy khác đi; bấm
+      nút lần nữa khi không có gì đổi vẫn không thêm bước Ctrl+Z.
+- Đo trên 4 ảnh khách: ba ảnh đèn gần như thẳng (0; 0; lệch phải 1 nấc), một ảnh lệch trái 2
+  nấc. Chưa có ảnh khách nào đèn lệch mạnh để nhìn tận mắt — mới kiểm bằng bài test.
+
+**Việc 2c — áo ăn theo sáng / màu của ảnh: thanh mới "Khớp áo với ảnh"**
+
+- [x] **Thanh "Khớp áo với ảnh" (0–100)** trong menu "Áo" của bảng Chỉnh chân dung, chỉ hiện
+      khi ảnh đang mặc áo ghép. 0 = áo y như trong file áo. Kéo lên thì áo nhận ba thứ app đo
+      được từ ảnh (cũng là ba thứ mục "Sửa màu & sáng" đo): ảnh **ám màu** (đèn vàng, tường
+      xanh…) thì áo ngả theo; ảnh **tối** thì áo dịu bớt; ảnh **đục** thì màu đen của áo bớt
+      gắt.
+- [x] **Nút "Chạy lại da cổ, viền áo" tự bật thanh này** cho áo chưa từng khớp (mức trong mẫu
+      ảnh thẻ đang chọn; mẫu để 0 thì dùng 100). Kết quả hiện ở dạng xem trước cùng với "Da
+      cổ": vừa ý thì "Áp dụng", muốn nhạt bớt thì kéo thanh, không muốn thì kéo về 0.
+- [x] **Không bao giờ phủ hai lần**: áo đã khớp rồi, chủ dời / xoay / xóa bớt áo bằng tay rồi
+      bấm nút lần nữa → thanh đứng đúng mức cũ và áo không bị phủ thêm. Kéo về 0 thì áo trở
+      lại như lúc đặt (lệch tối đa 2 mức màu do làm tròn).
+- [x] Ảnh đã được "Sửa màu & sáng" (khử ám, cân sáng, khử đục) thì phần còn lại để khớp gần
+      như bằng 0 — áo giữ nguyên. Đo trên 4 ảnh khách (đều sáng đủ, không ám): thanh ở 100 áo
+      gần như không đổi. Thử trên một bản tôi cố ý làm tối + ám vàng + đục: sơ mi trắng hết
+      trắng xanh chói, ngả ấm và dịu theo mặt; vest bớt đen kịt.
+- [x] App **không** coi màu da riêng của từng người là ám màu, và không coi da ngăm / da
+      trắng là ảnh tối / ảnh sáng: chỉ phần lệch vượt quá khoảng da bình thường mới được tính
+      (ám màu: vượt 0,15; sáng tối: vượt nửa khẩu), và áo chỉ nhận một phần của phần vượt đó
+      (80% phần ám, 50% phần sáng tối, tối đa tối đi 0,6 khẩu / sáng lên 0,3 khẩu).
+
+**Việc 3 — hết khựng gần 1 giây khi bấm nút "AI"**
+
+- [x] Gốc: lần đầu mở bảng AI trong mỗi phiên, app tính mã kiểm tra của các file model (file
+      lớn hàng trăm MB) ngay trên luồng giao diện. Nay việc đó chạy ở luồng nền; bảng AI mở
+      ngay, dòng "Model tùy chỉnh (chưa kiểm định)…" nếu có sẽ hiện sau chừng một giây.
+
+Việc tôi tự quyết (chủ đọc, không vừa ý thì bảo):
+- Tên thanh "Khớp áo với ảnh"; mức mặc định 100 khi mẫu để 0.
+- Mép áo và viền màu được sửa ngay lúc đặt áo chứ không đợi nút: sau khi chủ đã xóa mềm tay
+  chỗ tóc phủ lên áo thì app không nên làm sắc lại các mép chủ vừa xóa.
+- Thanh "Khớp áo với ảnh" không hiện với ảnh không ghép áo (áo khách mặc sẵn vốn đã cùng ánh
+  sáng với ảnh).
+- Áo ghép **không** được thêm vệt sáng tối trái / phải theo hướng đèn (chỉ bóng ngả theo): áo
+  của tiệm chụp đèn đều, thêm vệt dễ thành giả.
+
+Điều chưa chắc / chưa làm:
+- Mép áo sắc đúng bằng file áo ở 100%: nếu chủ thấy hơi "cứng" so với mép người (mép tách
+  nền mềm hơn) thì giảm được (hằng số `MAX_CRISP`, hoặc nhân hệ số cho `crisp`).
+- Áo có viền màu khác chạy sát mép (viền bo 1–2 điểm ảnh): bước khử viền màu lấy màu vải bên
+  trong đè lên 1–3 điểm ảnh ngoài cùng → viền bo rất mảnh có thể bị nhạt. Chưa gặp trong ba
+  file áo đã thử.
+- "Khớp áo với ảnh" dựa trên màu da mặt: da trang điểm đậm / da đã chỉnh hồng hào nhiều có thể
+  bị đọc thành ám màu nhẹ. Vì vậy mới có khoảng "da bình thường" và thanh kéo.
+- File `.iai` đã khớp áo, đóng rồi mở lại: app không còn nhớ áo đã khớp, bấm nút lần nữa sẽ
+  phủ thêm một lần (kéo thanh về 0 trong lượt xem trước để tránh). Chủ đang gộp layer rồi lưu
+  JPEG nên ít gặp; cần thì lưu dấu này vào `.iai`.
+- Chủ kéo thanh về 0 rồi "Áp dụng": lần bấm nút sau thanh lại bật ở mức mặc định.
+- Hướng đèn chưa được nhìn tận mắt trên ảnh khách lệch đèn mạnh (xem trên).
+
+Test: lõi — `core::garment` 8 bài (4 bài mới: mép giữ độ sắc khi phóng 3 lần và nằm đúng chỗ;
+viền sáng của vest lấy lại màu vải; vải trong mờ giữ nguyên; đặt áo trọn từ cổ tới đáy ảnh),
+`core::seam` 7 bài (2 bài mới: đọc hướng đèn từ da — đều / lệch / lệch rất ít / da được chỉnh
+nhẹ / ảnh xám; bóng ngả theo đèn), `core::portrait::correct` (áo nhận ám / tối / đục của ảnh,
+gỡ ra được, ảnh đã sửa hết thì áo giữ nguyên, màu da khác nhau không thành ám màu),
+`core::portrait::clothes` (áo nhận sáng của ảnh đúng một lần dù bị hỏi lại; về 0 là áo cũ),
+`core::ai::retouch` (file model chưa tính mã thì "chưa biết", không đọc file). App —
+`garment_ops` 20 bài (nút bật "Da cổ" + "Khớp áo với ảnh"), 1 bài chạy model thật trong
+`portrait_ops` (áo ấm theo ảnh được làm ấm; thanh ở 0 áo như lúc đặt; sửa tay áo xong bấm nút
+lại: thanh đứng mức cũ, áo không đổi; kéo về 0 là áo lúc đặt), bài bảng (thanh mới chỉ hiện
+khi ảnh mặc áo ghép; nút gửi cả hai mức). Kết quả 07/10: nhóm nhẹ 2011 qua, nhóm
+`app::portrait_ops` chạy từng bài 28 qua, `cargo fmt --check` sạch.
+
+Ảnh xem trước / sau: `tmp\dot40\xem\1-mep-ao-phong-6-lan.png` (mép vai áo phóng 6 lần, ba
+loại áo), `2-vai-va-co-vest.png` (cả vùng cổ + vai vest, phóng 2 lần),
+`3-khop-ao-voi-anh-toi-am-vang.png` (ảnh tôi cố ý làm tối + ám vàng: thanh ở 0 và ở 100).
+
+Lệnh xem ảnh thử: như đợt 36 (`IAI_GARMENT_PROBE` / `_PSD` / `_OUT` / `_PICK` / `_WIDE` /
+`_LAYERS`), thêm `IAI_GARMENT_MATCH=<0..100>` (ra `..__xong.jpg`) và `IAI_GARMENT_NECK`; mỗi áo
+in ra mức phóng và hướng đèn đọc được.
+
+- [ ] Chủ test bản `target\dot40\release\iai.exe` (build 07/10 10:28, code ở commit
+      `501831f`, có `--features canvas-editor-webview`). Build ra thư mục riêng vì lúc build
+      app của chủ đang mở (`target\release\iai.exe` vẫn là bản 06/10 23:26, chưa có đợt
+      40). Chủ test OK thì build lại vào `target\release` và xóa `target\dot40` (2,6 GB).
 
 ### Để sau, chỉ làm khi chủ bảo
 
@@ -777,9 +899,38 @@ Việc có thể làm tiếp (chủ chưa chọn việc nào — hỏi chủ ở
   đã tô) — `neck_found` nay cũng chạy khi kết quả phân tích lấy lại từ lần trước đã có sẵn cổ.
   Thanh của mẫu: `id_photo::ASIDE_KEY` giữ `(PortraitSettings, đã bắt đầu)` trong egui temp,
   hộp thoại trả lại khi `portrait_session` tắt; "Làm ảnh thẻ tự động" bấm giữa chừng dùng mẫu
-  đang để dành (`making_from`). `dress()` và phần xóa áo cũ / tô da còn trong
-  `core/garment.rs`, chỉ probe và test gọi. Probe cổ: ảnh phẳng kèm `<tên>.ao.png` +
-  `<tên>.nguoi.png` (alpha áo, alpha người) ra `xong_<tên>.jpg`.
+  đang để dành (`making_from`). (`dress()` và phần xóa áo cũ / tô da đã gỡ ở đợt 40.) Probe
+  cổ: ảnh phẳng kèm `<tên>.ao.png` + `<tên>.nguoi.png` (alpha áo, alpha người) ra
+  `xong_<tên>.jpg`.
+- **Đợt 40**: `core/garment.rs` còn `Garment` / `Collar` / `Figure { matte, hair }` /
+  `neck_of` / `Placement` / `Cloth` / `Piece` / `Fitting { photo, neck }` (`Fitting` không còn
+  giữ `Figure` và `FaceMarks`). Mép: `without_fringe` (điểm ảnh "sâu" = mọi điểm trong ô 3×3
+  có alpha ≥ `WHOLE` 250; điểm mép lấy trung bình 1/d² của các điểm sâu trong `FRINGE_REACH`
+  3), `edges_of` (alpha biến thiên bao nhiêu trong `EDGE_NEAR` 3 điểm ảnh, qua
+  `EDGE_SPAN` 0,5–0,9; ngoài hai bên và phía trên coi là trong suốt, phía dưới coi như áo chạy
+  tiếp), `crisper(alpha, edge, gain)` = làm dốc quanh 0,5 với `gain = placement.scale` (tối đa
+  `MAX_CRISP` 4) — đã thử gate theo 16 điểm của bicubic và bỏ (cửa sổ quá hẹp, mép ra lởm
+  chởm). Hướng đèn: `seam::lit_from(person, worn)` → (`unit`, `side`); `light_side` so từng
+  cặp điểm da đối xứng qua trục giữa hai đầu cổ áo, trong dải `LIGHT_UP` 1,3 × `LIGHT_ACROSS`
+  0,7 `unit` phía trên đường cổ áo; da = `skin_light` (sáng tuyến tính 0,08–0,9, R/G
+  1,15–3, G/B 1–4); trung vị của hiệu ln độ sáng, `SIDE_LIT` 0,04–0,4, làm tròn 1/8; ít hơn
+  300 cặp → 0. Bóng: các trường `around` / `beside` / tóc đọc lệch `ASIDE` 0,04 × `unit` về
+  phía đèn, `thrown` lệch `THROWN_ASIDE` 0,08; `TOUCH` giữ đối xứng. Khớp sáng / màu:
+  `correct::PhotoLight { veil, gain }` = `left_by(stats, fixes)` (phần `Correction` còn để lại
+  trong ảnh; `GARMENT_CAST` (0,15; 0,8), `GARMENT_EXPOSURE` (0,5; 0,5), `GARMENT_EV`),
+  `at(amount)`, `lay` / `lift` (ngược nhau, kể cả đoạn `eased`), `close_to`;
+  `clothes::GarmentLook { brightness, even, matched, carried }` (`of(settings, light)`,
+  `shows_as`, `sliders`), `LaidGarment::relit(rgba, width, &look, &carries)` = gỡ ánh sáng đang
+  mang → hai thanh sáng → đặt ánh sáng mới; `PortraitSettings.clothes_match`. App:
+  `garment_look(settings, model)` trong `portrait_ops.rs`; `WornGarment.carries` + `start:
+  GarmentLook`; `Relit { base, carries, look, made }` — `garment_relit` trả `(relit, còn
+  nguyên?)`, hết nguyên (áo bị sửa tay) thì layer đang có = gốc mới, vẫn mang
+  `relit.look.carried`, thanh "Khớp" đứng ở `relit.look.matched`; `put_on` xóa `Relit` của
+  layer áo cũ; `retouch_neck(neck, matched)` chỉ đặt `clothes_match` khi áo còn như lúc đặt;
+  `finish_dressed(neck, matched)`, `MATCH_BY_DEFAULT` 100; intent `finish_dressed:
+  Option<(f32, f32)>`. Nút "AI": `retouch::unverified_models()` trả `(danh sách, còn đang
+  tính?)`, chỉ hỏi `model_artifact_known` (không đọc file), file chưa biết thì một luồng nền
+  tính (`MODEL_CHECK_RUNNING`), bảng xin vẽ lại sau 200 ms.
 - **Đợt 38** (`garment_ops.rs`): `photo_to_dress` = tài liệu đầu tiên trong `doc_mru` (trừ file
   nguồn) mà `may_be_dressed`: đang mặc áo, hoặc không quá `MOST_PHOTO_LAYERS` (16) layer,
   không có nhóm, không phải `is_garment_sheet`, không phải file chữ / PDF / nhiều trang. Luật
