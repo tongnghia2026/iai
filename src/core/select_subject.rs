@@ -1,4 +1,9 @@
 // AI-based "Select Subject" using local ONNX background-removal models.
+//
+// A model's session is built once and kept for the next run, whoever asks
+// (the Select Subject button, an ID photo's cut-out): building it reads the
+// whole model file again. What a run needs beside the model itself (several
+// gigabytes for BiRefNet) is given back when the run ends.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -30,6 +35,110 @@ fn block_gpu_for(file_name: &'static str) {
 
 type OrtSession = ort::session::Session;
 
+/// A model's session, kept once it is built.
+struct Kept {
+    file_name: &'static str,
+    session: Arc<Mutex<OrtSession>>,
+    on_gpu: bool,
+}
+
+fn kept_sessions() -> &'static Mutex<Vec<Kept>> {
+    static KEPT: OnceLock<Mutex<Vec<Kept>>> = OnceLock::new();
+    KEPT.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// The session kept for a model file, and whether it runs on the GPU.
+fn kept_session(file_name: &str) -> Option<(Arc<Mutex<OrtSession>>, bool)> {
+    let kept = kept_sessions().lock().ok()?;
+    let found = kept.iter().find(|k| k.file_name == file_name)?;
+    Some((Arc::clone(&found.session), found.on_gpu))
+}
+
+/// Let go of a model's session: it failed, and the next run builds another.
+fn forget_session(file_name: &str) {
+    if let Ok(mut kept) = kept_sessions().lock() {
+        kept.retain(|k| k.file_name != file_name);
+    }
+}
+
+/// The session of the model at `path`: the one kept, or one built now (on the
+/// GPU when `prefer_gpu` and it can be) and kept from here on.
+fn session_for(
+    spec: &ModelSpec,
+    path: &Path,
+    prefer_gpu: bool,
+) -> Result<(Arc<Mutex<OrtSession>>, bool), String> {
+    if let Some(kept) = kept_session(spec.file_name) {
+        return Ok(kept);
+    }
+    let (session, on_gpu) = if prefer_gpu {
+        crate::core::ai::ort_ep::build_session(path, true)?
+    } else {
+        // No memory pattern: with one, a session that is run again sets a
+        // gigabyte more aside than the run needs.
+        let session = OrtSession::builder()
+            .map_err(|e| format!("ORT CPU builder: {e}"))?
+            .with_memory_pattern(false)
+            .map_err(|e| format!("ORT memory pattern: {e}"))?
+            .commit_from_file(path)
+            .map_err(|e| format!("ORT load model CPU: {e}"))?;
+        (session, false)
+    };
+    let session = Arc::new(Mutex::new(session));
+    if let Ok(mut kept) = kept_sessions().lock() {
+        kept.retain(|k| k.file_name != spec.file_name);
+        kept.push(Kept {
+            file_name: spec.file_name,
+            session: Arc::clone(&session),
+            on_gpu,
+        });
+    }
+    Ok((session, on_gpu))
+}
+
+/// Run `spec`'s model on its kept session, over `photo` (its RGBA pixels,
+/// width and height). `loaded` is told once the session is there. A run that
+/// fails on the GPU (a large model out of memory there) is made again on the
+/// CPU, and the model stays off the GPU; a session that fails is not kept.
+/// Returns the mask and whether the GPU made it.
+fn run_kept(
+    spec: ModelSpec,
+    path: &Path,
+    prefer_gpu: bool,
+    (pixels, width, height): (&[u8], u32, u32),
+    people_only: bool,
+    loaded: &dyn Fn(),
+) -> Result<(Vec<u8>, bool), String> {
+    let (session, on_gpu) = session_for(&spec, path, prefer_gpu)?;
+    loaded();
+    let result = run_inference(spec, &session, pixels, width, height, people_only);
+    if result.is_ok() {
+        return result.map(|mask| (mask, on_gpu));
+    }
+    forget_session(spec.file_name);
+    if !on_gpu {
+        return result.map(|mask| (mask, false));
+    }
+    block_gpu_for(spec.file_name);
+    let (session, _) = session_for(&spec, path, false)?;
+    let result = run_inference(spec, &session, pixels, width, height, people_only);
+    if result.is_err() {
+        forget_session(spec.file_name);
+    }
+    result.map(|mask| (mask, false))
+}
+
+/// Options for a run that gives the runtime's working memory back when it
+/// ends: kept, it would stay with the session for as long as that lives.
+fn run_options() -> Result<ort::session::RunOptions, String> {
+    let mut options =
+        ort::session::RunOptions::new().map_err(|e| format!("ORT run options: {e}"))?;
+    options
+        .add_config_entry("memory.enable_memory_arena_shrinkage", "cpu:0")
+        .map_err(|e| format!("ORT run options: {e}"))?;
+    Ok(options)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectSubjectModel {
     BiRefNetTiny,
@@ -46,7 +155,6 @@ struct ModelSpec {
     normalization: Normalization,
     apply_sigmoid: bool,
     soft_mask: bool,
-    cache_session: bool,
     /// Worth trying on DirectML. BiRefNet is not: it fails there (out of
     /// memory or unsupported) and the CPU retry stalls the app for a beat.
     gpu: bool,
@@ -84,7 +192,6 @@ impl SelectSubjectModel {
                 normalization: Normalization::ImageNet,
                 apply_sigmoid: true,
                 soft_mask: true,
-                cache_session: false,
                 gpu: false,
                 kind: SubjectKind::BgRemoval,
             },
@@ -100,7 +207,6 @@ impl SelectSubjectModel {
                 normalization: Normalization::MinusHalf,
                 apply_sigmoid: false,
                 soft_mask: false,
-                cache_session: true,
                 gpu: true,
                 kind: SubjectKind::YoloSeg,
             },
@@ -132,7 +238,7 @@ impl Default for SubjectStatus {
     }
 }
 
-type InferencePayload = (Option<Arc<Mutex<OrtSession>>>, Result<Vec<u8>, String>);
+type InferencePayload = Result<Vec<u8>, String>;
 
 pub struct SelectSubjectEngine {
     pub status: Arc<Mutex<SubjectStatus>>,
@@ -141,7 +247,6 @@ pub struct SelectSubjectEngine {
     /// document even if the user switched tabs while inference ran, so the poll
     /// resolves it by id instead of applying to whatever tab is active now.
     pending_doc_id: Option<u32>,
-    session: Option<Arc<Mutex<OrtSession>>>,
     /// Whether the current session runs on the GPU (DirectML) rather than CPU.
     /// Set by the worker when a session is built; reported to the user so a
     /// strong GPU that is actually being used is visible.
@@ -165,7 +270,6 @@ impl SelectSubjectEngine {
             status: Arc::new(Mutex::new(status)),
             result_rx: None,
             pending_doc_id: None,
-            session: None,
             used_gpu: Arc::new(AtomicBool::new(false)),
             selected_model,
             people_only: false,
@@ -214,7 +318,6 @@ impl SelectSubjectEngine {
             return true;
         }
         self.selected_model = model;
-        self.session = None;
         self.result_rx = None;
         self.pending_doc_id = None;
         self.refresh_status_from_disk();
@@ -268,14 +371,6 @@ impl SelectSubjectEngine {
     /// True when the last-built session runs on the GPU (DirectML).
     pub fn used_gpu(&self) -> bool {
         self.used_gpu.load(Ordering::Relaxed)
-    }
-
-    fn load_session_from_path(
-        path: &Path,
-        prefer_gpu: bool,
-    ) -> Result<(Arc<Mutex<OrtSession>>, bool), String> {
-        let (session, used_gpu) = crate::core::ai::ort_ep::build_session(path, prefer_gpu)?;
-        Ok((Arc::new(Mutex::new(session)), used_gpu))
     }
 
     pub fn download_model_async(&self) {
@@ -427,15 +522,9 @@ impl SelectSubjectEngine {
         }
 
         let spec = self.selected_model.spec();
-        let existing_session = if spec.cache_session {
-            self.session.clone()
-        } else {
-            None
-        };
         let model_path = self.model_path();
-        let is_first_load = existing_session.is_none();
-
-        *self.status.lock().unwrap() = if is_first_load {
+        // The model is read into memory only the first time it is asked for.
+        *self.status.lock().unwrap() = if kept_session(spec.file_name).is_none() {
             SubjectStatus::LoadingModel
         } else {
             SubjectStatus::Running
@@ -454,52 +543,19 @@ impl SelectSubjectEngine {
         self.pending_doc_id = Some(doc_id);
 
         std::thread::spawn(move || {
-            // Build the session (GPU when preferred). `on_gpu` is only true for a
-            // freshly built GPU session, which is the only case we retry on CPU.
-            let (mut sess_arc, on_gpu) = if let Some(s) = existing_session {
-                (s, false)
-            } else {
-                match Self::load_session_from_path(&model_path, prefer_gpu) {
-                    Ok((s, gpu)) => {
-                        used_gpu.store(gpu, Ordering::Relaxed);
-                        *status.lock().unwrap() = SubjectStatus::Running;
-                        (s, gpu)
-                    }
-                    Err(e) => {
-                        *status.lock().unwrap() = SubjectStatus::Error(e.clone());
-                        let _ = tx.send((None, Err(e)));
-                        return;
-                    }
-                }
-            };
-
-            let mut result =
-                run_inference(spec, &sess_arc, &pixels, canvas_w, canvas_h, people_only);
-
-            // GPU inference failed (e.g. DirectML OOM on a big model) — rebuild on
-            // CPU, remember to skip the GPU for this model from now on, and retry.
-            if result.is_err() && on_gpu {
-                block_gpu_for(spec.file_name);
-                if let Ok((cpu_sess, _)) = Self::load_session_from_path(&model_path, false) {
-                    used_gpu.store(false, Ordering::Relaxed);
-                    result =
-                        run_inference(spec, &cpu_sess, &pixels, canvas_w, canvas_h, people_only);
-                    sess_arc = cpu_sess;
-                }
-            }
-
-            // Cache the working session (YOLO reuses it) only when it succeeded.
-            let new_session = if is_first_load && spec.cache_session && result.is_ok() {
-                Some(sess_arc.clone())
-            } else {
-                None
-            };
-
+            let loaded = || *status.lock().unwrap() = SubjectStatus::Running;
+            let photo = (pixels.as_slice(), canvas_w, canvas_h);
+            let result = run_kept(spec, &model_path, prefer_gpu, photo, people_only, &loaded).map(
+                |(mask, on_gpu)| {
+                    used_gpu.store(on_gpu, Ordering::Relaxed);
+                    mask
+                },
+            );
             match &result {
                 Ok(_) => *status.lock().unwrap() = SubjectStatus::Ready,
                 Err(e) => *status.lock().unwrap() = SubjectStatus::Error(e.clone()),
             }
-            let _ = tx.send((new_session, result));
+            let _ = tx.send(result);
         });
 
         true
@@ -511,11 +567,8 @@ impl SelectSubjectEngine {
     pub fn poll_result(&mut self) -> Option<(Option<u32>, Result<Vec<u8>, String>)> {
         let rx = self.result_rx.as_ref()?;
         match rx.try_recv() {
-            Ok((new_sess, result)) => {
+            Ok(result) => {
                 self.result_rx = None;
-                if let Some(s) = new_sess {
-                    self.session = Some(s);
-                }
                 Some((self.pending_doc_id.take(), result))
             }
             Err(mpsc::TryRecvError::Empty) => None,
@@ -531,8 +584,9 @@ impl SelectSubjectEngine {
 }
 
 /// Run `model` on `pixels` on the calling thread and return its mask (soft for
-/// BiRefNet). Takes the GPU when `prefer_gpu` and the model runs there, falling back to the CPU the way
-/// `run_async` does.
+/// BiRefNet). Takes the GPU when `prefer_gpu` and the model runs there,
+/// falling back to the CPU the way `run_async` does, on the session that one
+/// keeps too.
 pub fn segment_blocking(
     model: SelectSubjectModel,
     pixels: &[u8],
@@ -549,14 +603,8 @@ pub fn segment_blocking(
         ));
     }
     let prefer_gpu = spec.gpu && prefer_gpu && !gpu_blocked(spec.file_name);
-    let (session, on_gpu) = SelectSubjectEngine::load_session_from_path(&path, prefer_gpu)?;
-    let result = run_inference(spec, &session, pixels, width, height, false);
-    if result.is_err() && on_gpu {
-        block_gpu_for(spec.file_name);
-        let (session, _) = SelectSubjectEngine::load_session_from_path(&path, false)?;
-        return run_inference(spec, &session, pixels, width, height, false);
-    }
-    result
+    let photo = (pixels, width, height);
+    run_kept(spec, &path, prefer_gpu, photo, false, &|| {}).map(|(mask, _)| mask)
 }
 
 fn run_inference(
@@ -617,8 +665,9 @@ fn run_inference(
             .map(|outlet| outlet.name().to_string())
             .unwrap_or_else(|| "input".to_string());
 
+        let options = run_options()?;
         let outputs = sess
-            .run(ort::inputs![input_name.as_str() => tensor])
+            .run_with_options(ort::inputs![input_name.as_str() => tensor], &options)
             .map_err(|e| format!("ORT inference: {e}"))?;
 
         let (_, data) = outputs[0]
@@ -720,8 +769,9 @@ fn run_yolo_seg(
             .first()
             .map(|o| o.name().to_string())
             .unwrap_or_else(|| "images".to_string());
+        let options = run_options()?;
         let outputs = sess
-            .run(ort::inputs![input_name.as_str() => tensor])
+            .run_with_options(ort::inputs![input_name.as_str() => tensor], &options)
             .map_err(|e| format!("ORT inference: {e}"))?;
         let (_, a) = outputs[0]
             .try_extract_tensor::<f32>()
@@ -870,4 +920,105 @@ fn run_yolo_seg(
         .pixels()
         .map(|p| if p.0[0] >= 128 { 255u8 } else { 0u8 })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A model this machine has, the smaller first; none on a machine that
+    /// has yet to download one.
+    fn installed() -> Option<SelectSubjectModel> {
+        [
+            SelectSubjectModel::Yolo11Seg,
+            SelectSubjectModel::BiRefNetTiny,
+        ]
+        .into_iter()
+        .find(|model| SelectSubjectEngine::model_path_for(*model).is_file())
+    }
+
+    #[test]
+    fn a_models_session_is_built_once_and_kept_until_it_fails() {
+        let Some(model) = installed() else {
+            return;
+        };
+        let (spec, path) = (model.spec(), SelectSubjectEngine::model_path_for(model));
+        forget_session(spec.file_name);
+        assert!(kept_session(spec.file_name).is_none());
+        let (first, on_gpu) = session_for(&spec, &path, false).unwrap();
+        assert!(!on_gpu);
+        // Asked again, by whoever, it is the same session: nothing is read.
+        let (again, _) = session_for(&spec, &path, false).unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        assert!(kept_session(spec.file_name).is_some_and(|(kept, _)| Arc::ptr_eq(&kept, &first)));
+        // A run on it works, and leaves it kept.
+        let (w, h) = (64u32, 48u32);
+        let photo: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 251) as u8, 90, 60, 255])
+            .collect();
+        let mask = segment_blocking(model, &photo, w, h, false).unwrap();
+        assert_eq!(mask.len(), (w * h) as usize);
+        assert!(kept_session(spec.file_name).is_some_and(|(kept, _)| Arc::ptr_eq(&kept, &first)));
+        // One that failed is let go of, and the next run builds another.
+        forget_session(spec.file_name);
+        let (rebuilt, _) = session_for(&spec, &path, false).unwrap();
+        assert!(!Arc::ptr_eq(&first, &rebuilt));
+        forget_session(spec.file_name);
+    }
+
+    #[cfg(windows)]
+    fn held_gb() -> (f64, f64) {
+        use windows_sys::Win32::System::ProcessStatus::{
+            K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+        let mut mine: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
+        unsafe {
+            K32GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                &mut mine as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS,
+                std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            );
+        }
+        (
+            mine.PrivateUsage as f64 / GB,
+            mine.PeakPagefileUsage as f64 / GB,
+        )
+    }
+
+    /// Opt-in: IAI_SUBJECT_PROBE is a photo. Cuts its subject out with
+    /// BiRefNet three times, as the app does, and says how long each took and
+    /// what memory the process holds after it. IAI_SUBJECT_PAUSE is seconds
+    /// to wait between the runs (run back to back, the later ones are slowed
+    /// by the processor's own limits, not by the session).
+    #[test]
+    #[ignore]
+    #[cfg(windows)]
+    fn probe_session_reuse() {
+        let Ok(photo) = std::env::var("IAI_SUBJECT_PROBE") else {
+            return;
+        };
+        let image = image::open(&photo).unwrap().to_rgba8();
+        let (w, h) = image.dimensions();
+        let pixels = image.into_raw();
+        let model = SelectSubjectModel::BiRefNetTiny;
+        let pause = std::env::var("IAI_SUBJECT_PAUSE")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        for run in 1..=3 {
+            if run > 1 {
+                std::thread::sleep(std::time::Duration::from_secs(pause));
+            }
+            let started = std::time::Instant::now();
+            let mask = segment_blocking(model, &pixels, w, h, false).unwrap();
+            let on = mask.iter().filter(|m| **m >= 128).count();
+            let (held, peak) = held_gb();
+            println!(
+                "run {run}: {} ms, {on} pixels on; holds {held:.2} GB (peak {peak:.2} GB)",
+                started.elapsed().as_millis()
+            );
+        }
+    }
 }
