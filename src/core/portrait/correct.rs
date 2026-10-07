@@ -4,6 +4,10 @@
 //! the scene), the exposure off the skin's brightness, and the haze off the
 //! photo's darkest pixels; all three are baked into one LUT for the whole
 //! layer.
+//!
+//! [`PhotoLight`] is the same measure turned round: what the photo's light
+//! still holds of the three, laid on a garment that was shot elsewhere so
+//! that it looks worn in this photo.
 
 use rayon::prelude::*;
 
@@ -35,6 +39,15 @@ const HAZE_CONTRAST: f32 = 0.25;
 const WARMTH_RANGE: f32 = 0.22;
 /// Above this (linear) a brightened channel is eased toward white.
 const KNEE: f32 = 0.8;
+/// Skin of another tone reads as skin lit this much more or less (stops):
+/// only what is past it is taken for the light's. A garment is given this
+/// share of that, and this much at most.
+const GARMENT_EXPOSURE: (f32, f32) = (0.5, 0.5);
+const GARMENT_EV: (f32, f32) = (-0.6, 0.3);
+/// Skin's own tone reads as a cast of up to this much (ln units): only what
+/// is past it is taken for the light's, and this share of that is laid on a
+/// garment.
+const GARMENT_CAST: (f32, f32) = (0.15, 0.8);
 
 fn luminance(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
@@ -225,15 +238,119 @@ impl Correction {
             let v = ((srgb_to_linear(c[i]) - self.veil[i]) / (1.0 - self.veil[i])).max(0.0);
             // A brightened channel eases into white instead of clipping; a
             // blown white stays white whatever the balance.
-            let top = self.gain[i];
-            let mut v = v * top;
-            if top > 1.0 && v > KNEE {
-                let over = v - KNEE;
-                let k = 1.0 / (1.0 - KNEE) - 1.0 / (top - KNEE);
-                v = KNEE + over / (1.0 + k * over);
-            }
+            let v = eased(v * self.gain[i], self.gain[i]);
             let x = linear_to_srgb(v).clamp(0.0, 1.0);
             x + self.contrast * x * (1.0 - x) * (2.0 * x - 1.0)
+        })
+    }
+}
+
+/// A channel brightened `top` times (more than once), eased into white from
+/// `KNEE` up instead of clipping.
+fn eased(v: f32, top: f32) -> f32 {
+    if top <= 1.0 || v <= KNEE {
+        return v;
+    }
+    let over = v - KNEE;
+    let k = 1.0 / (1.0 - KNEE) - 1.0 / (top - KNEE);
+    KNEE + over / (1.0 + k * over)
+}
+
+/// The light of a photo as a garment shot in clean, even light must take it
+/// to look worn there: the photo's cast, part of its exposure, and the veil
+/// over its blacks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhotoLight {
+    veil: [f32; 3],
+    gain: [f32; 3],
+}
+
+impl PhotoLight {
+    /// Clean, even light: a garment stays as it is.
+    pub const NONE: Self = Self {
+        veil: [0.0; 3],
+        gain: [1.0; 3],
+    };
+
+    /// What `fixes` leave in the photo of the light measured in `stats`:
+    /// all of it with none, and whatever "Ấm / lạnh" adds.
+    pub fn left_by(stats: &LightStats, fixes: Option<&Fixes>) -> Self {
+        let none = Fixes {
+            cast: 0.0,
+            warmth: 0.0,
+            exposure: 0.0,
+            haze: 0.0,
+        };
+        let fixes = fixes.unwrap_or(&none);
+        let kept = 1.0 - fixes.cast.clamp(0.0, 1.0);
+        let warmth = fixes.warmth.clamp(-1.0, 1.0) * WARMTH_RANGE;
+        let cast = stats.cast().map(|v| v * kept);
+        let size = cast[0].hypot(cast[1]);
+        let past = (size - GARMENT_CAST.0).max(0.0) * GARMENT_CAST.1 / size.max(1e-6);
+        let tint = [
+            (cast[0] * past + warmth).exp(),
+            1.0,
+            (cast[1] * past - warmth).exp(),
+        ];
+        let norm = luminance(tint);
+        // How far the skin is from well lit once the photo is corrected.
+        let fixed = Correction::new(stats, fixes);
+        let ev = stats.skin.map_or(0.0, |skin| {
+            let lit: [f32; 3] = std::array::from_fn(|c| {
+                ((skin[c] - fixed.veil[c]) / (1.0 - fixed.veil[c])).max(0.0) * fixed.gain[c]
+            });
+            let off = (luminance(lit).max(1e-3) / SKIN_LUMINANCE)
+                .log2()
+                .clamp(-EV_RANGE.1, -EV_RANGE.0);
+            let past = (off.abs() - GARMENT_EXPOSURE.0).max(0.0) * off.signum();
+            (past * GARMENT_EXPOSURE.1).clamp(GARMENT_EV.0, GARMENT_EV.1)
+        });
+        Self {
+            veil: std::array::from_fn(|c| stats.veil[c] - fixed.veil[c]),
+            gain: tint.map(|g| g / norm * 2f32.powf(ev)),
+        }
+    }
+
+    /// This light at `amount` (0..1) of itself.
+    pub fn at(&self, amount: f32) -> Self {
+        let amount = amount.clamp(0.0, 1.0);
+        Self {
+            veil: self.veil.map(|v| v * amount),
+            gain: self.gain.map(|g| g.powf(amount)),
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        *self == Self::NONE
+    }
+
+    /// Whether a garment in this light shows as it does in `other`: skin
+    /// retouched a little is read a little differently, and no one sees it.
+    pub fn close_to(&self, other: &Self) -> bool {
+        (0..3).all(|c| {
+            (self.veil[c] - other.veil[c]).abs() < 0.002
+                && (self.gain[c] / other.gain[c]).ln().abs() < 0.01
+        })
+    }
+
+    /// A colour of the garment as this light shows it. sRGB 0..1 in and out.
+    pub fn lay(&self, c: [f32; 3]) -> [f32; 3] {
+        std::array::from_fn(|i| {
+            let v = eased(srgb_to_linear(c[i]) * self.gain[i], self.gain[i]).min(1.0);
+            linear_to_srgb(self.veil[i] + (1.0 - self.veil[i]) * v).clamp(0.0, 1.0)
+        })
+    }
+
+    /// A colour this light shows, as it was before: `lay` undone.
+    pub fn lift(&self, c: [f32; 3]) -> [f32; 3] {
+        std::array::from_fn(|i| {
+            let (veil, top) = (self.veil[i], self.gain[i]);
+            let mut v = ((srgb_to_linear(c[i]) - veil) / (1.0 - veil)).max(0.0);
+            if top > 1.0 && v > KNEE {
+                let k = 1.0 / (1.0 - KNEE) - 1.0 / (top - KNEE);
+                v = KNEE + (v - KNEE) / (1.0 - k * (v - KNEE)).max(1e-3);
+            }
+            linear_to_srgb(v / top).clamp(0.0, 1.0)
         })
     }
 }
@@ -399,5 +516,57 @@ mod tests {
         let (warm, cool) = (lut(1.0), lut(-1.0));
         assert!(warm[0] > 134.0 && warm[2] < 122.0, "{warm:?}");
         assert!(cool[0] < 122.0 && cool[2] > 134.0, "{cool:?}");
+    }
+
+    #[test]
+    fn a_garment_takes_the_light_the_photo_still_holds() {
+        // A yellow lamp over dim skin, and a veil over the blacks.
+        let mut lamp = stats([1.0, 1.0, 0.7]);
+        lamp.skin = lamp.skin.map(|s| s.map(|v| v * 0.45));
+        lamp.veil = [0.02; 3];
+        let light = PhotoLight::left_by(&lamp, None);
+        // A white shirt goes yellow and dimmer, a black jacket less black.
+        let white = light.lay([0.95; 3]);
+        assert!(white[2] < white[0] - 0.02, "{white:?}");
+        assert!(white[1] < 0.93, "{white:?}");
+        let black = light.lay([0.0; 3]);
+        assert!(black.iter().all(|&v| v > 0.1), "{black:?}");
+        // Half of it is between the two.
+        let half = light.at(0.5).lay([0.95; 3]);
+        assert!(half[2] > white[2] && half[2] < 0.95, "{half:?}");
+        assert!(light.at(0.0).is_none());
+        // Lifted off, the colours are what they were.
+        for colour in [[0.95f32; 3], [0.5, 0.3, 0.2], [0.1; 3]] {
+            let back = light.lift(light.lay(colour));
+            for c in 0..3 {
+                assert!((back[c] - colour[c]).abs() < 0.01, "{colour:?} {back:?}");
+            }
+        }
+        // A photo corrected in full holds none of it: the garment stays.
+        let fixes = Fixes {
+            cast: 1.0,
+            warmth: 0.0,
+            exposure: 1.0,
+            haze: 1.0,
+        };
+        let left = PhotoLight::left_by(&lamp, Some(&fixes)).lay([0.95; 3]);
+        assert!(left.iter().all(|&v| (v - 0.95).abs() < 0.03), "{left:?}");
+        // Skin of another tone under clean light is no cast: white stays white.
+        for skin in [[0.87f32, 0.64, 0.55], [0.75, 0.41, 0.29]] {
+            let toned = LightStats {
+                skin: Some(skin),
+                veil: [0.0; 3],
+            };
+            let shirt = PhotoLight::left_by(&toned, None).lay([0.9; 3]);
+            let spread = shirt.iter().cloned().fold(f32::MIN, f32::max)
+                - shirt.iter().cloned().fold(f32::MAX, f32::min);
+            assert!(spread < 0.006, "{skin:?}: {shirt:?}");
+            assert!((shirt[1] - 0.9).abs() < 0.02, "{skin:?}: {shirt:?}");
+        }
+        // Bright skin makes a white shirt no greyer and does not burn it out.
+        let mut bright = stats([1.0; 3]);
+        bright.skin = bright.skin.map(|s| s.map(|v| v * 1.6));
+        let shirt = PhotoLight::left_by(&bright, None).lay([0.97; 3]);
+        assert!(shirt.iter().all(|&v| v > 0.96 && v < 1.0), "{shirt:?}");
     }
 }

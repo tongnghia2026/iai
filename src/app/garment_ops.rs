@@ -21,9 +21,10 @@
 //! (the person, old clothes gone, over the layers it stood for, hidden) and
 //! "Tóc trên áo". They are still known by those layers.
 //!
-//! "Sáng áo" and "Đều sáng áo" of Chỉnh chân dung relight the garment's
-//! layer. What it was before they did is kept here ([`Relit`]), so the
-//! sliders can be moved again without the garment wearing out.
+//! "Sáng áo", "Đều sáng áo" and "Khớp áo với ảnh" of Chỉnh chân dung relight
+//! the garment's layer. What it was before they did is kept here
+//! ([`Relit`]), so the sliders can be moved again without the garment
+//! wearing out, and the photo's light is never laid on it twice.
 //!
 //! The box also opens the shop's sheets ("Mở file áo") and goes back to the
 //! one a garment came from ("Đổi áo khác"). A garment taken there goes on
@@ -43,7 +44,7 @@ use crate::core::canvas::Canvas;
 use crate::core::command::LayerStructureCommand;
 use crate::core::document::DocumentId;
 use crate::core::garment::{Collar, Fitting, Garment, Piece};
-use crate::core::portrait::PortraitSettings;
+use crate::core::portrait::{GarmentLook, PhotoLight, PortraitSettings};
 use crate::core::tile::TileMap;
 use crate::tools::ToolId;
 
@@ -56,6 +57,8 @@ const SEAM_STEP: &str = "Viền áo";
 /// "Da cổ" of the retouch that finishes a dressed photo, when the sliders
 /// asked with it have none.
 const NECK_BY_DEFAULT: f32 = 60.0;
+/// "Khớp áo với ảnh" of that retouch, likewise.
+const MATCH_BY_DEFAULT: f32 = 100.0;
 const UNDRESS_STEP: &str = "Bỏ áo";
 /// The longer side of the garment's picture in the box.
 const THUMB: u32 = 128;
@@ -159,13 +162,15 @@ struct Lying {
     tiles: u64,
 }
 
-/// A garment's layer before "Sáng áo" and "Đều sáng áo" changed it, with the
-/// sliders that made what it holds now (`made`, its tiles' content hash). A
-/// layer worked on since (moved, scaled, painted) is no longer that: it is
-/// relit from what it has become.
+/// A garment's layer before its light sliders changed it, with the look
+/// that made what it holds now (`made`, its tiles' content hash). A layer
+/// worked on since (moved, scaled, painted) is no longer that: it is relit
+/// from what it has become, which still holds the photo's light of `look`.
 pub(in crate::app) struct Relit {
     pub base: TileMap,
-    pub look: (f32, f32),
+    /// The photo's light `base` itself holds, from a look before that.
+    pub carries: PhotoLight,
+    pub look: GarmentLook,
     pub made: u64,
 }
 
@@ -357,9 +362,13 @@ impl App {
         })
     }
 
-    /// What the garment in `layer` of `doc_id` was before it was relit, if
-    /// its layer still holds what the relight made.
-    pub(in crate::app) fn garment_relit(&self, doc_id: DocumentId, layer: u32) -> Option<&Relit> {
+    /// What the garment in `layer` of `doc_id` was before it was relit, and
+    /// whether its layer still holds what the relight made.
+    pub(in crate::app) fn garment_relit(
+        &self,
+        doc_id: DocumentId,
+        layer: u32,
+    ) -> Option<(&Relit, bool)> {
         let made = self
             .docs
             .documents
@@ -372,11 +381,8 @@ impl App {
             .find(|l| l.id == layer)?
             .tiles
             .content_hash();
-        self.shell
-            .garment
-            .relit
-            .get(&(doc_id, layer))
-            .filter(|relit| relit.made == made)
+        let relit = self.shell.garment.relit.get(&(doc_id, layer))?;
+        Some((relit, relit.made == made))
     }
 
     /// Keep what a garment was before its relight, or forget it (`None`:
@@ -877,8 +883,7 @@ impl App {
                     .set("Ảnh đã đổi trong lúc mặc áo — kéo áo vào lại", true);
             }
             Ok((fitting, piece)) => {
-                let size = (fitting.figure.width, fitting.figure.height);
-                self.shell.garment.fitting = Some((job.doc_id, size, fitting));
+                self.shell.garment.fitting = Some((job.doc_id, fitting.photo, fitting));
                 self.put_on(job.doc_id, piece, job.retouch);
             }
             Err(e) => {
@@ -947,6 +952,9 @@ impl App {
         );
         let session = &mut self.shell.garment;
         session.laid.insert(doc_id, garment);
+        session
+            .relit
+            .retain(|(doc, layer), _| *doc != doc_id || !old.contains(layer));
         // The shade is asked for once the garment lies as the owner wants.
         session.shaded.remove(&doc_id);
         self.id_photo_took(doc_id, before, taken, after);
@@ -1180,9 +1188,10 @@ impl App {
     /// of the active document right by hand. The shade between the garment
     /// and the person is made again from the layers as they are, and a
     /// retouch of the person as they show starts with only "Da cổ" on (at
-    /// `neck`, or the usual when that is none): it is looked at and applied
-    /// like any other.
-    pub(crate) fn finish_dressed(&mut self, neck: f32) {
+    /// `neck`, or the usual when that is none) and the garment in the
+    /// photo's light ("Khớp áo với ảnh" at `matched`, likewise): it is
+    /// looked at and applied like any other.
+    pub(crate) fn finish_dressed(&mut self, neck: f32, matched: f32) {
         let idx = self.docs.active_doc_idx;
         let doc_id = self.docs.documents[idx].id;
         if self.shell.garment.job.is_some()
@@ -1195,9 +1204,14 @@ impl App {
         self.sync_brush_gpu_to_cpu();
         self.fit_seam(idx, false);
         let neck = if neck > 0.0 { neck } else { NECK_BY_DEFAULT };
-        match self.retouch_neck(neck) {
+        let matched = if matched > 0.0 {
+            matched
+        } else {
+            MATCH_BY_DEFAULT
+        };
+        match self.retouch_neck(neck, matched) {
             Ok(()) => self.shell.garment.set(
-                "Đã làm lại viền áo. Đang làm da cổ — xem trên ảnh; chỉnh thanh Da cổ bên ô Chân dung nếu cần, vừa ý thì bấm Áp dụng",
+                "Đã làm lại viền áo. Đang làm da cổ và khớp sáng, màu áo với ảnh — xem trên ảnh; chỉnh thanh Da cổ, Khớp áo với ảnh bên ô Chân dung nếu cần, vừa ý thì bấm Áp dụng",
                 false,
             ),
             Err(e) => self
@@ -1331,8 +1345,6 @@ mod tests {
     fn photo() -> (Canvas, Fitting) {
         let (w, h) = (400usize, 600usize);
         let mut matte = vec![0u8; w * h];
-        let mut skin = vec![0u8; w * h];
-        let mut other = vec![0u8; w * h];
         let mut person = vec![0u8; w * h * 4];
         for y in 0..h {
             for x in 0..w {
@@ -1342,10 +1354,10 @@ mod tests {
                     || ((300..360).contains(&y) && from_axis < 40);
                 let dressed = y >= 360 && from_axis < 40 + (y as i32 - 360) * 3;
                 if bare {
-                    (matte[i], skin[i]) = (255, 255);
+                    matte[i] = 255;
                     person[i * 4..i * 4 + 4].copy_from_slice(&[220, 170, 140, 255]);
                 } else if dressed {
-                    (matte[i], other[i]) = (255, 255);
+                    matte[i] = 255;
                     person[i * 4..i * 4 + 4].copy_from_slice(&[200, 0, 0, 255]);
                 }
             }
@@ -1370,8 +1382,6 @@ mod tests {
             height: h as u32,
             matte,
             hair: vec![0u8; w * h],
-            skin,
-            other,
         };
         let face = FaceMarks {
             eyes: [200.0, 190.0],
@@ -1381,8 +1391,11 @@ mod tests {
             tilt: 0.0,
             width: 140.0,
         };
-        let neck = neck_of(&figure, &face);
-        (canvas, Fitting { figure, face, neck })
+        let fitting = Fitting {
+            photo: (w as u32, h as u32),
+            neck: neck_of(&figure, &face),
+        };
+        (canvas, fitting)
     }
 
     /// A sheet 600x400 on green with one shirt on it ("Layer 23", the active
@@ -1880,7 +1893,7 @@ mod tests {
         stack.active_idx = garment;
         let steps = app.docs.documents[0].canvas.undo_count();
 
-        app.finish_dressed(0.0);
+        app.finish_dressed(0.0, 0.0);
         // The shade is made, a step of its own.
         assert!(shade_at(&app, 184, 400) > 20);
         let canvas = &app.docs.documents[0].canvas;
@@ -1895,6 +1908,7 @@ mod tests {
             session.restore_settings,
             Some(PortraitSettings {
                 neck: NECK_BY_DEFAULT,
+                clothes_match: MATCH_BY_DEFAULT,
                 ..PortraitSettings::NEUTRAL
             })
         );
@@ -1905,7 +1919,7 @@ mod tests {
             state.status
         );
         // While that retouch is under way nothing more is asked.
-        app.finish_dressed(0.0);
+        app.finish_dressed(0.0, 0.0);
         assert_eq!(app.docs.documents[0].canvas.undo_count(), steps + 1);
         app.cancel_portrait();
 
@@ -1928,14 +1942,14 @@ mod tests {
         // Nothing follows that by itself.
         app.poll_garment();
         assert!(shade_at(&app, 184, 400) > 20);
-        app.finish_dressed(35.0);
+        app.finish_dressed(35.0, 0.0);
         assert_eq!(shade_at(&app, 184, 400), 0);
         assert_eq!(app.docs.documents[0].canvas.undo_count(), steps + 2);
         let session = app.shell.portrait.as_ref().unwrap();
         assert_eq!(session.restore_settings.map(|s| s.neck), Some(35.0));
         app.cancel_portrait();
         // Asked once more with nothing changed, the shade is no new step.
-        app.finish_dressed(35.0);
+        app.finish_dressed(35.0, 0.0);
         assert_eq!(app.docs.documents[0].canvas.undo_count(), steps + 2);
         app.cancel_portrait();
     }

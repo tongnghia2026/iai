@@ -17,13 +17,16 @@
 //!
 //! A garment laid on from a shop's sheet is a layer of its own: it is sharp
 //! as it is and no mask is needed to find it. [`LaidGarment`] reads the light
-//! across it and relights the whole of it by the same two sliders.
+//! across it and relights the whole of it by the same two sliders; a third,
+//! "Khớp áo với ảnh", lays the photo's own light on it ([`GarmentLook`]).
 
 use image::imageops::{resize, FilterType};
 use rayon::prelude::*;
 
 use super::analysis::{smoothstep, Clip, FaceModel, PortraitModel};
 use super::blur::blur4;
+use super::correct::PhotoLight;
+use super::effects::PortraitSettings;
 use super::geometry::Region;
 use crate::core::ai::body_parts::{BodyLabels, Segmenter};
 use crate::core::ai::retouch::Upscaler;
@@ -354,9 +357,53 @@ impl ClothesArea {
     }
 }
 
+/// How a garment laid on from a sheet is to look: "Sáng áo" (-100..100) and
+/// "Đều sáng áo" (0..100) as the sliders have them, and what "Khớp áo với
+/// ảnh" (0..100) lays on it of the photo's light.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GarmentLook {
+    pub brightness: f32,
+    pub even: f32,
+    pub matched: f32,
+    /// The photo's light at `matched` of itself: what the garment carries.
+    pub carried: PhotoLight,
+}
+
+impl GarmentLook {
+    /// The garment as the sheet has it.
+    pub const AS_LAID: Self = Self {
+        brightness: 0.0,
+        even: 0.0,
+        matched: 0.0,
+        carried: PhotoLight::NONE,
+    };
+
+    /// What `settings` ask of a garment on a photo in `light`.
+    pub fn of(settings: &PortraitSettings, light: &PhotoLight) -> Self {
+        let matched = settings.clothes_match.clamp(0.0, 100.0);
+        Self {
+            brightness: settings.clothes_brightness,
+            even: settings.clothes_even,
+            matched,
+            carried: light.at(matched / 100.0),
+        }
+    }
+
+    /// Whether the garment shows as it does at `other`.
+    pub fn shows_as(&self, other: &Self) -> bool {
+        (self.brightness, self.even) == (other.brightness, other.even)
+            && self.carried.close_to(&other.carried)
+    }
+
+    /// The three sliders, whatever light they stand for.
+    pub fn sliders(&self) -> (f32, f32, f32) {
+        (self.brightness, self.even, self.matched)
+    }
+}
+
 /// A garment laid on from a sheet, a layer of its own (straight RGBA): the
-/// light across it as it was laid. "Sáng áo" and "Đều sáng áo" relight
-/// every pixel of it that shows.
+/// light across it as it was laid. "Sáng áo", "Đều sáng áo" and "Khớp áo
+/// với ảnh" relight every pixel of it that shows.
 pub struct LaidGarment {
     light: Light,
 }
@@ -381,14 +428,22 @@ impl LaidGarment {
         }
     }
 
-    /// The garment `rgba` (`width` pixels a row, the one that was read)
-    /// made lighter or darker by `brightness` (-100..100) with its light
-    /// evened by `even` (0..100). Alpha stays as it is.
-    pub fn relit(&self, rgba: &[u8], width: u32, brightness: f32, even: f32) -> Vec<u8> {
-        let stops = (brightness / 100.0).clamp(-1.0, 1.0) * BRIGHTNESS_STOPS;
-        let even = (even / 100.0).clamp(0.0, 1.0);
+    /// The garment `rgba` (`width` pixels a row, the one that was read) as
+    /// `look` has it: made lighter or darker with its light evened, then in
+    /// the photo's light. `carries` is the photo's light `rgba` holds from
+    /// a look before: that goes first. Alpha stays as it is.
+    pub fn relit(
+        &self,
+        rgba: &[u8],
+        width: u32,
+        look: &GarmentLook,
+        carries: &PhotoLight,
+    ) -> Vec<u8> {
+        let stops = (look.brightness / 100.0).clamp(-1.0, 1.0) * BRIGHTNESS_STOPS;
+        let even = (look.even / 100.0).clamp(0.0, 1.0);
         let mut out = rgba.to_vec();
-        if width == 0 || (stops == 0.0 && even <= 0.0) {
+        let lights = stops != 0.0 || even > 0.0;
+        if width == 0 || (!lights && look.carried == *carries) {
             return out;
         }
         out.par_chunks_mut(width as usize * 4)
@@ -398,11 +453,19 @@ impl LaidGarment {
                     if px[3] == 0 {
                         continue;
                     }
-                    let gain = self.light.evened(even, x as f32 + 0.5, y as f32 + 0.5);
-                    let c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
-                    let lit = relit(c, gain, stops);
+                    let mut c = [px[0], px[1], px[2]].map(|v| v as f32 / 255.0);
+                    if !carries.is_none() {
+                        c = carries.lift(c);
+                    }
+                    if lights {
+                        let gain = self.light.evened(even, x as f32 + 0.5, y as f32 + 0.5);
+                        c = relit(c, gain, stops);
+                    }
+                    if !look.carried.is_none() {
+                        c = look.carried.lay(c);
+                    }
                     for k in 0..3 {
-                        px[k] = (lit[k] * 255.0).round().clamp(0.0, 255.0) as u8;
+                        px[k] = (c[k] * 255.0).round().clamp(0.0, 255.0) as u8;
                     }
                 }
             });
@@ -847,9 +910,9 @@ mod tests {
             println!("{name}: {w}x{h}, light {:?}", laid.light);
             let views = [
                 rgba.clone(),
-                laid.relit(&rgba, w, -60.0, 0.0),
-                laid.relit(&rgba, w, 60.0, 0.0),
-                laid.relit(&rgba, w, 0.0, 100.0),
+                laid.relit(&rgba, w, &lit(-60.0, 0.0), &PhotoLight::NONE),
+                laid.relit(&rgba, w, &lit(60.0, 0.0), &PhotoLight::NONE),
+                laid.relit(&rgba, w, &lit(0.0, 100.0), &PhotoLight::NONE),
             ];
             let mut sheet = image::RgbImage::from_pixel((w + 8) * 4, h, image::Rgb([255; 3]));
             for (k, view) in views.iter().enumerate() {
@@ -866,6 +929,15 @@ mod tests {
             sheet
                 .save(dir.join(format!("light_{}.jpg", name.trim_end_matches(".png"))))
                 .unwrap();
+        }
+    }
+
+    /// A garment's look with only its two light sliders moved.
+    fn lit(brightness: f32, even: f32) -> GarmentLook {
+        GarmentLook {
+            brightness,
+            even,
+            ..GarmentLook::AS_LAID
         }
     }
 
@@ -887,19 +959,20 @@ mod tests {
             let o = ((y * w + x) * 4) as usize;
             [pixels[o], pixels[o + 1], pixels[o + 2], pixels[o + 3]]
         };
+        let none = PhotoLight::NONE;
         // At rest it is as laid.
-        assert_eq!(laid.relit(&rgba, w, 0.0, 0.0), rgba);
+        assert_eq!(laid.relit(&rgba, w, &GarmentLook::AS_LAID, &none), rgba);
         // Darker: what shows is darker, what does not is as it was.
-        let darker = laid.relit(&rgba, w, -100.0, 0.0);
+        let darker = laid.relit(&rgba, w, &lit(-100.0, 0.0), &none);
         assert!(px(&darker, 120, 80)[0] < px(&rgba, 120, 80)[0] - 40);
         assert_eq!(px(&darker, 120, 80)[3], 255);
         assert_eq!(px(&darker, 5, 5), px(&rgba, 5, 5));
         // Lighter never burns out.
-        let lighter = laid.relit(&rgba, w, 100.0, 0.0);
+        let lighter = laid.relit(&rgba, w, &lit(100.0, 0.0), &none);
         assert!(px(&lighter, 40, 80)[0] > px(&rgba, 40, 80)[0]);
         assert!(px(&lighter, 40, 80)[0] < 255);
         // Evened: the dim side comes up toward the lit one.
-        let evened = laid.relit(&rgba, w, 0.0, 100.0);
+        let evened = laid.relit(&rgba, w, &lit(0.0, 100.0), &none);
         let gap = |pixels: &[u8]| px(pixels, 40, 80)[0] as i32 - px(pixels, 200, 80)[0] as i32;
         assert!(
             gap(&evened) < gap(&rgba) / 2,
@@ -909,9 +982,63 @@ mod tests {
         );
         // A layer that is not what was read is left alone.
         assert_eq!(
-            LaidGarment::read(&rgba[..40], w, h).relit(&rgba, w, 0.0, 0.0),
+            LaidGarment::read(&rgba[..40], w, h).relit(&rgba, w, &GarmentLook::AS_LAID, &none),
             rgba
         );
+    }
+
+    #[test]
+    fn a_garment_takes_the_photos_light_once_however_often_it_is_asked() {
+        use crate::core::portrait::correct::LightStats;
+        let (w, h) = (64u32, 48u32);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let v = 60 + (i % w) as u8 * 3;
+                [v, v, v, if i % w < 4 { 0 } else { 255 }]
+            })
+            .collect();
+        let laid = LaidGarment::read(&rgba, w, h);
+        // A dim photo under a yellow lamp.
+        let stats = LightStats {
+            skin: Some([0.26, 0.15, 0.07]),
+            veil: [0.015; 3],
+        };
+        let light = PhotoLight::left_by(&stats, None);
+        let settings = PortraitSettings {
+            clothes_match: 100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        let look = GarmentLook::of(&settings, &light);
+        let px = |pixels: &[u8], x: u32| {
+            let o = ((20 * w + x) * 4) as usize;
+            [pixels[o], pixels[o + 1], pixels[o + 2], pixels[o + 3]]
+        };
+        let matched = laid.relit(&rgba, w, &look, &PhotoLight::NONE);
+        let (was, is) = (px(&rgba, 50), px(&matched, 50));
+        assert!(is[2] + 6 < is[0], "the lamp's yellow: {is:?}");
+        assert!(is[1] < was[1], "the photo's dimness: {is:?}");
+        assert_eq!(px(&matched, 2), px(&rgba, 2), "what hides stays");
+        // The slider at rest asks nothing of the light.
+        assert_eq!(
+            GarmentLook::of(&PortraitSettings::NEUTRAL, &light),
+            GarmentLook::AS_LAID
+        );
+        // Asked again of the garment that carries it, nothing more is laid;
+        // half of it, and then none, bring the garment back.
+        assert_eq!(laid.relit(&matched, w, &look, &look.carried), matched);
+        let half = GarmentLook::of(
+            &PortraitSettings {
+                clothes_match: 50.0,
+                ..PortraitSettings::NEUTRAL
+            },
+            &light,
+        );
+        let eased = px(&laid.relit(&matched, w, &half, &look.carried), 50);
+        assert!(eased[2] > is[2] && eased[2] < was[2], "{eased:?}");
+        let back = laid.relit(&matched, w, &GarmentLook::AS_LAID, &look.carried);
+        for (a, b) in back.iter().zip(&rgba) {
+            assert!(a.abs_diff(*b) <= 2, "{a} {b}");
+        }
     }
 
     #[test]

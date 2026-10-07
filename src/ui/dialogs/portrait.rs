@@ -1103,17 +1103,28 @@ pub(crate) fn portrait_dialog(ctx: &egui::Context, data: &UiData, actions: &mut 
                             Amount,
                         ),
                     ];
+                    let matched = vec![(
+                        "Khớp áo với ảnh",
+                        &mut s.clothes_match,
+                        "Cho áo ghép ăn theo ánh sáng của ảnh: ảnh ám vàng / xanh thì áo ngả theo, ảnh tối thì áo dịu bớt, ảnh bị đục thì màu đen của áo bớt gắt. 0 = áo giữ nguyên như trong file áo. Chỉ tác động lên áo ghép",
+                        Amount,
+                    )];
                     // A garment laid on from a sheet is sharp as it is, and a
-                    // layer of its own: the two sliders of the light are its.
+                    // layer of its own: the sliders of the light are its.
                     let dressed = data.dialogs.garment_worn;
-                    let clothes_active = (!dressed && at_work(&sharpen)) || at_work(&light);
+                    let clothes_active = (!dressed && at_work(&sharpen))
+                        || at_work(&light)
+                        || (dressed && at_work(&matched));
                     group(ui, shown, &mut next, Group::Clothes, "Áo", clothes_active, |ui| {
                         rows(ui, ready && !dressed, sharpen);
                         rows(ui, ready, light);
                         if dressed {
+                            // Clothes shot with the photo are in its light
+                            // already: only a garment laid on is matched.
+                            rows(ui, ready, matched);
                             note_line(
                                 ui,
-                                "Ảnh đã ghép áo: hai thanh sáng chỉnh áo ghép; áo ghép đã nét sẵn.",
+                                "Ảnh đã ghép áo: các thanh sáng chỉnh áo ghép; áo ghép đã nét sẵn.",
                                 false,
                             );
                         } else if let Some((note, warning)) = &data.dialogs.portrait_clothes {
@@ -1458,6 +1469,7 @@ mod tests {
         let shown = texts(&data);
         assert!(has(&shown, "Áo") && has(&shown, "Nét áo"), "{shown:?}");
         assert!(has(&shown, "Sáng áo") && has(&shown, "Đều sáng áo"));
+        assert!(!has(&shown, "Khớp áo với ảnh"), "{shown:?}");
         assert!(has(&shown, first));
         // The brush paints them too, and says so while they are looked for.
         let finding = "Đang tìm áo…";
@@ -1468,15 +1480,16 @@ mod tests {
         data.dialogs.portrait_clothes = Some((first.to_string(), false));
         assert!(!has(&texts_in(&data, Group::Brush), first));
         data.dialogs.portrait_brush = None;
-        // A garment from a sheet is sharp as it is, and its light is the two
-        // sliders': the group says so.
+        // A garment from a sheet is sharp as it is, and its light is the
+        // sliders': the group says so, and offers to match it to the photo.
         data.dialogs.garment_worn = true;
         let shown = texts(&data);
         assert!(has(
             &shown,
-            "Ảnh đã ghép áo: hai thanh sáng chỉnh áo ghép; áo ghép đã nét sẵn."
+            "Ảnh đã ghép áo: các thanh sáng chỉnh áo ghép; áo ghép đã nét sẵn."
         ));
         assert!(has(&shown, "Sáng áo") && has(&shown, "Đều sáng áo"));
+        assert!(has(&shown, "Khớp áo với ảnh"), "{shown:?}");
         assert!(!has(&shown, first));
     }
 

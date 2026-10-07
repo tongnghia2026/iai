@@ -22,7 +22,8 @@ mod skin_mask;
 pub use analysis::{
     analyze, BrowLayers, Clip, FaceModel, PortraitModel, SkinLayers, TRUSTED_AGREEMENT,
 };
-pub use clothes::{ClothesArea, LaidGarment};
+pub use clothes::{ClothesArea, GarmentLook, LaidGarment};
+pub use correct::PhotoLight;
 pub use effects::{render, render_masks, FaceEdits, PortraitSettings};
 pub use geometry::Region;
 pub use recipe::PortraitRecipe;

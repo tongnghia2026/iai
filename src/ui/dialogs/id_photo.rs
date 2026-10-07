@@ -323,13 +323,13 @@ fn garment_row(
                                 egui::Button::new(FINISH_LABEL),
                             )
                             .on_hover_text(
-                                "Bấm sau khi đã chỉnh tay xong (dời, xoay, nắn áo, Smudge, Eraser…): app nhận lại vùng da cổ và mép áo như ảnh đang có, làm đều màu và thêm vân da cho da cổ tới sát mép áo, làm lại bóng viền áo (layer \"Viền áo\")",
+                                "Bấm sau khi đã chỉnh tay xong (dời, xoay, nắn áo, Smudge, Eraser…): app nhận lại vùng da cổ và mép áo như ảnh đang có, làm đều màu và thêm vân da cho da cổ tới sát mép áo, làm lại bóng viền áo (layer \"Viền áo\", bóng ngả theo hướng đèn của ảnh), và cho áo ăn theo sáng, màu của ảnh (thanh \"Khớp áo với ảnh\" trong menu Áo)",
                             )
                             .clicked()
                     {
                         let usual = making_from(ui.ctx(), settings);
                         set_aside(ui.ctx(), usual);
-                        actions.dialogs.finish_dressed = Some(usual.neck);
+                        actions.dialogs.finish_dressed = Some((usual.neck, usual.clothes_match));
                     }
                     if ui
                         .add_enabled(may_leave, egui::Button::new("Đổi áo khác"))
@@ -750,7 +750,10 @@ mod tests {
         let asked = click(&ctx, &data, &mut settings, text_at(&output, "Chỉnh áo"));
         assert!(asked.dialogs.adjust_garment && asked.dialogs.finish_dressed.is_none());
         let asked = click(&ctx, &data, &mut settings, text_at(&output, FINISH_LABEL));
-        assert_eq!(asked.dialogs.finish_dressed, Some(settings.neck));
+        assert_eq!(
+            asked.dialogs.finish_dressed,
+            Some((settings.neck, settings.clothes_match))
+        );
         assert!(!asked.dialogs.adjust_garment);
         let asked = click(&ctx, &data, &mut settings, text_at(&output, "Bỏ áo"));
         assert_eq!(asked.dialogs.remove_garment, Some(settings));

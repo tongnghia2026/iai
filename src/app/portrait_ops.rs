@@ -19,7 +19,8 @@ use crate::core::layer::Layer;
 use crate::core::portrait::correct;
 use crate::core::portrait::looks::{self, LookLut};
 use crate::core::portrait::{
-    self, FaceEdits, PortraitModel, PortraitRecipe, PortraitSettings, Region,
+    self, FaceEdits, GarmentLook, PhotoLight, PortraitModel, PortraitRecipe, PortraitSettings,
+    Region,
 };
 use crate::core::tile::TileMap;
 use crate::tools::ToolId;
@@ -33,9 +34,9 @@ const RESULT_LAYER: &str = "Chân dung";
 /// detail, and whether bodies are analysed.
 type PreviewKey = (PortraitSettings, Vec<bool>, bool, bool, u64);
 type Rendered = Option<(Region, Vec<u8>)>;
-/// A garment's pixels as relit for the preview, with the sliders ("Sáng áo",
-/// "Đều sáng áo") they were made at.
-type RelitGarment = Option<((f32, f32), Vec<u8>)>;
+/// A garment's pixels as relit for the preview, with the look ("Sáng áo",
+/// "Đều sáng áo", "Khớp áo với ảnh") they were made at.
+type RelitGarment = Option<(GarmentLook, Vec<u8>)>;
 
 const GARMENT_LIGHT_STEP: &str = "Sáng áo";
 
@@ -50,45 +51,48 @@ pub(crate) enum Applied {
     Garment,
 }
 
-/// The garment a dressed photo wears, a layer of its own, while "Sáng áo"
-/// and "Đều sáng áo" relight it.
+/// The garment a dressed photo wears, a layer of its own, while "Sáng áo",
+/// "Đều sáng áo" and "Khớp áo với ảnh" relight it.
 struct WornGarment {
     layer_id: u32,
     /// The layer's tiles when the session took it: put back when the
     /// session is given up.
     original: TileMap,
-    /// The garment before any relight, which the sliders work from, and the
-    /// sliders that made `original` of it.
+    /// The garment before any relight, which the sliders work from, the
+    /// photo's light it holds all the same (from a look before it was last
+    /// worked on by hand), and the look that made `original` of it.
     base_tiles: TileMap,
     base: Arc<Vec<u8>>,
+    carries: PhotoLight,
     size: (u32, u32),
-    start: (f32, f32),
+    start: GarmentLook,
     laid: Arc<portrait::LaidGarment>,
-    /// The sliders the canvas shows the garment at; `None` for `original`.
-    shown: Option<(f32, f32)>,
+    /// The look the canvas shows the garment at; `None` for `original`.
+    shown: Option<GarmentLook>,
 }
 
 impl WornGarment {
     /// The layer's tiles at `look`; `None` when that is what it holds.
-    fn relit(&self, look: (f32, f32)) -> Option<TileMap> {
-        if look == self.start {
+    fn relit(&self, look: GarmentLook) -> Option<TileMap> {
+        if look.shows_as(&self.start) {
             return None;
         }
-        if look == (0.0, 0.0) {
+        if look.shows_as(&GarmentLook::AS_LAID) && self.carries.is_none() {
             return Some(self.base_tiles.clone());
         }
         let (w, h) = self.size;
-        let pixels = self.laid.relit(&self.base, w, look.0, look.1);
+        let pixels = self.laid.relit(&self.base, w, &look, &self.carries);
         Some(TileMap::from_rgba(&pixels, w, h))
     }
 
-    /// `settings` as a session on this garment starts with them: the two
+    /// `settings` as a session on this garment starts with them: the
     /// sliders of its light where the garment stands, "Nét áo" at rest.
     fn starting(&self, settings: PortraitSettings) -> PortraitSettings {
         PortraitSettings {
             clothes_sharpen: 0.0,
-            clothes_brightness: self.start.0,
-            clothes_even: self.start.1,
+            clothes_brightness: self.start.brightness,
+            clothes_even: self.start.even,
+            clothes_match: self.start.matched,
             ..settings
         }
     }
@@ -383,9 +387,20 @@ impl App {
             .find(|l| l.id == layer_id && l.is_raster())?;
         let size = (layer.width, layer.height);
         let original = layer.tiles.clone();
-        let (base_tiles, start) = match self.garment_relit(doc_id, layer_id) {
-            Some(relit) => (relit.base.clone(), relit.look),
-            None => (original.clone(), (0.0, 0.0)),
+        let (base_tiles, carries, start) = match self.garment_relit(doc_id, layer_id) {
+            Some((relit, true)) => (relit.base.clone(), relit.carries, relit.look),
+            // Worked on since: the layer is the garment now, still in the
+            // photo's light it was given.
+            Some((relit, false)) => (
+                original.clone(),
+                relit.look.carried,
+                GarmentLook {
+                    brightness: 0.0,
+                    even: 0.0,
+                    ..relit.look
+                },
+            ),
+            None => (original.clone(), PhotoLight::NONE, GarmentLook::AS_LAID),
         };
         let base = base_tiles.flatten();
         if size.0 == 0 || base.len() != size.0 as usize * size.1 as usize * 4 {
@@ -397,6 +412,7 @@ impl App {
             original,
             base_tiles,
             base: Arc::new(base),
+            carries,
             size,
             start,
             laid: Arc::new(laid),
@@ -438,20 +454,22 @@ impl App {
             shown,
             GARMENT_LIGHT_STEP,
         ) {
-            self.keep_garment_light(doc_id, garment.layer_id, garment.base_tiles, look);
+            let base = (garment.base_tiles, garment.carries);
+            self.keep_garment_light(doc_id, garment.layer_id, base, look);
             if idx == self.docs.active_doc_idx {
                 self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
             }
         }
     }
 
-    /// Note that the garment in `layer` now holds `base` relit at `look`.
+    /// Note that the garment in `layer` now holds `base` (with the photo's
+    /// light that one carries) relit at `look`.
     fn keep_garment_light(
         &mut self,
         doc_id: crate::core::document::DocumentId,
         layer: u32,
-        base: TileMap,
-        look: (f32, f32),
+        (base, carries): (TileMap, PhotoLight),
+        look: GarmentLook,
     ) {
         let made = self
             .docs
@@ -460,15 +478,21 @@ impl App {
             .find(|d| d.id == doc_id)
             .and_then(|d| d.canvas.layer_stack.layers.iter().find(|l| l.id == layer))
             .map(|l| l.tiles.content_hash());
+        let as_laid = look.shows_as(&GarmentLook::AS_LAID) && carries.is_none();
         let relit = made
-            .filter(|_| look != (0.0, 0.0))
-            .map(|made| super::garment_ops::Relit { base, look, made });
+            .filter(|_| !as_laid)
+            .map(|made| super::garment_ops::Relit {
+                base,
+                carries,
+                look,
+                made,
+            });
         self.set_garment_relit(doc_id, layer, relit);
     }
 
     /// A session that let its garment go takes it again once nothing else
-    /// works on it, as the garment now is; the two sliders of its light go
-    /// where it stands.
+    /// works on it, as the garment now is; the sliders of its light go where
+    /// it stands.
     fn take_garment_again(&mut self) {
         let Some(session) = self.shell.portrait.as_ref() else {
             return;
@@ -483,8 +507,12 @@ impl App {
             return;
         };
         if let Some((settings, _)) = session.asked {
-            let look = (settings.clothes_brightness, settings.clothes_even);
-            if look != garment.start || settings.clothes_sharpen != 0.0 {
+            let sliders = (
+                settings.clothes_brightness,
+                settings.clothes_even,
+                settings.clothes_match,
+            );
+            if sliders != garment.start.sliders() || settings.clothes_sharpen != 0.0 {
                 session.restore_settings = Some(garment.starting(settings));
             }
         }
@@ -528,21 +556,26 @@ impl App {
     /// Start a retouch of the person of a dressed photo with only "Da cổ" on,
     /// at `neck`: what finishes the photo once its garment lies right. A
     /// "Chân dung" layer still as its sliders made it is reopened with them,
-    /// its "Da cổ" at `neck` at least.
-    pub(in crate::app) fn retouch_neck(&mut self, neck: f32) -> Result<(), String> {
+    /// its "Da cổ" at `neck` at least. The garment takes the photo's light
+    /// at `matched`, unless it has been given a look of its own before.
+    pub(in crate::app) fn retouch_neck(&mut self, neck: f32, matched: f32) -> Result<(), String> {
         self.aim_at_the_dressed_person();
         let only = PortraitSettings {
             neck,
             ..PortraitSettings::NEUTRAL
         };
         let started = self.begin_portrait_from(Some(only));
-        if let Some(settings) = self
-            .shell
-            .portrait
-            .as_mut()
-            .and_then(|session| session.restore_settings.as_mut())
-        {
-            settings.neck = settings.neck.max(neck);
+        if let Some(session) = self.shell.portrait.as_mut() {
+            let as_laid = session
+                .garment
+                .as_ref()
+                .is_some_and(|g| g.start == GarmentLook::AS_LAID && g.carries.is_none());
+            if let Some(settings) = session.restore_settings.as_mut() {
+                settings.neck = settings.neck.max(neck);
+                if as_laid {
+                    settings.clothes_match = matched;
+                }
+            }
         }
         self.shell.portrait_error = started.as_ref().err().cloned();
         started
@@ -976,12 +1009,19 @@ impl App {
         }
         // The garment worn takes the clothes' light, when that is not what
         // the canvas shows of it already; the person's layer none of it.
-        let look = (settings.clothes_brightness, settings.clothes_even);
+        let look = garment_look(&settings, &model);
         let relight = session
             .garment
             .as_ref()
-            .filter(|g| !masks && look != g.start && g.shown != Some(look))
-            .map(|g| (Arc::clone(&g.base), Arc::clone(&g.laid), g.size.0));
+            .filter(|g| !masks && !look.shows_as(&g.start) && g.shown != Some(look))
+            .map(|g| {
+                (
+                    Arc::clone(&g.base),
+                    Arc::clone(&g.laid),
+                    g.size.0,
+                    g.carries,
+                )
+            });
         let settings = if session.dressed {
             settings.without_clothes()
         } else {
@@ -992,8 +1032,9 @@ impl App {
         let (w, h) = (session.w, session.h);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let garment =
-                relight.map(|(base, laid, width)| (look, laid.relit(&base, width, look.0, look.1)));
+            let garment = relight.map(|(base, laid, width, carries)| {
+                (look, laid.relit(&base, width, &look, &carries))
+            });
             let rendered = if masks {
                 portrait::render_masks(&src, &model, &settings, &enabled, &edits)
             } else {
@@ -1050,9 +1091,12 @@ impl App {
         // found it when the preview is off, the areas are tinted or the
         // sliders are back where it stands.
         let (settings, preview, masks) = (key.0, key.2, key.3);
-        let look = (settings.clothes_brightness, settings.clothes_even);
+        let look = session
+            .model
+            .as_ref()
+            .map(|model| garment_look(&settings, model));
         let garment = session.garment.as_mut().and_then(|g| {
-            let target = (preview && !masks && look != g.start).then_some(look);
+            let target = look.filter(|look| preview && !masks && !look.shows_as(&g.start));
             if target == g.shown {
                 return None;
             }
@@ -1227,12 +1271,12 @@ impl App {
             .as_ref()
             .and_then(|s| s.garment.as_ref())
             .map(|g| {
-                let look = (settings.clothes_brightness, settings.clothes_even);
+                let look = garment_look(&settings, &model);
                 let relit = g.relit(look);
                 (
                     g.layer_id,
                     g.original.clone(),
-                    g.base_tiles.clone(),
+                    (g.base_tiles.clone(), g.carries),
                     look,
                     relit,
                 )
@@ -1693,6 +1737,14 @@ impl App {
 
 /// Analyse the bodies below `model`'s faces on a worker; the receiver hears
 /// once the model holds them.
+/// How `settings` have a garment laid on the photo `model` was read from
+/// look: its light sliders, and the photo's light as the corrections of
+/// "Sửa màu & sáng" leave it.
+fn garment_look(settings: &PortraitSettings, model: &PortraitModel) -> GarmentLook {
+    let light = PhotoLight::left_by(&model.light, settings.fixes().as_ref());
+    GarmentLook::of(settings, &light)
+}
+
 fn start_body_analysis(src: &Arc<Vec<u8>>, model: &Arc<PortraitModel>) -> Receiver<()> {
     let (tx, rx) = mpsc::channel();
     let (src, model) = (Arc::clone(src), Arc::clone(model));
@@ -3615,7 +3667,12 @@ mod tests {
         app.set_portrait_preview(half, faces.clone(), true, false);
         wait_for_preview(&mut app);
         let gh = laid.len() as u32 / 4 / gw;
-        let expected = portrait::LaidGarment::read(&laid, gw, gh).relit(&laid, gw, -50.0, 0.0);
+        let look = GarmentLook {
+            brightness: -50.0,
+            ..GarmentLook::AS_LAID
+        };
+        let expected =
+            portrait::LaidGarment::read(&laid, gw, gh).relit(&laid, gw, &look, &PhotoLight::NONE);
         let o = ((40 * gw + 60) * 4) as usize;
         assert_eq!(at(&app)[..], expected[o..o + 4]);
         assert_eq!(
@@ -3698,7 +3755,7 @@ mod tests {
         // The retouch that finishes a dressed photo: only "Da cổ" is on.
         // Returns the analysis and the neck as that retouch reads it.
         let finish = |app: &mut App| -> (Arc<PortraitModel>, Vec<u8>) {
-            app.retouch_neck(60.0).unwrap();
+            app.retouch_neck(60.0, 0.0).unwrap();
             let started = Instant::now();
             let waited = |what: &str| {
                 assert!(started.elapsed() < Duration::from_secs(240), "{what} hung");
@@ -3789,8 +3846,8 @@ mod tests {
         app.set_portrait_preview(darker, faces.clone(), true, false);
         let session = app.shell.portrait.as_ref().unwrap();
         assert_eq!(
-            session.garment.as_ref().map(|g| g.start),
-            Some((-100.0, 0.0))
+            session.garment.as_ref().map(|g| g.start.sliders()),
+            Some((-100.0, 0.0, 0.0))
         );
         app.cancel_portrait();
         assert_eq!(at(&app), shown);
@@ -3803,6 +3860,80 @@ mod tests {
         analysed(&mut app).unwrap();
         let start = app.portrait_restore().1.unwrap();
         assert_eq!((start.clothes_brightness, start.clothes_even), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_garment_takes_the_photos_light_once_whatever_is_done_to_it_after() {
+        let Some((mut app, garment, _, _)) = dressed_customer() else {
+            return;
+        };
+        let model = analysed(&mut app).unwrap();
+        let faces = vec![true; model.faces.len()];
+        let at = |app: &App| garment_px(app, garment, 60, 40);
+        let as_laid = at(&app);
+        // The photo is made warmer, and the garment is to take its light.
+        let warm = PortraitSettings {
+            fix_warmth: 100.0,
+            clothes_match: 100.0,
+            ..PortraitSettings::NEUTRAL
+        };
+        app.set_portrait_preview(warm, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        let matched = at(&app);
+        assert!(
+            matched[0] > as_laid[0] && matched[2] < as_laid[2],
+            "{as_laid:?} {matched:?}"
+        );
+        assert_eq!(matched[3], 255);
+        // With the slider at rest the garment is as laid, whatever the photo.
+        let unmatched = PortraitSettings {
+            clothes_match: 0.0,
+            ..warm
+        };
+        app.set_portrait_preview(unmatched, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        assert_eq!(at(&app), as_laid);
+        assert_eq!(
+            app.apply_portrait(warm, faces.clone()).unwrap(),
+            Applied::Added
+        );
+        assert_eq!(at(&app), matched);
+
+        // Worked on by hand since (here, painted), the garment still holds
+        // that light. The retouch that finishes the photo finds the slider
+        // where it stands, not where it would put it for a garment as laid,
+        // and lays nothing more.
+        let layers = &mut app.docs.documents[0].canvas.layer_stack.layers;
+        let layer = layers.iter_mut().find(|l| l.id == garment).unwrap();
+        layer.tiles.set_pixel(5, 5, 1, 2, 3, 255);
+        app.retouch_neck(0.0, 50.0).unwrap();
+        let started = Instant::now();
+        while app.shell.portrait.as_ref().unwrap().model.is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(180),
+                "analysis hung"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+            app.poll_portrait();
+        }
+        let start = app.portrait_restore().1.unwrap();
+        assert_eq!(start.clothes_match, 100.0);
+        app.set_portrait_preview(start, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        assert_eq!(at(&app), matched);
+        // Taken off again, the garment is as it was laid.
+        let off = PortraitSettings {
+            clothes_match: 0.0,
+            ..start
+        };
+        app.set_portrait_preview(off, faces.clone(), true, false);
+        wait_for_preview(&mut app);
+        let back = at(&app);
+        for c in 0..3 {
+            assert!(back[c].abs_diff(as_laid[c]) <= 2, "{as_laid:?} {back:?}");
+        }
+        app.cancel_portrait();
+        assert_eq!(at(&app), matched);
     }
 
     #[test]

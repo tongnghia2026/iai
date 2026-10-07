@@ -136,6 +136,11 @@ pub struct PortraitSettings {
     pub clothes_brightness: f32,
     #[serde(default)]
     pub clothes_even: f32,
+    /// "Khớp áo với ảnh", 0..100: how much of the photo's own light (its
+    /// cast, its exposure, the veil over its blacks) a garment laid on from
+    /// a sheet takes. The clothes shot with the photo have it all.
+    #[serde(default)]
+    pub clothes_match: f32,
 }
 
 impl Default for PortraitSettings {
@@ -198,6 +203,7 @@ impl Default for PortraitSettings {
             clothes_sharpen: 0.0,
             clothes_brightness: 0.0,
             clothes_even: 0.0,
+            clothes_match: 0.0,
         }
     }
 }
@@ -279,6 +285,7 @@ impl PortraitSettings {
         clothes_sharpen: 0.0,
         clothes_brightness: 0.0,
         clothes_even: 0.0,
+        clothes_match: 0.0,
     };
 
     /// The settings a layer was saved with. The one-sided "Giảm màu" sliders
@@ -339,6 +346,7 @@ impl PortraitSettings {
             clothes_sharpen: u(self.clothes_sharpen),
             clothes_brightness: both(self.clothes_brightness),
             clothes_even: u(self.clothes_even),
+            clothes_match: u(self.clothes_match),
             ..*self
         }
     }
@@ -350,6 +358,7 @@ impl PortraitSettings {
             clothes_sharpen: 0.0,
             clothes_brightness: 0.0,
             clothes_even: 0.0,
+            clothes_match: 0.0,
             ..*self
         }
     }
