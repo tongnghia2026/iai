@@ -1,0 +1,25 @@
+[package]
+name = "iai-raw"
+version = "0.1.0"
+edition = "2021"
+description = "The library that decodes camera RAW files for iAi, on rawloader and rawler."
+# rawloader and rawler are LGPL-2.1, and this crate, which is them and a thin
+# layer over them, goes under the same terms. A published build of iAi that
+# has parts under other terms does not link it in: it loads it at run time
+# from iai_raw.dll, which anyone may rebuild from here and put in its place
+# (see README.md in this folder).
+license = "LGPL-2.1-or-later"
+repository = "https://github.com/tongnghia2026/iai"
+publish = false
+
+[lib]
+name = "iai_raw"
+path = "src/lib.rs"
+# `rlib` to be linked into the app, `cdylib` to be iai_raw.dll beside it.
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+iai-raw-api = { path = "../iai-raw-api" }
+rawloader = "0.37"
+# CR3 support and a much larger camera database than rawloader.
+rawler = "0.7"

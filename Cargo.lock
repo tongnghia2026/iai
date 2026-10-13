@@ -2722,9 +2722,12 @@ dependencies = [
  "hayro",
  "hmac-sha256",
  "i_overlay",
+ "iai-raw",
+ "iai-raw-api",
  "image",
  "lcms2",
  "lcms2-sys",
+ "libloading",
  "lopdf",
  "lyon_path",
  "lyon_tessellation",
@@ -2733,8 +2736,6 @@ dependencies = [
  "png 0.17.16",
  "pollster 0.3.0",
  "qrcodegen",
- "rawler",
- "rawloader",
  "rayon",
  "reqwest",
  "rfd",
@@ -2752,6 +2753,19 @@ dependencies = [
  "wry",
  "zip",
 ]
+
+[[package]]
+name = "iai-raw"
+version = "0.1.0"
+dependencies = [
+ "iai-raw-api",
+ "rawler",
+ "rawloader",
+]
+
+[[package]]
+name = "iai-raw-api"
+version = "0.1.0"
 
 [[package]]
 name = "iana-time-zone"

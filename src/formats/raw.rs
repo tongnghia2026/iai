@@ -11,6 +11,7 @@
 //! sigmoid render from `develop_scene` — so the image on screen equals a
 //! Develop session at neutral settings, non-destructively.
 
+use super::raw_library::{self, Cfa, Decoder, Orientation, RawImage, RawImageData};
 use super::Importer;
 use crate::core::camera_profile::dcp_transform::PreparedHueSatMap;
 use crate::core::camera_profile::resolver::{
@@ -25,7 +26,6 @@ use crate::core::canvas::Canvas;
 use crate::core::develop_scene::{
     f16_bits_to_f32, f32_to_f16_bits, render_default_look, SceneSource,
 };
-use rawloader::{Orientation, RawImage, RawImageData};
 use rayon::prelude::*;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -286,20 +286,17 @@ struct DecodedRaw {
     backend: RawDecoderBackend,
 }
 
-/// Select the RAW front-end and decode into the shared `DecodedRaw` model.
-/// Primary decoder: rawloader. Fallback: rawler, which adds Canon CR3 and a much
-/// larger camera database. Files rawloader already decodes never reach the
-/// fallback, so their output is byte-for-byte unchanged.
+/// Decode through the RAW library into the shared `DecodedRaw` model. Its
+/// primary decoder is rawloader; its fallback is rawler, which adds Canon CR3
+/// and a much larger camera database. Files rawloader already decodes never
+/// reach the fallback, so their output is byte-for-byte unchanged.
 fn decode_front_end(path: &Path) -> Result<DecodedRaw, String> {
-    match rawloader::decode_file(path) {
-        Ok(image) => Ok(DecodedRaw {
-            image,
-            backend: RawDecoderBackend::Rawloader,
-        }),
-        Err(primary) => {
-            decode_via_rawler(path).map_err(|fallback| format!("rawloader: {primary}; {fallback}"))
-        }
-    }
+    let image = raw_library::decode_file(path)?;
+    let backend = match image.decoder {
+        Decoder::Rawloader => RawDecoderBackend::Rawloader,
+        Decoder::Rawler => RawDecoderBackend::Rawler,
+    };
+    Ok(DecodedRaw { image, backend })
 }
 
 fn decode_raw(path: &Path) -> Result<Canvas, String> {
@@ -559,150 +556,6 @@ pub fn probe_sensor_metadata(path: &Path) -> Result<RawSensorMetadata, String> {
     })
 }
 
-/// Decode a RAW with rawler and adapt it into a `rawloader::RawImage`, so the
-/// single shared decode body below handles both front-ends. rawler's public
-/// data model maps onto rawloader's one-to-one: same mosaic enum shape, a
-/// `[[f32; 3]; 4]` `xyz_to_cam`, an EXIF-numbered orientation, and a CFA whose
-/// `name` is the pattern string rawloader's `CFA::new` expects.
-fn decode_via_rawler(path: &Path) -> Result<DecodedRaw, String> {
-    let img = rawler::decode_file(path).map_err(|e| format!("rawler: {e:?}"))?;
-
-    // rawler's camera database stores characterization in `color_matrix`;
-    // `xyz_to_cam` is deprecated and is commonly left as an all-zero default.
-    // Select a matrix deterministically before adapting into rawloader's data
-    // model, otherwise supported rawler-only cameras can render black.
-    let mono = matches!(
-        img.photometric,
-        rawler::rawimage::RawPhotometricInterpretation::BlackIsZero
-    );
-    let xyz_to_cam = select_rawler_xyz_to_cam(&img.color_matrix, img.xyz_to_cam, mono)?;
-
-    let to_u16_4 = |a: [f32; 4]| a.map(|v| v.round().clamp(0.0, u16::MAX as f32) as u16);
-    let whitelevels = to_u16_4(img.whitelevel.as_bayer_array());
-    let blacklevels = to_u16_4(img.blacklevel.as_bayer_array());
-    // Preserve rawler's masked optical-black rectangles across the compatibility
-    // adapter. The pixel path already uses rawler's resolved black levels; this
-    // only keeps the provenance/audit data that the old adapter discarded.
-    let blackareas = img
-        .blackareas
-        .iter()
-        .map(|rect| {
-            (
-                rect.p.y as u64,
-                rect.p.x.saturating_add(rect.d.w) as u64,
-                rect.p.y.saturating_add(rect.d.h) as u64,
-                rect.p.x as u64,
-            )
-        })
-        .collect();
-
-    // rawloader crops are margins [top, right, bottom, left]. Prefer the default
-    // crop, then the active area, else the whole frame.
-    let crops = img
-        .crop_area
-        .or(img.active_area)
-        .map(|r| {
-            let [top, left, bottom, right] = r.as_tlbr_offsets(img.width, img.height);
-            [top, right, bottom, left]
-        })
-        .unwrap_or([0, 0, 0, 0]);
-
-    let cfa = rawloader::CFA::new(&img.camera.cfa.name);
-    let orientation = rawloader::Orientation::from_u16(img.orientation.to_u16());
-    let data = match img.data {
-        rawler::rawimage::RawImageData::Integer(v) => RawImageData::Integer(v),
-        rawler::rawimage::RawImageData::Float(v) => RawImageData::Float(v),
-    };
-
-    let image = RawImage {
-        make: img.make,
-        model: img.model,
-        clean_make: img.clean_make,
-        clean_model: img.clean_model,
-        width: img.width,
-        height: img.height,
-        cpp: img.cpp,
-        wb_coeffs: img.wb_coeffs,
-        whitelevels,
-        blacklevels,
-        xyz_to_cam,
-        cfa,
-        crops,
-        orientation,
-        data,
-        blackareas,
-    };
-    Ok(DecodedRaw {
-        image,
-        backend: RawDecoderBackend::Rawler,
-    })
-}
-
-fn select_rawler_xyz_to_cam(
-    color_matrices: &std::collections::HashMap<
-        rawler::imgop::xyz::Illuminant,
-        rawler::imgop::xyz::FlatColorMatrix,
-    >,
-    legacy: [[f32; 3]; 4],
-    mono: bool,
-) -> Result<[[f32; 3]; 4], String> {
-    use rawler::imgop::xyz::Illuminant;
-
-    fn usable_flat(matrix: &[f32]) -> bool {
-        matches!(matrix.len(), 9 | 12)
-            && matrix.iter().all(|value| value.is_finite())
-            && matrix
-                .chunks_exact(3)
-                .all(|row| row.iter().map(|value| value.abs()).sum::<f32>() > 1.0e-8)
-    }
-
-    fn usable_legacy(matrix: &[[f32; 3]; 4]) -> bool {
-        matrix.iter().flatten().all(|value| value.is_finite())
-            && matrix[..3]
-                .iter()
-                .all(|row| row.iter().map(|value| value.abs()).sum::<f32>() > 1.0e-8)
-    }
-
-    fn rank(illuminant: Illuminant) -> (u8, u16) {
-        let priority = match illuminant {
-            Illuminant::D65 => 0,
-            Illuminant::D55 => 1,
-            Illuminant::D50 => 2,
-            Illuminant::Daylight => 3,
-            Illuminant::D75 => 4,
-            Illuminant::A => 5,
-            _ => 6,
-        };
-        (priority, u16::from(illuminant))
-    }
-
-    if let Some((_, matrix)) = color_matrices
-        .iter()
-        .filter(|(_, matrix)| usable_flat(matrix))
-        .min_by_key(|(illuminant, _)| rank(**illuminant))
-    {
-        let mut selected = [[0.0f32; 3]; 4];
-        for (row, values) in matrix.chunks_exact(3).enumerate() {
-            selected[row].copy_from_slice(values);
-        }
-        return Ok(selected);
-    }
-
-    if usable_legacy(&legacy) {
-        return Ok(legacy);
-    }
-
-    if mono {
-        let mut identity = [[0.0f32; 3]; 4];
-        for channel in 0..3 {
-            identity[channel][channel] = 1.0;
-        }
-        return Ok(identity);
-    }
-
-    Err("rawler: camera has no usable deterministic XYZ-to-camera matrix".into())
-}
-
 /// Independently gated embedded-JPEG matching stages. Keeping matrix and curves
 /// separate is important: either can be A/B-tested without changing sensor
 /// normalization, demosaic, camera WB, or the decoder characterization matrix.
@@ -856,7 +709,7 @@ fn decode_raw_from(
     let wbc = if raw.wb_coeffs[0] > 0.0 && raw.wb_coeffs[1] > 0.0 && raw.wb_coeffs[2] > 0.0 {
         raw.wb_coeffs
     } else {
-        raw.neutralwb()
+        raw.neutral_wb
     };
     let gain = white_balance_gains(wbc, mono);
 
@@ -870,7 +723,7 @@ fn decode_raw_from(
 
     // Camera RGB → linear sRGB. cam_to_xyz_normalized is [XYZ][RGBE]; the E column
     // is zero for ordinary 3-colour sensors, so a 3×3 (RGB) compose is exact.
-    let cam2xyz = raw.cam_to_xyz_normalized();
+    let cam2xyz = raw.cam_to_xyz_normalized;
     let mut as_shot_white = as_shot_white_balance(&cam2xyz, gain, mono);
     // Bit-exact decoder compatibility matrix, kept for the legacy sRGB writer
     // and used as the resolver's guaranteed final tier.
@@ -1372,7 +1225,7 @@ fn draft_block_size(
     height: usize,
     top: usize,
     left: usize,
-    cfa: &rawloader::CFA,
+    cfa: &Cfa,
 ) -> Option<usize> {
     let mut k = width.max(height).div_ceil(DRAFT_MAX_DIM).max(2);
     while k <= 16 {
@@ -1407,7 +1260,7 @@ fn render_raw_draft(
     plane: &[f32],
     sensor_w: usize,
     area: ActiveArea,
-    cfa: &rawloader::CFA,
+    cfa: &Cfa,
     writer: &SceneWriter<'_>,
     tail: &RawSceneTail<'_>,
 ) -> Option<Canvas> {
@@ -1488,14 +1341,7 @@ const AHD_MAX_PIXELS: usize = if cfg!(debug_assertions) {
 /// RGB. Same-colour neighbours at ±2 form the gradient correction, so it queries the
 /// true CFA pattern via `cfa` (modular, valid at any coord).
 #[inline]
-fn demosaic_malvar(
-    plane: &[f32],
-    w: usize,
-    h: usize,
-    cfa: &rawloader::CFA,
-    r: usize,
-    c: usize,
-) -> [f32; 3] {
+fn demosaic_malvar(plane: &[f32], w: usize, h: usize, cfa: &Cfa, r: usize, c: usize) -> [f32; 3] {
     let at = |dr: i32, dc: i32| -> f32 {
         let nr = (r as i32 + dr).clamp(0, h as i32 - 1) as usize;
         let nc = (c as i32 + dc).clamp(0, w as i32 - 1) as usize;
@@ -1553,13 +1399,7 @@ fn ahd_idx(w: usize, h: usize, r: i32, c: i32) -> usize {
 /// Hamilton-Adams directional green plane: at each red/blue site estimate green
 /// along one axis, correcting the neighbour average with the same-colour Laplacian
 /// at ±2. Green sites keep their measured value. `horizontal` selects the axis.
-fn ahd_green(
-    plane: &[f32],
-    w: usize,
-    h: usize,
-    cfa: &rawloader::CFA,
-    horizontal: bool,
-) -> Vec<f32> {
+fn ahd_green(plane: &[f32], w: usize, h: usize, cfa: &Cfa, horizontal: bool) -> Vec<f32> {
     (0..w * h)
         .into_par_iter()
         .map(|i| {
@@ -1592,13 +1432,7 @@ fn ahd_green(
 /// the colour DIFFERENCES (X − G), which are smooth across edges: green sites take
 /// R and B from their horizontal vs vertical neighbour pairs; red/blue sites take
 /// the opposite colour from the four diagonals. The known channel stays measured.
-fn ahd_reconstruct(
-    plane: &[f32],
-    green: &[f32],
-    w: usize,
-    h: usize,
-    cfa: &rawloader::CFA,
-) -> Vec<[f32; 3]> {
+fn ahd_reconstruct(plane: &[f32], green: &[f32], w: usize, h: usize, cfa: &Cfa) -> Vec<[f32; 3]> {
     (0..w * h)
         .into_par_iter()
         .map(|i| {
@@ -1664,7 +1498,7 @@ fn demosaic_ahd(
     plane: &[f32],
     w: usize,
     h: usize,
-    cfa: &rawloader::CFA,
+    cfa: &Cfa,
     cam2xyz: &[[f32; 4]; 3],
     cancel: Option<&AtomicBool>,
 ) -> Option<Vec<[f32; 3]>> {
@@ -1852,7 +1686,7 @@ fn opposed_refavg_bayer(
     plane: &[f32],
     w: usize,
     h: usize,
-    cfa: &rawloader::CFA,
+    cfa: &Cfa,
     row: i32,
     col: i32,
     k: usize,
@@ -1877,7 +1711,7 @@ fn opposed_refavg_bayer(
 /// Replace only extreme, isolated Bayer sensels using nearby samples of the
 /// same CFA colour. The fast four-neighbour precheck keeps normal texture and
 /// real dark lines untouched; the wider median confirmation rejects edges.
-fn correct_isolated_bayer_defects(plane: &mut [f32], w: usize, h: usize, cfa: &rawloader::CFA) {
+fn correct_isolated_bayer_defects(plane: &mut [f32], w: usize, h: usize, cfa: &Cfa) {
     if w < 9 || h < 9 {
         return;
     }
@@ -1955,7 +1789,7 @@ fn apply_isolated_bayer_defect_stage(
     plane: &mut [f32],
     w: usize,
     h: usize,
-    cfa: &rawloader::CFA,
+    cfa: &Cfa,
     stage: SensorCorrectionStage,
 ) {
     if !stage.enabled {
@@ -1968,13 +1802,7 @@ fn apply_isolated_bayer_defect_stage(
 /// Opposed highlight reconstruction on the white-balanced Bayer plane, BEFORE
 /// demosaic — the interpolators then see smooth reconstructed values instead of
 /// a flat cap. No-op when nothing is clipped.
-fn inpaint_opposed_bayer(
-    plane: &mut [f32],
-    w: usize,
-    h: usize,
-    cfa: &rawloader::CFA,
-    gain: [f32; 4],
-) {
+fn inpaint_opposed_bayer(plane: &mut [f32], w: usize, h: usize, cfa: &Cfa, gain: [f32; 4]) {
     if !HIGHLIGHT_RECOVERY {
         return;
     }
@@ -3738,59 +3566,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rawler_fallback_prefers_a_valid_d65_matrix_deterministically() {
-        use rawler::imgop::xyz::Illuminant;
-
-        let tungsten = vec![0.9, 0.1, 0.0, 0.2, 0.7, 0.1, 0.0, 0.1, 0.9];
-        let d65 = vec![0.6, 0.3, 0.1, 0.1, 0.8, 0.1, 0.0, 0.2, 0.8];
-        let mut matrices = std::collections::HashMap::new();
-        matrices.insert(Illuminant::A, tungsten);
-        matrices.insert(Illuminant::D65, d65.clone());
-
-        let selected = select_rawler_xyz_to_cam(&matrices, [[0.0; 3]; 4], false).unwrap();
-        assert_eq!(selected[0], d65[0..3]);
-        assert_eq!(selected[1], d65[3..6]);
-        assert_eq!(selected[2], d65[6..9]);
-
-        // HashMap insertion/iteration order is not part of the decision.
-        let mut reversed = std::collections::HashMap::new();
-        reversed.insert(Illuminant::D65, d65);
-        reversed.insert(
-            Illuminant::A,
-            vec![0.9, 0.1, 0.0, 0.2, 0.7, 0.1, 0.0, 0.1, 0.9],
-        );
-        assert_eq!(
-            select_rawler_xyz_to_cam(&reversed, [[0.0; 3]; 4], false).unwrap(),
-            selected
-        );
-    }
-
-    #[test]
-    fn rawler_fallback_uses_legacy_or_mono_identity_but_never_a_zero_rgb_matrix() {
-        let matrices = std::collections::HashMap::new();
-        let legacy = [
-            [0.7, 0.2, 0.1],
-            [0.1, 0.8, 0.1],
-            [0.0, 0.1, 0.9],
-            [0.0, 0.0, 0.0],
-        ];
-        assert_eq!(
-            select_rawler_xyz_to_cam(&matrices, legacy, false).unwrap(),
-            legacy
-        );
-        assert!(select_rawler_xyz_to_cam(&matrices, [[0.0; 3]; 4], false).is_err());
-        assert_eq!(
-            select_rawler_xyz_to_cam(&matrices, [[0.0; 3]; 4], true).unwrap(),
-            [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [0.0, 0.0, 0.0],
-            ]
-        );
-    }
-
     fn srgb_to_linear_for_test(c: f32) -> f32 {
         if c <= 0.04045 {
             c / 12.92
@@ -4114,17 +3889,19 @@ mod tests {
             return;
         }
 
-        let raw = rawloader::decode_file(&path).expect("decode raw for diagnosis");
+        let raw = decode_front_end(&path)
+            .expect("decode raw for diagnosis")
+            .image;
         let area = active_area(&raw).expect("active area");
         let mono = raw.cpp == 1 && !raw.cfa.is_valid();
         let wbc = if raw.wb_coeffs[0] > 0.0 && raw.wb_coeffs[1] > 0.0 && raw.wb_coeffs[2] > 0.0 {
             raw.wb_coeffs
         } else {
-            raw.neutralwb()
+            raw.neutral_wb
         };
         let gain = white_balance_gains(wbc, mono);
         let levels = raw_levels(&raw, area);
-        let cam2xyz = raw.cam_to_xyz_normalized();
+        let cam2xyz = raw.cam_to_xyz_normalized;
         let cam2srgb = resolve_decoder_matrix(
             RawDecoderBackend::Rawloader,
             &raw.clean_make,
@@ -4339,9 +4116,13 @@ mod tests {
         }
     }
 
+    fn rggb() -> Cfa {
+        Cfa::new("RGGB", 2, 2, &[0, 1, 1, 2]).unwrap()
+    }
+
     /// Synthetic Bayer plane with fixed chroma ratios (r = 0.75·g, b = 0.5·g) and
     /// a horizontal green gradient whose bright end saturates at the sensor cap.
-    fn opposed_test_plane(w: usize, h: usize, cfa: &rawloader::CFA) -> Vec<f32> {
+    fn opposed_test_plane(w: usize, h: usize, cfa: &Cfa) -> Vec<f32> {
         let g_true = |x: usize| 0.2 + 1.6 * x as f32 / (w - 1) as f32;
         (0..w * h)
             .map(|i| {
@@ -4360,7 +4141,7 @@ mod tests {
     #[test]
     fn opposed_inpaint_reconstructs_clipped_green_with_plausible_chroma() {
         let (w, h) = (64usize, 16usize);
-        let cfa = rawloader::CFA::new("RGGB");
+        let cfa = rggb();
         let mut plane = opposed_test_plane(w, h, &cfa);
         let original = plane.clone();
         inpaint_opposed_bayer(&mut plane, w, h, &cfa, [1.0; 4]);
@@ -4400,7 +4181,7 @@ mod tests {
     #[test]
     fn opposed_inpaint_without_clipping_is_noop() {
         let (w, h) = (32usize, 16usize);
-        let cfa = rawloader::CFA::new("RGGB");
+        let cfa = rggb();
         let mut plane: Vec<f32> = (0..w * h)
             .map(|i| 0.1 + 0.7 * ((i % w) as f32 / (w - 1) as f32))
             .collect();
@@ -4423,7 +4204,7 @@ mod tests {
             data.push(g.min(1.0));
             data.push((0.5 * g).min(1.0));
         }
-        let data = RawImageData::Float(data);
+        let data = RawImageData::Float(data.into());
         let levels = RawLevels {
             black: [0.0; 4],
             observed_white: [1.0; 4],
@@ -4454,7 +4235,7 @@ mod tests {
         );
 
         // No clipping anywhere → no state at all.
-        let flat = RawImageData::Float(vec![0.4f32; w * h * 3]);
+        let flat = RawImageData::Float(vec![0.4f32; w * h * 3].into());
         assert!(opposed_rgb(&flat, w, h, &levels, [1.0; 4]).is_none());
     }
 
@@ -4590,7 +4371,7 @@ mod tests {
     #[test]
     fn bayer_defect_filter_removes_isolated_dead_and_hot_sites_but_keeps_lines() {
         let (w, h) = (20usize, 20usize);
-        let cfa = rawloader::CFA::new("RGGB");
+        let cfa = rggb();
         let mut plane = vec![0.4f32; w * h];
         plane[8 * w + 8] = 0.0;
         plane[12 * w + 12] = 4.0;
@@ -4642,7 +4423,7 @@ mod tests {
     #[test]
     fn disabled_sensor_correction_stage_is_bit_exact_noop() {
         let (w, h) = (20usize, 20usize);
-        let cfa = rawloader::CFA::new("RGGB");
+        let cfa = rggb();
         let mut plane = vec![0.4f32; w * h];
         plane[8 * w + 8] = 0.0;
         plane[12 * w + 12] = 4.0;
@@ -4876,7 +4657,7 @@ mod tests {
         // with plain bilinear and compare to ground truth. Linear (bilinear) interp
         // loses curvature; Malvar's gradient correction recovers it → less error.
         let (w, h) = (40usize, 40usize);
-        let cfa = rawloader::CFA::new("RGGB");
+        let cfa = rggb();
         let gt = |x: usize, y: usize| -> f32 {
             0.5 + 0.25 * ((x as f32) * 0.62).sin() * ((y as f32) * 0.31).cos()
         };
@@ -4926,7 +4707,7 @@ mod tests {
         // should pick it and leave far less chroma (colour moiré) than Malvar's
         // fixed, non-directional kernel.
         let (w, h) = (64usize, 64usize);
-        let cfa = rawloader::CFA::new("RGGB");
+        let cfa = rggb();
         let gt = |x: usize| 0.5 + 0.35 * ((x as f32) * 2.3).sin(); // near-Nyquist, gray
         let plane: Vec<f32> = (0..w * h).map(|i| gt(i % w)).collect();
         // Identity-ish normalized cam→XYZ so Lab tracks the gray directly.

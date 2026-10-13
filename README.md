@@ -182,7 +182,7 @@ Use `cargo check` for a quick compile test, or `cargo test` before making a rele
 | UI              | `egui`, `egui-wgpu`, `egui-winit`, `egui-phosphor` |
 | Image I/O       | `image` (PNG/JPEG/WebP/BMP), `png`, `tiff` (PSD & `.iai` use native readers/writers) |
 | PDF             | `hayro` (render / import), `lopdf` (write)     |
-| RAW decode      | `rawloader`, `rawler` (CR3 + wider camera DB) |
+| RAW decode      | `rawloader`, `rawler` (CR3 + wider camera DB), through `crates/iai-raw` |
 | Parallelism     | `rayon`                                       |
 | AI inference    | `ort` (ONNX Runtime)                          |
 | Colour mgmt     | `lcms2` (ICC / soft-proof)                    |
@@ -201,6 +201,9 @@ src/
 ├── formats/   PNG/JPEG/TIFF/WebP/BMP/PSD/RAW/PDF/SVG/iAi importers & exporters
 ├── ui/        Menubar, panels, toolbar, tab bar, dialogs, overlays
 └── extension/ Internal tool/filter trait seams (compile-time, not a plugin SDK)
+crates/
+├── iai-raw/     The RAW decoders (rawloader, rawler) behind one interface
+└── iai-raw-api/ That interface: what a decoded RAW file is to the app
 ```
 
 ## Contributing
@@ -214,6 +217,10 @@ v3.0 or later](LICENSE). © 2026 tongnghia2026. You are free to use, modify,
 sell and distribute it, provided that recipients — and users who interact with
 a modified version over a network — can obtain the complete corresponding
 source under the same license.
+
+Two folders carry terms of their own: `crates/iai-raw`, the layer over the two
+LGPL RAW decoders, is under `LGPL-2.1-or-later`, and `crates/iai-raw-api`, the
+interface to it, under `MIT`.
 
 Linked dependencies, runtime binaries and AI models retain their own terms;
 see [third-party notices](THIRD_PARTY.md) before distributing a binary or model
@@ -247,6 +254,12 @@ key: a one-time purchase, one key per machine, bought from inside the app
 In the source, the Pro pack is the `pro` Cargo feature: the places where the
 core calls into it are marked `#[cfg(feature = "pro")]`, and the modules they
 name are the ones that are not here.
+
+The published builds do not link the two LGPL libraries that decode camera RAW
+files into `iai.exe`: they load them from `iai_raw.dll`, a file beside it
+whose source is [`crates/iai-raw`](crates/iai-raw) here, and which you may
+replace with a build of your own (see that folder's README, and the
+[third-party notices](THIRD_PARTY.md)).
 
 ## Support the project
 

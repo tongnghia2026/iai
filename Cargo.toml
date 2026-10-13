@@ -18,7 +18,13 @@ default = []
 # The Pro pack: the "AI" window (ID photos, garments, portrait retouch, print
 # sheets, Gemini / ChatGPT) and the key that opens it. A build without it
 # (`--no-default-features`) is the free core, whole.
-pro = ["dep:ed25519-compact", "dep:socket2", "dep:tungstenite"]
+pro = ["raw-dll", "dep:ed25519-compact", "dep:socket2", "dep:tungstenite"]
+# The library that decodes camera RAW files (crates/iai-raw: rawloader and
+# rawler, both LGPL-2.1) is loaded at run time from iai_raw.dll beside the
+# exe instead of being linked into it, so that whoever has the app can put a
+# build of their own in its place. A build with parts that are not open has to
+# have it this way; a build without the feature links the library in.
+raw-dll = ["dep:libloading"]
 jzazbz-prototype = []
 canvas-editor-webview = ["dep:wry"]
 
@@ -47,11 +53,17 @@ zip = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 flate2 = "1"
-rawloader = "0.37"
-# Fallback RAW decoder: CR3 support and a much larger camera database than
-# rawloader. Both declare LGPL-2.1; binary distribution obligations and the
-# complete license text are documented in THIRD_PARTY.md and licenses/.
-rawler = "0.7"
+# What a decoded RAW file is to the app, and the interface of the library
+# that decodes it.
+iai-raw-api = { path = "crates/iai-raw-api" }
+# That library: rawloader, and rawler for what rawloader does not read. Both
+# declare LGPL-2.1; binary distribution obligations and the complete license
+# text are documented in THIRD_PARTY.md and licenses/. With `raw-dll` the app
+# calls nothing of this crate, and nothing of it is linked into the exe: it is
+# built beside it, as iai_raw.dll.
+iai-raw = { path = "crates/iai-raw" }
+# Loads iai_raw.dll. ISC; already in the tree through wgpu.
+libloading = { version = "0.8", optional = true }
 ort = { version = "2.0.0-rc.12", features = ["directml"] }
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json", "multipart"], default-features = false }
 ab_glyph = "0.2"

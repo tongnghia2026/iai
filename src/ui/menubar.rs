@@ -1796,6 +1796,7 @@ fn help_menu(
 ) {
     const IAI_REPO_URL: &str = "https://github.com/tongnghia2026/iai";
     const IAI_LICENSE_URL: &str = "https://github.com/tongnghia2026/iai/blob/main/LICENSE";
+    const IAI_NOTICES_URL: &str = "https://github.com/tongnghia2026/iai/blob/main/THIRD_PARTY.md";
     const IAI_FACEBOOK_URL: &str = "https://www.facebook.com/minhnghia7189/";
     const IAI_YOUTUBE_URL: &str = "https://www.youtube.com/@TongNghia3999";
 
@@ -1867,6 +1868,15 @@ fn help_menu(
         .clicked()
     {
         ui.ctx().open_url(egui::OpenUrl::new_tab(IAI_LICENSE_URL));
+    }
+    // The libraries the app is built on and their terms: among them the
+    // LGPL RAW decoders, and how to put a build of one's own in their place.
+    if ui
+        .button("Third-Party Notices")
+        .on_hover_text(IAI_NOTICES_URL)
+        .clicked()
+    {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(IAI_NOTICES_URL));
     }
     ui.separator();
     ui.menu_button("About iAi", |ui| {

@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use iai::core::develop_scene::render_default_look;
 use iai::formats::raw::RawImporter;
+use iai::formats::raw_library::{RawImage, RawImageData};
 use iai::formats::Importer;
-use rawloader::{RawImage, RawImageData};
 
 const REFERENCE_SIZE: [f64; 2] = [2592.0, 1728.0];
 const LEFT_TRIANGLE: [[f64; 2]; 3] = [[2128.0, 1366.0], [2327.0, 1219.0], [2332.0, 1411.0]];
@@ -334,7 +334,7 @@ fn cubepp_sensor_illuminant_baseline() {
     let path = fixture_path().expect("set IAI_CUBEPP_REFERENCE_DIR or populate the target cache");
     assert_eq!(std::fs::metadata(&path).unwrap().len(), EXPECTED_BYTES);
     assert_sha256(&path, EXPECTED_SHA256);
-    let raw = rawloader::decode_file(&path).expect("decode Cube++ CR2 with rawloader");
+    let raw = iai::formats::raw_library::decode_file(&path).expect("decode Cube++ CR2");
     let (top, left, active_width, active_height) = active_area(&raw);
     assert_eq!((active_width, active_height), (5196, 3462));
 

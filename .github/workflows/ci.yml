@@ -33,8 +33,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # `--all`: the crates under crates/ too.
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       # The published builds always have the Canvas Editor
       # (`document_webview.rs`); without the feature here it was never compiled.
       - name: Build (as shipped, with the Canvas Editor)
@@ -42,6 +43,8 @@ jobs:
       # The unit tests are the suite kept green day to day.
       - name: Test (as shipped; includes WGSL validation)
         run: cargo test --locked --lib --features canvas-editor-webview
+      - name: Test (the RAW library and its interface)
+        run: cargo test --locked -p iai-raw -p iai-raw-api
       # The integration tests in `tests/`: colour-pipeline and CPU/GPU parity
       # gates, the rest hand-run probes (ignored). The GPU ones skip themselves
       # here (`CI` is set).

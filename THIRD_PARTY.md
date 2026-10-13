@@ -16,21 +16,36 @@ Unicode, CC0, or another permissive license. The authoritative versions are
 locked in `Cargo.lock`; run `cargo metadata --locked --format-version 1` to
 inspect the complete resolved graph.
 
-Two direct RAW-decoding crates declare LGPL-2.1:
+Two RAW-decoding crates declare LGPL-2.1:
 
 | Component | Version | License | Upstream |
 |---|---:|---|---|
 | rawloader | 0.37.1 | LGPL-2.1 | https://github.com/pedrocr/rawloader |
 | rawler | 0.7.2 | LGPL-2.1 | https://github.com/dnglab/dnglab |
 
-Windows release builds link Rust dependencies into `iAi.exe`. Anyone
-redistributing that executable must keep the LGPL notice, permit replacement
-or modification of the LGPL components, and provide the complete
-machine-readable source/build inputs needed to rebuild and relink the exact
-binary. For official builds, the corresponding source is the tagged/committed
-revision of https://github.com/tongnghia2026/iai together with `Cargo.lock` and
-the Cargo build instructions in `README.md`. Do not add terms that prohibit
-reverse engineering for debugging modifications to the LGPL components.
+iAi reaches them only through [`crates/iai-raw`](crates/iai-raw), a thin layer
+over the two that is itself under `LGPL-2.1-or-later`. It is built one of two
+ways:
+
+- **A build of this repository** links `crates/iai-raw`, and the two crates
+  with it, into the executable. That build is free software as a whole (AGPL);
+  its corresponding source is this repository together with `Cargo.lock` and
+  the Cargo build instructions in `README.md`.
+- **The builds published on the Releases page** hold the Pro pack, which is
+  not open source. They do not link the two crates or `crates/iai-raw` into
+  `iai.exe`: they load them at run time from a file of its own beside it,
+  `iai_raw.dll`, through the C interface described in
+  [`crates/iai-raw-api`](crates/iai-raw-api) (`MIT`, text in its folder). Whoever
+  has such a build may modify the library and put their own `iai_raw.dll` in
+  place of the published one;
+  [`crates/iai-raw/README.md`](crates/iai-raw/README.md) says how. The
+  corresponding source of a published `iai_raw.dll` is `crates/iai-raw` and
+  `crates/iai-raw-api` at the commit the release is tagged on, with the
+  versions `Cargo.lock` pins.
+
+Anyone redistributing either kind of build must keep this notice and the LGPL
+text with it, and must not add terms that prohibit modifying the LGPL
+components or reverse engineering for debugging such modifications.
 
 The full LGPL-2.1 text is in [`licenses/LGPL-2.1.txt`](licenses/LGPL-2.1.txt).
 

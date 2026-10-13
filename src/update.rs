@@ -22,6 +22,8 @@ const FEED_URL: &str = "https://github.com/tongnghia2026/iai/releases/latest/dow
 
 /// The files a release may replace, by the names they are installed under.
 const EXE_NAME: &str = "iai.exe";
+/// The library the exe loads its RAW decoders from (`formats::raw_library`).
+const RAW_NAME: &str = "iai_raw.dll";
 const PDB_NAME: &str = "iai.pdb";
 
 /// The check at startup waits for the window to be up.
@@ -69,7 +71,7 @@ pub struct Release {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct ReleaseFile {
-    /// What it is once installed: `iai.exe` or `iai.pdb`.
+    /// What it is once installed: `iai.exe`, `iai_raw.dll` or `iai.pdb`.
     pub name: String,
     /// Its file beside `update.json`, gzipped when the name ends in `.gz`.
     pub asset: String,
@@ -95,7 +97,7 @@ impl Release {
 
     /// The files this app installs, the exe first.
     fn wanted(&self) -> impl Iterator<Item = &ReleaseFile> {
-        [EXE_NAME, PDB_NAME]
+        [EXE_NAME, RAW_NAME, PDB_NAME]
             .into_iter()
             .filter_map(|name| self.files.iter().find(|file| file.name == name))
     }
@@ -218,7 +220,11 @@ pub fn check(asked: bool) {
         if !asked {
             std::thread::sleep(STARTUP_DELAY);
         }
-        let status = match fetch_release(&feed()) {
+        let found = fetch_release(&feed());
+        if let Ok(Some(release)) = &found {
+            mend_library(release);
+        }
+        let status = match found {
             Ok(Some(release)) if release.newer_than(this_build()) => {
                 crate::diag::note("update", &format!("build {} is published", release.commit));
                 Status::Available(release)
@@ -351,10 +357,52 @@ fn beside(feed: &str, asset: &str) -> Result<String, String> {
     }
 }
 
+/// An app from before the RAW library was a file of its own knows nothing of
+/// that file: once updated, it is this exe without its library. This build
+/// then fetches the library itself, from the release that is this very build
+/// (a newer release brings its own, with its exe).
+fn mend_library(release: &Release) {
+    let Some(target) = crate::formats::raw_library::missing_file() else {
+        return;
+    };
+    match fetch_library(&feed(), release, this_build(), &target) {
+        Ok(true) => crate::diag::note("update", "the RAW library was missing: fetched"),
+        Ok(false) => crate::diag::note("update", "the RAW library is missing"),
+        Err(why) => crate::diag::note(
+            "update",
+            &format!("the RAW library is missing and was not fetched: {why}"),
+        ),
+    }
+}
+
+/// Download the RAW library of `release` to `target`, where there is none.
+/// `Ok(false)`: the release is not `build`, or holds no library.
+fn fetch_library(
+    feed: &str,
+    release: &Release,
+    build: Build,
+    target: &Path,
+) -> Result<bool, String> {
+    let file = release.files.iter().find(|file| file.name == RAW_NAME);
+    let Some(file) = file.filter(|_| release.commit == build.commit) else {
+        return Ok(false);
+    };
+    let waiting = waiting_name(target, std::process::id());
+    let client = client(Duration::from_secs(3600))?;
+    let url = beside(feed, &file.asset)?;
+    fetch_one(&client, &url, file, &waiting, &Arc::default(), &|| {})?;
+    std::fs::rename(&waiting, target).map_err(|e| {
+        let _ = std::fs::remove_file(&waiting);
+        format!("Không ghi được file: {e}")
+    })?;
+    Ok(true)
+}
+
 /// A downloaded build: each file as (where it waits, the name it takes).
 #[derive(Debug)]
 struct Staged {
     exe: (PathBuf, PathBuf),
+    library: Option<(PathBuf, PathBuf)>,
     pdb: Option<(PathBuf, PathBuf)>,
 }
 
@@ -369,9 +417,9 @@ fn waiting_name(target: &Path, pid: u32) -> PathBuf {
     suffixed(target, &format!(".update-{pid}"))
 }
 
-/// Where the exe that made way is kept until the new one has started.
-fn old_name(exe: &Path, pid: u32) -> PathBuf {
-    suffixed(exe, &format!(".old-{pid}"))
+/// Where a file that made way is kept until the new app has started.
+fn old_name(file: &Path, pid: u32) -> PathBuf {
+    suffixed(file, &format!(".old-{pid}"))
 }
 
 /// Where symbols wait when the old ones were still held open.
@@ -393,7 +441,8 @@ impl<R: Read> Read for Counted<R> {
 }
 
 /// Download the files of `release` to wait beside `exe`. The exe has to come
-/// whole; the app runs without its symbols.
+/// whole, and so has the library it reads RAW files with; the app runs
+/// without its symbols.
 fn fetch_files(
     feed: &str,
     release: &Release,
@@ -406,29 +455,41 @@ fn fetch_files(
     let client = client(Duration::from_secs(3600))?;
     let mut staged: Option<Staged> = None;
     for file in release.wanted() {
-        let is_exe = file.name == EXE_NAME;
-        let target = if is_exe {
+        let name = file.name.as_str();
+        let target = if name == EXE_NAME {
             exe.to_path_buf()
         } else {
-            exe.with_file_name(PDB_NAME)
+            exe.with_file_name(name)
         };
         let waiting = waiting_name(&target, pid);
         let url = beside(feed, &file.asset)?;
         let report = || progress((done.load(Ordering::Relaxed) as f32 / total as f32).min(1.0));
         match fetch_one(&client, &url, file, &waiting, &done, &report) {
-            Ok(()) if is_exe => {
+            Ok(()) if name == EXE_NAME => {
                 staged = Some(Staged {
                     exe: (waiting, target),
+                    library: None,
                     pdb: None,
                 })
             }
             Ok(()) => {
                 if let Some(staged) = &mut staged {
-                    staged.pdb = Some((waiting, target));
+                    if name == RAW_NAME {
+                        staged.library = Some((waiting, target));
+                    } else {
+                        staged.pdb = Some((waiting, target));
+                    }
                 }
             }
-            Err(why) if is_exe => return Err(why),
-            Err(why) => crate::diag::note("update", &format!("symbols not fetched: {why}")),
+            Err(why) if name == PDB_NAME => {
+                crate::diag::note("update", &format!("symbols not fetched: {why}"))
+            }
+            Err(why) => {
+                if let Some(staged) = &staged {
+                    let _ = std::fs::remove_file(&staged.exe.0);
+                }
+                return Err(why);
+            }
         }
     }
     staged.ok_or_else(|| odd_server("reading update.json", &"it names no iai.exe"))
@@ -503,15 +564,60 @@ fn fetch_one(
     installed
 }
 
-/// Put `staged` in the exe's place. The exe that was running is set aside
-/// (it cannot be deleted while it runs); should the new one not go in, the
-/// old one is put back so that the app still starts.
+/// A file a new one has taken the place of. A running exe and a loaded
+/// library cannot be deleted, but they can be renamed: what was there is set
+/// aside under [`old_name`], for the next start to delete (see `tidy`).
+struct Replaced<'a> {
+    target: &'a Path,
+    old: Option<PathBuf>,
+}
+
+impl<'a> Replaced<'a> {
+    /// Put `new` at `target`; should it not go in, what was there stays.
+    fn put(new: &Path, target: &'a Path, pid: u32) -> std::io::Result<Self> {
+        let old = old_name(target, pid);
+        let had = match std::fs::rename(target, &old) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e),
+        };
+        if let Err(e) = std::fs::rename(new, target) {
+            if had {
+                let _ = std::fs::rename(&old, target);
+            }
+            return Err(e);
+        }
+        Ok(Self {
+            target,
+            old: had.then_some(old),
+        })
+    }
+
+    /// Take the new file out again and put back what was there.
+    fn undo(self) {
+        let _ = std::fs::remove_file(self.target);
+        if let Some(old) = self.old {
+            let _ = std::fs::rename(old, self.target);
+        }
+    }
+}
+
+/// Put `staged` in the app's place. The RAW library goes in first and comes
+/// back out should the exe not follow it, so that the app still starts, and
+/// never beside the library of another build.
 fn swap(staged: &Staged, pid: u32) -> Result<(), String> {
+    let library = match &staged.library {
+        Some((new, library)) => Some(
+            Replaced::put(new, library, pid)
+                .map_err(|e| format!("putting the new RAW library in place: {e}"))?,
+        ),
+        None => None,
+    };
     let (new, exe) = &staged.exe;
-    let old = old_name(exe, pid);
-    std::fs::rename(exe, &old).map_err(|e| format!("setting the running exe aside: {e}"))?;
-    if let Err(e) = std::fs::rename(new, exe) {
-        let _ = std::fs::rename(&old, exe);
+    if let Err(e) = Replaced::put(new, exe, pid) {
+        if let Some(library) = library {
+            library.undo();
+        }
         return Err(format!("putting the new exe in place: {e}"));
     }
     if let Some((new, pdb)) = &staged.pdb {
@@ -558,8 +664,8 @@ pub fn finish_previous() {
 }
 
 /// Beside `exe`: symbols that could not be replaced as the app closed are
-/// now, the exe that made way is deleted, and downloads nobody came back for
-/// are dropped.
+/// now, the exe and the RAW library that made way are deleted, and downloads
+/// nobody came back for are dropped.
 fn tidy(exe: &Path, now: SystemTime) {
     let (Some(dir), Some(name)) = (exe.parent(), exe.file_name().and_then(|n| n.to_str())) else {
         return;
@@ -572,15 +678,19 @@ fn tidy(exe: &Path, now: SystemTime) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let old = format!("{name}.old-");
-    let waiting = [format!("{name}.update-"), format!("{PDB_NAME}.update-")];
+    let old = [format!("{name}.old-"), format!("{RAW_NAME}.old-")];
+    let waiting = [
+        format!("{name}.update-"),
+        format!("{RAW_NAME}.update-"),
+        format!("{PDB_NAME}.update-"),
+    ];
     let mut set_aside = Vec::new();
     for entry in entries.flatten() {
         let file = entry.file_name();
         let Some(file) = file.to_str() else {
             continue;
         };
-        if file.starts_with(&old) {
+        if old.iter().any(|prefix| file.starts_with(prefix)) {
             set_aside.push(entry.path());
         } else if waiting.iter().any(|prefix| file.starts_with(prefix)) {
             // Younger ones may be another window of the app downloading now.
@@ -610,15 +720,21 @@ fn tidy(exe: &Path, now: SystemTime) {
     }
 }
 
-/// `iai.exe --build-info` prints which build the exe is, and ends: the
-/// release workflow describes what it publishes from the exe itself.
+/// `iai.exe --build-info` prints which build the exe is and the library file
+/// it loads its RAW decoders from (`null` when they are linked in), and ends:
+/// the release workflow describes what it publishes from the exe itself.
 pub fn print_build_info_if_requested() -> bool {
     if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--build-info")) {
         return false;
     }
     let build = this_build();
+    let library = if cfg!(feature = "raw-dll") {
+        format!("\"{RAW_NAME}\"")
+    } else {
+        "null".to_owned()
+    };
     println!(
-        "{{\"commit\":\"{}\",\"time\":{}}}",
+        "{{\"commit\":\"{}\",\"time\":{},\"library\":{library}}}",
         build.commit, build.time
     );
     true
@@ -734,6 +850,18 @@ pub(crate) mod tests {
         (json, packed, pdb.to_vec())
     }
 
+    /// The same release, with the RAW `library` (gzipped) the exe loads.
+    fn published_with_library(exe: &[u8], library: &[u8], time: u64) -> (String, Vec<u8>) {
+        let (json, _, _) = published(exe, b"new symbols", time);
+        let packed = gzipped(library);
+        let entry = format!(
+            r#""files":[{{"name":"iai_raw.dll","asset":"iai_raw.dll.gz","bytes":{},"sha256":"{}"}},"#,
+            packed.len(),
+            sha256(library),
+        );
+        (json.replacen(r#""files":["#, &entry, 1), packed)
+    }
+
     #[test]
     fn a_release_reads_and_only_a_newer_one_is_offered() {
         let (json, packed, _) = published(b"new exe", b"new symbols", 2_000);
@@ -847,6 +975,103 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_raw_library_comes_with_the_exe_and_takes_its_own_place() {
+        let (json, library) = published_with_library(b"new exe", b"new library", 2_000);
+        let feed = serve(vec![
+            ("update.json", json.into_bytes()),
+            ("iai.exe.gz", gzipped(b"new exe")),
+            ("iai_raw.dll.gz", library),
+            ("iai.pdb", b"new symbols".to_vec()),
+        ]) + "update.json";
+        let release = fetch_release(&feed).unwrap().expect("a release");
+        // The exe, then what it cannot do without, then its symbols.
+        let wanted: Vec<&str> = release.wanted().map(|f| f.name.as_str()).collect();
+        assert_eq!(wanted, ["iai.exe", "iai_raw.dll", "iai.pdb"]);
+        let pid = std::process::id();
+
+        // Over an app that has the library, and over one from before it was a
+        // file of its own.
+        for had_library in [true, false] {
+            let folder = TempFolder::new(if had_library { "library" } else { "no_library" });
+            let exe = folder.file("iai.exe", b"old exe");
+            if had_library {
+                folder.file("iai_raw.dll", b"old library");
+            }
+            let staged = fetch_files(&feed, &release, &exe, &|_| {}).unwrap();
+            assert!(staged.library.is_some() && staged.pdb.is_some());
+            swap(&staged, pid).unwrap();
+            assert_eq!(std::fs::read(&exe).unwrap(), b"new exe");
+            assert_eq!(
+                std::fs::read(folder.0.join("iai_raw.dll")).unwrap(),
+                b"new library"
+            );
+            let set_aside = folder.0.join(format!("iai_raw.dll.old-{pid}"));
+            assert_eq!(set_aside.exists(), had_library);
+
+            tidy(&exe, SystemTime::now());
+            assert_eq!(folder.names(), ["iai.exe", "iai.pdb", "iai_raw.dll"]);
+        }
+    }
+
+    #[test]
+    fn a_damaged_raw_library_stops_the_update_and_nothing_is_left_waiting() {
+        let (json, _) = published_with_library(b"new exe", b"new library", 2_000);
+        let feed = serve(vec![
+            ("update.json", json.into_bytes()),
+            ("iai.exe.gz", gzipped(b"new exe")),
+            ("iai_raw.dll.gz", gzipped(b"new librarY")),
+            ("iai.pdb", b"new symbols".to_vec()),
+        ]) + "update.json";
+        let folder = TempFolder::new("damaged_library");
+        let exe = folder.file("iai.exe", b"old exe");
+        folder.file("iai_raw.dll", b"old library");
+        let release = fetch_release(&feed).unwrap().expect("a release");
+        let error = fetch_files(&feed, &release, &exe, &|_| {}).unwrap_err();
+        assert!(error.contains("không đúng"), "{error}");
+        assert_eq!(folder.names(), ["iai.exe", "iai_raw.dll"]);
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old exe");
+    }
+
+    #[test]
+    fn an_exe_left_without_its_raw_library_fetches_the_one_of_its_own_build() {
+        let (json, library) = published_with_library(b"new exe", b"new library", 2_000);
+        let feed = serve(vec![
+            ("update.json", json.into_bytes()),
+            ("iai_raw.dll.gz", library),
+        ]) + "update.json";
+        let release = fetch_release(&feed).unwrap().expect("a release");
+        let folder = TempFolder::new("mend");
+        folder.file("iai.exe", b"new exe");
+        let target = folder.0.join("iai_raw.dll");
+        let build = |commit| Build {
+            commit,
+            time: 2_000,
+        };
+
+        // The release is of another build: its library is not this exe's.
+        assert_eq!(
+            fetch_library(&feed, &release, build("def456"), &target),
+            Ok(false)
+        );
+        assert_eq!(folder.names(), ["iai.exe"]);
+
+        assert_eq!(
+            fetch_library(&feed, &release, build("abc123"), &target),
+            Ok(true)
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"new library");
+        assert_eq!(folder.names(), ["iai.exe", "iai_raw.dll"]);
+
+        // A release from before the library was a file of its own has none.
+        let (json, _, _) = published(b"new exe", b"new symbols", 2_000);
+        let old: Release = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            fetch_library(&feed, &old, build("abc123"), &target),
+            Ok(false)
+        );
+    }
+
+    #[test]
     fn a_damaged_download_is_refused_and_the_exe_stays() {
         // The exe published is not the one its SHA-256 names.
         let (json, _, pdb) = published(b"new exe", b"new symbols", 2_000);
@@ -902,12 +1127,29 @@ pub(crate) mod tests {
         let exe = folder.file("iai.exe", b"old exe");
         let staged = Staged {
             exe: (folder.0.join("iai.exe.update-7"), exe.clone()),
+            library: None,
             pdb: None,
         };
         // The download is gone by the time the app closes.
         assert!(swap(&staged, 7).is_err());
         assert_eq!(folder.names(), ["iai.exe"]);
         assert_eq!(std::fs::read(&exe).unwrap(), b"old exe");
+
+        // The library went in and the exe could not follow: the old library
+        // is back beside the old exe.
+        let library = folder.file("iai_raw.dll", b"old library");
+        let staged = Staged {
+            exe: (folder.0.join("iai.exe.update-7"), exe.clone()),
+            library: Some((
+                folder.file("iai_raw.dll.update-7", b"new library"),
+                library.clone(),
+            )),
+            pdb: None,
+        };
+        assert!(swap(&staged, 7).is_err());
+        assert_eq!(folder.names(), ["iai.exe", "iai_raw.dll"]);
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old exe");
+        assert_eq!(std::fs::read(&library).unwrap(), b"old library");
     }
 
     #[test]
@@ -917,6 +1159,9 @@ pub(crate) mod tests {
         folder.file("iai.pdb", b"old symbols");
         folder.file("iai.pdb.new", b"new symbols");
         folder.file("iai.exe.old-11", b"made way");
+        folder.file("iai_raw.dll", b"library");
+        folder.file("iai_raw.dll.old-11", b"made way");
+        folder.file("iai_raw.dll.update-12", b"being downloaded");
         folder.file("iai.exe.update-12", b"being downloaded");
         folder.file("iai.pdb.update-12.part", b"being downloaded");
         folder.file("iai.exe.WebView2", b"not the update's");
@@ -933,6 +1178,8 @@ pub(crate) mod tests {
                 "iai.execute",
                 "iai.pdb",
                 "iai.pdb.update-12.part",
+                "iai_raw.dll",
+                "iai_raw.dll.update-12",
             ]
         );
         assert_eq!(
@@ -944,7 +1191,13 @@ pub(crate) mod tests {
         tidy(&exe, SystemTime::now() + 2 * STALE);
         assert_eq!(
             folder.names(),
-            ["iai.exe", "iai.exe.WebView2", "iai.execute", "iai.pdb"]
+            [
+                "iai.exe",
+                "iai.exe.WebView2",
+                "iai.execute",
+                "iai.pdb",
+                "iai_raw.dll"
+            ]
         );
     }
 
@@ -987,7 +1240,8 @@ pub(crate) mod tests {
         let staged = fetch_files(&feed, &release, &exe, &|_| {}).unwrap();
         assert!(staged.pdb.is_some());
         swap(&staged, std::process::id()).unwrap();
-        for name in [EXE_NAME, PDB_NAME] {
+        for file in release.wanted() {
+            let name = &file.name;
             let size = std::fs::metadata(folder.0.join(name)).unwrap().len();
             println!("{name}: {size} bytes");
         }

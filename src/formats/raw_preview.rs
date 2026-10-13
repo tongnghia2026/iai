@@ -11,10 +11,11 @@
 //   • CR2 stores its raw sensor data as *lossless* JPEG (SOF3). Those streams get
 //     scanned too, so we accept only baseline (SOF0) and progressive (SOF2) —
 //     the marker kinds real previews use and `image` can decode.
-//   • The EXIF orientation is read via rawloader's metadata-only `decode_dummy`
+//   • The EXIF orientation is read via the RAW library's metadata-only pass
 //     (no demosaic — a few tens of ms even for an 85 MB file) and applied so
 //     portraits aren't sideways, matching raw.rs's full-decode orientation.
 
+use super::raw_library::Orientation;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -258,27 +259,17 @@ fn decode_jpeg_rgba8(bytes: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
     .flatten()
 }
 
-/// EXIF orientation via rawloader's metadata-only pass (skips demosaic). Any
-/// failure or panic yields `Unknown` (no rotation).
-fn dummy_orientation(data: &[u8]) -> rawloader::Orientation {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rawloader::decode_dummy(&mut std::io::Cursor::new(data))
-            .map(|r| r.orientation)
-            .unwrap_or(rawloader::Orientation::Unknown)
-    }))
-    .unwrap_or(rawloader::Orientation::Unknown)
+/// EXIF orientation via the RAW library's metadata-only pass (skips demosaic).
+/// Any failure or panic yields `Unknown` (no rotation).
+fn dummy_orientation(data: &[u8]) -> Orientation {
+    super::raw_library::orientation(data)
 }
 
 /// Remap an RGBA8 buffer to upright orientation per the EXIF tag: an optional
 /// transpose followed by horizontal/vertical flips. Mirrors raw.rs::apply_orientation
 /// (the RGBA16 full-decode version) so preview and commit agree.
-fn orient_rgba8(
-    src: &[u8],
-    w: usize,
-    h: usize,
-    o: rawloader::Orientation,
-) -> (Vec<u8>, usize, usize) {
-    use rawloader::Orientation::*;
+fn orient_rgba8(src: &[u8], w: usize, h: usize, o: Orientation) -> (Vec<u8>, usize, usize) {
+    use Orientation::*;
     let (swap, fx, fy) = match o {
         Normal | Unknown => (false, false, false),
         HorizontalFlip => (false, true, false),
@@ -380,7 +371,7 @@ mod tests {
             255, 0, 0, 255, // (0,0) red
             0, 0, 255, 255, // (1,0) blue
         ];
-        let (dst, w, h) = orient_rgba8(&src, 2, 1, rawloader::Orientation::Rotate90);
+        let (dst, w, h) = orient_rgba8(&src, 2, 1, Orientation::Rotate90);
         assert_eq!((w, h), (1, 2));
         assert_eq!(dst.len(), 2 * 4);
     }
