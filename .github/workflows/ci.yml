@@ -10,6 +10,8 @@ on:
       - "docs/**"
       - "**.md"
   pull_request:
+  # By hand, from the Actions page.
+  workflow_dispatch:
 
 # A newer push to the same branch makes the run in progress pointless.
 concurrency:
